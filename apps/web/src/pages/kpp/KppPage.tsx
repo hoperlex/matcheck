@@ -55,6 +55,9 @@ type SaveStatus = 'draft' | 'verified';
 
 const GREEN = '#52c41a';
 
+const trimQty = (s: string) =>
+  s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
+
 function newKey(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -283,7 +286,7 @@ export default function KppPage() {
       width: 140,
       render: (_: unknown, r: DraftItem) =>
         r.qtyActual !== null && r.qtyActual !== ''
-          ? `${r.qtyActual} ${r.unit}`
+          ? `${trimQty(r.qtyActual)} ${r.unit}`
           : <Typography.Text type="secondary">—</Typography.Text>,
     },
     {
@@ -340,7 +343,7 @@ export default function KppPage() {
           {r.nameRaw || <Typography.Text type="secondary">— пусто —</Typography.Text>}
         </div>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {r.qtyActual !== null && r.qtyActual !== '' ? `${r.qtyActual} ${r.unit}` : '—'}
+          {r.qtyActual !== null && r.qtyActual !== '' ? `${trimQty(r.qtyActual)} ${r.unit}` : '—'}
         </Typography.Text>
       </div>
       <Space size={4} onClick={(e) => e.stopPropagation()}>

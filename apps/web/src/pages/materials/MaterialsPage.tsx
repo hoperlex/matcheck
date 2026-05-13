@@ -10,6 +10,12 @@ import { SourceDocumentDetailModal } from '../inbox/SourceDocumentDetailModal';
 type JournalResponse = z.infer<typeof MaterialJournalResponseSchema>;
 type Row = JournalResponse['items'][number];
 
+const formatDocDate = (v: string | null) =>
+  v ? v.split('-').reverse().join('.') : '—';
+
+const trimQty = (s: string) =>
+  s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
+
 export default function MaterialsPage() {
   const [q, setQ] = useState('');
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
@@ -42,7 +48,12 @@ export default function MaterialsPage() {
         onRowClick={(r) => r.sourceDocumentId && setSelectedSourceId(r.sourceDocumentId)}
         columns={[
           { title: 'Материал', dataIndex: 'materialName' },
-          { title: 'Кол-во', dataIndex: 'qty', width: 110 },
+          {
+            title: 'Кол-во',
+            dataIndex: 'qty',
+            render: (v: string | null) => trimQty(v ?? '0'),
+            width: 110,
+          },
           { title: 'Ед.', dataIndex: 'unit', width: 80 },
           { title: 'Поставщик', dataIndex: 'supplierName', render: (v) => v ?? '—' },
           {
@@ -51,7 +62,12 @@ export default function MaterialsPage() {
             render: (v: string | null) => v ?? '—',
             width: 140,
           },
-          { title: 'Дата УПД', dataIndex: 'docDate', render: (v) => v ?? '—', width: 110 },
+          {
+            title: 'Дата УПД',
+            dataIndex: 'docDate',
+            render: (v: string | null) => formatDocDate(v),
+            width: 110,
+          },
           {
             title: 'Дата приёмки',
             dataIndex: 'arrivedAt',
@@ -65,14 +81,16 @@ export default function MaterialsPage() {
             <Space direction="vertical" size={2}>
               <Typography.Text strong>{r.materialName}</Typography.Text>
               <Typography.Text>
-                {r.qty} {r.unit}
+                {trimQty(r.qty)} {r.unit}
               </Typography.Text>
               <Typography.Text type="secondary">
                 {r.supplierName ?? '— поставщик не указан —'}
               </Typography.Text>
               <Space wrap size={4}>
                 {r.docNumber && <Tag color="blue">УПД {r.docNumber}</Tag>}
-                {r.docDate && <Typography.Text type="secondary">от {r.docDate}</Typography.Text>}
+                {r.docDate && (
+                  <Typography.Text type="secondary">от {formatDocDate(r.docDate)}</Typography.Text>
+                )}
                 {r.arrivedAt && (
                   <Typography.Text type="secondary">
                     · приёмка {new Date(r.arrivedAt).toLocaleDateString('ru-RU')}
