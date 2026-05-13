@@ -1,0 +1,35 @@
+{
+  # Глобальные настройки. ACME-email задавайте через env CADDY_ACME_EMAIL.
+  email {$CADDY_ACME_EMAIL}
+}
+
+{$CADDY_DOMAIN} {
+  encode zstd gzip
+
+  header {
+    Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Permissions-Policy "camera=(self), geolocation=()"
+    # CSP уже выставляет API через @fastify/helmet; для статики задаём минимум.
+    Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    -Server
+  }
+
+  handle /api/* {
+    reverse_proxy api:3001 {
+      header_up X-Forwarded-For {remote_host}
+      header_up X-Real-IP {remote_host}
+      transport http {
+        read_timeout 10m
+      }
+    }
+  }
+
+  handle {
+    reverse_proxy web:80
+  }
+}
+
+# Редирект 80 → 443 включён в Caddy по умолчанию для HTTPS-сайтов.

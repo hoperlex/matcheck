@@ -1,34 +1,45 @@
-import { useEffect, useState } from 'react';
-import type { HealthResponse } from '@matcheck/contracts';
+import { useEffect } from 'react';
+import { RouterProvider } from 'react-router-dom';
+import { ConfigProvider, App as AntApp } from 'antd';
+import ruRU from 'antd/locale/ru_RU';
+import dayjs from 'dayjs';
+import 'dayjs/locale/ru';
+import { router } from './app/router';
+import { QueryProvider } from './app/providers/QueryProvider';
+import { AuthProvider } from './app/providers/AuthProvider';
+import { useQueryClient } from '@tanstack/react-query';
+import { setupInvalidation } from './services/invalidation';
+import { startSyncLoop } from './services/sync';
+import { useAuthStore } from './stores/auth';
+
+dayjs.locale('ru');
+
+function SideEffects() {
+  const qc = useQueryClient();
+  const user = useAuthStore((s) => s.user);
+  useEffect(() => {
+    if (!user) return;
+    const teardownInv = setupInvalidation(qc);
+    const teardownSync = startSyncLoop(5 * 60 * 1000);
+    return () => {
+      teardownInv();
+      teardownSync();
+    };
+  }, [qc, user]);
+  return null;
+}
 
 export function App() {
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch('/api/health')
-      .then(async (r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return (await r.json()) as HealthResponse;
-      })
-      .then(setHealth)
-      .catch((err: Error) => setError(err.message));
-  }, []);
-
   return (
-    <main style={{ fontFamily: 'system-ui, sans-serif', padding: 24 }}>
-      <h1>matcheck</h1>
-      <p>Портал автоматизации приёмки материалов</p>
-      <section style={{ marginTop: 24 }}>
-        <h2>API health</h2>
-        {error ? (
-          <pre style={{ color: 'crimson' }}>Ошибка: {error}</pre>
-        ) : health ? (
-          <pre>{JSON.stringify(health, null, 2)}</pre>
-        ) : (
-          <p>Загрузка…</p>
-        )}
-      </section>
-    </main>
+    <ConfigProvider locale={ruRU} theme={{ token: { colorPrimary: '#1677ff', borderRadius: 8 } }}>
+      <AntApp>
+        <QueryProvider>
+          <AuthProvider>
+            <SideEffects />
+            <RouterProvider router={router} />
+          </AuthProvider>
+        </QueryProvider>
+      </AntApp>
+    </ConfigProvider>
   );
 }

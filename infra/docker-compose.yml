@@ -1,0 +1,59 @@
+version: '3.9'
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: matcheck-caddy
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - web
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    container_name: matcheck-api
+    restart: unless-stopped
+    env_file:
+      - ./api.env
+    depends_on:
+      redis:
+        condition: service_healthy
+    expose:
+      - '3001'
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    container_name: matcheck-web
+    restart: unless-stopped
+    expose:
+      - '80'
+
+  redis:
+    image: redis:7-alpine
+    container_name: matcheck-redis
+    restart: unless-stopped
+    command: ['redis-server', '--save', '60', '1', '--loglevel', 'warning']
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  caddy_data:
+  caddy_config:
+  redis_data:

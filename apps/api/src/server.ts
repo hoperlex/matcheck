@@ -6,7 +6,23 @@ import {
 } from 'fastify-type-provider-zod';
 import { loadEnv } from './lib/env.js';
 import { logger } from './lib/logger.js';
+import dbPlugin from './plugins/db.js';
+import redisPlugin from './plugins/redis.js';
+import securityPlugin from './plugins/security.js';
+import authPlugin from './plugins/auth.js';
 import { healthRoutes } from './routes/health.js';
+import { authRoutes } from './routes/auth.js';
+import { counterpartyRoutes } from './routes/counterparties.js';
+import { materialRoutes } from './routes/materials.js';
+import { sourceDocumentRoutes } from './routes/source-documents.js';
+import { deliveryRoutes } from './routes/deliveries.js';
+import { photoRoutes } from './routes/photos.js';
+import { syncRoutes } from './routes/sync.js';
+import { eventsRoutes } from './routes/events.js';
+import { llmProviderRoutes } from './routes/admin/llm-providers.js';
+import { edoAccountRoutes } from './routes/admin/edo-accounts.js';
+import { mailAccountRoutes } from './routes/admin/mail-accounts.js';
+import { userAdminRoutes } from './routes/admin/users.js';
 
 export async function buildServer() {
   const env = loadEnv();
@@ -20,7 +36,34 @@ export async function buildServer() {
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
 
+  await app.register(redisPlugin);
+  await app.register(dbPlugin);
+  await app.register(securityPlugin);
+  await app.register(authPlugin);
+
   await app.register(healthRoutes);
+  await app.register(authRoutes);
+  await app.register(counterpartyRoutes);
+  await app.register(materialRoutes);
+  await app.register(sourceDocumentRoutes);
+  await app.register(deliveryRoutes);
+  await app.register(photoRoutes);
+  await app.register(syncRoutes);
+  await app.register(eventsRoutes);
+  await app.register(llmProviderRoutes);
+  await app.register(edoAccountRoutes);
+  await app.register(mailAccountRoutes);
+  await app.register(userAdminRoutes);
+
+  app.setErrorHandler((err, req, reply) => {
+    req.log.error({ err }, 'request error');
+    if (reply.statusCode < 400) reply.code(500);
+    const error = err as Error & { code?: string };
+    reply.send({
+      error: error.name ?? 'internal_error',
+      message: env.NODE_ENV === 'production' ? 'Internal error' : error.message,
+    });
+  });
 
   return app;
 }

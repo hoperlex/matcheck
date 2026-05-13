@@ -1,0 +1,116 @@
+import { useAuthStore } from '../stores/auth';
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+    public payload?: unknown,
+  ) {
+    super(message);
+  }
+}
+
+export class ConflictError extends ApiError {
+  constructor(
+    public serverVersion: number,
+    public server: unknown,
+  ) {
+    super(409, 'conflict', 'Concurrent update detected');
+  }
+}
+
+const BASE = '/api/v1';
+
+let refreshInFlight: Promise<string | null> | null = null;
+
+async function doRefresh(): Promise<string | null> {
+  if (!refreshInFlight) {
+    refreshInFlight = fetch(`${BASE}/auth/refresh`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+      .then(async (r) => {
+        if (!r.ok) return null;
+        const j = (await r.json()) as { accessToken: string };
+        return j.accessToken;
+      })
+      .catch(() => null)
+      .finally(() => {
+        refreshInFlight = null;
+      });
+  }
+  return refreshInFlight;
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit & { retried?: boolean } = {},
+): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (!headers.has('Content-Type') && init.body && typeof init.body === 'string') {
+    headers.set('Content-Type', 'application/json');
+  }
+  const token = useAuthStore.getState().accessToken;
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers,
+    credentials: 'include',
+  });
+
+  if (res.status === 401 && !init.retried) {
+    const newToken = await doRefresh();
+    if (newToken) {
+      useAuthStore.getState().setAccessToken(newToken);
+      return request<T>(path, { ...init, retried: true });
+    }
+    useAuthStore.getState().clear();
+    throw new ApiError(401, 'unauthorized', 'Session expired');
+  }
+
+  if (res.status === 409) {
+    const body = (await res.json().catch(() => ({}))) as {
+      serverVersion?: number;
+      server?: unknown;
+    };
+    throw new ConflictError(body.serverVersion ?? 0, body.server);
+  }
+
+  if (!res.ok) {
+    let payload: unknown = null;
+    try {
+      payload = await res.json();
+    } catch {
+      /* ignore */
+    }
+    const msg =
+      (payload && typeof payload === 'object' && 'message' in payload
+        ? String((payload as { message: unknown }).message)
+        : null) ?? `HTTP ${res.status}`;
+    const code =
+      (payload && typeof payload === 'object' && 'error' in payload
+        ? String((payload as { error: unknown }).error)
+        : null) ?? 'http_error';
+    throw new ApiError(res.status, code, msg, payload);
+  }
+
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
+export const api = {
+  get: <T>(path: string) => request<T>(path),
+  post: <T>(path: string, body?: unknown) =>
+    request<T>(path, {
+      method: 'POST',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    }),
+  patch: <T>(path: string, body?: unknown) =>
+    request<T>(path, {
+      method: 'PATCH',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    }),
+  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+};

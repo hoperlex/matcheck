@@ -1,0 +1,99 @@
+import { useState } from 'react';
+import { Layout, Drawer, Button, Menu, Typography } from 'antd';
+import { MenuOutlined, LogoutOutlined } from '@ant-design/icons';
+import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { useAuthStore } from '../../stores/auth';
+import { filterByRole } from './navItems';
+import { api } from '../../services/api';
+
+const { Header, Content, Footer } = Layout;
+
+const PRIMARY_KEYS = ['/kpp', '/deliveries', '/inbox', '/'];
+
+export function MobileLayout() {
+  const user = useAuthStore((s) => s.user);
+  const clear = useAuthStore((s) => s.clear);
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [open, setOpen] = useState(false);
+
+  if (!user) return null;
+  const allItems = filterByRole(user.role).map((n) => ({ key: n.path, label: n.label }));
+  const tabItems = allItems.filter((it) => PRIMARY_KEYS.includes(it.key));
+
+  const handleLogout = async () => {
+    try {
+      await api.post('/auth/logout');
+    } catch {
+      /* ignore */
+    }
+    clear();
+    navigate('/login', { replace: true });
+  };
+
+  return (
+    <Layout style={{ minHeight: '100dvh' }}>
+      <Header
+        style={{
+          background: '#fff',
+          padding: '0 12px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+        }}
+      >
+        <Button icon={<MenuOutlined />} onClick={() => setOpen(true)} size="large" />
+        <Typography.Text strong style={{ fontSize: 16, flex: 1 }}>
+          matcheck
+        </Typography.Text>
+        <Typography.Text code style={{ fontSize: 11 }}>
+          {user.role}
+        </Typography.Text>
+      </Header>
+      <Drawer
+        open={open}
+        onClose={() => setOpen(false)}
+        placement="left"
+        width={280}
+        title={user.email}
+      >
+        <Menu
+          mode="inline"
+          selectedKeys={[location.pathname]}
+          items={allItems}
+          onClick={(e) => {
+            navigate(e.key);
+            setOpen(false);
+          }}
+        />
+        <Button
+          icon={<LogoutOutlined />}
+          block
+          style={{ marginTop: 16 }}
+          onClick={handleLogout}
+          size="large"
+        >
+          Выход
+        </Button>
+      </Drawer>
+      <Content style={{ padding: 12, background: '#f5f5f5', flex: 1, overflowY: 'auto' }}>
+        <Outlet />
+      </Content>
+      <Footer style={{ padding: 0, background: '#fff', borderTop: '1px solid #f0f0f0' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${tabItems.length}, 1fr)` }}>
+          {tabItems.map((tab) => (
+            <Button
+              key={tab.key}
+              type={location.pathname === tab.key ? 'primary' : 'text'}
+              size="large"
+              onClick={() => navigate(tab.key)}
+              style={{ height: 56, borderRadius: 0 }}
+            >
+              {tab.label}
+            </Button>
+          ))}
+        </div>
+      </Footer>
+    </Layout>
+  );
+}

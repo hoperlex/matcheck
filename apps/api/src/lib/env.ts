@@ -5,6 +5,40 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3001),
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+
+  // DB / Redis
+  DATABASE_URL: z.string().url().optional(),
+  REDIS_URL: z.string().optional(),
+
+  // CORS
+  CORS_ORIGIN: z.string().default('http://localhost:5173'),
+
+  // JWT (Ed25519)
+  JWT_PRIVATE_KEY_PEM: z.string().optional(),
+  JWT_PUBLIC_KEY_PEM: z.string().optional(),
+  JWT_ISSUER: z.string().default('matcheck-api'),
+  JWT_AUDIENCE: z.string().default('matcheck-web'),
+  ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+  REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(14),
+  REFRESH_TOKEN_ABSOLUTE_MAX_DAYS: z.coerce.number().int().positive().default(90),
+  COOKIE_DOMAIN: z.string().optional(),
+  COOKIE_SECURE: z.coerce.boolean().default(false),
+
+  // CSRF
+  CSRF_SECRET: z.string().min(32).optional(),
+
+  // Field encryption (AES-256-GCM, key map JSON)
+  APP_FIELD_ENCRYPTION_KEYS: z
+    .string()
+    .default('{"v1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'),
+  APP_FIELD_ENCRYPTION_ACTIVE_KEY_VERSION: z.string().default('v1'),
+
+  // S3 (cloud.ru)
+  S3_ENDPOINT: z.string().url().optional(),
+  S3_REGION: z.string().default('ru-central-1'),
+  S3_BUCKET: z.string().optional(),
+  S3_ACCESS_KEY_ID: z.string().optional(),
+  S3_SECRET_ACCESS_KEY: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
