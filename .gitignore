@@ -69,6 +69,9 @@ web_modules/
 .env
 .env.*
 !.env.example
+# защита от случайного коммита prod-env (реальный лежит /srv/matcheck/secrets/api.env)
+infra/api.env
+infra/api.env.local
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
