@@ -32,4 +32,4 @@ COPY apps/api/package.json ./package.json
 USER node
 EXPOSE 3001
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "--enable-source-maps", "dist/index.js"]
+CMD ["node", "--enable-source-maps", "dist/apps/api/src/index.js"]
