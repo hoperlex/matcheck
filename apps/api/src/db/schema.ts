@@ -29,6 +29,7 @@ export const sourceOriginEnum = pgEnum('source_origin', [
 ]);
 export const sourceStatusEnum = pgEnum('source_status', ['parsed', 'parse_failed', 'archived']);
 export const deliveryStatusEnum = pgEnum('delivery_status', [
+  'draft',
   'expected',
   'arrived',
   'verified',

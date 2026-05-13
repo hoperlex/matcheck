@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const DeliveryStatusSchema = z.enum(['expected', 'arrived', 'verified', 'rejected']);
+export const DeliveryStatusSchema = z.enum(['draft', 'expected', 'arrived', 'verified', 'rejected']);
 
 export const DeliveryItemSchema = z.object({
   id: z.string().uuid(),

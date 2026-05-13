@@ -1,11 +1,12 @@
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, gte, sql as drSql } from 'drizzle-orm';
+import { and, desc, eq, gte, ne, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
   ConflictResponseSchema,
   DeliveryListResponseSchema,
   DeliverySchema,
+  DeliveryStatusSchema,
   DeliveryUpsertSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
@@ -13,7 +14,7 @@ import { deliveries, deliveryItems, deliveryPhotos, deliverySources } from '../d
 import { publishEvent } from './events.js';
 
 const ListQuerySchema = z.object({
-  status: z.enum(['expected', 'arrived', 'verified', 'rejected']).optional(),
+  status: DeliveryStatusSchema.optional(),
   inspectorId: z.string().uuid().optional(),
   changedSince: z.string().datetime().optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
@@ -88,6 +89,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         filters.push(eq(deliveries.inspectorId, req.user.id));
       } else if (inspectorId) {
         filters.push(eq(deliveries.inspectorId, inspectorId));
+      }
+      // Чужие drafts скрыты, если status не указан явно
+      if (!status && req.user?.role !== 'inspector_kpp' && req.user) {
+        filters.push(
+          or(ne(deliveries.status, 'draft'), eq(deliveries.inspectorId, req.user.id))!,
+        );
       }
       if (changedSince) filters.push(gte(deliveries.updatedAt, new Date(changedSince)));
       const where = filters.length ? and(...filters) : undefined;

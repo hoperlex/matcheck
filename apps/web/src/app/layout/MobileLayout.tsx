@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, createElement } from 'react';
 import { Layout, Drawer, Button, Menu, Typography } from 'antd';
 import { MenuOutlined, LogoutOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
@@ -18,7 +18,11 @@ export function MobileLayout() {
   const [open, setOpen] = useState(false);
 
   if (!user) return null;
-  const allItems = filterByRole(user.role).map((n) => ({ key: n.path, label: n.label }));
+  const allItems = filterByRole(user.role).map((n) => ({
+    key: n.path,
+    icon: createElement(n.icon),
+    label: n.label,
+  }));
   const tabItems = allItems.filter((it) => PRIMARY_KEYS.includes(it.key));
 
   const handleLogout = async () => {
