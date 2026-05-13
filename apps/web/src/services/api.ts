@@ -114,3 +114,9 @@ export const api = {
     }),
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
 };
+
+export async function apiUploadFile<T>(path: string, file: File, fieldName = 'file'): Promise<T> {
+  const fd = new FormData();
+  fd.append(fieldName, file, file.name);
+  return request<T>(path, { method: 'POST', body: fd });
+}

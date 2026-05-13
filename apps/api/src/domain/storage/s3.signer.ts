@@ -48,3 +48,39 @@ export async function presign({
   const signed = await getClient().sign(req, { aws: { signQuery: true } });
   return signed.url;
 }
+
+export async function putObject(key: string, body: Buffer, contentType: string): Promise<void> {
+  const url = new URL(`${endpoint()}/${env.S3_BUCKET}/${key}`);
+  const res = await getClient().fetch(url, {
+    method: 'PUT',
+    body,
+    headers: { 'Content-Type': contentType, 'Content-Length': String(body.length) },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`S3 PUT ${key} failed: HTTP ${res.status} ${text.slice(0, 200)}`);
+  }
+}
+
+export async function copyObject(srcKey: string, dstKey: string): Promise<void> {
+  const url = new URL(`${endpoint()}/${env.S3_BUCKET}/${dstKey}`);
+  const res = await getClient().fetch(url, {
+    method: 'PUT',
+    headers: { 'x-amz-copy-source': `/${env.S3_BUCKET}/${encodeURI(srcKey)}` },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(
+      `S3 COPY ${srcKey} → ${dstKey} failed: HTTP ${res.status} ${text.slice(0, 200)}`,
+    );
+  }
+}
+
+export async function deleteObject(key: string): Promise<void> {
+  const url = new URL(`${endpoint()}/${env.S3_BUCKET}/${key}`);
+  const res = await getClient().fetch(url, { method: 'DELETE' });
+  if (!res.ok && res.status !== 404) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`S3 DELETE ${key} failed: HTTP ${res.status} ${text.slice(0, 200)}`);
+  }
+}

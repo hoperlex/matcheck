@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const SourceKindSchema = z.enum(['upd', 'request']);
-export const SourceOriginSchema = z.enum(['edo_diadoc', 'manual_xml', 'mail']);
+export const SourceOriginSchema = z.enum(['edo_diadoc', 'manual_xml', 'manual_pdf', 'mail']);
 export const SourceStatusSchema = z.enum(['parsed', 'parse_failed', 'archived']);
 
 export const SourceItemSchema = z.object({
@@ -65,3 +65,51 @@ export const ManualUpdUploadResponseSchema = z.object({
   id: z.string().uuid(),
   itemsCount: z.number(),
 });
+
+// ──────────── PDF УПД (двухшаговый flow: parse → confirm) ────────────
+
+export const UpdPdfPartySchema = z.object({
+  inn: z.string().nullable().optional(),
+  kpp: z.string().nullable().optional(),
+  name: z.string().nullable().optional(),
+});
+
+export const UpdPdfItemSchema = z.object({
+  nameRaw: z.string().min(1),
+  qty: z.number(),
+  unit: z.string().default('шт'),
+  price: z.number().nullable().optional(),
+  sum: z.number().nullable().optional(),
+  vatRate: z.number().nullable().optional(),
+  vatSum: z.number().nullable().optional(),
+});
+export type UpdPdfItem = z.infer<typeof UpdPdfItemSchema>;
+
+export const UpdPdfParsedSchema = z.object({
+  docNumber: z.string().nullable().optional(),
+  docDate: z.string().nullable().optional(),
+  totalSum: z.number().nullable().optional(),
+  vatSum: z.number().nullable().optional(),
+  supplier: UpdPdfPartySchema.nullable().optional(),
+  recipient: UpdPdfPartySchema.nullable().optional(),
+  items: z.array(UpdPdfItemSchema),
+  confidence: z.number().min(0).max(1).default(0.5),
+});
+export type UpdPdfParsed = z.infer<typeof UpdPdfParsedSchema>;
+
+export const UpdPdfParseResponseSchema = z.object({
+  draftS3Key: z.string(),
+  contentHash: z.string().regex(/^[0-9a-f]{64}$/),
+  parsed: UpdPdfParsedSchema,
+  llmProviderId: z.string().uuid().nullable(),
+  llmConfidence: z.number().min(0).max(1),
+  textLength: z.number(),
+});
+export type UpdPdfParseResponse = z.infer<typeof UpdPdfParseResponseSchema>;
+
+export const UpdPdfConfirmRequestSchema = z.object({
+  draftS3Key: z.string().min(1),
+  contentHash: z.string().regex(/^[0-9a-f]{64}$/),
+  parsed: UpdPdfParsedSchema,
+});
+export type UpdPdfConfirmRequest = z.infer<typeof UpdPdfConfirmRequestSchema>;

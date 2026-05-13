@@ -21,7 +21,12 @@ import {
 
 export const userRoleEnum = pgEnum('user_role', ['admin', 'manager', 'inspector_kpp']);
 export const sourceKindEnum = pgEnum('source_kind', ['upd', 'request']);
-export const sourceOriginEnum = pgEnum('source_origin', ['edo_diadoc', 'manual_xml', 'mail']);
+export const sourceOriginEnum = pgEnum('source_origin', [
+  'edo_diadoc',
+  'manual_xml',
+  'manual_pdf',
+  'mail',
+]);
 export const sourceStatusEnum = pgEnum('source_status', ['parsed', 'parse_failed', 'archived']);
 export const deliveryStatusEnum = pgEnum('delivery_status', [
   'expected',

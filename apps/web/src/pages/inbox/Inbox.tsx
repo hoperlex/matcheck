@@ -6,12 +6,14 @@ import type { SourceDocumentListResponseSchema } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { UpdPdfUploadModal } from './UpdPdfUploadModal';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 type Row = List['items'][number];
 
 export default function InboxPage() {
   const [kind, setKind] = useState<'all' | 'upd' | 'request'>('all');
+  const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const qc = useQueryClient();
 
   const list = useQuery({
@@ -58,6 +60,7 @@ export default function InboxPage() {
         <Upload {...uploadProps}>
           <Button type="primary">Загрузить УПД (XML)</Button>
         </Upload>
+        <Button onClick={() => setPdfModalOpen(true)}>Загрузить УПД (PDF)</Button>
       </Space>
       <ResponsiveTable<Row>
         items={list.data?.items ?? []}
@@ -93,6 +96,7 @@ export default function InboxPage() {
           </Card>
         )}
       />
+      <UpdPdfUploadModal open={pdfModalOpen} onClose={() => setPdfModalOpen(false)} />
     </div>
   );
 }

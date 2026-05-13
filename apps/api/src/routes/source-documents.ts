@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -6,6 +7,8 @@ import {
   ManualUpdUploadResponseSchema,
   SourceDocumentListResponseSchema,
   SourceDocumentDetailSchema,
+  UpdPdfConfirmRequestSchema,
+  UpdPdfParseResponseSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
 import {
@@ -15,6 +18,8 @@ import {
   sourceDocumentAttachments,
 } from '../db/schema.js';
 import { parseUpdXml } from '../domain/edo/upd.parser.js';
+import { parseUpdPdf, PdfNoTextError } from '../domain/edo/upd-pdf.parser.js';
+import { copyObject, deleteObject, putObject } from '../domain/storage/s3.signer.js';
 
 const ListQuerySchema = z.object({
   kind: z.enum(['upd', 'request']).optional(),
@@ -210,6 +215,192 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
       reply.code(201);
       return { id: created.id, itemsCount: parsed.items.length };
+    },
+  );
+
+  // ──────────── PDF УПД: parse (без записи в БД) ────────────
+  app.post(
+    '/api/v1/source-documents/parse-upd-pdf',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+    },
+    async (req, reply) => {
+      const fileData = await (
+        req as unknown as {
+          file: () => Promise<
+            { filename: string; mimetype: string; toBuffer: () => Promise<Buffer> } | undefined
+          >;
+        }
+      ).file();
+      if (!fileData) {
+        return reply.code(400).send({ error: 'no_file', message: 'PDF не приложен' });
+      }
+      if (!fileData.mimetype.includes('pdf') && !fileData.filename.toLowerCase().endsWith('.pdf')) {
+        return reply.code(400).send({ error: 'bad_mime', message: 'Ожидается PDF файл' });
+      }
+
+      const buffer = await fileData.toBuffer();
+      if (buffer.length === 0) {
+        return reply.code(400).send({ error: 'empty_file', message: 'Файл пустой' });
+      }
+
+      let parseResult;
+      try {
+        parseResult = await parseUpdPdf(buffer);
+      } catch (err) {
+        if (err instanceof PdfNoTextError) {
+          return reply.code(400).send({
+            error: 'pdf_no_text',
+            message:
+              'PDF не содержит текстового слоя (вероятно скан). Сканы пока не поддерживаются.',
+          });
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        req.log.warn({ err }, 'pdf parse failed');
+        return reply.code(400).send({ error: 'parse_failed', message: msg });
+      }
+
+      const contentHash = createHash('sha256').update(buffer).digest('hex');
+      const draftId = randomUUID();
+      const draftS3Key = `documents/_drafts/${draftId}/source.pdf`;
+      try {
+        await putObject(draftS3Key, buffer, 'application/pdf');
+      } catch (err) {
+        req.log.warn({ err }, 'S3 upload draft PDF failed — proceeding without preview');
+      }
+
+      const response = {
+        draftS3Key,
+        contentHash,
+        parsed: parseResult.parsed,
+        llmProviderId: parseResult.llmProviderId,
+        llmConfidence: parseResult.parsed.confidence,
+        textLength: parseResult.textLength,
+      };
+      return UpdPdfParseResponseSchema.parse(response);
+    },
+  );
+
+  // ──────────── PDF УПД: confirm (сохранение после правки) ────────────
+  app.post(
+    '/api/v1/source-documents/confirm-upd-pdf',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        body: UpdPdfConfirmRequestSchema,
+        response: { 201: SourceDocumentDetailSchema, 400: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      const { draftS3Key, parsed } = req.body;
+
+      const supplier = parsed.supplier;
+      const supplierId =
+        supplier && supplier.inn && supplier.name
+          ? await findOrCreateCounterparty(
+              app,
+              { inn: supplier.inn, kpp: supplier.kpp ?? null, name: supplier.name },
+              'supplier',
+            )
+          : null;
+      const recipient = parsed.recipient;
+      const recipientId =
+        recipient && recipient.inn && recipient.name
+          ? await findOrCreateCounterparty(
+              app,
+              { inn: recipient.inn, kpp: recipient.kpp ?? null, name: recipient.name },
+              'customer',
+            )
+          : null;
+
+      const llmProviderId = (req.body as { llmProviderId?: string | null }).llmProviderId ?? null;
+
+      const [created] = await app.db
+        .insert(sourceDocuments)
+        .values({
+          kind: 'upd',
+          origin: 'manual_pdf',
+          supplierId,
+          recipientId,
+          docNumber: parsed.docNumber ?? null,
+          docDate: parsed.docDate ? new Date(parsed.docDate) : null,
+          totalSum: parsed.totalSum != null ? parsed.totalSum.toString() : null,
+          vatSum: parsed.vatSum != null ? parsed.vatSum.toString() : null,
+          llmProviderId,
+          llmConfidence: parsed.confidence.toString(),
+          status: 'parsed',
+        })
+        .returning();
+      if (!created) throw new Error('Failed to insert source_document');
+
+      if (parsed.items.length) {
+        await app.db.insert(sourceDocumentItems).values(
+          parsed.items.map((it, idx) => ({
+            sourceDocumentId: created.id,
+            nameRaw: it.nameRaw,
+            qty: it.qty.toString(),
+            unit: it.unit,
+            price: it.price != null ? it.price.toString() : null,
+            sum: it.sum != null ? it.sum.toString() : null,
+            vatRate: it.vatRate != null ? it.vatRate.toString() : null,
+            vatSum: it.vatSum != null ? it.vatSum.toString() : null,
+            lineNo: idx + 1,
+          })),
+        );
+      }
+
+      // Перемещаем draft → final S3-ключ
+      const finalS3Key = `documents/${created.id}/source.pdf`;
+      try {
+        await copyObject(draftS3Key, finalS3Key);
+        await deleteObject(draftS3Key);
+        await app.db.insert(sourceDocumentAttachments).values({
+          sourceDocumentId: created.id,
+          s3Key: finalS3Key,
+          filename: 'source.pdf',
+          mimeType: 'application/pdf',
+          role: 'original',
+        });
+      } catch (err) {
+        req.log.warn({ err, draftS3Key, finalS3Key }, 'S3 copy/delete failed');
+      }
+
+      // Возвращаем DTO (как в GET /:id)
+      const items = await app.db
+        .select()
+        .from(sourceDocumentItems)
+        .where(eq(sourceDocumentItems.sourceDocumentId, created.id))
+        .orderBy(sourceDocumentItems.lineNo);
+      const attachments = await app.db
+        .select()
+        .from(sourceDocumentAttachments)
+        .where(eq(sourceDocumentAttachments.sourceDocumentId, created.id));
+
+      reply.code(201);
+      return {
+        ...sdRow(created),
+        items: items.map((i) => ({
+          id: i.id,
+          materialId: i.materialId,
+          nameRaw: i.nameRaw,
+          qty: i.qty,
+          unit: i.unit,
+          price: i.price,
+          sum: i.sum,
+          vatRate: i.vatRate,
+          vatSum: i.vatSum,
+          expectedDate: i.expectedDate?.toISOString().slice(0, 10) ?? null,
+          lineNo: i.lineNo,
+        })),
+        attachments: attachments.map((a) => ({
+          id: a.id,
+          s3Key: a.s3Key,
+          filename: a.filename,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+          role: a.role,
+        })),
+      };
     },
   );
 }

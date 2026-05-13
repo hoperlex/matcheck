@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import multipart from '@fastify/multipart';
 import {
   serializerCompiler,
   validatorCompiler,
@@ -39,6 +40,9 @@ export async function buildServer() {
   await app.register(redisPlugin);
   await app.register(dbPlugin);
   await app.register(securityPlugin);
+  await app.register(multipart, {
+    limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  });
   await app.register(authPlugin);
 
   await app.register(healthRoutes);
