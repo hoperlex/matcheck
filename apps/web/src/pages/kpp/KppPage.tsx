@@ -203,6 +203,7 @@ export default function KppPage() {
 
   const photoProps: UploadProps = {
     accept: 'image/*',
+    capture: 'environment',
     showUploadList: false,
     beforeUpload: async (file) => {
       if (!savedId) {
