@@ -9,11 +9,11 @@
   header {
     Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
     X-Content-Type-Options "nosniff"
-    X-Frame-Options "DENY"
+    X-Frame-Options "SAMEORIGIN"
     Referrer-Policy "strict-origin-when-cross-origin"
     Permissions-Policy "camera=(self), geolocation=()"
     # CSP уже выставляет API через @fastify/helmet; для статики задаём минимум.
-    Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://s3.cloud.ru; connect-src 'self' https://s3.cloud.ru; frame-src 'self' blob: https://s3.cloud.ru; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://s3.cloud.ru; connect-src 'self' https://s3.cloud.ru; frame-src 'self' blob: https://s3.cloud.ru; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
     -Server
   }
 

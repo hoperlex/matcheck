@@ -17,7 +17,7 @@ export default fp(async (app) => {
         imgSrc: ["'self'", 'data:', 'blob:'],
         connectSrc: ["'self'"],
         frameSrc: ["'self'", 'blob:', 'https://s3.cloud.ru'],
-        frameAncestors: ["'none'"],
+        frameAncestors: ["'self'"],
         baseUri: ["'self'"],
         formAction: ["'self'"],
       },

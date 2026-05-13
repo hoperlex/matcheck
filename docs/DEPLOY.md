@@ -192,10 +192,16 @@ docker ps --filter 'name=matcheck-' --format 'table {{.Names}}\t{{.Status}}\t{{.
 
 ```bash
 # [root]
-ln -s /etc/nginx/sites-available/matcheck.fvds.ru /etc/nginx/sites-enabled/matcheck.fvds.ru
+# Симлинк боевого vhost на репо-версию — git pull будет обновлять его автоматически.
+ln -sf /srv/matcheck/app/infra/nginx/matcheck.fvds.ru.conf \
+       /etc/nginx/sites-available/matcheck.fvds.ru
+ln -sf /etc/nginx/sites-available/matcheck.fvds.ru \
+       /etc/nginx/sites-enabled/matcheck.fvds.ru
 nginx -t                 # ОБЯЗАТЕЛЬНО перед reload
 systemctl reload nginx   # graceful, активные соединения соседей не разрываются
 ```
+
+Симлинк-цепочка `sites-enabled → sites-available → /srv/matcheck/app/infra/nginx/matcheck.fvds.ru.conf` означает, что после любого `git pull` боевой vhost-файл уже актуален — остаётся только `nginx -t && systemctl reload nginx`. Master-процесс nginx работает под root, право `750` на `/srv/matcheck/` ему не мешает.
 
 После каждого `reload nginx` обязательно прогнать health-check соседей (см. [Не трогать соседей](#не-трогать-соседей)).
 
@@ -256,7 +262,7 @@ tail -f /var/log/nginx/matcheck.error.log
 
 ## Обновление кода (универсальная команда)
 
-Один и тот же блок работает для любого обновления — с миграциями БД и без них. Drizzle-migrate **идемпотентен**: пропускает уже применённые миграции через журнал `__drizzle_migrations`.
+Один и тот же блок работает для **любого** обновления — кода API, кода Web, миграций БД, compose-файла или nginx-vhost. Drizzle-migrate идемпотентен (пропускает уже применённые миграции через `__drizzle_migrations`); `nginx -t && reload` дешёвый и graceful — если vhost в коммите не менялся, reload no-op'нет на тех же байтах. Запускать целиком, не задумываясь, что именно изменилось в последнем коммите.
 
 ```bash
 # [matcheck]
@@ -264,20 +270,37 @@ cd /srv/matcheck/app
 git pull
 git log --oneline -1   # фиксируем коммит для журнала деплоя
 
-# Снэпшот PG (НЕОБЯЗАТЕЛЬНО при чисто-кодовых правках, но рекомендуется перед миграциями)
-# YC Console → Managed PostgreSQL → кластер → Резервные копии → Создать копию
+# (Опционально, рекомендуется перед миграциями)
+# Снэпшот PG: YC Console → Managed PostgreSQL → кластер → Резервные копии → Создать копию
 
-# Сборка образа (deps кэшируются; пересобирается build-стадия + слой COPY apps/api)
+# Сборка образов (deps кэшируются; пересобирается build-стадия + слой COPY apps/api)
 docker compose -f infra/docker-compose.prod.yml build matcheck-api matcheck-web
 
 # Применение миграций (если новых нет — пройдёт за секунду, ничего не сделает)
 docker compose -f infra/docker-compose.prod.yml \
   run --rm matcheck-api node_modules/.bin/tsx scripts/migrate.ts
 
-# Перезапуск (force-recreate подхватывает новый образ и новый api.env)
+# Пересоздание контейнеров — подхватывает новый образ, compose и api.env
 docker compose -f infra/docker-compose.prod.yml up -d --force-recreate matcheck-api matcheck-web
+```
 
-# Проверка
+```bash
+# [root]
+# Применить изменения nginx-vhost из репо (симлинк → /srv/matcheck/app/infra/nginx/...).
+nginx -t && systemctl reload nginx
+
+# Проверка, что соседи не задеты (baseline зафиксирован 2026-05-13)
+for site in rates.fvds.ru aihub.fvds.ru classhub.fvds.ru ravek.link \
+            billhub.fvds.ru passdesk.fvds.ru osa.fvds.ru testaihub.fvds.ru; do
+  code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 8 "https://$site/")
+  printf '%-25s %s\n' "$site" "$code"
+done | diff /root/sites-baseline-pre-matcheck.txt -
+# ожидаем: пустой вывод (нет diff с baseline)
+```
+
+```bash
+# [matcheck]
+# Финальная проверка matcheck
 sleep 15
 docker ps --filter 'name=matcheck-' --format 'table {{.Names}}\t{{.Status}}'
 docker logs --tail 30 matcheck-api
@@ -285,7 +308,22 @@ curl -fsS https://matcheck.fvds.ru/api/v1/auth/refresh -X POST | head -5  # ож
 curl -fsSI https://matcheck.fvds.ru/ | head -3
 ```
 
-Что если git pull упал с `dubious ownership` — значит вы под root. Перейдите в matcheck: `sudo -iu matcheck`. Git-операции делаются только под пользователем matcheck.
+Что покрывает блок:
+
+| Изменение в коммите | Подхватывается чем |
+|---|---|
+| `apps/api/**`, `apps/web/**`, `packages/contracts/**` | `build` + `up -d --force-recreate matcheck-api matcheck-web` |
+| Миграции в `apps/api/src/db/migrations/**` | шаг `scripts/migrate.ts` |
+| `infra/docker-compose.prod.yml` (для api/web) | `up -d --force-recreate matcheck-api matcheck-web` |
+| `infra/nginx/matcheck.fvds.ru.conf` | симлинк `sites-available` → репо + `nginx -t && systemctl reload nginx` |
+
+Что **НЕ** покрывает (требует отдельных шагов):
+
+- `/srv/matcheck/secrets/api.env` — лежит вне репо, правится вручную (см. ниже);
+- структурные изменения compose (новый сервис, том) — нужен `up -d` без перечисления сервисов;
+- настройки самого `matcheck-redis` — в универсальной команде он намеренно не пересоздаётся, чтобы не терять очереди BullMQ.
+
+Что если `git pull` упал с `dubious ownership` — значит вы под root. Перейдите в matcheck: `sudo -iu matcheck`. Git-операции делаются только под пользователем matcheck.
 
 ### При обновлении только `api.env` (без правки кода)
 
@@ -306,12 +344,16 @@ git pull
 docker compose -f infra/docker-compose.prod.yml up -d   # автоматически применяет изменения compose
 ```
 
-### При правке системного nginx или TLS-сертификатах
+Если изменения касаются только api/web — проще запустить полную универсальную команду выше, она и так делает `--force-recreate matcheck-api matcheck-web`.
+
+### Ручная перевыдача TLS-сертификата
+
+Авторенью идёт через systemd timer `certbot.timer` + deploy-hook (`/etc/letsencrypt/renewal-hooks/deploy/00-reload-nginx.sh`), ручной шаг нужен только при принудительной перевыдаче:
 
 ```bash
 # [root]
-nginx -t && systemctl reload nginx
-# затем проверка соседей (см. ниже)
+certbot renew --force-renewal --cert-name matcheck.fvds.ru
+# deploy-hook сам сделает nginx -t && systemctl reload nginx
 ```
 
 ## Откат
