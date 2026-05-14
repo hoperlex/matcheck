@@ -16,6 +16,7 @@ import {
   check,
   bigserial,
 } from 'drizzle-orm/pg-core';
+import type { UpdValidation } from '@matcheck/contracts';
 
 // ─── Enums ─────────────────────────────────────────────────────────────────
 
@@ -318,6 +319,7 @@ export const sourceDocuments = pgTable(
     llmConfidence: numeric('llm_confidence', { precision: 4, scale: 3 }),
     parsedAt: timestamp('parsed_at', { withTimezone: true }).notNull().defaultNow(),
     parseError: text('parse_error'),
+    validation: jsonb('validation').$type<UpdValidation | null>(),
     version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

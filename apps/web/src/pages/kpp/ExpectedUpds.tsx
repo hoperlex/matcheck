@@ -1,15 +1,55 @@
-import { Card, Space, Tag, Typography } from 'antd';
+import { Card, Space, Tag, Tooltip, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import type {
   Counterparty,
   SourceDocument,
   SourceDocumentListResponseSchema,
+  UpdCheck,
+  UpdValidation,
 } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
+
+function checkLabel(c: UpdCheck): string {
+  const row = typeof c.scope === 'object' && c.scope ? c.scope.row : null;
+  switch (c.name) {
+    case 'sum_total':
+      return 'Σ сумм по строкам vs итог';
+    case 'vat_total':
+      return 'Σ НДС по строкам vs итог';
+    case 'items_count':
+      return 'Кол-во позиций';
+    case 'row_qty_price':
+      return `Строка ${row ?? '?'}: qty×price`;
+    case 'row_vat_rate':
+      return `Строка ${row ?? '?'}: НДС%`;
+  }
+}
+
+function MismatchTag({ v }: { v: UpdValidation }) {
+  const fails = v.checks.filter((c) => !c.ok);
+  if (fails.length === 0) return null;
+  const tooltip = (
+    <Space direction="vertical" size={2}>
+      {fails.slice(0, 5).map((c, idx) => (
+        <Typography.Text key={idx} style={{ color: 'inherit' }}>
+          {checkLabel(c)}: {c.expected ?? '—'} vs {c.actual ?? '—'} (Δ {c.diff ?? '—'})
+        </Typography.Text>
+      ))}
+      {fails.length > 5 ? <Typography.Text>… и ещё {fails.length - 5}</Typography.Text> : null}
+    </Space>
+  );
+  return (
+    <Tooltip title={tooltip}>
+      <Tag color="warning" style={{ marginLeft: 6 }}>
+        ⚠ расхождение
+      </Tag>
+    </Tooltip>
+  );
+}
 
 export function ExpectedUpds({ onOpen }: { onOpen: (upd: SourceDocument) => void }) {
   const list = useQuery({
@@ -52,7 +92,12 @@ export function ExpectedUpds({ onOpen }: { onOpen: (upd: SourceDocument) => void
         {
           title: 'Сумма',
           key: 'total',
-          render: (_: unknown, r: SourceDocument) => (r.totalSum ? `${r.totalSum} ₽` : '—'),
+          render: (_: unknown, r: SourceDocument) => (
+            <span>
+              {r.totalSum ? `${r.totalSum} ₽` : '—'}
+              {r.validation?.hasMismatch ? <MismatchTag v={r.validation} /> : null}
+            </span>
+          ),
         },
       ]}
       cardRender={(r) => (
@@ -61,6 +106,7 @@ export function ExpectedUpds({ onOpen }: { onOpen: (upd: SourceDocument) => void
             <Space>
               <Tag color="blue">{r.docNumber ?? '— без номера —'}</Tag>
               <Typography.Text strong>{r.docDate ?? '—'}</Typography.Text>
+              {r.validation?.hasMismatch ? <MismatchTag v={r.validation} /> : null}
             </Space>
             <Typography.Text type="secondary">
               {supplierName(r.supplierId)}

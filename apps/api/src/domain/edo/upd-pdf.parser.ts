@@ -23,6 +23,11 @@ const RESPONSE_JSON_SCHEMA = {
     docDate: { type: ['string', 'null'], description: 'YYYY-MM-DD' },
     totalSum: { type: ['number', 'null'] },
     vatSum: { type: ['number', 'null'] },
+    itemsCount: {
+      type: ['integer', 'null'],
+      description:
+        'Значение из строки УПД «Всего наименований», «Количество позиций» и т.п. — целое число строк таблицы товаров. Используется для серверной сверки кол-ва распознанных строк. Если не нашли в документе — null.',
+    },
     supplier: {
       type: ['object', 'null'],
       properties: {

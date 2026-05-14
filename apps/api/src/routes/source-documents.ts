@@ -25,6 +25,7 @@ import {
 import { parseUpdXml } from '../domain/edo/upd.parser.js';
 import { parseUpdPdf, PdfNoTextError } from '../domain/edo/upd-pdf.parser.js';
 import { parseUpdPdfLocal } from '../domain/edo/upd-pdf-local.parser.js';
+import { validateUpdTotals } from '../domain/edo/upd-validation.js';
 import { copyObject, deleteObject, presign, putObject } from '../domain/storage/s3.signer.js';
 import { getUpdParseMode } from '../domain/settings/app-settings.js';
 import { resolveStatusId } from '../domain/statuses/lookup.js';
@@ -108,6 +109,7 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect) {
     version: sd.version,
     createdAt: sd.createdAt.toISOString(),
     updatedAt: sd.updatedAt.toISOString(),
+    validation: sd.validation ?? null,
   };
 }
 
@@ -333,6 +335,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         ? await findOrCreateCounterparty(app, parsed.recipient, 'customer')
         : null;
 
+      const validation = validateUpdTotals({
+        totalSum: parsed.totalSum,
+        vatSum: parsed.vatSum,
+        items: parsed.items,
+      });
+
       const [created] = await app.db
         .insert(sourceDocuments)
         .values({
@@ -344,6 +352,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           docDate: parsed.docDate ? new Date(parsed.docDate) : null,
           totalSum: parsed.totalSum?.toString() ?? null,
           vatSum: parsed.vatSum?.toString() ?? null,
+          validation,
           status: 'parsed',
         })
         .returning({ id: sourceDocuments.id });
@@ -481,6 +490,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
       const llmProviderId = (req.body as { llmProviderId?: string | null }).llmProviderId ?? null;
 
+      const validation = validateUpdTotals({
+        totalSum: parsed.totalSum,
+        vatSum: parsed.vatSum,
+        itemsCount: parsed.itemsCount,
+        items: parsed.items,
+      });
+
       const [created] = await app.db
         .insert(sourceDocuments)
         .values({
@@ -494,6 +510,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           vatSum: parsed.vatSum != null ? parsed.vatSum.toString() : null,
           llmProviderId,
           llmConfidence: parsed.confidence.toString(),
+          validation,
           status: 'parsed',
         })
         .returning();

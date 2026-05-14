@@ -194,6 +194,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           version: sd.version,
           createdAt: sd.createdAt.toISOString(),
           updatedAt: sd.updatedAt.toISOString(),
+          validation: sd.validation ?? null,
           items: sdItemRows
             .filter((i) => i.sourceDocumentId === sd.id)
             .map((i) => ({

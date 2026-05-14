@@ -36,6 +36,42 @@ export const SourceAttachmentSchema = z.object({
 });
 export type SourceAttachment = z.infer<typeof SourceAttachmentSchema>;
 
+// ──────────── Авто-сверка арифметики (см. apps/api/src/domain/edo/upd-validation.ts) ───────
+
+export const UpdCheckNameSchema = z.enum([
+  'sum_total',
+  'vat_total',
+  'items_count',
+  'row_qty_price',
+  'row_vat_rate',
+]);
+export type UpdCheckName = z.infer<typeof UpdCheckNameSchema>;
+
+export const UpdCheckScopeSchema = z.union([
+  z.literal('document'),
+  z.object({ row: z.number().int().positive() }),
+]);
+export type UpdCheckScope = z.infer<typeof UpdCheckScopeSchema>;
+
+export const UpdCheckSchema = z.object({
+  name: UpdCheckNameSchema,
+  scope: UpdCheckScopeSchema,
+  expected: z.number().nullable(),
+  actual: z.number().nullable(),
+  diff: z.number().nullable(),
+  tolerance: z.number(),
+  ok: z.boolean(),
+  skipReason: z.enum(['no_expected', 'no_actual']).optional(),
+});
+export type UpdCheck = z.infer<typeof UpdCheckSchema>;
+
+export const UpdValidationSchema = z.object({
+  hasMismatch: z.boolean(),
+  checkedAt: z.string(),
+  checks: z.array(UpdCheckSchema),
+});
+export type UpdValidation = z.infer<typeof UpdValidationSchema>;
+
 export const SourceDocumentSchema = z.object({
   id: z.string().uuid(),
   kind: SourceKindSchema,
@@ -54,6 +90,7 @@ export const SourceDocumentSchema = z.object({
   version: z.number(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  validation: UpdValidationSchema.nullable(),
 });
 export type SourceDocument = z.infer<typeof SourceDocumentSchema>;
 
@@ -101,6 +138,9 @@ export const UpdPdfParsedSchema = z.object({
   docDate: z.string().nullable().optional(),
   totalSum: z.number().nullable().optional(),
   vatSum: z.number().nullable().optional(),
+  // Значение из строки УПД «Всего наименований N»; null/undefined, если парсер
+  // не смог его извлечь — тогда сверка по кол-ву позиций пропускается.
+  itemsCount: z.number().int().nonnegative().nullable().optional(),
   supplier: UpdPdfPartySchema.nullable().optional(),
   recipient: UpdPdfPartySchema.nullable().optional(),
   items: z.array(UpdPdfItemSchema),

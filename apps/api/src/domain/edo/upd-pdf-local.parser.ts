@@ -233,6 +233,27 @@ export function parseUpdText(text: string): UpdPdfParsed {
     }
   }
 
+  // Кол-во позиций из шапки/футера (для серверной сверки с items.length).
+  // Типовые формулировки: «Всего наименований N», «Количество позиций N»,
+  // «Итого N наименований». Если не нашли — null, проверка items_count skip.
+  let itemsCount: number | null = null;
+  const countRes: RegExp[] = [
+    /Всего\s+наименований[\s:]+(\d+)/i,
+    /Количество\s+позиций[\s:]+(\d+)/i,
+    /Кол-во\s+позиций[\s:]+(\d+)/i,
+    /Итого\s+(\d+)\s+наименован/i,
+  ];
+  for (const line of lines) {
+    for (const re of countRes) {
+      const m = re.exec(line);
+      if (m && m[1]) {
+        itemsCount = Number(m[1]);
+        break;
+      }
+    }
+    if (itemsCount !== null) break;
+  }
+
   // ─── Таблица позиций ────────────────────────────────────────────────────
   // Якорь начала: строка-легенда «А 1 1a 1б 2 ...» (А кириллица).
   // Якорь конца: «Всего к оплате».
@@ -328,6 +349,7 @@ export function parseUpdText(text: string): UpdPdfParsed {
     docDate,
     totalSum,
     vatSum,
+    itemsCount,
     supplier:
       supplierInn || supplierName
         ? { inn: supplierInn, kpp: supplierKpp, name: supplierName }
