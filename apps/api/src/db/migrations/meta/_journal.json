@@ -85,6 +85,13 @@
       "when": 1779840060000,
       "tag": "0011_source_direction",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1779926400000,
+      "tag": "0012_upd_contractor_and_dedup",
+      "breakpoints": true
     }
   ]
 }

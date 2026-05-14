@@ -183,6 +183,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           status: sd.status,
           supplierId: sd.supplierId,
           recipientId: sd.recipientId,
+          contractorId: sd.contractorId,
           docNumber: sd.docNumber,
           docDate: sd.docDate?.toISOString().slice(0, 10) ?? null,
           totalSum: sd.totalSum,

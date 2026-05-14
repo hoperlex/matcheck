@@ -73,10 +73,19 @@ async function request<T>(
 
   if (res.status === 409) {
     const body = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      message?: string;
       serverVersion?: number;
       server?: unknown;
     };
-    throw new ConflictError(body.serverVersion ?? 0, body.server);
+    // Старый формат оптимистичного конкурентного апдейта (shipments/deliveries):
+    // { error: 'conflict', serverVersion, server }. Все остальные 409 (например
+    // duplicate_upd или has_references) пробрасываем как обычный ApiError —
+    // вызывающий код сам разберёт payload.
+    if (body.error === 'conflict' || body.serverVersion != null) {
+      throw new ConflictError(body.serverVersion ?? 0, body.server);
+    }
+    throw new ApiError(409, body.error ?? 'conflict', body.message ?? 'Conflict', body);
   }
 
   if (!res.ok) {

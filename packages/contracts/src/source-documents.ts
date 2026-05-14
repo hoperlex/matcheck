@@ -81,6 +81,7 @@ export const SourceDocumentSchema = z.object({
   status: SourceStatusSchema,
   supplierId: z.string().uuid().nullable(),
   recipientId: z.string().uuid().nullable(),
+  contractorId: z.string().uuid().nullable(),
   docNumber: z.string().nullable(),
   docDate: z.string().nullable(),
   totalSum: z.string().nullable(),
@@ -111,6 +112,10 @@ export const SourceDocumentListResponseSchema = z.object({
 export const ManualUpdUploadRequestSchema = z.object({
   xml: z.string().min(1).max(10_000_000),
   direction: SourceDirectionSchema,
+  contractorId: z.string().uuid(),
+  // Если указан — подтверждение «Заменить» существующий УПД с этим id.
+  // Сервер удалит старый и создаст новый.
+  replaceExistingId: z.string().uuid().optional(),
 });
 export type ManualUpdUploadRequest = z.infer<typeof ManualUpdUploadRequestSchema>;
 
@@ -118,6 +123,28 @@ export const ManualUpdUploadResponseSchema = z.object({
   id: z.string().uuid(),
   itemsCount: z.number(),
 });
+
+// ──────────── Конфликт дубликата УПД (общий для PDF и XML) ────────────
+// Возвращается с кодом 409, когда при загрузке найден УПД с тем же
+// supplier_id + doc_number + doc_date. Клиент показывает диалог
+// «Заменить / Пропустить» и при «Заменить» повторяет запрос с
+// replaceExistingId = existing.id.
+
+export const UpdDuplicateExistingSchema = z.object({
+  id: z.string().uuid(),
+  docNumber: z.string().nullable(),
+  docDate: z.string().nullable(),
+  supplierId: z.string().uuid().nullable(),
+  totalSum: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type UpdDuplicateExisting = z.infer<typeof UpdDuplicateExistingSchema>;
+
+export const UpdDuplicateConflictSchema = z.object({
+  error: z.literal('duplicate_upd'),
+  existing: UpdDuplicateExistingSchema,
+});
+export type UpdDuplicateConflict = z.infer<typeof UpdDuplicateConflictSchema>;
 
 export const SourceDocumentDirectionUpdateSchema = z.object({
   direction: SourceDirectionSchema,
@@ -178,6 +205,9 @@ export const UpdPdfConfirmRequestSchema = z.object({
   contentHash: z.string().regex(/^[0-9a-f]{64}$/),
   parsed: UpdPdfParsedSchema,
   direction: SourceDirectionSchema,
+  contractorId: z.string().uuid(),
+  // Подтверждение «Заменить» существующий УПД (см. UpdDuplicateConflictSchema).
+  replaceExistingId: z.string().uuid().optional(),
 });
 export type UpdPdfConfirmRequest = z.infer<typeof UpdPdfConfirmRequestSchema>;
 

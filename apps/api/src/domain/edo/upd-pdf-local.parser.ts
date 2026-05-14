@@ -143,7 +143,7 @@ function parseItemDataLine(line: string): {
   const vatRate = parseVatRate(tailM[1]);
   let rest = tailM[2].trim();
   // Уберём хвостовой код страны и название (например, «643 Россия» или «112 Беларусь»).
-  rest = rest.replace(/\s+\d{3}\s+[\p{L}][\p{L}\s\-]*$/u, '').trim();
+  rest = rest.replace(/\s+\d{3}\s+[\p{L}][\p{L}\s-]*$/u, '').trim();
   const tailNums = partitionNumbers(rest, 2);
   if (!tailNums || tailNums.length !== 2) return null;
   const [vatSum, sumWithVat] = tailNums as [number, number];

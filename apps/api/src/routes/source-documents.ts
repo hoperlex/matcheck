@@ -11,6 +11,7 @@ import {
   SourceDocumentListResponseSchema,
   SourceDocumentDetailSchema,
   SourceDocumentFileResponseSchema,
+  UpdDuplicateConflictSchema,
   UpdPdfConfirmRequestSchema,
   UpdPdfParseResponseSchema,
   ErrorResponseSchema,
@@ -20,6 +21,7 @@ import {
   deliveries,
   deliverySources,
   materials,
+  shipmentSources,
   sourceDocuments,
   sourceDocumentItems,
   sourceDocumentAttachments,
@@ -31,6 +33,7 @@ import { validateUpdTotals } from '../domain/edo/upd-validation.js';
 import { copyObject, deleteObject, presign, putObject } from '../domain/storage/s3.signer.js';
 import { getUpdParseMode } from '../domain/settings/app-settings.js';
 import { resolveStatusId } from '../domain/statuses/lookup.js';
+import { publishEvent } from './events.js';
 
 const ListQuerySchema = z.object({
   kind: z.enum(['upd', 'request']).optional(),
@@ -101,6 +104,7 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect) {
     status: sd.status,
     supplierId: sd.supplierId,
     recipientId: sd.recipientId,
+    contractorId: sd.contractorId,
     docNumber: sd.docNumber,
     docDate: sd.docDate?.toISOString().slice(0, 10) ?? null,
     totalSum: sd.totalSum,
@@ -134,6 +138,95 @@ async function findOriginalAttachment(
     .orderBy(desc(sourceDocumentAttachments.createdAt))
     .limit(1);
   return att ?? null;
+}
+
+class HasReferencesError extends Error {
+  constructor(
+    public readonly deliveries: number,
+    public readonly shipments: number,
+  ) {
+    super(
+      `УПД используется в приёмках (${deliveries}) или отгрузках (${shipments}) — сначала удалите их`,
+    );
+  }
+}
+
+// Поиск дубля УПД по тройке (supplier_id, doc_number, doc_date). Учитывается
+// только kind='upd'. Используется и при /upload-upd, и при /confirm-upd-pdf.
+async function findUpdDuplicate(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: any,
+  {
+    supplierId,
+    docNumber,
+    docDate,
+  }: { supplierId: string | null; docNumber: string | null; docDate: Date | null },
+): Promise<typeof sourceDocuments.$inferSelect | null> {
+  if (!supplierId || !docNumber || !docDate) return null;
+  const [existing] = await app.db
+    .select()
+    .from(sourceDocuments)
+    .where(
+      and(
+        eq(sourceDocuments.kind, 'upd'),
+        eq(sourceDocuments.supplierId, supplierId),
+        eq(sourceDocuments.docNumber, docNumber),
+        eq(sourceDocuments.docDate, docDate),
+      ),
+    )
+    .limit(1);
+  return existing ?? null;
+}
+
+function duplicateConflictPayload(sd: typeof sourceDocuments.$inferSelect) {
+  return {
+    error: 'duplicate_upd' as const,
+    existing: {
+      id: sd.id,
+      docNumber: sd.docNumber,
+      docDate: sd.docDate?.toISOString().slice(0, 10) ?? null,
+      supplierId: sd.supplierId,
+      totalSum: sd.totalSum,
+      createdAt: sd.createdAt.toISOString(),
+    },
+  };
+}
+
+// Удаление УПД с проверкой привязок к приёмкам/отгрузкам и чисткой S3
+// для всех original-attachments. Бросает HasReferencesError, если есть
+// привязки. Сами позиции и attachments удаляются каскадно по FK.
+async function deleteUpdWithRefsCheck(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: any,
+  id: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log?: { warn: (...args: any[]) => void },
+): Promise<void> {
+  const [{ count: deliveriesCount } = { count: 0 }] = await app.db
+    .select({ count: drSql<number>`count(*)::int` })
+    .from(deliverySources)
+    .where(eq(deliverySources.sourceDocumentId, id));
+  const [{ count: shipmentsCount } = { count: 0 }] = await app.db
+    .select({ count: drSql<number>`count(*)::int` })
+    .from(shipmentSources)
+    .where(eq(shipmentSources.sourceDocumentId, id));
+  if (deliveriesCount > 0 || shipmentsCount > 0) {
+    throw new HasReferencesError(deliveriesCount, shipmentsCount);
+  }
+
+  const attachments = await app.db
+    .select({ s3Key: sourceDocumentAttachments.s3Key })
+    .from(sourceDocumentAttachments)
+    .where(eq(sourceDocumentAttachments.sourceDocumentId, id));
+  for (const a of attachments) {
+    try {
+      await deleteObject(a.s3Key);
+    } catch (err) {
+      log?.warn({ err, s3Key: a.s3Key }, 's3 delete failed');
+    }
+  }
+
+  await app.db.delete(sourceDocuments).where(eq(sourceDocuments.id, id));
 }
 
 export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<void> {
@@ -325,7 +418,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         body: ManualUpdUploadRequestSchema,
-        response: { 201: ManualUpdUploadResponseSchema, 400: ErrorResponseSchema },
+        response: {
+          201: ManualUpdUploadResponseSchema,
+          400: ErrorResponseSchema,
+          409: UpdDuplicateConflictSchema.or(ErrorResponseSchema),
+        },
       },
     },
     async (req, reply) => {
@@ -341,6 +438,27 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       const recipientId = parsed.recipient
         ? await findOrCreateCounterparty(app, parsed.recipient, 'customer')
         : null;
+      const { contractorId, replaceExistingId } = req.body;
+
+      const docDate = parsed.docDate ? new Date(parsed.docDate) : null;
+      const duplicate = await findUpdDuplicate(app, {
+        supplierId,
+        docNumber: parsed.docNumber,
+        docDate,
+      });
+      if (duplicate && duplicate.id !== replaceExistingId) {
+        return reply.code(409).send(duplicateConflictPayload(duplicate));
+      }
+      if (duplicate && replaceExistingId === duplicate.id) {
+        try {
+          await deleteUpdWithRefsCheck(app, duplicate.id, req.log);
+        } catch (err) {
+          if (err instanceof HasReferencesError) {
+            return reply.code(409).send({ error: 'has_references', message: err.message });
+          }
+          throw err;
+        }
+      }
 
       const validation = validateUpdTotals({
         totalSum: parsed.totalSum,
@@ -356,8 +474,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           origin: 'manual_xml',
           supplierId,
           recipientId,
+          contractorId,
           docNumber: parsed.docNumber,
-          docDate: parsed.docDate ? new Date(parsed.docDate) : null,
+          docDate,
           totalSum: parsed.totalSum?.toString() ?? null,
           vatSum: parsed.vatSum?.toString() ?? null,
           validation,
@@ -471,11 +590,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         body: UpdPdfConfirmRequestSchema,
-        response: { 201: SourceDocumentDetailSchema, 400: ErrorResponseSchema },
+        response: {
+          201: SourceDocumentDetailSchema,
+          400: ErrorResponseSchema,
+          409: UpdDuplicateConflictSchema.or(ErrorResponseSchema),
+        },
       },
     },
     async (req, reply) => {
-      const { draftS3Key, parsed, direction } = req.body;
+      const { draftS3Key, parsed, direction, contractorId, replaceExistingId } = req.body;
 
       const supplier = parsed.supplier;
       const supplierId =
@@ -498,6 +621,26 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
       const llmProviderId = (req.body as { llmProviderId?: string | null }).llmProviderId ?? null;
 
+      const docDate = parsed.docDate ? new Date(parsed.docDate) : null;
+      const duplicate = await findUpdDuplicate(app, {
+        supplierId,
+        docNumber: parsed.docNumber ?? null,
+        docDate,
+      });
+      if (duplicate && duplicate.id !== replaceExistingId) {
+        return reply.code(409).send(duplicateConflictPayload(duplicate));
+      }
+      if (duplicate && replaceExistingId === duplicate.id) {
+        try {
+          await deleteUpdWithRefsCheck(app, duplicate.id, req.log);
+        } catch (err) {
+          if (err instanceof HasReferencesError) {
+            return reply.code(409).send({ error: 'has_references', message: err.message });
+          }
+          throw err;
+        }
+      }
+
       const validation = validateUpdTotals({
         totalSum: parsed.totalSum,
         vatSum: parsed.vatSum,
@@ -513,8 +656,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           origin: 'manual_pdf',
           supplierId,
           recipientId,
+          contractorId,
           docNumber: parsed.docNumber ?? null,
-          docDate: parsed.docDate ? new Date(parsed.docDate) : null,
+          docDate,
           totalSum: parsed.totalSum != null ? parsed.totalSum.toString() : null,
           vatSum: parsed.vatSum != null ? parsed.vatSum.toString() : null,
           llmProviderId,
@@ -662,6 +806,44 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           role: a.role,
         })),
       };
+    },
+  );
+
+  // Удаление УПД. Если документ привязан к приёмке/отгрузке — 409
+  // has_references; иначе hard delete с каскадом позиций/attachments
+  // и чисткой S3.
+  app.delete(
+    '/api/v1/source-documents/:id',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: { 200: z.object({ ok: z.literal(true) }), 404: ErrorResponseSchema, 409: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      const [existing] = await app.db
+        .select()
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, req.params.id))
+        .limit(1);
+      if (!existing) return reply.code(404).send({ error: 'not_found' });
+
+      try {
+        await deleteUpdWithRefsCheck(app, req.params.id, req.log);
+      } catch (err) {
+        if (err instanceof HasReferencesError) {
+          return reply.code(409).send({ error: 'has_references', message: err.message });
+        }
+        throw err;
+      }
+
+      publishEvent(app, {
+        type: 'source_document_deleted',
+        id: req.params.id,
+        ts: new Date().toISOString(),
+      });
+      return { ok: true as const };
     },
   );
 }

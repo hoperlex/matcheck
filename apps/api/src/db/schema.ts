@@ -302,6 +302,9 @@ export const sourceDocuments = pgTable(
     status: sourceStatusEnum('status').notNull().default('parsed'),
     supplierId: uuid('supplier_id').references(() => counterparties.id, { onDelete: 'set null' }),
     recipientId: uuid('recipient_id').references(() => counterparties.id, { onDelete: 'set null' }),
+    contractorId: uuid('contractor_id').references(() => counterparties.id, {
+      onDelete: 'set null',
+    }),
     docNumber: text('doc_number'),
     docDate: timestamp('doc_date', { withTimezone: false, mode: 'date' }),
     totalSum: numeric('total_sum', { precision: 18, scale: 2 }),
@@ -340,6 +343,14 @@ export const sourceDocuments = pgTable(
       .on(t.expectedDate)
       .where(sql`${t.kind} = 'request'`),
     index('source_direction_idx').on(t.direction),
+    index('source_upd_dedup_idx')
+      .on(t.supplierId, t.docNumber, t.docDate)
+      .where(
+        sql`${t.kind} = 'upd' and ${t.supplierId} is not null and ${t.docNumber} is not null and ${t.docDate} is not null`,
+      ),
+    index('source_contractor_idx')
+      .on(t.contractorId)
+      .where(sql`${t.contractorId} is not null`),
     check(
       'source_upd_required',
       sql`(${t.kind} <> 'upd') or (${t.docNumber} is not null and ${t.docDate} is not null and ${t.totalSum} is not null)`,

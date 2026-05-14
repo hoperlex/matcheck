@@ -17,17 +17,27 @@ import { useQueryClient } from '@tanstack/react-query';
 import type {
   SourceDirection,
   SourceDocumentDetail,
+  UpdDuplicateExisting,
   UpdPdfParseResponse,
   UpdPdfParsed,
 } from '@matcheck/contracts';
 import { api, apiUploadFile, ApiError } from '../../services/api';
+import { ContractorSelect } from './ContractorSelect';
 
-type Stage = 'select' | 'parsing' | 'review' | 'saving';
+type Stage = 'select' | 'parsing' | 'review' | 'saving' | 'conflict';
 
 // Потолок ожидания запроса распознавания УПД (10 мин + 1 мин буфер). На сервере
 // LLM-запрос ограничен 600с, Fastify requestTimeout — 660с; клиент не должен
 // обрывать раньше сервера.
 const PARSE_TIMEOUT_MS = 660_000;
+
+function readDuplicateExisting(err: unknown): UpdDuplicateExisting | null {
+  if (!(err instanceof ApiError) || err.status !== 409 || err.code !== 'duplicate_upd') {
+    return null;
+  }
+  const payload = err.payload as { existing?: UpdDuplicateExisting } | null;
+  return payload?.existing ?? null;
+}
 
 export function UpdPdfUploadModal({
   open,
@@ -45,6 +55,8 @@ export function UpdPdfUploadModal({
   const [form] = Form.useForm<UpdPdfParsed>();
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [lastFile, setLastFile] = useState<File | null>(null);
+  const [contractorId, setContractorId] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<UpdDuplicateExisting | null>(null);
 
   useEffect(() => {
     return () => {
@@ -59,6 +71,8 @@ export function UpdPdfUploadModal({
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(null);
     setLastFile(null);
+    setContractorId(null);
+    setConflict(null);
     form.resetFields();
   }
 
@@ -98,7 +112,12 @@ export function UpdPdfUploadModal({
     accept: '.pdf,application/pdf',
     maxCount: 1,
     showUploadList: false,
+    disabled: !contractorId,
     beforeUpload: async (file) => {
+      if (!contractorId) {
+        message.warning('Сначала выберите подрядчика');
+        return false;
+      }
       const f = file as unknown as File;
       const localUrl = URL.createObjectURL(f);
       setPreviewUrl(localUrl);
@@ -108,8 +127,9 @@ export function UpdPdfUploadModal({
     },
   };
 
-  const confirm = async () => {
-    if (!parseRes) return;
+  async function saveConfirm(replaceExistingId?: string): Promise<void> {
+    if (!parseRes || !contractorId) return;
+    setError(null);
     try {
       const values = await form.validateFields();
       setStage('saving');
@@ -118,60 +138,102 @@ export function UpdPdfUploadModal({
         contentHash: parseRes.contentHash,
         parsed: values,
         direction,
+        contractorId,
+        ...(replaceExistingId ? { replaceExistingId } : {}),
       });
-      message.success('УПД сохранён');
+      message.success(replaceExistingId ? 'УПД заменён' : 'УПД сохранён');
       void qc.invalidateQueries({ queryKey: ['source-documents'] });
       close();
     } catch (err) {
+      const existing = readDuplicateExisting(err);
+      if (existing) {
+        setConflict(existing);
+        setStage('conflict');
+        return;
+      }
+      if (err instanceof ApiError && err.code === 'has_references') {
+        message.error(err.message);
+        setStage('review');
+        return;
+      }
       const msg = err instanceof ApiError ? err.message : 'Ошибка сохранения';
       setError(msg);
       setStage('review');
     }
+  }
+
+  const confirm = () => saveConfirm();
+  const replaceExisting = () => {
+    if (conflict) void saveConfirm(conflict.id);
   };
 
   const lowConfidence = parseRes && parseRes.llmConfidence < 0.7;
   const localEmpty =
     parseRes && parseRes.parseSource === 'local' && parseRes.parsed.items.length === 0;
 
+  let footer: React.ReactNode = null;
+  if (stage === 'review') {
+    footer = [
+      <Button key="cancel" onClick={close}>
+        Отменить
+      </Button>,
+      <Button key="save" type="primary" onClick={confirm}>
+        Сохранить
+      </Button>,
+    ];
+  } else if (stage === 'saving') {
+    footer = [
+      <Button key="cancel" onClick={close} disabled>
+        Отменить
+      </Button>,
+      <Button key="save" type="primary" loading>
+        Сохранить
+      </Button>,
+    ];
+  } else if (stage === 'conflict') {
+    footer = [
+      <Button key="skip" onClick={close}>
+        Пропустить
+      </Button>,
+      <Button key="replace" type="primary" danger onClick={replaceExisting}>
+        Заменить существующий
+      </Button>,
+    ];
+  }
+
   return (
     <Modal
       open={open}
       onCancel={close}
       title="Загрузка УПД (PDF)"
-      width={stage === 'review' ? '90vw' : 560}
-      footer={
-        stage === 'review'
-          ? [
-              <Button key="cancel" onClick={close} disabled={stage !== 'review'}>
-                Отменить
-              </Button>,
-              <Button
-                key="save"
-                type="primary"
-                onClick={confirm}
-                loading={(stage as Stage) === 'saving'}
-              >
-                Сохранить
-              </Button>,
-            ]
-          : null
-      }
+      width={stage === 'review' || stage === 'saving' ? '90vw' : 560}
+      footer={footer}
       destroyOnClose
-      style={stage === 'review' ? { top: 20 } : {}}
+      style={stage === 'review' || stage === 'saving' ? { top: 20 } : {}}
     >
       {error && (
         <Alert type="error" message={error} showIcon style={{ marginBottom: 12 }} closable />
       )}
 
       {stage === 'select' && (
-        <Upload.Dragger {...uploadProps}>
-          <p style={{ fontSize: 16, marginBottom: 8 }}>
-            Перетащите PDF сюда или кликните для выбора
-          </p>
-          <Typography.Text type="secondary">
-            Поддерживаются только PDF с текстовым слоем. Максимум 10 МБ.
-          </Typography.Text>
-        </Upload.Dragger>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <div>
+            <Typography.Text strong>Подрядчик</Typography.Text>
+            <div style={{ marginTop: 4 }}>
+              <ContractorSelect value={contractorId} onChange={setContractorId} />
+            </div>
+          </div>
+          <Upload.Dragger {...uploadProps}>
+            <p style={{ fontSize: 16, marginBottom: 8 }}>
+              Перетащите PDF сюда или кликните для выбора
+            </p>
+            <Typography.Text type="secondary">
+              {contractorId
+                ? 'Поддерживаются только PDF с текстовым слоем. Максимум 10 МБ.'
+                : 'Сначала выберите подрядчика выше.'}
+            </Typography.Text>
+          </Upload.Dragger>
+        </Space>
       )}
 
       {stage === 'parsing' && (
@@ -179,6 +241,33 @@ export function UpdPdfUploadModal({
           <Spin size="large" />
           <Typography.Text>Распознавание PDF… (до 10 минут)</Typography.Text>
         </Space>
+      )}
+
+      {stage === 'conflict' && conflict && (
+        <Alert
+          type="warning"
+          showIcon
+          message="Такой УПД уже загружен"
+          description={
+            <Space direction="vertical" size={2}>
+              <Typography.Text>
+                № <b>{conflict.docNumber ?? '— без номера —'}</b>
+                {conflict.docDate ? ` от ${conflict.docDate}` : ''}
+              </Typography.Text>
+              {conflict.totalSum ? (
+                <Typography.Text type="secondary">Сумма: {conflict.totalSum} ₽</Typography.Text>
+              ) : null}
+              <Typography.Text type="secondary">
+                Загружен: {new Date(conflict.createdAt).toLocaleString()}
+              </Typography.Text>
+              <Typography.Text style={{ marginTop: 8 }}>
+                «Заменить» удалит старый документ и сохранит свежераспознанный.
+                Если старый уже привязан к приёмке/отгрузке — заменить не получится,
+                сначала отвяжите его.
+              </Typography.Text>
+            </Space>
+          }
+        />
       )}
 
       {(stage === 'review' || stage === 'saving') && parseRes && (
@@ -225,7 +314,7 @@ export function UpdPdfUploadModal({
                 style={{ marginBottom: 12 }}
               />
             )}
-            <Form form={form} layout="vertical" disabled={(stage as Stage) === 'saving'}>
+            <Form form={form} layout="vertical" disabled={stage === 'saving'}>
               <Space.Compact block>
                 <Form.Item name="docNumber" label="№ документа" style={{ flex: 1, marginRight: 8 }}>
                   <Input />

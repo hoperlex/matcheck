@@ -1,12 +1,14 @@
+import type { MouseEvent } from 'react';
 import { useState } from 'react';
-import { Card, Segmented, Tabs, Typography, Tag, Space, Button, Upload, message } from 'antd';
-import type { UploadProps } from 'antd';
+import { Button, Card, Popconfirm, Segmented, Space, Tabs, Tag, Typography, message } from 'antd';
+import { DeleteOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { SourceDirection, SourceDocumentListResponseSchema } from '@matcheck/contracts';
 import type { z } from 'zod';
-import { api } from '../../services/api';
+import { api, ApiError } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
+import { UpdXmlUploadModal } from './UpdXmlUploadModal';
 import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
@@ -16,6 +18,7 @@ export default function InboxPage() {
   const [direction, setDirection] = useState<SourceDirection>('inbound');
   const [kind, setKind] = useState<'all' | 'upd' | 'request'>('all');
   const [pdfModalOpen, setPdfModalOpen] = useState(false);
+  const [xmlModalOpen, setXmlModalOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const qc = useQueryClient();
 
@@ -28,26 +31,43 @@ export default function InboxPage() {
     },
   });
 
-  const upload = useMutation({
-    mutationFn: async (file: File) => {
-      const xml = await file.text();
-      return api.post('/source-documents/upload-upd', { xml, direction });
+  const del = useMutation({
+    mutationFn: (id: string) => api.delete<{ ok: true }>(`/source-documents/${id}`),
+    onSuccess: async () => {
+      message.success('УПД удалён');
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['source-documents'] }),
+        qc.invalidateQueries({ queryKey: ['source-documents', 'unaccepted-upd', 'list'] }),
+      ]);
     },
-    onSuccess: () => {
-      message.success('УПД загружен');
-      void qc.invalidateQueries({ queryKey: ['source-documents'] });
+    onError: (err: Error) => {
+      if (err instanceof ApiError && err.code === 'has_references') {
+        message.error(err.message);
+        return;
+      }
+      message.error(err.message);
     },
-    onError: (err: Error) => message.error(`Не удалось: ${err.message}`),
   });
 
-  const uploadProps: UploadProps = {
-    accept: '.xml',
-    showUploadList: false,
-    beforeUpload(file) {
-      upload.mutate(file);
-      return false;
-    },
-  };
+  const renderDeleteButton = (r: Row) => (
+    <Popconfirm
+      title="Удалить УПД?"
+      description="Документ, его позиции и оригинальный файл будут удалены безвозвратно."
+      okText="Да, удалить"
+      cancelText="Нет"
+      okButtonProps={{ danger: true }}
+      onConfirm={() => del.mutate(r.id)}
+    >
+      <Button
+        danger
+        size="small"
+        shape="circle"
+        icon={<DeleteOutlined />}
+        loading={del.isPending && del.variables === r.id}
+        onClick={(e) => e.stopPropagation()}
+      />
+    </Popconfirm>
+  );
 
   return (
     <div>
@@ -72,9 +92,9 @@ export default function InboxPage() {
             { label: 'Заявки', value: 'request' },
           ]}
         />
-        <Upload {...uploadProps}>
-          <Button type="primary">Загрузить УПД (XML)</Button>
-        </Upload>
+        <Button type="primary" onClick={() => setXmlModalOpen(true)}>
+          Загрузить УПД (XML)
+        </Button>
         <Button onClick={() => setPdfModalOpen(true)}>Загрузить УПД (PDF)</Button>
       </Space>
       <ResponsiveTable<Row>
@@ -94,10 +114,20 @@ export default function InboxPage() {
           { title: 'Дата', dataIndex: 'docDate' },
           { title: 'Сумма', dataIndex: 'totalSum' },
           { title: 'Происхождение', dataIndex: 'origin' },
+          {
+            title: '',
+            key: 'actions',
+            width: 56,
+            align: 'right' as const,
+            onCell: () => ({
+              onClick: (e: MouseEvent) => e.stopPropagation(),
+            }),
+            render: (_: unknown, r: Row) => renderDeleteButton(r),
+          },
         ]}
         cardRender={(r) => (
           <Card style={{ width: '100%' }} size="small">
-            <Space direction="vertical" size={2}>
+            <Space direction="vertical" size={2} style={{ width: '100%', position: 'relative' }}>
               <Tag color={r.kind === 'upd' ? 'blue' : 'gold'}>
                 {r.kind === 'upd' ? 'УПД' : 'Заявка'}
               </Tag>
@@ -108,6 +138,12 @@ export default function InboxPage() {
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {r.origin}
               </Typography.Text>
+              <div
+                style={{ position: 'absolute', top: 0, right: 0 }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {renderDeleteButton(r)}
+              </div>
             </Space>
           </Card>
         )}
@@ -116,6 +152,11 @@ export default function InboxPage() {
         open={pdfModalOpen}
         direction={direction}
         onClose={() => setPdfModalOpen(false)}
+      />
+      <UpdXmlUploadModal
+        open={xmlModalOpen}
+        direction={direction}
+        onClose={() => setXmlModalOpen(false)}
       />
       <SourceDocumentDetailModal
         id={selectedId}

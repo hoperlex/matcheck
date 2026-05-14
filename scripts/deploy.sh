@@ -25,12 +25,25 @@
 
 set -euo pipefail
 
+# UTF-8 локаль нужна, чтобы ${#str} считал символы (codepoints), а не байты —
+# без этого pad() ниже выравнивает русские labels неправильно.
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+
 main() {
   if [[ -t 1 ]]; then
     BOLD=$'\e[1m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; CYAN=$'\e[36m'; NC=$'\e[0m'
   else
     BOLD=''; GREEN=''; YELLOW=''; CYAN=''; NC=''
   fi
+
+  # Выравнивание метки до фиксированной ширины В СИМВОЛАХ (а не байтах).
+  # printf %-Ns считает байты — кириллица в UTF-8 = 2 байта, и колонки съезжают.
+  pad() {
+    local label="$1" width="${2:-15}" len=${#1} n
+    n=$(( width - len ))
+    (( n < 0 )) && n=0
+    printf '%s%*s' "$label" "$n" ''
+  }
 
   cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   COMPOSE=(docker compose -f infra/docker-compose.prod.yml)
@@ -86,26 +99,26 @@ main() {
   echo "${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
 
   if [[ "$COMMIT_BEFORE" == "$COMMIT_AFTER" ]]; then
-    printf "  %-18s ${GREEN}✓${NC} %s (без изменений)\n" "Git pull" "$COMMIT_AFTER"
+    printf "  %s ${GREEN}✓${NC} %s (без изменений)\n" "$(pad 'Git pull')"       "$COMMIT_AFTER"
   else
-    printf "  %-18s ${GREEN}✓${NC} %s → %s\n"            "Git pull" "$COMMIT_BEFORE" "$COMMIT_AFTER"
+    printf "  %s ${GREEN}✓${NC} %s → %s\n"            "$(pad 'Git pull')"       "$COMMIT_BEFORE" "$COMMIT_AFTER"
   fi
 
-  printf "  %-18s ${GREEN}✓${NC} %s\n" "Сборка образов" "matcheck-api, matcheck-web"
+  printf "  %s ${GREEN}✓${NC} %s\n"                   "$(pad 'Сборка образов')" "matcheck-api, matcheck-web"
 
   if (( PENDING_BEFORE == 0 )); then
-    printf "  %-18s ${GREEN}✓${NC} нет новых (всего в БД: %d)\n" "Миграции" "$APPLIED_AFTER"
+    printf "  %s ${GREEN}✓${NC} нет новых (всего в БД: %d)\n" "$(pad 'Миграции')" "$APPLIED_AFTER"
   elif (( APPLIED_NOW == PENDING_BEFORE && PENDING_AFTER == 0 )); then
-    printf "  %-18s ${GREEN}✓${NC} %d из %d применена(о)\n" "Миграции" "$APPLIED_NOW" "$PENDING_BEFORE"
+    printf "  %s ${GREEN}✓${NC} %d из %d применена(о)\n"      "$(pad 'Миграции')" "$APPLIED_NOW" "$PENDING_BEFORE"
     if [[ -n "$PENDING_TAGS" ]]; then
-      printf "  %-18s   %s\n" "" "$PENDING_TAGS"
+      printf "  %s   %s\n"                                    "$(pad '')"         "$PENDING_TAGS"
     fi
   else
-    printf "  %-18s ${YELLOW}!${NC} ожидалось %d, применено %d (pending после: %d)\n" \
-      "Миграции" "$PENDING_BEFORE" "$APPLIED_NOW" "$PENDING_AFTER"
+    printf "  %s ${YELLOW}!${NC} ожидалось %d, применено %d (pending после: %d)\n" \
+      "$(pad 'Миграции')" "$PENDING_BEFORE" "$APPLIED_NOW" "$PENDING_AFTER"
   fi
 
-  printf "  %-18s ${GREEN}✓${NC} matcheck-api, matcheck-web up\n" "Контейнеры"
+  printf "  %s ${GREEN}✓${NC} matcheck-api, matcheck-web up\n" "$(pad 'Контейнеры')"
   echo
   echo "${BOLD}${GREEN}  Деплой завершён успешно${NC}"
   echo

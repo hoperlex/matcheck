@@ -25,6 +25,7 @@ export const SseEventSchema = z.object({
     'shipment_updated',
     'shipment_deleted',
     'source_document_updated',
+    'source_document_deleted',
     'counterparty_updated',
     'material_updated',
     'site_updated',
