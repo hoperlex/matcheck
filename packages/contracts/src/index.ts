@@ -3,6 +3,7 @@ export * from './auth.js';
 export * from './counterparties.js';
 export * from './materials.js';
 export * from './source-documents.js';
+export * from './statuses.js';
 export * from './deliveries.js';
 export * from './photos.js';
 export * from './llm.js';

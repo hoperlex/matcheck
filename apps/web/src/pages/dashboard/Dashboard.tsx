@@ -1,21 +1,17 @@
 import { Card, Col, Row, Statistic, Typography, Button } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import type {
-  DeliveryListResponseSchema,
-  SourceDocumentListResponseSchema,
-} from '@matcheck/contracts';
+import type { SourceDocumentListResponseSchema } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api } from '../../services/api';
 import { usePwaInstall } from '../../lib/usePwaInstall';
 
-type DeliveryList = z.infer<typeof DeliveryListResponseSchema>;
 type SourceList = z.infer<typeof SourceDocumentListResponseSchema>;
 
 export default function DashboardPage() {
-  const deliveries = useQuery({
-    queryKey: ['deliveries', { status: 'expected' }],
-    queryFn: () => api.get<DeliveryList>('/deliveries?status=expected'),
+  const expectedUpds = useQuery({
+    queryKey: ['source-documents', 'unaccepted-upd', 'count'],
+    queryFn: () => api.get<SourceList>('/source-documents?kind=upd&unaccepted=true&limit=1'),
   });
   const inbox = useQuery({
     queryKey: ['source-documents'],
@@ -41,10 +37,10 @@ export default function DashboardPage() {
           <Card>
             <Statistic
               title="Ожидаемые приёмки"
-              value={deliveries.data?.total ?? 0}
-              loading={deliveries.isLoading}
+              value={expectedUpds.data?.total ?? 0}
+              loading={expectedUpds.isLoading}
             />
-            <Link to="/kpp?tab=history">Перейти →</Link>
+            <Link to="/kpp">Перейти →</Link>
           </Card>
         </Col>
         <Col xs={24} sm={12} md={8}>

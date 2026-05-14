@@ -1,5 +1,14 @@
 import { db, type DeliveryRecord, type MutationRecord } from '../lib/db';
-import type { Delivery, DeliveryUpsert } from '@matcheck/contracts';
+import type { Delivery, DeliveryStatusCode, DeliveryUpsert, Status } from '@matcheck/contracts';
+
+const PLACEHOLDER_NOT_FILLED: Status = {
+  id: '',
+  entityType: 'delivery',
+  code: 'not_filled',
+  label: 'Не оформлена',
+  color: 'orange',
+  sortOrder: 10,
+};
 
 export async function listLocalDeliveries(): Promise<DeliveryRecord[]> {
   const d = await db();
@@ -18,7 +27,7 @@ export function effectiveState(r: DeliveryRecord): Delivery | null {
     if (!r.local) return null;
     return {
       id: r.id,
-      status: 'expected',
+      status: PLACEHOLDER_NOT_FILLED,
       supplierId: null,
       vehiclePlate: null,
       driverName: null,
@@ -102,7 +111,7 @@ export function buildUpsertPayload(r: DeliveryRecord): DeliveryUpsert {
   }
   return {
     id: r.id,
-    status: effective.status,
+    statusCode: effective.status.code as DeliveryStatusCode,
     supplierId: effective.supplierId,
     vehiclePlate: effective.vehiclePlate,
     driverName: effective.driverName,

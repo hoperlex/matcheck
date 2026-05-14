@@ -6,25 +6,47 @@ import {
   ConflictResponseSchema,
   DeliveryListResponseSchema,
   DeliverySchema,
-  DeliveryStatusSchema,
+  DeliveryStatusCodeSchema,
   DeliveryUpsertSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
-import { deliveries, deliveryItems, deliveryPhotos, deliverySources } from '../db/schema.js';
+import {
+  deliveries,
+  deliveryItems,
+  deliveryPhotos,
+  deliverySources,
+  statuses,
+} from '../db/schema.js';
+import { deleteObject } from '../domain/storage/s3.signer.js';
+import { resolveStatusId as resolveStatusIdShared } from '../domain/statuses/lookup.js';
 import { publishEvent } from './events.js';
 
 const ListQuerySchema = z.object({
-  status: DeliveryStatusSchema.optional(),
+  status: DeliveryStatusCodeSchema.optional(),
   inspectorId: z.string().uuid().optional(),
   changedSince: z.string().datetime().optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
 
+type StatusRow = typeof statuses.$inferSelect;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const resolveStatusId = (app: any, code: string) =>
+  resolveStatusIdShared(app, 'delivery', code);
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function buildDeliveryDto(app: any, id: string) {
-  const [d] = await app.db.select().from(deliveries).where(eq(deliveries.id, id)).limit(1);
-  if (!d) return null;
+  const rows = await app.db
+    .select({ d: deliveries, s: statuses })
+    .from(deliveries)
+    .innerJoin(statuses, eq(deliveries.statusId, statuses.id))
+    .where(eq(deliveries.id, id))
+    .limit(1);
+  const r = rows[0] as { d: typeof deliveries.$inferSelect; s: StatusRow } | undefined;
+  if (!r) return null;
+  const d = r.d;
+  const s = r.s;
   const items: (typeof deliveryItems.$inferSelect)[] = await app.db
     .select()
     .from(deliveryItems)
@@ -40,7 +62,14 @@ async function buildDeliveryDto(app: any, id: string) {
     .where(eq(deliverySources.deliveryId, id));
   return {
     id: d.id,
-    status: d.status,
+    status: {
+      id: s.id,
+      entityType: s.entityType,
+      code: s.code,
+      label: s.label,
+      color: s.color,
+      sortOrder: s.sortOrder,
+    },
     supplierId: d.supplierId,
     vehiclePlate: d.vehiclePlate,
     driverName: d.driverName,
@@ -48,7 +77,7 @@ async function buildDeliveryDto(app: any, id: string) {
     inspectorId: d.inspectorId,
     comment: d.comment,
     version: d.version,
-    sourceDocumentIds: sources.map((s) => s.sourceDocumentId),
+    sourceDocumentIds: sources.map((x) => x.sourceDocumentId),
     items: items.map((i) => ({
       id: i.id,
       materialId: i.materialId,
@@ -83,17 +112,21 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req) => {
       const { status, inspectorId, changedSince, limit, offset } = req.query;
       const filters = [];
-      if (status) filters.push(eq(deliveries.status, status));
+      if (status) {
+        const statusId = await resolveStatusId(app, status);
+        filters.push(eq(deliveries.statusId, statusId));
+      }
       // inspector_kpp видит только свои приёмки
       if (req.user?.role === 'inspector_kpp') {
         filters.push(eq(deliveries.inspectorId, req.user.id));
       } else if (inspectorId) {
         filters.push(eq(deliveries.inspectorId, inspectorId));
       }
-      // Чужие drafts скрыты, если status не указан явно
+      // Чужие черновики (draft) скрыты, если status не указан явно
       if (!status && req.user?.role !== 'inspector_kpp' && req.user) {
+        const draftId = await resolveStatusId(app, 'draft');
         filters.push(
-          or(ne(deliveries.status, 'draft'), eq(deliveries.inspectorId, req.user.id))!,
+          or(ne(deliveries.statusId, draftId), eq(deliveries.inspectorId, req.user.id))!,
         );
       }
       if (changedSince) filters.push(gte(deliveries.updatedAt, new Date(changedSince)));
@@ -154,6 +187,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const input = req.body;
       const inspectorId = req.user?.role === 'inspector_kpp' ? req.user.id : (req.user?.id ?? null);
+      const statusId = await resolveStatusId(app, input.statusCode);
 
       // OCC update
       if (input.id) {
@@ -163,8 +197,8 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           .where(eq(deliveries.id, input.id))
           .limit(1);
         if (!existing) {
-          // Create as upsert with explicit id (for offline-created drafts that got assigned id locally)
-          await createDelivery(app, input, inspectorId);
+          // Create as upsert with explicit id (для офлайн-черновиков с локально сгенерированным id)
+          await createDelivery(app, input, statusId, inspectorId);
         } else {
           if (input.baseVersion !== undefined && input.baseVersion !== existing.version) {
             const server = await buildDeliveryDto(app, existing.id);
@@ -174,7 +208,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               server: server!,
             });
           }
-          await updateDelivery(app, existing.id, input);
+          await updateDelivery(app, existing.id, input, statusId);
         }
         const dto = await buildDeliveryDto(app, input.id);
         if (!dto) return reply.code(404).send({ error: 'not_found' });
@@ -182,7 +216,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         return dto;
       }
 
-      const created = await createDelivery(app, input, inspectorId);
+      const created = await createDelivery(app, input, statusId, inspectorId);
       const dto = await buildDeliveryDto(app, created.id);
       if (!dto) throw new Error('Delivery missing after create');
       publishEvent(app, { type: 'delivery_updated', id: dto.id, ts: new Date().toISOString() });
@@ -193,15 +227,43 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
   app.delete(
     '/api/v1/deliveries/:id',
     {
-      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      preHandler: [app.authenticate],
       schema: { params: z.object({ id: z.string().uuid() }) },
     },
     async (req, reply) => {
-      const deleted = await app.db
-        .delete(deliveries)
+      const [existing] = await app.db
+        .select()
+        .from(deliveries)
         .where(eq(deliveries.id, req.params.id))
-        .returning({ id: deliveries.id });
-      if (deleted.length === 0) return reply.code(404).send({ error: 'not_found' });
+        .limit(1);
+      if (!existing) return reply.code(404).send({ error: 'not_found' });
+
+      // inspector_kpp может удалять только свои приёмки.
+      // admin/manager — любые.
+      const role = req.user?.role;
+      const isOwner = existing.inspectorId === req.user?.id;
+      if (role === 'inspector_kpp' && !isOwner) {
+        return reply.code(403).send({ error: 'forbidden' });
+      }
+      if (role !== 'admin' && role !== 'manager' && role !== 'inspector_kpp') {
+        return reply.code(403).send({ error: 'forbidden' });
+      }
+
+      // Удаляем S3-объекты фото перед каскадным удалением записей.
+      const photos = await app.db
+        .select({ s3Key: deliveryPhotos.s3Key, thumbS3Key: deliveryPhotos.thumbS3Key })
+        .from(deliveryPhotos)
+        .where(eq(deliveryPhotos.deliveryId, req.params.id));
+      for (const p of photos) {
+        try {
+          await deleteObject(p.s3Key);
+          if (p.thumbS3Key) await deleteObject(p.thumbS3Key);
+        } catch (err) {
+          req.log.warn({ err, s3Key: p.s3Key }, 'failed to delete s3 object');
+        }
+      }
+
+      await app.db.delete(deliveries).where(eq(deliveries.id, req.params.id));
       publishEvent(app, {
         type: 'delivery_deleted',
         id: req.params.id,
@@ -216,13 +278,14 @@ async function createDelivery(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   app: any,
   input: z.infer<typeof DeliveryUpsertSchema>,
+  statusId: string,
   inspectorId: string | null,
 ) {
   const [created] = await app.db
     .insert(deliveries)
     .values({
       id: input.id,
-      status: input.status,
+      statusId,
       supplierId: input.supplierId ?? null,
       vehiclePlate: input.vehiclePlate ?? null,
       driverName: input.driverName ?? null,
@@ -262,11 +325,12 @@ async function updateDelivery(
   app: any,
   id: string,
   input: z.infer<typeof DeliveryUpsertSchema>,
+  statusId: string,
 ) {
   await app.db
     .update(deliveries)
     .set({
-      status: input.status,
+      statusId,
       supplierId: input.supplierId ?? null,
       vehiclePlate: input.vehiclePlate ?? null,
       driverName: input.driverName ?? null,

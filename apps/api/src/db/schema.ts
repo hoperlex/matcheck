@@ -28,13 +28,6 @@ export const sourceOriginEnum = pgEnum('source_origin', [
   'mail',
 ]);
 export const sourceStatusEnum = pgEnum('source_status', ['parsed', 'parse_failed', 'archived']);
-export const deliveryStatusEnum = pgEnum('delivery_status', [
-  'draft',
-  'expected',
-  'arrived',
-  'verified',
-  'rejected',
-]);
 export const photoKindEnum = pgEnum('photo_kind', ['document', 'cargo', 'vehicle', 'other']);
 export const llmKindEnum = pgEnum('llm_kind', [
   'openrouter',
@@ -43,6 +36,22 @@ export const llmKindEnum = pgEnum('llm_kind', [
   'vertex',
 ]);
 export const attachmentRoleEnum = pgEnum('attachment_role', ['original', 'extracted_text']);
+
+// ─── Statuses (универсальный справочник статусов для разных сущностей) ────
+
+export const statuses = pgTable(
+  'statuses',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    entityType: varchar('entity_type', { length: 64 }).notNull(),
+    code: varchar('code', { length: 64 }).notNull(),
+    label: varchar('label', { length: 128 }).notNull(),
+    color: varchar('color', { length: 32 }),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('statuses_entity_code_unique').on(t.entityType, t.code)],
+);
 
 // ─── Auth ──────────────────────────────────────────────────────────────────
 
@@ -314,7 +323,9 @@ export const sourceDocumentAttachments = pgTable('source_document_attachments', 
 
 export const deliveries = pgTable('deliveries', {
   id: uuid('id').primaryKey().defaultRandom(),
-  status: deliveryStatusEnum('status').notNull().default('expected'),
+  statusId: uuid('status_id')
+    .notNull()
+    .references(() => statuses.id),
   supplierId: uuid('supplier_id').references(() => counterparties.id, { onDelete: 'set null' }),
   vehiclePlate: varchar('vehicle_plate', { length: 16 }),
   driverName: text('driver_name'),

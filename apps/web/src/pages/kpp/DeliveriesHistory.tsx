@@ -8,22 +8,6 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
 
-const statusColor: Record<Row['status'], string> = {
-  draft: 'default',
-  expected: 'gold',
-  arrived: 'blue',
-  verified: 'green',
-  rejected: 'red',
-};
-
-const statusLabel: Record<Row['status'], string> = {
-  draft: 'Черновик',
-  expected: 'Ожидается',
-  arrived: 'Прибыла',
-  verified: 'Принято',
-  rejected: 'Отклонена',
-};
-
 export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) {
   const list = useQuery({
     queryKey: ['deliveries'],
@@ -49,11 +33,14 @@ export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) 
       loading={list.isLoading}
       rowKey="id"
       onRowClick={(r) => onOpen(r.id)}
+      emptyText="Нет приёмок"
       columns={[
         {
           title: 'Статус',
-          dataIndex: 'status',
-          render: (s: Row['status']) => <Tag color={statusColor[s]}>{statusLabel[s]}</Tag>,
+          key: 'status',
+          render: (_: unknown, r: Row) => (
+            <Tag color={r.status.color ?? 'default'}>{r.status.label}</Tag>
+          ),
         },
         { title: 'Авто', dataIndex: 'vehiclePlate' },
         { title: 'Прибытие', dataIndex: 'arrivedAt' },
@@ -61,11 +48,6 @@ export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) 
           title: 'Поставщик',
           key: 'supplier',
           render: (_: unknown, r: Row) => supplierName(r.supplierId),
-        },
-        {
-          title: 'Подрядчик',
-          key: 'contractor',
-          render: () => '—',
         },
         {
           title: 'Кол-во',
@@ -77,7 +59,7 @@ export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) 
         <Card style={{ width: '100%' }} size="small">
           <Space direction="vertical" size={4} style={{ width: '100%' }}>
             <Space>
-              <Tag color={statusColor[r.status]}>{statusLabel[r.status]}</Tag>
+              <Tag color={r.status.color ?? 'default'}>{r.status.label}</Tag>
               <Typography.Text strong>{r.vehiclePlate ?? 'Без номера'}</Typography.Text>
             </Space>
             <Typography.Text type="secondary">

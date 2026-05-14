@@ -1,13 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  AutoComplete,
   Button,
   Card,
   Col,
   Collapse,
-  Drawer,
-  Form,
   Input,
   InputNumber,
   Popconfirm,
@@ -23,24 +20,24 @@ import {
 } from 'antd';
 import type { TableProps, UploadProps } from 'antd';
 import {
+  ArrowLeftOutlined,
   CameraOutlined,
-  CheckOutlined,
   DeleteOutlined,
   PlusOutlined,
 } from '@ant-design/icons';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   Delivery,
+  DeliveryStatusCode,
   DeliveryUpsert,
   SourceDocument,
   SourceDocumentDetail,
-  SourceDocumentListResponseSchema,
 } from '@matcheck/contracts';
-import type { z } from 'zod';
 import { api } from '../../services/api';
 import { capturePhoto } from '../../services/photoPipeline';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { DeliveriesHistory } from './DeliveriesHistory';
+import { ExpectedUpds } from './ExpectedUpds';
 
 type DraftItem = {
   clientKey: string;
@@ -52,10 +49,7 @@ type DraftItem = {
   materialId: string | null;
 };
 
-type SourceList = z.infer<typeof SourceDocumentListResponseSchema>;
-type SaveStatus = 'draft' | 'verified';
-
-const GREEN = '#52c41a';
+type ListTab = 'expected' | 'accepted';
 
 const trimQty = (s: string) =>
   s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
@@ -67,42 +61,39 @@ function newKey(): string {
 
 export default function KppPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [params, setParams] = useSearchParams();
   const deliveryId = params.get('delivery');
-  const tab: 'form' | 'history' =
-    params.get('tab') === 'history' && !deliveryId ? 'history' : 'form';
-  const setTab = (next: 'form' | 'history') => {
-    if (next === 'history') setParams({ tab: 'history' });
-    else if (deliveryId) setParams({ delivery: deliveryId });
-    else setParams({});
-  };
+  const fromAccepted = params.get('from') === 'accepted';
+  const tab: ListTab = params.get('tab') === 'accepted' ? 'accepted' : 'expected';
 
   const [items, setItems] = useState<DraftItem[]>([]);
-  const [confirmed, setConfirmed] = useState<Set<string>>(new Set());
-  const [editingKey, setEditingKey] = useState<string | null>(null);
-  const [pendingStatus, setPendingStatus] = useState<SaveStatus | null>(null);
-
   const [plate, setPlate] = useState('');
   const [comment, setComment] = useState('');
-  const [savedId, setSavedId] = useState<string | null>(null);
-  const [updQuery, setUpdQuery] = useState('');
   const [selectedUpd, setSelectedUpd] = useState<SourceDocument | null>(null);
   const [loadedDelivery, setLoadedDelivery] = useState<Delivery | null>(null);
+  const [creating, setCreating] = useState(false);
 
-  const editingItem = useMemo(
-    () => items.find((i) => i.clientKey === editingKey) ?? null,
-    [items, editingKey],
-  );
+  // Сбрасываем локальное состояние при выходе из формы
+  useEffect(() => {
+    if (!deliveryId) {
+      setItems([]);
+      setPlate('');
+      setComment('');
+      setSelectedUpd(null);
+      setLoadedDelivery(null);
+    }
+  }, [deliveryId]);
 
   const deliveryQuery = useQuery({
     queryKey: ['deliveries', deliveryId],
     queryFn: () => api.get<Delivery>(`/deliveries/${deliveryId}`),
-    enabled: !!deliveryId && !loadedDelivery,
+    enabled: !!deliveryId,
   });
 
   useEffect(() => {
     const d = deliveryQuery.data;
-    if (!d || loadedDelivery) return;
+    if (!d) return;
     setLoadedDelivery(d);
     setPlate(d.vehiclePlate ?? '');
     setComment(d.comment ?? '');
@@ -117,102 +108,72 @@ export default function KppPage() {
         materialId: it.materialId,
       })),
     );
-    setConfirmed(new Set());
-    if (d.sourceDocumentIds.length > 0) {
+    if (d.sourceDocumentIds.length > 0 && !selectedUpd) {
       api
         .get<SourceDocument>(`/source-documents/${d.sourceDocumentIds[0]}`)
         .then(setSelectedUpd)
         .catch(() => undefined);
     }
-  }, [deliveryQuery.data, loadedDelivery]);
+  }, [deliveryQuery.data, selectedUpd]);
 
-  const updSuggestions = useQuery({
-    queryKey: ['source-documents', 'unaccepted-upd', updQuery],
-    queryFn: () =>
-      api.get<SourceList>(
-        `/source-documents?kind=upd&unaccepted=true${
-          updQuery ? `&q=${encodeURIComponent(updQuery)}` : ''
-        }&limit=20`,
-      ),
-    enabled: !savedId,
-  });
+  /** Создаёт пустую приёмку — uuid выдаётся сервером, чтобы можно было сразу делать фото. */
+  const createBlank = async () => {
+    if (creating) return;
+    setCreating(true);
+    try {
+      const payload: DeliveryUpsert = {
+        statusCode: 'not_filled',
+        sourceDocumentIds: [],
+        items: [],
+      };
+      const created = await api.post<Delivery>('/deliveries', payload);
+      navigate(`/kpp?delivery=${created.id}`);
+    } catch (err) {
+      message.error(`Не удалось создать приёмку: ${(err as Error).message}`);
+    } finally {
+      setCreating(false);
+    }
+  };
 
-  const loadDetail = useMutation({
-    mutationFn: (id: string) => api.get<SourceDocumentDetail>(`/source-documents/${id}`),
-    onSuccess: (detail) => {
-      setSelectedUpd(detail);
-      setItems(
-        detail.items.map((it, idx) => ({
-          clientKey: newKey(),
-          lineNo: idx + 1,
+  /** Создаёт приёмку по выбранному УПД — подгружаются позиции, сразу записываются на сервер. */
+  const createFromUpd = async (upd: SourceDocument) => {
+    if (creating) return;
+    setCreating(true);
+    try {
+      const detail = await api.get<SourceDocumentDetail>(`/source-documents/${upd.id}`);
+      const payload: DeliveryUpsert = {
+        statusCode: 'not_filled',
+        supplierId: detail.supplierId ?? null,
+        sourceDocumentIds: [upd.id],
+        items: detail.items.map((it, i) => ({
+          lineNo: i + 1,
           nameRaw: it.nameRaw,
           qtyPlanned: it.qty,
           qtyActual: it.qty,
           unit: it.unit,
-          materialId: it.materialId,
+          materialId: it.materialId ?? null,
         })),
-      );
-      setConfirmed(new Set());
-    },
-    onError: (err: Error) => message.error(`Не удалось загрузить УПД: ${err.message}`),
-  });
-
-  const save = useMutation({
-    mutationFn: async (status: SaveStatus) => {
-      setPendingStatus(status);
-      const payload: DeliveryUpsert = {
-        id: loadedDelivery?.id,
-        baseVersion: loadedDelivery?.version,
-        status,
-        supplierId: selectedUpd?.supplierId ?? null,
-        vehiclePlate: plate || null,
-        arrivedAt: loadedDelivery?.arrivedAt ?? new Date().toISOString(),
-        comment: comment || null,
-        sourceDocumentIds: selectedUpd ? [selectedUpd.id] : [],
-        items: items
-          .filter((i) => i.nameRaw.trim().length > 0)
-          .map((i) => ({
-            lineNo: i.lineNo,
-            nameRaw: i.nameRaw,
-            qtyPlanned: i.qtyPlanned,
-            qtyActual: i.qtyActual,
-            unit: i.unit,
-            materialId: i.materialId,
-          })),
       };
-      return api.post<Delivery>('/deliveries', payload);
-    },
-    onSuccess: (d, status) => {
-      setLoadedDelivery(d);
-      if (status === 'verified') {
-        setSavedId(d.id);
-        message.success('Приёмка сохранена');
-      } else {
-        message.success('Черновик сохранён');
-        if (!deliveryId) {
-          navigate(`/kpp?delivery=${d.id}`, { replace: true });
-        }
-      }
-      setPendingStatus(null);
-    },
-    onError: (err: Error) => {
-      message.error(err.message);
-      setPendingStatus(null);
-    },
-  });
+      const created = await api.post<Delivery>('/deliveries', payload);
+      navigate(`/kpp?delivery=${created.id}`);
+    } catch (err) {
+      message.error(`Не удалось открыть УПД: ${(err as Error).message}`);
+    } finally {
+      setCreating(false);
+    }
+  };
 
   const photoProps: UploadProps = {
     accept: 'image/*',
     capture: 'environment',
     showUploadList: false,
     beforeUpload: async (file) => {
-      if (!savedId) {
-        message.warning('Сначала сохраните приёмку — фото привязываются к ней.');
-        return false;
-      }
+      if (!deliveryId) return false;
       try {
-        await capturePhoto(savedId, file, 'cargo');
+        await capturePhoto(deliveryId, file, 'cargo');
         message.success('Фото добавлено');
+        // обновим список фото в loadedDelivery
+        await queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
       } catch (err) {
         message.error(`Не удалось добавить фото: ${(err as Error).message}`);
       }
@@ -222,14 +183,6 @@ export default function KppPage() {
 
   const updateField = (key: string, patch: Partial<DraftItem>) => {
     setItems((prev) => prev.map((it) => (it.clientKey === key ? { ...it, ...patch } : it)));
-    if ('qtyActual' in patch || 'nameRaw' in patch || 'unit' in patch) {
-      setConfirmed((prev) => {
-        if (!prev.has(key)) return prev;
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
-    }
   };
 
   const addItem = () => {
@@ -251,71 +204,122 @@ export default function KppPage() {
     setItems((prev) =>
       prev.filter((it) => it.clientKey !== key).map((it, i) => ({ ...it, lineNo: i + 1 })),
     );
-    setConfirmed((prev) => {
-      if (!prev.has(key)) return prev;
-      const next = new Set(prev);
-      next.delete(key);
-      return next;
-    });
   };
 
-  const toggleConfirm = (key: string) => {
-    setConfirmed((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
+  const save = useMutation({
+    mutationFn: async () => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      const payload: DeliveryUpsert = {
+        id: loadedDelivery.id,
+        baseVersion: loadedDelivery.version,
+        statusCode: 'filled' satisfies DeliveryStatusCode,
+        supplierId: selectedUpd?.supplierId ?? loadedDelivery.supplierId ?? null,
+        vehiclePlate: plate || null,
+        arrivedAt: loadedDelivery.arrivedAt ?? new Date().toISOString(),
+        comment: comment || null,
+        sourceDocumentIds: selectedUpd
+          ? [selectedUpd.id]
+          : loadedDelivery.sourceDocumentIds,
+        items: items
+          .filter((i) => i.nameRaw.trim().length > 0)
+          .map((i) => ({
+            lineNo: i.lineNo,
+            nameRaw: i.nameRaw,
+            qtyPlanned: i.qtyPlanned,
+            qtyActual: i.qtyActual,
+            unit: i.unit,
+            materialId: i.materialId,
+          })),
+      };
+      return api.post<Delivery>('/deliveries', payload);
+    },
+    onSuccess: () => {
+      message.success('Приёмка сохранена');
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      navigate('/kpp?tab=accepted');
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
 
-  const updOptions = (updSuggestions.data?.items ?? []).map((sd) => ({
-    value: sd.id,
-    label: `${sd.docNumber ?? '— без номера —'}${sd.docDate ? ` от ${sd.docDate}` : ''}${
-      sd.totalSum ? ` · ${sd.totalSum} ₽` : ''
-    }`,
-  }));
+  const cancel = useMutation({
+    mutationFn: async () => {
+      if (!deliveryId) return;
+      await api.delete(`/deliveries/${deliveryId}`);
+    },
+    onSuccess: () => {
+      message.success('Приёмка удалена');
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      navigate('/kpp');
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  const photosCount = loadedDelivery?.photos.length ?? 0;
+  const verifyReason: string | null = (() => {
+    const reasons: string[] = [];
+    if (!plate.trim()) reasons.push('Заполните госномер');
+    if (photosCount === 0) reasons.push('Сделайте хотя бы одно фото');
+    return reasons.length ? reasons.join(' · ') : null;
+  })();
 
   type Column = NonNullable<TableProps<DraftItem>['columns']>[number];
-  const columns: Column[] = [
-    { title: '№', dataIndex: 'lineNo', width: 56 },
-    {
-      title: 'Название',
-      dataIndex: 'nameRaw',
-      ellipsis: { showTitle: false },
-      render: (v: string) =>
-        v ? (
-          <Tooltip title={v} placement="topLeft">
-            <span>{v}</span>
-          </Tooltip>
-        ) : (
-          <Typography.Text type="secondary">— пусто —</Typography.Text>
-        ),
-    },
-    {
-      title: 'Кол-во',
-      width: 140,
-      render: (_: unknown, r: DraftItem) =>
-        r.qtyActual !== null && r.qtyActual !== ''
-          ? `${trimQty(r.qtyActual)} ${r.unit}`
-          : <Typography.Text type="secondary">—</Typography.Text>,
-    },
-    {
-      title: '',
-      width: 110,
-      align: 'right',
-      render: (_: unknown, r: DraftItem) => (
-        <Space size={4} onClick={(e) => e.stopPropagation()}>
-          <Button
-            size="small"
-            type={confirmed.has(r.clientKey) ? 'primary' : 'default'}
-            icon={<CheckOutlined />}
-            style={
-              confirmed.has(r.clientKey)
-                ? { background: GREEN, borderColor: GREEN }
-                : undefined
-            }
-            onClick={() => toggleConfirm(r.clientKey)}
+  const columns: Column[] = useMemo(
+    () => [
+      { title: '№', dataIndex: 'lineNo', width: 56 },
+      {
+        title: 'Название',
+        dataIndex: 'nameRaw',
+        render: (_: unknown, r: DraftItem) => (
+          <Input.TextArea
+            autoSize={{ minRows: 1, maxRows: 4 }}
+            value={r.nameRaw}
+            placeholder="Наименование"
+            onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
+            readOnly={!!r.materialId}
           />
+        ),
+      },
+      {
+        title: 'План',
+        width: 90,
+        render: (_: unknown, r: DraftItem) =>
+          r.qtyPlanned !== null && r.qtyPlanned !== ''
+            ? trimQty(r.qtyPlanned)
+            : '—',
+      },
+      {
+        title: 'Факт',
+        width: 130,
+        render: (_: unknown, r: DraftItem) => (
+          <InputNumber
+            size="small"
+            min={0}
+            style={{ width: '100%' }}
+            value={r.qtyActual !== null && r.qtyActual !== '' ? Number(r.qtyActual) : null}
+            onChange={(v) =>
+              updateField(r.clientKey, {
+                qtyActual: v !== null && v !== undefined ? String(v) : null,
+              })
+            }
+          />
+        ),
+      },
+      {
+        title: 'Ед.',
+        width: 80,
+        render: (_: unknown, r: DraftItem) => (
+          <Input
+            size="small"
+            value={r.unit}
+            onChange={(e) => updateField(r.clientKey, { unit: e.target.value })}
+          />
+        ),
+      },
+      {
+        title: '',
+        width: 60,
+        align: 'right',
+        render: (_: unknown, r: DraftItem) => (
           <Popconfirm
             title="Удалить материал?"
             okText="Да"
@@ -324,73 +328,69 @@ export default function KppPage() {
           >
             <Button size="small" danger icon={<DeleteOutlined />} />
           </Popconfirm>
-        </Space>
-      ),
-    },
-  ];
+        ),
+      },
+    ],
+    [],
+  );
 
   const cardRender = (r: DraftItem) => (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        width: '100%',
-        minWidth: 0,
-      }}
-    >
-      <Typography.Text strong style={{ width: 28, flexShrink: 0 }}>
-        №{r.lineNo}
-      </Typography.Text>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-          }}
-        >
-          {r.nameRaw || <Typography.Text type="secondary">— пусто —</Typography.Text>}
-        </div>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {r.qtyActual !== null && r.qtyActual !== '' ? `${trimQty(r.qtyActual)} ${r.unit}` : '—'}
-        </Typography.Text>
-      </div>
-      <Space size={4} onClick={(e) => e.stopPropagation()}>
-        <Button
-          type={confirmed.has(r.clientKey) ? 'primary' : 'default'}
-          icon={<CheckOutlined />}
-          style={
-            confirmed.has(r.clientKey)
-              ? { background: GREEN, borderColor: GREEN }
-              : undefined
-          }
-          onClick={() => toggleConfirm(r.clientKey)}
-        />
+    <div style={{ width: '100%' }}>
+      <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+        <Typography.Text strong>№{r.lineNo}</Typography.Text>
         <Popconfirm
           title="Удалить материал?"
           okText="Да"
           cancelText="Нет"
           onConfirm={() => removeItem(r.clientKey)}
         >
-          <Button danger icon={<DeleteOutlined />} />
+          <Button size="small" danger icon={<DeleteOutlined />} />
         </Popconfirm>
       </Space>
+      <Input.TextArea
+        autoSize={{ minRows: 1, maxRows: 4 }}
+        value={r.nameRaw}
+        placeholder="Наименование"
+        onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
+        readOnly={!!r.materialId}
+        style={{ marginTop: 4 }}
+      />
+      <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
+        <Col span={8}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            План
+          </Typography.Text>
+          <div>{r.qtyPlanned !== null && r.qtyPlanned !== '' ? trimQty(r.qtyPlanned) : '—'}</div>
+        </Col>
+        <Col span={10}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            Факт
+          </Typography.Text>
+          <InputNumber
+            min={0}
+            style={{ width: '100%' }}
+            value={r.qtyActual !== null && r.qtyActual !== '' ? Number(r.qtyActual) : null}
+            onChange={(v) =>
+              updateField(r.clientKey, {
+                qtyActual: v !== null && v !== undefined ? String(v) : null,
+              })
+            }
+          />
+        </Col>
+        <Col span={6}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            Ед.
+          </Typography.Text>
+          <Input
+            value={r.unit}
+            onChange={(e) => updateField(r.clientKey, { unit: e.target.value })}
+          />
+        </Col>
+      </Row>
     </div>
   );
 
-  const allConfirmed = items.length > 0 && confirmed.size === items.length;
-  const locked = !!savedId;
-  const isFromVerified = loadedDelivery?.status === 'verified';
-
-  const verifyReason: string | null = (() => {
-    if (locked) return null;
-    const reasons: string[] = [];
-    if (items.length === 0) reasons.push('Добавьте хотя бы один материал');
-    else if (confirmed.size !== items.length) reasons.push('Подтвердите все строки галочкой');
-    if (!plate.trim()) reasons.push('Заполните госномер');
-    return reasons.length ? reasons.join(' · ') : null;
-  })();
+  // ──────────── список / форма ────────────
 
   if (deliveryId && deliveryQuery.isLoading && !loadedDelivery) {
     return (
@@ -400,252 +400,190 @@ export default function KppPage() {
     );
   }
 
+  // === Режим формы (открыта приёмка) ===
+  if (deliveryId) {
+    return (
+      <Space direction="vertical" size="middle" style={{ width: '100%', paddingBottom: 96 }}>
+        <Space style={{ width: '100%' }} align="center">
+          {fromAccepted && (
+            <Button
+              type="text"
+              icon={<ArrowLeftOutlined />}
+              onClick={() => navigate('/kpp?tab=accepted')}
+            />
+          )}
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            Приёмка
+          </Typography.Title>
+        </Space>
+
+        <Row gutter={[8, 8]}>
+          <Col xs={24} sm={12}>
+            <Card size="small" title="Госномер" styles={{ body: { padding: 12 } }}>
+              <Input
+                size="large"
+                placeholder="А123ВВ77"
+                value={plate}
+                onChange={(e) => setPlate(e.target.value.toUpperCase())}
+                autoCapitalize="characters"
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12}>
+            <Card size="small" title="УПД" styles={{ body: { padding: 12 } }}>
+              {selectedUpd ? (
+                <Space wrap>
+                  <Tag color="blue">{selectedUpd.docNumber ?? '— без номера —'}</Tag>
+                  <Typography.Text type="secondary">
+                    {selectedUpd.docDate ?? '—'} · {selectedUpd.totalSum ?? '—'} ₽
+                  </Typography.Text>
+                </Space>
+              ) : (
+                <Typography.Text type="secondary">— без УПД —</Typography.Text>
+              )}
+            </Card>
+          </Col>
+        </Row>
+
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: 'comment',
+              label: 'Комментарий',
+              children: (
+                <Input.TextArea
+                  rows={3}
+                  value={comment}
+                  onChange={(e) => setComment(e.target.value)}
+                />
+              ),
+            },
+            {
+              key: 'photos',
+              label: `Фото${photosCount ? ` (${photosCount})` : ''}`,
+              children: (
+                <Space wrap>
+                  <Upload {...photoProps}>
+                    <Button size="large" icon={<CameraOutlined />}>
+                      Снять фото
+                    </Button>
+                  </Upload>
+                  {photosCount === 0 && (
+                    <Typography.Text type="secondary">
+                      Хотя бы одно фото нужно для сохранения.
+                    </Typography.Text>
+                  )}
+                </Space>
+              ),
+            },
+          ]}
+        />
+
+        <Card
+          size="small"
+          title={`Материалы${items.length ? ` (${items.length})` : ''}`}
+          extra={
+            <Button size="small" icon={<PlusOutlined />} onClick={addItem}>
+              Материал
+            </Button>
+          }
+          styles={{ body: { padding: 0 } }}
+        >
+          {items.length === 0 ? (
+            <div style={{ padding: 16 }}>
+              <Typography.Text type="secondary">
+                Материалы можно не добавлять — приёмка сохранится со статусом «Не оформлена».
+                Чтобы оформить, добавьте строки вручную или выберите УПД.
+              </Typography.Text>
+            </div>
+          ) : (
+            <ResponsiveTable<DraftItem>
+              items={items}
+              columns={columns}
+              rowKey="clientKey"
+              cardRender={cardRender}
+            />
+          )}
+        </Card>
+
+        <div
+          style={{
+            position: 'fixed',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            padding: 12,
+            background: '#fff',
+            borderTop: '1px solid #f0f0f0',
+            zIndex: 100,
+            display: 'flex',
+            gap: 8,
+          }}
+        >
+          <Popconfirm
+            title="Удалить эту приёмку?"
+            description="Запись и связанные фото будут удалены."
+            okText="Да, удалить"
+            cancelText="Нет"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => cancel.mutate()}
+          >
+            <Button size="large" danger loading={cancel.isPending} style={{ flex: 1 }}>
+              Отмена
+            </Button>
+          </Popconfirm>
+          <Tooltip title={verifyReason ?? ''} placement="top">
+            <span style={{ flex: 1, display: 'inline-flex' }}>
+              <Button
+                type="primary"
+                size="large"
+                style={{ flex: 1 }}
+                loading={save.isPending}
+                disabled={!!verifyReason}
+                onClick={() => save.mutate()}
+              >
+                Сохранить
+              </Button>
+            </span>
+          </Tooltip>
+        </div>
+      </Space>
+    );
+  }
+
+  // === Режим списка (нет deliveryId) ===
   return (
-    <Space
-      direction="vertical"
-      size="middle"
-      style={{ width: '100%', paddingBottom: tab === 'history' ? 0 : 96 }}
-    >
+    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
         <Typography.Title level={3} style={{ margin: 0 }}>
           Приёмка
         </Typography.Title>
-        <Segmented
-          value={tab}
-          onChange={(v) => setTab(v as 'form' | 'history')}
-          options={[
-            { label: 'Форма', value: 'form' },
-            { label: 'История', value: 'history' },
-          ]}
-        />
+        <Space wrap>
+          <Segmented
+            value={tab}
+            onChange={(v) => {
+              const next = v as ListTab;
+              if (next === 'expected') setParams({});
+              else setParams({ tab: 'accepted' });
+            }}
+            options={[
+              { label: 'Ожидаемые', value: 'expected' },
+              { label: 'Принятые', value: 'accepted' },
+            ]}
+          />
+          <Button type="primary" icon={<PlusOutlined />} loading={creating} onClick={createBlank}>
+            Новая приёмка
+          </Button>
+        </Space>
       </Space>
 
-      {tab === 'history' ? (
-        <DeliveriesHistory
-          onOpen={(id) => {
-            navigate(`/kpp?delivery=${id}`);
-          }}
-        />
+      {tab === 'expected' ? (
+        <ExpectedUpds onOpen={createFromUpd} />
       ) : (
-        <>
-      <Row gutter={[8, 8]}>
-        <Col xs={24} sm={12}>
-          <Card size="small" title="Госномер" styles={{ body: { padding: 12 } }}>
-            <Input
-              size="large"
-              placeholder="А123ВВ77"
-              value={plate}
-              onChange={(e) => setPlate(e.target.value.toUpperCase())}
-              autoCapitalize="characters"
-              disabled={locked}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12}>
-          <Card size="small" title="УПД" styles={{ body: { padding: 12 } }}>
-            {selectedUpd ? (
-              <Space wrap>
-                <Tag color="blue">{selectedUpd.docNumber ?? '— без номера —'}</Tag>
-                <Typography.Text type="secondary">
-                  {selectedUpd.docDate ?? '—'} · {selectedUpd.totalSum ?? '—'} ₽
-                </Typography.Text>
-                <Button
-                  size="small"
-                  onClick={() => {
-                    setSelectedUpd(null);
-                    setItems([]);
-                    setConfirmed(new Set());
-                  }}
-                  disabled={locked}
-                >
-                  Сменить
-                </Button>
-              </Space>
-            ) : (
-              <AutoComplete
-                size="large"
-                style={{ width: '100%' }}
-                placeholder="Введите номер УПД для поиска"
-                value={updQuery}
-                onChange={(v) => setUpdQuery(v)}
-                onSelect={(value) => {
-                  loadDetail.mutate(value);
-                  setUpdQuery('');
-                }}
-                options={updOptions}
-                notFoundContent={updSuggestions.isLoading ? 'Поиск…' : 'Ничего не найдено'}
-                filterOption={false}
-                disabled={locked}
-              />
-            )}
-          </Card>
-        </Col>
-      </Row>
-
-      <Collapse
-        size="small"
-        items={[
-          {
-            key: 'comment',
-            label: 'Комментарий',
-            children: (
-              <Input.TextArea
-                rows={3}
-                value={comment}
-                onChange={(e) => setComment(e.target.value)}
-                disabled={locked}
-              />
-            ),
-          },
-          {
-            key: 'photos',
-            label: savedId ? `Фото (приёмка #${savedId.slice(0, 8)})` : 'Фото',
-            children: (
-              <Space wrap>
-                <Upload {...photoProps}>
-                  <Button size="large" icon={<CameraOutlined />} disabled={!savedId}>
-                    Снять фото
-                  </Button>
-                </Upload>
-                {!savedId && (
-                  <Typography.Text type="secondary">
-                    Доступно после сохранения приёмки.
-                  </Typography.Text>
-                )}
-              </Space>
-            ),
-          },
-        ]}
-      />
-
-      <Card
-        size="small"
-        title={`Материалы${items.length ? ` (${items.length})` : ''}`}
-        extra={
-          <Button size="small" icon={<PlusOutlined />} onClick={addItem} disabled={locked}>
-            Материал
-          </Button>
-        }
-        styles={{ body: { padding: 0 } }}
-      >
-        {items.length === 0 ? (
-          <div style={{ padding: 16 }}>
-            <Typography.Text type="secondary">
-              Выберите УПД выше — материалы подтянутся автоматически. Или добавьте строки вручную.
-            </Typography.Text>
-          </div>
-        ) : (
-          <ResponsiveTable<DraftItem>
-            items={items}
-            columns={columns}
-            rowKey="clientKey"
-            cardRender={cardRender}
-            onRowClick={(r) => setEditingKey(r.clientKey)}
-          />
-        )}
-      </Card>
-
-      <Drawer
-        open={editingKey !== null}
-        onClose={() => setEditingKey(null)}
-        placement="right"
-        width={Math.min(480, typeof window !== 'undefined' ? window.innerWidth : 480)}
-        title={editingItem ? `Материал № ${editingItem.lineNo}` : ''}
-        destroyOnClose
-      >
-        {editingItem && (
-          <Form layout="vertical">
-            <Form.Item label="Наименование">
-              <Input.TextArea
-                autoSize={{ minRows: 2, maxRows: 6 }}
-                value={editingItem.nameRaw}
-                onChange={(e) => updateField(editingItem.clientKey, { nameRaw: e.target.value })}
-                readOnly={!!editingItem.materialId}
-              />
-            </Form.Item>
-            <Form.Item label="План (из УПД)">
-              <InputNumber
-                value={editingItem.qtyPlanned !== null ? Number(editingItem.qtyPlanned) : null}
-                disabled
-                style={{ width: '100%' }}
-              />
-            </Form.Item>
-            <Form.Item label="Факт">
-              <InputNumber
-                autoFocus
-                size="large"
-                min={0}
-                style={{ width: '100%' }}
-                value={editingItem.qtyActual !== null ? Number(editingItem.qtyActual) : null}
-                onChange={(v) =>
-                  updateField(editingItem.clientKey, {
-                    qtyActual: v !== null && v !== undefined ? String(v) : null,
-                  })
-                }
-              />
-            </Form.Item>
-            <Form.Item label="Ед.">
-              <Input
-                value={editingItem.unit}
-                onChange={(e) => updateField(editingItem.clientKey, { unit: e.target.value })}
-              />
-            </Form.Item>
-            <Button type="primary" block onClick={() => setEditingKey(null)}>
-              Готово
-            </Button>
-          </Form>
-        )}
-      </Drawer>
-
-      <div
-        style={{
-          position: 'fixed',
-          left: 0,
-          right: 0,
-          bottom: 0,
-          padding: 12,
-          background: '#fff',
-          borderTop: '1px solid #f0f0f0',
-          zIndex: 100,
-          display: 'flex',
-          gap: 8,
-        }}
-      >
-        <Button
-          size="large"
-          style={{ flex: 1 }}
-          loading={save.isPending && pendingStatus === 'draft'}
-          disabled={
-            locked || isFromVerified || (save.isPending && pendingStatus !== 'draft')
-          }
-          onClick={() => save.mutate('draft')}
-        >
-          Сохранить черновик
-        </Button>
-        <Tooltip title={verifyReason ?? ''} placement="top">
-          <span style={{ flex: 1, display: 'inline-flex' }}>
-            <Button
-              type="primary"
-              size="large"
-              style={{
-                flex: 1,
-                background: allConfirmed && !locked && plate.trim() ? GREEN : undefined,
-                borderColor: allConfirmed && !locked && plate.trim() ? GREEN : undefined,
-              }}
-              loading={save.isPending && pendingStatus === 'verified'}
-              disabled={
-                locked ||
-                !!verifyReason ||
-                (save.isPending && pendingStatus !== 'verified')
-              }
-              onClick={() => save.mutate('verified')}
-            >
-              {locked ? 'Сохранено' : 'Сохранить'}
-            </Button>
-          </span>
-        </Tooltip>
-      </div>
-        </>
+        <DeliveriesHistory
+          onOpen={(id) => navigate(`/kpp?delivery=${id}&from=accepted`)}
+        />
       )}
     </Space>
   );

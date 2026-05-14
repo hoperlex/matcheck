@@ -27,6 +27,7 @@ import { parseUpdPdf, PdfNoTextError } from '../domain/edo/upd-pdf.parser.js';
 import { parseUpdPdfLocal } from '../domain/edo/upd-pdf-local.parser.js';
 import { copyObject, deleteObject, presign, putObject } from '../domain/storage/s3.signer.js';
 import { getUpdParseMode } from '../domain/settings/app-settings.js';
+import { resolveStatusId } from '../domain/statuses/lookup.js';
 
 const ListQuerySchema = z.object({
   kind: z.enum(['upd', 'request']).optional(),
@@ -143,11 +144,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       if (kind) conditions.push(eq(sourceDocuments.kind, kind));
       if (q) conditions.push(ilike(sourceDocuments.docNumber, `%${q}%`));
       if (unaccepted) {
+        const filledStatusId = await resolveStatusId(app, 'delivery', 'filled');
         const acceptedSub = app.db
           .select({ id: deliverySources.sourceDocumentId })
           .from(deliverySources)
           .innerJoin(deliveries, eq(deliveries.id, deliverySources.deliveryId))
-          .where(eq(deliveries.status, 'verified'));
+          .where(eq(deliveries.statusId, filledStatusId));
         conditions.push(drSql`${sourceDocuments.id} not in ${acceptedSub}`);
       }
       const where = conditions.length ? and(...conditions) : undefined;

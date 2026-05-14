@@ -17,6 +17,7 @@ import {
   materials,
   sourceDocuments,
 } from '../db/schema.js';
+import { resolveStatusId } from '../domain/statuses/lookup.js';
 
 const ListQuerySchema = z.object({
   q: z.string().optional(),
@@ -58,7 +59,8 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const { q, supplierId, from, to, limit, offset } = req.query;
-      const conditions = [eq(deliveries.status, 'verified')];
+      const filledStatusId = await resolveStatusId(app, 'delivery', 'filled');
+      const conditions = [eq(deliveries.statusId, filledStatusId)];
       if (q) {
         conditions.push(
           or(

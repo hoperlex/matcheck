@@ -1,6 +1,5 @@
 import { z } from 'zod';
-
-export const DeliveryStatusSchema = z.enum(['draft', 'expected', 'arrived', 'verified', 'rejected']);
+import { DeliveryStatusCodeSchema, StatusSchema } from './statuses.js';
 
 export const DeliveryItemSchema = z.object({
   id: z.string().uuid(),
@@ -26,7 +25,7 @@ export type DeliveryPhoto = z.infer<typeof DeliveryPhotoSchema>;
 
 export const DeliverySchema = z.object({
   id: z.string().uuid(),
-  status: DeliveryStatusSchema,
+  status: StatusSchema,
   supplierId: z.string().uuid().nullable(),
   vehiclePlate: z.string().nullable(),
   driverName: z.string().nullable(),
@@ -55,7 +54,7 @@ export const DeliveryUpsertItemSchema = z.object({
 
 export const DeliveryUpsertSchema = z.object({
   id: z.string().uuid().optional(),
-  status: DeliveryStatusSchema,
+  statusCode: DeliveryStatusCodeSchema,
   supplierId: z.string().uuid().nullable().optional(),
   vehiclePlate: z.string().max(16).nullable().optional(),
   driverName: z.string().max(200).nullable().optional(),

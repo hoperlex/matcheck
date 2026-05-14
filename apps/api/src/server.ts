@@ -17,6 +17,7 @@ import { counterpartyRoutes } from './routes/counterparties.js';
 import { materialRoutes } from './routes/materials.js';
 import { sourceDocumentRoutes } from './routes/source-documents.js';
 import { deliveryRoutes } from './routes/deliveries.js';
+import { statusRoutes } from './routes/statuses.js';
 import { photoRoutes } from './routes/photos.js';
 import { syncRoutes } from './routes/sync.js';
 import { eventsRoutes } from './routes/events.js';
@@ -56,6 +57,7 @@ export async function buildServer() {
   await app.register(materialRoutes);
   await app.register(sourceDocumentRoutes);
   await app.register(deliveryRoutes);
+  await app.register(statusRoutes);
   await app.register(photoRoutes);
   await app.register(syncRoutes);
   await app.register(eventsRoutes);

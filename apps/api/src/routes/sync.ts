@@ -13,6 +13,7 @@ import {
   sourceDocumentAttachments,
   sourceDocumentItems,
   sourceDocuments,
+  statuses,
 } from '../db/schema.js';
 
 const QuerySchema = z.object({
@@ -66,9 +67,10 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
 
       const inspectorOnly = req.user?.role === 'inspector_kpp';
       const inspectorId = req.user?.id;
-      const dRows = await app.db
-        .select()
+      const dRowsJoined = await app.db
+        .select({ d: deliveries, s: statuses })
         .from(deliveries)
+        .innerJoin(statuses, eq(deliveries.statusId, statuses.id))
         .where(
           inspectorOnly && inspectorId
             ? since
@@ -80,6 +82,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         )
         .orderBy(desc(deliveries.updatedAt))
         .limit(500);
+      const dRows = dRowsJoined.map((r) => ({ ...r.d, _status: r.s }));
       const dIds = dRows.map((r) => r.id);
       const dItems = dIds.length
         ? await app.db.select().from(deliveryItems).where(sql_in(deliveryItems.deliveryId, dIds))
@@ -164,7 +167,14 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         })),
         deliveries: dRows.map((d) => ({
           id: d.id,
-          status: d.status,
+          status: {
+            id: d._status.id,
+            entityType: d._status.entityType,
+            code: d._status.code,
+            label: d._status.label,
+            color: d._status.color,
+            sortOrder: d._status.sortOrder,
+          },
           supplierId: d.supplierId,
           vehiclePlate: d.vehiclePlate,
           driverName: d.driverName,
