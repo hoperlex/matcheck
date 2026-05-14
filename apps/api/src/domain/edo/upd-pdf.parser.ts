@@ -1,6 +1,7 @@
 import { PDFParse } from 'pdf-parse';
 import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { loadDefaultProvider } from '../llm/registry.js';
+import { loadActivePrompt } from '../prompts/registry.js';
 import { eq } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { llmProviders } from '../../db/schema.js';
@@ -51,27 +52,29 @@ const RESPONSE_JSON_SCHEMA = {
           sum: { type: ['number', 'null'] },
           vatRate: { type: ['number', 'null'] },
           vatSum: { type: ['number', 'null'] },
+          volumeM3: {
+            type: ['number', 'null'],
+            description: 'Объём ОДНОЙ единицы с разумной упаковкой/паллетой в м³',
+          },
+          massKg: {
+            type: ['number', 'null'],
+            description: 'Масса ОДНОЙ единицы с упаковкой в кг',
+          },
+          volumeConfidence: {
+            type: ['string', 'null'],
+            enum: ['low', 'medium', 'high', null],
+            description: 'Уверенность в оценке объёма/массы',
+          },
+          groupName: {
+            type: ['string', 'null'],
+            description: 'Семантическая группа позиции (Воздуховоды/Отводы/Бетон/...)',
+          },
         },
       },
     },
     confidence: { type: 'number', minimum: 0, maximum: 1 },
   },
 };
-
-const SYSTEM_PROMPT = `Ты извлекаешь данные из текста российского УПД (универсального передаточного документа), полученного через распознавание PDF.
-
-Главный приоритет — таблица позиций: для каждой строки извлеки nameRaw (наименование материала/товара/услуги как есть), qty (количество, число), unit (единица измерения), price (цена за единицу), sum (стоимость без НДС или с НДС).
-
-Второстепенно — заголовок документа: docNumber, docDate (YYYY-MM-DD), totalSum, vatSum, реквизиты supplier и recipient (ИНН, КПП, название).
-
-Правила:
-- Числа без пробелов как разделителей тысяч (12500 вместо "12 500").
-- Запятая в числах = десятичный разделитель (2,5 → 2.5).
-- Если поле не нашёл — null. Не выдумывай данные.
-- Игнорируй итоговые строки таблицы («Итого», «Всего», «Сумма НДС»).
-- Если разбор сомнителен (плохое OCR-качество, неполные данные) — confidence < 0.7.
-
-Отвечай ТОЛЬКО валидным JSON по предоставленной схеме.`;
 
 export type ParsePdfResult = {
   parsed: UpdPdfParsed;
@@ -96,11 +99,14 @@ export async function parseUpdPdf(buffer: Buffer): Promise<ParsePdfResult> {
     throw new PdfNoTextError(cleanText.length);
   }
 
-  const provider = await loadDefaultProvider();
+  const [provider, systemPrompt] = await Promise.all([
+    loadDefaultProvider(),
+    loadActivePrompt('upd'),
+  ]);
   const result = await provider.complete(
     {
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: cleanText.slice(0, 100_000) },
       ],
       jsonSchema: RESPONSE_JSON_SCHEMA,

@@ -236,6 +236,25 @@ export const settings = pgTable('settings', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const prompts = pgTable(
+  'prompts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    docKind: text('doc_kind').notNull(),
+    name: text('name').notNull(),
+    content: text('content').notNull(),
+    isActive: boolean('is_active').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('prompts_active_per_kind')
+      .on(t.docKind)
+      .where(sql`${t.isActive} = true`),
+    index('prompts_doc_kind_idx').on(t.docKind),
+  ],
+);
+
 // ─── Source documents (UPD + Requests) ─────────────────────────────────────
 
 export const sourceDocuments = pgTable(
@@ -304,6 +323,10 @@ export const sourceDocumentItems = pgTable('source_document_items', {
   vatSum: numeric('vat_sum', { precision: 18, scale: 2 }),
   expectedDate: timestamp('expected_date', { mode: 'date' }),
   lineNo: integer('line_no').notNull(),
+  volumeM3: numeric('volume_m3', { precision: 10, scale: 4 }),
+  massKg: numeric('mass_kg', { precision: 10, scale: 3 }),
+  volumeConfidence: text('volume_confidence'),
+  groupName: text('group_name'),
 });
 
 export const sourceDocumentAttachments = pgTable('source_document_attachments', {
@@ -362,6 +385,10 @@ export const deliveryItems = pgTable('delivery_items', {
   unit: varchar('unit', { length: 16 }).notNull().default('шт'),
   comment: text('comment'),
   lineNo: integer('line_no').notNull(),
+  volumeM3: numeric('volume_m3', { precision: 10, scale: 4 }),
+  massKg: numeric('mass_kg', { precision: 10, scale: 3 }),
+  volumeConfidence: text('volume_confidence'),
+  groupName: text('group_name'),
 });
 
 export const deliveryPhotos = pgTable(

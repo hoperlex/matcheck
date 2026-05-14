@@ -26,6 +26,7 @@ import { edoAccountRoutes } from './routes/admin/edo-accounts.js';
 import { mailAccountRoutes } from './routes/admin/mail-accounts.js';
 import { userAdminRoutes } from './routes/admin/users.js';
 import { appSettingsRoutes } from './routes/admin/settings.js';
+import { promptRoutes } from './routes/admin/prompts.js';
 
 export async function buildServer() {
   const env = loadEnv();
@@ -66,6 +67,7 @@ export async function buildServer() {
   await app.register(mailAccountRoutes);
   await app.register(userAdminRoutes);
   await app.register(appSettingsRoutes);
+  await app.register(promptRoutes);
 
   app.setErrorHandler((err, req, reply) => {
     req.log.error({ err }, 'request error');

@@ -49,6 +49,8 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { DeliveriesHistory } from './DeliveriesHistory';
 import { ExpectedUpds } from './ExpectedUpds';
 import { PhotoGallery } from './PhotoGallery';
+import { VehicleFillGauge } from './VehicleFillGauge';
+import { GroupedItemsList } from './grouping/GroupedItemsList';
 
 type DraftItem = {
   clientKey: string;
@@ -58,6 +60,10 @@ type DraftItem = {
   qtyActual: string | null;
   unit: string;
   materialId: string | null;
+  volumeM3: string | null;
+  massKg: string | null;
+  volumeConfidence: 'low' | 'medium' | 'high' | null;
+  groupName: string | null;
 };
 
 type ListTab = 'expected' | 'accepted';
@@ -145,6 +151,10 @@ export default function KppPage() {
         qtyActual: it.qtyActual,
         unit: it.unit,
         materialId: it.materialId,
+        volumeM3: it.volumeM3 ?? null,
+        massKg: it.massKg ?? null,
+        volumeConfidence: it.volumeConfidence ?? null,
+        groupName: it.groupName ?? null,
       })),
     );
     if (d.sourceDocumentIds.length > 0 && !selectedUpd) {
@@ -212,6 +222,10 @@ export default function KppPage() {
           unit: it.unit,
           comment: null,
           lineNo: i + 1,
+          volumeM3: it.volumeM3 ?? null,
+          massKg: it.massKg ?? null,
+          volumeConfidence: it.volumeConfidence ?? null,
+          groupName: it.groupName ?? null,
         })),
       };
       await applyLocalEdit(id, patch);
@@ -269,6 +283,10 @@ export default function KppPage() {
         qtyActual: null,
         unit: 'шт',
         materialId: null,
+        volumeM3: null,
+        massKg: null,
+        volumeConfidence: null,
+        groupName: null,
       },
     ]);
   };
@@ -307,6 +325,10 @@ export default function KppPage() {
             unit: i.unit,
             comment: null,
             lineNo: i.lineNo,
+            volumeM3: i.volumeM3,
+            massKg: i.massKg,
+            volumeConfidence: i.volumeConfidence,
+            groupName: i.groupName,
           })),
       };
       await applyLocalEdit(loadedDelivery.id, patch);
@@ -563,6 +585,19 @@ export default function KppPage() {
           </Col>
         </Row>
 
+        <VehicleFillGauge
+          items={items.map((it) => ({
+            qty:
+              it.qtyActual !== null && it.qtyActual !== ''
+                ? Number(it.qtyActual)
+                : it.qtyPlanned !== null && it.qtyPlanned !== ''
+                  ? Number(it.qtyPlanned)
+                  : 0,
+            volumeM3: it.volumeM3 !== null && it.volumeM3 !== '' ? Number(it.volumeM3) : null,
+            massKg: it.massKg !== null && it.massKg !== '' ? Number(it.massKg) : null,
+          }))}
+        />
+
         <Collapse
           size="small"
           defaultActiveKey={photosCount > 0 ? ['photos'] : []}
@@ -623,6 +658,15 @@ export default function KppPage() {
                 Материалы можно не добавлять — приёмка сохранится со статусом «Не оформлена».
                 Чтобы оформить, добавьте строки вручную или выберите УПД.
               </Typography.Text>
+            </div>
+          ) : items.some((it) => it.groupName) ? (
+            <div style={{ padding: 12 }}>
+              <GroupedItemsList
+                items={items}
+                deliveryId={deliveryId}
+                onChange={(key, patch) => updateField(key, patch as Partial<DraftItem>)}
+                onRemove={removeItem}
+              />
             </div>
           ) : (
             <ResponsiveTable<DraftItem>

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { loadDefaultProvider } from '../llm/registry.js';
+import { loadActivePrompt } from '../prompts/registry.js';
 import { extractToMarkdown } from './extractors.js';
 
 export const ParsedRequestSchema = z.object({
@@ -59,8 +60,6 @@ const responseJsonSchema = {
   required: ['items'],
 };
 
-const SYSTEM_PROMPT = `Ты извлекаешь данные о плановой поставке материалов из делового письма или вложения. Отвечай ТОЛЬКО валидным JSON, соответствующим схеме. Числа — без пробелов как разделителей тысяч (12500 вместо "12 500"). Даты — формат ISO YYYY-MM-DD. Если данные неоднозначны — задай confidence < 0.7. Если не нашёл позиций — верни пустой массив items и confidence: 0.`;
-
 export type ParseInput = {
   emailBody: string;
   attachments: { filename: string; mimeType: string; buffer: Buffer }[];
@@ -73,7 +72,10 @@ export type ParseOutput = {
 };
 
 export async function parseRequestFromMail(input: ParseInput): Promise<ParseOutput> {
-  const provider = await loadDefaultProvider();
+  const [provider, systemPrompt] = await Promise.all([
+    loadDefaultProvider(),
+    loadActivePrompt('request'),
+  ]);
 
   const parts: string[] = [];
   if (input.emailBody.trim()) {
@@ -95,7 +97,7 @@ export async function parseRequestFromMail(input: ParseInput): Promise<ParseOutp
   const result = await provider.complete(
     {
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: rawPrompt },
       ],
       jsonSchema: responseJsonSchema,

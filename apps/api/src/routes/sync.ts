@@ -153,6 +153,10 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
               vatSum: i.vatSum,
               expectedDate: i.expectedDate?.toISOString().slice(0, 10) ?? null,
               lineNo: i.lineNo,
+              volumeM3: i.volumeM3,
+              massKg: i.massKg,
+              volumeConfidence: i.volumeConfidence as 'low' | 'medium' | 'high' | null,
+              groupName: i.groupName,
             })),
           attachments: sdAttachRows
             .filter((a) => a.sourceDocumentId === sd.id)
@@ -196,6 +200,10 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
               unit: i.unit,
               comment: i.comment,
               lineNo: i.lineNo,
+              volumeM3: i.volumeM3,
+              massKg: i.massKg,
+              volumeConfidence: i.volumeConfidence as 'low' | 'medium' | 'high' | null,
+              groupName: i.groupName,
             })),
           photos: dPhotos
             .filter((p) => p.deliveryId === d.id)

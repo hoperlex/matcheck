@@ -14,6 +14,7 @@ const Materials = lazy(() => import('../pages/references/Materials'));
 const MaterialsJournal = lazy(() => import('../pages/materials/MaterialsPage'));
 const AdminUsers = lazy(() => import('../pages/admin/Users'));
 const AdminLlmProviders = lazy(() => import('../pages/admin/LlmProviders'));
+const AdminPrompts = lazy(() => import('../pages/admin/Prompts'));
 const AdminEdoAccounts = lazy(() => import('../pages/admin/EdoAccounts'));
 const AdminMailAccounts = lazy(() => import('../pages/admin/MailAccounts'));
 const Settings = lazy(() => import('../pages/settings/Settings'));
@@ -78,6 +79,7 @@ export const router = createBrowserRouter([
           { index: true, element: <Navigate to="/admin/users" replace /> },
           { path: 'users', element: suspense(<AdminUsers />) },
           { path: 'llm-providers', element: suspense(<AdminLlmProviders />) },
+          { path: 'prompts', element: suspense(<AdminPrompts />) },
           { path: 'edo-accounts', element: suspense(<AdminEdoAccounts />) },
           { path: 'mail-accounts', element: suspense(<AdminMailAccounts />) },
           { path: 'settings', element: suspense(<Settings />) },

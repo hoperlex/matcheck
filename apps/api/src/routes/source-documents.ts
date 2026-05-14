@@ -207,6 +207,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           vatSum: i.vatSum,
           expectedDate: i.expectedDate?.toISOString().slice(0, 10) ?? null,
           lineNo: i.lineNo,
+          volumeM3: i.volumeM3,
+          massKg: i.massKg,
+          volumeConfidence: i.volumeConfidence as 'low' | 'medium' | 'high' | null,
+          groupName: i.groupName,
         })),
         attachments: attachments.map((a) => ({
           id: a.id,
@@ -507,6 +511,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             sum: it.sum != null ? it.sum.toString() : null,
             vatRate: it.vatRate != null ? it.vatRate.toString() : null,
             vatSum: it.vatSum != null ? it.vatSum.toString() : null,
+            volumeM3: it.volumeM3 != null ? it.volumeM3.toString() : null,
+            massKg: it.massKg != null ? it.massKg.toString() : null,
+            volumeConfidence: it.volumeConfidence ?? null,
+            groupName: it.groupName ?? null,
             lineNo: idx + 1,
           })),
         );
@@ -555,6 +563,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           vatSum: i.vatSum,
           expectedDate: i.expectedDate?.toISOString().slice(0, 10) ?? null,
           lineNo: i.lineNo,
+          volumeM3: i.volumeM3,
+          massKg: i.massKg,
+          volumeConfidence: i.volumeConfidence as 'low' | 'medium' | 'high' | null,
+          groupName: i.groupName,
         })),
         attachments: attachments.map((a) => ({
           id: a.id,

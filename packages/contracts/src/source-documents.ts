@@ -4,6 +4,9 @@ export const SourceKindSchema = z.enum(['upd', 'request']);
 export const SourceOriginSchema = z.enum(['edo_diadoc', 'manual_xml', 'manual_pdf', 'mail']);
 export const SourceStatusSchema = z.enum(['parsed', 'parse_failed', 'archived']);
 
+export const VolumeConfidenceSchema = z.enum(['low', 'medium', 'high']);
+export type VolumeConfidence = z.infer<typeof VolumeConfidenceSchema>;
+
 export const SourceItemSchema = z.object({
   id: z.string().uuid(),
   materialId: z.string().uuid().nullable(),
@@ -16,6 +19,10 @@ export const SourceItemSchema = z.object({
   vatSum: z.string().nullable(),
   expectedDate: z.string().nullable(),
   lineNo: z.number(),
+  volumeM3: z.string().nullable(),
+  massKg: z.string().nullable(),
+  volumeConfidence: VolumeConfidenceSchema.nullable(),
+  groupName: z.string().nullable(),
 });
 export type SourceItem = z.infer<typeof SourceItemSchema>;
 
@@ -82,6 +89,10 @@ export const UpdPdfItemSchema = z.object({
   sum: z.number().nullable().optional(),
   vatRate: z.number().nullable().optional(),
   vatSum: z.number().nullable().optional(),
+  volumeM3: z.number().nullable().optional(),
+  massKg: z.number().nullable().optional(),
+  volumeConfidence: VolumeConfidenceSchema.nullable().optional(),
+  groupName: z.string().nullable().optional(),
 });
 export type UpdPdfItem = z.infer<typeof UpdPdfItemSchema>;
 

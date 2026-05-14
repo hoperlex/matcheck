@@ -87,6 +87,10 @@ async function buildDeliveryDto(app: any, id: string) {
       unit: i.unit,
       comment: i.comment,
       lineNo: i.lineNo,
+      volumeM3: i.volumeM3,
+      massKg: i.massKg,
+      volumeConfidence: i.volumeConfidence as 'low' | 'medium' | 'high' | null,
+      groupName: i.groupName,
     })),
     photos: photos.map((p) => ({
       id: p.id,
@@ -307,6 +311,10 @@ async function createDelivery(
         unit: i.unit,
         comment: i.comment ?? null,
         lineNo: i.lineNo,
+        volumeM3: i.volumeM3 ?? null,
+        massKg: i.massKg ?? null,
+        volumeConfidence: i.volumeConfidence ?? null,
+        groupName: i.groupName ?? null,
       })),
     );
   }
@@ -352,6 +360,10 @@ async function updateDelivery(
         unit: i.unit,
         comment: i.comment ?? null,
         lineNo: i.lineNo,
+        volumeM3: i.volumeM3 ?? null,
+        massKg: i.massKg ?? null,
+        volumeConfidence: i.volumeConfidence ?? null,
+        groupName: i.groupName ?? null,
       })),
     );
   }

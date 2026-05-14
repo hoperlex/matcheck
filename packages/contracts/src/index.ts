@@ -11,3 +11,4 @@ export * from './edo.js';
 export * from './mail.js';
 export * from './sync.js';
 export * from './app-settings.js';
+export * from './prompts.js';

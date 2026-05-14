@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { DeliveryStatusCodeSchema, StatusSchema } from './statuses.js';
+import { VolumeConfidenceSchema } from './source-documents.js';
 
 export const DeliveryItemSchema = z.object({
   id: z.string().uuid(),
@@ -10,6 +11,10 @@ export const DeliveryItemSchema = z.object({
   unit: z.string(),
   comment: z.string().nullable(),
   lineNo: z.number(),
+  volumeM3: z.string().nullable(),
+  massKg: z.string().nullable(),
+  volumeConfidence: VolumeConfidenceSchema.nullable(),
+  groupName: z.string().nullable(),
 });
 export type DeliveryItem = z.infer<typeof DeliveryItemSchema>;
 
@@ -50,6 +55,10 @@ export const DeliveryUpsertItemSchema = z.object({
   unit: z.string().min(1).default('шт'),
   comment: z.string().nullable().optional(),
   lineNo: z.number(),
+  volumeM3: z.string().nullable().optional(),
+  massKg: z.string().nullable().optional(),
+  volumeConfidence: VolumeConfidenceSchema.nullable().optional(),
+  groupName: z.string().nullable().optional(),
 });
 
 export const DeliveryUpsertSchema = z.object({

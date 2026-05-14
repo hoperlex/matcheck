@@ -29,6 +29,13 @@
       "when": 1779062400000,
       "tag": "0003_statuses_table",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1779494400000,
+      "tag": "0004_prompts_and_volume",
+      "breakpoints": true
     }
   ]
 }
