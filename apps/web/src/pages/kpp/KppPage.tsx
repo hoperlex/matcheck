@@ -10,6 +10,7 @@ import {
   Popconfirm,
   Row,
   Segmented,
+  Select,
   Space,
   Spin,
   Tag,
@@ -27,13 +28,16 @@ import {
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
+  Counterparty,
   Delivery,
   DeliveryStatusCode,
+  Site,
   SourceDocument,
   SourceDocumentDetail,
   Status,
 } from '@matcheck/contracts';
 import { api } from '../../services/api';
+import { SYSTEM_SITE_ID } from '../../lib/db';
 import { capturePhoto } from '../../services/photoPipeline';
 import {
   applyLocalEdit,
@@ -87,6 +91,8 @@ export default function KppPage() {
   const [items, setItems] = useState<DraftItem[]>([]);
   const [plate, setPlate] = useState('');
   const [comment, setComment] = useState('');
+  const [siteId, setSiteId] = useState<string | null>(null);
+  const [contractorId, setContractorId] = useState<string | null>(null);
   const [selectedUpd, setSelectedUpd] = useState<SourceDocument | null>(null);
   const [loadedDelivery, setLoadedDelivery] = useState<Delivery | null>(null);
   const [creating, setCreating] = useState(false);
@@ -97,10 +103,26 @@ export default function KppPage() {
       setItems([]);
       setPlate('');
       setComment('');
+      setSiteId(null);
+      setContractorId(null);
       setSelectedUpd(null);
       setLoadedDelivery(null);
     }
   }, [deliveryId]);
+
+  const sitesQuery = useQuery({
+    queryKey: ['sites', 'all'],
+    queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
+  });
+
+  const counterpartiesQuery = useQuery({
+    queryKey: ['counterparties', 'all'],
+    queryFn: () =>
+      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+  });
+
+  const sites = sitesQuery.data?.items ?? [];
+  const counterparties = counterpartiesQuery.data?.items ?? [];
 
   const deliveryQuery = useQuery({
     queryKey: ['deliveries', deliveryId],
@@ -142,6 +164,10 @@ export default function KppPage() {
     setLoadedDelivery(d);
     setPlate(d.vehiclePlate ?? '');
     setComment(d.comment ?? '');
+    // siteId/contractorId подхватываются один раз — последующее редактирование
+    // ведётся через локальный state.
+    setSiteId((prev) => prev ?? (d.siteId === SYSTEM_SITE_ID ? null : d.siteId));
+    setContractorId((prev) => prev ?? d.contractorId ?? null);
     setItems(
       d.items.map((it, idx) => ({
         clientKey: newKey(),
@@ -174,7 +200,10 @@ export default function KppPage() {
     setCreating(true);
     try {
       const id = crypto.randomUUID();
-      await applyLocalEdit(id, {});
+      // siteId — обязателен на сервере. До выбора реального объекта используем
+      // системный «Без объекта» как заглушку, чтобы черновик мог уехать
+      // на сервер (status='not_filled') и не зависал в pending-mutations.
+      await applyLocalEdit(id, { siteId: SYSTEM_SITE_ID });
       await enqueueMutation({
         id: crypto.randomUUID(),
         kind: 'delivery_upsert',
@@ -211,6 +240,7 @@ export default function KppPage() {
       }
       const id = crypto.randomUUID();
       const patch: Partial<Delivery> = {
+        siteId: SYSTEM_SITE_ID,
         supplierId: detail.supplierId ?? null,
         sourceDocumentIds: [upd.id],
         items: detail.items.map((it, i) => ({
@@ -307,7 +337,9 @@ export default function KppPage() {
       };
       const patch: Partial<Delivery> = {
         status: nextStatus,
+        siteId: siteId ?? loadedDelivery.siteId,
         supplierId: selectedUpd?.supplierId ?? loadedDelivery.supplierId ?? null,
+        contractorId,
         vehiclePlate: plate || null,
         arrivedAt: loadedDelivery.arrivedAt ?? new Date().toISOString(),
         comment: comment || null,
@@ -397,6 +429,7 @@ export default function KppPage() {
   );
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
+    if (!siteId) reasons.push('Выберите объект');
     if (!plate.trim()) reasons.push('Заполните госномер');
     if (photosCount === 0) reasons.push('Сделайте хотя бы одно фото');
     return reasons.length ? reasons.join(' · ') : null;
@@ -558,7 +591,57 @@ export default function KppPage() {
         </Space>
 
         <Row gutter={[8, 8]}>
-          <Col xs={24} sm={12}>
+          <Col xs={24} sm={12} md={6}>
+            <Card
+              size="small"
+              title={
+                <span>
+                  Объект <span style={{ color: '#ff4d4f' }}>*</span>
+                </span>
+              }
+              styles={{ body: { padding: 12 } }}
+            >
+              <Select<string>
+                size="large"
+                style={{ width: '100%' }}
+                placeholder="Выберите объект"
+                value={siteId ?? undefined}
+                onChange={(v) => setSiteId(v)}
+                showSearch
+                optionFilterProp="label"
+                loading={sitesQuery.isLoading}
+                options={sites.map((s) => ({
+                  value: s.id,
+                  label: `${s.code} · ${s.name}`,
+                }))}
+                notFoundContent={
+                  <Typography.Text type="secondary">
+                    Объектов нет — заведите их в Справочниках
+                  </Typography.Text>
+                }
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} md={6}>
+            <Card size="small" title="Подрядчик" styles={{ body: { padding: 12 } }}>
+              <Select<string>
+                size="large"
+                style={{ width: '100%' }}
+                placeholder="— не указан —"
+                value={contractorId ?? undefined}
+                onChange={(v) => setContractorId(v ?? null)}
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                loading={counterpartiesQuery.isLoading}
+                options={counterparties.map((c) => ({
+                  value: c.id,
+                  label: c.name,
+                }))}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} md={6}>
             <Card size="small" title="Госномер" styles={{ body: { padding: 12 } }}>
               <Input
                 size="large"
@@ -569,7 +652,7 @@ export default function KppPage() {
               />
             </Card>
           </Col>
-          <Col xs={24} sm={12}>
+          <Col xs={24} sm={12} md={6}>
             <Card size="small" title="УПД" styles={{ body: { padding: 12 } }}>
               {selectedUpd ? (
                 <Space wrap>

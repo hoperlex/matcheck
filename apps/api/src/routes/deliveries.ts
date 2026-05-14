@@ -70,7 +70,9 @@ async function buildDeliveryDto(app: any, id: string) {
       color: s.color,
       sortOrder: s.sortOrder,
     },
+    siteId: d.siteId,
     supplierId: d.supplierId,
+    contractorId: d.contractorId,
     vehiclePlate: d.vehiclePlate,
     driverName: d.driverName,
     arrivedAt: d.arrivedAt?.toISOString() ?? null,
@@ -290,7 +292,9 @@ async function createDelivery(
     .values({
       id: input.id,
       statusId,
+      siteId: input.siteId,
       supplierId: input.supplierId ?? null,
+      contractorId: input.contractorId ?? null,
       vehiclePlate: input.vehiclePlate ?? null,
       driverName: input.driverName ?? null,
       arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,
@@ -339,7 +343,9 @@ async function updateDelivery(
     .update(deliveries)
     .set({
       statusId,
+      siteId: input.siteId,
       supplierId: input.supplierId ?? null,
+      contractorId: input.contractorId ?? null,
       vehiclePlate: input.vehiclePlate ?? null,
       driverName: input.driverName ?? null,
       arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,

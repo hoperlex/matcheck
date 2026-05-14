@@ -14,6 +14,7 @@ import authPlugin from './plugins/auth.js';
 import { healthRoutes } from './routes/health.js';
 import { authRoutes } from './routes/auth.js';
 import { counterpartyRoutes } from './routes/counterparties.js';
+import { siteRoutes } from './routes/sites.js';
 import { materialRoutes } from './routes/materials.js';
 import { sourceDocumentRoutes } from './routes/source-documents.js';
 import { deliveryRoutes } from './routes/deliveries.js';
@@ -55,6 +56,7 @@ export async function buildServer() {
   await app.register(healthRoutes);
   await app.register(authRoutes);
   await app.register(counterpartyRoutes);
+  await app.register(siteRoutes);
   await app.register(materialRoutes);
   await app.register(sourceDocumentRoutes);
   await app.register(deliveryRoutes);

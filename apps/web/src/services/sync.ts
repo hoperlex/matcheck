@@ -26,6 +26,9 @@ export async function pullSync(): Promise<void> {
   for (const m of res.materials) {
     await tx.objectStore('references').put({ ...m, kind: 'material' });
   }
+  for (const s of res.sites) {
+    await tx.objectStore('references').put({ ...s, kind: 'site' });
+  }
   await tx.done;
   await setSetting(CURSOR_KEY, res.serverNow);
 }

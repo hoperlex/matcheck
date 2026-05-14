@@ -187,6 +187,34 @@ export const materials = pgTable(
   ],
 );
 
+// ─── Sites (объекты строительства) ─────────────────────────────────────────
+
+export const sites = pgTable(
+  'sites',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    code: varchar('code', { length: 5 }).notNull(),
+    name: text('name').notNull(),
+    fullName: text('full_name'),
+    address: text('address'),
+    isActive: boolean('is_active').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('site_code_unique').on(t.code),
+    index('site_active_idx')
+      .on(t.name)
+      .where(sql`${t.isActive}`),
+  ],
+);
+
+/**
+ * Системный объект «Без объекта» — используется как заглушка при миграции
+ * существующих приёмок и должен оставаться is_active=false.
+ */
+export const SYSTEM_SITE_ID = '00000000-0000-0000-0000-000000000001';
+
 // ─── ЭДО / Mail / LLM accounts ─────────────────────────────────────────────
 
 export const edoAccounts = pgTable('edo_accounts', {
@@ -344,21 +372,36 @@ export const sourceDocumentAttachments = pgTable('source_document_attachments', 
 
 // ─── Deliveries ────────────────────────────────────────────────────────────
 
-export const deliveries = pgTable('deliveries', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  statusId: uuid('status_id')
-    .notNull()
-    .references(() => statuses.id),
-  supplierId: uuid('supplier_id').references(() => counterparties.id, { onDelete: 'set null' }),
-  vehiclePlate: varchar('vehicle_plate', { length: 16 }),
-  driverName: text('driver_name'),
-  arrivedAt: timestamp('arrived_at', { withTimezone: true }),
-  inspectorId: uuid('inspector_id').references(() => users.id, { onDelete: 'set null' }),
-  comment: text('comment'),
-  version: integer('version').notNull().default(1),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const deliveries = pgTable(
+  'deliveries',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    statusId: uuid('status_id')
+      .notNull()
+      .references(() => statuses.id),
+    siteId: uuid('site_id')
+      .notNull()
+      .references(() => sites.id, { onDelete: 'restrict' }),
+    supplierId: uuid('supplier_id').references(() => counterparties.id, { onDelete: 'set null' }),
+    contractorId: uuid('contractor_id').references(() => counterparties.id, {
+      onDelete: 'set null',
+    }),
+    vehiclePlate: varchar('vehicle_plate', { length: 16 }),
+    driverName: text('driver_name'),
+    arrivedAt: timestamp('arrived_at', { withTimezone: true }),
+    inspectorId: uuid('inspector_id').references(() => users.id, { onDelete: 'set null' }),
+    comment: text('comment'),
+    version: integer('version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('deliveries_site_idx').on(t.siteId, t.updatedAt),
+    index('deliveries_contractor_idx')
+      .on(t.contractorId)
+      .where(sql`${t.contractorId} is not null`),
+  ],
+);
 
 export const deliverySources = pgTable(
   'delivery_sources',

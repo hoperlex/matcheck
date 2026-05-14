@@ -1,11 +1,11 @@
 import type { ComponentType } from 'react';
 import {
+  AppstoreOutlined,
   ControlOutlined,
   FileTextOutlined,
   InboxOutlined,
   SafetyOutlined,
   SettingOutlined,
-  TeamOutlined,
 } from '@ant-design/icons';
 import type { UserRole } from '@matcheck/contracts';
 
@@ -40,11 +40,11 @@ export const navItems: NavItem[] = [
     icon: InboxOutlined,
   },
   {
-    key: 'counterparties',
-    label: 'Контрагенты',
-    path: '/references/counterparties',
+    key: 'references',
+    label: 'Справочники',
+    path: '/references',
     roles: ['admin', 'manager'],
-    icon: TeamOutlined,
+    icon: AppstoreOutlined,
   },
   {
     key: 'admin',

@@ -31,7 +31,9 @@ export type DeliveryPhoto = z.infer<typeof DeliveryPhotoSchema>;
 export const DeliverySchema = z.object({
   id: z.string().uuid(),
   status: StatusSchema,
+  siteId: z.string().uuid(),
   supplierId: z.string().uuid().nullable(),
+  contractorId: z.string().uuid().nullable(),
   vehiclePlate: z.string().nullable(),
   driverName: z.string().nullable(),
   arrivedAt: z.string().nullable(),
@@ -64,7 +66,9 @@ export const DeliveryUpsertItemSchema = z.object({
 export const DeliveryUpsertSchema = z.object({
   id: z.string().uuid().optional(),
   statusCode: DeliveryStatusCodeSchema,
+  siteId: z.string().uuid(),
   supplierId: z.string().uuid().nullable().optional(),
+  contractorId: z.string().uuid().nullable().optional(),
   vehiclePlate: z.string().max(16).nullable().optional(),
   driverName: z.string().max(200).nullable().optional(),
   arrivedAt: z.string().nullable().optional(),

@@ -2,6 +2,7 @@ export * from './health.js';
 export * from './auth.js';
 export * from './counterparties.js';
 export * from './materials.js';
+export * from './sites.js';
 export * from './source-documents.js';
 export * from './statuses.js';
 export * from './deliveries.js';

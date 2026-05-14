@@ -4,11 +4,13 @@ import { Spin } from 'antd';
 import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from '../shared/ui/ProtectedRoute';
 import AdminLayout from '../pages/admin/AdminLayout';
+import ReferencesLayout from '../pages/references/ReferencesLayout';
 
 const Login = lazy(() => import('../pages/auth/Login'));
 const Register = lazy(() => import('../pages/auth/Register'));
 const Inbox = lazy(() => import('../pages/inbox/Inbox'));
 const KppPage = lazy(() => import('../pages/kpp/KppPage'));
+const Sites = lazy(() => import('../pages/references/Sites'));
 const Counterparties = lazy(() => import('../pages/references/Counterparties'));
 const Materials = lazy(() => import('../pages/references/Materials'));
 const MaterialsJournal = lazy(() => import('../pages/materials/MaterialsPage'));
@@ -55,18 +57,18 @@ export const router = createBrowserRouter([
       { path: 'inbox', element: <Navigate to="/documents" replace /> },
       { path: 'materials', element: suspense(<MaterialsJournal />) },
       {
-        path: 'references/counterparties',
+        path: 'references',
         element: (
           <ProtectedRoute roles={['admin', 'manager']}>
-            {suspense(<Counterparties />)}
+            <ReferencesLayout />
           </ProtectedRoute>
         ),
-      },
-      {
-        path: 'references/materials',
-        element: (
-          <ProtectedRoute roles={['admin', 'manager']}>{suspense(<Materials />)}</ProtectedRoute>
-        ),
+        children: [
+          { index: true, element: <Navigate to="/references/sites" replace /> },
+          { path: 'sites', element: suspense(<Sites />) },
+          { path: 'counterparties', element: suspense(<Counterparties />) },
+          { path: 'materials', element: suspense(<Materials />) },
+        ],
       },
       {
         path: 'admin',

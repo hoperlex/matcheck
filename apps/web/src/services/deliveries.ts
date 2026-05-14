@@ -1,4 +1,4 @@
-import { db, type DeliveryRecord, type MutationRecord } from '../lib/db';
+import { db, SYSTEM_SITE_ID, type DeliveryRecord, type MutationRecord } from '../lib/db';
 import type { Delivery, DeliveryStatusCode, DeliveryUpsert, Status } from '@matcheck/contracts';
 
 const PLACEHOLDER_NOT_FILLED: Status = {
@@ -28,7 +28,9 @@ export function effectiveState(r: DeliveryRecord): Delivery | null {
     return {
       id: r.id,
       status: PLACEHOLDER_NOT_FILLED,
+      siteId: SYSTEM_SITE_ID,
       supplierId: null,
+      contractorId: null,
       vehiclePlate: null,
       driverName: null,
       arrivedAt: null,
@@ -112,7 +114,9 @@ export function buildUpsertPayload(r: DeliveryRecord): DeliveryUpsert {
   return {
     id: r.id,
     statusCode: effective.status.code as DeliveryStatusCode,
+    siteId: effective.siteId,
     supplierId: effective.supplierId,
+    contractorId: effective.contractorId,
     vehiclePlate: effective.vehiclePlate,
     driverName: effective.driverName,
     arrivedAt: effective.arrivedAt,

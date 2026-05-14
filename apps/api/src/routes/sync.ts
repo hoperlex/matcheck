@@ -10,6 +10,7 @@ import {
   deliveryPhotos,
   deliverySources,
   materials,
+  sites,
   sourceDocumentAttachments,
   sourceDocumentItems,
   sourceDocuments,
@@ -42,6 +43,12 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         .from(materials)
         .where(since ? gte(materials.updatedAt, since) : undefined)
         .orderBy(desc(materials.updatedAt))
+        .limit(500);
+      const siteRows = await app.db
+        .select()
+        .from(sites)
+        .where(since ? gte(sites.updatedAt, since) : undefined)
+        .orderBy(desc(sites.updatedAt))
         .limit(500);
 
       const sdRows = await app.db
@@ -121,6 +128,16 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           createdAt: m.createdAt.toISOString(),
           updatedAt: m.updatedAt.toISOString(),
         })),
+        sites: siteRows.map((s) => ({
+          id: s.id,
+          code: s.code,
+          name: s.name,
+          fullName: s.fullName,
+          address: s.address,
+          isActive: s.isActive,
+          createdAt: s.createdAt.toISOString(),
+          updatedAt: s.updatedAt.toISOString(),
+        })),
         sourceDocuments: sdRows.map((sd) => ({
           id: sd.id,
           kind: sd.kind,
@@ -179,7 +196,9 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             color: d._status.color,
             sortOrder: d._status.sortOrder,
           },
+          siteId: d.siteId,
           supplierId: d.supplierId,
+          contractorId: d.contractorId,
           vehiclePlate: d.vehiclePlate,
           driverName: d.driverName,
           arrivedAt: d.arrivedAt?.toISOString() ?? null,
