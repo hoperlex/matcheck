@@ -14,7 +14,12 @@ import {
 } from 'antd';
 import type { UploadProps } from 'antd';
 import { useQueryClient } from '@tanstack/react-query';
-import type { SourceDocumentDetail, UpdPdfParseResponse, UpdPdfParsed } from '@matcheck/contracts';
+import type {
+  SourceDirection,
+  SourceDocumentDetail,
+  UpdPdfParseResponse,
+  UpdPdfParsed,
+} from '@matcheck/contracts';
 import { api, apiUploadFile, ApiError } from '../../services/api';
 
 type Stage = 'select' | 'parsing' | 'review' | 'saving';
@@ -24,7 +29,15 @@ type Stage = 'select' | 'parsing' | 'review' | 'saving';
 // обрывать раньше сервера.
 const PARSE_TIMEOUT_MS = 660_000;
 
-export function UpdPdfUploadModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function UpdPdfUploadModal({
+  open,
+  direction,
+  onClose,
+}: {
+  open: boolean;
+  direction: SourceDirection;
+  onClose: () => void;
+}) {
   const qc = useQueryClient();
   const [stage, setStage] = useState<Stage>('select');
   const [parseRes, setParseRes] = useState<UpdPdfParseResponse | null>(null);
@@ -104,6 +117,7 @@ export function UpdPdfUploadModal({ open, onClose }: { open: boolean; onClose: (
         draftS3Key: parseRes.draftS3Key,
         contentHash: parseRes.contentHash,
         parsed: values,
+        direction,
       });
       message.success('УПД сохранён');
       void qc.invalidateQueries({ queryKey: ['source-documents'] });

@@ -3,6 +3,8 @@ import { z } from 'zod';
 export const SourceKindSchema = z.enum(['upd', 'request']);
 export const SourceOriginSchema = z.enum(['edo_diadoc', 'manual_xml', 'manual_pdf', 'mail']);
 export const SourceStatusSchema = z.enum(['parsed', 'parse_failed', 'archived']);
+export const SourceDirectionSchema = z.enum(['inbound', 'outbound']);
+export type SourceDirection = z.infer<typeof SourceDirectionSchema>;
 
 export const VolumeConfidenceSchema = z.enum(['low', 'medium', 'high']);
 export type VolumeConfidence = z.infer<typeof VolumeConfidenceSchema>;
@@ -75,6 +77,7 @@ export type UpdValidation = z.infer<typeof UpdValidationSchema>;
 export const SourceDocumentSchema = z.object({
   id: z.string().uuid(),
   kind: SourceKindSchema,
+  direction: SourceDirectionSchema,
   status: SourceStatusSchema,
   supplierId: z.string().uuid().nullable(),
   recipientId: z.string().uuid().nullable(),
@@ -105,10 +108,21 @@ export const SourceDocumentListResponseSchema = z.object({
   total: z.number(),
 });
 
+export const ManualUpdUploadRequestSchema = z.object({
+  xml: z.string().min(1).max(10_000_000),
+  direction: SourceDirectionSchema,
+});
+export type ManualUpdUploadRequest = z.infer<typeof ManualUpdUploadRequestSchema>;
+
 export const ManualUpdUploadResponseSchema = z.object({
   id: z.string().uuid(),
   itemsCount: z.number(),
 });
+
+export const SourceDocumentDirectionUpdateSchema = z.object({
+  direction: SourceDirectionSchema,
+});
+export type SourceDocumentDirectionUpdate = z.infer<typeof SourceDocumentDirectionUpdateSchema>;
 
 // ──────────── PDF УПД (двухшаговый flow: parse → confirm) ────────────
 
@@ -163,6 +177,7 @@ export const UpdPdfConfirmRequestSchema = z.object({
   draftS3Key: z.string().min(1),
   contentHash: z.string().regex(/^[0-9a-f]{64}$/),
   parsed: UpdPdfParsedSchema,
+  direction: SourceDirectionSchema,
 });
 export type UpdPdfConfirmRequest = z.infer<typeof UpdPdfConfirmRequestSchema>;
 

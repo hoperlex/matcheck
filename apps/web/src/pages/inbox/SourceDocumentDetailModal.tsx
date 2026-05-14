@@ -1,12 +1,17 @@
-import { Modal, Table, Tabs, Tag, Typography, Spin, Alert, Space } from 'antd';
-import { useQuery } from '@tanstack/react-query';
+import { Modal, Table, Tabs, Tag, Typography, Spin, Alert, Space, Button, message } from 'antd';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
+  SourceDirection,
   SourceDocumentDetail,
   SourceDocumentFileResponse,
 } from '@matcheck/contracts';
 import { api, ApiError } from '../../services/api';
 
 type Item = SourceDocumentDetail['items'][number];
+
+function directionLabel(d: SourceDirection): string {
+  return d === 'inbound' ? 'Приёмка' : 'Отгрузка';
+}
 
 export function SourceDocumentDetailModal({
   id,
@@ -17,6 +22,8 @@ export function SourceDocumentDetailModal({
   open: boolean;
   onClose: () => void;
 }) {
+  const qc = useQueryClient();
+
   const detail = useQuery({
     queryKey: ['source-document', id],
     queryFn: () => api.get<SourceDocumentDetail>(`/source-documents/${id}`),
@@ -30,8 +37,24 @@ export function SourceDocumentDetailModal({
     retry: false,
   });
 
+  const switchDirection = useMutation({
+    mutationFn: (next: SourceDirection) =>
+      api.patch<SourceDocumentDetail>(`/source-documents/${id}/direction`, { direction: next }),
+    onSuccess: () => {
+      message.success('Направление обновлено');
+      void qc.invalidateQueries({ queryKey: ['source-documents'] });
+      void qc.invalidateQueries({ queryKey: ['source-document', id] });
+    },
+    onError: (err: Error) => message.error(`Не удалось: ${err.message}`),
+  });
+
   const sd = detail.data;
   const items = sd?.items ?? [];
+  const nextDirection: SourceDirection | null = sd
+    ? sd.direction === 'inbound'
+      ? 'outbound'
+      : 'inbound'
+    : null;
 
   return (
     <Modal
@@ -40,6 +63,9 @@ export function SourceDocumentDetailModal({
       title={
         sd ? (
           <Space>
+            <Tag color={sd.direction === 'inbound' ? 'green' : 'purple'}>
+              {directionLabel(sd.direction)}
+            </Tag>
             <Tag color={sd.kind === 'upd' ? 'blue' : 'gold'}>
               {sd.kind === 'upd' ? 'УПД' : 'Заявка'}
             </Tag>
@@ -54,7 +80,16 @@ export function SourceDocumentDetailModal({
       }
       width="90vw"
       style={{ top: 20 }}
-      footer={null}
+      footer={
+        sd && nextDirection ? (
+          <Button
+            onClick={() => switchDirection.mutate(nextDirection)}
+            loading={switchDirection.isPending}
+          >
+            Перевести в «{directionLabel(nextDirection)}»
+          </Button>
+        ) : null
+      }
       destroyOnClose
     >
       {detail.isLoading && (

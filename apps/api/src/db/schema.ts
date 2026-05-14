@@ -35,6 +35,7 @@ export const sourceOriginEnum = pgEnum('source_origin', [
   'mail',
 ]);
 export const sourceStatusEnum = pgEnum('source_status', ['parsed', 'parse_failed', 'archived']);
+export const sourceDirectionEnum = pgEnum('source_direction', ['inbound', 'outbound']);
 export const photoKindEnum = pgEnum('photo_kind', ['document', 'cargo', 'vehicle', 'other']);
 export const llmKindEnum = pgEnum('llm_kind', [
   'openrouter',
@@ -297,6 +298,7 @@ export const sourceDocuments = pgTable(
   {
     id: uuid('id').primaryKey().defaultRandom(),
     kind: sourceKindEnum('kind').notNull(),
+    direction: sourceDirectionEnum('direction').notNull().default('inbound'),
     status: sourceStatusEnum('status').notNull().default('parsed'),
     supplierId: uuid('supplier_id').references(() => counterparties.id, { onDelete: 'set null' }),
     recipientId: uuid('recipient_id').references(() => counterparties.id, { onDelete: 'set null' }),
@@ -337,6 +339,7 @@ export const sourceDocuments = pgTable(
     index('source_kind_expected_date_idx')
       .on(t.expectedDate)
       .where(sql`${t.kind} = 'request'`),
+    index('source_direction_idx').on(t.direction),
     check(
       'source_upd_required',
       sql`(${t.kind} <> 'upd') or (${t.docNumber} is not null and ${t.docDate} is not null and ${t.totalSum} is not null)`,

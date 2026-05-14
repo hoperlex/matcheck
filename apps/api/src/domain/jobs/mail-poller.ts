@@ -67,6 +67,7 @@ export async function runMailSyncForAccount(
         .insert(sourceDocuments)
         .values({
           kind: 'request',
+          direction: 'inbound',
           origin: 'mail',
           mailAccountId: account.id,
           messageId: m.messageId,

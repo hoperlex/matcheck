@@ -5,7 +5,9 @@ import { and, desc, eq, ilike, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
+  ManualUpdUploadRequestSchema,
   ManualUpdUploadResponseSchema,
+  SourceDocumentDirectionUpdateSchema,
   SourceDocumentListResponseSchema,
   SourceDocumentDetailSchema,
   SourceDocumentFileResponseSchema,
@@ -32,6 +34,7 @@ import { resolveStatusId } from '../domain/statuses/lookup.js';
 
 const ListQuerySchema = z.object({
   kind: z.enum(['upd', 'request']).optional(),
+  direction: z.enum(['inbound', 'outbound']).optional(),
   q: z.string().trim().min(1).max(200).optional(),
   unaccepted: z.coerce.boolean().optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
@@ -94,6 +97,7 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect) {
   return {
     id: sd.id,
     kind: sd.kind,
+    direction: sd.direction,
     status: sd.status,
     supplierId: sd.supplierId,
     recipientId: sd.recipientId,
@@ -141,11 +145,14 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       schema: { querystring: ListQuerySchema, response: { 200: SourceDocumentListResponseSchema } },
     },
     async (req) => {
-      const { kind, q, unaccepted, limit, offset } = req.query;
+      const { kind, direction, q, unaccepted, limit, offset } = req.query;
       const conditions = [];
       if (kind) conditions.push(eq(sourceDocuments.kind, kind));
+      if (direction) conditions.push(eq(sourceDocuments.direction, direction));
       if (q) conditions.push(ilike(sourceDocuments.docNumber, `%${q}%`));
-      if (unaccepted) {
+      // Фильтр «непринятые» имеет смысл только для входящих документов:
+      // он смотрит привязки к deliveries. Для outbound — игнорируем.
+      if (unaccepted && direction !== 'outbound') {
         const filledStatusId = await resolveStatusId(app, 'delivery', 'filled');
         const acceptedSub = app.db
           .select({ id: deliverySources.sourceDocumentId })
@@ -317,7 +324,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     {
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
-        body: z.object({ xml: z.string().min(1).max(10_000_000) }),
+        body: ManualUpdUploadRequestSchema,
         response: { 201: ManualUpdUploadResponseSchema, 400: ErrorResponseSchema },
       },
     },
@@ -345,6 +352,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .insert(sourceDocuments)
         .values({
           kind: 'upd',
+          direction: req.body.direction,
           origin: 'manual_xml',
           supplierId,
           recipientId,
@@ -467,7 +475,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       },
     },
     async (req, reply) => {
-      const { draftS3Key, parsed } = req.body;
+      const { draftS3Key, parsed, direction } = req.body;
 
       const supplier = parsed.supplier;
       const supplierId =
@@ -501,6 +509,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .insert(sourceDocuments)
         .values({
           kind: 'upd',
+          direction,
           origin: 'manual_pdf',
           supplierId,
           recipientId,
@@ -568,6 +577,65 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       reply.code(201);
       return {
         ...sdRow(created),
+        items: items.map((i) => ({
+          id: i.id,
+          materialId: i.materialId,
+          nameRaw: i.nameRaw,
+          qty: i.qty,
+          unit: i.unit,
+          price: i.price,
+          sum: i.sum,
+          vatRate: i.vatRate,
+          vatSum: i.vatSum,
+          expectedDate: i.expectedDate?.toISOString().slice(0, 10) ?? null,
+          lineNo: i.lineNo,
+          volumeM3: i.volumeM3,
+          massKg: i.massKg,
+          volumeConfidence: i.volumeConfidence as 'low' | 'medium' | 'high' | null,
+          groupName: i.groupName,
+        })),
+        attachments: attachments.map((a) => ({
+          id: a.id,
+          s3Key: a.s3Key,
+          filename: a.filename,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+          role: a.role,
+        })),
+      };
+    },
+  );
+
+  // Переключение направления документа («Приёмка» ↔ «Отгрузка») для
+  // правки авто-импорта из ЭДО/почты, где direction подставляется дефолтом.
+  app.patch(
+    '/api/v1/source-documents/:id/direction',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: SourceDocumentDirectionUpdateSchema,
+        response: { 200: SourceDocumentDetailSchema, 404: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      const [updated] = await app.db
+        .update(sourceDocuments)
+        .set({ direction: req.body.direction, updatedAt: new Date() })
+        .where(eq(sourceDocuments.id, req.params.id))
+        .returning();
+      if (!updated) return reply.code(404).send({ error: 'not_found' });
+      const items = await app.db
+        .select()
+        .from(sourceDocumentItems)
+        .where(eq(sourceDocumentItems.sourceDocumentId, updated.id))
+        .orderBy(sourceDocumentItems.lineNo);
+      const attachments = await app.db
+        .select()
+        .from(sourceDocumentAttachments)
+        .where(eq(sourceDocumentAttachments.sourceDocumentId, updated.id));
+      return {
+        ...sdRow(updated),
         items: items.map((i) => ({
           id: i.id,
           materialId: i.materialId,

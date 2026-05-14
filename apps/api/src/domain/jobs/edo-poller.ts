@@ -59,6 +59,7 @@ export async function runEdoSyncForAccount(
         .insert(sourceDocuments)
         .values({
           kind: 'upd',
+          direction: 'inbound',
           origin: 'edo_diadoc',
           edoAccountId: account.id,
           providerMessageId: incoming.providerMessageId,

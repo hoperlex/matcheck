@@ -179,6 +179,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         sourceDocuments: sdRows.map((sd) => ({
           id: sd.id,
           kind: sd.kind,
+          direction: sd.direction,
           status: sd.status,
           supplierId: sd.supplierId,
           recipientId: sd.recipientId,

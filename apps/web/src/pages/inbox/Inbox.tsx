@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { Card, Segmented, Typography, Tag, Space, Button, Upload, message } from 'antd';
+import { Card, Segmented, Tabs, Typography, Tag, Space, Button, Upload, message } from 'antd';
 import type { UploadProps } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { SourceDocumentListResponseSchema } from '@matcheck/contracts';
+import type { SourceDirection, SourceDocumentListResponseSchema } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
@@ -13,20 +13,25 @@ type List = z.infer<typeof SourceDocumentListResponseSchema>;
 type Row = List['items'][number];
 
 export default function InboxPage() {
+  const [direction, setDirection] = useState<SourceDirection>('inbound');
   const [kind, setKind] = useState<'all' | 'upd' | 'request'>('all');
   const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const qc = useQueryClient();
 
   const list = useQuery({
-    queryKey: ['source-documents', { kind }],
-    queryFn: () => api.get<List>(`/source-documents${kind === 'all' ? '' : `?kind=${kind}`}`),
+    queryKey: ['source-documents', { direction, kind }],
+    queryFn: () => {
+      const params = new URLSearchParams({ direction });
+      if (kind !== 'all') params.set('kind', kind);
+      return api.get<List>(`/source-documents?${params.toString()}`);
+    },
   });
 
   const upload = useMutation({
     mutationFn: async (file: File) => {
       const xml = await file.text();
-      return api.post('/source-documents/upload-upd', { xml });
+      return api.post('/source-documents/upload-upd', { xml, direction });
     },
     onSuccess: () => {
       message.success('УПД загружен');
@@ -46,10 +51,18 @@ export default function InboxPage() {
 
   return (
     <div>
+      <Typography.Title level={3} style={{ margin: '0 0 12px' }}>
+        Документы
+      </Typography.Title>
+      <Tabs
+        activeKey={direction}
+        onChange={(k) => setDirection(k as SourceDirection)}
+        items={[
+          { key: 'inbound', label: 'Приёмка' },
+          { key: 'outbound', label: 'Отгрузка' },
+        ]}
+      />
       <Space style={{ marginBottom: 16 }} wrap>
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          Документы
-        </Typography.Title>
         <Segmented
           value={kind}
           onChange={(v) => setKind(v as 'all' | 'upd' | 'request')}
@@ -99,7 +112,11 @@ export default function InboxPage() {
           </Card>
         )}
       />
-      <UpdPdfUploadModal open={pdfModalOpen} onClose={() => setPdfModalOpen(false)} />
+      <UpdPdfUploadModal
+        open={pdfModalOpen}
+        direction={direction}
+        onClose={() => setPdfModalOpen(false)}
+      />
       <SourceDocumentDetailModal
         id={selectedId}
         open={!!selectedId}

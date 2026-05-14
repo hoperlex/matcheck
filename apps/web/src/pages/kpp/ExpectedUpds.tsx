@@ -54,7 +54,8 @@ function MismatchTag({ v }: { v: UpdValidation }) {
 export function ExpectedUpds({ onOpen }: { onOpen: (upd: SourceDocument) => void }) {
   const list = useQuery({
     queryKey: ['source-documents', 'unaccepted-upd', 'list'],
-    queryFn: () => api.get<List>('/source-documents?kind=upd&unaccepted=true&limit=100'),
+    queryFn: () =>
+      api.get<List>('/source-documents?kind=upd&direction=inbound&unaccepted=true&limit=100'),
   });
 
   const counterparties = useQuery({
