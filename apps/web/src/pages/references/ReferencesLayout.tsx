@@ -6,7 +6,6 @@ const DEFAULT_TAB = '/references/sites';
 const tabs = [
   { key: DEFAULT_TAB, label: 'Объекты' },
   { key: '/references/counterparties', label: 'Контрагенты' },
-  { key: '/references/materials', label: 'Материалы' },
 ];
 
 export default function ReferencesLayout() {
