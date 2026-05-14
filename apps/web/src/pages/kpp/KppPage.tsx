@@ -115,9 +115,11 @@ export default function KppPage() {
   });
 
   const counterpartiesQuery = useQuery({
-    queryKey: ['counterparties', 'all'],
+    queryKey: ['counterparties', 'contractor'],
     queryFn: () =>
-      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+      api.get<{ items: Counterparty[]; total: number }>(
+        '/counterparties?limit=500&role=contractor',
+      ),
   });
 
   const sites = sitesQuery.data?.items ?? [];
@@ -565,6 +567,11 @@ export default function KppPage() {
                   value: c.id,
                   label: c.name,
                 }))}
+                notFoundContent={
+                  <Typography.Text type="secondary">
+                    Нет контрагентов с ролью «Подрядчик» — отметьте их в Справочниках
+                  </Typography.Text>
+                }
               />
             </Card>
           </Col>
