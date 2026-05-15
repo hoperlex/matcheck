@@ -135,6 +135,7 @@ export default function InboxPage() {
   const [xmlModalOpen, setXmlModalOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [resolveId, setResolveId] = useState<string | null>(null);
+  const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
   const qc = useQueryClient();
 
   const list = useQuery({
@@ -158,7 +159,21 @@ export default function InboxPage() {
   // has_references) откатываем кэш через snapshot и показываем тост ошибки.
   const del = useMutation({
     mutationFn: (id: string) => api.delete<{ ok: true }>(`/source-documents/${id}`),
+    // Сетевые сбои и 5xx — ретраим до 2 раз; 4xx (404, 409 has_references) —
+    // бизнес-ошибки, ретрай не имеет смысла.
+    retry: (failureCount, err) => {
+      if (failureCount >= 2) return false;
+      if (err instanceof ApiError && err.status >= 400 && err.status < 500) return false;
+      return true;
+    },
     onMutate: async (id: string) => {
+      // Очищаем индикатор предыдущей ошибки для этой записи (повторная попытка).
+      setDeleteErrors((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _removed, ...rest } = prev;
+        return rest;
+      });
+
       // Отменяем активные refetch, иначе они затрут оптимистическое изменение.
       await qc.cancelQueries({ queryKey: ['source-documents'] });
 
@@ -179,7 +194,7 @@ export default function InboxPage() {
 
       return { snapshots };
     },
-    onError: (err: Error, _id, ctx) => {
+    onError: (err: Error, id, ctx) => {
       // Откат оптимистического изменения.
       const snapshots = (ctx as { snapshots?: Array<[readonly unknown[], List | undefined]> } | undefined)
         ?.snapshots;
@@ -188,10 +203,8 @@ export default function InboxPage() {
           qc.setQueryData(key, value);
         }
       }
-      if (err instanceof ApiError && err.code === 'has_references') {
-        message.error(err.message);
-        return;
-      }
+      // Маркер ошибки на вернувшейся строке (виден до повторной попытки).
+      setDeleteErrors((prev) => ({ ...prev, [id]: err.message }));
       message.error(err.message);
     },
     onSettled: () => {
@@ -200,24 +213,28 @@ export default function InboxPage() {
     },
   });
 
-  const renderDeleteButton = (r: Row) => (
-    <Popconfirm
-      title="Удалить УПД?"
-      description="Документ, его позиции и оригинальный файл будут удалены безвозвратно."
-      okText="Да, удалить"
-      cancelText="Нет"
-      okButtonProps={{ danger: true }}
-      onConfirm={() => del.mutate(r.id)}
-    >
-      <Button
-        danger
-        size="small"
-        shape="circle"
-        icon={<DeleteOutlined />}
-        onClick={(e) => e.stopPropagation()}
-      />
-    </Popconfirm>
-  );
+  const renderDeleteButton = (r: Row) => {
+    const errMsg = deleteErrors[r.id];
+    return (
+      <Space size={4} onClick={(e) => e.stopPropagation()}>
+        {errMsg && (
+          <Tooltip title={errMsg}>
+            <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />
+          </Tooltip>
+        )}
+        <Popconfirm
+          title="Удалить УПД?"
+          description="Документ, его позиции и оригинальный файл будут удалены безвозвратно."
+          okText="Да, удалить"
+          cancelText="Нет"
+          okButtonProps={{ danger: true }}
+          onConfirm={() => del.mutate(r.id)}
+        >
+          <Button danger size="small" shape="circle" icon={<DeleteOutlined />} />
+        </Popconfirm>
+      </Space>
+    );
+  };
 
   const renderDocNumber = (v: string | null, r: Row) => {
     if (v) return v;

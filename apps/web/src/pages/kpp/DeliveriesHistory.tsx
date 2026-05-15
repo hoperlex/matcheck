@@ -1,10 +1,11 @@
 import type { MouseEvent } from 'react';
-import { Button, Card, Popconfirm, Space, Tag, Typography, message } from 'antd';
-import { DeleteOutlined } from '@ant-design/icons';
+import { useState } from 'react';
+import { Button, Card, Popconfirm, Space, Tag, Tooltip, Typography, message } from 'antd';
+import { DeleteOutlined, ExclamationCircleOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Counterparty, DeliveryListResponseSchema } from '@matcheck/contracts';
 import type { z } from 'zod';
-import { api } from '../../services/api';
+import { ApiError, api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
@@ -12,6 +13,7 @@ type Row = List['items'][number];
 
 export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) {
   const queryClient = useQueryClient();
+  const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
 
   const list = useQuery({
     queryKey: ['deliveries'],
@@ -24,18 +26,48 @@ export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) 
       api.get<{ items: Counterparty[]; total: number }>('/counterparties'),
   });
 
+  // Оптимистичное удаление с rollback и индикатором ошибки на строке —
+  // см. эталон в apps/web/src/pages/inbox/Inbox.tsx.
   const del = useMutation({
     mutationFn: (id: string) => api.delete<{ ok: true }>(`/deliveries/${id}`),
-    onSuccess: async () => {
-      message.success('Приёмка удалена');
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['deliveries'] }),
-        queryClient.invalidateQueries({
-          queryKey: ['source-documents', 'unaccepted-upd', 'list'],
-        }),
-      ]);
+    retry: (failureCount, err) => {
+      if (failureCount >= 2) return false;
+      if (err instanceof ApiError && err.status >= 400 && err.status < 500) return false;
+      return true;
     },
-    onError: (err: Error) => message.error(err.message),
+    onMutate: async (id: string) => {
+      setDeleteErrors((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _removed, ...rest } = prev;
+        return rest;
+      });
+      await queryClient.cancelQueries({ queryKey: ['deliveries'] });
+      const snapshots = queryClient.getQueriesData<List>({ queryKey: ['deliveries'] });
+      queryClient.setQueriesData<List>({ queryKey: ['deliveries'] }, (old) => {
+        if (!old || !Array.isArray(old.items)) return old;
+        return { ...old, items: old.items.filter((x) => x.id !== id) };
+      });
+      message.success('Приёмка удалена');
+      return { snapshots };
+    },
+    onError: (err: Error, id, ctx) => {
+      const snapshots = (ctx as { snapshots?: Array<[readonly unknown[], List | undefined]> } | undefined)
+        ?.snapshots;
+      if (snapshots) {
+        for (const [key, value] of snapshots) {
+          queryClient.setQueryData(key, value);
+        }
+      }
+      setDeleteErrors((prev) => ({ ...prev, [id]: err.message }));
+      message.error(err.message);
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      void queryClient.invalidateQueries({
+        queryKey: ['source-documents', 'unaccepted-upd', 'list'],
+      });
+      void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
+    },
   });
 
   const suppliersMap = new Map<string, string>();
@@ -45,25 +77,28 @@ export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) 
   const supplierName = (id: string | null | undefined) =>
     id ? suppliersMap.get(id) ?? '—' : '—';
 
-  const renderDeleteButton = (r: Row) => (
-    <Popconfirm
-      title="Удалить приёмку?"
-      description="Запись, фото и связи с УПД будут удалены. УПД вернётся в «Ожидаемые»."
-      okText="Да, удалить"
-      cancelText="Нет"
-      okButtonProps={{ danger: true }}
-      onConfirm={() => del.mutate(r.id)}
-    >
-      <Button
-        danger
-        size="small"
-        shape="circle"
-        icon={<DeleteOutlined />}
-        loading={del.isPending && del.variables === r.id}
-        onClick={(e) => e.stopPropagation()}
-      />
-    </Popconfirm>
-  );
+  const renderDeleteButton = (r: Row) => {
+    const errMsg = deleteErrors[r.id];
+    return (
+      <Space size={4} onClick={(e) => e.stopPropagation()}>
+        {errMsg && (
+          <Tooltip title={errMsg}>
+            <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />
+          </Tooltip>
+        )}
+        <Popconfirm
+          title="Удалить приёмку?"
+          description="Запись, фото и связи с УПД будут удалены. УПД вернётся в «Ожидаемые»."
+          okText="Да, удалить"
+          cancelText="Нет"
+          okButtonProps={{ danger: true }}
+          onConfirm={() => del.mutate(r.id)}
+        >
+          <Button danger size="small" shape="circle" icon={<DeleteOutlined />} />
+        </Popconfirm>
+      </Space>
+    );
+  };
 
   return (
     <ResponsiveTable<Row>
