@@ -115,7 +115,6 @@ export default function KppPage() {
   const [siteId, setSiteId] = useState<string | null>(inspectorSiteId);
   const [contractorId, setContractorId] = useState<string | null>(null);
   const [selectedUpd, setSelectedUpd] = useState<SourceDocument | null>(null);
-  const [loadedDelivery, setLoadedDelivery] = useState<Delivery | null>(null);
   const [creating, setCreating] = useState(false);
 
   // Сбрасываем локальное состояние при выходе из формы. Для inspector_kpp
@@ -128,7 +127,6 @@ export default function KppPage() {
       setSiteId(inspectorSiteId);
       setContractorId(null);
       setSelectedUpd(null);
-      setLoadedDelivery(null);
     }
   }, [deliveryId, inspectorSiteId]);
 
@@ -167,6 +165,11 @@ export default function KppPage() {
     enabled: !!deliveryId,
   });
 
+  // Производное значение: react-query — единственный источник истины для
+  // загруженной приёмки. Использование useState + setLoadedDelivery в useEffect
+  // приводило к гонке рендера (data уже есть, isLoading=false, но state ещё null).
+  const loadedDelivery: Delivery | null = deliveryQuery.data ?? null;
+
   // Черновик (server === null) не имеет photos в effectiveState — считаем локально
   const photosCountQuery = useQuery({
     queryKey: ['photos-count', deliveryId],
@@ -185,7 +188,6 @@ export default function KppPage() {
   useEffect(() => {
     const d = deliveryQuery.data;
     if (!d) return;
-    setLoadedDelivery(d);
     setPlate(d.vehiclePlate ?? '');
     setComment(d.comment ?? '');
     // siteId/contractorId подхватываются один раз — последующее редактирование
@@ -554,7 +556,17 @@ export default function KppPage() {
 
   // ──────────── список / форма ────────────
 
-  if (deliveryId && deliveryQuery.isLoading && !loadedDelivery) {
+  if (deliveryId && !loadedDelivery) {
+    if (deliveryQuery.isError) {
+      return (
+        <Alert
+          type="error"
+          showIcon
+          message="Не удалось загрузить приёмку"
+          description={(deliveryQuery.error as Error)?.message ?? 'Неизвестная ошибка'}
+        />
+      );
+    }
     return (
       <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
         <Spin size="large" />
