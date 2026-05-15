@@ -48,6 +48,10 @@ export async function loggedComplete<T>(
   } catch (err) {
     errorCode = err instanceof z.ZodError ? 'zod_failed' : 'provider_error';
     errorMessage = err instanceof Error ? err.message : String(err);
+    // Провайдер мог получить raw до падения JSON.parse — провайдеры
+    // прокидывают его через rawResponse, чтобы он попал в журнал.
+    const maybeRaw = (err as { rawResponse?: unknown })?.rawResponse;
+    if (typeof maybeRaw === 'string') rawForLog = maybeRaw;
     throw err;
   } finally {
     const latencyMs = Date.now() - startedAt;

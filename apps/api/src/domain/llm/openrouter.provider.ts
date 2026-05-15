@@ -54,7 +54,19 @@ export class OpenRouterProvider implements LlmProvider {
     };
     const raw = json.choices[0]?.message?.content ?? '';
     if (!raw) throw new Error('OpenRouter: empty completion content');
-    const data = schema.parse(JSON.parse(raw));
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      // Прокидываем raw через свойство ошибки, чтобы logged-complete сохранил
+      // сырой ответ в llm_calls.response_raw — без этого админ не увидит,
+      // на каком месте оборвался JSON (типичный симптом упора в max_tokens).
+      const e = err instanceof Error ? err : new Error(String(err));
+      (e as Error & { rawResponse?: string }).rawResponse = raw;
+      e.message = `OpenRouter: JSON.parse failed (likely truncated by max_tokens=${body.max_tokens}): ${e.message}`;
+      throw e;
+    }
+    const data = schema.parse(parsed);
     return {
       data,
       raw,

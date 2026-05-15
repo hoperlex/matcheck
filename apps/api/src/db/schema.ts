@@ -275,7 +275,7 @@ export const llmProviders = pgTable('llm_providers', {
   model: text('model').notNull(),
   apiKeyEncrypted: text('api_key_encrypted'),
   temperature: numeric('temperature', { precision: 4, scale: 2 }).notNull().default('0.2'),
-  maxTokens: integer('max_tokens').notNull().default(4096),
+  maxTokens: integer('max_tokens').notNull().default(16384),
   isDefault: boolean('is_default').notNull().default(false),
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

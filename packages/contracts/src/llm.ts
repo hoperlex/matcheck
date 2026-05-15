@@ -27,7 +27,7 @@ export const LlmProviderUpsertSchema = z.object({
   kind: LlmKindSchema,
   model: z.string().min(1).max(200),
   temperature: z.string().default('0.2'),
-  maxTokens: z.number().int().positive().max(200_000).default(4096),
+  maxTokens: z.number().int().positive().max(200_000).default(16384),
   isDefault: z.boolean().default(false),
   isActive: z.boolean().default(true),
 });
