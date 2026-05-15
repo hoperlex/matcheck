@@ -280,9 +280,12 @@ export default function KppPage() {
         }
       }
       const id = crypto.randomUUID();
+      // Для inspector_kpp siteId — назначенный объект инспектора (сервер всё равно
+      // перепишет). Для admin/manager — siteId из УПД, если он там есть.
       const patch: Partial<Delivery> = {
-        siteId: inspectorSiteId ?? SYSTEM_SITE_ID,
+        siteId: inspectorSiteId ?? detail.siteId ?? SYSTEM_SITE_ID,
         supplierId: detail.supplierId ?? null,
+        contractorId: detail.contractorId ?? null,
         sourceDocumentIds: [upd.id],
         items: detail.items.map((it, i) => ({
           id: crypto.randomUUID(),

@@ -131,6 +131,10 @@ export function buildUpsertPayload(r: DeliveryRecord): DeliveryUpsert {
       unit: it.unit,
       comment: it.comment,
       lineNo: it.lineNo,
+      volumeM3: it.volumeM3,
+      massKg: it.massKg,
+      volumeConfidence: it.volumeConfidence,
+      groupName: it.groupName,
     })),
     baseVersion: r.version,
   };
