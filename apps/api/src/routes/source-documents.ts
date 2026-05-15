@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, ilike, sql as drSql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
@@ -22,6 +23,7 @@ import {
   deliverySources,
   materials,
   shipmentSources,
+  sites,
   sourceDocuments,
   sourceDocumentItems,
   sourceDocumentAttachments,
@@ -96,7 +98,13 @@ async function findOrCreateCounterparty(
   return created.id;
 }
 
-function sdRow(sd: typeof sourceDocuments.$inferSelect) {
+type SdNames = {
+  supplierName?: string | null;
+  contractorName?: string | null;
+  siteName?: string | null;
+};
+
+function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
   return {
     id: sd.id,
     kind: sd.kind,
@@ -106,6 +114,9 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect) {
     recipientId: sd.recipientId,
     contractorId: sd.contractorId,
     siteId: sd.siteId,
+    supplierName: names.supplierName ?? null,
+    contractorName: names.contractorName ?? null,
+    siteName: names.siteName ?? null,
     docNumber: sd.docNumber,
     docDate: sd.docDate?.toISOString().slice(0, 10) ?? null,
     totalSum: sd.totalSum,
@@ -119,6 +130,43 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect) {
     createdAt: sd.createdAt.toISOString(),
     updatedAt: sd.updatedAt.toISOString(),
     validation: sd.validation ?? null,
+  };
+}
+
+// Подтягивает имена supplier/contractor/site по ID документа. Используется
+// в обработчиках, где sd получен без JOIN (insert/update/single fetch).
+async function loadSdNames(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: any,
+  sd: typeof sourceDocuments.$inferSelect,
+): Promise<SdNames> {
+  const [supplier, contractor, site] = await Promise.all([
+    sd.supplierId
+      ? app.db
+          .select({ name: counterparties.name })
+          .from(counterparties)
+          .where(eq(counterparties.id, sd.supplierId))
+          .limit(1)
+      : Promise.resolve([] as { name: string }[]),
+    sd.contractorId
+      ? app.db
+          .select({ name: counterparties.name })
+          .from(counterparties)
+          .where(eq(counterparties.id, sd.contractorId))
+          .limit(1)
+      : Promise.resolve([] as { name: string }[]),
+    sd.siteId
+      ? app.db
+          .select({ name: sites.name })
+          .from(sites)
+          .where(eq(sites.id, sd.siteId))
+          .limit(1)
+      : Promise.resolve([] as { name: string }[]),
+  ]);
+  return {
+    supplierName: supplier[0]?.name ?? null,
+    contractorName: contractor[0]?.name ?? null,
+    siteName: site[0]?.name ?? null,
   };
 }
 
@@ -265,9 +313,19 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         conditions.push(drSql`${sourceDocuments.id} not in ${acceptedSub}`);
       }
       const where = conditions.length ? and(...conditions) : undefined;
+      const supplier = alias(counterparties, 'supplier');
+      const contractor = alias(counterparties, 'contractor');
       const rows = await app.db
-        .select()
+        .select({
+          sd: sourceDocuments,
+          supplierName: supplier.name,
+          contractorName: contractor.name,
+          siteName: sites.name,
+        })
         .from(sourceDocuments)
+        .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
+        .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
+        .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
         .where(where)
         .orderBy(desc(sourceDocuments.parsedAt))
         .limit(limit)
@@ -276,7 +334,16 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .select({ count: drSql<number>`count(*)::int` })
         .from(sourceDocuments)
         .where(where);
-      return { items: rows.map(sdRow), total: count };
+      return {
+        items: rows.map((r) =>
+          sdRow(r.sd, {
+            supplierName: r.supplierName,
+            contractorName: r.contractorName,
+            siteName: r.siteName,
+          }),
+        ),
+        total: count,
+      };
     },
   );
 
@@ -290,12 +357,23 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       },
     },
     async (req, reply) => {
-      const [sd] = await app.db
-        .select()
+      const supplier = alias(counterparties, 'supplier');
+      const contractor = alias(counterparties, 'contractor');
+      const [row] = await app.db
+        .select({
+          sd: sourceDocuments,
+          supplierName: supplier.name,
+          contractorName: contractor.name,
+          siteName: sites.name,
+        })
         .from(sourceDocuments)
+        .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
+        .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
+        .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
         .where(eq(sourceDocuments.id, req.params.id))
         .limit(1);
-      if (!sd) return reply.code(404).send({ error: 'not_found' });
+      if (!row) return reply.code(404).send({ error: 'not_found' });
+      const sd = row.sd;
       // inspector_kpp видит только документы своего объекта.
       if (
         req.user?.role === 'inspector_kpp' &&
@@ -313,7 +391,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .from(sourceDocumentAttachments)
         .where(eq(sourceDocumentAttachments.sourceDocumentId, sd.id));
       return {
-        ...sdRow(sd),
+        ...sdRow(sd, {
+          supplierName: row.supplierName,
+          contractorName: row.contractorName,
+          siteName: row.siteName,
+        }),
         items: items.map((i) => ({
           id: i.id,
           materialId: i.materialId,
@@ -759,9 +841,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .from(sourceDocumentAttachments)
         .where(eq(sourceDocumentAttachments.sourceDocumentId, created.id));
 
+      const names = await loadSdNames(app, created);
       reply.code(201);
       return {
-        ...sdRow(created),
+        ...sdRow(created, names),
         items: items.map((i) => ({
           id: i.id,
           materialId: i.materialId,
@@ -819,8 +902,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .select()
         .from(sourceDocumentAttachments)
         .where(eq(sourceDocumentAttachments.sourceDocumentId, updated.id));
+      const names = await loadSdNames(app, updated);
       return {
-        ...sdRow(updated),
+        ...sdRow(updated, names),
         items: items.map((i) => ({
           id: i.id,
           materialId: i.materialId,

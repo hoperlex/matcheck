@@ -7,6 +7,7 @@ import type { SourceDirection, SourceDocumentListResponseSchema } from '@matchec
 import type { z } from 'zod';
 import { api, ApiError } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
 import { UpdXmlUploadModal } from './UpdXmlUploadModal';
 import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
@@ -112,7 +113,26 @@ export default function InboxPage() {
           },
           { title: '№', dataIndex: 'docNumber' },
           { title: 'Дата', dataIndex: 'docDate' },
-          { title: 'Сумма', dataIndex: 'totalSum' },
+          {
+            title: 'Объект',
+            dataIndex: 'siteName',
+            render: (v: string | null | undefined) => v ?? '—',
+          },
+          {
+            title: 'Подрядчик',
+            dataIndex: 'contractorName',
+            render: (v: string | null | undefined) => v ?? '—',
+          },
+          {
+            title: 'Поставщик',
+            dataIndex: 'supplierName',
+            render: (v: string | null | undefined) => v ?? '—',
+          },
+          {
+            title: 'Сумма',
+            dataIndex: 'totalSum',
+            render: (v: string | null) => formatDecimal(v) || '—',
+          },
           { title: 'Происхождение', dataIndex: 'origin' },
           {
             title: '',
@@ -133,7 +153,10 @@ export default function InboxPage() {
               </Tag>
               <Typography.Text strong>{r.docNumber ?? '— без номера —'}</Typography.Text>
               <Typography.Text type="secondary">
-                {r.docDate ?? '—'} · {r.totalSum ?? '—'} ₽
+                {r.docDate ?? '—'} · {formatDecimal(r.totalSum) || '—'} ₽
+              </Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {r.siteName ?? '—'} · {r.contractorName ?? '—'} · {r.supplierName ?? '—'}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {r.origin}

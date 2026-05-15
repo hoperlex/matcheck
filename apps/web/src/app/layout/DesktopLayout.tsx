@@ -1,11 +1,16 @@
 import { useEffect, useState, createElement } from 'react';
-import { Layout, Menu, Button, Space, Typography } from 'antd';
+import { Avatar, Button, Layout, Menu, Tooltip, Typography } from 'antd';
+import {
+  LogoutOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
+} from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../stores/auth';
 import { filterByRole } from './navItems';
 import { api } from '../../services/api';
 
-const { Header, Sider, Content } = Layout;
+const { Sider, Content } = Layout;
 
 const COLLAPSE_KEY = 'matcheck.sidebar.collapsed';
 
@@ -43,6 +48,8 @@ export function DesktopLayout() {
     navigate('/login', { replace: true });
   };
 
+  const avatarLetter = user.email.charAt(0).toUpperCase();
+
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <Sider
@@ -51,43 +58,97 @@ export function DesktopLayout() {
         collapsible
         collapsed={collapsed}
         onCollapse={setCollapsed}
+        trigger={null}
         theme="light"
+        style={{ display: 'flex', flexDirection: 'column' }}
       >
         <div
           style={{
-            padding: collapsed ? '16px 8px' : 16,
-            fontWeight: 600,
-            fontSize: 18,
-            textAlign: collapsed ? 'center' : 'left',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+            height: '100%',
           }}
         >
-          {collapsed ? 'mc' : 'matcheck'}
+          <div
+            style={{
+              padding: collapsed ? '16px 8px' : 16,
+              fontWeight: 600,
+              fontSize: 18,
+              textAlign: collapsed ? 'center' : 'left',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+            }}
+          >
+            {collapsed ? 'mc' : 'matcheck'}
+          </div>
+          <Menu
+            mode="inline"
+            selectedKeys={selected ? [selected.key] : []}
+            items={items}
+            onClick={(e) => navigate(e.key)}
+            style={{ flex: 1, borderInlineEnd: 'none' }}
+          />
+          <div
+            style={{
+              padding: collapsed ? '12px 8px' : 12,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: collapsed ? 'center' : 'stretch',
+              gap: 8,
+              borderTop: '1px solid #f0f0f0',
+            }}
+          >
+            {collapsed ? (
+              <>
+                <Tooltip title={user.email} placement="right">
+                  <Avatar size="small">{avatarLetter}</Avatar>
+                </Tooltip>
+                <Tooltip title="Выход" placement="right">
+                  <Button
+                    shape="circle"
+                    size="small"
+                    icon={<LogoutOutlined />}
+                    onClick={handleLogout}
+                    aria-label="Выход"
+                  />
+                </Tooltip>
+                <Tooltip title="Развернуть меню" placement="right">
+                  <Button
+                    shape="circle"
+                    size="small"
+                    type="text"
+                    icon={<MenuUnfoldOutlined />}
+                    onClick={() => setCollapsed(false)}
+                    aria-label="Развернуть меню"
+                  />
+                </Tooltip>
+              </>
+            ) : (
+              <>
+                <Typography.Text
+                  type="secondary"
+                  ellipsis={{ tooltip: user.email }}
+                  style={{ fontSize: 12 }}
+                >
+                  {user.email}
+                </Typography.Text>
+                <Button block icon={<LogoutOutlined />} onClick={handleLogout}>
+                  Выход
+                </Button>
+                <Button
+                  block
+                  type="text"
+                  icon={<MenuFoldOutlined />}
+                  onClick={() => setCollapsed(true)}
+                >
+                  Свернуть
+                </Button>
+              </>
+            )}
+          </div>
         </div>
-        <Menu
-          mode="inline"
-          selectedKeys={selected ? [selected.key] : []}
-          items={items}
-          onClick={(e) => navigate(e.key)}
-        />
       </Sider>
       <Layout>
-        <Header
-          style={{
-            background: '#fff',
-            padding: '0 16px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'flex-end',
-          }}
-        >
-          <Space>
-            <Typography.Text type="secondary">{user.email}</Typography.Text>
-            <Typography.Text code>{user.role}</Typography.Text>
-            <Button onClick={handleLogout}>Выход</Button>
-          </Space>
-        </Header>
         <Content style={{ padding: 24, background: '#f5f5f5' }}>
           <Outlet />
         </Content>

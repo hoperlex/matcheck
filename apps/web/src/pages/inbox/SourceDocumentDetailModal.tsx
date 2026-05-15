@@ -6,6 +6,7 @@ import type {
   SourceDocumentFileResponse,
 } from '@matcheck/contracts';
 import { api, ApiError } from '../../services/api';
+import { formatDecimal } from '../../shared/utils/formatDecimal';
 
 type Item = SourceDocumentDetail['items'][number];
 
@@ -62,13 +63,16 @@ export function SourceDocumentDetailModal({
       onCancel={onClose}
       title={
         sd ? (
-          <Space>
+          <Space wrap>
             <Tag color={sd.direction === 'inbound' ? 'green' : 'purple'}>
               {directionLabel(sd.direction)}
             </Tag>
             <Tag color={sd.kind === 'upd' ? 'blue' : 'gold'}>
               {sd.kind === 'upd' ? 'УПД' : 'Заявка'}
             </Tag>
+            {sd.siteName ? <Tag>Объект: {sd.siteName}</Tag> : null}
+            {sd.contractorName ? <Tag>Подрядчик: {sd.contractorName}</Tag> : null}
+            {sd.supplierName ? <Tag>Поставщик: {sd.supplierName}</Tag> : null}
             <span>
               {sd.docNumber ?? '— без номера —'}
               {sd.docDate ? ` от ${sd.docDate}` : ''}
@@ -123,20 +127,45 @@ export function SourceDocumentDetailModal({
                     columns={[
                       { title: '№', dataIndex: 'lineNo', width: 50 },
                       { title: 'Наименование', dataIndex: 'nameRaw' },
-                      { title: 'Кол-во', dataIndex: 'qty', width: 90 },
+                      {
+                        title: 'Кол-во',
+                        dataIndex: 'qty',
+                        width: 90,
+                        render: (v: string | null) => formatDecimal(v),
+                      },
                       { title: 'Ед.', dataIndex: 'unit', width: 60 },
-                      { title: 'Цена', dataIndex: 'price', width: 100 },
-                      { title: 'Сумма', dataIndex: 'sum', width: 110 },
-                      { title: 'Ставка НДС', dataIndex: 'vatRate', width: 90 },
-                      { title: 'Сумма НДС', dataIndex: 'vatSum', width: 110 },
+                      {
+                        title: 'Цена',
+                        dataIndex: 'price',
+                        width: 100,
+                        render: (v: string | null) => formatDecimal(v),
+                      },
+                      {
+                        title: 'Сумма',
+                        dataIndex: 'sum',
+                        width: 110,
+                        render: (v: string | null) => formatDecimal(v),
+                      },
+                      {
+                        title: 'Ставка НДС',
+                        dataIndex: 'vatRate',
+                        width: 90,
+                        render: (v: string | null) => formatDecimal(v),
+                      },
+                      {
+                        title: 'Сумма НДС',
+                        dataIndex: 'vatSum',
+                        width: 110,
+                        render: (v: string | null) => formatDecimal(v),
+                      },
                     ]}
                   />
                   <Space style={{ marginTop: 12 }}>
                     <Typography.Text>
-                      <b>Итого:</b> {sd.totalSum ?? '—'}
+                      <b>Итого:</b> {formatDecimal(sd.totalSum) || '—'}
                     </Typography.Text>
                     <Typography.Text type="secondary">
-                      НДС: {sd.vatSum ?? '—'}
+                      НДС: {formatDecimal(sd.vatSum) || '—'}
                     </Typography.Text>
                   </Space>
                 </>
