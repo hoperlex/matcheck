@@ -269,13 +269,23 @@ export const llmProviders = pgTable('llm_providers', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),
   kind: llmKindEnum('kind').notNull(),
-  apiBaseUrl: text('api_base_url').notNull(),
+  // Legacy: до 0020 ключ и base URL хранились здесь, теперь — в llm_provider_credentials по kind.
+  // Колонки оставлены NULLABLE как страховка; следующей миграцией DROP.
+  apiBaseUrl: text('api_base_url'),
   model: text('model').notNull(),
-  apiKeyEncrypted: text('api_key_encrypted').notNull(),
+  apiKeyEncrypted: text('api_key_encrypted'),
   temperature: numeric('temperature', { precision: 4, scale: 2 }).notNull().default('0.2'),
   maxTokens: integer('max_tokens').notNull().default(4096),
   isDefault: boolean('is_default').notNull().default(false),
   isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const llmProviderCredentials = pgTable('llm_provider_credentials', {
+  kind: llmKindEnum('kind').primaryKey(),
+  apiBaseUrl: text('api_base_url').notNull(),
+  apiKeyEncrypted: text('api_key_encrypted').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Button,
   Card,
@@ -15,23 +15,33 @@ import {
   message,
 } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { LlmProviderDto, LlmProviderUpsert } from '@matcheck/contracts';
+import type {
+  LlmKind,
+  LlmProviderCredentialDto,
+  LlmProviderDto,
+  LlmProviderUpsert,
+} from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { LlmProviderCredentialsModal } from './LlmProviderCredentialsModal';
 
-const KIND_DEFAULTS: Record<string, { apiBaseUrl: string; model: string }> = {
-  openrouter: { apiBaseUrl: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4.5' },
-  google_ai_studio: {
-    apiBaseUrl: 'https://generativelanguage.googleapis.com',
-    model: 'gemini-2.5-flash',
-  },
-  qwen_self_hosted: { apiBaseUrl: 'https://your-qwen-host/v1', model: 'qwen2.5-72b-instruct' },
-  vertex: { apiBaseUrl: 'https://us-central1-aiplatform.googleapis.com', model: 'gemini-2.5-pro' },
+const KIND_DEFAULT_MODEL: Record<LlmKind, string> = {
+  openrouter: 'anthropic/claude-sonnet-4.5',
+  google_ai_studio: 'gemini-2.5-flash',
+  qwen_self_hosted: 'qwen2.5-72b-instruct',
+  vertex: 'gemini-2.5-pro',
+};
+
+const KIND_LABEL: Record<LlmKind, string> = {
+  openrouter: 'OpenRouter',
+  google_ai_studio: 'Google AI Studio (Gemini)',
+  qwen_self_hosted: 'Qwen (self-hosted, OpenAI-compat)',
+  vertex: 'Vertex AI',
 };
 
 const NEW_DEFAULTS: Partial<LlmProviderUpsert> = {
   kind: 'openrouter',
-  ...KIND_DEFAULTS.openrouter,
+  model: KIND_DEFAULT_MODEL.openrouter,
   temperature: '0.2',
   maxTokens: 4096,
   isDefault: false,
@@ -41,6 +51,7 @@ const NEW_DEFAULTS: Partial<LlmProviderUpsert> = {
 export default function AdminLlmProvidersPage() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  const [credsOpen, setCredsOpen] = useState(false);
   const [editing, setEditing] = useState<LlmProviderDto | null>(null);
   const [form] = Form.useForm<LlmProviderUpsert>();
 
@@ -48,6 +59,18 @@ export default function AdminLlmProvidersPage() {
     queryKey: ['admin', 'llm-providers'],
     queryFn: () => api.get<LlmProviderDto[]>('/admin/llm-providers'),
   });
+
+  const creds = useQuery({
+    queryKey: ['admin', 'llm-provider-credentials'],
+    queryFn: () =>
+      api.get<LlmProviderCredentialDto[]>('/admin/llm-provider-credentials'),
+  });
+
+  const credsByKind = useMemo(() => {
+    const m = new Map<LlmKind, LlmProviderCredentialDto>();
+    for (const c of creds.data ?? []) m.set(c.kind, c);
+    return m;
+  }, [creds.data]);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['admin', 'llm-providers'] });
 
@@ -58,7 +81,6 @@ export default function AdminLlmProvidersPage() {
       form.setFieldsValue({
         name: editing.name,
         kind: editing.kind,
-        apiBaseUrl: editing.apiBaseUrl,
         model: editing.model,
         temperature: editing.temperature,
         maxTokens: editing.maxTokens,
@@ -124,13 +146,8 @@ export default function AdminLlmProvidersPage() {
   });
 
   const onSubmit = (v: LlmProviderUpsert) => {
-    if (editing) {
-      const { apiKey, ...rest } = v;
-      const body: Partial<LlmProviderUpsert> = apiKey ? { ...rest, apiKey } : rest;
-      update.mutate({ id: editing.id, body });
-    } else {
-      create.mutate(v);
-    }
+    if (editing) update.mutate({ id: editing.id, body: v });
+    else create.mutate(v);
   };
 
   const openEdit = (r: LlmProviderDto) => {
@@ -149,9 +166,12 @@ export default function AdminLlmProvidersPage() {
         <Typography.Title level={3} style={{ margin: 0 }}>
           LLM провайдеры
         </Typography.Title>
-        <Button type="primary" onClick={openCreate}>
-          Добавить
-        </Button>
+        <Space>
+          <Button onClick={() => setCredsOpen(true)}>Ключи провайдеров</Button>
+          <Button type="primary" onClick={openCreate}>
+            Добавить
+          </Button>
+        </Space>
       </Space>
       <ResponsiveTable<LlmProviderDto>
         items={list.data ?? []}
@@ -166,6 +186,7 @@ export default function AdminLlmProvidersPage() {
                 <span>{n}</span>
                 {r.isDefault && <Tag color="purple">default</Tag>}
                 {!r.isActive && <Tag>не активен</Tag>}
+                {!credsByKind.has(r.kind) && <Tag color="red">нет ключа</Tag>}
               </Space>
             ),
           },
@@ -214,6 +235,7 @@ export default function AdminLlmProvidersPage() {
                 <Typography.Text strong>{r.name}</Typography.Text>
                 {r.isDefault && <Tag color="purple">default</Tag>}
                 {!r.isActive && <Tag>не активен</Tag>}
+                {!credsByKind.has(r.kind) && <Tag color="red">нет ключа</Tag>}
               </Space>
               <Typography.Text type="secondary">
                 {r.kind} · {r.model}
@@ -260,8 +282,8 @@ export default function AdminLlmProvidersPage() {
           onFinish={onSubmit}
           onValuesChange={(changed, all) => {
             if (editing) return;
-            if (changed.kind && all.kind && KIND_DEFAULTS[all.kind]) {
-              form.setFieldsValue(KIND_DEFAULTS[all.kind]);
+            if (changed.kind && all.kind) {
+              form.setFieldsValue({ model: KIND_DEFAULT_MODEL[all.kind] });
             }
           }}
         >
@@ -270,34 +292,14 @@ export default function AdminLlmProvidersPage() {
           </Form.Item>
           <Form.Item name="kind" label="Тип" rules={[{ required: true }]}>
             <Select
-              options={[
-                { value: 'openrouter', label: 'OpenRouter' },
-                { value: 'google_ai_studio', label: 'Google AI Studio (Gemini)' },
-                { value: 'qwen_self_hosted', label: 'Qwen (self-hosted, OpenAI-compat)' },
-                { value: 'vertex', label: 'Vertex AI' },
-              ]}
+              options={(Object.keys(KIND_LABEL) as LlmKind[]).map((k) => ({
+                value: k,
+                label: credsByKind.has(k) ? KIND_LABEL[k] : `${KIND_LABEL[k]} — нет ключа`,
+              }))}
             />
-          </Form.Item>
-          <Form.Item
-            name="apiBaseUrl"
-            label="API base URL"
-            rules={[{ required: true, type: 'url' }]}
-          >
-            <Input />
           </Form.Item>
           <Form.Item name="model" label="Модель" rules={[{ required: true }]}>
             <Input />
-          </Form.Item>
-          <Form.Item
-            name="apiKey"
-            label={editing ? 'API key (новый)' : 'API key'}
-            rules={editing ? [] : [{ required: true }]}
-            extra={editing ? 'Оставьте пустым, чтобы не менять текущий ключ' : undefined}
-          >
-            <Input.Password
-              placeholder={editing ? 'Оставьте пустым, чтобы не менять' : undefined}
-              autoComplete="new-password"
-            />
           </Form.Item>
           <Space>
             <Form.Item name="temperature" label="Temperature">
@@ -324,6 +326,12 @@ export default function AdminLlmProvidersPage() {
           </Button>
         </Form>
       </Drawer>
+      <LlmProviderCredentialsModal
+        open={credsOpen}
+        onClose={() => setCredsOpen(false)}
+        credentials={creds.data ?? []}
+        modelsByKind={list.data ?? []}
+      />
     </div>
   );
 }

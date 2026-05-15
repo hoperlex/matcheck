@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import postgres from 'postgres';
+import { backfillProviderCredentials } from '../src/db/backfill-provider-credentials.js';
 
 interface JournalEntry {
   idx: number;
@@ -90,6 +91,11 @@ async function main() {
   }
 
   console.info(`[migrate] done. applied this run: ${appliedCount}`);
+
+  // Data-миграция: перенос ключей из llm_providers в llm_provider_credentials.
+  // Идемпотентна — повторные запуски ничего не делают.
+  await backfillProviderCredentials(sql);
+
   await sql.end();
 }
 

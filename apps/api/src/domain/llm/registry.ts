@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { db } from '../../db/client.js';
-import { llmProviders } from '../../db/schema.js';
+import { llmProviders, llmProviderCredentials } from '../../db/schema.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
 import { OpenRouterProvider } from './openrouter.provider.js';
 import { GoogleAiStudioProvider } from './google-ai-studio.provider.js';
@@ -22,12 +22,27 @@ export async function loadDefaultProvider(): Promise<LlmProvider> {
   return buildProviderFromRow(row);
 }
 
-export function buildProviderFromRow(row: typeof llmProviders.$inferSelect): LlmProvider {
-  const apiKey = decryptField(row.apiKeyEncrypted, buildAad('llm_providers', row.id));
+export async function buildProviderFromRow(
+  row: typeof llmProviders.$inferSelect,
+): Promise<LlmProvider> {
+  const [cred] = await db
+    .select()
+    .from(llmProviderCredentials)
+    .where(eq(llmProviderCredentials.kind, row.kind))
+    .limit(1);
+  if (!cred) {
+    throw new Error(
+      `No API key configured for provider kind "${row.kind}". Задайте ключ в админке через «Ключи провайдеров».`,
+    );
+  }
+  const apiKey = decryptField(
+    cred.apiKeyEncrypted,
+    buildAad('llm_provider_credentials', cred.kind),
+  );
   const cfg: LlmProviderConfig = {
     id: row.id,
     kind: row.kind,
-    apiBaseUrl: row.apiBaseUrl,
+    apiBaseUrl: cred.apiBaseUrl,
     model: row.model,
     apiKey,
     temperature: Number(row.temperature),

@@ -26,6 +26,7 @@ import { photoRoutes } from './routes/photos.js';
 import { syncRoutes } from './routes/sync.js';
 import { eventsRoutes } from './routes/events.js';
 import { llmProviderRoutes } from './routes/admin/llm-providers.js';
+import { llmProviderCredentialRoutes } from './routes/admin/llm-provider-credentials.js';
 import { edoAccountRoutes } from './routes/admin/edo-accounts.js';
 import { mailAccountRoutes } from './routes/admin/mail-accounts.js';
 import { userAdminRoutes } from './routes/admin/users.js';
@@ -71,6 +72,7 @@ export async function buildServer() {
   await app.register(syncRoutes);
   await app.register(eventsRoutes);
   await app.register(llmProviderRoutes);
+  await app.register(llmProviderCredentialRoutes);
   await app.register(edoAccountRoutes);
   await app.register(mailAccountRoutes);
   await app.register(userAdminRoutes);

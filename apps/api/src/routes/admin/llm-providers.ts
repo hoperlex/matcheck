@@ -8,8 +8,7 @@ import {
   LlmTestResponseSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
-import { llmProviders } from '../../db/schema.js';
-import { buildAad, encryptToString } from '../../domain/auth/crypto.js';
+import { llmProviders, llmProviderCredentials } from '../../db/schema.js';
 import { buildProviderFromRow } from '../../domain/llm/registry.js';
 
 function dto(p: typeof llmProviders.$inferSelect) {
@@ -17,7 +16,6 @@ function dto(p: typeof llmProviders.$inferSelect) {
     id: p.id,
     name: p.name,
     kind: p.kind,
-    apiBaseUrl: p.apiBaseUrl,
     model: p.model,
     temperature: p.temperature,
     maxTokens: p.maxTokens,
@@ -50,26 +48,32 @@ export async function llmProviderRoutes(rawApp: FastifyInstance): Promise<void> 
     {
       preHandler: [app.authenticate, app.authorize('admin')],
       schema: {
-        body: LlmProviderUpsertSchema.required({ apiKey: true }),
-        response: { 201: LlmProviderDtoSchema },
+        body: LlmProviderUpsertSchema,
+        response: { 201: LlmProviderDtoSchema, 400: ErrorResponseSchema },
       },
     },
     async (req, reply) => {
       const body = req.body;
+      const [cred] = await app.db
+        .select({ kind: llmProviderCredentials.kind })
+        .from(llmProviderCredentials)
+        .where(eq(llmProviderCredentials.kind, body.kind))
+        .limit(1);
+      if (!cred) {
+        return reply.code(400).send({
+          error: 'no_credentials_for_kind',
+          message: `Не задан ключ для провайдера типа "${body.kind}". Откройте «Ключи провайдеров» и добавьте ключ.`,
+        });
+      }
       if (body.isDefault) {
         await app.db.update(llmProviders).set({ isDefault: false });
       }
-      const id = crypto.randomUUID();
-      const encrypted = encryptToString(body.apiKey, buildAad('llm_providers', id));
       const [created] = await app.db
         .insert(llmProviders)
         .values({
-          id,
           name: body.name,
           kind: body.kind,
-          apiBaseUrl: body.apiBaseUrl,
           model: body.model,
-          apiKeyEncrypted: encrypted,
           temperature: body.temperature,
           maxTokens: body.maxTokens,
           isDefault: body.isDefault,
@@ -103,7 +107,6 @@ export async function llmProviderRoutes(rawApp: FastifyInstance): Promise<void> 
       const patch: Partial<typeof llmProviders.$inferInsert> = {
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.kind !== undefined ? { kind: body.kind } : {}),
-        ...(body.apiBaseUrl !== undefined ? { apiBaseUrl: body.apiBaseUrl } : {}),
         ...(body.model !== undefined ? { model: body.model } : {}),
         ...(body.temperature !== undefined ? { temperature: body.temperature } : {}),
         ...(body.maxTokens !== undefined ? { maxTokens: body.maxTokens } : {}),
@@ -111,12 +114,6 @@ export async function llmProviderRoutes(rawApp: FastifyInstance): Promise<void> 
         ...(body.isActive !== undefined ? { isActive: body.isActive } : {}),
         updatedAt: new Date(),
       };
-      if (body.apiKey) {
-        patch.apiKeyEncrypted = encryptToString(
-          body.apiKey,
-          buildAad('llm_providers', req.params.id),
-        );
-      }
       const [updated] = await app.db
         .update(llmProviders)
         .set(patch)
@@ -159,7 +156,7 @@ export async function llmProviderRoutes(rawApp: FastifyInstance): Promise<void> 
         .where(eq(llmProviders.id, req.params.id))
         .limit(1);
       if (!row) return reply.code(404).send({ error: 'not_found' });
-      const provider = buildProviderFromRow(row);
+      const provider = await buildProviderFromRow(row);
       const started = Date.now();
       const result = await provider.testConnection();
       return { ...result, durationMs: Date.now() - started };

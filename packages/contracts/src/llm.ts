@@ -12,7 +12,6 @@ export const LlmProviderDtoSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
   kind: LlmKindSchema,
-  apiBaseUrl: z.string(),
   model: z.string(),
   temperature: z.string(),
   maxTokens: z.number(),
@@ -26,9 +25,7 @@ export type LlmProviderDto = z.infer<typeof LlmProviderDtoSchema>;
 export const LlmProviderUpsertSchema = z.object({
   name: z.string().min(1).max(100),
   kind: LlmKindSchema,
-  apiBaseUrl: z.string().url(),
   model: z.string().min(1).max(200),
-  apiKey: z.string().min(1).optional(),
   temperature: z.string().default('0.2'),
   maxTokens: z.number().int().positive().max(200_000).default(4096),
   isDefault: z.boolean().default(false),
@@ -42,3 +39,20 @@ export const LlmTestResponseSchema = z.object({
   error: z.string().optional(),
   durationMs: z.number(),
 });
+
+// ─── Credentials: один ключ на тип провайдера (kind) ─────────────────────────
+
+export const LlmProviderCredentialDtoSchema = z.object({
+  kind: LlmKindSchema,
+  apiBaseUrl: z.string(),
+  hasKey: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type LlmProviderCredentialDto = z.infer<typeof LlmProviderCredentialDtoSchema>;
+
+export const LlmProviderCredentialUpsertSchema = z.object({
+  apiBaseUrl: z.string().url(),
+  apiKey: z.string().min(1).optional(),
+});
+export type LlmProviderCredentialUpsert = z.infer<typeof LlmProviderCredentialUpsertSchema>;
