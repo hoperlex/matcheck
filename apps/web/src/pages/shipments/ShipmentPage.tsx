@@ -34,6 +34,8 @@ import type {
   ShipmentPhoto,
   ShipmentStatusCode,
   Site,
+  SourceDocument,
+  SourceDocumentDetail,
   Status,
 } from '@matcheck/contracts';
 import { api } from '../../services/api';
@@ -52,6 +54,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { PhotoGallery } from '../kpp/PhotoGallery';
 import { ShipmentsHistory } from './ShipmentsHistory';
+import { ExpectedOutbound } from './ExpectedOutbound';
 
 type DraftItem = {
   clientKey: string;
@@ -68,6 +71,8 @@ const KIND_OPTIONS: { label: string; value: ShipmentKind }[] = [
   { label: 'Перемещение', value: 'transfer' },
   { label: 'Списание', value: 'writeoff' },
 ];
+
+type ListTab = 'expected' | 'accepted';
 
 const trimQty = (s: string) =>
   s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
@@ -97,6 +102,9 @@ export default function ShipmentPage() {
   const [params, setParams] = useSearchParams();
   const shipmentId = params.get('shipment');
   const fromList = params.get('from') === 'list';
+  // Дефолт — 'accepted' (не ломаем привычку: страница и раньше открывалась
+  // на истории отгрузок). Вкладка 'expected' появляется только при явном tab=expected.
+  const tab: ListTab = params.get('tab') === 'expected' ? 'expected' : 'accepted';
 
   // Для inspector_kpp объект-источник фиксирован значением из БД (selectбыл бы
   // disabled, а сервер всё равно перепишет siteId на user.siteId).
@@ -249,6 +257,67 @@ export default function ShipmentPage() {
       navigate(`/shipments?shipment=${id}`);
     } catch (err) {
       message.error(`Не удалось создать отгрузку: ${(err as Error).message}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  /**
+   * Создаёт отгрузку по выбранному исходящему УПД. Аналог createFromUpd
+   * в KppPage, но строит Shipment: kind='contractor', получатель — contractorId
+   * из УПД (для outbound-документа это и есть получатель груза).
+   */
+  const createFromUpd = async (upd: SourceDocument) => {
+    if (creating) return;
+    if (inspectorWithoutSite) {
+      message.error('Объект не назначен — обратитесь к администратору');
+      return;
+    }
+    setCreating(true);
+    try {
+      const dbi = await db();
+      let detail = await dbi.get('source_documents', upd.id);
+      if (!detail) {
+        try {
+          detail = await api.get<SourceDocumentDetail>(`/source-documents/${upd.id}`);
+        } catch {
+          message.error('Нет связи и детали УПД ещё не загружены — попробуйте позже');
+          return;
+        }
+      }
+      const id = crypto.randomUUID();
+      const patch: Partial<Shipment> = {
+        kind: 'contractor',
+        siteId: inspectorSiteId ?? detail.siteId ?? SYSTEM_SITE_ID,
+        receiverCounterpartyId: detail.contractorId ?? null,
+        sourceDocumentIds: [upd.id],
+        items: detail.items.map((it, i) => ({
+          id: crypto.randomUUID(),
+          materialId: it.materialId ?? null,
+          nameRaw: it.nameRaw,
+          qtyPlanned: it.qty,
+          qtyActual: it.qty,
+          unit: it.unit,
+          comment: null,
+          lineNo: i + 1,
+          volumeM3: it.volumeM3 ?? null,
+          massKg: it.massKg ?? null,
+          volumeConfidence: it.volumeConfidence ?? null,
+          groupName: it.groupName ?? null,
+        })),
+      };
+      await applyLocalEdit(id, patch);
+      await enqueueMutation({
+        id: crypto.randomUUID(),
+        kind: 'shipment_upsert',
+        entityId: id,
+        baseVersion: 0,
+        payload: null,
+      });
+      void runSync();
+      navigate(`/shipments?shipment=${id}&from=list`);
+    } catch (err) {
+      message.error(`Не удалось открыть УПД: ${(err as Error).message}`);
     } finally {
       setCreating(false);
     }
@@ -844,15 +913,29 @@ export default function ShipmentPage() {
         <Typography.Title level={3} style={{ margin: 0 }}>
           Отгрузка
         </Typography.Title>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          loading={creating}
-          onClick={createBlank}
-          disabled={inspectorWithoutSite}
-        >
-          Новая отгрузка
-        </Button>
+        <Space wrap>
+          <Segmented
+            value={tab}
+            onChange={(v) => {
+              const next = v as ListTab;
+              if (next === 'expected') setParams({ tab: 'expected' });
+              else setParams({});
+            }}
+            options={[
+              { label: 'Ожидаемые', value: 'expected' },
+              { label: 'Принятые', value: 'accepted' },
+            ]}
+          />
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            loading={creating}
+            onClick={createBlank}
+            disabled={inspectorWithoutSite}
+          >
+            Новая отгрузка
+          </Button>
+        </Space>
       </Space>
       {inspectorWithoutSite && (
         <Alert
@@ -862,12 +945,16 @@ export default function ShipmentPage() {
           description="Чтобы видеть отгрузки и создавать новые, обратитесь к администратору — он должен назначить вам объект на странице «Администрирование → Пользователи»."
         />
       )}
-      <ShipmentsHistory
-        onOpen={(id) => {
-          setParams({});
-          navigate(`/shipments?shipment=${id}&from=list`);
-        }}
-      />
+      {tab === 'expected' ? (
+        <ExpectedOutbound onOpen={createFromUpd} />
+      ) : (
+        <ShipmentsHistory
+          onOpen={(id) => {
+            setParams({});
+            navigate(`/shipments?shipment=${id}&from=list`);
+          }}
+        />
+      )}
     </Space>
   );
 }

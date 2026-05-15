@@ -1,5 +1,6 @@
 import type { MouseEvent } from 'react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Button,
   Card,
@@ -20,10 +21,16 @@ import {
   WarningOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { SourceDirection, SourceDocumentListResponseSchema } from '@matcheck/contracts';
+import type {
+  Counterparty,
+  Site,
+  SourceDirection,
+  SourceDocumentListResponseSchema,
+} from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api, ApiError } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
 import { UpdXmlUploadModal } from './UpdXmlUploadModal';
@@ -38,6 +45,8 @@ const UNFINISHED_STATUSES: ReadonlyArray<Row['status']> = [
   'processing',
   'needs_resolution',
 ];
+
+type KindFilter = 'all' | 'upd' | 'request';
 
 function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }) {
   switch (row.status) {
@@ -129,8 +138,41 @@ function ConfidenceCell({ row }: { row: Row }) {
 }
 
 export default function InboxPage() {
-  const [direction, setDirection] = useState<SourceDirection>('inbound');
-  const [kind, setKind] = useState<'all' | 'upd' | 'request'>('all');
+  const [params, setParams] = useSearchParams();
+  // direction/kind/q + контрагенты/объект — всё хранится в URL, чтобы фильтры
+  // переживали F5 и поддерживали share-able ссылки.
+  const direction: SourceDirection =
+    params.get('direction') === 'outbound' ? 'outbound' : 'inbound';
+  const kind: KindFilter = (() => {
+    const k = params.get('kind');
+    if (k === 'upd' || k === 'request') return k;
+    return 'all';
+  })();
+
+  const filters: ListFiltersValue = {
+    contractorId: params.get('contractor'),
+    supplierId: params.get('supplier'),
+    siteId: params.get('site'),
+    q: params.get('q') ?? '',
+  };
+
+  const updateParams = (patch: Record<string, string | null | undefined>) => {
+    const next = new URLSearchParams(params);
+    for (const [k, v] of Object.entries(patch)) {
+      if (v) next.set(k, v);
+      else next.delete(k);
+    }
+    setParams(next, { replace: true });
+  };
+  const updateFilters = (patch: Partial<ListFiltersValue>) => {
+    updateParams({
+      contractor: 'contractorId' in patch ? patch.contractorId : undefined,
+      supplier: 'supplierId' in patch ? patch.supplierId : undefined,
+      site: 'siteId' in patch ? patch.siteId : undefined,
+      q: 'q' in patch ? patch.q : undefined,
+    });
+  };
+
   const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const [xmlModalOpen, setXmlModalOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -139,11 +181,12 @@ export default function InboxPage() {
   const qc = useQueryClient();
 
   const list = useQuery({
-    queryKey: ['source-documents', { direction, kind }],
+    queryKey: ['source-documents', { direction, kind, q: filters.q.trim() }],
     queryFn: () => {
-      const params = new URLSearchParams({ direction });
-      if (kind !== 'all') params.set('kind', kind);
-      return api.get<List>(`/source-documents?${params.toString()}`);
+      const qs = new URLSearchParams({ direction });
+      if (kind !== 'all') qs.set('kind', kind);
+      if (filters.q.trim()) qs.set('q', filters.q.trim());
+      return api.get<List>(`/source-documents?${qs.toString()}`);
     },
     // Поллинг, пока в выдаче есть «живые» документы (queued/processing/
     // needs_resolution). Когда всё «обработано» — поллинг останавливается.
@@ -152,6 +195,17 @@ export default function InboxPage() {
       const hasUnfinished = items.some((x) => UNFINISHED_STATUSES.includes(x.status));
       return hasUnfinished ? 4000 : false;
     },
+  });
+
+  const counterpartiesQuery = useQuery({
+    queryKey: ['counterparties', 'all'],
+    queryFn: () =>
+      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+  });
+  const sitesQuery = useQuery({
+    queryKey: ['sites', 'all'],
+    queryFn: () =>
+      api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
   });
 
   // Оптимистическое удаление: строка мгновенно исчезает из таблицы, тост
@@ -209,9 +263,18 @@ export default function InboxPage() {
     },
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ['source-documents'] });
-      void qc.invalidateQueries({ queryKey: ['source-documents', 'unaccepted-upd', 'list'] });
     },
   });
+
+  const allItems = list.data?.items ?? [];
+  const filteredItems = useMemo(() => {
+    return allItems.filter((r) => {
+      if (filters.contractorId && r.contractorId !== filters.contractorId) return false;
+      if (filters.supplierId && r.supplierId !== filters.supplierId) return false;
+      if (filters.siteId && r.siteId !== filters.siteId) return false;
+      return true;
+    });
+  }, [allItems, filters.contractorId, filters.supplierId, filters.siteId]);
 
   const renderDeleteButton = (r: Row) => {
     const errMsg = deleteErrors[r.id];
@@ -255,7 +318,7 @@ export default function InboxPage() {
       </Typography.Title>
       <Tabs
         activeKey={direction}
-        onChange={(k) => setDirection(k as SourceDirection)}
+        onChange={(k) => updateParams({ direction: k === 'outbound' ? 'outbound' : null })}
         items={[
           { key: 'inbound', label: 'Приёмка' },
           { key: 'outbound', label: 'Отгрузка' },
@@ -264,7 +327,10 @@ export default function InboxPage() {
       <Space style={{ marginBottom: 16 }} wrap>
         <Segmented
           value={kind}
-          onChange={(v) => setKind(v as 'all' | 'upd' | 'request')}
+          onChange={(v) => {
+            const next = v as KindFilter;
+            updateParams({ kind: next === 'all' ? null : next });
+          }}
           options={[
             { label: 'Все', value: 'all' },
             { label: 'УПД', value: 'upd' },
@@ -279,8 +345,19 @@ export default function InboxPage() {
           <Spin size="small" indicator={<LoadingOutlined spin />} />
         )}
       </Space>
+      <div style={{ marginBottom: 16 }}>
+        <ListFilters
+          value={filters}
+          onChange={updateFilters}
+          fields={['contractor', 'supplier', 'site', 'q']}
+          counterparties={counterpartiesQuery.data?.items ?? []}
+          sites={sitesQuery.data?.items ?? []}
+          loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
+          searchPlaceholder="Номер документа"
+        />
+      </div>
       <ResponsiveTable<Row>
-        items={list.data?.items ?? []}
+        items={filteredItems}
         loading={list.isLoading}
         rowKey="id"
         onRowClick={(r) => setSelectedId(r.id)}
