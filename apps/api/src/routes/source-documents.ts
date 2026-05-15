@@ -34,7 +34,7 @@ import {
 } from '../db/schema.js';
 import { parseUpdXml } from '../domain/edo/upd.parser.js';
 import { validateUpdTotals } from '../domain/edo/upd-validation.js';
-import { deleteObject, presign, putObject } from '../domain/storage/s3.signer.js';
+import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { resolveStatusId } from '../domain/statuses/lookup.js';
 import { publishEvent } from './events.js';
 
@@ -286,9 +286,11 @@ function duplicateConflictPayload(sd: typeof sourceDocuments.$inferSelect) {
   };
 }
 
-// Удаление УПД с проверкой привязок к приёмкам/отгрузкам и чисткой S3
-// для всех original-attachments. Бросает HasReferencesError, если есть
-// привязки. Сами позиции и attachments удаляются каскадно по FK.
+// Удаление УПД с проверкой привязок к приёмкам/отгрузкам. Бросает
+// HasReferencesError, если есть привязки. Сами позиции, attachments и
+// llm_calls удаляются каскадно по FK; реальная чистка S3-объектов
+// выполняется асинхронно через очередь s3-cleanup (см. worker.ts), чтобы
+// HTTP-ответ возвращался мгновенно.
 async function deleteUpdWithRefsCheck(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   app: any,
@@ -308,19 +310,30 @@ async function deleteUpdWithRefsCheck(
     throw new HasReferencesError(deliveriesCount, shipmentsCount);
   }
 
+  // Забираем s3-ключи ДО hard delete (cascade удалит строки attachments).
   const attachments = await app.db
     .select({ s3Key: sourceDocumentAttachments.s3Key })
     .from(sourceDocumentAttachments)
     .where(eq(sourceDocumentAttachments.sourceDocumentId, id));
-  for (const a of attachments) {
-    try {
-      await deleteObject(a.s3Key);
-    } catch (err) {
-      log?.warn({ err, s3Key: a.s3Key }, 's3 delete failed');
-    }
-  }
 
   await app.db.delete(sourceDocuments).where(eq(sourceDocuments.id, id));
+
+  const s3Keys = attachments
+    .map((a: { s3Key: string }) => a.s3Key)
+    .filter((k: string): k is string => Boolean(k));
+  if (s3Keys.length > 0) {
+    try {
+      await app.queues.s3Cleanup.add(
+        'cleanup',
+        { s3Keys },
+        { jobId: `sd-${id}` },
+      );
+    } catch (err) {
+      // Падение enqueue не должно ронять удаление — БД уже консистентна,
+      // S3-объекты при необходимости можно будет почистить вручную.
+      log?.warn({ err, sourceDocumentId: id, s3Keys }, 'failed to enqueue s3 cleanup');
+    }
+  }
 }
 
 export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<void> {

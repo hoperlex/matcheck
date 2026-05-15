@@ -153,21 +153,50 @@ export default function InboxPage() {
     },
   });
 
+  // Оптимистическое удаление: строка мгновенно исчезает из таблицы, тост
+  // показывается сразу, а DELETE-запрос летит в фоне. При ошибке (например
+  // has_references) откатываем кэш через snapshot и показываем тост ошибки.
   const del = useMutation({
     mutationFn: (id: string) => api.delete<{ ok: true }>(`/source-documents/${id}`),
-    onSuccess: async () => {
+    onMutate: async (id: string) => {
+      // Отменяем активные refetch, иначе они затрут оптимистическое изменение.
+      await qc.cancelQueries({ queryKey: ['source-documents'] });
+
+      // Snapshot всех закэшированных списков (вариантов по direction/kind/...)
+      // для возможного rollback.
+      const snapshots = qc.getQueriesData<List>({ queryKey: ['source-documents'] });
+
+      // Убираем удаляемую запись из всех закэшированных списков.
+      qc.setQueriesData<List>({ queryKey: ['source-documents'] }, (old) => {
+        if (!old || !Array.isArray(old.items)) return old;
+        return { ...old, items: old.items.filter((x) => x.id !== id) };
+      });
+
+      // Если открыта модалка детали этого документа — закрываем.
+      if (selectedId === id) setSelectedId(null);
+
       message.success('УПД удалён');
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ['source-documents'] }),
-        qc.invalidateQueries({ queryKey: ['source-documents', 'unaccepted-upd', 'list'] }),
-      ]);
+
+      return { snapshots };
     },
-    onError: (err: Error) => {
+    onError: (err: Error, _id, ctx) => {
+      // Откат оптимистического изменения.
+      const snapshots = (ctx as { snapshots?: Array<[readonly unknown[], List | undefined]> } | undefined)
+        ?.snapshots;
+      if (snapshots) {
+        for (const [key, value] of snapshots) {
+          qc.setQueryData(key, value);
+        }
+      }
       if (err instanceof ApiError && err.code === 'has_references') {
         message.error(err.message);
         return;
       }
       message.error(err.message);
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['source-documents'] });
+      void qc.invalidateQueries({ queryKey: ['source-documents', 'unaccepted-upd', 'list'] });
     },
   });
 
@@ -185,7 +214,6 @@ export default function InboxPage() {
         size="small"
         shape="circle"
         icon={<DeleteOutlined />}
-        loading={del.isPending && del.variables === r.id}
         onClick={(e) => e.stopPropagation()}
       />
     </Popconfirm>

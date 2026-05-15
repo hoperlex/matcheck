@@ -19,8 +19,14 @@ import {
   sourceDocumentItems,
 } from './db/schema.js';
 import { sql as drSql } from 'drizzle-orm';
-import { buildQueueConnection, UPD_PARSE_QUEUE, type UpdParseJobData } from './plugins/queue.js';
-import { getObject } from './domain/storage/s3.signer.js';
+import {
+  buildQueueConnection,
+  S3_CLEANUP_QUEUE,
+  UPD_PARSE_QUEUE,
+  type S3CleanupJobData,
+  type UpdParseJobData,
+} from './plugins/queue.js';
+import { deleteObject, getObject } from './domain/storage/s3.signer.js';
 import { parseUpdPdf, PdfNoTextError } from './domain/edo/upd-pdf.parser.js';
 import { validateUpdTotals } from './domain/edo/upd-validation.js';
 import type { UpdPdfParsed } from '@matcheck/contracts';
@@ -280,6 +286,28 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   );
 }
 
+async function handleS3Cleanup(job: Job<S3CleanupJobData>): Promise<void> {
+  const { s3Keys } = job.data;
+  const log = logger.child({ jobId: job.id, queue: S3_CLEANUP_QUEUE });
+  if (!s3Keys || s3Keys.length === 0) return;
+
+  const results = await Promise.allSettled(s3Keys.map((k) => deleteObject(k)));
+  let failed = 0;
+  results.forEach((r, idx) => {
+    if (r.status === 'rejected') {
+      failed += 1;
+      log.warn({ err: r.reason, s3Key: s3Keys[idx] }, 's3 delete failed');
+    }
+  });
+  // Если все ключи зафейлились — это похоже на проблему с S3-доступом
+  // в целом, имеет смысл повторить задачу. Если часть успешна — БД и
+  // так уже консистентна, считаем успехом.
+  if (failed === s3Keys.length) {
+    throw new Error(`all ${failed} s3 deletions failed`);
+  }
+  log.info({ total: s3Keys.length, failed }, 's3 cleanup done');
+}
+
 async function recoverStaleProcessing(): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_PROCESSING_MS);
   const stale = await db
@@ -324,6 +352,15 @@ const worker = new Worker<UpdParseJobData>(UPD_PARSE_QUEUE, handleJob, {
   concurrency: CONCURRENCY,
 });
 
+// Второй воркер — асинхронная чистка S3-объектов при удалении документов.
+// Концурренси выше — операции лёгкие (один DELETE-запрос к S3 на ключ).
+const S3_CLEANUP_CONCURRENCY = 4;
+const s3CleanupWorker = new Worker<S3CleanupJobData>(
+  S3_CLEANUP_QUEUE,
+  handleS3Cleanup,
+  { connection, concurrency: S3_CLEANUP_CONCURRENCY },
+);
+
 worker.on('failed', async (job, err) => {
   if (!job) return;
   logger.warn({ jobId: job.id, attempts: job.attemptsMade, err: err.message }, 'job failed');
@@ -349,16 +386,35 @@ worker.on('completed', (job) => {
   logger.info({ jobId: job.id }, 'job completed');
 });
 
+s3CleanupWorker.on('failed', (job, err) => {
+  if (!job) return;
+  logger.warn(
+    { jobId: job.id, queue: S3_CLEANUP_QUEUE, attempts: job.attemptsMade, err: err.message },
+    's3 cleanup job failed',
+  );
+});
+
+s3CleanupWorker.on('completed', (job) => {
+  logger.info({ jobId: job.id, queue: S3_CLEANUP_QUEUE }, 's3 cleanup job completed');
+});
+
 async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, 'shutting down worker');
   await worker.close().catch(() => undefined);
+  await s3CleanupWorker.close().catch(() => undefined);
   await queue.close().catch(() => undefined);
   process.exit(0);
 }
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
 
-logger.info({ queue: UPD_PARSE_QUEUE, concurrency: CONCURRENCY }, 'worker started');
+logger.info(
+  {
+    queues: [UPD_PARSE_QUEUE, S3_CLEANUP_QUEUE],
+    concurrency: { [UPD_PARSE_QUEUE]: CONCURRENCY, [S3_CLEANUP_QUEUE]: S3_CLEANUP_CONCURRENCY },
+  },
+  'worker started',
+);
 void recoverStaleProcessing().catch((err) =>
   logger.error({ err }, 'recoverStaleProcessing failed'),
 );

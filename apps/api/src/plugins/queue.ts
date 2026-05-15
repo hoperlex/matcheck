@@ -7,12 +7,18 @@ export type UpdParseJobData = {
   s3Key: string;
 };
 
+export type S3CleanupJobData = {
+  s3Keys: string[];
+};
+
 export const UPD_PARSE_QUEUE = 'upd-parse';
+export const S3_CLEANUP_QUEUE = 's3-cleanup';
 
 declare module 'fastify' {
   interface FastifyInstance {
     queues: {
       updParse: Queue<UpdParseJobData>;
+      s3Cleanup: Queue<S3CleanupJobData>;
     };
   }
 }
@@ -38,14 +44,32 @@ export default fp(async (app) => {
     },
   });
 
-  app.decorate('queues', { updParse });
+  // Очередь для асинхронной чистки S3-объектов при удалении документов.
+  // HTTP-ответ DELETE возвращается мгновенно, реальное удаление файлов
+  // выполняется воркером с ретраями (см. apps/api/src/worker.ts).
+  const s3Cleanup = new Queue<S3CleanupJobData>(S3_CLEANUP_QUEUE, {
+    connection: buildQueueConnection(),
+    defaultJobOptions: {
+      attempts: 5,
+      backoff: { type: 'exponential', delay: 30_000 },
+      removeOnComplete: { age: 24 * 60 * 60, count: 1000 },
+      removeOnFail: { age: 7 * 24 * 60 * 60 },
+    },
+  });
+
+  app.decorate('queues', { updParse, s3Cleanup });
   app.addHook('onClose', async () => {
     try {
       await updParse.close();
     } catch {
       /* ignore */
     }
+    try {
+      await s3Cleanup.close();
+    } catch {
+      /* ignore */
+    }
   });
 
-  app.log.info({ queue: UPD_PARSE_QUEUE }, 'queue ready');
+  app.log.info({ queues: [UPD_PARSE_QUEUE, S3_CLEANUP_QUEUE] }, 'queues ready');
 });
