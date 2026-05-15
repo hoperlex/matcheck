@@ -601,17 +601,6 @@ export default function ShipmentPage() {
           defaultActiveKey={photosCount > 0 ? ['photos'] : []}
           items={[
             {
-              key: 'comment',
-              label: 'Комментарий',
-              children: (
-                <Input.TextArea
-                  rows={3}
-                  value={comment}
-                  onChange={(e) => setComment(e.target.value)}
-                />
-              ),
-            },
-            {
               key: 'photos',
               label: `Фото${photosCount ? ` (${photosCount})` : ''}`,
               children: (
@@ -666,6 +655,23 @@ export default function ShipmentPage() {
             />
           )}
         </Card>
+
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: 'comment',
+              label: 'Комментарий',
+              children: (
+                <Input.TextArea
+                  rows={3}
+                  value={comment}
+                  onChange={(e) => setComment(e.target.value)}
+                />
+              ),
+            },
+          ]}
+        />
 
         {isDesktop ? (
           <div
