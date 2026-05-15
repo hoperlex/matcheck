@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert,
@@ -31,6 +31,7 @@ import type {
   Counterparty,
   Shipment,
   ShipmentKind,
+  ShipmentPhoto,
   ShipmentStatusCode,
   Site,
   Status,
@@ -115,6 +116,11 @@ export default function ShipmentPage() {
   const [loadedShipment, setLoadedShipment] = useState<Shipment | null>(null);
   const [creating, setCreating] = useState(false);
 
+  // ID отгрузки, для которой уже выполнили первичную гидратацию формы из server data.
+  // Защищает локальные правки (plate/driverName/comment/items) от затирания при рефетче
+  // ['shipments', id] — рефетч происходит, например, после загрузки/удаления фото.
+  const hydratedIdRef = useRef<string | null>(null);
+
   useEffect(() => {
     if (!shipmentId) {
       setItems([]);
@@ -126,6 +132,7 @@ export default function ShipmentPage() {
       setDriverName('');
       setComment('');
       setLoadedShipment(null);
+      hydratedIdRef.current = null;
     }
   }, [shipmentId, inspectorSiteId]);
 
@@ -163,16 +170,27 @@ export default function ShipmentPage() {
     enabled: !!shipmentId,
   });
 
-  const photosCountQuery = useQuery({
-    queryKey: ['shipment-photos-count', shipmentId],
-    queryFn: async () => {
-      if (!shipmentId) return 0;
+  // Локальные IDB-записи фото — параллельный источник к loadedShipment.photos.
+  // Мерджим оба, чтобы свежеснятое фото показывалось в галерее, не дожидаясь pullSync.
+  const localPhotosQuery = useQuery({
+    queryKey: ['photos-local', 'shipment', shipmentId],
+    queryFn: async (): Promise<ShipmentPhoto[]> => {
+      if (!shipmentId) return [];
       const dbi = await db();
       const all = await dbi
         .transaction('photos')
         .store.index('byDelivery')
         .getAll(shipmentId);
-      return all.filter((p) => p.operationKind === 'shipment').length;
+      return all
+        .filter((p) => p.operationKind === 'shipment')
+        .map((p) => ({
+          id: p.id,
+          kind: p.kind,
+          s3Key: p.s3Key ?? '',
+          thumbS3Key: p.thumbS3Key ?? null,
+          contentHash: p.contentHash ?? null,
+          takenAt: new Date(p.takenAt).toISOString(),
+        }));
     },
     enabled: !!shipmentId,
   });
@@ -181,28 +199,31 @@ export default function ShipmentPage() {
     const s = shipmentQuery.data;
     if (!s) return;
     setLoadedShipment(s);
-    setKind(s.kind);
-    if (isInspector) {
-      setSiteId(inspectorSiteId);
-    } else {
-      setSiteId((prev) => prev ?? (s.siteId === SYSTEM_SITE_ID ? null : s.siteId));
+    if (hydratedIdRef.current !== s.id) {
+      hydratedIdRef.current = s.id;
+      setKind(s.kind);
+      if (isInspector) {
+        setSiteId(inspectorSiteId);
+      } else {
+        setSiteId((prev) => prev ?? (s.siteId === SYSTEM_SITE_ID ? null : s.siteId));
+      }
+      setDestSiteId((prev) => prev ?? s.destSiteId ?? null);
+      setReceiverId((prev) => prev ?? s.receiverCounterpartyId ?? null);
+      setPlate(s.vehiclePlate ?? '');
+      setDriverName(s.driverName ?? '');
+      setComment(s.comment ?? '');
+      setItems(
+        s.items.map((it, idx) => ({
+          clientKey: newKey(),
+          lineNo: idx + 1,
+          nameRaw: it.nameRaw,
+          qtyActual: it.qtyActual ?? it.qtyPlanned,
+          unit: it.unit,
+          materialId: it.materialId,
+        })),
+      );
     }
-    setDestSiteId((prev) => prev ?? s.destSiteId ?? null);
-    setReceiverId((prev) => prev ?? s.receiverCounterpartyId ?? null);
-    setPlate(s.vehiclePlate ?? '');
-    setDriverName(s.driverName ?? '');
-    setComment(s.comment ?? '');
-    setItems(
-      s.items.map((it, idx) => ({
-        clientKey: newKey(),
-        lineNo: idx + 1,
-        nameRaw: it.nameRaw,
-        qtyActual: it.qtyActual ?? it.qtyPlanned,
-        unit: it.unit,
-        materialId: it.materialId,
-      })),
-    );
-  }, [shipmentQuery.data]);
+  }, [shipmentQuery.data, isInspector, inspectorSiteId]);
 
   const createBlank = async () => {
     if (creating) return;
@@ -243,7 +264,7 @@ export default function ShipmentPage() {
         await capturePhoto('shipment', shipmentId, file, 'cargo');
         message.success('Фото добавлено');
         await Promise.all([
-          queryClient.invalidateQueries({ queryKey: ['shipment-photos-count', shipmentId] }),
+          queryClient.invalidateQueries({ queryKey: ['photos-local', 'shipment', shipmentId] }),
           queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] }),
         ]);
         void runSync();
@@ -352,10 +373,17 @@ export default function ShipmentPage() {
     onError: (err: Error) => message.error(err.message),
   });
 
-  const photosCount = Math.max(
-    photosCountQuery.data ?? 0,
-    loadedShipment?.photos.length ?? 0,
-  );
+  // Мерджим серверные photos и локальные IDB-записи по id, чтобы превью
+  // свежеснятого фото не пропадало между моментами IDB-put и pullSync.
+  const mergedPhotos: ShipmentPhoto[] = useMemo(() => {
+    const server = loadedShipment?.photos ?? [];
+    const local = localPhotosQuery.data ?? [];
+    return [
+      ...server,
+      ...local.filter((lp) => !server.some((sp) => sp.id === lp.id)),
+    ];
+  }, [loadedShipment?.photos, localPhotosQuery.data]);
+  const photosCount = mergedPhotos.length;
 
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
@@ -654,7 +682,7 @@ export default function ShipmentPage() {
                   {shipmentId && loadedShipment && (
                     <PhotoGallery
                       deliveryId={shipmentId}
-                      photos={loadedShipment.photos}
+                      photos={mergedPhotos}
                       operationKind="shipment"
                     />
                   )}

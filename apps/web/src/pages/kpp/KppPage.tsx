@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert,
@@ -29,6 +29,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   Counterparty,
   Delivery,
+  DeliveryPhoto,
   DeliveryStatusCode,
   Site,
   SourceDocument,
@@ -117,6 +118,11 @@ export default function KppPage() {
   const [selectedUpd, setSelectedUpd] = useState<SourceDocument | null>(null);
   const [creating, setCreating] = useState(false);
 
+  // ID приёмки, для которой уже выполнили первичную гидратацию формы из server data.
+  // Защищает локальные правки (plate/comment/items) от затирания при рефетче
+  // ['deliveries', id] — рефетч происходит, например, после загрузки/удаления фото.
+  const hydratedIdRef = useRef<string | null>(null);
+
   // Сбрасываем локальное состояние при выходе из формы. Для inspector_kpp
   // siteId восстанавливается из назначенного объекта (не очищается).
   useEffect(() => {
@@ -127,6 +133,7 @@ export default function KppPage() {
       setSiteId(inspectorSiteId);
       setContractorId(null);
       setSelectedUpd(null);
+      hydratedIdRef.current = null;
     }
   }, [deliveryId, inspectorSiteId]);
 
@@ -170,17 +177,29 @@ export default function KppPage() {
   // приводило к гонке рендера (data уже есть, isLoading=false, но state ещё null).
   const loadedDelivery: Delivery | null = deliveryQuery.data ?? null;
 
-  // Черновик (server === null) не имеет photos в effectiveState — считаем локально
-  const photosCountQuery = useQuery({
-    queryKey: ['photos-count', deliveryId],
-    queryFn: async () => {
-      if (!deliveryId) return 0;
+  // Локальные IDB-записи фото для приёмки. Параллельно с серверным delivery.photos:
+  // свежеснятое фото появляется в IDB немедленно (через capturePhoto), а в delivery.photos —
+  // только после S3-upload + следующего pullSync. Чтобы превью не «пропадало» между этими
+  // моментами, мерджим оба источника по id.
+  const localPhotosQuery = useQuery({
+    queryKey: ['photos-local', 'delivery', deliveryId],
+    queryFn: async (): Promise<DeliveryPhoto[]> => {
+      if (!deliveryId) return [];
       const dbi = await db();
       const all = await dbi
         .transaction('photos')
         .store.index('byDelivery')
         .getAll(deliveryId);
-      return all.length;
+      return all
+        .filter((p) => p.operationKind === 'delivery')
+        .map((p) => ({
+          id: p.id,
+          kind: p.kind,
+          s3Key: p.s3Key ?? '',
+          thumbS3Key: p.thumbS3Key ?? null,
+          contentHash: p.contentHash ?? null,
+          takenAt: new Date(p.takenAt).toISOString(),
+        }));
     },
     enabled: !!deliveryId,
   });
@@ -188,39 +207,45 @@ export default function KppPage() {
   useEffect(() => {
     const d = deliveryQuery.data;
     if (!d) return;
-    setPlate(d.vehiclePlate ?? '');
-    setComment(d.comment ?? '');
-    // siteId/contractorId подхватываются один раз — последующее редактирование
-    // ведётся через локальный state. Для inspector_kpp siteId всегда фиксирован
-    // на назначенном объекте.
-    if (isInspector) {
-      setSiteId(inspectorSiteId);
-    } else {
-      setSiteId((prev) => prev ?? (d.siteId === SYSTEM_SITE_ID ? null : d.siteId));
+    if (hydratedIdRef.current !== d.id) {
+      hydratedIdRef.current = d.id;
+      setPlate(d.vehiclePlate ?? '');
+      setComment(d.comment ?? '');
+      // siteId/contractorId подхватываются один раз — последующее редактирование
+      // ведётся через локальный state. Для inspector_kpp siteId всегда фиксирован
+      // на назначенном объекте.
+      if (isInspector) {
+        setSiteId(inspectorSiteId);
+      } else {
+        setSiteId((prev) => prev ?? (d.siteId === SYSTEM_SITE_ID ? null : d.siteId));
+      }
+      setContractorId((prev) => prev ?? d.contractorId ?? null);
+      setItems(
+        d.items.map((it, idx) => ({
+          clientKey: newKey(),
+          lineNo: idx + 1,
+          nameRaw: it.nameRaw,
+          qtyPlanned: it.qtyPlanned,
+          qtyActual: it.qtyActual,
+          unit: it.unit,
+          materialId: it.materialId,
+          volumeM3: it.volumeM3 ?? null,
+          massKg: it.massKg ?? null,
+          volumeConfidence: it.volumeConfidence ?? null,
+          groupName: it.groupName ?? null,
+        })),
+      );
     }
-    setContractorId((prev) => prev ?? d.contractorId ?? null);
-    setItems(
-      d.items.map((it, idx) => ({
-        clientKey: newKey(),
-        lineNo: idx + 1,
-        nameRaw: it.nameRaw,
-        qtyPlanned: it.qtyPlanned,
-        qtyActual: it.qtyActual,
-        unit: it.unit,
-        materialId: it.materialId,
-        volumeM3: it.volumeM3 ?? null,
-        massKg: it.massKg ?? null,
-        volumeConfidence: it.volumeConfidence ?? null,
-        groupName: it.groupName ?? null,
-      })),
-    );
+    // Подгрузка выбранного УПД идемпотентна по флагу !selectedUpd — оставляем
+    // вне условия гидратации, чтобы она сработала и после первого получения данных,
+    // и после смены selectedUpd.
     if (d.sourceDocumentIds.length > 0 && !selectedUpd) {
       api
         .get<SourceDocument>(`/source-documents/${d.sourceDocumentIds[0]}`)
         .then(setSelectedUpd)
         .catch(() => undefined);
     }
-  }, [deliveryQuery.data, selectedUpd]);
+  }, [deliveryQuery.data, selectedUpd, isInspector, inspectorSiteId]);
 
   /**
    * Создаёт пустую приёмку. UUID генерируется на клиенте, запись сразу появляется
@@ -328,10 +353,10 @@ export default function KppPage() {
       try {
         await capturePhoto('delivery', deliveryId, file, 'cargo');
         message.success('Фото добавлено');
-        // Локальный счётчик фото — invalidate на photos-count.
-        // Photos попадут в Delivery.photos после успешного upload + следующего pullSync.
+        // Локальный список фото перечитывается сразу из IDB, серверный delivery.photos —
+        // после S3-upload + следующего pullSync. Галерея мерджит оба источника по id.
         await Promise.all([
-          queryClient.invalidateQueries({ queryKey: ['photos-count', deliveryId] }),
+          queryClient.invalidateQueries({ queryKey: ['photos-local', 'delivery', deliveryId] }),
           queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] }),
         ]);
         void runSync();
@@ -441,11 +466,18 @@ export default function KppPage() {
     onError: (err: Error) => message.error(err.message),
   });
 
-  // Берём максимум: локальные (включая черновик, ещё не на сервере) или server-snapshot.
-  const photosCount = Math.max(
-    photosCountQuery.data ?? 0,
-    loadedDelivery?.photos.length ?? 0,
-  );
+  // Мерджим серверные photos и локальные IDB-записи по id. Это покрывает оба сценария:
+  // (а) черновик ещё не на сервере — фото есть только локально;
+  // (б) фото только что снято и ещё не подтянуто очередным pullSync.
+  const mergedPhotos: DeliveryPhoto[] = useMemo(() => {
+    const server = loadedDelivery?.photos ?? [];
+    const local = localPhotosQuery.data ?? [];
+    return [
+      ...server,
+      ...local.filter((lp) => !server.some((sp) => sp.id === lp.id)),
+    ];
+  }, [loadedDelivery?.photos, localPhotosQuery.data]);
+  const photosCount = mergedPhotos.length;
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
     if (!siteId) reasons.push('Выберите объект');
@@ -715,7 +747,7 @@ export default function KppPage() {
                   {deliveryId && loadedDelivery && (
                     <PhotoGallery
                       deliveryId={deliveryId}
-                      photos={loadedDelivery.photos}
+                      photos={mergedPhotos}
                     />
                   )}
                 </Space>

@@ -34,9 +34,15 @@ export function PhotoGallery({
     mutationFn: (id: string) => api.delete<PhotoDeleteResponse>(`/photos/${id}`),
     onSuccess: async (_, id) => {
       message.success('Фото удалено');
-      await queryClient.invalidateQueries({ queryKey: [invalidateKey, deliveryId] });
       const dbi = await db();
       await dbi.delete('photos', id).catch(() => undefined);
+      // Инвалидируем оба источника галереи: серверный snapshot приёмки/отгрузки
+      // и локальный IDB-список (последний нужен, иначе только что удалённое фото
+      // продолжит висеть в merged-списке до перерисовки страницы).
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: [invalidateKey, deliveryId] }),
+        queryClient.invalidateQueries({ queryKey: ['photos-local', operationKind, deliveryId] }),
+      ]);
     },
     onError: (err: Error) => message.error(err.message),
   });
