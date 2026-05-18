@@ -5,6 +5,7 @@ import { SourceDocumentDetailSchema } from './source-documents.js';
 import { CounterpartySchema } from './counterparties.js';
 import { MaterialSchema } from './materials.js';
 import { SiteSchema } from './sites.js';
+import { StatusSchema } from './statuses.js';
 
 // Журнал hard-delete операций. Возвращается /sync с фильтром `deleted_at >= since`
 // (для initial-sync без since — пустые массивы; полная история не нужна).
@@ -24,6 +25,9 @@ export const SyncDeltaResponseSchema = z.object({
   counterparties: z.array(CounterpartySchema),
   materials: z.array(MaterialSchema),
   sites: z.array(SiteSchema),
+  // Лейблы и цвета статусов (entity_type='delivery'|'shipment'|…) — клиент
+  // использует их вместо хардкода. Меняются редко, отдаются всегда без фильтра.
+  statuses: z.array(StatusSchema),
   deletedIds: SyncDeletedIdsSchema,
   serverNow: z.string(),
 });

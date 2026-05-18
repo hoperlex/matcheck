@@ -3,19 +3,43 @@ import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
+  PhotoConfirmResponseSchema,
   PhotoDeleteResponseSchema,
   PhotoGetUrlResponseSchema,
   PhotoPresignRequestSchema,
   PhotoPresignResponseSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
-import { deliveries, deliveryPhotos, shipments, shipmentPhotos } from '../db/schema.js';
-import { deleteObject, presign } from '../domain/storage/s3.signer.js';
+import {
+  counterparties,
+  deliveries,
+  deliveryPhotos,
+  shipments,
+  shipmentPhotos,
+  sites,
+} from '../db/schema.js';
+import { deleteObject, headObject, presign } from '../domain/storage/s3.signer.js';
+import { buildS3Key } from '../domain/storage/s3.path.js';
 import { publishEvent } from './events.js';
 
 const URL_TTL = 300; // 5 min
 
 type OperationKind = 'delivery' | 'shipment';
+
+// Расширение файла в S3-ключе по реальному MIME. Для неизвестного типа —
+// 'bin' (S3 хранит как application/octet-stream). Сервер не валидирует
+// контент, только использует расширение для удобства админ-просмотра.
+const EXT_BY_MIME: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+  'image/webp': 'webp',
+};
+function extensionFor(mime: string): string {
+  return EXT_BY_MIME[mime.toLowerCase()] ?? 'bin';
+}
 
 /**
  * Тонкая абстракция: для каждой стороны (delivery|shipment) фиксируем
@@ -76,6 +100,9 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
             id: deliveries.id,
             inspectorId: deliveries.inspectorId,
             pendingDeletionAt: deliveries.pendingDeletionAt,
+            siteId: deliveries.siteId,
+            contractorId: deliveries.contractorId,
+            supplierId: deliveries.supplierId,
           })
           .from(deliveries)
           .where(eq(deliveries.id, operationId))
@@ -120,10 +147,40 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           };
         }
 
+        // Подтягиваем site.code и контрагента для иерархии в S3:
+        // {site.code}/{counterparty}/deliveries/{id}/{filename}.
+        // Приёмка: contractor (если есть) → supplier → 'unknown'.
+        const cpId = d.contractorId ?? d.supplierId;
+        const [site] = await app.db
+          .select({ code: sites.code })
+          .from(sites)
+          .where(eq(sites.id, d.siteId))
+          .limit(1);
+        const [cp] = cpId
+          ? await app.db
+              .select({ inn: counterparties.inn, name: counterparties.name })
+              .from(counterparties)
+              .where(eq(counterparties.id, cpId))
+              .limit(1)
+          : [undefined];
+
         const photoId = crypto.randomUUID();
-        const s3Key = `${TABLES.delivery.prefix}/${operationId}/${photoId}.jpg`;
+        const ext = extensionFor(body.contentType);
+        const s3Key = buildS3Key({
+          site: site ?? null,
+          counterparty: cp ?? null,
+          entityType: 'deliveries',
+          entityId: operationId,
+          filename: `${photoId}.${ext}`,
+        });
         const thumbS3Key = body.thumbContentHash
-          ? `${TABLES.delivery.prefix}/${operationId}/${photoId}-thumb.jpg`
+          ? buildS3Key({
+              site: site ?? null,
+              counterparty: cp ?? null,
+              entityType: 'deliveries',
+              entityId: operationId,
+              filename: `${photoId}-thumb.${ext}`,
+            })
           : null;
         const [created] = await app.db
           .insert(deliveryPhotos)
@@ -163,6 +220,10 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           id: shipments.id,
           inspectorId: shipments.inspectorId,
           pendingDeletionAt: shipments.pendingDeletionAt,
+          siteId: shipments.siteId,
+          kind: shipments.kind,
+          receiverCounterpartyId: shipments.receiverCounterpartyId,
+          destSiteId: shipments.destSiteId,
         })
         .from(shipments)
         .where(eq(shipments.id, operationId))
@@ -206,10 +267,52 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         };
       }
 
+      // Иерархия S3 для отгрузки: контрагент определяется по kind.
+      const [shSite] = await app.db
+        .select({ code: sites.code })
+        .from(sites)
+        .where(eq(sites.id, s.siteId))
+        .limit(1);
+      const [shCp] = s.receiverCounterpartyId
+        ? await app.db
+            .select({ inn: counterparties.inn, name: counterparties.name })
+            .from(counterparties)
+            .where(eq(counterparties.id, s.receiverCounterpartyId))
+            .limit(1)
+        : [undefined];
+      let shFallback: string | undefined;
+      if (!shCp) {
+        if (s.kind === 'transfer' && s.destSiteId) {
+          const [dest] = await app.db
+            .select({ code: sites.code })
+            .from(sites)
+            .where(eq(sites.id, s.destSiteId))
+            .limit(1);
+          shFallback = `transfer-to-${dest?.code ?? 'unknown'}`;
+        } else if (s.kind === 'writeoff') {
+          shFallback = 'writeoff';
+        }
+      }
+
       const photoId = crypto.randomUUID();
-      const s3Key = `${TABLES.shipment.prefix}/${operationId}/${photoId}.jpg`;
+      const ext = extensionFor(body.contentType);
+      const s3Key = buildS3Key({
+        site: shSite ?? null,
+        counterparty: shCp ?? null,
+        fallbackCounterparty: shFallback,
+        entityType: 'shipments',
+        entityId: operationId,
+        filename: `${photoId}.${ext}`,
+      });
       const thumbS3Key = body.thumbContentHash
-        ? `${TABLES.shipment.prefix}/${operationId}/${photoId}-thumb.jpg`
+        ? buildS3Key({
+            site: shSite ?? null,
+            counterparty: shCp ?? null,
+            fallbackCounterparty: shFallback,
+            entityType: 'shipments',
+            entityId: operationId,
+            filename: `${photoId}-thumb.${ext}`,
+          })
         : null;
       const [created] = await app.db
         .insert(shipmentPhotos)
@@ -263,6 +366,14 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const found = await findPhoto(app, req.params.id);
       if (!found) return reply.code(404).send({ error: 'not_found' });
+      // Inspector_kpp может скачивать только фото своего объекта. Возвращаем
+      // 404 (а не 403), чтобы не раскрывать существование чужих фото.
+      if (
+        req.user?.role === 'inspector_kpp' &&
+        (!req.user.siteId || found.parentSiteId !== req.user.siteId)
+      ) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
       const key = req.query.thumb && found.thumbS3Key ? found.thumbS3Key : found.s3Key;
       try {
         const url = await presign({ method: 'GET', key, expiresIn: URL_TTL });
@@ -270,6 +381,76 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       } catch {
         return reply.code(500).send({ error: 's3_unavailable', message: 'S3 not configured' });
       }
+    },
+  );
+
+  // Confirm: клиент вызывает после успешного PUT в S3 — сервер проверяет
+  // S3.HEAD и проставляет uploaded_at = now(). Cleanup-job не тронет
+  // подтверждённые записи. Idempotent: повторный вызов возвращает прежний
+  // uploaded_at без новой проверки S3 (по существующему значению).
+  app.post(
+    '/api/v1/photos/:id/confirm',
+    {
+      preHandler: [app.authenticate],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: {
+          200: PhotoConfirmResponseSchema,
+          404: ErrorResponseSchema,
+          500: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const found = await findPhoto(app, req.params.id);
+      if (!found) return reply.code(404).send({ error: 'not_found' });
+      // Та же owner-проверка, что и в GET URL.
+      if (
+        req.user?.role === 'inspector_kpp' &&
+        (!req.user.siteId || found.parentSiteId !== req.user.siteId)
+      ) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+
+      // Если уже подтверждено — отдаём существующий uploaded_at без S3-вызова.
+      const table = found.kind === 'delivery' ? deliveryPhotos : shipmentPhotos;
+      const [row] = await app.db
+        .select({ uploadedAt: table.uploadedAt })
+        .from(table)
+        .where(eq(table.id, req.params.id))
+        .limit(1);
+      if (row?.uploadedAt) {
+        return { ok: true as const, uploadedAt: row.uploadedAt.toISOString() };
+      }
+
+      let exists: boolean;
+      try {
+        exists = await headObject(found.s3Key);
+      } catch (err) {
+        req.log.error({ err, key: found.s3Key }, 's3 HEAD failed in confirm');
+        return reply
+          .code(500)
+          .send({ error: 's3_unavailable', message: 'S3 проверка недоступна' });
+      }
+      if (!exists) {
+        return reply.code(404).send({
+          error: 'not_in_s3',
+          message: 'PUT в S3 ещё не завершён — повторите загрузку',
+        });
+      }
+      const now = new Date();
+      if (found.kind === 'delivery') {
+        await app.db
+          .update(deliveryPhotos)
+          .set({ uploadedAt: now })
+          .where(eq(deliveryPhotos.id, req.params.id));
+      } else {
+        await app.db
+          .update(shipmentPhotos)
+          .set({ uploadedAt: now })
+          .where(eq(shipmentPhotos.id, req.params.id));
+      }
+      return { ok: true as const, uploadedAt: now.toISOString() };
     },
   );
 
@@ -360,7 +541,13 @@ async function findPhoto(
   app: ReturnType<typeof asZod>,
   id: string,
 ): Promise<
-  | { kind: OperationKind; operationId: string; s3Key: string; thumbS3Key: string | null }
+  | {
+      kind: OperationKind;
+      operationId: string;
+      s3Key: string;
+      thumbS3Key: string | null;
+      parentSiteId: string | null;
+    }
   | null
 > {
   const [d] = await app.db
@@ -368,8 +555,10 @@ async function findPhoto(
       s3Key: deliveryPhotos.s3Key,
       thumbS3Key: deliveryPhotos.thumbS3Key,
       operationId: deliveryPhotos.deliveryId,
+      parentSiteId: deliveries.siteId,
     })
     .from(deliveryPhotos)
+    .innerJoin(deliveries, eq(deliveries.id, deliveryPhotos.deliveryId))
     .where(eq(deliveryPhotos.id, id))
     .limit(1);
   if (d)
@@ -378,6 +567,7 @@ async function findPhoto(
       operationId: d.operationId,
       s3Key: d.s3Key,
       thumbS3Key: d.thumbS3Key,
+      parentSiteId: d.parentSiteId,
     };
 
   const [s] = await app.db
@@ -385,8 +575,10 @@ async function findPhoto(
       s3Key: shipmentPhotos.s3Key,
       thumbS3Key: shipmentPhotos.thumbS3Key,
       operationId: shipmentPhotos.shipmentId,
+      parentSiteId: shipments.siteId,
     })
     .from(shipmentPhotos)
+    .innerJoin(shipments, eq(shipments.id, shipmentPhotos.shipmentId))
     .where(eq(shipmentPhotos.id, id))
     .limit(1);
   if (s)
@@ -395,6 +587,7 @@ async function findPhoto(
       operationId: s.operationId,
       s3Key: s.s3Key,
       thumbS3Key: s.thumbS3Key,
+      parentSiteId: s.parentSiteId,
     };
 
   return null;

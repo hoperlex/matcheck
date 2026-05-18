@@ -28,6 +28,8 @@ export const ShipmentPhotoSchema = z.object({
   thumbS3Key: z.string().nullable(),
   contentHash: z.string().nullable(),
   takenAt: z.string(),
+  // null = orphan-запись (PUT в S3 не подтверждён); см. DeliveryPhotoSchema.
+  uploadedAt: z.string().nullable(),
 });
 export type ShipmentPhoto = z.infer<typeof ShipmentPhotoSchema>;
 

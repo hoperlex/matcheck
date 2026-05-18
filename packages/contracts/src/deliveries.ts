@@ -25,6 +25,10 @@ export const DeliveryPhotoSchema = z.object({
   thumbS3Key: z.string().nullable(),
   contentHash: z.string().nullable(),
   takenAt: z.string(),
+  // null = orphan-запись (PUT в S3 не подтверждён). Клиент не должен пытаться
+  // открыть такое фото — через час оно либо подтвердится cleanup-job'ом, либо
+  // удалится.
+  uploadedAt: z.string().nullable(),
 });
 export type DeliveryPhoto = z.infer<typeof DeliveryPhotoSchema>;
 

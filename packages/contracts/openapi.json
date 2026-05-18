@@ -33,6 +33,10 @@
       "description": "Приёмки материалов"
     },
     {
+      "name": "Shipments",
+      "description": "Отгрузки материалов"
+    },
+    {
       "name": "SourceDocuments",
       "description": "Входящие документы (УПД)"
     },
@@ -42,7 +46,7 @@
     },
     {
       "name": "References",
-      "description": "Справочники (контрагенты, материалы)"
+      "description": "Справочники (контрагенты, материалы, статусы)"
     }
   ],
   "components": {
@@ -84,6 +88,13 @@
           "isActive": {
             "type": "boolean"
           },
+          "siteId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "createdAt": {
             "type": "string"
           }
@@ -93,6 +104,7 @@
           "email",
           "role",
           "isActive",
+          "siteId",
           "createdAt"
         ]
       },
@@ -160,6 +172,13 @@
               "isActive": {
                 "type": "boolean"
               },
+              "siteId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
               "createdAt": {
                 "type": "string"
               }
@@ -169,6 +188,7 @@
               "email",
               "role",
               "isActive",
+              "siteId",
               "createdAt"
             ]
           },
@@ -211,7 +231,17 @@
         "enum": [
           "not_filled",
           "draft",
-          "filled"
+          "filled",
+          "confirmed_mol"
+        ]
+      },
+      "ShipmentStatusCode": {
+        "type": "string",
+        "enum": [
+          "not_filled",
+          "draft",
+          "shipped",
+          "confirmed_mol"
         ]
       },
       "Status": {
@@ -247,6 +277,52 @@
           "label",
           "color",
           "sortOrder"
+        ]
+      },
+      "StatusListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "entityType": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "color": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "sortOrder": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "id",
+                "entityType",
+                "code",
+                "label",
+                "color",
+                "sortOrder"
+              ]
+            }
+          }
+        },
+        "required": [
+          "items"
         ]
       },
       "DeliveryItem": {
@@ -368,6 +444,12 @@
           },
           "takenAt": {
             "type": "string"
+          },
+          "uploadedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -376,7 +458,8 @@
           "s3Key",
           "thumbS3Key",
           "contentHash",
-          "takenAt"
+          "takenAt",
+          "uploadedAt"
         ]
       },
       "Delivery": {
@@ -465,6 +548,50 @@
             "format": "uuid"
           },
           "comment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirmedByMolUserId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "confirmedByMolUserEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirmedByMolAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pendingDeletionAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pendingDeletionByUserId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "pendingDeletionByUserEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pendingDeletionReason": {
             "type": [
               "string",
               "null"
@@ -604,6 +731,12 @@
                 },
                 "takenAt": {
                   "type": "string"
+                },
+                "uploadedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -612,7 +745,8 @@
                 "s3Key",
                 "thumbS3Key",
                 "contentHash",
-                "takenAt"
+                "takenAt",
+                "uploadedAt"
               ]
             }
           },
@@ -634,6 +768,13 @@
           "arrivedAt",
           "inspectorId",
           "comment",
+          "confirmedByMolUserId",
+          "confirmedByMolUserEmail",
+          "confirmedByMolAt",
+          "pendingDeletionAt",
+          "pendingDeletionByUserId",
+          "pendingDeletionByUserEmail",
+          "pendingDeletionReason",
           "version",
           "sourceDocumentIds",
           "items",
@@ -654,7 +795,8 @@
             "enum": [
               "not_filled",
               "draft",
-              "filled"
+              "filled",
+              "confirmed_mol"
             ]
           },
           "siteId": {
@@ -898,6 +1040,50 @@
                     "null"
                   ]
                 },
+                "confirmedByMolUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "confirmedByMolUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "confirmedByMolAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionByUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "pendingDeletionByUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionReason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "version": {
                   "type": "number"
                 },
@@ -1032,6 +1218,12 @@
                       },
                       "takenAt": {
                         "type": "string"
+                      },
+                      "uploadedAt": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       }
                     },
                     "required": [
@@ -1040,7 +1232,8 @@
                       "s3Key",
                       "thumbS3Key",
                       "contentHash",
-                      "takenAt"
+                      "takenAt",
+                      "uploadedAt"
                     ]
                   }
                 },
@@ -1062,6 +1255,13 @@
                 "arrivedAt",
                 "inspectorId",
                 "comment",
+                "confirmedByMolUserId",
+                "confirmedByMolUserEmail",
+                "confirmedByMolAt",
+                "pendingDeletionAt",
+                "pendingDeletionByUserId",
+                "pendingDeletionByUserEmail",
+                "pendingDeletionReason",
                 "version",
                 "sourceDocumentIds",
                 "items",
@@ -1079,6 +1279,18 @@
           "items",
           "total"
         ]
+      },
+      "DeliveryMarkDeletion": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          }
+        }
       },
       "ConflictResponse": {
         "type": "object",
@@ -1178,6 +1390,50 @@
                 "format": "uuid"
               },
               "comment": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "confirmedByMolUserId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "confirmedByMolUserEmail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "confirmedByMolAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pendingDeletionAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pendingDeletionByUserId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "pendingDeletionByUserEmail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pendingDeletionReason": {
                 "type": [
                   "string",
                   "null"
@@ -1317,6 +1573,12 @@
                     },
                     "takenAt": {
                       "type": "string"
+                    },
+                    "uploadedAt": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -1325,7 +1587,8 @@
                     "s3Key",
                     "thumbS3Key",
                     "contentHash",
-                    "takenAt"
+                    "takenAt",
+                    "uploadedAt"
                   ]
                 }
               },
@@ -1347,6 +1610,1369 @@
               "arrivedAt",
               "inspectorId",
               "comment",
+              "confirmedByMolUserId",
+              "confirmedByMolUserEmail",
+              "confirmedByMolAt",
+              "pendingDeletionAt",
+              "pendingDeletionByUserId",
+              "pendingDeletionByUserEmail",
+              "pendingDeletionReason",
+              "version",
+              "sourceDocumentIds",
+              "items",
+              "photos",
+              "createdAt",
+              "updatedAt"
+            ]
+          }
+        },
+        "required": [
+          "error",
+          "serverVersion",
+          "server"
+        ]
+      },
+      "ShipmentKind": {
+        "type": "string",
+        "enum": [
+          "contractor",
+          "return",
+          "transfer",
+          "writeoff"
+        ]
+      },
+      "ShipmentItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "materialId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "nameRaw": {
+            "type": "string"
+          },
+          "qtyPlanned": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qtyActual": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit": {
+            "type": "string"
+          },
+          "comment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lineNo": {
+            "type": "number"
+          },
+          "volumeM3": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "massKg": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "volumeConfidence": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "groupName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "materialId",
+          "nameRaw",
+          "qtyPlanned",
+          "qtyActual",
+          "unit",
+          "comment",
+          "lineNo",
+          "volumeM3",
+          "massKg",
+          "volumeConfidence",
+          "groupName"
+        ]
+      },
+      "ShipmentPhoto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "document",
+              "cargo",
+              "vehicle",
+              "other"
+            ]
+          },
+          "s3Key": {
+            "type": "string"
+          },
+          "thumbS3Key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contentHash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "takenAt": {
+            "type": "string"
+          },
+          "uploadedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "s3Key",
+          "thumbS3Key",
+          "contentHash",
+          "takenAt",
+          "uploadedAt"
+        ]
+      },
+      "Shipment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "entityType": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "color": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sortOrder": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "id",
+              "entityType",
+              "code",
+              "label",
+              "color",
+              "sortOrder"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "contractor",
+              "return",
+              "transfer",
+              "writeoff"
+            ]
+          },
+          "siteId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "receiverCounterpartyId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "destSiteId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "vehiclePlate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "driverName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shippedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "inspectorId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "comment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirmedByMolUserId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "confirmedByMolUserEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirmedByMolAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pendingDeletionAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pendingDeletionByUserId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "pendingDeletionByUserEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pendingDeletionReason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": "number"
+          },
+          "sourceDocumentIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "materialId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "nameRaw": {
+                  "type": "string"
+                },
+                "qtyPlanned": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "qtyActual": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "unit": {
+                  "type": "string"
+                },
+                "comment": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "lineNo": {
+                  "type": "number"
+                },
+                "volumeM3": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "massKg": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "volumeConfidence": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high"
+                  ]
+                },
+                "groupName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "materialId",
+                "nameRaw",
+                "qtyPlanned",
+                "qtyActual",
+                "unit",
+                "comment",
+                "lineNo",
+                "volumeM3",
+                "massKg",
+                "volumeConfidence",
+                "groupName"
+              ]
+            }
+          },
+          "photos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "document",
+                    "cargo",
+                    "vehicle",
+                    "other"
+                  ]
+                },
+                "s3Key": {
+                  "type": "string"
+                },
+                "thumbS3Key": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "contentHash": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "takenAt": {
+                  "type": "string"
+                },
+                "uploadedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "s3Key",
+                "thumbS3Key",
+                "contentHash",
+                "takenAt",
+                "uploadedAt"
+              ]
+            }
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "kind",
+          "siteId",
+          "receiverCounterpartyId",
+          "destSiteId",
+          "vehiclePlate",
+          "driverName",
+          "shippedAt",
+          "inspectorId",
+          "comment",
+          "confirmedByMolUserId",
+          "confirmedByMolUserEmail",
+          "confirmedByMolAt",
+          "pendingDeletionAt",
+          "pendingDeletionByUserId",
+          "pendingDeletionByUserEmail",
+          "pendingDeletionReason",
+          "version",
+          "sourceDocumentIds",
+          "items",
+          "photos",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "ShipmentUpsert": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "statusCode": {
+            "type": "string",
+            "enum": [
+              "not_filled",
+              "draft",
+              "shipped",
+              "confirmed_mol"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "contractor",
+              "return",
+              "transfer",
+              "writeoff"
+            ]
+          },
+          "siteId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "receiverCounterpartyId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "destSiteId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "vehiclePlate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 16
+          },
+          "driverName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "shippedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "comment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sourceDocumentIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "default": []
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "materialId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "nameRaw": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "qtyPlanned": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "qtyActual": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "unit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "default": "шт"
+                },
+                "comment": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "lineNo": {
+                  "type": "number"
+                },
+                "volumeM3": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "massKg": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "volumeConfidence": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high"
+                  ]
+                },
+                "groupName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "nameRaw",
+                "lineNo"
+              ]
+            },
+            "default": []
+          },
+          "baseVersion": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "statusCode",
+          "kind",
+          "siteId"
+        ]
+      },
+      "ShipmentListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "status": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "entityType": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "color": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "sortOrder": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "entityType",
+                    "code",
+                    "label",
+                    "color",
+                    "sortOrder"
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "contractor",
+                    "return",
+                    "transfer",
+                    "writeoff"
+                  ]
+                },
+                "siteId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "receiverCounterpartyId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "destSiteId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "vehiclePlate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "driverName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "shippedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "inspectorId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "comment": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "confirmedByMolUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "confirmedByMolUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "confirmedByMolAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionByUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "pendingDeletionByUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionReason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "version": {
+                  "type": "number"
+                },
+                "sourceDocumentIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "materialId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "nameRaw": {
+                        "type": "string"
+                      },
+                      "qtyPlanned": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "qtyActual": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "unit": {
+                        "type": "string"
+                      },
+                      "comment": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "lineNo": {
+                        "type": "number"
+                      },
+                      "volumeM3": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "massKg": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "volumeConfidence": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high"
+                        ]
+                      },
+                      "groupName": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "materialId",
+                      "nameRaw",
+                      "qtyPlanned",
+                      "qtyActual",
+                      "unit",
+                      "comment",
+                      "lineNo",
+                      "volumeM3",
+                      "massKg",
+                      "volumeConfidence",
+                      "groupName"
+                    ]
+                  }
+                },
+                "photos": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "document",
+                          "cargo",
+                          "vehicle",
+                          "other"
+                        ]
+                      },
+                      "s3Key": {
+                        "type": "string"
+                      },
+                      "thumbS3Key": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "contentHash": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "takenAt": {
+                        "type": "string"
+                      },
+                      "uploadedAt": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "kind",
+                      "s3Key",
+                      "thumbS3Key",
+                      "contentHash",
+                      "takenAt",
+                      "uploadedAt"
+                    ]
+                  }
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "status",
+                "kind",
+                "siteId",
+                "receiverCounterpartyId",
+                "destSiteId",
+                "vehiclePlate",
+                "driverName",
+                "shippedAt",
+                "inspectorId",
+                "comment",
+                "confirmedByMolUserId",
+                "confirmedByMolUserEmail",
+                "confirmedByMolAt",
+                "pendingDeletionAt",
+                "pendingDeletionByUserId",
+                "pendingDeletionByUserEmail",
+                "pendingDeletionReason",
+                "version",
+                "sourceDocumentIds",
+                "items",
+                "photos",
+                "createdAt",
+                "updatedAt"
+              ]
+            }
+          },
+          "total": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ]
+      },
+      "ShipmentMarkDeletion": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          }
+        }
+      },
+      "ShipmentConflictResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "conflict"
+            ]
+          },
+          "serverVersion": {
+            "type": "number"
+          },
+          "server": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "status": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "entityType": {
+                    "type": "string"
+                  },
+                  "code": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "color": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "sortOrder": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "entityType",
+                  "code",
+                  "label",
+                  "color",
+                  "sortOrder"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "contractor",
+                  "return",
+                  "transfer",
+                  "writeoff"
+                ]
+              },
+              "siteId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "receiverCounterpartyId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "destSiteId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "vehiclePlate": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "driverName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "shippedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "inspectorId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "comment": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "confirmedByMolUserId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "confirmedByMolUserEmail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "confirmedByMolAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pendingDeletionAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pendingDeletionByUserId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "pendingDeletionByUserEmail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pendingDeletionReason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "version": {
+                "type": "number"
+              },
+              "sourceDocumentIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "materialId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "nameRaw": {
+                      "type": "string"
+                    },
+                    "qtyPlanned": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "qtyActual": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "unit": {
+                      "type": "string"
+                    },
+                    "comment": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "lineNo": {
+                      "type": "number"
+                    },
+                    "volumeM3": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "massKg": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "volumeConfidence": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high"
+                      ]
+                    },
+                    "groupName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "materialId",
+                    "nameRaw",
+                    "qtyPlanned",
+                    "qtyActual",
+                    "unit",
+                    "comment",
+                    "lineNo",
+                    "volumeM3",
+                    "massKg",
+                    "volumeConfidence",
+                    "groupName"
+                  ]
+                }
+              },
+              "photos": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "document",
+                        "cargo",
+                        "vehicle",
+                        "other"
+                      ]
+                    },
+                    "s3Key": {
+                      "type": "string"
+                    },
+                    "thumbS3Key": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "contentHash": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "takenAt": {
+                      "type": "string"
+                    },
+                    "uploadedAt": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "s3Key",
+                    "thumbS3Key",
+                    "contentHash",
+                    "takenAt",
+                    "uploadedAt"
+                  ]
+                }
+              },
+              "createdAt": {
+                "type": "string"
+              },
+              "updatedAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "status",
+              "kind",
+              "siteId",
+              "receiverCounterpartyId",
+              "destSiteId",
+              "vehiclePlate",
+              "driverName",
+              "shippedAt",
+              "inspectorId",
+              "comment",
+              "confirmedByMolUserId",
+              "confirmedByMolUserEmail",
+              "confirmedByMolAt",
+              "pendingDeletionAt",
+              "pendingDeletionByUserId",
+              "pendingDeletionByUserEmail",
+              "pendingDeletionReason",
               "version",
               "sourceDocumentIds",
               "items",
@@ -1383,7 +3009,10 @@
         "enum": [
           "parsed",
           "parse_failed",
-          "archived"
+          "archived",
+          "queued",
+          "processing",
+          "needs_resolution"
         ]
       },
       "SourceItem": {
@@ -1546,12 +3175,22 @@
               "request"
             ]
           },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "inbound",
+              "outbound"
+            ]
+          },
           "status": {
             "type": "string",
             "enum": [
               "parsed",
               "parse_failed",
-              "archived"
+              "archived",
+              "queued",
+              "processing",
+              "needs_resolution"
             ]
           },
           "supplierId": {
@@ -1567,6 +3206,38 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "contractorId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "siteId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "supplierName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contractorName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "siteName": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "docNumber": {
             "type": [
@@ -1622,6 +3293,53 @@
           },
           "parsedAt": {
             "type": "string"
+          },
+          "queuedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "processedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parseErrorCode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "duplicate_upd",
+              "validation_mismatch",
+              "pdf_no_text",
+              "parse_failed",
+              "internal_error"
+            ]
+          },
+          "parseErrorDetails": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {}
+          },
+          "originalFilename": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contentHash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "jobAttempts": {
+            "type": "number"
           },
           "version": {
             "type": "number"
@@ -1735,9 +3453,12 @@
         "required": [
           "id",
           "kind",
+          "direction",
           "status",
           "supplierId",
           "recipientId",
+          "contractorId",
+          "siteId",
           "docNumber",
           "docDate",
           "totalSum",
@@ -1747,6 +3468,13 @@
           "llmProviderId",
           "llmConfidence",
           "parsedAt",
+          "queuedAt",
+          "processedAt",
+          "parseErrorCode",
+          "parseErrorDetails",
+          "originalFilename",
+          "contentHash",
+          "jobAttempts",
           "version",
           "createdAt",
           "updatedAt",
@@ -1767,12 +3495,22 @@
               "request"
             ]
           },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "inbound",
+              "outbound"
+            ]
+          },
           "status": {
             "type": "string",
             "enum": [
               "parsed",
               "parse_failed",
-              "archived"
+              "archived",
+              "queued",
+              "processing",
+              "needs_resolution"
             ]
           },
           "supplierId": {
@@ -1788,6 +3526,38 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "contractorId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "siteId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "supplierName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contractorName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "siteName": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "docNumber": {
             "type": [
@@ -1843,6 +3613,53 @@
           },
           "parsedAt": {
             "type": "string"
+          },
+          "queuedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "processedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parseErrorCode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "duplicate_upd",
+              "validation_mismatch",
+              "pdf_no_text",
+              "parse_failed",
+              "internal_error"
+            ]
+          },
+          "parseErrorDetails": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {}
+          },
+          "originalFilename": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contentHash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "jobAttempts": {
+            "type": "number"
           },
           "version": {
             "type": "number"
@@ -2108,9 +3925,12 @@
         "required": [
           "id",
           "kind",
+          "direction",
           "status",
           "supplierId",
           "recipientId",
+          "contractorId",
+          "siteId",
           "docNumber",
           "docDate",
           "totalSum",
@@ -2120,6 +3940,13 @@
           "llmProviderId",
           "llmConfidence",
           "parsedAt",
+          "queuedAt",
+          "processedAt",
+          "parseErrorCode",
+          "parseErrorDetails",
+          "originalFilename",
+          "contentHash",
+          "jobAttempts",
           "version",
           "createdAt",
           "updatedAt",
@@ -2147,12 +3974,22 @@
                     "request"
                   ]
                 },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "inbound",
+                    "outbound"
+                  ]
+                },
                 "status": {
                   "type": "string",
                   "enum": [
                     "parsed",
                     "parse_failed",
-                    "archived"
+                    "archived",
+                    "queued",
+                    "processing",
+                    "needs_resolution"
                   ]
                 },
                 "supplierId": {
@@ -2168,6 +4005,38 @@
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "contractorId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "siteId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "supplierName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "contractorName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "siteName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "docNumber": {
                   "type": [
@@ -2223,6 +4092,53 @@
                 },
                 "parsedAt": {
                   "type": "string"
+                },
+                "queuedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "processedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "parseErrorCode": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "duplicate_upd",
+                    "validation_mismatch",
+                    "pdf_no_text",
+                    "parse_failed",
+                    "internal_error"
+                  ]
+                },
+                "parseErrorDetails": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": {}
+                },
+                "originalFilename": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "contentHash": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "jobAttempts": {
+                  "type": "number"
                 },
                 "version": {
                   "type": "number"
@@ -2336,9 +4252,12 @@
               "required": [
                 "id",
                 "kind",
+                "direction",
                 "status",
                 "supplierId",
                 "recipientId",
+                "contractorId",
+                "siteId",
                 "docNumber",
                 "docDate",
                 "totalSum",
@@ -2348,6 +4267,13 @@
                 "llmProviderId",
                 "llmConfidence",
                 "parsedAt",
+                "queuedAt",
+                "processedAt",
+                "parseErrorCode",
+                "parseErrorDetails",
+                "originalFilename",
+                "contentHash",
+                "jobAttempts",
                 "version",
                 "createdAt",
                 "updatedAt",
@@ -2362,6 +4288,29 @@
         "required": [
           "items",
           "total"
+        ]
+      },
+      "SourceDocumentFileResponse": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "mimeType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "url",
+          "filename",
+          "mimeType"
         ]
       },
       "PhotoKind": {
@@ -2493,6 +4442,24 @@
         },
         "required": [
           "ok"
+        ]
+      },
+      "PhotoConfirmResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "uploadedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "uploadedAt"
         ]
       },
       "Counterparty": {
@@ -2711,6 +4678,83 @@
           "total"
         ]
       },
+      "Site": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "fullName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "name",
+          "fullName",
+          "address",
+          "isActive",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "SyncDeletedIds": {
+        "type": "object",
+        "properties": {
+          "deliveries": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "shipments": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "sourceDocuments": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "required": [
+          "deliveries",
+          "shipments",
+          "sourceDocuments"
+        ]
+      },
       "SyncDeltaResponse": {
         "type": "object",
         "properties": {
@@ -2805,6 +4849,50 @@
                   "format": "uuid"
                 },
                 "comment": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "confirmedByMolUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "confirmedByMolUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "confirmedByMolAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionByUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "pendingDeletionByUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionReason": {
                   "type": [
                     "string",
                     "null"
@@ -2944,6 +5032,12 @@
                       },
                       "takenAt": {
                         "type": "string"
+                      },
+                      "uploadedAt": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       }
                     },
                     "required": [
@@ -2952,7 +5046,8 @@
                       "s3Key",
                       "thumbS3Key",
                       "contentHash",
-                      "takenAt"
+                      "takenAt",
+                      "uploadedAt"
                     ]
                   }
                 },
@@ -2974,6 +5069,13 @@
                 "arrivedAt",
                 "inspectorId",
                 "comment",
+                "confirmedByMolUserId",
+                "confirmedByMolUserEmail",
+                "confirmedByMolAt",
+                "pendingDeletionAt",
+                "pendingDeletionByUserId",
+                "pendingDeletionByUserEmail",
+                "pendingDeletionReason",
                 "version",
                 "sourceDocumentIds",
                 "items",
@@ -3085,6 +5187,50 @@
                     "null"
                   ]
                 },
+                "confirmedByMolUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "confirmedByMolUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "confirmedByMolAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionByUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "pendingDeletionByUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pendingDeletionReason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "version": {
                   "type": "number"
                 },
@@ -3219,6 +5365,12 @@
                       },
                       "takenAt": {
                         "type": "string"
+                      },
+                      "uploadedAt": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       }
                     },
                     "required": [
@@ -3227,7 +5379,8 @@
                       "s3Key",
                       "thumbS3Key",
                       "contentHash",
-                      "takenAt"
+                      "takenAt",
+                      "uploadedAt"
                     ]
                   }
                 },
@@ -3250,6 +5403,13 @@
                 "shippedAt",
                 "inspectorId",
                 "comment",
+                "confirmedByMolUserId",
+                "confirmedByMolUserEmail",
+                "confirmedByMolAt",
+                "pendingDeletionAt",
+                "pendingDeletionByUserId",
+                "pendingDeletionByUserEmail",
+                "pendingDeletionReason",
                 "version",
                 "sourceDocumentIds",
                 "items",
@@ -3275,12 +5435,22 @@
                     "request"
                   ]
                 },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "inbound",
+                    "outbound"
+                  ]
+                },
                 "status": {
                   "type": "string",
                   "enum": [
                     "parsed",
                     "parse_failed",
-                    "archived"
+                    "archived",
+                    "queued",
+                    "processing",
+                    "needs_resolution"
                   ]
                 },
                 "supplierId": {
@@ -3296,6 +5466,38 @@
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "contractorId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "siteId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "supplierName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "contractorName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "siteName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "docNumber": {
                   "type": [
@@ -3351,6 +5553,53 @@
                 },
                 "parsedAt": {
                   "type": "string"
+                },
+                "queuedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "processedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "parseErrorCode": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "duplicate_upd",
+                    "validation_mismatch",
+                    "pdf_no_text",
+                    "parse_failed",
+                    "internal_error"
+                  ]
+                },
+                "parseErrorDetails": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": {}
+                },
+                "originalFilename": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "contentHash": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "jobAttempts": {
+                  "type": "number"
                 },
                 "version": {
                   "type": "number"
@@ -3616,9 +5865,12 @@
               "required": [
                 "id",
                 "kind",
+                "direction",
                 "status",
                 "supplierId",
                 "recipientId",
+                "contractorId",
+                "siteId",
                 "docNumber",
                 "docDate",
                 "totalSum",
@@ -3628,6 +5880,13 @@
                 "llmProviderId",
                 "llmConfidence",
                 "parsedAt",
+                "queuedAt",
+                "processedAt",
+                "parseErrorCode",
+                "parseErrorDetails",
+                "originalFilename",
+                "contentHash",
+                "jobAttempts",
                 "version",
                 "createdAt",
                 "updatedAt",
@@ -3785,6 +6044,75 @@
               ]
             }
           },
+          "statuses": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "entityType": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "color": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "sortOrder": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "id",
+                "entityType",
+                "code",
+                "label",
+                "color",
+                "sortOrder"
+              ]
+            }
+          },
+          "deletedIds": {
+            "type": "object",
+            "properties": {
+              "deliveries": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "shipments": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "sourceDocuments": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "required": [
+              "deliveries",
+              "shipments",
+              "sourceDocuments"
+            ]
+          },
           "serverNow": {
             "type": "string"
           }
@@ -3797,6 +6125,8 @@
           "counterparties",
           "materials",
           "sites",
+          "statuses",
+          "deletedIds",
           "serverNow"
         ]
       },
@@ -3811,14 +6141,16 @@
               "shipment_updated",
               "shipment_deleted",
               "source_document_updated",
+              "source_document_deleted",
               "counterparty_updated",
               "material_updated",
               "site_updated",
               "ping"
             ]
           },
-          "id": {
-            "type": "string"
+          "entityId": {
+            "type": "string",
+            "format": "uuid"
           },
           "ts": {
             "type": "string"
@@ -4038,7 +6370,7 @@
           "Sync"
         ],
         "summary": "Дельта-синхронизация",
-        "description": "Возвращает все объекты с updatedAt >= since. Limits на запрос: 500 counterparties, 500 materials, 200 sourceDocuments, 500 deliveries. Если данных больше — повторно вызвать /sync с новым cursor. Inspector_kpp видит только свои deliveries.",
+        "description": "Возвращает все объекты с updatedAt >= since. Limits на запрос: 500 counterparties, 500 materials, 200 sourceDocuments, 500 deliveries, 500 shipments. Если данных больше — повторно вызвать /sync с новым cursor. Inspector_kpp видит данные своего объекта (по siteId). При initial-sync (since=null) рекомендуется задать windowDays для ограничения окна выдачи; при дельта-sync окно не применяется (старые записи могли поменяться). Поле deletedIds возвращается только при дельта-sync — содержит id записей, окончательно удалённых после since.",
         "security": [
           {
             "bearerAuth": []
@@ -4048,11 +6380,23 @@
           {
             "schema": {
               "type": "string",
-              "description": "ISO-8601 timestamp. Если не указан — full sync с начала времён.",
+              "description": "ISO-8601 timestamp. Если не указан — initial-sync, окно ограничивается windowDays.",
               "example": "2026-05-14T10:00:00Z"
             },
             "required": false,
             "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 365,
+              "description": "Окно (в днях) для initial-sync: deliveries/shipments/sourceDocuments отдаются за последние N дней. Default 90. Применяется только при since=null; при дельта-sync игнорируется.",
+              "example": 90
+            },
+            "required": false,
+            "name": "windowDays",
             "in": "query"
           }
         ],
@@ -4274,7 +6618,7 @@
           "Deliveries"
         ],
         "summary": "Список приёмок",
-        "description": "Inspector_kpp видит только свои приёмки. Manager/admin — все. Поддерживает дельта-выборку через changedSince.",
+        "description": "Inspector_kpp видит приёмки своего объекта (по siteId), включая записи других инспекторов. Manager/admin — все. Поддерживает дельта-выборку через changedSince. По умолчанию скрывает помеченные на удаление; trash=true показывает только их (корзина).",
         "security": [
           {
             "bearerAuth": []
@@ -4287,7 +6631,8 @@
               "enum": [
                 "not_filled",
                 "draft",
-                "filled"
+                "filled",
+                "confirmed_mol"
               ]
             },
             "required": false,
@@ -4310,6 +6655,18 @@
             },
             "required": false,
             "name": "changedSince",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "false/unset — активные документы; true — корзина (pending_deletion)."
+            },
+            "required": false,
+            "name": "trash",
             "in": "query"
           },
           {
@@ -4363,7 +6720,7 @@
           "Deliveries"
         ],
         "summary": "Создать или обновить приёмку (upsert)",
-        "description": "OCC через `baseVersion`. Если версия на сервере отличается — 409 Conflict с серверным snapshot. Клиент показывает UI разрешения (server_win / local_win / merge) и повторяет POST с новым baseVersion.",
+        "description": "OCC через `baseVersion`. Если версия на сервере отличается — 409 `conflict` с серверным snapshot. Клиент показывает UI разрешения (server_win / local_win / merge) и повторяет POST с новым baseVersion. Если документ помечен на удаление (pendingDeletionAt != null) — 409 `pending_deletion`, любые мутации запрещены до unmark-deletion.",
         "security": [
           {
             "bearerAuth": []
@@ -4410,7 +6767,7 @@
             }
           },
           "409": {
-            "description": "Конфликт версии: серверная версия отличается от baseVersion",
+            "description": "Конфликт версии (conflict) или документ помечен на удаление (pending_deletion)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4482,7 +6839,7 @@
           "Deliveries"
         ],
         "summary": "Удалить приёмку",
-        "description": "Inspector_kpp может удалить только свою приёмку. Каскадно удаляет фото из S3.",
+        "description": "Двухэтапная модель удаления:\n- `draft`/`not_filled` — hard-delete. Inspector_kpp может удалить приёмку своего siteId; manager/admin — любые.\n- `filled`/`confirmed_mol` — сначала POST /mark-deletion; иначе 409 `must_mark_first`. Окончательное удаление помеченного документа доступно только admin.\nПри hard-delete пишется запись в журнал удалений → офлайн-клиент видит её в `/sync.deletedIds`.",
         "security": [
           {
             "bearerAuth": []
@@ -4540,6 +6897,189 @@
           },
           "404": {
             "description": "Приёмка не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Требуется пометка на удаление (must_mark_first)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/deliveries/{id}/mark-deletion": {
+      "post": {
+        "tags": [
+          "Deliveries"
+        ],
+        "summary": "Пометить приёмку на удаление",
+        "description": "Применимо только к статусам `filled`/`confirmed_mol`. Документ становится read-only: все мутации (upsert, фото) отвечают 409 `pending_deletion`. Окончательное удаление выполняет admin с портала через DELETE.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryMarkDeletion"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Помечена на удаление",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Delivery"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "cannot_mark_status — статус не позволяет пометку",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Доступ запрещён (недостаточно прав)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Приёмка не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "already_pending — уже помечена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/deliveries/{id}/unmark-deletion": {
+      "post": {
+        "tags": [
+          "Deliveries"
+        ],
+        "summary": "Снять пометку об удалении",
+        "description": "Доступ: автор пометки или admin. Inspector_kpp ограничен своим siteId.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Пометка снята",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Delivery"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Доступ запрещён (недостаточно прав)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Приёмка не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "not_pending — документ не помечен на удаление",
             "content": {
               "application/json": {
                 "schema": {
@@ -4743,6 +7283,73 @@
         }
       }
     },
+    "/api/v1/photos/{id}/confirm": {
+      "post": {
+        "tags": [
+          "Photos"
+        ],
+        "summary": "Подтвердить успешную загрузку фото в S3",
+        "description": "Клиент вызывает после успешного PUT в S3. Сервер делает S3.HEAD и, если объект существует, проставляет `uploaded_at = now()`. Это защищает запись от cleanup-job orphan-записей. Idempotent: повторный вызов возвращает прежний uploaded_at. Inspector_kpp может подтвердить только фото своего объекта (по siteId).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Подтверждено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhotoConfirmResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Фото не найдено или ещё не загружено в S3 (not_in_s3)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "S3 недоступна (s3_unavailable) — повторить позже",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/photos/{id}/url": {
       "get": {
         "tags": [
@@ -4818,7 +7425,7 @@
           "Photos"
         ],
         "summary": "Удалить фото (только admin)",
-        "description": "Удаляет запись из delivery_photos и связанные объекты в S3 (основной + thumb). Доступно только пользователям с ролью admin. Ошибки S3 не валят запрос — логируются.",
+        "description": "Удаляет запись из delivery_photos и связанные объекты в S3 (основной + thumb). Доступно только пользователям с ролью admin. Ошибки S3 не валят запрос — логируются. Если родительский документ помечен на удаление — 409 `pending_deletion`.",
         "security": [
           {
             "bearerAuth": []
@@ -4868,6 +7475,644 @@
           },
           "404": {
             "description": "Фото не найдено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Родительский документ помечен на удаление",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/shipments": {
+      "get": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Список отгрузок",
+        "description": "Inspector_kpp видит отгрузки своего объекта (по siteId). Manager/admin — все. По умолчанию скрывает помеченные на удаление; trash=true показывает корзину.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "not_filled",
+                "draft",
+                "shipped",
+                "confirmed_mol"
+              ]
+            },
+            "required": false,
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "contractor",
+                "return",
+                "transfer",
+                "writeoff"
+              ]
+            },
+            "required": false,
+            "name": "kind",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Для manager/admin. Inspector_kpp игнорируется — сервер всегда использует свой siteId."
+            },
+            "required": false,
+            "name": "siteId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "inspectorId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO-8601"
+            },
+            "required": false,
+            "name": "changedSince",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "false/unset — активные документы; true — корзина."
+            },
+            "required": false,
+            "name": "trash",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "required": false,
+            "name": "offset",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Список отгрузок",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Создать или обновить отгрузку (upsert)",
+        "description": "OCC через `baseVersion`. На несовпадение версии — 409 `conflict` с серверным snapshot. Если документ помечен на удаление — 409 `pending_deletion`. Валидация по kind: contractor/return требуют receiverCounterpartyId; transfer — destSiteId ≠ siteId; writeoff — без получателя.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShipmentUpsert"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Создана/обновлена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Невалидные ссылки kind ↔ receiver/destSite",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Доступ запрещён (недостаточно прав)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Конфликт версии (conflict) или документ помечен на удаление (pending_deletion)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentConflictResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/shipments/{id}": {
+      "get": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Детали отгрузки",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Отгрузка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Отгрузка не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Удалить отгрузку",
+        "description": "Двухэтапная модель, аналогично deliveries:\n- `draft`/`not_filled` — hard-delete. Inspector_kpp в рамках своего siteId; manager/admin — любые.\n- `shipped`/`confirmed_mol` — сначала POST /mark-deletion; иначе 409 `must_mark_first`. Окончательное удаление помеченной отгрузки — только admin.\nПри hard-delete пишется запись в журнал удалений → офлайн-клиент видит её в `/sync.deletedIds`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Удалена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Доступ запрещён (недостаточно прав)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Отгрузка не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Требуется пометка на удаление (must_mark_first)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/shipments/{id}/mark-deletion": {
+      "post": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Пометить отгрузку на удаление",
+        "description": "Применимо только к статусам `shipped`/`confirmed_mol`. Документ становится read-only. Окончательное удаление выполняет admin через DELETE.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShipmentMarkDeletion"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Помечена на удаление",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "cannot_mark_status — статус не позволяет пометку",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Доступ запрещён (недостаточно прав)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Отгрузка не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "already_pending — уже помечена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/shipments/{id}/unmark-deletion": {
+      "post": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Снять пометку об удалении",
+        "description": "Доступ: автор пометки или admin. Inspector_kpp ограничен своим siteId.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Пометка снята",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Доступ запрещён (недостаточно прав)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Отгрузка не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "not_pending — документ не помечен на удаление",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/source-documents/{id}/file": {
+      "get": {
+        "tags": [
+          "SourceDocuments"
+        ],
+        "summary": "Получить presigned URL для скачивания оригинала УПД",
+        "description": "Возвращает presigned GET-URL на оригинальный PDF/XML документа в S3, имя файла и MIME. TTL URL — 3600 сек. Inspector_kpp может скачивать только документы своего siteId.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Presigned URL и метаданные файла",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceDocumentFileResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Доступ запрещён (недостаточно прав)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Документ или файл не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/statuses": {
+      "get": {
+        "tags": [
+          "References"
+        ],
+        "summary": "Справочник статусов (по типу сущности)",
+        "description": "Возвращает все статусы для указанного entityType: code, label, color, sortOrder. Если entityType не задан — все статусы (delivery + shipment + …).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Например, `delivery` или `shipment`.",
+              "example": "delivery"
+            },
+            "required": false,
+            "name": "entityType",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Список статусов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
             "content": {
               "application/json": {
                 "schema": {

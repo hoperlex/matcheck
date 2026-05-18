@@ -165,6 +165,7 @@ async function buildDeliveryDto(app: any, id: string) {
       thumbS3Key: p.thumbS3Key,
       contentHash: p.contentHash,
       takenAt: p.takenAt.toISOString(),
+      uploadedAt: p.uploadedAt?.toISOString() ?? null,
     })),
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),

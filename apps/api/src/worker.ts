@@ -28,6 +28,7 @@ import {
 } from './plugins/queue.js';
 import { deleteObject, getObject } from './domain/storage/s3.signer.js';
 import { parseUpdPdf, PdfNoTextError } from './domain/edo/upd-pdf.parser.js';
+import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
 import { validateUpdTotals } from './domain/edo/upd-validation.js';
 import type { UpdPdfParsed } from '@matcheck/contracts';
 
@@ -418,4 +419,22 @@ logger.info(
 void recoverStaleProcessing().catch((err) =>
   logger.error({ err }, 'recoverStaleProcessing failed'),
 );
+
+// Periodic photo-orphan cleanup. Запись в delivery_photos / shipment_photos
+// создаётся ДО PUT в S3 — без последующего confirm она остаётся orphan'ом.
+// Раз в час делаем S3.HEAD и либо проставляем uploaded_at, либо удаляем.
+// Первый запуск — через 5 мин от старта (даём клиентам, висевшим на старом
+// presign-URL, время подтвердить).
+const PHOTO_ORPHAN_INTERVAL_MS = 60 * 60 * 1000;
+const PHOTO_ORPHAN_DELAY_MS = 5 * 60 * 1000;
+setTimeout(() => {
+  void cleanupPhotoOrphans(logger).catch((err) =>
+    logger.error({ err }, 'photo orphan cleanup failed'),
+  );
+  setInterval(() => {
+    void cleanupPhotoOrphans(logger).catch((err) =>
+      logger.error({ err }, 'photo orphan cleanup failed'),
+    );
+  }, PHOTO_ORPHAN_INTERVAL_MS).unref();
+}, PHOTO_ORPHAN_DELAY_MS).unref();
 

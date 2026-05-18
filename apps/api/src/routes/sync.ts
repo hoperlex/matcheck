@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { desc, eq, gte } from 'drizzle-orm';
+import { desc, eq, gte, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import { SyncDeltaResponseSchema } from '@matcheck/contracts';
@@ -25,6 +25,10 @@ import {
 
 const QuerySchema = z.object({
   since: z.string().datetime().optional(),
+  // Окно (в днях) для initial-sync: deliveries/shipments/sourceDocuments
+  // отдаются за последние N дней. Default 90. При since != null игнорируется
+  // (старые записи могли поменяться, дельта-sync их захватывает).
+  windowDays: z.coerce.number().int().min(1).max(365).optional(),
 });
 
 export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
@@ -37,6 +41,13 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const since = req.query.since ? new Date(req.query.since) : null;
+      const windowDays = req.query.windowDays ?? 90;
+      // effectiveSince — для deliveries/shipments/sourceDocuments:
+      //  - при дельта-sync (since != null): since;
+      //  - при initial-sync (since == null): now - windowDays days.
+      // Справочники (counterparties/materials/sites/statuses) окно не применяют —
+      // они полностью нужны клиенту независимо от дат.
+      const effectiveSince = since ?? new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
       const inspectorOnly = req.user?.role === 'inspector_kpp';
       const userSiteId = req.user?.siteId ?? null;
 
@@ -50,6 +61,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           counterparties: [],
           materials: [],
           sites: [],
+          statuses: [],
           sourceDocuments: [],
           deliveries: [],
           shipments: [],
@@ -75,11 +87,31 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(since ? gte(sites.updatedAt, since) : undefined)
         .orderBy(desc(sites.updatedAt))
         .limit(500);
+      // Статусы (entity_type='delivery'|'shipment'|…) клиент использует для UI:
+      // лейбл, цвет, sortOrder. Меняются редко — отдаём всегда без фильтра.
+      const statusRows = await app.db
+        .select()
+        .from(statuses)
+        .orderBy(statuses.entityType, statuses.sortOrder);
 
+      // Источниковые документы: для inspector_kpp фильтруем по своему siteId
+      // и оставляем только не привязанные к приёмке/отгрузке — это сценарий
+      // «Ожидаемые УПД» в мобильном Inbox. Для manager/admin — все документы
+      // в окне effectiveSince.
+      const sdWhereParts = [gte(sourceDocuments.updatedAt, effectiveSince)];
+      if (inspectorOnly && userSiteId) {
+        sdWhereParts.push(eq(sourceDocuments.siteId, userSiteId));
+        sdWhereParts.push(
+          drSql`not exists (select 1 from delivery_sources ds where ds.source_document_id = ${sourceDocuments.id})`,
+        );
+        sdWhereParts.push(
+          drSql`not exists (select 1 from shipment_sources ss where ss.source_document_id = ${sourceDocuments.id})`,
+        );
+      }
       const sdRows = await app.db
         .select()
         .from(sourceDocuments)
-        .where(since ? gte(sourceDocuments.updatedAt, since) : undefined)
+        .where(drAnd(...sdWhereParts))
         .orderBy(desc(sourceDocuments.updatedAt))
         .limit(200);
 
@@ -100,6 +132,8 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       // Инспектор видит всё в рамках своего объекта (включая записи других
       // инспекторов на том же siteId) — синхронизировано с GET /deliveries,
       // см. коммит 1833b9d. До этого фильтр был по inspectorId.
+      // Окно effectiveSince применяется и при initial-sync (windowDays), и при
+      // дельта-sync (since).
       const dRowsJoined = await app.db
         .select({ d: deliveries, s: statuses, molEmail: users.email })
         .from(deliveries)
@@ -107,12 +141,8 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         .leftJoin(users, eq(deliveries.confirmedByMolUserId, users.id))
         .where(
           inspectorOnly && userSiteId
-            ? since
-              ? eqAnd(deliveries.siteId, userSiteId, gte(deliveries.updatedAt, since))
-              : eq(deliveries.siteId, userSiteId)
-            : since
-              ? gte(deliveries.updatedAt, since)
-              : undefined,
+            ? eqAnd(deliveries.siteId, userSiteId, gte(deliveries.updatedAt, effectiveSince))
+            : gte(deliveries.updatedAt, effectiveSince),
         )
         .orderBy(desc(deliveries.updatedAt))
         .limit(500);
@@ -131,7 +161,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             .where(sql_in(deliverySources.deliveryId, dIds))
         : [];
 
-      // ── Shipments (симметрично deliveries: видимость по siteId) ──
+      // ── Shipments (симметрично deliveries: видимость по siteId + окно) ──
       const shRowsJoined = await app.db
         .select({ s: shipments, st: statuses, molEmail: users.email })
         .from(shipments)
@@ -139,12 +169,8 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         .leftJoin(users, eq(shipments.confirmedByMolUserId, users.id))
         .where(
           inspectorOnly && userSiteId
-            ? since
-              ? eqAnd(shipments.siteId, userSiteId, gte(shipments.updatedAt, since))
-              : eq(shipments.siteId, userSiteId)
-            : since
-              ? gte(shipments.updatedAt, since)
-              : undefined,
+            ? eqAnd(shipments.siteId, userSiteId, gte(shipments.updatedAt, effectiveSince))
+            : gte(shipments.updatedAt, effectiveSince),
         )
         .orderBy(desc(shipments.updatedAt))
         .limit(500);
@@ -170,9 +196,9 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       // Возвращаем только при дельта-sync (since != null) — на initial-sync
       // клиент стартует с нуля, история удалений не нужна. Для inspector_kpp
       // фильтр по siteId (записи без siteId — например, до 0024 — не отдаём).
-      let deletedDeliveryIds: string[] = [];
-      let deletedShipmentIds: string[] = [];
-      let deletedSourceDocumentIds: string[] = [];
+      const deletedDeliveryIds: string[] = [];
+      const deletedShipmentIds: string[] = [];
+      const deletedSourceDocumentIds: string[] = [];
       if (since) {
         const delRows = await app.db
           .select({ entityType: entityDeletions.entityType, entityId: entityDeletions.entityId })
@@ -232,6 +258,14 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           isActive: s.isActive,
           createdAt: s.createdAt.toISOString(),
           updatedAt: s.updatedAt.toISOString(),
+        })),
+        statuses: statusRows.map((st) => ({
+          id: st.id,
+          entityType: st.entityType,
+          code: st.code,
+          label: st.label,
+          color: st.color,
+          sortOrder: st.sortOrder,
         })),
         sourceDocuments: sdRows.map((sd) => ({
           id: sd.id,
@@ -354,6 +388,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
               thumbS3Key: p.thumbS3Key,
               contentHash: p.contentHash,
               takenAt: p.takenAt.toISOString(),
+              uploadedAt: p.uploadedAt?.toISOString() ?? null,
             })),
           createdAt: d.createdAt.toISOString(),
           updatedAt: d.updatedAt.toISOString(),
@@ -413,6 +448,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
               thumbS3Key: p.thumbS3Key,
               contentHash: p.contentHash,
               takenAt: p.takenAt.toISOString(),
+              uploadedAt: p.uploadedAt?.toISOString() ?? null,
             })),
           createdAt: s.createdAt.toISOString(),
           updatedAt: s.updatedAt.toISOString(),

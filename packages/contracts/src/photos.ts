@@ -17,6 +17,11 @@ export const PhotoPresignRequestSchema = z.object({
   kind: PhotoKindSchema,
   contentHash: z.string().regex(/^[0-9a-f]{64}$/),
   idempotencyKey: z.string().uuid(),
+  // Реальный MIME загружаемого файла: image/jpeg, image/png, image/heic,
+  // image/heif, image/webp. Сервер использует его для расширения файла в S3
+  // и параметра Content-Type в presigned URL. Default — image/jpeg для
+  // обратной совместимости со старым веб-фронтом, но мобильный клиент должен
+  // присылать реальный MIME.
   contentType: z.string().default('image/jpeg'),
   thumbContentHash: z
     .string()
@@ -44,3 +49,12 @@ export type PhotoGetUrlResponse = z.infer<typeof PhotoGetUrlResponseSchema>;
 
 export const PhotoDeleteResponseSchema = z.object({ ok: z.literal(true) });
 export type PhotoDeleteResponse = z.infer<typeof PhotoDeleteResponseSchema>;
+
+// Подтверждение фото после успешного PUT в S3: сервер делает S3.HEAD и,
+// если объект существует, проставляет uploaded_at = now(). Иначе 404 —
+// клиент должен повторить PUT.
+export const PhotoConfirmResponseSchema = z.object({
+  ok: z.literal(true),
+  uploadedAt: z.string(),
+});
+export type PhotoConfirmResponse = z.infer<typeof PhotoConfirmResponseSchema>;

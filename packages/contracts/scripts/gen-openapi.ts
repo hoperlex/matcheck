@@ -46,9 +46,10 @@ const document = generator.generateDocument({
     { name: 'Auth', description: 'Аутентификация и управление сессией' },
     { name: 'Sync', description: 'Дельта-синхронизация и real-time-уведомления' },
     { name: 'Deliveries', description: 'Приёмки материалов' },
+    { name: 'Shipments', description: 'Отгрузки материалов' },
     { name: 'SourceDocuments', description: 'Входящие документы (УПД)' },
     { name: 'Photos', description: 'Загрузка и доступ к фото' },
-    { name: 'References', description: 'Справочники (контрагенты, материалы)' },
+    { name: 'References', description: 'Справочники (контрагенты, материалы, статусы)' },
   ],
 });
 

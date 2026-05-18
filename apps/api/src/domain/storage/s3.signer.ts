@@ -95,3 +95,17 @@ export async function deleteObject(key: string): Promise<void> {
     throw new Error(`S3 DELETE ${key} failed: HTTP ${res.status} ${text.slice(0, 200)}`);
   }
 }
+
+// Проверка существования объекта в S3 без скачивания тела. Используется в
+// confirm-эндпоинте фото и в orphan-cleanup-job. true = объект есть; false =
+// 404; throw — сетевая/permission-ошибка (caller решает что делать).
+export async function headObject(key: string): Promise<boolean> {
+  const url = new URL(`${endpoint()}/${env.S3_BUCKET}/${key}`);
+  const res = await getClient().fetch(url, { method: 'HEAD' });
+  if (res.status === 404) return false;
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`S3 HEAD ${key} failed: HTTP ${res.status} ${text.slice(0, 200)}`);
+  }
+  return true;
+}

@@ -563,6 +563,11 @@ export const deliveryPhotos = pgTable(
     contentHash: varchar('content_hash', { length: 64 }),
     idempotencyKey: uuid('idempotency_key'),
     takenAt: timestamp('taken_at', { withTimezone: true }).notNull().defaultNow(),
+    // Подтверждение успешного PUT в S3 (POST /photos/{id}/confirm). NULL =
+    // orphan-запись, фото в S3 ещё не загружено; через час фоновая job
+    // photoOrphanCleanup проверит S3.HEAD и либо проставит uploaded_at, либо
+    // удалит запись.
+    uploadedAt: timestamp('uploaded_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -572,6 +577,9 @@ export const deliveryPhotos = pgTable(
     uniqueIndex('delivery_photo_idempotency_unique')
       .on(t.deliveryId, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} is not null`),
+    index('delivery_photos_orphan_idx')
+      .on(t.takenAt)
+      .where(sql`${t.uploadedAt} is null`),
   ],
 );
 
@@ -691,6 +699,7 @@ export const shipmentPhotos = pgTable(
     contentHash: varchar('content_hash', { length: 64 }),
     idempotencyKey: uuid('idempotency_key'),
     takenAt: timestamp('taken_at', { withTimezone: true }).notNull().defaultNow(),
+    uploadedAt: timestamp('uploaded_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -700,6 +709,9 @@ export const shipmentPhotos = pgTable(
     uniqueIndex('shipment_photo_idempotency_unique')
       .on(t.shipmentId, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} is not null`),
+    index('shipment_photos_orphan_idx')
+      .on(t.takenAt)
+      .where(sql`${t.uploadedAt} is null`),
   ],
 );
 

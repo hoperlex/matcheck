@@ -65,12 +65,18 @@ User-Agent: matcheck-android/1.0 (Build 1; Android 14)
     "email": "inspector@example.ru",
     "role": "inspector_kpp",
     "isActive": true,
+    "siteId": "uuid-объекта-строительства",
     "createdAt": "2026-01-01T00:00:00.000Z"
   },
   "refreshToken": "base64url-32-bytes-of-randomness",
   "refreshExpiresIn": 1209600
 }
 ```
+
+Поле `user.siteId` для роли `inspector_kpp` всегда заполнено — это объект,
+к которому привязан пользователь. Мобильный клиент сохраняет его при логине;
+селект объекта в UI инспектора отключён (сервер всё равно перезаписывает).
+Для admin/manager `siteId` равен `null`.
 
 **Ошибки:**
 
@@ -138,11 +144,11 @@ Authorization: Bearer <refreshToken>
 
 | Роль | Доступ |
 |---|---|
-| `inspector_kpp` | Видит и создаёт только свои `deliveries`. Только GET по `counterparties` и `materials`. Mobile-клиент рассчитан на эту роль. |
-| `manager` | Видит все `deliveries`, может создавать справочники. |
-| `admin` | Полный доступ. |
+| `inspector_kpp` | Видит deliveries и shipments своего объекта (`siteId`), включая записи других инспекторов на том же объекте. Создаёт от своего имени. GET по `counterparties` и `materials`. Mobile-клиент рассчитан на эту роль. |
+| `manager` | Видит все `deliveries`/`shipments`, может создавать справочники. |
+| `admin` | Полный доступ. Окончательное удаление помеченных документов (см. ниже) — только admin. |
 
-Сервер фильтрует данные на стороне БД — клиенту не нужно делать фильтрацию. При запросе `/deliveries` инспектор получит только свои строки, даже без `inspectorId` в query.
+Сервер фильтрует данные на стороне БД — клиенту не нужно делать фильтрацию. При запросе `/deliveries` инспектор получит только данные своего объекта (по `siteId`), даже без явных query-параметров.
 
 ## OCC (optimistic concurrency control) для приёмок
 
@@ -171,15 +177,91 @@ Authorization: Bearer <refreshToken>
 
 Образец TS-реализации: [`apps/web/src/services/conflictResolver.ts`](../apps/web/src/services/conflictResolver.ts). Логику синхронизации (push-queue, retry, OCC) можно один к одному перенести на Kotlin/Coroutines + Room.
 
+## Shipments (отгрузки)
+
+`POST/GET/DELETE /api/v1/shipments` — зеркало `/deliveries`, та же модель OCC,
+тот же photo-pipeline. Отличия:
+
+- Поле `kind: 'contractor' | 'return' | 'transfer' | 'writeoff'` — обязательно
+  при upsert.
+- `receiverCounterpartyId` — обязателен для `contractor` и `return`.
+- `destSiteId` (другой объект-получатель) — обязателен для `transfer`,
+  должен отличаться от `siteId`.
+- `writeoff` — без `receiverCounterpartyId` и `destSiteId`.
+- Статусы: `not_filled` → `draft` → `shipped` → `confirmed_mol`.
+
+OCC ответ — `ShipmentConflictResponse` (структура идентична `ConflictResponse`
+для deliveries, только snapshot — `Shipment`).
+
+## Soft-delete (двухэтапное удаление)
+
+Бизнес-правило: оформленные/подтверждённые МОЛ приёмки и отгрузки нельзя
+удалить напрямую — сначала ставится пометка («корзина»), окончательно удаляет
+только админ с портала. На планшете инспектора кнопка «удалить окончательно»
+не показывается.
+
+### Эндпоинты
+
+| Сценарий | Эндпоинт | Кто |
+|---|---|---|
+| Удалить черновик | `DELETE /api/v1/deliveries\|shipments/{id}` | inspector_kpp своего `siteId`, manager, admin |
+| Пометить оформленную/подтверждённую | `POST /api/v1/deliveries\|shipments/{id}/mark-deletion` body `{reason?: string}` | inspector_kpp своего `siteId`, manager, admin |
+| Снять пометку | `POST /api/v1/deliveries\|shipments/{id}/unmark-deletion` | автор пометки или admin |
+| Окончательно удалить помеченный | `DELETE /api/v1/deliveries\|shipments/{id}` | **только admin** |
+| Открыть корзину | `GET /api/v1/deliveries\|shipments?trash=1` | inspector_kpp (своего объекта), manager, admin |
+
+### Поля в DTO
+
+После пометки `Delivery`/`Shipment` содержат:
+
+```json
+{
+  "pendingDeletionAt": "2026-05-18T10:00:00.000Z",
+  "pendingDeletionByUserId": "uuid",
+  "pendingDeletionByUserEmail": "user@example.ru",
+  "pendingDeletionReason": "ошибка ввода"
+}
+```
+
+В ответе `/sync` поле `pendingDeletionByUserEmail` всегда `null` — это
+намеренное упрощение (без дополнительного join). Реальный email подтягивается
+при открытии деталей через `GET /deliveries|shipments/{id}`.
+
+### Семантика 409 и 400
+
+| Код | Значение | Что делать клиенту |
+|---|---|---|
+| 409 `must_mark_first` | DELETE filled/confirmed_mol без пометки | Вызвать `mark-deletion`, потом повторить DELETE (только admin) |
+| 409 `already_pending` | mark по уже помеченному | Обновить локальную копию из server-snapshot |
+| 409 `not_pending` | unmark по не помеченному | Обновить локальную копию |
+| 409 `pending_deletion` | upsert / photo presign / photo delete по помеченному | UI в read-only, разрешить только unmark |
+| 400 `cannot_mark_status` | mark по draft/not_filled | Использовать обычный DELETE |
+
+### Read-only режим клиента
+
+При `pendingDeletionAt != null` мобильное приложение должно:
+- блокировать редактирование полей;
+- скрыть кнопку камеры (сервер вернёт 409 на `POST /photos/presign`);
+- показать бейдж «На удалении» с автором, датой и причиной.
+
+Окончательное удаление (`DELETE` после mark) кнопка показывается **только**
+если `role === 'admin'`. Для inspector_kpp — нет.
+
 ## Photo pipeline
 
 Двухэтапный процесс с дедупликацией по `contentHash`.
 
 ### Алгоритм
 
-1. **Клиент сжимает фото** нативно: Bitmap + InSampleSize + JPEG quality 80. Стандарт:
+1. **Клиент сжимает фото** нативно. Формат — любой: JPEG, PNG, HEIC/HEIF, WebP
+   (что прислано — то и сохраняется в S3). Рекомендация — сжатие до ~1.5 МБ
+   ради экономии трафика на полевом 4G:
    - Main: max side 2048 px, цель ~1.5 МБ.
    - Thumb (опционально): max side 320 px, цель ~0.1 МБ.
+
+   В `POST /photos/presign` обязательно слать реальный `contentType` —
+   `"image/jpeg"`, `"image/heic"`, `"image/webp"` и т.д. Сервер использует
+   его для расширения файла в S3.
 
 2. **Клиент считает SHA-256** от main-байтов:
    ```kotlin
@@ -215,7 +297,14 @@ Authorization: Bearer <refreshToken>
    ```
    Прямой PUT, без OkHttp-interceptor на Authorization (presigned URL уже подписан AWS-методом). Параллельно — `thumbUploadUrl` если он выдан.
 
-7. На успешный PUT (HTTP 200) **дополнительный confirm-запрос не нужен** — сервер увидит факт загрузки при следующем `GET /sync` (фото в `Delivery.photos[]`).
+7. На успешный PUT (HTTP 200) **рекомендуется** вызвать `POST /api/v1/photos/{id}/confirm` —
+   сервер делает S3.HEAD и проставляет `uploaded_at = now()`. Это защищает
+   запись от автоматической очистки orphan-задачей (раз в час сервер
+   проверяет неподтверждённые фото старше 1 часа и удаляет, если объекта
+   в S3 нет). Без confirm фото всё равно «дозреет» через час (cleanup
+   увидит S3-объект и проставит uploaded_at), но клиент не должен пытаться
+   открыть фото с `uploadedAt: null` — `GET /url` может вернуть 404, если
+   запись orphan'нулась.
 
 ### TTL и retry
 
@@ -228,7 +317,8 @@ Authorization: Bearer <refreshToken>
 
 ## Дельта-синхронизация
 
-`GET /api/v1/sync?since={ISO-8601-timestamp}` возвращает все объекты с `updatedAt >= since`:
+`GET /api/v1/sync?since={ISO-8601-timestamp}&windowDays={1..365}` возвращает
+все объекты с `updatedAt >= since`:
 
 ```json
 {
@@ -236,10 +326,37 @@ Authorization: Bearer <refreshToken>
   "serverNow": "2026-05-14T10:30:01.000Z",
   "counterparties": [...],
   "materials": [...],
+  "sites": [...],
+  "statuses": [...],
   "sourceDocuments": [...],
-  "deliveries": [...]
+  "deliveries": [...],
+  "shipments": [...],
+  "deletedIds": {
+    "deliveries": ["uuid", ...],
+    "shipments": ["uuid", ...],
+    "sourceDocuments": ["uuid", ...]
+  }
 }
 ```
+
+### Параметры
+
+- **`since`** (опц.) — ISO-8601. Если не задан — initial-sync, окно
+  ограничивается `windowDays`.
+- **`windowDays`** (опц., default 90, 1..365) — окно для initial-sync:
+  `deliveries`/`shipments`/`sourceDocuments` отдаются за последние N дней.
+  При дельта-sync (`since != null`) — игнорируется (старые записи могли
+  поменяться, дельта-sync их захватывает).
+
+### Что отдаёт inspector_kpp
+
+- `counterparties`, `materials`, `sites`, `statuses` — полностью (без siteId-фильтра).
+- `deliveries`, `shipments` — по своему `siteId` (включая записи других
+  инспекторов на том же объекте).
+- `sourceDocuments` — по своему `siteId`, **только не привязанные** к
+  приёмке/отгрузке (это сценарий «Inbox: ожидаемые УПД»).
+- `deletedIds` — id записей, физически удалённых после `since`, по своему
+  `siteId`. Пустые массивы при initial-sync.
 
 ### Limits на запрос
 
@@ -247,8 +364,10 @@ Authorization: Bearer <refreshToken>
 |---|---|
 | `counterparties` | 500 |
 | `materials` | 500 |
+| `sites` | 500 |
 | `sourceDocuments` | 200 |
 | `deliveries` | 500 |
+| `shipments` | 500 |
 
 Если в каком-то массиве пришло ровно лимит — возможно, есть ещё данные. Стратегия pagination через cursor:
 
@@ -307,14 +426,20 @@ factory.newEventSource(request, listener)
 
 ```
 event: delivery_updated
-data: {"type":"delivery_updated","id":"<uuid>","ts":"2026-05-14T10:00:00.000Z"}
+data: {"type":"delivery_updated","entityId":"<uuid>","ts":"2026-05-14T10:00:00.000Z"}
 ```
 
-**Event types:** `delivery_updated`, `delivery_deleted`, `source_document_updated`, `counterparty_updated`, `material_updated`, `ping`.
+Поле `entityId` обязательно для всех `*_updated` и `*_deleted` событий (для
+`ping` — отсутствует). При `*_deleted` клиент может **сразу удалить** локальную
+запись по `entityId`, без вызова `/sync`.
+
+**Event types:** `delivery_updated`, `delivery_deleted`, `shipment_updated`,
+`shipment_deleted`, `source_document_updated`, `source_document_deleted`,
+`counterparty_updated`, `material_updated`, `site_updated`, `ping`.
 
 **Ping:** каждые 25 сек. Если ping не приходит дольше 60 сек — соединение считается мёртвым, переподключайтесь.
 
-**Важно:** SSE — это «триггер для sync», а не канал данных. На событие `delivery_updated` клиент **должен** вызвать `GET /sync?since={last_cursor}` — само событие содержит только тип и id, актуальное состояние нужно подтянуть отдельно.
+**Важно:** SSE — это «триггер для sync», а не канал данных. На событие `*_updated` клиент **должен** вызвать `GET /sync?since={last_cursor}` — само событие содержит только тип и `entityId`, актуальное состояние нужно подтянуть отдельно. Для `*_deleted` достаточно удалить локальную запись по `entityId`.
 
 ## Offline-first архитектура клиента
 

@@ -177,6 +177,7 @@ async function buildShipmentDto(app: any, id: string) {
       thumbS3Key: p.thumbS3Key,
       contentHash: p.contentHash,
       takenAt: p.takenAt.toISOString(),
+      uploadedAt: p.uploadedAt?.toISOString() ?? null,
     })),
     createdAt: s.createdAt.toISOString(),
     updatedAt: s.updatedAt.toISOString(),

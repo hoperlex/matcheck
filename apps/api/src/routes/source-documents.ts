@@ -35,6 +35,7 @@ import {
 import { parseUpdXml } from '../domain/edo/upd.parser.js';
 import { validateUpdTotals } from '../domain/edo/upd-validation.js';
 import { presign, putObject } from '../domain/storage/s3.signer.js';
+import { buildS3Key } from '../domain/storage/s3.path.js';
 import { publishEvent } from './events.js';
 
 const ListQuerySchema = z.object({
@@ -771,8 +772,25 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       }
 
       // S3 загрузка перед INSERT — если упадёт, документа в БД не появится.
+      // Ключ: {site.code}/{contractor.inn}__{slug(name)}/source-documents/{id}/source.pdf.
       const newId = randomUUID();
-      const s3Key = `documents/${newId}/source.pdf`;
+      const [pdfSite] = await app.db
+        .select({ code: sites.code })
+        .from(sites)
+        .where(eq(sites.id, siteId))
+        .limit(1);
+      const [pdfCp] = await app.db
+        .select({ inn: counterparties.inn, name: counterparties.name })
+        .from(counterparties)
+        .where(eq(counterparties.id, contractorId))
+        .limit(1);
+      const s3Key = buildS3Key({
+        site: pdfSite ?? null,
+        counterparty: pdfCp ?? null,
+        entityType: 'source-documents',
+        entityId: newId,
+        filename: 'source.pdf',
+      });
       try {
         await putObject(s3Key, buffer, 'application/pdf');
       } catch (err) {
