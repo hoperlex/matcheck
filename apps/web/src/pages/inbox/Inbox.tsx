@@ -33,7 +33,6 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
-import { UpdXmlUploadModal } from './UpdXmlUploadModal';
 import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
 import { UpdResolveDuplicateModal } from './UpdResolveDuplicateModal';
 
@@ -174,7 +173,6 @@ export default function InboxPage() {
   };
 
   const [pdfModalOpen, setPdfModalOpen] = useState(false);
-  const [xmlModalOpen, setXmlModalOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [resolveId, setResolveId] = useState<string | null>(null);
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
@@ -337,10 +335,9 @@ export default function InboxPage() {
             { label: 'Заявки', value: 'request' },
           ]}
         />
-        <Button type="primary" onClick={() => setXmlModalOpen(true)}>
-          Загрузить УПД (XML)
+        <Button type="primary" onClick={() => setPdfModalOpen(true)}>
+          Загрузить УПД (PDF)
         </Button>
-        <Button onClick={() => setPdfModalOpen(true)}>Загрузить УПД (PDF)</Button>
         {list.isFetching && !list.isLoading && (
           <Spin size="small" indicator={<LoadingOutlined spin />} />
         )}
@@ -453,11 +450,6 @@ export default function InboxPage() {
         open={pdfModalOpen}
         direction={direction}
         onClose={() => setPdfModalOpen(false)}
-      />
-      <UpdXmlUploadModal
-        open={xmlModalOpen}
-        direction={direction}
-        onClose={() => setXmlModalOpen(false)}
       />
       <SourceDocumentDetailModal
         id={selectedId}

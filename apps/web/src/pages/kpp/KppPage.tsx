@@ -1040,6 +1040,12 @@ export default function KppPage() {
           error={linkUpdError}
         />
 
+        {selectedUpd && !loadedDelivery?.sourceShipmentId && (
+          <Card size="small" title="Дата поставки" styles={{ body: { padding: 12 } }}>
+            <Typography.Text>{selectedUpd.expectedDate ?? '—'}</Typography.Text>
+          </Card>
+        )}
+
         <VehicleFillGauge
           items={items.map((it) => ({
             qty:

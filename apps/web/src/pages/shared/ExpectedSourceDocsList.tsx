@@ -154,6 +154,11 @@ export function ExpectedSourceDocsList({
           },
           { title: 'Дата', dataIndex: 'docDate', render: (v: string | null) => v ?? '—' },
           {
+            title: 'Дата поставки',
+            dataIndex: 'expectedDate',
+            render: (v: string | null) => v ?? '—',
+          },
+          {
             title: 'Поставщик',
             key: 'supplier',
             render: (_: unknown, r: SourceDocument) => r.supplierName ?? '—',
