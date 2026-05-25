@@ -1304,10 +1304,10 @@ export default function ShipmentPage() {
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          Отгрузка
-        </Typography.Title>
-        <Space wrap>
+        <Space wrap align="center">
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            Отгрузка
+          </Typography.Title>
           <Segmented
             value={tab}
             onChange={(v) => {
@@ -1320,15 +1320,15 @@ export default function ShipmentPage() {
               { label: 'Принятые', value: 'accepted' },
             ]}
           />
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={createBlank}
-            disabled={inspectorWithoutSite}
-          >
-            Новая отгрузка
-          </Button>
         </Space>
+        <Button
+          type="primary"
+          icon={<PlusOutlined />}
+          onClick={createBlank}
+          disabled={inspectorWithoutSite}
+        >
+          Новая отгрузка
+        </Button>
       </Space>
       {inspectorWithoutSite && (
         <Alert
