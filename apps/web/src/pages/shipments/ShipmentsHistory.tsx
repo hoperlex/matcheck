@@ -61,15 +61,10 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
   const authUser = useAuthStore((s) => s.user);
   const isAdmin = authUser?.role === 'admin';
 
-  // Три вкладки: «Активные» (без no_document), «Без документа», «Корзина».
-  // См. соответствующий комментарий в DeliveriesHistory.tsx.
-  type View = 'active' | 'no_document' | 'trash';
-  const view: View =
-    params.get('trash') === '1'
-      ? 'trash'
-      : params.get('view') === 'no_document'
-        ? 'no_document'
-        : 'active';
+  // Две вкладки: «Активные» (включая отгрузки без УПД, статус no_document)
+  // и «Корзина». URL: trash=1 — корзина.
+  type View = 'active' | 'trash';
+  const view: View = params.get('trash') === '1' ? 'trash' : 'active';
   const isTrash = view === 'trash';
 
   const filters: ListFiltersValue & { status: string | null; plate: string } = {
@@ -103,20 +98,13 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
     params2.delete('trash');
     params2.delete('view');
     if (next === 'trash') params2.set('trash', '1');
-    else if (next === 'no_document') params2.set('view', 'no_document');
     setParams(params2, { replace: true });
   };
 
   const list = useQuery({
     queryKey: ['shipments', view],
     queryFn: () =>
-      api.get<List>(
-        view === 'trash'
-          ? '/shipments?trash=1'
-          : view === 'no_document'
-            ? '/shipments?status=no_document'
-            : '/shipments',
-      ),
+      api.get<List>(view === 'trash' ? '/shipments?trash=1' : '/shipments'),
   });
 
   const counterpartiesQuery = useQuery({
@@ -273,8 +261,6 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
 
   const filteredItems = useMemo(() => {
     return items.filter((r) => {
-      // Активная вкладка не показывает «Без документа» — для них есть отдельная.
-      if (view === 'active' && r.status.code === 'no_document') return false;
       if (filters.contractorId && r.receiverCounterpartyId !== filters.contractorId) {
         return false;
       }
@@ -293,7 +279,6 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
   }, [
     items,
     sourceDocsById,
-    view,
     filters.contractorId,
     filters.supplierId,
     filters.siteId,
@@ -416,7 +401,6 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
         onChange={(v) => setView(v as View)}
         options={[
           { label: 'Активные', value: 'active' },
-          { label: 'Без документа', value: 'no_document' },
           { label: 'Корзина', value: 'trash' },
         ]}
       />
@@ -430,16 +414,14 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
         searchPlaceholder="Номер документа"
         extra={
           <>
-            {view !== 'no_document' && (
-              <Select<string>
-                style={{ width: SELECT_WIDTH }}
-                placeholder="Статус"
-                value={filters.status ?? undefined}
-                onChange={(v) => updateFilters({ status: v ?? null })}
-                allowClear
-                options={statusOptions}
-              />
-            )}
+            <Select<string>
+              style={{ width: SELECT_WIDTH }}
+              placeholder="Статус"
+              value={filters.status ?? undefined}
+              onChange={(v) => updateFilters({ status: v ?? null })}
+              allowClear
+              options={statusOptions}
+            />
             <Input.Search
               style={{ width: 180 }}
               placeholder="Номер авто"
@@ -455,13 +437,7 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
         loading={list.isLoading}
         rowKey="id"
         onRowClick={(r) => onOpen(r.id)}
-        emptyText={
-          view === 'trash'
-            ? 'Корзина пуста'
-            : view === 'no_document'
-              ? 'Нет отгрузок без документа'
-              : 'Нет отгрузок'
-        }
+        emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет отгрузок'}
         columns={[
           {
             title: 'Статус',
