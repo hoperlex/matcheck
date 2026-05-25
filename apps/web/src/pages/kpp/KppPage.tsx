@@ -232,25 +232,17 @@ export default function KppPage() {
   // без переписки. Фактические items/plate/comment живут в локальном state формы.
   const virtualDelivery: Delivery | null = useMemo(() => {
     if (!isNew || !deliveryId) return null;
-    // До первого «Сохранить» статус виртуальной приёмки определяется по наличию
-    // updIdFromUrl: с УПД — обычный not_filled, без УПД — no_document.
-    const initialStatus: Status = updIdFromUrl
-      ? {
-          id: '',
-          entityType: 'delivery',
-          code: 'not_filled',
-          label: 'Не оформлена',
-          color: null,
-          sortOrder: 0,
-        }
-      : {
-          id: '',
-          entityType: 'delivery',
-          code: 'no_document',
-          label: 'Без документа',
-          color: 'gold',
-          sortOrder: 15,
-        };
+    // До первого «Сохранить» статус виртуальной приёмки — not_filled
+    // независимо от наличия УПД. Признак «без документа» отображается
+    // отдельным тегом и вычисляется из sourceDocumentIds.
+    const initialStatus: Status = {
+      id: '',
+      entityType: 'delivery',
+      code: 'not_filled',
+      label: 'Не оформлена',
+      color: 'orange',
+      sortOrder: 10,
+    };
     return {
       id: deliveryId,
       status: initialStatus,
@@ -537,15 +529,15 @@ export default function KppPage() {
     mutationFn: async () => {
       if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
       // Обычное «Сохранить» не должно «понижать» подтверждённый документ.
-      // Если УПД не выбрана — статус «Без документа» (сервер всё равно
-      // нормализует, но локальный optimistic-state должен совпадать).
+      // Без УПД оформить как filled нельзя — сервер всё равно понизит,
+      // но локальный optimistic-state должен совпадать.
       const currentCode = loadedDelivery.status.code as DeliveryStatusCode;
       const nextCode: DeliveryStatusCode =
         currentCode === 'confirmed_mol'
           ? 'confirmed_mol'
           : selectedUpd
             ? 'filled'
-            : 'no_document';
+            : 'not_filled';
       await persistStatus(nextCode);
     },
     onSuccess: () => {
@@ -1008,7 +1000,7 @@ export default function KppPage() {
                   <Space direction="vertical" size={4} style={{ width: '100%' }}>
                     <Typography.Text type="secondary">— без УПД —</Typography.Text>
                     {!isInspector &&
-                      loadedDelivery?.status.code === 'no_document' &&
+                      loadedDelivery?.sourceDocumentIds.length === 0 &&
                       !isNew && (
                         <Button
                           size="small"

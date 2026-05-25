@@ -61,11 +61,15 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
   const authUser = useAuthStore((s) => s.user);
   const isAdmin = authUser?.role === 'admin';
 
-  // Две вкладки: «Активные» (включая отгрузки без УПД, статус no_document)
-  // и «Корзина». URL: trash=1 — корзина.
+  // Две вкладки: «Активные» (включая отгрузки без УПД) и «Корзина».
+  // URL: trash=1 — корзина. Фильтр «Документ» — ортогональный сегмент:
+  // all | with | without (URL-параметр doc=with|without).
   type View = 'active' | 'trash';
+  type DocFilter = 'all' | 'with' | 'without';
   const view: View = params.get('trash') === '1' ? 'trash' : 'active';
   const isTrash = view === 'trash';
+  const docFilter: DocFilter =
+    params.get('doc') === 'with' ? 'with' : params.get('doc') === 'without' ? 'without' : 'all';
 
   const filters: ListFiltersValue & { status: string | null; plate: string } = {
     contractorId: params.get('contractor'),
@@ -101,10 +105,23 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
     setParams(params2, { replace: true });
   };
 
+  const setDocFilter = (next: DocFilter) => {
+    const params2 = new URLSearchParams(params);
+    params2.delete('doc');
+    if (next !== 'all') params2.set('doc', next);
+    setParams(params2, { replace: true });
+  };
+
   const list = useQuery({
-    queryKey: ['shipments', view],
-    queryFn: () =>
-      api.get<List>(view === 'trash' ? '/shipments?trash=1' : '/shipments'),
+    queryKey: ['shipments', view, docFilter],
+    queryFn: () => {
+      const qs = new URLSearchParams();
+      if (view === 'trash') qs.set('trash', '1');
+      if (docFilter === 'with') qs.set('noDocument', 'false');
+      else if (docFilter === 'without') qs.set('noDocument', 'true');
+      const q = qs.toString();
+      return api.get<List>(q ? `/shipments?${q}` : '/shipments');
+    },
   });
 
   const counterpartiesQuery = useQuery({
@@ -384,6 +401,7 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
   const renderStatusCell = (r: Row) => (
     <Space size={4} wrap>
       <Tag color={r.status.color ?? 'default'}>{r.status.label}</Tag>
+      {r.sourceDocumentIds.length === 0 && <Tag color="gold">Без документа</Tag>}
       {isTrash && (
         <PendingDeletionTag
           at={r.pendingDeletionAt}
@@ -396,14 +414,25 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Segmented
-        value={view}
-        onChange={(v) => setView(v as View)}
-        options={[
-          { label: 'Активные', value: 'active' },
-          { label: 'Корзина', value: 'trash' },
-        ]}
-      />
+      <Space wrap>
+        <Segmented
+          value={view}
+          onChange={(v) => setView(v as View)}
+          options={[
+            { label: 'Активные', value: 'active' },
+            { label: 'Корзина', value: 'trash' },
+          ]}
+        />
+        <Segmented
+          value={docFilter}
+          onChange={(v) => setDocFilter(v as DocFilter)}
+          options={[
+            { label: 'Все', value: 'all' },
+            { label: 'С УПД', value: 'with' },
+            { label: 'Без УПД', value: 'without' },
+          ]}
+        />
+      </Space>
       <ListFilters
         value={filters}
         onChange={updateFilters}

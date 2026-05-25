@@ -37,14 +37,15 @@ const ListQuerySchema = z.object({
   changedSince: z.string().datetime().optional(),
   // По умолчанию (false/unset) скрывает помеченные на удаление; trash=true показывает корзину.
   trash: z.coerce.boolean().optional(),
+  // Фильтр по наличию привязанной УПД: true — только без документа,
+  // false — только с документом, undefined — без фильтра.
+  noDocument: z.coerce.boolean().optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
 
 // Статусы, при которых разрешён hard-delete без предварительной пометки.
-// 'no_document' — полу-черновик, созданный инспектором без УПД; нет смысла
-// гонять его через корзину.
-const HARD_DELETE_STATUSES = new Set(['draft', 'not_filled', 'no_document']);
+const HARD_DELETE_STATUSES = new Set(['draft', 'not_filled']);
 // Статусы, для которых соответственно требуется soft-delete (mark → admin hard).
 const SOFT_DELETE_STATUSES = new Set(['filled', 'confirmed_mol']);
 
@@ -205,7 +206,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: { querystring: ListQuerySchema, response: { 200: DeliveryListResponseSchema } },
     },
     async (req) => {
-      const { status, inspectorId, changedSince, trash, limit, offset } = req.query;
+      const { status, inspectorId, changedSince, trash, noDocument, limit, offset } = req.query;
       const filters = [];
       // По умолчанию показываем только активные документы; trash=true даёт корзину.
       filters.push(
@@ -214,6 +215,13 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       if (status) {
         const statusId = await resolveStatusId(app, status);
         filters.push(eq(deliveries.statusId, statusId));
+      }
+      if (noDocument !== undefined) {
+        filters.push(
+          noDocument
+            ? drSql`not exists (select 1 from delivery_sources ds where ds.delivery_id = ${deliveries.id})`
+            : drSql`exists (select 1 from delivery_sources ds where ds.delivery_id = ${deliveries.id})`,
+        );
       }
       // inspector_kpp видит приёмки своего объекта (включая созданные другими).
       // Без назначенного объекта — пустой результат.
@@ -310,11 +318,16 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       }
 
       // Нормализация статуса по пустоте sourceDocumentIds:
-      // если УПД не привязана — это «Без документа», что бы клиент ни прислал.
-      // Сервер — единственный источник истины, чтобы offline-клиенты, не успевшие
-      // обновить логику, не могли отправить, например, 'filled' без УПД.
+      // без УПД нельзя оформить документ как 'filled' или подтвердить МОЛ
+      // (это бы означало приёмку готовых позиций без оригинала). Сервер —
+      // единственный источник истины: если клиент прислал такой статус без
+      // УПД, понижаем до not_filled. Признак «нет документа» сам по себе
+      // отображается отдельным тегом и не занимает слот статуса.
       const effectiveStatusCode =
-        input.sourceDocumentIds.length === 0 ? 'no_document' : input.statusCode;
+        input.sourceDocumentIds.length === 0 &&
+        (input.statusCode === 'filled' || input.statusCode === 'confirmed_mol')
+          ? 'not_filled'
+          : input.statusCode;
       const statusId = await resolveStatusId(app, effectiveStatusCode);
 
       try {
@@ -683,12 +696,17 @@ async function updateDelivery(
   const isFirstConfirm =
     input.statusCode === 'confirmed_mol' && existing.confirmedByMolUserId === null;
 
-  // Ручная привязка УПД к приёмке «Без документа» на портале: клиент шлёт
+  // Ручная привязка УПД к приёмке без документа на портале: клиент шлёт
   // непустой sourceDocumentIds и пустой items — сервер подтягивает позиции
   // из УПД (qtyPlanned из qty, qtyActual=null). Дальше оператор/инспектор
   // доводит приёмку до filled штатным путём.
+  const [existingSourcesCount] = await app.db
+    .select({ c: drSql<number>`count(*)::int` })
+    .from(deliverySources)
+    .where(eq(deliverySources.deliveryId, id));
+  const existingHadNoDocs = (existingSourcesCount?.c ?? 0) === 0;
   const itemsForInsert =
-    existingCode === 'no_document' &&
+    existingHadNoDocs &&
     input.sourceDocumentIds.length > 0 &&
     input.items.length === 0
       ? await buildDeliveryItemsFromSources(app, input.sourceDocumentIds)

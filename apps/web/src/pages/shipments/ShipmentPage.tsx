@@ -298,25 +298,17 @@ export default function ShipmentPage() {
   // без переписки. Фактические items/receiver/comment живут в локальном state формы.
   const virtualShipment: Shipment | null = useMemo(() => {
     if (!isNew || !shipmentId) return null;
-    // До первого «Сохранить» статус виртуальной отгрузки определяется по наличию
-    // updIdFromUrl: с УПД — обычный not_filled, без УПД — no_document.
-    const initialStatus: Status = updIdFromUrl
-      ? {
-          id: '',
-          entityType: 'shipment',
-          code: 'not_filled',
-          label: 'Не оформлена',
-          color: null,
-          sortOrder: 0,
-        }
-      : {
-          id: '',
-          entityType: 'shipment',
-          code: 'no_document',
-          label: 'Без документа',
-          color: 'gold',
-          sortOrder: 15,
-        };
+    // До первого «Сохранить» статус виртуальной отгрузки — not_filled
+    // независимо от наличия УПД. Признак «без документа» отображается
+    // отдельным тегом и вычисляется из sourceDocumentIds.
+    const initialStatus: Status = {
+      id: '',
+      entityType: 'shipment',
+      code: 'not_filled',
+      label: 'Не оформлена',
+      color: 'orange',
+      sortOrder: 10,
+    };
     return {
       id: shipmentId,
       status: initialStatus,
@@ -516,8 +508,8 @@ export default function ShipmentPage() {
   const save = useMutation({
     mutationFn: async () => {
       if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
-      // Если УПД не привязана — статус «Без документа» (сервер всё равно
-      // нормализует, но локальный optimistic-state должен совпадать).
+      // Без УПД оформить как shipped нельзя — сервер всё равно понизит,
+      // но локальный optimistic-state должен совпадать.
       const hasUpd = loadedShipment.sourceDocumentIds.length > 0;
       const currentCode = loadedShipment.status.code as ShipmentStatusCode;
       const nextCode: ShipmentStatusCode =
@@ -525,7 +517,7 @@ export default function ShipmentPage() {
           ? 'confirmed_mol'
           : hasUpd
             ? 'shipped'
-            : 'no_document';
+            : 'not_filled';
       await persistStatus(nextCode);
     },
     onSuccess: () => {
@@ -895,7 +887,7 @@ export default function ShipmentPage() {
           />
         )}
 
-        {loadedShipment?.status.code === 'no_document' && !isNew && (
+        {loadedShipment?.sourceDocumentIds.length === 0 && !isNew && (
           <Alert
             type="info"
             showIcon

@@ -39,13 +39,15 @@ const ListQuerySchema = z.object({
   changedSince: z.string().datetime().optional(),
   // По умолчанию (false/unset) скрывает помеченные на удаление; trash=true показывает корзину.
   trash: z.coerce.boolean().optional(),
+  // Фильтр по наличию привязанной УПД: true — только без документа,
+  // false — только с документом, undefined — без фильтра.
+  noDocument: z.coerce.boolean().optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
 
 // Статусы, при которых разрешён hard-delete без предварительной пометки.
-// 'no_document' — отгрузка без УПД (только фото), удаляется напрямую.
-const HARD_DELETE_STATUSES = new Set(['draft', 'not_filled', 'no_document']);
+const HARD_DELETE_STATUSES = new Set(['draft', 'not_filled']);
 // Статусы, для которых соответственно требуется soft-delete (mark → admin hard).
 const SOFT_DELETE_STATUSES = new Set(['filled', 'confirmed_mol']);
 
@@ -202,7 +204,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: { querystring: ListQuerySchema, response: { 200: ShipmentListResponseSchema } },
     },
     async (req) => {
-      const { status, kind, siteId, inspectorId, changedSince, trash, limit, offset } = req.query;
+      const { status, kind, siteId, inspectorId, changedSince, trash, noDocument, limit, offset } = req.query;
       const filters = [];
       filters.push(
         trash ? isNotNull(shipments.pendingDeletionAt) : isNull(shipments.pendingDeletionAt),
@@ -210,6 +212,13 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       if (status) {
         const statusId = await resolveStatusId(app, status);
         filters.push(eq(shipments.statusId, statusId));
+      }
+      if (noDocument !== undefined) {
+        filters.push(
+          noDocument
+            ? drSql`not exists (select 1 from shipment_sources ss where ss.shipment_id = ${shipments.id})`
+            : drSql`exists (select 1 from shipment_sources ss where ss.shipment_id = ${shipments.id})`,
+        );
       }
       if (kind) filters.push(eq(shipments.kind, kind));
       // inspector_kpp видит отгрузки своего объекта-источника (включая чужие).
@@ -308,10 +317,14 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       }
 
       // Нормализация статуса по пустоте sourceDocumentIds — см. комментарий
-      // в /api/v1/deliveries: офлайн-планшеты не могут отправить, например,
-      // 'shipped' без УПД, сервер форсит 'no_document'.
+      // в /api/v1/deliveries: без УПД нельзя оформить как 'shipped' или
+      // 'confirmed_mol', понижаем до not_filled. Признак «нет документа»
+      // отображается отдельным тегом и не занимает слот статуса.
       const effectiveStatusCode =
-        input.sourceDocumentIds.length === 0 ? 'no_document' : input.statusCode;
+        input.sourceDocumentIds.length === 0 &&
+        (input.statusCode === 'shipped' || input.statusCode === 'confirmed_mol')
+          ? 'not_filled'
+          : input.statusCode;
       const statusId = await resolveStatusId(app, effectiveStatusCode);
 
       // Дополнительная валидация согласованности kind ↔ receiver/destSite,
@@ -713,11 +726,16 @@ async function updateShipment(
   const isFirstConfirm =
     input.statusCode === 'confirmed_mol' && existing.confirmedByMolUserId === null;
 
-  // Ручная привязка УПД к отгрузке «Без документа» на портале: клиент шлёт
+  // Ручная привязка УПД к отгрузке без документа на портале: клиент шлёт
   // непустой sourceDocumentIds и пустой items — сервер подтягивает позиции
   // из УПД. См. updateDelivery (симметрично).
+  const [existingSourcesCount] = await app.db
+    .select({ c: drSql<number>`count(*)::int` })
+    .from(shipmentSources)
+    .where(eq(shipmentSources.shipmentId, id));
+  const existingHadNoDocs = (existingSourcesCount?.c ?? 0) === 0;
   const itemsForInsert =
-    existingCode === 'no_document' &&
+    existingHadNoDocs &&
     input.sourceDocumentIds.length > 0 &&
     input.items.length === 0
       ? await buildShipmentItemsFromSources(app, input.sourceDocumentIds)
