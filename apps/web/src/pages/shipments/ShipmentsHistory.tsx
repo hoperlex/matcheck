@@ -62,14 +62,11 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
   const isAdmin = authUser?.role === 'admin';
 
   // Две вкладки: «Активные» (включая отгрузки без УПД) и «Корзина».
-  // URL: trash=1 — корзина. Фильтр «Документ» — ортогональный сегмент:
-  // all | with | without (URL-параметр doc=with|without).
+  // URL: trash=1 — корзина. Поиск «Без документа» доступен через
+  // селект «Статус» как псевдо-значение no_document.
   type View = 'active' | 'trash';
-  type DocFilter = 'all' | 'with' | 'without';
   const view: View = params.get('trash') === '1' ? 'trash' : 'active';
   const isTrash = view === 'trash';
-  const docFilter: DocFilter =
-    params.get('doc') === 'with' ? 'with' : params.get('doc') === 'without' ? 'without' : 'all';
 
   const filters: ListFiltersValue & { status: string | null; plate: string } = {
     contractorId: params.get('contractor'),
@@ -105,23 +102,10 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
     setParams(params2, { replace: true });
   };
 
-  const setDocFilter = (next: DocFilter) => {
-    const params2 = new URLSearchParams(params);
-    params2.delete('doc');
-    if (next !== 'all') params2.set('doc', next);
-    setParams(params2, { replace: true });
-  };
-
   const list = useQuery({
-    queryKey: ['shipments', view, docFilter],
-    queryFn: () => {
-      const qs = new URLSearchParams();
-      if (view === 'trash') qs.set('trash', '1');
-      if (docFilter === 'with') qs.set('noDocument', 'false');
-      else if (docFilter === 'without') qs.set('noDocument', 'true');
-      const q = qs.toString();
-      return api.get<List>(q ? `/shipments?${q}` : '/shipments');
-    },
+    queryKey: ['shipments', view],
+    queryFn: () =>
+      api.get<List>(view === 'trash' ? '/shipments?trash=1' : '/shipments'),
   });
 
   const counterpartiesQuery = useQuery({
@@ -268,12 +252,20 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
 
   const items = list.data?.items ?? [];
 
+  // Опции селекта «Статус» собираем из реальных данных и добавляем
+  // псевдо-опцию «Без документа» — это не код статуса в БД, а способ
+  // отфильтровать отгрузки с пустым sourceDocumentIds.
   const statusOptions = useMemo(() => {
     const seen = new Map<string, { label: string }>();
     for (const r of items) {
       if (!seen.has(r.status.code)) seen.set(r.status.code, { label: r.status.label });
     }
-    return Array.from(seen.entries()).map(([code, v]) => ({ value: code, label: v.label }));
+    const opts = Array.from(seen.entries()).map(([code, v]) => ({
+      value: code,
+      label: v.label,
+    }));
+    opts.push({ value: 'no_document', label: 'Без документа' });
+    return opts;
   }, [items]);
 
   const filteredItems = useMemo(() => {
@@ -285,7 +277,11 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
         return false;
       }
       if (filters.siteId && r.siteId !== filters.siteId) return false;
-      if (filters.status && r.status.code !== filters.status) return false;
+      if (filters.status === 'no_document') {
+        if (r.sourceDocumentIds.length !== 0) return false;
+      } else if (filters.status && r.status.code !== filters.status) {
+        return false;
+      }
       if (filters.plate.trim() && !matchText(r.vehiclePlate, filters.plate)) return false;
       if (filters.q.trim()) {
         const docNum = resolveDocNumber(r);
@@ -414,25 +410,14 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Space wrap>
-        <Segmented
-          value={view}
-          onChange={(v) => setView(v as View)}
-          options={[
-            { label: 'Активные', value: 'active' },
-            { label: 'Корзина', value: 'trash' },
-          ]}
-        />
-        <Segmented
-          value={docFilter}
-          onChange={(v) => setDocFilter(v as DocFilter)}
-          options={[
-            { label: 'Все', value: 'all' },
-            { label: 'С УПД', value: 'with' },
-            { label: 'Без УПД', value: 'without' },
-          ]}
-        />
-      </Space>
+      <Segmented
+        value={view}
+        onChange={(v) => setView(v as View)}
+        options={[
+          { label: 'Активные', value: 'active' },
+          { label: 'Корзина', value: 'trash' },
+        ]}
+      />
       <ListFilters
         value={filters}
         onChange={updateFilters}
