@@ -62,7 +62,6 @@ import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { DeliveriesHistory } from './DeliveriesHistory';
 import { ExpectedUpds } from './ExpectedUpds';
 import { PhotoGallery } from './PhotoGallery';
-import { VehicleFillGauge } from './VehicleFillGauge';
 import { GroupedItemsList } from './grouping/GroupedItemsList';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
@@ -1045,19 +1044,6 @@ export default function KppPage() {
             <Typography.Text>{selectedUpd.expectedDate ?? '—'}</Typography.Text>
           </Card>
         )}
-
-        <VehicleFillGauge
-          items={items.map((it) => ({
-            qty:
-              it.qtyActual !== null && it.qtyActual !== ''
-                ? Number(it.qtyActual)
-                : it.qtyPlanned !== null && it.qtyPlanned !== ''
-                  ? Number(it.qtyPlanned)
-                  : 0,
-            volumeM3: it.volumeM3 !== null && it.volumeM3 !== '' ? Number(it.volumeM3) : null,
-            massKg: it.massKg !== null && it.massKg !== '' ? Number(it.massKg) : null,
-          }))}
-        />
 
         <Collapse
           size="small"
