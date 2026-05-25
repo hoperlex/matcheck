@@ -1,11 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Button,
   Card,
   Drawer,
   Form,
   Input,
-  Modal,
   Space,
   Switch,
   Tag,
@@ -22,6 +21,8 @@ type List = { items: Counterparty[]; total: number };
 export default function CounterpartiesPage() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  // null — режим создания, иначе редактируется конкретная запись.
+  const [editing, setEditing] = useState<Counterparty | null>(null);
   const [search, setSearch] = useState('');
   const [form] = Form.useForm<CounterpartyUpsert>();
 
@@ -35,12 +36,69 @@ export default function CounterpartiesPage() {
     mutationFn: (body: CounterpartyUpsert) => api.post('/counterparties', body),
     onSuccess: () => {
       message.success('Контрагент создан');
-      setOpen(false);
-      form.resetFields();
+      closeDrawer();
       void qc.invalidateQueries({ queryKey: ['counterparties'] });
     },
     onError: (err: Error) => message.error(err.message),
   });
+
+  const update = useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Partial<CounterpartyUpsert> }) =>
+      api.patch(`/counterparties/${id}`, body),
+    onSuccess: () => {
+      message.success('Контрагент сохранён');
+      closeDrawer();
+      void qc.invalidateQueries({ queryKey: ['counterparties'] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  // При открытии Drawer в режиме редактирования заполняем форму данными
+  // выбранной строки. resetFields() — для создания, чтобы не было утечки
+  // значений от предыдущего открытия.
+  useEffect(() => {
+    if (!open) return;
+    if (editing) {
+      form.setFieldsValue({
+        inn: editing.inn,
+        kpp: editing.kpp,
+        name: editing.name,
+        address: editing.address ?? undefined,
+        isSelf: editing.isSelf,
+        isSupplier: editing.isSupplier,
+        isCustomer: editing.isCustomer,
+        isContractor: editing.isContractor,
+      });
+    } else {
+      form.resetFields();
+    }
+  }, [open, editing, form]);
+
+  function openCreate() {
+    setEditing(null);
+    setOpen(true);
+  }
+
+  function openEdit(row: Counterparty) {
+    setEditing(row);
+    setOpen(true);
+  }
+
+  function closeDrawer() {
+    setOpen(false);
+    setEditing(null);
+    form.resetFields();
+  }
+
+  function onFinish(values: CounterpartyUpsert) {
+    if (editing) {
+      update.mutate({ id: editing.id, body: values });
+    } else {
+      create.mutate(values);
+    }
+  }
+
+  const submitting = create.isPending || update.isPending;
 
   return (
     <div>
@@ -50,7 +108,7 @@ export default function CounterpartiesPage() {
         </Typography.Title>
         <Space>
           <Input.Search placeholder="ИНН или название" allowClear onSearch={setSearch} />
-          <Button type="primary" onClick={() => setOpen(true)}>
+          <Button type="primary" onClick={openCreate}>
             Добавить
           </Button>
         </Space>
@@ -59,6 +117,7 @@ export default function CounterpartiesPage() {
         items={list.data?.items ?? []}
         loading={list.isLoading}
         rowKey="id"
+        onRowClick={openEdit}
         columns={[
           { title: 'ИНН', dataIndex: 'inn' },
           { title: 'КПП', dataIndex: 'kpp' },
@@ -77,7 +136,7 @@ export default function CounterpartiesPage() {
           },
         ]}
         cardRender={(r) => (
-          <Card style={{ width: '100%' }} size="small">
+          <Card style={{ width: '100%' }} size="small" onClick={() => openEdit(r)}>
             <Space direction="vertical" size={4}>
               <Typography.Text strong>{r.name}</Typography.Text>
               <Typography.Text type="secondary">
@@ -95,16 +154,12 @@ export default function CounterpartiesPage() {
       />
       <Drawer
         open={open}
-        onClose={() => setOpen(false)}
-        title="Новый контрагент"
+        onClose={closeDrawer}
+        title={editing ? 'Контрагент' : 'Новый контрагент'}
         width={420}
         destroyOnClose
       >
-        <Form<CounterpartyUpsert>
-          form={form}
-          layout="vertical"
-          onFinish={(values) => create.mutate(values)}
-        >
+        <Form<CounterpartyUpsert> form={form} layout="vertical" onFinish={onFinish}>
           <Form.Item
             name="inn"
             label="ИНН"
@@ -141,12 +196,11 @@ export default function CounterpartiesPage() {
               </Form.Item>
             </Space>
           </Form.Item>
-          <Button type="primary" htmlType="submit" loading={create.isPending} block size="large">
+          <Button type="primary" htmlType="submit" loading={submitting} block size="large">
             Сохранить
           </Button>
         </Form>
       </Drawer>
-      <Modal open={false} onCancel={() => undefined} footer={null} />
     </div>
   );
 }
