@@ -316,16 +316,9 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         input.siteId = req.user.siteId;
       }
 
-      // Нормализация статуса по пустоте sourceDocumentIds — см. комментарий
-      // в /api/v1/deliveries: без УПД нельзя оформить как 'shipped' или
-      // 'confirmed_mol', понижаем до not_filled. Признак «нет документа»
-      // отображается отдельным тегом и не занимает слот статуса.
-      const effectiveStatusCode =
-        input.sourceDocumentIds.length === 0 &&
-        (input.statusCode === 'shipped' || input.statusCode === 'confirmed_mol')
-          ? 'not_filled'
-          : input.statusCode;
-      const statusId = await resolveStatusId(app, effectiveStatusCode);
+      // Статус процесса и наличие УПД — независимые измерения.
+      // См. комментарий в /api/v1/deliveries.
+      const statusId = await resolveStatusId(app, input.statusCode);
 
       // Дополнительная валидация согласованности kind ↔ receiver/destSite,
       // BD-CHECK даст более грубое сообщение — отдадим клиенту что-то понятное.

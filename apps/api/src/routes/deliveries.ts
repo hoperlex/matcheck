@@ -317,18 +317,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         input.siteId = req.user.siteId;
       }
 
-      // Нормализация статуса по пустоте sourceDocumentIds:
-      // без УПД нельзя оформить документ как 'filled' или подтвердить МОЛ
-      // (это бы означало приёмку готовых позиций без оригинала). Сервер —
-      // единственный источник истины: если клиент прислал такой статус без
-      // УПД, понижаем до not_filled. Признак «нет документа» сам по себе
-      // отображается отдельным тегом и не занимает слот статуса.
-      const effectiveStatusCode =
-        input.sourceDocumentIds.length === 0 &&
-        (input.statusCode === 'filled' || input.statusCode === 'confirmed_mol')
-          ? 'not_filled'
-          : input.statusCode;
-      const statusId = await resolveStatusId(app, effectiveStatusCode);
+      // Статус процесса и наличие УПД — независимые измерения: инспектор
+      // может оформить приёмку (filled) и без оригинала (например, мобилка
+      // «Завершить 1 этап» по фото и госномеру, документ подгрузят позже).
+      // Признак «нет документа» отображается отдельным тегом на основании
+      // sourceDocumentIds и не занимает слот статуса.
+      const statusId = await resolveStatusId(app, input.statusCode);
 
       try {
         // OCC update
