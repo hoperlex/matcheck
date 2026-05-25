@@ -6,6 +6,8 @@ import {
   Form,
   List,
   Modal,
+  Segmented,
+  Select,
   Space,
   Tag,
   Typography,
@@ -14,10 +16,14 @@ import {
 } from 'antd';
 import { InboxOutlined, FilePdfOutlined } from '@ant-design/icons';
 import type { UploadFile, UploadProps } from 'antd';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Dayjs } from 'dayjs';
-import type { SourceDirection, UpdPdfQueueResponse } from '@matcheck/contracts';
-import { apiUploadFile, ApiError } from '../../services/api';
+import type {
+  ResponsiblePerson,
+  SourceDirection,
+  UpdPdfQueueResponse,
+} from '@matcheck/contracts';
+import { api, apiUploadFile, ApiError } from '../../services/api';
 import { ContractorSelect } from './ContractorSelect';
 import { SiteSelect } from './SiteSelect';
 
@@ -46,14 +52,31 @@ export function UpdPdfUploadModal({
   onClose: () => void;
 }) {
   const qc = useQueryClient();
+  // Получатель — переключатель: контрагент-подрядчик или МОЛ. Не обязателен,
+  // диспетчер может загрузить УПД и без него (потом проставит инспектор).
+  const [recipientKind, setRecipientKind] = useState<'counterparty' | 'mol'>(
+    'counterparty',
+  );
   const [contractorId, setContractorId] = useState<string | null>(null);
+  const [recipientMolId, setRecipientMolId] = useState<string | null>(null);
   const [siteId, setSiteId] = useState<string | null>(null);
   const [expectedDate, setExpectedDate] = useState<Dayjs | null>(null);
   const [rows, setRows] = useState<FileRow[]>([]);
   const [uploading, setUploading] = useState(false);
 
+  const responsiblePersonsQuery = useQuery({
+    queryKey: ['responsible-persons', 'active'],
+    queryFn: () =>
+      api.get<{ items: ResponsiblePerson[]; total: number }>(
+        '/responsible-persons?activeOnly=true&limit=500',
+      ),
+  });
+  const responsiblePersons = responsiblePersonsQuery.data?.items ?? [];
+
   function reset() {
+    setRecipientKind('counterparty');
     setContractorId(null);
+    setRecipientMolId(null);
     setSiteId(null);
     setExpectedDate(null);
     setRows([]);
@@ -66,7 +89,7 @@ export function UpdPdfUploadModal({
     onClose();
   }
 
-  const canUpload = !!contractorId && !!siteId && rows.length > 0 && !uploading;
+  const canUpload = !!siteId && rows.length > 0 && !uploading;
 
   const uploadProps: UploadProps = {
     accept: 'application/pdf',
@@ -89,7 +112,7 @@ export function UpdPdfUploadModal({
   };
 
   async function startUpload() {
-    if (!contractorId || !siteId) return;
+    if (!siteId) return;
     setUploading(true);
     // Каждый файл — независимый POST. Можно слать параллельно, но при 10–20
     // больших PDF параллельные запросы упрутся в API multipart-лимиты;
@@ -101,14 +124,23 @@ export function UpdPdfUploadModal({
         prev.map((r) => (r.uid === row.uid ? { ...r, status: 'uploading' } : r)),
       );
       try {
+        // Получатель опционален: в зависимости от выбора переключателя
+        // отправляем либо contractorId, либо recipientMolId, либо ни того
+        // ни другого. Multipart требует строки — пустые значения опускаем.
+        const recipientFields: Record<string, string> = {};
+        if (recipientKind === 'counterparty' && contractorId) {
+          recipientFields.contractorId = contractorId;
+        } else if (recipientKind === 'mol' && recipientMolId) {
+          recipientFields.recipientMolId = recipientMolId;
+        }
         const res = await apiUploadFile<UpdPdfQueueResponse>(
           '/source-documents/upload-upd-pdf',
           row.file,
           {
             fields: {
               direction,
-              contractorId,
               siteId,
+              ...recipientFields,
               ...(expectedDate ? { expectedDate: expectedDate.format('YYYY-MM-DD') } : {}),
             },
           },
@@ -177,8 +209,52 @@ export function UpdPdfUploadModal({
         description="Документы появятся в списке со статусом «в очереди» и обновятся автоматически по мере обработки."
       />
       <Form layout="vertical">
-        <Form.Item label="Подрядчик" required>
-          <ContractorSelect value={contractorId} onChange={setContractorId} disabled={uploading} />
+        <Form.Item label="Получатель">
+          <Segmented
+            block
+            style={{ marginBottom: 8 }}
+            value={recipientKind}
+            onChange={(v) => {
+              const next = v as 'counterparty' | 'mol';
+              setRecipientKind(next);
+              if (next === 'counterparty') setRecipientMolId(null);
+              else setContractorId(null);
+            }}
+            options={[
+              { label: 'Подрядчик', value: 'counterparty' },
+              { label: 'МОЛ', value: 'mol' },
+            ]}
+            disabled={uploading}
+          />
+          {recipientKind === 'counterparty' ? (
+            <ContractorSelect
+              value={contractorId}
+              onChange={setContractorId}
+              disabled={uploading}
+              placeholder="Выберите получателя"
+            />
+          ) : (
+            <Select<string>
+              style={{ width: '100%' }}
+              placeholder="Выберите получателя"
+              value={recipientMolId ?? undefined}
+              onChange={(v) => setRecipientMolId(v ?? null)}
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              loading={responsiblePersonsQuery.isLoading}
+              disabled={uploading}
+              options={responsiblePersons.map((m) => ({
+                value: m.id,
+                label: m.fullName,
+              }))}
+              notFoundContent={
+                <Typography.Text type="secondary">
+                  Заведите МОЛ в Справочниках
+                </Typography.Text>
+              }
+            />
+          )}
         </Form.Item>
         <Form.Item label="Объект" required>
           <SiteSelect value={siteId} onChange={setSiteId} disabled={uploading} />

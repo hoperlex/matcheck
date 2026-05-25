@@ -7,6 +7,8 @@ import {
   Input,
   InputNumber,
   Modal,
+  Segmented,
+  Select,
   Space,
   Spin,
   Table,
@@ -19,6 +21,7 @@ import dayjs, { type Dayjs } from 'dayjs';
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
+  ResponsiblePerson,
   SourceDirection,
   SourceDocumentDetail,
   SourceDocumentFileResponse,
@@ -45,7 +48,9 @@ type EditForm = {
   docNumber: string | null;
   docDate: Dayjs | null;
   expectedDate: Dayjs | null;
+  recipientKind: 'counterparty' | 'mol';
   contractorId: string | null;
+  recipientMolId: string | null;
   siteId: string | null;
   totalSum: string | null;
   items: EditItem[];
@@ -85,7 +90,11 @@ function initialForm(sd: SourceDocumentDetail): EditForm {
     docNumber: sd.docNumber,
     docDate: sd.docDate ? dayjs(sd.docDate) : null,
     expectedDate: sd.expectedDate ? dayjs(sd.expectedDate) : null,
+    // Если у УПД сохранён МОЛ — открываем переключатель в его сторону,
+    // иначе по умолчанию — подрядчик (исторический режим).
+    recipientKind: sd.recipientMolId ? 'mol' : 'counterparty',
     contractorId: sd.contractorId,
+    recipientMolId: sd.recipientMolId,
     siteId: sd.siteId,
     totalSum: sd.totalSum,
     items: sd.items.map(itemToEdit),
@@ -111,6 +120,15 @@ export function SourceDocumentDetailModal({
     queryFn: () => api.get<SourceDocumentDetail>(`/source-documents/${id}`),
     enabled: open && !!id,
   });
+
+  const responsiblePersonsQuery = useQuery({
+    queryKey: ['responsible-persons', 'active'],
+    queryFn: () =>
+      api.get<{ items: ResponsiblePerson[]; total: number }>(
+        '/responsible-persons?activeOnly=true&limit=500',
+      ),
+  });
+  const responsiblePersons = responsiblePersonsQuery.data?.items ?? [];
 
   const file = useQuery({
     queryKey: ['source-document-file', id],
@@ -171,11 +189,15 @@ export function SourceDocumentDetailModal({
 
   function onSave() {
     if (!edit) return;
+    // Получатель — взаимоисключающий выбор: либо contractorId, либо
+    // recipientMolId. Очищаем «противоположное» поле явно, чтобы
+    // PATCH сбрасывал ранее сохранённое значение.
     const body: Record<string, unknown> = {
       docNumber: edit.docNumber,
       docDate: edit.docDate ? edit.docDate.format('YYYY-MM-DD') : null,
       expectedDate: edit.expectedDate ? edit.expectedDate.format('YYYY-MM-DD') : null,
-      contractorId: edit.contractorId,
+      contractorId: edit.recipientKind === 'counterparty' ? edit.contractorId : null,
+      recipientMolId: edit.recipientKind === 'mol' ? edit.recipientMolId : null,
       siteId: edit.siteId,
       totalSum: edit.totalSum,
       items: edit.items.map((it) => ({
@@ -216,6 +238,7 @@ export function SourceDocumentDetailModal({
               </Tag>
               {sd.siteName ? <Tag>Объект: {sd.siteName}</Tag> : null}
               {sd.contractorName ? <Tag>Подрядчик: {sd.contractorName}</Tag> : null}
+              {sd.recipientMolName ? <Tag>МОЛ: {sd.recipientMolName}</Tag> : null}
               {sd.supplierName ? <Tag>Поставщик: {sd.supplierName}</Tag> : null}
               {sd.llmConfidence != null && (
                 <Tag>Уверенность: {Math.round(Number(sd.llmConfidence) * 100)}%</Tag>
@@ -375,11 +398,54 @@ export function SourceDocumentDetailModal({
                           style={{ width: '100%' }}
                         />
                       </Form.Item>
-                      <Form.Item label="Подрядчик">
-                        <ContractorSelect
-                          value={edit.contractorId}
-                          onChange={(v) => setEdit({ ...edit, contractorId: v })}
+                      <Form.Item label="Получатель">
+                        <Segmented
+                          block
+                          style={{ marginBottom: 8 }}
+                          value={edit.recipientKind}
+                          onChange={(v) => {
+                            const next = v as 'counterparty' | 'mol';
+                            setEdit({
+                              ...edit,
+                              recipientKind: next,
+                              contractorId: next === 'counterparty' ? edit.contractorId : null,
+                              recipientMolId: next === 'mol' ? edit.recipientMolId : null,
+                            });
+                          }}
+                          options={[
+                            { label: 'Подрядчик', value: 'counterparty' },
+                            { label: 'МОЛ', value: 'mol' },
+                          ]}
                         />
+                        {edit.recipientKind === 'counterparty' ? (
+                          <ContractorSelect
+                            value={edit.contractorId}
+                            onChange={(v) => setEdit({ ...edit, contractorId: v })}
+                            placeholder="Выберите получателя"
+                          />
+                        ) : (
+                          <Select<string>
+                            style={{ width: '100%' }}
+                            placeholder="Выберите получателя"
+                            value={edit.recipientMolId ?? undefined}
+                            onChange={(v) =>
+                              setEdit({ ...edit, recipientMolId: v ?? null })
+                            }
+                            allowClear
+                            showSearch
+                            optionFilterProp="label"
+                            loading={responsiblePersonsQuery.isLoading}
+                            options={responsiblePersons.map((m) => ({
+                              value: m.id,
+                              label: m.fullName,
+                            }))}
+                            notFoundContent={
+                              <Typography.Text type="secondary">
+                                Заведите МОЛ в Справочниках
+                              </Typography.Text>
+                            }
+                          />
+                        )}
                       </Form.Item>
                       <Form.Item label="Объект">
                         <SiteSelect
@@ -477,7 +543,12 @@ function ReadOnlyHeader({ sd }: { sd: SourceDocumentDetail }) {
         <b>Дата поставки:</b> {sd.expectedDate ?? '—'}
       </Typography.Text>
       <Typography.Text>
-        <b>Подрядчик:</b> {sd.contractorName ?? '—'}
+        <b>Получатель:</b>{' '}
+        {sd.recipientMolName
+          ? `${sd.recipientMolName} (МОЛ)`
+          : sd.contractorName
+            ? `${sd.contractorName} (подрядчик)`
+            : '—'}
       </Typography.Text>
       <Typography.Text>
         <b>Объект:</b> {sd.siteName ?? '—'}

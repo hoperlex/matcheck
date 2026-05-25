@@ -11,10 +11,12 @@ export function ContractorSelect({
   value,
   onChange,
   disabled,
+  placeholder = 'Выберите подрядчика',
 }: {
   value: string | null;
   onChange: (id: string | null) => void;
   disabled?: boolean;
+  placeholder?: string;
 }) {
   const list = useQuery({
     queryKey: ['counterparties', { role: 'contractor' }],
@@ -26,7 +28,7 @@ export function ContractorSelect({
     <Select
       showSearch
       allowClear
-      placeholder="Выберите подрядчика"
+      placeholder={placeholder}
       value={value ?? undefined}
       onChange={(v) => onChange(v ?? null)}
       loading={list.isLoading}

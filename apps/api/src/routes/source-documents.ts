@@ -26,6 +26,7 @@ import {
   entityDeletions,
   llmCalls,
   materials,
+  responsiblePersons,
   shipmentSources,
   sites,
   sourceDocuments,
@@ -102,6 +103,7 @@ async function findOrCreateCounterparty(
 type SdNames = {
   supplierName?: string | null;
   contractorName?: string | null;
+  recipientMolName?: string | null;
   siteName?: string | null;
 };
 
@@ -114,9 +116,11 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     supplierId: sd.supplierId,
     recipientId: sd.recipientId,
     contractorId: sd.contractorId,
+    recipientMolId: sd.recipientMolId,
     siteId: sd.siteId,
     supplierName: names.supplierName ?? null,
     contractorName: names.contractorName ?? null,
+    recipientMolName: names.recipientMolName ?? null,
     siteName: names.siteName ?? null,
     docNumber: sd.docNumber,
     docDate: sd.docDate?.toISOString().slice(0, 10) ?? null,
@@ -185,7 +189,7 @@ async function loadSdNames(
   app: any,
   sd: typeof sourceDocuments.$inferSelect,
 ): Promise<SdNames> {
-  const [supplier, contractor, site] = await Promise.all([
+  const [supplier, contractor, mol, site] = await Promise.all([
     sd.supplierId
       ? app.db
           .select({ name: counterparties.name })
@@ -200,6 +204,13 @@ async function loadSdNames(
           .where(eq(counterparties.id, sd.contractorId))
           .limit(1)
       : Promise.resolve([] as { name: string }[]),
+    sd.recipientMolId
+      ? app.db
+          .select({ name: responsiblePersons.fullName })
+          .from(responsiblePersons)
+          .where(eq(responsiblePersons.id, sd.recipientMolId))
+          .limit(1)
+      : Promise.resolve([] as { name: string }[]),
     sd.siteId
       ? app.db
           .select({ name: sites.name })
@@ -211,6 +222,7 @@ async function loadSdNames(
   return {
     supplierName: supplier[0]?.name ?? null,
     contractorName: contractor[0]?.name ?? null,
+    recipientMolName: mol[0]?.name ?? null,
     siteName: site[0]?.name ?? null,
   };
 }
@@ -403,11 +415,16 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           sd: sourceDocuments,
           supplierName: supplier.name,
           contractorName: contractor.name,
+          recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
         .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
+        .leftJoin(
+          responsiblePersons,
+          eq(sourceDocuments.recipientMolId, responsiblePersons.id),
+        )
         .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
         .where(where)
         .orderBy(desc(sourceDocuments.parsedAt))
@@ -422,6 +439,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           sdRow(r.sd, {
             supplierName: r.supplierName,
             contractorName: r.contractorName,
+            recipientMolName: r.recipientMolName,
             siteName: r.siteName,
           }),
         ),
@@ -447,11 +465,16 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           sd: sourceDocuments,
           supplierName: supplier.name,
           contractorName: contractor.name,
+          recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
         .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
+        .leftJoin(
+          responsiblePersons,
+          eq(sourceDocuments.recipientMolId, responsiblePersons.id),
+        )
         .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
         .where(eq(sourceDocuments.id, req.params.id))
         .limit(1);
@@ -477,6 +500,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         ...sdRow(sd, {
           supplierName: row.supplierName,
           contractorName: row.contractorName,
+          recipientMolName: row.recipientMolName,
           siteName: row.siteName,
         }),
         items: items.map(itemDto),
@@ -735,7 +759,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           message: meta.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
         });
       }
-      const { direction, contractorId, siteId, expectedDate } = meta.data;
+      const { direction, contractorId, recipientMolId, siteId, expectedDate } = meta.data;
 
       const buffer = await fileData.toBuffer();
       if (buffer.length === 0) {
@@ -744,24 +768,27 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
       const contentHash = createHash('sha256').update(buffer).digest('hex');
 
-      // Идемпотентность по (contractor_id, content_hash) среди живых
-      // документов. parse_failed / archived не блокируют повторную загрузку
+      // Идемпотентность по content_hash среди живых документов.
+      // parse_failed / archived не блокируют повторную загрузку
       // — пользователь мог исправить файл и хочет попробовать снова.
+      // Если contractorId указан — дополнительно фильтруем по нему,
+      // чтобы один и тот же шаблон у разных подрядчиков не сливался.
+      const existingWhere = [
+        eq(sourceDocuments.contentHash, contentHash),
+        inArray(sourceDocuments.status, [
+          'queued',
+          'processing',
+          'parsed',
+          'needs_resolution',
+        ]),
+      ];
+      if (contractorId) {
+        existingWhere.push(eq(sourceDocuments.contractorId, contractorId));
+      }
       const [existing] = await app.db
         .select()
         .from(sourceDocuments)
-        .where(
-          and(
-            eq(sourceDocuments.contractorId, contractorId),
-            eq(sourceDocuments.contentHash, contentHash),
-            inArray(sourceDocuments.status, [
-              'queued',
-              'processing',
-              'parsed',
-              'needs_resolution',
-            ]),
-          ),
-        )
+        .where(and(...existingWhere))
         .limit(1);
       if (existing) {
         const names = await loadSdNames(app, existing);
@@ -774,17 +801,21 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
       // S3 загрузка перед INSERT — если упадёт, документа в БД не появится.
       // Ключ: {site.code}/{contractor.inn}__{slug(name)}/source-documents/{id}/source.pdf.
+      // Когда получатель — МОЛ или не указан, подрядчика для пути нет;
+      // buildS3Key падает обратно на 'unknown' в этом сегменте.
       const newId = randomUUID();
       const [pdfSite] = await app.db
         .select({ code: sites.code })
         .from(sites)
         .where(eq(sites.id, siteId))
         .limit(1);
-      const [pdfCp] = await app.db
-        .select({ inn: counterparties.inn, name: counterparties.name })
-        .from(counterparties)
-        .where(eq(counterparties.id, contractorId))
-        .limit(1);
+      const [pdfCp] = contractorId
+        ? await app.db
+            .select({ inn: counterparties.inn, name: counterparties.name })
+            .from(counterparties)
+            .where(eq(counterparties.id, contractorId))
+            .limit(1)
+        : [];
       const s3Key = buildS3Key({
         site: pdfSite ?? null,
         counterparty: pdfCp ?? null,
@@ -807,7 +838,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           kind: 'upd',
           direction,
           origin: 'manual_pdf',
-          contractorId,
+          contractorId: contractorId ?? null,
+          recipientMolId: recipientMolId ?? null,
           siteId,
           expectedDate: expectedDate ? new Date(expectedDate) : null,
           status: 'queued',
@@ -1076,6 +1108,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       .nullable()
       .optional(),
     contractorId: z.string().uuid().nullable().optional(),
+    recipientMolId: z.string().uuid().nullable().optional(),
     siteId: z.string().uuid().nullable().optional(),
     totalSum: z.union([z.number(), z.string()]).nullable().optional(),
     supplier: z
@@ -1126,6 +1159,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         upd.expectedDate = req.body.expectedDate ? new Date(req.body.expectedDate) : null;
       }
       if (req.body.contractorId !== undefined) upd.contractorId = req.body.contractorId;
+      if (req.body.recipientMolId !== undefined) upd.recipientMolId = req.body.recipientMolId;
       if (req.body.siteId !== undefined) upd.siteId = req.body.siteId;
       if (req.body.totalSum !== undefined) {
         upd.totalSum =

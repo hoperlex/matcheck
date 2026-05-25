@@ -382,6 +382,9 @@ export const sourceDocuments = pgTable(
     contractorId: uuid('contractor_id').references(() => counterparties.id, {
       onDelete: 'set null',
     }),
+    recipientMolId: uuid('recipient_mol_id').references(() => responsiblePersons.id, {
+      onDelete: 'set null',
+    }),
     siteId: uuid('site_id').references(() => sites.id, { onDelete: 'set null' }),
     docNumber: text('doc_number'),
     docDate: timestamp('doc_date', { withTimezone: false, mode: 'date' }),

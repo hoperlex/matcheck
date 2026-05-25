@@ -101,9 +101,11 @@ export const SourceDocumentSchema = z.object({
   supplierId: z.string().uuid().nullable(),
   recipientId: z.string().uuid().nullable(),
   contractorId: z.string().uuid().nullable(),
+  recipientMolId: z.string().uuid().nullable(),
   siteId: z.string().uuid().nullable(),
   supplierName: z.string().nullable().optional(),
   contractorName: z.string().nullable().optional(),
+  recipientMolName: z.string().nullable().optional(),
   siteName: z.string().nullable().optional(),
   docNumber: z.string().nullable(),
   docDate: z.string().nullable(),
@@ -270,7 +272,18 @@ export type SourceDocumentFileResponse = z.infer<typeof SourceDocumentFileRespon
 
 export const UpdPdfQueueRequestSchema = z.object({
   direction: SourceDirectionSchema,
-  contractorId: z.string().uuid(),
+  // Получатель — либо контрагент-подрядчик, либо МОЛ, либо ничего.
+  // Multipart всегда приходит строкой, поэтому пустую строку приводим к null.
+  contractorId: z
+    .union([z.literal(''), z.string().uuid()])
+    .transform((v) => (v === '' ? null : v))
+    .nullable()
+    .optional(),
+  recipientMolId: z
+    .union([z.literal(''), z.string().uuid()])
+    .transform((v) => (v === '' ? null : v))
+    .nullable()
+    .optional(),
   siteId: z.string().uuid(),
   // Опциональная дата фактической поставки. Multipart всегда приходит
   // строкой, поэтому пустую строку приводим к null.

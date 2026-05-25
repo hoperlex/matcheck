@@ -374,7 +374,15 @@ export default function KppPage() {
     if (!isInspector) {
       setSiteId((prev) => prev ?? (detail.siteId === SYSTEM_SITE_ID ? null : detail.siteId));
     }
-    setContractorId((prev) => prev ?? detail.contractorId ?? null);
+    // Получатель из УПД (диспетчер указал при загрузке): МОЛ имеет приоритет
+    // над контрагентом, симметрично восстановлению из БД выше.
+    if (detail.recipientMolId) {
+      setRecipientKind('mol');
+      setRecipientMolId((prev) => prev ?? detail.recipientMolId);
+      setContractorId(null);
+    } else {
+      setContractorId((prev) => prev ?? detail.contractorId ?? null);
+    }
     setItems(
       detail.items.map((it, idx) => ({
         clientKey: newKey(),
