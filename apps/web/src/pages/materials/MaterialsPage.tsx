@@ -33,7 +33,7 @@ const STATUS_COLOR: Record<string, string> = {
 const statusTagColor = (code: string) => STATUS_COLOR[code] ?? 'default';
 
 const formatDocDate = (v: string | null) =>
-  v ? v.split('-').reverse().join('.') : '—';
+  v ? v.slice(0, 10).split('-').reverse().join('.') : '—';
 
 const trimQty = (s: string | null) => {
   if (!s) return '—';
@@ -46,6 +46,15 @@ const formatMoney = (s: string | null | undefined) => {
   if (!Number.isFinite(n)) return '—';
   return n.toFixed(2);
 };
+
+const renderMaterialName = (v: string) => (
+  <Typography.Paragraph
+    ellipsis={{ rows: 2, tooltip: v }}
+    style={{ marginBottom: 0 }}
+  >
+    {v}
+  </Typography.Paragraph>
+);
 
 type MaterialsTab = 'balance' | 'intake' | 'shipment';
 
@@ -144,7 +153,7 @@ function BalanceTab() {
         numbered
         columns={[
           { title: 'Объект', key: 'site', render: (_, r) => `${r.siteCode} · ${r.siteName}` },
-          { title: 'Материал', dataIndex: 'materialName' },
+          { title: 'Материал', dataIndex: 'materialName', width: 320, render: renderMaterialName },
           {
             title: 'Подрядчик',
             dataIndex: 'contractorName',
@@ -262,7 +271,7 @@ function IntakeTab() {
             width: 110,
           },
           { title: 'Объект', key: 'site', render: (_, r) => `${r.siteCode} · ${r.siteName}` },
-          { title: 'Материал', dataIndex: 'materialName' },
+          { title: 'Материал', dataIndex: 'materialName', width: 320, render: renderMaterialName },
           { title: 'Кол-во', dataIndex: 'qty', render: (v: string | null) => trimQty(v), width: 110 },
           { title: 'Ед.', dataIndex: 'unit', width: 80 },
           { title: 'Поставщик', dataIndex: 'supplierName', render: (v) => v ?? '—' },
@@ -417,7 +426,7 @@ function ShipmentTab() {
             ),
           },
           { title: 'Объект', key: 'site', render: (_, r) => `${r.siteCode} · ${r.siteName}` },
-          { title: 'Материал', dataIndex: 'materialName' },
+          { title: 'Материал', dataIndex: 'materialName', width: 320, render: renderMaterialName },
           {
             title: 'Кол-во',
             dataIndex: 'qty',
