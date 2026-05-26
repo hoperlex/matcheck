@@ -31,7 +31,12 @@ function SideEffects() {
 
 export function App() {
   return (
-    <ConfigProvider locale={ruRU} theme={{ token: { colorPrimary: '#1677ff', borderRadius: 8 } }}>
+    <ConfigProvider
+      locale={ruRU}
+      theme={{
+        token: { colorPrimary: '#1677ff', borderRadius: 8, colorBgLayout: '#f5f5f5' },
+      }}
+    >
       <AntApp>
         <QueryProvider>
           <AuthProvider>

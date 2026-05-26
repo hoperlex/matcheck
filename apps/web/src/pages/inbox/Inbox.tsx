@@ -359,6 +359,7 @@ export default function InboxPage() {
           {
             title: 'Тип',
             dataIndex: 'kind',
+            width: 80,
             render: (k: Row['kind']) => (
               <Tag color={k === 'upd' ? 'blue' : 'gold'}>{k === 'upd' ? 'УПД' : 'Заявка'}</Tag>
             ),
@@ -407,7 +408,7 @@ export default function InboxPage() {
             dataIndex: 'totalSum',
             render: (v: string | null) => formatDecimal(v) || '—',
           },
-          { title: 'Происхождение', dataIndex: 'origin' },
+          { title: 'Происхождение', dataIndex: 'origin', width: 140 },
           {
             title: '',
             key: 'actions',
