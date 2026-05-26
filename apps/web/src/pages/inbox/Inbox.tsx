@@ -5,7 +5,6 @@ import {
   Button,
   Card,
   Popconfirm,
-  Segmented,
   Space,
   Spin,
   Tabs,
@@ -325,27 +324,19 @@ export default function InboxPage() {
                 { key: 'inbound', label: 'Приёмка' },
                 { key: 'outbound', label: 'Отгрузка' },
               ]}
+              tabBarExtraContent={{
+                right: (
+                  <Space size={8}>
+                    {list.isFetching && !list.isLoading && (
+                      <Spin size="small" indicator={<LoadingOutlined spin />} />
+                    )}
+                    <Button type="primary" onClick={() => setPdfModalOpen(true)}>
+                      Загрузить УПД (PDF)
+                    </Button>
+                  </Space>
+                ),
+              }}
             />
-            <Space style={{ marginBottom: 16 }} wrap>
-              <Segmented
-                value={kind}
-                onChange={(v) => {
-                  const next = v as KindFilter;
-                  updateParams({ kind: next === 'all' ? null : next });
-                }}
-                options={[
-                  { label: 'Все', value: 'all' },
-                  { label: 'УПД', value: 'upd' },
-                  { label: 'Заявки', value: 'request' },
-                ]}
-              />
-              <Button type="primary" onClick={() => setPdfModalOpen(true)}>
-                Загрузить УПД (PDF)
-              </Button>
-              {list.isFetching && !list.isLoading && (
-                <Spin size="small" indicator={<LoadingOutlined spin />} />
-              )}
-            </Space>
             <ListFilters
               value={filters}
               onChange={updateFilters}
@@ -386,6 +377,11 @@ export default function InboxPage() {
           { title: '№', dataIndex: 'docNumber', render: renderDocNumber },
           { title: 'Дата', dataIndex: 'docDate', render: (v: string | null) => v ?? '—' },
           {
+            title: 'Дата поставки',
+            dataIndex: 'expectedDate',
+            render: (v: string | null) => v ?? '—',
+          },
+          {
             title: 'Объект',
             dataIndex: 'siteName',
             render: (v: string | null | undefined) => v ?? '—',
@@ -399,6 +395,11 @@ export default function InboxPage() {
             title: 'Поставщик',
             dataIndex: 'supplierName',
             render: (v: string | null | undefined) => v ?? '—',
+          },
+          {
+            title: 'Сумма НДС',
+            dataIndex: 'vatSum',
+            render: (v: string | null) => formatDecimal(v) || '—',
           },
           {
             title: 'Сумма',
