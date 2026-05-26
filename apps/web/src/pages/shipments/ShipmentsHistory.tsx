@@ -6,7 +6,7 @@ import {
   Card,
   Input,
   Popconfirm,
-  Segmented,
+  Switch,
   Select,
   Space,
   Tag,
@@ -413,14 +413,18 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
     <StickyPageHeader
       header={
         <Space direction="vertical" size="small" style={{ width: '100%' }}>
-          <Segmented
-            value={view}
-            onChange={(v) => setView(v as View)}
-            options={[
-              { label: 'Активные', value: 'active' },
-              { label: 'Корзина', value: 'trash' },
-            ]}
-          />
+          <Space align="center">
+            <Typography.Text strong>Активные</Typography.Text>
+            <Space size={6} align="center" style={{ marginLeft: 24 }}>
+              <Switch
+                checked={view === 'trash'}
+                onChange={(checked) => setView(checked ? 'trash' : 'active')}
+              />
+              <Typography.Text type={view === 'trash' ? undefined : 'secondary'}>
+                Удалённые
+              </Typography.Text>
+            </Space>
+          </Space>
           <ListFilters
             value={filters}
             onChange={updateFilters}

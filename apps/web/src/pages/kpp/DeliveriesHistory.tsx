@@ -6,9 +6,9 @@ import {
   Card,
   Input,
   Popconfirm,
-  Segmented,
   Select,
   Space,
+  Switch,
   Tag,
   Tooltip,
   Typography,
@@ -44,6 +44,57 @@ type SourceRow = SourceList['items'][number];
 const SELECT_WIDTH = 200;
 // Статусы, для которых вместо hard-delete показываем «Пометить на удаление».
 const SOFT_DELETE_STATUSES = new Set(['filled', 'confirmed_mol']);
+
+const ARRIVAL_DATE_FMT = new Intl.DateTimeFormat('ru-RU', {
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
+function formatArrival(iso: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return ARRIVAL_DATE_FMT.format(d).replace(',', '');
+}
+
+// Σ qty × price по позициям, где price задан. Если ни у одной позиции нет
+// цены — возвращаем null, чтобы UI показал «—», а не нолик.
+function deliveryItemsTotal(items: Row['items'] | undefined): number | null {
+  if (!items?.length) return null;
+  let sum = 0;
+  let hasAny = false;
+  for (const it of items) {
+    const price = it.price !== null && it.price !== '' ? Number(it.price) : null;
+    if (price === null || !Number.isFinite(price)) continue;
+    const qtyRaw = it.qtyActual ?? it.qtyPlanned;
+    const qty = qtyRaw !== null && qtyRaw !== '' ? Number(qtyRaw) : null;
+    if (qty === null || !Number.isFinite(qty)) continue;
+    sum += qty * price;
+    hasAny = true;
+  }
+  return hasAny ? sum : null;
+}
+
+function deliveryItemsVatSum(items: Row['items'] | undefined): number | null {
+  if (!items?.length) return null;
+  let sum = 0;
+  let hasAny = false;
+  for (const it of items) {
+    if (it.vatSum === null || it.vatSum === '') continue;
+    const v = Number(it.vatSum);
+    if (!Number.isFinite(v)) continue;
+    sum += v;
+    hasAny = true;
+  }
+  return hasAny ? sum : null;
+}
+
+function formatMoney(n: number | null): string {
+  return n === null ? '—' : n.toFixed(2);
+}
 
 export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) {
   const queryClient = useQueryClient();
@@ -424,14 +475,18 @@ export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) 
     <StickyPageHeader
       header={
         <Space direction="vertical" size="small" style={{ width: '100%' }}>
-          <Segmented
-            value={view}
-            onChange={(v) => setView(v as View)}
-            options={[
-              { label: 'Активные', value: 'active' },
-              { label: 'Корзина', value: 'trash' },
-            ]}
-          />
+          <Space align="center">
+            <Typography.Text strong>Активные</Typography.Text>
+            <Space size={6} align="center" style={{ marginLeft: 24 }}>
+              <Switch
+                checked={view === 'trash'}
+                onChange={(checked) => setView(checked ? 'trash' : 'active')}
+              />
+              <Typography.Text type={view === 'trash' ? undefined : 'secondary'}>
+                Удалённые
+              </Typography.Text>
+            </Space>
+          </Space>
           <ListFilters
             value={filters}
             onChange={updateFilters}
@@ -477,7 +532,11 @@ export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) 
             render: (_: unknown, r: Row) => renderStatusCell(r),
           },
           { title: 'Авто', dataIndex: 'vehiclePlate' },
-          { title: 'Прибытие', dataIndex: 'arrivedAt' },
+          {
+            title: 'Прибытие',
+            dataIndex: 'arrivedAt',
+            render: (v: string | null) => formatArrival(v),
+          },
           {
             title: 'Поставщик',
             key: 'supplier',
@@ -494,9 +553,16 @@ export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) 
             render: (_: unknown, r: Row) => renderSite(r),
           },
           {
-            title: 'Кол-во',
-            key: 'itemsCount',
-            render: (_: unknown, r: Row) => r.items?.length ?? 0,
+            title: 'Сумма НДС',
+            key: 'vatSum',
+            width: 120,
+            render: (_: unknown, r: Row) => formatMoney(deliveryItemsVatSum(r.items)),
+          },
+          {
+            title: 'Сумма',
+            key: 'totalSum',
+            width: 130,
+            render: (_: unknown, r: Row) => formatMoney(deliveryItemsTotal(r.items)),
           },
           {
             title: '',
