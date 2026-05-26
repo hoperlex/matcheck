@@ -159,6 +159,8 @@ export default function ShipmentPage() {
   const inspectorWithoutSite = isInspector && !inspectorSiteId;
 
   const [items, setItems] = useState<DraftItem[]>([]);
+  // Inline-edit названия материала: см. apps/web/src/pages/kpp/KppPage.tsx.
+  const [editingNameKey, setEditingNameKey] = useState<string | null>(null);
   const [kind, setKind] = useState<ShipmentKind>('contractor');
   const [siteId, setSiteId] = useState<string | null>(inspectorSiteId);
   const [destSiteId, setDestSiteId] = useState<string | null>(null);
@@ -711,31 +713,55 @@ export default function ShipmentPage() {
       {
         title: 'Название',
         dataIndex: 'nameRaw',
-        render: (_: unknown, r: DraftItem) => (
-          <Space.Compact direction="vertical" style={{ width: '100%' }}>
-            {r.itemKind === 'asset' && (
-              <Space size={4} style={{ marginBottom: 4 }}>
-                <AssetTag />
-                {r.inventoryNumber && (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    Инв. № {r.inventoryNumber}
-                  </Typography.Text>
-                )}
-                {r.serialNumber && (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    SN {r.serialNumber}
-                  </Typography.Text>
-                )}
-              </Space>
-            )}
-            <Input.TextArea
-              autoSize={{ minRows: 1, maxRows: 4 }}
-              value={r.nameRaw}
-              placeholder="Наименование"
-              onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
-            />
-          </Space.Compact>
-        ),
+        render: (_: unknown, r: DraftItem) => {
+          const assetMeta = r.itemKind === 'asset' && (
+            <Space size={4} style={{ marginBottom: 4 }}>
+              <AssetTag />
+              {r.inventoryNumber && (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  Инв. № {r.inventoryNumber}
+                </Typography.Text>
+              )}
+              {r.serialNumber && (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  SN {r.serialNumber}
+                </Typography.Text>
+              )}
+            </Space>
+          );
+          const isEditing = editingNameKey === r.clientKey;
+          return (
+            <Space.Compact direction="vertical" style={{ width: '100%' }}>
+              {assetMeta}
+              {isEditing ? (
+                <Input.TextArea
+                  autoSize={{ minRows: 1, maxRows: 4 }}
+                  autoFocus
+                  value={r.nameRaw}
+                  placeholder="Наименование"
+                  onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
+                  onBlur={() => setEditingNameKey(null)}
+                />
+              ) : (
+                <div
+                  onClick={() => setEditingNameKey(r.clientKey)}
+                  style={{
+                    cursor: 'text',
+                    whiteSpace: 'pre-wrap',
+                    minHeight: 22,
+                    padding: '4px 0',
+                  }}
+                >
+                  {r.nameRaw || (
+                    <Typography.Text type="secondary">
+                      — нажмите, чтобы заполнить —
+                    </Typography.Text>
+                  )}
+                </div>
+              )}
+            </Space.Compact>
+          );
+        },
       },
       {
         title: 'План',
@@ -805,10 +831,12 @@ export default function ShipmentPage() {
         ),
       },
     ],
-    [],
+    [editingNameKey],
   );
 
-  const cardRender = (r: DraftItem) => (
+  const cardRender = (r: DraftItem) => {
+    const isEditing = editingNameKey === r.clientKey;
+    return (
     <div style={{ width: '100%' }}>
       <Space style={{ width: '100%', justifyContent: 'space-between' }}>
         <Typography.Text strong>№{r.lineNo}</Typography.Text>
@@ -836,13 +864,31 @@ export default function ShipmentPage() {
           )}
         </Space>
       )}
-      <Input.TextArea
-        autoSize={{ minRows: 1, maxRows: 4 }}
-        value={r.nameRaw}
-        placeholder="Наименование"
-        onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
-        style={{ marginTop: 4 }}
-      />
+      {isEditing ? (
+        <Input.TextArea
+          autoSize={{ minRows: 1, maxRows: 4 }}
+          autoFocus
+          value={r.nameRaw}
+          placeholder="Наименование"
+          onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
+          onBlur={() => setEditingNameKey(null)}
+          style={{ marginTop: 4 }}
+        />
+      ) : (
+        <div
+          onClick={() => setEditingNameKey(r.clientKey)}
+          style={{
+            marginTop: 4,
+            cursor: 'text',
+            whiteSpace: 'pre-wrap',
+            minHeight: 22,
+          }}
+        >
+          {r.nameRaw || (
+            <Typography.Text type="secondary">— нажмите, чтобы заполнить —</Typography.Text>
+          )}
+        </div>
+      )}
       <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
         <Col span={8}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -895,7 +941,8 @@ export default function ShipmentPage() {
         </Col>
       </Row>
     </div>
-  );
+    );
+  };
 
   if (shipmentId && shipmentQuery.isLoading && !loadedShipment) {
     return (

@@ -153,6 +153,11 @@ export default function KppPage() {
   const inspectorWithoutSite = isInspector && !inspectorSiteId;
 
   const [items, setItems] = useState<DraftItem[]>([]);
+  // Inline-edit названия материала: clientKey строки в режиме редактирования.
+  // Клик по тексту → инпут с autoFocus; blur/Enter → обратно в текст.
+  // Для позиций из справочника материалов (materialId !== null) редактирование
+  // отключено — название берётся из материала и не должно править в приёмке.
+  const [editingNameKey, setEditingNameKey] = useState<string | null>(null);
   const [plate, setPlate] = useState('');
   const [comment, setComment] = useState('');
   const [siteId, setSiteId] = useState<string | null>(inspectorSiteId);
@@ -719,15 +724,38 @@ export default function KppPage() {
       {
         title: 'Название',
         dataIndex: 'nameRaw',
-        render: (_: unknown, r: DraftItem) => (
-          <Input.TextArea
-            autoSize={{ minRows: 1, maxRows: 4 }}
-            value={r.nameRaw}
-            placeholder="Наименование"
-            onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
-            readOnly={!!r.materialId}
-          />
-        ),
+        render: (_: unknown, r: DraftItem) => {
+          const locked = !!r.materialId;
+          if (!locked && editingNameKey === r.clientKey) {
+            return (
+              <Input.TextArea
+                autoSize={{ minRows: 1, maxRows: 4 }}
+                autoFocus
+                value={r.nameRaw}
+                placeholder="Наименование"
+                onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
+                onBlur={() => setEditingNameKey(null)}
+              />
+            );
+          }
+          return (
+            <div
+              onClick={() => {
+                if (!locked) setEditingNameKey(r.clientKey);
+              }}
+              style={{
+                cursor: locked ? 'default' : 'text',
+                whiteSpace: 'pre-wrap',
+                minHeight: 22,
+                padding: '4px 0',
+              }}
+            >
+              {r.nameRaw || (
+                <Typography.Text type="secondary">— нажмите, чтобы заполнить —</Typography.Text>
+              )}
+            </div>
+          );
+        },
       },
       {
         title: 'План',
@@ -782,23 +810,44 @@ export default function KppPage() {
         },
       },
     ],
-    [],
+    [editingNameKey],
   );
 
   const cardRender = (r: DraftItem) => {
     const priceNum = toNum(r.price);
     const vatNum = computeVatSum(r);
+    const locked = !!r.materialId;
+    const isEditing = !locked && editingNameKey === r.clientKey;
     return (
       <div style={{ width: '100%' }}>
         <Typography.Text strong>№{r.lineNo}</Typography.Text>
-        <Input.TextArea
-          autoSize={{ minRows: 1, maxRows: 4 }}
-          value={r.nameRaw}
-          placeholder="Наименование"
-          onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
-          readOnly={!!r.materialId}
-          style={{ marginTop: 4 }}
-        />
+        {isEditing ? (
+          <Input.TextArea
+            autoSize={{ minRows: 1, maxRows: 4 }}
+            autoFocus
+            value={r.nameRaw}
+            placeholder="Наименование"
+            onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
+            onBlur={() => setEditingNameKey(null)}
+            style={{ marginTop: 4 }}
+          />
+        ) : (
+          <div
+            onClick={() => {
+              if (!locked) setEditingNameKey(r.clientKey);
+            }}
+            style={{
+              marginTop: 4,
+              cursor: locked ? 'default' : 'text',
+              whiteSpace: 'pre-wrap',
+              minHeight: 22,
+            }}
+          >
+            {r.nameRaw || (
+              <Typography.Text type="secondary">— нажмите, чтобы заполнить —</Typography.Text>
+            )}
+          </div>
+        )}
         <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
           <Col span={8}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
