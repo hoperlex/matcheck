@@ -73,6 +73,7 @@ export default function ResponsiblePersonsPage() {
         items={list.data?.items ?? []}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         columns={[
           { title: 'ФИО', dataIndex: 'fullName' },
           { title: 'Должность', dataIndex: 'position' },

@@ -51,6 +51,7 @@ export default function AdminEdoAccountsPage() {
         items={list.data ?? []}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         columns={[
           { title: 'Имя', dataIndex: 'name' },
           { title: 'Провайдер', dataIndex: 'provider', render: (p: string) => <Tag>{p}</Tag> },

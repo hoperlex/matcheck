@@ -121,6 +121,7 @@ export default function CounterpartiesPage() {
         items={list.data?.items ?? []}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         onRowClick={openEdit}
         columns={[
           { title: 'ИНН', dataIndex: 'inn' },

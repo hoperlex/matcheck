@@ -353,6 +353,7 @@ export default function InboxPage() {
         items={filteredItems}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         onRowClick={(r) => setSelectedId(r.id)}
         columns={[
           {

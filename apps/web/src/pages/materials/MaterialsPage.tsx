@@ -141,6 +141,7 @@ function BalanceTab() {
         loading={stockQuery.isLoading}
         rowKey={(r) => `${r.siteId}-${r.materialId ?? 'null'}-${r.unit}`}
         emptyText="Остатков нет"
+        numbered
         columns={[
           { title: 'Объект', key: 'site', render: (_, r) => `${r.siteCode} · ${r.siteName}` },
           { title: 'Материал', dataIndex: 'materialName' },
@@ -250,6 +251,7 @@ function IntakeTab() {
         loading={intakeQuery.isLoading}
         rowKey="itemId"
         emptyText="Нет данных"
+        numbered
         onRowClick={(r) => navigate(`/kpp?delivery=${r.deliveryId}&from=accepted`)}
         columns={[
           {
@@ -396,6 +398,7 @@ function ShipmentTab() {
         loading={shipmentQuery.isLoading}
         rowKey="itemId"
         emptyText="Нет данных"
+        numbered
         onRowClick={(r) => navigate(`/shipments?shipment=${r.shipmentId}&from=list`)}
         columns={[
           {

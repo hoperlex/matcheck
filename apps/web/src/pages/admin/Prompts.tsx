@@ -135,6 +135,7 @@ export default function AdminPromptsPage() {
         items={list.data ?? []}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         columns={[
           {
             title: 'Тип',

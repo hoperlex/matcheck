@@ -467,6 +467,7 @@ export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) 
         items={filteredItems}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         onRowClick={(r) => onOpen(r.id)}
         emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет приёмок'}
         columns={[

@@ -1,4 +1,4 @@
-import { List, Table, type TableProps } from 'antd';
+import { List, Space, Table, Typography, type TableProps } from 'antd';
 import type { ReactNode } from 'react';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { useStickyHeaderHeight } from './StickyPageHeader';
@@ -13,6 +13,7 @@ export function ResponsiveTable<T extends object>({
   loading,
   emptyText,
   onRowClick,
+  numbered,
 }: {
   items: T[];
   columns: Column<T>[];
@@ -21,17 +22,34 @@ export function ResponsiveTable<T extends object>({
   loading?: boolean;
   emptyText?: string;
   onRowClick?: (row: T) => void;
+  // Если true — слева добавляется автоинкрементная колонка «№»
+  // (в пределах текущей страницы пагинации), а в карточном режиме
+  // перед содержимым карточки выводится «N.».
+  numbered?: boolean;
 }) {
   const bp = useBreakpoint();
   // Сумма высот всех родительских StickyPageHeader. 0 — sticky-обёртки нет,
   // прилипания заголовка таблицы не нужно. > 0 — заголовок таблицы прилипает
   // прямо под нижний край шапки, чтобы при скролле колонки оставались видны.
   const stickyOffset = useStickyHeaderHeight();
+
+  const finalColumns: Column<T>[] = numbered
+    ? [
+        {
+          title: '№',
+          key: '__num__',
+          width: 56,
+          render: (_: unknown, __: T, idx: number) => idx + 1,
+        },
+        ...columns,
+      ]
+    : columns;
+
   if (bp === 'desktop') {
     return (
       <Table<T>
         dataSource={items}
-        columns={columns}
+        columns={finalColumns}
         rowKey={rowKey as TableProps<T>['rowKey']}
         loading={loading}
         size="middle"
@@ -54,13 +72,22 @@ export function ResponsiveTable<T extends object>({
       dataSource={items}
       loading={loading}
       locale={{ emptyText: emptyText ?? 'Нет данных' }}
-      renderItem={(item) => (
+      renderItem={(item, idx) => (
         <List.Item
           key={typeof rowKey === 'function' ? rowKey(item) : String(item[rowKey])}
           onClick={onRowClick ? () => onRowClick(item) : undefined}
           style={onRowClick ? { cursor: 'pointer' } : undefined}
         >
-          {cardRender(item)}
+          {numbered ? (
+            <Space align="start" style={{ width: '100%' }}>
+              <Typography.Text type="secondary" style={{ minWidth: 24 }}>
+                {idx + 1}.
+              </Typography.Text>
+              <div style={{ flex: 1, minWidth: 0 }}>{cardRender(item)}</div>
+            </Space>
+          ) : (
+            cardRender(item)
+          )}
         </List.Item>
       )}
     />

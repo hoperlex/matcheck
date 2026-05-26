@@ -60,6 +60,7 @@ export default function AdminMailAccountsPage() {
         items={list.data ?? []}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         columns={[
           { title: 'Имя', dataIndex: 'name' },
           { title: 'Host', dataIndex: 'host' },

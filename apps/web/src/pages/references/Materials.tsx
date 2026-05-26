@@ -50,6 +50,7 @@ export default function MaterialsPage() {
         items={list.data?.items ?? []}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         columns={[
           { title: 'Код', dataIndex: 'code' },
           { title: 'Название', dataIndex: 'name' },

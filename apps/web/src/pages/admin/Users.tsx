@@ -54,6 +54,7 @@ export default function AdminUsersPage() {
         items={list.data ?? []}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         columns={[
           { title: 'Email', dataIndex: 'email' },
           {

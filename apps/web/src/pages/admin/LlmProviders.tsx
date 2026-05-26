@@ -181,6 +181,7 @@ export default function AdminLlmProvidersPage() {
         items={list.data ?? []}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         columns={[
           {
             title: 'Имя',

@@ -100,6 +100,7 @@ export default function SitesPage() {
         items={list.data?.items ?? []}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         onRowClick={(r) => canEdit && r.id !== SYSTEM_SITE_ID && openEdit(r)}
         columns={[
           { title: 'Код', dataIndex: 'code', width: 100 },

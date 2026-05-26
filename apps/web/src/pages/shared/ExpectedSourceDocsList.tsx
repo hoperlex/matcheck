@@ -148,6 +148,7 @@ export function ExpectedSourceDocsList({
         items={filteredItems}
         loading={list.isLoading}
         rowKey="id"
+        numbered
         onRowClick={(r) => onOpen(r)}
         emptyText="Нет ожидаемых УПД"
         columns={[
