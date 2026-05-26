@@ -59,6 +59,7 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { runSync } from '../../services/sync';
 import { db, SYSTEM_SITE_ID } from '../../lib/db';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { PhotoGallery } from '../kpp/PhotoGallery';
 import { ShipmentsHistory } from './ShipmentsHistory';
@@ -1444,52 +1445,57 @@ export default function ShipmentPage() {
 
   // ─── Режим списка ───────────────────────────────────────────────────────
   return (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
-        <Space wrap align="center">
-          <Typography.Title level={3} style={{ margin: 0 }}>
-            Отгрузка
-          </Typography.Title>
-          <Segmented
-            value={tab}
-            onChange={(v) => {
-              const next = v as ListTab;
-              if (next === 'expected') setParams({ tab: 'expected' });
-              else setParams({});
-            }}
-            options={[
-              { label: 'Ожидаемые', value: 'expected' },
-              { label: 'Принятые', value: 'accepted' },
-            ]}
-          />
+    <StickyPageHeader
+      header={
+        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
+          <Space wrap align="center">
+            <Typography.Title level={3} style={{ margin: 0 }}>
+              Отгрузка
+            </Typography.Title>
+            <Segmented
+              value={tab}
+              onChange={(v) => {
+                const next = v as ListTab;
+                if (next === 'expected') setParams({ tab: 'expected' });
+                else setParams({});
+              }}
+              options={[
+                { label: 'Ожидаемые', value: 'expected' },
+                { label: 'Принятые', value: 'accepted' },
+              ]}
+            />
+          </Space>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={createBlank}
+            disabled={inspectorWithoutSite}
+          >
+            Новая отгрузка
+          </Button>
         </Space>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={createBlank}
-          disabled={inspectorWithoutSite}
-        >
-          Новая отгрузка
-        </Button>
+      }
+    >
+      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+        {inspectorWithoutSite && (
+          <Alert
+            type="warning"
+            showIcon
+            message="Объект не назначен"
+            description="Чтобы видеть отгрузки и создавать новые, обратитесь к администратору — он должен назначить вам объект на странице «Администрирование → Пользователи»."
+          />
+        )}
+        {tab === 'expected' ? (
+          <ExpectedOutbound onOpen={createFromUpd} />
+        ) : (
+          <ShipmentsHistory
+            onOpen={(id) => {
+              setParams({});
+              navigate(`/shipments?shipment=${id}&from=list`);
+            }}
+          />
+        )}
       </Space>
-      {inspectorWithoutSite && (
-        <Alert
-          type="warning"
-          showIcon
-          message="Объект не назначен"
-          description="Чтобы видеть отгрузки и создавать новые, обратитесь к администратору — он должен назначить вам объект на странице «Администрирование → Пользователи»."
-        />
-      )}
-      {tab === 'expected' ? (
-        <ExpectedOutbound onOpen={createFromUpd} />
-      ) : (
-        <ShipmentsHistory
-          onOpen={(id) => {
-            setParams({});
-            navigate(`/shipments?shipment=${id}&from=list`);
-          }}
-        />
-      )}
-    </Space>
+    </StickyPageHeader>
   );
 }

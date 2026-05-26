@@ -14,6 +14,7 @@ import type {
 import type { z } from 'zod';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
@@ -130,16 +131,19 @@ export function ExpectedSourceDocsList({
   }, [allItems, filters.contractorId, filters.supplierId, filters.siteId]);
 
   return (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <ListFilters
-        value={filters}
-        onChange={updateFilters}
-        fields={['contractor', 'supplier', 'site', 'q']}
-        counterparties={counterpartiesQuery.data?.items ?? []}
-        sites={sitesQuery.data?.items ?? []}
-        loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
-        searchPlaceholder="Номер документа"
-      />
+    <StickyPageHeader
+      header={
+        <ListFilters
+          value={filters}
+          onChange={updateFilters}
+          fields={['contractor', 'supplier', 'site', 'q']}
+          counterparties={counterpartiesQuery.data?.items ?? []}
+          sites={sitesQuery.data?.items ?? []}
+          loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
+          searchPlaceholder="Номер документа"
+        />
+      }
+    >
       <ResponsiveTable<SourceDocument>
         items={filteredItems}
         loading={list.isLoading}
@@ -203,6 +207,6 @@ export function ExpectedSourceDocsList({
           </Card>
         )}
       />
-    </Space>
+    </StickyPageHeader>
   );
 }

@@ -58,6 +58,7 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { runSync } from '../../services/sync';
 import { db } from '../../lib/db';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { DeliveriesHistory } from './DeliveriesHistory';
 import { ExpectedUpds } from './ExpectedUpds';
@@ -1391,51 +1392,55 @@ export default function KppPage() {
 
   // === Режим списка (нет deliveryId) ===
   return (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
-        <Space wrap align="center">
-          <Typography.Title level={3} style={{ margin: 0 }}>
-            Приёмка
-          </Typography.Title>
-          <Segmented
-            value={tab}
-            onChange={(v) => {
-              const next = v as ListTab;
-              if (next === 'expected') setParams({});
-              else setParams({ tab: 'accepted' });
-            }}
-            options={[
-              { label: 'Ожидаемые', value: 'expected' },
-              { label: 'Принятые', value: 'accepted' },
-            ]}
-          />
+    <StickyPageHeader
+      header={
+        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
+          <Space wrap align="center">
+            <Typography.Title level={3} style={{ margin: 0 }}>
+              Приёмка
+            </Typography.Title>
+            <Segmented
+              value={tab}
+              onChange={(v) => {
+                const next = v as ListTab;
+                if (next === 'expected') setParams({});
+                else setParams({ tab: 'accepted' });
+              }}
+              options={[
+                { label: 'Ожидаемые', value: 'expected' },
+                { label: 'Принятые', value: 'accepted' },
+              ]}
+            />
+          </Space>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={createBlank}
+            disabled={inspectorWithoutSite}
+          >
+            Новая приёмка
+          </Button>
         </Space>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={createBlank}
-          disabled={inspectorWithoutSite}
-        >
-          Новая приёмка
-        </Button>
+      }
+    >
+      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+        {inspectorWithoutSite && (
+          <Alert
+            type="warning"
+            showIcon
+            message="Объект не назначен"
+            description="Чтобы видеть приёмки и создавать новые, обратитесь к администратору — он должен назначить вам объект на странице «Администрирование → Пользователи»."
+          />
+        )}
+
+        {tab === 'expected' ? (
+          <ExpectedUpds onOpen={createFromUpd} />
+        ) : (
+          <DeliveriesHistory
+            onOpen={(id) => navigate(`/kpp?delivery=${id}&from=accepted`)}
+          />
+        )}
       </Space>
-
-      {inspectorWithoutSite && (
-        <Alert
-          type="warning"
-          showIcon
-          message="Объект не назначен"
-          description="Чтобы видеть приёмки и создавать новые, обратитесь к администратору — он должен назначить вам объект на странице «Администрирование → Пользователи»."
-        />
-      )}
-
-      {tab === 'expected' ? (
-        <ExpectedUpds onOpen={createFromUpd} />
-      ) : (
-        <DeliveriesHistory
-          onOpen={(id) => navigate(`/kpp?delivery=${id}&from=accepted`)}
-        />
-      )}
-    </Space>
+    </StickyPageHeader>
   );
 }

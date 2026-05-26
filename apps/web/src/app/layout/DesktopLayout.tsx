@@ -50,6 +50,7 @@ export function DesktopLayout() {
 
   const avatarLetter = user.email.charAt(0).toUpperCase();
 
+  const siderWidth = collapsed ? 64 : 240;
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <Sider
@@ -60,7 +61,18 @@ export function DesktopLayout() {
         onCollapse={setCollapsed}
         trigger={null}
         theme="light"
-        style={{ display: 'flex', flexDirection: 'column' }}
+        // Fixed sidebar: остаётся слева при скролле контента, см. UX-задачу.
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          position: 'fixed',
+          left: 0,
+          top: 0,
+          bottom: 0,
+          height: '100vh',
+          overflow: 'auto',
+          zIndex: 100,
+        }}
       >
         <div
           style={{
@@ -147,7 +159,7 @@ export function DesktopLayout() {
           </div>
         </div>
       </Sider>
-      <Layout>
+      <Layout style={{ marginInlineStart: siderWidth, transition: 'margin-inline-start 0.2s' }}>
         <Content style={{ padding: 24, background: '#f5f5f5' }}>
           <Outlet />
         </Content>

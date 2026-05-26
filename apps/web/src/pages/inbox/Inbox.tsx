@@ -30,6 +30,7 @@ import type {
 import type { z } from 'zod';
 import { api, ApiError } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
@@ -311,48 +312,52 @@ export default function InboxPage() {
 
   return (
     <div>
-      <Typography.Title level={3} style={{ margin: '0 0 12px' }}>
-        Документы
-      </Typography.Title>
-      <Tabs
-        activeKey={direction}
-        onChange={(k) => updateParams({ direction: k === 'outbound' ? 'outbound' : null })}
-        items={[
-          { key: 'inbound', label: 'Приёмка' },
-          { key: 'outbound', label: 'Отгрузка' },
-        ]}
-      />
-      <Space style={{ marginBottom: 16 }} wrap>
-        <Segmented
-          value={kind}
-          onChange={(v) => {
-            const next = v as KindFilter;
-            updateParams({ kind: next === 'all' ? null : next });
-          }}
-          options={[
-            { label: 'Все', value: 'all' },
-            { label: 'УПД', value: 'upd' },
-            { label: 'Заявки', value: 'request' },
-          ]}
-        />
-        <Button type="primary" onClick={() => setPdfModalOpen(true)}>
-          Загрузить УПД (PDF)
-        </Button>
-        {list.isFetching && !list.isLoading && (
-          <Spin size="small" indicator={<LoadingOutlined spin />} />
-        )}
-      </Space>
-      <div style={{ marginBottom: 16 }}>
-        <ListFilters
-          value={filters}
-          onChange={updateFilters}
-          fields={['contractor', 'supplier', 'site', 'q']}
-          counterparties={counterpartiesQuery.data?.items ?? []}
-          sites={sitesQuery.data?.items ?? []}
-          loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
-          searchPlaceholder="Номер документа"
-        />
-      </div>
+      <StickyPageHeader
+        header={
+          <>
+            <Typography.Title level={3} style={{ margin: '0 0 12px' }}>
+              Документы
+            </Typography.Title>
+            <Tabs
+              activeKey={direction}
+              onChange={(k) => updateParams({ direction: k === 'outbound' ? 'outbound' : null })}
+              items={[
+                { key: 'inbound', label: 'Приёмка' },
+                { key: 'outbound', label: 'Отгрузка' },
+              ]}
+            />
+            <Space style={{ marginBottom: 16 }} wrap>
+              <Segmented
+                value={kind}
+                onChange={(v) => {
+                  const next = v as KindFilter;
+                  updateParams({ kind: next === 'all' ? null : next });
+                }}
+                options={[
+                  { label: 'Все', value: 'all' },
+                  { label: 'УПД', value: 'upd' },
+                  { label: 'Заявки', value: 'request' },
+                ]}
+              />
+              <Button type="primary" onClick={() => setPdfModalOpen(true)}>
+                Загрузить УПД (PDF)
+              </Button>
+              {list.isFetching && !list.isLoading && (
+                <Spin size="small" indicator={<LoadingOutlined spin />} />
+              )}
+            </Space>
+            <ListFilters
+              value={filters}
+              onChange={updateFilters}
+              fields={['contractor', 'supplier', 'site', 'q']}
+              counterparties={counterpartiesQuery.data?.items ?? []}
+              sites={sitesQuery.data?.items ?? []}
+              loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
+              searchPlaceholder="Номер документа"
+            />
+          </>
+        }
+      >
       <ResponsiveTable<Row>
         items={filteredItems}
         loading={list.isLoading}
@@ -446,6 +451,7 @@ export default function InboxPage() {
           </Card>
         )}
       />
+      </StickyPageHeader>
       <UpdPdfUploadModal
         open={pdfModalOpen}
         direction={direction}

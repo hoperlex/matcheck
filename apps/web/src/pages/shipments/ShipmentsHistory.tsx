@@ -33,6 +33,7 @@ import {
 } from '../../services/shipments';
 import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
@@ -409,43 +410,48 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
   );
 
   return (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Segmented
-        value={view}
-        onChange={(v) => setView(v as View)}
-        options={[
-          { label: 'Активные', value: 'active' },
-          { label: 'Корзина', value: 'trash' },
-        ]}
-      />
-      <ListFilters
-        value={filters}
-        onChange={updateFilters}
-        fields={['contractor', 'supplier', 'site', 'q']}
-        counterparties={counterpartiesQuery.data?.items ?? []}
-        sites={sitesQuery.data?.items ?? []}
-        loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
-        searchPlaceholder="Номер документа"
-        extra={
-          <>
-            <Select<string>
-              style={{ width: SELECT_WIDTH }}
-              placeholder="Статус"
-              value={filters.status ?? undefined}
-              onChange={(v) => updateFilters({ status: v ?? null })}
-              allowClear
-              options={statusOptions}
-            />
-            <Input.Search
-              style={{ width: 180 }}
-              placeholder="Номер авто"
-              value={filters.plate}
-              allowClear
-              onChange={(e) => updateFilters({ plate: e.target.value })}
-            />
-          </>
-        }
-      />
+    <StickyPageHeader
+      header={
+        <Space direction="vertical" size="small" style={{ width: '100%' }}>
+          <Segmented
+            value={view}
+            onChange={(v) => setView(v as View)}
+            options={[
+              { label: 'Активные', value: 'active' },
+              { label: 'Корзина', value: 'trash' },
+            ]}
+          />
+          <ListFilters
+            value={filters}
+            onChange={updateFilters}
+            fields={['contractor', 'supplier', 'site', 'q']}
+            counterparties={counterpartiesQuery.data?.items ?? []}
+            sites={sitesQuery.data?.items ?? []}
+            loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
+            searchPlaceholder="Номер документа"
+            extra={
+              <>
+                <Select<string>
+                  style={{ width: SELECT_WIDTH }}
+                  placeholder="Статус"
+                  value={filters.status ?? undefined}
+                  onChange={(v) => updateFilters({ status: v ?? null })}
+                  allowClear
+                  options={statusOptions}
+                />
+                <Input.Search
+                  style={{ width: 180 }}
+                  placeholder="Номер авто"
+                  value={filters.plate}
+                  allowClear
+                  onChange={(e) => updateFilters({ plate: e.target.value })}
+                />
+              </>
+            }
+          />
+        </Space>
+      }
+    >
       <ResponsiveTable<Row>
         items={filteredItems}
         loading={list.isLoading}
@@ -525,6 +531,6 @@ export function ShipmentsHistory({ onOpen }: { onOpen: (id: string) => void }) {
           </Card>
         )}
       />
-    </Space>
+    </StickyPageHeader>
   );
 }

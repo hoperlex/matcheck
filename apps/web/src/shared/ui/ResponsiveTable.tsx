@@ -1,6 +1,7 @@
 import { List, Table, type TableProps } from 'antd';
 import type { ReactNode } from 'react';
 import { useBreakpoint } from '../hooks/useBreakpoint';
+import { useStickyHeaderHeight } from './StickyPageHeader';
 
 type Column<T> = NonNullable<TableProps<T>['columns']>[number];
 
@@ -22,6 +23,10 @@ export function ResponsiveTable<T extends object>({
   onRowClick?: (row: T) => void;
 }) {
   const bp = useBreakpoint();
+  // Сумма высот всех родительских StickyPageHeader. 0 — sticky-обёртки нет,
+  // прилипания заголовка таблицы не нужно. > 0 — заголовок таблицы прилипает
+  // прямо под нижний край шапки, чтобы при скролле колонки оставались видны.
+  const stickyOffset = useStickyHeaderHeight();
   if (bp === 'desktop') {
     return (
       <Table<T>
@@ -32,6 +37,7 @@ export function ResponsiveTable<T extends object>({
         size="middle"
         pagination={{ pageSize: 50, showSizeChanger: true }}
         locale={{ emptyText: emptyText ?? 'Нет данных' }}
+        sticky={stickyOffset > 0 ? { offsetHeader: stickyOffset } : false}
         onRow={
           onRowClick
             ? (row) => ({
