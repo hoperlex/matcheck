@@ -21,6 +21,10 @@ export const ShipmentItemSchema = z.object({
   lineNo: z.number(),
   volumeM3: z.string().nullable(),
   massKg: z.string().nullable(),
+  // Финансовый снимок позиции из УПД — см. DeliveryItemSchema.
+  price: z.string().nullable(),
+  vatRate: z.string().nullable(),
+  vatSum: z.string().nullable(),
   volumeConfidence: VolumeConfidenceSchema.nullable(),
   groupName: z.string().nullable(),
 });
@@ -87,6 +91,9 @@ export const ShipmentUpsertItemSchema = z.object({
   lineNo: z.number(),
   volumeM3: z.string().nullable().optional(),
   massKg: z.string().nullable().optional(),
+  price: z.string().nullable().optional(),
+  vatRate: z.string().nullable().optional(),
+  vatSum: z.string().nullable().optional(),
   volumeConfidence: VolumeConfidenceSchema.nullable().optional(),
   groupName: z.string().nullable().optional(),
 });

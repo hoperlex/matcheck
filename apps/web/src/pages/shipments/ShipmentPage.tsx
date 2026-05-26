@@ -69,6 +69,7 @@ type DraftItem = {
   clientKey: string;
   lineNo: number;
   nameRaw: string;
+  qtyPlanned: string | null;
   qtyActual: string | null;
   unit: string;
   materialId: string | null;
@@ -79,7 +80,30 @@ type DraftItem = {
   assetId: string | null;
   inventoryNumber: string | null;
   serialNumber: string | null;
+  // Финансовый снимок из УПД, см. apps/web/src/pages/kpp/KppPage.tsx.
+  price: string | null;
+  vatRate: string | null;
+  vatSum: string | null;
 };
+
+function toNum(v: string | null): number | null {
+  if (v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function computeVatSum(it: {
+  qtyActual: string | null;
+  qtyPlanned: string | null;
+  price: string | null;
+  vatRate: string | null;
+}): number | null {
+  const qty = toNum(it.qtyActual) ?? toNum(it.qtyPlanned);
+  const price = toNum(it.price);
+  const rate = toNum(it.vatRate);
+  if (qty === null || price === null || rate === null) return null;
+  return (qty * price * rate) / 100;
+}
 
 const KIND_OPTIONS: { label: string; value: ShipmentKind }[] = [
   { label: 'Подрядчику', value: 'contractor' },
@@ -281,6 +305,7 @@ export default function ShipmentPage() {
           clientKey: newKey(),
           lineNo: idx + 1,
           nameRaw: it.nameRaw,
+          qtyPlanned: it.qtyPlanned,
           qtyActual: it.qtyActual ?? it.qtyPlanned,
           unit: it.unit,
           materialId: it.materialId,
@@ -288,6 +313,9 @@ export default function ShipmentPage() {
           assetId: it.assetId,
           inventoryNumber: it.inventoryNumber,
           serialNumber: it.serialNumber,
+          price: it.price ?? null,
+          vatRate: it.vatRate ?? null,
+          vatSum: it.vatSum ?? null,
         })),
       );
     }
@@ -358,6 +386,7 @@ export default function ShipmentPage() {
         clientKey: newKey(),
         lineNo: idx + 1,
         nameRaw: it.nameRaw,
+        qtyPlanned: it.qty,
         qtyActual: it.qty,
         unit: it.unit,
         materialId: it.materialId ?? null,
@@ -365,6 +394,9 @@ export default function ShipmentPage() {
         assetId: null,
         inventoryNumber: null,
         serialNumber: null,
+        price: it.price ?? null,
+        vatRate: it.vatRate ?? null,
+        vatSum: it.vatSum ?? null,
       })),
     );
   }, [isNew, shipmentId, newFromUpdQuery.data, isInspector]);
@@ -431,6 +463,7 @@ export default function ShipmentPage() {
         clientKey: newKey(),
         lineNo: prev.length + 1,
         nameRaw: '',
+        qtyPlanned: null,
         qtyActual: null,
         unit: 'шт',
         materialId: null,
@@ -438,6 +471,9 @@ export default function ShipmentPage() {
         assetId: null,
         inventoryNumber: null,
         serialNumber: null,
+        price: null,
+        vatRate: null,
+        vatSum: null,
       },
     ]);
   };
@@ -471,24 +507,30 @@ export default function ShipmentPage() {
       comment: comment || null,
       items: items
         .filter((i) => i.nameRaw.trim().length > 0)
-        .map((i) => ({
-          id: crypto.randomUUID(),
-          itemKind: i.itemKind,
-          materialId: i.itemKind === 'asset' ? null : i.materialId,
-          assetId: i.itemKind === 'asset' ? i.assetId : null,
-          inventoryNumber: i.inventoryNumber,
-          serialNumber: i.serialNumber,
-          nameRaw: i.nameRaw,
-          qtyPlanned: null,
-          qtyActual: i.qtyActual,
-          unit: i.unit,
-          comment: null,
-          lineNo: i.lineNo,
-          volumeM3: null,
-          massKg: null,
-          volumeConfidence: null,
-          groupName: null,
-        })),
+        .map((i) => {
+          const computed = computeVatSum(i);
+          return {
+            id: crypto.randomUUID(),
+            itemKind: i.itemKind,
+            materialId: i.itemKind === 'asset' ? null : i.materialId,
+            assetId: i.itemKind === 'asset' ? i.assetId : null,
+            inventoryNumber: i.inventoryNumber,
+            serialNumber: i.serialNumber,
+            nameRaw: i.nameRaw,
+            qtyPlanned: i.qtyPlanned,
+            qtyActual: i.qtyActual,
+            unit: i.unit,
+            comment: null,
+            lineNo: i.lineNo,
+            volumeM3: null,
+            massKg: null,
+            price: i.price,
+            vatRate: i.vatRate,
+            vatSum: computed !== null ? computed.toFixed(2) : (i.vatSum ?? null),
+            volumeConfidence: null,
+            groupName: null,
+          };
+        }),
     };
   };
 
@@ -660,7 +702,12 @@ export default function ShipmentPage() {
   type Column = NonNullable<TableProps<DraftItem>['columns']>[number];
   const columns: Column[] = useMemo(
     () => [
-      { title: '№', dataIndex: 'lineNo', width: 56 },
+      {
+        title: '№',
+        key: 'idx',
+        width: 56,
+        render: (_: unknown, __: DraftItem, idx: number) => idx + 1,
+      },
       {
         title: 'Название',
         dataIndex: 'nameRaw',
@@ -691,7 +738,15 @@ export default function ShipmentPage() {
         ),
       },
       {
-        title: 'Кол-во',
+        title: 'План',
+        width: 90,
+        render: (_: unknown, r: DraftItem) =>
+          r.qtyPlanned !== null && r.qtyPlanned !== ''
+            ? trimQty(r.qtyPlanned)
+            : '—',
+      },
+      {
+        title: 'Факт',
         width: 130,
         render: (_: unknown, r: DraftItem) => (
           <InputNumber
@@ -717,6 +772,22 @@ export default function ShipmentPage() {
             onChange={(e) => updateField(r.clientKey, { unit: e.target.value })}
           />
         ),
+      },
+      {
+        title: 'Цена',
+        width: 110,
+        render: (_: unknown, r: DraftItem) => {
+          const v = toNum(r.price);
+          return v !== null ? v.toFixed(2) : '—';
+        },
+      },
+      {
+        title: 'Сумма НДС',
+        width: 120,
+        render: (_: unknown, r: DraftItem) => {
+          const v = computeVatSum(r);
+          return v !== null ? v.toFixed(2) : '—';
+        },
       },
       {
         title: '',
@@ -773,9 +844,15 @@ export default function ShipmentPage() {
         style={{ marginTop: 4 }}
       />
       <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
-        <Col span={16}>
+        <Col span={8}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            Кол-во
+            План
+          </Typography.Text>
+          <div>{r.qtyPlanned !== null && r.qtyPlanned !== '' ? trimQty(r.qtyPlanned) : '—'}</div>
+        </Col>
+        <Col span={10}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            Факт
           </Typography.Text>
           <InputNumber
             min={0}
@@ -788,7 +865,7 @@ export default function ShipmentPage() {
             }
           />
         </Col>
-        <Col span={8}>
+        <Col span={6}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             Ед.
           </Typography.Text>
@@ -796,6 +873,25 @@ export default function ShipmentPage() {
             value={r.unit}
             onChange={(e) => updateField(r.clientKey, { unit: e.target.value })}
           />
+        </Col>
+      </Row>
+      <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
+        <Col span={12}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            Цена
+          </Typography.Text>
+          <div>{toNum(r.price) !== null ? toNum(r.price)!.toFixed(2) : '—'}</div>
+        </Col>
+        <Col span={12}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            Сумма НДС
+          </Typography.Text>
+          <div>
+            {(() => {
+              const v = computeVatSum(r);
+              return v !== null ? v.toFixed(2) : '—';
+            })()}
+          </div>
         </Col>
       </Row>
     </div>
@@ -811,7 +907,6 @@ export default function ShipmentPage() {
 
   // ─── Режим формы ─────────────────────────────────────────────────────────
   if (shipmentId) {
-    void trimQty;
     const pendingAt = loadedShipment?.pendingDeletionAt ?? null;
     const isPending = pendingAt !== null;
     const isAdmin = authUser?.role === 'admin';

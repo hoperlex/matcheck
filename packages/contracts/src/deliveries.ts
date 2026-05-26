@@ -20,6 +20,13 @@ export const DeliveryItemSchema = z.object({
   lineNo: z.number(),
   volumeM3: z.string().nullable(),
   massKg: z.string().nullable(),
+  // Финансовый снимок позиции из УПД: цена за единицу, ставка НДС (%),
+  // сумма НДС. price/vatRate подтягиваются один раз при создании
+  // приёмки из УПД; vatSum пересчитывается клиентом из qtyActual×price×vatRate
+  // и приходит на сервер уже пересчитанным.
+  price: z.string().nullable(),
+  vatRate: z.string().nullable(),
+  vatSum: z.string().nullable(),
   volumeConfidence: VolumeConfidenceSchema.nullable(),
   groupName: z.string().nullable(),
 });
@@ -94,6 +101,9 @@ export const DeliveryUpsertItemSchema = z.object({
   lineNo: z.number(),
   volumeM3: z.string().nullable().optional(),
   massKg: z.string().nullable().optional(),
+  price: z.string().nullable().optional(),
+  vatRate: z.string().nullable().optional(),
+  vatSum: z.string().nullable().optional(),
   volumeConfidence: VolumeConfidenceSchema.nullable().optional(),
   groupName: z.string().nullable().optional(),
 });

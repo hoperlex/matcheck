@@ -62,7 +62,6 @@ import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { DeliveriesHistory } from './DeliveriesHistory';
 import { ExpectedUpds } from './ExpectedUpds';
 import { PhotoGallery } from './PhotoGallery';
-import { GroupedItemsList } from './grouping/GroupedItemsList';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
 
@@ -81,9 +80,33 @@ type DraftItem = {
   serialNumber: string | null;
   volumeM3: string | null;
   massKg: string | null;
+  // Финансовый снимок из УПД. vatSum пересчитывается на лету при сохранении
+  // из (qtyActual ?? qtyPlanned) × price × vatRate / 100.
+  price: string | null;
+  vatRate: string | null;
+  vatSum: string | null;
   volumeConfidence: 'low' | 'medium' | 'high' | null;
   groupName: string | null;
 };
+
+function toNum(v: string | null): number | null {
+  if (v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function computeVatSum(it: {
+  qtyActual: string | null;
+  qtyPlanned: string | null;
+  price: string | null;
+  vatRate: string | null;
+}): number | null {
+  const qty = toNum(it.qtyActual) ?? toNum(it.qtyPlanned);
+  const price = toNum(it.price);
+  const rate = toNum(it.vatRate);
+  if (qty === null || price === null || rate === null) return null;
+  return (qty * price * rate) / 100;
+}
 
 type ListTab = 'expected' | 'accepted';
 
@@ -343,6 +366,9 @@ export default function KppPage() {
           serialNumber: it.serialNumber,
           volumeM3: it.volumeM3 ?? null,
           massKg: it.massKg ?? null,
+          price: it.price ?? null,
+          vatRate: it.vatRate ?? null,
+          vatSum: it.vatSum ?? null,
           volumeConfidence: it.volumeConfidence ?? null,
           groupName: it.groupName ?? null,
         })),
@@ -397,6 +423,9 @@ export default function KppPage() {
         serialNumber: null,
         volumeM3: it.volumeM3 ?? null,
         massKg: it.massKg ?? null,
+        price: it.price ?? null,
+        vatRate: it.vatRate ?? null,
+        vatSum: it.vatSum ?? null,
         volumeConfidence: it.volumeConfidence ?? null,
         groupName: it.groupName ?? null,
       })),
@@ -475,6 +504,9 @@ export default function KppPage() {
         serialNumber: null,
         volumeM3: null,
         massKg: null,
+        price: null,
+        vatRate: null,
+        vatSum: null,
         volumeConfidence: null,
         groupName: null,
       },
@@ -498,24 +530,30 @@ export default function KppPage() {
         : loadedDelivery.sourceDocumentIds,
       items: items
         .filter((i) => i.nameRaw.trim().length > 0)
-        .map((i) => ({
-          id: crypto.randomUUID(),
-          itemKind: i.itemKind,
-          materialId: i.itemKind === 'asset' ? null : i.materialId,
-          assetId: i.itemKind === 'asset' ? i.assetId : null,
-          inventoryNumber: i.inventoryNumber,
-          serialNumber: i.serialNumber,
-          nameRaw: i.nameRaw,
-          qtyPlanned: i.qtyPlanned,
-          qtyActual: i.qtyActual,
-          unit: i.unit,
-          comment: null,
-          lineNo: i.lineNo,
-          volumeM3: i.volumeM3,
-          massKg: i.massKg,
-          volumeConfidence: i.volumeConfidence,
-          groupName: i.groupName,
-        })),
+        .map((i) => {
+          const computed = computeVatSum(i);
+          return {
+            id: crypto.randomUUID(),
+            itemKind: i.itemKind,
+            materialId: i.itemKind === 'asset' ? null : i.materialId,
+            assetId: i.itemKind === 'asset' ? i.assetId : null,
+            inventoryNumber: i.inventoryNumber,
+            serialNumber: i.serialNumber,
+            nameRaw: i.nameRaw,
+            qtyPlanned: i.qtyPlanned,
+            qtyActual: i.qtyActual,
+            unit: i.unit,
+            comment: null,
+            lineNo: i.lineNo,
+            volumeM3: i.volumeM3,
+            massKg: i.massKg,
+            price: i.price,
+            vatRate: i.vatRate,
+            vatSum: computed !== null ? computed.toFixed(2) : (i.vatSum ?? null),
+            volumeConfidence: i.volumeConfidence,
+            groupName: i.groupName,
+          };
+        }),
     };
   };
 
@@ -672,7 +710,12 @@ export default function KppPage() {
   type Column = NonNullable<TableProps<DraftItem>['columns']>[number];
   const columns: Column[] = useMemo(
     () => [
-      { title: '№', dataIndex: 'lineNo', width: 56 },
+      {
+        title: '№',
+        key: 'idx',
+        width: 56,
+        render: (_: unknown, __: DraftItem, idx: number) => idx + 1,
+      },
       {
         title: 'Название',
         dataIndex: 'nameRaw',
@@ -722,55 +765,89 @@ export default function KppPage() {
           />
         ),
       },
+      {
+        title: 'Цена',
+        width: 110,
+        render: (_: unknown, r: DraftItem) => {
+          const v = toNum(r.price);
+          return v !== null ? v.toFixed(2) : '—';
+        },
+      },
+      {
+        title: 'Сумма НДС',
+        width: 120,
+        render: (_: unknown, r: DraftItem) => {
+          const v = computeVatSum(r);
+          return v !== null ? v.toFixed(2) : '—';
+        },
+      },
     ],
     [],
   );
 
-  const cardRender = (r: DraftItem) => (
-    <div style={{ width: '100%' }}>
-      <Typography.Text strong>№{r.lineNo}</Typography.Text>
-      <Input.TextArea
-        autoSize={{ minRows: 1, maxRows: 4 }}
-        value={r.nameRaw}
-        placeholder="Наименование"
-        onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
-        readOnly={!!r.materialId}
-        style={{ marginTop: 4 }}
-      />
-      <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
-        <Col span={8}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            План
-          </Typography.Text>
-          <div>{r.qtyPlanned !== null && r.qtyPlanned !== '' ? trimQty(r.qtyPlanned) : '—'}</div>
-        </Col>
-        <Col span={10}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            Факт
-          </Typography.Text>
-          <InputNumber
-            min={0}
-            style={{ width: '100%' }}
-            value={r.qtyActual !== null && r.qtyActual !== '' ? Number(r.qtyActual) : null}
-            onChange={(v) =>
-              updateField(r.clientKey, {
-                qtyActual: v !== null && v !== undefined ? String(v) : null,
-              })
-            }
-          />
-        </Col>
-        <Col span={6}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            Ед.
-          </Typography.Text>
-          <Input
-            value={r.unit}
-            onChange={(e) => updateField(r.clientKey, { unit: e.target.value })}
-          />
-        </Col>
-      </Row>
-    </div>
-  );
+  const cardRender = (r: DraftItem) => {
+    const priceNum = toNum(r.price);
+    const vatNum = computeVatSum(r);
+    return (
+      <div style={{ width: '100%' }}>
+        <Typography.Text strong>№{r.lineNo}</Typography.Text>
+        <Input.TextArea
+          autoSize={{ minRows: 1, maxRows: 4 }}
+          value={r.nameRaw}
+          placeholder="Наименование"
+          onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
+          readOnly={!!r.materialId}
+          style={{ marginTop: 4 }}
+        />
+        <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
+          <Col span={8}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              План
+            </Typography.Text>
+            <div>{r.qtyPlanned !== null && r.qtyPlanned !== '' ? trimQty(r.qtyPlanned) : '—'}</div>
+          </Col>
+          <Col span={10}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Факт
+            </Typography.Text>
+            <InputNumber
+              min={0}
+              style={{ width: '100%' }}
+              value={r.qtyActual !== null && r.qtyActual !== '' ? Number(r.qtyActual) : null}
+              onChange={(v) =>
+                updateField(r.clientKey, {
+                  qtyActual: v !== null && v !== undefined ? String(v) : null,
+                })
+              }
+            />
+          </Col>
+          <Col span={6}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Ед.
+            </Typography.Text>
+            <Input
+              value={r.unit}
+              onChange={(e) => updateField(r.clientKey, { unit: e.target.value })}
+            />
+          </Col>
+        </Row>
+        <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
+          <Col span={12}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Цена
+            </Typography.Text>
+            <div>{priceNum !== null ? priceNum.toFixed(2) : '—'}</div>
+          </Col>
+          <Col span={12}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Сумма НДС
+            </Typography.Text>
+            <div>{vatNum !== null ? vatNum.toFixed(2) : '—'}</div>
+          </Col>
+        </Row>
+      </div>
+    );
+  };
 
   // ──────────── список / форма ────────────
 
@@ -1094,14 +1171,6 @@ export default function KppPage() {
                 Материалы можно не добавлять — приёмка сохранится со статусом «Не оформлена».
                 Чтобы оформить, добавьте строки вручную или выберите УПД.
               </Typography.Text>
-            </div>
-          ) : items.some((it) => it.groupName) ? (
-            <div style={{ padding: 12 }}>
-              <GroupedItemsList
-                items={items}
-                deliveryId={deliveryId}
-                onChange={(key, patch) => updateField(key, patch as Partial<DraftItem>)}
-              />
             </div>
           ) : (
             <ResponsiveTable<DraftItem>

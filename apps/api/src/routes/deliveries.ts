@@ -180,6 +180,9 @@ async function buildDeliveryDto(app: any, id: string) {
       lineNo: i.lineNo,
       volumeM3: i.volumeM3,
       massKg: i.massKg,
+      price: i.price,
+      vatRate: i.vatRate,
+      vatSum: i.vatSum,
       volumeConfidence: i.volumeConfidence as 'low' | 'medium' | 'high' | null,
       groupName: i.groupName,
     })),
@@ -646,6 +649,9 @@ async function createDelivery(
         lineNo: i.lineNo,
         volumeM3: i.volumeM3 ?? null,
         massKg: i.massKg ?? null,
+        price: i.price ?? null,
+        vatRate: i.vatRate ?? null,
+        vatSum: i.vatSum ?? null,
         volumeConfidence: i.volumeConfidence ?? null,
         groupName: i.groupName ?? null,
       })),
@@ -718,6 +724,9 @@ async function updateDelivery(
           lineNo: i.lineNo,
           volumeM3: i.volumeM3 ?? null,
           massKg: i.massKg ?? null,
+          price: i.price ?? null,
+          vatRate: i.vatRate ?? null,
+          vatSum: i.vatSum ?? null,
           volumeConfidence: i.volumeConfidence ?? null,
           groupName: i.groupName ?? null,
         }));
@@ -798,6 +807,9 @@ async function buildDeliveryItemsFromSources(
     lineNo: number;
     volumeM3: string | null;
     massKg: string | null;
+    price: string | null;
+    vatRate: string | null;
+    vatSum: string | null;
     volumeConfidence: 'low' | 'medium' | 'high' | null;
     groupName: string | null;
   }>
@@ -822,6 +834,9 @@ async function buildDeliveryItemsFromSources(
     lineNo: idx + 1,
     volumeM3: r.volumeM3,
     massKg: r.massKg,
+    price: r.price,
+    vatRate: r.vatRate,
+    vatSum: r.vatSum,
     volumeConfidence: r.volumeConfidence as 'low' | 'medium' | 'high' | null,
     groupName: r.groupName,
   }));

@@ -253,6 +253,13 @@
       "when": 1780877400000,
       "tag": "0035_source_documents_recipient_mol",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1780877460000,
+      "tag": "0036_delivery_shipment_item_pricing",
+      "breakpoints": true
     }
   ]
 }
