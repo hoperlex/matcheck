@@ -133,7 +133,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           SELECT
             d.site_id,
             ${groupKeyDelivery} AS group_key,
-            MAX(di.material_id) AS material_id,
+            MAX(di.material_id::text)::uuid AS material_id,
             MAX(di.name_raw)    AS name_raw,
             di.unit,
             SUM(COALESCE(di.qty_actual, di.qty_planned))::numeric(18,4) AS qty_in,
@@ -163,7 +163,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           SELECT
             s.site_id,
             ${groupKeyShipment} AS group_key,
-            MAX(si.material_id) AS material_id,
+            MAX(si.material_id::text)::uuid AS material_id,
             MAX(si.name_raw)    AS name_raw,
             si.unit,
             SUM(COALESCE(si.qty_actual, si.qty_planned))::numeric(18,4) AS qty_out
@@ -181,7 +181,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           SELECT
             s.dest_site_id AS site_id,
             ${groupKeyShipment} AS group_key,
-            MAX(si.material_id) AS material_id,
+            MAX(si.material_id::text)::uuid AS material_id,
             MAX(si.name_raw)    AS name_raw,
             si.unit,
             SUM(COALESCE(si.qty_actual, si.qty_planned))::numeric(18,4) AS qty_transfer_in
