@@ -109,19 +109,32 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       if (q) {
         const safeQ = escapeLike(q);
         filters.push(
-          `(COALESCE(m.name, '') ILIKE '%${safeQ}%' OR COALESCE(m.code, '') ILIKE '%${safeQ}%')`,
+          `(COALESCE(m.name, '') ILIKE '%${safeQ}%' OR COALESCE(m.code, '') ILIKE '%${safeQ}%' OR COALESCE(b.name_raw, '') ILIKE '%${safeQ}%')`,
         );
       }
       const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
 
-      // Приёмки в разрезе (site × material × unit). Контрагентов собираем
+      // Ключ группировки: если позиция привязана к справочнику material —
+      // группируем по material_id; иначе — по сырому тексту di.name_raw.
+      // Это позволяет ввести в баланс позиции, заведённые инспектором руками
+      // или распознанные LLM без последующей линковки в справочник.
+      // Префикс 'name:' гарантирует, что текст-ключ никогда не совпадёт
+      // с uuid материала.
+      const groupKeyDelivery = `COALESCE(di.material_id::text, 'name:' || di.name_raw)`;
+      const groupKeyShipment = `COALESCE(si.material_id::text, 'name:' || si.name_raw)`;
+
+      // Приёмки в разрезе (site × group_key × unit). Контрагентов собираем
       // в string_agg, сумму считаем как Σ qty × price (NULL → 0 в произведении,
       // но если у всех NULL — финальная sum = NULL, отдаём как «—» на фронте).
+      // Pending_deletion_at IS NULL — приёмки, помеченные на удаление, в баланс
+      // не должны входить (правка-баг: раньше учитывались).
       const intakesCte = `
         intakes AS (
           SELECT
             d.site_id,
-            di.material_id,
+            ${groupKeyDelivery} AS group_key,
+            MAX(di.material_id) AS material_id,
+            MAX(di.name_raw)    AS name_raw,
             di.unit,
             SUM(COALESCE(di.qty_actual, di.qty_planned))::numeric(18,4) AS qty_in,
             CASE
@@ -136,20 +149,22 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           LEFT JOIN counterparties con ON con.id = d.contractor_id
           WHERE st.entity_type = 'delivery'
             AND st.code IN ('filled','confirmed_mol')
-            AND di.material_id IS NOT NULL
+            AND d.pending_deletion_at IS NULL
             AND COALESCE(di.qty_actual, di.qty_planned) IS NOT NULL
             ${dateFilterDelivery}
-          GROUP BY d.site_id, di.material_id, di.unit
+          GROUP BY d.site_id, ${groupKeyDelivery}, di.unit
         )
       `;
 
       // Отгрузки и приходы-перемещения собираем в один кортеж, чтобы получить
-      // qty_out и qty_in_transfer по site×material×unit.
+      // qty_out и qty_in_transfer по site × group_key × unit.
       const movementsCte = `
         out_aggs AS (
           SELECT
             s.site_id,
-            si.material_id,
+            ${groupKeyShipment} AS group_key,
+            MAX(si.material_id) AS material_id,
+            MAX(si.name_raw)    AS name_raw,
             si.unit,
             SUM(COALESCE(si.qty_actual, si.qty_planned))::numeric(18,4) AS qty_out
           FROM shipment_items si
@@ -157,15 +172,17 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           JOIN statuses st  ON st.id = s.status_id
           WHERE st.entity_type = 'shipment'
             AND st.code IN ('shipped','confirmed_mol')
-            AND si.material_id IS NOT NULL
+            AND s.pending_deletion_at IS NULL
             AND COALESCE(si.qty_actual, si.qty_planned) IS NOT NULL
             ${dateFilterShipment}
-          GROUP BY s.site_id, si.material_id, si.unit
+          GROUP BY s.site_id, ${groupKeyShipment}, si.unit
         ),
         in_transfer AS (
           SELECT
             s.dest_site_id AS site_id,
-            si.material_id,
+            ${groupKeyShipment} AS group_key,
+            MAX(si.material_id) AS material_id,
+            MAX(si.name_raw)    AS name_raw,
             si.unit,
             SUM(COALESCE(si.qty_actual, si.qty_planned))::numeric(18,4) AS qty_transfer_in
           FROM shipment_items si
@@ -173,12 +190,12 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           JOIN statuses st  ON st.id = s.status_id
           WHERE st.entity_type = 'shipment'
             AND st.code IN ('shipped','confirmed_mol')
+            AND s.pending_deletion_at IS NULL
             AND s.kind = 'transfer'
             AND s.dest_site_id IS NOT NULL
-            AND si.material_id IS NOT NULL
             AND COALESCE(si.qty_actual, si.qty_planned) IS NOT NULL
             ${dateFilterShipment}
-          GROUP BY s.dest_site_id, si.material_id, si.unit
+          GROUP BY s.dest_site_id, ${groupKeyShipment}, si.unit
         )
       `;
 
@@ -189,6 +206,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           SELECT
             COALESCE(i.site_id, o.site_id, t.site_id)        AS site_id,
             COALESCE(i.material_id, o.material_id, t.material_id) AS material_id,
+            COALESCE(i.name_raw, o.name_raw, t.name_raw)     AS name_raw,
             COALESCE(i.unit, o.unit, t.unit)                 AS unit,
             COALESCE(i.qty_in, 0)::numeric(18,4)
               + COALESCE(t.qty_transfer_in, 0)::numeric(18,4) AS qty_in,
@@ -199,10 +217,10 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
             i.contractor_names
           FROM intakes i
           FULL OUTER JOIN out_aggs o
-            ON o.site_id = i.site_id AND o.material_id = i.material_id AND o.unit = i.unit
+            ON o.site_id = i.site_id AND o.group_key = i.group_key AND o.unit = i.unit
           FULL OUTER JOIN in_transfer t
             ON t.site_id = COALESCE(i.site_id, o.site_id)
-            AND t.material_id = COALESCE(i.material_id, o.material_id)
+            AND t.group_key = COALESCE(i.group_key, o.group_key)
             AND t.unit = COALESCE(i.unit, o.unit)
           WHERE (COALESCE(i.qty_in, 0) + COALESCE(t.qty_transfer_in, 0) - COALESCE(o.qty_out, 0)) <> 0
         )
@@ -216,7 +234,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         ${ctes}
         SELECT
           b.material_id AS "materialId",
-          COALESCE(m.name, '— без материала —') AS "materialName",
+          COALESCE(m.name, b.name_raw, '— без материала —') AS "materialName",
           b.site_id   AS "siteId",
           si.code     AS "siteCode",
           si.name     AS "siteName",
@@ -230,7 +248,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         LEFT JOIN materials m ON m.id = b.material_id
         JOIN sites si        ON si.id = b.site_id
         ${whereSql}
-        ORDER BY si.code, COALESCE(m.name, '— без материала —')
+        ORDER BY si.code, COALESCE(m.name, b.name_raw, '— без материала —')
         LIMIT ${limit} OFFSET ${offset}
         `,
       );
