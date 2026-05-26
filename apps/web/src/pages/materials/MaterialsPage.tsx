@@ -40,6 +40,13 @@ const trimQty = (s: string | null) => {
   return s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
 };
 
+const formatMoney = (s: string | null | undefined) => {
+  if (s === null || s === undefined || s === '') return '—';
+  const n = Number(s);
+  if (!Number.isFinite(n)) return '—';
+  return n.toFixed(2);
+};
+
 type MaterialsTab = 'balance' | 'intake' | 'shipment';
 
 export default function MaterialsPage() {
@@ -137,6 +144,11 @@ function BalanceTab() {
         columns={[
           { title: 'Объект', key: 'site', render: (_, r) => `${r.siteCode} · ${r.siteName}` },
           { title: 'Материал', dataIndex: 'materialName' },
+          {
+            title: 'Подрядчик',
+            dataIndex: 'contractorName',
+            render: (v: string | null) => v ?? '—',
+          },
           { title: 'Принято', dataIndex: 'qtyIn', render: (v: string) => trimQty(v) },
           { title: 'Отгружено', dataIndex: 'qtyOut', render: (v: string) => trimQty(v) },
           {
@@ -152,6 +164,12 @@ function BalanceTab() {
             },
           },
           { title: 'Ед.', dataIndex: 'unit', width: 80 },
+          {
+            title: 'Сумма',
+            dataIndex: 'sum',
+            width: 130,
+            render: (v: string | null) => formatMoney(v),
+          },
         ]}
         cardRender={(r) => (
           <div style={{ width: '100%' }}>
@@ -260,6 +278,18 @@ function IntakeTab() {
             width: 110,
           },
           {
+            title: 'Сумма НДС',
+            dataIndex: 'vatSum',
+            width: 120,
+            render: (v: string | null) => formatMoney(v),
+          },
+          {
+            title: 'Сумма',
+            dataIndex: 'sum',
+            width: 130,
+            render: (v: string | null) => formatMoney(v),
+          },
+          {
             title: 'Статус',
             key: 'status',
             width: 160,
@@ -284,6 +314,9 @@ function IntakeTab() {
                 ? new Date(r.arrivedAt).toLocaleDateString('ru-RU')
                 : '—'}{' '}
               · {r.supplierName ?? '—'}
+            </Typography.Text>
+            <Typography.Text type="secondary" style={{ display: 'block' }}>
+              Сумма {formatMoney(r.sum)} · НДС {formatMoney(r.vatSum)}
             </Typography.Text>
             <Tag color={statusTagColor(r.statusCode)} style={{ marginTop: 4 }}>
               {r.statusLabel}

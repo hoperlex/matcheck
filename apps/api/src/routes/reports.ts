@@ -91,20 +91,17 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       const mId = safeUuid(materialId);
       const dateTs = safeTimestamp(date);
 
-      // baseAgg вычисляет qty_in/qty_out/balance в разрезе material × site × unit.
-      // Если задан date — пересчитываем на лету (фильтр по ts); иначе читаем готовый v_stock_balance.
-      const baseAgg = dateTs
-        ? `
-          SELECT material_id, site_id, unit,
-                 SUM(CASE WHEN direction =  1 THEN qty ELSE 0 END)::numeric(18,4) AS qty_in,
-                 SUM(CASE WHEN direction = -1 THEN qty ELSE 0 END)::numeric(18,4) AS qty_out,
-                 SUM(direction * qty)::numeric(18,4)                              AS balance
-          FROM v_stock_movements
-          WHERE ts <= '${dateTs}'::timestamptz AND material_id IS NOT NULL
-          GROUP BY material_id, site_id, unit
-          HAVING SUM(direction * qty) <> 0
-        `
-        : `SELECT material_id, site_id, unit, qty_in, qty_out, balance FROM v_stock_balance`;
+      // qty_in/qty_out агрегируем напрямую из deliveries/shipments, чтобы
+      // подтянуть подрядчиков (string_agg) и сумму приёмок (Σ qty × price).
+      // Старый v_stock_balance этих полей не отдаёт, и view расширять не
+      // хочется — данные нужны только этому отчёту.
+      // dateFilterDelivery/Shipment — необязательный фильтр по дате среза.
+      const dateFilterDelivery = dateTs
+        ? `AND COALESCE(d.arrived_at, d.updated_at) <= '${dateTs}'::timestamptz`
+        : '';
+      const dateFilterShipment = dateTs
+        ? `AND COALESCE(s.shipped_at, s.updated_at) <= '${dateTs}'::timestamptz`
+        : '';
 
       const filters: string[] = [];
       if (sId) filters.push(`b.site_id = '${sId}'::uuid`);
@@ -117,10 +114,106 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       }
       const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
 
+      // Приёмки в разрезе (site × material × unit). Контрагентов собираем
+      // в string_agg, сумму считаем как Σ qty × price (NULL → 0 в произведении,
+      // но если у всех NULL — финальная sum = NULL, отдаём как «—» на фронте).
+      const intakesCte = `
+        intakes AS (
+          SELECT
+            d.site_id,
+            di.material_id,
+            di.unit,
+            SUM(COALESCE(di.qty_actual, di.qty_planned))::numeric(18,4) AS qty_in,
+            CASE
+              WHEN bool_or(di.price IS NOT NULL)
+              THEN SUM(COALESCE(di.qty_actual, di.qty_planned) * COALESCE(di.price, 0))::numeric(18,2)
+              ELSE NULL
+            END AS sum_in,
+            NULLIF(string_agg(DISTINCT con.name, ', ' ORDER BY con.name), '') AS contractor_names
+          FROM delivery_items di
+          JOIN deliveries d ON d.id = di.delivery_id
+          JOIN statuses st  ON st.id = d.status_id
+          LEFT JOIN counterparties con ON con.id = d.contractor_id
+          WHERE st.entity_type = 'delivery'
+            AND st.code IN ('filled','confirmed_mol')
+            AND di.material_id IS NOT NULL
+            AND COALESCE(di.qty_actual, di.qty_planned) IS NOT NULL
+            ${dateFilterDelivery}
+          GROUP BY d.site_id, di.material_id, di.unit
+        )
+      `;
+
+      // Отгрузки и приходы-перемещения собираем в один кортеж, чтобы получить
+      // qty_out и qty_in_transfer по site×material×unit.
+      const movementsCte = `
+        out_aggs AS (
+          SELECT
+            s.site_id,
+            si.material_id,
+            si.unit,
+            SUM(COALESCE(si.qty_actual, si.qty_planned))::numeric(18,4) AS qty_out
+          FROM shipment_items si
+          JOIN shipments s  ON s.id = si.shipment_id
+          JOIN statuses st  ON st.id = s.status_id
+          WHERE st.entity_type = 'shipment'
+            AND st.code IN ('shipped','confirmed_mol')
+            AND si.material_id IS NOT NULL
+            AND COALESCE(si.qty_actual, si.qty_planned) IS NOT NULL
+            ${dateFilterShipment}
+          GROUP BY s.site_id, si.material_id, si.unit
+        ),
+        in_transfer AS (
+          SELECT
+            s.dest_site_id AS site_id,
+            si.material_id,
+            si.unit,
+            SUM(COALESCE(si.qty_actual, si.qty_planned))::numeric(18,4) AS qty_transfer_in
+          FROM shipment_items si
+          JOIN shipments s  ON s.id = si.shipment_id
+          JOIN statuses st  ON st.id = s.status_id
+          WHERE st.entity_type = 'shipment'
+            AND st.code IN ('shipped','confirmed_mol')
+            AND s.kind = 'transfer'
+            AND s.dest_site_id IS NOT NULL
+            AND si.material_id IS NOT NULL
+            AND COALESCE(si.qty_actual, si.qty_planned) IS NOT NULL
+            ${dateFilterShipment}
+          GROUP BY s.dest_site_id, si.material_id, si.unit
+        )
+      `;
+
+      // bal — финальный агрегат: intakes + in_transfer слева, out_aggs справа.
+      // Включаем строки, у которых есть хоть какое-то движение (FULL OUTER JOIN).
+      const balCte = `
+        bal AS (
+          SELECT
+            COALESCE(i.site_id, o.site_id, t.site_id)        AS site_id,
+            COALESCE(i.material_id, o.material_id, t.material_id) AS material_id,
+            COALESCE(i.unit, o.unit, t.unit)                 AS unit,
+            COALESCE(i.qty_in, 0)::numeric(18,4)
+              + COALESCE(t.qty_transfer_in, 0)::numeric(18,4) AS qty_in,
+            COALESCE(o.qty_out, 0)::numeric(18,4)            AS qty_out,
+            (COALESCE(i.qty_in, 0) + COALESCE(t.qty_transfer_in, 0) - COALESCE(o.qty_out, 0))::numeric(18,4)
+                                                              AS balance,
+            i.sum_in,
+            i.contractor_names
+          FROM intakes i
+          FULL OUTER JOIN out_aggs o
+            ON o.site_id = i.site_id AND o.material_id = i.material_id AND o.unit = i.unit
+          FULL OUTER JOIN in_transfer t
+            ON t.site_id = COALESCE(i.site_id, o.site_id)
+            AND t.material_id = COALESCE(i.material_id, o.material_id)
+            AND t.unit = COALESCE(i.unit, o.unit)
+          WHERE (COALESCE(i.qty_in, 0) + COALESCE(t.qty_transfer_in, 0) - COALESCE(o.qty_out, 0)) <> 0
+        )
+      `;
+
+      const ctes = `WITH ${intakesCte}, ${movementsCte}, ${balCte}`;
+
       const rows = await execRows(
         app,
         `
-        WITH bal AS (${baseAgg})
+        ${ctes}
         SELECT
           b.material_id AS "materialId",
           COALESCE(m.name, '— без материала —') AS "materialName",
@@ -130,7 +223,9 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           b.unit      AS "unit",
           b.qty_in::text  AS "qtyIn",
           b.qty_out::text AS "qtyOut",
-          b.balance::text AS "balance"
+          b.balance::text AS "balance",
+          b.contractor_names AS "contractorName",
+          b.sum_in::text  AS "sum"
         FROM bal b
         LEFT JOIN materials m ON m.id = b.material_id
         JOIN sites si        ON si.id = b.site_id
@@ -143,7 +238,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       const totalRows = await execRows(
         app,
         `
-        WITH bal AS (${baseAgg})
+        ${ctes}
         SELECT count(*)::int AS count
         FROM bal b
         LEFT JOIN materials m ON m.id = b.material_id
@@ -163,6 +258,8 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           qtyIn: String(r.qtyIn ?? '0'),
           qtyOut: String(r.qtyOut ?? '0'),
           balance: String(r.balance ?? '0'),
+          contractorName: (r.contractorName as string | null) ?? null,
+          sum: r.sum === null || r.sum === undefined ? null : String(r.sum),
         })),
         total: Number(totalRows[0]?.count ?? 0),
       };
@@ -211,6 +308,12 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           COALESCE(m.name, di.name_raw) AS "materialName",
           COALESCE(di.qty_actual, di.qty_planned)::text AS "qty",
           di.unit AS "unit",
+          di.price::text AS "price",
+          di.vat_sum::text AS "vatSum",
+          CASE
+            WHEN di.price IS NULL THEN NULL
+            ELSE (COALESCE(di.qty_actual, di.qty_planned) * di.price)::numeric(18,2)::text
+          END AS "sum",
           d.supplier_id AS "supplierId",
           sup.name AS "supplierName",
           d.contractor_id AS "contractorId",
@@ -265,6 +368,9 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           materialName: String(r.materialName),
           qty: r.qty === null || r.qty === undefined ? null : String(r.qty),
           unit: String(r.unit),
+          price: r.price === null || r.price === undefined ? null : String(r.price),
+          vatSum: r.vatSum === null || r.vatSum === undefined ? null : String(r.vatSum),
+          sum: r.sum === null || r.sum === undefined ? null : String(r.sum),
           supplierId: (r.supplierId as string | null) ?? null,
           supplierName: (r.supplierName as string | null) ?? null,
           contractorId: (r.contractorId as string | null) ?? null,

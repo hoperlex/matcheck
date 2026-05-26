@@ -14,6 +14,13 @@ export const StockBalanceRowSchema = z.object({
   qtyIn: z.string(),
   qtyOut: z.string(),
   balance: z.string(),
+  // Имена всех подрядчиков, чьи приёмки этого материала на этом объекте
+  // вошли в qty_in. Несколько — через запятую. Может быть null, если у
+  // приёмок не задан contractor_id.
+  contractorName: z.string().nullable(),
+  // Σ qty × price по всем приёмкам этого материала на этом объекте.
+  // Null, если ни в одной приёмке не задана цена.
+  sum: z.string().nullable(),
 });
 export type StockBalanceRow = z.infer<typeof StockBalanceRowSchema>;
 
@@ -37,6 +44,12 @@ export const IntakeJournalRowSchema = z.object({
   materialName: z.string(),
   qty: z.string().nullable(),
   unit: z.string(),
+  // Цена за единицу и сумма НДС — снимок из УПД, заполняется при создании
+  // приёмки. Может быть null, если позиция добавлена руками без цены.
+  price: z.string().nullable(),
+  vatSum: z.string().nullable(),
+  // Σ qty × price для этой строки приёмки. Null, если цены нет.
+  sum: z.string().nullable(),
   supplierId: z.string().uuid().nullable(),
   supplierName: z.string().nullable(),
   contractorId: z.string().uuid().nullable(),
