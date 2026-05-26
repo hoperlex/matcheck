@@ -15,6 +15,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Counterparty, CounterpartyUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 
 type List = { items: Counterparty[]; total: number };
 
@@ -101,18 +102,21 @@ export default function CounterpartiesPage() {
   const submitting = create.isPending || update.isPending;
 
   return (
-    <div>
-      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }} wrap>
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          Контрагенты
-        </Typography.Title>
-        <Space>
-          <Input.Search placeholder="ИНН или название" allowClear onSearch={setSearch} />
-          <Button type="primary" onClick={openCreate}>
-            Добавить
-          </Button>
+    <StickyPageHeader
+      header={
+        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            Контрагенты
+          </Typography.Title>
+          <Space>
+            <Input.Search placeholder="ИНН или название" allowClear onSearch={setSearch} />
+            <Button type="primary" onClick={openCreate}>
+              Добавить
+            </Button>
+          </Space>
         </Space>
-      </Space>
+      }
+    >
       <ResponsiveTable<Counterparty>
         items={list.data?.items ?? []}
         loading={list.isLoading}
@@ -201,6 +205,6 @@ export default function CounterpartiesPage() {
           </Button>
         </Form>
       </Drawer>
-    </div>
+    </StickyPageHeader>
   );
 }

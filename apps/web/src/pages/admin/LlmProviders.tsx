@@ -23,6 +23,7 @@ import type {
 } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { LlmProviderCredentialsModal } from './LlmProviderCredentialsModal';
 
 const KIND_DEFAULT_MODEL: Record<LlmKind, string> = {
@@ -161,18 +162,21 @@ export default function AdminLlmProvidersPage() {
   };
 
   return (
-    <div>
-      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }}>
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          LLM провайдеры
-        </Typography.Title>
-        <Space>
-          <Button onClick={() => setCredsOpen(true)}>Ключи провайдеров</Button>
-          <Button type="primary" onClick={openCreate}>
-            Добавить
-          </Button>
+    <StickyPageHeader
+      header={
+        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            LLM провайдеры
+          </Typography.Title>
+          <Space>
+            <Button onClick={() => setCredsOpen(true)}>Ключи провайдеров</Button>
+            <Button type="primary" onClick={openCreate}>
+              Добавить
+            </Button>
+          </Space>
         </Space>
-      </Space>
+      }
+    >
       <ResponsiveTable<LlmProviderDto>
         items={list.data ?? []}
         loading={list.isLoading}
@@ -332,6 +336,6 @@ export default function AdminLlmProvidersPage() {
         credentials={creds.data ?? []}
         modelsByKind={list.data ?? []}
       />
-    </div>
+    </StickyPageHeader>
   );
 }

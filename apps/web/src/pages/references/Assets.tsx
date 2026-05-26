@@ -15,6 +15,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Asset, AssetUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 
 type List = { items: Asset[]; total: number };
 
@@ -41,18 +42,21 @@ export default function AssetsPage() {
   });
 
   return (
-    <div>
-      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }} wrap>
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          ОС (основные средства)
-        </Typography.Title>
-        <Space>
-          <Input.Search placeholder="Название или код" allowClear onSearch={setSearch} />
-          <Button type="primary" onClick={() => setOpen(true)}>
-            Добавить
-          </Button>
+    <StickyPageHeader
+      header={
+        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            ОС (основные средства)
+          </Typography.Title>
+          <Space>
+            <Input.Search placeholder="Название или код" allowClear onSearch={setSearch} />
+            <Button type="primary" onClick={() => setOpen(true)}>
+              Добавить
+            </Button>
+          </Space>
         </Space>
-      </Space>
+      }
+    >
       <ResponsiveTable<Asset>
         items={list.data?.items ?? []}
         loading={list.isLoading}
@@ -117,6 +121,6 @@ export default function AssetsPage() {
           </Button>
         </Form>
       </Drawer>
-    </div>
+    </StickyPageHeader>
   );
 }

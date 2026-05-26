@@ -15,6 +15,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { MailAccountDto, MailAccountUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 
 export default function AdminMailAccountsPage() {
   const qc = useQueryClient();
@@ -43,15 +44,18 @@ export default function AdminMailAccountsPage() {
   });
 
   return (
-    <div>
-      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }}>
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          Почтовые ящики
-        </Typography.Title>
-        <Button type="primary" onClick={() => setOpen(true)}>
-          Добавить
-        </Button>
-      </Space>
+    <StickyPageHeader
+      header={
+        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            Почтовые ящики
+          </Typography.Title>
+          <Button type="primary" onClick={() => setOpen(true)}>
+            Добавить
+          </Button>
+        </Space>
+      }
+    >
       <ResponsiveTable<MailAccountDto>
         items={list.data ?? []}
         loading={list.isLoading}
@@ -126,6 +130,6 @@ export default function AdminMailAccountsPage() {
           </Button>
         </Form>
       </Drawer>
-    </div>
+    </StickyPageHeader>
   );
 }

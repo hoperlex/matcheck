@@ -16,6 +16,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Site, SiteUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { useAuthStore } from '../../stores/auth';
 
 const SYSTEM_SITE_ID = '00000000-0000-0000-0000-000000000001';
@@ -81,18 +82,20 @@ export default function SitesPage() {
   }
 
   return (
-    <div>
-      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }} wrap>
-        <Space>
-          <Input.Search placeholder="Код или название" allowClear onSearch={setSearch} />
+    <StickyPageHeader
+      header={
+        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
+          <Space>
+            <Input.Search placeholder="Код или название" allowClear onSearch={setSearch} />
+          </Space>
+          {canEdit && (
+            <Button type="primary" onClick={openCreate}>
+              Добавить объект
+            </Button>
+          )}
         </Space>
-        {canEdit && (
-          <Button type="primary" onClick={openCreate}>
-            Добавить объект
-          </Button>
-        )}
-      </Space>
-
+      }
+    >
       <ResponsiveTable<Site>
         items={list.data?.items ?? []}
         loading={list.isLoading}
@@ -202,6 +205,6 @@ export default function SitesPage() {
           </Button>
         </Form>
       </Drawer>
-    </div>
+    </StickyPageHeader>
   );
 }

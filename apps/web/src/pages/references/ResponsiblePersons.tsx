@@ -24,6 +24,7 @@ import type {
 } from '@matcheck/contracts';
 import { api, apiUploadFile, ApiError } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 
 type List = { items: ResponsiblePerson[]; total: number };
 
@@ -52,19 +53,22 @@ export default function ResponsiblePersonsPage() {
   });
 
   return (
-    <div>
-      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }} wrap>
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          МОЛ (материально-ответственные лица)
-        </Typography.Title>
-        <Space>
-          <Input.Search placeholder="ФИО" allowClear onSearch={setSearch} />
-          <Button onClick={() => setImportOpen(true)}>Импорт из Excel</Button>
-          <Button type="primary" onClick={() => setOpen(true)}>
-            Добавить
-          </Button>
+    <StickyPageHeader
+      header={
+        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            МОЛ (материально-ответственные лица)
+          </Typography.Title>
+          <Space>
+            <Input.Search placeholder="ФИО" allowClear onSearch={setSearch} />
+            <Button onClick={() => setImportOpen(true)}>Импорт из Excel</Button>
+            <Button type="primary" onClick={() => setOpen(true)}>
+              Добавить
+            </Button>
+          </Space>
         </Space>
-      </Space>
+      }
+    >
       <ResponsiveTable<ResponsiblePerson>
         items={list.data?.items ?? []}
         loading={list.isLoading}
@@ -134,7 +138,7 @@ export default function ResponsiblePersonsPage() {
           void qc.invalidateQueries({ queryKey: ['responsible-persons'] });
         }}
       />
-    </div>
+    </StickyPageHeader>
   );
 }
 

@@ -18,6 +18,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PromptDocKind, PromptDto, PromptUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 
 const DOC_KIND_LABEL: Record<PromptDocKind, string> = {
   upd: 'УПД (PDF)',
@@ -105,27 +106,31 @@ export default function AdminPromptsPage() {
   };
 
   return (
-    <div>
-      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }}>
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          Промпты LLM
-        </Typography.Title>
-        <Button
-          type="primary"
-          onClick={() => {
-            setEditing(null);
-            setOpen(true);
-          }}
-        >
-          Добавить
-        </Button>
-      </Space>
-
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        Системные промпты для распознавания документов через LLM. У каждого типа документа активен
-        только один промпт. При активации новой версии прежняя автоматически деактивируется.
-      </Typography.Paragraph>
-
+    <StickyPageHeader
+      header={
+        <>
+          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+            <Typography.Title level={3} style={{ margin: 0 }}>
+              Промпты LLM
+            </Typography.Title>
+            <Button
+              type="primary"
+              onClick={() => {
+                setEditing(null);
+                setOpen(true);
+              }}
+            >
+              Добавить
+            </Button>
+          </Space>
+          <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
+            Системные промпты для распознавания документов через LLM. У каждого типа документа
+            активен только один промпт. При активации новой версии прежняя автоматически
+            деактивируется.
+          </Typography.Paragraph>
+        </>
+      }
+    >
       <ResponsiveTable<PromptDto>
         items={list.data ?? []}
         loading={list.isLoading}
@@ -273,6 +278,6 @@ export default function AdminPromptsPage() {
           </Button>
         </Form>
       </Drawer>
-    </div>
+    </StickyPageHeader>
   );
 }

@@ -15,6 +15,7 @@ import type {
 import type { Dayjs } from 'dayjs';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 
 const KIND_LABELS: Record<ShipmentKind, { label: string; color: string }> = {
   contractor: { label: 'Подрядчику', color: 'geekblue' },
@@ -39,21 +40,36 @@ const trimQty = (s: string | null) => {
   return s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
 };
 
+type MaterialsTab = 'balance' | 'intake' | 'shipment';
+
 export default function MaterialsPage() {
+  // Активный таб держим в state (а не во встроенных children Tabs),
+  // чтобы навигационную панель вкладок можно было поместить в sticky
+  // шапку, а содержимое таба — снаружи sticky-блока.
+  const [activeKey, setActiveKey] = useState<MaterialsTab>('balance');
   return (
-    <div>
-      <Typography.Title level={3} style={{ marginBottom: 16 }}>
-        Материалы
-      </Typography.Title>
-      <Tabs
-        defaultActiveKey="balance"
-        items={[
-          { key: 'balance', label: 'На объекте', children: <BalanceTab /> },
-          { key: 'intake', label: 'Поступление', children: <IntakeTab /> },
-          { key: 'shipment', label: 'Отгрузка', children: <ShipmentTab /> },
-        ]}
-      />
-    </div>
+    <StickyPageHeader
+      header={
+        <>
+          <Typography.Title level={3} style={{ margin: '0 0 8px' }}>
+            Материалы
+          </Typography.Title>
+          <Tabs
+            activeKey={activeKey}
+            onChange={(k) => setActiveKey(k as MaterialsTab)}
+            items={[
+              { key: 'balance', label: 'На объекте' },
+              { key: 'intake', label: 'Поступление' },
+              { key: 'shipment', label: 'Отгрузка' },
+            ]}
+          />
+        </>
+      }
+    >
+      {activeKey === 'balance' && <BalanceTab />}
+      {activeKey === 'intake' && <IntakeTab />}
+      {activeKey === 'shipment' && <ShipmentTab />}
+    </StickyPageHeader>
   );
 }
 
@@ -81,35 +97,38 @@ function BalanceTab() {
   });
 
   return (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Space wrap>
-        <Select<string | undefined>
-          allowClear
-          placeholder="Все объекты"
-          style={{ minWidth: 240 }}
-          value={siteId}
-          onChange={setSiteId}
-          showSearch
-          optionFilterProp="label"
-          loading={sites.isLoading}
-          options={(sites.data?.items ?? []).map((s) => ({
-            value: s.id,
-            label: `${s.code} · ${s.name}`,
-          }))}
-        />
-        <DatePicker
-          value={date}
-          onChange={setDate}
-          placeholder="На дату (сейчас)"
-          format="DD.MM.YYYY"
-        />
-        <Input.Search
-          placeholder="Материал"
-          allowClear
-          onSearch={setQ}
-          style={{ width: 240 }}
-        />
-      </Space>
+    <StickyPageHeader
+      header={
+        <Space wrap>
+          <Select<string | undefined>
+            allowClear
+            placeholder="Все объекты"
+            style={{ minWidth: 240 }}
+            value={siteId}
+            onChange={setSiteId}
+            showSearch
+            optionFilterProp="label"
+            loading={sites.isLoading}
+            options={(sites.data?.items ?? []).map((s) => ({
+              value: s.id,
+              label: `${s.code} · ${s.name}`,
+            }))}
+          />
+          <DatePicker
+            value={date}
+            onChange={setDate}
+            placeholder="На дату (сейчас)"
+            format="DD.MM.YYYY"
+          />
+          <Input.Search
+            placeholder="Материал"
+            allowClear
+            onSearch={setQ}
+            style={{ width: 240 }}
+          />
+        </Space>
+      }
+    >
       <ResponsiveTable<StockBalanceRow>
         items={stockQuery.data?.items ?? []}
         loading={stockQuery.isLoading}
@@ -154,7 +173,7 @@ function BalanceTab() {
           </div>
         )}
       />
-    </Space>
+    </StickyPageHeader>
   );
 }
 
@@ -182,29 +201,32 @@ function IntakeTab() {
   });
 
   return (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Space wrap>
-        <Select<string | undefined>
-          allowClear
-          placeholder="Все объекты"
-          style={{ minWidth: 240 }}
-          value={siteId}
-          onChange={setSiteId}
-          showSearch
-          optionFilterProp="label"
-          loading={sites.isLoading}
-          options={(sites.data?.items ?? []).map((s) => ({
-            value: s.id,
-            label: `${s.code} · ${s.name}`,
-          }))}
-        />
-        <Input.Search
-          placeholder="Материал или поставщик"
-          allowClear
-          onSearch={setQ}
-          style={{ width: 320 }}
-        />
-      </Space>
+    <StickyPageHeader
+      header={
+        <Space wrap>
+          <Select<string | undefined>
+            allowClear
+            placeholder="Все объекты"
+            style={{ minWidth: 240 }}
+            value={siteId}
+            onChange={setSiteId}
+            showSearch
+            optionFilterProp="label"
+            loading={sites.isLoading}
+            options={(sites.data?.items ?? []).map((s) => ({
+              value: s.id,
+              label: `${s.code} · ${s.name}`,
+            }))}
+          />
+          <Input.Search
+            placeholder="Материал или поставщик"
+            allowClear
+            onSearch={setQ}
+            style={{ width: 320 }}
+          />
+        </Space>
+      }
+    >
       <ResponsiveTable<IntakeJournalRow>
         items={intakeQuery.data?.items ?? []}
         loading={intakeQuery.isLoading}
@@ -269,7 +291,7 @@ function IntakeTab() {
           </div>
         )}
       />
-    </Space>
+    </StickyPageHeader>
   );
 }
 
@@ -299,40 +321,43 @@ function ShipmentTab() {
   });
 
   return (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Space wrap>
-        <Select<string | undefined>
-          allowClear
-          placeholder="Все объекты"
-          style={{ minWidth: 240 }}
-          value={siteId}
-          onChange={setSiteId}
-          showSearch
-          optionFilterProp="label"
-          loading={sites.isLoading}
-          options={(sites.data?.items ?? []).map((s) => ({
-            value: s.id,
-            label: `${s.code} · ${s.name}`,
-          }))}
-        />
-        <Select<ShipmentKind | undefined>
-          allowClear
-          placeholder="Любой вид"
-          style={{ minWidth: 180 }}
-          value={kind}
-          onChange={setKind}
-          options={(Object.keys(KIND_LABELS) as ShipmentKind[]).map((k) => ({
-            value: k,
-            label: KIND_LABELS[k].label,
-          }))}
-        />
-        <Input.Search
-          placeholder="Материал или получатель"
-          allowClear
-          onSearch={setQ}
-          style={{ width: 320 }}
-        />
-      </Space>
+    <StickyPageHeader
+      header={
+        <Space wrap>
+          <Select<string | undefined>
+            allowClear
+            placeholder="Все объекты"
+            style={{ minWidth: 240 }}
+            value={siteId}
+            onChange={setSiteId}
+            showSearch
+            optionFilterProp="label"
+            loading={sites.isLoading}
+            options={(sites.data?.items ?? []).map((s) => ({
+              value: s.id,
+              label: `${s.code} · ${s.name}`,
+            }))}
+          />
+          <Select<ShipmentKind | undefined>
+            allowClear
+            placeholder="Любой вид"
+            style={{ minWidth: 180 }}
+            value={kind}
+            onChange={setKind}
+            options={(Object.keys(KIND_LABELS) as ShipmentKind[]).map((k) => ({
+              value: k,
+              label: KIND_LABELS[k].label,
+            }))}
+          />
+          <Input.Search
+            placeholder="Материал или получатель"
+            allowClear
+            onSearch={setQ}
+            style={{ width: 320 }}
+          />
+        </Space>
+      }
+    >
       <ResponsiveTable<ShipmentJournalRow>
         items={shipmentQuery.data?.items ?? []}
         loading={shipmentQuery.isLoading}
@@ -409,6 +434,6 @@ function ShipmentTab() {
           </div>
         )}
       />
-    </Space>
+    </StickyPageHeader>
   );
 }

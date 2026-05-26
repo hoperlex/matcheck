@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { EdoAccountDto, EdoAccountUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 
 export default function AdminEdoAccountsPage() {
   const qc = useQueryClient();
@@ -34,15 +35,18 @@ export default function AdminEdoAccountsPage() {
   });
 
   return (
-    <div>
-      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }}>
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          ЭДО учётки (Диадок)
-        </Typography.Title>
-        <Button type="primary" onClick={() => setOpen(true)}>
-          Добавить
-        </Button>
-      </Space>
+    <StickyPageHeader
+      header={
+        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            ЭДО учётки (Диадок)
+          </Typography.Title>
+          <Button type="primary" onClick={() => setOpen(true)}>
+            Добавить
+          </Button>
+        </Space>
+      }
+    >
       <ResponsiveTable<EdoAccountDto>
         items={list.data ?? []}
         loading={list.isLoading}
@@ -110,6 +114,6 @@ export default function AdminEdoAccountsPage() {
           </Button>
         </Form>
       </Drawer>
-    </div>
+    </StickyPageHeader>
   );
 }

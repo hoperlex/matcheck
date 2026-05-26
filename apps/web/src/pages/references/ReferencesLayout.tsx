@@ -1,5 +1,6 @@
 import { Tabs, Typography } from 'antd';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 
 const DEFAULT_TAB = '/references/sites';
 
@@ -18,10 +19,17 @@ export default function ReferencesLayout() {
   const active = tabs.find((t) => location.pathname.startsWith(t.key))?.key ?? DEFAULT_TAB;
 
   return (
-    <div>
-      <Typography.Title level={3}>Справочники</Typography.Title>
-      <Tabs activeKey={active} items={tabs} onChange={(key) => navigate(key)} />
+    <StickyPageHeader
+      header={
+        <>
+          <Typography.Title level={3} style={{ margin: '0 0 8px' }}>
+            Справочники
+          </Typography.Title>
+          <Tabs activeKey={active} items={tabs} onChange={(key) => navigate(key)} />
+        </>
+      }
+    >
       <Outlet />
-    </div>
+    </StickyPageHeader>
   );
 }

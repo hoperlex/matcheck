@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Site, UserAdminPatch, UserDto, UserRole } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 
 const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp'];
 
@@ -46,8 +47,9 @@ export default function AdminUsersPage() {
   };
 
   return (
-    <div>
-      <Typography.Title level={3}>Пользователи</Typography.Title>
+    <StickyPageHeader
+      header={<Typography.Title level={3} style={{ margin: 0 }}>Пользователи</Typography.Title>}
+    >
       <ResponsiveTable<UserDto>
         items={list.data ?? []}
         loading={list.isLoading}
@@ -106,6 +108,6 @@ export default function AdminUsersPage() {
           );
         }}
       />
-    </div>
+    </StickyPageHeader>
   );
 }

@@ -1,5 +1,6 @@
 import { Tabs, Typography } from 'antd';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 
 const DEFAULT_TAB = '/admin/users';
 
@@ -19,10 +20,17 @@ export default function AdminLayout() {
   const active = tabs.find((t) => location.pathname.startsWith(t.key))?.key ?? DEFAULT_TAB;
 
   return (
-    <div>
-      <Typography.Title level={3}>Администрирование</Typography.Title>
-      <Tabs activeKey={active} items={tabs} onChange={(key) => navigate(key)} />
+    <StickyPageHeader
+      header={
+        <>
+          <Typography.Title level={3} style={{ margin: '0 0 8px' }}>
+            Администрирование
+          </Typography.Title>
+          <Tabs activeKey={active} items={tabs} onChange={(key) => navigate(key)} />
+        </>
+      }
+    >
       <Outlet />
-    </div>
+    </StickyPageHeader>
   );
 }
