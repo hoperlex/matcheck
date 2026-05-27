@@ -179,6 +179,11 @@ export function ExpectedSourceDocsList({
             render: (_: unknown, r: SourceDocument) => r.siteName ?? '—',
           },
           {
+            title: 'Сумма НДС',
+            key: 'vat',
+            render: (_: unknown, r: SourceDocument) => (r.vatSum ? `${r.vatSum} ₽` : '—'),
+          },
+          {
             title: 'Сумма',
             key: 'total',
             render: (_: unknown, r: SourceDocument) => (
@@ -200,6 +205,7 @@ export function ExpectedSourceDocsList({
               <Typography.Text type="secondary">
                 {r.supplierName ?? '—'}
                 {r.totalSum ? ` · ${r.totalSum} ₽` : ''}
+                {r.vatSum ? ` (НДС ${r.vatSum} ₽)` : ''}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {r.contractorName ?? '—'} · {r.siteName ?? '—'}
