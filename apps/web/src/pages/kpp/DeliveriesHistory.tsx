@@ -553,6 +553,14 @@ export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) 
             render: (_: unknown, r: Row) => renderSite(r),
           },
           {
+            title: 'Фото',
+            key: 'photos',
+            width: 80,
+            // Суммарное количество фото обоих этапов (stage='before' + 'after').
+            // r.photos уже агрегирован сервером — отдельно по stage не считаем.
+            render: (_: unknown, r: Row) => r.photos?.length ?? 0,
+          },
+          {
             title: 'Сумма НДС',
             key: 'vatSum',
             width: 120,
