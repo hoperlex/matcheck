@@ -65,6 +65,7 @@ import { ExpectedUpds } from './ExpectedUpds';
 import { PhotoGallery } from './PhotoGallery';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
+import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
 
 type DraftItem = {
   clientKey: string;
@@ -1296,22 +1297,72 @@ export default function KppPage() {
           )}
         </Card>
 
-        <Collapse
-          size="small"
-          items={[
-            {
-              key: 'comment',
-              label: 'Комментарий',
-              children: (
-                <Input.TextArea
-                  rows={3}
-                  value={comment}
-                  onChange={(e) => setComment(e.target.value)}
-                />
-              ),
-            },
-          ]}
-        />
+        {(() => {
+          // Мобильный пишет comment как multiline с маркерами «1 Этап: "…"»,
+          // «2 Этап: "…"», «Примечание: …» (см. parseDeliveryComment). Если
+          // маркеры найдены — рендерим read-only-секции по этапам. Иначе
+          // (приёмка, созданная/правленая с веба) — оставляем общий textarea.
+          const parsed = parseDeliveryComment(comment);
+          if (parsed.hasStructure) {
+            const empty = (
+              <Typography.Text type="secondary">— нет —</Typography.Text>
+            );
+            return (
+              <Collapse
+                size="small"
+                defaultActiveKey={['comment']}
+                items={[
+                  {
+                    key: 'comment',
+                    label: 'Комментарий',
+                    children: (
+                      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                        <div>
+                          <Typography.Text strong>1 Этап</Typography.Text>
+                          <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
+                            {parsed.stage1 ?? empty}
+                          </div>
+                        </div>
+                        <div>
+                          <Typography.Text strong>2 Этап</Typography.Text>
+                          <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
+                            {parsed.stage2 ?? empty}
+                          </div>
+                        </div>
+                        {parsed.note !== null && (
+                          <div>
+                            <Typography.Text strong>Примечание</Typography.Text>
+                            <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
+                              {parsed.note}
+                            </div>
+                          </div>
+                        )}
+                      </Space>
+                    ),
+                  },
+                ]}
+              />
+            );
+          }
+          return (
+            <Collapse
+              size="small"
+              items={[
+                {
+                  key: 'comment',
+                  label: 'Комментарий',
+                  children: (
+                    <Input.TextArea
+                      rows={3}
+                      value={comment}
+                      onChange={(e) => setComment(e.target.value)}
+                    />
+                  ),
+                },
+              ]}
+            />
+          );
+        })()}
 
         {(() => {
           const isConfirmed = loadedDelivery.status.code === 'confirmed_mol';
