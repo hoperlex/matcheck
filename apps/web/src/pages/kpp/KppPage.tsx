@@ -236,15 +236,14 @@ export default function KppPage() {
     // В режиме isNew записи на сервере и в IDB ещё нет — запрос дал бы 404
     // и завис бы в isLoading. Форма работает только с локальным state.
     enabled: !!deliveryId && !isNew,
-    // Пока в приёмке есть хотя бы одно orphan-фото (мобильный сделал presign,
-    // но S3-confirm ещё не пришёл), быстро поллим — иначе пользователь будет
-    // ждать общего syncLoop (60 с). Когда всё подтверждено — refetch не нужен.
-    refetchInterval: (q) => {
-      const d = q.state.data as Delivery | undefined;
-      if (!d) return false;
-      const hasOrphan = d.photos.some((p) => p.uploadedAt === null);
-      return hasOrphan ? 5000 : false;
-    },
+    // Пока форма приёмки открыта — поллим каждые 5 сек. Это гарантированный
+    // fallback к SSE-инвалидации (см. services/invalidation.ts): в проде
+    // events-stream может молчать из-за прокси/буферизации/cookie, а ждать
+    // 60-секундный syncLoop для прихода stage2-комментария, обновлённых
+    // материалов или статуса confirmed_mol от мобильного — слишком долго.
+    // Запросы /deliveries/:id лёгкие; react-query сам остановит polling,
+    // когда вкладка скрыта (refetchIntervalInBackground=false по умолчанию).
+    refetchInterval: 5000,
   });
 
   // Детали УПД для преднаполнения формы в режиме isNew. Сначала пробуем IndexedDB
