@@ -200,21 +200,26 @@ export const UpdPdfPartySchema = z.object({
   name: z.string().nullable().optional(),
 });
 
-// Позиция УПД, возвращённая LLM. Поля vatRate/vatSum намеренно убраны:
-// бизнесу они в позициях не нужны, а модель сосредотачивается на ключевых
-// колонках (qty/price/sum) и не путает их с долей НДС.
+// Позиция УПД, возвращённая LLM.
+//
+// vatRate/vatSum — налоговая ставка (%) и сумма НДС по строке. Извлекаются
+// промптом v5+: они нужны веб-портал для колонки «Сумма НДС» в таблице
+// материалов приёмки. До v5 эти поля игнорировались (см. комментарий
+// миграции 0019); старые позиции в БД остаются с NULL.
 //
 // z.preprocess мэппит snake_case → camelCase: если LLM (несмотря на
-// промпт v4 и JSON Schema в camelCase) вернёт volume_m3/mass_kg/
-// volume_confidence/group_name/name_raw — значения подхватятся в
-// соответствующие camelCase-поля. Иначе Zod с .optional() молча
-// отбрасывал бы snake_case ключи, и в БД попадал NULL.
+// промпт v5 и JSON Schema в camelCase) вернёт volume_m3/mass_kg/
+// volume_confidence/group_name/name_raw/vat_rate/vat_sum — значения
+// подхватятся в соответствующие camelCase-поля. Иначе Zod с .optional()
+// молча отбрасывал бы snake_case ключи, и в БД попадал NULL.
 const SNAKE_TO_CAMEL_ITEM: Record<string, string> = {
   volume_m3: 'volumeM3',
   mass_kg: 'massKg',
   volume_confidence: 'volumeConfidence',
   group_name: 'groupName',
   name_raw: 'nameRaw',
+  vat_rate: 'vatRate',
+  vat_sum: 'vatSum',
 };
 export const UpdPdfItemSchema = z.preprocess(
   (raw) => {
@@ -232,6 +237,12 @@ export const UpdPdfItemSchema = z.preprocess(
     unit: z.string().default('шт'),
     price: z.number().nullable().optional(),
     sum: z.number().nullable().optional(),
+    // Налоговая ставка в процентах (например, 20, 10, 0). null допустим,
+    // если строка «Без НДС» — тогда vatSum обычно тоже null/0.
+    vatRate: z.number().nullable().optional(),
+    // Сумма налога по строке в рублях (отдельная колонка «Сумма налога»
+    // формы УПД, не путать с `sum`).
+    vatSum: z.number().nullable().optional(),
     volumeM3: z.number().nullable().optional(),
     massKg: z.number().nullable().optional(),
     volumeConfidence: VolumeConfidenceSchema.nullable().optional(),

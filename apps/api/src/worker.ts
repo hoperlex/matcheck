@@ -271,6 +271,11 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         unit: it.unit,
         price: it.price != null ? it.price.toString() : null,
         sum: it.sum != null ? it.sum.toString() : null,
+        // vatRate/vatSum извлекаются промптом v5+. Старые промпты их
+        // игнорируют → останутся NULL, веб-портал в этом случае рисует
+        // «—» в колонке «Сумма НДС». См. контракт UpdPdfItemSchema.
+        vatRate: it.vatRate != null ? it.vatRate.toString() : null,
+        vatSum: it.vatSum != null ? it.vatSum.toString() : null,
         volumeM3: it.volumeM3 != null ? it.volumeM3.toString() : null,
         massKg: it.massKg != null ? it.massKg.toString() : null,
         volumeConfidence: it.volumeConfidence ?? null,

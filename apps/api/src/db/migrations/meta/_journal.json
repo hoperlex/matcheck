@@ -267,6 +267,13 @@
       "when": 1780877520000,
       "tag": "0037_delivery_photo_stage",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1780877580000,
+      "tag": "0038_upd_prompt_v5",
+      "breakpoints": true
     }
   ]
 }

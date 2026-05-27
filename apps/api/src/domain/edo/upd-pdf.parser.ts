@@ -13,9 +13,9 @@ export class PdfNoTextError extends Error {
   }
 }
 
-// JSON-схема ответа LLM. vatRate/vatSum в позициях убраны: бизнесу они в
-// позициях не нужны, а модель сосредотачивается на ключевых колонках
-// (qty/price/sum). На уровне шапки vatSum оставлен.
+// JSON-схема ответа LLM. vatRate/vatSum по позициям нужны веб-порталу
+// (колонка «Сумма НДС» в материалах приёмки), модель извлекает их
+// промптом v5+. На уровне шапки vatSum тоже сохранён.
 const RESPONSE_JSON_SCHEMA = {
   type: 'object',
   required: ['items', 'confidence'],
@@ -60,6 +60,16 @@ const RESPONSE_JSON_SCHEMA = {
           unit: { type: 'string', description: 'Единица измерения текстом' },
           price: { type: ['number', 'null'], description: 'Цена за единицу' },
           sum: { type: ['number', 'null'], description: 'Стоимость по строке (без НДС или с НДС)' },
+          vatRate: {
+            type: ['number', 'null'],
+            description:
+              'Налоговая ставка по строке в процентах: 20, 10, 0. null — если в строке «Без НДС» / прочерк.',
+          },
+          vatSum: {
+            type: ['number', 'null'],
+            description:
+              'Сумма налога (НДС) по строке в рублях. Отдельная колонка формы УПД «Сумма налога, предъявляемая покупателю», НЕ путать с sum.',
+          },
           volumeM3: {
             type: ['number', 'null'],
             description: 'Объём ОДНОЙ единицы товара в м³. null только если совсем нет данных.',
