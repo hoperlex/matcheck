@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Image, Popconfirm, Spin, message } from 'antd';
+import { Button, Image, Popconfirm, Spin, Typography, message } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
@@ -133,7 +133,14 @@ function PhotoThumb({
     };
   }, [photo.id]);
 
-  const needsRemote = idbChecked && !localThumb;
+  // Серверная запись с uploaded_at = null — мобильный клиент уже создал orphan
+  // через /photos/presign, но PUT в S3 ещё не подтвердил. Локального blob у
+  // веб-юзера нет. Запрашивать URL бессмысленно (S3 вернёт 404/Forbidden), а
+  // показывать сломанную картинку — плохой UX. Рисуем «Загружается…» поверх
+  // плейсхолдера и ждём, пока confirm проставит uploaded_at: KppPage рефетчит
+  // delivery каждые несколько секунд, пока в photos есть хоть один orphan.
+  const isUploading = photo.uploadedAt === null && !localThumb;
+  const needsRemote = idbChecked && !localThumb && !isUploading;
   const thumbQuery = useQuery({
     queryKey: ['photo-url', photo.id, 'thumb'],
     queryFn: () => api.get<PhotoGetUrlResponse>(`/photos/${photo.id}/url?thumb=true`),
@@ -149,6 +156,31 @@ function PhotoThumb({
 
   const thumbSrc = localThumb ?? thumbQuery.data?.url ?? '';
   const fullSrc = localFull ?? fullQuery.data?.url ?? thumbSrc;
+
+  if (isUploading) {
+    return (
+      <div
+        style={{
+          position: 'relative',
+          width: THUMB_SIZE,
+          height: THUMB_SIZE,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 6,
+          background: '#fafafa',
+          border: '1px dashed #d9d9d9',
+          borderRadius: 6,
+        }}
+      >
+        <Spin size="small" />
+        <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+          Загружается…
+        </Typography.Text>
+      </div>
+    );
+  }
 
   return (
     <div style={{ position: 'relative', width: THUMB_SIZE, height: THUMB_SIZE }}>

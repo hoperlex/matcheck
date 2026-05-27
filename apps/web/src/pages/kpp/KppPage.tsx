@@ -235,6 +235,15 @@ export default function KppPage() {
     // В режиме isNew записи на сервере и в IDB ещё нет — запрос дал бы 404
     // и завис бы в isLoading. Форма работает только с локальным state.
     enabled: !!deliveryId && !isNew,
+    // Пока в приёмке есть хотя бы одно orphan-фото (мобильный сделал presign,
+    // но S3-confirm ещё не пришёл), быстро поллим — иначе пользователь будет
+    // ждать общего syncLoop (60 с). Когда всё подтверждено — refetch не нужен.
+    refetchInterval: (q) => {
+      const d = q.state.data as Delivery | undefined;
+      if (!d) return false;
+      const hasOrphan = d.photos.some((p) => p.uploadedAt === null);
+      return hasOrphan ? 5000 : false;
+    },
   });
 
   // Детали УПД для преднаполнения формы в режиме isNew. Сначала пробуем IndexedDB
@@ -322,10 +331,15 @@ export default function KppPage() {
         .map((p) => ({
           id: p.id,
           kind: p.kind,
+          stage: p.stage,
           s3Key: p.s3Key ?? '',
           thumbS3Key: p.thumbS3Key ?? null,
           contentHash: p.contentHash ?? null,
           takenAt: new Date(p.takenAt).toISOString(),
+          // Локальное фото отображается из IDB blob, поэтому считаем его
+          // «подтверждённым» с точки зрения PhotoThumb — иначе показался бы
+          // оверлей «Загружается…», хотя превью уже есть.
+          uploadedAt: new Date(p.takenAt).toISOString(),
         }));
     },
     enabled: !!deliveryId,
@@ -473,7 +487,12 @@ export default function KppPage() {
     beforeUpload: async (file) => {
       if (!deliveryId) return false;
       try {
-        await capturePhoto('delivery', deliveryId, file, 'cargo');
+        // На веб-портале нет UI 1-/2-го этапа (это специфика мобильного),
+        // поэтому маппим по серверному статусу: после подтверждения МОЛ
+        // (2-й этап завершён) — фото попадает в «После», иначе — в «До».
+        const stage =
+          loadedDelivery?.status.code === 'confirmed_mol' ? 'after' : 'before';
+        await capturePhoto('delivery', deliveryId, file, 'cargo', stage);
         message.success('Фото добавлено');
         // Локальный список фото перечитывается сразу из IDB, серверный delivery.photos —
         // после S3-upload + следующего pullSync. Галерея мерджит оба источника по id.
@@ -705,6 +724,17 @@ export default function KppPage() {
     ];
   }, [loadedDelivery?.photos, localPhotosQuery.data]);
   const photosCount = mergedPhotos.length;
+  // Разделение «До» (1-й этап на КПП) / «После» (после подтверждения МОЛ).
+  // Источник истины — поле stage, проставляемое мобильным клиентом при
+  // загрузке. Старые фото и фото с веба без явного этапа считаем «До».
+  const beforePhotos = useMemo(
+    () => mergedPhotos.filter((p) => p.stage !== 'after'),
+    [mergedPhotos],
+  );
+  const afterPhotos = useMemo(
+    () => mergedPhotos.filter((p) => p.stage === 'after'),
+    [mergedPhotos],
+  );
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
     if (!siteId) reasons.push('Выберите объект');
@@ -1194,10 +1224,44 @@ export default function KppPage() {
                     )}
                   </Space>
                   {deliveryId && loadedDelivery && (
-                    <PhotoGallery
-                      deliveryId={deliveryId}
-                      photos={mergedPhotos}
-                    />
+                    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                      <div>
+                        <Typography.Text strong>
+                          До {beforePhotos.length > 0 && `(${beforePhotos.length})`}
+                        </Typography.Text>
+                        <div style={{ marginTop: 8 }}>
+                          {beforePhotos.length > 0 ? (
+                            <PhotoGallery
+                              deliveryId={deliveryId}
+                              photos={beforePhotos}
+                            />
+                          ) : (
+                            <Typography.Text type="secondary">
+                              Фото 1-го этапа ещё нет.
+                            </Typography.Text>
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        <Typography.Text strong>
+                          После {afterPhotos.length > 0 && `(${afterPhotos.length})`}
+                        </Typography.Text>
+                        <div style={{ marginTop: 8 }}>
+                          {afterPhotos.length > 0 ? (
+                            <PhotoGallery
+                              deliveryId={deliveryId}
+                              photos={afterPhotos}
+                            />
+                          ) : (
+                            <Typography.Text type="secondary">
+                              {loadedDelivery.status.code === 'confirmed_mol'
+                                ? 'Фото 2-го этапа ещё нет.'
+                                : 'МОЛ ещё не подтвердил приёмку.'}
+                            </Typography.Text>
+                          )}
+                        </div>
+                      </div>
+                    </Space>
                   )}
                 </Space>
               ),

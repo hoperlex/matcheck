@@ -1,4 +1,4 @@
-import type { PhotoPresignResponse } from '@matcheck/contracts';
+import type { DeliveryPhotoStage, PhotoPresignResponse } from '@matcheck/contracts';
 import { api } from './api';
 import { db, type OperationKind } from '../lib/db';
 
@@ -49,6 +49,7 @@ export async function capturePhoto(
   operationId: string,
   blob: Blob,
   kind: 'document' | 'cargo' | 'vehicle' | 'other',
+  stage: DeliveryPhotoStage = 'before',
 ): Promise<string> {
   const main = await compressInWorker(blob, 1.5, 2048);
   const thumb = await compressInWorker(blob, 0.1, 320);
@@ -74,6 +75,7 @@ export async function capturePhoto(
     operationKind,
     origin: 'local',
     kind,
+    stage,
     contentHash,
     idempotencyKey,
     blob: main,
@@ -102,6 +104,8 @@ export async function uploadPhoto(photoId: string): Promise<void> {
     idempotencyKey: p.idempotencyKey,
     contentType: 'image/jpeg',
     thumbContentHash: p.thumbBlob ? await sha256Hex(p.thumbBlob) : undefined,
+    // Этап актуален только для приёмок; для отгрузок сервер поле игнорирует.
+    stage: p.operationKind === 'delivery' ? p.stage : undefined,
   });
 
   if (!presign.alreadyExists && presign.uploadUrl) {

@@ -32,9 +32,17 @@ export const DeliveryItemSchema = z.object({
 });
 export type DeliveryItem = z.infer<typeof DeliveryItemSchema>;
 
+// Этап приёмки, к которому относится фото. Проставляет мобильный клиент
+// при загрузке: 'before' — фото 1-го этапа (КПП/осмотр), 'after' — фото
+// 2-го этапа (после выгрузки и подтверждения МОЛ). Default 'before'
+// для совместимости с клиентами, не присылающими поле.
+export const DeliveryPhotoStageSchema = z.enum(['before', 'after']);
+export type DeliveryPhotoStage = z.infer<typeof DeliveryPhotoStageSchema>;
+
 export const DeliveryPhotoSchema = z.object({
   id: z.string().uuid(),
   kind: z.enum(['document', 'cargo', 'vehicle', 'other']),
+  stage: DeliveryPhotoStageSchema.default('before'),
   s3Key: z.string(),
   thumbS3Key: z.string().nullable(),
   contentHash: z.string().nullable(),

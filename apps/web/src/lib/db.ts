@@ -2,6 +2,7 @@ import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type {
   Counterparty,
   Delivery,
+  DeliveryPhotoStage,
   Material,
   Shipment,
   Site,
@@ -56,6 +57,9 @@ export type PhotoRecord = {
   operationKind: OperationKind;
   origin: 'local' | 'remote';
   kind: 'document' | 'cargo' | 'vehicle' | 'other';
+  // Этап приёмки: 'before' (1-й этап) или 'after' (2-й этап, после
+  // подтверждения МОЛ). Для shipment поле всегда 'before' и не используется.
+  stage: DeliveryPhotoStage;
   contentHash: string;
   idempotencyKey: string;
   blob?: Blob;
@@ -92,7 +96,7 @@ interface MatcheckDB extends DBSchema {
 
 let dbPromise: Promise<IDBPDatabase<MatcheckDB>> | null = null;
 
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 export function db(): Promise<IDBPDatabase<MatcheckDB>> {
   if (!dbPromise) {
@@ -160,6 +164,20 @@ export function db(): Promise<IDBPDatabase<MatcheckDB>> {
             const p = cursor.value;
             if (!('operationKind' in p)) {
               await cursor.update({ ...p, operationKind: 'delivery' as const });
+            }
+            const next = await cursor.continue();
+            await walk(next);
+          });
+        }
+        if (oldVersion < 4) {
+          // PhotoRecord теперь несёт stage. Существующим записям проставляем
+          // 'before' — все ранее снятые фото логически относятся к 1-му этапу.
+          const photos = tx.objectStore('photos');
+          photos.openCursor().then(async function walk(cursor) {
+            if (!cursor) return;
+            const p = cursor.value;
+            if (!('stage' in p)) {
+              await cursor.update({ ...p, stage: 'before' as const });
             }
             const next = await cursor.continue();
             await walk(next);

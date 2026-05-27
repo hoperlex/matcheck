@@ -260,6 +260,13 @@
       "when": 1780877460000,
       "tag": "0036_delivery_shipment_item_pricing",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1780877520000,
+      "tag": "0037_delivery_photo_stage",
+      "breakpoints": true
     }
   ]
 }

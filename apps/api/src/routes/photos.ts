@@ -188,6 +188,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
             id: photoId,
             deliveryId: operationId,
             kind: body.kind,
+            stage: body.stage ?? 'before',
             s3Key,
             thumbS3Key,
             contentHash: body.contentHash,

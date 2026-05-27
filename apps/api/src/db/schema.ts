@@ -48,6 +48,9 @@ export const sourceStatusEnum = pgEnum('source_status', [
 ]);
 export const sourceDirectionEnum = pgEnum('source_direction', ['inbound', 'outbound']);
 export const photoKindEnum = pgEnum('photo_kind', ['document', 'cargo', 'vehicle', 'other']);
+// Этап приёмки: 'before' — фото 1-го этапа (на КПП), 'after' — фото 2-го
+// этапа (после выгрузки/подтверждения МОЛ). Только для delivery_photos.
+export const deliveryPhotoStageEnum = pgEnum('delivery_photo_stage', ['before', 'after']);
 export const llmKindEnum = pgEnum('llm_kind', [
   'openrouter',
   'google_ai_studio',
@@ -654,6 +657,10 @@ export const deliveryPhotos = pgTable(
       .notNull()
       .references(() => deliveries.id, { onDelete: 'cascade' }),
     kind: photoKindEnum('kind').notNull().default('cargo'),
+    // Этап приёмки. Мобильный клиент проставляет при presign в зависимости от
+    // того, на каком шаге пользователь нажал «Сделать фото». Default 'before'
+    // покрывает старые версии клиентов и backfill (см. миграцию 0037).
+    stage: deliveryPhotoStageEnum('stage').notNull().default('before'),
     s3Key: text('s3_key').notNull(),
     thumbS3Key: text('thumb_s3_key'),
     contentHash: varchar('content_hash', { length: 64 }),
