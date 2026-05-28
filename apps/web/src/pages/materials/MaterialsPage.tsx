@@ -3,6 +3,7 @@ import { DatePicker, Input, Select, Space, Tag, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import type {
+  Counterparty,
   IntakeJournalResponse,
   IntakeJournalRow,
   ShipmentJournalResponse,
@@ -109,6 +110,7 @@ function BalanceTab({
   onTabChange: (k: string) => void;
 }) {
   const [siteId, setSiteId] = useState<string | undefined>(undefined);
+  const [contractorId, setContractorId] = useState<string | undefined>(undefined);
   const [date, setDate] = useState<Dayjs | null>(null);
   const [q, setQ] = useState('');
 
@@ -116,12 +118,18 @@ function BalanceTab({
     queryKey: ['sites', 'all'],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?limit=500'),
   });
+  const counterparties = useQuery({
+    queryKey: ['counterparties', 'all'],
+    queryFn: () =>
+      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+  });
 
   const stockQuery = useQuery({
-    queryKey: ['reports', 'stock', { siteId, date: date?.toISOString(), q }],
+    queryKey: ['reports', 'stock', { siteId, contractorId, date: date?.toISOString(), q }],
     queryFn: () => {
       const qs = new URLSearchParams();
       if (siteId) qs.set('siteId', siteId);
+      if (contractorId) qs.set('contractorId', contractorId);
       if (date) qs.set('date', date.endOf('day').toISOString());
       if (q) qs.set('q', q);
       return api.get<StockBalanceResponse>(`/reports/stock?${qs.toString()}`);
@@ -145,6 +153,20 @@ function BalanceTab({
               options={(sites.data?.items ?? []).map((s) => ({
                 value: s.id,
                 label: `${s.code} · ${s.name}`,
+              }))}
+            />
+            <Select<string | undefined>
+              allowClear
+              placeholder="Подрядчик"
+              style={{ minWidth: 220 }}
+              value={contractorId}
+              onChange={setContractorId}
+              showSearch
+              optionFilterProp="label"
+              loading={counterparties.isLoading}
+              options={(counterparties.data?.items ?? []).map((c) => ({
+                value: c.id,
+                label: c.name,
               }))}
             />
             <DatePicker
@@ -263,18 +285,25 @@ function IntakeTab({
 }) {
   const navigate = useNavigate();
   const [siteId, setSiteId] = useState<string | undefined>(undefined);
+  const [contractorId, setContractorId] = useState<string | undefined>(undefined);
   const [q, setQ] = useState('');
 
   const sites = useQuery({
     queryKey: ['sites', 'all'],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?limit=500'),
   });
+  const counterparties = useQuery({
+    queryKey: ['counterparties', 'all'],
+    queryFn: () =>
+      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+  });
 
   const intakeQuery = useQuery({
-    queryKey: ['reports', 'intake', { siteId, q }],
+    queryKey: ['reports', 'intake', { siteId, contractorId, q }],
     queryFn: () => {
       const qs = new URLSearchParams();
       if (siteId) qs.set('siteId', siteId);
+      if (contractorId) qs.set('contractorId', contractorId);
       if (q) qs.set('q', q);
       qs.set('limit', '500');
       return api.get<IntakeJournalResponse>(`/reports/intake?${qs.toString()}`);
@@ -298,6 +327,20 @@ function IntakeTab({
               options={(sites.data?.items ?? []).map((s) => ({
                 value: s.id,
                 label: `${s.code} · ${s.name}`,
+              }))}
+            />
+            <Select<string | undefined>
+              allowClear
+              placeholder="Подрядчик"
+              style={{ minWidth: 220 }}
+              value={contractorId}
+              onChange={setContractorId}
+              showSearch
+              optionFilterProp="label"
+              loading={counterparties.isLoading}
+              options={(counterparties.data?.items ?? []).map((c) => ({
+                value: c.id,
+                label: c.name,
               }))}
             />
             <Input.Search
@@ -445,6 +488,7 @@ function ShipmentTab({
 }) {
   const navigate = useNavigate();
   const [siteId, setSiteId] = useState<string | undefined>(undefined);
+  const [contractorId, setContractorId] = useState<string | undefined>(undefined);
   const [kind, setKind] = useState<ShipmentKind | undefined>(undefined);
   const [q, setQ] = useState('');
 
@@ -452,12 +496,18 @@ function ShipmentTab({
     queryKey: ['sites', 'all'],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?limit=500'),
   });
+  const counterparties = useQuery({
+    queryKey: ['counterparties', 'all'],
+    queryFn: () =>
+      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+  });
 
   const shipmentQuery = useQuery({
-    queryKey: ['reports', 'shipment', { siteId, kind, q }],
+    queryKey: ['reports', 'shipment', { siteId, contractorId, kind, q }],
     queryFn: () => {
       const qs = new URLSearchParams();
       if (siteId) qs.set('siteId', siteId);
+      if (contractorId) qs.set('contractorId', contractorId);
       if (kind) qs.set('kind', kind);
       if (q) qs.set('q', q);
       qs.set('limit', '500');
@@ -482,6 +532,20 @@ function ShipmentTab({
               options={(sites.data?.items ?? []).map((s) => ({
                 value: s.id,
                 label: `${s.code} · ${s.name}`,
+              }))}
+            />
+            <Select<string | undefined>
+              allowClear
+              placeholder="Подрядчик"
+              style={{ minWidth: 220 }}
+              value={contractorId}
+              onChange={setContractorId}
+              showSearch
+              optionFilterProp="label"
+              loading={counterparties.isLoading}
+              options={(counterparties.data?.items ?? []).map((c) => ({
+                value: c.id,
+                label: c.name,
               }))}
             />
             <Select<ShipmentKind | undefined>

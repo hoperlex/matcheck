@@ -12,6 +12,10 @@ import {
 const StockQuerySchema = z.object({
   siteId: z.string().uuid().optional(),
   materialId: z.string().uuid().optional(),
+  // Подрядчик (counterparty). Для остатков фильтруем И приёмки
+  // (deliveries.contractor_id), И отгрузки (shipments.receiver_counterparty_id) —
+  // показываем «движение в пределах этого подрядчика».
+  contractorId: z.string().uuid().optional(),
   q: z.string().optional(),
   date: z.string().datetime().optional(),
   limit: z.coerce.number().int().positive().max(500).default(200),
@@ -20,6 +24,8 @@ const StockQuerySchema = z.object({
 
 const IntakeQuerySchema = z.object({
   siteId: z.string().uuid().optional(),
+  // Подрядчик-получатель приёмки (deliveries.contractor_id).
+  contractorId: z.string().uuid().optional(),
   q: z.string().optional(),
   dateFrom: z.string().datetime().optional(),
   dateTo: z.string().datetime().optional(),
@@ -30,6 +36,10 @@ const IntakeQuerySchema = z.object({
 const ShipmentJournalQuerySchema = z.object({
   siteId: z.string().uuid().optional(),
   kind: ShipmentKindSchema.optional(),
+  // Получатель отгрузки (shipments.receiver_counterparty_id) — для
+  // подрядных/возвратных отгрузок это и есть «подрядчик», для transfer/
+  // writeoff поле обычно null, такие строки выпадут при фильтре.
+  contractorId: z.string().uuid().optional(),
   q: z.string().optional(),
   dateFrom: z.string().datetime().optional(),
   dateTo: z.string().datetime().optional(),
@@ -86,9 +96,10 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: { querystring: StockQuerySchema, response: { 200: StockBalanceResponseSchema } },
     },
     async (req) => {
-      const { siteId, materialId, q, date, limit, offset } = req.query;
+      const { siteId, materialId, contractorId, q, date, limit, offset } = req.query;
       const sId = safeUuid(siteId);
       const mId = safeUuid(materialId);
+      const cId = safeUuid(contractorId);
       const dateTs = safeTimestamp(date);
 
       // qty_in/qty_out агрегируем напрямую из deliveries/shipments, чтобы
@@ -101,6 +112,16 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         : '';
       const dateFilterShipment = dateTs
         ? `AND COALESCE(s.shipped_at, s.updated_at) <= '${dateTs}'::timestamptz`
+        : '';
+      // Фильтр подрядчика — отдельно в каждый CTE: приёмки матчим по
+      // deliveries.contractor_id, отгрузки — по shipments.receiver_counterparty_id
+      // (для transfer/writeoff поле обычно null → выпадают, и это ОК для
+      // фильтрации по подрядчику).
+      const contractorFilterDelivery = cId
+        ? `AND d.contractor_id = '${cId}'::uuid`
+        : '';
+      const contractorFilterShipment = cId
+        ? `AND s.receiver_counterparty_id = '${cId}'::uuid`
         : '';
 
       const filters: string[] = [];
@@ -152,6 +173,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
             AND d.pending_deletion_at IS NULL
             AND COALESCE(di.qty_actual, di.qty_planned) IS NOT NULL
             ${dateFilterDelivery}
+            ${contractorFilterDelivery}
           GROUP BY d.site_id, ${groupKeyDelivery}, di.unit
         )
       `;
@@ -175,6 +197,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
             AND s.pending_deletion_at IS NULL
             AND COALESCE(si.qty_actual, si.qty_planned) IS NOT NULL
             ${dateFilterShipment}
+            ${contractorFilterShipment}
           GROUP BY s.site_id, ${groupKeyShipment}, si.unit
         ),
         in_transfer AS (
@@ -292,8 +315,9 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: { querystring: IntakeQuerySchema, response: { 200: IntakeJournalResponseSchema } },
     },
     async (req) => {
-      const { siteId, q, dateFrom, dateTo, limit, offset } = req.query;
+      const { siteId, contractorId, q, dateFrom, dateTo, limit, offset } = req.query;
       const sId = safeUuid(siteId);
+      const cId = safeUuid(contractorId);
       const from = safeTimestamp(dateFrom);
       const to = safeTimestamp(dateTo);
 
@@ -302,6 +326,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         `st.code IN ('filled', 'confirmed_mol')`,
       ];
       if (sId) where.push(`d.site_id = '${sId}'::uuid`);
+      if (cId) where.push(`d.contractor_id = '${cId}'::uuid`);
       if (from) where.push(`COALESCE(d.arrived_at, d.updated_at) >= '${from}'::timestamptz`);
       if (to) where.push(`COALESCE(d.arrived_at, d.updated_at) <= '${to}'::timestamptz`);
       if (q) {
@@ -414,9 +439,10 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       },
     },
     async (req) => {
-      const { siteId, kind, q, dateFrom, dateTo, limit, offset } = req.query;
+      const { siteId, kind, contractorId, q, dateFrom, dateTo, limit, offset } = req.query;
       const sId = safeUuid(siteId);
       const k = safeKind(kind);
+      const cId = safeUuid(contractorId);
       const from = safeTimestamp(dateFrom);
       const to = safeTimestamp(dateTo);
 
@@ -426,6 +452,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       ];
       if (sId) where.push(`s.site_id = '${sId}'::uuid`);
       if (k) where.push(`s.kind = '${k}'::shipment_kind`);
+      if (cId) where.push(`s.receiver_counterparty_id = '${cId}'::uuid`);
       if (from) where.push(`COALESCE(s.shipped_at, s.updated_at) >= '${from}'::timestamptz`);
       if (to) where.push(`COALESCE(s.shipped_at, s.updated_at) <= '${to}'::timestamptz`);
       if (q) {
