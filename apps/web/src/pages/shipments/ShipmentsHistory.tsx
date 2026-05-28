@@ -428,18 +428,25 @@ export function ShipmentsHistory({
     <StickyPageHeader
       header={
         <Space direction="vertical" size="small" style={{ width: '100%' }}>
-          <Space align="center">
-            <Typography.Text strong>Активные</Typography.Text>
-            <Space size={6} align="center" style={{ marginLeft: 24 }}>
-              <Switch
-                checked={view === 'trash'}
-                onChange={(checked) => setView(checked ? 'trash' : 'active')}
-              />
-              <Typography.Text type={view === 'trash' ? undefined : 'secondary'}>
-                Удалённые
-              </Typography.Text>
-            </Space>
-          </Space>
+          {/* Переключатель «Удалённые» — отдельной строкой выше фильтров,
+              прижат к правому краю. Слово «Активные» убрано: вкладка
+              «Принятые» по дефолту и так показывает активные отгрузки. */}
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'flex-end',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            <Switch
+              checked={view === 'trash'}
+              onChange={(checked) => setView(checked ? 'trash' : 'active')}
+            />
+            <Typography.Text type={view === 'trash' ? undefined : 'secondary'}>
+              Удалённые
+            </Typography.Text>
+          </div>
           <ListFilters
             value={filters}
             onChange={updateFilters}
