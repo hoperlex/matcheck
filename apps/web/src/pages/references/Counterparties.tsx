@@ -5,15 +5,18 @@ import {
   Drawer,
   Form,
   Input,
+  Popconfirm,
   Space,
   Switch,
   Tag,
   Typography,
   message,
 } from 'antd';
+import { DeleteOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Counterparty, CounterpartyUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
+import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
@@ -54,6 +57,18 @@ export default function CounterpartiesPage() {
     },
     onError: (err: Error) => message.error(err.message),
   });
+
+  const del = useMutation({
+    mutationFn: (id: string) => api.delete(`/counterparties/${id}`),
+    onSuccess: () => {
+      message.success('Контрагент удалён');
+      void qc.invalidateQueries({ queryKey: ['counterparties'] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  const role = useAuthStore((s) => s.user?.role);
+  const canDelete = role === 'admin';
 
   // При открытии Drawer в режиме редактирования заполняем форму данными
   // выбранной строки. resetFields() — для создания, чтобы не было утечки
@@ -159,6 +174,37 @@ export default function CounterpartiesPage() {
               </Space>
             ),
           },
+          ...(canDelete
+            ? [
+                {
+                  title: '',
+                  key: 'actions',
+                  width: 80,
+                  render: (_: unknown, r: Counterparty) => (
+                    <Popconfirm
+                      title="Удалить контрагента?"
+                      description="Действие необратимо. Связанные приёмки/отгрузки остаются, но без подтянутого имени."
+                      okText="Да, удалить"
+                      cancelText="Нет"
+                      okButtonProps={{ danger: true }}
+                      onConfirm={(e) => {
+                        e?.stopPropagation();
+                        del.mutate(r.id);
+                      }}
+                      onCancel={(e) => e?.stopPropagation()}
+                    >
+                      <Button
+                        danger
+                        size="small"
+                        icon={<DeleteOutlined />}
+                        loading={del.isPending && del.variables === r.id}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </Popconfirm>
+                  ),
+                },
+              ]
+            : []),
         ]}
         cardRender={(r) => (
           <Card style={{ width: '100%' }} size="small" onClick={() => openEdit(r)}>

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert,
   Button,
@@ -8,6 +8,7 @@ import {
   Input,
   List,
   Modal,
+  Popconfirm,
   Space,
   Switch,
   Tag,
@@ -15,7 +16,7 @@ import {
   Upload,
   message,
 } from 'antd';
-import { InboxOutlined } from '@ant-design/icons';
+import { DeleteOutlined, InboxOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   ResponsiblePerson,
@@ -23,6 +24,7 @@ import type {
   ResponsiblePersonUpsert,
 } from '@matcheck/contracts';
 import { api, apiUploadFile, ApiError } from '../../services/api';
+import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
@@ -32,9 +34,12 @@ type List = { items: ResponsiblePerson[]; total: number };
 export default function ResponsiblePersonsPage() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<ResponsiblePerson | null>(null);
   const [search, setSearch] = useState('');
   const [importOpen, setImportOpen] = useState(false);
   const [form] = Form.useForm<ResponsiblePersonUpsert>();
+  const role = useAuthStore((s) => s.user?.role);
+  const canDelete = role === 'admin';
 
   const list = useQuery({
     queryKey: ['responsible-persons', search],
@@ -42,12 +47,52 @@ export default function ResponsiblePersonsPage() {
       api.get<List>(`/responsible-persons${search ? `?q=${encodeURIComponent(search)}` : ''}`),
   });
 
-  const create = useMutation({
-    mutationFn: (body: ResponsiblePersonUpsert) => api.post('/responsible-persons', body),
-    onSuccess: () => {
-      message.success('МОЛ создан');
-      setOpen(false);
+  function closeDrawer() {
+    setOpen(false);
+    setEditing(null);
+    form.resetFields();
+  }
+
+  // Заполняем форму при открытии редактирования; resetFields при создании.
+  useEffect(() => {
+    if (!open) return;
+    if (editing) {
+      form.setFieldsValue({
+        fullName: editing.fullName,
+        position: editing.position ?? undefined,
+        phone: editing.phone ?? undefined,
+        isActive: editing.isActive,
+      });
+    } else {
       form.resetFields();
+      form.setFieldsValue({ isActive: true });
+    }
+  }, [open, editing, form]);
+
+  function openEdit(row: ResponsiblePerson) {
+    setEditing(row);
+    setOpen(true);
+  }
+
+  const save = useMutation({
+    mutationFn: async (body: ResponsiblePersonUpsert) => {
+      if (editing) {
+        return api.patch(`/responsible-persons/${editing.id}`, body);
+      }
+      return api.post('/responsible-persons', body);
+    },
+    onSuccess: () => {
+      message.success(editing ? 'МОЛ сохранён' : 'МОЛ создан');
+      closeDrawer();
+      void qc.invalidateQueries({ queryKey: ['responsible-persons'] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  const del = useMutation({
+    mutationFn: (id: string) => api.delete(`/responsible-persons/${id}`),
+    onSuccess: () => {
+      message.success('МОЛ удалён');
       void qc.invalidateQueries({ queryKey: ['responsible-persons'] });
     },
     onError: (err: Error) => message.error(err.message),
@@ -75,6 +120,7 @@ export default function ResponsiblePersonsPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        onRowClick={openEdit}
         columns={[
           {
             title: 'ФИО',
@@ -103,6 +149,37 @@ export default function ResponsiblePersonsPage() {
                 <Tag color="default">В архиве</Tag>
               ),
           },
+          ...(canDelete
+            ? [
+                {
+                  title: '',
+                  key: 'actions',
+                  width: 80,
+                  render: (_: unknown, r: ResponsiblePerson) => (
+                    <Popconfirm
+                      title="Удалить МОЛ?"
+                      description="Действие необратимо."
+                      okText="Да, удалить"
+                      cancelText="Нет"
+                      okButtonProps={{ danger: true }}
+                      onConfirm={(e) => {
+                        e?.stopPropagation();
+                        del.mutate(r.id);
+                      }}
+                      onCancel={(e) => e?.stopPropagation()}
+                    >
+                      <Button
+                        danger
+                        size="small"
+                        icon={<DeleteOutlined />}
+                        loading={del.isPending && del.variables === r.id}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </Popconfirm>
+                  ),
+                },
+              ]
+            : []),
         ]}
         cardRender={(r) => (
           <Card style={{ width: '100%' }} size="small">
@@ -119,8 +196,8 @@ export default function ResponsiblePersonsPage() {
       />
       <Drawer
         open={open}
-        onClose={() => setOpen(false)}
-        title="Новый МОЛ"
+        onClose={closeDrawer}
+        title={editing ? `Редактирование: ${editing.fullName}` : 'Новый МОЛ'}
         width={420}
         destroyOnClose
         maskClosable={false}
@@ -130,7 +207,7 @@ export default function ResponsiblePersonsPage() {
           form={form}
           layout="vertical"
           initialValues={{ isActive: true }}
-          onFinish={(values) => create.mutate(values)}
+          onFinish={(values) => save.mutate(values)}
         >
           <Form.Item name="fullName" label="ФИО" rules={[{ required: true }]}>
             <Input />
@@ -144,7 +221,7 @@ export default function ResponsiblePersonsPage() {
           <Form.Item name="isActive" label="Активный" valuePropName="checked">
             <Switch />
           </Form.Item>
-          <Button type="primary" htmlType="submit" loading={create.isPending} block size="large">
+          <Button type="primary" htmlType="submit" loading={save.isPending} block size="large">
             Сохранить
           </Button>
         </Form>
