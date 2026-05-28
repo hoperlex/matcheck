@@ -50,14 +50,6 @@ const formatMoney = (s: string | null | undefined) => {
   return n.toFixed(2);
 };
 
-const renderMaterialName = (v: string) => (
-  <Typography.Paragraph
-    ellipsis={{ rows: 2, tooltip: v }}
-    style={{ marginBottom: 0 }}
-  >
-    {v}
-  </Typography.Paragraph>
-);
 
 type MaterialsTab = 'balance' | 'intake' | 'shipment';
 
@@ -190,7 +182,6 @@ function BalanceTab({
             dataIndex: 'materialName',
             width: 320,
             sorter: stringSorter<StockBalanceRow>((r) => r.materialName),
-            render: renderMaterialName,
           },
           {
             title: 'Подрядчик',
@@ -348,7 +339,6 @@ function IntakeTab({
             dataIndex: 'materialName',
             width: 320,
             sorter: stringSorter<IntakeJournalRow>((r) => r.materialName),
-            render: renderMaterialName,
           },
           {
             title: 'Кол-во',
@@ -553,7 +543,6 @@ function ShipmentTab({
             dataIndex: 'materialName',
             width: 320,
             sorter: stringSorter<ShipmentJournalRow>((r) => r.materialName),
-            render: renderMaterialName,
           },
           {
             title: 'Кол-во',

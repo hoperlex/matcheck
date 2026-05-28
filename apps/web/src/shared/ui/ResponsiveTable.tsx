@@ -1,9 +1,37 @@
-import { List, Space, Table, Typography, type TableProps } from 'antd';
+import { List, Space, Table, Tooltip, Typography, type TableProps } from 'antd';
 import type { ReactNode } from 'react';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { useStickyHeaderHeight } from './StickyPageHeader';
 
 type Column<T> = NonNullable<TableProps<T>['columns']>[number];
+
+/**
+ * Оборачиваем оригинальный column.render так, чтобы строковые/числовые
+ * значения автоматически получали antd Tooltip с полным содержимым.
+ * JSX-результаты (Tag, Space, Button) пропускаем как есть — для них tooltip
+ * либо не нужен, либо уже навешан внутри ячейки. В паре с column.ellipsis
+ * это даёт «обрезанный текст с подсказкой на hover», все строки одной
+ * высоты, без 2-3-строчных «пляшущих» ячеек.
+ */
+function wrapRender<T>(
+  origRender: Column<T>['render'],
+): Column<T>['render'] {
+  return (value: unknown, record: T, idx: number): ReactNode => {
+    const out: ReactNode = origRender
+      ? (origRender(value, record, idx) as ReactNode)
+      : (value as ReactNode);
+    if (typeof out === 'string' || typeof out === 'number') {
+      const s = String(out);
+      if (s.length === 0 || s === '—' || s === '-') return out;
+      return (
+        <Tooltip title={s} placement="topLeft" mouseEnterDelay={0.4}>
+          <span>{s}</span>
+        </Tooltip>
+      );
+    }
+    return out;
+  };
+}
 
 export function ResponsiveTable<T extends object>({
   items,
@@ -33,17 +61,27 @@ export function ResponsiveTable<T extends object>({
   // прямо под нижний край шапки, чтобы при скролле колонки оставались видны.
   const stickyOffset = useStickyHeaderHeight();
 
+  // Все колонки получают ellipsis (одна строка + обрезка с «…»), значит все
+  // строки таблицы одной высоты. Native title отключаем (showTitle: false),
+  // подсказку даёт antd Tooltip из wrapRender — он же дублирует подсказку
+  // для render-функций, которые возвращают string/number.
+  const decorate = (col: Column<T>): Column<T> => ({
+    ellipsis: { showTitle: false },
+    ...col,
+    render: wrapRender<T>(col.render),
+  });
+
   const finalColumns: Column<T>[] = numbered
     ? [
-        {
+        decorate({
           title: '№',
           key: '__num__',
           width: 56,
           render: (_: unknown, __: T, idx: number) => idx + 1,
-        },
-        ...columns,
+        }),
+        ...columns.map(decorate),
       ]
-    : columns;
+    : columns.map(decorate);
 
   if (bp === 'desktop') {
     return (

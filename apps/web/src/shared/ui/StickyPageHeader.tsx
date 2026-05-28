@@ -1,7 +1,7 @@
 import {
   createContext,
   useContext,
-  useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
@@ -28,7 +28,11 @@ export function StickyPageHeader({
   const ref = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState(0);
 
-  useEffect(() => {
+  // useLayoutEffect — измерение шапки и установка height ДО первого paint:
+  // иначе ResponsiveTable получает offsetHeader=0 на первом рендере и шапка
+  // таблицы прилипает к top:0, а после следующего рендера прыгает на N px
+  // вниз — видимый «люфт» при первом скролле.
+  useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     const update = () => setHeight(Math.ceil(el.getBoundingClientRect().height));
