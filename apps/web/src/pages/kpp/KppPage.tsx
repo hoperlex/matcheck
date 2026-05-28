@@ -247,6 +247,23 @@ export default function KppPage() {
     refetchInterval: 5000,
   });
 
+  // Лёгкие count-запросы для счётчиков на вкладках Ожидаемые/Принятые.
+  // ОБЯЗАТЕЛЬНО объявляются вместе с остальными хуками — выше любых early
+  // return'ов формы. Иначе при переходе между списком и карточкой меняется
+  // количество вызванных хуков (React error #300). limit=1 — сервер вернёт
+  // только total, тело ответа крошечное.
+  const expectedCountQuery = useQuery({
+    queryKey: ['source-documents', 'unaccepted-upd-count', 'inbound'],
+    queryFn: () =>
+      api.get<{ total: number }>(
+        '/source-documents?kind=upd&direction=inbound&unaccepted=true&limit=1',
+      ),
+  });
+  const acceptedCountQuery = useQuery({
+    queryKey: ['deliveries', 'count', 'active'],
+    queryFn: () => api.get<{ total: number }>('/deliveries?limit=1'),
+  });
+
   // Детали УПД для преднаполнения формы в режиме isNew. Сначала пробуем IndexedDB
   // (его наполняет pullSync), при пустом кеше — серверный fallback. Грузится один
   // раз на updIdFromUrl, после чего гидратация заполняет items/contractor/site.
@@ -1506,21 +1523,9 @@ export default function KppPage() {
   }
 
   // === Режим списка (нет deliveryId) ===
-  // Лёгкие count-запросы для счётчиков на вкладках. limit=1 — серверу
-  // достаточно для возврата total, тело ответа маленькое. SSE-инвалидация
-  // (setupInvalidation) сама протухает кэш ['source-documents'] /
-  // ['deliveries'] и счётчики обновятся.
-  const expectedCountQuery = useQuery({
-    queryKey: ['source-documents', 'unaccepted-upd-count', 'inbound'],
-    queryFn: () =>
-      api.get<{ total: number }>(
-        '/source-documents?kind=upd&direction=inbound&unaccepted=true&limit=1',
-      ),
-  });
-  const acceptedCountQuery = useQuery({
-    queryKey: ['deliveries', 'count', 'active'],
-    queryFn: () => api.get<{ total: number }>('/deliveries?limit=1'),
-  });
+  // expectedCountQuery / acceptedCountQuery объявлены выше, рядом с
+  // остальными хуками — иначе React error #300 при переходе со списка
+  // на форму приёмки.
 
   const handleTabChange = (key: string) => {
     if (key === 'expected') setParams({});

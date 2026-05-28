@@ -221,6 +221,21 @@ export default function ShipmentPage() {
   const counterpartyReceiverOptions =
     kind === 'return' ? counterparties.filter((c) => c.isSupplier) : counterparties;
 
+  // Лёгкие count-запросы для счётчиков на вкладках Ожидаемые/Принятые.
+  // ОБЯЗАТЕЛЬНО объявляются вместе с остальными хуками — выше любых early
+  // return'ов формы (иначе React error #300 при навигации со списка в форму).
+  const expectedCountQuery = useQuery({
+    queryKey: ['source-documents', 'unaccepted-upd-count', 'outbound'],
+    queryFn: () =>
+      api.get<{ total: number }>(
+        '/source-documents?kind=upd&direction=outbound&unaccepted=true&limit=1',
+      ),
+  });
+  const acceptedCountQuery = useQuery({
+    queryKey: ['shipments', 'count', 'active'],
+    queryFn: () => api.get<{ total: number }>('/shipments?limit=1'),
+  });
+
   const shipmentQuery = useQuery({
     queryKey: ['shipments', shipmentId],
     queryFn: async (): Promise<Shipment> => {
@@ -1445,20 +1460,8 @@ export default function ShipmentPage() {
   }
 
   // ─── Режим списка ───────────────────────────────────────────────────────
-  // Счётчики для вкладок — лёгкие limit=1 запросы, читаем поле total из ответа.
-  // Тот же подход, что в KppPage; SSE-инвалидация ['source-documents'] /
-  // ['shipments'] обновляет кэш автоматически.
-  const expectedCountQuery = useQuery({
-    queryKey: ['source-documents', 'unaccepted-upd-count', 'outbound'],
-    queryFn: () =>
-      api.get<{ total: number }>(
-        '/source-documents?kind=upd&direction=outbound&unaccepted=true&limit=1',
-      ),
-  });
-  const acceptedCountQuery = useQuery({
-    queryKey: ['shipments', 'count', 'active'],
-    queryFn: () => api.get<{ total: number }>('/shipments?limit=1'),
-  });
+  // expectedCountQuery / acceptedCountQuery объявлены выше, рядом с
+  // остальными хуками (нельзя после early return — React error #300).
 
   const handleTabChange = (key: string) => {
     if (key === 'expected') setParams({ tab: 'expected' });
