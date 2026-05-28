@@ -30,7 +30,20 @@ import { deleteObject, getObject } from './domain/storage/s3.signer.js';
 import { parseUpdPdf, PdfNoTextError } from './domain/edo/upd-pdf.parser.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
 import { validateUpdTotals } from './domain/edo/upd-validation.js';
+import { publishSseEvent } from './domain/sse/redis-bridge.js';
 import type { UpdPdfParsed } from '@matcheck/contracts';
+
+// Хелпер: уведомляем подключённых SSE-клиентов о смене статуса УПД через
+// Redis Pub/Sub (worker в отдельном процессе, in-process bus API ему
+// недоступен). Без него мобила узнавала о готовности новой УПД только
+// через 15-минутный periodic sync.
+async function notifySourceDocumentUpdated(sourceDocumentId: string): Promise<void> {
+  await publishSseEvent({
+    type: 'source_document_updated',
+    entityId: sourceDocumentId,
+    ts: new Date().toISOString(),
+  });
+}
 
 const CONCURRENCY = 2;
 // Документы, висящие в processing дольше этого времени, считаем «потерянными»
@@ -130,6 +143,7 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         })
         .where(eq(sourceDocuments.id, sourceDocumentId));
       log.warn({ textLength: err.textLength }, 'pdf has no text — marked parse_failed');
+      await notifySourceDocumentUpdated(sourceDocumentId);
       return;
     }
     log.error({ err }, 'parse failed, will retry');
@@ -201,6 +215,7 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         })
         .where(eq(sourceDocuments.id, sourceDocumentId));
       log.warn({ existingId: existing.id }, 'duplicate detected — needs_resolution');
+      await notifySourceDocumentUpdated(sourceDocumentId);
     }
   }
 
@@ -290,6 +305,7 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     { itemsCount: parsed.items.length, status, parseErrorCode },
     'upd parsed successfully',
   );
+  await notifySourceDocumentUpdated(sourceDocumentId);
 }
 
 async function handleS3Cleanup(job: Job<S3CleanupJobData>): Promise<void> {
@@ -382,6 +398,7 @@ worker.on('failed', async (job, err) => {
           updatedAt: new Date(),
         })
         .where(eq(sourceDocuments.id, job.data.sourceDocumentId));
+      await notifySourceDocumentUpdated(job.data.sourceDocumentId);
     } catch (e) {
       logger.error({ err: e }, 'failed to mark document as parse_failed');
     }

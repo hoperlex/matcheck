@@ -559,6 +559,16 @@ export default function KppPage() {
   const buildPatch = (nextCode: DeliveryStatusCode): Partial<Delivery> => {
     if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
     const nextStatus: Status = { ...loadedDelivery.status, code: nextCode };
+    // Если серверный comment структурирован (multiline «1 Этап:…/2 Этап:…»
+    // от мобильного клиента), отправляем его как есть, минуя local state.
+    // Иначе мы рискуем затереть свежее обновление от мобилы (2 Этап,
+    // дописанный после открытия страницы): refetch не обновляет local
+    // state, save отправил бы устаревший текст.
+    const serverComment = loadedDelivery.comment ?? '';
+    const serverParsed = parseDeliveryComment(serverComment);
+    const effectiveComment = serverParsed.hasStructure
+      ? serverComment || null
+      : (comment || null);
     return {
       status: nextStatus,
       siteId: siteId ?? loadedDelivery.siteId,
@@ -567,7 +577,7 @@ export default function KppPage() {
       recipientMolId: recipientKind === 'mol' ? recipientMolId : null,
       vehiclePlate: plate || null,
       arrivedAt: loadedDelivery.arrivedAt ?? new Date().toISOString(),
-      comment: comment || null,
+      comment: effectiveComment,
       sourceDocumentIds: selectedUpd
         ? [selectedUpd.id]
         : loadedDelivery.sourceDocumentIds,
@@ -1319,7 +1329,17 @@ export default function KppPage() {
           // «2 Этап: "…"», «Примечание: …» (см. parseDeliveryComment). Если
           // маркеры найдены — рендерим read-only-секции по этапам. Иначе
           // (приёмка, созданная/правленая с веба) — оставляем общий textarea.
-          const parsed = parseDeliveryComment(comment);
+          //
+          // Источник для парсинга — серверный loadedDelivery.comment (он
+          // обновляется при refetch каждые 5 сек), а не local state `comment`:
+          // последний фиксируется при первой гидратации и не подтягивает
+          // обновления от мобилы (например 2 Этап, дописанный после
+          // открытия страницы — иначе появляется только после F5).
+          const sourceComment =
+            loadedDelivery?.comment !== undefined && loadedDelivery?.comment !== null
+              ? loadedDelivery.comment
+              : comment;
+          const parsed = parseDeliveryComment(sourceComment);
           if (parsed.hasStructure) {
             const empty = (
               <Typography.Text type="secondary">— нет —</Typography.Text>
