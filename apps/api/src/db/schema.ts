@@ -85,6 +85,10 @@ export const users = pgTable(
     passwordHash: text('password_hash').notNull(),
     role: userRoleEnum('role').notNull().default('manager'),
     isActive: boolean('is_active').notNull().default(false),
+    // Контактный телефон (для роли manager — нужен мобильному клиенту
+    // КПП, чтобы инспектор мог позвонить менеджеру, который загрузил УПД).
+    // Опциональный для всех ролей; нормализация формата на стороне клиента.
+    phone: varchar('phone', { length: 32 }),
     // Объект, к которому привязан пользователь. Обязателен для inspector_kpp
     // (определяет область видимости приёмок/отгрузок/документов).
     // Для admin/manager всегда null.
@@ -417,6 +421,13 @@ export const sourceDocuments = pgTable(
     queuedAt: timestamp('queued_at', { withTimezone: true }),
     processedAt: timestamp('processed_at', { withTimezone: true }),
     validation: jsonb('validation').$type<UpdValidation | null>(),
+    // Пользователь, загрузивший УПД через /upload-upd или /upload-upd-pdf.
+    // Для EDO/mail-полученных документов — NULL (poller, не юзер).
+    // Используется мобильным клиентом для отображения контакта менеджера
+    // в шапке списка материалов на 1 Этапе приёмки.
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
     version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -444,6 +455,9 @@ export const sourceDocuments = pgTable(
       .on(t.contractorId)
       .where(sql`${t.contractorId} is not null`),
     index('source_site_idx').on(t.siteId).where(sql`${t.siteId} is not null`),
+    index('source_documents_created_by_idx')
+      .on(t.createdByUserId)
+      .where(sql`${t.createdByUserId} is not null`),
     index('source_documents_content_hash_idx')
       .on(t.contractorId, t.contentHash)
       .where(sql`${t.contentHash} is not null`),

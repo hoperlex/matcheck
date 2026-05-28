@@ -107,6 +107,14 @@ export const SourceDocumentSchema = z.object({
   contractorName: z.string().nullable().optional(),
   recipientMolName: z.string().nullable().optional(),
   siteName: z.string().nullable().optional(),
+  // Пользователь, загрузивший УПД через /upload-upd или /upload-upd-pdf.
+  // Для EDO/mail-полученных — NULL (нет конкретного юзера). Мобильный
+  // клиент использует createdByUserPhone для кнопки звонка из шапки
+  // списка материалов на 1 Этапе приёмки; при отсутствии кнопка не
+  // рисуется.
+  createdByUserId: z.string().uuid().nullable().optional(),
+  createdByUserEmail: z.string().nullable().optional(),
+  createdByUserPhone: z.string().nullable().optional(),
   docNumber: z.string().nullable(),
   docDate: z.string().nullable(),
   totalSum: z.string().nullable(),

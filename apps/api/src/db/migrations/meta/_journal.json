@@ -274,6 +274,13 @@
       "when": 1780877580000,
       "tag": "0038_upd_prompt_v5",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1780877640000,
+      "tag": "0039_user_phone_and_doc_creator",
+      "breakpoints": true
     }
   ]
 }

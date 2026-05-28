@@ -16,6 +16,7 @@ function dto(u: typeof users.$inferSelect) {
     role: u.role,
     isActive: u.isActive,
     siteId: u.siteId,
+    phone: u.phone,
     createdAt: u.createdAt.toISOString(),
   };
 }
@@ -56,6 +57,13 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
       const nextRole = req.body.role ?? existing.role;
       if (req.body.role !== undefined) patch.role = req.body.role;
       if (req.body.isActive !== undefined) patch.isActive = req.body.isActive;
+      // phone — опциональный, нормализуем: пустая строка → NULL, иначе trim.
+      // Это упрощает мобильному клиенту проверку «есть телефон или нет»
+      // (отсутствие → не показывать кнопку звонка в шапке материалов).
+      if (req.body.phone !== undefined) {
+        const trimmed = req.body.phone?.trim() ?? null;
+        patch.phone = trimmed && trimmed.length > 0 ? trimmed : null;
+      }
 
       // Нормализация siteId по итоговой роли: только inspector_kpp может иметь объект.
       // При смене роли на admin/manager — обнуляем, даже если в body пришёл UUID.

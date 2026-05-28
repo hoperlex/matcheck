@@ -5,6 +5,10 @@ export type UserRole = z.infer<typeof UserRoleSchema>;
 
 export const EmailSchema = z.string().email().max(254).toLowerCase().trim();
 export const PasswordSchema = z.string().min(8).max(256);
+// Контактный телефон, опциональный. Без жёсткой валидации формата (E.164):
+// пользователь вводит как удобно, нормализация для tel:URI — на клиенте.
+// max 32 — запас под форматные символы (+ - () пробелы).
+export const PhoneSchema = z.string().trim().max(32).nullable().optional();
 
 export const LoginRequestSchema = z.object({
   email: EmailSchema,
@@ -19,6 +23,11 @@ export const RegisterRequestSchema = z.object({
 });
 export type RegisterRequest = z.infer<typeof RegisterRequestSchema>;
 
+// PhoneSchema (см. выше) используется только в UserDto и UserAdminPatch —
+// телефон проставляется/правится админом через таблицу «Пользователи»
+// в админ-разделе, форма регистрации не меняется (нужно лишь для роли
+// manager, остальным опционально).
+
 export const UserDtoSchema = z.object({
   id: z.string().uuid(),
   email: z.string(),
@@ -27,6 +36,9 @@ export const UserDtoSchema = z.object({
   // Объект, привязанный к пользователю. Обязателен для inspector_kpp;
   // для admin/manager всегда null.
   siteId: z.string().uuid().nullable(),
+  // Контактный телефон (см. RegisterRequestSchema). null, если пользователь
+  // не указал.
+  phone: z.string().nullable(),
   createdAt: z.string(),
 });
 export type UserDto = z.infer<typeof UserDtoSchema>;
@@ -35,6 +47,10 @@ export const UserAdminPatchSchema = z.object({
   role: UserRoleSchema.optional(),
   isActive: z.boolean().optional(),
   siteId: z.string().uuid().nullable().optional(),
+  // Админ может править/проставлять телефон уже зарегистрированному
+  // пользователю (например для менеджеров, которые регистрировались до
+  // добавления поля или забыли заполнить).
+  phone: PhoneSchema,
 });
 export type UserAdminPatch = z.infer<typeof UserAdminPatchSchema>;
 

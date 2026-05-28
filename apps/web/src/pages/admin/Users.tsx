@@ -1,4 +1,6 @@
-import { Select, Switch, Tag, Typography, Space, message } from 'antd';
+import { useState } from 'react';
+import { Input, Select, Switch, Tag, Tooltip, Typography, Space, message } from 'antd';
+import { PhoneOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Site, UserAdminPatch, UserDto, UserRole } from '@matcheck/contracts';
 import { api } from '../../services/api';
@@ -27,6 +29,39 @@ export default function AdminUsersPage() {
     },
     onError: (err: Error) => message.error(err.message),
   });
+
+  const PhoneCell = ({ row }: { row: UserDto }) => {
+    // Локальный draft, чтобы не дёргать PATCH при каждом нажатии клавиши.
+    // Шлём изменение только на blur/Enter и только если значение реально
+    // отличается от серверного (после trim). Пустая строка — это null,
+    // мобила различает «нет контакта» именно по null.
+    const [draft, setDraft] = useState<string>(row.phone ?? '');
+    const commit = () => {
+      const next = draft.trim();
+      const cur = (row.phone ?? '').trim();
+      if (next === cur) return;
+      patch.mutate({ id: row.id, body: { phone: next.length > 0 ? next : null } });
+    };
+    return (
+      <Space size={4} align="center">
+        <Input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onPressEnter={(e) => (e.target as HTMLInputElement).blur()}
+          placeholder="+7 …"
+          allowClear
+          style={{ width: 180 }}
+          prefix={<PhoneOutlined style={{ color: '#bfbfbf' }} />}
+        />
+        {row.role === 'manager' && !row.phone && (
+          <Tooltip title="Без телефона мобильный клиент не сможет позвонить менеджеру из шапки списка материалов">
+            <Tag color="orange">нет контакта</Tag>
+          </Tooltip>
+        )}
+      </Space>
+    );
+  };
 
   const renderSiteCell = (row: UserDto) => {
     if (row.role !== 'inspector_kpp') {
@@ -85,6 +120,11 @@ export default function AdminUsersPage() {
             ),
           },
           { title: 'Создан', dataIndex: 'createdAt' },
+          {
+            title: 'Контакт',
+            key: 'phone',
+            render: (_: unknown, row: UserDto) => <PhoneCell row={row} />,
+          },
         ]}
         cardRender={(u) => {
           const site = u.siteId ? sites.find((s) => s.id === u.siteId) : null;

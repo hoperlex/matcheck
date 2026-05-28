@@ -36,6 +36,7 @@ function userToDto(u: {
   role: 'admin' | 'manager' | 'inspector_kpp';
   isActive: boolean;
   siteId: string | null;
+  phone: string | null;
   createdAt: Date;
 }) {
   return {
@@ -44,6 +45,7 @@ function userToDto(u: {
     role: u.role,
     isActive: u.isActive,
     siteId: u.siteId,
+    phone: u.phone,
     createdAt: u.createdAt.toISOString(),
   };
 }

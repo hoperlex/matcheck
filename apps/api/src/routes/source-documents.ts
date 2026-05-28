@@ -32,6 +32,7 @@ import {
   sourceDocuments,
   sourceDocumentItems,
   sourceDocumentAttachments,
+  users,
 } from '../db/schema.js';
 import { parseUpdXml } from '../domain/edo/upd.parser.js';
 import { validateUpdTotals } from '../domain/edo/upd-validation.js';
@@ -105,6 +106,11 @@ type SdNames = {
   contractorName?: string | null;
   recipientMolName?: string | null;
   siteName?: string | null;
+  // Email и телефон автора УПД (того, кто загрузил через /upload-upd*).
+  // Для EDO/mail-полученных — null. Используется мобильным клиентом
+  // для кнопки звонка в шапке списка материалов.
+  createdByUserEmail?: string | null;
+  createdByUserPhone?: string | null;
 };
 
 function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
@@ -122,6 +128,9 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     contractorName: names.contractorName ?? null,
     recipientMolName: names.recipientMolName ?? null,
     siteName: names.siteName ?? null,
+    createdByUserId: sd.createdByUserId,
+    createdByUserEmail: names.createdByUserEmail ?? null,
+    createdByUserPhone: names.createdByUserPhone ?? null,
     docNumber: sd.docNumber,
     docDate: sd.docDate?.toISOString().slice(0, 10) ?? null,
     totalSum: sd.totalSum,
@@ -189,7 +198,7 @@ async function loadSdNames(
   app: any,
   sd: typeof sourceDocuments.$inferSelect,
 ): Promise<SdNames> {
-  const [supplier, contractor, mol, site] = await Promise.all([
+  const [supplier, contractor, mol, site, createdBy] = await Promise.all([
     sd.supplierId
       ? app.db
           .select({ name: counterparties.name })
@@ -218,12 +227,21 @@ async function loadSdNames(
           .where(eq(sites.id, sd.siteId))
           .limit(1)
       : Promise.resolve([] as { name: string }[]),
+    sd.createdByUserId
+      ? app.db
+          .select({ email: users.email, phone: users.phone })
+          .from(users)
+          .where(eq(users.id, sd.createdByUserId))
+          .limit(1)
+      : Promise.resolve([] as { email: string; phone: string | null }[]),
   ]);
   return {
     supplierName: supplier[0]?.name ?? null,
     contractorName: contractor[0]?.name ?? null,
     recipientMolName: mol[0]?.name ?? null,
     siteName: site[0]?.name ?? null,
+    createdByUserEmail: createdBy[0]?.email ?? null,
+    createdByUserPhone: createdBy[0]?.phone ?? null,
   };
 }
 
@@ -688,6 +706,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           vatSum: parsed.vatSum?.toString() ?? null,
           validation,
           status: 'parsed',
+          // Привязываем УПД к пользователю, который её загрузил, — нужно
+          // мобильному клиенту для кнопки «☎ менеджер» в шапке материалов.
+          createdByUserId: req.user?.id ?? null,
         })
         .returning({ id: sourceDocuments.id });
       if (!created) throw new Error('Failed to insert source_document');
@@ -847,6 +868,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           originalFilename: fileData.filename,
           queuedAt: now,
           parsedAt: now,
+          // См. комментарий в /upload-upd: пробрасываем автора для мобильного.
+          createdByUserId: req.user?.id ?? null,
         })
         .returning();
       if (!created) throw new Error('Failed to insert source_document');

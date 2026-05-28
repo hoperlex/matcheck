@@ -139,6 +139,21 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             .where(sql_in(sourceDocumentAttachments.sourceDocumentId, sdIds))
         : [];
 
+      // Контакт автора УПД — нужен мобильному клиенту для кнопки звонка
+      // в шапке списка материалов на 1 Этапе. Один SELECT по уникальным
+      // userId'ам, чтобы не делать N+1. EDO/mail-полученные УПД имеют
+      // createdByUserId = null — пропускаются.
+      const sdCreatorIds = Array.from(
+        new Set(sdRows.map((r) => r.createdByUserId).filter((v): v is string => !!v)),
+      );
+      const sdCreators = sdCreatorIds.length
+        ? await app.db
+            .select({ id: users.id, email: users.email, phone: users.phone })
+            .from(users)
+            .where(sql_in(users.id, sdCreatorIds))
+        : [];
+      const sdCreatorById = new Map(sdCreators.map((u) => [u.id, u]));
+
       // Инспектор видит всё в рамках своего объекта (включая записи других
       // инспекторов на том же siteId) — синхронизировано с GET /deliveries,
       // см. коммит 1833b9d. До этого фильтр был по inspectorId.
@@ -363,7 +378,9 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           color: st.color,
           sortOrder: st.sortOrder,
         })),
-        sourceDocuments: sdRows.map((sd) => ({
+        sourceDocuments: sdRows.map((sd) => {
+          const creator = sd.createdByUserId ? sdCreatorById.get(sd.createdByUserId) : null;
+          return {
           id: sd.id,
           kind: sd.kind,
           direction: sd.direction,
@@ -399,6 +416,9 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           createdAt: sd.createdAt.toISOString(),
           updatedAt: sd.updatedAt.toISOString(),
           validation: sd.validation ?? null,
+          createdByUserId: sd.createdByUserId,
+          createdByUserEmail: creator?.email ?? null,
+          createdByUserPhone: creator?.phone ?? null,
           items: sdItemRows
             .filter((i) => i.sourceDocumentId === sd.id)
             .map((i) => ({
@@ -428,7 +448,8 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
               sizeBytes: a.sizeBytes,
               role: a.role,
             })),
-        })),
+          };
+        }),
         deliveries: dRows.map((d) => ({
           id: d.id,
           status: {
