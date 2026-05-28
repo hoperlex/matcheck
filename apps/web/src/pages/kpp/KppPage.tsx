@@ -66,6 +66,7 @@ import { PhotoGallery } from './PhotoGallery';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
 import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
+import type { PageTabItem } from '../../shared/ui/PageTabs';
 
 type DraftItem = {
   clientKey: string;
@@ -1505,36 +1506,49 @@ export default function KppPage() {
   }
 
   // === Режим списка (нет deliveryId) ===
+  // Лёгкие count-запросы для счётчиков на вкладках. limit=1 — серверу
+  // достаточно для возврата total, тело ответа маленькое. SSE-инвалидация
+  // (setupInvalidation) сама протухает кэш ['source-documents'] /
+  // ['deliveries'] и счётчики обновятся.
+  const expectedCountQuery = useQuery({
+    queryKey: ['source-documents', 'unaccepted-upd-count', 'inbound'],
+    queryFn: () =>
+      api.get<{ total: number }>(
+        '/source-documents?kind=upd&direction=inbound&unaccepted=true&limit=1',
+      ),
+  });
+  const acceptedCountQuery = useQuery({
+    queryKey: ['deliveries', 'count', 'active'],
+    queryFn: () => api.get<{ total: number }>('/deliveries?limit=1'),
+  });
+
+  const handleTabChange = (key: string) => {
+    if (key === 'expected') setParams({});
+    else setParams({ tab: 'accepted' });
+  };
+
+  const listTabs: PageTabItem[] = [
+    { key: 'expected', label: 'Ожидаемые', count: expectedCountQuery.data?.total ?? null },
+    { key: 'accepted', label: 'Принятые', count: acceptedCountQuery.data?.total ?? null },
+  ];
+
+  const createButton = (
+    <Button
+      type="primary"
+      icon={<PlusOutlined />}
+      onClick={createBlank}
+      disabled={inspectorWithoutSite}
+    >
+      Новая приёмка
+    </Button>
+  );
+
   return (
     <StickyPageHeader
       header={
-        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
-          <Space wrap align="center">
-            <Typography.Title level={3} style={{ margin: 0 }}>
-              Приёмка
-            </Typography.Title>
-            <Segmented
-              value={tab}
-              onChange={(v) => {
-                const next = v as ListTab;
-                if (next === 'expected') setParams({});
-                else setParams({ tab: 'accepted' });
-              }}
-              options={[
-                { label: 'Ожидаемые', value: 'expected' },
-                { label: 'Принятые', value: 'accepted' },
-              ]}
-            />
-          </Space>
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={createBlank}
-            disabled={inspectorWithoutSite}
-          >
-            Новая приёмка
-          </Button>
-        </Space>
+        <Typography.Title level={3} style={{ margin: 0 }}>
+          Приёмка
+        </Typography.Title>
       }
     >
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -1548,10 +1562,20 @@ export default function KppPage() {
         )}
 
         {tab === 'expected' ? (
-          <ExpectedUpds onOpen={createFromUpd} />
+          <ExpectedUpds
+            onOpen={createFromUpd}
+            tabs={listTabs}
+            activeTab={tab}
+            onTabChange={handleTabChange}
+            filtersExtra={createButton}
+          />
         ) : (
           <DeliveriesHistory
             onOpen={(id) => navigate(`/kpp?delivery=${id}&from=accepted`)}
+            tabs={listTabs}
+            activeTab={tab}
+            onTabChange={handleTabChange}
+            filtersExtra={createButton}
           />
         )}
       </Space>

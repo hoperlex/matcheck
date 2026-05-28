@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { DatePicker, Input, Select, Space, Tabs, Tag, Typography } from 'antd';
+import { DatePicker, Input, Select, Space, Tag, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import type {
@@ -16,6 +16,7 @@ import type { Dayjs } from 'dayjs';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 
 const KIND_LABELS: Record<ShipmentKind, { label: string; color: string }> = {
   contractor: { label: 'Подрядчику', color: 'geekblue' },
@@ -58,40 +59,61 @@ const renderMaterialName = (v: string) => (
 
 type MaterialsTab = 'balance' | 'intake' | 'shipment';
 
+const MATERIALS_TABS: PageTabItem[] = [
+  { key: 'balance', label: 'На объекте' },
+  { key: 'intake', label: 'Поступление' },
+  { key: 'shipment', label: 'Отгрузка' },
+];
+
 export default function MaterialsPage() {
-  // Активный таб держим в state (а не во встроенных children Tabs),
-  // чтобы навигационную панель вкладок можно было поместить в sticky
-  // шапку, а содержимое таба — снаружи sticky-блока.
+  // Активный таб держим в state — навигация без URL-параметра, как и было.
+  // Сами вкладки теперь рендерятся ВНУТРИ каждого таба под его фильтрами
+  // (см. *TabHeader ниже), чтобы соответствовать общему UX-шаблону:
+  // [фильтры] → [вкладки] → [таблица].
   const [activeKey, setActiveKey] = useState<MaterialsTab>('balance');
+  const onTabChange = (k: string) => setActiveKey(k as MaterialsTab);
   return (
     <StickyPageHeader
       header={
-        <>
-          <Typography.Title level={3} style={{ margin: '0 0 8px' }}>
-            Материалы
-          </Typography.Title>
-          <Tabs
-            activeKey={activeKey}
-            onChange={(k) => setActiveKey(k as MaterialsTab)}
-            items={[
-              { key: 'balance', label: 'На объекте' },
-              { key: 'intake', label: 'Поступление' },
-              { key: 'shipment', label: 'Отгрузка' },
-            ]}
-          />
-        </>
+        <Typography.Title level={3} style={{ margin: 0 }}>
+          Материалы
+        </Typography.Title>
       }
     >
-      {activeKey === 'balance' && <BalanceTab />}
-      {activeKey === 'intake' && <IntakeTab />}
-      {activeKey === 'shipment' && <ShipmentTab />}
+      {activeKey === 'balance' && (
+        <BalanceTab activeTab={activeKey} onTabChange={onTabChange} />
+      )}
+      {activeKey === 'intake' && (
+        <IntakeTab activeTab={activeKey} onTabChange={onTabChange} />
+      )}
+      {activeKey === 'shipment' && (
+        <ShipmentTab activeTab={activeKey} onTabChange={onTabChange} />
+      )}
     </StickyPageHeader>
   );
 }
 
+// Общий блок «фильтры → вкладки» в шапке каждого таба «Материалов».
+// Используется внутри StickyPageHeader.header.
+function TabBarUnderFilters({
+  activeTab,
+  onTabChange,
+}: {
+  activeTab: MaterialsTab;
+  onTabChange: (k: string) => void;
+}) {
+  return <PageTabs items={MATERIALS_TABS} activeKey={activeTab} onChange={onTabChange} />;
+}
+
 // ─── Tab «На объекте» ─────────────────────────────────────────────────────
 
-function BalanceTab() {
+function BalanceTab({
+  activeTab,
+  onTabChange,
+}: {
+  activeTab: MaterialsTab;
+  onTabChange: (k: string) => void;
+}) {
   const [siteId, setSiteId] = useState<string | undefined>(undefined);
   const [date, setDate] = useState<Dayjs | null>(null);
   const [q, setQ] = useState('');
@@ -115,34 +137,37 @@ function BalanceTab() {
   return (
     <StickyPageHeader
       header={
-        <Space wrap>
-          <Select<string | undefined>
-            allowClear
-            placeholder="Все объекты"
-            style={{ minWidth: 240 }}
-            value={siteId}
-            onChange={setSiteId}
-            showSearch
-            optionFilterProp="label"
-            loading={sites.isLoading}
-            options={(sites.data?.items ?? []).map((s) => ({
-              value: s.id,
-              label: `${s.code} · ${s.name}`,
-            }))}
-          />
-          <DatePicker
-            value={date}
-            onChange={setDate}
-            placeholder="На дату (сейчас)"
-            format="DD.MM.YYYY"
-          />
-          <Input.Search
-            placeholder="Материал"
-            allowClear
-            onSearch={setQ}
-            style={{ width: 240 }}
-          />
-        </Space>
+        <>
+          <Space wrap>
+            <Select<string | undefined>
+              allowClear
+              placeholder="Все объекты"
+              style={{ minWidth: 240 }}
+              value={siteId}
+              onChange={setSiteId}
+              showSearch
+              optionFilterProp="label"
+              loading={sites.isLoading}
+              options={(sites.data?.items ?? []).map((s) => ({
+                value: s.id,
+                label: `${s.code} · ${s.name}`,
+              }))}
+            />
+            <DatePicker
+              value={date}
+              onChange={setDate}
+              placeholder="На дату (сейчас)"
+              format="DD.MM.YYYY"
+            />
+            <Input.Search
+              placeholder="Материал"
+              allowClear
+              onSearch={setQ}
+              style={{ width: 240 }}
+            />
+          </Space>
+          <TabBarUnderFilters activeTab={activeTab} onTabChange={onTabChange} />
+        </>
       }
     >
       <ResponsiveTable<StockBalanceRow>
@@ -207,7 +232,13 @@ function BalanceTab() {
 
 // ─── Tab «Поступление» ────────────────────────────────────────────────────
 
-function IntakeTab() {
+function IntakeTab({
+  activeTab,
+  onTabChange,
+}: {
+  activeTab: MaterialsTab;
+  onTabChange: (k: string) => void;
+}) {
   const navigate = useNavigate();
   const [siteId, setSiteId] = useState<string | undefined>(undefined);
   const [q, setQ] = useState('');
@@ -231,28 +262,31 @@ function IntakeTab() {
   return (
     <StickyPageHeader
       header={
-        <Space wrap>
-          <Select<string | undefined>
-            allowClear
-            placeholder="Все объекты"
-            style={{ minWidth: 240 }}
-            value={siteId}
-            onChange={setSiteId}
-            showSearch
-            optionFilterProp="label"
-            loading={sites.isLoading}
-            options={(sites.data?.items ?? []).map((s) => ({
-              value: s.id,
-              label: `${s.code} · ${s.name}`,
-            }))}
-          />
-          <Input.Search
-            placeholder="Материал или поставщик"
-            allowClear
-            onSearch={setQ}
-            style={{ width: 320 }}
-          />
-        </Space>
+        <>
+          <Space wrap>
+            <Select<string | undefined>
+              allowClear
+              placeholder="Все объекты"
+              style={{ minWidth: 240 }}
+              value={siteId}
+              onChange={setSiteId}
+              showSearch
+              optionFilterProp="label"
+              loading={sites.isLoading}
+              options={(sites.data?.items ?? []).map((s) => ({
+                value: s.id,
+                label: `${s.code} · ${s.name}`,
+              }))}
+            />
+            <Input.Search
+              placeholder="Материал или поставщик"
+              allowClear
+              onSearch={setQ}
+              style={{ width: 320 }}
+            />
+          </Space>
+          <TabBarUnderFilters activeTab={activeTab} onTabChange={onTabChange} />
+        </>
       }
     >
       <ResponsiveTable<IntakeJournalRow>
@@ -341,7 +375,13 @@ function IntakeTab() {
 
 // ─── Tab «Отгрузка» ───────────────────────────────────────────────────────
 
-function ShipmentTab() {
+function ShipmentTab({
+  activeTab,
+  onTabChange,
+}: {
+  activeTab: MaterialsTab;
+  onTabChange: (k: string) => void;
+}) {
   const navigate = useNavigate();
   const [siteId, setSiteId] = useState<string | undefined>(undefined);
   const [kind, setKind] = useState<ShipmentKind | undefined>(undefined);
@@ -367,39 +407,42 @@ function ShipmentTab() {
   return (
     <StickyPageHeader
       header={
-        <Space wrap>
-          <Select<string | undefined>
-            allowClear
-            placeholder="Все объекты"
-            style={{ minWidth: 240 }}
-            value={siteId}
-            onChange={setSiteId}
-            showSearch
-            optionFilterProp="label"
-            loading={sites.isLoading}
-            options={(sites.data?.items ?? []).map((s) => ({
-              value: s.id,
-              label: `${s.code} · ${s.name}`,
-            }))}
-          />
-          <Select<ShipmentKind | undefined>
-            allowClear
-            placeholder="Любой вид"
-            style={{ minWidth: 180 }}
-            value={kind}
-            onChange={setKind}
-            options={(Object.keys(KIND_LABELS) as ShipmentKind[]).map((k) => ({
-              value: k,
-              label: KIND_LABELS[k].label,
-            }))}
-          />
-          <Input.Search
-            placeholder="Материал или получатель"
-            allowClear
-            onSearch={setQ}
-            style={{ width: 320 }}
-          />
-        </Space>
+        <>
+          <Space wrap>
+            <Select<string | undefined>
+              allowClear
+              placeholder="Все объекты"
+              style={{ minWidth: 240 }}
+              value={siteId}
+              onChange={setSiteId}
+              showSearch
+              optionFilterProp="label"
+              loading={sites.isLoading}
+              options={(sites.data?.items ?? []).map((s) => ({
+                value: s.id,
+                label: `${s.code} · ${s.name}`,
+              }))}
+            />
+            <Select<ShipmentKind | undefined>
+              allowClear
+              placeholder="Любой вид"
+              style={{ minWidth: 180 }}
+              value={kind}
+              onChange={setKind}
+              options={(Object.keys(KIND_LABELS) as ShipmentKind[]).map((k) => ({
+                value: k,
+                label: KIND_LABELS[k].label,
+              }))}
+            />
+            <Input.Search
+              placeholder="Материал или получатель"
+              allowClear
+              onSearch={setQ}
+              style={{ width: 320 }}
+            />
+          </Space>
+          <TabBarUnderFilters activeTab={activeTab} onTabChange={onTabChange} />
+        </>
       }
     >
       <ResponsiveTable<ShipmentJournalRow>

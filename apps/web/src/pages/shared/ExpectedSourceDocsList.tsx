@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Card, Space, Tag, Tooltip, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
@@ -16,6 +16,7 @@ import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
+import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 
@@ -69,9 +70,23 @@ function MismatchTag({ v }: { v: UpdValidation }) {
 export function ExpectedSourceDocsList({
   direction,
   onOpen,
+  tabs,
+  activeTab,
+  onTabChange,
+  filtersExtra,
 }: {
   direction: SourceDirection;
   onOpen: (upd: SourceDocument) => void;
+  // Вкладки страницы-родителя (например «Ожидаемые / Принятые») рендерятся
+  // ВНУТРИ нашего sticky-header'а под ListFilters — этого требует UX
+  // эталона. Если не передать, вкладочный блок не рисуется (компонент
+  // совместим с использованием вне страницы с вкладками).
+  tabs?: PageTabItem[];
+  activeTab?: string;
+  onTabChange?: (key: string) => void;
+  // Слот в правый край ListFilters — туда родитель вставляет кнопку
+  // «Новая приёмка» / «Новая отгрузка».
+  filtersExtra?: ReactNode;
 }) {
   const [params, setParams] = useSearchParams();
 
@@ -133,15 +148,21 @@ export function ExpectedSourceDocsList({
   return (
     <StickyPageHeader
       header={
-        <ListFilters
-          value={filters}
-          onChange={updateFilters}
-          fields={['contractor', 'supplier', 'site', 'q']}
-          counterparties={counterpartiesQuery.data?.items ?? []}
-          sites={sitesQuery.data?.items ?? []}
-          loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
-          searchPlaceholder="Номер документа"
-        />
+        <>
+          <ListFilters
+            value={filters}
+            onChange={updateFilters}
+            fields={['contractor', 'supplier', 'site', 'q']}
+            counterparties={counterpartiesQuery.data?.items ?? []}
+            sites={sitesQuery.data?.items ?? []}
+            loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
+            searchPlaceholder="Номер документа"
+            extra={filtersExtra}
+          />
+          {tabs && activeTab && onTabChange && (
+            <PageTabs items={tabs} activeKey={activeTab} onChange={onTabChange} />
+          )}
+        </>
       }
     >
       <ResponsiveTable<SourceDocument>

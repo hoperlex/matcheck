@@ -1,22 +1,63 @@
 import { Tabs, Typography } from 'antd';
+import { useQuery } from '@tanstack/react-query';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { api } from '../../services/api';
 
 const DEFAULT_TAB = '/references/sites';
 
-const tabs = [
-  { key: DEFAULT_TAB, label: 'Объекты' },
-  { key: '/references/counterparties', label: 'Контрагенты' },
-  { key: '/references/responsible-persons', label: 'МОЛ' },
-  { key: '/references/materials', label: 'Материалы' },
-  { key: '/references/assets', label: 'ОС' },
+interface CountResp {
+  total: number;
+}
+
+/**
+ * Описание вкладок-подсправочников: путь-роут (он же ключ Tabs) +
+ * подпись + URL для лёгкого count-запроса (limit=1, берём total из ответа).
+ * Все эндпоинты возвращают `{ items, total }`, поэтому формат единый.
+ */
+const TAB_DEFS: { key: string; label: string; countUrl: string }[] = [
+  { key: DEFAULT_TAB, label: 'Объекты', countUrl: '/sites?limit=1' },
+  { key: '/references/counterparties', label: 'Контрагенты', countUrl: '/counterparties?limit=1' },
+  { key: '/references/responsible-persons', label: 'МОЛ', countUrl: '/responsible-persons?limit=1' },
+  { key: '/references/materials', label: 'Материалы', countUrl: '/materials?limit=1' },
+  { key: '/references/assets', label: 'ОС', countUrl: '/assets?limit=1' },
 ];
 
 export default function ReferencesLayout() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const active = tabs.find((t) => location.pathname.startsWith(t.key))?.key ?? DEFAULT_TAB;
+  const active = TAB_DEFS.find((t) => location.pathname.startsWith(t.key))?.key ?? DEFAULT_TAB;
+
+  // Параллельно тянем total по всем 5 справочникам. Запросы лёгкие
+  // (limit=1), кэшируются react-query и переживают переключение вкладок.
+  // null в data — счётчик пока не пришёл, PageTabs покажет подпись без скобок.
+  const counts = useQuery({
+    queryKey: ['references-counts'],
+    queryFn: async (): Promise<Record<string, number>> => {
+      const entries = await Promise.all(
+        TAB_DEFS.map(async (t) => {
+          try {
+            const r = await api.get<CountResp>(t.countUrl);
+            return [t.key, r.total] as const;
+          } catch {
+            return [t.key, -1] as const;
+          }
+        }),
+      );
+      const out: Record<string, number> = {};
+      for (const [k, v] of entries) if (v >= 0) out[k] = v;
+      return out;
+    },
+  });
+
+  const items = TAB_DEFS.map((t) => {
+    const c = counts.data?.[t.key];
+    return {
+      key: t.key,
+      label: c == null ? t.label : `${t.label} (${c})`,
+    };
+  });
 
   return (
     <StickyPageHeader
@@ -25,7 +66,7 @@ export default function ReferencesLayout() {
           <Typography.Title level={3} style={{ margin: '0 0 8px' }}>
             Справочники
           </Typography.Title>
-          <Tabs activeKey={active} items={tabs} onChange={(key) => navigate(key)} />
+          <Tabs activeKey={active} items={items} onChange={(key) => navigate(key)} />
         </>
       }
     >

@@ -7,7 +7,6 @@ import {
   Popconfirm,
   Space,
   Spin,
-  Tabs,
   Tag,
   Tooltip,
   Typography,
@@ -31,6 +30,7 @@ import { api, ApiError } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
+import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
 import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
@@ -206,6 +206,20 @@ export default function InboxPage() {
       api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
   });
 
+  // Лёгкие count-запросы для вкладок «Приёмка / Отгрузка». limit=1 — серверу
+  // достаточно для возврата total. Запросы независимы от текущего direction,
+  // чтобы счётчики были стабильны при переключении.
+  const inboundCountQuery = useQuery({
+    queryKey: ['source-documents', 'count', 'inbound'],
+    queryFn: () =>
+      api.get<{ total: number }>('/source-documents?direction=inbound&limit=1'),
+  });
+  const outboundCountQuery = useQuery({
+    queryKey: ['source-documents', 'count', 'outbound'],
+    queryFn: () =>
+      api.get<{ total: number }>('/source-documents?direction=outbound&limit=1'),
+  });
+
   // Оптимистическое удаление: строка мгновенно исчезает из таблицы, тост
   // показывается сразу, а DELETE-запрос летит в фоне. При ошибке (например
   // has_references) откатываем кэш через snapshot и показываем тост ошибки.
@@ -309,6 +323,11 @@ export default function InboxPage() {
     return '—';
   };
 
+  const docsTabs: PageTabItem[] = [
+    { key: 'inbound', label: 'Приёмка', count: inboundCountQuery.data?.total ?? null },
+    { key: 'outbound', label: 'Отгрузка', count: outboundCountQuery.data?.total ?? null },
+  ];
+
   return (
     <div>
       <StickyPageHeader
@@ -317,26 +336,6 @@ export default function InboxPage() {
             <Typography.Title level={3} style={{ margin: '0 0 12px' }}>
               Документы
             </Typography.Title>
-            <Tabs
-              activeKey={direction}
-              onChange={(k) => updateParams({ direction: k === 'outbound' ? 'outbound' : null })}
-              items={[
-                { key: 'inbound', label: 'Приёмка' },
-                { key: 'outbound', label: 'Отгрузка' },
-              ]}
-              tabBarExtraContent={{
-                right: (
-                  <Space size={8}>
-                    {list.isFetching && !list.isLoading && (
-                      <Spin size="small" indicator={<LoadingOutlined spin />} />
-                    )}
-                    <Button type="primary" onClick={() => setPdfModalOpen(true)}>
-                      Загрузить УПД (PDF)
-                    </Button>
-                  </Space>
-                ),
-              }}
-            />
             <ListFilters
               value={filters}
               onChange={updateFilters}
@@ -345,6 +344,21 @@ export default function InboxPage() {
               sites={sitesQuery.data?.items ?? []}
               loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
               searchPlaceholder="Номер документа"
+              extra={
+                <Space size={8}>
+                  {list.isFetching && !list.isLoading && (
+                    <Spin size="small" indicator={<LoadingOutlined spin />} />
+                  )}
+                  <Button type="primary" onClick={() => setPdfModalOpen(true)}>
+                    Загрузить УПД (PDF)
+                  </Button>
+                </Space>
+              }
+            />
+            <PageTabs
+              items={docsTabs}
+              activeKey={direction}
+              onChange={(k) => updateParams({ direction: k === 'outbound' ? 'outbound' : null })}
             />
           </>
         }

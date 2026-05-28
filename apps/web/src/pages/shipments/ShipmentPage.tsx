@@ -60,6 +60,7 @@ import { runSync } from '../../services/sync';
 import { db, SYSTEM_SITE_ID } from '../../lib/db';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import type { PageTabItem } from '../../shared/ui/PageTabs';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { PhotoGallery } from '../kpp/PhotoGallery';
 import { ShipmentsHistory } from './ShipmentsHistory';
@@ -1444,36 +1445,48 @@ export default function ShipmentPage() {
   }
 
   // ─── Режим списка ───────────────────────────────────────────────────────
+  // Счётчики для вкладок — лёгкие limit=1 запросы, читаем поле total из ответа.
+  // Тот же подход, что в KppPage; SSE-инвалидация ['source-documents'] /
+  // ['shipments'] обновляет кэш автоматически.
+  const expectedCountQuery = useQuery({
+    queryKey: ['source-documents', 'unaccepted-upd-count', 'outbound'],
+    queryFn: () =>
+      api.get<{ total: number }>(
+        '/source-documents?kind=upd&direction=outbound&unaccepted=true&limit=1',
+      ),
+  });
+  const acceptedCountQuery = useQuery({
+    queryKey: ['shipments', 'count', 'active'],
+    queryFn: () => api.get<{ total: number }>('/shipments?limit=1'),
+  });
+
+  const handleTabChange = (key: string) => {
+    if (key === 'expected') setParams({ tab: 'expected' });
+    else setParams({});
+  };
+
+  const listTabs: PageTabItem[] = [
+    { key: 'expected', label: 'Ожидаемые', count: expectedCountQuery.data?.total ?? null },
+    { key: 'accepted', label: 'Принятые', count: acceptedCountQuery.data?.total ?? null },
+  ];
+
+  const createButton = (
+    <Button
+      type="primary"
+      icon={<PlusOutlined />}
+      onClick={createBlank}
+      disabled={inspectorWithoutSite}
+    >
+      Новая отгрузка
+    </Button>
+  );
+
   return (
     <StickyPageHeader
       header={
-        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
-          <Space wrap align="center">
-            <Typography.Title level={3} style={{ margin: 0 }}>
-              Отгрузка
-            </Typography.Title>
-            <Segmented
-              value={tab}
-              onChange={(v) => {
-                const next = v as ListTab;
-                if (next === 'expected') setParams({ tab: 'expected' });
-                else setParams({});
-              }}
-              options={[
-                { label: 'Ожидаемые', value: 'expected' },
-                { label: 'Принятые', value: 'accepted' },
-              ]}
-            />
-          </Space>
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={createBlank}
-            disabled={inspectorWithoutSite}
-          >
-            Новая отгрузка
-          </Button>
-        </Space>
+        <Typography.Title level={3} style={{ margin: 0 }}>
+          Отгрузка
+        </Typography.Title>
       }
     >
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -1486,13 +1499,23 @@ export default function ShipmentPage() {
           />
         )}
         {tab === 'expected' ? (
-          <ExpectedOutbound onOpen={createFromUpd} />
+          <ExpectedOutbound
+            onOpen={createFromUpd}
+            tabs={listTabs}
+            activeTab={tab}
+            onTabChange={handleTabChange}
+            filtersExtra={createButton}
+          />
         ) : (
           <ShipmentsHistory
             onOpen={(id) => {
               setParams({});
               navigate(`/shipments?shipment=${id}&from=list`);
             }}
+            tabs={listTabs}
+            activeTab={tab}
+            onTabChange={handleTabChange}
+            filtersExtra={createButton}
           />
         )}
       </Space>

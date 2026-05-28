@@ -1,4 +1,4 @@
-import type { MouseEvent } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -33,6 +33,7 @@ import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
+import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 
@@ -96,7 +97,19 @@ function formatMoney(n: number | null): string {
   return n === null ? '—' : n.toFixed(2);
 }
 
-export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) {
+export function DeliveriesHistory({
+  onOpen,
+  tabs,
+  activeTab,
+  onTabChange,
+  filtersExtra,
+}: {
+  onOpen: (id: string) => void;
+  tabs?: PageTabItem[];
+  activeTab?: string;
+  onTabChange?: (key: string) => void;
+  filtersExtra?: ReactNode;
+}) {
   const queryClient = useQueryClient();
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
   const [reasonDraft, setReasonDraft] = useState<Record<string, string>>({});
@@ -512,9 +525,13 @@ export function DeliveriesHistory({ onOpen }: { onOpen: (id: string) => void }) 
                   allowClear
                   onChange={(e) => updateFilters({ plate: e.target.value })}
                 />
+                {filtersExtra}
               </>
             }
           />
+          {tabs && activeTab && onTabChange && (
+            <PageTabs items={tabs} activeKey={activeTab} onChange={onTabChange} />
+          )}
         </Space>
       }
     >
