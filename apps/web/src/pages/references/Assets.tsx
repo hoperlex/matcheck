@@ -100,6 +100,8 @@ export default function AssetsPage() {
         title="Новое ОС"
         width={420}
         destroyOnClose
+        maskClosable={false}
+        keyboard={false}
       >
         <Form<AssetUpsert>
           form={form}

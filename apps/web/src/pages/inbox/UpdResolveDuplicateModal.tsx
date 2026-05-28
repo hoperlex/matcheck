@@ -71,6 +71,8 @@ export function UpdResolveDuplicateModal({
       }}
       footer={null}
       width={560}
+      maskClosable={false}
+      keyboard={false}
     >
       <Alert
         type="warning"

@@ -34,6 +34,8 @@ export function LlmCallsDrawer({
       onClose={onClose}
       width={720}
       destroyOnClose
+      maskClosable={false}
+      keyboard={false}
     >
       {q.isLoading ? (
         <Spin />

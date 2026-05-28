@@ -189,6 +189,8 @@ export default function SitesPage() {
         title={editing ? `Объект ${editing.code}` : 'Новый объект'}
         width={420}
         destroyOnClose
+        maskClosable={false}
+        keyboard={false}
       >
         <Form<SiteUpsert>
           form={form}

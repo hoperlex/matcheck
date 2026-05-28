@@ -67,6 +67,8 @@ export function LinkSourceDocumentModal({
       width={900}
       footer={null}
       destroyOnClose
+      maskClosable={false}
+      keyboard={false}
     >
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         {error ? <Alert type="error" message={error} showIcon /> : null}

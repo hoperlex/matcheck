@@ -183,6 +183,8 @@ export default function CounterpartiesPage() {
         title={editing ? 'Контрагент' : 'Новый контрагент'}
         width={420}
         destroyOnClose
+        maskClosable={false}
+        keyboard={false}
       >
         <Form<CounterpartyUpsert> form={form} layout="vertical" onFinish={onFinish}>
           <Form.Item

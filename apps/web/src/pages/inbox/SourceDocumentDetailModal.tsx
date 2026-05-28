@@ -227,6 +227,8 @@ export function SourceDocumentDetailModal({
       <Modal
         open={open}
         onCancel={onClose}
+        maskClosable={false}
+        keyboard={false}
         title={
           sd ? (
             <Space wrap>

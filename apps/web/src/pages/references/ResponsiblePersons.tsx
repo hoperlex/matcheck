@@ -123,6 +123,8 @@ export default function ResponsiblePersonsPage() {
         title="Новый МОЛ"
         width={420}
         destroyOnClose
+        maskClosable={false}
+        keyboard={false}
       >
         <Form<ResponsiblePersonUpsert>
           form={form}
@@ -208,7 +210,8 @@ function ImportModal({
       open={open}
       title="Импорт МОЛ из Excel"
       onCancel={close}
-      maskClosable={!uploading}
+      maskClosable={false}
+      keyboard={false}
       closable={!uploading}
       footer={
         <Button onClick={close} disabled={uploading}>

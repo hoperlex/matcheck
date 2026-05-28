@@ -96,6 +96,8 @@ export default function AdminMailAccountsPage() {
         title="Новый ящик"
         width={480}
         destroyOnClose
+        maskClosable={false}
+        keyboard={false}
       >
         <Form<MailAccountUpsert>
           form={form}

@@ -84,6 +84,8 @@ export default function AdminEdoAccountsPage() {
         title="Новая ЭДО-учётка"
         width={480}
         destroyOnClose
+        maskClosable={false}
+        keyboard={false}
       >
         <Form<EdoAccountUpsert>
           form={form}

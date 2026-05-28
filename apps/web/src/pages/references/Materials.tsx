@@ -74,6 +74,8 @@ export default function MaterialsPage() {
         title="Новый материал"
         width={420}
         destroyOnClose
+        maskClosable={false}
+        keyboard={false}
       >
         <Form<MaterialUpsert> form={form} layout="vertical" onFinish={(v) => create.mutate(v)}>
           <Form.Item name="code" label="Код">

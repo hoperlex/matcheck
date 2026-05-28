@@ -238,6 +238,8 @@ export default function AdminPromptsPage() {
         title={editing ? `Редактирование: ${editing.name}` : 'Новый промпт'}
         width={Math.min(720, Math.round(window.innerWidth * 0.95))}
         destroyOnClose
+        maskClosable={false}
+        keyboard={false}
       >
         <Form<FormValues> form={form} layout="vertical" onFinish={onSubmit}>
           <Form.Item name="docKind" label="Тип документа" rules={[{ required: true }]}>

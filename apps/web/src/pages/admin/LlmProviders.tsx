@@ -280,6 +280,8 @@ export default function AdminLlmProvidersPage() {
         title={editing ? `Редактирование: ${editing.name}` : 'Новый LLM провайдер'}
         width={520}
         destroyOnClose
+        maskClosable={false}
+        keyboard={false}
       >
         <Form<LlmProviderUpsert>
           form={form}

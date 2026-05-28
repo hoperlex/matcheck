@@ -129,6 +129,8 @@ export function UpdXmlUploadModal({
       title="Загрузка УПД (XML)"
       footer={footer}
       destroyOnClose
+      maskClosable={false}
+      keyboard={false}
     >
       {error && (
         <Alert type="error" message={error} showIcon style={{ marginBottom: 12 }} closable />

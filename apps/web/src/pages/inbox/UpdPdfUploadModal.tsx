@@ -185,7 +185,8 @@ export function UpdPdfUploadModal({
       open={open}
       title="Загрузить УПД (PDF)"
       onCancel={close}
-      maskClosable={!uploading}
+      maskClosable={false}
+      keyboard={false}
       closable={!uploading}
       footer={
         <Space>

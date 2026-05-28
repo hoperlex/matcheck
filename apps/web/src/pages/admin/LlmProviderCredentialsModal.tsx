@@ -61,6 +61,8 @@ export function LlmProviderCredentialsModal({
       title="Ключи провайдеров"
       width={640}
       destroyOnClose
+      maskClosable={false}
+      keyboard={false}
     >
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
         Один ключ хранится на тип провайдера и переиспользуется всеми моделями этого типа.
