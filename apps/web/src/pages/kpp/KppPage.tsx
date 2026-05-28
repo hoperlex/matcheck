@@ -1245,7 +1245,7 @@ export default function KppPage() {
                     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                       <div>
                         <Typography.Text strong>
-                          До {beforePhotos.length > 0 && `(${beforePhotos.length})`}
+                          1 Этап {beforePhotos.length > 0 && `(${beforePhotos.length})`}
                         </Typography.Text>
                         <div style={{ marginTop: 8 }}>
                           {beforePhotos.length > 0 ? (
@@ -1262,7 +1262,7 @@ export default function KppPage() {
                       </div>
                       <div>
                         <Typography.Text strong>
-                          После {afterPhotos.length > 0 && `(${afterPhotos.length})`}
+                          2 Этап {afterPhotos.length > 0 && `(${afterPhotos.length})`}
                         </Typography.Text>
                         <div style={{ marginTop: 8 }}>
                           {afterPhotos.length > 0 ? (
