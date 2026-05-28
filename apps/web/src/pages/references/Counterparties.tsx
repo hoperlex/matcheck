@@ -16,6 +16,7 @@ import type { Counterparty, CounterpartyUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { stringSorter } from '../../shared/ui/tableSorters';
 
 type List = { items: Counterparty[]; total: number };
 
@@ -124,12 +125,31 @@ export default function CounterpartiesPage() {
         numbered
         onRowClick={openEdit}
         columns={[
-          { title: 'ИНН', dataIndex: 'inn' },
-          { title: 'КПП', dataIndex: 'kpp' },
-          { title: 'Название', dataIndex: 'name' },
+          {
+            title: 'ИНН',
+            dataIndex: 'inn',
+            sorter: stringSorter<Counterparty>((r) => r.inn),
+          },
+          {
+            title: 'КПП',
+            dataIndex: 'kpp',
+            sorter: stringSorter<Counterparty>((r) => r.kpp),
+          },
+          {
+            title: 'Название',
+            dataIndex: 'name',
+            sorter: stringSorter<Counterparty>((r) => r.name),
+          },
           {
             title: 'Роли',
             key: 'roles',
+            // Сортировка по сумме включённых флагов — «более универсальные»
+            // (наш / поставщик / заказчик / подрядчик одновременно) выше.
+            sorter: (a: Counterparty, b: Counterparty) => {
+              const w = (r: Counterparty) =>
+                Number(r.isSelf) + Number(r.isSupplier) + Number(r.isCustomer) + Number(r.isContractor);
+              return w(b) - w(a);
+            },
             render: (_: unknown, r: Counterparty) => (
               <Space wrap>
                 {r.isSelf && <Tag color="purple">Наш</Tag>}

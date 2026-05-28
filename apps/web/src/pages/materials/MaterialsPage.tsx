@@ -17,6 +17,8 @@ import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
+import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
+import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 
 const KIND_LABELS: Record<ShipmentKind, { label: string; color: string }> = {
   contractor: { label: 'Подрядчику', color: 'geekblue' },
@@ -177,18 +179,41 @@ function BalanceTab({
         emptyText="Остатков нет"
         numbered
         columns={[
-          { title: 'Объект', key: 'site', render: (_, r) => `${r.siteCode} · ${r.siteName}` },
-          { title: 'Материал', dataIndex: 'materialName', width: 320, render: renderMaterialName },
+          {
+            title: 'Объект',
+            key: 'site',
+            sorter: stringSorter<StockBalanceRow>((r) => `${r.siteCode} · ${r.siteName}`),
+            render: (_, r) => `${r.siteCode} · ${r.siteName}`,
+          },
+          {
+            title: 'Материал',
+            dataIndex: 'materialName',
+            width: 320,
+            sorter: stringSorter<StockBalanceRow>((r) => r.materialName),
+            render: renderMaterialName,
+          },
           {
             title: 'Подрядчик',
             dataIndex: 'contractorName',
+            sorter: stringSorter<StockBalanceRow>((r) => r.contractorName),
             render: (v: string | null) => v ?? '—',
           },
-          { title: 'Принято', dataIndex: 'qtyIn', render: (v: string) => trimQty(v) },
-          { title: 'Отгружено', dataIndex: 'qtyOut', render: (v: string) => trimQty(v) },
+          {
+            title: 'Принято',
+            dataIndex: 'qtyIn',
+            sorter: numberSorter<StockBalanceRow>((r) => r.qtyIn),
+            render: (v: string) => trimQty(v),
+          },
+          {
+            title: 'Отгружено',
+            dataIndex: 'qtyOut',
+            sorter: numberSorter<StockBalanceRow>((r) => r.qtyOut),
+            render: (v: string) => trimQty(v),
+          },
           {
             title: 'Остаток',
             dataIndex: 'balance',
+            sorter: numberSorter<StockBalanceRow>((r) => r.balance),
             render: (v: string) => {
               const n = Number(v);
               return (
@@ -198,11 +223,17 @@ function BalanceTab({
               );
             },
           },
-          { title: 'Ед.', dataIndex: 'unit', width: 80 },
+          {
+            title: 'Ед.',
+            dataIndex: 'unit',
+            width: 80,
+            sorter: stringSorter<StockBalanceRow>((r) => r.unit),
+          },
           {
             title: 'Сумма',
             dataIndex: 'sum',
             width: 130,
+            sorter: numberSorter<StockBalanceRow>((r) => r.sum),
             render: (v: string | null) => formatMoney(v),
           },
         ]}
@@ -300,44 +331,84 @@ function IntakeTab({
           {
             title: 'Дата',
             dataIndex: 'arrivedAt',
+            width: 110,
+            sorter: dateSorter<IntakeJournalRow>((r) => r.arrivedAt),
+            ...dateRangeColumnFilter<IntakeJournalRow>((r) => r.arrivedAt),
             render: (v: string | null) =>
               v ? new Date(v).toLocaleDateString('ru-RU') : '—',
-            width: 110,
           },
-          { title: 'Объект', key: 'site', render: (_, r) => `${r.siteCode} · ${r.siteName}` },
-          { title: 'Материал', dataIndex: 'materialName', width: 320, render: renderMaterialName },
-          { title: 'Кол-во', dataIndex: 'qty', render: (v: string | null) => trimQty(v), width: 110 },
-          { title: 'Ед.', dataIndex: 'unit', width: 80 },
-          { title: 'Поставщик', dataIndex: 'supplierName', render: (v) => v ?? '—' },
-          { title: 'Подрядчик', dataIndex: 'contractorName', render: (v) => v ?? '—' },
+          {
+            title: 'Объект',
+            key: 'site',
+            sorter: stringSorter<IntakeJournalRow>((r) => `${r.siteCode} · ${r.siteName}`),
+            render: (_, r) => `${r.siteCode} · ${r.siteName}`,
+          },
+          {
+            title: 'Материал',
+            dataIndex: 'materialName',
+            width: 320,
+            sorter: stringSorter<IntakeJournalRow>((r) => r.materialName),
+            render: renderMaterialName,
+          },
+          {
+            title: 'Кол-во',
+            dataIndex: 'qty',
+            width: 110,
+            sorter: numberSorter<IntakeJournalRow>((r) => r.qty),
+            render: (v: string | null) => trimQty(v),
+          },
+          {
+            title: 'Ед.',
+            dataIndex: 'unit',
+            width: 80,
+            sorter: stringSorter<IntakeJournalRow>((r) => r.unit),
+          },
+          {
+            title: 'Поставщик',
+            dataIndex: 'supplierName',
+            sorter: stringSorter<IntakeJournalRow>((r) => r.supplierName),
+            render: (v) => v ?? '—',
+          },
+          {
+            title: 'Подрядчик',
+            dataIndex: 'contractorName',
+            sorter: stringSorter<IntakeJournalRow>((r) => r.contractorName),
+            render: (v) => v ?? '—',
+          },
           {
             title: '№ УПД',
             dataIndex: 'docNumber',
-            render: (v: string | null) => v ?? '—',
             width: 140,
+            sorter: stringSorter<IntakeJournalRow>((r) => r.docNumber),
+            render: (v: string | null) => v ?? '—',
           },
           {
             title: 'Дата УПД',
             dataIndex: 'docDate',
-            render: (v: string | null) => formatDocDate(v),
             width: 110,
+            sorter: dateSorter<IntakeJournalRow>((r) => r.docDate),
+            ...dateRangeColumnFilter<IntakeJournalRow>((r) => r.docDate),
+            render: (v: string | null) => formatDocDate(v),
           },
           {
             title: 'Сумма НДС',
             dataIndex: 'vatSum',
             width: 120,
+            sorter: numberSorter<IntakeJournalRow>((r) => r.vatSum),
             render: (v: string | null) => formatMoney(v),
           },
           {
             title: 'Сумма',
             dataIndex: 'sum',
             width: 130,
+            sorter: numberSorter<IntakeJournalRow>((r) => r.sum),
             render: (v: string | null) => formatMoney(v),
           },
           {
             title: 'Статус',
             key: 'status',
             width: 160,
+            sorter: stringSorter<IntakeJournalRow>((r) => r.statusLabel),
             render: (_, r) => (
               <Tag color={statusTagColor(r.statusCode)}>{r.statusLabel}</Tag>
             ),
@@ -456,30 +527,57 @@ function ShipmentTab({
           {
             title: 'Дата',
             dataIndex: 'shippedAt',
+            width: 110,
+            sorter: dateSorter<ShipmentJournalRow>((r) => r.shippedAt),
+            ...dateRangeColumnFilter<ShipmentJournalRow>((r) => r.shippedAt),
             render: (v: string | null) =>
               v ? new Date(v).toLocaleDateString('ru-RU') : '—',
-            width: 110,
           },
           {
             title: 'Вид',
             key: 'kind',
             width: 130,
+            sorter: stringSorter<ShipmentJournalRow>((r) => KIND_LABELS[r.kind].label),
             render: (_, r) => (
               <Tag color={KIND_LABELS[r.kind].color}>{KIND_LABELS[r.kind].label}</Tag>
             ),
           },
-          { title: 'Объект', key: 'site', render: (_, r) => `${r.siteCode} · ${r.siteName}` },
-          { title: 'Материал', dataIndex: 'materialName', width: 320, render: renderMaterialName },
+          {
+            title: 'Объект',
+            key: 'site',
+            sorter: stringSorter<ShipmentJournalRow>((r) => `${r.siteCode} · ${r.siteName}`),
+            render: (_, r) => `${r.siteCode} · ${r.siteName}`,
+          },
+          {
+            title: 'Материал',
+            dataIndex: 'materialName',
+            width: 320,
+            sorter: stringSorter<ShipmentJournalRow>((r) => r.materialName),
+            render: renderMaterialName,
+          },
           {
             title: 'Кол-во',
             dataIndex: 'qty',
-            render: (v: string | null) => trimQty(v),
             width: 110,
+            sorter: numberSorter<ShipmentJournalRow>((r) => r.qty),
+            render: (v: string | null) => trimQty(v),
           },
-          { title: 'Ед.', dataIndex: 'unit', width: 80 },
+          {
+            title: 'Ед.',
+            dataIndex: 'unit',
+            width: 80,
+            sorter: stringSorter<ShipmentJournalRow>((r) => r.unit),
+          },
           {
             title: 'Получатель',
             key: 'receiver',
+            sorter: stringSorter<ShipmentJournalRow>((r) =>
+              r.kind === 'transfer'
+                ? r.destSiteName ?? null
+                : r.kind === 'writeoff'
+                  ? null
+                  : r.receiverName ?? null,
+            ),
             render: (_, r) =>
               r.kind === 'transfer'
                 ? r.destSiteName ?? '—'
@@ -491,6 +589,7 @@ function ShipmentTab({
             title: 'Статус',
             key: 'status',
             width: 160,
+            sorter: stringSorter<ShipmentJournalRow>((r) => r.statusLabel),
             render: (_, r) => (
               <Tag color={statusTagColor(r.statusCode)}>{r.statusLabel}</Tag>
             ),

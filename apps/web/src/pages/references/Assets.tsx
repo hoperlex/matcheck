@@ -16,6 +16,7 @@ import type { Asset, AssetUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { stringSorter } from '../../shared/ui/tableSorters';
 
 type List = { items: Asset[]; total: number };
 
@@ -63,12 +64,13 @@ export default function AssetsPage() {
         rowKey="id"
         numbered
         columns={[
-          { title: 'Код', dataIndex: 'code' },
-          { title: 'Название', dataIndex: 'name' },
-          { title: 'Ед.', dataIndex: 'unit' },
+          { title: 'Код', dataIndex: 'code', sorter: stringSorter<Asset>((r) => r.code) },
+          { title: 'Название', dataIndex: 'name', sorter: stringSorter<Asset>((r) => r.name) },
+          { title: 'Ед.', dataIndex: 'unit', sorter: stringSorter<Asset>((r) => r.unit) },
           {
             title: 'Статус',
             key: 'status',
+            sorter: (a: Asset, b: Asset) => Number(b.isActive) - Number(a.isActive),
             render: (_: unknown, r: Asset) =>
               r.isActive ? (
                 <Tag color="green">Активный</Tag>

@@ -34,6 +34,8 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
+import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
+import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 
@@ -546,33 +548,52 @@ export function DeliveriesHistory({
           {
             title: 'Статус',
             key: 'status',
+            sorter: stringSorter<Row>((r) => r.status.label),
             render: (_: unknown, r: Row) => renderStatusCell(r),
           },
-          { title: 'Авто', dataIndex: 'vehiclePlate' },
+          {
+            title: 'Авто',
+            dataIndex: 'vehiclePlate',
+            sorter: stringSorter<Row>((r) => r.vehiclePlate),
+          },
           {
             title: 'Прибытие',
             dataIndex: 'arrivedAt',
+            sorter: dateSorter<Row>((r) => r.arrivedAt),
+            ...dateRangeColumnFilter<Row>((r) => r.arrivedAt),
             render: (v: string | null) => formatArrival(v),
           },
           {
             title: 'Поставщик',
             key: 'supplier',
+            sorter: stringSorter<Row>((r) =>
+              r.supplierId ? counterpartiesMap.get(r.supplierId) ?? null : null,
+            ),
             render: (_: unknown, r: Row) => supplierName(r.supplierId),
           },
           {
             title: 'Подрядчик',
             key: 'contractor',
+            sorter: stringSorter<Row>((r) => {
+              const { id } = resolveContractor(r);
+              return id ? counterpartiesMap.get(id) ?? null : null;
+            }),
             render: (_: unknown, r: Row) => renderContractor(r),
           },
           {
             title: 'Объект',
             key: 'site',
+            sorter: stringSorter<Row>((r) => {
+              const { id } = resolveSite(r);
+              return id ? sitesMap.get(id) ?? null : null;
+            }),
             render: (_: unknown, r: Row) => renderSite(r),
           },
           {
             title: 'Фото',
             key: 'photos',
             width: 80,
+            sorter: numberSorter<Row>((r) => r.photos?.length ?? 0),
             // Суммарное количество фото обоих этапов (stage='before' + 'after').
             // r.photos уже агрегирован сервером — отдельно по stage не считаем.
             render: (_: unknown, r: Row) => r.photos?.length ?? 0,
@@ -581,12 +602,14 @@ export function DeliveriesHistory({
             title: 'Сумма НДС',
             key: 'vatSum',
             width: 120,
+            sorter: numberSorter<Row>((r) => deliveryItemsVatSum(r.items)),
             render: (_: unknown, r: Row) => formatMoney(deliveryItemsVatSum(r.items)),
           },
           {
             title: 'Сумма',
             key: 'totalSum',
             width: 130,
+            sorter: numberSorter<Row>((r) => deliveryItemsTotal(r.items)),
             render: (_: unknown, r: Row) => formatMoney(deliveryItemsTotal(r.items)),
           },
           {

@@ -17,6 +17,7 @@ import type { Site, SiteUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { stringSorter } from '../../shared/ui/tableSorters';
 import { useAuthStore } from '../../stores/auth';
 
 const SYSTEM_SITE_ID = '00000000-0000-0000-0000-000000000001';
@@ -103,14 +104,34 @@ export default function SitesPage() {
         numbered
         onRowClick={(r) => canEdit && r.id !== SYSTEM_SITE_ID && openEdit(r)}
         columns={[
-          { title: 'Код', dataIndex: 'code', width: 100 },
-          { title: 'Название', dataIndex: 'name' },
-          { title: 'Полное название', dataIndex: 'fullName', render: (v) => v ?? '—' },
-          { title: 'Адрес', dataIndex: 'address', render: (v) => v ?? '—' },
+          {
+            title: 'Код',
+            dataIndex: 'code',
+            width: 100,
+            sorter: stringSorter<Site>((r) => r.code),
+          },
+          {
+            title: 'Название',
+            dataIndex: 'name',
+            sorter: stringSorter<Site>((r) => r.name),
+          },
+          {
+            title: 'Полное название',
+            dataIndex: 'fullName',
+            sorter: stringSorter<Site>((r) => r.fullName),
+            render: (v) => v ?? '—',
+          },
+          {
+            title: 'Адрес',
+            dataIndex: 'address',
+            sorter: stringSorter<Site>((r) => r.address),
+            render: (v) => v ?? '—',
+          },
           {
             title: 'Активен',
             dataIndex: 'isActive',
             width: 110,
+            sorter: (a: Site, b: Site) => Number(b.isActive) - Number(a.isActive),
             render: (v: boolean) => (v ? <Tag color="green">Да</Tag> : <Tag>Нет</Tag>),
           },
           ...(canDelete

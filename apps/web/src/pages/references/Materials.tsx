@@ -5,6 +5,7 @@ import type { Material, MaterialUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { stringSorter } from '../../shared/ui/tableSorters';
 
 type List = { items: Material[]; total: number };
 
@@ -52,9 +53,9 @@ export default function MaterialsPage() {
         rowKey="id"
         numbered
         columns={[
-          { title: 'Код', dataIndex: 'code' },
-          { title: 'Название', dataIndex: 'name' },
-          { title: 'Ед.', dataIndex: 'unit' },
+          { title: 'Код', dataIndex: 'code', sorter: stringSorter<Material>((r) => r.code) },
+          { title: 'Название', dataIndex: 'name', sorter: stringSorter<Material>((r) => r.name) },
+          { title: 'Ед.', dataIndex: 'unit', sorter: stringSorter<Material>((r) => r.unit) },
         ]}
         cardRender={(r) => (
           <Card style={{ width: '100%' }} size="small">

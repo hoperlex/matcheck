@@ -17,6 +17,8 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
+import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
+import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 
@@ -176,37 +178,51 @@ export function ExpectedSourceDocsList({
           {
             title: 'Номер',
             dataIndex: 'docNumber',
+            sorter: stringSorter<SourceDocument>((r) => r.docNumber),
             render: (v: string | null) => v ?? '— без номера —',
           },
-          { title: 'Дата', dataIndex: 'docDate', render: (v: string | null) => v ?? '—' },
+          {
+            title: 'Дата',
+            dataIndex: 'docDate',
+            sorter: dateSorter<SourceDocument>((r) => r.docDate),
+            ...dateRangeColumnFilter<SourceDocument>((r) => r.docDate),
+            render: (v: string | null) => v ?? '—',
+          },
           {
             title: 'Дата поставки',
             dataIndex: 'expectedDate',
+            sorter: dateSorter<SourceDocument>((r) => r.expectedDate),
+            ...dateRangeColumnFilter<SourceDocument>((r) => r.expectedDate),
             render: (v: string | null) => v ?? '—',
           },
           {
             title: 'Поставщик',
             key: 'supplier',
+            sorter: stringSorter<SourceDocument>((r) => r.supplierName),
             render: (_: unknown, r: SourceDocument) => r.supplierName ?? '—',
           },
           {
             title: 'Подрядчик',
             key: 'contractor',
+            sorter: stringSorter<SourceDocument>((r) => r.contractorName),
             render: (_: unknown, r: SourceDocument) => r.contractorName ?? '—',
           },
           {
             title: 'Объект',
             key: 'site',
+            sorter: stringSorter<SourceDocument>((r) => r.siteName),
             render: (_: unknown, r: SourceDocument) => r.siteName ?? '—',
           },
           {
             title: 'Сумма НДС',
             key: 'vat',
+            sorter: numberSorter<SourceDocument>((r) => r.vatSum),
             render: (_: unknown, r: SourceDocument) => (r.vatSum ? `${r.vatSum} ₽` : '—'),
           },
           {
             title: 'Сумма',
             key: 'total',
+            sorter: numberSorter<SourceDocument>((r) => r.totalSum),
             render: (_: unknown, r: SourceDocument) => (
               <span>
                 {r.totalSum ? `${r.totalSum} ₽` : '—'}

@@ -25,6 +25,7 @@ import type {
 import { api, apiUploadFile, ApiError } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { stringSorter } from '../../shared/ui/tableSorters';
 
 type List = { items: ResponsiblePerson[]; total: number };
 
@@ -75,12 +76,26 @@ export default function ResponsiblePersonsPage() {
         rowKey="id"
         numbered
         columns={[
-          { title: 'ФИО', dataIndex: 'fullName' },
-          { title: 'Должность', dataIndex: 'position' },
-          { title: 'Телефон', dataIndex: 'phone' },
+          {
+            title: 'ФИО',
+            dataIndex: 'fullName',
+            sorter: stringSorter<ResponsiblePerson>((r) => r.fullName),
+          },
+          {
+            title: 'Должность',
+            dataIndex: 'position',
+            sorter: stringSorter<ResponsiblePerson>((r) => r.position),
+          },
+          {
+            title: 'Телефон',
+            dataIndex: 'phone',
+            sorter: stringSorter<ResponsiblePerson>((r) => r.phone),
+          },
           {
             title: 'Статус',
             key: 'status',
+            sorter: (a: ResponsiblePerson, b: ResponsiblePerson) =>
+              Number(b.isActive) - Number(a.isActive),
             render: (_: unknown, r: ResponsiblePerson) =>
               r.isActive ? (
                 <Tag color="green">Активный</Tag>

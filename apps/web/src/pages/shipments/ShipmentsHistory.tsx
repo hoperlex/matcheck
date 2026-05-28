@@ -36,6 +36,8 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
+import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
+import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 
@@ -484,11 +486,13 @@ export function ShipmentsHistory({
           {
             title: 'Статус',
             key: 'status',
+            sorter: stringSorter<Row>((r) => r.status.label),
             render: (_: unknown, r: Row) => renderStatusCell(r),
           },
           {
             title: 'Вид',
             key: 'kind',
+            sorter: stringSorter<Row>((r) => KIND_LABELS[r.kind].label),
             render: (_: unknown, r: Row) => (
               <Tag color={KIND_LABELS[r.kind].color}>{KIND_LABELS[r.kind].label}</Tag>
             ),
@@ -496,23 +500,41 @@ export function ShipmentsHistory({
           {
             title: 'Откуда',
             key: 'site',
+            sorter: stringSorter<Row>((r) => sitesMap.get(r.siteId) ?? null),
             render: (_: unknown, r: Row) => sitesMap.get(r.siteId) ?? '—',
           },
           {
             title: 'Куда',
             key: 'dest',
+            sorter: stringSorter<Row>((r) => destinationLabel(r)),
             render: (_: unknown, r: Row) => destinationLabel(r),
           },
           {
             title: 'Подрядчик/Поставщик',
             key: 'counterparty',
+            sorter: stringSorter<Row>((r) => {
+              const cp = r.receiverCounterpartyId
+                ? counterpartiesMap.get(r.receiverCounterpartyId)
+                : null;
+              return cp ?? null;
+            }),
             render: (_: unknown, r: Row) => renderCounterpartyCol(r),
           },
-          { title: 'Авто', dataIndex: 'vehiclePlate' },
-          { title: 'Отгружено', dataIndex: 'shippedAt' },
+          {
+            title: 'Авто',
+            dataIndex: 'vehiclePlate',
+            sorter: stringSorter<Row>((r) => r.vehiclePlate),
+          },
+          {
+            title: 'Отгружено',
+            dataIndex: 'shippedAt',
+            sorter: dateSorter<Row>((r) => r.shippedAt),
+            ...dateRangeColumnFilter<Row>((r) => r.shippedAt),
+          },
           {
             title: 'Кол-во',
             key: 'itemsCount',
+            sorter: numberSorter<Row>((r) => r.items?.length ?? 0),
             render: (_: unknown, r: Row) => r.items?.length ?? 0,
           },
           {

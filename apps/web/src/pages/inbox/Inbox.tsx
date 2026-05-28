@@ -31,6 +31,8 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
+import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
+import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
 import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
@@ -374,6 +376,7 @@ export default function InboxPage() {
             title: 'Тип',
             dataIndex: 'kind',
             width: 80,
+            sorter: stringSorter<Row>((r) => r.kind),
             render: (k: Row['kind']) => (
               <Tag color={k === 'upd' ? 'blue' : 'gold'}>{k === 'upd' ? 'УПД' : 'Заявка'}</Tag>
             ),
@@ -381,6 +384,7 @@ export default function InboxPage() {
           {
             title: 'Статус',
             dataIndex: 'status',
+            sorter: stringSorter<Row>((r) => r.status),
             render: (_: unknown, r: Row) => (
               <StatusTag row={r} onResolve={(row) => setResolveId(row.id)} />
             ),
@@ -388,41 +392,65 @@ export default function InboxPage() {
           {
             title: 'Уверенность',
             dataIndex: 'llmConfidence',
+            sorter: numberSorter<Row>((r) => r.llmConfidence),
             render: (_: unknown, r: Row) => <ConfidenceCell row={r} />,
           },
-          { title: '№', dataIndex: 'docNumber', render: renderDocNumber },
-          { title: 'Дата', dataIndex: 'docDate', render: (v: string | null) => v ?? '—' },
+          {
+            title: '№',
+            dataIndex: 'docNumber',
+            sorter: stringSorter<Row>((r) => r.docNumber),
+            render: renderDocNumber,
+          },
+          {
+            title: 'Дата',
+            dataIndex: 'docDate',
+            sorter: dateSorter<Row>((r) => r.docDate),
+            ...dateRangeColumnFilter<Row>((r) => r.docDate),
+            render: (v: string | null) => v ?? '—',
+          },
           {
             title: 'Дата поставки',
             dataIndex: 'expectedDate',
+            sorter: dateSorter<Row>((r) => r.expectedDate),
+            ...dateRangeColumnFilter<Row>((r) => r.expectedDate),
             render: (v: string | null) => v ?? '—',
           },
           {
             title: 'Объект',
             dataIndex: 'siteName',
+            sorter: stringSorter<Row>((r) => r.siteName),
             render: (v: string | null | undefined) => v ?? '—',
           },
           {
             title: 'Подрядчик',
             dataIndex: 'contractorName',
+            sorter: stringSorter<Row>((r) => r.contractorName),
             render: (v: string | null | undefined) => v ?? '—',
           },
           {
             title: 'Поставщик',
             dataIndex: 'supplierName',
+            sorter: stringSorter<Row>((r) => r.supplierName),
             render: (v: string | null | undefined) => v ?? '—',
           },
           {
             title: 'Сумма НДС',
             dataIndex: 'vatSum',
+            sorter: numberSorter<Row>((r) => r.vatSum),
             render: (v: string | null) => formatDecimal(v) || '—',
           },
           {
             title: 'Сумма',
             dataIndex: 'totalSum',
+            sorter: numberSorter<Row>((r) => r.totalSum),
             render: (v: string | null) => formatDecimal(v) || '—',
           },
-          { title: 'Происхождение', dataIndex: 'origin', width: 140 },
+          {
+            title: 'Происхождение',
+            dataIndex: 'origin',
+            width: 140,
+            sorter: stringSorter<Row>((r) => r.origin),
+          },
           {
             title: '',
             key: 'actions',
