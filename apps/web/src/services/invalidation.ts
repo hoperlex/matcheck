@@ -50,9 +50,12 @@ export function setupInvalidation(qc: QueryClient): () => void {
       // source-documents: вкладка «Ожидаемые» зависит от привязок в
       // delivery_sources — после создания/удаления приёмки список
       // ожидаемых УПД должен перечитаться.
-      keys = [['deliveries'], ['source-documents'], ['sync']];
+      // reports: раздел «Материалы» (Stock/Intake/Shipment) агрегируется
+      // из delivery_items — без инвалидации показывал бы старые данные
+      // до F5 (особенно «Сумма НДС» сразу после Завершить 2 Этап в мобиле).
+      keys = [['deliveries'], ['source-documents'], ['sync'], ['reports']];
     } else if (type === 'shipment_updated' || type === 'shipment_deleted') {
-      keys = [['shipments'], ['source-documents'], ['sync']];
+      keys = [['shipments'], ['source-documents'], ['sync'], ['reports']];
     } else if (type === 'source_document_updated') {
       keys = [['source-documents'], ['sync']];
     }
