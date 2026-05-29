@@ -364,11 +364,30 @@ export default function KppPage() {
     enabled: !!deliveryId,
   });
 
+  // В статусе confirmed_mol приёмка фактически read-only от мобилы —
+  // юзер на портале её не редактирует. Поэтому при любом серверном
+  // обновлении (поллинг ловит новый updatedAt) безопасно пересинхронизировать
+  // local state: items/comment/plate/получатель. Без этого после Завершить
+  // 2 Этап в мобиле материалы на портале «замораживались» до F5, хотя фото
+  // и распарсенный comment подхватывались автоматически.
+  const lastSyncedUpdatedAtRef = useRef<string | null>(null);
+
   useEffect(() => {
     const d = deliveryQuery.data;
     if (!d) return;
-    if (hydratedIdRef.current !== d.id) {
+
+    // Условие гидратации:
+    // 1) первая загрузка приёмки (deliveryId сменился);
+    // 2) приёмка в confirmed_mol И серверный updatedAt сдвинулся —
+    //    мобила что-то изменила (items, comment, поля), нужно подхватить.
+    const isFirstHydration = hydratedIdRef.current !== d.id;
+    const isReadOnlyConfirmed = d.status.code === 'confirmed_mol';
+    const hasNewServerSnapshot =
+      isReadOnlyConfirmed && lastSyncedUpdatedAtRef.current !== d.updatedAt;
+
+    if (isFirstHydration || hasNewServerSnapshot) {
       hydratedIdRef.current = d.id;
+      lastSyncedUpdatedAtRef.current = d.updatedAt;
       setPlate(d.vehiclePlate ?? '');
       setComment(d.comment ?? '');
       // siteId/contractorId подхватываются один раз — последующее редактирование
