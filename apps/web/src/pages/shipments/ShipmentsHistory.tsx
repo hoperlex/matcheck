@@ -6,7 +6,6 @@ import {
   Card,
   Input,
   Popconfirm,
-  Switch,
   Select,
   Space,
   Tag,
@@ -110,13 +109,8 @@ export function ShipmentsHistory({
     setParams(next, { replace: true });
   };
 
-  const setView = (next: View) => {
-    const params2 = new URLSearchParams(params);
-    params2.delete('trash');
-    params2.delete('view');
-    if (next === 'trash') params2.set('trash', '1');
-    setParams(params2, { replace: true });
-  };
+  // setView был выпилен — переключатель «Удалённые» теперь живёт в шапке
+  // ShipmentPage. Здесь читаем только URL для запроса /shipments?trash=1.
 
   const list = useQuery({
     queryKey: ['shipments', view],
@@ -428,25 +422,10 @@ export function ShipmentsHistory({
     <StickyPageHeader
       header={
         <Space direction="vertical" size="small" style={{ width: '100%' }}>
-          {/* Переключатель «Удалённые» — отдельной строкой выше фильтров,
-              прижат к правому краю. Слово «Активные» убрано: вкладка
-              «Принятые» по дефолту и так показывает активные отгрузки. */}
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'flex-end',
-              alignItems: 'center',
-              gap: 6,
-            }}
-          >
-            <Switch
-              checked={view === 'trash'}
-              onChange={(checked) => setView(checked ? 'trash' : 'active')}
-            />
-            <Typography.Text type={view === 'trash' ? undefined : 'secondary'}>
-              Удалённые
-            </Typography.Text>
-          </div>
+          {/* Переключатель «Удалённые» теперь живёт в шапке ShipmentPage
+              рядом с Title (читается через URL ?trash=1) — это даёт
+              постоянное место наверху и убирает «прыжок» контента при
+              переключении вкладок Ожидаемые/Принятые. */}
           <ListFilters
             value={filters}
             onChange={updateFilters}

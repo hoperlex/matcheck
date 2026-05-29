@@ -14,6 +14,7 @@ import {
   Select,
   Space,
   Spin,
+  Switch,
   Tooltip,
   Typography,
   Upload,
@@ -1464,8 +1465,11 @@ export default function ShipmentPage() {
   // остальными хуками (нельзя после early return — React error #300).
 
   const handleTabChange = (key: string) => {
-    if (key === 'expected') setParams({ tab: 'expected' });
-    else setParams({});
+    // Сохраняем trash при смене вкладок, см. комментарий в KppPage.
+    const next = new URLSearchParams(params);
+    if (key === 'expected') next.set('tab', 'expected');
+    else next.delete('tab');
+    setParams(next, { replace: true });
   };
 
   const listTabs: PageTabItem[] = [
@@ -1484,12 +1488,52 @@ export default function ShipmentPage() {
     </Button>
   );
 
+  // Переключатель «Удалённые» — постоянная верхняя строка (см. KppPage):
+  // место зарезервировано всегда; на Ожидаемые скрыт через visibility:hidden,
+  // включение автоматически переключает на вкладку Принятые.
+  const trashOn = params.get('trash') === '1';
+  const setTrash = (next: boolean) => {
+    const p = new URLSearchParams(params);
+    if (next) p.set('trash', '1');
+    else p.delete('trash');
+    // «Удалённые» имеют смысл только в Принятые; expectedTab у нас по
+    // умолчанию (без ?tab=) — accepted в ShipmentPage, поэтому tab не трогаем.
+    if (next) p.delete('tab');
+    setParams(p, { replace: true });
+  };
+  const trashSwitchVisible = tab === 'accepted';
+
   return (
     <StickyPageHeader
       header={
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          Отгрузка
-        </Typography.Title>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            width: '100%',
+          }}
+        >
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            Отгрузка
+          </Typography.Title>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              visibility: trashSwitchVisible ? 'visible' : 'hidden',
+            }}
+          >
+            <Switch
+              checked={trashOn}
+              onChange={(checked) => setTrash(checked)}
+            />
+            <Typography.Text type={trashOn ? undefined : 'secondary'}>
+              Удалённые
+            </Typography.Text>
+          </div>
+        </div>
       }
     >
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>

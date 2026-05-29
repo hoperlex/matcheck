@@ -14,6 +14,7 @@ import {
   Select,
   Space,
   Spin,
+  Switch,
   Tag,
   Tooltip,
   Typography,
@@ -1548,8 +1549,15 @@ export default function KppPage() {
   // на форму приёмки.
 
   const handleTabChange = (key: string) => {
-    if (key === 'expected') setParams({});
-    else setParams({ tab: 'accepted' });
+    // Сохраняем переключатель trash при смене вкладки: пользователь мог
+    // прийти в Принятые с включённым trash и хочет вернуться без потери.
+    const next = new URLSearchParams(params);
+    if (key === 'expected') {
+      next.delete('tab');
+    } else {
+      next.set('tab', 'accepted');
+    }
+    setParams(next, { replace: true });
   };
 
   const listTabs: PageTabItem[] = [
@@ -1568,12 +1576,53 @@ export default function KppPage() {
     </Button>
   );
 
+  // Переключатель «Удалённые» вынесен в верхнюю строку (рядом с Title) —
+  // чтобы место под ним было зарезервировано всегда и фильтры/таблица не
+  // прыгали по вертикали при смене вкладок. На вкладке «Ожидаемые»
+  // переключатель не имеет смысла (там source-documents, не deliveries) —
+  // прячем через visibility:hidden, место остаётся.
+  const trashOn = params.get('trash') === '1';
+  const setTrash = (next: boolean) => {
+    const p = new URLSearchParams(params);
+    if (next) p.set('trash', '1');
+    else p.delete('trash');
+    // Включение «Удалённых» только в Принятые имеет смысл — переключаем туда.
+    if (next) p.set('tab', 'accepted');
+    setParams(p, { replace: true });
+  };
+  const trashSwitchVisible = tab === 'accepted';
+
   return (
     <StickyPageHeader
       header={
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          Приёмка
-        </Typography.Title>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            width: '100%',
+          }}
+        >
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            Приёмка
+          </Typography.Title>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              visibility: trashSwitchVisible ? 'visible' : 'hidden',
+            }}
+          >
+            <Switch
+              checked={trashOn}
+              onChange={(checked) => setTrash(checked)}
+            />
+            <Typography.Text type={trashOn ? undefined : 'secondary'}>
+              Удалённые
+            </Typography.Text>
+          </div>
+        </div>
       }
     >
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
