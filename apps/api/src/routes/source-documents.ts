@@ -41,7 +41,7 @@ import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { publishEvent } from './events.js';
 
-const KIND_VALUES = ['upd', 'request', 'transport_waybill'] as const;
+const KIND_VALUES = ['upd', 'request', 'transport_waybill', 'os2_transfer'] as const;
 type KindValue = (typeof KIND_VALUES)[number];
 
 // kind принимает либо одно значение, либо CSV-список значений
