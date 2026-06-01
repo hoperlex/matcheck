@@ -40,7 +40,7 @@ export function LinkSourceDocumentModal({
     queryKey: ['source-documents', 'unaccepted-upd', direction],
     queryFn: () => {
       const qs = new URLSearchParams({
-        kind: 'upd,transport_waybill',
+        kind: 'upd,transport_waybill,os2_transfer',
         direction,
         unaccepted: 'true',
         limit: '200',

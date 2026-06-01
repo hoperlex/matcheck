@@ -1,9 +1,11 @@
-// Распознавание Транспортной накладной (форма РФ 2116) через vision-LLM.
+// Vision-LLM распознавание пакета накладных. Поддерживает обе формы:
+//  - ТН (форма РФ 2116) — материалы извне на стройку.
+//  - ОС-2 (внутреннее перемещение основных средств).
 //
-// В отличие от УПД, где работает pdf-parse (текст → LLM), ТН приходит как
-// фото листа на телефон — текстового слоя нет. Поэтому здесь прямой
-// vision-вызов: изображения отдаются модели как inline_data parts, и она
-// сама распознаёт текст + классифицирует документы пакета.
+// В отличие от УПД, где работает pdf-parse (текст → LLM), накладные приходят
+// фотопакетом. Поэтому здесь прямой vision-вызов: все изображения отдаются
+// модели одним запросом, она классифицирует каждый файл (ТН / ОС-2 / игнор)
+// и возвращает массив `documents` с явной формой и полями.
 //
 // Поддерживаются два провайдера:
 //  - google_ai_studio — прямое подключение к Gemini API, передаём
@@ -11,66 +13,92 @@
 //  - openrouter — OpenAI-совместимый Chat Completions с vision: фото идут
 //    через image_url data:base64. PDF не поддерживается провайдером —
 //    для смешанных пакетов придётся выбирать Gemini напрямую.
+//
+// Один пакет → N source_documents в БД. См. worker.handleWaybillBundleJob.
 
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { llmCalls, llmProviders, llmProviderCredentials } from '../../db/schema.js';
 import { eq } from 'drizzle-orm';
 import {
-  TransportWaybillParsedSchema,
-  type TransportWaybillParsed,
+  WaybillBatchParsedSchema,
+  type WaybillBatchParsed,
 } from '@matcheck/contracts';
 import { loadActivePromptWithMeta } from '../prompts/registry.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
 
-// JSON-схема ответа Gemini — точно соответствует TransportWaybillParsedSchema.
-// Дублируем явно, потому что Gemini требует JSON-schema, а не Zod.
+// JSON-схема ответа для Gemini responseSchema. Дублируем структуру
+// WaybillBatchParsedSchema из контрактов в JSON Schema формате.
 const RESPONSE_JSON_SCHEMA = {
   type: 'object',
-  required: ['found', 'items', 'confidence'],
+  required: ['documents'],
   properties: {
-    found: { type: 'boolean' },
-    docNumber: { type: ['string', 'null'] },
-    docDate: {
-      type: ['string', 'null'],
-      description: 'YYYY-MM-DD',
-    },
-    shipper: {
-      type: ['object', 'null'],
-      properties: {
-        inn: { type: ['string', 'null'] },
-        name: { type: ['string', 'null'] },
-      },
-    },
-    consignee: {
-      type: ['object', 'null'],
-      properties: {
-        inn: { type: ['string', 'null'] },
-        name: { type: ['string', 'null'] },
-      },
-    },
-    items: {
+    documents: {
       type: 'array',
       items: {
         type: 'object',
-        required: ['nameRaw'],
+        required: ['form', 'items', 'confidence'],
         properties: {
-          nameRaw: { type: 'string' },
-          qty: { type: ['number', 'null'] },
-          unit: { type: ['string', 'null'] },
+          form: { type: 'string', enum: ['tn_2116', 'os2'] },
+          docNumber: { type: ['string', 'null'] },
+          docDate: { type: ['string', 'null'], description: 'YYYY-MM-DD' },
+          shipper: {
+            type: ['object', 'null'],
+            properties: {
+              inn: { type: ['string', 'null'] },
+              name: { type: ['string', 'null'] },
+            },
+          },
+          consignee: {
+            type: ['object', 'null'],
+            properties: {
+              inn: { type: ['string', 'null'] },
+              name: { type: ['string', 'null'] },
+            },
+          },
+          sender: {
+            type: ['object', 'null'],
+            properties: {
+              name: { type: ['string', 'null'] },
+              department: { type: ['string', 'null'] },
+            },
+          },
+          recipient: {
+            type: ['object', 'null'],
+            properties: {
+              name: { type: ['string', 'null'] },
+              department: { type: ['string', 'null'] },
+            },
+          },
+          totalSum: { type: ['number', 'null'] },
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['nameRaw'],
+              properties: {
+                nameRaw: { type: 'string' },
+                qty: { type: ['number', 'null'] },
+                unit: { type: ['string', 'null'] },
+                invNumber: { type: ['string', 'null'] },
+                price: { type: ['number', 'null'] },
+                sum: { type: ['number', 'null'] },
+              },
+            },
+          },
+          confidence: { type: 'number', minimum: 0, maximum: 1 },
         },
       },
     },
-    confidence: { type: 'number', minimum: 0, maximum: 1 },
   },
 } as const;
 
-export type ParseTransportWaybillResult = {
-  parsed: TransportWaybillParsed;
+export type ParseWaybillBatchResult = {
+  parsed: WaybillBatchParsed;
   llmProviderId: string | null;
 };
 
-export type TransportWaybillInputImage = {
+export type WaybillInputImage = {
   buffer: Buffer;
   mimeType: string; // image/jpeg | image/png | image/webp | application/pdf
   filename: string;
@@ -86,39 +114,39 @@ const SUPPORTED_MIMES = new Set([
 ]);
 
 /**
- * Парсит пакет файлов через Gemini vision. Все файлы отдаются одним
- * запросом — модель сама классифицирует и собирает данные из печатной ТН.
+ * Парсит пакет файлов через vision-LLM. Возвращает массив найденных
+ * документов с явной формой (`tn_2116` / `os2`). Пустой массив = ничего
+ * распознаваемого в пакете не найдено.
  *
- * Логирование в llmCalls — как в loggedComplete для УПД.
+ * Логирование в llmCalls — без request-изображений (они огромные в base64),
+ * только промпт + ответ + токены.
  */
-export async function parseTransportWaybill(
-  files: TransportWaybillInputImage[],
-  ctx: { sourceDocumentId: string | null },
-): Promise<ParseTransportWaybillResult> {
+export async function parseWaybillBatch(
+  files: WaybillInputImage[],
+  ctx: { sourceDocumentId: string | null; bundleId: string | null },
+): Promise<ParseWaybillBatchResult> {
   if (files.length === 0) {
-    throw new Error('parseTransportWaybill: пустой пакет файлов');
+    throw new Error('parseWaybillBatch: пустой пакет файлов');
   }
   for (const f of files) {
     if (!SUPPORTED_MIMES.has(f.mimeType.toLowerCase())) {
       throw new Error(
-        `parseTransportWaybill: неподдерживаемый MIME ${f.mimeType} у файла ${f.filename}`,
+        `parseWaybillBatch: неподдерживаемый MIME ${f.mimeType} у файла ${f.filename}`,
       );
     }
   }
 
-  // Загружаем default provider напрямую — нам нужен vision-specific API,
-  // существующий LlmProvider.complete() работает только с текстом.
   const [row] = await db
     .select()
     .from(llmProviders)
     .where(eq(llmProviders.isDefault, true))
     .limit(1);
   if (!row) {
-    throw new Error('Транспортные накладные: не настроен default LLM-провайдер');
+    throw new Error('Накладные: не настроен default LLM-провайдер');
   }
   if (row.kind !== 'google_ai_studio' && row.kind !== 'openrouter') {
     throw new Error(
-      `Транспортные накладные: vision не поддерживается провайдером ${row.kind}. ` +
+      `Накладные: vision не поддерживается провайдером ${row.kind}. ` +
         'Используйте Google AI Studio или OpenRouter.',
     );
   }
@@ -128,22 +156,22 @@ export async function parseTransportWaybill(
     .where(eq(llmProviderCredentials.kind, row.kind))
     .limit(1);
   if (!cred) {
-    throw new Error(`Транспортные накладные: не задан API-ключ провайдера ${row.kind}`);
+    throw new Error(`Накладные: не задан API-ключ провайдера ${row.kind}`);
   }
   const apiKey = decryptField(
     cred.apiKeyEncrypted,
     buildAad('llm_provider_credentials', cred.kind),
   );
+  // Промпт лежит в БД под doc_kind='transport_waybill' для совместимости
+  // с существующей админкой; контент промпта (default v2+) уже мульти-формный.
   const promptMeta = await loadActivePromptWithMeta('transport_waybill');
 
   // OpenRouter vision не принимает application/pdf — только image_url.
-  // Сейчас не делаем серверный PDF→image rendering (нужен pdfjs/imagemagick),
-  // поэтому в этом сценарии явно сообщаем пользователю.
   if (row.kind === 'openrouter') {
     const pdfs = files.filter((f) => f.mimeType.toLowerCase() === 'application/pdf');
     if (pdfs.length > 0) {
       throw new Error(
-        `Транспортные накладные через OpenRouter: PDF не поддерживается (${pdfs.map((f) => f.filename).join(', ')}). ` +
+        `Накладные через OpenRouter: PDF не поддерживается (${pdfs.map((f) => f.filename).join(', ')}). ` +
           'Загрузите только фото JPG/PNG/WEBP или переключите default-провайдера на Google AI Studio.',
       );
     }
@@ -151,7 +179,7 @@ export async function parseTransportWaybill(
 
   const startedAt = Date.now();
   let raw: string | null = null;
-  let parsedZod: TransportWaybillParsed | null = null;
+  let parsedZod: WaybillBatchParsed | null = null;
   let promptTokens: number | null = null;
   let completionTokens: number | null = null;
   let errorCode: string | null = null;
@@ -164,7 +192,7 @@ export async function parseTransportWaybill(
         apiKey,
         model: row.model,
         temperature: Number(row.temperature ?? 0.2),
-        maxTokens: row.maxTokens ?? 4096,
+        maxTokens: row.maxTokens ?? 8192,
         promptText: promptMeta.content,
         files,
       });
@@ -177,7 +205,7 @@ export async function parseTransportWaybill(
         apiKey,
         model: row.model,
         temperature: Number(row.temperature ?? 0.2),
-        maxTokens: row.maxTokens ?? 4096,
+        maxTokens: row.maxTokens ?? 8192,
         promptText: promptMeta.content,
         files,
       });
@@ -196,7 +224,7 @@ export async function parseTransportWaybill(
       e.message = `vision LLM: JSON.parse failed (likely truncated): ${e.message}`;
       throw e;
     }
-    parsedZod = TransportWaybillParsedSchema.parse(jsonParsed);
+    parsedZod = WaybillBatchParsedSchema.parse(jsonParsed);
     return { parsed: parsedZod, llmProviderId: row.id };
   } catch (err) {
     errorCode = err instanceof z.ZodError ? 'zod_failed' : 'provider_error';
@@ -204,8 +232,6 @@ export async function parseTransportWaybill(
     throw err;
   } finally {
     const latencyMs = Date.now() - startedAt;
-    // Журналим как делает loggedComplete для УПД — без request-картинок
-    // (они огромные в base64), только промпт + ответ + токены.
     try {
       await db.insert(llmCalls).values({
         sourceDocumentId: ctx.sourceDocumentId,
@@ -216,7 +242,7 @@ export async function parseTransportWaybill(
         requestMessages: [
           {
             role: 'user',
-            content: `[${files.length} image(s): ${files.map((f) => f.filename).join(', ')}]\n${promptMeta.content.slice(0, 4000)}`,
+            content: `[bundle=${ctx.bundleId ?? '-'} ${files.length} image(s): ${files.map((f) => f.filename).join(', ')}]\n${promptMeta.content.slice(0, 4000)}`,
           },
         ],
         requestSchema: RESPONSE_JSON_SCHEMA as object,
@@ -241,7 +267,7 @@ type VisionCallArgs = {
   temperature: number;
   maxTokens: number;
   promptText: string;
-  files: TransportWaybillInputImage[];
+  files: WaybillInputImage[];
 };
 
 type VisionCallResult = {
@@ -250,10 +276,6 @@ type VisionCallResult = {
   completionTokens: number | null;
 };
 
-/**
- * Прямой вызов Google AI Studio. Изображения и PDF — через inline_data
- * parts, ответ форсим в JSON через responseSchema.
- */
 async function callGemini(args: VisionCallArgs): Promise<VisionCallResult> {
   const parts: Array<{ inline_data: { mime_type: string; data: string } } | { text: string }> = [];
   for (const f of args.files) {
@@ -298,11 +320,6 @@ async function callGemini(args: VisionCallArgs): Promise<VisionCallResult> {
   };
 }
 
-/**
- * Вызов OpenRouter (OpenAI-совместимый Chat Completions). Изображения
- * передаются как image_url с data: base64. Просим JSON через
- * response_format=json_object — большинство vision-моделей это поддерживают.
- */
 async function callOpenRouter(args: VisionCallArgs): Promise<VisionCallResult> {
   const content: Array<
     { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
@@ -348,10 +365,6 @@ async function callOpenRouter(args: VisionCallArgs): Promise<VisionCallResult> {
   };
 }
 
-/**
- * Некоторые модели через OpenRouter оборачивают JSON в ```json … ```
- * несмотря на response_format. Снимаем обёртку, если есть.
- */
 function stripJsonFences(s: string): string {
   const trimmed = s.trim();
   if (!trimmed.startsWith('```')) return trimmed;

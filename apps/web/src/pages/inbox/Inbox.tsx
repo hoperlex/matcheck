@@ -35,7 +35,7 @@ import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSor
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
-import { TransportWaybillUploadModal } from './TransportWaybillUploadModal';
+import { WaybillUploadModal } from './WaybillUploadModal';
 import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
 import { UpdResolveDuplicateModal } from './UpdResolveDuplicateModal';
 
@@ -51,13 +51,16 @@ const UNFINISHED_STATUSES: ReadonlyArray<Row['status']> = [
 type KindFilter = 'all' | 'upd' | 'request';
 
 /**
- * Цвет/подпись типа документа. Три варианта: УПД, Заявка, Накладная
- * (транспортная накладная — распознаётся отдельным vision-LLM pipeline,
- * см. `TransportWaybillUploadModal`).
+ * Цвет/подпись типа документа. Накладные двух форм (ТН-2116 и ОС-2)
+ * показываются одним тегом «Накладная» — для пользователя это
+ * семантически один тип источника (см. WaybillUploadModal и
+ * waybill-batch.parser.ts на бэке).
  */
 function KindTag({ kind }: { kind: Row['kind'] }) {
   if (kind === 'upd') return <Tag color="blue">УПД</Tag>;
-  if (kind === 'transport_waybill') return <Tag color="purple">Накладная</Tag>;
+  if (kind === 'transport_waybill' || kind === 'os2_transfer') {
+    return <Tag color="purple">Накладная</Tag>;
+  }
   return <Tag color="gold">Заявка</Tag>;
 }
 
@@ -513,7 +516,7 @@ export default function InboxPage() {
         direction={direction}
         onClose={() => setPdfModalOpen(false)}
       />
-      <TransportWaybillUploadModal
+      <WaybillUploadModal
         open={twModalOpen}
         direction={direction}
         onClose={() => setTwModalOpen(false)}

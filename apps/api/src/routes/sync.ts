@@ -437,6 +437,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
               massKg: i.massKg,
               volumeConfidence: i.volumeConfidence as 'low' | 'medium' | 'high' | null,
               groupName: i.groupName,
+              inventoryNumber: i.inventoryNumber,
             })),
           attachments: sdAttachRows
             .filter((a) => a.sourceDocumentId === sd.id)

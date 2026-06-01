@@ -229,7 +229,7 @@ export default function ShipmentPage() {
     queryKey: ['source-documents', 'unaccepted-upd-count', 'outbound'],
     queryFn: () =>
       api.get<{ total: number }>(
-        '/source-documents?kind=upd,transport_waybill&direction=outbound&unaccepted=true&limit=1',
+        '/source-documents?kind=upd,transport_waybill,os2_transfer&direction=outbound&unaccepted=true&limit=1',
       ),
   });
   const acceptedCountQuery = useQuery({

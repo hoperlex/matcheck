@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ComponentProps } from 'react';
 import {
   Alert,
   Button,
@@ -239,14 +239,14 @@ export function SourceDocumentDetailModal({
                 color={
                   sd.kind === 'upd'
                     ? 'blue'
-                    : sd.kind === 'transport_waybill'
+                    : sd.kind === 'transport_waybill' || sd.kind === 'os2_transfer'
                       ? 'purple'
                       : 'gold'
                 }
               >
                 {sd.kind === 'upd'
                   ? 'УПД'
-                  : sd.kind === 'transport_waybill'
+                  : sd.kind === 'transport_waybill' || sd.kind === 'os2_transfer'
                     ? 'Накладная'
                     : 'Заявка'}
               </Tag>
@@ -370,7 +370,7 @@ export function SourceDocumentDetailModal({
                       )}
                     />
                   ) : (
-                    <ReadOnlyTable items={items} />
+                    <ReadOnlyTable items={items} showInvNumber={sd.kind === 'os2_transfer'} />
                   ),
                 },
                 {
@@ -529,7 +529,42 @@ export function SourceDocumentDetailModal({
   );
 }
 
-function ReadOnlyTable({ items }: { items: Item[] }) {
+function ReadOnlyTable({ items, showInvNumber }: { items: Item[]; showInvNumber?: boolean }) {
+  // Колонка «Инв.№» отображается только для ОС-2 (kind='os2_transfer') —
+  // у ТН и УПД она была бы пустой.
+  const columns: NonNullable<ComponentProps<typeof Table<Item>>['columns']> = [
+    { title: '№', dataIndex: 'lineNo', width: 50 },
+    { title: 'Наименование', dataIndex: 'nameRaw' },
+  ];
+  if (showInvNumber) {
+    columns.push({
+      title: 'Инв.№',
+      dataIndex: 'inventoryNumber',
+      width: 110,
+      render: (v: string | null) => v ?? '—',
+    });
+  }
+  columns.push(
+    {
+      title: 'Кол-во',
+      dataIndex: 'qty',
+      width: 90,
+      render: (v: string | null) => formatDecimal(v),
+    },
+    { title: 'Ед.', dataIndex: 'unit', width: 60 },
+    {
+      title: 'Цена',
+      dataIndex: 'price',
+      width: 100,
+      render: (v: string | null) => formatDecimal(v),
+    },
+    {
+      title: 'Сумма',
+      dataIndex: 'sum',
+      width: 110,
+      render: (v: string | null) => formatDecimal(v),
+    },
+  );
   return (
     <Table<Item>
       dataSource={items}
@@ -537,29 +572,7 @@ function ReadOnlyTable({ items }: { items: Item[] }) {
       size="small"
       pagination={false}
       scroll={{ y: '60vh' }}
-      columns={[
-        { title: '№', dataIndex: 'lineNo', width: 50 },
-        { title: 'Наименование', dataIndex: 'nameRaw' },
-        {
-          title: 'Кол-во',
-          dataIndex: 'qty',
-          width: 90,
-          render: (v: string | null) => formatDecimal(v),
-        },
-        { title: 'Ед.', dataIndex: 'unit', width: 60 },
-        {
-          title: 'Цена',
-          dataIndex: 'price',
-          width: 100,
-          render: (v: string | null) => formatDecimal(v),
-        },
-        {
-          title: 'Сумма',
-          dataIndex: 'sum',
-          width: 110,
-          render: (v: string | null) => formatDecimal(v),
-        },
-      ]}
+      columns={columns}
     />
   );
 }

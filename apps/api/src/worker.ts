@@ -15,6 +15,7 @@ import { db } from './db/client.js';
 import {
   counterparties,
   materials,
+  sourceBundles,
   sourceDocuments,
   sourceDocumentItems,
 } from './db/schema.js';
@@ -29,14 +30,14 @@ import {
 import { deleteObject, getObject } from './domain/storage/s3.signer.js';
 import { parseUpdPdf, PdfNoTextError } from './domain/edo/upd-pdf.parser.js';
 import {
-  parseTransportWaybill,
-  type TransportWaybillInputImage,
-} from './domain/edo/transport-waybill.parser.js';
+  parseWaybillBatch,
+  type WaybillInputImage,
+} from './domain/edo/waybill-batch.parser.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
 import { validateUpdTotals } from './domain/edo/upd-validation.js';
 import { publishSseEvent } from './domain/sse/redis-bridge.js';
 import { sourceDocumentAttachments } from './db/schema.js';
-import type { UpdPdfParsed } from '@matcheck/contracts';
+import type { UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
 
 // Хелпер: уведомляем подключённых SSE-клиентов о смене статуса УПД через
 // Redis Pub/Sub (worker в отдельном процессе, in-process bus API ему
@@ -102,13 +103,22 @@ async function findOrCreateCounterparty(
 }
 
 async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
+  // Очередь UPD_PARSE_QUEUE обслуживает два вида job: УПД (sourceDocumentId+s3Key)
+  // и накладные batch (bundleId). См. UpdParseJobData в plugins/queue.ts.
+  if ('bundleId' in job.data && job.data.bundleId) {
+    const log = logger.child({ bundleId: job.data.bundleId, jobId: job.id });
+    await handleWaybillBundleJob(job.data.bundleId, log);
+    return;
+  }
+  if (!job.data.sourceDocumentId || !job.data.s3Key) {
+    logger.warn({ jobId: job.id, data: job.data }, 'unknown job payload — skipping');
+    return;
+  }
   const { sourceDocumentId, s3Key } = job.data;
   const log = logger.child({ sourceDocumentId, jobId: job.id });
 
   // Переводим в processing + считаем attempt. Если кто-то уже удалил
   // документ через DELETE /:id, returning() вернёт пустой массив — выходим.
-  // returning().kind определяет, какой парсер запускать: УПД (текстовый
-  // pdf-parse + LLM) или Транспортная накладная (vision-LLM с inline_data).
   const [proc] = await db
     .update(sourceDocuments)
     .set({
@@ -123,12 +133,7 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     return;
   }
 
-  if (proc.kind === 'transport_waybill') {
-    await handleTransportWaybillJob(sourceDocumentId, log);
-    return;
-  }
-
-  // ─── Дальше — старый УПД-флоу (kind='upd'/'request') ─────────────────────
+  // ─── УПД-флоу (kind='upd'/'request') ─────────────────────────────────────
   let buffer: Buffer;
   try {
     buffer = await getObject(s3Key);
@@ -321,140 +326,272 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   await notifySourceDocumentUpdated(sourceDocumentId);
 }
 
-// ─── Транспортная накладная: vision-LLM пайплайн ─────────────────────────
+// ─── Накладные (ТН-2116 + ОС-2): vision-LLM пайплайн ─────────────────────
 //
-// Берём ВСЕ attachments записи (юзер мог приложить ТН лицевую + оборотную
-// + паспорт качества + рукописную накладную), отдаём пакет в Gemini vision.
-// Модель сама классифицирует и извлекает данные только из печатной ТН;
-// found=false → ставим parse_failed, иначе сохраняем шапку и items.
-async function handleTransportWaybillJob(
-  sourceDocumentId: string,
-  // Minimal logger-интерфейс: child() возвращает структурный pino-логер,
-  // его полный тип не передаётся через границу функции без обобщения.
-  // Берём только методы, которые реально вызываем.
-  log: {
-    info: (obj: unknown, msg?: string) => void;
-    warn: (obj: unknown, msg?: string) => void;
-    error: (obj: unknown, msg?: string) => void;
-  },
-): Promise<void> {
-  const attachments = await db
-    .select()
-    .from(sourceDocumentAttachments)
-    .where(eq(sourceDocumentAttachments.sourceDocumentId, sourceDocumentId));
-  if (attachments.length === 0) {
-    await db
-      .update(sourceDocuments)
-      .set({
-        status: 'parse_failed',
-        parseErrorCode: 'parse_failed',
-        parseErrorDetails: { message: 'нет приложенных файлов' },
-        processedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(sourceDocuments.id, sourceDocumentId));
-    log.warn('transport_waybill: нет attachments — parse_failed');
-    await notifySourceDocumentUpdated(sourceDocumentId);
+// Один пакет (source_bundles row) может породить N source_documents разных
+// форм. Шаги:
+//   1. Перевод bundle.status в 'processing'.
+//   2. Сбор всех attachments пакета (по bundle_id записей нет — attachments
+//      привязаны к source_documents; временно мы кладём их на «техническую»
+//      запись source_document с kind='transport_waybill' status='queued',
+//      создаваемую при загрузке. См. uploadWaybill в routes/source-documents.ts).
+//   3. Vision-LLM вызов parseWaybillBatch → массив документов.
+//   4. Если массив пустой → bundle.status='parse_failed' + удаление
+//      технической source_document.
+//   5. Иначе: транзакционно
+//        - DELETE технической source_document (с её attachments_junction);
+//        - INSERT N source_documents (kind по форме), их items;
+//        - INSERT N×M строк в sourceDocumentAttachments (все файлы пакета
+//          ко всем созданным документам — оператор всегда видит весь
+//          пакет в карточке любого документа);
+//        - UPDATE bundle.status='parsed', doc_count=N.
+//   6. SSE-уведомление о каждом созданном source_document.
+//
+// Минимальный logger-интерфейс — для совместимости с тем, что возвращает
+// logger.child() (полный pino-тип через границу функции не передаётся).
+type WorkerLog = {
+  info: (obj: unknown, msg?: string) => void;
+  warn: (obj: unknown, msg?: string) => void;
+  error: (obj: unknown, msg?: string) => void;
+};
+
+async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise<void> {
+  // Берём bundle и проверяем что он ещё актуален.
+  const [bundle] = await db
+    .update(sourceBundles)
+    .set({ status: 'processing', updatedAt: new Date() })
+    .where(eq(sourceBundles.id, bundleId))
+    .returning();
+  if (!bundle) {
+    log.warn('bundle is gone — skipping job');
     return;
   }
 
-  const files: TransportWaybillInputImage[] = [];
+  // Техническая source_document, под которой висят attachments пакета.
+  // Она создаётся при загрузке (kind='transport_waybill', status='queued')
+  // и после распознавания будет заменена на N реальных документов.
+  const [tech] = await db
+    .select({ id: sourceDocuments.id })
+    .from(sourceDocuments)
+    .where(eq(sourceDocuments.bundleId, bundleId))
+    .limit(1);
+  if (!tech) {
+    await db
+      .update(sourceBundles)
+      .set({
+        status: 'parse_failed',
+        parseErrorCode: 'parse_failed',
+        parseErrorMessage: 'нет технической записи source_document для пакета',
+        updatedAt: new Date(),
+      })
+      .where(eq(sourceBundles.id, bundleId));
+    log.warn('bundle has no technical source_document — parse_failed');
+    return;
+  }
+  const techId = tech.id;
+
+  const attachments = await db
+    .select()
+    .from(sourceDocumentAttachments)
+    .where(eq(sourceDocumentAttachments.sourceDocumentId, techId));
+  if (attachments.length === 0) {
+    await db
+      .update(sourceBundles)
+      .set({
+        status: 'parse_failed',
+        parseErrorCode: 'parse_failed',
+        parseErrorMessage: 'нет приложенных файлов',
+        updatedAt: new Date(),
+      })
+      .where(eq(sourceBundles.id, bundleId));
+    log.warn('bundle: нет attachments — parse_failed');
+    return;
+  }
+
+  const files: WaybillInputImage[] = [];
   for (const a of attachments) {
     try {
       const buf = await getObject(a.s3Key);
       files.push({ buffer: buf, mimeType: a.mimeType ?? 'image/jpeg', filename: a.filename });
     } catch (err) {
-      log.warn({ err, s3Key: a.s3Key }, 'transport_waybill: skip attachment, getObject failed');
+      log.warn({ err, s3Key: a.s3Key }, 'bundle: skip attachment, getObject failed');
     }
   }
   if (files.length === 0) {
-    throw new Error('transport_waybill: не удалось скачать ни одного attachment');
+    throw new Error('bundle: не удалось скачать ни одного attachment');
   }
 
   let parsed;
   let llmProviderId: string | null = null;
   try {
-    const r = await parseTransportWaybill(files, { sourceDocumentId });
+    const r = await parseWaybillBatch(files, { sourceDocumentId: techId, bundleId });
     parsed = r.parsed;
     llmProviderId = r.llmProviderId;
   } catch (err) {
-    log.error({ err }, 'transport_waybill parse failed, will retry');
+    log.error({ err }, 'waybill batch parse failed, will retry');
     throw err;
   }
 
-  // ТН в пакете не найдена → parse_failed с понятным кодом.
-  if (!parsed.found) {
+  // Пакет не содержит распознаваемых документов → parse_failed,
+  // ни одной source_document не создаём (техническую удалит DELETE
+  // ниже только если есть documents; здесь оставляем её для аудита).
+  if (parsed.documents.length === 0) {
     await db
       .update(sourceDocuments)
       .set({
         status: 'parse_failed',
-        parseErrorCode: 'no_transport_waybill_found',
-        parseErrorDetails: { confidence: parsed.confidence },
+        parseErrorCode: 'no_waybill_found',
         llmProviderId,
-        llmConfidence: parsed.confidence.toString(),
+        llmConfidence: '0',
         processedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(sourceDocuments.id, sourceDocumentId));
-    log.warn('transport_waybill not found in package');
-    await notifySourceDocumentUpdated(sourceDocumentId);
+      .where(eq(sourceDocuments.id, techId));
+    await db
+      .update(sourceBundles)
+      .set({
+        status: 'parse_failed',
+        parseErrorCode: 'no_waybill_found',
+        parseErrorMessage: 'в пакете не найдено ни ТН, ни ОС-2',
+        updatedAt: new Date(),
+      })
+      .where(eq(sourceBundles.id, bundleId));
+    log.warn('no waybill found in bundle');
+    await notifySourceDocumentUpdated(techId);
     return;
   }
 
-  // Контрагенты: ИНН опционален у ТН (может быть размыт/обрезан).
-  // Без ИНН не создаём, чтобы не плодить дубли по разному написанию.
-  const shipperId =
-    parsed.shipper?.inn && parsed.shipper?.name
-      ? await findOrCreateCounterparty(
-          { inn: parsed.shipper.inn, kpp: null, name: parsed.shipper.name },
-          'supplier',
-        )
-      : null;
-  const consigneeId =
-    parsed.consignee?.inn && parsed.consignee?.name
-      ? await findOrCreateCounterparty(
-          { inn: parsed.consignee.inn, kpp: null, name: parsed.consignee.name },
-          'customer',
-        )
-      : null;
+  // Создаём N source_documents по одному на каждый элемент массива.
+  // Атачменты пакета прикрепляем к каждому из них (все ко всем) —
+  // оператор в карточке любого документа видит весь пакет.
+  const created: { id: string; docNumber: string | null; form: string }[] = [];
+  for (const doc of parsed.documents) {
+    const newId = await createSourceDocumentFromWaybill({
+      doc,
+      bundleId,
+      bundle,
+      llmProviderId,
+      attachments: attachments.map((a) => ({
+        s3Key: a.s3Key,
+        filename: a.filename,
+        mimeType: a.mimeType,
+        sizeBytes: a.sizeBytes,
+      })),
+    });
+    created.push({ id: newId, docNumber: doc.docNumber ?? null, form: doc.form });
+  }
 
-  const docDate = parsed.docDate ? new Date(parsed.docDate) : null;
+  // Удаляем техническую запись — она больше не нужна, её attachments уже
+  // продублированы в реальные source_documents.
+  await db.delete(sourceDocuments).where(eq(sourceDocuments.id, techId));
 
   await db
-    .update(sourceDocuments)
+    .update(sourceBundles)
     .set({
       status: 'parsed',
-      parseErrorCode: null,
-      parseErrorDetails: null,
-      supplierId: shipperId,
-      // Грузополучатель в ТН — это «Подрядчик» в нашей терминологии,
-      // но в schema у нас есть recipient_id (=customer counterparty).
-      // Используем именно его — это то, кому документ адресован.
-      recipientId: consigneeId,
-      docNumber: parsed.docNumber ?? null,
-      docDate,
-      llmProviderId,
-      llmConfidence: parsed.confidence.toString(),
-      processedAt: new Date(),
+      docCount: created.length,
       updatedAt: new Date(),
     })
-    .where(eq(sourceDocuments.id, sourceDocumentId));
+    .where(eq(sourceBundles.id, bundleId));
 
-  await db
-    .delete(sourceDocumentItems)
-    .where(eq(sourceDocumentItems.sourceDocumentId, sourceDocumentId));
-  if (parsed.items.length > 0) {
+  log.info(
+    { created: created.length, forms: created.map((c) => c.form) },
+    'waybill bundle parsed successfully',
+  );
+  for (const c of created) {
+    await notifySourceDocumentUpdated(c.id);
+  }
+}
+
+// Создаёт одну запись source_documents из распознанного WaybillDocument
+// (ТН или ОС-2), прикрепляет attachments пакета и items позиций.
+// Возвращает id созданного source_document.
+async function createSourceDocumentFromWaybill(args: {
+  doc: WaybillDocument;
+  bundleId: string;
+  bundle: typeof sourceBundles.$inferSelect;
+  llmProviderId: string | null;
+  attachments: { s3Key: string; filename: string; mimeType: string | null; sizeBytes: number | null }[];
+}): Promise<string> {
+  const { doc, bundleId, bundle, llmProviderId, attachments } = args;
+
+  // Контрагенты ТН (только при наличии ИНН — без него не плодим дубли).
+  let supplierId: string | null = null;
+  let recipientId: string | null = null;
+  if (doc.form === 'tn_2116') {
+    if (doc.shipper?.inn && doc.shipper?.name) {
+      supplierId = await findOrCreateCounterparty(
+        { inn: doc.shipper.inn, kpp: null, name: doc.shipper.name },
+        'supplier',
+      );
+    }
+    if (doc.consignee?.inn && doc.consignee?.name) {
+      recipientId = await findOrCreateCounterparty(
+        { inn: doc.consignee.inn, kpp: null, name: doc.consignee.name },
+        'customer',
+      );
+    }
+  }
+
+  const docDate = doc.docDate ? new Date(doc.docDate) : null;
+  const kind = doc.form === 'os2' ? 'os2_transfer' : 'transport_waybill';
+
+  const [inserted] = await db
+    .insert(sourceDocuments)
+    .values({
+      kind,
+      direction: bundle.direction,
+      status: 'parsed',
+      supplierId,
+      recipientId,
+      contractorId: bundle.contractorId,
+      recipientMolId: bundle.recipientMolId,
+      siteId: bundle.siteId,
+      docNumber: doc.docNumber ?? null,
+      docDate,
+      totalSum: doc.totalSum != null ? doc.totalSum.toString() : null,
+      expectedDate: bundle.expectedDate,
+      origin: 'manual_pdf',
+      llmProviderId,
+      llmConfidence: doc.confidence.toString(),
+      parsedAt: new Date(),
+      processedAt: new Date(),
+      bundleId,
+      createdByUserId: bundle.createdByUserId,
+    })
+    .returning({ id: sourceDocuments.id });
+  if (!inserted) throw new Error('Failed to insert source_document from waybill');
+  const id = inserted.id;
+
+  // Дублируем attachments на каждый созданный документ. S3-файл общий
+  // (один объект в bucket), а в junction-таблице — новые строки.
+  if (attachments.length > 0) {
+    await db.insert(sourceDocumentAttachments).values(
+      attachments.map((a) => ({
+        sourceDocumentId: id,
+        s3Key: a.s3Key,
+        filename: a.filename,
+        mimeType: a.mimeType,
+        sizeBytes: a.sizeBytes,
+        role: 'original' as const,
+      })),
+    );
+  }
+
+  // Позиции документа. Для ОС-2 — invNumber + price/sum; для ТН — без них.
+  if (doc.items.length > 0) {
     const rows = await Promise.all(
-      parsed.items.map(async (it, idx) => ({
-        sourceDocumentId,
-        materialId: await findOrCreateMaterial(it.nameRaw, it.unit ?? null),
+      doc.items.map(async (it, idx) => ({
+        sourceDocumentId: id,
+        materialId:
+          kind === 'transport_waybill'
+            ? await findOrCreateMaterial(it.nameRaw, it.unit ?? null)
+            : null,
         nameRaw: it.nameRaw,
         qty: it.qty != null ? it.qty.toString() : '0',
         unit: it.unit && it.unit.trim() ? it.unit.trim() : 'шт',
-        // Финансы в ТН не указываются (это перевозочный документ,
-        // не отгрузочный) — оставляем NULL.
-        price: null,
-        sum: null,
+        price: it.price != null ? it.price.toString() : null,
+        sum: it.sum != null ? it.sum.toString() : null,
         vatRate: null,
         vatSum: null,
         volumeM3: null,
@@ -462,16 +599,13 @@ async function handleTransportWaybillJob(
         volumeConfidence: null,
         groupName: null,
         lineNo: idx + 1,
+        inventoryNumber: it.invNumber ?? null,
       })),
     );
     await db.insert(sourceDocumentItems).values(rows);
   }
 
-  log.info(
-    { itemsCount: parsed.items.length, docNumber: parsed.docNumber },
-    'transport_waybill parsed successfully',
-  );
-  await notifySourceDocumentUpdated(sourceDocumentId);
+  return id;
 }
 
 async function handleS3Cleanup(job: Job<S3CleanupJobData>): Promise<void> {
@@ -552,8 +686,41 @@ const s3CleanupWorker = new Worker<S3CleanupJobData>(
 worker.on('failed', async (job, err) => {
   if (!job) return;
   logger.warn({ jobId: job.id, attempts: job.attemptsMade, err: err.message }, 'job failed');
-  if (job.attemptsMade >= (job.opts.attempts ?? 1)) {
-    try {
+  if (job.attemptsMade < (job.opts.attempts ?? 1)) return;
+  try {
+    if ('bundleId' in job.data && job.data.bundleId) {
+      const bundleId = job.data.bundleId;
+      await db
+        .update(sourceBundles)
+        .set({
+          status: 'parse_failed',
+          parseErrorCode: 'internal_error',
+          parseErrorMessage: err.message,
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceBundles.id, bundleId));
+      // Помечаем и техническую source_document, если она ещё жива.
+      const [tech] = await db
+        .select({ id: sourceDocuments.id })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.bundleId, bundleId))
+        .limit(1);
+      if (tech) {
+        await db
+          .update(sourceDocuments)
+          .set({
+            status: 'parse_failed',
+            parseErrorCode: 'internal_error',
+            parseErrorDetails: { message: err.message },
+            processedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(sourceDocuments.id, tech.id));
+        await notifySourceDocumentUpdated(tech.id);
+      }
+      return;
+    }
+    if (job.data.sourceDocumentId) {
       await db
         .update(sourceDocuments)
         .set({
@@ -565,9 +732,9 @@ worker.on('failed', async (job, err) => {
         })
         .where(eq(sourceDocuments.id, job.data.sourceDocumentId));
       await notifySourceDocumentUpdated(job.data.sourceDocumentId);
-    } catch (e) {
-      logger.error({ err: e }, 'failed to mark document as parse_failed');
     }
+  } catch (e) {
+    logger.error({ err: e }, 'failed to mark document as parse_failed');
   }
 });
 

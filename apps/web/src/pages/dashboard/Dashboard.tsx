@@ -12,7 +12,9 @@ export default function DashboardPage() {
   const expectedUpds = useQuery({
     queryKey: ['source-documents', 'unaccepted-upd', 'count'],
     queryFn: () =>
-      api.get<SourceList>('/source-documents?kind=upd,transport_waybill&unaccepted=true&limit=1'),
+      api.get<SourceList>(
+        '/source-documents?kind=upd,transport_waybill,os2_transfer&unaccepted=true&limit=1',
+      ),
   });
   const inbox = useQuery({
     queryKey: ['source-documents'],

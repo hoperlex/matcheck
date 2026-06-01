@@ -1,11 +1,21 @@
 import { z } from 'zod';
 
-// 'transport_waybill' — печатная транспортная накладная (форма РФ 2116).
-// Распознаётся отдельным vision-LLM pipeline (см. transport-waybill.parser.ts),
-// в отличие от УПД, где идёт текстовый pdf-parse. В одном пакете могут лежать
-// рукописные накладные, паспорта качества, ОС-2 — все они игнорируются;
-// извлекаются данные только из печатной ТН.
-export const SourceKindSchema = z.enum(['upd', 'request', 'transport_waybill']);
+// Виды source_documents:
+//  - 'upd'                — УПД (PDF/XML), pdf-parse → текстовый LLM.
+//  - 'request'            — заявка/письмо.
+//  - 'transport_waybill'  — печатная транспортная накладная (форма РФ 2116).
+//  - 'os2_transfer'       — накладная на внутреннее перемещение ОС (форма ОС-2).
+//
+// Накладные обоих видов (ТН и ОС-2) распознаются единым vision-LLM пайплайном
+// (см. waybill-batch.parser.ts): пакет фото загружается одним POST,
+// LLM классифицирует каждый файл и возвращает массив документов разных форм.
+// Один пакет может породить N source_documents (см. source_bundles).
+export const SourceKindSchema = z.enum([
+  'upd',
+  'request',
+  'transport_waybill',
+  'os2_transfer',
+]);
 export const SourceOriginSchema = z.enum(['edo_diadoc', 'manual_xml', 'manual_pdf', 'mail']);
 export const SourceStatusSchema = z.enum([
   'parsed',
@@ -25,8 +35,11 @@ export const SourceParseErrorCodeSchema = z.enum([
   'pdf_no_text',
   'parse_failed',
   'internal_error',
-  // ТН-pipeline: ни один файл из пакета не классифицирован как печатная ТН.
+  // ТН-pipeline (legacy): ни один файл из пакета не классифицирован как печатная ТН.
   'no_transport_waybill_found',
+  // Waybill-batch pipeline: в пакете не найдено ни одного распознаваемого
+  // документа (ни ТН-2116, ни ОС-2). Только рукописное / паспорта качества / прочее.
+  'no_waybill_found',
 ]);
 export type SourceParseErrorCode = z.infer<typeof SourceParseErrorCodeSchema>;
 export const SourceDirectionSchema = z.enum(['inbound', 'outbound']);
@@ -51,6 +64,11 @@ export const SourceItemSchema = z.object({
   massKg: z.string().nullable(),
   volumeConfidence: VolumeConfidenceSchema.nullable(),
   groupName: z.string().nullable(),
+  // Инвентарный номер ОС из строки накладной ОС-2 (например «119866»).
+  // Заполняется только для документов kind='os2_transfer'; у ТН и УПД — null.
+  // На фронте видимость столбца «Инв.№» в карточке отгрузки/приёмки
+  // переключается по kind документа-источника.
+  inventoryNumber: z.string().nullable(),
 });
 export type SourceItem = z.infer<typeof SourceItemSchema>;
 
@@ -285,40 +303,72 @@ export const UpdPdfParsedSchema = z.object({
 });
 export type UpdPdfParsed = z.infer<typeof UpdPdfParsedSchema>;
 
-// ──────────── Транспортная накладная (ТН, форма РФ 2116) ────────────
-// Vision-LLM получает все изображения пакета одним вызовом, классифицирует
-// каждое и возвращает данные ТОЛЬКО для печатной ТН. Если ТН не найдена —
-// confidence: 0 и пустой items, worker помечает документ
-// status='parse_failed' с parseErrorCode='no_transport_waybill_found'.
+// ──────────── Накладные (ТН-2116 и ОС-2) — мульти-документный batch ────────
+// Vision-LLM получает пакет изображений одним вызовом и возвращает массив
+// найденных документов. Каждый документ классифицирован по форме
+// (`tn_2116` или `os2`) и несёт свой набор полей. Один пакет → N
+// source_documents в БД. Если массив пустой — worker помечает bundle как
+// parse_failed с кодом 'no_waybill_found'.
 //
-// Поля минимальные — извлекаем только то, что попросил пользователь
-// (№, дата, поставщик, подрядчик, материалы). ИНН — опционально, для
-// поиска/связи контрагентов в справочнике.
+// Партии файлов (например лицевая + оборотная одной ТН) LLM склеивает по
+// совпадению docNumber и возвращает одним элементом массива.
 
-export const TransportWaybillPartySchema = z.object({
+export const WaybillPartySchema = z.object({
   inn: z.string().nullable().optional(),
   name: z.string().nullable().optional(),
 });
+export type WaybillParty = z.infer<typeof WaybillPartySchema>;
 
-export const TransportWaybillItemSchema = z.object({
+// «Сдатчик»/«Получатель» в ОС-2 — внутренние подразделения, не контрагенты.
+// `name` — ФИО МОЛ + текст (например «Медников Р.С. Основной склад IT»).
+// `department` — отдельный текст подразделения, если LLM смогла выделить.
+export const WaybillInternalPartySchema = z.object({
+  name: z.string().nullable().optional(),
+  department: z.string().nullable().optional(),
+});
+export type WaybillInternalParty = z.infer<typeof WaybillInternalPartySchema>;
+
+export const WaybillItemSchema = z.object({
   nameRaw: z.string().min(1),
   qty: z.number().nullable().optional(),
   unit: z.string().nullable().optional(),
+  // Инвентарный номер — заполняется только в ОС-2.
+  invNumber: z.string().nullable().optional(),
+  // Цены — заполняются только в ОС-2.
+  price: z.number().nullable().optional(),
+  sum: z.number().nullable().optional(),
 });
+export type WaybillItem = z.infer<typeof WaybillItemSchema>;
 
-export const TransportWaybillParsedSchema = z.object({
-  // null = ТН в пакете не найдена. Worker пометит документ как parse_failed.
-  found: z.boolean(),
+export const WaybillFormSchema = z.enum(['tn_2116', 'os2']);
+export type WaybillForm = z.infer<typeof WaybillFormSchema>;
+
+export const WaybillDocumentSchema = z.object({
+  form: WaybillFormSchema,
   docNumber: z.string().nullable().optional(),
   docDate: z.string().nullable().optional(), // YYYY-MM-DD
-  // Грузоотправитель — в нашей терминологии «Поставщик».
-  shipper: TransportWaybillPartySchema.nullable().optional(),
-  // Грузополучатель — «Подрядчик».
-  consignee: TransportWaybillPartySchema.nullable().optional(),
-  items: z.array(TransportWaybillItemSchema),
+  // Только для tn_2116: грузоотправитель (поставщик).
+  shipper: WaybillPartySchema.nullable().optional(),
+  // Только для tn_2116: грузополучатель (подрядчик).
+  consignee: WaybillPartySchema.nullable().optional(),
+  // Только для os2: внутренний отправитель.
+  sender: WaybillInternalPartySchema.nullable().optional(),
+  // Только для os2: внутренний получатель.
+  recipient: WaybillInternalPartySchema.nullable().optional(),
+  // Только для os2: «Итого по документу» из шапки таблицы.
+  totalSum: z.number().nullable().optional(),
+  items: z.array(WaybillItemSchema),
   confidence: z.number().min(0).max(1),
 });
-export type TransportWaybillParsed = z.infer<typeof TransportWaybillParsedSchema>;
+export type WaybillDocument = z.infer<typeof WaybillDocumentSchema>;
+
+export const WaybillBatchParsedSchema = z.object({
+  // Пустой массив = LLM не нашла ни одного распознаваемого документа в пакете.
+  // Worker пометит bundle как parse_failed с кодом 'no_waybill_found' и ни
+  // одного source_document не создаёт.
+  documents: z.array(WaybillDocumentSchema),
+});
+export type WaybillBatchParsed = z.infer<typeof WaybillBatchParsedSchema>;
 
 export const SourceDocumentFileResponseSchema = z.object({
   url: z.string().url(),

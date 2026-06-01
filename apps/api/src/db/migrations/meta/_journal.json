@@ -288,6 +288,13 @@
       "when": 1780877700000,
       "tag": "0040_transport_waybill_kind_and_prompt",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1780877760000,
+      "tag": "0041_waybill_batch_os2_invnumber",
+      "breakpoints": true
     }
   ]
 }

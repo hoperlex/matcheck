@@ -116,7 +116,7 @@ export function ExpectedSourceDocsList({
     queryKey: ['source-documents', 'unaccepted-upd', direction, filters.q],
     queryFn: () => {
       const qs = new URLSearchParams({
-        kind: 'upd,transport_waybill',
+        kind: 'upd,transport_waybill,os2_transfer',
         direction,
         unaccepted: 'true',
         limit: '200',
@@ -179,7 +179,7 @@ export function ExpectedSourceDocsList({
             title: 'Тип',
             key: 'kind',
             render: (_: unknown, r: SourceDocument) =>
-              r.kind === 'transport_waybill' ? (
+              r.kind === 'transport_waybill' || r.kind === 'os2_transfer' ? (
                 <Tag color="purple">Накладная</Tag>
               ) : r.kind === 'upd' ? (
                 <Tag color="blue">УПД</Tag>

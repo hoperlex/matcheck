@@ -15,6 +15,7 @@ import {
   primaryKey,
   check,
   bigserial,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import type { UpdValidation } from '@matcheck/contracts';
 
@@ -31,7 +32,12 @@ export const shipmentKindEnum = pgEnum('shipment_kind', [
 // См. миграцию 0029. Constraint на согласованность asset_id/material_id —
 // на уровне таблиц delivery_items / shipment_items.
 export const itemKindEnum = pgEnum('item_kind', ['material', 'asset']);
-export const sourceKindEnum = pgEnum('source_kind', ['upd', 'request', 'transport_waybill']);
+export const sourceKindEnum = pgEnum('source_kind', [
+  'upd',
+  'request',
+  'transport_waybill',
+  'os2_transfer',
+]);
 export const sourceOriginEnum = pgEnum('source_origin', [
   'edo_diadoc',
   'manual_xml',
@@ -429,6 +435,11 @@ export const sourceDocuments = pgTable(
       onDelete: 'set null',
     }),
     version: integer('version').notNull().default(1),
+    // Ссылка на пакет загрузки (см. sourceBundles). Один пакет может породить
+    // N source_documents — например ТН-2116 + ОС-2 из одной пачки фото.
+    bundleId: uuid('bundle_id').references((): AnyPgColumn => sourceBundles.id, {
+      onDelete: 'set null',
+    }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -464,11 +475,46 @@ export const sourceDocuments = pgTable(
     index('source_documents_unfinished_idx')
       .on(t.status, t.parsedAt)
       .where(sql`${t.status} in ('queued', 'processing')`),
+    index('source_documents_bundle_idx')
+      .on(t.bundleId)
+      .where(sql`${t.bundleId} is not null`),
     check(
       'source_upd_required',
       sql`(${t.kind} <> 'upd') or (${t.status} <> 'parsed') or (${t.docNumber} is not null and ${t.docDate} is not null and ${t.totalSum} is not null)`,
     ),
   ],
+);
+
+// Пакет файлов одной загрузки накладных. Один пакет может породить N
+// source_documents разных форм (ТН-2116 + ОС-2 в одной пачке фото).
+// Уникальность по bundle_hash обеспечивает идемпотентность при
+// повторной загрузке того же набора файлов.
+export const sourceBundles = pgTable(
+  'source_bundles',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bundleHash: varchar('bundle_hash', { length: 64 }).notNull(),
+    direction: sourceDirectionEnum('direction').notNull(),
+    siteId: uuid('site_id').references(() => sites.id, { onDelete: 'set null' }),
+    contractorId: uuid('contractor_id').references(() => counterparties.id, {
+      onDelete: 'set null',
+    }),
+    recipientMolId: uuid('recipient_mol_id').references(() => responsiblePersons.id, {
+      onDelete: 'set null',
+    }),
+    expectedDate: timestamp('expected_date', { mode: 'date' }),
+    // queued | processing | parsed | parse_failed
+    status: text('status').notNull().default('queued'),
+    parseErrorCode: text('parse_error_code'),
+    parseErrorMessage: text('parse_error_message'),
+    docCount: integer('doc_count').notNull().default(0),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('source_bundles_bundle_hash_unique').on(t.bundleHash)],
 );
 
 export const sourceDocumentItems = pgTable('source_document_items', {
@@ -490,6 +536,9 @@ export const sourceDocumentItems = pgTable('source_document_items', {
   massKg: numeric('mass_kg', { precision: 10, scale: 3 }),
   volumeConfidence: text('volume_confidence'),
   groupName: text('group_name'),
+  // Инвентарный номер ОС из ОС-2 (например «119866»). Заполняется только
+  // для kind='os2_transfer'; у ТН и УПД остаётся NULL.
+  inventoryNumber: text('inventory_number'),
 });
 
 export const sourceDocumentAttachments = pgTable('source_document_attachments', {

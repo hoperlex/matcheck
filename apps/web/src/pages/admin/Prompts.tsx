@@ -23,7 +23,7 @@ import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 const DOC_KIND_LABEL: Record<PromptDocKind, string> = {
   upd: 'УПД (PDF)',
   request: 'Заявка (письмо)',
-  transport_waybill: 'Транспортная накладная (фото)',
+  transport_waybill: 'Накладные (ТН/ОС-2, фото)',
 };
 
 type FormValues = PromptUpsert;
@@ -249,7 +249,7 @@ export default function AdminPromptsPage() {
               options={[
                 { value: 'upd', label: 'УПД (PDF)' },
                 { value: 'request', label: 'Заявка (письмо)' },
-                { value: 'transport_waybill', label: 'Транспортная накладная (фото)' },
+                { value: 'transport_waybill', label: 'Накладные (ТН/ОС-2, фото)' },
               ]}
             />
           </Form.Item>

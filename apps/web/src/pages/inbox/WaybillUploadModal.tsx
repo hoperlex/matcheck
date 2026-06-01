@@ -33,13 +33,14 @@ type Row = {
 };
 
 /**
- * Загрузка пакета файлов для распознавания Транспортной накладной (форма
- * РФ 2116). В отличие от УПД, где 1 файл = 1 документ, тут N файлов одного
- * пакета = 1 запись source_documents (kind='transport_waybill'). Vision-LLM
- * на сервере сам находит печатную ТН среди приложенных фото и игнорирует
- * паспорта качества, рукописные накладные и прочие документы.
+ * Загрузка пакета файлов для распознавания накладных — ТН (форма 2116) и
+ * ОС-2 (внутреннее перемещение основных средств). LLM на сервере сама
+ * классифицирует каждый файл и возвращает массив документов. Один пакет
+ * фото может породить N source_documents разных форм — например ТН + ОС-2
+ * из одной пачки. Паспорта качества, рукописные накладные и прочие
+ * документы игнорируются.
  */
-export function TransportWaybillUploadModal({
+export function WaybillUploadModal({
   open,
   direction,
   onClose,
@@ -117,7 +118,7 @@ export function TransportWaybillUploadModal({
         recipientFields.recipientMolId = recipientMolId;
       }
       const res = await apiUploadFiles<UpdPdfQueueResponse>(
-        '/source-documents/upload-transport-waybill',
+        '/source-documents/upload-waybill',
         rows.map((r) => r.file),
         {
           fields: {
@@ -172,8 +173,8 @@ export function TransportWaybillUploadModal({
         type="info"
         showIcon
         style={{ marginBottom: 12 }}
-        message="Прикладывайте лицевую + оборотную сторону одной ТН плюс любые сопроводительные документы."
-        description="Распознаётся ТОЛЬКО печатная Транспортная накладная (форма РФ 2116). Рукописные накладные, паспорта качества и прочие документы из пакета игнорируются. Поддерживаются JPG/PNG/WEBP/HEIC; PDF работает только при default-провайдере Google AI Studio."
+        message="Один пакет фото может содержать несколько накладных — каждая попадёт в Ожидаемые отдельной строкой."
+        description="Распознаются печатные ТН (форма 2116) и накладные ОС-2 (внутреннее перемещение основных средств). Паспорта качества, рукописные накладные и прочие документы игнорируются. Поддерживаются JPG/PNG/WEBP/HEIC; PDF работает только при default-провайдере Google AI Studio."
       />
       <Form layout="vertical">
         <Form.Item label="Получатель">
@@ -242,7 +243,7 @@ export function TransportWaybillUploadModal({
             </p>
             <p className="ant-upload-text">Перетащите фото или нажмите для выбора</p>
             <p className="ant-upload-hint">
-              Один пакет = одна ТН. Лимит на файл — 10 МБ.
+              В пакете может быть несколько накладных. Лимит на файл — 10 МБ.
             </p>
           </Upload.Dragger>
         </Form.Item>
