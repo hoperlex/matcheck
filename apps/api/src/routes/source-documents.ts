@@ -918,7 +918,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     },
     async (req, reply) => {
       const mp = req as unknown as {
-        files: () => AsyncIterable<{
+        files: (opts?: { limits?: { files?: number; fileSize?: number } }) => AsyncIterable<{
           filename: string;
           mimetype: string;
           toBuffer: () => Promise<Buffer>;
@@ -927,11 +927,14 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       };
 
       // Собираем все файлы пакета + поля метаданных. Поля multipart лежат
-      // как «псевдо-файлы» с .value, разбираемся отдельно.
+      // как «псевдо-файлы» с .value, разбираемся отдельно. Глобальный
+      // лимит multipart — 1 файл; для пакета ТН переопределяем на 20
+      // (типичный пакет — 2–5 фото, но мобильные клиенты могут пакетно
+      // фотать оба разворота + сопроводилки).
       const collected: Array<{ filename: string; mimetype: string; buffer: Buffer }> = [];
       const rawFields: Record<string, string | undefined> = {};
       let lastFields: Record<string, { value?: string } | undefined> = {};
-      for await (const part of mp.files()) {
+      for await (const part of mp.files({ limits: { files: 20, fileSize: 10 * 1024 * 1024 } })) {
         // Поля из формы тоже идут в .files() с заполненным fields.
         // Запоминаем последний набор fields — они одинаковы у всех parts.
         lastFields = part.fields;

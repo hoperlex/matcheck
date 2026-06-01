@@ -5,9 +5,12 @@
 // vision-вызов: изображения отдаются модели как inline_data parts, и она
 // сама распознаёт текст + классифицирует документы пакета.
 //
-// Сейчас поддерживается ТОЛЬКО Google AI Studio (Gemini). У OpenRouter
-// vision тоже есть, но добавим позднее, если потребуется. Если default
-// провайдер не Gemini — бросим ошибку.
+// Поддерживаются два провайдера:
+//  - google_ai_studio — прямое подключение к Gemini API, передаём
+//    изображения через inline_data parts. Понимает application/pdf.
+//  - openrouter — OpenAI-совместимый Chat Completions с vision: фото идут
+//    через image_url data:base64. PDF не поддерживается провайдером —
+//    для смешанных пакетов придётся выбирать Gemini напрямую.
 
 import { z } from 'zod';
 import { db } from '../../db/client.js';
@@ -103,7 +106,7 @@ export async function parseTransportWaybill(
     }
   }
 
-  // Загружаем provider напрямую — нам нужен Gemini-specific vision API,
+  // Загружаем default provider напрямую — нам нужен vision-specific API,
   // существующий LlmProvider.complete() работает только с текстом.
   const [row] = await db
     .select()
@@ -113,10 +116,10 @@ export async function parseTransportWaybill(
   if (!row) {
     throw new Error('Транспортные накладные: не настроен default LLM-провайдер');
   }
-  if (row.kind !== 'google_ai_studio') {
+  if (row.kind !== 'google_ai_studio' && row.kind !== 'openrouter') {
     throw new Error(
-      `Транспортные накладные требуют Gemini (Google AI Studio), но default провайдер — ${row.kind}. ` +
-        'Настройте Gemini как default в админке.',
+      `Транспортные накладные: vision не поддерживается провайдером ${row.kind}. ` +
+        'Используйте Google AI Studio или OpenRouter.',
     );
   }
   const [cred] = await db
@@ -125,7 +128,7 @@ export async function parseTransportWaybill(
     .where(eq(llmProviderCredentials.kind, row.kind))
     .limit(1);
   if (!cred) {
-    throw new Error('Транспортные накладные: не задан API-ключ Gemini');
+    throw new Error(`Транспортные накладные: не задан API-ключ провайдера ${row.kind}`);
   }
   const apiKey = decryptField(
     cred.apiKeyEncrypted,
@@ -133,30 +136,18 @@ export async function parseTransportWaybill(
   );
   const promptMeta = await loadActivePromptWithMeta('transport_waybill');
 
-  // Парты запроса: inline_data для каждого изображения + текст-промпт.
-  // Gemini принимает несколько изображений в одном вызове.
-  const parts: Array<{ inline_data: { mime_type: string; data: string } } | { text: string }> = [];
-  for (const f of files) {
-    parts.push({
-      inline_data: {
-        mime_type: f.mimeType,
-        data: f.buffer.toString('base64'),
-      },
-    });
+  // OpenRouter vision не принимает application/pdf — только image_url.
+  // Сейчас не делаем серверный PDF→image rendering (нужен pdfjs/imagemagick),
+  // поэтому в этом сценарии явно сообщаем пользователю.
+  if (row.kind === 'openrouter') {
+    const pdfs = files.filter((f) => f.mimeType.toLowerCase() === 'application/pdf');
+    if (pdfs.length > 0) {
+      throw new Error(
+        `Транспортные накладные через OpenRouter: PDF не поддерживается (${pdfs.map((f) => f.filename).join(', ')}). ` +
+          'Загрузите только фото JPG/PNG/WEBP или переключите default-провайдера на Google AI Studio.',
+      );
+    }
   }
-  parts.push({ text: promptMeta.content });
-
-  const body = {
-    contents: [{ role: 'user', parts }],
-    generationConfig: {
-      temperature: Number(row.temperature ?? 0.2),
-      maxOutputTokens: row.maxTokens ?? 4096,
-      responseMimeType: 'application/json',
-      responseSchema: RESPONSE_JSON_SCHEMA,
-    },
-  };
-
-  const url = `${cred.apiBaseUrl.replace(/\/$/, '')}/v1beta/models/${row.model}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const startedAt = Date.now();
   let raw: string | null = null;
@@ -167,31 +158,42 @@ export async function parseTransportWaybill(
   let errorMessage: string | null = null;
 
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(600_000),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Gemini vision HTTP ${res.status}: ${text.slice(0, 500)}`);
+    if (row.kind === 'google_ai_studio') {
+      const result = await callGemini({
+        apiBaseUrl: cred.apiBaseUrl,
+        apiKey,
+        model: row.model,
+        temperature: Number(row.temperature ?? 0.2),
+        maxTokens: row.maxTokens ?? 4096,
+        promptText: promptMeta.content,
+        files,
+      });
+      raw = result.raw;
+      promptTokens = result.promptTokens;
+      completionTokens = result.completionTokens;
+    } else {
+      const result = await callOpenRouter({
+        apiBaseUrl: cred.apiBaseUrl,
+        apiKey,
+        model: row.model,
+        temperature: Number(row.temperature ?? 0.2),
+        maxTokens: row.maxTokens ?? 4096,
+        promptText: promptMeta.content,
+        files,
+      });
+      raw = result.raw;
+      promptTokens = result.promptTokens;
+      completionTokens = result.completionTokens;
     }
-    const json = (await res.json()) as {
-      candidates?: { content?: { parts?: { text?: string }[] } }[];
-      usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number };
-    };
-    raw = json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    if (!raw) throw new Error('Gemini vision: empty content');
-    promptTokens = json.usageMetadata?.promptTokenCount ?? null;
-    completionTokens = json.usageMetadata?.candidatesTokenCount ?? null;
+
+    if (!raw) throw new Error('vision LLM: пустой ответ');
 
     let jsonParsed: unknown;
     try {
-      jsonParsed = JSON.parse(raw);
+      jsonParsed = JSON.parse(stripJsonFences(raw));
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
-      e.message = `Gemini vision: JSON.parse failed (likely truncated): ${e.message}`;
+      e.message = `vision LLM: JSON.parse failed (likely truncated): ${e.message}`;
       throw e;
     }
     parsedZod = TransportWaybillParsedSchema.parse(jsonParsed);
@@ -230,4 +232,129 @@ export async function parseTransportWaybill(
       /* ignore */
     }
   }
+}
+
+type VisionCallArgs = {
+  apiBaseUrl: string;
+  apiKey: string;
+  model: string;
+  temperature: number;
+  maxTokens: number;
+  promptText: string;
+  files: TransportWaybillInputImage[];
+};
+
+type VisionCallResult = {
+  raw: string;
+  promptTokens: number | null;
+  completionTokens: number | null;
+};
+
+/**
+ * Прямой вызов Google AI Studio. Изображения и PDF — через inline_data
+ * parts, ответ форсим в JSON через responseSchema.
+ */
+async function callGemini(args: VisionCallArgs): Promise<VisionCallResult> {
+  const parts: Array<{ inline_data: { mime_type: string; data: string } } | { text: string }> = [];
+  for (const f of args.files) {
+    parts.push({
+      inline_data: {
+        mime_type: f.mimeType,
+        data: f.buffer.toString('base64'),
+      },
+    });
+  }
+  parts.push({ text: args.promptText });
+
+  const body = {
+    contents: [{ role: 'user', parts }],
+    generationConfig: {
+      temperature: args.temperature,
+      maxOutputTokens: args.maxTokens,
+      responseMimeType: 'application/json',
+      responseSchema: RESPONSE_JSON_SCHEMA,
+    },
+  };
+  const url = `${args.apiBaseUrl.replace(/\/$/, '')}/v1beta/models/${args.model}:generateContent?key=${encodeURIComponent(args.apiKey)}`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(600_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Gemini vision HTTP ${res.status}: ${text.slice(0, 500)}`);
+  }
+  const json = (await res.json()) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+    usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number };
+  };
+  return {
+    raw: json.candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+    promptTokens: json.usageMetadata?.promptTokenCount ?? null,
+    completionTokens: json.usageMetadata?.candidatesTokenCount ?? null,
+  };
+}
+
+/**
+ * Вызов OpenRouter (OpenAI-совместимый Chat Completions). Изображения
+ * передаются как image_url с data: base64. Просим JSON через
+ * response_format=json_object — большинство vision-моделей это поддерживают.
+ */
+async function callOpenRouter(args: VisionCallArgs): Promise<VisionCallResult> {
+  const content: Array<
+    { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
+  > = [];
+  for (const f of args.files) {
+    const dataUrl = `data:${f.mimeType};base64,${f.buffer.toString('base64')}`;
+    content.push({ type: 'image_url', image_url: { url: dataUrl } });
+  }
+  content.push({ type: 'text', text: args.promptText });
+
+  const body = {
+    model: args.model,
+    messages: [{ role: 'user', content }],
+    temperature: args.temperature,
+    max_tokens: args.maxTokens,
+    response_format: { type: 'json_object' as const },
+  };
+
+  const url = `${args.apiBaseUrl.replace(/\/$/, '')}/chat/completions`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${args.apiKey}`,
+      'HTTP-Referer': 'https://matcheck.local',
+      'X-Title': 'matcheck',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(600_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`OpenRouter vision HTTP ${res.status}: ${text.slice(0, 500)}`);
+  }
+  const json = (await res.json()) as {
+    choices?: { message?: { content?: string } }[];
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
+  return {
+    raw: json.choices?.[0]?.message?.content ?? '',
+    promptTokens: json.usage?.prompt_tokens ?? null,
+    completionTokens: json.usage?.completion_tokens ?? null,
+  };
+}
+
+/**
+ * Некоторые модели через OpenRouter оборачивают JSON в ```json … ```
+ * несмотря на response_format. Снимаем обёртку, если есть.
+ */
+function stripJsonFences(s: string): string {
+  const trimmed = s.trim();
+  if (!trimmed.startsWith('```')) return trimmed;
+  const noLead = trimmed.replace(/^```(?:json)?\s*/i, '');
+  return noLead.replace(/\s*```\s*$/i, '');
 }
