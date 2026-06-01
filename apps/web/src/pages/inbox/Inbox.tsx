@@ -375,7 +375,7 @@ export default function InboxPage() {
                   <Button type="primary" onClick={() => setPdfModalOpen(true)}>
                     Загрузить УПД (PDF)
                   </Button>
-                  <Button onClick={() => setTwModalOpen(true)}>
+                  <Button type="primary" onClick={() => setTwModalOpen(true)}>
                     Загрузить накладные
                   </Button>
                 </Space>
