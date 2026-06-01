@@ -903,6 +903,196 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     },
   );
 
+  // ──────────── Транспортная накладная (ТН): загрузка пакета файлов ─────────
+  // В отличие от УПД, тут юзер кладёт ПАКЕТ изображений (фото листов на
+  // телефон) — лицевая + оборотная ТН, плюс возможно паспорт качества или
+  // рукописная накладная как «лишнее». Все файлы становятся attachments к
+  // одной записи source_documents (kind='transport_waybill'). Vision-LLM в
+  // worker'е сам найдёт печатную ТН в пакете и извлечёт её поля; остальные
+  // документы игнорируются. Если ТН в пакете нет —
+  // parseErrorCode='no_transport_waybill_found'.
+  app.post(
+    '/api/v1/source-documents/upload-transport-waybill',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+    },
+    async (req, reply) => {
+      const mp = req as unknown as {
+        files: () => AsyncIterable<{
+          filename: string;
+          mimetype: string;
+          toBuffer: () => Promise<Buffer>;
+          fields: Record<string, { value?: string } | undefined>;
+        }>;
+      };
+
+      // Собираем все файлы пакета + поля метаданных. Поля multipart лежат
+      // как «псевдо-файлы» с .value, разбираемся отдельно.
+      const collected: Array<{ filename: string; mimetype: string; buffer: Buffer }> = [];
+      const rawFields: Record<string, string | undefined> = {};
+      let lastFields: Record<string, { value?: string } | undefined> = {};
+      for await (const part of mp.files()) {
+        // Поля из формы тоже идут в .files() с заполненным fields.
+        // Запоминаем последний набор fields — они одинаковы у всех parts.
+        lastFields = part.fields;
+        const buf = await part.toBuffer();
+        if (buf.length === 0) continue;
+        const mime = (part.mimetype ?? '').toLowerCase();
+        const isImage =
+          mime.startsWith('image/') ||
+          /\.(jpg|jpeg|png|webp|heic|heif)$/i.test(part.filename);
+        const isPdf = mime.includes('pdf') || /\.pdf$/i.test(part.filename);
+        if (!isImage && !isPdf) {
+          // Молча пропускаем неподдерживаемые типы — это могут быть поля
+          // form-data, ошибочно прилетевшие через .files().
+          continue;
+        }
+        collected.push({ filename: part.filename, mimetype: part.mimetype, buffer: buf });
+      }
+      for (const [k, v] of Object.entries(lastFields)) {
+        if (v && typeof v === 'object' && 'value' in v && typeof v.value === 'string') {
+          rawFields[k] = v.value;
+        }
+      }
+
+      if (collected.length === 0) {
+        return reply
+          .code(400)
+          .send({ error: 'no_files', message: 'Не приложен ни один файл' });
+      }
+
+      const meta = UpdPdfQueueRequestSchema.safeParse(rawFields);
+      if (!meta.success) {
+        return reply.code(400).send({
+          error: 'bad_request',
+          message: meta.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+        });
+      }
+      const { direction, contractorId, recipientMolId, siteId, expectedDate } = meta.data;
+
+      // Идемпотентность по совокупному хешу пакета: сортируем хеши отдельных
+      // файлов и берём sha256 от их конкатенации. Тот же набор фоток в разном
+      // порядке → тот же contentHash → возвращаем существующую запись.
+      const fileHashes = collected
+        .map((f) => createHash('sha256').update(f.buffer).digest('hex'))
+        .sort();
+      const bundleHash = createHash('sha256').update(fileHashes.join('|')).digest('hex');
+
+      const existingWhere = [
+        eq(sourceDocuments.contentHash, bundleHash),
+        eq(sourceDocuments.kind, 'transport_waybill'),
+        inArray(sourceDocuments.status, ['queued', 'processing', 'parsed', 'needs_resolution']),
+      ];
+      const [existing] = await app.db
+        .select()
+        .from(sourceDocuments)
+        .where(and(...existingWhere))
+        .limit(1);
+      if (existing) {
+        const names = await loadSdNames(app, existing);
+        return UpdPdfQueueResponseSchema.parse({
+          created: sdRow(existing, names),
+          alreadyExists: true,
+        });
+      }
+
+      // S3 пути: каждый файл со своим именем под одним sourceDocumentId.
+      const newId = randomUUID();
+      const [twSite] = await app.db
+        .select({ code: sites.code })
+        .from(sites)
+        .where(eq(sites.id, siteId))
+        .limit(1);
+      const [twCp] = contractorId
+        ? await app.db
+            .select({ inn: counterparties.inn, name: counterparties.name })
+            .from(counterparties)
+            .where(eq(counterparties.id, contractorId))
+            .limit(1)
+        : [];
+
+      const attachmentsToInsert: Array<{
+        sourceDocumentId: string;
+        s3Key: string;
+        filename: string;
+        mimeType: string;
+        sizeBytes: number;
+        role: 'original';
+      }> = [];
+      try {
+        for (let i = 0; i < collected.length; i++) {
+          const f = collected[i]!;
+          // Безопасное имя для S3: убираем директории, оставляем расширение.
+          const safeName = f.filename.replace(/[/\\]/g, '_').slice(-100) || `page-${i + 1}.bin`;
+          const s3Key = buildS3Key({
+            site: twSite ?? null,
+            counterparty: twCp ?? null,
+            entityType: 'source-documents',
+            entityId: newId,
+            filename: `tw-${i + 1}-${safeName}`,
+          });
+          await putObject(s3Key, f.buffer, f.mimetype || 'application/octet-stream');
+          attachmentsToInsert.push({
+            sourceDocumentId: newId,
+            s3Key,
+            filename: safeName,
+            mimeType: f.mimetype || 'application/octet-stream',
+            sizeBytes: f.buffer.length,
+            role: 'original',
+          });
+        }
+      } catch (err) {
+        req.log.error({ err }, 's3 putObject failed for transport waybill bundle');
+        return reply.code(503).send({ error: 's3_unavailable', message: 'S3 недоступен' });
+      }
+
+      const now = new Date();
+      const [created] = await app.db
+        .insert(sourceDocuments)
+        .values({
+          id: newId,
+          kind: 'transport_waybill',
+          direction,
+          origin: 'manual_pdf',
+          contractorId: contractorId ?? null,
+          recipientMolId: recipientMolId ?? null,
+          siteId,
+          expectedDate: expectedDate ? new Date(expectedDate) : null,
+          status: 'queued',
+          contentHash: bundleHash,
+          originalFilename: collected[0]?.filename ?? null,
+          queuedAt: now,
+          parsedAt: now,
+          createdByUserId: req.user?.id ?? null,
+        })
+        .returning();
+      if (!created) throw new Error('Failed to insert source_document (transport_waybill)');
+
+      await app.db.insert(sourceDocumentAttachments).values(attachmentsToInsert);
+
+      // s3Key в job-data берём от первого файла — worker для ТН его не
+      // использует напрямую (тянет всех attachments по sourceDocumentId),
+      // но поле обязательное в UpdParseJobData.
+      const job = await app.queues.updParse.add('parse', {
+        sourceDocumentId: created.id,
+        s3Key: attachmentsToInsert[0]!.s3Key,
+      });
+      if (job.id) {
+        await app.db
+          .update(sourceDocuments)
+          .set({ jobId: job.id })
+          .where(eq(sourceDocuments.id, created.id));
+      }
+
+      const names = await loadSdNames(app, created);
+      reply.code(201);
+      return UpdPdfQueueResponseSchema.parse({
+        created: { ...sdRow(created, names), jobAttempts: 0 },
+        alreadyExists: false,
+      });
+    },
+  );
+
   // ──────────── Разрешение дубликата УПД (needs_resolution+duplicate_upd) ────────────
   app.post(
     '/api/v1/source-documents/:id/resolve-duplicate',

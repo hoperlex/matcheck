@@ -31,7 +31,7 @@ export const shipmentKindEnum = pgEnum('shipment_kind', [
 // См. миграцию 0029. Constraint на согласованность asset_id/material_id —
 // на уровне таблиц delivery_items / shipment_items.
 export const itemKindEnum = pgEnum('item_kind', ['material', 'asset']);
-export const sourceKindEnum = pgEnum('source_kind', ['upd', 'request']);
+export const sourceKindEnum = pgEnum('source_kind', ['upd', 'request', 'transport_waybill']);
 export const sourceOriginEnum = pgEnum('source_origin', [
   'edo_diadoc',
   'manual_xml',

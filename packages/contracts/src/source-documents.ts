@@ -1,6 +1,11 @@
 import { z } from 'zod';
 
-export const SourceKindSchema = z.enum(['upd', 'request']);
+// 'transport_waybill' — печатная транспортная накладная (форма РФ 2116).
+// Распознаётся отдельным vision-LLM pipeline (см. transport-waybill.parser.ts),
+// в отличие от УПД, где идёт текстовый pdf-parse. В одном пакете могут лежать
+// рукописные накладные, паспорта качества, ОС-2 — все они игнорируются;
+// извлекаются данные только из печатной ТН.
+export const SourceKindSchema = z.enum(['upd', 'request', 'transport_waybill']);
 export const SourceOriginSchema = z.enum(['edo_diadoc', 'manual_xml', 'manual_pdf', 'mail']);
 export const SourceStatusSchema = z.enum([
   'parsed',
@@ -20,6 +25,8 @@ export const SourceParseErrorCodeSchema = z.enum([
   'pdf_no_text',
   'parse_failed',
   'internal_error',
+  // ТН-pipeline: ни один файл из пакета не классифицирован как печатная ТН.
+  'no_transport_waybill_found',
 ]);
 export type SourceParseErrorCode = z.infer<typeof SourceParseErrorCodeSchema>;
 export const SourceDirectionSchema = z.enum(['inbound', 'outbound']);
@@ -277,6 +284,41 @@ export const UpdPdfParsedSchema = z.object({
   confidence: z.number().min(0).max(1),
 });
 export type UpdPdfParsed = z.infer<typeof UpdPdfParsedSchema>;
+
+// ──────────── Транспортная накладная (ТН, форма РФ 2116) ────────────
+// Vision-LLM получает все изображения пакета одним вызовом, классифицирует
+// каждое и возвращает данные ТОЛЬКО для печатной ТН. Если ТН не найдена —
+// confidence: 0 и пустой items, worker помечает документ
+// status='parse_failed' с parseErrorCode='no_transport_waybill_found'.
+//
+// Поля минимальные — извлекаем только то, что попросил пользователь
+// (№, дата, поставщик, подрядчик, материалы). ИНН — опционально, для
+// поиска/связи контрагентов в справочнике.
+
+export const TransportWaybillPartySchema = z.object({
+  inn: z.string().nullable().optional(),
+  name: z.string().nullable().optional(),
+});
+
+export const TransportWaybillItemSchema = z.object({
+  nameRaw: z.string().min(1),
+  qty: z.number().nullable().optional(),
+  unit: z.string().nullable().optional(),
+});
+
+export const TransportWaybillParsedSchema = z.object({
+  // null = ТН в пакете не найдена. Worker пометит документ как parse_failed.
+  found: z.boolean(),
+  docNumber: z.string().nullable().optional(),
+  docDate: z.string().nullable().optional(), // YYYY-MM-DD
+  // Грузоотправитель — в нашей терминологии «Поставщик».
+  shipper: TransportWaybillPartySchema.nullable().optional(),
+  // Грузополучатель — «Подрядчик».
+  consignee: TransportWaybillPartySchema.nullable().optional(),
+  items: z.array(TransportWaybillItemSchema),
+  confidence: z.number().min(0).max(1),
+});
+export type TransportWaybillParsed = z.infer<typeof TransportWaybillParsedSchema>;
 
 export const SourceDocumentFileResponseSchema = z.object({
   url: z.string().url(),

@@ -148,3 +148,30 @@ export async function apiUploadFile<T>(
   fd.append(opts.fieldName ?? 'file', file, file.name);
   return request<T>(path, { method: 'POST', body: fd, signal: opts.signal });
 }
+
+/**
+ * Загрузка пакета файлов одним POST — используется для Транспортной
+ * накладной, где юзер прикладывает несколько фото листов (лицевая +
+ * оборотная + сопроводительные). Сервер кладёт каждый файл как
+ * attachment к одной записи source_documents и обрабатывает их вместе.
+ */
+export async function apiUploadFiles<T>(
+  path: string,
+  files: File[],
+  opts: {
+    fieldName?: string;
+    signal?: AbortSignal;
+    fields?: Record<string, string>;
+  } = {},
+): Promise<T> {
+  const fd = new FormData();
+  for (const [k, v] of Object.entries(opts.fields ?? {})) {
+    fd.append(k, v);
+  }
+  // Все файлы под одним именем поля — @fastify/multipart выдаёт их через
+  // .files() итератор, порядок сохраняется.
+  for (const f of files) {
+    fd.append(opts.fieldName ?? 'files', f, f.name);
+  }
+  return request<T>(path, { method: 'POST', body: fd, signal: opts.signal });
+}

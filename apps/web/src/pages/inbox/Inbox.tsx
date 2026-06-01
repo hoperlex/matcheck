@@ -35,6 +35,7 @@ import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSor
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
+import { TransportWaybillUploadModal } from './TransportWaybillUploadModal';
 import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
 import { UpdResolveDuplicateModal } from './UpdResolveDuplicateModal';
 
@@ -48,6 +49,17 @@ const UNFINISHED_STATUSES: ReadonlyArray<Row['status']> = [
 ];
 
 type KindFilter = 'all' | 'upd' | 'request';
+
+/**
+ * Цвет/подпись типа документа. Три варианта: УПД, Заявка, Накладная
+ * (транспортная накладная — распознаётся отдельным vision-LLM pipeline,
+ * см. `TransportWaybillUploadModal`).
+ */
+function KindTag({ kind }: { kind: Row['kind'] }) {
+  if (kind === 'upd') return <Tag color="blue">УПД</Tag>;
+  if (kind === 'transport_waybill') return <Tag color="purple">Накладная</Tag>;
+  return <Tag color="gold">Заявка</Tag>;
+}
 
 function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }) {
   switch (row.status) {
@@ -175,6 +187,7 @@ export default function InboxPage() {
   };
 
   const [pdfModalOpen, setPdfModalOpen] = useState(false);
+  const [twModalOpen, setTwModalOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [resolveId, setResolveId] = useState<string | null>(null);
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
@@ -354,6 +367,9 @@ export default function InboxPage() {
                   <Button type="primary" onClick={() => setPdfModalOpen(true)}>
                     Загрузить УПД (PDF)
                   </Button>
+                  <Button onClick={() => setTwModalOpen(true)}>
+                    Загрузить накладные
+                  </Button>
                 </Space>
               }
             />
@@ -375,11 +391,9 @@ export default function InboxPage() {
           {
             title: 'Тип',
             dataIndex: 'kind',
-            width: 80,
+            width: 110,
             sorter: stringSorter<Row>((r) => r.kind),
-            render: (k: Row['kind']) => (
-              <Tag color={k === 'upd' ? 'blue' : 'gold'}>{k === 'upd' ? 'УПД' : 'Заявка'}</Tag>
-            ),
+            render: (k: Row['kind']) => <KindTag kind={k} />,
           },
           {
             title: 'Статус',
@@ -466,9 +480,7 @@ export default function InboxPage() {
           <Card style={{ width: '100%' }} size="small">
             <Space direction="vertical" size={2} style={{ width: '100%', position: 'relative' }}>
               <Space size={4} wrap>
-                <Tag color={r.kind === 'upd' ? 'blue' : 'gold'}>
-                  {r.kind === 'upd' ? 'УПД' : 'Заявка'}
-                </Tag>
+                <KindTag kind={r.kind} />
                 <StatusTag row={r} onResolve={(row) => setResolveId(row.id)} />
               </Space>
               <Typography.Text strong>
@@ -501,6 +513,11 @@ export default function InboxPage() {
         open={pdfModalOpen}
         direction={direction}
         onClose={() => setPdfModalOpen(false)}
+      />
+      <TransportWaybillUploadModal
+        open={twModalOpen}
+        direction={direction}
+        onClose={() => setTwModalOpen(false)}
       />
       <SourceDocumentDetailModal
         id={selectedId}

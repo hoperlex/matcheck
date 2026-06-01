@@ -281,6 +281,13 @@
       "when": 1780877640000,
       "tag": "0039_user_phone_and_doc_creator",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1780877700000,
+      "tag": "0040_transport_waybill_kind_and_prompt",
+      "breakpoints": true
     }
   ]
 }

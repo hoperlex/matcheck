@@ -183,7 +183,7 @@ export function UpdPdfUploadModal({
   return (
     <Modal
       open={open}
-      title="Загрузить УПД (PDF)"
+      title={`Загрузить УПД (PDF) для ${direction === 'inbound' ? 'приёмки' : 'отгрузки'}`}
       onCancel={close}
       maskClosable={false}
       keyboard={false}

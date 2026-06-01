@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PromptDocKindSchema = z.enum(['upd', 'request']);
+export const PromptDocKindSchema = z.enum(['upd', 'request', 'transport_waybill']);
 export type PromptDocKind = z.infer<typeof PromptDocKindSchema>;
 
 export const PromptDtoSchema = z.object({
