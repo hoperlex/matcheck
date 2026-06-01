@@ -235,8 +235,20 @@ export function SourceDocumentDetailModal({
               <Tag color={sd.direction === 'inbound' ? 'green' : 'purple'}>
                 {directionLabel(sd.direction)}
               </Tag>
-              <Tag color={sd.kind === 'upd' ? 'blue' : 'gold'}>
-                {sd.kind === 'upd' ? 'УПД' : 'Заявка'}
+              <Tag
+                color={
+                  sd.kind === 'upd'
+                    ? 'blue'
+                    : sd.kind === 'transport_waybill'
+                      ? 'purple'
+                      : 'gold'
+                }
+              >
+                {sd.kind === 'upd'
+                  ? 'УПД'
+                  : sd.kind === 'transport_waybill'
+                    ? 'Накладная'
+                    : 'Заявка'}
               </Tag>
               {sd.siteName ? <Tag>Объект: {sd.siteName}</Tag> : null}
               {sd.contractorName ? <Tag>Подрядчик: {sd.contractorName}</Tag> : null}
