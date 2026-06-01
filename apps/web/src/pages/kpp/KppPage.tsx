@@ -257,7 +257,7 @@ export default function KppPage() {
     queryKey: ['source-documents', 'unaccepted-upd-count', 'inbound'],
     queryFn: () =>
       api.get<{ total: number }>(
-        '/source-documents?kind=upd&direction=inbound&unaccepted=true&limit=1',
+        '/source-documents?kind=upd,transport_waybill&direction=inbound&unaccepted=true&limit=1',
       ),
   });
   const acceptedCountQuery = useQuery({

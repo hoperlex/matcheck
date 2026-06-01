@@ -40,8 +40,35 @@ import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { publishEvent } from './events.js';
 
+const KIND_VALUES = ['upd', 'request', 'transport_waybill'] as const;
+type KindValue = (typeof KIND_VALUES)[number];
+
+// kind принимает либо одно значение, либо CSV-список значений
+// (например kind=upd,transport_waybill) — нужно для «Ожидаемые» в
+// КПП/Отгрузках, где должны попадать и УПД, и ТН одновременно.
+const KindFilterSchema = z
+  .string()
+  .transform((s, ctx) => {
+    const parts = s
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean);
+    if (parts.length === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'empty kind' });
+      return z.NEVER;
+    }
+    for (const p of parts) {
+      if (!(KIND_VALUES as readonly string[]).includes(p)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `unknown kind: ${p}` });
+        return z.NEVER;
+      }
+    }
+    return parts as KindValue[];
+  })
+  .optional();
+
 const ListQuerySchema = z.object({
-  kind: z.enum(['upd', 'request']).optional(),
+  kind: KindFilterSchema,
   direction: z.enum(['inbound', 'outbound']).optional(),
   q: z.string().trim().min(1).max(200).optional(),
   unaccepted: z.coerce.boolean().optional(),
@@ -394,7 +421,14 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     async (req) => {
       const { kind, direction, q, unaccepted, limit, offset } = req.query;
       const conditions = [];
-      if (kind) conditions.push(eq(sourceDocuments.kind, kind));
+      if (kind && kind.length > 0) {
+        const first = kind[0];
+        if (kind.length === 1 && first) {
+          conditions.push(eq(sourceDocuments.kind, first));
+        } else {
+          conditions.push(inArray(sourceDocuments.kind, kind));
+        }
+      }
       if (direction) conditions.push(eq(sourceDocuments.direction, direction));
       if (q) conditions.push(ilike(sourceDocuments.docNumber, `%${q}%`));
       // inspector_kpp видит только документы своего объекта.
@@ -566,7 +600,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     '/api/v1/source-documents/:id/file/raw',
     {
       preHandler: [app.authenticate],
-      schema: { params: z.object({ id: z.string().uuid() }) },
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        querystring: z.object({ attachmentId: z.string().uuid().optional() }),
+      },
     },
     async (req, reply) => {
       // inspector_kpp видит файлы только документов своего объекта.
@@ -580,7 +617,25 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           return reply.code(404).send({ error: 'not_found' });
         }
       }
-      const att = await findOriginalAttachment(app, req.params.id);
+      // Если передан attachmentId — отдаём именно его (нужно для пакетов
+      // ТН, где несколько фото в одном source_document). Иначе fallback на
+      // «первый original» (текущее поведение для УПД с одним PDF).
+      let att: typeof sourceDocumentAttachments.$inferSelect | null = null;
+      if (req.query.attachmentId) {
+        const [a] = await app.db
+          .select()
+          .from(sourceDocumentAttachments)
+          .where(
+            and(
+              eq(sourceDocumentAttachments.id, req.query.attachmentId),
+              eq(sourceDocumentAttachments.sourceDocumentId, req.params.id),
+            ),
+          )
+          .limit(1);
+        att = a ?? null;
+      } else {
+        att = await findOriginalAttachment(app, req.params.id);
+      }
       if (!att) return reply.code(404).send({ error: 'no_attachment' });
 
       let signedUrl: string;

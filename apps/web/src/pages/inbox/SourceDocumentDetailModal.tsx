@@ -474,22 +474,46 @@ export function SourceDocumentDetailModal({
                 },
                 {
                   key: 'original',
-                  label: 'Оригинал',
-                  children: file.isLoading ? (
-                    <Spin />
-                  ) : file.data ? (
-                    <iframe
-                      src={`/api/v1/source-documents/${id}/file/raw`}
-                      title="Оригинал документа"
-                      style={{ width: '100%', height: '75vh', border: '1px solid #f0f0f0' }}
-                    />
-                  ) : (
-                    <Typography.Text type="secondary">
-                      {file.error instanceof ApiError && file.error.status === 404
-                        ? 'Оригинальный файл недоступен (документ загружен из XML).'
-                        : 'Не удалось получить оригинал.'}
-                    </Typography.Text>
-                  ),
+                  label:
+                    sd.attachments.length > 1
+                      ? `Оригинал (${sd.attachments.length})`
+                      : 'Оригинал',
+                  children:
+                    sd.attachments.length > 0 ? (
+                      // Для УПД обычно один attachment, для ТН — пакет
+                      // фото (лицевая + оборотная сторона + сопроводилки).
+                      // Рендерим каждый файл отдельным iframe — браузер сам
+                      // справляется и с PDF, и с image/jpeg|png.
+                      <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                        {sd.attachments.map((a) => (
+                          <div key={a.id}>
+                            <Typography.Text
+                              type="secondary"
+                              style={{ display: 'block', marginBottom: 4 }}
+                            >
+                              {a.filename}
+                            </Typography.Text>
+                            <iframe
+                              src={`/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}`}
+                              title={a.filename}
+                              style={{
+                                width: '100%',
+                                height: sd.attachments.length > 1 ? '60vh' : '75vh',
+                                border: '1px solid #f0f0f0',
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </Space>
+                    ) : file.isLoading ? (
+                      <Spin />
+                    ) : (
+                      <Typography.Text type="secondary">
+                        {file.error instanceof ApiError && file.error.status === 404
+                          ? 'Оригинальный файл недоступен (документ загружен из XML).'
+                          : 'Не удалось получить оригинал.'}
+                      </Typography.Text>
+                    ),
                 },
               ]}
             />
