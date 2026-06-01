@@ -71,8 +71,31 @@ function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }
           распознаётся
         </Tag>
       );
-    case 'parsed':
-      return <Tag color="green">обработано</Tag>;
+    case 'parsed': {
+      const c = row.llmConfidence != null ? Math.round(Number(row.llmConfidence) * 100) : null;
+      const hasMismatch = row.validation?.hasMismatch === true;
+      return (
+        <Space direction="vertical" size={0} align="start">
+          <Tag color="green" style={{ marginInlineEnd: 0 }}>
+            обработано
+          </Tag>
+          {(c != null || hasMismatch) && (
+            <Space size={4} align="center">
+              {c != null && (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {c}%
+                </Typography.Text>
+              )}
+              {hasMismatch && (
+                <Tooltip title="Сумма по позициям не сходится с шапкой">
+                  <WarningOutlined style={{ color: '#fa8c16', fontSize: 12 }} />
+                </Tooltip>
+              )}
+            </Space>
+          )}
+        </Space>
+      );
+    }
     case 'parse_failed': {
       const msg =
         (row.parseErrorDetails as { message?: string } | null)?.message ?? row.parseErrorCode ?? 'ошибка';
@@ -130,24 +153,6 @@ function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }
     default:
       return <Tag>{row.status}</Tag>;
   }
-}
-
-function ConfidenceCell({ row }: { row: Row }) {
-  if (row.status === 'queued' || row.status === 'processing') {
-    return <Typography.Text type="secondary">—</Typography.Text>;
-  }
-  const c = row.llmConfidence != null ? Number(row.llmConfidence) : null;
-  const hasMismatch = row.validation?.hasMismatch === true;
-  return (
-    <Space size={4}>
-      {c != null ? <span>{Math.round(c * 100)}%</span> : <span>—</span>}
-      {hasMismatch && (
-        <Tooltip title="Сумма по позициям не сходится с шапкой">
-          <WarningOutlined style={{ color: '#fa8c16' }} />
-        </Tooltip>
-      )}
-    </Space>
-  );
 }
 
 export default function InboxPage() {
@@ -402,12 +407,6 @@ export default function InboxPage() {
             render: (_: unknown, r: Row) => (
               <StatusTag row={r} onResolve={(row) => setResolveId(row.id)} />
             ),
-          },
-          {
-            title: 'Уверенность',
-            dataIndex: 'llmConfidence',
-            sorter: numberSorter<Row>((r) => r.llmConfidence),
-            render: (_: unknown, r: Row) => <ConfidenceCell row={r} />,
           },
           {
             title: '№',
