@@ -503,6 +503,28 @@ async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise
   }
 }
 
+// Защищённый парс docDate от LLM. Промпт просит YYYY-MM-DD, но в проде
+// встречалось DD.MM.YYYY и прочие форматы — `new Date('06.05.2026')` даёт
+// Invalid Date и валит весь INSERT с RangeError: Invalid time value.
+function parseLlmDocDate(s: string | null | undefined): Date | null {
+  if (!s) return null;
+  const trimmed = s.trim();
+  // Каноническая форма из промпта.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const d = new Date(trimmed);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  // DD.MM.YYYY — частый формат на русских накладных.
+  const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(trimmed);
+  if (m) {
+    const d = new Date(`${m[3]}-${m[2]}-${m[1]}`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  // Прочие — пробуем Date.parse как best-effort; невалидные → null.
+  const d = new Date(trimmed);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 // Создаёт одну запись source_documents из распознанного WaybillDocument
 // (ТН или ОС-2), прикрепляет attachments пакета и items позиций.
 // Возвращает id созданного source_document.
@@ -533,7 +555,7 @@ async function createSourceDocumentFromWaybill(args: {
     }
   }
 
-  const docDate = doc.docDate ? new Date(doc.docDate) : null;
+  const docDate = parseLlmDocDate(doc.docDate);
   const kind = doc.form === 'os2' ? 'os2_transfer' : 'transport_waybill';
 
   const [inserted] = await db
