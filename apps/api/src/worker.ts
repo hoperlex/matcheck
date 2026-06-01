@@ -558,6 +558,16 @@ async function createSourceDocumentFromWaybill(args: {
   const docDate = parseLlmDocDate(doc.docDate);
   const kind = doc.form === 'os2' ? 'os2_transfer' : 'transport_waybill';
 
+  // Защита от несоответствия типов: bundle.expectedDate может прийти как
+  // строка 'YYYY-MM-DD' (исторически — если колонка осталась типа PG date
+  // до миграции 0043) или как Date. Приводим к Date или null.
+  const bundleExpected =
+    bundle.expectedDate instanceof Date
+      ? bundle.expectedDate
+      : bundle.expectedDate
+        ? new Date(bundle.expectedDate)
+        : null;
+
   const [inserted] = await db
     .insert(sourceDocuments)
     .values({
@@ -572,7 +582,7 @@ async function createSourceDocumentFromWaybill(args: {
       docNumber: doc.docNumber ?? null,
       docDate,
       totalSum: doc.totalSum != null ? doc.totalSum.toString() : null,
-      expectedDate: bundle.expectedDate,
+      expectedDate: bundleExpected,
       origin: 'manual_pdf',
       llmProviderId,
       llmConfidence: doc.confidence.toString(),

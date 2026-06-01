@@ -416,7 +416,7 @@ export default function InboxPage() {
                     margin: '3px 0',
                   }}
                 />
-                <div style={{ color: '#8c8c8c', fontWeight: 'normal' }}>Уверенность</div>
+                <div>Уверенность</div>
               </div>
             ),
             dataIndex: 'status',

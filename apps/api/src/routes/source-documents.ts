@@ -1044,14 +1044,21 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .sort();
       const bundleHash = createHash('sha256').update(fileHashes.join('|')).digest('hex');
 
+      // Уникальный индекс на source_bundles.bundle_hash гарантирует, что
+      // повторная загрузка того же набора файлов попадёт в существующую
+      // запись. Возможны три случая:
+      //   1. Bundle есть, к нему привязан хотя бы один source_document
+      //      (тех. или реальный) → возвращаем alreadyExists.
+      //   2. Bundle есть, но все его документы удалены или сам он в
+      //      parse_failed → «переиспользуем»: сбрасываем status='queued',
+      //      создаём новый тех. документ + attachments, кладём в очередь.
+      //   3. Bundle нет → INSERT нового.
       const [existingBundle] = await app.db
         .select()
         .from(sourceBundles)
         .where(eq(sourceBundles.bundleHash, bundleHash))
         .limit(1);
       if (existingBundle) {
-        // Если bundle уже распознан — берём первый из созданных документов;
-        // если ещё нет — техническую запись.
         const [existingDoc] = await app.db
           .select()
           .from(sourceDocuments)
@@ -1064,6 +1071,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             alreadyExists: true,
           });
         }
+        // Bundle есть, но «осиротевший» — перезапускаем распознавание.
       }
 
       const [wbSite] = await app.db
@@ -1079,21 +1087,47 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             .limit(1)
         : [];
 
-      // 1) Создаём bundle.
-      const [bundle] = await app.db
-        .insert(sourceBundles)
-        .values({
-          bundleHash,
-          direction,
-          siteId,
-          contractorId: contractorId ?? null,
-          recipientMolId: recipientMolId ?? null,
-          expectedDate: expectedDate ? new Date(expectedDate) : null,
-          status: 'queued',
-          createdByUserId: req.user?.id ?? null,
-        })
-        .returning();
-      if (!bundle) throw new Error('Failed to insert source_bundles');
+      // 1) Создаём (или переиспользуем существующий «осиротевший») bundle.
+      let bundle: typeof sourceBundles.$inferSelect;
+      if (existingBundle) {
+        // Переиспользование: сбрасываем статус и метаданные перезагрузки,
+        // bundle_hash остаётся (уникальный индекс не пересоздаётся).
+        const [updated] = await app.db
+          .update(sourceBundles)
+          .set({
+            direction,
+            siteId,
+            contractorId: contractorId ?? null,
+            recipientMolId: recipientMolId ?? null,
+            expectedDate: expectedDate ? new Date(expectedDate) : null,
+            status: 'queued',
+            parseErrorCode: null,
+            parseErrorMessage: null,
+            docCount: 0,
+            createdByUserId: req.user?.id ?? existingBundle.createdByUserId,
+            updatedAt: new Date(),
+          })
+          .where(eq(sourceBundles.id, existingBundle.id))
+          .returning();
+        if (!updated) throw new Error('Failed to update existing source_bundle');
+        bundle = updated;
+      } else {
+        const [inserted] = await app.db
+          .insert(sourceBundles)
+          .values({
+            bundleHash,
+            direction,
+            siteId,
+            contractorId: contractorId ?? null,
+            recipientMolId: recipientMolId ?? null,
+            expectedDate: expectedDate ? new Date(expectedDate) : null,
+            status: 'queued',
+            createdByUserId: req.user?.id ?? null,
+          })
+          .returning();
+        if (!inserted) throw new Error('Failed to insert source_bundles');
+        bundle = inserted;
+      }
 
       // 2) Грузим файлы в S3 под bundle.id.
       const attachmentsToInsert: Array<{

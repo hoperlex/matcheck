@@ -178,6 +178,20 @@ export function ExpectedSourceDocsList({
           {
             title: 'Тип',
             key: 'kind',
+            sorter: stringSorter<SourceDocument>((r) => r.kind),
+            // Фильтр — чтобы можно было быстро посчитать «сколько УПД,
+            // сколько Накладных, сколько Заявок» прямо в UI без БД.
+            filters: [
+              { text: 'УПД', value: 'upd' },
+              { text: 'Накладная', value: 'waybill' },
+              { text: 'Заявка', value: 'request' },
+            ],
+            onFilter: (value, r) => {
+              if (value === 'waybill') {
+                return r.kind === 'transport_waybill' || r.kind === 'os2_transfer';
+              }
+              return r.kind === value;
+            },
             render: (_: unknown, r: SourceDocument) =>
               r.kind === 'transport_waybill' || r.kind === 'os2_transfer' ? (
                 <Tag color="purple">Накладная</Tag>
