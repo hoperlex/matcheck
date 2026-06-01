@@ -404,7 +404,21 @@ export default function InboxPage() {
             render: (k: Row['kind']) => <KindTag kind={k} />,
           },
           {
-            title: 'Статус',
+            // Заголовок «двухстрочный»: сверху «Статус», снизу «Уверенность» —
+            // потому что в ячейке тоже идут две строки (тег статуса +
+            // процент). Визуально читается как числитель/знаменатель.
+            title: (
+              <div style={{ textAlign: 'center', lineHeight: 1.15 }}>
+                <div>Статус</div>
+                <div
+                  style={{
+                    borderTop: '1px solid #e5e7eb',
+                    margin: '3px 0',
+                  }}
+                />
+                <div style={{ color: '#8c8c8c', fontWeight: 'normal' }}>Уверенность</div>
+              </div>
+            ),
             dataIndex: 'status',
             sorter: stringSorter<Row>((r) => r.status),
             render: (_: unknown, r: Row) => (
