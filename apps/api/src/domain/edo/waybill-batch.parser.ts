@@ -224,6 +224,22 @@ export async function parseWaybillBatch(
       e.message = `vision LLM: JSON.parse failed (likely truncated): ${e.message}`;
       throw e;
     }
+    // Адаптер форм ответа. У OpenRouter нет жёсткой responseSchema, и модели
+    // часто игнорируют обёртку. Видели в проде:
+    //   1. [{form,...}, {form,...}]                 — плоский массив
+    //   2. {documents: [...]}                       — каноническая форма
+    //   3. {form, items, ...}                       — один документ как объект
+    // Приводим к каноническому виду {documents: [...]} перед валидацией.
+    if (Array.isArray(jsonParsed)) {
+      jsonParsed = { documents: jsonParsed };
+    } else if (
+      jsonParsed &&
+      typeof jsonParsed === 'object' &&
+      !('documents' in jsonParsed) &&
+      'form' in jsonParsed
+    ) {
+      jsonParsed = { documents: [jsonParsed] };
+    }
     parsedZod = WaybillBatchParsedSchema.parse(jsonParsed);
     return { parsed: parsedZod, llmProviderId: row.id };
   } catch (err) {

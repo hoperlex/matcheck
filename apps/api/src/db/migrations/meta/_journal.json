@@ -295,6 +295,13 @@
       "when": 1780877760000,
       "tag": "0041_waybill_batch_os2_invnumber",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1780877820000,
+      "tag": "0042_waybill_prompt_v3_object_wrapper",
+      "breakpoints": true
     }
   ]
 }
