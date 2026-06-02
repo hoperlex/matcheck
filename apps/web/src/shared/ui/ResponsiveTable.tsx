@@ -43,6 +43,7 @@ export function ResponsiveTable<T extends object>({
   onRowClick,
   numbered,
   rowSelection,
+  expandable,
 }: {
   items: T[];
   columns: Column<T>[];
