@@ -36,6 +36,7 @@ import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
+import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
 import { WaybillUploadModal } from './WaybillUploadModal';
 import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
@@ -394,9 +395,56 @@ export default function InboxPage() {
       <StickyPageHeader
         header={
           <>
-            <Typography.Title level={3} style={{ margin: '0 0 12px' }}>
-              Документы
-            </Typography.Title>
+            {/* Верхняя строка: заголовок + табы + (опционально) bulk-actions
+                справа. Аналогично KppPage — таблица поднимается на одну строку. */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                flexWrap: 'wrap',
+                marginBottom: 8,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+                <Typography.Title level={3} style={{ margin: 0 }}>
+                  Документы
+                </Typography.Title>
+                <PageTabs
+                  items={docsTabs}
+                  activeKey={direction}
+                  onChange={(k) => updateParams({ direction: k === 'outbound' ? 'outbound' : null })}
+                />
+              </div>
+              {bulk.hasSelection && (
+                <Space size={8} style={{ marginLeft: 'auto' }}>
+                  <Typography.Text type="secondary">
+                    Выбрано: <b>{bulk.selectedCount}</b>
+                  </Typography.Text>
+                  <Popconfirm
+                    title={`Удалить ${bulk.selectedCount} ${pluralizeDoc(bulk.selectedCount)}?`}
+                    okText="Удалить"
+                    cancelText="Отмена"
+                    okButtonProps={{ danger: true, loading: bulkDel.isPending }}
+                    onConfirm={() =>
+                      bulkDel.mutate(Array.from(bulk.selectedIds))
+                    }
+                    placement="bottomRight"
+                  >
+                    <Button
+                      danger
+                      icon={<DeleteOutlined />}
+                      loading={bulkDel.isPending}
+                    >
+                      Удалить выбранные
+                    </Button>
+                  </Popconfirm>
+                  <Button onClick={bulk.clear} disabled={bulkDel.isPending}>
+                    Снять выбор
+                  </Button>
+                </Space>
+              )}
+            </div>
             <ListFilters
               value={filters}
               onChange={updateFilters}
@@ -414,46 +462,6 @@ export default function InboxPage() {
                     Загрузить накладные
                   </Button>
                 </Space>
-              }
-            />
-            <PageTabs
-              items={docsTabs}
-              activeKey={direction}
-              onChange={(k) => updateParams({ direction: k === 'outbound' ? 'outbound' : null })}
-              // Bulk-actions живут в шапке справа от табов, а не отдельной
-              // строкой над таблицей — иначе появление кнопок сдвигает
-              // строки вниз, и курсор больше не над только что нажатым
-              // чекбоксом. Также убирает «прыжок» sticky-offset при
-              // первом скролле.
-              extra={
-                bulk.hasSelection ? (
-                  <Space size={8}>
-                    <Typography.Text type="secondary">
-                      Выбрано: <b>{bulk.selectedCount}</b>
-                    </Typography.Text>
-                    <Popconfirm
-                      title={`Удалить ${bulk.selectedCount} ${pluralizeDoc(bulk.selectedCount)}?`}
-                      okText="Удалить"
-                      cancelText="Отмена"
-                      okButtonProps={{ danger: true, loading: bulkDel.isPending }}
-                      onConfirm={() =>
-                        bulkDel.mutate(Array.from(bulk.selectedIds))
-                      }
-                      placement="bottomRight"
-                    >
-                      <Button
-                        danger
-                        icon={<DeleteOutlined />}
-                        loading={bulkDel.isPending}
-                      >
-                        Удалить выбранные
-                      </Button>
-                    </Popconfirm>
-                    <Button onClick={bulk.clear} disabled={bulkDel.isPending}>
-                      Снять выбор
-                    </Button>
-                  </Space>
-                ) : null
               }
             />
           </>
@@ -507,14 +515,14 @@ export default function InboxPage() {
             dataIndex: 'docDate',
             sorter: dateSorter<Row>((r) => r.docDate),
             ...dateRangeColumnFilter<Row>((r) => r.docDate),
-            render: (v: string | null) => v ?? '—',
+            render: (v: string | null) => formatDateRu(v),
           },
           {
             title: 'Дата поставки',
             dataIndex: 'expectedDate',
             sorter: dateSorter<Row>((r) => r.expectedDate),
             ...dateRangeColumnFilter<Row>((r) => r.expectedDate),
-            render: (v: string | null) => v ?? '—',
+            render: (v: string | null) => formatDateRu(v),
           },
           {
             title: 'Объект',
@@ -538,19 +546,13 @@ export default function InboxPage() {
             title: 'Сумма НДС',
             dataIndex: 'vatSum',
             sorter: numberSorter<Row>((r) => r.vatSum),
-            render: (v: string | null) => formatDecimal(v) || '—',
+            render: (v: string | null) => formatMoneyRu(v),
           },
           {
             title: 'Сумма',
             dataIndex: 'totalSum',
             sorter: numberSorter<Row>((r) => r.totalSum),
-            render: (v: string | null) => formatDecimal(v) || '—',
-          },
-          {
-            title: 'Происхождение',
-            dataIndex: 'origin',
-            width: 140,
-            sorter: stringSorter<Row>((r) => r.origin),
+            render: (v: string | null) => formatMoneyRu(v),
           },
           {
             title: '',
