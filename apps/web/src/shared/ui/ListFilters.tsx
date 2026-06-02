@@ -1,6 +1,7 @@
-import { useEffect, useState, type ReactNode } from 'react';
-import { Input, Select, Space } from 'antd';
+import type { ReactNode } from 'react';
+import { Select, Space } from 'antd';
 import type { Counterparty, Site } from '@matcheck/contracts';
+import { DebouncedSearch } from './DebouncedSearch';
 
 export type ListFilterField = 'contractor' | 'supplier' | 'site' | 'q';
 
@@ -24,7 +25,6 @@ export interface ListFiltersProps {
 
 const SELECT_WIDTH = 200;
 const SEARCH_WIDTH = 220;
-const SEARCH_DEBOUNCE_MS = 250;
 
 /**
  * Общая панель фильтров для списочных страниц (Приёмка, Отгрузка, Документы).
@@ -46,18 +46,6 @@ export function ListFilters({
   const showSupplier = fields.includes('supplier');
   const showSite = fields.includes('site');
   const showQ = fields.includes('q');
-
-  // Локальный буфер строки поиска: набираем без задержки, а наружу пушим
-  // дебаунсом — иначе каждый символ плодит запись в history.
-  const [qLocal, setQLocal] = useState(value.q);
-  useEffect(() => {
-    setQLocal(value.q);
-  }, [value.q]);
-  useEffect(() => {
-    if (qLocal === value.q) return;
-    const t = window.setTimeout(() => onChange({ q: qLocal }), SEARCH_DEBOUNCE_MS);
-    return () => window.clearTimeout(t);
-  }, [qLocal, value.q, onChange]);
 
   const contractorOptions = counterparties
     .filter((c) => c.isContractor)
@@ -112,13 +100,11 @@ export function ListFilters({
         />
       )}
       {showQ && (
-        <Input.Search
+        <DebouncedSearch
           style={{ width: SEARCH_WIDTH }}
           placeholder={searchPlaceholder ?? 'Номер документа'}
-          value={qLocal}
-          allowClear
-          onChange={(e) => setQLocal(e.target.value)}
-          onSearch={(v) => onChange({ q: v })}
+          value={value.q}
+          onChange={(v) => onChange({ q: v })}
         />
       )}
       {extra}

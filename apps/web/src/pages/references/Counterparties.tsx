@@ -22,6 +22,7 @@ import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
+import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 
 type List = { items: Counterparty[]; total: number };
 
@@ -143,7 +144,12 @@ export default function CounterpartiesPage() {
             Контрагенты
           </Typography.Title>
           <Space>
-            <Input.Search placeholder="ИНН или название" allowClear onSearch={setSearch} />
+            <DebouncedSearch
+              placeholder="ИНН или название"
+              value={search}
+              onChange={setSearch}
+              style={{ width: 260 }}
+            />
             {canDelete && (
               <BulkActionInline
                 selectedCount={bulk.selectedCount}

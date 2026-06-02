@@ -21,6 +21,7 @@ import { stringSorter } from '../../shared/ui/tableSorters';
 import { useAuthStore } from '../../stores/auth';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
+import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 
 const SYSTEM_SITE_ID = '00000000-0000-0000-0000-000000000001';
 
@@ -117,7 +118,12 @@ export default function SitesPage() {
       header={
         <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
           <Space>
-            <Input.Search placeholder="Код или название" allowClear onSearch={setSearch} />
+            <DebouncedSearch
+              placeholder="Код или название"
+              value={search}
+              onChange={setSearch}
+              style={{ width: 240 }}
+            />
           </Space>
           <Space>
             {canDelete && (

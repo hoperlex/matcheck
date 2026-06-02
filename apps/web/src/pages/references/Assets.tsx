@@ -20,6 +20,7 @@ import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
+import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 
 type List = { items: Asset[]; total: number };
 
@@ -96,7 +97,12 @@ export default function AssetsPage() {
             ОС (основные средства)
           </Typography.Title>
           <Space>
-            <Input.Search placeholder="Название или код" allowClear onSearch={setSearch} />
+            <DebouncedSearch
+              placeholder="Название или код"
+              value={search}
+              onChange={setSearch}
+              style={{ width: 240 }}
+            />
             <Button type="primary" onClick={() => setOpen(true)}>
               Добавить
             </Button>

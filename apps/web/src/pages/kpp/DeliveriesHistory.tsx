@@ -36,6 +36,7 @@ import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters'
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
+import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
@@ -542,12 +543,11 @@ export function DeliveriesHistory({
                   allowClear
                   options={statusOptions}
                 />
-                <Input.Search
+                <DebouncedSearch
                   style={{ width: 180 }}
                   placeholder="Номер авто"
                   value={filters.plate}
-                  allowClear
-                  onChange={(e) => updateFilters({ plate: e.target.value })}
+                  onChange={(v) => updateFilters({ plate: v })}
                 />
                 {filtersExtra}
               </>

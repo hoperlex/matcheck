@@ -31,6 +31,7 @@ import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
+import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 
 type List = { items: ResponsiblePerson[]; total: number };
 
@@ -126,7 +127,12 @@ export default function ResponsiblePersonsPage() {
             МОЛ (материально-ответственные лица)
           </Typography.Title>
           <Space>
-            <Input.Search placeholder="ФИО" allowClear onSearch={setSearch} />
+            <DebouncedSearch
+              placeholder="ФИО"
+              value={search}
+              onChange={setSearch}
+              style={{ width: 220 }}
+            />
             {canDelete && (
               <BulkActionInline
                 selectedCount={bulk.selectedCount}

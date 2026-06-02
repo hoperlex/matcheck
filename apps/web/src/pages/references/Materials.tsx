@@ -18,6 +18,7 @@ import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
+import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 
 type List = { items: Material[]; total: number };
 
@@ -92,7 +93,12 @@ export default function MaterialsPage() {
             Номенклатура
           </Typography.Title>
           <Space>
-            <Input.Search placeholder="Название" allowClear onSearch={setSearch} />
+            <DebouncedSearch
+              placeholder="Название"
+              value={search}
+              onChange={setSearch}
+              style={{ width: 240 }}
+            />
             <Button type="primary" onClick={() => setOpen(true)}>
               Добавить
             </Button>

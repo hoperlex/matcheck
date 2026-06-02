@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { DatePicker, Input, Select, Space, Tag, Typography } from 'antd';
+import { DatePicker, Select, Space, Tag, Typography } from 'antd';
+import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import type {
@@ -175,10 +176,10 @@ function BalanceTab({
               placeholder="На дату (сейчас)"
               format="DD.MM.YYYY"
             />
-            <Input.Search
+            <DebouncedSearch
               placeholder="Материал"
-              allowClear
-              onSearch={setQ}
+              value={q}
+              onChange={setQ}
               style={{ width: 240 }}
             />
           </Space>
@@ -343,10 +344,10 @@ function IntakeTab({
                 label: c.name,
               }))}
             />
-            <Input.Search
+            <DebouncedSearch
               placeholder="Материал или поставщик"
-              allowClear
-              onSearch={setQ}
+              value={q}
+              onChange={setQ}
               style={{ width: 320 }}
             />
           </Space>
@@ -559,10 +560,10 @@ function ShipmentTab({
                 label: KIND_LABELS[k].label,
               }))}
             />
-            <Input.Search
+            <DebouncedSearch
               placeholder="Материал или получатель"
-              allowClear
-              onSearch={setQ}
+              value={q}
+              onChange={setQ}
               style={{ width: 320 }}
             />
           </Space>
