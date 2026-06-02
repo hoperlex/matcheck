@@ -4,6 +4,8 @@ import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
+  BulkDeleteRequestSchema,
+  BulkDeleteResponseSchema,
   ConflictResponseSchema,
   DeliveryListResponseSchema,
   DeliveryMarkDeletionSchema,
@@ -604,6 +606,234 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!dto) return reply.code(404).send({ error: 'not_found' });
       publishEvent(app, { type: 'delivery_updated', entityId: dto.id, ts: new Date().toISOString() });
       return dto;
+    },
+  );
+
+  // ──────────── Bulk: пометить N приёмок на удаление ────────────
+  // Каждая запись обрабатывается отдельной транзакцией. Идёт по той же
+  // логике, что и single /mark-deletion (видимость, статус, already_pending).
+  // Безопасно: ошибка на одной записи не откатывает остальные.
+  app.post(
+    '/api/v1/deliveries/bulk-mark-deletion',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        body: BulkDeleteRequestSchema,
+        response: { 200: BulkDeleteResponseSchema },
+      },
+    },
+    async (req) => {
+      const ids = req.body.ids;
+      const deleted: string[] = [];
+      const skipped: Array<{
+        id: string;
+        reason:
+          | 'not_found'
+          | 'already_pending'
+          | 'wrong_status'
+          | 'forbidden'
+          | 'internal_error';
+      }> = [];
+
+      for (const id of ids) {
+        try {
+          const [existing] = await app.db
+            .select()
+            .from(deliveries)
+            .where(eq(deliveries.id, id))
+            .limit(1);
+          if (!existing) {
+            skipped.push({ id, reason: 'not_found' });
+            continue;
+          }
+          if (req.user?.role === 'inspector_kpp') {
+            if (!req.user.siteId || existing.siteId !== req.user.siteId) {
+              skipped.push({ id, reason: 'not_found' });
+              continue;
+            }
+          }
+          if (existing.pendingDeletionAt !== null) {
+            skipped.push({ id, reason: 'already_pending' });
+            continue;
+          }
+          const code = (await getStatusCodeById(app, existing.statusId)) ?? '';
+          if (!SOFT_DELETE_STATUSES.has(code)) {
+            skipped.push({ id, reason: 'wrong_status' });
+            continue;
+          }
+          await app.db
+            .update(deliveries)
+            .set({
+              pendingDeletionAt: new Date(),
+              pendingDeletionByUserId: req.user?.id ?? null,
+              pendingDeletionReason: null,
+              version: drSql`${deliveries.version} + 1`,
+              updatedAt: new Date(),
+            })
+            .where(eq(deliveries.id, id));
+          publishEvent(app, {
+            type: 'delivery_updated',
+            entityId: id,
+            ts: new Date().toISOString(),
+          });
+          deleted.push(id);
+        } catch (err) {
+          req.log.error({ err, id }, 'bulk-mark-deletion: failed');
+          skipped.push({ id, reason: 'internal_error' });
+        }
+      }
+      return { deleted, skipped };
+    },
+  );
+
+  // ──────────── Bulk: восстановить N приёмок (снять пометку) ────────────
+  app.post(
+    '/api/v1/deliveries/bulk-unmark-deletion',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        body: BulkDeleteRequestSchema,
+        response: { 200: BulkDeleteResponseSchema },
+      },
+    },
+    async (req) => {
+      const ids = req.body.ids;
+      const deleted: string[] = [];
+      const skipped: Array<{
+        id: string;
+        reason: 'not_found' | 'not_pending' | 'forbidden' | 'internal_error';
+      }> = [];
+
+      for (const id of ids) {
+        try {
+          const [existing] = await app.db
+            .select()
+            .from(deliveries)
+            .where(eq(deliveries.id, id))
+            .limit(1);
+          if (!existing) {
+            skipped.push({ id, reason: 'not_found' });
+            continue;
+          }
+          // Видимость + право: тот же набор что у single unmark.
+          const isAuthor =
+            existing.pendingDeletionByUserId !== null &&
+            existing.pendingDeletionByUserId === req.user?.id;
+          if (!isAuthor && req.user?.role !== 'admin') {
+            skipped.push({ id, reason: 'forbidden' });
+            continue;
+          }
+          if (req.user?.role === 'inspector_kpp') {
+            if (!req.user.siteId || existing.siteId !== req.user.siteId) {
+              skipped.push({ id, reason: 'not_found' });
+              continue;
+            }
+          }
+          if (existing.pendingDeletionAt === null) {
+            skipped.push({ id, reason: 'not_pending' });
+            continue;
+          }
+          await app.db
+            .update(deliveries)
+            .set({
+              pendingDeletionAt: null,
+              pendingDeletionByUserId: null,
+              pendingDeletionReason: null,
+              version: drSql`${deliveries.version} + 1`,
+              updatedAt: new Date(),
+            })
+            .where(eq(deliveries.id, id));
+          publishEvent(app, {
+            type: 'delivery_updated',
+            entityId: id,
+            ts: new Date().toISOString(),
+          });
+          deleted.push(id);
+        } catch (err) {
+          req.log.error({ err, id }, 'bulk-unmark-deletion: failed');
+          skipped.push({ id, reason: 'internal_error' });
+        }
+      }
+      return { deleted, skipped };
+    },
+  );
+
+  // ──────────── Bulk: удалить навсегда (только pending, только admin) ────────────
+  app.post(
+    '/api/v1/deliveries/bulk-hard-delete',
+    {
+      preHandler: [app.authenticate, app.authorize('admin')],
+      schema: {
+        body: BulkDeleteRequestSchema,
+        response: { 200: BulkDeleteResponseSchema },
+      },
+    },
+    async (req) => {
+      const ids = req.body.ids;
+      const deleted: string[] = [];
+      const skipped: Array<{
+        id: string;
+        reason: 'not_found' | 'must_mark_first' | 'forbidden' | 'internal_error';
+      }> = [];
+
+      for (const id of ids) {
+        try {
+          const [existing] = await app.db
+            .select()
+            .from(deliveries)
+            .where(eq(deliveries.id, id))
+            .limit(1);
+          if (!existing) {
+            skipped.push({ id, reason: 'not_found' });
+            continue;
+          }
+          const isPending = existing.pendingDeletionAt !== null;
+          if (!isPending) {
+            // Без pending — только draft/not_filled (как в single).
+            const code = (await getStatusCodeById(app, existing.statusId)) ?? '';
+            if (!HARD_DELETE_STATUSES.has(code)) {
+              skipped.push({ id, reason: 'must_mark_first' });
+              continue;
+            }
+          }
+          // S3-объекты удаляются до DB-delete; ошибки в S3 не должны
+          // блокировать удаление записи (логируем и продолжаем).
+          const photos = await app.db
+            .select({
+              s3Key: deliveryPhotos.s3Key,
+              thumbS3Key: deliveryPhotos.thumbS3Key,
+            })
+            .from(deliveryPhotos)
+            .where(eq(deliveryPhotos.deliveryId, id));
+          for (const p of photos) {
+            try {
+              await deleteObject(p.s3Key);
+              if (p.thumbS3Key) await deleteObject(p.thumbS3Key);
+            } catch (s3Err) {
+              req.log.warn({ err: s3Err, s3Key: p.s3Key }, 'bulk-hard-delete: s3 delete failed');
+            }
+          }
+          await app.db.transaction(async (tx) => {
+            await tx.insert(entityDeletions).values({
+              entityType: 'delivery',
+              entityId: id,
+              siteId: existing.siteId,
+              deletedByUserId: req.user?.id ?? null,
+            });
+            await tx.delete(deliveries).where(eq(deliveries.id, id));
+          });
+          publishEvent(app, {
+            type: 'delivery_deleted',
+            entityId: id,
+            ts: new Date().toISOString(),
+          });
+          deleted.push(id);
+        } catch (err) {
+          req.log.error({ err, id }, 'bulk-hard-delete: failed');
+          skipped.push({ id, reason: 'internal_error' });
+        }
+      }
+      return { deleted, skipped };
     },
   );
 }

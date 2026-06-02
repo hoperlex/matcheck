@@ -16,6 +16,7 @@ import {
 import { DeleteOutlined, ExclamationCircleOutlined, UndoOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
+  BulkDeleteResponse,
   Counterparty,
   Shipment,
   ShipmentKind,
@@ -35,6 +36,8 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
+import { useBulkSelection } from '../../shared/ui/useBulkSelection';
+import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
@@ -260,6 +263,36 @@ export function ShipmentsHistory({
     return sd?.docNumber ?? null;
   };
 
+  // Массовый выбор + три bulk-мутации. Набор кнопок в bulk-bar
+  // переключается по isTrash, как в DeliveriesHistory.
+  const bulk = useBulkSelection<Row>((r) => r.id);
+  const handleBulkSuccess = (res: BulkDeleteResponse, okMsg: string) => {
+    bulk.clear();
+    if (res.deleted.length > 0) message.success(`${okMsg}: ${res.deleted.length}`);
+    if (res.skipped.length > 0) {
+      message.warning(`Пропущено ${res.skipped.length}: ${bulkSkipMessage(res.skipped)}`);
+    }
+    void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+  };
+  const bulkMark = useMutation({
+    mutationFn: (ids: string[]) =>
+      api.post<BulkDeleteResponse>('/shipments/bulk-mark-deletion', { ids }),
+    onSuccess: (res) => handleBulkSuccess(res, 'Помечено на удаление'),
+    onError: (err: Error) => message.error(err.message),
+  });
+  const bulkUnmark = useMutation({
+    mutationFn: (ids: string[]) =>
+      api.post<BulkDeleteResponse>('/shipments/bulk-unmark-deletion', { ids }),
+    onSuccess: (res) => handleBulkSuccess(res, 'Восстановлено'),
+    onError: (err: Error) => message.error(err.message),
+  });
+  const bulkHard = useMutation({
+    mutationFn: (ids: string[]) =>
+      api.post<BulkDeleteResponse>('/shipments/bulk-hard-delete', { ids }),
+    onSuccess: (res) => handleBulkSuccess(res, 'Удалено навсегда'),
+    onError: (err: Error) => message.error(err.message),
+  });
+
   const items = list.data?.items ?? [];
 
   // Опции селекта «Статус» собираем из реальных данных и добавляем
@@ -456,7 +489,63 @@ export function ShipmentsHistory({
             }
           />
           {tabs && activeTab && onTabChange && (
-            <PageTabs items={tabs} activeKey={activeTab} onChange={onTabChange} />
+            <PageTabs
+              items={tabs}
+              activeKey={activeTab}
+              onChange={onTabChange}
+              extra={
+                bulk.hasSelection ? (
+                  isTrash ? (
+                    <Space size={8}>
+                      <Typography.Text type="secondary">
+                        Выбрано: <b>{bulk.selectedCount}</b>
+                      </Typography.Text>
+                      <Popconfirm
+                        title={`Восстановить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)}?`}
+                        okText="Восстановить"
+                        cancelText="Отмена"
+                        onConfirm={() =>
+                          bulkUnmark.mutate(Array.from(bulk.selectedIds))
+                        }
+                        placement="bottomRight"
+                      >
+                        <Button icon={<UndoOutlined />} loading={bulkUnmark.isPending}>
+                          Восстановить выбранные
+                        </Button>
+                      </Popconfirm>
+                      {isAdmin && (
+                        <Popconfirm
+                          title={`Удалить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)} навсегда?`}
+                          description="Восстановить будет невозможно."
+                          okText="Удалить"
+                          cancelText="Отмена"
+                          okButtonProps={{ danger: true, loading: bulkHard.isPending }}
+                          onConfirm={() =>
+                            bulkHard.mutate(Array.from(bulk.selectedIds))
+                          }
+                          placement="bottomRight"
+                        >
+                          <Button danger icon={<DeleteOutlined />} loading={bulkHard.isPending}>
+                            Удалить навсегда
+                          </Button>
+                        </Popconfirm>
+                      )}
+                      <Button onClick={bulk.clear} disabled={bulkUnmark.isPending || bulkHard.isPending}>
+                        Снять выбор
+                      </Button>
+                    </Space>
+                  ) : (
+                    <BulkActionInline
+                      selectedCount={bulk.selectedCount}
+                      onClear={bulk.clear}
+                      onDelete={() => bulkMark.mutate(Array.from(bulk.selectedIds))}
+                      deleting={bulkMark.isPending}
+                      confirmTitle={`Пометить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)} на удаление?`}
+                    />
+                  )
+                ) : null
+              }
+            />
           )}
         </Space>
       }
@@ -466,6 +555,7 @@ export function ShipmentsHistory({
         loading={list.isLoading}
         rowKey="id"
         numbered
+        rowSelection={isAdmin || !isTrash ? bulk.selection : undefined}
         onRowClick={(r) => onOpen(r.id)}
         emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет отгрузок'}
         columns={[
@@ -563,4 +653,33 @@ export function ShipmentsHistory({
       />
     </StickyPageHeader>
   );
+}
+
+// Склонение «отгрузка»: 1 отгрузку / 2-4 отгрузки / 5+ отгрузок.
+function pluralizeShipment(n: number): string {
+  const last = n % 10;
+  const lastTwo = n % 100;
+  if (lastTwo >= 11 && lastTwo <= 14) return 'отгрузок';
+  if (last === 1) return 'отгрузку';
+  if (last >= 2 && last <= 4) return 'отгрузки';
+  return 'отгрузок';
+}
+
+function bulkSkipMessage(skipped: BulkDeleteResponse['skipped']): string {
+  const counts = new Map<string, number>();
+  for (const s of skipped) counts.set(s.reason, (counts.get(s.reason) ?? 0) + 1);
+  const labels: Record<string, string> = {
+    not_found: 'не найдены',
+    already_pending: 'уже на удалении',
+    not_pending: 'не помечены на удаление',
+    wrong_status: 'статус не позволяет',
+    must_mark_first: 'нужно сначала пометить',
+    forbidden: 'нет прав',
+    has_references: 'есть привязки',
+    system_readonly: 'системные записи',
+    internal_error: 'другая ошибка',
+  };
+  return Array.from(counts.entries())
+    .map(([reason, n]) => `${n} — ${labels[reason] ?? reason}`)
+    .join('; ');
 }

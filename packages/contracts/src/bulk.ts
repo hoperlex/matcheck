@@ -18,6 +18,16 @@ export const BulkDeleteSkipReasonSchema = z.enum([
   'has_references',
   // Технически запрещено удалять (например, системная запись).
   'system_readonly',
+  // Документ уже помечен на удаление (для bulk-mark).
+  'already_pending',
+  // Документ не был помечен на удаление (для bulk-unmark/hard-delete).
+  'not_pending',
+  // Статус документа не позволяет операцию (для mark — только filled/confirmed_mol).
+  'wrong_status',
+  // Нужно сначала пометить, потом удалить (для hard-delete без pending в статусе parsed).
+  'must_mark_first',
+  // Нет прав у текущего пользователя на эту конкретную запись.
+  'forbidden',
   // Неизвестная ошибка при удалении конкретной записи (см. логи бэка).
   'internal_error',
 ]);
