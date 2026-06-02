@@ -1,6 +1,7 @@
-import { useMemo, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Card, Space, Tag, Tooltip, Typography } from 'antd';
+import { Button, Card, Space, Tag, Tooltip, Typography } from 'antd';
+import { MinusSquareOutlined, PlusSquareOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import type {
   Counterparty,
@@ -21,6 +22,7 @@ import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../sh
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
+import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 
@@ -149,6 +151,13 @@ export function ExpectedSourceDocsList({
     });
   }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds]);
 
+  // Раскрытие строк с позициями документа — lazy fetch (см. Inbox).
+  const [expandedIds, setExpandedIds] = useState<string[]>([]);
+  const toggleExpand = (id: string) =>
+    setExpandedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+
   return (
     <StickyPageHeader
       header={
@@ -174,12 +183,20 @@ export function ExpectedSourceDocsList({
         loading={list.isLoading}
         rowKey="id"
         numbered
+        expandable={{
+          showExpandColumn: false,
+          expandedRowKeys: expandedIds,
+          expandedRowRender: (r) => (
+            <ExpandedSourceDocumentItems id={r.id} kind={r.kind} />
+          ),
+        }}
         onRowClick={(r) => onOpen(r)}
         emptyText="Нет ожидаемых УПД и накладных"
         columns={[
           {
             title: 'Тип',
             key: 'kind',
+            width: 150,
             sorter: prioritySorter<SourceDocument, SourceDocument['kind']>(
               (r) => r.kind,
               ['upd', 'request', 'transport_waybill', 'os2_transfer'],
@@ -197,14 +214,31 @@ export function ExpectedSourceDocsList({
               }
               return r.kind === value;
             },
-            render: (_: unknown, r: SourceDocument) =>
-              r.kind === 'transport_waybill' || r.kind === 'os2_transfer' ? (
-                <Tag color="purple">Накладная</Tag>
-              ) : r.kind === 'upd' ? (
-                <Tag color="blue">УПД</Tag>
-              ) : (
-                <Tag color="gold">Заявка</Tag>
-              ),
+            render: (_: unknown, r: SourceDocument) => {
+              const expanded = expandedIds.includes(r.id);
+              const tag =
+                r.kind === 'transport_waybill' || r.kind === 'os2_transfer' ? (
+                  <Tag color="purple">Накладная</Tag>
+                ) : r.kind === 'upd' ? (
+                  <Tag color="blue">УПД</Tag>
+                ) : (
+                  <Tag color="gold">Заявка</Tag>
+                );
+              return (
+                <Space size={4}>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={expanded ? <MinusSquareOutlined /> : <PlusSquareOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleExpand(r.id);
+                    }}
+                  />
+                  {tag}
+                </Space>
+              );
+            },
           },
           {
             title: 'Номер',

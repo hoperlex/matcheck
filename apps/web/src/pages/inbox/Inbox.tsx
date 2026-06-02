@@ -15,6 +15,8 @@ import {
   DeleteOutlined,
   ExclamationCircleOutlined,
   LoadingOutlined,
+  MinusSquareOutlined,
+  PlusSquareOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -34,6 +36,7 @@ import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
+import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
@@ -328,6 +331,14 @@ export default function InboxPage() {
   // Массовое удаление: чекбоксы слева, bulk action bar поверх таблицы.
   // Выбор сбрасывается при смене вкладки direction (через зависимость в
   // queryKey list — он получит другой набор items).
+  // Раскрытие строк (показ позиций документа под шапкой). Lazy fetch
+  // через ExpandedSourceDocumentItems → useQuery, кеш react-query.
+  const [expandedIds, setExpandedIds] = useState<string[]>([]);
+  const toggleExpand = (id: string) =>
+    setExpandedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+
   const bulk = useBulkSelection<Row>((r) => r.id);
   const bulkDel = useMutation({
     mutationFn: (ids: string[]) =>
@@ -473,19 +484,45 @@ export default function InboxPage() {
         rowKey="id"
         numbered
         rowSelection={bulk.selection}
+        expandable={{
+          // Свою колонку с иконкой не рендерим — ± живёт в столбце «Тип».
+          showExpandColumn: false,
+          expandedRowKeys: expandedIds,
+          expandedRowRender: (r) => (
+            <ExpandedSourceDocumentItems id={r.id} kind={r.kind} />
+          ),
+        }}
         onRowClick={(r) => setSelectedId(r.id)}
         columns={[
           {
             title: 'Тип',
             dataIndex: 'kind',
-            width: 110,
+            width: 150,
             // По частоте использования: УПД сверху, заявки в середине,
             // накладные (ТН + ОС-2) вместе внизу.
             sorter: prioritySorter<Row, Row['kind']>(
               (r) => r.kind,
               ['upd', 'request', 'transport_waybill', 'os2_transfer'],
             ),
-            render: (k: Row['kind']) => <KindTag kind={k} />,
+            // Кнопка ± рядом с тегом — раскрывает/сворачивает позиции
+            // под строкой. stopPropagation чтобы не сработал onRowClick.
+            render: (_: unknown, r: Row) => {
+              const expanded = expandedIds.includes(r.id);
+              return (
+                <Space size={4}>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={expanded ? <MinusSquareOutlined /> : <PlusSquareOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleExpand(r.id);
+                    }}
+                  />
+                  <KindTag kind={r.kind} />
+                </Space>
+              );
+            },
           },
           {
             // Заголовок «двухстрочный»: сверху «Статус», снизу «Уверенность» —

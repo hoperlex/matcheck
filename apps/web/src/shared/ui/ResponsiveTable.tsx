@@ -58,6 +58,11 @@ export function ResponsiveTable<T extends object>({
   // Необязательный antd rowSelection для массового выбора строк
   // (см. useBulkSelection). В карточном (mobile) режиме игнорируется.
   rowSelection?: TableProps<T>['rowSelection'];
+  // Необязательный antd expandable для раскрывающихся строк (например
+  // отображение позиций source_document под шапкой). Поддерживаем кастомный
+  // toggle через колонку — для этого используется showExpandColumn:false
+  // и контролируемый expandedRowKeys на стороне родителя.
+  expandable?: TableProps<T>['expandable'];
 }) {
   const bp = useBreakpoint();
   // Сумма высот всех родительских StickyPageHeader. 0 — sticky-обёртки нет,
@@ -96,6 +101,7 @@ export function ResponsiveTable<T extends object>({
         loading={loading}
         size="middle"
         rowSelection={rowSelection}
+        expandable={expandable}
         pagination={{ pageSize: 100, showSizeChanger: false }}
         locale={{ emptyText: emptyText ?? 'Нет данных' }}
         sticky={stickyOffset > 0 ? { offsetHeader: stickyOffset } : false}
