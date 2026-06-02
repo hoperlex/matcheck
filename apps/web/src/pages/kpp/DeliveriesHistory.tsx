@@ -41,6 +41,7 @@ import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSor
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
+import { formatMoneyRu } from '../../shared/utils/formatRu';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
@@ -691,14 +692,14 @@ export function DeliveriesHistory({
             key: 'vatSum',
             width: 120,
             sorter: numberSorter<Row>((r) => deliveryItemsVatSum(r.items)),
-            render: (_: unknown, r: Row) => formatMoney(deliveryItemsVatSum(r.items)),
+            render: (_: unknown, r: Row) => formatMoneyRu(deliveryItemsVatSum(r.items)),
           },
           {
             title: 'Сумма',
             key: 'totalSum',
             width: 130,
             sorter: numberSorter<Row>((r) => deliveryItemsTotal(r.items)),
-            render: (_: unknown, r: Row) => formatMoney(deliveryItemsTotal(r.items)),
+            render: (_: unknown, r: Row) => formatMoneyRu(deliveryItemsTotal(r.items)),
           },
           {
             title: '',

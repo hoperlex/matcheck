@@ -67,7 +67,7 @@ import { PhotoGallery } from './PhotoGallery';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
 import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
-import type { PageTabItem } from '../../shared/ui/PageTabs';
+import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 
 type DraftItem = {
   clientKey: string;
@@ -1620,11 +1620,23 @@ export default function KppPage() {
             alignItems: 'center',
             justifyContent: 'space-between',
             width: '100%',
+            gap: 12,
+            flexWrap: 'wrap',
           }}
         >
-          <Typography.Title level={3} style={{ margin: 0 }}>
-            Приёмка
-          </Typography.Title>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+            <Typography.Title level={3} style={{ margin: 0 }}>
+              Приёмка
+            </Typography.Title>
+            {/* Табы «Ожидаемые/Принятые» — в одной строке с заголовком,
+                чтобы освободить вертикальное пространство и поднять таблицу.
+                Дочерние компоненты больше не рендерят свой <PageTabs>. */}
+            <PageTabs
+              items={listTabs}
+              activeKey={tab}
+              onChange={handleTabChange}
+            />
+          </div>
           <div
             style={{
               display: 'flex',
@@ -1655,19 +1667,13 @@ export default function KppPage() {
         )}
 
         {tab === 'expected' ? (
-          <ExpectedUpds
-            onOpen={createFromUpd}
-            tabs={listTabs}
-            activeTab={tab}
-            onTabChange={handleTabChange}
-            filtersExtra={createButton}
-          />
+          // tabs/activeTab/onTabChange больше не передаём — PageTabs живёт
+          // в шапке KppPage (рядом с заголовком), чтобы освободить
+          // вертикальное место для таблицы.
+          <ExpectedUpds onOpen={createFromUpd} filtersExtra={createButton} />
         ) : (
           <DeliveriesHistory
             onOpen={(id) => navigate(`/kpp?delivery=${id}&from=accepted`)}
-            tabs={listTabs}
-            activeTab={tab}
-            onTabChange={handleTabChange}
             filtersExtra={createButton}
           />
         )}

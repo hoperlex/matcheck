@@ -19,6 +19,7 @@ import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters'
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
+import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 
@@ -212,14 +213,14 @@ export function ExpectedSourceDocsList({
             dataIndex: 'docDate',
             sorter: dateSorter<SourceDocument>((r) => r.docDate),
             ...dateRangeColumnFilter<SourceDocument>((r) => r.docDate),
-            render: (v: string | null) => v ?? '—',
+            render: (v: string | null) => formatDateRu(v),
           },
           {
             title: 'Дата поставки',
             dataIndex: 'expectedDate',
             sorter: dateSorter<SourceDocument>((r) => r.expectedDate),
             ...dateRangeColumnFilter<SourceDocument>((r) => r.expectedDate),
-            render: (v: string | null) => v ?? '—',
+            render: (v: string | null) => formatDateRu(v),
           },
           {
             title: 'Поставщик',
@@ -243,7 +244,7 @@ export function ExpectedSourceDocsList({
             title: 'Сумма НДС',
             key: 'vat',
             sorter: numberSorter<SourceDocument>((r) => r.vatSum),
-            render: (_: unknown, r: SourceDocument) => (r.vatSum ? `${r.vatSum} ₽` : '—'),
+            render: (_: unknown, r: SourceDocument) => formatMoneyRu(r.vatSum),
           },
           {
             title: 'Сумма',
@@ -251,7 +252,7 @@ export function ExpectedSourceDocsList({
             sorter: numberSorter<SourceDocument>((r) => r.totalSum),
             render: (_: unknown, r: SourceDocument) => (
               <span>
-                {r.totalSum ? `${r.totalSum} ₽` : '—'}
+                {formatMoneyRu(r.totalSum)}
                 {r.validation?.hasMismatch ? <MismatchTag v={r.validation} /> : null}
               </span>
             ),
