@@ -272,23 +272,6 @@ export default function ShipmentPage() {
     enabled: isNew && !!updIdFromUrl,
   });
 
-  // Для уже сохранённой отгрузки — детали привязанного источника
-  // (для отображения номера/даты/суммы УПД или Накладной в шапке).
-  const linkedSourceId = loadedShipment?.sourceDocumentIds[0] ?? null;
-  const linkedSourceQuery = useQuery({
-    queryKey: ['source-document-detail', linkedSourceId],
-    queryFn: async (): Promise<SourceDocumentDetail> => {
-      if (!linkedSourceId) throw new Error('no source id');
-      const dbi = await db();
-      const cached = await dbi.get('source_documents', linkedSourceId);
-      if (cached) return cached;
-      return await api.get<SourceDocumentDetail>(`/source-documents/${linkedSourceId}`);
-    },
-    enabled: !isNew && !!linkedSourceId,
-  });
-  // Единый источник для шапки: при isNew — из URL, иначе — из сохранённой отгрузки.
-  const linkedSource = isNew ? newFromUpdQuery.data : linkedSourceQuery.data;
-
   // Локальные IDB-записи фото — параллельный источник к loadedShipment.photos.
   // Мерджим оба, чтобы свежеснятое фото показывалось в галерее, не дожидаясь pullSync.
   const localPhotosQuery = useQuery({
@@ -440,6 +423,25 @@ export default function ShipmentPage() {
   }, [isNew, shipmentId, newFromUpdQuery.data, isInspector]);
 
   const loadedShipment: Shipment | null = virtualShipment ?? shipmentQuery.data ?? null;
+
+  // Для уже сохранённой отгрузки — детали привязанного источника
+  // (для отображения номера/даты/суммы УПД или Накладной в шапке).
+  // Должно быть ПОСЛЕ объявления loadedShipment — иначе TDZ
+  // (Cannot access 'loadedShipment' before initialization).
+  const linkedSourceId = loadedShipment?.sourceDocumentIds[0] ?? null;
+  const linkedSourceQuery = useQuery({
+    queryKey: ['source-document-detail', linkedSourceId],
+    queryFn: async (): Promise<SourceDocumentDetail> => {
+      if (!linkedSourceId) throw new Error('no source id');
+      const dbi = await db();
+      const cached = await dbi.get('source_documents', linkedSourceId);
+      if (cached) return cached;
+      return await api.get<SourceDocumentDetail>(`/source-documents/${linkedSourceId}`);
+    },
+    enabled: !isNew && !!linkedSourceId,
+  });
+  // Единый источник для шапки: при isNew — из URL, иначе — из сохранённой отгрузки.
+  const linkedSource = isNew ? newFromUpdQuery.data : linkedSourceQuery.data;
 
   /**
    * Открывает форму новой пустой отгрузки. UUID кладётся в URL под флагом new=1.
