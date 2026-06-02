@@ -42,6 +42,7 @@ export function ResponsiveTable<T extends object>({
   emptyText,
   onRowClick,
   numbered,
+  rowSelection,
 }: {
   items: T[];
   columns: Column<T>[];
@@ -54,6 +55,9 @@ export function ResponsiveTable<T extends object>({
   // (в пределах текущей страницы пагинации), а в карточном режиме
   // перед содержимым карточки выводится «N.».
   numbered?: boolean;
+  // Необязательный antd rowSelection для массового выбора строк
+  // (см. useBulkSelection). В карточном (mobile) режиме игнорируется.
+  rowSelection?: TableProps<T>['rowSelection'];
 }) {
   const bp = useBreakpoint();
   // Сумма высот всех родительских StickyPageHeader. 0 — sticky-обёртки нет,
@@ -91,6 +95,7 @@ export function ResponsiveTable<T extends object>({
         rowKey={rowKey as TableProps<T>['rowKey']}
         loading={loading}
         size="middle"
+        rowSelection={rowSelection}
         pagination={{ pageSize: 50, showSizeChanger: true }}
         locale={{ emptyText: emptyText ?? 'Нет данных' }}
         sticky={stickyOffset > 0 ? { offsetHeader: stickyOffset } : false}

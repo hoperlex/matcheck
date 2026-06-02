@@ -414,6 +414,42 @@ export const UpdPdfQueueResponseSchema = z.object({
 });
 export type UpdPdfQueueResponse = z.infer<typeof UpdPdfQueueResponseSchema>;
 
+// ──────────── Bulk-удаление source_documents ────────────
+// Тело — массив id. Ответ — те, кого удалили, и те, кого пропустили
+// (с указанием причины). Best-effort: каждая запись — независимая
+// транзакция. Записи с привязками к приёмке/отгрузке не удаляются,
+// а попадают в skipped с reason='has_references'. Идиоматично для
+// bulk-операций: фронт показывает пользователю «удалено X, пропущено Y».
+
+export const SourceDocumentBulkDeleteRequestSchema = z.object({
+  ids: z.array(z.string().uuid()).min(1).max(500),
+});
+export type SourceDocumentBulkDeleteRequest = z.infer<
+  typeof SourceDocumentBulkDeleteRequestSchema
+>;
+
+export const SourceDocumentBulkDeleteSkipReasonSchema = z.enum([
+  'has_references',
+  'not_found',
+  'internal_error',
+]);
+export type SourceDocumentBulkDeleteSkipReason = z.infer<
+  typeof SourceDocumentBulkDeleteSkipReasonSchema
+>;
+
+export const SourceDocumentBulkDeleteResponseSchema = z.object({
+  deleted: z.array(z.string().uuid()),
+  skipped: z.array(
+    z.object({
+      id: z.string().uuid(),
+      reason: SourceDocumentBulkDeleteSkipReasonSchema,
+    }),
+  ),
+});
+export type SourceDocumentBulkDeleteResponse = z.infer<
+  typeof SourceDocumentBulkDeleteResponseSchema
+>;
+
 // ──────────── Разрешение статуса needs_resolution ────────────
 
 export const UpdResolveDuplicateRequestSchema = z.object({

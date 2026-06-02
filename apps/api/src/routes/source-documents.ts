@@ -9,6 +9,8 @@ import {
   LlmCallListResponseSchema,
   ManualUpdUploadRequestSchema,
   ManualUpdUploadResponseSchema,
+  SourceDocumentBulkDeleteRequestSchema,
+  SourceDocumentBulkDeleteResponseSchema,
   SourceDocumentDirectionUpdateSchema,
   SourceDocumentListResponseSchema,
   SourceDocumentDetailSchema,
@@ -1674,6 +1676,56 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         ts: new Date().toISOString(),
       });
       return { ok: true as const };
+    },
+  );
+
+  // ──────────── Массовое удаление source_documents ────────────
+  // Best-effort: каждая запись — независимая транзакция. С привязками
+  // к приёмке/отгрузке (delivery_sources/shipment_sources) НЕ удаляются,
+  // попадают в `skipped` с reason='has_references'. Это позволяет фронту
+  // показать пользователю «удалено X, пропущено Y» без отката всей пачки.
+  app.post(
+    '/api/v1/source-documents/bulk-delete',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        body: SourceDocumentBulkDeleteRequestSchema,
+        response: { 200: SourceDocumentBulkDeleteResponseSchema },
+      },
+    },
+    async (req) => {
+      const deleted: string[] = [];
+      const skipped: Array<{ id: string; reason: 'has_references' | 'not_found' | 'internal_error' }> = [];
+
+      for (const id of req.body.ids) {
+        const [existing] = await app.db
+          .select({ id: sourceDocuments.id })
+          .from(sourceDocuments)
+          .where(eq(sourceDocuments.id, id))
+          .limit(1);
+        if (!existing) {
+          skipped.push({ id, reason: 'not_found' });
+          continue;
+        }
+        try {
+          await deleteUpdWithRefsCheck(app, id, req.user?.id ?? null, req.log);
+          deleted.push(id);
+          publishEvent(app, {
+            type: 'source_document_deleted',
+            entityId: id,
+            ts: new Date().toISOString(),
+          });
+        } catch (err) {
+          if (err instanceof HasReferencesError) {
+            skipped.push({ id, reason: 'has_references' });
+          } else {
+            req.log.error({ err, id }, 'bulk-delete: failed to delete source_document');
+            skipped.push({ id, reason: 'internal_error' });
+          }
+        }
+      }
+
+      return { deleted, skipped };
     },
   );
 }

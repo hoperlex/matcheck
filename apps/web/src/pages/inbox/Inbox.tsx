@@ -23,6 +23,7 @@ import type {
   Counterparty,
   Site,
   SourceDirection,
+  SourceDocumentBulkDeleteResponse,
   SourceDocumentListResponseSchema,
 } from '@matcheck/contracts';
 import type { z } from 'zod';
@@ -33,6 +34,8 @@ import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters'
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
+import { useBulkSelection } from '../../shared/ui/useBulkSelection';
+import { BulkActionBar } from '../../shared/ui/BulkActionBar';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
 import { WaybillUploadModal } from './WaybillUploadModal';
@@ -311,6 +314,31 @@ export default function InboxPage() {
     });
   }, [allItems, filters.contractorId, filters.supplierId, filters.siteId]);
 
+  // Массовое удаление: чекбоксы слева, bulk action bar поверх таблицы.
+  // Выбор сбрасывается при смене вкладки direction (через зависимость в
+  // queryKey list — он получит другой набор items).
+  const bulk = useBulkSelection<Row>((r) => r.id);
+  const bulkDel = useMutation({
+    mutationFn: (ids: string[]) =>
+      api.post<SourceDocumentBulkDeleteResponse>('/source-documents/bulk-delete', { ids }),
+    onSuccess: (res) => {
+      bulk.clear();
+      if (res.deleted.length > 0) message.success(`Удалено: ${res.deleted.length}`);
+      if (res.skipped.length > 0) {
+        const refsCount = res.skipped.filter((s) => s.reason === 'has_references').length;
+        const otherCount = res.skipped.length - refsCount;
+        const parts: string[] = [];
+        if (refsCount > 0) parts.push(`${refsCount} — есть привязки к приёмке/отгрузке`);
+        if (otherCount > 0) parts.push(`${otherCount} — другая причина`);
+        message.warning(`Пропущено ${res.skipped.length}: ${parts.join('; ')}`);
+      }
+      void qc.invalidateQueries({ queryKey: ['source-documents'] });
+    },
+    onError: (err: Error) => {
+      message.error(err.message);
+    },
+  });
+
   const renderDeleteButton = (r: Row) => {
     const errMsg = deleteErrors[r.id];
     return (
@@ -389,11 +417,19 @@ export default function InboxPage() {
           </>
         }
       >
+      <BulkActionBar
+        selectedCount={bulk.selectedCount}
+        onClear={bulk.clear}
+        onDelete={() => bulkDel.mutate(Array.from(bulk.selectedIds))}
+        deleting={bulkDel.isPending}
+        itemNoun="документ"
+      />
       <ResponsiveTable<Row>
         items={filteredItems}
         loading={list.isLoading}
         rowKey="id"
         numbered
+        rowSelection={bulk.selection}
         onRowClick={(r) => setSelectedId(r.id)}
         columns={[
           {
