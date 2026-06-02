@@ -31,7 +31,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
-import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
+import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
@@ -479,7 +479,12 @@ export default function InboxPage() {
             title: 'Тип',
             dataIndex: 'kind',
             width: 110,
-            sorter: stringSorter<Row>((r) => r.kind),
+            // По частоте использования: УПД сверху, заявки в середине,
+            // накладные (ТН + ОС-2) вместе внизу.
+            sorter: prioritySorter<Row, Row['kind']>(
+              (r) => r.kind,
+              ['upd', 'request', 'transport_waybill', 'os2_transfer'],
+            ),
             render: (k: Row['kind']) => <KindTag kind={k} />,
           },
           {
@@ -499,7 +504,11 @@ export default function InboxPage() {
               </div>
             ),
             dataIndex: 'status',
-            sorter: stringSorter<Row>((r) => r.status),
+            // По «требует внимания»: активные вверху, архив внизу.
+            sorter: prioritySorter<Row, Row['status']>(
+              (r) => r.status,
+              ['processing', 'queued', 'needs_resolution', 'parse_failed', 'parsed', 'archived'],
+            ),
             render: (_: unknown, r: Row) => (
               <StatusTag row={r} onResolve={(row) => setResolveId(row.id)} />
             ),
@@ -513,6 +522,9 @@ export default function InboxPage() {
           {
             title: 'Дата',
             dataIndex: 'docDate',
+            // По умолчанию свежие документы сверху — это то, чего обычно
+            // ждёт оператор при открытии списка.
+            defaultSortOrder: 'descend' as const,
             sorter: dateSorter<Row>((r) => r.docDate),
             ...dateRangeColumnFilter<Row>((r) => r.docDate),
             render: (v: string | null) => formatDateRu(v),

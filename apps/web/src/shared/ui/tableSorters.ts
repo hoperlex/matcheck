@@ -58,6 +58,30 @@ export function numberSorter<T>(get: Getter<T, number | string>) {
 }
 
 /**
+ * Сортировка по фиксированному порядку категорий — для колонок типа
+ * «Тип» (УПД/Заявка/Накладная) или «Статус», где алфавит на сыром
+ * значении даёт мусор. Значения вне списка `order` уходят в конец.
+ *
+ * Пример:
+ *   sorter: prioritySorter<Row>((r) => r.kind, ['upd', 'request', 'transport_waybill', 'os2_transfer'])
+ */
+export function prioritySorter<T, V extends string>(
+  get: Getter<T, V>,
+  order: readonly V[],
+) {
+  const index = new Map<V, number>();
+  order.forEach((v, i) => index.set(v, i));
+  const unknownRank = order.length;
+  return (a: T, b: T): number => {
+    const av = get(a);
+    const bv = get(b);
+    const ai = av == null ? unknownRank + 1 : index.get(av as V) ?? unknownRank;
+    const bi = bv == null ? unknownRank + 1 : index.get(bv as V) ?? unknownRank;
+    return ai - bi;
+  };
+}
+
+/**
  * Сортировка по ISO-дате (или Date). null/невалидное — в конец.
  */
 export function dateSorter<T>(get: Getter<T, string | Date>) {

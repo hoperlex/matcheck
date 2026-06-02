@@ -40,7 +40,7 @@ import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
-import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
+import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
@@ -563,7 +563,10 @@ export function ShipmentsHistory({
           {
             title: 'Статус',
             key: 'status',
-            sorter: stringSorter<Row>((r) => r.status.label),
+            sorter: prioritySorter<Row, string>(
+              (r) => r.status.code,
+              ['draft', 'not_filled', 'filled', 'confirmed_mol', 'shipped', 'archived'],
+            ),
             render: (_: unknown, r: Row) => renderStatusCell(r),
           },
           {
@@ -605,6 +608,8 @@ export function ShipmentsHistory({
           {
             title: 'Отгружено',
             dataIndex: 'shippedAt',
+            // Свежие отгрузки сверху.
+            defaultSortOrder: 'descend' as const,
             sorter: dateSorter<Row>((r) => r.shippedAt),
             ...dateRangeColumnFilter<Row>((r) => r.shippedAt),
           },

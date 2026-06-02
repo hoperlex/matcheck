@@ -37,7 +37,7 @@ import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
-import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
+import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
@@ -638,7 +638,12 @@ export function DeliveriesHistory({
           {
             title: 'Статус',
             key: 'status',
-            sorter: stringSorter<Row>((r) => r.status.label),
+            // По «требует внимания»: draft/not_filled → filled →
+            // confirmed_mol → archived. Активные сверху.
+            sorter: prioritySorter<Row, string>(
+              (r) => r.status.code,
+              ['draft', 'not_filled', 'filled', 'confirmed_mol', 'archived'],
+            ),
             render: (_: unknown, r: Row) => renderStatusCell(r),
           },
           {
@@ -649,6 +654,8 @@ export function DeliveriesHistory({
           {
             title: 'Прибытие',
             dataIndex: 'arrivedAt',
+            // Свежие прибытия сверху по умолчанию.
+            defaultSortOrder: 'descend' as const,
             sorter: dateSorter<Row>((r) => r.arrivedAt),
             ...dateRangeColumnFilter<Row>((r) => r.arrivedAt),
             render: (v: string | null) => formatArrival(v),

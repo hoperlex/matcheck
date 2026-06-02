@@ -17,7 +17,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
-import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
+import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
@@ -180,7 +180,10 @@ export function ExpectedSourceDocsList({
           {
             title: 'Тип',
             key: 'kind',
-            sorter: stringSorter<SourceDocument>((r) => r.kind),
+            sorter: prioritySorter<SourceDocument, SourceDocument['kind']>(
+              (r) => r.kind,
+              ['upd', 'request', 'transport_waybill', 'os2_transfer'],
+            ),
             // Фильтр — чтобы можно было быстро посчитать «сколько УПД,
             // сколько Накладных, сколько Заявок» прямо в UI без БД.
             filters: [
@@ -212,6 +215,9 @@ export function ExpectedSourceDocsList({
           {
             title: 'Дата',
             dataIndex: 'docDate',
+            // Для приёмки — свежие документы важнее (default desc).
+            // Для отгрузки дефолт ставим на «Дата поставки» (см. ниже).
+            defaultSortOrder: direction === 'inbound' ? ('descend' as const) : undefined,
             sorter: dateSorter<SourceDocument>((r) => r.docDate),
             ...dateRangeColumnFilter<SourceDocument>((r) => r.docDate),
             render: (v: string | null) => formatDateRu(v),
@@ -219,6 +225,9 @@ export function ExpectedSourceDocsList({
           {
             title: 'Дата поставки',
             dataIndex: 'expectedDate',
+            // Для отгрузки ближайшая дата поставки сверху (default asc) —
+            // что нужно готовить в первую очередь.
+            defaultSortOrder: direction === 'outbound' ? ('ascend' as const) : undefined,
             sorter: dateSorter<SourceDocument>((r) => r.expectedDate),
             ...dateRangeColumnFilter<SourceDocument>((r) => r.expectedDate),
             render: (v: string | null) => formatDateRu(v),
