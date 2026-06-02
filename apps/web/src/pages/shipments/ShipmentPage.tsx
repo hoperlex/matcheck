@@ -15,6 +15,7 @@ import {
   Space,
   Spin,
   Switch,
+  Tag,
   Tooltip,
   Typography,
   Upload,
@@ -270,6 +271,23 @@ export default function ShipmentPage() {
     },
     enabled: isNew && !!updIdFromUrl,
   });
+
+  // Для уже сохранённой отгрузки — детали привязанного источника
+  // (для отображения номера/даты/суммы УПД или Накладной в шапке).
+  const linkedSourceId = loadedShipment?.sourceDocumentIds[0] ?? null;
+  const linkedSourceQuery = useQuery({
+    queryKey: ['source-document-detail', linkedSourceId],
+    queryFn: async (): Promise<SourceDocumentDetail> => {
+      if (!linkedSourceId) throw new Error('no source id');
+      const dbi = await db();
+      const cached = await dbi.get('source_documents', linkedSourceId);
+      if (cached) return cached;
+      return await api.get<SourceDocumentDetail>(`/source-documents/${linkedSourceId}`);
+    },
+    enabled: !isNew && !!linkedSourceId,
+  });
+  // Единый источник для шапки: при isNew — из URL, иначе — из сохранённой отгрузки.
+  const linkedSource = isNew ? newFromUpdQuery.data : linkedSourceQuery.data;
 
   // Локальные IDB-записи фото — параллельный источник к loadedShipment.photos.
   // Мерджим оба, чтобы свежеснятое фото показывалось в галерее, не дожидаясь pullSync.
@@ -1243,6 +1261,39 @@ export default function ShipmentPage() {
               />
             </Card>
           </Col>
+          {linkedSource && (
+            <Col xs={24} sm={12} md={6}>
+              <Card
+                size="small"
+                // Заголовок зависит от формы источника: ТН/ОС-2 → «Накладная»,
+                // УПД (или legacy) → «УПД». Аналогично «УПД»-карточке в KppPage.
+                title={
+                  linkedSource.kind === 'transport_waybill' ||
+                  linkedSource.kind === 'os2_transfer'
+                    ? 'Накладная'
+                    : 'УПД'
+                }
+                styles={{ body: { padding: 12 } }}
+              >
+                <Space wrap>
+                  <Tag
+                    color={
+                      linkedSource.kind === 'transport_waybill' ||
+                      linkedSource.kind === 'os2_transfer'
+                        ? 'purple'
+                        : 'blue'
+                    }
+                  >
+                    {linkedSource.docNumber ?? '— без номера —'}
+                  </Tag>
+                  <Typography.Text type="secondary">
+                    {linkedSource.docDate ?? '—'}
+                    {linkedSource.totalSum ? ` · ${linkedSource.totalSum} ₽` : ''}
+                  </Typography.Text>
+                </Space>
+              </Card>
+            </Col>
+          )}
         </Row>
 
         <Collapse
