@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Tabs } from 'antd';
 
 /**
@@ -17,10 +18,16 @@ export function PageTabs({
   items,
   activeKey,
   onChange,
+  extra,
 }: {
   items: PageTabItem[];
   activeKey: string;
   onChange: (key: string) => void;
+  // Контент справа от табов (antd tabBarExtraContent). Используется,
+  // например, для bulk-action кнопок «Удалить выбранные / Снять выбор» —
+  // они занимают «зарезервированное» место в шапке и не двигают таблицу
+  // при появлении/исчезновении.
+  extra?: ReactNode;
 }) {
   return (
     <Tabs
@@ -30,6 +37,7 @@ export function PageTabs({
         key: it.key,
         label: it.count == null ? it.label : `${it.label} (${it.count})`,
       }))}
+      tabBarExtraContent={extra}
       style={{ marginBottom: 0 }}
     />
   );

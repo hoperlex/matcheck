@@ -32,10 +32,15 @@ export function StickyPageHeader({
   // иначе ResponsiveTable получает offsetHeader=0 на первом рендере и шапка
   // таблицы прилипает к top:0, а после следующего рендера прыгает на N px
   // вниз — видимый «люфт» при первом скролле.
+  //
+  // offsetHeight даёт целое число пикселей — без суб-пиксельных колебаний
+  // getBoundingClientRect (вызывавших люфт 1-2px при скролле). setState
+  // внутри useLayoutEffect React 18 применяет синхронно до paint, поэтому
+  // flushSync здесь не нужен и противопоказан (warning в console).
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const update = () => setHeight(Math.ceil(el.getBoundingClientRect().height));
+    const update = () => setHeight(el.offsetHeight);
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);

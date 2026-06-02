@@ -6,7 +6,6 @@ import {
   Card,
   Popconfirm,
   Space,
-  Spin,
   Tag,
   Tooltip,
   Typography,
@@ -35,7 +34,6 @@ import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
-import { BulkActionBar } from '../../shared/ui/BulkActionBar';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
 import { WaybillUploadModal } from './WaybillUploadModal';
@@ -59,6 +57,17 @@ type KindFilter = 'all' | 'upd' | 'request';
  * семантически один тип источника (см. WaybillUploadModal и
  * waybill-batch.parser.ts на бэке).
  */
+// Склонение «документ» под число для bulk-confirm:
+// 1 документ / 2-4 документа / 5+ документов.
+function pluralizeDoc(n: number): string {
+  const last = n % 10;
+  const lastTwo = n % 100;
+  if (lastTwo >= 11 && lastTwo <= 14) return 'документов';
+  if (last === 1) return 'документ';
+  if (last >= 2 && last <= 4) return 'документа';
+  return 'документов';
+}
+
 function KindTag({ kind }: { kind: Row['kind'] }) {
   if (kind === 'upd') return <Tag color="blue">УПД</Tag>;
   if (kind === 'transport_waybill' || kind === 'os2_transfer') {
@@ -397,9 +406,6 @@ export default function InboxPage() {
               searchPlaceholder="Номер документа"
               extra={
                 <Space size={8}>
-                  {list.isFetching && !list.isLoading && (
-                    <Spin size="small" indicator={<LoadingOutlined spin />} />
-                  )}
                   <Button type="primary" onClick={() => setPdfModalOpen(true)}>
                     Загрузить УПД (PDF)
                   </Button>
@@ -413,17 +419,45 @@ export default function InboxPage() {
               items={docsTabs}
               activeKey={direction}
               onChange={(k) => updateParams({ direction: k === 'outbound' ? 'outbound' : null })}
+              // Bulk-actions живут в шапке справа от табов, а не отдельной
+              // строкой над таблицей — иначе появление кнопок сдвигает
+              // строки вниз, и курсор больше не над только что нажатым
+              // чекбоксом. Также убирает «прыжок» sticky-offset при
+              // первом скролле.
+              extra={
+                bulk.hasSelection ? (
+                  <Space size={8}>
+                    <Typography.Text type="secondary">
+                      Выбрано: <b>{bulk.selectedCount}</b>
+                    </Typography.Text>
+                    <Popconfirm
+                      title={`Удалить ${bulk.selectedCount} ${pluralizeDoc(bulk.selectedCount)}?`}
+                      okText="Удалить"
+                      cancelText="Отмена"
+                      okButtonProps={{ danger: true, loading: bulkDel.isPending }}
+                      onConfirm={() =>
+                        bulkDel.mutate(Array.from(bulk.selectedIds))
+                      }
+                      placement="bottomRight"
+                    >
+                      <Button
+                        danger
+                        icon={<DeleteOutlined />}
+                        loading={bulkDel.isPending}
+                      >
+                        Удалить выбранные
+                      </Button>
+                    </Popconfirm>
+                    <Button onClick={bulk.clear} disabled={bulkDel.isPending}>
+                      Снять выбор
+                    </Button>
+                  </Space>
+                ) : null
+              }
             />
           </>
         }
       >
-      <BulkActionBar
-        selectedCount={bulk.selectedCount}
-        onClear={bulk.clear}
-        onDelete={() => bulkDel.mutate(Array.from(bulk.selectedIds))}
-        deleting={bulkDel.isPending}
-        itemNoun="документ"
-      />
       <ResponsiveTable<Row>
         items={filteredItems}
         loading={list.isLoading}
