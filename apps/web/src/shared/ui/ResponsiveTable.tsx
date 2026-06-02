@@ -96,7 +96,7 @@ export function ResponsiveTable<T extends object>({
         loading={loading}
         size="middle"
         rowSelection={rowSelection}
-        pagination={{ pageSize: 50, showSizeChanger: true }}
+        pagination={{ pageSize: 100, showSizeChanger: false }}
         locale={{ emptyText: emptyText ?? 'Нет данных' }}
         sticky={stickyOffset > 0 ? { offsetHeader: stickyOffset } : false}
         onRow={
