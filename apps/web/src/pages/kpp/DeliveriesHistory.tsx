@@ -42,6 +42,7 @@ import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
+import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
@@ -131,9 +132,9 @@ export function DeliveriesHistory({
   const isTrash = view === 'trash';
 
   const filters: ListFiltersValue & { status: string | null; plate: string } = {
-    contractorId: params.get('contractor'),
-    supplierId: params.get('supplier'),
-    siteId: params.get('site'),
+    contractorIds: parseCsvIds(params.get('contractor')),
+    supplierIds: parseCsvIds(params.get('supplier')),
+    siteIds: parseCsvIds(params.get('site')),
     q: params.get('q') ?? '',
     status: params.get('status'),
     plate: params.get('plate') ?? '',
@@ -147,9 +148,9 @@ export function DeliveriesHistory({
       if (val) next.set(key, val);
       else next.delete(key);
     };
-    if ('contractorId' in patch) apply('contractor', patch.contractorId);
-    if ('supplierId' in patch) apply('supplier', patch.supplierId);
-    if ('siteId' in patch) apply('site', patch.siteId);
+    if ('contractorIds' in patch) apply('contractor', toCsvIds(patch.contractorIds));
+    if ('supplierIds' in patch) apply('supplier', toCsvIds(patch.supplierIds));
+    if ('siteIds' in patch) apply('site', toCsvIds(patch.siteIds));
     if ('q' in patch) apply('q', patch.q);
     if ('status' in patch) apply('status', patch.status);
     if ('plate' in patch) apply('plate', patch.plate);
@@ -363,9 +364,9 @@ export function DeliveriesHistory({
     return items.filter((r) => {
       const c = resolveContractor(r);
       const s = resolveSite(r);
-      if (filters.contractorId && c.id !== filters.contractorId) return false;
-      if (filters.supplierId && r.supplierId !== filters.supplierId) return false;
-      if (filters.siteId && s.id !== filters.siteId) return false;
+      if (filters.contractorIds.length > 0 && (!c.id || !filters.contractorIds.includes(c.id))) return false;
+      if (filters.supplierIds.length > 0 && (!r.supplierId || !filters.supplierIds.includes(r.supplierId))) return false;
+      if (filters.siteIds.length > 0 && (!s.id || !filters.siteIds.includes(s.id))) return false;
       if (filters.status === 'no_document') {
         if (r.sourceDocumentIds.length !== 0) return false;
       } else if (filters.status && r.status.code !== filters.status) {
@@ -381,9 +382,9 @@ export function DeliveriesHistory({
   }, [
     items,
     sourceDocsById,
-    filters.contractorId,
-    filters.supplierId,
-    filters.siteId,
+    filters.contractorIds,
+    filters.supplierIds,
+    filters.siteIds,
     filters.status,
     filters.plate,
     filters.q,

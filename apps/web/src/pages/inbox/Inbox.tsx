@@ -34,6 +34,7 @@ import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
+import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
 import { WaybillUploadModal } from './WaybillUploadModal';
@@ -183,9 +184,9 @@ export default function InboxPage() {
   })();
 
   const filters: ListFiltersValue = {
-    contractorId: params.get('contractor'),
-    supplierId: params.get('supplier'),
-    siteId: params.get('site'),
+    contractorIds: parseCsvIds(params.get('contractor')),
+    supplierIds: parseCsvIds(params.get('supplier')),
+    siteIds: parseCsvIds(params.get('site')),
     q: params.get('q') ?? '',
   };
 
@@ -199,9 +200,9 @@ export default function InboxPage() {
   };
   const updateFilters = (patch: Partial<ListFiltersValue>) => {
     updateParams({
-      contractor: 'contractorId' in patch ? patch.contractorId : undefined,
-      supplier: 'supplierId' in patch ? patch.supplierId : undefined,
-      site: 'siteId' in patch ? patch.siteId : undefined,
+      contractor: 'contractorIds' in patch ? toCsvIds(patch.contractorIds) : undefined,
+      supplier: 'supplierIds' in patch ? toCsvIds(patch.supplierIds) : undefined,
+      site: 'siteIds' in patch ? toCsvIds(patch.siteIds) : undefined,
       q: 'q' in patch ? patch.q : undefined,
     });
   };
@@ -316,12 +317,12 @@ export default function InboxPage() {
   const allItems = list.data?.items ?? [];
   const filteredItems = useMemo(() => {
     return allItems.filter((r) => {
-      if (filters.contractorId && r.contractorId !== filters.contractorId) return false;
-      if (filters.supplierId && r.supplierId !== filters.supplierId) return false;
-      if (filters.siteId && r.siteId !== filters.siteId) return false;
+      if (filters.contractorIds.length > 0 && (!r.contractorId || !filters.contractorIds.includes(r.contractorId))) return false;
+      if (filters.supplierIds.length > 0 && (!r.supplierId || !filters.supplierIds.includes(r.supplierId))) return false;
+      if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId))) return false;
       return true;
     });
-  }, [allItems, filters.contractorId, filters.supplierId, filters.siteId]);
+  }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds]);
 
   // Массовое удаление: чекбоксы слева, bulk action bar поверх таблицы.
   // Выбор сбрасывается при смене вкладки direction (через зависимость в

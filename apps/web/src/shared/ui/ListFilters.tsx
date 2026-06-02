@@ -5,10 +5,13 @@ import { DebouncedSearch } from './DebouncedSearch';
 
 export type ListFilterField = 'contractor' | 'supplier' | 'site' | 'q';
 
+// Селекты Подрядчик/Поставщик/Объект — мульти-выбор. Пустой массив = «все».
+// В URL хранится как CSV: `?contractor=uuid1,uuid2`. Парсинг — на стороне
+// страниц, см. parseCsvIds в shared/utils.
 export interface ListFiltersValue {
-  contractorId: string | null;
-  supplierId: string | null;
-  siteId: string | null;
+  contractorIds: string[];
+  supplierIds: string[];
+  siteIds: string[];
   q: string;
 }
 
@@ -23,7 +26,7 @@ export interface ListFiltersProps {
   extra?: ReactNode;
 }
 
-const SELECT_WIDTH = 200;
+const SELECT_WIDTH = 240;
 const SEARCH_WIDTH = 220;
 
 /**
@@ -31,6 +34,10 @@ const SEARCH_WIDTH = 220;
  * Полностью controlled — состояние хранит родитель (обычно в URL searchParams).
  * Справочники прокидываются через props, чтобы они переиспользовались для резолва
  * имён в столбцах таблицы и не дублировались между несколькими списками на странице.
+ *
+ * Селекты в режиме `multiple` — пользователь может выбрать несколько
+ * подрядчиков/поставщиков/объектов. `maxTagCount="responsive"` — теги
+ * адаптивно сворачиваются в «+N», чтобы не растягивать высоту строки.
  */
 export function ListFilters({
   value,
@@ -61,40 +68,46 @@ export function ListFilters({
   return (
     <Space wrap size={[8, 8]} style={{ width: '100%' }}>
       {showContractor && (
-        <Select<string>
-          style={{ width: SELECT_WIDTH }}
+        <Select<string[]>
+          mode="multiple"
+          style={{ minWidth: SELECT_WIDTH }}
           placeholder="Подрядчик"
-          value={value.contractorId ?? undefined}
-          onChange={(v) => onChange({ contractorId: v ?? null })}
+          value={value.contractorIds}
+          onChange={(v) => onChange({ contractorIds: v })}
           allowClear
           showSearch
           optionFilterProp="label"
+          maxTagCount="responsive"
           loading={loading}
           options={contractorOptions}
         />
       )}
       {showSupplier && (
-        <Select<string>
-          style={{ width: SELECT_WIDTH }}
+        <Select<string[]>
+          mode="multiple"
+          style={{ minWidth: SELECT_WIDTH }}
           placeholder="Поставщик"
-          value={value.supplierId ?? undefined}
-          onChange={(v) => onChange({ supplierId: v ?? null })}
+          value={value.supplierIds}
+          onChange={(v) => onChange({ supplierIds: v })}
           allowClear
           showSearch
           optionFilterProp="label"
+          maxTagCount="responsive"
           loading={loading}
           options={supplierOptions}
         />
       )}
       {showSite && (
-        <Select<string>
-          style={{ width: SELECT_WIDTH }}
+        <Select<string[]>
+          mode="multiple"
+          style={{ minWidth: SELECT_WIDTH }}
           placeholder="Объект"
-          value={value.siteId ?? undefined}
-          onChange={(v) => onChange({ siteId: v ?? null })}
+          value={value.siteIds}
+          onChange={(v) => onChange({ siteIds: v })}
           allowClear
           showSearch
           optionFilterProp="label"
+          maxTagCount="responsive"
           loading={loading}
           options={siteOptions}
         />

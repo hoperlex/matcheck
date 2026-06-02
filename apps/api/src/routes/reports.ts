@@ -10,12 +10,13 @@ import {
 } from '@matcheck/contracts';
 
 const StockQuerySchema = z.object({
-  siteId: z.string().uuid().optional(),
   materialId: z.string().uuid().optional(),
-  // Подрядчик (counterparty). Для остатков фильтруем И приёмки
+  // Подрядчик(и) — CSV вида `uuid1,uuid2`. Для остатков фильтруем И приёмки
   // (deliveries.contractor_id), И отгрузки (shipments.receiver_counterparty_id) —
-  // показываем «движение в пределах этого подрядчика».
-  contractorId: z.string().uuid().optional(),
+  // показываем «движение в пределах этих подрядчиков».
+  contractorId: z.string().optional(),
+  // Объект(ы) — CSV. Пустая строка / undefined = «все».
+  siteId: z.string().optional(),
   q: z.string().optional(),
   date: z.string().datetime().optional(),
   limit: z.coerce.number().int().positive().max(500).default(200),
@@ -23,9 +24,8 @@ const StockQuerySchema = z.object({
 });
 
 const IntakeQuerySchema = z.object({
-  siteId: z.string().uuid().optional(),
-  // Подрядчик-получатель приёмки (deliveries.contractor_id).
-  contractorId: z.string().uuid().optional(),
+  siteId: z.string().optional(),
+  contractorId: z.string().optional(),
   q: z.string().optional(),
   dateFrom: z.string().datetime().optional(),
   dateTo: z.string().datetime().optional(),
@@ -34,12 +34,9 @@ const IntakeQuerySchema = z.object({
 });
 
 const ShipmentJournalQuerySchema = z.object({
-  siteId: z.string().uuid().optional(),
+  siteId: z.string().optional(),
   kind: ShipmentKindSchema.optional(),
-  // Получатель отгрузки (shipments.receiver_counterparty_id) — для
-  // подрядных/возвратных отгрузок это и есть «подрядчик», для transfer/
-  // writeoff поле обычно null, такие строки выпадут при фильтре.
-  contractorId: z.string().uuid().optional(),
+  contractorId: z.string().optional(),
   q: z.string().optional(),
   dateFrom: z.string().datetime().optional(),
   dateTo: z.string().datetime().optional(),
@@ -53,6 +50,23 @@ const ISO_TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2
 
 function safeUuid(v: string | undefined): string | null {
   return v && UUID_RE.test(v) ? v : null;
+}
+
+// Парсит CSV вида `uuid1,uuid2,uuid3` в массив валидированных UUID-строк.
+// Невалидные элементы отбрасываются молча — defensive, чтобы кривой URL
+// не уронил весь запрос. Пустая строка / undefined → [].
+function safeUuids(v: string | undefined): string[] {
+  if (!v) return [];
+  return v
+    .split(',')
+    .map((x) => x.trim())
+    .filter((x) => UUID_RE.test(x));
+}
+
+// Собирает SQL-фрагмент `col IN ('uuid1'::uuid, 'uuid2'::uuid, ...)`.
+// Все uuid уже прошли через safeUuids — экранирование не нужно.
+function uuidInClause(col: string, ids: string[]): string {
+  return `${col} IN (${ids.map((id) => `'${id}'::uuid`).join(',')})`;
 }
 
 function safeTimestamp(v: string | undefined): string | null {
@@ -97,15 +111,13 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const { siteId, materialId, contractorId, q, date, limit, offset } = req.query;
-      const sId = safeUuid(siteId);
+      const sIds = safeUuids(siteId);
       const mId = safeUuid(materialId);
-      const cId = safeUuid(contractorId);
+      const cIds = safeUuids(contractorId);
       const dateTs = safeTimestamp(date);
 
       // qty_in/qty_out агрегируем напрямую из deliveries/shipments, чтобы
       // подтянуть подрядчиков (string_agg) и сумму приёмок (Σ qty × price).
-      // Старый v_stock_balance этих полей не отдаёт, и view расширять не
-      // хочется — данные нужны только этому отчёту.
       // dateFilterDelivery/Shipment — необязательный фильтр по дате среза.
       const dateFilterDelivery = dateTs
         ? `AND COALESCE(d.arrived_at, d.updated_at) <= '${dateTs}'::timestamptz`
@@ -113,19 +125,16 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       const dateFilterShipment = dateTs
         ? `AND COALESCE(s.shipped_at, s.updated_at) <= '${dateTs}'::timestamptz`
         : '';
-      // Фильтр подрядчика — отдельно в каждый CTE: приёмки матчим по
-      // deliveries.contractor_id, отгрузки — по shipments.receiver_counterparty_id
-      // (для transfer/writeoff поле обычно null → выпадают, и это ОК для
-      // фильтрации по подрядчику).
-      const contractorFilterDelivery = cId
-        ? `AND d.contractor_id = '${cId}'::uuid`
+      // Фильтр подрядчика(ов) — IN (...) если выбрано несколько.
+      const contractorFilterDelivery = cIds.length
+        ? `AND ${uuidInClause('d.contractor_id', cIds)}`
         : '';
-      const contractorFilterShipment = cId
-        ? `AND s.receiver_counterparty_id = '${cId}'::uuid`
+      const contractorFilterShipment = cIds.length
+        ? `AND ${uuidInClause('s.receiver_counterparty_id', cIds)}`
         : '';
 
       const filters: string[] = [];
-      if (sId) filters.push(`b.site_id = '${sId}'::uuid`);
+      if (sIds.length) filters.push(uuidInClause('b.site_id', sIds));
       if (mId) filters.push(`b.material_id = '${mId}'::uuid`);
       if (q) {
         const safeQ = escapeLike(q);
@@ -316,8 +325,8 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const { siteId, contractorId, q, dateFrom, dateTo, limit, offset } = req.query;
-      const sId = safeUuid(siteId);
-      const cId = safeUuid(contractorId);
+      const sIds = safeUuids(siteId);
+      const cIds = safeUuids(contractorId);
       const from = safeTimestamp(dateFrom);
       const to = safeTimestamp(dateTo);
 
@@ -325,8 +334,8 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         `st.entity_type = 'delivery'`,
         `st.code IN ('filled', 'confirmed_mol')`,
       ];
-      if (sId) where.push(`d.site_id = '${sId}'::uuid`);
-      if (cId) where.push(`d.contractor_id = '${cId}'::uuid`);
+      if (sIds.length) where.push(uuidInClause('d.site_id', sIds));
+      if (cIds.length) where.push(uuidInClause('d.contractor_id', cIds));
       if (from) where.push(`COALESCE(d.arrived_at, d.updated_at) >= '${from}'::timestamptz`);
       if (to) where.push(`COALESCE(d.arrived_at, d.updated_at) <= '${to}'::timestamptz`);
       if (q) {
@@ -440,9 +449,9 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const { siteId, kind, contractorId, q, dateFrom, dateTo, limit, offset } = req.query;
-      const sId = safeUuid(siteId);
+      const sIds = safeUuids(siteId);
       const k = safeKind(kind);
-      const cId = safeUuid(contractorId);
+      const cIds = safeUuids(contractorId);
       const from = safeTimestamp(dateFrom);
       const to = safeTimestamp(dateTo);
 
@@ -450,9 +459,9 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         `st.entity_type = 'shipment'`,
         `st.code IN ('shipped', 'confirmed_mol')`,
       ];
-      if (sId) where.push(`s.site_id = '${sId}'::uuid`);
+      if (sIds.length) where.push(uuidInClause('s.site_id', sIds));
       if (k) where.push(`s.kind = '${k}'::shipment_kind`);
-      if (cId) where.push(`s.receiver_counterparty_id = '${cId}'::uuid`);
+      if (cIds.length) where.push(uuidInClause('s.receiver_counterparty_id', cIds));
       if (from) where.push(`COALESCE(s.shipped_at, s.updated_at) >= '${from}'::timestamptz`);
       if (to) where.push(`COALESCE(s.shipped_at, s.updated_at) <= '${to}'::timestamptz`);
       if (q) {

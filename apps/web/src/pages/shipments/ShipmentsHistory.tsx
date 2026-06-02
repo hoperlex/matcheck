@@ -39,6 +39,7 @@ import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
+import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
@@ -88,9 +89,9 @@ export function ShipmentsHistory({
   const isTrash = view === 'trash';
 
   const filters: ListFiltersValue & { status: string | null; plate: string } = {
-    contractorId: params.get('contractor'),
-    supplierId: params.get('supplier'),
-    siteId: params.get('site'),
+    contractorIds: parseCsvIds(params.get('contractor')),
+    supplierIds: parseCsvIds(params.get('supplier')),
+    siteIds: parseCsvIds(params.get('site')),
     q: params.get('q') ?? '',
     status: params.get('status'),
     plate: params.get('plate') ?? '',
@@ -104,9 +105,9 @@ export function ShipmentsHistory({
       if (val) next.set(key, val);
       else next.delete(key);
     };
-    if ('contractorId' in patch) apply('contractor', patch.contractorId);
-    if ('supplierId' in patch) apply('supplier', patch.supplierId);
-    if ('siteId' in patch) apply('site', patch.siteId);
+    if ('contractorIds' in patch) apply('contractor', toCsvIds(patch.contractorIds));
+    if ('supplierIds' in patch) apply('supplier', toCsvIds(patch.supplierIds));
+    if ('siteIds' in patch) apply('site', toCsvIds(patch.siteIds));
     if ('q' in patch) apply('q', patch.q);
     if ('status' in patch) apply('status', patch.status);
     if ('plate' in patch) apply('plate', patch.plate);
@@ -314,13 +315,13 @@ export function ShipmentsHistory({
 
   const filteredItems = useMemo(() => {
     return items.filter((r) => {
-      if (filters.contractorId && r.receiverCounterpartyId !== filters.contractorId) {
+      if (filters.contractorIds.length > 0 && (!r.receiverCounterpartyId || !filters.contractorIds.includes(r.receiverCounterpartyId))) {
         return false;
       }
-      if (filters.supplierId && r.receiverCounterpartyId !== filters.supplierId) {
+      if (filters.supplierIds.length > 0 && (!r.receiverCounterpartyId || !filters.supplierIds.includes(r.receiverCounterpartyId))) {
         return false;
       }
-      if (filters.siteId && r.siteId !== filters.siteId) return false;
+      if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId))) return false;
       if (filters.status === 'no_document') {
         if (r.sourceDocumentIds.length !== 0) return false;
       } else if (filters.status && r.status.code !== filters.status) {
@@ -336,9 +337,9 @@ export function ShipmentsHistory({
   }, [
     items,
     sourceDocsById,
-    filters.contractorId,
-    filters.supplierId,
-    filters.siteId,
+    filters.contractorIds,
+    filters.supplierIds,
+    filters.siteIds,
     filters.status,
     filters.plate,
     filters.q,

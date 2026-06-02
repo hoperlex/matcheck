@@ -110,8 +110,8 @@ function BalanceTab({
   activeTab: MaterialsTab;
   onTabChange: (k: string) => void;
 }) {
-  const [siteId, setSiteId] = useState<string | undefined>(undefined);
-  const [contractorId, setContractorId] = useState<string | undefined>(undefined);
+  const [siteIds, setSiteIds] = useState<string[]>([]);
+  const [contractorIds, setContractorIds] = useState<string[]>([]);
   const [date, setDate] = useState<Dayjs | null>(null);
   const [q, setQ] = useState('');
 
@@ -126,11 +126,11 @@ function BalanceTab({
   });
 
   const stockQuery = useQuery({
-    queryKey: ['reports', 'stock', { siteId, contractorId, date: date?.toISOString(), q }],
+    queryKey: ['reports', 'stock', { siteIds, contractorIds, date: date?.toISOString(), q }],
     queryFn: () => {
       const qs = new URLSearchParams();
-      if (siteId) qs.set('siteId', siteId);
-      if (contractorId) qs.set('contractorId', contractorId);
+      if (siteIds.length) qs.set('siteId', siteIds.join(','));
+      if (contractorIds.length) qs.set('contractorId', contractorIds.join(','));
       if (date) qs.set('date', date.endOf('day').toISOString());
       if (q) qs.set('q', q);
       return api.get<StockBalanceResponse>(`/reports/stock?${qs.toString()}`);
@@ -142,28 +142,32 @@ function BalanceTab({
       header={
         <>
           <Space wrap>
-            <Select<string | undefined>
+            <Select<string[]>
+              mode="multiple"
               allowClear
               placeholder="Все объекты"
               style={{ minWidth: 240 }}
-              value={siteId}
-              onChange={setSiteId}
+              value={siteIds}
+              onChange={setSiteIds}
               showSearch
               optionFilterProp="label"
+              maxTagCount="responsive"
               loading={sites.isLoading}
               options={(sites.data?.items ?? []).map((s) => ({
                 value: s.id,
                 label: `${s.code} · ${s.name}`,
               }))}
             />
-            <Select<string | undefined>
+            <Select<string[]>
+              mode="multiple"
               allowClear
               placeholder="Подрядчик"
-              style={{ minWidth: 220 }}
-              value={contractorId}
-              onChange={setContractorId}
+              style={{ minWidth: 240 }}
+              value={contractorIds}
+              onChange={setContractorIds}
               showSearch
               optionFilterProp="label"
+              maxTagCount="responsive"
               loading={counterparties.isLoading}
               options={(counterparties.data?.items ?? []).map((c) => ({
                 value: c.id,
@@ -285,8 +289,8 @@ function IntakeTab({
   onTabChange: (k: string) => void;
 }) {
   const navigate = useNavigate();
-  const [siteId, setSiteId] = useState<string | undefined>(undefined);
-  const [contractorId, setContractorId] = useState<string | undefined>(undefined);
+  const [siteIds, setSiteIds] = useState<string[]>([]);
+  const [contractorIds, setContractorIds] = useState<string[]>([]);
   const [q, setQ] = useState('');
 
   const sites = useQuery({
@@ -300,11 +304,11 @@ function IntakeTab({
   });
 
   const intakeQuery = useQuery({
-    queryKey: ['reports', 'intake', { siteId, contractorId, q }],
+    queryKey: ['reports', 'intake', { siteIds, contractorIds, q }],
     queryFn: () => {
       const qs = new URLSearchParams();
-      if (siteId) qs.set('siteId', siteId);
-      if (contractorId) qs.set('contractorId', contractorId);
+      if (siteIds.length) qs.set('siteId', siteIds.join(','));
+      if (contractorIds.length) qs.set('contractorId', contractorIds.join(','));
       if (q) qs.set('q', q);
       qs.set('limit', '500');
       return api.get<IntakeJournalResponse>(`/reports/intake?${qs.toString()}`);
@@ -316,28 +320,32 @@ function IntakeTab({
       header={
         <>
           <Space wrap>
-            <Select<string | undefined>
+            <Select<string[]>
+              mode="multiple"
               allowClear
               placeholder="Все объекты"
               style={{ minWidth: 240 }}
-              value={siteId}
-              onChange={setSiteId}
+              value={siteIds}
+              onChange={setSiteIds}
               showSearch
               optionFilterProp="label"
+              maxTagCount="responsive"
               loading={sites.isLoading}
               options={(sites.data?.items ?? []).map((s) => ({
                 value: s.id,
                 label: `${s.code} · ${s.name}`,
               }))}
             />
-            <Select<string | undefined>
+            <Select<string[]>
+              mode="multiple"
               allowClear
               placeholder="Подрядчик"
-              style={{ minWidth: 220 }}
-              value={contractorId}
-              onChange={setContractorId}
+              style={{ minWidth: 240 }}
+              value={contractorIds}
+              onChange={setContractorIds}
               showSearch
               optionFilterProp="label"
+              maxTagCount="responsive"
               loading={counterparties.isLoading}
               options={(counterparties.data?.items ?? []).map((c) => ({
                 value: c.id,
@@ -488,8 +496,8 @@ function ShipmentTab({
   onTabChange: (k: string) => void;
 }) {
   const navigate = useNavigate();
-  const [siteId, setSiteId] = useState<string | undefined>(undefined);
-  const [contractorId, setContractorId] = useState<string | undefined>(undefined);
+  const [siteIds, setSiteIds] = useState<string[]>([]);
+  const [contractorIds, setContractorIds] = useState<string[]>([]);
   const [kind, setKind] = useState<ShipmentKind | undefined>(undefined);
   const [q, setQ] = useState('');
 
@@ -504,11 +512,11 @@ function ShipmentTab({
   });
 
   const shipmentQuery = useQuery({
-    queryKey: ['reports', 'shipment', { siteId, contractorId, kind, q }],
+    queryKey: ['reports', 'shipment', { siteIds, contractorIds, kind, q }],
     queryFn: () => {
       const qs = new URLSearchParams();
-      if (siteId) qs.set('siteId', siteId);
-      if (contractorId) qs.set('contractorId', contractorId);
+      if (siteIds.length) qs.set('siteId', siteIds.join(','));
+      if (contractorIds.length) qs.set('contractorId', contractorIds.join(','));
       if (kind) qs.set('kind', kind);
       if (q) qs.set('q', q);
       qs.set('limit', '500');
@@ -521,28 +529,32 @@ function ShipmentTab({
       header={
         <>
           <Space wrap>
-            <Select<string | undefined>
+            <Select<string[]>
+              mode="multiple"
               allowClear
               placeholder="Все объекты"
               style={{ minWidth: 240 }}
-              value={siteId}
-              onChange={setSiteId}
+              value={siteIds}
+              onChange={setSiteIds}
               showSearch
               optionFilterProp="label"
+              maxTagCount="responsive"
               loading={sites.isLoading}
               options={(sites.data?.items ?? []).map((s) => ({
                 value: s.id,
                 label: `${s.code} · ${s.name}`,
               }))}
             />
-            <Select<string | undefined>
+            <Select<string[]>
+              mode="multiple"
               allowClear
               placeholder="Подрядчик"
-              style={{ minWidth: 220 }}
-              value={contractorId}
-              onChange={setContractorId}
+              style={{ minWidth: 240 }}
+              value={contractorIds}
+              onChange={setContractorIds}
               showSearch
               optionFilterProp="label"
+              maxTagCount="responsive"
               loading={counterparties.isLoading}
               options={(counterparties.data?.items ?? []).map((c) => ({
                 value: c.id,

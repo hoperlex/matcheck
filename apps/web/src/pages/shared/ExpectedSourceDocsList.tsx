@@ -20,6 +20,7 @@ import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
+import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 
@@ -94,9 +95,9 @@ export function ExpectedSourceDocsList({
   const [params, setParams] = useSearchParams();
 
   const filters: ListFiltersValue = {
-    contractorId: params.get('contractor'),
-    supplierId: params.get('supplier'),
-    siteId: params.get('site'),
+    contractorIds: parseCsvIds(params.get('contractor')),
+    supplierIds: parseCsvIds(params.get('supplier')),
+    siteIds: parseCsvIds(params.get('site')),
     q: params.get('q') ?? '',
   };
 
@@ -106,9 +107,9 @@ export function ExpectedSourceDocsList({
       if (val) next.set(key, val);
       else next.delete(key);
     };
-    if ('contractorId' in patch) apply('contractor', patch.contractorId);
-    if ('supplierId' in patch) apply('supplier', patch.supplierId);
-    if ('siteId' in patch) apply('site', patch.siteId);
+    if ('contractorIds' in patch) apply('contractor', toCsvIds(patch.contractorIds));
+    if ('supplierIds' in patch) apply('supplier', toCsvIds(patch.supplierIds));
+    if ('siteIds' in patch) apply('site', toCsvIds(patch.siteIds));
     if ('q' in patch) apply('q', patch.q);
     setParams(next, { replace: true });
   };
@@ -141,12 +142,12 @@ export function ExpectedSourceDocsList({
   const allItems = list.data?.items ?? [];
   const filteredItems = useMemo(() => {
     return allItems.filter((r) => {
-      if (filters.contractorId && r.contractorId !== filters.contractorId) return false;
-      if (filters.supplierId && r.supplierId !== filters.supplierId) return false;
-      if (filters.siteId && r.siteId !== filters.siteId) return false;
+      if (filters.contractorIds.length > 0 && (!r.contractorId || !filters.contractorIds.includes(r.contractorId))) return false;
+      if (filters.supplierIds.length > 0 && (!r.supplierId || !filters.supplierIds.includes(r.supplierId))) return false;
+      if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId))) return false;
       return true;
     });
-  }, [allItems, filters.contractorId, filters.supplierId, filters.siteId]);
+  }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds]);
 
   return (
     <StickyPageHeader
