@@ -1,9 +1,11 @@
 import type { FastifyInstance } from 'fastify';
-import { and, eq, ilike, sql as drSql } from 'drizzle-orm';
+import { and, eq, ilike, inArray, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import ExcelJS from 'exceljs';
 import { asZod } from '../lib/fastify.js';
 import {
+  BulkDeleteRequestSchema,
+  BulkDeleteResponseSchema,
   ResponsiblePersonImportResponseSchema,
   ResponsiblePersonListResponseSchema,
   ResponsiblePersonSchema,
@@ -268,6 +270,47 @@ export async function responsiblePersonRoutes(rawApp: FastifyInstance): Promise<
       });
       if (!result) return reply.code(404).send({ error: 'not_found' });
       return { ok: true };
+    },
+  );
+
+  // Массовое удаление МОЛов. Hard-delete + запись каждого удалённого
+  // в entity_deletions (та же таблица, что для одиночного DELETE), чтобы
+  // offline-клиенты узнали об удалении через /sync.deletedIds.
+  // FK от source_documents.recipient_mol_id и других — все SET NULL,
+  // удаление не блокируется ничем.
+  app.post(
+    '/api/v1/responsible-persons/bulk-delete',
+    {
+      preHandler: [app.authenticate, app.authorize('admin')],
+      schema: {
+        body: BulkDeleteRequestSchema,
+        response: { 200: BulkDeleteResponseSchema },
+      },
+    },
+    async (req) => {
+      const ids = req.body.ids;
+      const result = await app.db.transaction(async (tx) => {
+        const deleted = await tx
+          .delete(responsiblePersons)
+          .where(inArray(responsiblePersons.id, ids))
+          .returning({ id: responsiblePersons.id });
+        if (deleted.length > 0) {
+          await tx.insert(entityDeletions).values(
+            deleted.map((d) => ({
+              entityType: 'responsible_person' as const,
+              entityId: d.id,
+              siteId: null,
+              deletedByUserId: req.user?.id ?? null,
+            })),
+          );
+        }
+        return deleted.map((d) => d.id);
+      });
+      const deletedSet = new Set(result);
+      const skipped = ids
+        .filter((id) => !deletedSet.has(id))
+        .map((id) => ({ id, reason: 'not_found' as const }));
+      return { deleted: result, skipped };
     },
   );
 }

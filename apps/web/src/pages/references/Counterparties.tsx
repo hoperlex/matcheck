@@ -14,12 +14,14 @@ import {
 } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Counterparty, CounterpartyUpsert } from '@matcheck/contracts';
+import type { BulkDeleteResponse, Counterparty, CounterpartyUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
+import { useBulkSelection } from '../../shared/ui/useBulkSelection';
+import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 
 type List = { items: Counterparty[]; total: number };
 
@@ -69,6 +71,22 @@ export default function CounterpartiesPage() {
 
   const role = useAuthStore((s) => s.user?.role);
   const canDelete = role === 'admin';
+
+  // Массовое удаление контрагентов.
+  const bulk = useBulkSelection<Counterparty>((r) => r.id);
+  const bulkDel = useMutation({
+    mutationFn: (ids: string[]) =>
+      api.post<BulkDeleteResponse>('/counterparties/bulk-delete', { ids }),
+    onSuccess: (res) => {
+      bulk.clear();
+      if (res.deleted.length > 0) message.success(`Удалено: ${res.deleted.length}`);
+      if (res.skipped.length > 0) {
+        message.warning(`Пропущено ${res.skipped.length}: не найдены или другая причина`);
+      }
+      void qc.invalidateQueries({ queryKey: ['counterparties'] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
 
   // При открытии Drawer в режиме редактирования заполняем форму данными
   // выбранной строки. resetFields() — для создания, чтобы не было утечки
@@ -126,6 +144,15 @@ export default function CounterpartiesPage() {
           </Typography.Title>
           <Space>
             <Input.Search placeholder="ИНН или название" allowClear onSearch={setSearch} />
+            {canDelete && (
+              <BulkActionInline
+                selectedCount={bulk.selectedCount}
+                onClear={bulk.clear}
+                onDelete={() => bulkDel.mutate(Array.from(bulk.selectedIds))}
+                deleting={bulkDel.isPending}
+                confirmTitle={`Удалить ${bulk.selectedCount} ${pluralizeCp(bulk.selectedCount)}?`}
+              />
+            )}
             <Button type="primary" onClick={openCreate}>
               Добавить
             </Button>
@@ -138,6 +165,7 @@ export default function CounterpartiesPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        rowSelection={canDelete ? bulk.selection : undefined}
         onRowClick={openEdit}
         columns={[
           {
@@ -276,4 +304,14 @@ export default function CounterpartiesPage() {
       </Drawer>
     </StickyPageHeader>
   );
+}
+
+// Склонение «контрагент»: 1 контрагент / 2-4 контрагента / 5+ контрагентов.
+function pluralizeCp(n: number): string {
+  const last = n % 10;
+  const lastTwo = n % 100;
+  if (lastTwo >= 11 && lastTwo <= 14) return 'контрагентов';
+  if (last === 1) return 'контрагента';
+  if (last >= 2 && last <= 4) return 'контрагента';
+  return 'контрагентов';
 }

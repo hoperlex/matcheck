@@ -1,8 +1,10 @@
 import type { FastifyInstance } from 'fastify';
-import { and, eq, ilike, or, sql as drSql } from 'drizzle-orm';
+import { and, eq, ilike, inArray, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
+  BulkDeleteRequestSchema,
+  BulkDeleteResponseSchema,
   ErrorResponseSchema,
   SiteListResponseSchema,
   SitePatchSchema,
@@ -198,6 +200,77 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
         .returning({ id: sites.id });
       if (deleted.length === 0) return reply.code(404).send({ error: 'not_found' });
       return { ok: true };
+    },
+  );
+
+  // Массовое удаление объектов. Учитывает три правила, что и одиночное:
+  //  - системный объект (SYSTEM_SITE_ID) удалять нельзя → system_readonly;
+  //  - объект, на который ссылаются deliveries → has_references;
+  //  - объект не найден → not_found.
+  // Те, что прошли проверки, удаляются одним DELETE WHERE id IN (...).
+  app.post(
+    '/api/v1/sites/bulk-delete',
+    {
+      preHandler: [app.authenticate, app.authorize('admin')],
+      schema: {
+        body: BulkDeleteRequestSchema,
+        response: { 200: BulkDeleteResponseSchema },
+      },
+    },
+    async (req) => {
+      const ids = req.body.ids;
+      const skipped: Array<{
+        id: string;
+        reason: 'system_readonly' | 'has_references' | 'not_found' | 'internal_error';
+      }> = [];
+
+      // 1) System sites.
+      const systemIds = ids.filter((id) => id === SYSTEM_SITE_ID);
+      for (const id of systemIds) skipped.push({ id, reason: 'system_readonly' });
+
+      // 2) Существование.
+      const candidates = ids.filter((id) => id !== SYSTEM_SITE_ID);
+      const existingRows = candidates.length
+        ? await app.db
+            .select({ id: sites.id })
+            .from(sites)
+            .where(inArray(sites.id, candidates))
+        : [];
+      const existingSet = new Set(existingRows.map((r) => r.id));
+      for (const id of candidates) {
+        if (!existingSet.has(id)) skipped.push({ id, reason: 'not_found' });
+      }
+
+      // 3) Привязки к приёмкам — пакетный COUNT по siteId.
+      const checkable = candidates.filter((id) => existingSet.has(id));
+      const refRows = checkable.length
+        ? await app.db
+            .select({
+              siteId: deliveries.siteId,
+              count: drSql<number>`count(*)::int`,
+            })
+            .from(deliveries)
+            .where(inArray(deliveries.siteId, checkable))
+            .groupBy(deliveries.siteId)
+        : [];
+      const refSet = new Set(
+        refRows.filter((r) => Number(r.count) > 0).map((r) => r.siteId).filter((x): x is string => !!x),
+      );
+      const safeToDelete = checkable.filter((id) => !refSet.has(id));
+      for (const id of checkable) {
+        if (refSet.has(id)) skipped.push({ id, reason: 'has_references' });
+      }
+
+      // 4) Удаление.
+      const deletedRows = safeToDelete.length
+        ? await app.db
+            .delete(sites)
+            .where(inArray(sites.id, safeToDelete))
+            .returning({ id: sites.id })
+        : [];
+      const deleted = deletedRows.map((r) => r.id);
+
+      return { deleted, skipped };
     },
   );
 }

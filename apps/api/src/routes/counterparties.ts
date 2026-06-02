@@ -1,8 +1,10 @@
 import type { FastifyInstance } from 'fastify';
-import { and, eq, ilike, or, sql as drSql } from 'drizzle-orm';
+import { and, eq, ilike, inArray, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
+  BulkDeleteRequestSchema,
+  BulkDeleteResponseSchema,
   CounterpartyListResponseSchema,
   CounterpartySchema,
   CounterpartyUpsertSchema,
@@ -129,6 +131,33 @@ export async function counterpartyRoutes(rawApp: FastifyInstance): Promise<void>
         .returning({ id: counterparties.id });
       if (deleted.length === 0) return reply.code(404).send({ error: 'not_found' });
       return { ok: true };
+    },
+  );
+
+  // Массовое удаление контрагентов. FK от source_documents/deliveries/
+  // shipments на counterparties — все ON DELETE SET NULL, поэтому удалять
+  // безопасно: ссылки в документах просто обнуляются. Не найденные ID
+  // возвращаются как skipped.not_found.
+  app.post(
+    '/api/v1/counterparties/bulk-delete',
+    {
+      preHandler: [app.authenticate, app.authorize('admin')],
+      schema: {
+        body: BulkDeleteRequestSchema,
+        response: { 200: BulkDeleteResponseSchema },
+      },
+    },
+    async (req) => {
+      const ids = req.body.ids;
+      const deletedRows = await app.db
+        .delete(counterparties)
+        .where(inArray(counterparties.id, ids))
+        .returning({ id: counterparties.id });
+      const deletedSet = new Set(deletedRows.map((r) => r.id));
+      const skipped = ids
+        .filter((id) => !deletedSet.has(id))
+        .map((id) => ({ id, reason: 'not_found' as const }));
+      return { deleted: Array.from(deletedSet), skipped };
     },
   );
 }

@@ -19,6 +19,7 @@ import {
 import { DeleteOutlined, InboxOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
+  BulkDeleteResponse,
   ResponsiblePerson,
   ResponsiblePersonImportResponse,
   ResponsiblePersonUpsert,
@@ -28,6 +29,8 @@ import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
+import { useBulkSelection } from '../../shared/ui/useBulkSelection';
+import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 
 type List = { items: ResponsiblePerson[]; total: number };
 
@@ -98,6 +101,23 @@ export default function ResponsiblePersonsPage() {
     onError: (err: Error) => message.error(err.message),
   });
 
+  // Массовое удаление МОЛ. Бэк под капотом пишет в entity_deletions для
+  // offline-sync (как и одиночный DELETE), без отдельного audit-журнала.
+  const bulk = useBulkSelection<ResponsiblePerson>((r) => r.id);
+  const bulkDel = useMutation({
+    mutationFn: (ids: string[]) =>
+      api.post<BulkDeleteResponse>('/responsible-persons/bulk-delete', { ids }),
+    onSuccess: (res) => {
+      bulk.clear();
+      if (res.deleted.length > 0) message.success(`Удалено: ${res.deleted.length}`);
+      if (res.skipped.length > 0) {
+        message.warning(`Пропущено ${res.skipped.length}: не найдены или другая причина`);
+      }
+      void qc.invalidateQueries({ queryKey: ['responsible-persons'] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
   return (
     <StickyPageHeader
       header={
@@ -107,6 +127,15 @@ export default function ResponsiblePersonsPage() {
           </Typography.Title>
           <Space>
             <Input.Search placeholder="ФИО" allowClear onSearch={setSearch} />
+            {canDelete && (
+              <BulkActionInline
+                selectedCount={bulk.selectedCount}
+                onClear={bulk.clear}
+                onDelete={() => bulkDel.mutate(Array.from(bulk.selectedIds))}
+                deleting={bulkDel.isPending}
+                confirmTitle={`Удалить ${bulk.selectedCount} ${pluralizeMol(bulk.selectedCount)}?`}
+              />
+            )}
             <Button onClick={() => setImportOpen(true)}>Импорт из Excel</Button>
             <Button type="primary" onClick={() => setOpen(true)}>
               Добавить
@@ -120,6 +149,7 @@ export default function ResponsiblePersonsPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        rowSelection={canDelete ? bulk.selection : undefined}
         onRowClick={openEdit}
         columns={[
           {
@@ -235,6 +265,13 @@ export default function ResponsiblePersonsPage() {
       />
     </StickyPageHeader>
   );
+}
+
+// Аббревиатура «МОЛ» в русском склоняется по числу как «лицо», но
+// традиционно в шапках/отчётах используется как несклоняемая:
+// «Удалить 1 МОЛ?» / «Удалить 5 МОЛ?». Так и оставим.
+function pluralizeMol(_n: number): string {
+  return 'МОЛ';
 }
 
 function ImportModal({

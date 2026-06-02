@@ -13,12 +13,14 @@ import {
   message,
 } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Site, SiteUpsert } from '@matcheck/contracts';
+import type { BulkDeleteResponse, Site, SiteUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
 import { useAuthStore } from '../../stores/auth';
+import { useBulkSelection } from '../../shared/ui/useBulkSelection';
+import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 
 const SYSTEM_SITE_ID = '00000000-0000-0000-0000-000000000001';
 
@@ -63,6 +65,34 @@ export default function SitesPage() {
     onError: (err: Error) => message.error(err.message),
   });
 
+  // Массовое удаление. Системный объект (NA) на фронте disable-им
+  // через getCheckboxProps, чтобы пользователь даже не мог его выбрать.
+  // На бэке двойная защита есть тоже (system_readonly в skipped).
+  const bulk = useBulkSelection<Site>((r) => r.id);
+  bulk.selection.getCheckboxProps = (r: Site) => ({
+    disabled: r.id === SYSTEM_SITE_ID,
+  });
+  const bulkDel = useMutation({
+    mutationFn: (ids: string[]) =>
+      api.post<BulkDeleteResponse>('/sites/bulk-delete', { ids }),
+    onSuccess: (res) => {
+      bulk.clear();
+      if (res.deleted.length > 0) message.success(`Удалено: ${res.deleted.length}`);
+      if (res.skipped.length > 0) {
+        const refs = res.skipped.filter((s) => s.reason === 'has_references').length;
+        const sys = res.skipped.filter((s) => s.reason === 'system_readonly').length;
+        const other = res.skipped.length - refs - sys;
+        const parts: string[] = [];
+        if (refs) parts.push(`${refs} — используются в приёмках`);
+        if (sys) parts.push(`${sys} — системный объект`);
+        if (other) parts.push(`${other} — другая причина`);
+        message.warning(`Пропущено ${res.skipped.length}: ${parts.join('; ')}`);
+      }
+      void qc.invalidateQueries({ queryKey: ['sites'] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
   function openCreate() {
     setEditing(null);
     form.resetFields();
@@ -89,11 +119,22 @@ export default function SitesPage() {
           <Space>
             <Input.Search placeholder="Код или название" allowClear onSearch={setSearch} />
           </Space>
-          {canEdit && (
-            <Button type="primary" onClick={openCreate}>
-              Добавить объект
-            </Button>
-          )}
+          <Space>
+            {canDelete && (
+              <BulkActionInline
+                selectedCount={bulk.selectedCount}
+                onClear={bulk.clear}
+                onDelete={() => bulkDel.mutate(Array.from(bulk.selectedIds))}
+                deleting={bulkDel.isPending}
+                confirmTitle={`Удалить ${bulk.selectedCount} ${pluralizeObj(bulk.selectedCount)}?`}
+              />
+            )}
+            {canEdit && (
+              <Button type="primary" onClick={openCreate}>
+                Добавить объект
+              </Button>
+            )}
+          </Space>
         </Space>
       }
     >
@@ -102,6 +143,7 @@ export default function SitesPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        rowSelection={canDelete ? bulk.selection : undefined}
         onRowClick={(r) => canEdit && r.id !== SYSTEM_SITE_ID && openEdit(r)}
         columns={[
           {
@@ -231,4 +273,14 @@ export default function SitesPage() {
       </Drawer>
     </StickyPageHeader>
   );
+}
+
+// Склонение «объект» под число: 1 объект / 2-4 объекта / 5+ объектов.
+function pluralizeObj(n: number): string {
+  const last = n % 10;
+  const lastTwo = n % 100;
+  if (lastTwo >= 11 && lastTwo <= 14) return 'объектов';
+  if (last === 1) return 'объект';
+  if (last >= 2 && last <= 4) return 'объекта';
+  return 'объектов';
 }
