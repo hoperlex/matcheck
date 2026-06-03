@@ -615,7 +615,10 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     onSuccess: () => {
       message.success('Отгрузка сохранена');
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
-      navigate('/operations?type=shipment');
+      // Перебрасываем на вкладку «Принятые» — там сохранённая отгрузка
+      // и появится. Без tab=accepted попадаем на «Ожидаемые» (default)
+      // и ищем запись там, где её нет.
+      navigate('/operations?type=shipment&tab=accepted');
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -627,7 +630,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     onSuccess: () => {
       message.success('Отгрузка подтверждена МОЛ');
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
-      navigate('/operations?type=shipment');
+      navigate('/operations?type=shipment&tab=accepted');
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -705,7 +708,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       message.success('Отгрузка удалена');
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
-      navigate('/operations?type=shipment&trash=1');
+      navigate('/operations?type=shipment&tab=accepted&trash=1');
     },
     onError: (err: Error) => message.error(err.message),
   });

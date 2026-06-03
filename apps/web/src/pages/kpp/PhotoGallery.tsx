@@ -178,6 +178,35 @@ function PhotoThumb({
         <Typography.Text type="secondary" style={{ fontSize: 11 }}>
           Загружается…
         </Typography.Text>
+        {/* Кнопка удаления для orphan-фото: серверная запись есть, локального
+            blob нет, реальный PUT в S3 не подтвердился (timeout, дабл-клик,
+            обрыв сети). Без этой кнопки пользователь должен ждать час, пока
+            фоновая job photoOrphanCleanup сама удалит. */}
+        {canDelete && (
+          <Popconfirm
+            title="Удалить незавершённую загрузку?"
+            description="Фото не было загружено в S3. Запись будет удалена."
+            okText="Да, удалить"
+            cancelText="Нет"
+            okButtonProps={{ danger: true }}
+            onConfirm={onDelete}
+          >
+            <Button
+              danger
+              size="small"
+              shape="circle"
+              icon={<DeleteOutlined />}
+              loading={deleting}
+              style={{
+                position: 'absolute',
+                top: 4,
+                right: 4,
+                background: 'rgba(255, 255, 255, 0.9)',
+                zIndex: 1,
+              }}
+            />
+          </Popconfirm>
+        )}
       </div>
     );
   }
