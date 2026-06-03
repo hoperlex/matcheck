@@ -1,10 +1,11 @@
 import { useState, createElement } from 'react';
 import { Layout, Drawer, Button, Menu, Typography } from 'antd';
-import { MenuOutlined, LogoutOutlined } from '@ant-design/icons';
+import { MenuOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../stores/auth';
 import { filterByRole } from './navItems';
 import { api } from '../../services/api';
+import { UserProfileModal } from '../../components/UserProfileModal';
 
 const { Header, Content, Footer } = Layout;
 
@@ -16,8 +17,10 @@ export function MobileLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [open, setOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   if (!user) return null;
+  const displayName = user.fullName?.trim() || user.email;
   const allItems = filterByRole(user.role).map((n) => ({
     key: n.path,
     icon: createElement(n.icon),
@@ -59,7 +62,7 @@ export function MobileLayout() {
         onClose={() => setOpen(false)}
         placement="left"
         width={280}
-        title={user.email}
+        title={displayName}
       >
         <Menu
           mode="inline"
@@ -71,15 +74,28 @@ export function MobileLayout() {
           }}
         />
         <Button
-          icon={<LogoutOutlined />}
+          icon={<UserOutlined />}
           block
           style={{ marginTop: 16 }}
+          onClick={() => {
+            setOpen(false);
+            setProfileOpen(true);
+          }}
+          size="large"
+        >
+          Личный кабинет
+        </Button>
+        <Button
+          icon={<LogoutOutlined />}
+          block
+          style={{ marginTop: 8 }}
           onClick={handleLogout}
           size="large"
         >
           Выход
         </Button>
       </Drawer>
+      <UserProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
       <Content style={{ padding: 12, background: '#f5f5f5', flex: 1, overflowY: 'auto' }}>
         <Outlet />
       </Content>

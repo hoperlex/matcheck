@@ -91,6 +91,10 @@ export const users = pgTable(
     passwordHash: text('password_hash').notNull(),
     role: userRoleEnum('role').notNull().default('manager'),
     isActive: boolean('is_active').notNull().default(false),
+    // ФИО для отображения в шапке/футере и в админке. Опциональное:
+    // существующие users без значения, новые могут указать на регистрации
+    // или позже через «Личный кабинет».
+    fullName: text('full_name'),
     // Контактный телефон (для роли manager — нужен мобильному клиенту
     // КПП, чтобы инспектор мог позвонить менеджеру, который загрузил УПД).
     // Опциональный для всех ролей; нормализация формата на стороне клиента.

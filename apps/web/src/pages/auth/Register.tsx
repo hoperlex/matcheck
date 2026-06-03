@@ -9,11 +9,17 @@ export default function RegisterPage() {
   const [success, setSuccess] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  const onFinish = async (values: { email: string; password: string }) => {
+  const onFinish = async (values: { email: string; fullName?: string; password: string }) => {
     setError(null);
     setSubmitting(true);
     try {
-      await api.post('/auth/register', values);
+      // ФИО опционально: пустое поле не отправляем (бэк нормализует в NULL).
+      const trimmed = values.fullName?.trim();
+      await api.post('/auth/register', {
+        email: values.email,
+        password: values.password,
+        ...(trimmed ? { fullName: trimmed } : {}),
+      });
       setSuccess(true);
     } catch (err) {
       if (err instanceof ApiError) setError(err.message);
@@ -59,6 +65,16 @@ export default function RegisterPage() {
                 rules={[{ required: true, type: 'email', message: 'Корректный email' }]}
               >
                 <Input autoComplete="username" inputMode="email" />
+              </Form.Item>
+              <Form.Item
+                name="fullName"
+                label="ФИО"
+                rules={[{ max: 200, message: 'Не более 200 символов' }]}
+              >
+                <Input
+                  placeholder="Иванов Иван Иванович (можно добавить позже)"
+                  autoComplete="name"
+                />
               </Form.Item>
               <Form.Item
                 name="password"

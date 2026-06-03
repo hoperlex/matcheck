@@ -39,9 +39,30 @@ export const UserDtoSchema = z.object({
   // Контактный телефон (см. RegisterRequestSchema). null, если пользователь
   // не указал.
   phone: z.string().nullable(),
+  // ФИО (Иванов Иван Иванович). null для пользователей, заведённых до
+  // появления поля или не заполнивших его. Редактируется через «Личный
+  // кабинет».
+  fullName: z.string().nullable(),
   createdAt: z.string(),
 });
 export type UserDto = z.infer<typeof UserDtoSchema>;
+
+// Профиль текущего юзера: то, что он может изменить о себе сам через ЛК.
+// Сейчас — только ФИО. Email и роль через ЛК не меняются: email — это
+// логин (нужна верификация), роль — прерогатива админа.
+export const UpdateProfileRequestSchema = z.object({
+  fullName: z.string().trim().max(200).nullable(),
+});
+export type UpdateProfileRequest = z.infer<typeof UpdateProfileRequestSchema>;
+
+// Смена пароля. Текущий пароль обязателен — защищает от случая, когда
+// злоумышленник получил активную сессию: без знания текущего пароля он
+// не сможет «угнать» учётку, сменив его.
+export const ChangePasswordRequestSchema = z.object({
+  currentPassword: PasswordSchema,
+  newPassword: PasswordSchema,
+});
+export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>;
 
 export const UserAdminPatchSchema = z.object({
   role: UserRoleSchema.optional(),

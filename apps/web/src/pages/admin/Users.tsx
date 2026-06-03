@@ -125,6 +125,11 @@ export default function AdminUsersPage() {
             key: 'phone',
             render: (_: unknown, row: UserDto) => <PhoneCell row={row} />,
           },
+          {
+            title: 'ФИО',
+            dataIndex: 'fullName',
+            render: (v: string | null) => v ?? '—',
+          },
         ]}
         cardRender={(u) => {
           const site = u.siteId ? sites.find((s) => s.id === u.siteId) : null;

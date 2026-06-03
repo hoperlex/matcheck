@@ -2,11 +2,13 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { eq } from 'drizzle-orm';
 import { asZod } from '../lib/fastify.js';
 import {
+  ChangePasswordRequestSchema,
   LoginRequestSchema,
   LoginResponseSchema,
   RefreshResponseSchema,
   RegisterRequestSchema,
   RegisterResponseSchema,
+  UpdateProfileRequestSchema,
   UserDtoSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
@@ -37,6 +39,7 @@ function userToDto(u: {
   isActive: boolean;
   siteId: string | null;
   phone: string | null;
+  fullName: string | null;
   createdAt: Date;
 }) {
   return {
@@ -46,6 +49,7 @@ function userToDto(u: {
     isActive: u.isActive,
     siteId: u.siteId,
     phone: u.phone,
+    fullName: u.fullName,
     createdAt: u.createdAt.toISOString(),
   };
 }
@@ -97,7 +101,7 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
       },
     },
     async (req, reply) => {
-      const { email, password } = req.body;
+      const { email, password, fullName } = req.body;
       const check = await checkPasswordStrength(password, email);
       if (!check.ok) {
         return reply.code(400).send({
@@ -115,9 +119,16 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
         return reply.code(409).send({ error: 'email_taken', message: 'Email already registered' });
       }
       const passwordHash = await hashPassword(password);
+      const trimmedFullName = fullName?.trim() || null;
       const [created] = await app.db
         .insert(users)
-        .values({ email, passwordHash, role: 'manager', isActive: false })
+        .values({
+          email,
+          passwordHash,
+          role: 'manager',
+          isActive: false,
+          fullName: trimmedFullName,
+        })
         .returning();
       if (!created) throw new Error('Failed to create user');
       await app.db.insert(authEvents).values({
@@ -328,6 +339,102 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
       const [user] = await app.db.select().from(users).where(eq(users.id, req.user.id)).limit(1);
       if (!user) return reply.code(401).send({ error: 'unauthorized' });
       return userToDto(user);
+    },
+  );
+
+  // Личный кабинет: пользователь правит свой профиль. Сейчас доступно
+  // только ФИО — email = логин (требует верификации), роль/объект = задача
+  // админа. Пустая строка после trim сохраняется как NULL.
+  app.patch(
+    '/api/v1/auth/me',
+    {
+      preHandler: [app.authenticate],
+      schema: {
+        body: UpdateProfileRequestSchema,
+        response: { 200: UserDtoSchema, 401: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      if (!req.user) return reply.code(401).send({ error: 'unauthorized' });
+      const trimmed = req.body.fullName?.trim() || null;
+      await app.db
+        .update(users)
+        .set({ fullName: trimmed, updatedAt: new Date() })
+        .where(eq(users.id, req.user.id));
+      const [user] = await app.db.select().from(users).where(eq(users.id, req.user.id)).limit(1);
+      if (!user) return reply.code(401).send({ error: 'unauthorized' });
+      return userToDto(user);
+    },
+  );
+
+  // Личный кабинет: смена пароля. Требуем текущий пароль — защита от
+  // случая, когда злоумышленник получил активную сессию: без знания
+  // текущего пароля он не сможет «угнать» учётку через смену.
+  // Все остальные сессии этого юзера инвалидируются через
+  // sessionsInvalidatedAt — middleware authenticate проверит и
+  // отклонит старые refresh'и.
+  app.post(
+    '/api/v1/auth/change-password',
+    {
+      preHandler: [app.authenticate],
+      schema: {
+        body: ChangePasswordRequestSchema,
+        response: {
+          200: UserDtoSchema,
+          400: ErrorResponseSchema,
+          401: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      if (!req.user) return reply.code(401).send({ error: 'unauthorized' });
+      const { currentPassword, newPassword } = req.body;
+      const [user] = await app.db.select().from(users).where(eq(users.id, req.user.id)).limit(1);
+      if (!user) return reply.code(401).send({ error: 'unauthorized' });
+      const ok = await verifyPassword(currentPassword, user.passwordHash);
+      if (!ok) {
+        await app.db.insert(authEvents).values({
+          userId: user.id,
+          event: 'password_change_failed',
+          ip: req.ip,
+          userAgent: req.headers['user-agent'] ?? null,
+        });
+        return reply
+          .code(400)
+          .send({ error: 'wrong_current_password', message: 'Неверный текущий пароль' });
+      }
+      const strength = await checkPasswordStrength(newPassword, user.email);
+      if (!strength.ok) {
+        return reply.code(400).send({
+          error: 'weak_password',
+          message: 'Новый пароль не отвечает требованиям',
+          details: strength,
+        });
+      }
+      const newHash = await hashPassword(newPassword);
+      const now = new Date();
+      await app.db
+        .update(users)
+        .set({
+          passwordHash: newHash,
+          passwordChangedAt: now,
+          // Инвалидируем все прочие сессии: старые refresh-токены
+          // перестанут работать. Текущая сессия (req.user) останется
+          // активной — токен уже выдан и сравнение sessionsInvalidatedAt
+          // строго больше, не больше-или-равно.
+          sessionsInvalidatedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(users.id, user.id));
+      await app.db.insert(authEvents).values({
+        userId: user.id,
+        event: 'password_changed',
+        ip: req.ip,
+        userAgent: req.headers['user-agent'] ?? null,
+      });
+      const [updated] = await app.db.select().from(users).where(eq(users.id, user.id)).limit(1);
+      if (!updated) return reply.code(401).send({ error: 'unauthorized' });
+      return userToDto(updated);
     },
   );
 }

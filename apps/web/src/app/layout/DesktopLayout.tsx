@@ -9,6 +9,7 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../stores/auth';
 import { filterByRole } from './navItems';
 import { api } from '../../services/api';
+import { UserProfileModal } from '../../components/UserProfileModal';
 
 const { Sider, Content } = Layout;
 
@@ -48,7 +49,11 @@ export function DesktopLayout() {
     navigate('/login', { replace: true });
   };
 
-  const avatarLetter = user.email.charAt(0).toUpperCase();
+  // ФИО важнее в шапке: если есть — показываем его, иначе email. Аватарка —
+  // первая буква от того, что показываем (быстрая идентификация).
+  const displayName = user.fullName?.trim() || user.email;
+  const avatarLetter = displayName.charAt(0).toUpperCase();
+  const [profileOpen, setProfileOpen] = useState(false);
 
   const siderWidth = collapsed ? 64 : 240;
   return (
@@ -112,8 +117,14 @@ export function DesktopLayout() {
           >
             {collapsed ? (
               <>
-                <Tooltip title={user.email} placement="right">
-                  <Avatar size="small">{avatarLetter}</Avatar>
+                <Tooltip title={`${displayName} — Личный кабинет`} placement="right">
+                  <Avatar
+                    size="small"
+                    onClick={() => setProfileOpen(true)}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    {avatarLetter}
+                  </Avatar>
                 </Tooltip>
                 <Tooltip title="Выход" placement="right">
                   <Button
@@ -137,12 +148,51 @@ export function DesktopLayout() {
               </>
             ) : (
               <>
-                <Typography.Text
-                  ellipsis={{ tooltip: user.email }}
-                  style={{ fontSize: 14 }}
+                {/* Карточка юзера — кликабельная, открывает Личный кабинет.
+                    ФИО сверху (если есть), email подписью; иначе только email. */}
+                <div
+                  onClick={() => setProfileOpen(true)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '6px 8px',
+                    borderRadius: 6,
+                    cursor: 'pointer',
+                    transition: 'background 0.15s',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = '#f5f5f5')}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                  title="Открыть личный кабинет"
                 >
-                  {user.email}
-                </Typography.Text>
+                  <Avatar size="small">{avatarLetter}</Avatar>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {user.fullName ? (
+                      <>
+                        <Typography.Text
+                          ellipsis={{ tooltip: user.fullName }}
+                          style={{ fontSize: 13, display: 'block', lineHeight: 1.2 }}
+                        >
+                          {user.fullName}
+                        </Typography.Text>
+                        <Typography.Text
+                          type="secondary"
+                          ellipsis={{ tooltip: user.email }}
+                          style={{ fontSize: 11, display: 'block', lineHeight: 1.2 }}
+                        >
+                          {user.email}
+                        </Typography.Text>
+                      </>
+                    ) : (
+                      <Typography.Text
+                        ellipsis={{ tooltip: user.email }}
+                        style={{ fontSize: 13 }}
+                      >
+                        {user.email}
+                      </Typography.Text>
+                    )}
+                  </div>
+                </div>
                 <Button block icon={<LogoutOutlined />} onClick={handleLogout}>
                   Выход
                 </Button>
@@ -164,6 +214,7 @@ export function DesktopLayout() {
           <Outlet />
         </Content>
       </Layout>
+      <UserProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
     </Layout>
   );
 }

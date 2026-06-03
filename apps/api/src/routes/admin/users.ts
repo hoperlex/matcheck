@@ -17,6 +17,7 @@ function dto(u: typeof users.$inferSelect) {
     isActive: u.isActive,
     siteId: u.siteId,
     phone: u.phone,
+    fullName: u.fullName,
     createdAt: u.createdAt.toISOString(),
   };
 }
