@@ -50,6 +50,7 @@ import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { DeliveryViewDrawer, type DeliveryViewData } from './DeliveryViewDrawer';
+import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
@@ -160,6 +161,21 @@ export function DeliveriesHistory({
     if ('plate' in patch) apply('plate', patch.plate);
     setParams(next, { replace: true });
   };
+
+  // «Липкие» фильтры между разделами — см. useSyncGlobalFilters.
+  useSyncGlobalFilters({
+    current: {
+      contractorIds: filters.contractorIds,
+      supplierIds: filters.supplierIds,
+      siteIds: filters.siteIds,
+    },
+    apply: (next) =>
+      updateFilters({
+        contractorIds: next.contractorIds,
+        supplierIds: next.supplierIds,
+        siteIds: next.siteIds,
+      }),
+  });
 
   // setView был выпилен — переключатель «Удалённые» теперь живёт в шапке
   // KppPage. Здесь читаем только URL для запроса /deliveries?trash=1.

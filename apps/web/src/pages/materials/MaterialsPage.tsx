@@ -19,6 +19,7 @@ import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
+import { useSyncGlobalFiltersSiteContractor } from '../../shared/hooks/useSyncGlobalFilters';
 
 const KIND_LABELS: Record<ShipmentKind, { label: string; color: string }> = {
   contractor: { label: 'Подрядчику', color: 'geekblue' },
@@ -100,6 +101,7 @@ function IntakeTab({
   const [siteIds, setSiteIds] = useState<string[]>([]);
   const [contractorIds, setContractorIds] = useState<string[]>([]);
   const [q, setQ] = useState('');
+  useSyncGlobalFiltersSiteContractor({ siteIds, setSiteIds, contractorIds, setContractorIds });
 
   const sites = useQuery({
     queryKey: ['sites', 'all'],
@@ -308,6 +310,7 @@ function ShipmentTab({
   const [contractorIds, setContractorIds] = useState<string[]>([]);
   const [kind, setKind] = useState<ShipmentKind | undefined>(undefined);
   const [q, setQ] = useState('');
+  useSyncGlobalFiltersSiteContractor({ siteIds, setSiteIds, contractorIds, setContractorIds });
 
   const sites = useQuery({
     queryKey: ['sites', 'all'],

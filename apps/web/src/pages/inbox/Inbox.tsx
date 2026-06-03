@@ -39,6 +39,7 @@ import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
+import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
@@ -211,6 +212,24 @@ export default function InboxPage() {
       q: 'q' in patch ? patch.q : undefined,
     });
   };
+
+  // «Липкие» фильтры между разделами: если URL пустой при заходе, поднимаем
+  // Подрядчика/Поставщика/Объект из global store. Любое изменение здесь
+  // тоже отзеркаливается обратно в store. Поиск/направление остаются
+  // локальными для этого раздела.
+  useSyncGlobalFilters({
+    current: {
+      contractorIds: filters.contractorIds,
+      supplierIds: filters.supplierIds,
+      siteIds: filters.siteIds,
+    },
+    apply: (next) =>
+      updateFilters({
+        contractorIds: next.contractorIds,
+        supplierIds: next.supplierIds,
+        siteIds: next.siteIds,
+      }),
+  });
 
   const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const [twModalOpen, setTwModalOpen] = useState(false);

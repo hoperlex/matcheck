@@ -22,6 +22,7 @@ import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../sh
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
+import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
@@ -115,6 +116,21 @@ export function ExpectedSourceDocsList({
     if ('q' in patch) apply('q', patch.q);
     setParams(next, { replace: true });
   };
+
+  // «Липкие» фильтры между разделами — см. useSyncGlobalFilters.
+  useSyncGlobalFilters({
+    current: {
+      contractorIds: filters.contractorIds,
+      supplierIds: filters.supplierIds,
+      siteIds: filters.siteIds,
+    },
+    apply: (next) =>
+      updateFilters({
+        contractorIds: next.contractorIds,
+        supplierIds: next.supplierIds,
+        siteIds: next.siteIds,
+      }),
+  });
 
   const list = useQuery({
     queryKey: ['source-documents', 'unaccepted-upd', direction, filters.q],

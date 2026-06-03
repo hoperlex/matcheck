@@ -40,6 +40,7 @@ import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
+import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
@@ -113,6 +114,21 @@ export function ShipmentsHistory({
     if ('plate' in patch) apply('plate', patch.plate);
     setParams(next, { replace: true });
   };
+
+  // «Липкие» фильтры между разделами — см. useSyncGlobalFilters.
+  useSyncGlobalFilters({
+    current: {
+      contractorIds: filters.contractorIds,
+      supplierIds: filters.supplierIds,
+      siteIds: filters.siteIds,
+    },
+    apply: (next) =>
+      updateFilters({
+        contractorIds: next.contractorIds,
+        supplierIds: next.supplierIds,
+        siteIds: next.siteIds,
+      }),
+  });
 
   // setView был выпилен — переключатель «Удалённые» теперь живёт в шапке
   // ShipmentPage. Здесь читаем только URL для запроса /shipments?trash=1.
