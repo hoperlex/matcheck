@@ -1,5 +1,5 @@
-import { lazy, Suspense } from 'react';
-import { createBrowserRouter, Navigate } from 'react-router-dom';
+import { lazy, Suspense, type ReactNode } from 'react';
+import { createBrowserRouter, Navigate, useSearchParams } from 'react-router-dom';
 import { Spin } from 'antd';
 import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from '../shared/ui/ProtectedRoute';
@@ -24,6 +24,32 @@ const AdminEdoAccounts = lazy(() => import('../pages/admin/EdoAccounts'));
 const AdminMailAccounts = lazy(() => import('../pages/admin/MailAccounts'));
 const Settings = lazy(() => import('../pages/settings/Settings'));
 const PublicSharePage = lazy(() => import('../pages/share/PublicSharePage'));
+const OperationsPage = lazy(() => import('../pages/operations/OperationsPage'));
+
+/**
+ * Гард для /kpp: если в URL нет `delivery=<id>` и не флага `new=1`,
+ * это листовой режим — перенаправляем на новый /operations?type=delivery,
+ * сохранив все остальные query-параметры (фильтры, table-таб и т.п.).
+ * Edit-режим (с delivery/new) рендерит KppPage как раньше.
+ */
+function KppGuard({ children }: { children: ReactNode }) {
+  const [params] = useSearchParams();
+  const hasEdit = params.get('delivery') !== null || params.get('new') === '1';
+  if (hasEdit) return <>{children}</>;
+  const next = new URLSearchParams(params);
+  next.set('type', 'delivery');
+  return <Navigate to={`/operations?${next.toString()}`} replace />;
+}
+
+/** То же для /shipments — редирект на /operations?type=shipment без edit-параметров. */
+function ShipmentsGuard({ children }: { children: ReactNode }) {
+  const [params] = useSearchParams();
+  const hasEdit = params.get('shipment') !== null || params.get('new') === '1';
+  if (hasEdit) return <>{children}</>;
+  const next = new URLSearchParams(params);
+  next.set('type', 'shipment');
+  return <Navigate to={`/operations?${next.toString()}`} replace />;
+}
 
 function suspense(node: React.ReactNode) {
   return (
@@ -53,9 +79,20 @@ export const router = createBrowserRouter([
       </ProtectedRoute>
     ),
     children: [
-      { index: true, element: <Navigate to="/kpp" replace /> },
-      { path: 'kpp', element: suspense(<KppPage />) },
-      { path: 'shipments', element: suspense(<ShipmentPage />) },
+      { index: true, element: <Navigate to="/operations?type=delivery" replace /> },
+      { path: 'operations', element: suspense(<OperationsPage />) },
+      // /kpp и /shipments оставлены для edit-режима (форма приёмки/отгрузки
+      // с ?delivery=…/?shipment=… или ?new=1). Без edit-параметров гарды
+      // перенаправляют на /operations?type=… — старые закладки и ссылки
+      // продолжают работать.
+      {
+        path: 'kpp',
+        element: <KppGuard>{suspense(<KppPage />)}</KppGuard>,
+      },
+      {
+        path: 'shipments',
+        element: <ShipmentsGuard>{suspense(<ShipmentPage />)}</ShipmentsGuard>,
+      },
       {
         path: 'documents',
         element: (
