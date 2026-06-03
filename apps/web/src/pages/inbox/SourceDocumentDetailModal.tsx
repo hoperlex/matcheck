@@ -39,6 +39,7 @@ import { useAuthStore } from '../../stores/auth';
 import { api, ApiError } from '../../services/api';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import {
+  formatDateRu,
   formatMoneyRu,
   inputNumberFormatterRu,
   inputNumberParserRu,
@@ -453,7 +454,7 @@ export function SourceDocumentDetailModal({
                     <DatePicker
                       value={edit.docDate}
                       onChange={(d) => setEdit({ ...edit, docDate: d })}
-                      format="YYYY-MM-DD"
+                      format="DD.MM.YYYY"
                       style={{ width: '100%' }}
                     />
                   </Form.Item>
@@ -464,6 +465,9 @@ export function SourceDocumentDetailModal({
                         setEdit({ ...edit, totalSum: v != null ? String(v) : null })
                       }
                       decimalSeparator=","
+                      formatter={inputNumberFormatterRu}
+                      parser={inputNumberParserRu}
+                      addonAfter="₽"
                       style={{ width: '100%' }}
                     />
                   </Form.Item>
@@ -471,7 +475,7 @@ export function SourceDocumentDetailModal({
                     <DatePicker
                       value={edit.expectedDate}
                       onChange={(d) => setEdit({ ...edit, expectedDate: d })}
-                      format="YYYY-MM-DD"
+                      format="DD.MM.YYYY"
                       style={{ width: '100%' }}
                     />
                   </Form.Item>
@@ -625,11 +629,22 @@ function renderBody(args: {
   const splitterLayout: 'vertical' | 'horizontal' =
     layout === 'stacked' ? 'vertical' : 'horizontal';
 
-  // Чем меньше позиций — тем уже панель «Позиции» по умолчанию, тем больше
-  // места отдаём оригиналу (главное содержимое для пользователя). Пользователь
-  // потом всё равно может перетащить границу. defaultSize применяется только
-  // при первом монтировании Splitter — на правки позиций он не реагирует.
-  function defaultItemsSize(): string {
+  // Размер панели «Позиции» по умолчанию: подбираем так, чтобы редактируемая
+  // таблица (6 колонок: №/Наименование/Кол-во/Ед./Цена/Сумма + кнопка
+  // удалить) помещалась без горизонтального скролла.
+  //
+  // sideBySide — границей решает ширина: editable-таблица с InputNumber+₽
+  // требует минимум ~700px. Меньше — и колонки «Цена»/«Сумма» обрезаются,
+  // символ ₽ не помещается. Поэтому отдаём пиксели, не %.
+  //
+  // stacked — границей решает высота. Тут оптимизируем: если позиций мало,
+  // отдаём почти всю высоту оригиналу.
+  const splitterMin: number | string = layout === 'sideBySide' ? 700 : '15%';
+  function defaultItemsSize(): number | string {
+    if (layout === 'sideBySide') {
+      // Чуть больше для запаса; пользователь может сузить вручную.
+      return itemsCount > 10 ? 800 : 720;
+    }
     if (itemsCount <= 2) return '22%';
     if (itemsCount <= 5) return '32%';
     if (itemsCount <= 10) return '42%';
@@ -684,7 +699,7 @@ function renderBody(args: {
         layout={splitterLayout}
         style={{ flex: 1, minHeight: 0, border: '1px solid #f0f0f0', borderRadius: 4 }}
       >
-        <Splitter.Panel min="15%" defaultSize={defaultItemsSize()}>
+        <Splitter.Panel min={splitterMin} defaultSize={defaultItemsSize()}>
           <div
             style={{
               height: '100%',
@@ -847,14 +862,14 @@ function ReadOnlyHeader({ sd }: { sd: SourceDocumentDetail }) {
         <b>№:</b> {sd.docNumber ?? '—'}
       </Typography.Text>
       <Typography.Text>
-        <b>Дата:</b> {sd.docDate ?? '—'}
+        <b>Дата:</b> {formatDateRu(sd.docDate)}
       </Typography.Text>
       <Typography.Text>
-        <b>Сумма:</b> {formatDecimal(sd.totalSum) || '—'}
+        <b>Сумма:</b> {formatMoneyRu(sd.totalSum)}
       </Typography.Text>
-      <Typography.Text type="secondary">НДС: {formatDecimal(sd.vatSum) || '—'}</Typography.Text>
+      <Typography.Text type="secondary">НДС: {formatMoneyRu(sd.vatSum)}</Typography.Text>
       <Typography.Text>
-        <b>Дата поставки:</b> {sd.expectedDate ?? '—'}
+        <b>Дата поставки:</b> {formatDateRu(sd.expectedDate)}
       </Typography.Text>
       <Typography.Text>
         <b>Получатель:</b>{' '}
