@@ -13,7 +13,13 @@ import {
   Typography,
   message,
 } from 'antd';
-import { DeleteOutlined, ExclamationCircleOutlined, UndoOutlined } from '@ant-design/icons';
+import {
+  DeleteOutlined,
+  EditOutlined,
+  ExclamationCircleOutlined,
+  EyeOutlined,
+  UndoOutlined,
+} from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   BulkDeleteResponse,
@@ -43,6 +49,7 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
+import { DeliveryViewDrawer, type DeliveryViewData } from './DeliveryViewDrawer';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
@@ -120,6 +127,7 @@ export function DeliveriesHistory({
   const queryClient = useQueryClient();
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
   const [reasonDraft, setReasonDraft] = useState<Record<string, string>>({});
+  const [viewData, setViewData] = useState<DeliveryViewData | null>(null);
   const [params, setParams] = useSearchParams();
   const authUser = useAuthStore((s) => s.user);
   const isAdmin = authUser?.role === 'admin';
@@ -342,6 +350,37 @@ export function DeliveriesHistory({
     return sd?.docNumber ?? null;
   };
 
+  // Собираем готовый снимок для read-only Drawer: уже подставлены имена
+  // подрядчика/объекта/поставщика и метаданные привязанного УПД. Drawer
+  // сам не лезет в API — отрисовывает то, что мы передали.
+  const buildViewData = (r: Row): DeliveryViewData => {
+    const { id: contractorId } = resolveContractor(r);
+    const { id: siteId } = resolveSite(r);
+    const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
+    const kindLabel = sd
+      ? sd.kind === 'upd'
+        ? 'УПД'
+        : sd.kind === 'transport_waybill' || sd.kind === 'os2_transfer'
+          ? 'Накладная'
+          : sd.kind === 'request'
+            ? 'Заявка'
+            : null
+      : null;
+    const totalSum =
+      sd?.totalSum != null && sd.totalSum !== '' && Number.isFinite(Number(sd.totalSum))
+        ? Number(sd.totalSum)
+        : null;
+    return {
+      delivery: r,
+      contractorName: contractorId ? counterpartiesMap.get(contractorId) ?? null : null,
+      supplierName: r.supplierId ? counterpartiesMap.get(r.supplierId) ?? null : null,
+      siteName: siteId ? sitesMap.get(siteId) ?? null : null,
+      docNumber: sd?.docNumber ?? null,
+      docKindLabel: kindLabel,
+      docTotalSum: totalSum,
+    };
+  };
+
   // Опции селекта «Статус» собираем из реальных данных и добавляем
   // псевдо-опцию «Без документа» — это не код статуса в БД, а способ
   // отфильтровать приёмки с пустым sourceDocumentIds.
@@ -487,6 +526,32 @@ export function DeliveriesHistory({
     );
   };
 
+  // Две кнопки слева от привычного блока «Удалить/Восстановить»:
+  // 👁 — лёгкий Drawer-просмотр (фото + материалы read-only),
+  // ✏ — переход в полный редактор (тот же путь что был у клика по строке).
+  // Клик по строке оставлен как был — иконки появляются как дополнительный
+  // путь, чтобы не ломать мышечную память.
+  const renderViewEdit = (r: Row) => (
+    <>
+      <Tooltip title="Просмотр">
+        <Button
+          size="small"
+          shape="circle"
+          icon={<EyeOutlined />}
+          onClick={() => setViewData(buildViewData(r))}
+        />
+      </Tooltip>
+      <Tooltip title="Редактировать">
+        <Button
+          size="small"
+          shape="circle"
+          icon={<EditOutlined />}
+          onClick={() => onOpen(r.id)}
+        />
+      </Tooltip>
+    </>
+  );
+
   const renderStatusCell = (r: Row) => (
     <Space size={4} wrap>
       <Tag color={r.status.color ?? 'default'}>{r.status.label}</Tag>
@@ -520,6 +585,7 @@ export function DeliveriesHistory({
     id ? counterpartiesMap.get(id) ?? '—' : '—';
 
   return (
+    <>
     <StickyPageHeader
       header={
         <Space direction="vertical" size="small" style={{ width: '100%' }}>
@@ -710,18 +776,23 @@ export function DeliveriesHistory({
             render: (_: unknown, r: Row) => formatMoneyRu(deliveryItemsTotal(r.items)),
           },
           {
-            title: '',
+            title: 'Действия',
             key: 'actions',
-            width: 88,
+            width: 170,
             align: 'right' as const,
             onCell: () => ({
               onClick: (e: MouseEvent) => e.stopPropagation(),
             }),
-            render: (_: unknown, r: Row) => renderActions(r),
+            render: (_: unknown, r: Row) => (
+              <Space size={4}>
+                {renderViewEdit(r)}
+                {renderActions(r)}
+              </Space>
+            ),
           },
         ]}
         cardRender={(r) => (
-          <Card style={{ width: '100%' }} size="small">
+          <Card key={r.id} style={{ width: '100%' }} size="small">
             <Space
               direction="vertical"
               size={4}
@@ -742,13 +813,28 @@ export function DeliveriesHistory({
                 style={{ position: 'absolute', top: 0, right: 0 }}
                 onClick={(e) => e.stopPropagation()}
               >
-                {renderActions(r)}
+                <Space size={4}>
+                  {renderViewEdit(r)}
+                  {renderActions(r)}
+                </Space>
               </div>
             </Space>
           </Card>
         )}
       />
     </StickyPageHeader>
+    <DeliveryViewDrawer
+      data={viewData}
+      open={viewData !== null}
+      onClose={() => setViewData(null)}
+      onEdit={() => {
+        if (!viewData) return;
+        const id = viewData.delivery.id;
+        setViewData(null);
+        onOpen(id);
+      }}
+    />
+    </>
   );
 }
 
