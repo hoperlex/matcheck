@@ -504,6 +504,228 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     },
   );
 
+  // Экспорт документов с фильтрами в .xlsx. Каждый документ — строка
+  // верхнего уровня; его позиции — строки с outlineLevel=1 (свёрнуты по
+  // умолчанию, раскрываются по «+» в Excel). Фильтры зеркалят фильтры
+  // в UI: contractor/supplier/site CSV-списками, q — по номеру документа.
+  {
+    const csvUuids = (raw: string | undefined): string[] => {
+      if (!raw) return [];
+      return raw
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => /^[0-9a-fA-F-]{36}$/.test(s));
+    };
+    const fmtDateRu = (d: Date | string | null): string => {
+      if (!d) return '';
+      const date = d instanceof Date ? d : new Date(d);
+      if (Number.isNaN(date.getTime())) return '';
+      const dd = String(date.getUTCDate()).padStart(2, '0');
+      const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+      const yyyy = date.getUTCFullYear();
+      return `${dd}.${mm}.${yyyy}`;
+    };
+    const kindLabel = (k: string): string =>
+      k === 'upd'
+        ? 'УПД'
+        : k === 'transport_waybill' || k === 'os2_transfer'
+          ? 'Накладная'
+          : k === 'request'
+            ? 'Заявка'
+            : k;
+    const statusLabel = (s: string): string =>
+      s === 'queued'
+        ? 'В очереди'
+        : s === 'processing'
+          ? 'Обрабатывается'
+          : s === 'processed'
+            ? 'Обработано'
+            : s === 'needs_resolution'
+              ? 'Требует решения'
+              : s === 'parse_failed'
+                ? 'Ошибка'
+                : s;
+
+    const ExportQuerySchema = z.object({
+      direction: z.enum(['inbound', 'outbound']),
+      contractorIds: z.string().optional(),
+      supplierIds: z.string().optional(),
+      siteIds: z.string().optional(),
+      q: z.string().trim().min(1).max(200).optional(),
+    });
+
+    app.get(
+      '/api/v1/source-documents/export.xlsx',
+      {
+        preHandler: [app.authenticate],
+        schema: { querystring: ExportQuerySchema },
+      },
+      async (req, reply) => {
+        const { direction, contractorIds, supplierIds, siteIds, q } = req.query;
+        const conditions = [eq(sourceDocuments.direction, direction)];
+        if (q) conditions.push(ilike(sourceDocuments.docNumber, `%${q}%`));
+        const cIds = csvUuids(contractorIds);
+        if (cIds.length) conditions.push(inArray(sourceDocuments.contractorId, cIds));
+        const sIds = csvUuids(supplierIds);
+        if (sIds.length) conditions.push(inArray(sourceDocuments.supplierId, sIds));
+        const stIds = csvUuids(siteIds);
+        if (stIds.length) conditions.push(inArray(sourceDocuments.siteId, stIds));
+        // inspector_kpp видит только свой объект — те же правила, что в GET /.
+        if (req.user?.role === 'inspector_kpp') {
+          if (!req.user.siteId) {
+            conditions.push(drSql`false`);
+          } else {
+            conditions.push(eq(sourceDocuments.siteId, req.user.siteId));
+          }
+        }
+
+        const supplier = alias(counterparties, 'supplier');
+        const contractor = alias(counterparties, 'contractor');
+        const rows = await app.db
+          .select({
+            sd: sourceDocuments,
+            supplierName: supplier.name,
+            contractorName: contractor.name,
+            siteName: sites.name,
+          })
+          .from(sourceDocuments)
+          .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
+          .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
+          .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
+          .where(and(...conditions))
+          .orderBy(desc(sourceDocuments.parsedAt));
+
+        const sdIds = rows.map((r) => r.sd.id);
+        const itemsBySd = new Map<string, (typeof sourceDocumentItems.$inferSelect)[]>();
+        if (sdIds.length > 0) {
+          const items = await app.db
+            .select()
+            .from(sourceDocumentItems)
+            .where(inArray(sourceDocumentItems.sourceDocumentId, sdIds))
+            .orderBy(sourceDocumentItems.sourceDocumentId, sourceDocumentItems.lineNo);
+          for (const it of items) {
+            const arr = itemsBySd.get(it.sourceDocumentId) ?? [];
+            arr.push(it);
+            itemsBySd.set(it.sourceDocumentId, arr);
+          }
+        }
+
+        // exceljs импортируем динамически — большая либа, грузить только
+        // когда реально нужно (не в холодном старте Fastify).
+        const ExcelJS = (await import('exceljs')).default;
+        const wb = new ExcelJS.Workbook();
+        const ws = wb.addWorksheet('Документы', {
+          views: [{ state: 'frozen', ySplit: 1 }],
+          properties: { defaultRowHeight: 16 },
+        });
+
+        ws.columns = [
+          { header: '№', key: 'idx', width: 6 },
+          { header: 'Тип', key: 'kind', width: 11 },
+          { header: 'Статус', key: 'status', width: 14 },
+          { header: '№ документа', key: 'docNumber', width: 16 },
+          { header: 'Дата', key: 'docDate', width: 12 },
+          { header: 'Дата поставки', key: 'expectedDate', width: 14 },
+          { header: 'Объект', key: 'siteName', width: 24 },
+          { header: 'Подрядчик', key: 'contractorName', width: 28 },
+          { header: 'Поставщик', key: 'supplierName', width: 28 },
+          { header: 'Наименование', key: 'nameRaw', width: 40 },
+          { header: 'Кол-во', key: 'qty', width: 10 },
+          { header: 'Ед.', key: 'unit', width: 7 },
+          { header: 'Цена', key: 'price', width: 12 },
+          { header: 'Сумма НДС', key: 'vatSum', width: 14 },
+          { header: 'Сумма', key: 'sum', width: 16 },
+        ];
+        const headerRow = ws.getRow(1);
+        headerRow.font = { bold: true };
+        headerRow.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+        headerRow.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFEDEDED' },
+        };
+
+        const MONEY_FMT = '# ##0.00 "₽"';
+        const QTY_FMT = '# ##0.####';
+
+        let idx = 0;
+        for (const r of rows) {
+          idx++;
+          const sd = r.sd;
+          const docRow = ws.addRow({
+            idx,
+            kind: kindLabel(sd.kind),
+            status: statusLabel(sd.status),
+            docNumber: sd.docNumber ?? '',
+            docDate: fmtDateRu(sd.docDate),
+            expectedDate: fmtDateRu(sd.expectedDate),
+            siteName: r.siteName ?? '',
+            contractorName: r.contractorName ?? '',
+            supplierName: r.supplierName ?? '',
+            nameRaw: '',
+            qty: null,
+            unit: '',
+            price: null,
+            vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
+            sum: sd.totalSum != null ? Number(sd.totalSum) : null,
+          });
+          docRow.font = { bold: true };
+          docRow.getCell('vatSum').numFmt = MONEY_FMT;
+          docRow.getCell('sum').numFmt = MONEY_FMT;
+          docRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFF7F7F7' },
+          };
+
+          const items = itemsBySd.get(sd.id) ?? [];
+          for (const it of items) {
+            const itemRow = ws.addRow({
+              idx: it.lineNo,
+              kind: '',
+              status: '',
+              docNumber: '',
+              docDate: '',
+              expectedDate: '',
+              siteName: '',
+              contractorName: '',
+              supplierName: '',
+              nameRaw: it.nameRaw,
+              qty: Number(it.qty),
+              unit: it.unit,
+              price: it.price != null ? Number(it.price) : null,
+              vatSum: it.vatSum != null ? Number(it.vatSum) : null,
+              sum: it.sum != null ? Number(it.sum) : null,
+            });
+            itemRow.outlineLevel = 1; // строка позиции — внутри +/- группы
+            itemRow.getCell('qty').numFmt = QTY_FMT;
+            itemRow.getCell('price').numFmt = MONEY_FMT;
+            itemRow.getCell('vatSum').numFmt = MONEY_FMT;
+            itemRow.getCell('sum').numFmt = MONEY_FMT;
+          }
+        }
+
+        // По умолчанию все группы свернуты — пользователь видит чистый
+        // список документов, при необходимости разворачивает «+».
+        ws.properties.outlineLevelRow = 1;
+
+        const buf = await wb.xlsx.writeBuffer();
+        const today = new Date().toISOString().slice(0, 10);
+        const filename = `documents-${direction}-${today}.xlsx`;
+        return reply
+          .header(
+            'Content-Type',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          )
+          .header(
+            'Content-Disposition',
+            `attachment; filename="${filename}"`,
+          )
+          .send(Buffer.from(buf));
+      },
+    );
+  }
+
   app.get(
     '/api/v1/source-documents/:id',
     {

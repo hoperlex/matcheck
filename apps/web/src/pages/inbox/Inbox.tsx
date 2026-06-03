@@ -13,6 +13,7 @@ import {
 } from 'antd';
 import {
   DeleteOutlined,
+  DownloadOutlined,
   ExclamationCircleOutlined,
   LoadingOutlined,
   MinusSquareOutlined,
@@ -28,7 +29,7 @@ import type {
   SourceDocumentListResponseSchema,
 } from '@matcheck/contracts';
 import type { z } from 'zod';
-import { api, ApiError } from '../../services/api';
+import { api, apiDownload, ApiError } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
@@ -213,6 +214,43 @@ export default function InboxPage() {
 
   const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const [twModalOpen, setTwModalOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  // Скачивание xlsx-выгрузки с теми же фильтрами, что и в UI: бэк сам
+  // фильтрует по contractor/supplier/site и q. Имя файла берём из
+  // Content-Disposition (фоллбек — direction+дата).
+  async function handleExportExcel() {
+    try {
+      setExporting(true);
+      const qs = new URLSearchParams({ direction });
+      if (filters.contractorIds.length > 0)
+        qs.set('contractorIds', filters.contractorIds.join(','));
+      if (filters.supplierIds.length > 0)
+        qs.set('supplierIds', filters.supplierIds.join(','));
+      if (filters.siteIds.length > 0) qs.set('siteIds', filters.siteIds.join(','));
+      const qTrim = filters.q.trim();
+      if (qTrim) qs.set('q', qTrim);
+      const { blob, filename } = await apiDownload(
+        `/source-documents/export.xlsx?${qs.toString()}`,
+      );
+      const fallback = `documents-${direction}-${new Date()
+        .toISOString()
+        .slice(0, 10)}.xlsx`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || fallback;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // setTimeout: revoke сразу после click() ломает скачивание в Safari.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      message.error((err as Error).message);
+    } finally {
+      setExporting(false);
+    }
+  }
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [resolveId, setResolveId] = useState<string | null>(null);
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
@@ -471,6 +509,13 @@ export default function InboxPage() {
                   </Button>
                   <Button type="primary" onClick={() => setTwModalOpen(true)}>
                     Загрузить накладные
+                  </Button>
+                  <Button
+                    icon={<DownloadOutlined />}
+                    onClick={handleExportExcel}
+                    loading={exporting}
+                  >
+                    Экспорт Excel
                   </Button>
                 </Space>
               }

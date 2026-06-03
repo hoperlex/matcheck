@@ -130,6 +130,59 @@ export const api = {
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
 };
 
+/**
+ * Скачивание файла с авторизацией. Возвращает Blob + предложенное имя файла
+ * (из Content-Disposition; пустая строка, если сервер не прислал). Используется
+ * для xlsx-экспорта, CSV и других бинарных загрузок, где обычный api.get<T>
+ * не подходит (тот ждёт JSON).
+ */
+export async function apiDownload(
+  path: string,
+): Promise<{ blob: Blob; filename: string }> {
+  const headers = new Headers();
+  const token = useAuthStore.getState().accessToken;
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+
+  let res = await fetch(`${BASE}${path}`, {
+    headers,
+    credentials: 'include',
+  });
+
+  if (res.status === 401) {
+    const newToken = await doRefresh();
+    if (newToken) {
+      useAuthStore.getState().setAccessToken(newToken);
+      const retryHeaders = new Headers();
+      retryHeaders.set('Authorization', `Bearer ${newToken}`);
+      res = await fetch(`${BASE}${path}`, {
+        headers: retryHeaders,
+        credentials: 'include',
+      });
+    } else {
+      useAuthStore.getState().expireSession();
+      throw new ApiError(401, 'unauthorized', 'Session expired');
+    }
+  }
+
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const payload = (await res.json()) as { message?: string };
+      if (payload?.message) msg = payload.message;
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(res.status, 'http_error', msg);
+  }
+
+  // Content-Disposition: attachment; filename="documents-inbound-2026-06-02.xlsx"
+  const cd = res.headers.get('Content-Disposition') ?? '';
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  const filename = m?.[1] ?? '';
+  const blob = await res.blob();
+  return { blob, filename };
+}
+
 export async function apiUploadFile<T>(
   path: string,
   file: File,
