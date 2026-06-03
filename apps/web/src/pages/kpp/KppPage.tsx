@@ -1610,7 +1610,18 @@ export default function KppPage() {
     if (next) p.set('tab', 'accepted');
     setParams(p, { replace: true });
   };
-  const trashSwitchVisible = tab === 'accepted';
+  // Корзина — только для admin. Manager не видит ни тумблер, ни сами удалённые
+  // приёмки, даже если введёт ?trash=1 в URL руками: useEffect ниже сбросит
+  // параметр (DeliveriesHistory читает trash из URL — поэтому правим именно URL).
+  const isAdminUser = authUser?.role === 'admin';
+  const trashSwitchVisible = tab === 'accepted' && isAdminUser;
+  useEffect(() => {
+    if (!isAdminUser && trashOn) {
+      const p = new URLSearchParams(params);
+      p.delete('trash');
+      setParams(p, { replace: true });
+    }
+  }, [isAdminUser, trashOn, params, setParams]);
 
   return (
     <StickyPageHeader
