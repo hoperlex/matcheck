@@ -178,16 +178,28 @@ export default function OperationsPage() {
             flexWrap: 'wrap',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-            {/* Верхний переключатель — между Приёмкой и Отгрузкой.
-                Крупные табы заменяют собой Title-заголовок раздела. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 40, flexWrap: 'wrap' }}>
+            {/* Верхний переключатель — между Приёмкой и Отгрузкой. Крупный
+                жирный шрифт делает табы похожими на заголовок раздела
+                (заменяет Typography.Title). gap:40 на родителе создаёт
+                визуальный разрыв с подчинёнными табами «Ожидаемые/Принятые». */}
             <Tabs
               size="large"
               activeKey={type}
               onChange={(k) => updateUrl({ type: k })}
               items={[
-                { key: 'delivery', label: 'Приёмка' },
-                { key: 'shipment', label: 'Отгрузка' },
+                {
+                  key: 'delivery',
+                  label: (
+                    <span style={{ fontSize: 22, fontWeight: 600 }}>Приёмка</span>
+                  ),
+                },
+                {
+                  key: 'shipment',
+                  label: (
+                    <span style={{ fontSize: 22, fontWeight: 600 }}>Отгрузка</span>
+                  ),
+                },
               ]}
               style={{ marginBottom: -12 }}
             />

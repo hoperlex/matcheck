@@ -508,25 +508,11 @@ export function ShipmentsHistory({
             sites={sitesQuery.data?.items ?? []}
             loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
             searchPlaceholder="Номер документа"
-            extra={
-              <>
-                <Select<string>
-                  style={{ width: SELECT_WIDTH }}
-                  placeholder="Статус"
-                  value={filters.status ?? undefined}
-                  onChange={(v) => updateFilters({ status: v ?? null })}
-                  allowClear
-                  options={statusOptions}
-                />
-                <DebouncedSearch
-                  style={{ width: 180 }}
-                  placeholder="Номер авто"
-                  value={filters.plate}
-                  onChange={(v) => updateFilters({ plate: v })}
-                />
-                {filtersExtra}
-              </>
-            }
+            // Инпуты «Статус» и «Номер авто» убраны по UX-запросу: единый
+            // набор фильтров с вкладкой «Ожидаемые» (Подрядчик/Поставщик/
+            // Объект/Номер документа). Старый ?status=/?plate= в URL
+            // продолжает фильтровать, но UI его не выставляет.
+            extra={filtersExtra}
           />
           {tabs && activeTab && onTabChange && (
             <PageTabs
