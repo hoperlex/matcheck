@@ -65,7 +65,11 @@ export const navItems: NavItem[] = [
     key: 'settings',
     label: 'Настройки',
     path: '/settings',
-    roles: ['manager', 'inspector_kpp'],
+    // Только для inspector_kpp: настройки распознавания УПД-PDF, PWA-кэш,
+    // установка приложения — это всё про устройство инспектора. У admin
+    // есть свой /admin/settings (тот же компонент в админ-меню),
+    // у manager доступа не должно быть.
+    roles: ['inspector_kpp'],
     icon: SettingOutlined,
   },
 ];

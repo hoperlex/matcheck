@@ -93,7 +93,17 @@ export const router = createBrowserRouter([
           { path: 'settings', element: suspense(<Settings />) },
         ],
       },
-      { path: 'settings', element: suspense(<Settings />) },
+      {
+        // /settings — настройки устройства инспектора (PWA-кэш, синхронизация,
+        // установка приложения, способ распознавания УПД). Manager заходить
+        // не должен; admin использует тот же компонент через /admin/settings.
+        path: 'settings',
+        element: (
+          <ProtectedRoute roles={['inspector_kpp']}>
+            {suspense(<Settings />)}
+          </ProtectedRoute>
+        ),
+      },
       { path: '*', element: <Navigate to="/" replace /> },
     ],
   },
