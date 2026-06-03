@@ -1,5 +1,17 @@
 import { useEffect, useState } from 'react';
-import { Alert, Button, Divider, Form, Input, Modal, Typography, message } from 'antd';
+import {
+  Alert,
+  Button,
+  Divider,
+  Form,
+  Input,
+  Modal,
+  Popconfirm,
+  Space,
+  Typography,
+  message,
+} from 'antd';
+import { LogoutOutlined } from '@ant-design/icons';
 import type { UserDto } from '@matcheck/contracts';
 import { api, ApiError } from '../services/api';
 import { useAuthStore } from '../stores/auth';
@@ -17,7 +29,15 @@ import { useAuthStore } from '../stores/auth';
  *    После успеха сервер ставит sessionsInvalidatedAt = now → старые
  *    refresh-токены перестают работать, текущая сессия живёт дальше.
  */
-export function UserProfileModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function UserProfileModal({
+  open,
+  onClose,
+  onLogout,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onLogout: () => void;
+}) {
   const user = useAuthStore((s) => s.user);
   const setUser = useAuthStore((s) => s.setUser);
   const [profileForm] = Form.useForm<{ fullName: string }>();
@@ -82,9 +102,30 @@ export function UserProfileModal({ open, onClose }: { open: boolean; onClose: ()
       open={open}
       onCancel={onClose}
       title="Личный кабинет"
-      footer={null}
       width={520}
       destroyOnClose
+      // Footer ЛК — единственное место выхода из системы (по UX-стандарту:
+      // logout — редкое действие, прячем за один клик в профиле, чтобы
+      // случайно не нажали в сайдбаре). Popconfirm защищает от случайного
+      // клика «Выйти», когда хотели «Закрыть».
+      footer={
+        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+          <Popconfirm
+            title="Выйти из системы?"
+            description="Все несохранённые изменения будут потеряны."
+            okText="Выйти"
+            cancelText="Отмена"
+            okButtonProps={{ danger: true }}
+            onConfirm={onLogout}
+            placement="topLeft"
+          >
+            <Button danger icon={<LogoutOutlined />}>
+              Выход
+            </Button>
+          </Popconfirm>
+          <Button onClick={onClose}>Закрыть</Button>
+        </Space>
+      }
     >
       <Typography.Title level={5} style={{ marginTop: 0 }}>
         Профиль

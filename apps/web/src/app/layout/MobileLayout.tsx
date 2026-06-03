@@ -1,6 +1,6 @@
 import { useState, createElement } from 'react';
 import { Layout, Drawer, Button, Menu, Typography } from 'antd';
-import { MenuOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons';
+import { MenuOutlined, UserOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../stores/auth';
 import { filterByRole } from './navItems';
@@ -73,6 +73,8 @@ export function MobileLayout() {
             setOpen(false);
           }}
         />
+        {/* Кнопка «Выход» переехала в footer модалки Личного кабинета —
+            единственная точка выхода из системы (UX-стандарт). */}
         <Button
           icon={<UserOutlined />}
           block
@@ -85,17 +87,12 @@ export function MobileLayout() {
         >
           Личный кабинет
         </Button>
-        <Button
-          icon={<LogoutOutlined />}
-          block
-          style={{ marginTop: 8 }}
-          onClick={handleLogout}
-          size="large"
-        >
-          Выход
-        </Button>
       </Drawer>
-      <UserProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
+      <UserProfileModal
+        open={profileOpen}
+        onClose={() => setProfileOpen(false)}
+        onLogout={handleLogout}
+      />
       <Content style={{ padding: 12, background: '#f5f5f5', flex: 1, overflowY: 'auto' }}>
         <Outlet />
       </Content>

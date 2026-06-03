@@ -1,10 +1,6 @@
 import { useEffect, useState, createElement } from 'react';
 import { Avatar, Button, Layout, Menu, Tooltip, Typography } from 'antd';
-import {
-  LogoutOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
-} from '@ant-design/icons';
+import { MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../stores/auth';
 import { filterByRole } from './navItems';
@@ -126,15 +122,6 @@ export function DesktopLayout() {
                     {avatarLetter}
                   </Avatar>
                 </Tooltip>
-                <Tooltip title="Выход" placement="right">
-                  <Button
-                    shape="circle"
-                    size="small"
-                    icon={<LogoutOutlined />}
-                    onClick={handleLogout}
-                    aria-label="Выход"
-                  />
-                </Tooltip>
                 <Tooltip title="Развернуть меню" placement="right">
                   <Button
                     shape="circle"
@@ -149,7 +136,9 @@ export function DesktopLayout() {
             ) : (
               <>
                 {/* Карточка юзера — кликабельная, открывает Личный кабинет.
-                    ФИО сверху (если есть), email подписью; иначе только email. */}
+                    ФИО сверху (если есть), email подписью; иначе только email.
+                    Кнопка «Выход» переехала в footer модалки Личного кабинета
+                    (стандарт UX — logout — редкое действие, прячем в профиль). */}
                 <div
                   onClick={() => setProfileOpen(true)}
                   style={{
@@ -193,9 +182,6 @@ export function DesktopLayout() {
                     )}
                   </div>
                 </div>
-                <Button block icon={<LogoutOutlined />} onClick={handleLogout}>
-                  Выход
-                </Button>
                 <Button
                   block
                   type="text"
@@ -214,7 +200,11 @@ export function DesktopLayout() {
           <Outlet />
         </Content>
       </Layout>
-      <UserProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
+      <UserProfileModal
+        open={profileOpen}
+        onClose={() => setProfileOpen(false)}
+        onLogout={handleLogout}
+      />
     </Layout>
   );
 }
