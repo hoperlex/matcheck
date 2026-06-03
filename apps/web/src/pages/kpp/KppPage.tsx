@@ -176,6 +176,25 @@ export default function KppPage() {
   const [linkUpdOpen, setLinkUpdOpen] = useState(false);
   const [linkUpdError, setLinkUpdError] = useState<string | null>(null);
 
+  // Эти хуки должны быть ДО любых early-return'ов ниже по компоненту
+  // (см. строки `if (deliveryId && !loadedDelivery) return …` и
+  // `if (deliveryId) return …`). Иначе порядок хуков меняется между
+  // list- и edit-режимом и React даёт error #310 (Rendered fewer hooks
+  // than during the previous render). `trashOn` / `isAdminUser` —
+  // derived, не хуки, но логически живут вместе с useEffect ниже.
+  const [exporting, setExporting] = useState(false);
+  const trashOn = params.get('trash') === '1';
+  const isAdminUser = authUser?.role === 'admin';
+  // Корзина — только для admin. Если manager введёт ?trash=1 в URL руками,
+  // сбрасываем параметр (DeliveriesHistory читает trash из URL).
+  useEffect(() => {
+    if (!isAdminUser && trashOn) {
+      const p = new URLSearchParams(params);
+      p.delete('trash');
+      setParams(p, { replace: true });
+    }
+  }, [isAdminUser, trashOn, params, setParams]);
+
   // ID приёмки, для которой уже выполнили первичную гидратацию формы из server data.
   // Защищает локальные правки (plate/comment/items) от затирания при рефетче
   // ['deliveries', id] — рефетч происходит, например, после загрузки/удаления фото.
@@ -1597,8 +1616,6 @@ export default function KppPage() {
     </Button>
   );
 
-  const [exporting, setExporting] = useState(false);
-
   // Экспорт в Excel — зависит от активной вкладки:
   //  - «Ожидаемые» → source-documents с direction=inbound + unaccepted=true;
   //  - «Принятые» → deliveries c теми же фильтрами что в DeliveriesHistory.
@@ -1672,7 +1689,8 @@ export default function KppPage() {
   // прыгали по вертикали при смене вкладок. На вкладке «Ожидаемые»
   // переключатель не имеет смысла (там source-documents, не deliveries) —
   // прячем через visibility:hidden, место остаётся.
-  const trashOn = params.get('trash') === '1';
+  // trashOn / isAdminUser / useEffect(trash-сброс) подняты в начало
+  // компонента (до early returns) — см. там же.
   const setTrash = (next: boolean) => {
     const p = new URLSearchParams(params);
     if (next) p.set('trash', '1');
@@ -1681,18 +1699,7 @@ export default function KppPage() {
     if (next) p.set('tab', 'accepted');
     setParams(p, { replace: true });
   };
-  // Корзина — только для admin. Manager не видит ни тумблер, ни сами удалённые
-  // приёмки, даже если введёт ?trash=1 в URL руками: useEffect ниже сбросит
-  // параметр (DeliveriesHistory читает trash из URL — поэтому правим именно URL).
-  const isAdminUser = authUser?.role === 'admin';
   const trashSwitchVisible = tab === 'accepted' && isAdminUser;
-  useEffect(() => {
-    if (!isAdminUser && trashOn) {
-      const p = new URLSearchParams(params);
-      p.delete('trash');
-      setParams(p, { replace: true });
-    }
-  }, [isAdminUser, trashOn, params, setParams]);
 
   return (
     <StickyPageHeader

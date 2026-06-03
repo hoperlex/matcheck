@@ -624,25 +624,11 @@ export function DeliveriesHistory({
             sites={sitesQuery.data?.items ?? []}
             loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
             searchPlaceholder="Номер документа"
-            extra={
-              <>
-                <Select<string>
-                  style={{ width: SELECT_WIDTH }}
-                  placeholder="Статус"
-                  value={filters.status ?? undefined}
-                  onChange={(v) => updateFilters({ status: v ?? null })}
-                  allowClear
-                  options={statusOptions}
-                />
-                <DebouncedSearch
-                  style={{ width: 180 }}
-                  placeholder="Номер авто"
-                  value={filters.plate}
-                  onChange={(v) => updateFilters({ plate: v })}
-                />
-                {filtersExtra}
-              </>
-            }
+            // Инпуты «Статус» и «Номер авто» убраны по UX-запросу: оставлен
+            // единый набор фильтров с вкладкой «Ожидаемые». Если фильтры всё
+            // ещё в URL (от старой ссылки) — query тянет полный список, а
+            // UI просто не подсвечивает их применёнными.
+            extra={filtersExtra}
           />
           {tabs && activeTab && onTabChange && (
             <PageTabs
