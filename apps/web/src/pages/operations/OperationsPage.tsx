@@ -16,6 +16,7 @@ import { ShipmentsHistory } from '../shipments/ShipmentsHistory';
 // (IndexedDB, photoPipeline). Грузим лениво — модалка не появится без
 // клика, не тратим бандл-стартап на их разбор.
 const KppPage = lazy(() => import('../kpp/KppPage'));
+const ShipmentPage = lazy(() => import('../shipments/ShipmentPage'));
 
 /**
  * Feature flag: если выставлен `VITE_OPERATIONS_MODAL_DISABLED=1`, edit
@@ -75,23 +76,24 @@ export default function OperationsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdminUser, trashOn]);
 
-  // Создание / открытие записи. Для приёмок открываем модалку прямо
-  // здесь (добавляем `?delivery=` к текущему URL `/operations`). Для
-  // отгрузок пока — старый маршрут (этап В перенесёт сюда же).
-  // Под feature flag MODAL_DISABLED — всё всегда через старые страницы.
+  // Создание / открытие записи. Для обоих типов (delivery/shipment)
+  // открываем модалку прямо здесь — добавляем `?delivery=`/`?shipment=`
+  // к текущему URL `/operations`. KppPage/ShipmentPage внутри Modal
+  // читают эти параметры из useSearchParams.
+  // Под feature flag MODAL_DISABLED — всё через старые страницы.
   const createNew = () => {
     if (inspectorWithoutSite) {
       message.error('Объект не назначен — обратитесь к администратору');
       return;
     }
     const id = crypto.randomUUID();
-    if (type === 'delivery' && !MODAL_DISABLED) {
-      updateUrl({ delivery: id, new: '1' });
-    } else if (type === 'delivery') {
-      navigate(`/kpp?delivery=${id}&new=1`);
-    } else {
-      navigate(`/shipments?shipment=${id}&new=1`);
+    if (!MODAL_DISABLED) {
+      if (type === 'delivery') updateUrl({ delivery: id, new: '1' });
+      else updateUrl({ shipment: id, new: '1' });
+      return;
     }
+    if (type === 'delivery') navigate(`/kpp?delivery=${id}&new=1`);
+    else navigate(`/shipments?shipment=${id}&new=1`);
   };
   const createFromUpd = (upd: SourceDocument) => {
     if (inspectorWithoutSite) {
@@ -99,29 +101,27 @@ export default function OperationsPage() {
       return;
     }
     const id = crypto.randomUUID();
-    if (type === 'delivery' && !MODAL_DISABLED) {
-      updateUrl({ delivery: id, new: '1', upd: upd.id });
-    } else if (type === 'delivery') {
-      navigate(`/kpp?delivery=${id}&new=1&upd=${upd.id}`);
-    } else {
-      navigate(`/shipments?shipment=${id}&new=1&upd=${upd.id}`);
+    if (!MODAL_DISABLED) {
+      if (type === 'delivery') updateUrl({ delivery: id, new: '1', upd: upd.id });
+      else updateUrl({ shipment: id, new: '1', upd: upd.id, from: 'list' });
+      return;
     }
+    if (type === 'delivery') navigate(`/kpp?delivery=${id}&new=1&upd=${upd.id}`);
+    else navigate(`/shipments?shipment=${id}&new=1&upd=${upd.id}&from=list`);
   };
   const onOpenExisting = (id: string) => {
-    if (type === 'delivery' && !MODAL_DISABLED) {
-      updateUrl({ delivery: id, from: 'accepted' });
-    } else if (type === 'delivery') {
-      navigate(`/kpp?delivery=${id}&from=accepted`);
-    } else {
-      navigate(`/shipments?shipment=${id}&from=accepted`);
+    if (!MODAL_DISABLED) {
+      if (type === 'delivery') updateUrl({ delivery: id, from: 'accepted' });
+      else updateUrl({ shipment: id, from: 'list' });
+      return;
     }
+    if (type === 'delivery') navigate(`/kpp?delivery=${id}&from=accepted`);
+    else navigate(`/shipments?shipment=${id}&from=list`);
   };
 
-  // Когда срабатывает мутация save/confirmMol/etc внутри KppPage, она
-  // делает navigate('/kpp?tab=accepted') — на этапе А пока обычный
-  // navigate без правки KppPage. KppGuard в router редиректит обратно
-  // на /operations, и пользователь оказывается на чистом списке (без
-  // ?delivery=) → Modal закрывается. Этап Б устранит промежуточный /kpp.
+  // Modal'ы открываются по edit-параметрам в URL. После save/cancel
+  // внутри KppPage/ShipmentPage navigate сам очищает ?delivery=/
+  // ?shipment= — Modal закрывается через open=false.
   const editDeliveryId = type === 'delivery' ? params.get('delivery') : null;
   const editDeliveryIsNew =
     type === 'delivery' && params.get('new') === '1';
@@ -129,6 +129,14 @@ export default function OperationsPage() {
     !MODAL_DISABLED && (Boolean(editDeliveryId) || editDeliveryIsNew);
   const closeDeliveryModal = () => {
     updateUrl({ delivery: null, new: null, upd: null, from: null });
+  };
+  const editShipmentId = type === 'shipment' ? params.get('shipment') : null;
+  const editShipmentIsNew =
+    type === 'shipment' && params.get('new') === '1';
+  const shipmentModalOpen =
+    !MODAL_DISABLED && (Boolean(editShipmentId) || editShipmentIsNew);
+  const closeShipmentModal = () => {
+    updateUrl({ shipment: null, new: null, upd: null, from: null });
   };
 
   // Экспорт Excel — повторяет логику KppPage.handleExportExcel, но
@@ -312,6 +320,34 @@ export default function OperationsPage() {
           }
         >
           <KppPage key={editDeliveryId ?? 'new'} embedded />
+        </Suspense>
+      </Modal>
+
+      {/* Модалка edit-режима Отгрузки (этап В). По смыслу симметрична
+          Приёмке: открывается при ?shipment=… или (?new=1 && type=shipment),
+          ShipmentPage внутри сам читает useSearchParams. key + destroyOnClose
+          гарантируют полный unmount/remount при смене записи — IndexedDB
+          photo-pipeline `['photos-local','shipment',shipmentId]` пересоздаётся. */}
+      <Modal
+        open={shipmentModalOpen}
+        onCancel={closeShipmentModal}
+        title={editShipmentIsNew ? 'Новая отгрузка' : 'Отгрузка'}
+        width="min(1200px, 96vw)"
+        style={{ top: 16 }}
+        styles={{ body: { padding: '16px 20px' } }}
+        footer={null}
+        destroyOnClose
+        maskClosable={false}
+        keyboard={false}
+      >
+        <Suspense
+          fallback={
+            <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
+              <Spin size="large" />
+            </div>
+          }
+        >
+          <ShipmentPage key={editShipmentId ?? 'new'} embedded />
         </Suspense>
       </Modal>
     </StickyPageHeader>

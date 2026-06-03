@@ -140,7 +140,16 @@ function newKey(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export default function ShipmentPage() {
+/**
+ * Edit-режим отгрузки. Раньше — отдельная страница `/shipments?shipment=…`,
+ * сейчас может рендериться внутри большой `<Modal>` на `/operations`
+ * (см. OperationsPage). Пропс `embedded=true` скрывает внутренний
+ * заголовок (Title + back-button) — Modal рисует свой.
+ *
+ * Списочный режим переехал в OperationsPage; ShipmentPage без edit-
+ * параметров редиректит сюда через ShipmentsGuard в router.tsx.
+ */
+export default function ShipmentPage({ embedded = false }: { embedded?: boolean }) {
   const navigate = useNavigate();
   const isDesktop = useBreakpoint() === 'desktop';
   const queryClient = useQueryClient();
@@ -455,7 +464,7 @@ export default function ShipmentPage() {
       return;
     }
     const id = crypto.randomUUID();
-    navigate(`/shipments?shipment=${id}&new=1`);
+    navigate(`/operations?type=shipment&shipment=${id}&new=1`);
   };
 
   /**
@@ -469,7 +478,7 @@ export default function ShipmentPage() {
       return;
     }
     const id = crypto.randomUUID();
-    navigate(`/shipments?shipment=${id}&new=1&upd=${upd.id}&from=list`);
+    navigate(`/operations?type=shipment&shipment=${id}&new=1&upd=${upd.id}&from=list`);
   };
 
   const photoProps: UploadProps = {
@@ -606,7 +615,7 @@ export default function ShipmentPage() {
     onSuccess: () => {
       message.success('Отгрузка сохранена');
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
-      navigate('/shipments');
+      navigate('/operations?type=shipment');
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -618,7 +627,7 @@ export default function ShipmentPage() {
     onSuccess: () => {
       message.success('Отгрузка подтверждена МОЛ');
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
-      navigate('/shipments');
+      navigate('/operations?type=shipment');
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -696,7 +705,7 @@ export default function ShipmentPage() {
       message.success('Отгрузка удалена');
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
-      navigate('/shipments?trash=1');
+      navigate('/operations?type=shipment&trash=1');
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -995,25 +1004,34 @@ export default function ShipmentPage() {
       isAdmin || authUser?.id === (loadedShipment?.pendingDeletionByUserId ?? null);
     return (
       <Space direction="vertical" size="middle" style={{ width: '100%', paddingBottom: isDesktop ? 0 : 96 }}>
-        <Space style={{ width: '100%' }} align="center">
-          {fromList && (
-            <Button
-              type="text"
-              icon={<ArrowLeftOutlined />}
-              onClick={() => navigate('/shipments')}
-            />
-          )}
-          <Typography.Title level={3} style={{ margin: 0 }}>
-            {isNew ? 'Новая отгрузка' : 'Отгрузка'}
-          </Typography.Title>
-          {isPending && loadedShipment && (
-            <PendingDeletionTag
-              at={loadedShipment.pendingDeletionAt}
-              byEmail={loadedShipment.pendingDeletionByUserEmail}
-              reason={loadedShipment.pendingDeletionReason}
-            />
-          )}
-        </Space>
+        {!embedded && (
+          <Space style={{ width: '100%' }} align="center">
+            {fromList && (
+              <Button
+                type="text"
+                icon={<ArrowLeftOutlined />}
+                onClick={() => navigate('/operations?type=shipment')}
+              />
+            )}
+            <Typography.Title level={3} style={{ margin: 0 }}>
+              {isNew ? 'Новая отгрузка' : 'Отгрузка'}
+            </Typography.Title>
+            {isPending && loadedShipment && (
+              <PendingDeletionTag
+                at={loadedShipment.pendingDeletionAt}
+                byEmail={loadedShipment.pendingDeletionByUserEmail}
+                reason={loadedShipment.pendingDeletionReason}
+              />
+            )}
+          </Space>
+        )}
+        {embedded && isPending && loadedShipment && (
+          <PendingDeletionTag
+            at={loadedShipment.pendingDeletionAt}
+            byEmail={loadedShipment.pendingDeletionByUserEmail}
+            reason={loadedShipment.pendingDeletionReason}
+          />
+        )}
 
         {isPending && loadedShipment && (
           <Alert
@@ -1426,7 +1444,7 @@ export default function ShipmentPage() {
                 zIndex: 5,
               }}
             >
-              <Button onClick={() => navigate('/shipments')}>Отмена</Button>
+              <Button onClick={() => navigate('/operations?type=shipment')}>Отмена</Button>
               {markBlock}
               <Tooltip title={verifyReason ?? ''} placement="top">
                 <span style={{ display: 'inline-flex' }}>
@@ -1470,7 +1488,7 @@ export default function ShipmentPage() {
               <Button
                 size="large"
                 style={{ flex: 1 }}
-                onClick={() => navigate('/shipments')}
+                onClick={() => navigate('/operations?type=shipment')}
               >
                 Отмена
               </Button>
@@ -1606,7 +1624,7 @@ export default function ShipmentPage() {
           <ShipmentsHistory
             onOpen={(id) => {
               setParams({});
-              navigate(`/shipments?shipment=${id}&from=list`);
+              navigate(`/operations?type=shipment&shipment=${id}&from=list`);
             }}
             tabs={listTabs}
             activeTab={tab}
