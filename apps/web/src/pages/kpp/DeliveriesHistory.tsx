@@ -729,8 +729,9 @@ export function DeliveriesHistory({
           {
             title: 'Прибытие',
             dataIndex: 'arrivedAt',
-            // Свежие прибытия сверху по умолчанию.
-            defaultSortOrder: 'descend' as const,
+            // defaultSortOrder убран: при перемонтировке сортировка
+            // навязывалась принудительно. /deliveries отдаёт записи по
+            // updated_at desc — свежие сверху и без явной сортировки.
             sorter: dateSorter<Row>((r) => r.arrivedAt),
             ...dateRangeColumnFilter<Row>((r) => r.arrivedAt),
             render: (v: string | null) => formatArrival(v),

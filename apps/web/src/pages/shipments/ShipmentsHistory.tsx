@@ -633,8 +633,10 @@ export function ShipmentsHistory({
           {
             title: 'Отгружено',
             dataIndex: 'shippedAt',
-            // Свежие отгрузки сверху.
-            defaultSortOrder: 'descend' as const,
+            // defaultSortOrder убран: иначе при каждой перемонтировке
+            // сортировка возвращалась принудительно. Сервер отдаёт
+            // /shipments по updated_at desc — свежие сверху и без явной
+            // сортировки.
             sorter: dateSorter<Row>((r) => r.shippedAt),
             ...dateRangeColumnFilter<Row>((r) => r.shippedAt),
           },

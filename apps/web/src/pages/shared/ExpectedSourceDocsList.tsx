@@ -265,9 +265,9 @@ export function ExpectedSourceDocsList({
           {
             title: 'Дата',
             dataIndex: 'docDate',
-            // Для приёмки — свежие документы важнее (default desc).
-            // Для отгрузки дефолт ставим на «Дата поставки» (см. ниже).
-            defaultSortOrder: direction === 'inbound' ? ('descend' as const) : undefined,
+            // defaultSortOrder убран по UX-запросу: иначе при каждой
+            // перемонтировке (refresh / переход) сортировка возвращалась
+            // принудительно. Сервер уже отдаёт документы по parsed_at desc.
             sorter: dateSorter<SourceDocument>((r) => r.docDate),
             ...dateRangeColumnFilter<SourceDocument>((r) => r.docDate),
             render: (v: string | null) => formatDateRu(v),
@@ -275,9 +275,6 @@ export function ExpectedSourceDocsList({
           {
             title: 'Дата поставки',
             dataIndex: 'expectedDate',
-            // Для отгрузки ближайшая дата поставки сверху (default asc) —
-            // что нужно готовить в первую очередь.
-            defaultSortOrder: direction === 'outbound' ? ('ascend' as const) : undefined,
             sorter: dateSorter<SourceDocument>((r) => r.expectedDate),
             ...dateRangeColumnFilter<SourceDocument>((r) => r.expectedDate),
             render: (v: string | null) => formatDateRu(v),

@@ -641,9 +641,10 @@ export default function InboxPage() {
           {
             title: 'Дата',
             dataIndex: 'docDate',
-            // По умолчанию свежие документы сверху — это то, чего обычно
-            // ждёт оператор при открытии списка.
-            defaultSortOrder: 'descend' as const,
+            // defaultSortOrder убран: иначе при каждой перемонтировке
+            // (refresh / переход на другой раздел и обратно) сортировка
+            // возвращалась принудительно. Сервер уже отдаёт документы по
+            // parsed_at desc — свежие сверху без явной сортировки.
             sorter: dateSorter<Row>((r) => r.docDate),
             ...dateRangeColumnFilter<Row>((r) => r.docDate),
             render: (v: string | null) => formatDateRu(v),
