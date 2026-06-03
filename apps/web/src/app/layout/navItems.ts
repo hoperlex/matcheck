@@ -42,7 +42,7 @@ export const navItems: NavItem[] = [
   },
   {
     key: 'materials',
-    label: 'Материалы',
+    label: 'История поступлений',
     path: '/materials',
     roles: ['admin', 'manager', 'inspector_kpp'],
     icon: InboxOutlined,
