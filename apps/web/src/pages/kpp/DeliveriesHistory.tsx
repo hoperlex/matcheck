@@ -107,10 +107,6 @@ function deliveryItemsVatSum(items: Row['items'] | undefined): number | null {
   return hasAny ? sum : null;
 }
 
-function formatMoney(n: number | null): string {
-  return n === null ? '—' : n.toFixed(2);
-}
-
 export function DeliveriesHistory({
   onOpen,
   tabs,

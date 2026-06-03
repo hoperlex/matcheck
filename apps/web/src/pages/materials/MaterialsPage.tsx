@@ -18,6 +18,7 @@ import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
+import { formatMoneyRu } from '../../shared/utils/formatRu';
 
 const KIND_LABELS: Record<ShipmentKind, { label: string; color: string }> = {
   contractor: { label: 'Подрядчику', color: 'geekblue' },
@@ -41,14 +42,6 @@ const trimQty = (s: string | null) => {
   if (!s) return '—';
   return s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
 };
-
-const formatMoney = (s: string | null | undefined) => {
-  if (s === null || s === undefined || s === '') return '—';
-  const n = Number(s);
-  if (!Number.isFinite(n)) return '—';
-  return n.toFixed(2);
-};
-
 
 type MaterialsTab = 'intake' | 'shipment';
 
@@ -252,14 +245,14 @@ function IntakeTab({
             dataIndex: 'vatSum',
             width: 120,
             sorter: numberSorter<IntakeJournalRow>((r) => r.vatSum),
-            render: (v: string | null) => formatMoney(v),
+            render: (v: string | null) => formatMoneyRu(v),
           },
           {
             title: 'Сумма',
             dataIndex: 'sum',
             width: 130,
             sorter: numberSorter<IntakeJournalRow>((r) => r.sum),
-            render: (v: string | null) => formatMoney(v),
+            render: (v: string | null) => formatMoneyRu(v),
           },
           {
             title: 'Статус',
@@ -289,7 +282,7 @@ function IntakeTab({
               · {r.supplierName ?? '—'}
             </Typography.Text>
             <Typography.Text type="secondary" style={{ display: 'block' }}>
-              Сумма {formatMoney(r.sum)} · НДС {formatMoney(r.vatSum)}
+              Сумма {formatMoneyRu(r.sum)} · НДС {formatMoneyRu(r.vatSum)}
             </Typography.Text>
             <Tag color={statusTagColor(r.statusCode)} style={{ marginTop: 4 }}>
               {r.statusLabel}

@@ -68,6 +68,7 @@ import { PhotoGallery } from '../kpp/PhotoGallery';
 import { ShipmentsHistory } from './ShipmentsHistory';
 import { ExpectedOutbound } from './ExpectedOutbound';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
+import { formatMoneyRu } from '../../shared/utils/formatRu';
 
 type DraftItem = {
   clientKey: string;
@@ -839,18 +840,18 @@ export default function ShipmentPage() {
       },
       {
         title: 'Цена',
-        width: 110,
+        width: 130,
         render: (_: unknown, r: DraftItem) => {
           const v = toNum(r.price);
-          return v !== null ? v.toFixed(2) : '—';
+          return formatMoneyRu(v);
         },
       },
       {
         title: 'Сумма НДС',
-        width: 120,
+        width: 140,
         render: (_: unknown, r: DraftItem) => {
           const v = computeVatSum(r);
-          return v !== null ? v.toFixed(2) : '—';
+          return formatMoneyRu(v);
         },
       },
       {
@@ -964,18 +965,13 @@ export default function ShipmentPage() {
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             Цена
           </Typography.Text>
-          <div>{toNum(r.price) !== null ? toNum(r.price)!.toFixed(2) : '—'}</div>
+          <div>{formatMoneyRu(toNum(r.price))}</div>
         </Col>
         <Col span={12}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             Сумма НДС
           </Typography.Text>
-          <div>
-            {(() => {
-              const v = computeVatSum(r);
-              return v !== null ? v.toFixed(2) : '—';
-            })()}
-          </div>
+          <div>{formatMoneyRu(computeVatSum(r))}</div>
         </Col>
       </Row>
     </div>

@@ -67,6 +67,7 @@ import { PhotoGallery } from './PhotoGallery';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
 import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
+import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 
 type DraftItem = {
@@ -874,18 +875,18 @@ export default function KppPage() {
       },
       {
         title: 'Цена',
-        width: 110,
+        width: 130,
         render: (_: unknown, r: DraftItem) => {
           const v = toNum(r.price);
-          return v !== null ? v.toFixed(2) : '—';
+          return formatMoneyRu(v);
         },
       },
       {
         title: 'Сумма НДС',
-        width: 120,
+        width: 140,
         render: (_: unknown, r: DraftItem) => {
           const v = computeVatSum(r);
-          return v !== null ? v.toFixed(2) : '—';
+          return formatMoneyRu(v);
         },
       },
     ],
@@ -964,13 +965,13 @@ export default function KppPage() {
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               Цена
             </Typography.Text>
-            <div>{priceNum !== null ? priceNum.toFixed(2) : '—'}</div>
+            <div>{formatMoneyRu(priceNum)}</div>
           </Col>
           <Col span={12}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               Сумма НДС
             </Typography.Text>
-            <div>{vatNum !== null ? vatNum.toFixed(2) : '—'}</div>
+            <div>{formatMoneyRu(vatNum)}</div>
           </Col>
         </Row>
       </div>
