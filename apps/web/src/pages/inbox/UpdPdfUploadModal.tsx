@@ -25,6 +25,7 @@ import type {
 } from '@matcheck/contracts';
 import { api, apiUploadFile, ApiError } from '../../services/api';
 import { ContractorSelect } from './ContractorSelect';
+import { ResponsiblePersonSelect } from '../../components/ResponsiblePersonSelect';
 import { SiteSelect } from './SiteSelect';
 
 type FileStatus = 'pending' | 'uploading' | 'done' | 'error' | 'duplicate';
@@ -235,25 +236,11 @@ export function UpdPdfUploadModal({
               placeholder="Выберите получателя"
             />
           ) : (
-            <Select<string>
-              style={{ width: '100%' }}
+            <ResponsiblePersonSelect
+              value={recipientMolId}
+              onChange={setRecipientMolId}
               placeholder="Выберите получателя"
-              value={recipientMolId ?? undefined}
-              onChange={(v) => setRecipientMolId(v ?? null)}
-              allowClear
-              showSearch
-              optionFilterProp="label"
-              loading={responsiblePersonsQuery.isLoading}
               disabled={uploading}
-              options={responsiblePersons.map((m) => ({
-                value: m.id,
-                label: m.fullName,
-              }))}
-              notFoundContent={
-                <Typography.Text type="secondary">
-                  Заведите МОЛ в Справочниках
-                </Typography.Text>
-              }
             />
           )}
         </Form.Item>

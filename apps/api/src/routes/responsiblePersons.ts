@@ -71,10 +71,30 @@ export async function responsiblePersonRoutes(rawApp: FastifyInstance): Promise<
     '/api/v1/responsible-persons',
     {
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
-      schema: { body: ResponsiblePersonUpsertSchema, response: { 201: ResponsiblePersonSchema } },
+      schema: {
+        body: ResponsiblePersonUpsertSchema,
+        // 200 — найден существующий по lower(full_name) (дедуп сработал).
+        // 201 — создан новый.
+        response: {
+          200: ResponsiblePersonSchema,
+          201: ResponsiblePersonSchema,
+        },
+      },
     },
     async (req, reply) => {
-      const [created] = await app.db.insert(responsiblePersons).values(req.body).returning();
+      const body = req.body;
+      const trimmedName = body.fullName.trim();
+      const lname = trimmedName.toLowerCase();
+      // Дедуп по lower(full_name) — для МОЛ aliases не делаем (ФИО более
+      // уникально, обычно нет коротких форм).
+      const [existing] = await app.db
+        .select()
+        .from(responsiblePersons)
+        .where(drSql`lower(${responsiblePersons.fullName}) = ${lname}`)
+        .limit(1);
+      if (existing) return row(existing);
+
+      const [created] = await app.db.insert(responsiblePersons).values(body).returning();
       if (!created) throw new Error('insert failed');
       reply.code(201);
       return row(created);

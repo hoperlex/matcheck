@@ -188,6 +188,13 @@ export const counterparties = pgTable(
     inn: varchar('inn', { length: 12 }).notNull(),
     kpp: varchar('kpp', { length: 9 }),
     name: text('name').notNull(),
+    // Альтернативные написания для дедупа при «+ Создать» из combobox.
+    // Поиск в API counterparties идёт по lower(name) или lower(any(aliases)).
+    // Редактируется админом в Справочниках.
+    aliases: text('aliases')
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
     address: text('address'),
     isSelf: boolean('is_self').notNull().default(false),
     isSupplier: boolean('is_supplier').notNull().default(false),

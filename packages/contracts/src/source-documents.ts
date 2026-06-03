@@ -27,6 +27,59 @@ export const SourceStatusSchema = z.enum([
 ]);
 export type SourceStatus = z.infer<typeof SourceStatusSchema>;
 
+/**
+ * Отображаемый статус документа = реальный статус из БД ИЛИ «draft»,
+ * если документ распарсен, но в нём не заполнены ключевые поля для
+ * привязки к приёмке/отгрузке. Это derived-статус в UI, в БД его нет.
+ *
+ * Условия «Черновика» (когда status='parsed'):
+ *  - не указан получатель (Подрядчик ИЛИ МОЛ), ИЛИ
+ *  - не указан Объект, ИЛИ
+ *  - не указана Дата поставки.
+ *
+ * Когда пользователь дозаполнит и сохранит — derived-статус
+ * автоматически переключится на «parsed» (= «Обработано»).
+ */
+export type DocumentDisplayStatus = SourceStatus | 'draft';
+
+export function getDocumentDisplayStatus(sd: {
+  status: SourceStatus;
+  contractorId?: string | null;
+  recipientMolId?: string | null;
+  expectedDate?: string | null;
+  siteId?: string | null;
+}): DocumentDisplayStatus {
+  if (sd.status !== 'parsed') return sd.status;
+  const hasRecipient = !!(sd.contractorId || sd.recipientMolId);
+  const hasExpectedDate = !!sd.expectedDate;
+  const hasSite = !!sd.siteId;
+  if (!hasRecipient || !hasExpectedDate || !hasSite) return 'draft';
+  return 'parsed';
+}
+
+/** Русский лейбл и цвет antd-тега для каждого отображаемого статуса. */
+export function getDocumentDisplayStatusLabel(s: DocumentDisplayStatus): {
+  label: string;
+  color: string;
+} {
+  switch (s) {
+    case 'draft':
+      return { label: 'Черновик', color: 'gold' };
+    case 'parsed':
+      return { label: 'обработано', color: 'green' };
+    case 'queued':
+      return { label: 'в очереди', color: 'default' };
+    case 'processing':
+      return { label: 'распознаётся', color: 'blue' };
+    case 'needs_resolution':
+      return { label: 'требует решения', color: 'orange' };
+    case 'parse_failed':
+      return { label: 'ошибка', color: 'red' };
+    case 'archived':
+      return { label: 'архив', color: 'default' };
+  }
+}
+
 // Машинно-читаемый код ошибки/состояния, по которому UI решает, какой
 // диалог показывать (skip/replace при дубле, alert при mismatch и т.д.).
 export const SourceParseErrorCodeSchema = z.enum([

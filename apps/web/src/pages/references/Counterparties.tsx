@@ -6,6 +6,7 @@ import {
   Form,
   Input,
   Popconfirm,
+  Select,
   Space,
   Switch,
   Tag,
@@ -15,6 +16,7 @@ import {
 import { DeleteOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { BulkDeleteResponse, Counterparty, CounterpartyUpsert } from '@matcheck/contracts';
+import { isPlaceholderInn } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
@@ -96,9 +98,12 @@ export default function CounterpartiesPage() {
     if (!open) return;
     if (editing) {
       form.setFieldsValue({
-        inn: editing.inn,
+        // Placeholder-ИНН («0000…») в форме показываем пустым полем — у
+        // пользователя «нет ИНН»; реальный ИНН может появиться позже от LLM.
+        inn: isPlaceholderInn(editing.inn) ? undefined : editing.inn,
         kpp: editing.kpp,
         name: editing.name,
+        aliases: editing.aliases ?? [],
         address: editing.address ?? undefined,
         isSelf: editing.isSelf,
         isSupplier: editing.isSupplier,
@@ -177,7 +182,10 @@ export default function CounterpartiesPage() {
           {
             title: 'ИНН',
             dataIndex: 'inn',
-            sorter: stringSorter<Counterparty>((r) => r.inn),
+            sorter: stringSorter<Counterparty>((r) =>
+              isPlaceholderInn(r.inn) ? null : r.inn,
+            ),
+            render: (v: string) => (isPlaceholderInn(v) ? '—' : v),
           },
           {
             title: 'КПП',
@@ -188,6 +196,22 @@ export default function CounterpartiesPage() {
             title: 'Название',
             dataIndex: 'name',
             sorter: stringSorter<Counterparty>((r) => r.name),
+          },
+          {
+            title: 'Альтернативные названия',
+            dataIndex: 'aliases',
+            render: (v: string[] | null | undefined) =>
+              v && v.length > 0 ? (
+                <Space size={[4, 4]} wrap>
+                  {v.map((a) => (
+                    <Tag key={a} style={{ marginInlineEnd: 0 }}>
+                      {a}
+                    </Tag>
+                  ))}
+                </Space>
+              ) : (
+                '—'
+              ),
           },
           {
             title: 'Роли',
@@ -269,8 +293,9 @@ export default function CounterpartiesPage() {
         <Form<CounterpartyUpsert> form={form} layout="vertical" onFinish={onFinish}>
           <Form.Item
             name="inn"
-            label="ИНН"
-            rules={[{ required: true, pattern: /^(\d{10}|\d{12})$/ }]}
+            label="ИНН (необязательно)"
+            rules={[{ pattern: /^(\d{10}|\d{12})$/, message: '10 или 12 цифр' }]}
+            extra="Если оставить пустым, сервер сгенерирует placeholder. Реальный ИНН можно добавить позже."
           >
             <Input inputMode="numeric" />
           </Form.Item>
@@ -283,6 +308,17 @@ export default function CounterpartiesPage() {
           </Form.Item>
           <Form.Item name="name" label="Название" rules={[{ required: true }]}>
             <Input />
+          </Form.Item>
+          <Form.Item
+            name="aliases"
+            label="Альтернативные названия"
+            extra="Введите альтернативное написание и нажмите Enter. Используется для поиска и дедупа при «+ Создать» из combobox."
+          >
+            <Select<string[]>
+              mode="tags"
+              placeholder="Например: Лютик, ООО «Лютик», ООО Лютик"
+              tokenSeparators={[',']}
+            />
           </Form.Item>
           <Form.Item name="address" label="Адрес">
             <Input.TextArea rows={2} />

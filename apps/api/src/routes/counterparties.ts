@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { and, eq, ilike, inArray, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -9,8 +10,19 @@ import {
   CounterpartySchema,
   CounterpartyUpsertSchema,
   ErrorResponseSchema,
+  PLACEHOLDER_INN_PREFIX,
+  isPlaceholderInn,
 } from '@matcheck/contracts';
 import { counterparties } from '../db/schema.js';
+
+/**
+ * Генератор placeholder-ИНН для контрагентов, созданных «на лету» без ИНН.
+ * Формат: 0000 + 8 hex = 12 символов, помещается в varchar(12). Шанс
+ * коллизии — 16^8 = ~4·10⁹ комбинаций, для нашего объёма безопасно.
+ */
+function generatePlaceholderInn(): string {
+  return PLACEHOLDER_INN_PREFIX + randomBytes(4).toString('hex');
+}
 
 const ListQuerySchema = z.object({
   q: z.string().optional(),
@@ -25,6 +37,7 @@ function row(c: typeof counterparties.$inferSelect) {
     inn: c.inn,
     kpp: c.kpp,
     name: c.name,
+    aliases: c.aliases ?? [],
     address: c.address,
     isSelf: c.isSelf,
     isSupplier: c.isSupplier,
@@ -47,7 +60,15 @@ export async function counterpartyRoutes(rawApp: FastifyInstance): Promise<void>
       const { q, role, limit, offset } = req.query;
       const filters = [];
       if (q) {
-        filters.push(or(ilike(counterparties.name, `%${q}%`), ilike(counterparties.inn, `${q}%`)));
+        // Поиск по name / inn / aliases. aliases — массив текстов; используем
+        // EXISTS с UNNEST + ILIKE, чтобы matching работал по любому из алиасов.
+        filters.push(
+          or(
+            ilike(counterparties.name, `%${q}%`),
+            ilike(counterparties.inn, `${q}%`),
+            drSql`exists (select 1 from unnest(${counterparties.aliases}) as a(v) where a.v ilike ${'%' + q + '%'})`,
+          ),
+        );
       }
       if (role === 'supplier') filters.push(eq(counterparties.isSupplier, true));
       if (role === 'customer') filters.push(eq(counterparties.isCustomer, true));
@@ -75,12 +96,105 @@ export async function counterpartyRoutes(rawApp: FastifyInstance): Promise<void>
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         body: CounterpartyUpsertSchema,
-        response: { 201: CounterpartySchema, 409: ErrorResponseSchema },
+        // 200 — найден существующий (дедуп сработал, использован он).
+        // 201 — создан новый.
+        response: { 200: CounterpartySchema, 201: CounterpartySchema, 409: ErrorResponseSchema },
       },
     },
     async (req, reply) => {
+      const body = req.body;
+      const trimmedName = body.name.trim();
+      const lname = trimmedName.toLowerCase();
+      const wantsRoles = {
+        isSelf: body.isSelf ?? false,
+        isSupplier: body.isSupplier ?? false,
+        isCustomer: body.isCustomer ?? false,
+        isContractor: body.isContractor ?? false,
+      };
+
+      // 1. Дедуп по ИНН: если ИНН передан и не плейсхолдер — ищем точное
+      // совпадение. Если найден — добавляем недостающие роли и возвращаем.
+      if (body.inn && !isPlaceholderInn(body.inn)) {
+        const innMatchConds = [eq(counterparties.inn, body.inn)];
+        if (body.kpp) innMatchConds.push(eq(counterparties.kpp, body.kpp));
+        const [existing] = await app.db
+          .select()
+          .from(counterparties)
+          .where(and(...innMatchConds))
+          .limit(1);
+        if (existing) {
+          const patch: Partial<typeof counterparties.$inferInsert> = {};
+          if (wantsRoles.isSupplier && !existing.isSupplier) patch.isSupplier = true;
+          if (wantsRoles.isCustomer && !existing.isCustomer) patch.isCustomer = true;
+          if (wantsRoles.isContractor && !existing.isContractor) patch.isContractor = true;
+          if (Object.keys(patch).length > 0) {
+            patch.updatedAt = new Date();
+            const [upd] = await app.db
+              .update(counterparties)
+              .set(patch)
+              .where(eq(counterparties.id, existing.id))
+              .returning();
+            return upd ? row(upd) : row(existing);
+          }
+          return row(existing);
+        }
+      }
+
+      // 2. Дедуп по lower(name) ИЛИ lower(any(aliases)). Тут же — апгрейд
+      // плейсхолдер-ИНН на реальный, если он передан.
+      const [byName] = await app.db
+        .select()
+        .from(counterparties)
+        .where(
+          or(
+            drSql`lower(${counterparties.name}) = ${lname}`,
+            drSql`exists (select 1 from unnest(${counterparties.aliases}) as a(v) where lower(a.v) = ${lname})`,
+          ),
+        )
+        .limit(1);
+      if (byName) {
+        const patch: Partial<typeof counterparties.$inferInsert> = {};
+        if (
+          body.inn &&
+          !isPlaceholderInn(body.inn) &&
+          isPlaceholderInn(byName.inn)
+        ) {
+          // Апгрейд плейсхолдера на настоящий ИНН.
+          patch.inn = body.inn;
+          if (body.kpp !== undefined) patch.kpp = body.kpp ?? null;
+        }
+        if (wantsRoles.isSupplier && !byName.isSupplier) patch.isSupplier = true;
+        if (wantsRoles.isCustomer && !byName.isCustomer) patch.isCustomer = true;
+        if (wantsRoles.isContractor && !byName.isContractor) patch.isContractor = true;
+        if (Object.keys(patch).length > 0) {
+          patch.updatedAt = new Date();
+          const [upd] = await app.db
+            .update(counterparties)
+            .set(patch)
+            .where(eq(counterparties.id, byName.id))
+            .returning();
+          return upd ? row(upd) : row(byName);
+        }
+        return row(byName);
+      }
+
+      // 3. Не нашли — создаём. Если ИНН не передан, генерируем плейсхолдер.
+      const innToUse = body.inn ?? generatePlaceholderInn();
       try {
-        const [created] = await app.db.insert(counterparties).values(req.body).returning();
+        const [created] = await app.db
+          .insert(counterparties)
+          .values({
+            inn: innToUse,
+            kpp: body.kpp ?? null,
+            name: trimmedName,
+            aliases: body.aliases ?? [],
+            address: body.address ?? null,
+            isSelf: wantsRoles.isSelf,
+            isSupplier: wantsRoles.isSupplier,
+            isCustomer: wantsRoles.isCustomer,
+            isContractor: wantsRoles.isContractor,
+          })
+          .returning();
         if (!created) throw new Error('insert failed');
         reply.code(201);
         return row(created);

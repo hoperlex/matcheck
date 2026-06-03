@@ -35,6 +35,7 @@ import type {
   SourceDocumentFileResponse,
   UpdCheck,
 } from '@matcheck/contracts';
+import { getDocumentDisplayStatus } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
 import { api, ApiError } from '../../services/api';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
@@ -47,6 +48,7 @@ import {
 import { LlmCallsDrawer } from './LlmCallsDrawer';
 import { ContractorSelect } from './ContractorSelect';
 import { SiteSelect } from './SiteSelect';
+import { ResponsiblePersonSelect } from '../../components/ResponsiblePersonSelect';
 
 type Item = SourceDocumentDetail['items'][number];
 
@@ -289,6 +291,24 @@ export function SourceDocumentDetailModal({
               >
                 {directionLabel(sd.direction)}
               </Tag>
+              {(() => {
+                // Чип статуса с derived «Черновик» — поверх обычного статуса.
+                const display = getDocumentDisplayStatus({
+                  status: sd.status,
+                  contractorId: sd.contractorId,
+                  recipientMolId: sd.recipientMolId,
+                  expectedDate: sd.expectedDate,
+                  siteId: sd.siteId,
+                });
+                if (display === 'draft') {
+                  return (
+                    <Tag color="gold" style={{ marginInlineEnd: 0 }}>
+                      Черновик
+                    </Tag>
+                  );
+                }
+                return null;
+              })()}
               <Tag
                 style={{ marginInlineEnd: 0 }}
                 color={
@@ -505,26 +525,10 @@ export function SourceDocumentDetailModal({
                         placeholder="Выберите получателя"
                       />
                     ) : (
-                      <Select<string>
-                        style={{ width: '100%' }}
+                      <ResponsiblePersonSelect
+                        value={edit.recipientMolId}
+                        onChange={(v) => setEdit({ ...edit, recipientMolId: v })}
                         placeholder="Выберите получателя"
-                        value={edit.recipientMolId ?? undefined}
-                        onChange={(v) =>
-                          setEdit({ ...edit, recipientMolId: v ?? null })
-                        }
-                        allowClear
-                        showSearch
-                        optionFilterProp="label"
-                        loading={responsiblePersonsQuery.isLoading}
-                        options={responsiblePersons.map((m) => ({
-                          value: m.id,
-                          label: m.fullName,
-                        }))}
-                        notFoundContent={
-                          <Typography.Text type="secondary">
-                            Заведите МОЛ в Справочниках
-                          </Typography.Text>
-                        }
                       />
                     )}
                   </Form.Item>

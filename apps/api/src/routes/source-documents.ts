@@ -21,6 +21,8 @@ import {
   UpdPdfQueueResponseSchema,
   UpdResolveDuplicateRequestSchema,
   ErrorResponseSchema,
+  getDocumentDisplayStatus,
+  getDocumentDisplayStatusLabel,
 } from '@matcheck/contracts';
 import {
   counterparties,
@@ -533,18 +535,19 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           : k === 'request'
             ? 'Заявка'
             : k;
-    const statusLabel = (s: string): string =>
-      s === 'queued'
-        ? 'В очереди'
-        : s === 'processing'
-          ? 'Обрабатывается'
-          : s === 'processed'
-            ? 'Обработано'
-            : s === 'needs_resolution'
-              ? 'Требует решения'
-              : s === 'parse_failed'
-                ? 'Ошибка'
-                : s;
+    // Используем общий helper из contracts: пересчитывает status в
+    // отображаемый («Черновик» / «обработано» / т.д.) по тем же правилам,
+    // что и UI. Это даёт согласованный статус в Excel-выгрузке.
+    const statusLabelFor = (sd: typeof sourceDocuments.$inferSelect): string => {
+      const display = getDocumentDisplayStatus({
+        status: sd.status,
+        contractorId: sd.contractorId,
+        recipientMolId: sd.recipientMolId,
+        expectedDate: sd.expectedDate ? sd.expectedDate.toISOString() : null,
+        siteId: sd.siteId,
+      });
+      return getDocumentDisplayStatusLabel(display).label;
+    };
 
     const ExportQuerySchema = z.object({
       direction: z.enum(['inbound', 'outbound']),
@@ -674,7 +677,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           const docRow = ws.addRow({
             idx,
             kind: kindLabel(sd.kind),
-            status: statusLabel(sd.status),
+            status: statusLabelFor(sd),
             docNumber: sd.docNumber ?? '',
             docDate: fmtDateRu(sd.docDate),
             expectedDate: fmtDateRu(sd.expectedDate),

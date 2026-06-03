@@ -28,6 +28,7 @@ import type {
   SourceDocumentBulkDeleteResponse,
   SourceDocumentListResponseSchema,
 } from '@matcheck/contracts';
+import { getDocumentDisplayStatus } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api, apiDownload, ApiError } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
@@ -84,6 +85,23 @@ function KindTag({ kind }: { kind: Row['kind'] }) {
 }
 
 function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }) {
+  // Derived-статус: если parsed, но не заполнены получатель/объект/дата
+  // поставки — показываем «Черновик» вместо «обработано». UI сразу
+  // подскажет пользователю, что документ требует дозаполнения.
+  const display = getDocumentDisplayStatus({
+    status: row.status,
+    contractorId: row.contractorId,
+    recipientMolId: row.recipientMolId,
+    expectedDate: row.expectedDate,
+    siteId: row.siteId,
+  });
+  if (display === 'draft') {
+    return (
+      <Tooltip title="Не заполнены: получатель / объект / дата поставки. Откройте документ и дозаполните.">
+        <Tag color="gold">Черновик</Tag>
+      </Tooltip>
+    );
+  }
   switch (row.status) {
     case 'queued':
       return <Tag color="blue">в очереди</Tag>;
