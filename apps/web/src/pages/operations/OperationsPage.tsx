@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, Space, Switch, Tabs, Typography, message } from 'antd';
+import { Button, Modal, Space, Spin, Switch, Tabs, Typography, message } from 'antd';
 import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
 import type { SourceDocument } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
@@ -11,6 +11,20 @@ import { ExpectedUpds } from '../kpp/ExpectedUpds';
 import { ExpectedOutbound } from '../shipments/ExpectedOutbound';
 import { DeliveriesHistory } from '../kpp/DeliveriesHistory';
 import { ShipmentsHistory } from '../shipments/ShipmentsHistory';
+
+// KppPage и ShipmentPage — крупные модули с собственными зависимостями
+// (IndexedDB, photoPipeline). Грузим лениво — модалка не появится без
+// клика, не тратим бандл-стартап на их разбор.
+const KppPage = lazy(() => import('../kpp/KppPage'));
+
+/**
+ * Feature flag: если выставлен `VITE_OPERATIONS_MODAL_DISABLED=1`, edit
+ * остаётся на старой полной странице `/kpp?delivery=…`. Страховка на
+ * случай регрессий в Modal-обвязке: можно мгновенно вернуть прежнее
+ * поведение без revert'а коммита.
+ */
+const MODAL_DISABLED =
+  import.meta.env.VITE_OPERATIONS_MODAL_DISABLED === '1';
 
 type OpType = 'delivery' | 'shipment';
 type ListTab = 'expected' | 'accepted';
@@ -61,16 +75,23 @@ export default function OperationsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdminUser, trashOn]);
 
-  // Создание новой записи — переход на старую edit-страницу с new=1.
-  // На втором этапе тут будет открываться модалка вместо перехода.
+  // Создание / открытие записи. Для приёмок открываем модалку прямо
+  // здесь (добавляем `?delivery=` к текущему URL `/operations`). Для
+  // отгрузок пока — старый маршрут (этап В перенесёт сюда же).
+  // Под feature flag MODAL_DISABLED — всё всегда через старые страницы.
   const createNew = () => {
     if (inspectorWithoutSite) {
       message.error('Объект не назначен — обратитесь к администратору');
       return;
     }
     const id = crypto.randomUUID();
-    if (type === 'delivery') navigate(`/kpp?delivery=${id}&new=1`);
-    else navigate(`/shipments?shipment=${id}&new=1`);
+    if (type === 'delivery' && !MODAL_DISABLED) {
+      updateUrl({ delivery: id, new: '1' });
+    } else if (type === 'delivery') {
+      navigate(`/kpp?delivery=${id}&new=1`);
+    } else {
+      navigate(`/shipments?shipment=${id}&new=1`);
+    }
   };
   const createFromUpd = (upd: SourceDocument) => {
     if (inspectorWithoutSite) {
@@ -78,12 +99,36 @@ export default function OperationsPage() {
       return;
     }
     const id = crypto.randomUUID();
-    if (type === 'delivery') navigate(`/kpp?delivery=${id}&new=1&upd=${upd.id}`);
-    else navigate(`/shipments?shipment=${id}&new=1&upd=${upd.id}`);
+    if (type === 'delivery' && !MODAL_DISABLED) {
+      updateUrl({ delivery: id, new: '1', upd: upd.id });
+    } else if (type === 'delivery') {
+      navigate(`/kpp?delivery=${id}&new=1&upd=${upd.id}`);
+    } else {
+      navigate(`/shipments?shipment=${id}&new=1&upd=${upd.id}`);
+    }
   };
   const onOpenExisting = (id: string) => {
-    if (type === 'delivery') navigate(`/kpp?delivery=${id}&from=accepted`);
-    else navigate(`/shipments?shipment=${id}&from=accepted`);
+    if (type === 'delivery' && !MODAL_DISABLED) {
+      updateUrl({ delivery: id, from: 'accepted' });
+    } else if (type === 'delivery') {
+      navigate(`/kpp?delivery=${id}&from=accepted`);
+    } else {
+      navigate(`/shipments?shipment=${id}&from=accepted`);
+    }
+  };
+
+  // Когда срабатывает мутация save/confirmMol/etc внутри KppPage, она
+  // делает navigate('/kpp?tab=accepted') — на этапе А пока обычный
+  // navigate без правки KppPage. KppGuard в router редиректит обратно
+  // на /operations, и пользователь оказывается на чистом списке (без
+  // ?delivery=) → Modal закрывается. Этап Б устранит промежуточный /kpp.
+  const editDeliveryId = type === 'delivery' ? params.get('delivery') : null;
+  const editDeliveryIsNew =
+    type === 'delivery' && params.get('new') === '1';
+  const deliveryModalOpen =
+    !MODAL_DISABLED && (Boolean(editDeliveryId) || editDeliveryIsNew);
+  const closeDeliveryModal = () => {
+    updateUrl({ delivery: null, new: null, upd: null, from: null });
   };
 
   // Экспорт Excel — повторяет логику KppPage.handleExportExcel, но
@@ -237,6 +282,38 @@ export default function OperationsPage() {
       ) : (
         <ShipmentsHistory onOpen={onOpenExisting} filtersExtra={headerExtras} />
       )}
+
+      {/* Модалка edit-режима Приёмки (этап А). KppPage внутри получает
+          deliveryId/new=1 из тех же URL-параметров, что и раньше — никаких
+          изменений в его внутренней логике. key={editDeliveryId ?? 'new'}
+          + destroyOnClose дают полный unmount/remount при смене записи —
+          IndexedDB-photo-pipeline корректно пересоздаётся.
+          В этапе А мутации внутри KppPage всё ещё навигируют на
+          /kpp?tab=accepted; KppGuard перенаправит обратно на /operations,
+          и Modal закроется через open=false (промежуточный мерцающий
+          /kpp устранит этап Б). */}
+      <Modal
+        open={deliveryModalOpen}
+        onCancel={closeDeliveryModal}
+        title={editDeliveryIsNew ? 'Новая приёмка' : 'Приёмка'}
+        width="min(1200px, 96vw)"
+        style={{ top: 16 }}
+        styles={{ body: { padding: '16px 20px' } }}
+        footer={null}
+        destroyOnClose
+        maskClosable={false}
+        keyboard={false}
+      >
+        <Suspense
+          fallback={
+            <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
+              <Spin size="large" />
+            </div>
+          }
+        >
+          <KppPage key={editDeliveryId ?? 'new'} embedded />
+        </Suspense>
+      </Modal>
     </StickyPageHeader>
   );
 }

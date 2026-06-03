@@ -137,7 +137,16 @@ function newKey(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export default function KppPage() {
+/**
+ * Edit-режим приёмки. Прежде это была отдельная страница `/kpp?delivery=…`,
+ * сейчас может рендериться внутри большой `<Modal>` на `/operations`
+ * (см. OperationsPage). Пропс `embedded=true` скрывает внутренний
+ * заголовок (Title + back-button) — Modal рисует свой.
+ *
+ * Списочный режим переехал в OperationsPage; KppPage без edit-параметров
+ * редиректит сюда через KppGuard в router.tsx.
+ */
+export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const navigate = useNavigate();
   const isDesktop = useBreakpoint() === 'desktop';
   const queryClient = useQueryClient();
@@ -1027,25 +1036,37 @@ export default function KppPage() {
       isAdmin || authUser?.id === (loadedDelivery?.pendingDeletionByUserId ?? null);
     return (
       <Space direction="vertical" size="middle" style={{ width: '100%', paddingBottom: isDesktop ? 0 : 96 }}>
-        <Space style={{ width: '100%' }} align="center">
-          {fromAccepted && (
-            <Button
-              type="text"
-              icon={<ArrowLeftOutlined />}
-              onClick={() => navigate('/kpp?tab=accepted')}
-            />
-          )}
-          <Typography.Title level={3} style={{ margin: 0 }}>
-            {isNew ? 'Новая приёмка' : 'Приёмка'}
-          </Typography.Title>
-          {isPending && loadedDelivery && (
-            <PendingDeletionTag
-              at={loadedDelivery.pendingDeletionAt}
-              byEmail={loadedDelivery.pendingDeletionByUserEmail}
-              reason={loadedDelivery.pendingDeletionReason}
-            />
-          )}
-        </Space>
+        {!embedded && (
+          <Space style={{ width: '100%' }} align="center">
+            {fromAccepted && (
+              <Button
+                type="text"
+                icon={<ArrowLeftOutlined />}
+                onClick={() => navigate('/kpp?tab=accepted')}
+              />
+            )}
+            <Typography.Title level={3} style={{ margin: 0 }}>
+              {isNew ? 'Новая приёмка' : 'Приёмка'}
+            </Typography.Title>
+            {isPending && loadedDelivery && (
+              <PendingDeletionTag
+                at={loadedDelivery.pendingDeletionAt}
+                byEmail={loadedDelivery.pendingDeletionByUserEmail}
+                reason={loadedDelivery.pendingDeletionReason}
+              />
+            )}
+          </Space>
+        )}
+        {/* Внутри модалки тоже нужен PendingDeletionTag, если документ на
+            удалении — Modal сам рисует общий заголовок, но статус «помечен
+            на удаление» важно показать рядом с формой. */}
+        {embedded && isPending && loadedDelivery && (
+          <PendingDeletionTag
+            at={loadedDelivery.pendingDeletionAt}
+            byEmail={loadedDelivery.pendingDeletionByUserEmail}
+            reason={loadedDelivery.pendingDeletionReason}
+          />
+        )}
 
         {isPending && loadedDelivery && (
           <Alert
