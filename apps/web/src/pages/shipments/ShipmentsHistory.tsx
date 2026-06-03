@@ -13,7 +13,12 @@ import {
   Typography,
   message,
 } from 'antd';
-import { DeleteOutlined, ExclamationCircleOutlined, UndoOutlined } from '@ant-design/icons';
+import {
+  DeleteOutlined,
+  ExclamationCircleOutlined,
+  ShareAltOutlined,
+  UndoOutlined,
+} from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   BulkDeleteResponse,
@@ -41,6 +46,7 @@ import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
+import { ShareLinkModal } from '../../components/ShareLinkModal';
 import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
@@ -78,6 +84,7 @@ export function ShipmentsHistory({
   const queryClient = useQueryClient();
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
   const [reasonDraft, setReasonDraft] = useState<Record<string, string>>({});
+  const [shareId, setShareId] = useState<string | null>(null);
   const [params, setParams] = useSearchParams();
   const authUser = useAuthStore((s) => s.user);
   const isAdmin = authUser?.role === 'admin';
@@ -361,6 +368,19 @@ export function ShipmentsHistory({
     filters.q,
   ]);
 
+  // Иконка «Поделиться» — показывается всегда, даже в корзине, чтобы
+  // можно было создать публичную ссылку и без перехода в edit-режим.
+  const shareIcon = (r: Row) => (
+    <Tooltip title="Поделиться ссылкой">
+      <Button
+        size="small"
+        shape="circle"
+        icon={<ShareAltOutlined />}
+        onClick={() => setShareId(r.id)}
+      />
+    </Tooltip>
+  );
+
   const renderActions = (r: Row) => {
     const errMsg = deleteErrors[r.id];
     const errIcon = errMsg ? (
@@ -374,6 +394,7 @@ export function ShipmentsHistory({
       return (
         <Space size={4} onClick={(e) => e.stopPropagation()}>
           {errIcon}
+          {shareIcon(r)}
           {canUnmark && (
             <Tooltip title="Восстановить">
               <Button
@@ -406,6 +427,7 @@ export function ShipmentsHistory({
       return (
         <Space size={4} onClick={(e) => e.stopPropagation()}>
           {errIcon}
+          {shareIcon(r)}
           <Popconfirm
             title="Пометить на удаление?"
             description={
@@ -470,6 +492,7 @@ export function ShipmentsHistory({
   );
 
   return (
+    <>
     <StickyPageHeader
       header={
         <Space direction="vertical" size="small" style={{ width: '100%' }}>
@@ -674,6 +697,14 @@ export function ShipmentsHistory({
         )}
       />
     </StickyPageHeader>
+    <ShareLinkModal
+      entityType="shipment"
+      entityId={shareId}
+      open={shareId !== null}
+      onClose={() => setShareId(null)}
+      title="Поделиться отгрузкой"
+    />
+    </>
   );
 }
 

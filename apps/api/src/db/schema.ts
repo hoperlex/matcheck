@@ -960,6 +960,37 @@ export const entityDeletions = pgTable(
   ],
 );
 
+// ─── Share-tokens (публичные ссылки на просмотр приёмки/отгрузки) ─────────
+
+// Менеджер генерирует ссылку, отправляет внешнему получателю (например,
+// поставщику). Тот открывает /share/{token} без авторизации и видит
+// read-only карточку с фото и материалами. TTL по умолчанию 10 дней.
+// Фото проксируются через API (см. routes/share.ts), S3-URL не светится.
+export const shareTokens = pgTable(
+  'share_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    entityType: text('entity_type').notNull(), // 'delivery' | 'shipment'
+    entityId: uuid('entity_id').notNull(),
+    token: varchar('token', { length: 64 }).notNull().unique(),
+    createdByUserId: uuid('created_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    accessedCount: integer('accessed_count').notNull().default(0),
+    lastAccessedAt: timestamp('last_accessed_at', { withTimezone: true }),
+    lastAccessedIp: text('last_accessed_ip'),
+    lastAccessedUserAgent: text('last_accessed_user_agent'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('share_tokens_entity_active_idx')
+      .on(t.entityType, t.entityId)
+      .where(sql`${t.revokedAt} is null`),
+  ],
+);
+
 // ─── Sync log ──────────────────────────────────────────────────────────────
 
 export const syncLog = pgTable('sync_log', {

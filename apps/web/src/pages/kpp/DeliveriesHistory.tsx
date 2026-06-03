@@ -18,6 +18,7 @@ import {
   EditOutlined,
   ExclamationCircleOutlined,
   EyeOutlined,
+  ShareAltOutlined,
   UndoOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -51,6 +52,7 @@ import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { DeliveryViewDrawer, type DeliveryViewData } from './DeliveryViewDrawer';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
+import { ShareLinkModal } from '../../components/ShareLinkModal';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
@@ -125,6 +127,7 @@ export function DeliveriesHistory({
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
   const [reasonDraft, setReasonDraft] = useState<Record<string, string>>({});
   const [viewData, setViewData] = useState<DeliveryViewData | null>(null);
+  const [shareId, setShareId] = useState<string | null>(null);
   const [params, setParams] = useSearchParams();
   const authUser = useAuthStore((s) => s.user);
   const isAdmin = authUser?.role === 'admin';
@@ -561,6 +564,14 @@ export function DeliveriesHistory({
           onClick={() => onOpen(r.id)}
         />
       </Tooltip>
+      <Tooltip title="Поделиться ссылкой">
+        <Button
+          size="small"
+          shape="circle"
+          icon={<ShareAltOutlined />}
+          onClick={() => setShareId(r.id)}
+        />
+      </Tooltip>
     </>
   );
 
@@ -790,7 +801,7 @@ export function DeliveriesHistory({
           {
             title: 'Действия',
             key: 'actions',
-            width: 170,
+            width: 200,
             align: 'right' as const,
             onCell: () => ({
               onClick: (e: MouseEvent) => e.stopPropagation(),
@@ -845,6 +856,13 @@ export function DeliveriesHistory({
         setViewData(null);
         onOpen(id);
       }}
+    />
+    <ShareLinkModal
+      entityType="delivery"
+      entityId={shareId}
+      open={shareId !== null}
+      onClose={() => setShareId(null)}
+      title="Поделиться приёмкой"
     />
     </>
   );

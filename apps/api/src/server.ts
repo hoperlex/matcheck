@@ -34,6 +34,7 @@ import { mailAccountRoutes } from './routes/admin/mail-accounts.js';
 import { userAdminRoutes } from './routes/admin/users.js';
 import { appSettingsRoutes } from './routes/admin/settings.js';
 import { promptRoutes } from './routes/admin/prompts.js';
+import { shareRoutes } from './routes/share.js';
 
 export async function buildServer() {
   const env = loadEnv();
@@ -82,6 +83,7 @@ export async function buildServer() {
   await app.register(userAdminRoutes);
   await app.register(appSettingsRoutes);
   await app.register(promptRoutes);
+  await app.register(shareRoutes);
 
   app.setErrorHandler((err, req, reply) => {
     req.log.error({ err }, 'request error');

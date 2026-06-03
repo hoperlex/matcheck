@@ -23,6 +23,7 @@ const AdminPrompts = lazy(() => import('../pages/admin/Prompts'));
 const AdminEdoAccounts = lazy(() => import('../pages/admin/EdoAccounts'));
 const AdminMailAccounts = lazy(() => import('../pages/admin/MailAccounts'));
 const Settings = lazy(() => import('../pages/settings/Settings'));
+const PublicSharePage = lazy(() => import('../pages/share/PublicSharePage'));
 
 function suspense(node: React.ReactNode) {
   return (
@@ -41,6 +42,9 @@ function suspense(node: React.ReactNode) {
 export const router = createBrowserRouter([
   { path: '/login', element: suspense(<Login />) },
   { path: '/register', element: suspense(<Register />) },
+  // Публичная страница просмотра приёмки/отгрузки по share-токену.
+  // Вне ProtectedRoute: доступ по знанию unguessable токена, без логина.
+  { path: '/share/:token', element: suspense(<PublicSharePage />) },
   {
     path: '/',
     element: (
