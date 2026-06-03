@@ -26,6 +26,7 @@ import {
   ArrowLeftOutlined,
   CameraOutlined,
   DeleteOutlined,
+  DownloadOutlined,
   PlusOutlined,
   UndoOutlined,
 } from '@ant-design/icons';
@@ -41,7 +42,7 @@ import type {
   SourceDocumentDetail,
   Status,
 } from '@matcheck/contracts';
-import { api } from '../../services/api';
+import { api, apiDownload } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
 import { SYSTEM_SITE_ID } from '../../lib/db';
 import { capturePhoto } from '../../services/photoPipeline';
@@ -1596,6 +1597,76 @@ export default function KppPage() {
     </Button>
   );
 
+  const [exporting, setExporting] = useState(false);
+
+  // Экспорт в Excel — зависит от активной вкладки:
+  //  - «Ожидаемые» → source-documents с direction=inbound + unaccepted=true;
+  //  - «Принятые» → deliveries c теми же фильтрами что в DeliveriesHistory.
+  // Фильтры контрагент/поставщик/объект/номер берутся из URL params (их пишут
+  // дочерние компоненты), статус/авто/trash — тоже из URL (только для accepted).
+  async function handleExportExcel() {
+    try {
+      setExporting(true);
+      const contractor = params.get('contractor');
+      const supplier = params.get('supplier');
+      const site = params.get('site');
+      const qVal = params.get('q')?.trim();
+      const qs = new URLSearchParams();
+      if (contractor) qs.set('contractorIds', contractor);
+      if (supplier) qs.set('supplierIds', supplier);
+      if (site) qs.set('siteIds', site);
+      if (qVal) qs.set('q', qVal);
+
+      let path: string;
+      let fallback: string;
+      const today = new Date().toISOString().slice(0, 10);
+      if (tab === 'expected') {
+        qs.set('direction', 'inbound');
+        qs.set('unaccepted', 'true');
+        path = `/source-documents/export.xlsx?${qs.toString()}`;
+        fallback = `documents-expected-inbound-${today}.xlsx`;
+      } else {
+        const statusVal = params.get('status');
+        if (statusVal) qs.set('status', statusVal);
+        const plateVal = params.get('plate')?.trim();
+        if (plateVal) qs.set('plate', plateVal);
+        if (params.get('trash') === '1') qs.set('trash', 'true');
+        path = `/deliveries/export.xlsx?${qs.toString()}`;
+        fallback = `deliveries-${today}.xlsx`;
+      }
+
+      const { blob, filename } = await apiDownload(path);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || fallback;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      message.error((err as Error).message);
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  const exportButton = (
+    <Button
+      icon={<DownloadOutlined />}
+      onClick={handleExportExcel}
+      loading={exporting}
+    >
+      Экспорт Excel
+    </Button>
+  );
+  const headerExtras = (
+    <Space size={8}>
+      {createButton}
+      {exportButton}
+    </Space>
+  );
+
   // Переключатель «Удалённые» вынесен в верхнюю строку (рядом с Title) —
   // чтобы место под ним было зарезервировано всегда и фильтры/таблица не
   // прыгали по вертикали при смене вкладок. На вкладке «Ожидаемые»
@@ -1682,11 +1753,11 @@ export default function KppPage() {
           // tabs/activeTab/onTabChange больше не передаём — PageTabs живёт
           // в шапке KppPage (рядом с заголовком), чтобы освободить
           // вертикальное место для таблицы.
-          <ExpectedUpds onOpen={createFromUpd} filtersExtra={createButton} />
+          <ExpectedUpds onOpen={createFromUpd} filtersExtra={headerExtras} />
         ) : (
           <DeliveriesHistory
             onOpen={(id) => navigate(`/kpp?delivery=${id}&from=accepted`)}
-            filtersExtra={createButton}
+            filtersExtra={headerExtras}
           />
         )}
       </Space>

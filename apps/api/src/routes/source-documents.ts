@@ -552,6 +552,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       supplierIds: z.string().optional(),
       siteIds: z.string().optional(),
       q: z.string().trim().min(1).max(200).optional(),
+      // unaccepted=true — только документы без привязки к delivery/shipment
+      // (то, что показывается во вкладке «Ожидаемые» Приёмки/Отгрузки).
+      unaccepted: z.coerce.boolean().optional(),
     });
 
     app.get(
@@ -561,7 +564,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         schema: { querystring: ExportQuerySchema },
       },
       async (req, reply) => {
-        const { direction, contractorIds, supplierIds, siteIds, q } = req.query;
+        const { direction, contractorIds, supplierIds, siteIds, q, unaccepted } = req.query;
         const conditions = [eq(sourceDocuments.direction, direction)];
         if (q) conditions.push(ilike(sourceDocuments.docNumber, `%${q}%`));
         const cIds = csvUuids(contractorIds);
@@ -570,6 +573,22 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         if (sIds.length) conditions.push(inArray(sourceDocuments.supplierId, sIds));
         const stIds = csvUuids(siteIds);
         if (stIds.length) conditions.push(inArray(sourceDocuments.siteId, stIds));
+        // unaccepted: документ ещё не привязан к delivery (для inbound) или
+        // shipment (для outbound). Логика повторяет GET /source-documents.
+        if (unaccepted) {
+          if (direction !== 'outbound') {
+            const linkedToDelivery = app.db
+              .select({ id: deliverySources.sourceDocumentId })
+              .from(deliverySources);
+            conditions.push(drSql`${sourceDocuments.id} not in ${linkedToDelivery}`);
+          }
+          if (direction !== 'inbound') {
+            const linkedToShipment = app.db
+              .select({ id: shipmentSources.sourceDocumentId })
+              .from(shipmentSources);
+            conditions.push(drSql`${sourceDocuments.id} not in ${linkedToShipment}`);
+          }
+        }
         // inspector_kpp видит только свой объект — те же правила, что в GET /.
         if (req.user?.role === 'inspector_kpp') {
           if (!req.user.siteId) {

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, gte, inArray, isNotNull, isNull, ne, or, sql as drSql } from 'drizzle-orm';
+import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, ne, or, sql as drSql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
@@ -15,6 +15,7 @@ import {
   ErrorResponseSchema,
 } from '@matcheck/contracts';
 import {
+  counterparties,
   deliveries,
   deliveryItems,
   deliveryPhotos,
@@ -23,6 +24,7 @@ import {
   shipments,
   sites,
   sourceDocumentItems,
+  sourceDocuments,
   statuses,
   users,
 } from '../db/schema.js';
@@ -836,6 +838,328 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       return { deleted, skipped };
     },
   );
+
+  // Экспорт принятых приёмок в xlsx с тем же набором фильтров, что и в UI.
+  // Каждая приёмка — строка верхнего уровня; позиции (delivery_items) —
+  // строки с outlineLevel=1 (свёрнуты по умолчанию, раскрываются в Excel
+  // через «+»). Контрагент резолвится как в UI: delivery.contractorId ||
+  // sourceDocument.contractorId первого привязанного УПД.
+  {
+    const csvUuids = (raw: string | undefined): string[] => {
+      if (!raw) return [];
+      return raw
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => /^[0-9a-fA-F-]{36}$/.test(s));
+    };
+    const fmtDateTimeRu = (d: Date | string | null): string => {
+      if (!d) return '';
+      const date = d instanceof Date ? d : new Date(d);
+      if (Number.isNaN(date.getTime())) return '';
+      const dd = String(date.getUTCDate()).padStart(2, '0');
+      const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+      const yyyy = date.getUTCFullYear();
+      const hh = String(date.getUTCHours()).padStart(2, '0');
+      const mi = String(date.getUTCMinutes()).padStart(2, '0');
+      return `${dd}.${mm}.${yyyy} ${hh}:${mi}`;
+    };
+
+    const ExportDeliveriesQuerySchema = z.object({
+      contractorIds: z.string().optional(),
+      supplierIds: z.string().optional(),
+      siteIds: z.string().optional(),
+      q: z.string().trim().min(1).max(200).optional(),
+      status: z.string().trim().min(1).max(50).optional(),
+      plate: z.string().trim().min(1).max(50).optional(),
+      trash: z.coerce.boolean().optional(),
+      noDocument: z.coerce.boolean().optional(),
+    });
+
+    app.get(
+      '/api/v1/deliveries/export.xlsx',
+      {
+        preHandler: [app.authenticate],
+        schema: { querystring: ExportDeliveriesQuerySchema },
+      },
+      async (req, reply) => {
+        const { contractorIds, supplierIds, siteIds, q, status, plate, trash, noDocument } =
+          req.query;
+        const cIds = csvUuids(contractorIds);
+        const sIds = csvUuids(supplierIds);
+        const stIds = csvUuids(siteIds);
+
+        const conds = [
+          trash
+            ? isNotNull(deliveries.pendingDeletionAt)
+            : isNull(deliveries.pendingDeletionAt),
+        ];
+        if (sIds.length) conds.push(inArray(deliveries.supplierId, sIds));
+        if (stIds.length) conds.push(inArray(deliveries.siteId, stIds));
+        if (plate) conds.push(ilike(deliveries.vehiclePlate, `%${plate}%`));
+        if (status && status !== 'no_document') {
+          const statusId = await resolveStatusId(app, status);
+          conds.push(eq(deliveries.statusId, statusId));
+        }
+        if (noDocument || status === 'no_document') {
+          conds.push(
+            drSql`not exists (select 1 from delivery_sources ds where ds.delivery_id = ${deliveries.id})`,
+          );
+        }
+        if (req.user?.role === 'inspector_kpp') {
+          if (!req.user.siteId) {
+            conds.push(drSql`false`);
+          } else {
+            conds.push(eq(deliveries.siteId, req.user.siteId));
+          }
+        }
+
+        const supplier = alias(counterparties, 'supplier');
+        const contractor = alias(counterparties, 'contractor');
+        const rows = await app.db
+          .select({
+            d: deliveries,
+            statusCode: statuses.code,
+            statusLabel: statuses.label,
+            supplierName: supplier.name,
+            contractorName: contractor.name,
+            siteCode: sites.code,
+            siteName: sites.name,
+          })
+          .from(deliveries)
+          .innerJoin(statuses, eq(deliveries.statusId, statuses.id))
+          .leftJoin(supplier, eq(deliveries.supplierId, supplier.id))
+          .leftJoin(contractor, eq(deliveries.contractorId, contractor.id))
+          .leftJoin(sites, eq(deliveries.siteId, sites.id))
+          .where(and(...conds))
+          .orderBy(desc(deliveries.updatedAt));
+
+        const deliveryIds = rows.map((r) => r.d.id);
+        type SrcLink = { deliveryId: string; sourceDocumentId: string };
+        type SrcDoc = {
+          id: string;
+          docNumber: string | null;
+          contractorId: string | null;
+          contractorName: string | null;
+        };
+        const srcLinks: SrcLink[] = deliveryIds.length
+          ? await app.db
+              .select({
+                deliveryId: deliverySources.deliveryId,
+                sourceDocumentId: deliverySources.sourceDocumentId,
+              })
+              .from(deliverySources)
+              .where(inArray(deliverySources.deliveryId, deliveryIds))
+          : [];
+        const sdIds = Array.from(new Set(srcLinks.map((l) => l.sourceDocumentId)));
+        const sdContractor = alias(counterparties, 'sd_contractor');
+        const sdRowsRaw: SrcDoc[] = sdIds.length
+          ? await app.db
+              .select({
+                id: sourceDocuments.id,
+                docNumber: sourceDocuments.docNumber,
+                contractorId: sourceDocuments.contractorId,
+                contractorName: sdContractor.name,
+              })
+              .from(sourceDocuments)
+              .leftJoin(sdContractor, eq(sourceDocuments.contractorId, sdContractor.id))
+              .where(inArray(sourceDocuments.id, sdIds))
+          : [];
+        const sdById = new Map<string, SrcDoc>(sdRowsRaw.map((r) => [r.id, r]));
+        const linksByDelivery = new Map<string, SrcLink[]>();
+        for (const l of srcLinks) {
+          const arr = linksByDelivery.get(l.deliveryId) ?? [];
+          arr.push(l);
+          linksByDelivery.set(l.deliveryId, arr);
+        }
+
+        // Резолвим контрагента и номер документа как в UI:
+        // contractor = delivery.contractorId || sd.contractorId первой привязки.
+        const resolved = rows.map((r) => {
+          const links = linksByDelivery.get(r.d.id) ?? [];
+          const firstSd = links[0] ? sdById.get(links[0].sourceDocumentId) : undefined;
+          const contractorIdR = r.d.contractorId ?? firstSd?.contractorId ?? null;
+          const contractorNameR = r.contractorName ?? firstSd?.contractorName ?? null;
+          const docNumber = firstSd?.docNumber ?? null;
+          return {
+            ...r,
+            contractorIdResolved: contractorIdR,
+            contractorNameResolved: contractorNameR,
+            docNumber,
+          };
+        });
+
+        // Клиентоподобные фильтры по контрагенту и q (поиск по номеру УПД).
+        const filtered = resolved.filter((r) => {
+          if (cIds.length) {
+            if (!r.contractorIdResolved || !cIds.includes(r.contractorIdResolved)) return false;
+          }
+          if (q) {
+            const num = r.docNumber ?? '';
+            if (!num.toLowerCase().includes(q.toLowerCase())) return false;
+          }
+          return true;
+        });
+
+        const finalIds = filtered.map((r) => r.d.id);
+        const itemsByDelivery = new Map<string, (typeof deliveryItems.$inferSelect)[]>();
+        if (finalIds.length > 0) {
+          const items = await app.db
+            .select()
+            .from(deliveryItems)
+            .where(inArray(deliveryItems.deliveryId, finalIds))
+            .orderBy(deliveryItems.deliveryId, deliveryItems.lineNo);
+          for (const it of items) {
+            const arr = itemsByDelivery.get(it.deliveryId) ?? [];
+            arr.push(it);
+            itemsByDelivery.set(it.deliveryId, arr);
+          }
+        }
+        const photoCounts = new Map<string, number>();
+        if (finalIds.length > 0) {
+          const counts: { deliveryId: string; count: number }[] = await app.db
+            .select({
+              deliveryId: deliveryPhotos.deliveryId,
+              count: drSql<number>`count(*)::int`,
+            })
+            .from(deliveryPhotos)
+            .where(inArray(deliveryPhotos.deliveryId, finalIds))
+            .groupBy(deliveryPhotos.deliveryId);
+          for (const c of counts) photoCounts.set(c.deliveryId, c.count);
+        }
+
+        const ExcelJS = (await import('exceljs')).default;
+        const wb = new ExcelJS.Workbook();
+        const ws = wb.addWorksheet('Принятые', {
+          views: [{ state: 'frozen', ySplit: 1 }],
+          properties: { defaultRowHeight: 16 },
+        });
+        ws.columns = [
+          { header: '№', key: 'idx', width: 6 },
+          { header: 'Статус', key: 'status', width: 16 },
+          { header: 'Авто', key: 'vehiclePlate', width: 12 },
+          { header: 'Прибытие', key: 'arrivedAt', width: 18 },
+          { header: '№ УПД', key: 'docNumber', width: 16 },
+          { header: 'Поставщик', key: 'supplierName', width: 28 },
+          { header: 'Подрядчик', key: 'contractorName', width: 28 },
+          { header: 'Объект', key: 'siteName', width: 24 },
+          { header: 'Фото', key: 'photos', width: 8 },
+          { header: 'Наименование', key: 'nameRaw', width: 40 },
+          { header: 'План', key: 'qtyPlanned', width: 9 },
+          { header: 'Факт', key: 'qtyActual', width: 9 },
+          { header: 'Ед.', key: 'unit', width: 7 },
+          { header: 'Цена', key: 'price', width: 12 },
+          { header: 'Сумма НДС', key: 'vatSum', width: 14 },
+          { header: 'Сумма', key: 'sum', width: 16 },
+        ];
+        const headerRow = ws.getRow(1);
+        headerRow.font = { bold: true };
+        headerRow.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+        headerRow.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFEDEDED' },
+        };
+
+        const MONEY_FMT = '# ##0.00 "₽"';
+        const QTY_FMT = '# ##0.####';
+
+        let idx = 0;
+        for (const r of filtered) {
+          idx++;
+          const d = r.d;
+          const items = itemsByDelivery.get(d.id) ?? [];
+          // Сумма документа: Σ qty × price по позициям (то же, что в UI).
+          let docSum: number | null = null;
+          let docVatSum: number | null = null;
+          for (const it of items) {
+            const qtyRaw = it.qtyActual ?? it.qtyPlanned;
+            const qty = qtyRaw != null && qtyRaw !== '' ? Number(qtyRaw) : null;
+            const price = it.price != null && it.price !== '' ? Number(it.price) : null;
+            if (qty != null && price != null && Number.isFinite(qty) && Number.isFinite(price)) {
+              docSum = (docSum ?? 0) + qty * price;
+            }
+            if (it.vatSum != null && it.vatSum !== '' && Number.isFinite(Number(it.vatSum))) {
+              docVatSum = (docVatSum ?? 0) + Number(it.vatSum);
+            }
+          }
+          const siteFull = r.siteCode && r.siteName ? `${r.siteCode} · ${r.siteName}` : r.siteName ?? '';
+          const docRow = ws.addRow({
+            idx,
+            status: r.statusLabel,
+            vehiclePlate: d.vehiclePlate ?? '',
+            arrivedAt: fmtDateTimeRu(d.arrivedAt),
+            docNumber: r.docNumber ?? '',
+            supplierName: r.supplierName ?? '',
+            contractorName: r.contractorNameResolved ?? '',
+            siteName: siteFull,
+            photos: photoCounts.get(d.id) ?? 0,
+            nameRaw: '',
+            qtyPlanned: null,
+            qtyActual: null,
+            unit: '',
+            price: null,
+            vatSum: docVatSum,
+            sum: docSum,
+          });
+          docRow.font = { bold: true };
+          docRow.getCell('vatSum').numFmt = MONEY_FMT;
+          docRow.getCell('sum').numFmt = MONEY_FMT;
+          docRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFF7F7F7' },
+          };
+
+          for (const it of items) {
+            const qtyP = it.qtyPlanned != null && it.qtyPlanned !== '' ? Number(it.qtyPlanned) : null;
+            const qtyA = it.qtyActual != null && it.qtyActual !== '' ? Number(it.qtyActual) : null;
+            const price = it.price != null && it.price !== '' ? Number(it.price) : null;
+            const qtyForRowTotal = qtyA ?? qtyP;
+            const rowSum =
+              qtyForRowTotal != null && price != null && Number.isFinite(qtyForRowTotal) && Number.isFinite(price)
+                ? qtyForRowTotal * price
+                : null;
+            const itemRow = ws.addRow({
+              idx: it.lineNo,
+              status: '',
+              vehiclePlate: '',
+              arrivedAt: '',
+              docNumber: '',
+              supplierName: '',
+              contractorName: '',
+              siteName: '',
+              photos: null,
+              nameRaw: it.nameRaw,
+              qtyPlanned: qtyP,
+              qtyActual: qtyA,
+              unit: it.unit,
+              price,
+              vatSum: it.vatSum != null && it.vatSum !== '' ? Number(it.vatSum) : null,
+              sum: rowSum,
+            });
+            itemRow.outlineLevel = 1;
+            itemRow.getCell('qtyPlanned').numFmt = QTY_FMT;
+            itemRow.getCell('qtyActual').numFmt = QTY_FMT;
+            itemRow.getCell('price').numFmt = MONEY_FMT;
+            itemRow.getCell('vatSum').numFmt = MONEY_FMT;
+            itemRow.getCell('sum').numFmt = MONEY_FMT;
+          }
+        }
+        ws.properties.outlineLevelRow = 1;
+
+        const buf = await wb.xlsx.writeBuffer();
+        const today = new Date().toISOString().slice(0, 10);
+        const filename = `deliveries-${today}.xlsx`;
+        return reply
+          .header(
+            'Content-Type',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          )
+          .header('Content-Disposition', `attachment; filename="${filename}"`)
+          .send(Buffer.from(buf));
+      },
+    );
+  }
 }
 
 async function createDelivery(
