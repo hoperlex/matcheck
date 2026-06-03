@@ -40,3 +40,30 @@ export function formatMoneyRu(input: number | string | null | undefined): string
   }).format(n);
   return `${formatted} ₽`;
 }
+
+/**
+ * Formatter для antd InputNumber: число → «1 234,56» (с узким неразрывным
+ * пробелом и запятой). Символ рубля не добавляем — он навешивается через
+ * addonAfter, чтобы не мешать редактированию.
+ */
+export function inputNumberFormatterRu(value: string | number | undefined): string {
+  if (value === undefined || value === null || value === '') return '';
+  const n = typeof value === 'string' ? Number(value) : value;
+  if (!Number.isFinite(n)) return '';
+  return new Intl.NumberFormat('ru-RU', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(n);
+}
+
+/**
+ * Parser для antd InputNumber: «1 234,56 ₽» → «1234.56» (точкой, без
+ * пробелов и валюты). Принимает любые «грязные» строки от пользователя.
+ */
+export function inputNumberParserRu(displayValue: string | undefined): string {
+  if (!displayValue) return '';
+  return displayValue
+    .replace(/[\s  ]/g, '')
+    .replace(/[^\d,.-]/g, '')
+    .replace(',', '.');
+}

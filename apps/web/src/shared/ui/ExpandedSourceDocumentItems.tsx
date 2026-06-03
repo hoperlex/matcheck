@@ -76,8 +76,8 @@ export function ExpandedSourceDocumentItems({
     {
       title: 'Цена',
       dataIndex: 'price',
-      width: 100,
-      render: (v: string | null) => formatDecimal(v),
+      width: 130,
+      render: (v: string | null) => formatMoneyRu(v),
     },
     {
       title: 'Сумма НДС',

@@ -38,6 +38,11 @@ import type {
 import { useAuthStore } from '../../stores/auth';
 import { api, ApiError } from '../../services/api';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
+import {
+  formatMoneyRu,
+  inputNumberFormatterRu,
+  inputNumberParserRu,
+} from '../../shared/utils/formatRu';
 import { LlmCallsDrawer } from './LlmCallsDrawer';
 import { ContractorSelect } from './ContractorSelect';
 import { SiteSelect } from './SiteSelect';
@@ -321,9 +326,13 @@ export function SourceDocumentDetailModal({
             'Документ'
           )
         }
-        width="92vw"
-        style={{ top: 12 }}
-        styles={{ body: { padding: '12px 16px' } }}
+        width="97vw"
+        style={{ top: 4 }}
+        styles={{
+          header: { padding: '8px 16px', marginBottom: 0 },
+          body: { padding: '6px 12px' },
+          footer: { padding: '6px 12px' },
+        }}
         footer={
           sd ? (
             <Space wrap>
@@ -616,29 +625,40 @@ function renderBody(args: {
   const splitterLayout: 'vertical' | 'horizontal' =
     layout === 'stacked' ? 'vertical' : 'horizontal';
 
+  // Чем меньше позиций — тем уже панель «Позиции» по умолчанию, тем больше
+  // места отдаём оригиналу (главное содержимое для пользователя). Пользователь
+  // потом всё равно может перетащить границу. defaultSize применяется только
+  // при первом монтировании Splitter — на правки позиций он не реагирует.
+  function defaultItemsSize(): string {
+    if (itemsCount <= 2) return '22%';
+    if (itemsCount <= 5) return '32%';
+    if (itemsCount <= 10) return '42%';
+    return '50%';
+  }
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '78vh', minHeight: 480 }}>
-      <Collapse
-        ghost
-        size="small"
-        style={{ marginBottom: 4 }}
-        items={[
-          {
-            key: 'header',
-            label: 'Реквизиты документа',
-            children: <div style={{ padding: '4px 0' }}>{headerNode}</div>,
-          },
-        ]}
-      />
+    <div style={{ display: 'flex', flexDirection: 'column', height: '92vh', minHeight: 480 }}>
       <div
         style={{
           display: 'flex',
-          justifyContent: 'flex-end',
           alignItems: 'center',
+          justifyContent: 'space-between',
           gap: 8,
-          marginBottom: 6,
+          marginBottom: 2,
         }}
       >
+        <Collapse
+          ghost
+          size="small"
+          style={{ flex: 1 }}
+          items={[
+            {
+              key: 'header',
+              label: 'Реквизиты документа',
+              children: <div style={{ padding: '4px 0' }}>{headerNode}</div>,
+            },
+          ]}
+        />
         <Tooltip title="Расположение панелей: позиции и оригинал">
           <Segmented
             size="small"
@@ -664,7 +684,7 @@ function renderBody(args: {
         layout={splitterLayout}
         style={{ flex: 1, minHeight: 0, border: '1px solid #f0f0f0', borderRadius: 4 }}
       >
-        <Splitter.Panel min="20%" defaultSize="50%">
+        <Splitter.Panel min="15%" defaultSize={defaultItemsSize()}>
           <div
             style={{
               height: '100%',
@@ -733,7 +753,10 @@ function OriginalAttachments({
               {a.filename}
             </Typography.Text>
             <iframe
-              src={`/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}`}
+              // #toolbar=1&navpanes=0 — Chrome PDF Viewer прячет левую панель
+              // с миниатюрами страниц, освобождая место для самого документа.
+              // Параметр игнорируется браузером для image/*.
+              src={`/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}#toolbar=1&navpanes=0`}
               title={a.filename}
               style={{
                 flex: 1,
@@ -795,14 +818,14 @@ function ReadOnlyTable({ items, showInvNumber }: { items: Item[]; showInvNumber?
     {
       title: 'Цена',
       dataIndex: 'price',
-      width: 100,
-      render: (v: string | null) => formatDecimal(v),
+      width: 130,
+      render: (v: string | null) => formatMoneyRu(v),
     },
     {
       title: 'Сумма',
       dataIndex: 'sum',
-      width: 110,
-      render: (v: string | null) => formatDecimal(v),
+      width: 150,
+      render: (v: string | null) => formatMoneyRu(v),
     },
   );
   return (
@@ -913,12 +936,15 @@ function EditableTable({
           {
             title: 'Цена',
             dataIndex: 'price',
-            width: 130,
+            width: 160,
             render: (v: string | null, _r, i) => (
               <InputNumber
                 value={v != null ? Number(v) : null}
                 onChange={(x) => updateItem(i, { price: x != null ? String(x) : null })}
                 decimalSeparator=","
+                formatter={inputNumberFormatterRu}
+                parser={inputNumberParserRu}
+                addonAfter="₽"
                 style={{ width: '100%' }}
               />
             ),
@@ -926,12 +952,15 @@ function EditableTable({
           {
             title: 'Сумма',
             dataIndex: 'sum',
-            width: 140,
+            width: 180,
             render: (v: string | null, _r, i) => (
               <InputNumber
                 value={v != null ? Number(v) : null}
                 onChange={(x) => updateItem(i, { sum: x != null ? String(x) : null })}
                 decimalSeparator=","
+                formatter={inputNumberFormatterRu}
+                parser={inputNumberParserRu}
+                addonAfter="₽"
                 style={{ width: '100%' }}
               />
             ),
