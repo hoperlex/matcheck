@@ -1314,7 +1314,10 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
 
         <Collapse
           size="small"
-          defaultActiveKey={photosCount > 0 ? ['photos'] : []}
+          // Если фото уже есть — свёрнут; если нет — раскрыт, чтобы
+          // пользователь сразу увидел «Снять фото» (без него Save disabled
+          // и не понятно почему — фото обязательно).
+          defaultActiveKey={photosCount === 0 ? ['photos'] : []}
           items={[
             {
               key: 'photos',
@@ -1439,11 +1442,23 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 padding: '12px 0',
                 background: '#f5f5f5',
                 display: 'flex',
+                flexWrap: 'wrap',
                 justifyContent: 'flex-end',
+                alignItems: 'center',
                 gap: 8,
                 zIndex: 5,
               }}
             >
+              {/* Явное сообщение почему Save disabled — раньше показывался
+                  только в Tooltip при hover, теперь видно сразу. */}
+              {verifyReason && (
+                <Typography.Text
+                  type="warning"
+                  style={{ marginRight: 'auto', fontSize: 12 }}
+                >
+                  ⚠ {verifyReason}
+                </Typography.Text>
+              )}
               <Button onClick={() => navigate('/operations?type=shipment')}>Отмена</Button>
               {markBlock}
               <Tooltip title={verifyReason ?? ''} placement="top">

@@ -1335,15 +1335,20 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
 
         {selectedUpd && !loadedDelivery?.sourceShipmentId && (
           <Card size="small" title="Дата поставки" styles={{ body: { padding: 8 } }}>
+            {/* Read-only: дата поставки — атрибут УПД, а не приёмки.
+                Редактируется в Документах (SourceDocumentDetailModal) или в
+                Приёмка→Ожидаемые при клике по строке. Здесь отображаем
+                актуальное значение из связанного source_document. */}
             <Typography.Text>{selectedUpd.expectedDate ?? '—'}</Typography.Text>
           </Card>
         )}
 
         <Collapse
           size="small"
-          // Свёрнут по умолчанию — экономит экранное пространство в Modal.
-          // Пользователь раскрывает кликом по заголовку.
-          defaultActiveKey={[]}
+          // Если фото уже есть — свёрнут, экономит экранное пространство.
+          // Если нет — раскрыт, чтобы пользователь сразу увидел «Снять фото»
+          // (без этого Save disabled и не понятно почему — фото обязательно).
+          defaultActiveKey={photosCount === 0 ? ['photos'] : []}
           items={[
             {
               key: 'photos',
@@ -1564,11 +1569,25 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 padding: '12px 0',
                 background: '#f5f5f5',
                 display: 'flex',
+                flexWrap: 'wrap',
                 justifyContent: 'flex-end',
+                alignItems: 'center',
                 gap: 8,
                 zIndex: 5,
               }}
             >
+              {/* Явное сообщение почему Save может быть disabled — раньше
+                  пользователь видел причину только при наведении на кнопку
+                  (Tooltip), что плохо обнаружимо. Теперь оранжевый тег
+                  светится рядом, если есть незакрытые требования. */}
+              {verifyReason && (
+                <Typography.Text
+                  type="warning"
+                  style={{ marginRight: 'auto', fontSize: 12 }}
+                >
+                  ⚠ {verifyReason}
+                </Typography.Text>
+              )}
               <Button onClick={() => navigate(fromAccepted ? '/operations?type=delivery&tab=accepted' : '/operations?type=delivery')}>
                 Отмена
               </Button>
