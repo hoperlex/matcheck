@@ -309,6 +309,27 @@
       "when": 1780877880000,
       "tag": "0043_source_bundles_expected_date_timestamp",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1780877940000,
+      "tag": "0044_users_full_name",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1780878000000,
+      "tag": "0045_counterparty_aliases",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1780878060000,
+      "tag": "0046_share_tokens",
+      "breakpoints": true
     }
   ]
 }
