@@ -1,4 +1,4 @@
-import { Button, Drawer, Empty, Space, Table, Tag, Typography } from 'antd';
+import { Button, Empty, Modal, Space, Table, Tag, Typography } from 'antd';
 import { EditOutlined } from '@ant-design/icons';
 import type { z } from 'zod';
 import type { DeliveryListResponseSchema } from '@matcheck/contracts';
@@ -20,7 +20,12 @@ export type DeliveryViewData = {
   docTotalSum: number | null;
 };
 
-export function DeliveryViewDrawer({
+/**
+ * Read-only модалка просмотра приёмки (кнопка 👁 в строке). Раньше была
+ * Drawer'ом — переехала на Modal для визуального единообразия с
+ * edit-режимом (этап 2.А): оба окна выглядят одинаково.
+ */
+export function DeliveryViewModal({
   data,
   open,
   onClose,
@@ -84,17 +89,15 @@ export function DeliveryViewDrawer({
   ];
 
   return (
-    <Drawer
+    <Modal
       open={open}
-      onClose={onClose}
-      width="85%"
+      onCancel={onClose}
+      width="min(1200px, 96vw)"
+      style={{ top: 16 }}
       title={
         d && data ? (
           <Space size={4} wrap style={{ fontSize: 12 }}>
-            <Tag
-              style={{ marginInlineEnd: 0 }}
-              color={d.status.color ?? 'default'}
-            >
+            <Tag style={{ marginInlineEnd: 0 }} color={d.status.color ?? 'default'}>
               {d.status.label}
             </Tag>
             {d.sourceDocumentIds.length === 0 && (
@@ -241,6 +244,6 @@ export function DeliveryViewDrawer({
           </div>
         </Space>
       ) : null}
-    </Drawer>
+    </Modal>
   );
 }

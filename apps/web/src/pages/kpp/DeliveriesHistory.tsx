@@ -50,7 +50,7 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
-import { DeliveryViewDrawer, type DeliveryViewData } from './DeliveryViewDrawer';
+import { DeliveryViewModal, type DeliveryViewData } from './DeliveryViewModal';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
 
@@ -833,7 +833,7 @@ export function DeliveriesHistory({
         )}
       />
     </StickyPageHeader>
-    <DeliveryViewDrawer
+    <DeliveryViewModal
       data={viewData}
       open={viewData !== null}
       onClose={() => setViewData(null)}

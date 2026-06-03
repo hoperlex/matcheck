@@ -531,7 +531,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       return;
     }
     const id = crypto.randomUUID();
-    navigate(`/kpp?delivery=${id}&new=1`);
+    navigate(`/operations?type=delivery&delivery=${id}&new=1`);
   };
 
   /**
@@ -545,7 +545,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       return;
     }
     const id = crypto.randomUUID();
-    navigate(`/kpp?delivery=${id}&new=1&upd=${upd.id}`);
+    navigate(`/operations?type=delivery&delivery=${id}&new=1&upd=${upd.id}`);
   };
 
   const photoProps: UploadProps = {
@@ -691,7 +691,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onSuccess: () => {
       message.success('Приёмка сохранена');
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
-      navigate('/kpp?tab=accepted');
+      navigate('/operations?type=delivery&tab=accepted');
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -703,7 +703,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onSuccess: () => {
       message.success('Приёмка подтверждена МОЛ');
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
-      navigate('/kpp?tab=accepted');
+      navigate('/operations?type=delivery&tab=accepted');
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -783,7 +783,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       message.success('Приёмка удалена');
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
-      navigate('/kpp?tab=accepted&trash=1');
+      navigate('/operations?type=delivery&tab=accepted&trash=1');
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -1042,7 +1042,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               <Button
                 type="text"
                 icon={<ArrowLeftOutlined />}
-                onClick={() => navigate('/kpp?tab=accepted')}
+                onClick={() => navigate('/operations?type=delivery&tab=accepted')}
               />
             )}
             <Typography.Title level={3} style={{ margin: 0 }}>
@@ -1519,7 +1519,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 zIndex: 5,
               }}
             >
-              <Button onClick={() => navigate(fromAccepted ? '/kpp?tab=accepted' : '/kpp')}>
+              <Button onClick={() => navigate(fromAccepted ? '/operations?type=delivery&tab=accepted' : '/operations?type=delivery')}>
                 Отмена
               </Button>
               {markBlock}
@@ -1565,7 +1565,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               <Button
                 size="large"
                 style={{ flex: 1 }}
-                onClick={() => navigate(fromAccepted ? '/kpp?tab=accepted' : '/kpp')}
+                onClick={() => navigate(fromAccepted ? '/operations?type=delivery&tab=accepted' : '/operations?type=delivery')}
               >
                 Отмена
               </Button>
@@ -1784,7 +1784,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           <ExpectedUpds onOpen={createFromUpd} filtersExtra={headerExtras} />
         ) : (
           <DeliveriesHistory
-            onOpen={(id) => navigate(`/kpp?delivery=${id}&from=accepted`)}
+            onOpen={(id) => navigate(`/operations?type=delivery&delivery=${id}&from=accepted`)}
             filtersExtra={headerExtras}
           />
         )}
