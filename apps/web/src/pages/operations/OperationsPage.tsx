@@ -304,9 +304,18 @@ export default function OperationsPage() {
         open={deliveryModalOpen}
         onCancel={closeDeliveryModal}
         title={editDeliveryIsNew ? 'Новая приёмка' : 'Приёмка'}
-        width="min(1200px, 96vw)"
-        style={{ top: 16 }}
-        styles={{ body: { padding: '16px 20px' } }}
+        width="95vw"
+        style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
+        styles={{
+          // Body высоты 95vh минус заголовок (~50) и небольшие отступы.
+          // Скролл идёт внутри body — фиксированный header и footer (если
+          // были бы) остаются на местах.
+          body: {
+            padding: '12px 16px',
+            maxHeight: 'calc(95vh - 56px)',
+            overflowY: 'auto',
+          },
+        }}
         footer={null}
         destroyOnClose
         maskClosable={false}
@@ -332,9 +341,18 @@ export default function OperationsPage() {
         open={shipmentModalOpen}
         onCancel={closeShipmentModal}
         title={editShipmentIsNew ? 'Новая отгрузка' : 'Отгрузка'}
-        width="min(1200px, 96vw)"
-        style={{ top: 16 }}
-        styles={{ body: { padding: '16px 20px' } }}
+        width="95vw"
+        style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
+        styles={{
+          // Body высоты 95vh минус заголовок (~50) и небольшие отступы.
+          // Скролл идёт внутри body — фиксированный header и footer (если
+          // были бы) остаются на местах.
+          body: {
+            padding: '12px 16px',
+            maxHeight: 'calc(95vh - 56px)',
+            overflowY: 'auto',
+          },
+        }}
         footer={null}
         destroyOnClose
         maskClosable={false}

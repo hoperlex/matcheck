@@ -68,7 +68,11 @@ import { PhotoGallery } from './PhotoGallery';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
 import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
-import { formatMoneyRu } from '../../shared/utils/formatRu';
+import {
+  formatMoneyRu,
+  inputNumberFormatterRu,
+  inputNumberParserRu,
+} from '../../shared/utils/formatRu';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 
 type DraftItem = {
@@ -868,11 +872,20 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       },
       {
         title: 'План',
-        width: 90,
-        render: (_: unknown, r: DraftItem) =>
-          r.qtyPlanned !== null && r.qtyPlanned !== ''
-            ? trimQty(r.qtyPlanned)
-            : '—',
+        width: 110,
+        render: (_: unknown, r: DraftItem) => (
+          <InputNumber
+            size="small"
+            min={0}
+            style={{ width: '100%' }}
+            value={r.qtyPlanned !== null && r.qtyPlanned !== '' ? Number(r.qtyPlanned) : null}
+            onChange={(v) =>
+              updateField(r.clientKey, {
+                qtyPlanned: v !== null && v !== undefined ? String(v) : null,
+              })
+            }
+          />
+        ),
       },
       {
         title: 'Факт',
@@ -904,18 +917,52 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       },
       {
         title: 'Цена',
-        width: 130,
-        render: (_: unknown, r: DraftItem) => {
-          const v = toNum(r.price);
-          return formatMoneyRu(v);
-        },
+        width: 160,
+        render: (_: unknown, r: DraftItem) => (
+          <InputNumber
+            size="small"
+            min={0}
+            style={{ width: '100%' }}
+            value={r.price !== null && r.price !== '' ? Number(r.price) : null}
+            onChange={(v) =>
+              updateField(r.clientKey, {
+                price: v !== null && v !== undefined ? String(v) : null,
+              })
+            }
+            decimalSeparator=","
+            formatter={inputNumberFormatterRu}
+            parser={inputNumberParserRu}
+            addonAfter="₽"
+          />
+        ),
       },
       {
         title: 'Сумма НДС',
-        width: 140,
+        width: 170,
         render: (_: unknown, r: DraftItem) => {
-          const v = computeVatSum(r);
-          return formatMoneyRu(v);
+          // По умолчанию значение — auto-compute (qty × price × vatRate / 100).
+          // Если пользователь ввёл руками — value сохраняется в r.vatSum и
+          // показывается как override. При очистке поля (null) возвращается
+          // к computed на следующем рендере.
+          const stored = r.vatSum !== null && r.vatSum !== '' ? Number(r.vatSum) : null;
+          const value = stored ?? computeVatSum(r);
+          return (
+            <InputNumber
+              size="small"
+              min={0}
+              style={{ width: '100%' }}
+              value={value}
+              onChange={(v) =>
+                updateField(r.clientKey, {
+                  vatSum: v !== null && v !== undefined ? String(v) : null,
+                })
+              }
+              decimalSeparator=","
+              formatter={inputNumberFormatterRu}
+              parser={inputNumberParserRu}
+              addonAfter="₽"
+            />
+          );
         },
       },
     ],
@@ -1114,6 +1161,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           />
         )}
 
+        {/* Компактная шапка: Card-блоки уменьшены, инпуты size="middle"
+            вместо "large", padding body урезан. Высота строки экономится
+            ~30-40px — больше места для материалов и фото. */}
         <Row gutter={[8, 8]}>
           <Col xs={24} sm={12} md={6}>
             <Card
@@ -1123,10 +1173,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   Объект <span style={{ color: '#ff4d4f' }}>*</span>
                 </span>
               }
-              styles={{ body: { padding: 12 } }}
+              styles={{ body: { padding: 8 } }}
             >
               <Select<string>
-                size="large"
                 style={{ width: '100%' }}
                 placeholder="Выберите объект"
                 value={siteId ?? undefined}
@@ -1148,10 +1197,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             </Card>
           </Col>
           <Col xs={24} sm={12} md={6}>
-            <Card size="small" title="Получатель" styles={{ body: { padding: 12 } }}>
+            <Card size="small" title="Получатель" styles={{ body: { padding: 8 } }}>
               <Segmented
                 block
-                style={{ marginBottom: 8 }}
+                size="small"
+                style={{ marginBottom: 6 }}
                 options={[
                   { label: 'Подрядчик', value: 'counterparty' },
                   { label: 'МОЛ', value: 'mol' },
@@ -1166,7 +1216,6 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               />
               {recipientKind === 'counterparty' ? (
                 <Select<string>
-                  size="large"
                   style={{ width: '100%' }}
                   placeholder="— не указан —"
                   value={contractorId ?? undefined}
@@ -1187,7 +1236,6 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 />
               ) : (
                 <Select<string>
-                  size="large"
                   style={{ width: '100%' }}
                   placeholder="— не указан —"
                   value={recipientMolId ?? undefined}
@@ -1210,9 +1258,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             </Card>
           </Col>
           <Col xs={24} sm={12} md={6}>
-            <Card size="small" title="Госномер" styles={{ body: { padding: 12 } }}>
+            <Card size="small" title="Госномер" styles={{ body: { padding: 8 } }}>
               <Input
-                size="large"
                 placeholder="А123ВВ77"
                 value={plate}
                 onChange={(e) => setPlate(e.target.value.toUpperCase())}
@@ -1225,7 +1272,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               // Парная приёмка из transfer — вместо УПД показываем источник и
               // обе фактические даты. Дата прибытия заполнится, как только
               // инспектор destSite подтвердит приёмку.
-              <Card size="small" title="Перемещение" styles={{ body: { padding: 12 } }}>
+              <Card size="small" title="Перемещение" styles={{ body: { padding: 8 } }}>
                 <Space direction="vertical" size={2}>
                   <Space wrap>
                     <Tag color="geekblue">с объекта</Tag>
@@ -1242,7 +1289,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 </Space>
               </Card>
             ) : (
-              <Card size="small" title="УПД" styles={{ body: { padding: 12 } }}>
+              <Card size="small" title="УПД" styles={{ body: { padding: 8 } }}>
                 {selectedUpd ? (
                   <Space wrap>
                     <Tag color="blue">{selectedUpd.docNumber ?? '— без номера —'}</Tag>
@@ -1287,14 +1334,16 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         />
 
         {selectedUpd && !loadedDelivery?.sourceShipmentId && (
-          <Card size="small" title="Дата поставки" styles={{ body: { padding: 12 } }}>
+          <Card size="small" title="Дата поставки" styles={{ body: { padding: 8 } }}>
             <Typography.Text>{selectedUpd.expectedDate ?? '—'}</Typography.Text>
           </Card>
         )}
 
         <Collapse
           size="small"
-          defaultActiveKey={photosCount > 0 ? ['photos'] : []}
+          // Свёрнут по умолчанию — экономит экранное пространство в Modal.
+          // Пользователь раскрывает кликом по заголовку.
+          defaultActiveKey={[]}
           items={[
             {
               key: 'photos',
@@ -1409,7 +1458,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             return (
               <Collapse
                 size="small"
-                defaultActiveKey={['comment']}
+                // Свёрнут по умолчанию, как и Фото — экономия места в Modal.
+                defaultActiveKey={[]}
                 items={[
                   {
                     key: 'comment',
