@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState, type ComponentProps } from 'react';
+import { useEffect, useMemo, useState, type ComponentProps, type ReactNode } from 'react';
 import {
   Alert,
   Button,
+  Collapse,
   DatePicker,
   Form,
   Input,
@@ -11,14 +12,21 @@ import {
   Select,
   Space,
   Spin,
+  Splitter,
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
-import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
+import {
+  BorderHorizontalOutlined,
+  BorderVerticleOutlined,
+  DeleteOutlined,
+  PlusOutlined,
+} from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   ResponsiblePerson,
@@ -85,6 +93,33 @@ function itemToEdit(i: Item): EditItem {
   };
 }
 
+// Сплит-режим модалки: 'stacked' — позиции сверху, оригинал снизу (горизонтальный
+// разделитель); 'sideBySide' — позиции слева, оригинал справа (вертикальный). В
+// antd Splitter ориентация инвертирована: layout='vertical' = панели стек-ом,
+// layout='horizontal' = панели рядом.
+type SplitMode = 'stacked' | 'sideBySide';
+const LAYOUT_LS_KEY = 'matcheck.docModal.layout';
+
+function readLayout(): SplitMode {
+  if (typeof window === 'undefined') return 'stacked';
+  const v = window.localStorage.getItem(LAYOUT_LS_KEY);
+  return v === 'sideBySide' ? 'sideBySide' : 'stacked';
+}
+
+// Порог 1280px подобран под минимально читаемый PDF в правой/нижней панели.
+// Ниже — split-layout схлопывается до старых вкладок (Позиции/Шапка/Оригинал).
+function useIsWideViewport(): boolean {
+  const [wide, setWide] = useState<boolean>(() =>
+    typeof window === 'undefined' ? true : window.innerWidth >= 1280,
+  );
+  useEffect(() => {
+    const onResize = () => setWide(window.innerWidth >= 1280);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return wide;
+}
+
 function initialForm(sd: SourceDocumentDetail): EditForm {
   return {
     docNumber: sd.docNumber,
@@ -114,6 +149,16 @@ export function SourceDocumentDetailModal({
   const role = useAuthStore((s) => s.user?.role ?? null);
   const [edit, setEdit] = useState<EditForm | null>(null);
   const [llmDrawerOpen, setLlmDrawerOpen] = useState(false);
+  const isWide = useIsWideViewport();
+  const [layout, setLayoutState] = useState<SplitMode>(readLayout);
+  const setLayout = (next: SplitMode) => {
+    setLayoutState(next);
+    try {
+      window.localStorage.setItem(LAYOUT_LS_KEY, next);
+    } catch {
+      // localStorage может быть недоступен (privacy mode) — молча игнорируем.
+    }
+  };
 
   const detail = useQuery({
     queryKey: ['source-document', id],
@@ -231,11 +276,15 @@ export function SourceDocumentDetailModal({
         keyboard={false}
         title={
           sd ? (
-            <Space wrap>
-              <Tag color={sd.direction === 'inbound' ? 'green' : 'purple'}>
+            <Space size={4} wrap style={{ fontSize: 12 }}>
+              <Tag
+                style={{ marginInlineEnd: 0 }}
+                color={sd.direction === 'inbound' ? 'green' : 'purple'}
+              >
                 {directionLabel(sd.direction)}
               </Tag>
               <Tag
+                style={{ marginInlineEnd: 0 }}
                 color={
                   sd.kind === 'upd'
                     ? 'blue'
@@ -250,20 +299,31 @@ export function SourceDocumentDetailModal({
                     ? 'Накладная'
                     : 'Заявка'}
               </Tag>
-              {sd.siteName ? <Tag>Объект: {sd.siteName}</Tag> : null}
-              {sd.contractorName ? <Tag>Подрядчик: {sd.contractorName}</Tag> : null}
-              {sd.recipientMolName ? <Tag>МОЛ: {sd.recipientMolName}</Tag> : null}
-              {sd.supplierName ? <Tag>Поставщик: {sd.supplierName}</Tag> : null}
+              {sd.siteName ? (
+                <Tag style={{ marginInlineEnd: 0 }}>Объект: {sd.siteName}</Tag>
+              ) : null}
+              {sd.contractorName ? (
+                <Tag style={{ marginInlineEnd: 0 }}>Подрядчик: {sd.contractorName}</Tag>
+              ) : null}
+              {sd.recipientMolName ? (
+                <Tag style={{ marginInlineEnd: 0 }}>МОЛ: {sd.recipientMolName}</Tag>
+              ) : null}
+              {sd.supplierName ? (
+                <Tag style={{ marginInlineEnd: 0 }}>Поставщик: {sd.supplierName}</Tag>
+              ) : null}
               {sd.llmConfidence != null && (
-                <Tag>Уверенность: {Math.round(Number(sd.llmConfidence) * 100)}%</Tag>
+                <Tag style={{ marginInlineEnd: 0 }}>
+                  Уверенность: {Math.round(Number(sd.llmConfidence) * 100)}%
+                </Tag>
               )}
             </Space>
           ) : (
             'Документ'
           )
         }
-        width="90vw"
-        style={{ top: 20 }}
+        width="92vw"
+        style={{ top: 12 }}
+        styles={{ body: { padding: '12px 16px' } }}
         footer={
           sd ? (
             <Space wrap>
@@ -353,170 +413,141 @@ export function SourceDocumentDetailModal({
               />
             )}
 
-            <Tabs
-              defaultActiveKey="items"
-              items={[
-                {
-                  key: 'items',
-                  label: `Позиции (${edit?.items.length ?? items.length})`,
-                  children: edit && !isProcessing && !isDuplicate ? (
-                    <EditableTable
-                      edit={edit}
-                      setEdit={setEdit}
-                      failedRows={new Set(
-                        failedChecks
-                          .map((c) => (typeof c.scope === 'object' ? c.scope.row : null))
-                          .filter((x): x is number => x != null),
-                      )}
+            {renderBody({
+              isWide,
+              layout,
+              setLayout,
+              itemsNode: edit && !isProcessing && !isDuplicate ? (
+                <EditableTable
+                  edit={edit}
+                  setEdit={setEdit}
+                  failedRows={new Set(
+                    failedChecks
+                      .map((c) => (typeof c.scope === 'object' ? c.scope.row : null))
+                      .filter((x): x is number => x != null),
+                  )}
+                />
+              ) : (
+                <ReadOnlyTable items={items} showInvNumber={sd.kind === 'os2_transfer'} />
+              ),
+              headerNode: edit && !isProcessing && !isDuplicate ? (
+                <Form layout="vertical" style={{ maxWidth: 500 }}>
+                  <Form.Item label="№ документа">
+                    <Input
+                      value={edit.docNumber ?? ''}
+                      onChange={(e) =>
+                        setEdit({ ...edit, docNumber: e.target.value || null })
+                      }
                     />
-                  ) : (
-                    <ReadOnlyTable items={items} showInvNumber={sd.kind === 'os2_transfer'} />
-                  ),
-                },
-                {
-                  key: 'header',
-                  label: 'Шапка',
-                  children: edit && !isProcessing && !isDuplicate ? (
-                    <Form layout="vertical" style={{ maxWidth: 500 }}>
-                      <Form.Item label="№ документа">
-                        <Input
-                          value={edit.docNumber ?? ''}
-                          onChange={(e) =>
-                            setEdit({ ...edit, docNumber: e.target.value || null })
-                          }
-                        />
-                      </Form.Item>
-                      <Form.Item label="Дата">
-                        <DatePicker
-                          value={edit.docDate}
-                          onChange={(d) => setEdit({ ...edit, docDate: d })}
-                          format="YYYY-MM-DD"
-                          style={{ width: '100%' }}
-                        />
-                      </Form.Item>
-                      <Form.Item label="Сумма">
-                        <InputNumber
-                          value={edit.totalSum != null ? Number(edit.totalSum) : null}
-                          onChange={(v) =>
-                            setEdit({ ...edit, totalSum: v != null ? String(v) : null })
-                          }
-                          decimalSeparator=","
-                          style={{ width: '100%' }}
-                        />
-                      </Form.Item>
-                      <Form.Item label="Дата поставки">
-                        <DatePicker
-                          value={edit.expectedDate}
-                          onChange={(d) => setEdit({ ...edit, expectedDate: d })}
-                          format="YYYY-MM-DD"
-                          style={{ width: '100%' }}
-                        />
-                      </Form.Item>
-                      <Form.Item label="Получатель">
-                        <Segmented
-                          block
-                          style={{ marginBottom: 8 }}
-                          value={edit.recipientKind}
-                          onChange={(v) => {
-                            const next = v as 'counterparty' | 'mol';
-                            setEdit({
-                              ...edit,
-                              recipientKind: next,
-                              contractorId: next === 'counterparty' ? edit.contractorId : null,
-                              recipientMolId: next === 'mol' ? edit.recipientMolId : null,
-                            });
-                          }}
-                          options={[
-                            { label: 'Подрядчик', value: 'counterparty' },
-                            { label: 'МОЛ', value: 'mol' },
-                          ]}
-                        />
-                        {edit.recipientKind === 'counterparty' ? (
-                          <ContractorSelect
-                            value={edit.contractorId}
-                            onChange={(v) => setEdit({ ...edit, contractorId: v })}
-                            placeholder="Выберите получателя"
-                          />
-                        ) : (
-                          <Select<string>
-                            style={{ width: '100%' }}
-                            placeholder="Выберите получателя"
-                            value={edit.recipientMolId ?? undefined}
-                            onChange={(v) =>
-                              setEdit({ ...edit, recipientMolId: v ?? null })
-                            }
-                            allowClear
-                            showSearch
-                            optionFilterProp="label"
-                            loading={responsiblePersonsQuery.isLoading}
-                            options={responsiblePersons.map((m) => ({
-                              value: m.id,
-                              label: m.fullName,
-                            }))}
-                            notFoundContent={
-                              <Typography.Text type="secondary">
-                                Заведите МОЛ в Справочниках
-                              </Typography.Text>
-                            }
-                          />
-                        )}
-                      </Form.Item>
-                      <Form.Item label="Объект">
-                        <SiteSelect
-                          value={edit.siteId}
-                          onChange={(v) => setEdit({ ...edit, siteId: v })}
-                        />
-                      </Form.Item>
-                    </Form>
-                  ) : (
-                    <ReadOnlyHeader sd={sd} />
-                  ),
-                },
-                {
-                  key: 'original',
-                  label:
-                    sd.attachments.length > 1
-                      ? `Оригинал (${sd.attachments.length})`
-                      : 'Оригинал',
-                  children:
-                    sd.attachments.length > 0 ? (
-                      // Для УПД обычно один attachment, для ТН — пакет
-                      // фото (лицевая + оборотная сторона + сопроводилки).
-                      // Рендерим каждый файл отдельным iframe — браузер сам
-                      // справляется и с PDF, и с image/jpeg|png.
-                      <Space direction="vertical" size={16} style={{ width: '100%' }}>
-                        {sd.attachments.map((a) => (
-                          <div key={a.id}>
-                            <Typography.Text
-                              type="secondary"
-                              style={{ display: 'block', marginBottom: 4 }}
-                            >
-                              {a.filename}
-                            </Typography.Text>
-                            <iframe
-                              src={`/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}`}
-                              title={a.filename}
-                              style={{
-                                width: '100%',
-                                height: sd.attachments.length > 1 ? '60vh' : '75vh',
-                                border: '1px solid #f0f0f0',
-                              }}
-                            />
-                          </div>
-                        ))}
-                      </Space>
-                    ) : file.isLoading ? (
-                      <Spin />
+                  </Form.Item>
+                  <Form.Item label="Дата">
+                    <DatePicker
+                      value={edit.docDate}
+                      onChange={(d) => setEdit({ ...edit, docDate: d })}
+                      format="YYYY-MM-DD"
+                      style={{ width: '100%' }}
+                    />
+                  </Form.Item>
+                  <Form.Item label="Сумма">
+                    <InputNumber
+                      value={edit.totalSum != null ? Number(edit.totalSum) : null}
+                      onChange={(v) =>
+                        setEdit({ ...edit, totalSum: v != null ? String(v) : null })
+                      }
+                      decimalSeparator=","
+                      style={{ width: '100%' }}
+                    />
+                  </Form.Item>
+                  <Form.Item label="Дата поставки">
+                    <DatePicker
+                      value={edit.expectedDate}
+                      onChange={(d) => setEdit({ ...edit, expectedDate: d })}
+                      format="YYYY-MM-DD"
+                      style={{ width: '100%' }}
+                    />
+                  </Form.Item>
+                  <Form.Item label="Получатель">
+                    <Segmented
+                      block
+                      style={{ marginBottom: 8 }}
+                      value={edit.recipientKind}
+                      onChange={(v) => {
+                        const next = v as 'counterparty' | 'mol';
+                        setEdit({
+                          ...edit,
+                          recipientKind: next,
+                          contractorId: next === 'counterparty' ? edit.contractorId : null,
+                          recipientMolId: next === 'mol' ? edit.recipientMolId : null,
+                        });
+                      }}
+                      options={[
+                        { label: 'Подрядчик', value: 'counterparty' },
+                        { label: 'МОЛ', value: 'mol' },
+                      ]}
+                    />
+                    {edit.recipientKind === 'counterparty' ? (
+                      <ContractorSelect
+                        value={edit.contractorId}
+                        onChange={(v) => setEdit({ ...edit, contractorId: v })}
+                        placeholder="Выберите получателя"
+                      />
                     ) : (
-                      <Typography.Text type="secondary">
-                        {file.error instanceof ApiError && file.error.status === 404
-                          ? 'Оригинальный файл недоступен (документ загружен из XML).'
-                          : 'Не удалось получить оригинал.'}
-                      </Typography.Text>
-                    ),
-                },
-              ]}
-            />
+                      <Select<string>
+                        style={{ width: '100%' }}
+                        placeholder="Выберите получателя"
+                        value={edit.recipientMolId ?? undefined}
+                        onChange={(v) =>
+                          setEdit({ ...edit, recipientMolId: v ?? null })
+                        }
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        loading={responsiblePersonsQuery.isLoading}
+                        options={responsiblePersons.map((m) => ({
+                          value: m.id,
+                          label: m.fullName,
+                        }))}
+                        notFoundContent={
+                          <Typography.Text type="secondary">
+                            Заведите МОЛ в Справочниках
+                          </Typography.Text>
+                        }
+                      />
+                    )}
+                  </Form.Item>
+                  <Form.Item label="Объект">
+                    <SiteSelect
+                      value={edit.siteId}
+                      onChange={(v) => setEdit({ ...edit, siteId: v })}
+                    />
+                  </Form.Item>
+                </Form>
+              ) : (
+                <ReadOnlyHeader sd={sd} />
+              ),
+              originalNode:
+                sd.attachments.length > 0 ? (
+                  // Для УПД обычно один attachment, для ТН — пакет фото
+                  // (лицевая + оборотная сторона + сопроводилки). Каждый
+                  // файл — отдельный iframe: браузер сам справляется и с
+                  // PDF, и с image/jpeg|png.
+                  <OriginalAttachments
+                    attachments={sd.attachments}
+                    id={id!}
+                    compact={isWide}
+                  />
+                ) : file.isLoading ? (
+                  <Spin />
+                ) : (
+                  <Typography.Text type="secondary">
+                    {file.error instanceof ApiError && file.error.status === 404
+                      ? 'Оригинальный файл недоступен (документ загружен из XML).'
+                      : 'Не удалось получить оригинал.'}
+                  </Typography.Text>
+                ),
+              itemsCount: edit?.items.length ?? items.length,
+              attachmentsCount: sd.attachments.length,
+            })}
           </>
         )}
       </Modal>
@@ -526,6 +557,215 @@ export function SourceDocumentDetailModal({
         onClose={() => setLlmDrawerOpen(false)}
       />
     </>
+  );
+}
+
+// Тело модалки: на широком экране — Collapse «Реквизиты» + Splitter «Позиции/Оригинал»
+// с toggle ориентации; на узком — старые вкладки Позиции/Шапка/Оригинал (PDF в split
+// на 700px нечитаем). Высота 78vh — рассчитана под чипы шапки модалки и футер с
+// кнопками; внутри Splitter растягивается по flex.
+function renderBody(args: {
+  isWide: boolean;
+  layout: SplitMode;
+  setLayout: (next: SplitMode) => void;
+  itemsNode: ReactNode;
+  headerNode: ReactNode;
+  originalNode: ReactNode;
+  itemsCount: number;
+  attachmentsCount: number;
+}): ReactNode {
+  const {
+    isWide,
+    layout,
+    setLayout,
+    itemsNode,
+    headerNode,
+    originalNode,
+    itemsCount,
+    attachmentsCount,
+  } = args;
+
+  if (!isWide) {
+    return (
+      <Tabs
+        defaultActiveKey="items"
+        items={[
+          {
+            key: 'items',
+            label: `Позиции (${itemsCount})`,
+            children: itemsNode,
+          },
+          {
+            key: 'header',
+            label: 'Шапка',
+            children: headerNode,
+          },
+          {
+            key: 'original',
+            label:
+              attachmentsCount > 1 ? `Оригинал (${attachmentsCount})` : 'Оригинал',
+            children: originalNode,
+          },
+        ]}
+      />
+    );
+  }
+
+  // antd Splitter: layout='vertical' = панели стекируются (разделитель горизонтальный);
+  // layout='horizontal' = панели бок о бок (разделитель вертикальный).
+  const splitterLayout: 'vertical' | 'horizontal' =
+    layout === 'stacked' ? 'vertical' : 'horizontal';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '78vh', minHeight: 480 }}>
+      <Collapse
+        ghost
+        size="small"
+        style={{ marginBottom: 4 }}
+        items={[
+          {
+            key: 'header',
+            label: 'Реквизиты документа',
+            children: <div style={{ padding: '4px 0' }}>{headerNode}</div>,
+          },
+        ]}
+      />
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'flex-end',
+          alignItems: 'center',
+          gap: 8,
+          marginBottom: 6,
+        }}
+      >
+        <Tooltip title="Расположение панелей: позиции и оригинал">
+          <Segmented
+            size="small"
+            value={layout}
+            onChange={(v) => setLayout(v as SplitMode)}
+            options={[
+              {
+                value: 'stacked',
+                icon: <BorderHorizontalOutlined />,
+                title: 'Сверху/снизу',
+              },
+              {
+                value: 'sideBySide',
+                icon: <BorderVerticleOutlined />,
+                title: 'Слева/справа',
+              },
+            ]}
+          />
+        </Tooltip>
+      </div>
+      <Splitter
+        key={splitterLayout}
+        layout={splitterLayout}
+        style={{ flex: 1, minHeight: 0, border: '1px solid #f0f0f0', borderRadius: 4 }}
+      >
+        <Splitter.Panel min="20%" defaultSize="50%">
+          <div
+            style={{
+              height: '100%',
+              overflow: 'auto',
+              padding: 8,
+            }}
+          >
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Позиции ({itemsCount})
+            </Typography.Text>
+            <div style={{ marginTop: 4 }}>{itemsNode}</div>
+          </div>
+        </Splitter.Panel>
+        <Splitter.Panel min="20%">
+          <div
+            style={{
+              height: '100%',
+              display: 'flex',
+              flexDirection: 'column',
+              padding: 8,
+            }}
+          >
+            <Typography.Text type="secondary" style={{ fontSize: 12, marginBottom: 4 }}>
+              Оригинал{attachmentsCount > 1 ? ` (${attachmentsCount})` : ''}
+            </Typography.Text>
+            <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>{originalNode}</div>
+          </div>
+        </Splitter.Panel>
+      </Splitter>
+    </div>
+  );
+}
+
+function OriginalAttachments({
+  attachments,
+  id,
+  compact,
+}: {
+  attachments: ReadonlyArray<{ id: string; filename: string }>;
+  id: string;
+  // compact=true — внутри Splitter, iframe растягивается на всю панель;
+  // compact=false — внутри Tabs (узкий экран), фиксированная высота как раньше.
+  compact: boolean;
+}) {
+  if (compact) {
+    // Если один файл — один iframe на всю панель. Если несколько — стек с
+    // равными долями (плохо читается, но для редкого случая ТН ок).
+    return (
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          height: '100%',
+        }}
+      >
+        {attachments.map((a) => (
+          <div
+            key={a.id}
+            style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
+          >
+            <Typography.Text
+              type="secondary"
+              style={{ fontSize: 11, display: 'block', marginBottom: 2 }}
+            >
+              {a.filename}
+            </Typography.Text>
+            <iframe
+              src={`/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}`}
+              title={a.filename}
+              style={{
+                flex: 1,
+                width: '100%',
+                minHeight: 200,
+                border: '1px solid #f0f0f0',
+              }}
+            />
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      {attachments.map((a) => (
+        <div key={a.id}>
+          <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
+            {a.filename}
+          </Typography.Text>
+          <iframe
+            src={`/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}`}
+            title={a.filename}
+            style={{
+              width: '100%',
+              height: attachments.length > 1 ? '60vh' : '75vh',
+              border: '1px solid #f0f0f0',
+            }}
+          />
+        </div>
+      ))}
+    </Space>
   );
 }
 
