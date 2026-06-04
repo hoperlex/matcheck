@@ -651,13 +651,16 @@ function DetailBody({
       }
     }
 
-    // Auto-scroll к последней строке. requestAnimationFrame — чтобы antd
-    // успел обновить tbody (Table перерисовывает виртуальный список после
-    // нашего setEdit, но antd планирует layout в следующем кадре).
-    const tbody = topPaneRef.current?.querySelector<HTMLElement>('.ant-table-body');
-    if (tbody) {
+    // Auto-scroll к низу панели «Позиции» — внешнего скроллера, не tbody.
+    // Так в видимой области оказывается и свежедобавленная строка, и
+    // кнопка «+ Добавить позицию» сразу под таблицей: пользователю не
+    // приходится скроллить, чтобы её увидеть и кликнуть ещё раз.
+    // requestAnimationFrame — чтобы antd успел перерисовать таблицу
+    // после setEdit, иначе scrollHeight ещё не учитывает новую строку.
+    const pane = topPaneRef.current;
+    if (pane) {
       requestAnimationFrame(() => {
-        tbody.scrollTo({ top: tbody.scrollHeight, behavior: 'smooth' });
+        pane.scrollTo({ top: pane.scrollHeight, behavior: 'smooth' });
       });
     }
   }, [itemsCount, layout]);
@@ -1130,7 +1133,11 @@ function EditableTable({
         rowKey="idx"
         size="small"
         pagination={false}
-        scroll={{ y: '55vh' }}
+        // scroll={y} убран намеренно: с внутренним tbody-скроллом кнопка
+        // «Добавить позицию» уезжала за нижний край панели и её не было
+        // видно. Теперь Table растягивается по содержимому, скроллит
+        // внешний контейнер Splitter.Panel — и при auto-scroll к низу
+        // (см. DetailBody) кнопка остаётся в видимой части.
         rowClassName={(r) => (failedRows.has(r.idx + 1) ? 'matcheck-row-mismatch' : '')}
         columns={[
           { title: '№', dataIndex: 'idx', width: 50, render: (idx: number) => idx + 1 },
