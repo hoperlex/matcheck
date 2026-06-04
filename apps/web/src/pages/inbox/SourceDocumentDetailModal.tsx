@@ -224,6 +224,10 @@ export function SourceDocumentDetailModal({
       message.success('Документ сохранён');
       void qc.invalidateQueries({ queryKey: ['source-documents'] });
       void qc.invalidateQueries({ queryKey: ['source-document', id] });
+      // Закрываем модалку — пользователь явно подтвердил изменения и не
+      // должен дополнительно жать ×. Крестик/Esc остаются как способ
+      // выйти без сохранения.
+      onClose();
     },
     onError: (err: Error) => message.error(err.message),
   });
