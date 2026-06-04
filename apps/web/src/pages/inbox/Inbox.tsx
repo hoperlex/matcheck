@@ -113,26 +113,20 @@ function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }
         </Tag>
       );
     case 'parsed': {
-      const c = row.llmConfidence != null ? Math.round(Number(row.llmConfidence) * 100) : null;
+      // Процент LLM-confidence в UI скрыт по запросу пользователя —
+      // значение llmConfidence остаётся в БД/контрактах, при необходимости
+      // его можно вернуть в столбец. Warning-иконку для несовпадения сумм
+      // оставляем — это сигнал к действию.
       const hasMismatch = row.validation?.hasMismatch === true;
       return (
-        <Space direction="vertical" size={0} align="start">
+        <Space size={4} align="center">
           <Tag color="green" style={{ marginInlineEnd: 0 }}>
             обработано
           </Tag>
-          {(c != null || hasMismatch) && (
-            <Space size={4} align="center">
-              {c != null && (
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {c}%
-                </Typography.Text>
-              )}
-              {hasMismatch && (
-                <Tooltip title="Сумма по позициям не сходится с шапкой">
-                  <WarningOutlined style={{ color: '#fa8c16', fontSize: 12 }} />
-                </Tooltip>
-              )}
-            </Space>
+          {hasMismatch && (
+            <Tooltip title="Сумма по позициям не сходится с шапкой">
+              <WarningOutlined style={{ color: '#fa8c16', fontSize: 12 }} />
+            </Tooltip>
           )}
         </Space>
       );
@@ -616,21 +610,10 @@ export default function InboxPage() {
             },
           },
           {
-            // Заголовок «двухстрочный»: сверху «Статус», снизу «Уверенность» —
-            // потому что в ячейке тоже идут две строки (тег статуса +
-            // процент). Визуально читается как числитель/знаменатель.
-            title: (
-              <div style={{ textAlign: 'center', lineHeight: 1.15 }}>
-                <div>Статус</div>
-                <div
-                  style={{
-                    borderTop: '1px solid #e5e7eb',
-                    margin: '3px 0',
-                  }}
-                />
-                <div>Уверенность</div>
-              </div>
-            ),
+            // Раньше шапка была двухстрочной «Статус / Уверенность» —
+            // теперь процент в ячейке не рисуется, заголовок упростили
+            // до одного «Статус».
+            title: 'Статус',
             dataIndex: 'status',
             // По «требует внимания»: активные вверху, архив внизу.
             sorter: prioritySorter<Row, Row['status']>(
