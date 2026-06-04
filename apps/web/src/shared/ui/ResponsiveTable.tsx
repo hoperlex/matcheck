@@ -1,5 +1,5 @@
 import { List, Space, Table, Tooltip, Typography, type TableProps } from 'antd';
-import type { ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { useStickyHeaderHeight } from './StickyPageHeader';
 
@@ -81,12 +81,26 @@ export function ResponsiveTable<T extends object>({
     render: wrapRender<T>(col.render),
   });
 
+  // Map ссылок строк на их исходную позицию — comparator колонки «№» лезет
+  // сюда O(1), без него indexOf давал бы O(n²·log n) при сортировке.
+  const originalIndex = useMemo(() => {
+    const m = new Map<T, number>();
+    items.forEach((it, i) => m.set(it, i));
+    return m;
+  }, [items]);
+
   const finalColumns: Column<T>[] = numbered
     ? [
         decorate({
           title: '№',
           key: '__num__',
           width: 56,
+          // Сортировка по «№» = по исходной позиции в items. Первый клик —
+          // ASC (как пришли с бэка), второй — DESC (инверсия), третий —
+          // снимает сортировку. Нужен, чтобы юзер мог одним кликом
+          // развернуть список «снизу вверх», не меняя других сортировок.
+          sorter: (a: T, b: T) =>
+            (originalIndex.get(a) ?? 0) - (originalIndex.get(b) ?? 0),
           render: (_: unknown, __: T, idx: number) => idx + 1,
         }),
         ...columns.map(decorate),
