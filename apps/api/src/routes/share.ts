@@ -200,28 +200,26 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
     },
   );
 
-  // Отзыв ссылки — может creator или admin. После revoke токен сразу
-  // перестаёт работать в публичных endpoints.
+  // Отзыв ссылки — может любой admin или manager (командная модель: ссылки
+  // принадлежат «компании», а не конкретному менеджеру; коллеги должны мочь
+  // прибрать чужие ссылки, например при увольнении автора или просто чтобы
+  // прервать утечку). Inspector_kpp — нет, защита от случайных кликов.
   app.post(
     '/api/v1/share-links/:id/revoke',
     {
-      preHandler: [app.authenticate],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
         response: { 200: ShareLinkSchema, 403: ErrorResponseSchema, 404: ErrorResponseSchema },
       },
     },
     async (req, reply) => {
-      const user = req.user!;
       const [existing] = await app.db
         .select()
         .from(shareTokens)
         .where(eq(shareTokens.id, req.params.id))
         .limit(1);
       if (!existing) return reply.code(404).send({ error: 'not_found' });
-      if (existing.createdByUserId !== user.id && user.role !== 'admin') {
-        return reply.code(403).send({ error: 'forbidden' });
-      }
       const [upd] = await app.db
         .update(shareTokens)
         .set({ revokedAt: new Date() })

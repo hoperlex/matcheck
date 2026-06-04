@@ -30,22 +30,18 @@ import {
 export async function shareMessageRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
 
-  // Owner-check: токен существует И принадлежит текущему юзеру (или он admin).
-  // Возвращает либо ряд токена, либо null. Используется в каждом endpoint'е
-  // для авторизации на уровне треда (одного токена).
-  async function findOwnedToken(
+  // Командная модель: любой admin/manager видит все треды и может отвечать
+  // — ссылки и переписки принадлежат «компании», а не конкретному автору.
+  // Это совпадает с поведением revoke в share.ts.
+  async function findTokenForManager(
     tokenId: string,
-    userId: string,
-    isAdmin: boolean,
   ): Promise<typeof shareTokens.$inferSelect | null> {
     const [row] = await app.db
       .select()
       .from(shareTokens)
       .where(eq(shareTokens.id, tokenId))
       .limit(1);
-    if (!row) return null;
-    if (!isAdmin && row.createdByUserId !== userId) return null;
-    return row;
+    return row ?? null;
   }
 
   // Имя отправителя для manager-сообщений: ФИО, иначе email. На клиенте
@@ -60,22 +56,19 @@ export async function shareMessageRoutes(rawApp: FastifyInstance): Promise<void>
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: { response: { 200: ShareMessageUnreadCountResponseSchema } },
     },
-    async (req) => {
-      const me = req.user!.id;
-      const isAdmin = req.user!.role === 'admin';
-      // admin видит счётчик по всем токенам, manager — только по своим.
-      const whereClause = isAdmin
-        ? and(eq(shareMessages.isRead, false), eq(shareMessages.senderType, 'external'))
-        : and(
-            eq(shareMessages.isRead, false),
-            eq(shareMessages.senderType, 'external'),
-            eq(shareTokens.createdByUserId, me),
-          );
+    async () => {
+      // Любой manager/admin видит общий счётчик непрочитанных от внешних
+      // пользователей — командная модель, см. findTokenForManager выше.
       const [row] = await app.db
         .select({ count: sql<number>`count(*)::int` })
         .from(shareMessages)
         .innerJoin(shareTokens, eq(shareTokens.id, shareMessages.shareTokenId))
-        .where(whereClause);
+        .where(
+          and(
+            eq(shareMessages.isRead, false),
+            eq(shareMessages.senderType, 'external'),
+          ),
+        );
       return { count: Number(row?.count ?? 0) };
     },
   );
@@ -86,13 +79,10 @@ export async function shareMessageRoutes(rawApp: FastifyInstance): Promise<void>
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: { response: { 200: ShareMessageThreadListResponseSchema } },
     },
-    async (req) => {
-      const me = req.user!.id;
-      const isAdmin = req.user!.role === 'admin';
-
-      // Получаем токены пользователя, обогащаем entity-label из
-      // deliveries/shipments (через JOIN на УПД). Используем сырые SQL
-      // фрагменты для агрегации по треду — это компактнее, чем CTE.
+    async () => {
+      // Командная модель: manager/admin видят все треды, обогащаем
+      // entity-label из deliveries/shipments. Используем сырые SQL для
+      // агрегации по треду — компактнее, чем CTE.
       const rowsRaw = await app.db.execute(sql`
         WITH last_msgs AS (
           SELECT
@@ -153,7 +143,6 @@ export async function shareMessageRoutes(rawApp: FastifyInstance): Promise<void>
           ORDER BY sdoc.doc_date DESC NULLS LAST
           LIMIT 1
         ) sd2 ON st.entity_type = 'shipment'
-        WHERE ${isAdmin ? sql`TRUE` : sql`st.created_by_user_id = ${me}`}
         ORDER BY (COALESCE(uc.cnt, 0) > 0) DESC, lm.created_at DESC
         LIMIT 100
       `);
@@ -213,9 +202,7 @@ export async function shareMessageRoutes(rawApp: FastifyInstance): Promise<void>
       },
     },
     async (req, reply) => {
-      const me = req.user!.id;
-      const isAdmin = req.user!.role === 'admin';
-      const token = await findOwnedToken(req.params.tokenId, me, isAdmin);
+      const token = await findTokenForManager(req.params.tokenId);
       if (!token) return reply.code(404).send({ error: 'not_found' });
 
       const messages = await app.db
@@ -336,10 +323,9 @@ export async function shareMessageRoutes(rawApp: FastifyInstance): Promise<void>
       },
     },
     async (req, reply) => {
-      const me = req.user!.id;
-      const isAdmin = req.user!.role === 'admin';
-      const token = await findOwnedToken(req.params.tokenId, me, isAdmin);
+      const token = await findTokenForManager(req.params.tokenId);
       if (!token) return reply.code(404).send({ error: 'not_found' });
+      const me = req.user!.id;
 
       const [u] = await app.db
         .select({ fullName: users.fullName, email: users.email })
@@ -400,9 +386,7 @@ export async function shareMessageRoutes(rawApp: FastifyInstance): Promise<void>
       },
     },
     async (req, reply) => {
-      const me = req.user!.id;
-      const isAdmin = req.user!.role === 'admin';
-      const token = await findOwnedToken(req.params.tokenId, me, isAdmin);
+      const token = await findTokenForManager(req.params.tokenId);
       if (!token) return reply.code(404).send({ error: 'not_found' });
       await app.db
         .update(shareMessages)
