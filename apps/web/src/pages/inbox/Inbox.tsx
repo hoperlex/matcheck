@@ -20,7 +20,7 @@ import {
   PlusSquareOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   Counterparty,
   Site,
@@ -39,6 +39,7 @@ import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../sh
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
+import { usePrefetchSourceDocumentDetails } from '../../shared/hooks/usePrefetchSourceDocumentDetails';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
@@ -301,6 +302,9 @@ export default function InboxPage() {
       if (filters.q.trim()) qs.set('q', filters.q.trim());
       return api.get<List>(`/source-documents?${qs.toString()}`);
     },
+    // При смене вкладки/фильтра показываем прошлый список, а новые данные
+    // подтягиваются «поверх» — без прыжка к Empty и спиннера.
+    placeholderData: keepPreviousData,
     // Поллинг, пока в выдаче есть «живые» документы (queued/processing/
     // needs_resolution). Когда всё «обработано» — поллинг останавливается.
     refetchInterval: (q) => {
@@ -402,6 +406,11 @@ export default function InboxPage() {
       return true;
     });
   }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds]);
+
+  // Префетч позиций — фоном после рендера списка. Клик «+» раскрывает
+  // строку, дёргать сеть в этот момент не приходится: ExpandedSource-
+  // DocumentItems читает тот же queryKey из кэша react-query.
+  usePrefetchSourceDocumentDetails(useMemo(() => filteredItems.map((r) => r.id), [filteredItems]));
 
   // Массовое удаление: чекбоксы слева, bulk action bar поверх таблицы.
   // Выбор сбрасывается при смене вкладки direction (через зависимость в

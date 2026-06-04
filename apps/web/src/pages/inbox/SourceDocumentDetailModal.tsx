@@ -224,6 +224,10 @@ export function SourceDocumentDetailModal({
       message.success('Документ сохранён');
       void qc.invalidateQueries({ queryKey: ['source-documents'] });
       void qc.invalidateQueries({ queryKey: ['source-document', id] });
+      // Тот же endpoint обслуживает префетч-кэш ExpandedSourceDocumentItems
+      // (отдельный queryKey по историческим причинам) — инвалидируем оба,
+      // иначе раскрытие «+» в списке покажет старые позиции.
+      void qc.invalidateQueries({ queryKey: ['source-document-detail', id] });
       // Закрываем модалку — пользователь явно подтвердил изменения и не
       // должен дополнительно жать ×. Крестик/Esc остаются как способ
       // выйти без сохранения.
@@ -239,6 +243,10 @@ export function SourceDocumentDetailModal({
       message.success('Расхождение принято');
       void qc.invalidateQueries({ queryKey: ['source-documents'] });
       void qc.invalidateQueries({ queryKey: ['source-document', id] });
+      // Тот же endpoint обслуживает префетч-кэш ExpandedSourceDocumentItems
+      // (отдельный queryKey по историческим причинам) — инвалидируем оба,
+      // иначе раскрытие «+» в списке покажет старые позиции.
+      void qc.invalidateQueries({ queryKey: ['source-document-detail', id] });
     },
     onError: (err: Error) => message.error(err.message),
   });

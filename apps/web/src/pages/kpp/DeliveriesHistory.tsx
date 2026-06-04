@@ -21,7 +21,7 @@ import {
   ShareAltOutlined,
   UndoOutlined,
 } from '@ant-design/icons';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   BulkDeleteResponse,
   Counterparty,
@@ -187,6 +187,7 @@ export function DeliveriesHistory({
     queryKey: ['deliveries', view],
     queryFn: () =>
       api.get<List>(view === 'trash' ? '/deliveries?trash=1' : '/deliveries'),
+    placeholderData: keepPreviousData,
   });
 
   const counterpartiesQuery = useQuery({

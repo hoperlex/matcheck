@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Button, Card, Space, Tag, Tooltip, Typography } from 'antd';
 import { MinusSquareOutlined, PlusSquareOutlined } from '@ant-design/icons';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import type {
   Counterparty,
   Site,
@@ -24,6 +24,7 @@ import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
+import { usePrefetchSourceDocumentDetails } from '../../shared/hooks/usePrefetchSourceDocumentDetails';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 
@@ -144,6 +145,7 @@ export function ExpectedSourceDocsList({
       if (filters.q.trim()) qs.set('q', filters.q.trim());
       return api.get<List>(`/source-documents?${qs.toString()}`);
     },
+    placeholderData: keepPreviousData,
   });
 
   const counterpartiesQuery = useQuery({
@@ -167,7 +169,11 @@ export function ExpectedSourceDocsList({
     });
   }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds]);
 
-  // Раскрытие строк с позициями документа — lazy fetch (см. Inbox).
+  // Префетч позиций — фоном после рендера. Раскрытие «+» читает кэш
+  // react-query, без обращения к сети (см. usePrefetchSourceDocumentDetails).
+  usePrefetchSourceDocumentDetails(useMemo(() => filteredItems.map((r) => r.id), [filteredItems]));
+
+  // Раскрытие строк с позициями документа.
   const [expandedIds, setExpandedIds] = useState<string[]>([]);
   const toggleExpand = (id: string) =>
     setExpandedIds((prev) =>

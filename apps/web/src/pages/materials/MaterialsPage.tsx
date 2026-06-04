@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Select, Space, Tag, Typography } from 'antd';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import type {
   Counterparty,
@@ -146,6 +146,8 @@ export default function MaterialsPage() {
   });
 
   // Два параллельных запроса; объёмы небольшие (limit=500), мерж клиентом.
+  // placeholderData: keepPreviousData — при смене фильтра старая выборка
+  // остаётся на экране, новая подтягивается без прыжка к Empty/Spin.
   const intakeQuery = useQuery({
     queryKey: ['reports', 'intake', { siteIds, contractorIds, q }],
     queryFn: () => {
@@ -156,6 +158,7 @@ export default function MaterialsPage() {
       qs.set('limit', '500');
       return api.get<IntakeJournalResponse>(`/reports/intake?${qs.toString()}`);
     },
+    placeholderData: keepPreviousData,
   });
   const shipmentQuery = useQuery({
     queryKey: ['reports', 'shipment', { siteIds, contractorIds, q }],
@@ -167,6 +170,7 @@ export default function MaterialsPage() {
       qs.set('limit', '500');
       return api.get<ShipmentJournalResponse>(`/reports/shipment?${qs.toString()}`);
     },
+    placeholderData: keepPreviousData,
   });
 
   const rows = useMemo<UnifiedRow[]>(() => {
