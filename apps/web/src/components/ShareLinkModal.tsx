@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -86,6 +86,24 @@ export function ShareLinkModal({
     (i) => i.revokedAt || new Date(i.expiresAt).getTime() <= now,
   );
 
+  // Авто-генерация ссылки при открытии: если активных нет, сразу создаём
+  // одну — пользователь не должен жать «Сгенерировать ссылку» вручную.
+  // Защита от повторного вызова: ref сбрасывается при close/reopen, чтобы
+  // следующее открытие модалки на ДРУГОЙ записи снова работало.
+  const autoCreatedRef = useRef(false);
+  useEffect(() => {
+    if (!open) {
+      autoCreatedRef.current = false;
+      return;
+    }
+    if (autoCreatedRef.current) return;
+    if (list.isLoading || list.error) return;
+    if (activeLinks.length > 0) return;
+    if (create.isPending) return;
+    autoCreatedRef.current = true;
+    create.mutate();
+  }, [open, list.isLoading, list.error, activeLinks.length, create]);
+
   return (
     <Modal
       open={open}
@@ -108,19 +126,34 @@ export function ShareLinkModal({
         <>
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             {activeLinks.length === 0 && (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="Активных ссылок нет"
-              >
-                <Button
-                  type="primary"
-                  icon={<LinkOutlined />}
-                  loading={create.isPending}
-                  onClick={() => create.mutate()}
+              // Пока auto-create в работе — крутим спиннер «Создаём ссылку…»,
+              // чтобы пользователь не видел Empty с кнопкой и не подумал что
+              // что-то сломалось. Кнопка остаётся как fallback на случай
+              // ошибки создания (тогда пользователь нажмёт её сам).
+              create.isPending ? (
+                <Space
+                  direction="vertical"
+                  align="center"
+                  style={{ width: '100%', padding: '24px 0' }}
                 >
-                  Сгенерировать ссылку
-                </Button>
-              </Empty>
+                  <Spin />
+                  <Typography.Text type="secondary">Создаём ссылку…</Typography.Text>
+                </Space>
+              ) : (
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description={create.isError ? 'Не удалось создать ссылку' : 'Активных ссылок нет'}
+                >
+                  <Button
+                    type="primary"
+                    icon={<LinkOutlined />}
+                    loading={create.isPending}
+                    onClick={() => create.mutate()}
+                  >
+                    Сгенерировать ссылку
+                  </Button>
+                </Empty>
+              )
             )}
 
             {activeLinks.map((link) => (
