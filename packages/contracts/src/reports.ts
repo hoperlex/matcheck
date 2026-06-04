@@ -113,7 +113,12 @@ export const InspectorStatsRowSchema = z.object({
   siteId: z.string().uuid(),
   siteCode: z.string(),
   siteName: z.string(),
-  vehicles: z.number().int(),                     // приёмки + отгрузки за день
+  // Разбивка машин: приёмки и отгрузки отдельно + итог vehicles.
+  // Инвариант: deliveries + shipments == vehicles (по построению UNION
+  // в /reports/inspector-stats).
+  deliveries: z.number().int(),
+  shipments: z.number().int(),
+  vehicles: z.number().int(),
   sumNoVat: z.string(),                           // numeric → string, как остальные деньги
 });
 export type InspectorStatsRow = z.infer<typeof InspectorStatsRowSchema>;

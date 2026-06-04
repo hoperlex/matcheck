@@ -667,6 +667,12 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           o.site_id AS "siteId",
           si.code AS "siteCode",
           si.name AS "siteName",
+          -- Разбивка машин: FILTER (WHERE …) — нативный PG-синтаксис для
+          -- условных счётчиков. Инвариант deliveries + shipments == vehicles
+          -- держится автоматически: каждая строка ops имеет ровно один из
+          -- id ненулевым по построению UNION в CTE.
+          COUNT(*) FILTER (WHERE o.delivery_id IS NOT NULL)::int AS "deliveries",
+          COUNT(*) FILTER (WHERE o.shipment_id IS NOT NULL)::int AS "shipments",
           COUNT(*)::int AS "vehicles",
           COALESCE(SUM(ds.sum_no_vat), 0)::numeric(18,2)::text AS "sumNoVat"
         FROM ops o
@@ -709,6 +715,8 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           siteId: String(r.siteId),
           siteCode: String(r.siteCode),
           siteName: String(r.siteName),
+          deliveries: Number(r.deliveries),
+          shipments: Number(r.shipments),
           vehicles: Number(r.vehicles),
           sumNoVat: String(r.sumNoVat),
         })),

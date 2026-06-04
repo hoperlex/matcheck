@@ -156,6 +156,20 @@ export default function StatsPage() {
               render: (_: unknown, r: InspectorStatsRow) => `${r.siteCode} · ${r.siteName}`,
             },
             {
+              title: 'Приёмки',
+              dataIndex: 'deliveries',
+              width: 110,
+              align: 'right' as const,
+              sorter: numberSorter<InspectorStatsRow>((r) => r.deliveries),
+            },
+            {
+              title: 'Отгрузки',
+              dataIndex: 'shipments',
+              width: 110,
+              align: 'right' as const,
+              sorter: numberSorter<InspectorStatsRow>((r) => r.shipments),
+            },
+            {
               title: 'Машин',
               dataIndex: 'vehicles',
               width: 110,
@@ -181,7 +195,7 @@ export default function StatsPage() {
                 {formatDate(r.date)} · {r.siteCode} · {r.siteName}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ display: 'block' }}>
-                Машин: {r.vehicles}
+                Приёмки: {r.deliveries} · Отгрузки: {r.shipments} · Машин: {r.vehicles}
               </Typography.Text>
             </div>
           )}
