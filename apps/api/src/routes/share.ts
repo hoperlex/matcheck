@@ -9,6 +9,9 @@ import {
   ShareLinkListResponseSchema,
   PublicSharedShipmentSchema,
   PublicSharedEntitySchema,
+  PublicShareMessageListResponseSchema,
+  PublicShareMessageCreateRequestSchema,
+  PublicShareMessageCreateResponseSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
 import {
@@ -18,6 +21,7 @@ import {
   deliveryPhotos,
   deliverySources,
   responsiblePersons,
+  shareMessages,
   shareTokens,
   shipments,
   shipmentItems,
@@ -555,6 +559,94 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
         .code(res.statusCode)
         .headers(res.headers as Record<string, string>)
         .send(res.rawPayload);
+    },
+  );
+
+  // ─── Public: чат с менеджером ───────────────────────────────────────────
+  //
+  // Без preHandler authenticate — доступ по знанию токена. В выдаче никогда
+  // не светится senderEmail (даже для external — это поле для менеджера в
+  // защищённой части). bumpAccessCounter не делаем — это не «открытие
+  // ссылки», а внутренняя сетевая активность чата.
+
+  app.get(
+    '/api/v1/share/:token/messages',
+    {
+      schema: {
+        params: z.object({ token: z.string().min(32).max(64) }),
+        response: {
+          200: PublicShareMessageListResponseSchema,
+          410: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const t = await findActiveToken(req.params.token);
+      if (!t) return reply.code(410).send({ error: 'gone', message: 'Ссылка недоступна' });
+      const rows = await app.db
+        .select()
+        .from(shareMessages)
+        .where(eq(shareMessages.shareTokenId, t.id))
+        .orderBy(shareMessages.createdAt);
+      return {
+        items: rows.map((m) => ({
+          id: m.id,
+          senderType: m.senderType as 'external' | 'manager',
+          senderName: m.senderName,
+          // Email внешним пользователям не отдаём (это пишет тот же человек,
+          // ничего нового он не узнает; для менеджеров мы тут не светим
+          // их email тоже — на публичной странице это лишний канал утечки).
+          senderEmail: null,
+          body: m.body,
+          createdAt: m.createdAt.toISOString(),
+          isRead: m.isRead,
+        })),
+      };
+    },
+  );
+
+  app.post(
+    '/api/v1/share/:token/messages',
+    {
+      // Защита от спама: 5 сообщений в минуту на IP. @fastify/rate-limit
+      // зарегистрирован глобально в plugins/security.ts.
+      config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
+      schema: {
+        params: z.object({ token: z.string().min(32).max(64) }),
+        body: PublicShareMessageCreateRequestSchema,
+        response: {
+          200: PublicShareMessageCreateResponseSchema,
+          410: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const t = await findActiveToken(req.params.token);
+      if (!t) return reply.code(410).send({ error: 'gone', message: 'Ссылка недоступна' });
+      const [created] = await app.db
+        .insert(shareMessages)
+        .values({
+          shareTokenId: t.id,
+          senderType: 'external',
+          senderUserId: null,
+          senderName: req.body.senderName.trim(),
+          senderEmail: req.body.senderEmail.trim(),
+          body: req.body.body.trim(),
+          isRead: false,
+        })
+        .returning();
+      if (!created) throw new Error('Failed to insert share message');
+      return {
+        message: {
+          id: created.id,
+          senderType: 'external' as const,
+          senderName: created.senderName,
+          senderEmail: null, // см. комментарий выше — наружу не светим
+          body: created.body,
+          createdAt: created.createdAt.toISOString(),
+          isRead: created.isRead,
+        },
+      };
     },
   );
 }

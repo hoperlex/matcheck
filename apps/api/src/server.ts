@@ -35,6 +35,7 @@ import { userAdminRoutes } from './routes/admin/users.js';
 import { appSettingsRoutes } from './routes/admin/settings.js';
 import { promptRoutes } from './routes/admin/prompts.js';
 import { shareRoutes } from './routes/share.js';
+import { shareMessageRoutes } from './routes/share-messages.js';
 
 export async function buildServer() {
   const env = loadEnv();
@@ -84,6 +85,7 @@ export async function buildServer() {
   await app.register(appSettingsRoutes);
   await app.register(promptRoutes);
   await app.register(shareRoutes);
+  await app.register(shareMessageRoutes);
 
   app.setErrorHandler((err, req, reply) => {
     req.log.error({ err }, 'request error');

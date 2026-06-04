@@ -19,3 +19,4 @@ export * from './sync.js';
 export * from './app-settings.js';
 export * from './prompts.js';
 export * from './share.js';
+export * from './share-messages.js';

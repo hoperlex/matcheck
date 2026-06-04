@@ -330,6 +330,13 @@
       "when": 1780878060000,
       "tag": "0046_share_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1780878120000,
+      "tag": "0047_share_messages",
+      "breakpoints": true
     }
   ]
 }

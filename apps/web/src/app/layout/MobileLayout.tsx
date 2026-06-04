@@ -6,6 +6,7 @@ import { useAuthStore } from '../../stores/auth';
 import { filterByRole } from './navItems';
 import { api } from '../../services/api';
 import { UserProfileModal } from '../../components/UserProfileModal';
+import { NotificationsBell } from '../../components/NotificationsBell';
 
 const { Header, Content, Footer } = Layout;
 
@@ -53,6 +54,7 @@ export function MobileLayout() {
         <Typography.Text strong style={{ fontSize: 16, flex: 1 }}>
           matcheck
         </Typography.Text>
+        <NotificationsBell />
         <Typography.Text code style={{ fontSize: 11 }}>
           {user.role}
         </Typography.Text>

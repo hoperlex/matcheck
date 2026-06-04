@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   Alert,
+  Button,
   Empty,
+  Form,
   Image,
+  Input,
   Layout,
   Result,
   Space,
@@ -11,11 +14,58 @@ import {
   Table,
   Tag,
   Typography,
+  message as antdMessage,
 } from 'antd';
-import type { PublicSharedEntity } from '@matcheck/contracts';
+import { SendOutlined, EditOutlined } from '@ant-design/icons';
+import type {
+  PublicShareMessageCreateResponse,
+  PublicShareMessageListResponse,
+  PublicSharedEntity,
+  ShareMessage,
+} from '@matcheck/contracts';
 import { ApiError } from '../../services/api';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
+
+const SENDER_LS_KEY = 'matcheck.shareMsg.sender';
+type SavedSender = { name: string; email: string };
+
+function readSavedSender(): SavedSender | null {
+  try {
+    const raw = window.localStorage.getItem(SENDER_LS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SavedSender>;
+    if (typeof parsed.name === 'string' && typeof parsed.email === 'string') {
+      return { name: parsed.name, email: parsed.email };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSavedSender(s: SavedSender): void {
+  try {
+    window.localStorage.setItem(SENDER_LS_KEY, JSON.stringify(s));
+  } catch {
+    /* private mode — ignore */
+  }
+}
+
+function formatRelativeTime(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return iso;
+  }
+}
 
 /**
  * Публичная страница просмотра приёмки/отгрузки по share-токену.
@@ -253,6 +303,8 @@ export default function PublicSharePage() {
             )}
           </div>
 
+          <PublicShareChat token={token} />
+
           <div
             style={{
               padding: 16,
@@ -281,5 +333,250 @@ export default function PublicSharePage() {
         </Space>
       </Layout.Content>
     </Layout>
+  );
+}
+
+/**
+ * Секция «Связаться с менеджером» на публичной share-странице. Внешний
+ * пользователь вводит имя+email (сохраняется в localStorage — со 2-го раза
+ * форма короткая) и сообщение. Polling 30 сек чтобы видеть ответы менеджера.
+ */
+function PublicShareChat({ token }: { token: string }): JSX.Element {
+  const [savedSender, setSavedSender] = useState<SavedSender | null>(() => readSavedSender());
+  const [editingSender, setEditingSender] = useState(false);
+  const [body, setBody] = useState('');
+  const [name, setName] = useState(savedSender?.name ?? '');
+  const [email, setEmail] = useState(savedSender?.email ?? '');
+  const [messages, setMessages] = useState<ShareMessage[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sectionGone, setSectionGone] = useState(false);
+
+  const fetchMessages = useMemo(
+    () => async () => {
+      try {
+        const r = await fetch(`/api/v1/share/${encodeURIComponent(token)}/messages`);
+        if (r.status === 410) {
+          setSectionGone(true);
+          return;
+        }
+        if (!r.ok) return;
+        const json = (await r.json()) as PublicShareMessageListResponse;
+        setMessages(json.items);
+      } catch {
+        /* ignore network blips */
+      } finally {
+        setLoading(false);
+      }
+    },
+    [token],
+  );
+
+  useEffect(() => {
+    void fetchMessages();
+    const id = window.setInterval(fetchMessages, 30_000);
+    return () => window.clearInterval(id);
+  }, [fetchMessages]);
+
+  if (sectionGone) return <></>;
+
+  const showFullForm = !savedSender || editingSender;
+
+  const onSend = async () => {
+    setError(null);
+    if (!body.trim()) return;
+    const payload = {
+      senderName: (savedSender?.name ?? name).trim(),
+      senderEmail: (savedSender?.email ?? email).trim(),
+      body: body.trim(),
+    };
+    setSending(true);
+    try {
+      const r = await fetch(`/api/v1/share/${encodeURIComponent(token)}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (r.status === 429) {
+        setError('Слишком много сообщений. Подождите минуту и попробуйте снова.');
+        return;
+      }
+      if (r.status === 410) {
+        setSectionGone(true);
+        return;
+      }
+      if (!r.ok) {
+        const j = (await r.json().catch(() => null)) as { message?: string } | null;
+        setError(j?.message ?? 'Не удалось отправить сообщение.');
+        return;
+      }
+      const json = (await r.json()) as PublicShareMessageCreateResponse;
+      setMessages((prev) => [...prev, json.message]);
+      setBody('');
+      // Запоминаем имя/email при первой успешной отправке.
+      const sender: SavedSender = { name: payload.senderName, email: payload.senderEmail };
+      saveSavedSender(sender);
+      setSavedSender(sender);
+      setEditingSender(false);
+      antdMessage.success('Сообщение отправлено');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Сетевая ошибка');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        padding: 16,
+        background: '#fff',
+        border: '1px solid #f0f0f0',
+        borderRadius: 6,
+      }}
+    >
+      <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 8 }}>
+        Связаться с менеджером
+      </Typography.Title>
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+        Менеджер увидит ваш вопрос и ответит здесь же. Обновите страницу через пару
+        минут, чтобы увидеть ответ.
+      </Typography.Paragraph>
+
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: 16 }}>
+          <Spin size="small" />
+        </div>
+      ) : messages.length === 0 ? (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="Пока сообщений нет"
+          style={{ margin: '8px 0 16px' }}
+        />
+      ) : (
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+            marginBottom: 12,
+            maxHeight: 320,
+            overflowY: 'auto',
+            paddingRight: 4,
+          }}
+        >
+          {messages.map((m) => (
+            <PublicBubble key={m.id} m={m} />
+          ))}
+        </div>
+      )}
+
+      {showFullForm ? (
+        <Form layout="vertical" disabled={sending}>
+          <Space.Compact style={{ width: '100%' }}>
+            <Form.Item style={{ marginBottom: 8, flex: 1 }} required>
+              <Input
+                placeholder="Ваше имя"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                maxLength={120}
+              />
+            </Form.Item>
+            <Form.Item style={{ marginBottom: 8, flex: 1 }} required>
+              <Input
+                placeholder="Email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                maxLength={200}
+                type="email"
+              />
+            </Form.Item>
+          </Space.Compact>
+        </Form>
+      ) : (
+        <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+          Отправляете как: <b>{savedSender?.name}</b>{' '}
+          <a
+            onClick={(e) => {
+              e.preventDefault();
+              setEditingSender(true);
+            }}
+            style={{ marginLeft: 4 }}
+          >
+            <EditOutlined /> изменить
+          </a>
+        </Typography.Text>
+      )}
+
+      <Input.TextArea
+        placeholder="Сообщение менеджеру…"
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        autoSize={{ minRows: 3, maxRows: 8 }}
+        maxLength={4000}
+        disabled={sending}
+        style={{ marginBottom: 8 }}
+      />
+      {error && (
+        <Alert
+          type="error"
+          showIcon
+          message={error}
+          style={{ marginBottom: 8 }}
+          closable
+          onClose={() => setError(null)}
+        />
+      )}
+      <div style={{ textAlign: 'right' }}>
+        <Button
+          type="primary"
+          icon={<SendOutlined />}
+          loading={sending}
+          disabled={
+            !body.trim() ||
+            (showFullForm && (!name.trim() || !email.trim() || !email.includes('@')))
+          }
+          onClick={onSend}
+        >
+          Отправить
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function PublicBubble({ m }: { m: ShareMessage }) {
+  // На публичной странице «я» — это external (получатель ссылки), его
+  // сообщения справа в синем; менеджер — слева в сером. Симметрично
+  // менеджерскому Drawer'у, но «я» с другой стороны.
+  const isExternal = m.senderType === 'external';
+  return (
+    <div
+      style={{
+        display: 'flex',
+        justifyContent: isExternal ? 'flex-end' : 'flex-start',
+      }}
+    >
+      <div
+        style={{
+          maxWidth: '78%',
+          background: isExternal ? '#e6f4ff' : '#fafafa',
+          border: '1px solid #f0f0f0',
+          borderRadius: 8,
+          padding: '6px 10px',
+        }}
+      >
+        <div style={{ display: 'flex', gap: 8, fontSize: 11, color: '#8c8c8c' }}>
+          <span style={{ fontWeight: 600 }}>
+            {m.senderName ?? (isExternal ? 'Вы' : 'Менеджер')}
+          </span>
+          <span>{formatRelativeTime(m.createdAt)}</span>
+        </div>
+        <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', marginTop: 2 }}>
+          {m.body}
+        </div>
+      </div>
+    </div>
   );
 }

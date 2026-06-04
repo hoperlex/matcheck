@@ -991,6 +991,38 @@ export const shareTokens = pgTable(
   ],
 );
 
+// ─── Share messages: чат на публичной share-странице ──────────────────────
+//
+// Привязка к share_tokens по CASCADE. sender_type='external' — без логина
+// (поля name/email из формы). sender_type='manager' — автор ссылки (или
+// другой админ/менеджер с доступом), берём ФИО из users.
+// Для уведомлений у менеджера в портале: badge показывает сумму external+
+// is_read=false по токенам, где created_by_user_id = me.
+export const shareMessages = pgTable(
+  'share_messages',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    shareTokenId: uuid('share_token_id')
+      .notNull()
+      .references(() => shareTokens.id, { onDelete: 'cascade' }),
+    senderType: text('sender_type').notNull(),       // 'external' | 'manager'
+    senderUserId: uuid('sender_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    senderName: text('sender_name'),
+    senderEmail: text('sender_email'),
+    body: text('body').notNull(),
+    isRead: boolean('is_read').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('share_messages_token_created_idx').on(t.shareTokenId, t.createdAt),
+    index('share_messages_unread_partial_idx')
+      .on(t.shareTokenId)
+      .where(sql`${t.isRead} = false and ${t.senderType} = 'external'`),
+  ],
+);
+
 // ─── Sync log ──────────────────────────────────────────────────────────────
 
 export const syncLog = pgTable('sync_log', {

@@ -6,6 +6,7 @@ import { useAuthStore } from '../../stores/auth';
 import { filterByRole } from './navItems';
 import { api } from '../../services/api';
 import { UserProfileModal } from '../../components/UserProfileModal';
+import { NotificationsBell } from '../../components/NotificationsBell';
 
 const { Sider, Content } = Layout;
 
@@ -113,6 +114,7 @@ export function DesktopLayout() {
           >
             {collapsed ? (
               <>
+                <NotificationsBell collapsed />
                 <Tooltip title={`${displayName} — Личный кабинет`} placement="right">
                   <Avatar
                     size="small"
@@ -138,49 +140,55 @@ export function DesktopLayout() {
                 {/* Карточка юзера — кликабельная, открывает Личный кабинет.
                     ФИО сверху (если есть), email подписью; иначе только email.
                     Кнопка «Выход» переехала в footer модалки Личного кабинета
-                    (стандарт UX — logout — редкое действие, прячем в профиль). */}
-                <div
-                  onClick={() => setProfileOpen(true)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '6px 8px',
-                    borderRadius: 6,
-                    cursor: 'pointer',
-                    transition: 'background 0.15s',
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = '#f5f5f5')}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-                  title="Открыть личный кабинет"
-                >
-                  <Avatar size="small">{avatarLetter}</Avatar>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    {user.fullName ? (
-                      <>
+                    (стандарт UX — logout — редкое действие, прячем в профиль).
+                    Колокольчик уведомлений — справа от карточки. */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div
+                    onClick={() => setProfileOpen(true)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '6px 8px',
+                      borderRadius: 6,
+                      cursor: 'pointer',
+                      transition: 'background 0.15s',
+                      flex: 1,
+                      minWidth: 0,
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = '#f5f5f5')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                    title="Открыть личный кабинет"
+                  >
+                    <Avatar size="small">{avatarLetter}</Avatar>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      {user.fullName ? (
+                        <>
+                          <Typography.Text
+                            ellipsis={{ tooltip: user.fullName }}
+                            style={{ fontSize: 13, display: 'block', lineHeight: 1.2 }}
+                          >
+                            {user.fullName}
+                          </Typography.Text>
+                          <Typography.Text
+                            type="secondary"
+                            ellipsis={{ tooltip: user.email }}
+                            style={{ fontSize: 11, display: 'block', lineHeight: 1.2 }}
+                          >
+                            {user.email}
+                          </Typography.Text>
+                        </>
+                      ) : (
                         <Typography.Text
-                          ellipsis={{ tooltip: user.fullName }}
-                          style={{ fontSize: 13, display: 'block', lineHeight: 1.2 }}
-                        >
-                          {user.fullName}
-                        </Typography.Text>
-                        <Typography.Text
-                          type="secondary"
                           ellipsis={{ tooltip: user.email }}
-                          style={{ fontSize: 11, display: 'block', lineHeight: 1.2 }}
+                          style={{ fontSize: 13 }}
                         >
                           {user.email}
                         </Typography.Text>
-                      </>
-                    ) : (
-                      <Typography.Text
-                        ellipsis={{ tooltip: user.email }}
-                        style={{ fontSize: 13 }}
-                      >
-                        {user.email}
-                      </Typography.Text>
-                    )}
+                      )}
+                    </div>
                   </div>
+                  <NotificationsBell />
                 </div>
                 <Button
                   block
