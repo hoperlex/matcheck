@@ -217,17 +217,6 @@ export function SourceDocumentDetailModal({
     }
   }, [sd]);
 
-  const switchDirection = useMutation({
-    mutationFn: (next: SourceDirection) =>
-      api.patch<SourceDocumentDetail>(`/source-documents/${id}/direction`, { direction: next }),
-    onSuccess: () => {
-      message.success('Направление обновлено');
-      void qc.invalidateQueries({ queryKey: ['source-documents'] });
-      void qc.invalidateQueries({ queryKey: ['source-document', id] });
-    },
-    onError: (err: Error) => message.error(`Не удалось: ${err.message}`),
-  });
-
   const patch = useMutation({
     mutationFn: (body: Record<string, unknown>) =>
       api.patch<SourceDocumentDetail>(`/source-documents/${id}`, body),
@@ -273,12 +262,6 @@ export function SourceDocumentDetailModal({
     };
     patch.mutate(body);
   }
-
-  const nextDirection: SourceDirection | null = sd
-    ? sd.direction === 'inbound'
-      ? 'outbound'
-      : 'inbound'
-    : null;
 
   const isMismatchPending =
     sd?.status === 'needs_resolution' && sd.parseErrorCode === 'validation_mismatch';
@@ -358,10 +341,21 @@ export function SourceDocumentDetailModal({
           )
         }
         width="97vw"
-        style={{ top: 4 }}
+        style={{ top: 4, paddingBottom: 0 }}
         styles={{
           header: { padding: '8px 16px', marginBottom: 0 },
-          body: { padding: '6px 12px' },
+          // Высота body ограничена так, чтобы footer с «Сохранить» всегда
+          // оставался виден без скролла страницы. 150px = top(4) + header
+          // с wrap-чипами (~80) + footer (~50) + paddings и буфер. Внутри
+          // body — flex column: Alert-сообщения сверху статично, DetailBody
+          // растягивается на оставшееся (flex:1) и скроллит внутри себя.
+          body: {
+            padding: '6px 12px',
+            height: 'calc(100vh - 150px)',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          },
           footer: { padding: '6px 12px' },
         }}
         footer={
@@ -369,14 +363,6 @@ export function SourceDocumentDetailModal({
             <Space wrap>
               {role === 'admin' && (
                 <Button onClick={() => setLlmDrawerOpen(true)}>Логи распознавания</Button>
-              )}
-              {nextDirection && (
-                <Button
-                  onClick={() => switchDirection.mutate(nextDirection)}
-                  loading={switchDirection.isPending}
-                >
-                  Перевести в «{directionLabel(nextDirection)}»
-                </Button>
               )}
               {isMismatchPending && (
                 <Button onClick={() => ack.mutate()} loading={ack.isPending}>
@@ -717,7 +703,7 @@ function DetailBody({
     layout === 'stacked' && topSizePx != null ? topSizePx : undefined;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '92vh', minHeight: 480 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       <div
         style={{
           display: 'flex',
