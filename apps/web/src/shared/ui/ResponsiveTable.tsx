@@ -101,7 +101,11 @@ export function ResponsiveTable<T extends object>({
           // развернуть список «снизу вверх», не меняя других сортировок.
           sorter: (a: T, b: T) =>
             (originalIndex.get(a) ?? 0) - (originalIndex.get(b) ?? 0),
-          render: (_: unknown, __: T, idx: number) => idx + 1,
+          // Номер привязан к исходной позиции, а не к текущему индексу в
+          // отсортированной таблице. Иначе после DESC-сортировки первая
+          // строка получала бы «1» вместо ожидаемых «N, N-1, …» — теряется
+          // визуальная подсказка «куда уехала именно эта запись».
+          render: (_: unknown, record: T) => (originalIndex.get(record) ?? -1) + 1,
         }),
         ...columns.map(decorate),
       ]
