@@ -1,4 +1,4 @@
-import { Button, Empty, Modal, Space, Table, Tag, Typography } from 'antd';
+import { Button, Collapse, Empty, Modal, Space, Table, Tag, Typography } from 'antd';
 import { EditOutlined } from '@ant-design/icons';
 import type { z } from 'zod';
 import type { DeliveryListResponseSchema } from '@matcheck/contracts';
@@ -46,7 +46,14 @@ export function DeliveryViewModal({
   // деньги в русском формате (formatMoneyRu даёт «1 234,56 ₽»).
   const itemColumns = [
     { title: '№', dataIndex: 'lineNo', width: 50 },
-    { title: 'Название', dataIndex: 'nameRaw' },
+    {
+      title: 'Название',
+      dataIndex: 'nameRaw',
+      // ellipsis с native-title — длинное название не растягивает таблицу
+      // в ширину (модалка 97vw, но позиции с описанием на абзац легко
+      // выходят за рамки). Полный текст видно при hover.
+      ellipsis: { showTitle: true } as const,
+    },
     {
       title: 'План',
       dataIndex: 'qtyPlanned',
@@ -92,8 +99,8 @@ export function DeliveryViewModal({
     <Modal
       open={open}
       onCancel={onClose}
-      width="min(1200px, 96vw)"
-      style={{ top: 16 }}
+      width="97vw"
+      style={{ top: 4, paddingBottom: 0 }}
       title={
         d && data ? (
           <Space size={4} wrap style={{ fontSize: 12 }}>
@@ -140,7 +147,14 @@ export function DeliveryViewModal({
       }
       styles={{
         header: { padding: '8px 16px' },
-        body: { padding: '12px 16px' },
+        // Body фикс-высоты — footer с «Закрыть/Открыть в редакторе»
+        // всегда виден без скролла страницы. Внутри body — собственный
+        // скролл, под содержимое.
+        body: {
+          padding: '12px 16px',
+          maxHeight: 'calc(97vh - 120px)',
+          overflow: 'auto',
+        },
         footer: { padding: '8px 16px' },
       }}
       footer={
@@ -171,55 +185,72 @@ export function DeliveryViewModal({
             ) : null}
             {d.confirmedByMolAt ? (
               <Typography.Text>
-                <b>Подтверждение МОЛ:</b> {formatDateRu(d.confirmedByMolAt)}
+                <b>Подтверждение МОЛ:</b>{' '}
+                {`${formatDateRu(d.confirmedByMolAt)} ${new Date(d.confirmedByMolAt)
+                  .toTimeString()
+                  .slice(0, 5)}`}
                 {d.confirmedByMolUserEmail ? ` (${d.confirmedByMolUserEmail})` : ''}
               </Typography.Text>
             ) : null}
           </Space>
 
-          <div>
-            <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 8 }}>
-              Фото ({d.photos.length})
-            </Typography.Title>
-            {d.photos.length === 0 ? (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="Нет фото"
-                style={{ margin: '12px 0' }}
-              />
-            ) : (
-              <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                {before.length > 0 && (
-                  <div>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      1 Этап ({before.length})
-                    </Typography.Text>
-                    <div style={{ marginTop: 4 }}>
-                      <PhotoGallery
-                        deliveryId={d.id}
-                        photos={before}
-                        operationKind="delivery"
-                      />
-                    </div>
-                  </div>
-                )}
-                {after.length > 0 && (
-                  <div>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      2 Этап ({after.length})
-                    </Typography.Text>
-                    <div style={{ marginTop: 4 }}>
-                      <PhotoGallery
-                        deliveryId={d.id}
-                        photos={after}
-                        operationKind="delivery"
-                      />
-                    </div>
-                  </div>
-                )}
-              </Space>
-            )}
-          </div>
+          <Collapse
+            // По умолчанию фото раскрыты — основной контент просмотра.
+            // Если у приёмки много материалов с длинными названиями,
+            // пользователь сворачивает фото одним кликом, чтобы быстрее
+            // листать таблицу.
+            defaultActiveKey={['photos']}
+            ghost
+            size="small"
+            items={[
+              {
+                key: 'photos',
+                label: (
+                  <Typography.Text strong>
+                    Фото ({d.photos.length})
+                  </Typography.Text>
+                ),
+                children: d.photos.length === 0 ? (
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description="Нет фото"
+                    style={{ margin: '12px 0' }}
+                  />
+                ) : (
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    {before.length > 0 && (
+                      <div>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          1 Этап ({before.length})
+                        </Typography.Text>
+                        <div style={{ marginTop: 4 }}>
+                          <PhotoGallery
+                            deliveryId={d.id}
+                            photos={before}
+                            operationKind="delivery"
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {after.length > 0 && (
+                      <div>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          2 Этап ({after.length})
+                        </Typography.Text>
+                        <div style={{ marginTop: 4 }}>
+                          <PhotoGallery
+                            deliveryId={d.id}
+                            photos={after}
+                            operationKind="delivery"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </Space>
+                ),
+              },
+            ]}
+          />
 
           <div>
             <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 8 }}>
@@ -238,7 +269,11 @@ export function DeliveryViewModal({
                 size="small"
                 pagination={false}
                 columns={itemColumns}
-                scroll={{ x: 'max-content' }}
+                // scroll={x:'max-content'} убран — заставлял таблицу
+                // растягиваться по самому длинному названию и плодил
+                // горизонтальный скролл даже на широкой 97vw-модалке.
+                // Колонка «Название» теперь ellipsis: гибко влезает в
+                // оставшуюся ширину, длинное название обрезается с title.
               />
             )}
           </div>

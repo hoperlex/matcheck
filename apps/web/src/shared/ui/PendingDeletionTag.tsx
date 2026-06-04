@@ -11,7 +11,11 @@ export interface PendingDeletionTagProps {
  * Используется в списках (рядом со статус-бейджем) и на странице редактора.
  */
 export function PendingDeletionTag({ at, byEmail, reason }: PendingDeletionTagProps) {
-  const date = at ? new Date(at).toLocaleString('ru-RU') : '—';
+  // Без даты пометки запись не на удалении — тег не показываем. Раньше
+  // компонент рендерил тег всегда, и на read-only-карточках обычной
+  // приёмки висело «На удалении», вводя пользователя в заблуждение.
+  if (at === null) return null;
+  const date = new Date(at).toLocaleString('ru-RU');
   const author = byEmail ?? '—';
   const lines = [`Помечен: ${author}`, `Дата: ${date}`];
   if (reason) lines.push(`Причина: ${reason}`);
