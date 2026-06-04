@@ -105,7 +105,14 @@ export default function PublicSharePage() {
   const isDelivery = data.entityType === 'delivery';
   const itemColumns = [
     { title: '№', dataIndex: 'lineNo', width: 50 },
-    { title: 'Наименование', dataIndex: 'nameRaw' },
+    {
+      title: 'Наименование',
+      dataIndex: 'nameRaw',
+      // ellipsis с native-title — длинное название не растягивает таблицу
+      // в ширину (вместе с убранным scroll={{x:'max-content'}} это убирает
+      // горизонтальный скролл у материалов).
+      ellipsis: { showTitle: true } as const,
+    },
     {
       title: isDelivery ? 'План' : 'Кол-во',
       dataIndex: 'qtyPlanned',
@@ -139,7 +146,14 @@ export default function PublicSharePage() {
 
   return (
     <Layout style={{ minHeight: '100vh', background: '#fafafa' }}>
-      <Layout.Content style={{ padding: 24, maxWidth: 1200, margin: '0 auto', width: '100%' }}>
+      <Layout.Content
+        style={{
+          padding: 16,
+          maxWidth: '95vw',
+          margin: '0 auto',
+          width: '100%',
+        }}
+      >
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
           <Typography.Title level={3} style={{ margin: 0 }}>
             {isDelivery ? 'Приёмка' : 'Отгрузка'} (просмотр)
@@ -218,11 +232,20 @@ export default function PublicSharePage() {
                   {data.photos.map((p) => (
                     <Image
                       key={p.id}
-                      src={p.thumbUrl}
-                      preview={{ src: p.url }}
+                      // src и preview указывают на один полноразмерный URL.
+                      // Раньше src был p.thumbUrl, но если PUT thumb в S3
+                      // упал тихо (см. photoPipeline:thumb-catch), сервер
+                      // возвращает 502 и миниатюра рендерится пустой.
+                      // Полный URL гарантированно есть — браузер кэширует,
+                      // антд PreviewGroup переиспользует тот же ресурс.
+                      src={p.url}
                       width={160}
                       height={160}
                       style={{ objectFit: 'cover', borderRadius: 6 }}
+                      // Fallback на случай если сервер вернул 502/404 для
+                      // несуществующего объекта — серый квадрат вместо
+                      // «broken image».
+                      fallback="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0Ij48cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIGZpbGw9IiNmNWY1ZjUiLz48dGV4dCB4PSI1MCUiIHk9IjUwJSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzhjOGM4YyIgZm9udC1zaXplPSIxMCI+0L3QtdGCINGE0L7RgtC+PC90ZXh0Pjwvc3ZnPg=="
                     />
                   ))}
                 </Image.PreviewGroup>
@@ -249,7 +272,9 @@ export default function PublicSharePage() {
                 columns={itemColumns}
                 size="small"
                 pagination={false}
-                scroll={{ x: 'max-content' }}
+                // scroll={x:'max-content'} убран — давал горизонтальный
+                // скролл на длинных названиях. Колонка «Наименование»
+                // теперь ellipsis, влезает в ширину страницы (95vw).
               />
             )}
           </div>
