@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type ComponentProps, type ReactNode } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from 'react';
 import {
   Alert,
   Button,
@@ -446,111 +453,113 @@ export function SourceDocumentDetailModal({
               />
             )}
 
-            {renderBody({
-              isWide,
-              layout,
-              setLayout,
-              itemsNode: edit && !isProcessing && !isDuplicate ? (
-                <EditableTable
-                  edit={edit}
-                  setEdit={setEdit}
-                  failedRows={new Set(
-                    failedChecks
-                      .map((c) => (typeof c.scope === 'object' ? c.scope.row : null))
-                      .filter((x): x is number => x != null),
-                  )}
-                />
-              ) : (
-                <ReadOnlyTable items={items} showInvNumber={sd.kind === 'os2_transfer'} />
-              ),
-              headerNode: edit && !isProcessing && !isDuplicate ? (
-                <Form layout="vertical" style={{ maxWidth: 500 }}>
-                  <Form.Item label="№ документа">
-                    <Input
-                      value={edit.docNumber ?? ''}
-                      onChange={(e) =>
-                        setEdit({ ...edit, docNumber: e.target.value || null })
-                      }
-                    />
-                  </Form.Item>
-                  <Form.Item label="Дата">
-                    <DatePicker
-                      value={edit.docDate}
-                      onChange={(d) => setEdit({ ...edit, docDate: d })}
-                      format="DD.MM.YYYY"
-                      style={{ width: '100%' }}
-                    />
-                  </Form.Item>
-                  <Form.Item label="Сумма">
-                    <InputNumber
-                      value={edit.totalSum != null ? Number(edit.totalSum) : null}
-                      onChange={(v) =>
-                        setEdit({ ...edit, totalSum: v != null ? String(v) : null })
-                      }
-                      decimalSeparator=","
-                      formatter={inputNumberFormatterRu}
-                      parser={inputNumberParserRu}
-                      addonAfter="₽"
-                      style={{ width: '100%' }}
-                    />
-                  </Form.Item>
-                  <Form.Item label="Дата поставки">
-                    <DatePicker
-                      value={edit.expectedDate}
-                      onChange={(d) => setEdit({ ...edit, expectedDate: d })}
-                      format="DD.MM.YYYY"
-                      style={{ width: '100%' }}
-                    />
-                  </Form.Item>
-                  <Form.Item label="Получатель">
-                    <Segmented
-                      block
-                      style={{ marginBottom: 8 }}
-                      value={edit.recipientKind}
-                      onChange={(v) => {
-                        const next = v as 'counterparty' | 'mol';
-                        setEdit({
-                          ...edit,
-                          recipientKind: next,
-                          contractorId: next === 'counterparty' ? edit.contractorId : null,
-                          recipientMolId: next === 'mol' ? edit.recipientMolId : null,
-                        });
-                      }}
-                      options={[
-                        { label: 'Подрядчик', value: 'counterparty' },
-                        { label: 'МОЛ', value: 'mol' },
-                      ]}
-                    />
-                    {edit.recipientKind === 'counterparty' ? (
-                      <ContractorSelect
-                        value={edit.contractorId}
-                        onChange={(v) => setEdit({ ...edit, contractorId: v })}
-                        placeholder="Выберите получателя"
+            <DetailBody
+              isWide={isWide}
+              layout={layout}
+              setLayout={setLayout}
+              itemsNode={
+                edit && !isProcessing && !isDuplicate ? (
+                  <EditableTable
+                    edit={edit}
+                    setEdit={setEdit}
+                    failedRows={
+                      new Set(
+                        failedChecks
+                          .map((c) => (typeof c.scope === 'object' ? c.scope.row : null))
+                          .filter((x): x is number => x != null),
+                      )
+                    }
+                  />
+                ) : (
+                  <ReadOnlyTable items={items} showInvNumber={sd.kind === 'os2_transfer'} />
+                )
+              }
+              headerNode={
+                edit && !isProcessing && !isDuplicate ? (
+                  <Form layout="vertical" style={{ maxWidth: 500 }}>
+                    <Form.Item label="№ документа">
+                      <Input
+                        value={edit.docNumber ?? ''}
+                        onChange={(e) =>
+                          setEdit({ ...edit, docNumber: e.target.value || null })
+                        }
                       />
-                    ) : (
-                      <ResponsiblePersonSelect
-                        value={edit.recipientMolId}
-                        onChange={(v) => setEdit({ ...edit, recipientMolId: v })}
-                        placeholder="Выберите получателя"
+                    </Form.Item>
+                    <Form.Item label="Дата">
+                      <DatePicker
+                        value={edit.docDate}
+                        onChange={(d) => setEdit({ ...edit, docDate: d })}
+                        format="DD.MM.YYYY"
+                        style={{ width: '100%' }}
                       />
-                    )}
-                  </Form.Item>
-                  <Form.Item label="Объект">
-                    <SiteSelect
-                      value={edit.siteId}
-                      onChange={(v) => setEdit({ ...edit, siteId: v })}
-                    />
-                  </Form.Item>
-                </Form>
-              ) : (
-                <ReadOnlyHeader sd={sd} />
-              ),
-              originalNode:
+                    </Form.Item>
+                    <Form.Item label="Сумма">
+                      <InputNumber
+                        value={edit.totalSum != null ? Number(edit.totalSum) : null}
+                        onChange={(v) =>
+                          setEdit({ ...edit, totalSum: v != null ? String(v) : null })
+                        }
+                        decimalSeparator=","
+                        formatter={inputNumberFormatterRu}
+                        parser={inputNumberParserRu}
+                        addonAfter="₽"
+                        style={{ width: '100%' }}
+                      />
+                    </Form.Item>
+                    <Form.Item label="Дата поставки">
+                      <DatePicker
+                        value={edit.expectedDate}
+                        onChange={(d) => setEdit({ ...edit, expectedDate: d })}
+                        format="DD.MM.YYYY"
+                        style={{ width: '100%' }}
+                      />
+                    </Form.Item>
+                    <Form.Item label="Получатель">
+                      <Segmented
+                        block
+                        style={{ marginBottom: 8 }}
+                        value={edit.recipientKind}
+                        onChange={(v) => {
+                          const next = v as 'counterparty' | 'mol';
+                          setEdit({
+                            ...edit,
+                            recipientKind: next,
+                            contractorId: next === 'counterparty' ? edit.contractorId : null,
+                            recipientMolId: next === 'mol' ? edit.recipientMolId : null,
+                          });
+                        }}
+                        options={[
+                          { label: 'Подрядчик', value: 'counterparty' },
+                          { label: 'МОЛ', value: 'mol' },
+                        ]}
+                      />
+                      {edit.recipientKind === 'counterparty' ? (
+                        <ContractorSelect
+                          value={edit.contractorId}
+                          onChange={(v) => setEdit({ ...edit, contractorId: v })}
+                          placeholder="Выберите получателя"
+                        />
+                      ) : (
+                        <ResponsiblePersonSelect
+                          value={edit.recipientMolId}
+                          onChange={(v) => setEdit({ ...edit, recipientMolId: v })}
+                          placeholder="Выберите получателя"
+                        />
+                      )}
+                    </Form.Item>
+                    <Form.Item label="Объект">
+                      <SiteSelect
+                        value={edit.siteId}
+                        onChange={(v) => setEdit({ ...edit, siteId: v })}
+                      />
+                    </Form.Item>
+                  </Form>
+                ) : (
+                  <ReadOnlyHeader sd={sd} />
+                )
+              }
+              originalNode={
                 sd.attachments.length > 0 ? (
-                  // Для УПД обычно один attachment, для ТН — пакет фото
-                  // (лицевая + оборотная сторона + сопроводилки). Каждый
-                  // файл — отдельный iframe: браузер сам справляется и с
-                  // PDF, и с image/jpeg|png.
                   <OriginalAttachments
                     attachments={sd.attachments}
                     id={id!}
@@ -564,10 +573,11 @@ export function SourceDocumentDetailModal({
                       ? 'Оригинальный файл недоступен (документ загружен из XML).'
                       : 'Не удалось получить оригинал.'}
                   </Typography.Text>
-                ),
-              itemsCount: edit?.items.length ?? items.length,
-              attachmentsCount: sd.attachments.length,
-            })}
+                )
+              }
+              itemsCount={edit?.items.length ?? items.length}
+              attachmentsCount={sd.attachments.length}
+            />
           </>
         )}
       </Modal>
@@ -580,11 +590,30 @@ export function SourceDocumentDetailModal({
   );
 }
 
+// Доля высоты, отдаваемая верхней панели «Позиции» в stacked-layout — растёт
+// с количеством позиций, но НИКОГДА выше 50% (cap). После cap'а последнюю
+// добавленную позицию показывает auto-scroll внутри таблицы.
+function computeStackedTopPct(itemsCount: number): number {
+  if (itemsCount <= 2) return 22;
+  if (itemsCount <= 5) return 32;
+  if (itemsCount <= 10) return 42;
+  return 50;
+}
+
 // Тело модалки: на широком экране — Collapse «Реквизиты» + Splitter «Позиции/Оригинал»
 // с toggle ориентации; на узком — старые вкладки Позиции/Шапка/Оригинал (PDF в split
-// на 700px нечитаем). Высота 78vh — рассчитана под чипы шапки модалки и футер с
+// на 700px нечитаем). Высота 92vh — рассчитана под чипы шапки модалки и футер с
 // кнопками; внутри Splitter растягивается по flex.
-function renderBody(args: {
+function DetailBody({
+  isWide,
+  layout,
+  setLayout,
+  itemsNode,
+  headerNode,
+  originalNode,
+  itemsCount,
+  attachmentsCount,
+}: {
   isWide: boolean;
   layout: SplitMode;
   setLayout: (next: SplitMode) => void;
@@ -593,17 +622,47 @@ function renderBody(args: {
   originalNode: ReactNode;
   itemsCount: number;
   attachmentsCount: number;
-}): ReactNode {
-  const {
-    isWide,
-    layout,
-    setLayout,
-    itemsNode,
-    headerNode,
-    originalNode,
-    itemsCount,
-    attachmentsCount,
-  } = args;
+}): JSX.Element {
+  // Controlled-размер верхней панели в пикселях. null = используем defaultSize
+  // от antd Splitter (только до первого автоматического или ручного resize).
+  const [topSizePx, setTopSizePx] = useState<number | null>(null);
+  const splitterBoxRef = useRef<HTMLDivElement | null>(null);
+  const topPaneRef = useRef<HTMLDivElement | null>(null);
+  const prevItemsCount = useRef(itemsCount);
+
+  // При росте itemsCount (пользователь нажал «Добавить позицию»):
+  //   1. Опускаем границу Splitter'а вниз до computeStackedTopPct(n), но
+  //      не выше 50% (cap). Не трогаем, если итоговый размер меньше
+  //      текущего — пользовательский ручной resize не сбрасываем.
+  //   2. Скроллим tbody таблицы к низу, чтобы свежедобавленная строка
+  //      всегда была в поле зрения (особенно после того, как граница
+  //      упёрлась в cap 50% и больше двигаться не может).
+  // При уменьшении (удалили строку) — оставляем границу где она была:
+  // пользователь сам подгоняет, если хочет дать УПД больше места.
+  useEffect(() => {
+    const grew = itemsCount > prevItemsCount.current;
+    prevItemsCount.current = itemsCount;
+    if (!grew) return;
+
+    if (layout === 'stacked' && splitterBoxRef.current) {
+      const totalH = splitterBoxRef.current.clientHeight;
+      if (totalH > 0) {
+        const targetPct = Math.min(computeStackedTopPct(itemsCount), 50);
+        const targetPx = (targetPct / 100) * totalH;
+        setTopSizePx((prev) => Math.max(prev ?? 0, targetPx));
+      }
+    }
+
+    // Auto-scroll к последней строке. requestAnimationFrame — чтобы antd
+    // успел обновить tbody (Table перерисовывает виртуальный список после
+    // нашего setEdit, но antd планирует layout в следующем кадре).
+    const tbody = topPaneRef.current?.querySelector<HTMLElement>('.ant-table-body');
+    if (tbody) {
+      requestAnimationFrame(() => {
+        tbody.scrollTo({ top: tbody.scrollHeight, behavior: 'smooth' });
+      });
+    }
+  }, [itemsCount, layout]);
 
   if (!isWide) {
     return (
@@ -643,20 +702,19 @@ function renderBody(args: {
   // sideBySide — границей решает ширина: editable-таблица с InputNumber+₽
   // требует минимум ~700px. Меньше — и колонки «Цена»/«Сумма» обрезаются,
   // символ ₽ не помещается. Поэтому отдаём пиксели, не %.
-  //
-  // stacked — границей решает высота. Тут оптимизируем: если позиций мало,
-  // отдаём почти всю высоту оригиналу.
   const splitterMin: number | string = layout === 'sideBySide' ? 700 : '15%';
   function defaultItemsSize(): number | string {
     if (layout === 'sideBySide') {
       // Чуть больше для запаса; пользователь может сузить вручную.
       return itemsCount > 10 ? 800 : 720;
     }
-    if (itemsCount <= 2) return '22%';
-    if (itemsCount <= 5) return '32%';
-    if (itemsCount <= 10) return '42%';
-    return '50%';
+    return `${computeStackedTopPct(itemsCount)}%`;
   }
+
+  // controlled-размер применяем только в stacked. В sideBySide и при первом
+  // mount'е (topSizePx === null) — отдаём defaultSize, antd сам решает.
+  const controlledTopSize: number | undefined =
+    layout === 'stacked' && topSizePx != null ? topSizePx : undefined;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '92vh', minHeight: 480 }}>
@@ -701,41 +759,59 @@ function renderBody(args: {
           />
         </Tooltip>
       </div>
-      <Splitter
-        key={splitterLayout}
-        layout={splitterLayout}
-        style={{ flex: 1, minHeight: 0, border: '1px solid #f0f0f0', borderRadius: 4 }}
+      <div
+        ref={splitterBoxRef}
+        style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
       >
-        <Splitter.Panel min={splitterMin} defaultSize={defaultItemsSize()}>
-          <div
-            style={{
-              height: '100%',
-              overflow: 'auto',
-              padding: 8,
-            }}
+        <Splitter
+          key={splitterLayout}
+          layout={splitterLayout}
+          onResize={(sizes) => {
+            // onResize срабатывает и при ручном drag'е, и при автоматическом
+            // сдвиге через size. В обоих случаях фиксируем актуальные пиксели,
+            // чтобы следующий ручной drag начинался от текущей позиции.
+            if (layout === 'stacked' && typeof sizes[0] === 'number') {
+              setTopSizePx(sizes[0]);
+            }
+          }}
+          style={{ flex: 1, minHeight: 0, border: '1px solid #f0f0f0', borderRadius: 4 }}
+        >
+          <Splitter.Panel
+            min={splitterMin}
+            defaultSize={defaultItemsSize()}
+            size={controlledTopSize}
           >
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              Позиции ({itemsCount})
-            </Typography.Text>
-            <div style={{ marginTop: 4 }}>{itemsNode}</div>
-          </div>
-        </Splitter.Panel>
-        <Splitter.Panel min="20%">
-          <div
-            style={{
-              height: '100%',
-              display: 'flex',
-              flexDirection: 'column',
-              padding: 8,
-            }}
-          >
-            <Typography.Text type="secondary" style={{ fontSize: 12, marginBottom: 4 }}>
-              Оригинал{attachmentsCount > 1 ? ` (${attachmentsCount})` : ''}
-            </Typography.Text>
-            <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>{originalNode}</div>
-          </div>
-        </Splitter.Panel>
-      </Splitter>
+            <div
+              ref={topPaneRef}
+              style={{
+                height: '100%',
+                overflow: 'auto',
+                padding: 8,
+              }}
+            >
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                Позиции ({itemsCount})
+              </Typography.Text>
+              <div style={{ marginTop: 4 }}>{itemsNode}</div>
+            </div>
+          </Splitter.Panel>
+          <Splitter.Panel min="20%">
+            <div
+              style={{
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+                padding: 8,
+              }}
+            >
+              <Typography.Text type="secondary" style={{ fontSize: 12, marginBottom: 4 }}>
+                Оригинал{attachmentsCount > 1 ? ` (${attachmentsCount})` : ''}
+              </Typography.Text>
+              <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>{originalNode}</div>
+            </div>
+          </Splitter.Panel>
+        </Splitter>
+      </div>
     </div>
   );
 }
