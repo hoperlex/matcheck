@@ -266,7 +266,9 @@ export default function OperationsPage() {
               onChange={(k) => updateUrl({ tab: k })}
               extra={
                 counters.data && counters.data.inProgress > 0 ? (
-                  <Tag color="green" style={{ marginInlineEnd: 0 }}>
+                  // marginLeft 40 — визуально половина таба «Принятые»,
+                  // даёт воздух между табами и счётчиком.
+                  <Tag color="green" style={{ marginLeft: 40, marginInlineEnd: 0 }}>
                     В процессе: {counters.data.inProgress}
                   </Tag>
                 ) : null

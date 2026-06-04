@@ -32,8 +32,8 @@ export function MobileLayout() {
     label:
       n.key === 'operations' && operationsCount > 0 ? (
         <span>
-          {n.label}{' '}
-          <Tag color="green" style={{ marginLeft: 4 }}>
+          {n.label}
+          <Tag color="green" style={{ marginLeft: 16, marginInlineEnd: 0 }}>
             +{operationsCount}
           </Tag>
         </span>
