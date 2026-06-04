@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Select, Space, Tag, Typography } from 'antd';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { useQuery } from '@tanstack/react-query';
@@ -9,24 +9,15 @@ import type {
   IntakeJournalRow,
   ShipmentJournalResponse,
   ShipmentJournalRow,
-  ShipmentKind,
   Site,
 } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
-import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { useSyncGlobalFiltersSiteContractor } from '../../shared/hooks/useSyncGlobalFilters';
-
-const KIND_LABELS: Record<ShipmentKind, { label: string; color: string }> = {
-  contractor: { label: 'Подрядчику', color: 'geekblue' },
-  return: { label: 'Возврат', color: 'magenta' },
-  transfer: { label: 'Перемещение', color: 'cyan' },
-  writeoff: { label: 'Списание', color: 'volcano' },
-};
 
 const STATUS_COLOR: Record<string, string> = {
   filled: 'green',
@@ -44,59 +35,100 @@ const trimQty = (s: string | null) => {
   return s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
 };
 
-type MaterialsTab = 'intake' | 'shipment';
+// Тип движения — общий «отметчик» строки журнала. Цвета совпадают с
+// чипами в Документах: green = приёмка, purple = отгрузка.
+type RowType = 'intake' | 'shipment';
+const TYPE_LABELS: Record<RowType, { label: string; color: string }> = {
+  intake: { label: 'Поступление', color: 'green' },
+  shipment: { label: 'Отгрузка', color: 'purple' },
+};
 
-const MATERIALS_TABS: PageTabItem[] = [
-  { key: 'intake', label: 'Поступление' },
-  { key: 'shipment', label: 'Отгрузка' },
-];
+/**
+ * Унифицированная строка журнала: общая структура для приёмки и отгрузки.
+ * Поля, которые есть только в одном типе (Поставщик, Сумма НДС, Сумма),
+ * остаются опциональными — для другого типа они показываются как «—».
+ */
+type UnifiedRow = {
+  type: RowType;
+  // Уникальный key строки. itemId источника гарантированно уникален в
+  // пределах своего типа; чтобы избежать коллизий при мердже, мы префиксуем
+  // его типом.
+  rowKey: string;
+  deliveryId: string | null;
+  shipmentId: string | null;
+  date: string | null;
+  siteCode: string;
+  siteName: string;
+  materialName: string;
+  qty: string | null;
+  unit: string;
+  supplierName: string | null;
+  contractorName: string | null;
+  docNumber: string | null;
+  docDate: string | null;
+  vatSum: string | null;
+  sum: string | null;
+  statusCode: string;
+  statusLabel: string;
+};
+
+function fromIntake(r: IntakeJournalRow): UnifiedRow {
+  return {
+    type: 'intake',
+    rowKey: `intake:${r.itemId}`,
+    deliveryId: r.deliveryId,
+    shipmentId: null,
+    date: r.arrivedAt,
+    siteCode: r.siteCode,
+    siteName: r.siteName,
+    materialName: r.materialName,
+    qty: r.qty,
+    unit: r.unit,
+    supplierName: r.supplierName,
+    contractorName: r.contractorName,
+    docNumber: r.docNumber,
+    docDate: r.docDate,
+    vatSum: r.vatSum,
+    sum: r.sum,
+    statusCode: r.statusCode,
+    statusLabel: r.statusLabel,
+  };
+}
+
+function fromShipment(r: ShipmentJournalRow): UnifiedRow {
+  // «Подрядчик» для отгрузки: для contractor/return — получатель-контрагент;
+  // для transfer — объект-приёмник (это формально не подрядчик, но в общей
+  // таблице семантически близко: «куда ушло»); для writeoff (списание) —
+  // получателя нет.
+  const contractorName =
+    r.kind === 'transfer'
+      ? r.destSiteName
+      : r.kind === 'writeoff'
+        ? null
+        : r.receiverName;
+  return {
+    type: 'shipment',
+    rowKey: `shipment:${r.itemId}`,
+    deliveryId: null,
+    shipmentId: r.shipmentId,
+    date: r.shippedAt,
+    siteCode: r.siteCode,
+    siteName: r.siteName,
+    materialName: r.materialName,
+    qty: r.qty,
+    unit: r.unit,
+    supplierName: null,
+    contractorName,
+    docNumber: r.docNumber,
+    docDate: r.docDate,
+    vatSum: null,
+    sum: null,
+    statusCode: r.statusCode,
+    statusLabel: r.statusLabel,
+  };
+}
 
 export default function MaterialsPage() {
-  // Активный таб держим в state — навигация без URL-параметра, как и было.
-  // Сами вкладки теперь рендерятся ВНУТРИ каждого таба под его фильтрами
-  // (см. *TabHeader ниже), чтобы соответствовать общему UX-шаблону:
-  // [фильтры] → [вкладки] → [таблица].
-  const [activeKey, setActiveKey] = useState<MaterialsTab>('intake');
-  const onTabChange = (k: string) => setActiveKey(k as MaterialsTab);
-  return (
-    <StickyPageHeader
-      header={
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          История поступлений
-        </Typography.Title>
-      }
-    >
-      {activeKey === 'intake' && (
-        <IntakeTab activeTab={activeKey} onTabChange={onTabChange} />
-      )}
-      {activeKey === 'shipment' && (
-        <ShipmentTab activeTab={activeKey} onTabChange={onTabChange} />
-      )}
-    </StickyPageHeader>
-  );
-}
-
-// Общий блок «фильтры → вкладки» в шапке каждого таба «Материалов».
-// Используется внутри StickyPageHeader.header.
-function TabBarUnderFilters({
-  activeTab,
-  onTabChange,
-}: {
-  activeTab: MaterialsTab;
-  onTabChange: (k: string) => void;
-}) {
-  return <PageTabs items={MATERIALS_TABS} activeKey={activeTab} onChange={onTabChange} />;
-}
-
-// ─── Tab «Поступление» ────────────────────────────────────────────────────
-
-function IntakeTab({
-  activeTab,
-  onTabChange,
-}: {
-  activeTab: MaterialsTab;
-  onTabChange: (k: string) => void;
-}) {
   const navigate = useNavigate();
   const [siteIds, setSiteIds] = useState<string[]>([]);
   const [contractorIds, setContractorIds] = useState<string[]>([]);
@@ -113,6 +145,7 @@ function IntakeTab({
       api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
   });
 
+  // Два параллельных запроса; объёмы небольшие (limit=500), мерж клиентом.
   const intakeQuery = useQuery({
     queryKey: ['reports', 'intake', { siteIds, contractorIds, q }],
     queryFn: () => {
@@ -124,221 +157,40 @@ function IntakeTab({
       return api.get<IntakeJournalResponse>(`/reports/intake?${qs.toString()}`);
     },
   });
-
-  return (
-    <StickyPageHeader
-      header={
-        <>
-          <Space wrap>
-            <Select<string[]>
-              mode="multiple"
-              allowClear
-              placeholder="Все объекты"
-              style={{ minWidth: 240 }}
-              value={siteIds}
-              onChange={setSiteIds}
-              showSearch
-              optionFilterProp="label"
-              maxTagCount="responsive"
-              loading={sites.isLoading}
-              options={(sites.data?.items ?? []).map((s) => ({
-                value: s.id,
-                label: `${s.code} · ${s.name}`,
-              }))}
-            />
-            <Select<string[]>
-              mode="multiple"
-              allowClear
-              placeholder="Подрядчик"
-              style={{ minWidth: 240 }}
-              value={contractorIds}
-              onChange={setContractorIds}
-              showSearch
-              optionFilterProp="label"
-              maxTagCount="responsive"
-              loading={counterparties.isLoading}
-              options={(counterparties.data?.items ?? []).map((c) => ({
-                value: c.id,
-                label: c.name,
-              }))}
-            />
-            <DebouncedSearch
-              placeholder="Материал или поставщик"
-              value={q}
-              onChange={setQ}
-              style={{ width: 320 }}
-            />
-          </Space>
-          <TabBarUnderFilters activeTab={activeTab} onTabChange={onTabChange} />
-        </>
-      }
-    >
-      <ResponsiveTable<IntakeJournalRow>
-        items={intakeQuery.data?.items ?? []}
-        loading={intakeQuery.isLoading}
-        rowKey="itemId"
-        emptyText="Нет данных"
-        numbered
-        onRowClick={(r) => navigate(`/kpp?delivery=${r.deliveryId}&from=accepted`)}
-        columns={[
-          {
-            title: 'Дата',
-            dataIndex: 'arrivedAt',
-            width: 110,
-            sorter: dateSorter<IntakeJournalRow>((r) => r.arrivedAt),
-            ...dateRangeColumnFilter<IntakeJournalRow>((r) => r.arrivedAt),
-            render: (v: string | null) =>
-              v ? new Date(v).toLocaleDateString('ru-RU') : '—',
-          },
-          {
-            title: 'Объект',
-            key: 'site',
-            sorter: stringSorter<IntakeJournalRow>((r) => `${r.siteCode} · ${r.siteName}`),
-            render: (_, r) => `${r.siteCode} · ${r.siteName}`,
-          },
-          {
-            title: 'Материал',
-            dataIndex: 'materialName',
-            width: 320,
-            sorter: stringSorter<IntakeJournalRow>((r) => r.materialName),
-          },
-          {
-            title: 'Кол-во',
-            dataIndex: 'qty',
-            width: 110,
-            sorter: numberSorter<IntakeJournalRow>((r) => r.qty),
-            render: (v: string | null) => trimQty(v),
-          },
-          {
-            title: 'Ед.',
-            dataIndex: 'unit',
-            width: 80,
-            sorter: stringSorter<IntakeJournalRow>((r) => r.unit),
-          },
-          {
-            title: 'Поставщик',
-            dataIndex: 'supplierName',
-            sorter: stringSorter<IntakeJournalRow>((r) => r.supplierName),
-            render: (v) => v ?? '—',
-          },
-          {
-            title: 'Подрядчик',
-            dataIndex: 'contractorName',
-            sorter: stringSorter<IntakeJournalRow>((r) => r.contractorName),
-            render: (v) => v ?? '—',
-          },
-          {
-            title: '№ УПД',
-            dataIndex: 'docNumber',
-            width: 140,
-            sorter: stringSorter<IntakeJournalRow>((r) => r.docNumber),
-            render: (v: string | null) => v ?? '—',
-          },
-          {
-            title: 'Дата УПД',
-            dataIndex: 'docDate',
-            width: 110,
-            sorter: dateSorter<IntakeJournalRow>((r) => r.docDate),
-            ...dateRangeColumnFilter<IntakeJournalRow>((r) => r.docDate),
-            render: (v: string | null) => formatDocDate(v),
-          },
-          {
-            title: 'Сумма НДС',
-            dataIndex: 'vatSum',
-            width: 120,
-            sorter: numberSorter<IntakeJournalRow>((r) => r.vatSum),
-            render: (v: string | null) => formatMoneyRu(v),
-          },
-          {
-            title: 'Сумма',
-            dataIndex: 'sum',
-            width: 130,
-            sorter: numberSorter<IntakeJournalRow>((r) => r.sum),
-            render: (v: string | null) => formatMoneyRu(v),
-          },
-          {
-            title: 'Статус',
-            key: 'status',
-            width: 160,
-            sorter: stringSorter<IntakeJournalRow>((r) => r.statusLabel),
-            render: (_, r) => (
-              <Tag color={statusTagColor(r.statusCode)}>{r.statusLabel}</Tag>
-            ),
-          },
-        ]}
-        cardRender={(r) => (
-          <div style={{ width: '100%' }}>
-            <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-              <Typography.Text strong>{r.materialName}</Typography.Text>
-              <Typography.Text strong>
-                {trimQty(r.qty)} {r.unit}
-              </Typography.Text>
-            </Space>
-            <Typography.Text type="secondary" style={{ display: 'block' }}>
-              {r.siteCode} · {r.siteName}
-            </Typography.Text>
-            <Typography.Text type="secondary" style={{ display: 'block' }}>
-              {r.arrivedAt
-                ? new Date(r.arrivedAt).toLocaleDateString('ru-RU')
-                : '—'}{' '}
-              · {r.supplierName ?? '—'}
-            </Typography.Text>
-            <Typography.Text type="secondary" style={{ display: 'block' }}>
-              Сумма {formatMoneyRu(r.sum)} · НДС {formatMoneyRu(r.vatSum)}
-            </Typography.Text>
-            <Tag color={statusTagColor(r.statusCode)} style={{ marginTop: 4 }}>
-              {r.statusLabel}
-            </Tag>
-          </div>
-        )}
-      />
-    </StickyPageHeader>
-  );
-}
-
-// ─── Tab «Отгрузка» ───────────────────────────────────────────────────────
-
-function ShipmentTab({
-  activeTab,
-  onTabChange,
-}: {
-  activeTab: MaterialsTab;
-  onTabChange: (k: string) => void;
-}) {
-  const navigate = useNavigate();
-  const [siteIds, setSiteIds] = useState<string[]>([]);
-  const [contractorIds, setContractorIds] = useState<string[]>([]);
-  const [kind, setKind] = useState<ShipmentKind | undefined>(undefined);
-  const [q, setQ] = useState('');
-  useSyncGlobalFiltersSiteContractor({ siteIds, setSiteIds, contractorIds, setContractorIds });
-
-  const sites = useQuery({
-    queryKey: ['sites', 'all'],
-    queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?limit=500'),
-  });
-  const counterparties = useQuery({
-    queryKey: ['counterparties', 'all'],
-    queryFn: () =>
-      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
-  });
-
   const shipmentQuery = useQuery({
-    queryKey: ['reports', 'shipment', { siteIds, contractorIds, kind, q }],
+    queryKey: ['reports', 'shipment', { siteIds, contractorIds, q }],
     queryFn: () => {
       const qs = new URLSearchParams();
       if (siteIds.length) qs.set('siteId', siteIds.join(','));
       if (contractorIds.length) qs.set('contractorId', contractorIds.join(','));
-      if (kind) qs.set('kind', kind);
       if (q) qs.set('q', q);
       qs.set('limit', '500');
       return api.get<ShipmentJournalResponse>(`/reports/shipment?${qs.toString()}`);
     },
   });
 
+  const rows = useMemo<UnifiedRow[]>(() => {
+    const intake = (intakeQuery.data?.items ?? []).map(fromIntake);
+    const shipment = (shipmentQuery.data?.items ?? []).map(fromShipment);
+    // Сортируем по дате DESC: свежие сверху. null-даты — в конец.
+    return [...intake, ...shipment].sort((a, b) => {
+      if (a.date == null && b.date == null) return 0;
+      if (a.date == null) return 1;
+      if (b.date == null) return -1;
+      return b.date.localeCompare(a.date);
+    });
+  }, [intakeQuery.data, shipmentQuery.data]);
+
   return (
     <StickyPageHeader
       header={
-        <>
+        <Typography.Title level={3} style={{ margin: 0 }}>
+          История поступлений
+        </Typography.Title>
+      }
+    >
+      <StickyPageHeader
+        header={
           <Space wrap>
             <Select<string[]>
               mode="multiple"
@@ -372,132 +224,162 @@ function ShipmentTab({
                 label: c.name,
               }))}
             />
-            <Select<ShipmentKind | undefined>
-              allowClear
-              placeholder="Любой вид"
-              style={{ minWidth: 180 }}
-              value={kind}
-              onChange={setKind}
-              options={(Object.keys(KIND_LABELS) as ShipmentKind[]).map((k) => ({
-                value: k,
-                label: KIND_LABELS[k].label,
-              }))}
-            />
             <DebouncedSearch
-              placeholder="Материал или получатель"
+              placeholder="Материал или контрагент"
               value={q}
               onChange={setQ}
               style={{ width: 320 }}
             />
           </Space>
-          <TabBarUnderFilters activeTab={activeTab} onTabChange={onTabChange} />
-        </>
-      }
-    >
-      <ResponsiveTable<ShipmentJournalRow>
-        items={shipmentQuery.data?.items ?? []}
-        loading={shipmentQuery.isLoading}
-        rowKey="itemId"
-        emptyText="Нет данных"
-        numbered
-        onRowClick={(r) => navigate(`/shipments?shipment=${r.shipmentId}&from=list`)}
-        columns={[
-          {
-            title: 'Дата',
-            dataIndex: 'shippedAt',
-            width: 110,
-            sorter: dateSorter<ShipmentJournalRow>((r) => r.shippedAt),
-            ...dateRangeColumnFilter<ShipmentJournalRow>((r) => r.shippedAt),
-            render: (v: string | null) =>
-              v ? new Date(v).toLocaleDateString('ru-RU') : '—',
-          },
-          {
-            title: 'Вид',
-            key: 'kind',
-            width: 130,
-            sorter: stringSorter<ShipmentJournalRow>((r) => KIND_LABELS[r.kind].label),
-            render: (_, r) => (
-              <Tag color={KIND_LABELS[r.kind].color}>{KIND_LABELS[r.kind].label}</Tag>
-            ),
-          },
-          {
-            title: 'Объект',
-            key: 'site',
-            sorter: stringSorter<ShipmentJournalRow>((r) => `${r.siteCode} · ${r.siteName}`),
-            render: (_, r) => `${r.siteCode} · ${r.siteName}`,
-          },
-          {
-            title: 'Материал',
-            dataIndex: 'materialName',
-            width: 320,
-            sorter: stringSorter<ShipmentJournalRow>((r) => r.materialName),
-          },
-          {
-            title: 'Кол-во',
-            dataIndex: 'qty',
-            width: 110,
-            sorter: numberSorter<ShipmentJournalRow>((r) => r.qty),
-            render: (v: string | null) => trimQty(v),
-          },
-          {
-            title: 'Ед.',
-            dataIndex: 'unit',
-            width: 80,
-            sorter: stringSorter<ShipmentJournalRow>((r) => r.unit),
-          },
-          {
-            title: 'Получатель',
-            key: 'receiver',
-            sorter: stringSorter<ShipmentJournalRow>((r) =>
-              r.kind === 'transfer'
-                ? r.destSiteName ?? null
-                : r.kind === 'writeoff'
-                  ? null
-                  : r.receiverName ?? null,
-            ),
-            render: (_, r) =>
-              r.kind === 'transfer'
-                ? r.destSiteName ?? '—'
-                : r.kind === 'writeoff'
-                  ? '—'
-                  : r.receiverName ?? '—',
-          },
-          {
-            title: 'Статус',
-            key: 'status',
-            width: 160,
-            sorter: stringSorter<ShipmentJournalRow>((r) => r.statusLabel),
-            render: (_, r) => (
-              <Tag color={statusTagColor(r.statusCode)}>{r.statusLabel}</Tag>
-            ),
-          },
-        ]}
-        cardRender={(r) => (
-          <div style={{ width: '100%' }}>
-            <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-              <Typography.Text strong>{r.materialName}</Typography.Text>
-              <Typography.Text strong>
-                {trimQty(r.qty)} {r.unit}
+        }
+      >
+        <ResponsiveTable<UnifiedRow>
+          items={rows}
+          loading={intakeQuery.isLoading || shipmentQuery.isLoading}
+          rowKey="rowKey"
+          emptyText="Нет данных"
+          numbered
+          onRowClick={(r) => {
+            if (r.type === 'intake' && r.deliveryId) {
+              navigate(`/operations?type=delivery&delivery=${r.deliveryId}&from=accepted`);
+            } else if (r.type === 'shipment' && r.shipmentId) {
+              navigate(`/operations?type=shipment&shipment=${r.shipmentId}&from=list`);
+            }
+          }}
+          columns={[
+            {
+              title: 'Тип',
+              key: 'type',
+              width: 130,
+              // По умолчанию открыт только «Поступление» — раздел исторически
+              // называется «История поступлений». Пользователь снимает галочку
+              // или ставит «Отгрузка», чтобы посмотреть исходящее движение.
+              filters: [
+                { text: TYPE_LABELS.intake.label, value: 'intake' },
+                { text: TYPE_LABELS.shipment.label, value: 'shipment' },
+              ],
+              defaultFilteredValue: ['intake'],
+              onFilter: (val, r) => r.type === val,
+              sorter: stringSorter<UnifiedRow>((r) => TYPE_LABELS[r.type].label),
+              render: (_: unknown, r: UnifiedRow) => (
+                <Tag color={TYPE_LABELS[r.type].color}>{TYPE_LABELS[r.type].label}</Tag>
+              ),
+            },
+            {
+              title: 'Дата',
+              dataIndex: 'date',
+              width: 110,
+              sorter: dateSorter<UnifiedRow>((r) => r.date),
+              ...dateRangeColumnFilter<UnifiedRow>((r) => r.date),
+              render: (v: string | null) =>
+                v ? new Date(v).toLocaleDateString('ru-RU') : '—',
+            },
+            {
+              title: 'Объект',
+              key: 'site',
+              sorter: stringSorter<UnifiedRow>((r) => `${r.siteCode} · ${r.siteName}`),
+              render: (_: unknown, r: UnifiedRow) => `${r.siteCode} · ${r.siteName}`,
+            },
+            {
+              title: 'Материал',
+              dataIndex: 'materialName',
+              width: 320,
+              sorter: stringSorter<UnifiedRow>((r) => r.materialName),
+            },
+            {
+              title: 'Кол-во',
+              dataIndex: 'qty',
+              width: 110,
+              sorter: numberSorter<UnifiedRow>((r) => r.qty),
+              render: (v: string | null) => trimQty(v),
+            },
+            {
+              title: 'Ед.',
+              dataIndex: 'unit',
+              width: 80,
+              sorter: stringSorter<UnifiedRow>((r) => r.unit),
+            },
+            {
+              title: 'Поставщик',
+              dataIndex: 'supplierName',
+              sorter: stringSorter<UnifiedRow>((r) => r.supplierName),
+              render: (v: string | null) => v ?? '—',
+            },
+            {
+              title: 'Подрядчик',
+              dataIndex: 'contractorName',
+              sorter: stringSorter<UnifiedRow>((r) => r.contractorName),
+              render: (v: string | null) => v ?? '—',
+            },
+            {
+              title: '№ УПД',
+              dataIndex: 'docNumber',
+              width: 140,
+              sorter: stringSorter<UnifiedRow>((r) => r.docNumber),
+              render: (v: string | null) => v ?? '—',
+            },
+            {
+              title: 'Дата УПД',
+              dataIndex: 'docDate',
+              width: 110,
+              sorter: dateSorter<UnifiedRow>((r) => r.docDate),
+              ...dateRangeColumnFilter<UnifiedRow>((r) => r.docDate),
+              render: (v: string | null) => formatDocDate(v),
+            },
+            {
+              title: 'Сумма НДС',
+              dataIndex: 'vatSum',
+              width: 120,
+              sorter: numberSorter<UnifiedRow>((r) => r.vatSum),
+              render: (v: string | null) => formatMoneyRu(v),
+            },
+            {
+              title: 'Сумма',
+              dataIndex: 'sum',
+              width: 130,
+              sorter: numberSorter<UnifiedRow>((r) => r.sum),
+              render: (v: string | null) => formatMoneyRu(v),
+            },
+            {
+              title: 'Статус',
+              key: 'status',
+              width: 160,
+              sorter: stringSorter<UnifiedRow>((r) => r.statusLabel),
+              render: (_: unknown, r: UnifiedRow) => (
+                <Tag color={statusTagColor(r.statusCode)}>{r.statusLabel}</Tag>
+              ),
+            },
+          ]}
+          cardRender={(r) => (
+            <div style={{ width: '100%' }}>
+              <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                <Typography.Text strong>{r.materialName}</Typography.Text>
+                <Typography.Text strong>
+                  {trimQty(r.qty)} {r.unit}
+                </Typography.Text>
+              </Space>
+              <Space>
+                <Tag color={TYPE_LABELS[r.type].color}>{TYPE_LABELS[r.type].label}</Tag>
+                <Tag color={statusTagColor(r.statusCode)}>{r.statusLabel}</Tag>
+                <Typography.Text type="secondary">
+                  {r.siteCode} · {r.siteName}
+                </Typography.Text>
+              </Space>
+              <Typography.Text type="secondary" style={{ display: 'block' }}>
+                {r.date ? new Date(r.date).toLocaleDateString('ru-RU') : '—'} ·{' '}
+                {r.type === 'intake'
+                  ? r.supplierName ?? '—'
+                  : r.contractorName ?? 'списание'}
               </Typography.Text>
-            </Space>
-            <Space>
-              <Tag color={KIND_LABELS[r.kind].color}>{KIND_LABELS[r.kind].label}</Tag>
-              <Tag color={statusTagColor(r.statusCode)}>{r.statusLabel}</Tag>
-              <Typography.Text type="secondary">
-                {r.siteCode} · {r.siteName}
-              </Typography.Text>
-            </Space>
-            <Typography.Text type="secondary" style={{ display: 'block' }}>
-              {r.shippedAt ? new Date(r.shippedAt).toLocaleDateString('ru-RU') : '—'} →{' '}
-              {r.kind === 'transfer'
-                ? r.destSiteName ?? '—'
-                : r.kind === 'writeoff'
-                  ? 'списание'
-                  : r.receiverName ?? '—'}
-            </Typography.Text>
-          </div>
-        )}
-      />
+              {r.type === 'intake' && (
+                <Typography.Text type="secondary" style={{ display: 'block' }}>
+                  Сумма {formatMoneyRu(r.sum)} · НДС {formatMoneyRu(r.vatSum)}
+                </Typography.Text>
+              )}
+            </div>
+          )}
+        />
+      </StickyPageHeader>
     </StickyPageHeader>
   );
 }
