@@ -564,7 +564,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         // (2-й этап завершён) — фото попадает в «После», иначе — в «До».
         const stage =
           loadedDelivery?.status.code === 'confirmed_mol' ? 'after' : 'before';
-        await capturePhoto('delivery', deliveryId, file, 'cargo', stage);
+        const { uploadPromise } = await capturePhoto(
+          'delivery',
+          deliveryId,
+          file,
+          'cargo',
+          stage,
+        );
         message.success('Фото добавлено');
         // Локальный список фото перечитывается сразу из IDB, серверный delivery.photos —
         // после S3-upload + следующего pullSync. Галерея мерджит оба источника по id.
@@ -572,6 +578,15 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           queryClient.invalidateQueries({ queryKey: ['photos-local', 'delivery', deliveryId] }),
           queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] }),
         ]);
+        // После завершения upload IDB-id фото меняется на server-id (см.
+        // photoPipeline.uploadPhoto). Без повторного invalidate galery читает
+        // запись по old-id и зависает на «Загружается…».
+        void uploadPromise.then(() => {
+          void queryClient.invalidateQueries({
+            queryKey: ['photos-local', 'delivery', deliveryId],
+          });
+          void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+        });
         void runSync();
       } catch (err) {
         message.error(`Не удалось добавить фото: ${(err as Error).message}`);

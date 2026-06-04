@@ -1,4 +1,8 @@
-import type { DeliveryPhotoStage, PhotoPresignResponse } from '@matcheck/contracts';
+import type {
+  DeliveryPhotoStage,
+  PhotoConfirmResponse,
+  PhotoPresignResponse,
+} from '@matcheck/contracts';
 import { api } from './api';
 import { db, type OperationKind } from '../lib/db';
 
@@ -44,13 +48,28 @@ export async function sha256Hex(blob: Blob): Promise<string> {
     .join('');
 }
 
+export type CapturedPhoto = {
+  /**
+   * Локальный uuid сразу после захвата. Используется как ключ в IDB до тех
+   * пор, пока uploadPromise не подменит его на server-id из presign-ответа.
+   */
+  id: string;
+  /**
+   * Promise успешного завершения S3-upload + /confirm. Резолвится после того,
+   * как IDB-запись переименована на server-id. Вызывающий код подписывается
+   * через .then(...) для повторного invalidate queryClient — без этого UI
+   * продолжит читать запись по old-id, которой в IDB уже нет.
+   */
+  uploadPromise: Promise<void>;
+};
+
 export async function capturePhoto(
   operationKind: OperationKind,
   operationId: string,
   blob: Blob,
   kind: 'document' | 'cargo' | 'vehicle' | 'other',
   stage: DeliveryPhotoStage = 'before',
-): Promise<string> {
+): Promise<CapturedPhoto> {
   const main = await compressInWorker(blob, 1.5, 2048);
   const thumb = await compressInWorker(blob, 0.1, 320);
   const contentHash = await sha256Hex(main);
@@ -66,7 +85,12 @@ export async function capturePhoto(
     .index('byHash')
     .get(contentHash);
   if (existing && existing.deliveryId === operationId && existing.operationKind === operationKind) {
-    return existing.id;
+    // Уже есть локальная запись с этим contentHash. Если она ещё не uploaded —
+    // переиспользуем её promise upload'а, а не плодим параллельные попытки.
+    const uploadPromise = existing.uploaded
+      ? Promise.resolve()
+      : uploadPhoto(existing.id).catch(() => undefined);
+    return { id: existing.id, uploadPromise };
   }
 
   await dbi.put('photos', {
@@ -84,9 +108,10 @@ export async function capturePhoto(
     uploaded: false,
   });
 
-  // Best-effort immediate upload
-  void uploadPhoto(id).catch(() => undefined);
-  return id;
+  // Best-effort immediate upload — выставляем promise наружу, чтобы UI мог
+  // дождаться обмена local-id на server-id и пере-invalidate queryClient.
+  const uploadPromise = uploadPhoto(id).catch(() => undefined);
+  return { id, uploadPromise };
 }
 
 export async function uploadPhoto(photoId: string): Promise<void> {
@@ -123,8 +148,22 @@ export async function uploadPhoto(photoId: string): Promise<void> {
       }).catch(() => undefined);
     }
   }
+
+  // Confirm обязателен: сервер делает HEAD в S3 и проставляет uploaded_at.
+  // Без него запись остаётся orphan'ом (uploaded_at=null) и через час будет
+  // вычищена cleanup-job'ом — фото пропадёт. См. apps/api/routes/photos.ts.
+  await api.post<PhotoConfirmResponse>(`/photos/${presign.photoId}/confirm`, {});
+
+  // Сервер генерирует photoId сам (см. apps/api/routes/photos.ts: insert с
+  // crypto.randomUUID()). Чтобы merged-список в UI не показывал ДВА фото
+  // (server + local с разными id), синхронизируем локальный id с серверным —
+  // тот же приём, что в matcheck.mobile PhotoUploadProcessor.kt.
+  if (presign.photoId !== p.id) {
+    await dbi.delete('photos', p.id);
+  }
   await dbi.put('photos', {
     ...p,
+    id: presign.photoId,
     s3Key: presign.s3Key,
     thumbS3Key: presign.thumbS3Key ?? undefined,
     uploaded: true,

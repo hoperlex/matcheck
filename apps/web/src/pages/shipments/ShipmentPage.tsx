@@ -488,12 +488,21 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     beforeUpload: async (file) => {
       if (!shipmentId) return false;
       try {
-        await capturePhoto('shipment', shipmentId, file, 'cargo');
+        const { uploadPromise } = await capturePhoto('shipment', shipmentId, file, 'cargo');
         message.success('Фото добавлено');
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ['photos-local', 'shipment', shipmentId] }),
           queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] }),
         ]);
+        // После завершения upload IDB-id фото меняется на server-id (см.
+        // photoPipeline.uploadPhoto). Без повторного invalidate galery читает
+        // запись по old-id и зависает на «Загружается…».
+        void uploadPromise.then(() => {
+          void queryClient.invalidateQueries({
+            queryKey: ['photos-local', 'shipment', shipmentId],
+          });
+          void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
+        });
         void runSync();
       } catch (err) {
         message.error(`Не удалось добавить фото: ${(err as Error).message}`);
