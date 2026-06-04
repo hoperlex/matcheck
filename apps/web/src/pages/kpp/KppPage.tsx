@@ -142,6 +142,27 @@ function newKey(): string {
 }
 
 /**
+ * Компактный inline-label для полей шапки. Мелкий шрифт, серый цвет —
+ * заметен, но не съедает место как antd Form.Item label или Card title.
+ */
+function FieldLabel({
+  children,
+  required,
+}: {
+  children: React.ReactNode;
+  required?: boolean;
+}) {
+  return (
+    <Typography.Text
+      style={{ fontSize: 11, color: '#8c8c8c', display: 'block', marginBottom: 2 }}
+    >
+      {children}
+      {required && <span style={{ color: '#ff4d4f' }}> *</span>}
+    </Typography.Text>
+  );
+}
+
+/**
  * Edit-режим приёмки. Прежде это была отдельная страница `/kpp?delivery=…`,
  * сейчас может рендериться внутри большой `<Modal>` на `/operations`
  * (см. OperationsPage). Пропс `embedded=true` скрывает внутренний
@@ -1176,145 +1197,165 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           />
         )}
 
-        {/* Компактная шапка: Card-блоки уменьшены, инпуты size="middle"
-            вместо "large", padding body урезан. Высота строки экономится
-            ~30-40px — больше места для материалов и фото. */}
-        <Row gutter={[8, 8]}>
-          <Col xs={24} sm={12} md={6}>
-            <Card
+        {/* Компактная inline-шапка: одна строка вместо 4 Card-блоков.
+            Label сверху мелким шрифтом, инпуты size="small". Экономит
+            ~80-100px вертикально — больше места под материалы и фото.
+            Grid с minmax-колонками: при сужении окна Получатель и УПД
+            не схлопываются раньше, чем нужно (минимумы подобраны под
+            Segmented + Select / Tag + дата). */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns:
+              'minmax(180px, 1fr) minmax(240px, 1.4fr) minmax(140px, 0.7fr) minmax(220px, 1.2fr)',
+            gap: 8,
+            marginBottom: 8,
+            alignItems: 'start',
+          }}
+        >
+          <div>
+            <FieldLabel required>Объект</FieldLabel>
+            <Select<string>
+              style={{ width: '100%' }}
               size="small"
-              title={
-                <span>
-                  Объект <span style={{ color: '#ff4d4f' }}>*</span>
-                </span>
+              placeholder="Выберите объект"
+              value={siteId ?? undefined}
+              onChange={(v) => setSiteId(v)}
+              showSearch
+              optionFilterProp="label"
+              loading={sitesQuery.isLoading}
+              disabled={isInspector}
+              options={sites.map((s) => ({
+                value: s.id,
+                label: `${s.code} · ${s.name}`,
+              }))}
+              notFoundContent={
+                <Typography.Text type="secondary">
+                  Объектов нет — заведите их в Справочниках
+                </Typography.Text>
               }
-              styles={{ body: { padding: 8 } }}
-            >
+            />
+          </div>
+
+          <div>
+            <FieldLabel>Получатель</FieldLabel>
+            <Segmented
+              block
+              size="small"
+              style={{ marginBottom: 4 }}
+              options={[
+                { label: 'Подрядчик', value: 'counterparty' },
+                { label: 'МОЛ', value: 'mol' },
+              ]}
+              value={recipientKind}
+              onChange={(v) => {
+                const next = v as 'counterparty' | 'mol';
+                setRecipientKind(next);
+                if (next === 'counterparty') setRecipientMolId(null);
+                else setContractorId(null);
+              }}
+            />
+            {recipientKind === 'counterparty' ? (
               <Select<string>
                 style={{ width: '100%' }}
-                placeholder="Выберите объект"
-                value={siteId ?? undefined}
-                onChange={(v) => setSiteId(v)}
+                size="small"
+                placeholder="— не указан —"
+                value={contractorId ?? undefined}
+                onChange={(v) => setContractorId(v ?? null)}
+                allowClear
                 showSearch
                 optionFilterProp="label"
-                loading={sitesQuery.isLoading}
-                disabled={isInspector}
-                options={sites.map((s) => ({
-                  value: s.id,
-                  label: `${s.code} · ${s.name}`,
+                loading={counterpartiesQuery.isLoading}
+                options={counterparties.map((c) => ({
+                  value: c.id,
+                  label: c.name,
                 }))}
                 notFoundContent={
                   <Typography.Text type="secondary">
-                    Объектов нет — заведите их в Справочниках
+                    Нет контрагентов с ролью «Подрядчик» — отметьте их в Справочниках
                   </Typography.Text>
                 }
               />
-            </Card>
-          </Col>
-          <Col xs={24} sm={12} md={6}>
-            <Card size="small" title="Получатель" styles={{ body: { padding: 8 } }}>
-              <Segmented
-                block
+            ) : (
+              <Select<string>
+                style={{ width: '100%' }}
                 size="small"
-                style={{ marginBottom: 6 }}
-                options={[
-                  { label: 'Подрядчик', value: 'counterparty' },
-                  { label: 'МОЛ', value: 'mol' },
-                ]}
-                value={recipientKind}
-                onChange={(v) => {
-                  const next = v as 'counterparty' | 'mol';
-                  setRecipientKind(next);
-                  if (next === 'counterparty') setRecipientMolId(null);
-                  else setContractorId(null);
-                }}
+                placeholder="— не указан —"
+                value={recipientMolId ?? undefined}
+                onChange={(v) => setRecipientMolId(v ?? null)}
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                loading={responsiblePersonsQuery.isLoading}
+                options={responsiblePersons.map((m) => ({
+                  value: m.id,
+                  label: m.fullName,
+                }))}
+                notFoundContent={
+                  <Typography.Text type="secondary">
+                    Заведите МОЛ в Справочниках
+                  </Typography.Text>
+                }
               />
-              {recipientKind === 'counterparty' ? (
-                <Select<string>
-                  style={{ width: '100%' }}
-                  placeholder="— не указан —"
-                  value={contractorId ?? undefined}
-                  onChange={(v) => setContractorId(v ?? null)}
-                  allowClear
-                  showSearch
-                  optionFilterProp="label"
-                  loading={counterpartiesQuery.isLoading}
-                  options={counterparties.map((c) => ({
-                    value: c.id,
-                    label: c.name,
-                  }))}
-                  notFoundContent={
-                    <Typography.Text type="secondary">
-                      Нет контрагентов с ролью «Подрядчик» — отметьте их в Справочниках
-                    </Typography.Text>
-                  }
-                />
-              ) : (
-                <Select<string>
-                  style={{ width: '100%' }}
-                  placeholder="— не указан —"
-                  value={recipientMolId ?? undefined}
-                  onChange={(v) => setRecipientMolId(v ?? null)}
-                  allowClear
-                  showSearch
-                  optionFilterProp="label"
-                  loading={responsiblePersonsQuery.isLoading}
-                  options={responsiblePersons.map((m) => ({
-                    value: m.id,
-                    label: m.fullName,
-                  }))}
-                  notFoundContent={
-                    <Typography.Text type="secondary">
-                      Заведите МОЛ в Справочниках
-                    </Typography.Text>
-                  }
-                />
-              )}
-            </Card>
-          </Col>
-          <Col xs={24} sm={12} md={6}>
-            <Card size="small" title="Госномер" styles={{ body: { padding: 8 } }}>
-              <Input
-                placeholder="А123ВВ77"
-                value={plate}
-                onChange={(e) => setPlate(e.target.value.toUpperCase())}
-                autoCapitalize="characters"
-              />
-            </Card>
-          </Col>
-          <Col xs={24} sm={12} md={6}>
+            )}
+          </div>
+
+          <div>
+            <FieldLabel>Госномер</FieldLabel>
+            <Input
+              size="small"
+              placeholder="А123ВВ77"
+              value={plate}
+              onChange={(e) => setPlate(e.target.value.toUpperCase())}
+              autoCapitalize="characters"
+            />
+          </div>
+
+          <div>
             {loadedDelivery?.sourceShipmentId ? (
-              // Парная приёмка из transfer — вместо УПД показываем источник и
-              // обе фактические даты. Дата прибытия заполнится, как только
-              // инспектор destSite подтвердит приёмку.
-              <Card size="small" title="Перемещение" styles={{ body: { padding: 8 } }}>
-                <Space direction="vertical" size={2}>
-                  <Space wrap>
-                    <Tag color="geekblue">с объекта</Tag>
-                    <Typography.Text strong>
+              // Парная приёмка из transfer — вместо УПД показываем источник
+              // и обе фактические даты (атрибут УПД здесь не применим).
+              <>
+                <FieldLabel>Перемещение</FieldLabel>
+                <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                  <Space wrap size={4}>
+                    <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>
+                      с объекта
+                    </Tag>
+                    <Typography.Text strong style={{ fontSize: 13 }}>
                       {loadedDelivery.sourceShipmentSiteCode ?? '—'}
                     </Typography.Text>
                   </Space>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    Отгружено: {formatMolDate(loadedDelivery.sourceShipmentShippedAt)}
-                  </Typography.Text>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                    Отгружено: {formatMolDate(loadedDelivery.sourceShipmentShippedAt)} ·
                     Принято: {formatMolDate(loadedDelivery.arrivedAt)}
                   </Typography.Text>
                 </Space>
-              </Card>
+              </>
             ) : (
-              <Card size="small" title="УПД" styles={{ body: { padding: 8 } }}>
+              <>
+                <FieldLabel>УПД</FieldLabel>
                 {selectedUpd ? (
-                  <Space wrap>
-                    <Tag color="blue">{selectedUpd.docNumber ?? '— без номера —'}</Tag>
-                    <Typography.Text type="secondary">
-                      {selectedUpd.docDate ?? '—'} · {selectedUpd.totalSum ?? '—'} ₽
-                    </Typography.Text>
+                  <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                    <Space wrap size={4}>
+                      <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                        {selectedUpd.docNumber ?? '— без номера —'}
+                      </Tag>
+                      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                        {selectedUpd.docDate ?? '—'} · {selectedUpd.totalSum ?? '—'} ₽
+                      </Typography.Text>
+                    </Space>
+                    {selectedUpd.expectedDate && (
+                      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                        Дата поставки: {selectedUpd.expectedDate}
+                      </Typography.Text>
+                    )}
                   </Space>
                 ) : (
-                  <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                    <Typography.Text type="secondary">— без УПД —</Typography.Text>
+                  <Space size={4} wrap>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      — без УПД —
+                    </Typography.Text>
                     {!isInspector &&
                       loadedDelivery?.sourceDocumentIds.length === 0 &&
                       !isNew && (
@@ -1331,10 +1372,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       )}
                   </Space>
                 )}
-              </Card>
+              </>
             )}
-          </Col>
-        </Row>
+          </div>
+        </div>
 
         <LinkSourceDocumentModal
           open={linkUpdOpen}
@@ -1348,15 +1389,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           error={linkUpdError}
         />
 
-        {selectedUpd && !loadedDelivery?.sourceShipmentId && (
-          <Card size="small" title="Дата поставки" styles={{ body: { padding: 8 } }}>
-            {/* Read-only: дата поставки — атрибут УПД, а не приёмки.
-                Редактируется в Документах (SourceDocumentDetailModal) или в
-                Приёмка→Ожидаемые при клике по строке. Здесь отображаем
-                актуальное значение из связанного source_document. */}
-            <Typography.Text>{selectedUpd.expectedDate ?? '—'}</Typography.Text>
-          </Card>
-        )}
+        {/* Отдельная карточка «Дата поставки» убрана: значение теперь
+            показывается inline под УПД (см. шапку выше). Дата поставки —
+            атрибут УПД, в edit-режиме приёмки она read-only. */}
 
         <Collapse
           size="small"
