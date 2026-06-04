@@ -5,6 +5,7 @@ import {
   Collapse,
   DatePicker,
   Form,
+  Image,
   Input,
   InputNumber,
   Modal,
@@ -25,6 +26,8 @@ import {
   BorderHorizontalOutlined,
   BorderVerticleOutlined,
   DeleteOutlined,
+  FilePdfOutlined,
+  FileTextOutlined,
   PlusOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -737,6 +740,9 @@ function renderBody(args: {
   );
 }
 
+// Lightbox-паттерн: одно вложение крупно + полоса миниатюр снизу для
+// переключения. Раньше стекали все вложения 1/N высоты — для ТН с
+// 3–4 фото каждое уменьшалось до нечитаемого размера.
 function OriginalAttachments({
   attachments,
   id,
@@ -744,70 +750,200 @@ function OriginalAttachments({
 }: {
   attachments: ReadonlyArray<{ id: string; filename: string }>;
   id: string;
-  // compact=true — внутри Splitter, iframe растягивается на всю панель;
+  // compact=true — внутри Splitter (правая/нижняя панель), занимает 100% высоты;
   // compact=false — внутри Tabs (узкий экран), фиксированная высота как раньше.
   compact: boolean;
 }) {
-  if (compact) {
-    // Если один файл — один iframe на всю панель. Если несколько — стек с
-    // равными долями (плохо читается, но для редкого случая ТН ок).
-    return (
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 8,
-          height: '100%',
-        }}
-      >
-        {attachments.map((a) => (
+  const [activeId, setActiveId] = useState<string | null>(attachments[0]?.id ?? null);
+
+  // Если открыли другой документ — attachments сменились, нужно сбросить
+  // активный на первый. Сравниваем по списку id, потому что массив
+  // attachments — readonly прокси с новой ссылкой на каждом ререндере.
+  useEffect(() => {
+    if (attachments.length === 0) {
+      setActiveId(null);
+      return;
+    }
+    if (!attachments.some((a) => a.id === activeId)) {
+      setActiveId(attachments[0].id);
+    }
+  }, [attachments, activeId]);
+
+  if (attachments.length === 0 || !activeId) return null;
+  const active = attachments.find((a) => a.id === activeId) ?? attachments[0];
+  if (!active) return null;
+  const activeIndex = attachments.findIndex((a) => a.id === active.id);
+  const activeUrl = `/api/v1/source-documents/${id}/file/raw?attachmentId=${active.id}`;
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        height: compact ? '100%' : '75vh',
+        minHeight: 320,
+      }}
+    >
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        <Typography.Text
+          type="secondary"
+          style={{ fontSize: 11, display: 'block', marginBottom: 2 }}
+        >
+          {attachments.length > 1
+            ? `Фото ${activeIndex + 1} из ${attachments.length} · ${active.filename}`
+            : active.filename}
+        </Typography.Text>
+        {isImageExt(active.filename) ? (
+          // antd Image даёт встроенный lightbox (zoom/rotate/fullscreen) —
+          // для скана накладной это удобнее, чем image в <iframe>, где у
+          // Chrome нет ни зума, ни поворота. Меняем active.id ⇒ Image
+          // перегружает src.
           <div
-            key={a.id}
-            style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
+            key={active.id}
+            style={{
+              flex: 1,
+              minHeight: 200,
+              border: '1px solid #f0f0f0',
+              background: '#fafafa',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              overflow: 'hidden',
+            }}
           >
-            <Typography.Text
-              type="secondary"
-              style={{ fontSize: 11, display: 'block', marginBottom: 2 }}
-            >
-              {a.filename}
-            </Typography.Text>
-            <iframe
-              // #toolbar=1&navpanes=0 — Chrome PDF Viewer прячет левую панель
-              // с миниатюрами страниц, освобождая место для самого документа.
-              // Параметр игнорируется браузером для image/*.
-              src={`/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}#toolbar=1&navpanes=0`}
-              title={a.filename}
-              style={{
-                flex: 1,
+            <Image
+              src={activeUrl}
+              alt={active.filename}
+              wrapperStyle={{
                 width: '100%',
-                minHeight: 200,
-                border: '1px solid #f0f0f0',
+                height: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
               }}
+              style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+              preview={{ mask: 'Открыть для зума' }}
             />
           </div>
-        ))}
-      </div>
-    );
-  }
-  return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      {attachments.map((a) => (
-        <div key={a.id}>
-          <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
-            {a.filename}
-          </Typography.Text>
+        ) : (
           <iframe
-            src={`/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}`}
-            title={a.filename}
+            key={active.id}
+            // #toolbar=1&navpanes=0 — Chrome PDF Viewer прячет левую панель
+            // с миниатюрами страниц, освобождая место для самого документа.
+            src={`${activeUrl}#toolbar=1&navpanes=0`}
+            title={active.filename}
             style={{
+              flex: 1,
               width: '100%',
-              height: attachments.length > 1 ? '60vh' : '75vh',
+              minHeight: 200,
               border: '1px solid #f0f0f0',
             }}
           />
-        </div>
-      ))}
-    </Space>
+        )}
+      </div>
+      {attachments.length > 1 && (
+        <ThumbBar
+          attachments={attachments}
+          activeId={activeId}
+          onSelect={setActiveId}
+          id={id}
+        />
+      )}
+    </div>
+  );
+}
+
+function isImageExt(name: string): boolean {
+  return /\.(jpe?g|png|webp|gif|bmp|heic|heif)$/i.test(name);
+}
+
+function ThumbBar({
+  attachments,
+  activeId,
+  onSelect,
+  id,
+}: {
+  attachments: ReadonlyArray<{ id: string; filename: string }>;
+  activeId: string;
+  onSelect: (id: string) => void;
+  id: string;
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 6,
+        overflowX: 'auto',
+        paddingBottom: 4,
+        flexShrink: 0,
+      }}
+    >
+      {attachments.map((a, i) => {
+        const isImg = isImageExt(a.filename);
+        const isActive = a.id === activeId;
+        const thumbUrl = `/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}`;
+        const isPdf = /\.pdf$/i.test(a.filename);
+        return (
+          <Tooltip key={a.id} title={a.filename} placement="top">
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelect(a.id)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onSelect(a.id);
+                }
+              }}
+              style={{
+                flexShrink: 0,
+                width: 64,
+                height: 64,
+                border: isActive ? '2px solid #1677ff' : '1px solid #d9d9d9',
+                borderRadius: 4,
+                cursor: 'pointer',
+                overflow: 'hidden',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                position: 'relative',
+                background: '#fafafa',
+                transition: 'border-color 0.15s',
+              }}
+            >
+              {isImg ? (
+                <img
+                  src={thumbUrl}
+                  alt=""
+                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                />
+              ) : isPdf ? (
+                <FilePdfOutlined style={{ fontSize: 28, color: '#d4380d' }} />
+              ) : (
+                <FileTextOutlined style={{ fontSize: 28, color: '#8c8c8c' }} />
+              )}
+              <div
+                style={{
+                  position: 'absolute',
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  background: 'rgba(0,0,0,0.55)',
+                  color: '#fff',
+                  fontSize: 10,
+                  textAlign: 'center',
+                  padding: '1px 2px',
+                  lineHeight: 1.2,
+                }}
+              >
+                {i + 1}
+              </div>
+            </div>
+          </Tooltip>
+        );
+      })}
+    </div>
   );
 }
 
