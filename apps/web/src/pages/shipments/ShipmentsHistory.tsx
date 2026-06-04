@@ -15,7 +15,9 @@ import {
 } from 'antd';
 import {
   DeleteOutlined,
+  EditOutlined,
   ExclamationCircleOutlined,
+  EyeOutlined,
   ShareAltOutlined,
   UndoOutlined,
 } from '@ant-design/icons';
@@ -47,6 +49,7 @@ import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
+import { ShipmentViewModal, type ShipmentViewData } from './ShipmentViewModal';
 import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
@@ -85,6 +88,7 @@ export function ShipmentsHistory({
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
   const [reasonDraft, setReasonDraft] = useState<Record<string, string>>({});
   const [shareId, setShareId] = useState<string | null>(null);
+  const [viewData, setViewData] = useState<ShipmentViewData | null>(null);
   const [params, setParams] = useSearchParams();
   const authUser = useAuthStore((s) => s.user);
   const isAdmin = authUser?.role === 'admin';
@@ -382,6 +386,64 @@ export function ShipmentsHistory({
     </Tooltip>
   );
 
+  // Снимок для read-only ShipmentViewModal: подставляем имена получателя
+  // (counterparty/destSite в зависимости от kind), объекта и краткие
+  // метаданные привязанного УПД. Модалка сама не лезет в API.
+  const buildViewData = (r: Row): ShipmentViewData => {
+    const receiverName =
+      r.receiverCounterpartyId
+        ? counterpartiesMap.get(r.receiverCounterpartyId) ?? null
+        : null;
+    const destSiteName = r.destSiteId ? sitesMap.get(r.destSiteId) ?? null : null;
+    const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
+    const kindLabel = sd
+      ? sd.kind === 'upd'
+        ? 'УПД'
+        : sd.kind === 'transport_waybill' || sd.kind === 'os2_transfer'
+          ? 'Накладная'
+          : sd.kind === 'request'
+            ? 'Заявка'
+            : null
+      : null;
+    const totalSum =
+      sd?.totalSum != null && sd.totalSum !== '' && Number.isFinite(Number(sd.totalSum))
+        ? Number(sd.totalSum)
+        : null;
+    return {
+      shipment: r,
+      receiverName,
+      siteName: sitesMap.get(r.siteId) ?? null,
+      destSiteName,
+      docNumber: sd?.docNumber ?? null,
+      docKindLabel: kindLabel,
+      docTotalSum: totalSum,
+    };
+  };
+
+  // 👁 Просмотр + ✏ Редактор — слева от Поделиться/Удалить. Зеркало
+  // DeliveriesHistory.renderViewEdit: клик по строке открывает edit как
+  // раньше, иконки — дополнительные пути.
+  const renderViewEdit = (r: Row) => (
+    <>
+      <Tooltip title="Просмотр">
+        <Button
+          size="small"
+          shape="circle"
+          icon={<EyeOutlined />}
+          onClick={() => setViewData(buildViewData(r))}
+        />
+      </Tooltip>
+      <Tooltip title="Редактировать">
+        <Button
+          size="small"
+          shape="circle"
+          icon={<EditOutlined />}
+          onClick={() => onOpen(r.id)}
+        />
+      </Tooltip>
+    </>
+  );
+
   const renderActions = (r: Row) => {
     const errMsg = deleteErrors[r.id];
     const errIcon = errMsg ? (
@@ -648,14 +710,19 @@ export function ShipmentsHistory({
             render: (_: unknown, r: Row) => r.items?.length ?? 0,
           },
           {
-            title: '',
+            title: 'Действия',
             key: 'actions',
-            width: 88,
+            width: 200,
             align: 'right' as const,
             onCell: () => ({
               onClick: (e: MouseEvent) => e.stopPropagation(),
             }),
-            render: (_: unknown, r: Row) => renderActions(r),
+            render: (_: unknown, r: Row) => (
+              <Space size={4}>
+                {renderViewEdit(r)}
+                {renderActions(r)}
+              </Space>
+            ),
           },
         ]}
         cardRender={(r) => (
@@ -679,7 +746,10 @@ export function ShipmentsHistory({
                 style={{ position: 'absolute', top: 0, right: 0 }}
                 onClick={(e) => e.stopPropagation()}
               >
-                {renderActions(r)}
+                <Space size={4}>
+                  {renderViewEdit(r)}
+                  {renderActions(r)}
+                </Space>
               </div>
             </Space>
           </Card>
@@ -692,6 +762,17 @@ export function ShipmentsHistory({
       open={shareId !== null}
       onClose={() => setShareId(null)}
       title="Поделиться отгрузкой"
+    />
+    <ShipmentViewModal
+      data={viewData}
+      open={viewData !== null}
+      onClose={() => setViewData(null)}
+      onEdit={() => {
+        if (!viewData) return;
+        const id = viewData.shipment.id;
+        setViewData(null);
+        onOpen(id);
+      }}
     />
     </>
   );
