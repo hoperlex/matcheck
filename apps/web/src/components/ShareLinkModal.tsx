@@ -82,9 +82,6 @@ export function ShareLinkModal({
   const activeLinks = items.filter(
     (i) => !i.revokedAt && new Date(i.expiresAt).getTime() > now,
   );
-  const inactiveLinks = items.filter(
-    (i) => i.revokedAt || new Date(i.expiresAt).getTime() <= now,
-  );
 
   // Авто-генерация ссылки при открытии: если активных нет, сразу создаём
   // одну — пользователь не должен жать «Сгенерировать ссылку» вручную.
@@ -174,17 +171,8 @@ export function ShareLinkModal({
                 Создать ещё одну ссылку
               </Button>
             )}
-
-            {inactiveLinks.length > 0 && (
-              <>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  История ({inactiveLinks.length})
-                </Typography.Text>
-                {inactiveLinks.slice(0, 5).map((link) => (
-                  <InactiveLinkRow key={link.id} link={link} />
-                ))}
-              </>
-            )}
+            {/* Блок «История (N)» с отозванными/истёкшими ссылками
+                скрыт по запросу — пользователь видит только активные. */}
           </Space>
         </>
       )}
@@ -261,32 +249,3 @@ function ActiveLinkRow({
   );
 }
 
-function InactiveLinkRow({ link }: { link: ShareLink }) {
-  const isRevoked = link.revokedAt !== null;
-  return (
-    <div
-      style={{
-        border: '1px solid #f0f0f0',
-        borderRadius: 6,
-        padding: 8,
-        opacity: 0.6,
-      }}
-    >
-      <Space size={[8, 4]} wrap style={{ fontSize: 12 }}>
-        <Tag color="default" style={{ marginInlineEnd: 0 }}>
-          {isRevoked ? 'Отозвана' : 'Истекла'}
-        </Tag>
-        <Typography.Text type="secondary">
-          {isRevoked && link.revokedAt
-            ? `Отозвана ${formatDateRu(link.revokedAt)}`
-            : `Истекла ${formatDateRu(link.expiresAt)}`}
-        </Typography.Text>
-        {link.accessedCount > 0 && (
-          <Typography.Text type="secondary">
-            Открывалась {link.accessedCount} раз
-          </Typography.Text>
-        )}
-      </Space>
-    </div>
-  );
-}

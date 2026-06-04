@@ -93,7 +93,7 @@ export async function shareMessageRoutes(rawApp: FastifyInstance): Promise<void>
       // Получаем токены пользователя, обогащаем entity-label из
       // deliveries/shipments (через JOIN на УПД). Используем сырые SQL
       // фрагменты для агрегации по треду — это компактнее, чем CTE.
-      const rows = await app.db.execute(sql`
+      const rowsRaw = await app.db.execute(sql`
         WITH last_msgs AS (
           SELECT
             sm.share_token_id,
@@ -157,7 +157,13 @@ export async function shareMessageRoutes(rawApp: FastifyInstance): Promise<void>
         ORDER BY (COALESCE(uc.cnt, 0) > 0) DESC, lm.created_at DESC
         LIMIT 100
       `);
-      const items = ((rows as { rows?: Record<string, unknown>[] }).rows ?? []).map((r) => {
+      // postgres-js драйвер возвращает массив напрямую, а node-postgres —
+      // объект { rows: [...] }. Делаем fallback на «сам массив», иначе
+      // тредов не видно даже когда в БД сообщения есть.
+      const rows =
+        (rowsRaw as { rows?: Record<string, unknown>[] }).rows ??
+        (rowsRaw as unknown as Record<string, unknown>[]);
+      const items = rows.map((r) => {
         const entityType = String(r.entityType) as 'delivery' | 'shipment';
         const docNumber =
           entityType === 'delivery' ? r.deliveryDocNumber : r.shipmentDocNumber;
@@ -232,15 +238,18 @@ export async function shareMessageRoutes(rawApp: FastifyInstance): Promise<void>
           .from(deliveries)
           .where(eq(deliveries.id, token.entityId))
           .limit(1);
-        const [sd] = await app.db.execute(sql`
+        const sdRaw = await app.db.execute(sql`
           SELECT sdoc.doc_number AS "docNumber"
           FROM delivery_sources ds
           JOIN source_documents sdoc ON sdoc.id = ds.source_document_id
           WHERE ds.delivery_id = ${token.entityId}
           ORDER BY sdoc.doc_date DESC NULLS LAST
           LIMIT 1
-        `) as unknown as Array<{ docNumber: string | null }>;
-        const docNumber = sd?.docNumber;
+        `);
+        const sdArr =
+          (sdRaw as { rows?: Array<{ docNumber: string | null }> }).rows ??
+          (sdRaw as unknown as Array<{ docNumber: string | null }>);
+        const docNumber = sdArr[0]?.docNumber;
         if (docNumber) entityLabel = `Приёмка УПД №${docNumber}`;
         else if (d?.plate) entityLabel = `Приёмка авто ${d.plate}`;
       } else {
@@ -249,15 +258,18 @@ export async function shareMessageRoutes(rawApp: FastifyInstance): Promise<void>
           .from(shipments)
           .where(eq(shipments.id, token.entityId))
           .limit(1);
-        const [sd] = await app.db.execute(sql`
+        const sdRaw = await app.db.execute(sql`
           SELECT sdoc.doc_number AS "docNumber"
           FROM shipment_sources ss
           JOIN source_documents sdoc ON sdoc.id = ss.source_document_id
           WHERE ss.shipment_id = ${token.entityId}
           ORDER BY sdoc.doc_date DESC NULLS LAST
           LIMIT 1
-        `) as unknown as Array<{ docNumber: string | null }>;
-        const docNumber = sd?.docNumber;
+        `);
+        const sdArr =
+          (sdRaw as { rows?: Array<{ docNumber: string | null }> }).rows ??
+          (sdRaw as unknown as Array<{ docNumber: string | null }>);
+        const docNumber = sdArr[0]?.docNumber;
         if (docNumber) entityLabel = `Отгрузка УПД №${docNumber}`;
         else if (s?.plate) entityLabel = `Отгрузка авто ${s.plate}`;
       }
