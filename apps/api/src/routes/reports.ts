@@ -3,6 +3,7 @@ import { sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
+  InspectorStatsResponseSchema,
   IntakeJournalResponseSchema,
   ShipmentJournalResponseSchema,
   ShipmentKindSchema,
@@ -41,6 +42,15 @@ const ShipmentJournalQuerySchema = z.object({
   dateFrom: z.string().datetime().optional(),
   dateTo: z.string().datetime().optional(),
   limit: z.coerce.number().int().positive().max(500).default(100),
+  offset: z.coerce.number().int().nonnegative().default(0),
+});
+
+const InspectorStatsQuerySchema = z.object({
+  siteId: z.string().optional(),
+  inspectorId: z.string().optional(),
+  dateFrom: z.string().datetime().optional(),
+  dateTo: z.string().datetime().optional(),
+  limit: z.coerce.number().int().positive().max(500).default(500),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
 
@@ -550,6 +560,157 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           docDate: maybeDocDate(r.docDate),
           statusCode: String(r.statusCode),
           statusLabel: String(r.statusLabel),
+        })),
+        total: Number(totalRows[0]?.count ?? 0),
+      };
+    },
+  );
+
+  // ─── Статистика по инспекторам КПП ─────────────────────────────────────
+  // Группировка: (день × инспектор × объект). «Машины» = COUNT приёмок +
+  // отгрузок этого инспектора за день. «Сумма без НДС» = SUM(qty × price)
+  // по delivery_items привязанных приёмок (формула совпадает с
+  // /reports/intake — единая трактовка денег во всём портале). У shipments
+  // цены обычно нет, для них сумму не считаем.
+  app.get(
+    '/api/v1/reports/inspector-stats',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        querystring: InspectorStatsQuerySchema,
+        response: { 200: InspectorStatsResponseSchema },
+      },
+    },
+    async (req) => {
+      const { siteId, inspectorId, dateFrom, dateTo, limit, offset } = req.query;
+      const sIds = safeUuids(siteId);
+      const iIds = safeUuids(inspectorId);
+      const from = safeTimestamp(dateFrom);
+      const to = safeTimestamp(dateTo);
+
+      // Дата операции — в МСК: бизнес-день у пользователя именно московский.
+      // COALESCE на updated_at — fallback на случай если arrived_at/shipped_at
+      // не проставлены (мобила могла пропустить).
+      const dateExprD = `DATE(COALESCE(d.arrived_at, d.updated_at) AT TIME ZONE 'Europe/Moscow')`;
+      const dateExprS = `DATE(COALESCE(s.shipped_at, s.updated_at) AT TIME ZONE 'Europe/Moscow')`;
+
+      const whereD: string[] = [
+        `st.entity_type = 'delivery'`,
+        `st.code IN ('filled', 'confirmed_mol')`,
+        `d.pending_deletion_at IS NULL`,
+        `d.inspector_id IS NOT NULL`,
+      ];
+      const whereS: string[] = [
+        `st.entity_type = 'shipment'`,
+        `st.code IN ('shipped', 'confirmed_mol')`,
+        `s.pending_deletion_at IS NULL`,
+        `s.inspector_id IS NOT NULL`,
+      ];
+      if (sIds.length) {
+        whereD.push(uuidInClause('d.site_id', sIds));
+        whereS.push(uuidInClause('s.site_id', sIds));
+      }
+      if (iIds.length) {
+        whereD.push(uuidInClause('d.inspector_id', iIds));
+        whereS.push(uuidInClause('s.inspector_id', iIds));
+      }
+      if (from) {
+        whereD.push(`COALESCE(d.arrived_at, d.updated_at) >= '${from}'::timestamptz`);
+        whereS.push(`COALESCE(s.shipped_at, s.updated_at) >= '${from}'::timestamptz`);
+      }
+      if (to) {
+        whereD.push(`COALESCE(d.arrived_at, d.updated_at) <= '${to}'::timestamptz`);
+        whereS.push(`COALESCE(s.shipped_at, s.updated_at) <= '${to}'::timestamptz`);
+      }
+      const whereDSql = whereD.join(' AND ');
+      const whereSSql = whereS.join(' AND ');
+
+      const rows = await execRows(
+        app,
+        `
+        WITH ops AS (
+          SELECT
+            ${dateExprD} AS op_date,
+            d.inspector_id,
+            d.site_id,
+            d.id AS delivery_id,
+            NULL::uuid AS shipment_id
+          FROM deliveries d
+          JOIN statuses st ON st.id = d.status_id
+          WHERE ${whereDSql}
+
+          UNION ALL
+
+          SELECT
+            ${dateExprS} AS op_date,
+            s.inspector_id,
+            s.site_id,
+            NULL::uuid AS delivery_id,
+            s.id AS shipment_id
+          FROM shipments s
+          JOIN statuses st ON st.id = s.status_id
+          WHERE ${whereSSql}
+        ),
+        delivery_sums AS (
+          SELECT
+            di.delivery_id,
+            SUM(COALESCE(di.qty_actual, di.qty_planned) * di.price)::numeric(18,2) AS sum_no_vat
+          FROM delivery_items di
+          WHERE di.price IS NOT NULL
+          GROUP BY di.delivery_id
+        )
+        SELECT
+          o.op_date::text AS "date",
+          o.inspector_id AS "inspectorId",
+          u.full_name AS "inspectorFullName",
+          u.email AS "inspectorEmail",
+          o.site_id AS "siteId",
+          si.code AS "siteCode",
+          si.name AS "siteName",
+          COUNT(*)::int AS "vehicles",
+          COALESCE(SUM(ds.sum_no_vat), 0)::numeric(18,2)::text AS "sumNoVat"
+        FROM ops o
+        LEFT JOIN delivery_sums ds ON ds.delivery_id = o.delivery_id
+        LEFT JOIN users u ON u.id = o.inspector_id
+        LEFT JOIN sites si ON si.id = o.site_id
+        GROUP BY o.op_date, o.inspector_id, u.full_name, u.email, o.site_id, si.code, si.name
+        ORDER BY o.op_date DESC, COALESCE(u.full_name, u.email)
+        LIMIT ${limit} OFFSET ${offset}
+        `,
+      );
+
+      const totalRows = await execRows(
+        app,
+        `
+        WITH ops AS (
+          SELECT ${dateExprD} AS op_date, d.inspector_id, d.site_id
+          FROM deliveries d
+          JOIN statuses st ON st.id = d.status_id
+          WHERE ${whereDSql}
+          UNION ALL
+          SELECT ${dateExprS} AS op_date, s.inspector_id, s.site_id
+          FROM shipments s
+          JOIN statuses st ON st.id = s.status_id
+          WHERE ${whereSSql}
+        )
+        SELECT COUNT(*)::int AS count FROM (
+          SELECT op_date, inspector_id, site_id FROM ops
+          GROUP BY op_date, inspector_id, site_id
+        ) t
+        `,
+      );
+
+      return {
+        items: rows.map((r) => ({
+          date: String(r.date),
+          inspectorId: String(r.inspectorId),
+          inspectorFullName: (r.inspectorFullName as string | null) ?? null,
+          inspectorEmail: String(r.inspectorEmail),
+          siteId: String(r.siteId),
+          siteCode: String(r.siteCode),
+          siteName: String(r.siteName),
+          vehicles: Number(r.vehicles),
+          sumNoVat: String(r.sumNoVat),
         })),
         total: Number(totalRows[0]?.count ?? 0),
       };

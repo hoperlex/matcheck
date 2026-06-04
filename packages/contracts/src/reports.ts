@@ -98,3 +98,28 @@ export const ShipmentJournalResponseSchema = z.object({
   total: z.number(),
 });
 export type ShipmentJournalResponse = z.infer<typeof ShipmentJournalResponseSchema>;
+
+/**
+ * Строка отчёта «Статистика по инспекторам КПП».
+ * Одна тройка (день × инспектор × объект): сколько машин он провёл и какая
+ * суммарная стоимость без НДС (Σ qtyActual × price по delivery_items).
+ * У отгрузок цены обычно нет — для них считаем только машины.
+ */
+export const InspectorStatsRowSchema = z.object({
+  date: z.string(),                               // 'YYYY-MM-DD' в МСК
+  inspectorId: z.string().uuid(),
+  inspectorFullName: z.string().nullable(),
+  inspectorEmail: z.string(),
+  siteId: z.string().uuid(),
+  siteCode: z.string(),
+  siteName: z.string(),
+  vehicles: z.number().int(),                     // приёмки + отгрузки за день
+  sumNoVat: z.string(),                           // numeric → string, как остальные деньги
+});
+export type InspectorStatsRow = z.infer<typeof InspectorStatsRowSchema>;
+
+export const InspectorStatsResponseSchema = z.object({
+  items: z.array(InspectorStatsRowSchema),
+  total: z.number(),
+});
+export type InspectorStatsResponse = z.infer<typeof InspectorStatsResponseSchema>;

@@ -1,6 +1,7 @@
 import type { ComponentType } from 'react';
 import {
   AppstoreOutlined,
+  BarChartOutlined,
   ControlOutlined,
   FileTextOutlined,
   InboxOutlined,
@@ -38,6 +39,15 @@ export const navItems: NavItem[] = [
     path: '/materials',
     roles: ['admin', 'manager', 'inspector_kpp'],
     icon: InboxOutlined,
+  },
+  {
+    key: 'stats',
+    label: 'Статистика',
+    path: '/stats',
+    // Аналитика для руководителя: admin + manager. Инспектор свою
+    // выработку не видит — это раздел уровнем «над» поступлениями.
+    roles: ['admin', 'manager'],
+    icon: BarChartOutlined,
   },
   {
     key: 'references',

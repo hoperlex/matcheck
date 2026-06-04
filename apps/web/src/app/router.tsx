@@ -17,6 +17,7 @@ const Materials = lazy(() => import('../pages/references/Materials'));
 const ResponsiblePersons = lazy(() => import('../pages/references/ResponsiblePersons'));
 const Assets = lazy(() => import('../pages/references/Assets'));
 const MaterialsJournal = lazy(() => import('../pages/materials/MaterialsPage'));
+const StatsPage = lazy(() => import('../pages/stats/StatsPage'));
 const AdminUsers = lazy(() => import('../pages/admin/Users'));
 const AdminLlmProviders = lazy(() => import('../pages/admin/LlmProviders'));
 const AdminPrompts = lazy(() => import('../pages/admin/Prompts'));
@@ -116,6 +117,12 @@ export const router = createBrowserRouter([
       },
       { path: 'inbox', element: <Navigate to="/documents" replace /> },
       { path: 'materials', element: suspense(<MaterialsJournal />) },
+      {
+        path: 'stats',
+        element: (
+          <ProtectedRoute roles={['admin', 'manager']}>{suspense(<StatsPage />)}</ProtectedRoute>
+        ),
+      },
       {
         path: 'references',
         element: (
