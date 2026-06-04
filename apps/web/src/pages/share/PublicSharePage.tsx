@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   Alert,
   Button,
+  Collapse,
   Empty,
   Form,
   Image,
@@ -13,10 +14,16 @@ import {
   Spin,
   Table,
   Tag,
+  Tooltip,
   Typography,
   message as antdMessage,
 } from 'antd';
-import { SendOutlined, EditOutlined } from '@ant-design/icons';
+import {
+  CloseOutlined,
+  EditOutlined,
+  MessageOutlined,
+  SendOutlined,
+} from '@ant-design/icons';
 import type {
   PublicShareMessageCreateResponse,
   PublicShareMessageListResponse,
@@ -257,53 +264,61 @@ export default function PublicSharePage() {
             ) : null}
           </div>
 
-          <div
+          <Collapse
+            // По умолчанию фото раскрыты. Клик по шапке сворачивает —
+            // материалы тогда сразу видны без скролла.
+            defaultActiveKey={['photos']}
+            ghost
             style={{
-              padding: 16,
               background: '#fff',
               border: '1px solid #f0f0f0',
               borderRadius: 6,
             }}
-          >
-            <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 12 }}>
-              Фото ({data.photos.length})
-            </Typography.Title>
-            {data.photos.length === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Фото нет" />
-            ) : (
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, 160px)',
-                  gap: 8,
-                }}
-              >
-                <Image.PreviewGroup>
-                  {data.photos.map((p) => (
-                    <Image
-                      key={p.id}
-                      // src и preview указывают на один полноразмерный URL.
-                      // Раньше src был p.thumbUrl, но если PUT thumb в S3
-                      // упал тихо (см. photoPipeline:thumb-catch), сервер
-                      // возвращает 502 и миниатюра рендерится пустой.
-                      // Полный URL гарантированно есть — браузер кэширует,
-                      // антд PreviewGroup переиспользует тот же ресурс.
-                      src={p.url}
-                      width={160}
-                      height={160}
-                      style={{ objectFit: 'cover', borderRadius: 6 }}
-                      // Fallback на случай если сервер вернул 502/404 для
-                      // несуществующего объекта — серый квадрат вместо
-                      // «broken image».
-                      fallback="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0Ij48cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIGZpbGw9IiNmNWY1ZjUiLz48dGV4dCB4PSI1MCUiIHk9IjUwJSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzhjOGM4YyIgZm9udC1zaXplPSIxMCI+0L3QtdGCINGE0L7RgtC+PC90ZXh0Pjwvc3ZnPg=="
-                    />
-                  ))}
-                </Image.PreviewGroup>
-              </div>
-            )}
-          </div>
-
-          <PublicShareChat token={token} />
+            items={[
+              {
+                key: 'photos',
+                label: (
+                  <Typography.Text strong>
+                    Фото ({data.photos.length})
+                  </Typography.Text>
+                ),
+                children:
+                  data.photos.length === 0 ? (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Фото нет" />
+                  ) : (
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fill, 160px)',
+                        gap: 8,
+                      }}
+                    >
+                      <Image.PreviewGroup>
+                        {data.photos.map((p) => (
+                          <Image
+                            key={p.id}
+                            // src и preview указывают на один полноразмерный URL.
+                            // Раньше src был p.thumbUrl, но если PUT thumb в S3
+                            // упал тихо (см. photoPipeline:thumb-catch), сервер
+                            // возвращает 502 и миниатюра рендерится пустой.
+                            // Полный URL гарантированно есть — браузер кэширует,
+                            // антд PreviewGroup переиспользует тот же ресурс.
+                            src={p.url}
+                            width={160}
+                            height={160}
+                            style={{ objectFit: 'cover', borderRadius: 6 }}
+                            // Fallback на случай если сервер вернул 502/404 для
+                            // несуществующего объекта — серый квадрат вместо
+                            // «broken image».
+                            fallback="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0Ij48cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIGZpbGw9IiNmNWY1ZjUiLz48dGV4dCB4PSI1MCUiIHk9IjUwJSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzhjOGM4YyIgZm9udC1zaXplPSIxMCI+0L3QtdGCINGE0L7RgtC+PC90ZXh0Pjwvc3ZnPg=="
+                          />
+                        ))}
+                      </Image.PreviewGroup>
+                    </div>
+                  ),
+              },
+            ]}
+          />
 
           <div
             style={{
@@ -332,16 +347,23 @@ export default function PublicSharePage() {
           </div>
         </Space>
       </Layout.Content>
+      <PublicShareChat token={token} />
     </Layout>
   );
 }
 
 /**
- * Секция «Связаться с менеджером» на публичной share-странице. Внешний
- * пользователь вводит имя+email (сохраняется в localStorage — со 2-го раза
- * форма короткая) и сообщение. Polling 30 сек чтобы видеть ответы менеджера.
+ * Floating-chat-виджет на публичной share-странице (intercom-style).
+ * Свёрнут — круглая иконка в правом нижнем углу с tooltip «Связаться с
+ * менеджером»; при hover увеличивается. Клик — раскрывается панель с
+ * историей переписки и формой отправки.
+ *
+ * Логика отправки: первая отправка — поля Имя+Email (сохраняются в
+ * localStorage); вторая и далее — только TextArea с ссылкой «изменить».
+ * Polling списка сообщений раз в 30 сек чтобы видеть ответ менеджера.
  */
 function PublicShareChat({ token }: { token: string }): JSX.Element {
+  const [expanded, setExpanded] = useState(false);
   const [savedSender, setSavedSender] = useState<SavedSender | null>(() => readSavedSender());
   const [editingSender, setEditingSender] = useState(false);
   const [body, setBody] = useState('');
@@ -351,14 +373,26 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sectionGone, setSectionGone] = useState(false);
+  const [gone, setGone] = useState(false);
+  // Грубый mobile-флаг: ширина < 768. RNB через ResizeObserver — overkill
+  // для одного виджета. Перечитываем при ресайзе.
+  const [isMobile, setIsMobile] = useState<boolean>(() =>
+    typeof window === 'undefined' ? false : window.innerWidth < 768,
+  );
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const fetchMessages = useMemo(
     () => async () => {
       try {
         const r = await fetch(`/api/v1/share/${encodeURIComponent(token)}/messages`);
         if (r.status === 410) {
-          setSectionGone(true);
+          setGone(true);
           return;
         }
         if (!r.ok) return;
@@ -373,13 +407,40 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
     [token],
   );
 
+  // Адаптивный polling: панель открыта — 2 сек (эффект мессенджера, ответ
+  // менеджера виден через ≤2 сек); закрыта — 30 сек (фоновое обновление
+  // истории без нагрузки на бэк). При возврате фокуса на окно — рефреш
+  // сразу, чтобы из «закрытой» вкладки возвращаться к свежему состоянию.
   useEffect(() => {
     void fetchMessages();
-    const id = window.setInterval(fetchMessages, 30_000);
-    return () => window.clearInterval(id);
-  }, [fetchMessages]);
+    const interval = expanded ? 2_000 : 30_000;
+    const id = window.setInterval(fetchMessages, interval);
+    const onFocus = () => void fetchMessages();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [fetchMessages, expanded]);
 
-  if (sectionGone) return <></>;
+  // Esc закрывает панель.
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setExpanded(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [expanded]);
+
+  // Автоскролл к низу при новом сообщении (и при первом раскрытии).
+  useEffect(() => {
+    if (!expanded) return;
+    if (!scrollRef.current) return;
+    scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages.length, expanded]);
+
+  if (gone) return <></>;
 
   const showFullForm = !savedSender || editingSender;
 
@@ -403,7 +464,7 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
         return;
       }
       if (r.status === 410) {
-        setSectionGone(true);
+        setGone(true);
         return;
       }
       if (!r.ok) {
@@ -414,7 +475,6 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
       const json = (await r.json()) as PublicShareMessageCreateResponse;
       setMessages((prev) => [...prev, json.message]);
       setBody('');
-      // Запоминаем имя/email при первой успешной отправке.
       const sender: SavedSender = { name: payload.senderName, email: payload.senderEmail };
       saveSavedSender(sender);
       setSavedSender(sender);
@@ -427,120 +487,193 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
     }
   };
 
+  const fabSize = isMobile ? 48 : 56;
+
+  // Свёрнутый режим — круглая FAB-иконка.
+  if (!expanded) {
+    return (
+      <Tooltip title="Связаться с менеджером" placement="left">
+        <Button
+          type="primary"
+          shape="circle"
+          icon={<MessageOutlined style={{ fontSize: isMobile ? 20 : 22 }} />}
+          onClick={() => setExpanded(true)}
+          style={{
+            position: 'fixed',
+            right: 24,
+            bottom: 24,
+            width: fabSize,
+            height: fabSize,
+            zIndex: 1000,
+            boxShadow: '0 6px 24px rgba(22, 119, 255, 0.4)',
+            transition: 'transform 0.15s ease',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.transform = 'scale(1.08)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.transform = 'scale(1)';
+          }}
+        />
+      </Tooltip>
+    );
+  }
+
+  // Развёрнутый режим — панель чата над FAB-местом.
+  const panelWidth = isMobile ? 'calc(100vw - 24px)' : 380;
+  const panelMaxHeight = isMobile ? 'calc(100vh - 80px)' : 'min(520px, calc(100vh - 80px))';
+
   return (
     <div
       style={{
-        padding: 16,
+        position: 'fixed',
+        right: isMobile ? 12 : 24,
+        bottom: isMobile ? 12 : 24,
+        width: panelWidth,
+        maxHeight: panelMaxHeight,
         background: '#fff',
         border: '1px solid #f0f0f0',
-        borderRadius: 6,
+        borderRadius: 12,
+        boxShadow: '0 8px 32px rgba(0,0,0,0.16)',
+        zIndex: 1000,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
       }}
     >
-      <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 8 }}>
-        Связаться с менеджером
-      </Typography.Title>
-      <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
-        Менеджер увидит ваш вопрос и ответит здесь же. Обновите страницу через пару
-        минут, чтобы увидеть ответ.
-      </Typography.Paragraph>
-
-      {loading ? (
-        <div style={{ textAlign: 'center', padding: 16 }}>
-          <Spin size="small" />
-        </div>
-      ) : messages.length === 0 ? (
-        <Empty
-          image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="Пока сообщений нет"
-          style={{ margin: '8px 0 16px' }}
-        />
-      ) : (
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 6,
-            marginBottom: 12,
-            maxHeight: 320,
-            overflowY: 'auto',
-            paddingRight: 4,
-          }}
-        >
-          {messages.map((m) => (
-            <PublicBubble key={m.id} m={m} />
-          ))}
-        </div>
-      )}
-
-      {showFullForm ? (
-        <Form layout="vertical" disabled={sending}>
-          <Space.Compact style={{ width: '100%' }}>
-            <Form.Item style={{ marginBottom: 8, flex: 1 }} required>
-              <Input
-                placeholder="Ваше имя"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                maxLength={120}
-              />
-            </Form.Item>
-            <Form.Item style={{ marginBottom: 8, flex: 1 }} required>
-              <Input
-                placeholder="Email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                maxLength={200}
-                type="email"
-              />
-            </Form.Item>
-          </Space.Compact>
-        </Form>
-      ) : (
-        <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-          Отправляете как: <b>{savedSender?.name}</b>{' '}
-          <a
-            onClick={(e) => {
-              e.preventDefault();
-              setEditingSender(true);
-            }}
-            style={{ marginLeft: 4 }}
-          >
-            <EditOutlined /> изменить
-          </a>
+      {/* Шапка панели */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '10px 12px',
+          background: '#1677ff',
+          color: '#fff',
+        }}
+      >
+        <Typography.Text strong style={{ color: '#fff', fontSize: 15 }}>
+          Связаться с менеджером
         </Typography.Text>
-      )}
-
-      <Input.TextArea
-        placeholder="Сообщение менеджеру…"
-        value={body}
-        onChange={(e) => setBody(e.target.value)}
-        autoSize={{ minRows: 3, maxRows: 8 }}
-        maxLength={4000}
-        disabled={sending}
-        style={{ marginBottom: 8 }}
-      />
-      {error && (
-        <Alert
-          type="error"
-          showIcon
-          message={error}
-          style={{ marginBottom: 8 }}
-          closable
-          onClose={() => setError(null)}
-        />
-      )}
-      <div style={{ textAlign: 'right' }}>
         <Button
-          type="primary"
-          icon={<SendOutlined />}
-          loading={sending}
-          disabled={
-            !body.trim() ||
-            (showFullForm && (!name.trim() || !email.trim() || !email.includes('@')))
-          }
-          onClick={onSend}
-        >
-          Отправить
-        </Button>
+          type="text"
+          size="small"
+          icon={<CloseOutlined style={{ color: '#fff' }} />}
+          onClick={() => setExpanded(false)}
+          aria-label="Закрыть"
+        />
+      </div>
+
+      {/* История сообщений — скроллер. */}
+      <div
+        ref={scrollRef}
+        style={{
+          flex: 1,
+          minHeight: 120,
+          overflowY: 'auto',
+          padding: 12,
+          background: '#fafafa',
+        }}
+      >
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: 16 }}>
+            <Spin size="small" />
+          </div>
+        ) : messages.length === 0 ? (
+          <Typography.Text
+            type="secondary"
+            style={{ display: 'block', textAlign: 'center', padding: '12px 0', fontSize: 12 }}
+          >
+            Менеджер увидит ваш вопрос и ответит здесь же. Обновите страницу
+            через пару минут, чтобы увидеть ответ.
+          </Typography.Text>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {messages.map((m) => (
+              <PublicBubble key={m.id} m={m} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Форма отправки */}
+      <div style={{ padding: 10, borderTop: '1px solid #f0f0f0', background: '#fff' }}>
+        {showFullForm ? (
+          <Form layout="vertical" disabled={sending} style={{ marginBottom: 6 }}>
+            <Space.Compact style={{ width: '100%' }}>
+              <Form.Item style={{ marginBottom: 6, flex: 1 }} required>
+                <Input
+                  placeholder="Ваше имя"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  maxLength={120}
+                  size="small"
+                />
+              </Form.Item>
+              <Form.Item style={{ marginBottom: 6, flex: 1 }} required>
+                <Input
+                  placeholder="Email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  maxLength={200}
+                  type="email"
+                  size="small"
+                />
+              </Form.Item>
+            </Space.Compact>
+          </Form>
+        ) : (
+          <Typography.Text
+            type="secondary"
+            style={{ fontSize: 11, display: 'block', marginBottom: 4 }}
+          >
+            Отправляете как: <b>{savedSender?.name}</b>{' '}
+            <a
+              onClick={(e) => {
+                e.preventDefault();
+                setEditingSender(true);
+              }}
+              style={{ marginLeft: 4 }}
+            >
+              <EditOutlined /> изменить
+            </a>
+          </Typography.Text>
+        )}
+
+        <Input.TextArea
+          placeholder="Сообщение менеджеру…"
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          autoSize={{ minRows: 2, maxRows: 5 }}
+          maxLength={4000}
+          disabled={sending}
+          style={{ marginBottom: 6 }}
+        />
+        {error && (
+          <Alert
+            type="error"
+            showIcon
+            message={error}
+            style={{ marginBottom: 6 }}
+            closable
+            onClose={() => setError(null)}
+          />
+        )}
+        <div style={{ textAlign: 'right' }}>
+          <Button
+            type="primary"
+            size="small"
+            icon={<SendOutlined />}
+            loading={sending}
+            disabled={
+              !body.trim() ||
+              (showFullForm && (!name.trim() || !email.trim() || !email.includes('@')))
+            }
+            onClick={onSend}
+          >
+            Отправить
+          </Button>
+        </div>
       </div>
     </div>
   );

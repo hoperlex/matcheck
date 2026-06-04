@@ -47,7 +47,10 @@ export function ShareThreadDrawer({
     queryFn: () =>
       api.get<ShareMessageThreadDetailResponse>(`/share-messages/threads/${tokenId}`),
     enabled: open && !!tokenId,
-    refetchInterval: open && !!tokenId ? 15_000 : false,
+    // Открытый Drawer = активный разговор — опрашиваем каждые 3 сек, чтобы
+    // сообщение внешнего пользователя долетало почти мгновенно.
+    refetchInterval: open && !!tokenId ? 3_000 : false,
+    refetchOnWindowFocus: true,
   });
 
   const markRead = useMutation({
@@ -78,19 +81,55 @@ export function ShareThreadDrawer({
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [detail.data?.messages.length]);
 
-  const send = useMutation<ManagerShareMessageCreateResponse, Error, string>({
+  const send = useMutation<
+    ManagerShareMessageCreateResponse,
+    Error,
+    string,
+    { prev: ShareMessageThreadDetailResponse | undefined }
+  >({
     mutationFn: (body: string) =>
       api.post<ManagerShareMessageCreateResponse>(
         `/share-messages/threads/${tokenId}`,
         { body },
       ),
-    onSuccess: () => {
+    // Optimistic update — менеджер видит свой bubble мгновенно, без
+    // ожидания HTTP-ответа. На onError откатываем.
+    onMutate: async (body) => {
+      await qc.cancelQueries({ queryKey: ['share-messages', 'thread', tokenId] });
+      const prev = qc.getQueryData<ShareMessageThreadDetailResponse>([
+        'share-messages',
+        'thread',
+        tokenId,
+      ]);
+      if (prev) {
+        const draftMsg: ShareMessage = {
+          id: `temp-${Date.now()}`,
+          senderType: 'manager',
+          senderName: 'Вы',
+          senderEmail: null,
+          body,
+          createdAt: new Date().toISOString(),
+          isRead: true,
+        };
+        qc.setQueryData<ShareMessageThreadDetailResponse>(
+          ['share-messages', 'thread', tokenId],
+          { ...prev, messages: [...prev.messages, draftMsg] },
+        );
+      }
       setDraft('');
+      return { prev };
+    },
+    onError: (err, _vars, ctx) => {
+      if (ctx?.prev) {
+        qc.setQueryData(['share-messages', 'thread', tokenId], ctx.prev);
+      }
+      message.error(err.message);
+    },
+    onSettled: () => {
       void qc.invalidateQueries({ queryKey: ['share-messages', 'thread', tokenId] });
       void qc.invalidateQueries({ queryKey: ['share-messages', 'unread-count'] });
       void qc.invalidateQueries({ queryKey: ['share-messages', 'threads'] });
     },
-    onError: (err) => message.error(err.message),
   });
 
   const thread = detail.data?.thread;

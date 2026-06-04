@@ -31,9 +31,12 @@ export function NotificationsBell({ collapsed = false }: { collapsed?: boolean }
     queryFn: () =>
       api.get<ShareMessageUnreadCountResponse>('/share-messages/unread-count'),
     enabled,
-    // 30 секунд — компромисс между «вижу сразу» и «не дёргаю бэк зря».
-    // Тот же интервал, что у Inbox для «живых» документов.
-    refetchInterval: enabled ? 30_000 : false,
+    // 10 секунд — компромисс «вижу новое сообщение почти сразу» / «не
+    // нагружаю бэк». Лёгкий запрос (один COUNT с partial-index), нагрузка
+    // ничтожна. Refetch при возврате фокуса — мгновенное обновление,
+    // когда менеджер возвращается к вкладке.
+    refetchInterval: enabled ? 10_000 : false,
+    refetchOnWindowFocus: true,
   });
 
   const threads = useQuery({
