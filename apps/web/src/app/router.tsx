@@ -26,26 +26,41 @@ const Settings = lazy(() => import('../pages/settings/Settings'));
 const PublicSharePage = lazy(() => import('../pages/share/PublicSharePage'));
 const OperationsPage = lazy(() => import('../pages/operations/OperationsPage'));
 
+// Feature flag-страховка: если выставлен VITE_OPERATIONS_MODAL_DISABLED=1,
+// гарды пропускают edit-параметры на старую полноэкранную KppPage/
+// ShipmentPage без редиректа. По умолчанию edit-режим тоже редиректит на
+// /operations (этап Г): модалка — единственная точка входа в форму.
+const MODAL_DISABLED = import.meta.env.VITE_OPERATIONS_MODAL_DISABLED === '1';
+
 /**
- * Гард для /kpp: если в URL нет `delivery=<id>` и не флага `new=1`,
- * это листовой режим — перенаправляем на новый /operations?type=delivery,
- * сохранив все остальные query-параметры (фильтры, table-таб и т.п.).
- * Edit-режим (с delivery/new) рендерит KppPage как раньше.
+ * Гард для /kpp: всегда редиректит на /operations?type=delivery&…,
+ * сохраняя все query-параметры. Edit-параметры (?delivery=, ?new=1,
+ * ?upd=, ?from=) подхватывает OperationsPage и открывает модалку.
+ * Это устраняет дубликат UI-точки входа: старые ссылки и закладки
+ * `matcheck.fvds.ru/kpp?delivery=<id>` приземляются на модалке.
+ *
+ * Под feature flag VITE_OPERATIONS_MODAL_DISABLED=1 edit-параметры
+ * продолжают рендерить KppPage как полноэкранную страницу (страховка
+ * на случай проблем с модалкой на проде).
  */
 function KppGuard({ children }: { children: ReactNode }) {
   const [params] = useSearchParams();
-  const hasEdit = params.get('delivery') !== null || params.get('new') === '1';
-  if (hasEdit) return <>{children}</>;
+  if (MODAL_DISABLED) {
+    const hasEdit = params.get('delivery') !== null || params.get('new') === '1';
+    if (hasEdit) return <>{children}</>;
+  }
   const next = new URLSearchParams(params);
   next.set('type', 'delivery');
   return <Navigate to={`/operations?${next.toString()}`} replace />;
 }
 
-/** То же для /shipments — редирект на /operations?type=shipment без edit-параметров. */
+/** То же для /shipments — всегда редирект на /operations?type=shipment&…. */
 function ShipmentsGuard({ children }: { children: ReactNode }) {
   const [params] = useSearchParams();
-  const hasEdit = params.get('shipment') !== null || params.get('new') === '1';
-  if (hasEdit) return <>{children}</>;
+  if (MODAL_DISABLED) {
+    const hasEdit = params.get('shipment') !== null || params.get('new') === '1';
+    if (hasEdit) return <>{children}</>;
+  }
   const next = new URLSearchParams(params);
   next.set('type', 'shipment');
   return <Navigate to={`/operations?${next.toString()}`} replace />;
