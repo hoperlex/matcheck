@@ -5,6 +5,7 @@ import { asZod } from '../lib/fastify.js';
 import {
   InspectorStatsResponseSchema,
   IntakeJournalResponseSchema,
+  OperationsCountersResponseSchema,
   ShipmentJournalResponseSchema,
   ShipmentKindSchema,
   StockBalanceResponseSchema,
@@ -721,6 +722,90 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           sumNoVat: String(r.sumNoVat),
         })),
         total: Number(totalRows[0]?.count ?? 0),
+      };
+    },
+  );
+
+  // ─── Счётчики для шапки раздела «Операции» ─────────────────────────────
+  //
+  // completedToday = COUNT приёмок+отгрузок со status='confirmed_mol' и
+  // confirmed_by_mol_at в сегодняшнем дне МСК.
+  // inProgress = COUNT приёмок (status='filled') + отгрузок (status='shipped')
+  // — 1 Этап есть, 2 Этап ещё нет.
+  // Inspector_kpp видит только свой site_id (по аналогии с /deliveries
+  // и /shipments); admin/manager — глобально.
+  app.get(
+    '/api/v1/reports/operations-counters',
+    {
+      preHandler: [app.authenticate],
+      schema: { response: { 200: OperationsCountersResponseSchema } },
+    },
+    async (req) => {
+      const inspectorSiteId =
+        req.user?.role === 'inspector_kpp' ? safeUuid(req.user.siteId ?? undefined) : null;
+      // Если inspector без назначенного site — возвращаем нули, чтобы не
+      // светить чужие данные. Это edge-case: admin ещё не задал объект.
+      if (req.user?.role === 'inspector_kpp' && !inspectorSiteId) {
+        return { completedToday: 0, inProgress: 0 };
+      }
+      const siteFilterD = inspectorSiteId
+        ? `AND d.site_id = '${inspectorSiteId}'::uuid`
+        : '';
+      const siteFilterS = inspectorSiteId
+        ? `AND s.site_id = '${inspectorSiteId}'::uuid`
+        : '';
+
+      const rows = await execRows(
+        app,
+        `
+        WITH
+          del_done AS (
+            SELECT COUNT(*)::int AS n
+            FROM deliveries d
+            JOIN statuses st ON st.id = d.status_id
+            WHERE st.entity_type = 'delivery' AND st.code = 'confirmed_mol'
+              AND d.pending_deletion_at IS NULL
+              AND d.confirmed_by_mol_at IS NOT NULL
+              AND DATE(d.confirmed_by_mol_at AT TIME ZONE 'Europe/Moscow')
+                = DATE(NOW() AT TIME ZONE 'Europe/Moscow')
+              ${siteFilterD}
+          ),
+          sh_done AS (
+            SELECT COUNT(*)::int AS n
+            FROM shipments s
+            JOIN statuses st ON st.id = s.status_id
+            WHERE st.entity_type = 'shipment' AND st.code = 'confirmed_mol'
+              AND s.pending_deletion_at IS NULL
+              AND s.confirmed_by_mol_at IS NOT NULL
+              AND DATE(s.confirmed_by_mol_at AT TIME ZONE 'Europe/Moscow')
+                = DATE(NOW() AT TIME ZONE 'Europe/Moscow')
+              ${siteFilterS}
+          ),
+          del_progress AS (
+            SELECT COUNT(*)::int AS n
+            FROM deliveries d
+            JOIN statuses st ON st.id = d.status_id
+            WHERE st.entity_type = 'delivery' AND st.code = 'filled'
+              AND d.pending_deletion_at IS NULL
+              ${siteFilterD}
+          ),
+          sh_progress AS (
+            SELECT COUNT(*)::int AS n
+            FROM shipments s
+            JOIN statuses st ON st.id = s.status_id
+            WHERE st.entity_type = 'shipment' AND st.code = 'shipped'
+              AND s.pending_deletion_at IS NULL
+              ${siteFilterS}
+          )
+        SELECT
+          ((SELECT n FROM del_done) + (SELECT n FROM sh_done))::int     AS "completedToday",
+          ((SELECT n FROM del_progress) + (SELECT n FROM sh_progress))::int AS "inProgress"
+        `,
+      );
+      const r = rows[0] ?? {};
+      return {
+        completedToday: Number(r.completedToday ?? 0),
+        inProgress: Number(r.inProgress ?? 0),
       };
     },
   );

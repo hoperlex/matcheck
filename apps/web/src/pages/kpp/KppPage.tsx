@@ -731,6 +731,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onSuccess: () => {
       message.success('Приёмка сохранена');
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       navigate('/operations?type=delivery&tab=accepted');
     },
     onError: (err: Error) => message.error(err.message),
@@ -743,6 +744,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onSuccess: () => {
       message.success('Приёмка подтверждена МОЛ');
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       navigate('/operations?type=delivery&tab=accepted');
     },
     onError: (err: Error) => message.error(err.message),
@@ -781,6 +783,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       hydratedIdRef.current = null;
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
     },
     onError: (err: Error) => {
@@ -797,6 +800,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       message.success('Помечено на удаление');
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -810,6 +814,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       message.success('Пометка снята');
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -822,6 +827,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onSuccess: () => {
       message.success('Приёмка удалена');
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
       navigate('/operations?type=delivery&tab=accepted&trash=1');
     },

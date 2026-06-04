@@ -128,3 +128,15 @@ export const InspectorStatsResponseSchema = z.object({
   total: z.number(),
 });
 export type InspectorStatsResponse = z.infer<typeof InspectorStatsResponseSchema>;
+
+/**
+ * Лёгкие счётчики для шапки раздела «Операции»: завершённые сегодня
+ * (status='confirmed_mol' AND confirmed_by_mol_at в МСК-дне) и сейчас в работе
+ * (delivery='filled' + shipment='shipped'). Для inspector_kpp фильтруются
+ * по его site_id, для admin/manager — глобально.
+ */
+export const OperationsCountersResponseSchema = z.object({
+  completedToday: z.number().int().nonnegative(),
+  inProgress: z.number().int().nonnegative(),
+});
+export type OperationsCountersResponse = z.infer<typeof OperationsCountersResponseSchema>;

@@ -204,6 +204,7 @@ export function ShipmentsHistory({
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
     },
   });
@@ -229,6 +230,7 @@ export function ShipmentsHistory({
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
     },
   });
 
@@ -252,6 +254,7 @@ export function ShipmentsHistory({
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
     },
   });
 

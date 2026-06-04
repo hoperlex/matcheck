@@ -1,12 +1,13 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, Modal, Space, Spin, Switch, Tabs, Typography, message } from 'antd';
+import { Button, Modal, Space, Spin, Switch, Tabs, Tag, Typography, message } from 'antd';
 import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
 import type { SourceDocument } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
 import { api, apiDownload } from '../../services/api';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
+import { useOperationsCounters } from '../../shared/hooks/useOperationsCounters';
 import { ExpectedUpds } from '../kpp/ExpectedUpds';
 import { ExpectedOutbound } from '../shipments/ExpectedOutbound';
 import { DeliveriesHistory } from '../kpp/DeliveriesHistory';
@@ -47,6 +48,7 @@ export default function OperationsPage() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const authUser = useAuthStore((s) => s.user);
+  const counters = useOperationsCounters();
 
   const type: OpType = params.get('type') === 'shipment' ? 'shipment' : 'delivery';
   const tab: ListTab = params.get('tab') === 'accepted' ? 'accepted' : 'expected';
@@ -256,11 +258,19 @@ export default function OperationsPage() {
               ]}
               style={{ marginBottom: -12 }}
             />
-            {/* Под ним — обычные табы Ожидаемые/Принятые. */}
+            {/* Под ним — обычные табы Ожидаемые/Принятые. Справа —
+                «В процессе: N» (filled + shipped) если есть активные. */}
             <PageTabs
               items={listTabs}
               activeKey={tab}
               onChange={(k) => updateUrl({ tab: k })}
+              extra={
+                counters.data && counters.data.inProgress > 0 ? (
+                  <Tag color="green" style={{ marginInlineEnd: 0 }}>
+                    В процессе: {counters.data.inProgress}
+                  </Tag>
+                ) : null
+              }
             />
           </div>
           <div

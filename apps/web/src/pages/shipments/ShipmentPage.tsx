@@ -624,6 +624,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     onSuccess: () => {
       message.success('Отгрузка сохранена');
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       // Перебрасываем на вкладку «Принятые» — там сохранённая отгрузка
       // и появится. Без tab=accepted попадаем на «Ожидаемые» (default)
       // и ищем запись там, где её нет.
@@ -639,6 +640,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     onSuccess: () => {
       message.success('Отгрузка подтверждена МОЛ');
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       navigate('/operations?type=shipment&tab=accepted');
     },
     onError: (err: Error) => message.error(err.message),
@@ -675,6 +677,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       hydratedIdRef.current = null;
       void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
     },
     onError: (err: Error) => {
@@ -691,6 +694,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       message.success('Помечено на удаление');
       void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -704,6 +708,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       message.success('Пометка снята');
       void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -716,6 +721,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     onSuccess: () => {
       message.success('Отгрузка удалена');
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
       navigate('/operations?type=shipment&tab=accepted&trash=1');
     },

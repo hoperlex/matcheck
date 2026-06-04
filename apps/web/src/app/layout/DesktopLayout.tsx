@@ -1,5 +1,5 @@
 import { useEffect, useState, createElement } from 'react';
-import { Avatar, Button, Layout, Menu, Tooltip, Typography } from 'antd';
+import { Avatar, Button, Layout, Menu, Tag, Tooltip, Typography } from 'antd';
 import { MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../stores/auth';
@@ -7,6 +7,7 @@ import { filterByRole } from './navItems';
 import { api } from '../../services/api';
 import { UserProfileModal } from '../../components/UserProfileModal';
 import { NotificationsBell } from '../../components/NotificationsBell';
+import { useOperationsCounters } from '../../shared/hooks/useOperationsCounters';
 
 const { Sider, Content } = Layout;
 
@@ -26,11 +27,26 @@ export function DesktopLayout() {
     localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0');
   }, [collapsed]);
 
+  const counters = useOperationsCounters();
+
   if (!user) return null;
+  const operationsCount = counters.data?.completedToday ?? 0;
   const items = filterByRole(user.role).map((n) => ({
     key: n.path,
     icon: createElement(n.icon),
-    label: n.label,
+    // Для «Операции» — если есть подтверждённые за сегодня, рисуем зелёный
+    // Tag «+N» справа от label. При 0 — Tag не рисуем (визуальный шум).
+    label:
+      n.key === 'operations' && operationsCount > 0 ? (
+        <span>
+          {n.label}{' '}
+          <Tag color="green" style={{ marginLeft: 4 }}>
+            +{operationsCount}
+          </Tag>
+        </span>
+      ) : (
+        n.label
+      ),
   }));
   const selected = items.find(
     (i) => location.pathname === i.key || (i.key !== '/' && location.pathname.startsWith(i.key)),

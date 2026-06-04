@@ -1,5 +1,5 @@
 import { useState, createElement } from 'react';
-import { Layout, Drawer, Button, Menu, Typography } from 'antd';
+import { Layout, Drawer, Button, Menu, Tag, Typography } from 'antd';
 import { MenuOutlined, UserOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../stores/auth';
@@ -7,6 +7,7 @@ import { filterByRole } from './navItems';
 import { api } from '../../services/api';
 import { UserProfileModal } from '../../components/UserProfileModal';
 import { NotificationsBell } from '../../components/NotificationsBell';
+import { useOperationsCounters } from '../../shared/hooks/useOperationsCounters';
 
 const { Header, Content, Footer } = Layout;
 
@@ -19,15 +20,34 @@ export function MobileLayout() {
   const location = useLocation();
   const [open, setOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const counters = useOperationsCounters();
 
   if (!user) return null;
   const displayName = user.fullName?.trim() || user.email;
+  const operationsCount = counters.data?.completedToday ?? 0;
+  // Drawer-меню — label с Tag «+N» для «Операции».
   const allItems = filterByRole(user.role).map((n) => ({
     key: n.path,
     icon: createElement(n.icon),
-    label: n.label,
+    label:
+      n.key === 'operations' && operationsCount > 0 ? (
+        <span>
+          {n.label}{' '}
+          <Tag color="green" style={{ marginLeft: 4 }}>
+            +{operationsCount}
+          </Tag>
+        </span>
+      ) : (
+        n.label
+      ),
   }));
-  const tabItems = allItems.filter((it) => PRIMARY_KEYS.includes(it.key));
+  // Footer-табы — короткие label без Tag (узкие тач-цели, +N испортит верстку).
+  const tabItems = allItems
+    .filter((it) => PRIMARY_KEYS.includes(it.key))
+    .map((it) => {
+      const orig = filterByRole(user.role).find((n) => n.path === it.key);
+      return { ...it, label: orig?.label ?? it.label };
+    });
 
   const handleLogout = async () => {
     try {
