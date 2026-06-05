@@ -125,10 +125,10 @@ export function ResponsiveTable<T extends object>({
   if (bp === 'desktop') {
     // Внутренний tbody-скролл: tbody вписывается в окно, пагинация всегда
     // видна внизу страницы (не уезжает за границу). Высота = vh минус
-    // sticky-шапка страницы (фильтры) минус ~210px (шапка таблицы +
-    // пагинация + paddings + буфер). Раньше был `sticky offsetHeader`,
-    // но страница скроллилась целиком и пагинация уезжала за низ.
-    const tableScrollY = `calc(100vh - ${stickyOffset + 210}px)`;
+    // sticky-шапка страницы (фильтры) минус ~140px (шапка таблицы ~50 +
+    // пагинация ~50 + paddings + 5px воздуха до края окна). Раньше было
+    // 210 — оставался большой пустой блок снизу.
+    const tableScrollY = `calc(100vh - ${stickyOffset + 140}px)`;
     return (
       <Table<T>
         dataSource={items}
