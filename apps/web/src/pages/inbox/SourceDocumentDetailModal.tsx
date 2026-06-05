@@ -342,11 +342,9 @@ export function SourceDocumentDetailModal({
               {sd.supplierName ? (
                 <Tag style={{ marginInlineEnd: 0 }}>Поставщик: {sd.supplierName}</Tag>
               ) : null}
-              {sd.llmConfidence != null && (
-                <Tag style={{ marginInlineEnd: 0 }}>
-                  Уверенность: {Math.round(Number(sd.llmConfidence) * 100)}%
-                </Tag>
-              )}
+              {/* Чип «Уверенность: N%» убран по запросу — значение
+                  llmConfidence остаётся в БД и контракте на случай если
+                  понадобится вернуть. */}
             </Space>
           ) : (
             'Документ'
