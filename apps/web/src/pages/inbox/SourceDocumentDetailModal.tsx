@@ -801,12 +801,17 @@ function DetailBody({
                 display: 'flex',
                 flexDirection: 'column',
                 padding: 8,
+                overflow: 'hidden',
               }}
             >
               <Typography.Text type="secondary" style={{ fontSize: 12, marginBottom: 4 }}>
                 Оригинал{attachmentsCount > 1 ? ` (${attachmentsCount})` : ''}
               </Typography.Text>
-              <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>{originalNode}</div>
+              {/* overflow:hidden у обёртки + OriginalAttachments сам занимает
+                  100% (lightbox с iframe/Image имеет внутренний скролл).
+                  Раньше тут был overflow:auto — давало лишний правый скролл
+                  поверх iframe PDF-viewer'а. */}
+              <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>{originalNode}</div>
             </div>
           </Splitter.Panel>
         </Splitter>
@@ -1064,7 +1069,9 @@ function ReadOnlyTable({ items, showInvNumber }: { items: Item[]; showInvNumber?
       rowKey="id"
       size="small"
       pagination={false}
-      scroll={{ y: '60vh' }}
+      // scroll={y} убран — давал внутренний tbody-скролл поверх скролла
+      // Splitter.Panel. Тaблица растягивается по содержимому, скроллит
+      // только внешняя панель.
       columns={columns}
     />
   );
