@@ -36,7 +36,11 @@ const TTL_DAYS = 10;
 const TTL_MS = TTL_DAYS * 24 * 60 * 60 * 1000;
 
 function newToken(): string {
-  return randomBytes(32).toString('hex');
+  // 16 байт = 128 бит энтропии (астрономически сложно перебрать через
+  // brute-force). base64url даёт 22 символа без padding — в 3 раза короче
+  // прежнего 64-символьного hex. Старые длинные токены остаются валидны
+  // до истечения TTL — схема валидации min(20).max(64) принимает оба.
+  return randomBytes(16).toString('base64url');
 }
 
 function publicBaseUrl(): string {
@@ -265,7 +269,7 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
     '/api/v1/share/:token',
     {
       schema: {
-        params: z.object({ token: z.string().min(32).max(64) }),
+        params: z.object({ token: z.string().min(20).max(64) }),
         response: { 200: PublicSharedEntitySchema, 404: ErrorResponseSchema, 410: ErrorResponseSchema },
       },
     },
@@ -464,7 +468,7 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
     {
       schema: {
         params: z.object({
-          token: z.string().min(32).max(64),
+          token: z.string().min(20).max(64),
           photoId: z.string().uuid(),
         }),
         querystring: z.object({ thumb: z.coerce.boolean().optional() }),
@@ -544,7 +548,7 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
     {
       schema: {
         params: z.object({
-          token: z.string().min(32).max(64),
+          token: z.string().min(20).max(64),
           photoId: z.string().uuid(),
         }),
       },
@@ -571,7 +575,7 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
     '/api/v1/share/:token/messages',
     {
       schema: {
-        params: z.object({ token: z.string().min(32).max(64) }),
+        params: z.object({ token: z.string().min(20).max(64) }),
         response: {
           200: PublicShareMessageListResponseSchema,
           410: ErrorResponseSchema,
@@ -610,7 +614,7 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
       // зарегистрирован глобально в plugins/security.ts.
       config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
       schema: {
-        params: z.object({ token: z.string().min(32).max(64) }),
+        params: z.object({ token: z.string().min(20).max(64) }),
         body: PublicShareMessageCreateRequestSchema,
         response: {
           200: PublicShareMessageCreateResponseSchema,
