@@ -5,9 +5,11 @@ import { asZod } from '../../lib/fastify.js';
 import {
   UserDtoSchema,
   UserAdminPatchSchema,
+  AdminSetPasswordRequestSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
 import { users } from '../../db/schema.js';
+import { hashPassword } from '../../domain/auth/password.js';
 
 function dto(u: typeof users.$inferSelect) {
   return {
@@ -43,7 +45,7 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: {
         params: z.object({ id: z.string().uuid() }),
         body: UserAdminPatchSchema,
-        response: { 200: UserDtoSchema, 404: ErrorResponseSchema },
+        response: { 200: UserDtoSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema },
       },
     },
     async (req, reply) => {
@@ -58,6 +60,23 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
       const nextRole = req.body.role ?? existing.role;
       if (req.body.role !== undefined) patch.role = req.body.role;
       if (req.body.isActive !== undefined) patch.isActive = req.body.isActive;
+      // email — email уникальный, проверяем коллизию перед update.
+      if (req.body.email !== undefined && req.body.email !== existing.email) {
+        const [dup] = await app.db
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.email, req.body.email))
+          .limit(1);
+        if (dup && dup.id !== existing.id) {
+          return reply.code(409).send({ error: 'email_taken' });
+        }
+        patch.email = req.body.email;
+      }
+      // fullName — null = «убрать», иначе trim. Пустая строка тоже → null.
+      if (req.body.fullName !== undefined) {
+        const trimmed = req.body.fullName?.trim() ?? null;
+        patch.fullName = trimmed && trimmed.length > 0 ? trimmed : null;
+      }
       // phone — опциональный, нормализуем: пустая строка → NULL, иначе trim.
       // Это упрощает мобильному клиенту проверку «есть телефон или нет»
       // (отсутствие → не показывать кнопку звонка в шапке материалов).
@@ -83,6 +102,66 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
         .returning();
       if (!updated) return reply.code(404).send({ error: 'not_found' });
       return dto(updated);
+    },
+  );
+
+  // Смена пароля админом — без подтверждения текущего пароля. Защита
+  // только authorize('admin'). Используется, когда пользователь забыл
+  // пароль и не может пройти штатный «Восстановление пароля». В таблице
+  // Администрирование → Пользователи это иконка-ключик в строке.
+  app.post(
+    '/api/v1/admin/users/:id/password',
+    {
+      preHandler: [app.authenticate, app.authorize('admin')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: AdminSetPasswordRequestSchema,
+        response: { 200: z.object({ ok: z.literal(true) }), 404: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      const [existing] = await app.db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, req.params.id))
+        .limit(1);
+      if (!existing) return reply.code(404).send({ error: 'not_found' });
+      const hash = await hashPassword(req.body.newPassword);
+      await app.db
+        .update(users)
+        .set({ passwordHash: hash, updatedAt: new Date() })
+        .where(eq(users.id, existing.id));
+      return { ok: true as const };
+    },
+  );
+
+  // Удаление пользователя — hard delete. Защита от удаления самого себя
+  // (защита от случайного «удалю свой админ-аккаунт и потеряю доступ»).
+  app.delete(
+    '/api/v1/admin/users/:id',
+    {
+      preHandler: [app.authenticate, app.authorize('admin')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: {
+          200: z.object({ ok: z.literal(true) }),
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      if (req.user!.id === req.params.id) {
+        return reply.code(400).send({ error: 'cannot_delete_self' });
+      }
+      const [existing] = await app.db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, req.params.id))
+        .limit(1);
+      if (!existing) return reply.code(404).send({ error: 'not_found' });
+      await app.db.delete(users).where(eq(users.id, existing.id));
+      return { ok: true as const };
     },
   );
 }

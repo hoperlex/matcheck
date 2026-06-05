@@ -65,6 +65,7 @@ export const ChangePasswordRequestSchema = z.object({
 export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>;
 
 export const UserAdminPatchSchema = z.object({
+  email: EmailSchema.optional(),
   role: UserRoleSchema.optional(),
   isActive: z.boolean().optional(),
   siteId: z.string().uuid().nullable().optional(),
@@ -72,8 +73,17 @@ export const UserAdminPatchSchema = z.object({
   // пользователю (например для менеджеров, которые регистрировались до
   // добавления поля или забыли заполнить).
   phone: PhoneSchema,
+  // ФИО — для отображения в карточках и таблицах. null = «убрать ФИО».
+  fullName: z.string().trim().max(200).nullable().optional(),
 });
 export type UserAdminPatch = z.infer<typeof UserAdminPatchSchema>;
+
+// Смена пароля админом (без знания текущего пароля). Используется в
+// разделе Администрирование → Пользователи. Защищено authorize('admin').
+export const AdminSetPasswordRequestSchema = z.object({
+  newPassword: PasswordSchema,
+});
+export type AdminSetPasswordRequest = z.infer<typeof AdminSetPasswordRequestSchema>;
 
 export const LoginResponseSchema = z.object({
   accessToken: z.string(),

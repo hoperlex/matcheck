@@ -1,16 +1,18 @@
 import { useState } from 'react';
-import { Input, Select, Switch, Tag, Tooltip, Typography, Space, message } from 'antd';
-import { PhoneOutlined } from '@ant-design/icons';
+import { Button, Input, Select, Switch, Tag, Tooltip, Typography, Space, message } from 'antd';
+import { EditOutlined, PhoneOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Site, UserAdminPatch, UserDto, UserRole } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { UserEditModal } from './UserEditModal';
 
 const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp'];
 
 export default function AdminUsersPage() {
   const qc = useQueryClient();
+  const [editing, setEditing] = useState<UserDto | null>(null);
   const list = useQuery({
     queryKey: ['admin', 'users'],
     queryFn: () => api.get<UserDto[]>('/admin/users'),
@@ -130,6 +132,21 @@ export default function AdminUsersPage() {
             dataIndex: 'fullName',
             render: (v: string | null) => v ?? '—',
           },
+          {
+            title: 'Действия',
+            key: 'actions',
+            width: 100,
+            align: 'right' as const,
+            render: (_: unknown, row: UserDto) => (
+              <Tooltip title="Редактировать">
+                <Button
+                  type="text"
+                  icon={<EditOutlined />}
+                  onClick={() => setEditing(row)}
+                />
+              </Tooltip>
+            ),
+          },
         ]}
         cardRender={(u) => {
           const site = u.siteId ? sites.find((s) => s.id === u.siteId) : null;
@@ -153,6 +170,12 @@ export default function AdminUsersPage() {
             </Space>
           );
         }}
+      />
+      <UserEditModal
+        user={editing}
+        sites={sites}
+        open={editing !== null}
+        onClose={() => setEditing(null)}
       />
     </StickyPageHeader>
   );
