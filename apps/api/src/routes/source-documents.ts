@@ -668,7 +668,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         };
 
         const MONEY_FMT = '# ##0.00 "₽"';
-        const QTY_FMT = '# ##0.####';
+        // QTY: формат подбирается per-row — целые числа без разделителя
+        // («30»), дробные с запятой («19,985», до 4 знаков). Раньше был
+        // только `# ##0.####`, и в RU-локали для целого 30 Excel рисовал
+        // «30,» с висящей запятой.
+        const QTY_FMT_INT = '# ##0';
+        const QTY_FMT_DEC = '# ##0.####';
 
         let idx = 0;
         for (const r of rows) {
@@ -720,7 +725,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
               sum: it.sum != null ? Number(it.sum) : null,
             });
             itemRow.outlineLevel = 1; // строка позиции — внутри +/- группы
-            itemRow.getCell('qty').numFmt = QTY_FMT;
+            const qtyNum = Number(it.qty);
+            itemRow.getCell('qty').numFmt = Number.isInteger(qtyNum)
+              ? QTY_FMT_INT
+              : QTY_FMT_DEC;
             itemRow.getCell('price').numFmt = MONEY_FMT;
             itemRow.getCell('vatSum').numFmt = MONEY_FMT;
             itemRow.getCell('sum').numFmt = MONEY_FMT;
