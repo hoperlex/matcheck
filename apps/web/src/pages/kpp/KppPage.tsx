@@ -1007,6 +1007,20 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           );
         },
       },
+      {
+        // Сумма (без НДС) = qty × price. Только read-only отображение, чтобы
+        // пользователь видел итог по строке как в Истории поступлений.
+        // Редактируется через qty/price, не отдельно.
+        title: 'Сумма',
+        width: 140,
+        align: 'right' as const,
+        render: (_: unknown, r: DraftItem) => {
+          const qty = toNum(r.qtyActual) ?? toNum(r.qtyPlanned);
+          const price = toNum(r.price);
+          if (qty === null || price === null) return '—';
+          return formatMoneyRu(qty * price);
+        },
+      },
     ],
     [editingNameKey],
   );

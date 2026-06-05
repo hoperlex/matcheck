@@ -882,6 +882,19 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
         },
       },
       {
+        // Сумма (без НДС) = qty × price — отображение, как в Истории
+        // поступлений и в Приёмке.
+        title: 'Сумма',
+        width: 140,
+        align: 'right' as const,
+        render: (_: unknown, r: DraftItem) => {
+          const qty = toNum(r.qtyActual) ?? toNum(r.qtyPlanned);
+          const price = toNum(r.price);
+          if (qty === null || price === null) return '—';
+          return formatMoneyRu(qty * price);
+        },
+      },
+      {
         title: '',
         width: 60,
         align: 'right',
