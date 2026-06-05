@@ -112,6 +112,12 @@ export function ResponsiveTable<T extends object>({
     : columns.map(decorate);
 
   if (bp === 'desktop') {
+    // Внутренний tbody-скролл: tbody вписывается в окно, пагинация всегда
+    // видна внизу страницы (не уезжает за границу). Высота = vh минус
+    // sticky-шапка страницы (фильтры) минус ~210px (шапка таблицы +
+    // пагинация + paddings + буфер). Раньше был `sticky offsetHeader`,
+    // но страница скроллилась целиком и пагинация уезжала за низ.
+    const tableScrollY = `calc(100vh - ${stickyOffset + 210}px)`;
     return (
       <Table<T>
         dataSource={items}
@@ -123,7 +129,7 @@ export function ResponsiveTable<T extends object>({
         expandable={expandable}
         pagination={{ pageSize: 100, showSizeChanger: false }}
         locale={{ emptyText: emptyText ?? 'Нет данных' }}
-        sticky={stickyOffset > 0 ? { offsetHeader: stickyOffset } : false}
+        scroll={{ y: tableScrollY }}
         onRow={
           onRowClick
             ? (row) => ({
