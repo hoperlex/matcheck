@@ -13,7 +13,11 @@ import { db, type OperationKind } from '../../lib/db';
 import { useAuthStore } from '../../stores/auth';
 
 const THUMB_SIZE = 140;
-const URL_STALE = 4 * 60 * 1000; // presigned URL живёт 5 минут, обновляем чуть раньше
+// React-query staleTime для presigned URL. Сервер выдаёт URL с TTL 15 мин
+// (см. apps/api/src/routes/photos.ts URL_TTL). Обновляем за 2 мин до
+// истечения — оставляем запас на сетевые задержки и дрейф часов между
+// клиентом и сервером.
+const URL_STALE = 13 * 60 * 1000;
 
 type AnyPhoto = DeliveryPhoto | ShipmentPhoto;
 

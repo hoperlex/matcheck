@@ -22,7 +22,14 @@ import { deleteObject, headObject, presign } from '../domain/storage/s3.signer.j
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { publishEvent } from './events.js';
 
-const URL_TTL = 300; // 5 min
+// TTL presigned URL для GET/PUT в S3. Поднят с 300с до 900с, чтобы
+// компенсировать возможный дрейф системных часов API-сервера: при
+// расхождении на минуту-две раньше эффективное окно валидности URL
+// сужалось до 3-4 мин, и react-query успевал отдать «свежий» URL,
+// который S3 уже считал истёкшим (Request has expired). 15 мин — типовой
+// безопасный для production TTL: подпись валидна только на конкретный
+// объект, бакет не светим.
+const URL_TTL = 900; // 15 min
 
 type OperationKind = 'delivery' | 'shipment';
 
