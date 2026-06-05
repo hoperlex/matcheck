@@ -1152,7 +1152,11 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           error={linkUpdError}
         />
 
-        <Card size="small" title="Вид отгрузки" styles={{ body: { padding: 12 } }}>
+        {/* «Вид отгрузки» (kind) оставлен Segmented'ом — это критичный
+            переключатель, меняющий состав остальных полей. Менять его
+            через chip-popover менее удобно: пользователь должен видеть
+            режим постоянно. Card сжали до padding 8. */}
+        <Card size="small" title="Вид отгрузки" styles={{ body: { padding: 8 } }}>
           <Segmented
             block
             options={KIND_OPTIONS}
@@ -1176,153 +1180,198 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           />
         </Card>
 
-        <Row gutter={[8, 8]}>
-          <Col xs={24} sm={12} md={6}>
-            <Card
-              size="small"
-              title={
-                <span>
-                  Откуда <span style={{ color: '#ff4d4f' }}>*</span>
-                </span>
-              }
-              styles={{ body: { padding: 12 } }}
-            >
-              <Select<string>
-                size="large"
-                style={{ width: '100%' }}
-                placeholder="Объект"
-                value={siteId ?? undefined}
-                onChange={(v) => setSiteId(v)}
-                showSearch
-                optionFilterProp="label"
-                loading={sitesQuery.isLoading}
+        {/* Inline-чипы: визуально как в read-only ViewModal'е, клик —
+            редактор в Popover. Экономит ~80px вертикально по сравнению
+            с Row+Card+Col, освобождая место под Фото и Материалы. */}
+        {(() => {
+          const fromLabel = (() => {
+            const s = sites.find((x) => x.id === siteId);
+            return s ? `${s.code} · ${s.name}` : null;
+          })();
+          const toLabel = (() => {
+            const s = sites.find((x) => x.id === destSiteId);
+            return s ? `${s.code} · ${s.name}` : null;
+          })();
+          const receiverLabel = (() => {
+            if (receiverKind === 'counterparty') {
+              const c = counterpartyReceiverOptions.find((x) => x.id === receiverId);
+              return c
+                ? `${kind === 'return' ? 'Поставщик' : 'Подрядчик'}: ${c.name}`
+                : null;
+            }
+            const m = responsiblePersons.find((x) => x.id === receiverId);
+            return m ? `МОЛ: ${m.fullName}` : null;
+          })();
+          return (
+            <Space wrap size={[6, 6]} style={{ marginBottom: 8 }}>
+              <InlineEditChip
+                label="Откуда"
+                value={fromLabel}
+                required
                 disabled={isInspector}
-                options={sites.map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` }))}
-              />
-            </Card>
-          </Col>
-          {kind === 'transfer' && (
-            <Col xs={24} sm={12} md={6}>
-              <Card
-                size="small"
-                title={
-                  <span>
-                    Куда <span style={{ color: '#ff4d4f' }}>*</span>
-                  </span>
-                }
-                styles={{ body: { padding: 12 } }}
+                width={320}
               >
-                <Select<string>
-                  size="large"
-                  style={{ width: '100%' }}
-                  placeholder="Объект-приёмник"
-                  value={destSiteId ?? undefined}
-                  onChange={(v) => setDestSiteId(v)}
-                  showSearch
-                  optionFilterProp="label"
-                  loading={sitesQuery.isLoading}
-                  options={sites
-                    .filter((s) => s.id !== siteId)
-                    .map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` }))}
-                />
-              </Card>
-            </Col>
-          )}
-          {(kind === 'contractor' || kind === 'return' || kind === 'transfer') && (
-            <Col xs={24} sm={12} md={6}>
-              <Card
-                size="small"
-                title={
-                  <span>
-                    Получатель <span style={{ color: '#ff4d4f' }}>*</span>
-                  </span>
-                }
-                styles={{ body: { padding: 12 } }}
-              >
-                {/* Для return — только поставщик (counterparty), переключатель скрыт.
-                    Для contractor и transfer — выбор «Подрядчик / МОЛ». */}
-                {kind !== 'return' && (
-                  <Segmented
-                    block
-                    style={{ marginBottom: 8 }}
-                    options={[
-                      { label: 'Подрядчик', value: 'counterparty' },
-                      { label: 'МОЛ', value: 'mol' },
-                    ]}
-                    value={receiverKind}
-                    onChange={(v) => {
-                      setReceiverKind(v as 'counterparty' | 'mol');
-                      setReceiverId(null);
-                    }}
-                  />
-                )}
-                {receiverKind === 'counterparty' ? (
+                {(close) => (
                   <Select<string>
-                    size="large"
+                    autoFocus
                     style={{ width: '100%' }}
-                    placeholder={kind === 'return' ? 'Поставщик' : 'Контрагент'}
-                    value={receiverId ?? undefined}
-                    onChange={(v) => setReceiverId(v)}
+                    placeholder="Объект"
+                    value={siteId ?? undefined}
+                    onChange={(v) => {
+                      setSiteId(v);
+                      close();
+                    }}
                     showSearch
                     optionFilterProp="label"
-                    loading={counterpartiesQuery.isLoading}
-                    options={counterpartyReceiverOptions.map((c) => ({
-                      value: c.id,
-                      label: c.name,
+                    loading={sitesQuery.isLoading}
+                    options={sites.map((s) => ({
+                      value: s.id,
+                      label: `${s.code} · ${s.name}`,
                     }))}
                   />
-                ) : (
-                  <Select<string>
-                    size="large"
-                    style={{ width: '100%' }}
-                    placeholder="МОЛ"
-                    value={receiverId ?? undefined}
-                    onChange={(v) => setReceiverId(v)}
-                    showSearch
-                    optionFilterProp="label"
-                    loading={responsiblePersonsQuery.isLoading}
-                    options={responsiblePersons.map((m) => ({ value: m.id, label: m.fullName }))}
+                )}
+              </InlineEditChip>
+
+              {kind === 'transfer' && (
+                <InlineEditChip
+                  label="Куда"
+                  value={toLabel}
+                  required
+                  width={320}
+                >
+                  {(close) => (
+                    <Select<string>
+                      autoFocus
+                      style={{ width: '100%' }}
+                      placeholder="Объект-приёмник"
+                      value={destSiteId ?? undefined}
+                      onChange={(v) => {
+                        setDestSiteId(v);
+                        close();
+                      }}
+                      showSearch
+                      optionFilterProp="label"
+                      loading={sitesQuery.isLoading}
+                      options={sites
+                        .filter((s) => s.id !== siteId)
+                        .map((s) => ({
+                          value: s.id,
+                          label: `${s.code} · ${s.name}`,
+                        }))}
+                    />
+                  )}
+                </InlineEditChip>
+              )}
+
+              {(kind === 'contractor' || kind === 'return' || kind === 'transfer') && (
+                <InlineEditChip
+                  label="Получатель"
+                  value={receiverLabel}
+                  required
+                  width={320}
+                >
+                  {(close) => (
+                    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                      {kind !== 'return' && (
+                        <Segmented
+                          block
+                          size="small"
+                          options={[
+                            { label: 'Подрядчик', value: 'counterparty' },
+                            { label: 'МОЛ', value: 'mol' },
+                          ]}
+                          value={receiverKind}
+                          onChange={(v) => {
+                            setReceiverKind(v as 'counterparty' | 'mol');
+                            setReceiverId(null);
+                          }}
+                        />
+                      )}
+                      {receiverKind === 'counterparty' ? (
+                        <Select<string>
+                          autoFocus
+                          style={{ width: '100%' }}
+                          placeholder={kind === 'return' ? 'Поставщик' : 'Контрагент'}
+                          value={receiverId ?? undefined}
+                          onChange={(v) => {
+                            setReceiverId(v);
+                            close();
+                          }}
+                          showSearch
+                          optionFilterProp="label"
+                          loading={counterpartiesQuery.isLoading}
+                          options={counterpartyReceiverOptions.map((c) => ({
+                            value: c.id,
+                            label: c.name,
+                          }))}
+                        />
+                      ) : (
+                        <Select<string>
+                          autoFocus
+                          style={{ width: '100%' }}
+                          placeholder="МОЛ"
+                          value={receiverId ?? undefined}
+                          onChange={(v) => {
+                            setReceiverId(v);
+                            close();
+                          }}
+                          showSearch
+                          optionFilterProp="label"
+                          loading={responsiblePersonsQuery.isLoading}
+                          options={responsiblePersons.map((m) => ({
+                            value: m.id,
+                            label: m.fullName,
+                          }))}
+                        />
+                      )}
+                    </Space>
+                  )}
+                </InlineEditChip>
+              )}
+
+              <InlineEditChip
+                label="Госномер"
+                value={plate || null}
+                placeholder="— не указан —"
+                width={200}
+              >
+                {(close) => (
+                  <Input
+                    autoFocus
+                    size="small"
+                    placeholder="А123ВВ77"
+                    value={plate}
+                    onChange={(e) => setPlate(e.target.value.toUpperCase())}
+                    onPressEnter={close}
+                    onBlur={close}
+                    autoCapitalize="characters"
                   />
                 )}
-              </Card>
-            </Col>
-          )}
-          <Col xs={24} sm={12} md={6}>
-            <Card size="small" title="Госномер" styles={{ body: { padding: 12 } }}>
-              <Input
-                size="large"
-                placeholder="А123ВВ77"
-                value={plate}
-                onChange={(e) => setPlate(e.target.value.toUpperCase())}
-                autoCapitalize="characters"
-              />
-            </Card>
-          </Col>
-          <Col xs={24} sm={12} md={6}>
-            <Card size="small" title="Водитель" styles={{ body: { padding: 12 } }}>
-              <Input
-                size="large"
-                placeholder="ФИО"
-                value={driverName}
-                onChange={(e) => setDriverName(e.target.value)}
-              />
-            </Card>
-          </Col>
-          {linkedSource && (
-            <Col xs={24} sm={12} md={6}>
-              <Card
-                size="small"
-                // Заголовок зависит от формы источника: ТН/ОС-2 → «Накладная»,
-                // УПД (или legacy) → «УПД». Аналогично «УПД»-карточке в KppPage.
-                title={
-                  linkedSource.kind === 'transport_waybill' ||
-                  linkedSource.kind === 'os2_transfer'
-                    ? 'Накладная'
-                    : 'УПД'
-                }
-                styles={{ body: { padding: 12 } }}
+              </InlineEditChip>
+
+              <InlineEditChip
+                label="Водитель"
+                value={driverName || null}
+                placeholder="— не указан —"
+                width={260}
               >
-                <Space wrap>
+                {(close) => (
+                  <Input
+                    autoFocus
+                    size="small"
+                    placeholder="ФИО"
+                    value={driverName}
+                    onChange={(e) => setDriverName(e.target.value)}
+                    onPressEnter={close}
+                    onBlur={close}
+                  />
+                )}
+              </InlineEditChip>
+
+              {/* УПД/Накладная — read-only чипы (значения приходят от
+                  привязки УПД, в этой шапке не редактируются). */}
+              {linkedSource && (
+                <>
                   <Tag
                     color={
                       linkedSource.kind === 'transport_waybill' ||
@@ -1330,18 +1379,34 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                         ? 'purple'
                         : 'blue'
                     }
+                    style={{ marginInlineEnd: 0 }}
                   >
-                    {linkedSource.docNumber ?? '— без номера —'}
+                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                      {linkedSource.kind === 'transport_waybill' ||
+                      linkedSource.kind === 'os2_transfer'
+                        ? 'Накладная'
+                        : 'УПД'}
+                      :
+                    </Typography.Text>{' '}
+                    <Typography.Text strong style={{ fontSize: 12 }}>
+                      {linkedSource.docNumber ?? '— без номера —'}
+                    </Typography.Text>
                   </Tag>
-                  <Typography.Text type="secondary">
-                    {linkedSource.docDate ?? '—'}
-                    {linkedSource.totalSum ? ` · ${linkedSource.totalSum} ₽` : ''}
-                  </Typography.Text>
-                </Space>
-              </Card>
-            </Col>
-          )}
-        </Row>
+                  {linkedSource.docDate && (
+                    <Tag style={{ marginInlineEnd: 0 }}>
+                      Дата документа: {linkedSource.docDate}
+                    </Tag>
+                  )}
+                  {linkedSource.totalSum && (
+                    <Tag style={{ marginInlineEnd: 0 }}>
+                      Сумма: {linkedSource.totalSum} ₽
+                    </Tag>
+                  )}
+                </>
+              )}
+            </Space>
+          );
+        })()}
 
         <Collapse
           size="small"

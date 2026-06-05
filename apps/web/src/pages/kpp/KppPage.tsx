@@ -61,6 +61,7 @@ import { runSync } from '../../services/sync';
 import { db } from '../../lib/db';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { InlineEditChip } from '../../shared/ui/InlineEditChip';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { DeliveriesHistory } from './DeliveriesHistory';
 import { ExpectedUpds } from './ExpectedUpds';
@@ -1217,185 +1218,215 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           />
         )}
 
-        {/* Компактная inline-шапка: одна строка вместо 4 Card-блоков.
-            Label сверху мелким шрифтом, инпуты size="small". Экономит
-            ~80-100px вертикально — больше места под материалы и фото.
-            Grid с minmax-колонками: при сужении окна Получатель и УПД
-            не схлопываются раньше, чем нужно (минимумы подобраны под
-            Segmented + Select / Tag + дата). */}
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns:
-              'minmax(180px, 1fr) minmax(240px, 1.4fr) minmax(140px, 0.7fr) minmax(220px, 1.2fr)',
-            gap: 8,
-            marginBottom: 8,
-            alignItems: 'start',
-          }}
-        >
-          <div>
-            <FieldLabel required>Объект</FieldLabel>
-            <Select<string>
-              style={{ width: '100%' }}
-              size="small"
-              placeholder="Выберите объект"
-              value={siteId ?? undefined}
-              onChange={(v) => setSiteId(v)}
-              showSearch
-              optionFilterProp="label"
-              loading={sitesQuery.isLoading}
-              disabled={isInspector}
-              options={sites.map((s) => ({
-                value: s.id,
-                label: `${s.code} · ${s.name}`,
-              }))}
-              notFoundContent={
-                <Typography.Text type="secondary">
-                  Объектов нет — заведите их в Справочниках
-                </Typography.Text>
-              }
-            />
-          </div>
-
-          <div>
-            <FieldLabel>Получатель</FieldLabel>
-            <Segmented
-              block
-              size="small"
-              style={{ marginBottom: 4 }}
-              options={[
-                { label: 'Подрядчик', value: 'counterparty' },
-                { label: 'МОЛ', value: 'mol' },
-              ]}
-              value={recipientKind}
-              onChange={(v) => {
-                const next = v as 'counterparty' | 'mol';
-                setRecipientKind(next);
-                if (next === 'counterparty') setRecipientMolId(null);
-                else setContractorId(null);
-              }}
-            />
-            {recipientKind === 'counterparty' ? (
-              <Select<string>
-                style={{ width: '100%' }}
-                size="small"
-                placeholder="— не указан —"
-                value={contractorId ?? undefined}
-                onChange={(v) => setContractorId(v ?? null)}
-                allowClear
-                showSearch
-                optionFilterProp="label"
-                loading={counterpartiesQuery.isLoading}
-                options={counterparties.map((c) => ({
-                  value: c.id,
-                  label: c.name,
-                }))}
-                notFoundContent={
-                  <Typography.Text type="secondary">
-                    Нет контрагентов с ролью «Подрядчик» — отметьте их в Справочниках
-                  </Typography.Text>
-                }
-              />
-            ) : (
-              <Select<string>
-                style={{ width: '100%' }}
-                size="small"
-                placeholder="— не указан —"
-                value={recipientMolId ?? undefined}
-                onChange={(v) => setRecipientMolId(v ?? null)}
-                allowClear
-                showSearch
-                optionFilterProp="label"
-                loading={responsiblePersonsQuery.isLoading}
-                options={responsiblePersons.map((m) => ({
-                  value: m.id,
-                  label: m.fullName,
-                }))}
-                notFoundContent={
-                  <Typography.Text type="secondary">
-                    Заведите МОЛ в Справочниках
-                  </Typography.Text>
-                }
-              />
-            )}
-          </div>
-
-          <div>
-            <FieldLabel>Госномер</FieldLabel>
-            <Input
-              size="small"
-              placeholder="А123ВВ77"
-              value={plate}
-              onChange={(e) => setPlate(e.target.value.toUpperCase())}
-              autoCapitalize="characters"
-            />
-          </div>
-
-          <div>
-            {loadedDelivery?.sourceShipmentId ? (
-              // Парная приёмка из transfer — вместо УПД показываем источник
-              // и обе фактические даты (атрибут УПД здесь не применим).
-              <>
-                <FieldLabel>Перемещение</FieldLabel>
-                <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                  <Space wrap size={4}>
-                    <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>
-                      с объекта
-                    </Tag>
-                    <Typography.Text strong style={{ fontSize: 13 }}>
-                      {loadedDelivery.sourceShipmentSiteCode ?? '—'}
-                    </Typography.Text>
-                  </Space>
-                  <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                    Отгружено: {formatMolDate(loadedDelivery.sourceShipmentShippedAt)} ·
-                    Принято: {formatMolDate(loadedDelivery.arrivedAt)}
-                  </Typography.Text>
-                </Space>
-              </>
-            ) : (
-              <>
-                <FieldLabel>УПД</FieldLabel>
-                {selectedUpd ? (
-                  <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                    <Space wrap size={4}>
-                      <Tag color="blue" style={{ marginInlineEnd: 0 }}>
-                        {selectedUpd.docNumber ?? '— без номера —'}
-                      </Tag>
-                      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                        {selectedUpd.docDate ?? '—'} · {selectedUpd.totalSum ?? '—'} ₽
+        {/* Inline-шапка из чипов: визуально как в read-only ViewModal'е,
+            но клик по чипу открывает Popover с редактором (Select/Input).
+            Экономит ~50-80px вертикально по сравнению с grid + label —
+            больше места под Фото и Материалы. */}
+        {(() => {
+          const siteLabel = (() => {
+            const s = sites.find((x) => x.id === siteId);
+            return s ? `${s.code} · ${s.name}` : null;
+          })();
+          const recipientLabel = (() => {
+            if (recipientKind === 'counterparty') {
+              const c = counterparties.find((x) => x.id === contractorId);
+              return c ? `Подрядчик: ${c.name}` : null;
+            }
+            const m = responsiblePersons.find((x) => x.id === recipientMolId);
+            return m ? `МОЛ: ${m.fullName}` : null;
+          })();
+          return (
+            <Space wrap size={[6, 6]} style={{ marginBottom: 8 }}>
+              <InlineEditChip
+                label="Объект"
+                value={siteLabel}
+                required
+                disabled={isInspector}
+                width={320}
+              >
+                {(close) => (
+                  <Select<string>
+                    autoFocus
+                    style={{ width: '100%' }}
+                    placeholder="Выберите объект"
+                    value={siteId ?? undefined}
+                    onChange={(v) => {
+                      setSiteId(v);
+                      close();
+                    }}
+                    showSearch
+                    optionFilterProp="label"
+                    loading={sitesQuery.isLoading}
+                    options={sites.map((s) => ({
+                      value: s.id,
+                      label: `${s.code} · ${s.name}`,
+                    }))}
+                    notFoundContent={
+                      <Typography.Text type="secondary">
+                        Объектов нет — заведите в Справочниках
                       </Typography.Text>
-                    </Space>
-                    {selectedUpd.expectedDate && (
-                      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                        Дата поставки: {selectedUpd.expectedDate}
-                      </Typography.Text>
+                    }
+                  />
+                )}
+              </InlineEditChip>
+
+              <InlineEditChip
+                label="Получатель"
+                value={recipientLabel}
+                width={320}
+              >
+                {(close) => (
+                  <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                    <Segmented
+                      block
+                      size="small"
+                      options={[
+                        { label: 'Подрядчик', value: 'counterparty' },
+                        { label: 'МОЛ', value: 'mol' },
+                      ]}
+                      value={recipientKind}
+                      onChange={(v) => {
+                        const next = v as 'counterparty' | 'mol';
+                        setRecipientKind(next);
+                        if (next === 'counterparty') setRecipientMolId(null);
+                        else setContractorId(null);
+                      }}
+                    />
+                    {recipientKind === 'counterparty' ? (
+                      <Select<string>
+                        autoFocus
+                        style={{ width: '100%' }}
+                        placeholder="— не указан —"
+                        value={contractorId ?? undefined}
+                        onChange={(v) => {
+                          setContractorId(v ?? null);
+                          close();
+                        }}
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        loading={counterpartiesQuery.isLoading}
+                        options={counterparties.map((c) => ({
+                          value: c.id,
+                          label: c.name,
+                        }))}
+                      />
+                    ) : (
+                      <Select<string>
+                        autoFocus
+                        style={{ width: '100%' }}
+                        placeholder="— не указан —"
+                        value={recipientMolId ?? undefined}
+                        onChange={(v) => {
+                          setRecipientMolId(v ?? null);
+                          close();
+                        }}
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        loading={responsiblePersonsQuery.isLoading}
+                        options={responsiblePersons.map((m) => ({
+                          value: m.id,
+                          label: m.fullName,
+                        }))}
+                      />
                     )}
                   </Space>
-                ) : (
-                  <Space size={4} wrap>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      — без УПД —
-                    </Typography.Text>
-                    {!isInspector &&
-                      loadedDelivery?.sourceDocumentIds.length === 0 &&
-                      !isNew && (
-                        <Button
-                          size="small"
-                          icon={<LinkOutlined />}
-                          onClick={() => {
-                            setLinkUpdError(null);
-                            setLinkUpdOpen(true);
-                          }}
-                        >
-                          Привязать УПД
-                        </Button>
-                      )}
-                  </Space>
                 )}
-              </>
-            )}
-          </div>
-        </div>
+              </InlineEditChip>
+
+              <InlineEditChip
+                label="Госномер"
+                value={plate || null}
+                placeholder="— не указан —"
+                width={200}
+              >
+                {(close) => (
+                  <Input
+                    autoFocus
+                    size="small"
+                    placeholder="А123ВВ77"
+                    value={plate}
+                    onChange={(e) => setPlate(e.target.value.toUpperCase())}
+                    onPressEnter={close}
+                    onBlur={close}
+                    autoCapitalize="characters"
+                  />
+                )}
+              </InlineEditChip>
+
+              {/* УПД / Перемещение — read-only чип: значение приходит из УПД
+                  (либо при создании, либо после привязки), inline-редактирования
+                  тут нет. Tag-стиль как у read-only ViewModal. */}
+              {loadedDelivery?.sourceShipmentId ? (
+                <>
+                  <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                      Перемещение:
+                    </Typography.Text>{' '}
+                    <Typography.Text strong style={{ fontSize: 12 }}>
+                      с объекта {loadedDelivery.sourceShipmentSiteCode ?? '—'}
+                    </Typography.Text>
+                  </Tag>
+                  <Tag style={{ marginInlineEnd: 0 }}>
+                    Отгружено: {formatMolDate(loadedDelivery.sourceShipmentShippedAt)}
+                  </Tag>
+                  <Tag style={{ marginInlineEnd: 0 }}>
+                    Принято: {formatMolDate(loadedDelivery.arrivedAt)}
+                  </Tag>
+                </>
+              ) : selectedUpd ? (
+                <>
+                  <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                      УПД:
+                    </Typography.Text>{' '}
+                    <Typography.Text strong style={{ fontSize: 12 }}>
+                      {selectedUpd.docNumber ?? '— без номера —'}
+                    </Typography.Text>
+                  </Tag>
+                  {selectedUpd.docDate && (
+                    <Tag style={{ marginInlineEnd: 0 }}>
+                      Дата документа: {selectedUpd.docDate}
+                    </Tag>
+                  )}
+                  {selectedUpd.expectedDate && (
+                    <Tag style={{ marginInlineEnd: 0 }}>
+                      Дата поставки: {selectedUpd.expectedDate}
+                    </Tag>
+                  )}
+                  {selectedUpd.totalSum && (
+                    <Tag style={{ marginInlineEnd: 0 }}>
+                      Сумма: {selectedUpd.totalSum} ₽
+                    </Tag>
+                  )}
+                </>
+              ) : (
+                <Tag style={{ marginInlineEnd: 0 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    — без УПД —
+                  </Typography.Text>
+                  {!isInspector &&
+                    loadedDelivery?.sourceDocumentIds.length === 0 &&
+                    !isNew && (
+                      <Button
+                        type="link"
+                        size="small"
+                        icon={<LinkOutlined />}
+                        style={{ padding: '0 4px', fontSize: 12 }}
+                        onClick={() => {
+                          setLinkUpdError(null);
+                          setLinkUpdOpen(true);
+                        }}
+                      >
+                        Привязать
+                      </Button>
+                    )}
+                </Tag>
+              )}
+            </Space>
+          );
+        })()}
 
         <LinkSourceDocumentModal
           open={linkUpdOpen}
