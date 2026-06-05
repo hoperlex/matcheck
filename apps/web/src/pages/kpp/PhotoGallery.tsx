@@ -21,12 +21,17 @@ export function PhotoGallery({
   deliveryId,
   photos,
   operationKind = 'delivery',
+  readOnly = false,
 }: {
   deliveryId: string;
   photos: AnyPhoto[];
   operationKind?: OperationKind;
+  // readOnly: галерея используется в просмотре (например, в Истории
+  // поступлений → модалка «Фото материала»). Кнопка удаления скрыта,
+  // даже если пользователь admin. Семантически: «здесь смотрят, не правят».
+  readOnly?: boolean;
 }): JSX.Element | null {
-  const canDelete = useAuthStore((s) => s.user?.role === 'admin');
+  const canDelete = useAuthStore((s) => s.user?.role === 'admin') && !readOnly;
   const queryClient = useQueryClient();
   const invalidateKey = operationKind === 'shipment' ? 'shipments' : 'deliveries';
 

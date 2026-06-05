@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
-import { Select, Space, Tag, Typography } from 'antd';
+import { Button, Select, Space, Tag, Tooltip, Typography } from 'antd';
+import { PictureOutlined } from '@ant-design/icons';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
+import { MaterialPhotosModal } from './MaterialPhotosModal';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import type {
@@ -133,6 +135,12 @@ export default function MaterialsPage() {
   const [siteIds, setSiteIds] = useState<string[]>([]);
   const [contractorIds, setContractorIds] = useState<string[]>([]);
   const [q, setQ] = useState('');
+  // Состояние модалки «Фото материала». Открывается из иконки 📷 в
+  // колонке «Тип» — не путать с onRowClick (тот ведёт в edit-режим).
+  const [photosFor, setPhotosFor] = useState<{
+    kind: 'delivery' | 'shipment';
+    id: string;
+  } | null>(null);
   useSyncGlobalFiltersSiteContractor({ siteIds, setSiteIds, contractorIds, setContractorIds });
 
   const sites = useQuery({
@@ -268,9 +276,34 @@ export default function MaterialsPage() {
               defaultFilteredValue: ['intake'],
               onFilter: (val, r) => r.type === val,
               sorter: stringSorter<UnifiedRow>((r) => TYPE_LABELS[r.type].label),
-              render: (_: unknown, r: UnifiedRow) => (
-                <Tag color={TYPE_LABELS[r.type].color}>{TYPE_LABELS[r.type].label}</Tag>
-              ),
+              render: (_: unknown, r: UnifiedRow) => {
+                // Иконка 📷 — открывает модалку с фото этой приёмки/отгрузки.
+                // stopPropagation: иначе onRowClick параллельно открыл бы
+                // edit-модалку в /operations.
+                const targetId =
+                  r.type === 'intake' ? r.deliveryId : r.shipmentId;
+                const targetKind = r.type === 'intake' ? 'delivery' : 'shipment';
+                return (
+                  <Space size={4}>
+                    <Tag color={TYPE_LABELS[r.type].color} style={{ marginInlineEnd: 0 }}>
+                      {TYPE_LABELS[r.type].label}
+                    </Tag>
+                    {targetId && (
+                      <Tooltip title="Фото">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<PictureOutlined />}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setPhotosFor({ kind: targetKind, id: targetId });
+                          }}
+                        />
+                      </Tooltip>
+                    )}
+                  </Space>
+                );
+              },
             },
             {
               title: 'Дата',
@@ -387,6 +420,12 @@ export default function MaterialsPage() {
           )}
         />
       </StickyPageHeader>
+      <MaterialPhotosModal
+        kind={photosFor?.kind ?? null}
+        id={photosFor?.id ?? null}
+        open={photosFor !== null}
+        onClose={() => setPhotosFor(null)}
+      />
     </StickyPageHeader>
   );
 }
