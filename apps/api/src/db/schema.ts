@@ -57,6 +57,10 @@ export const photoKindEnum = pgEnum('photo_kind', ['document', 'cargo', 'vehicle
 // Этап приёмки: 'before' — фото 1-го этапа (на КПП), 'after' — фото 2-го
 // этапа (после выгрузки/подтверждения МОЛ). Только для delivery_photos.
 export const deliveryPhotoStageEnum = pgEnum('delivery_photo_stage', ['before', 'after']);
+// Этап у фото отгрузки — зеркало deliveryPhotoStageEnum. Введён миграцией
+// 0048, чтобы Принятые на портале показывали «1 Этап (N) / 2 Этап (M)»
+// как у приёмок.
+export const shipmentPhotoStageEnum = pgEnum('shipment_photo_stage', ['before', 'after']);
 export const llmKindEnum = pgEnum('llm_kind', [
   'openrouter',
   'google_ai_studio',
@@ -911,6 +915,7 @@ export const shipmentPhotos = pgTable(
       .notNull()
       .references(() => shipments.id, { onDelete: 'cascade' }),
     kind: photoKindEnum('kind').notNull().default('cargo'),
+    stage: shipmentPhotoStageEnum('stage').notNull().default('before'),
     s3Key: text('s3_key').notNull(),
     thumbS3Key: text('thumb_s3_key'),
     contentHash: varchar('content_hash', { length: 64 }),

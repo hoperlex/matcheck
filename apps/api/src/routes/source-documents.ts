@@ -1698,6 +1698,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       .nullable()
       .optional(),
     contractorId: z.string().uuid().nullable().optional(),
+    // recipientId — внешний контрагент-получатель для outbound-документов
+    // (например, ООО «ТЕПЛО»). Раньше не редактировался через UI, и mobile
+    // на «Выезд» Stage1 получал docMeta.recipientId=null → POST shipment с
+    // null receiverCounterpartyId → сервер 400. Поле уже есть в БД и в DTO,
+    // не достаёт лишь возможности проставить из портала.
+    recipientId: z.string().uuid().nullable().optional(),
     recipientMolId: z.string().uuid().nullable().optional(),
     siteId: z.string().uuid().nullable().optional(),
     totalSum: z.union([z.number(), z.string()]).nullable().optional(),
@@ -1749,6 +1755,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         upd.expectedDate = req.body.expectedDate ? new Date(req.body.expectedDate) : null;
       }
       if (req.body.contractorId !== undefined) upd.contractorId = req.body.contractorId;
+      if (req.body.recipientId !== undefined) upd.recipientId = req.body.recipientId;
       if (req.body.recipientMolId !== undefined) upd.recipientMolId = req.body.recipientMolId;
       if (req.body.siteId !== undefined) upd.siteId = req.body.siteId;
       if (req.body.totalSum !== undefined) {

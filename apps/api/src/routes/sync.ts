@@ -588,6 +588,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             .map((p) => ({
               id: p.id,
               kind: p.kind,
+              stage: p.stage,
               s3Key: p.s3Key,
               thumbS3Key: p.thumbS3Key,
               contentHash: p.contentHash,

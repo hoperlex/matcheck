@@ -188,6 +188,7 @@ async function buildShipmentDto(app: any, id: string) {
     photos: photos.map((p) => ({
       id: p.id,
       kind: p.kind,
+      stage: p.stage,
       s3Key: p.s3Key,
       thumbS3Key: p.thumbS3Key,
       contentHash: p.contentHash,
@@ -302,6 +303,10 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           404: ErrorResponseSchema,
           // 409 — либо OCC-конфликт (Conflict), либо pending_deletion (Error).
           409: z.union([ShipmentConflictResponseSchema, ErrorResponseSchema]),
+          // 422 — receiver_required (документ не дозаполнен), отдельно от
+          // 400, чтобы mobile-MutationProcessor мог различать «дозаполните
+          // данные» от «клиент послал мусор» (без ретраев).
+          422: ErrorResponseSchema,
         },
       },
     },
@@ -327,9 +332,15 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
 
       // Дополнительная валидация согласованности kind ↔ receiver/destSite,
       // BD-CHECK даст более грубое сообщение — отдадим клиенту что-то понятное.
+      // receiver_required → 422 (документ не дозаполнен, mobile показывает
+      // понятный текст и НЕ ретраит). invalid_kind_links → 400 (клиент послал
+      // несовместимые поля). Разделение нужно mobile-MutationProcessor'у.
       const linksError = validateKindLinks(input);
       if (linksError) {
-        return reply.code(400).send({ error: 'invalid_kind_links', message: linksError });
+        const statusCode = linksError.code === 'receiver_required' ? 422 : 400;
+        return reply
+          .code(statusCode)
+          .send({ error: linksError.code, message: linksError.message });
       }
 
       try {
@@ -832,35 +843,51 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
   );
 }
 
-function validateKindLinks(input: z.infer<typeof ShipmentUpsertSchema>): string | null {
+/**
+ * Результат проверки согласованности kind ↔ receiver/destSite.
+ * `code='receiver_required'` нужен mobile, чтобы отличить «документ
+ * не дозаполнен — попросить менеджера» от «клиент послал мусор».
+ * Остальные ошибки — обычные `invalid_kind_links` (400).
+ */
+type KindLinksError = {
+  code: 'receiver_required' | 'invalid_kind_links';
+  message: string;
+};
+function validateKindLinks(input: z.infer<typeof ShipmentUpsertSchema>): KindLinksError | null {
   const { kind, receiverCounterpartyId, receiverMolId, destSiteId, siteId } = input;
   // Получатель указан XOR через counterparty или МОЛ (двух одновременно — нельзя).
   const hasContractorReceiver = Boolean(receiverCounterpartyId);
   const hasMolReceiver = Boolean(receiverMolId);
   const hasAnyReceiver = hasContractorReceiver || hasMolReceiver;
   const hasBothReceivers = hasContractorReceiver && hasMolReceiver;
+  const bad = (message: string): KindLinksError => ({ code: 'invalid_kind_links', message });
+  const noReceiver = (message: string): KindLinksError => ({
+    code: 'receiver_required',
+    message,
+  });
 
   if (kind === 'contractor') {
-    if (hasBothReceivers) return 'Укажите получателя одним способом: подрядчик или МОЛ';
-    if (!hasAnyReceiver) return 'Для отгрузки нужен получатель (подрядчик или МОЛ)';
-    if (destSiteId) return 'destSiteId допустим только для перемещения';
+    if (hasBothReceivers) return bad('Укажите получателя одним способом: подрядчик или МОЛ');
+    if (!hasAnyReceiver) return noReceiver('Для отгрузки нужен получатель (подрядчик или МОЛ)');
+    if (destSiteId) return bad('destSiteId допустим только для перемещения');
     return null;
   }
   if (kind === 'return') {
-    if (hasMolReceiver) return 'Возврат поставщику оформляется только на контрагента';
-    if (!hasContractorReceiver) return 'Для возврата нужен получатель-поставщик';
-    if (destSiteId) return 'destSiteId допустим только для перемещения';
+    if (hasMolReceiver) return bad('Возврат поставщику оформляется только на контрагента');
+    if (!hasContractorReceiver) return noReceiver('Для возврата нужен получатель-поставщик');
+    if (destSiteId) return bad('destSiteId допустим только для перемещения');
     return null;
   }
   if (kind === 'transfer') {
-    if (!destSiteId) return 'Для перемещения нужен объект-получатель';
-    if (destSiteId === siteId) return 'Объект-получатель не может совпадать с источником';
-    if (hasBothReceivers) return 'Укажите получателя одним способом: подрядчик или МОЛ';
-    if (!hasAnyReceiver) return 'Для перемещения нужен получатель на новом объекте (подрядчик или МОЛ)';
+    if (!destSiteId) return bad('Для перемещения нужен объект-получатель');
+    if (destSiteId === siteId) return bad('Объект-получатель не может совпадать с источником');
+    if (hasBothReceivers) return bad('Укажите получателя одним способом: подрядчик или МОЛ');
+    if (!hasAnyReceiver)
+      return noReceiver('Для перемещения нужен получатель на новом объекте (подрядчик или МОЛ)');
     return null;
   }
   // writeoff
-  if (hasAnyReceiver || destSiteId) return 'Для списания получатель не указывается';
+  if (hasAnyReceiver || destSiteId) return bad('Для списания получатель не указывается');
   return null;
 }
 

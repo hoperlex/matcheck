@@ -742,6 +742,17 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     ];
   }, [loadedShipment?.photos, localPhotosQuery.data]);
   const photosCount = mergedPhotos.length;
+  // Разделение фото на 1-й и 2-й Этап (зеркало KppPage). Источник истины —
+  // поле stage из shipment_photos (миграция 0048). Старые фото без явного
+  // этапа имеют default 'before' (1-й Этап).
+  const beforePhotos = useMemo(
+    () => mergedPhotos.filter((p) => p.stage !== 'after'),
+    [mergedPhotos],
+  );
+  const afterPhotos = useMemo(
+    () => mergedPhotos.filter((p) => p.stage === 'after'),
+    [mergedPhotos],
+  );
 
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
@@ -1434,11 +1445,46 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                     )}
                   </Space>
                   {shipmentId && loadedShipment && (
-                    <PhotoGallery
-                      deliveryId={shipmentId}
-                      photos={mergedPhotos}
-                      operationKind="shipment"
-                    />
+                    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                      <div>
+                        <Typography.Text strong>
+                          1 Этап {beforePhotos.length > 0 && `(${beforePhotos.length})`}
+                        </Typography.Text>
+                        <div style={{ marginTop: 8 }}>
+                          {beforePhotos.length > 0 ? (
+                            <PhotoGallery
+                              deliveryId={shipmentId}
+                              photos={beforePhotos}
+                              operationKind="shipment"
+                            />
+                          ) : (
+                            <Typography.Text type="secondary">
+                              Фото 1-го этапа ещё нет.
+                            </Typography.Text>
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        <Typography.Text strong>
+                          2 Этап {afterPhotos.length > 0 && `(${afterPhotos.length})`}
+                        </Typography.Text>
+                        <div style={{ marginTop: 8 }}>
+                          {afterPhotos.length > 0 ? (
+                            <PhotoGallery
+                              deliveryId={shipmentId}
+                              photos={afterPhotos}
+                              operationKind="shipment"
+                            />
+                          ) : (
+                            <Typography.Text type="secondary">
+                              {loadedShipment.status.code === 'confirmed_mol'
+                                ? 'Фото 2-го этапа ещё нет.'
+                                : 'МОЛ ещё не подтвердил отгрузку.'}
+                            </Typography.Text>
+                          )}
+                        </div>
+                      </div>
+                    </Space>
                   )}
                 </Space>
               ),

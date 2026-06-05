@@ -337,6 +337,20 @@
       "when": 1780878120000,
       "tag": "0047_share_messages",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1780878180000,
+      "tag": "0048_shipment_photo_stage",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1780878240000,
+      "tag": "0049_shipment_shipped_label_oformlena",
+      "breakpoints": true
     }
   ]
 }

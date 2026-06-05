@@ -31,9 +31,9 @@ const KIND_LABELS: Record<ShipmentKind, { label: string; color: string }> = {
 
 /**
  * Read-only модалка просмотра отгрузки (кнопка 👁 в строке). Зеркало
- * DeliveryViewModal — UX симметричный: те же чипы шапки, Collapse «Фото»,
- * таблица материалов без горизонтального скролла. У отгрузки нет деления
- * 1/2 Этапа, поэтому фото идут одной плиткой.
+ * DeliveryViewModal — UX симметричный: те же чипы шапки, Collapse «Фото»
+ * с разделением «1 Этап / 2 Этап» (поле stage у shipment_photos
+ * введено миграцией 0048), таблица материалов без горизонтального скролла.
  */
 export function ShipmentViewModal({
   data,
@@ -195,33 +195,76 @@ export function ShipmentViewModal({
             ) : null}
           </Space>
 
-          <Collapse
-            defaultActiveKey={['photos']}
-            ghost
-            size="small"
-            items={[
-              {
-                key: 'photos',
-                label: (
-                  <Typography.Text strong>Фото ({s.photos.length})</Typography.Text>
-                ),
-                children:
-                  s.photos.length === 0 ? (
-                    <Empty
-                      image={Empty.PRESENTED_IMAGE_SIMPLE}
-                      description="Нет фото"
-                      style={{ margin: '12px 0' }}
-                    />
-                  ) : (
-                    <PhotoGallery
-                      deliveryId={s.id}
-                      photos={s.photos}
-                      operationKind="shipment"
-                    />
-                  ),
-              },
-            ]}
-          />
+          {(() => {
+            const beforePhotos = s.photos.filter((p) => p.stage !== 'after');
+            const afterPhotos = s.photos.filter((p) => p.stage === 'after');
+            return (
+              <Collapse
+                defaultActiveKey={['photos']}
+                ghost
+                size="small"
+                items={[
+                  {
+                    key: 'photos',
+                    label: (
+                      <Typography.Text strong>Фото ({s.photos.length})</Typography.Text>
+                    ),
+                    children:
+                      s.photos.length === 0 ? (
+                        <Empty
+                          image={Empty.PRESENTED_IMAGE_SIMPLE}
+                          description="Нет фото"
+                          style={{ margin: '12px 0' }}
+                        />
+                      ) : (
+                        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                          <div>
+                            <Typography.Text strong>
+                              1 Этап{' '}
+                              {beforePhotos.length > 0 && `(${beforePhotos.length})`}
+                            </Typography.Text>
+                            <div style={{ marginTop: 8 }}>
+                              {beforePhotos.length > 0 ? (
+                                <PhotoGallery
+                                  deliveryId={s.id}
+                                  photos={beforePhotos}
+                                  operationKind="shipment"
+                                />
+                              ) : (
+                                <Typography.Text type="secondary">
+                                  Фото 1-го этапа ещё нет.
+                                </Typography.Text>
+                              )}
+                            </div>
+                          </div>
+                          <div>
+                            <Typography.Text strong>
+                              2 Этап{' '}
+                              {afterPhotos.length > 0 && `(${afterPhotos.length})`}
+                            </Typography.Text>
+                            <div style={{ marginTop: 8 }}>
+                              {afterPhotos.length > 0 ? (
+                                <PhotoGallery
+                                  deliveryId={s.id}
+                                  photos={afterPhotos}
+                                  operationKind="shipment"
+                                />
+                              ) : (
+                                <Typography.Text type="secondary">
+                                  {s.status.code === 'confirmed_mol'
+                                    ? 'Фото 2-го этапа ещё нет.'
+                                    : 'МОЛ ещё не подтвердил отгрузку.'}
+                                </Typography.Text>
+                              )}
+                            </div>
+                          </div>
+                        </Space>
+                      ),
+                  },
+                ]}
+              />
+            );
+          })()}
 
           <div>
             <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 8 }}>

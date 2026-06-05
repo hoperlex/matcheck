@@ -44,13 +44,25 @@ export type DocumentDisplayStatus = SourceStatus | 'draft';
 
 export function getDocumentDisplayStatus(sd: {
   status: SourceStatus;
+  direction?: SourceDirection;
   contractorId?: string | null;
+  // recipientId — внешний контрагент-получатель, нужен для outbound. На
+  // inbound поле обычно null и не учитывается (там роль «получателя»
+  // играет наш contractorId).
+  recipientId?: string | null;
   recipientMolId?: string | null;
   expectedDate?: string | null;
   siteId?: string | null;
 }): DocumentDisplayStatus {
   if (sd.status !== 'parsed') return sd.status;
-  const hasRecipient = !!(sd.contractorId || sd.recipientMolId);
+  // Признак «получатель указан» зависит от направления документа:
+  //   outbound: внешний контрагент (recipientId) ИЛИ наш МОЛ-получатель;
+  //   inbound:  наш подрядчик-приёмник (contractorId) ИЛИ наш МОЛ.
+  // Без direction (старые callsite'ы) — поведение как было: contractorId|MOL.
+  const hasRecipient =
+    sd.direction === 'outbound'
+      ? !!(sd.recipientId || sd.recipientMolId)
+      : !!(sd.contractorId || sd.recipientMolId);
   const hasExpectedDate = !!sd.expectedDate;
   const hasSite = !!sd.siteId;
   if (!hasRecipient || !hasExpectedDate || !hasSite) return 'draft';

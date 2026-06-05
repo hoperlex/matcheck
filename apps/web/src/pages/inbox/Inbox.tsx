@@ -91,7 +91,9 @@ function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }
   // подскажет пользователю, что документ требует дозаполнения.
   const display = getDocumentDisplayStatus({
     status: row.status,
+    direction: row.direction,
     contractorId: row.contractorId,
+    recipientId: row.recipientId,
     recipientMolId: row.recipientMolId,
     expectedDate: row.expectedDate,
     siteId: row.siteId,

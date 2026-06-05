@@ -28,10 +28,11 @@ export const PhotoPresignRequestSchema = z.object({
     .string()
     .regex(/^[0-9a-f]{64}$/)
     .optional(),
-  // Этап приёмки для фото delivery: 'before' (1-й этап, КПП) или 'after'
-  // (2-й этап, после подтверждения МОЛ). Для shipment игнорируется на
-  // сервере. Default 'before' — старые клиенты, не присылающие поле,
-  // продолжают грузить фото в раздел «До».
+  // Этап для фото delivery/shipment: 'before' (1-й этап) или 'after'
+  // (2-й этап, после подтверждения МОЛ). Default 'before' — старые
+  // клиенты, не присылающие поле, продолжают грузить фото в раздел «До».
+  // Тип ShipmentPhotoStageSchema совпадает с DeliveryPhotoStageSchema по
+  // значениям, поэтому общую схему презайна не дробим.
   stage: DeliveryPhotoStageSchema.optional(),
 });
 export type PhotoPresignRequest = z.infer<typeof PhotoPresignRequestSchema>;

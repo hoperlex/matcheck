@@ -75,7 +75,12 @@ type EditForm = {
   docDate: Dayjs | null;
   expectedDate: Dayjs | null;
   recipientKind: 'counterparty' | 'mol';
+  // inbound: contractorId — наш подрядчик-приёмник.
+  // outbound: contractorId — наш подрядчик-отправитель (НЕ редактируем здесь
+  // в этой форме, чтобы не путать). Для outbound редактируемое поле «Получатель»
+  // привязано к recipientId (внешний контрагент-получатель).
   contractorId: string | null;
+  recipientId: string | null;
   recipientMolId: string | null;
   siteId: string | null;
   totalSum: string | null;
@@ -143,10 +148,11 @@ function initialForm(sd: SourceDocumentDetail): EditForm {
     docNumber: sd.docNumber,
     docDate: sd.docDate ? dayjs(sd.docDate) : null,
     expectedDate: sd.expectedDate ? dayjs(sd.expectedDate) : null,
-    // Если у УПД сохранён МОЛ — открываем переключатель в его сторону,
+    // Если у документа сохранён МОЛ — открываем переключатель в его сторону,
     // иначе по умолчанию — подрядчик (исторический режим).
     recipientKind: sd.recipientMolId ? 'mol' : 'counterparty',
     contractorId: sd.contractorId,
+    recipientId: sd.recipientId,
     recipientMolId: sd.recipientMolId,
     siteId: sd.siteId,
     totalSum: sd.totalSum,
@@ -253,14 +259,19 @@ export function SourceDocumentDetailModal({
 
   function onSave() {
     if (!edit) return;
-    // Получатель — взаимоисключающий выбор: либо contractorId, либо
-    // recipientMolId. Очищаем «противоположное» поле явно, чтобы
-    // PATCH сбрасывал ранее сохранённое значение.
+    // Получатель — взаимоисключающий выбор. Маппинг полей зависит от
+    // направления документа:
+    //   inbound: counterparty → contractorId (наш приёмник-подрядчик);
+    //   outbound: counterparty → recipientId (внешний контрагент-получатель,
+    //             которого ждёт mobile при finalize Stage1 «Выезд»).
+    // recipientMolId одинаков для обоих направлений.
+    // Очищаем «противоположное» поле явно, чтобы PATCH сбрасывал ранее
+    // сохранённое значение.
+    const isOutbound = sd?.direction === 'outbound';
     const body: Record<string, unknown> = {
       docNumber: edit.docNumber,
       docDate: edit.docDate ? edit.docDate.format('YYYY-MM-DD') : null,
       expectedDate: edit.expectedDate ? edit.expectedDate.format('YYYY-MM-DD') : null,
-      contractorId: edit.recipientKind === 'counterparty' ? edit.contractorId : null,
       recipientMolId: edit.recipientKind === 'mol' ? edit.recipientMolId : null,
       siteId: edit.siteId,
       totalSum: edit.totalSum,
@@ -272,6 +283,13 @@ export function SourceDocumentDetailModal({
         sum: it.sum,
       })),
     };
+    if (isOutbound) {
+      // contractorId (наш отправитель) этой формой не правим — оставляем как
+      // в БД, не отправляя в PATCH вовсе.
+      body.recipientId = edit.recipientKind === 'counterparty' ? edit.recipientId : null;
+    } else {
+      body.contractorId = edit.recipientKind === 'counterparty' ? edit.contractorId : null;
+    }
     patch.mutate(body);
   }
 
@@ -300,7 +318,9 @@ export function SourceDocumentDetailModal({
                 // Чип статуса с derived «Черновик» — поверх обычного статуса.
                 const display = getDocumentDisplayStatus({
                   status: sd.status,
+                  direction: sd.direction,
                   contractorId: sd.contractorId,
+                  recipientId: sd.recipientId,
                   recipientMolId: sd.recipientMolId,
                   expectedDate: sd.expectedDate,
                   siteId: sd.siteId,
@@ -517,24 +537,46 @@ export function SourceDocumentDetailModal({
                         value={edit.recipientKind}
                         onChange={(v) => {
                           const next = v as 'counterparty' | 'mol';
+                          // Чистим «противоположное» поле, чтобы при save XOR
+                          // отправлял правильную пару. Для outbound таргет —
+                          // recipientId, для inbound — contractorId.
                           setEdit({
                             ...edit,
                             recipientKind: next,
-                            contractorId: next === 'counterparty' ? edit.contractorId : null,
+                            contractorId:
+                              sd.direction === 'inbound' && next === 'counterparty'
+                                ? edit.contractorId
+                                : sd.direction === 'inbound'
+                                  ? null
+                                  : edit.contractorId,
+                            recipientId:
+                              sd.direction === 'outbound' && next === 'counterparty'
+                                ? edit.recipientId
+                                : sd.direction === 'outbound'
+                                  ? null
+                                  : edit.recipientId,
                             recipientMolId: next === 'mol' ? edit.recipientMolId : null,
                           });
                         }}
                         options={[
-                          { label: 'Подрядчик', value: 'counterparty' },
+                          { label: sd.direction === 'outbound' ? 'Контрагент' : 'Подрядчик', value: 'counterparty' },
                           { label: 'МОЛ', value: 'mol' },
                         ]}
                       />
                       {edit.recipientKind === 'counterparty' ? (
-                        <ContractorSelect
-                          value={edit.contractorId}
-                          onChange={(v) => setEdit({ ...edit, contractorId: v })}
-                          placeholder="Выберите получателя"
-                        />
+                        sd.direction === 'outbound' ? (
+                          <ContractorSelect
+                            value={edit.recipientId}
+                            onChange={(v) => setEdit({ ...edit, recipientId: v })}
+                            placeholder="Выберите получателя"
+                          />
+                        ) : (
+                          <ContractorSelect
+                            value={edit.contractorId}
+                            onChange={(v) => setEdit({ ...edit, contractorId: v })}
+                            placeholder="Выберите получателя"
+                          />
+                        )
                       ) : (
                         <ResponsiblePersonSelect
                           value={edit.recipientMolId}

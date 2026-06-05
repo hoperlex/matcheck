@@ -446,9 +446,7 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
           .filter((p) => p.uploadedAt !== null)
           .map((p) => ({
             id: p.id,
-            // У shipmentPhotos нет поля stage — на отгрузке только один этап
-            // (загрузка перед отправкой), мобила не различает before/after.
-            stage: 'before',
+            stage: p.stage,
             takenAt: p.takenAt.toISOString(),
             url: `${baseUrl}/${p.id}`,
             thumbUrl: `${baseUrl}/${p.id}/thumb`,

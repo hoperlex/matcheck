@@ -30,9 +30,17 @@ export const ShipmentItemSchema = z.object({
 });
 export type ShipmentItem = z.infer<typeof ShipmentItemSchema>;
 
+// Этап у фото отгрузки — зеркало DeliveryPhotoStageSchema. 'before' — снято
+// на 1-м этапе (mobile «Выезд → 1 Этап»), 'after' — после подтверждения
+// МОЛ (Stage2). Default 'before' для совместимости со старыми клиентами,
+// не присылающими поле — фото попадает в 1-й этап.
+export const ShipmentPhotoStageSchema = z.enum(['before', 'after']);
+export type ShipmentPhotoStage = z.infer<typeof ShipmentPhotoStageSchema>;
+
 export const ShipmentPhotoSchema = z.object({
   id: z.string().uuid(),
   kind: z.enum(['document', 'cargo', 'vehicle', 'other']),
+  stage: ShipmentPhotoStageSchema.default('before'),
   s3Key: z.string(),
   thumbS3Key: z.string().nullable(),
   contentHash: z.string().nullable(),
