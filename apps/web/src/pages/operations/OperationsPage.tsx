@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, Modal, Space, Spin, Switch, Tabs, Tag, Typography, message } from 'antd';
+import { Button, Modal, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography, message } from 'antd';
 import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
 import type { SourceDocument } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
@@ -298,9 +298,11 @@ export default function OperationsPage() {
                       </Tag>
                     )}
                     {counters.data.overdue > 0 && (
-                      <Tag color="red" style={{ marginInlineEnd: 0 }}>
-                        Незавершенные: {counters.data.overdue}
-                      </Tag>
+                      <Tooltip title="Незавершенные за другие дни">
+                        <Tag color="red" style={{ marginInlineEnd: 0, cursor: 'help' }}>
+                          Незавершенные: {counters.data.overdue}
+                        </Tag>
+                      </Tooltip>
                     )}
                   </Space>
                 ) : null
