@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { and, eq, ilike, inArray, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
+import { publishEvent } from './events.js';
 import {
   BulkDeleteRequestSchema,
   BulkDeleteResponseSchema,
@@ -151,6 +152,14 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
           .where(eq(sites.id, req.params.id))
           .returning();
         if (!updated) return reply.code(404).send({ error: 'not_found' });
+        // SSE: мобила слушает site_updated и дёргает /sync. Без этого
+        // переименование объекта / смена кода долетали до мобилы только
+        // через periodic Worker.
+        publishEvent(app, {
+          type: 'site_updated',
+          entityId: updated.id,
+          ts: new Date().toISOString(),
+        });
         return row(updated);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);

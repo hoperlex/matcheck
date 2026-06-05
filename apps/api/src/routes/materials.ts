@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, ilike, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
+import { publishEvent } from './events.js';
 import {
   MaterialJournalResponseSchema,
   MaterialListResponseSchema,
@@ -190,6 +191,14 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(materials.id, req.params.id))
         .returning();
       if (!updated) return reply.code(404).send({ error: 'not_found' });
+      // SSE: мобила слушает material_updated и дёргает /sync — иначе
+      // переименование/правки материала долетают только через periodic
+      // Worker.
+      publishEvent(app, {
+        type: 'material_updated',
+        entityId: updated.id,
+        ts: new Date().toISOString(),
+      });
       return row(updated);
     },
   );

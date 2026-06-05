@@ -1855,6 +1855,16 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .from(sourceDocumentAttachments)
         .where(eq(sourceDocumentAttachments.sourceDocumentId, updated.id));
       const names = await loadSdNames(app, updated);
+      // SSE: мобила слушает source_document_updated и дёргает /sync, чтобы
+      // обновить локальную копию документа. Без этого PATCH-эвента
+      // изменения (дата поставки, получатель, реквизиты) долетали до
+      // мобилы только через periodic Worker (15 мин) или onResume —
+      // и УПД не перепрыгивала «Сегодня» ↔ «Остальные» вовремя.
+      publishEvent(app, {
+        type: 'source_document_updated',
+        entityId: updated.id,
+        ts: new Date().toISOString(),
+      });
       return {
         ...sdRow(updated, names),
         items: updatedItems.map(itemDto),
@@ -1892,6 +1902,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .from(sourceDocumentAttachments)
         .where(eq(sourceDocumentAttachments.sourceDocumentId, updated.id));
       const names = await loadSdNames(app, updated);
+      // SSE: переключение direction УПД («Приёмка»↔«Отгрузка») должно
+      // мгновенно убрать документ из противоположного списка ожидаемых
+      // на мобиле, иначе менеджер правит direction, а инспектор всё ещё
+      // видит документ в старой вкладке до периодического sync.
+      publishEvent(app, {
+        type: 'source_document_updated',
+        entityId: updated.id,
+        ts: new Date().toISOString(),
+      });
       return {
         ...sdRow(updated, names),
         items: items.map(itemDto),
