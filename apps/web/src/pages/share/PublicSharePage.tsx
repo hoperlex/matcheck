@@ -29,15 +29,18 @@ import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 
 const SENDER_LS_KEY = 'matcheck.shareMsg.sender';
-type SavedSender = { name: string; email: string };
+// SavedSender — раньше был {name, email}. После запроса убрать email из
+// формы остался только name. Старые записи с {name, email} тоже читаются —
+// в типе email опциональный, мы просто не используем его.
+type SavedSender = { name: string };
 
 function readSavedSender(): SavedSender | null {
   try {
     const raw = window.localStorage.getItem(SENDER_LS_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<SavedSender>;
-    if (typeof parsed.name === 'string' && typeof parsed.email === 'string') {
-      return { name: parsed.name, email: parsed.email };
+    const parsed = JSON.parse(raw) as Partial<{ name: string }>;
+    if (typeof parsed.name === 'string' && parsed.name.length > 0) {
+      return { name: parsed.name };
     }
     return null;
   } catch {
@@ -396,7 +399,6 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
   const [editingSender, setEditingSender] = useState(false);
   const [body, setBody] = useState('');
   const [name, setName] = useState(savedSender?.name ?? '');
-  const [email, setEmail] = useState(savedSender?.email ?? '');
   const [messages, setMessages] = useState<ShareMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -454,7 +456,6 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
     if (!body.trim()) return;
     const payload = {
       senderName: (savedSender?.name ?? name).trim(),
-      senderEmail: (savedSender?.email ?? email).trim(),
       body: body.trim(),
     };
     setSending(true);
@@ -480,7 +481,7 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
       const json = (await r.json()) as PublicShareMessageCreateResponse;
       setMessages((prev) => [...prev, json.message]);
       setBody('');
-      const sender: SavedSender = { name: payload.senderName, email: payload.senderEmail };
+      const sender: SavedSender = { name: payload.senderName };
       saveSavedSender(sender);
       setSavedSender(sender);
       setEditingSender(false);
@@ -558,27 +559,15 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
       <div style={{ padding: 10, borderTop: '1px solid #f0f0f0', background: '#fff' }}>
         {showFullForm ? (
           <Form layout="vertical" disabled={sending} style={{ marginBottom: 6 }}>
-            <Space.Compact style={{ width: '100%' }}>
-              <Form.Item style={{ marginBottom: 6, flex: 1 }} required>
-                <Input
-                  placeholder="Ваше имя"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  maxLength={120}
-                  size="small"
-                />
-              </Form.Item>
-              <Form.Item style={{ marginBottom: 6, flex: 1 }} required>
-                <Input
-                  placeholder="Email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  maxLength={200}
-                  type="email"
-                  size="small"
-                />
-              </Form.Item>
-            </Space.Compact>
+            <Form.Item style={{ marginBottom: 6 }} required>
+              <Input
+                placeholder="Ваше имя"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                maxLength={120}
+                size="small"
+              />
+            </Form.Item>
           </Form>
         ) : (
           <Typography.Text
@@ -599,9 +588,19 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
         )}
 
         <Input.TextArea
-          placeholder="Сообщение менеджеру…"
+          placeholder="Сообщение менеджеру… (Enter — отправить, Shift+Enter — перенос строки)"
           value={body}
           onChange={(e) => setBody(e.target.value)}
+          // Enter без Shift отправляет сообщение, Shift+Enter — перенос
+          // строки. Привычный мессенджерный UX, чтобы не дёргать кнопку
+          // мышью каждый раз.
+          onPressEnter={(e) => {
+            if (e.shiftKey) return;
+            e.preventDefault();
+            const disabled =
+              !body.trim() || (showFullForm && !name.trim()) || sending;
+            if (!disabled) void onSend();
+          }}
           autoSize={{ minRows: 2, maxRows: 5 }}
           maxLength={4000}
           disabled={sending}
@@ -623,10 +622,7 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
             size="small"
             icon={<SendOutlined />}
             loading={sending}
-            disabled={
-              !body.trim() ||
-              (showFullForm && (!name.trim() || !email.trim() || !email.includes('@')))
-            }
+            disabled={!body.trim() || (showFullForm && !name.trim())}
             onClick={onSend}
           >
             Отправить

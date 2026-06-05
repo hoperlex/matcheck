@@ -36,7 +36,10 @@ export type PublicShareMessageListResponse = z.infer<
 
 export const PublicShareMessageCreateRequestSchema = z.object({
   senderName: z.string().trim().min(1).max(120),
-  senderEmail: z.string().trim().email().max(200),
+  // senderEmail убран из обязательных — внешний отправитель указывает
+  // только имя. Если клиент всё-таки прислал email — игнорируем (старая
+  // совместимость не нужна, форма перерисована).
+  senderEmail: z.string().trim().email().max(200).optional().nullable(),
   body: z.string().trim().min(1).max(4000),
 });
 export type PublicShareMessageCreateRequest = z.infer<

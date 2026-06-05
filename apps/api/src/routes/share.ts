@@ -632,7 +632,9 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
           senderType: 'external',
           senderUserId: null,
           senderName: req.body.senderName.trim(),
-          senderEmail: req.body.senderEmail.trim(),
+          // senderEmail в форме больше не запрашиваем — поле в БД
+          // оставлено nullable для старых записей и на будущее.
+          senderEmail: req.body.senderEmail?.trim() || null,
           body: req.body.body.trim(),
           isRead: false,
         })
