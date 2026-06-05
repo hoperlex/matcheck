@@ -35,13 +35,13 @@ export function DesktopLayout() {
     key: n.path,
     icon: createElement(n.icon),
     // Для «Операции» — если есть подтверждённые за сегодня, рисуем зелёный
-    // Tag «+N» справа от label. При 0 — Tag не рисуем (визуальный шум).
+    // Tag «Сегодня: +N» справа от label. При 0 — Tag не рисуем (визуальный шум).
     label:
       n.key === 'operations' && operationsCount > 0 ? (
         <span>
           {n.label}
           <Tag color="green" style={{ marginLeft: 16, marginInlineEnd: 0 }}>
-            +{operationsCount}
+            Сегодня: +{operationsCount}
           </Tag>
         </span>
       ) : (

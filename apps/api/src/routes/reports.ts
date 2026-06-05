@@ -746,7 +746,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       // Если inspector без назначенного site — возвращаем нули, чтобы не
       // светить чужие данные. Это edge-case: admin ещё не задал объект.
       if (req.user?.role === 'inspector_kpp' && !inspectorSiteId) {
-        return { completedToday: 0, inProgress: 0 };
+        return { completedToday: 0, inProgressToday: 0, overdue: 0 };
       }
       const siteFilterD = inspectorSiteId
         ? `AND d.site_id = '${inspectorSiteId}'::uuid`
@@ -755,6 +755,10 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         ? `AND s.site_id = '${inspectorSiteId}'::uuid`
         : '';
 
+      // del/sh_progress (filled/shipped, без МОЛ) делим по дате arrived_at /
+      // shipped_at: today = МСК-день совпадает с сегодняшним; overdue =
+      // строго раньше. NULL-дата уходит в overdue (на всякий — давно
+      // забытая запись без даты прибытия).
       const rows = await execRows(
         app,
         `
@@ -781,31 +785,61 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
                 = DATE(NOW() AT TIME ZONE 'Europe/Moscow')
               ${siteFilterS}
           ),
-          del_progress AS (
+          del_progress_today AS (
             SELECT COUNT(*)::int AS n
             FROM deliveries d
             JOIN statuses st ON st.id = d.status_id
             WHERE st.entity_type = 'delivery' AND st.code = 'filled'
               AND d.pending_deletion_at IS NULL
+              AND d.arrived_at IS NOT NULL
+              AND DATE(d.arrived_at AT TIME ZONE 'Europe/Moscow')
+                = DATE(NOW() AT TIME ZONE 'Europe/Moscow')
               ${siteFilterD}
           ),
-          sh_progress AS (
+          sh_progress_today AS (
             SELECT COUNT(*)::int AS n
             FROM shipments s
             JOIN statuses st ON st.id = s.status_id
             WHERE st.entity_type = 'shipment' AND st.code = 'shipped'
               AND s.pending_deletion_at IS NULL
+              AND s.shipped_at IS NOT NULL
+              AND DATE(s.shipped_at AT TIME ZONE 'Europe/Moscow')
+                = DATE(NOW() AT TIME ZONE 'Europe/Moscow')
+              ${siteFilterS}
+          ),
+          del_overdue AS (
+            SELECT COUNT(*)::int AS n
+            FROM deliveries d
+            JOIN statuses st ON st.id = d.status_id
+            WHERE st.entity_type = 'delivery' AND st.code = 'filled'
+              AND d.pending_deletion_at IS NULL
+              AND (d.arrived_at IS NULL OR
+                   DATE(d.arrived_at AT TIME ZONE 'Europe/Moscow')
+                     < DATE(NOW() AT TIME ZONE 'Europe/Moscow'))
+              ${siteFilterD}
+          ),
+          sh_overdue AS (
+            SELECT COUNT(*)::int AS n
+            FROM shipments s
+            JOIN statuses st ON st.id = s.status_id
+            WHERE st.entity_type = 'shipment' AND st.code = 'shipped'
+              AND s.pending_deletion_at IS NULL
+              AND (s.shipped_at IS NULL OR
+                   DATE(s.shipped_at AT TIME ZONE 'Europe/Moscow')
+                     < DATE(NOW() AT TIME ZONE 'Europe/Moscow'))
               ${siteFilterS}
           )
         SELECT
-          ((SELECT n FROM del_done) + (SELECT n FROM sh_done))::int     AS "completedToday",
-          ((SELECT n FROM del_progress) + (SELECT n FROM sh_progress))::int AS "inProgress"
+          ((SELECT n FROM del_done) + (SELECT n FROM sh_done))::int                       AS "completedToday",
+          ((SELECT n FROM del_progress_today) + (SELECT n FROM sh_progress_today))::int   AS "inProgressToday",
+          ((SELECT n FROM del_overdue) + (SELECT n FROM sh_overdue))::int                 AS "overdue"
         `,
       );
       const r = rows[0] ?? {};
       return {
         completedToday: Number(r.completedToday ?? 0),
-        inProgress: Number(r.inProgress ?? 0),
+        inProgressToday: Number(r.inProgressToday ?? 0),
+        overdue: Number(r.overdue ?? 0),
       };
     },
   );

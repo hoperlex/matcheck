@@ -40,6 +40,7 @@ import {
 } from '../../services/shipments';
 import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { operationsRowClass } from '../../shared/utils/operationsRowHighlight';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
@@ -650,6 +651,9 @@ export function ShipmentsHistory({
         rowSelection={isAdmin || !isTrash ? bulk.selection : undefined}
         onRowClick={(r) => onOpen(r.id)}
         emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет отгрузок'}
+        rowClassName={(r) =>
+          operationsRowClass({ statusCode: r.status.code, dateIso: r.shippedAt })
+        }
         columns={[
           {
             title: 'Статус',

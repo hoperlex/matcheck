@@ -34,7 +34,7 @@ export function MobileLayout() {
         <span>
           {n.label}
           <Tag color="green" style={{ marginLeft: 16, marginInlineEnd: 0 }}>
-            +{operationsCount}
+            Сегодня: +{operationsCount}
           </Tag>
         </span>
       ) : (

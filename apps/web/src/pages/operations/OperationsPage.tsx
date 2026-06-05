@@ -231,6 +231,18 @@ export default function OperationsPage() {
   ];
 
   return (
+    <>
+      {/* Стили подсветки строк в журнале «Принятые»: жёлтый — filled/
+          shipped без МОЛ за сегодня; красный — то же со вчера и старше.
+          Hover-цвета — чуть темнее основной заливки, чтобы оставалось
+          ощущение интерактивности (rowClassName может комбинироваться
+          с antd hover-стилями). !important — antd row-hover сильнее. */}
+      <style>{`
+        .${'matcheck-row-progress-today'} > td { background-color: #fffbe6 !important; }
+        .${'matcheck-row-progress-today'}:hover > td { background-color: #fff1b8 !important; }
+        .${'matcheck-row-overdue'} > td { background-color: #fff1f0 !important; }
+        .${'matcheck-row-overdue'}:hover > td { background-color: #ffccc7 !important; }
+      `}</style>
     <StickyPageHeader
       header={
         <div
@@ -269,18 +281,28 @@ export default function OperationsPage() {
               style={{ marginBottom: -12 }}
             />
             {/* Под ним — обычные табы Ожидаемые/Принятые. Справа —
-                «В процессе: N» (filled + shipped) если есть активные. */}
+                «Сегодня в процессе: N» (жёлтый) и «Незавершенные: N»
+                (красный) — оба показываются только если есть строки.
+                «Сегодня в процессе» = filled/shipped без МОЛ за сегодня;
+                «Незавершенные» = filled/shipped без МОЛ со вчера и раньше. */}
             <PageTabs
               items={listTabs}
               activeKey={tab}
               onChange={(k) => updateUrl({ tab: k })}
               extra={
-                counters.data && counters.data.inProgress > 0 ? (
-                  // marginLeft 40 — визуально половина таба «Принятые»,
-                  // даёт воздух между табами и счётчиком.
-                  <Tag color="green" style={{ marginLeft: 40, marginInlineEnd: 0 }}>
-                    В процессе: {counters.data.inProgress}
-                  </Tag>
+                counters.data && (counters.data.inProgressToday > 0 || counters.data.overdue > 0) ? (
+                  <Space size={8} style={{ marginLeft: 40 }}>
+                    {counters.data.inProgressToday > 0 && (
+                      <Tag color="gold" style={{ marginInlineEnd: 0 }}>
+                        Сегодня в процессе: {counters.data.inProgressToday}
+                      </Tag>
+                    )}
+                    {counters.data.overdue > 0 && (
+                      <Tag color="red" style={{ marginInlineEnd: 0 }}>
+                        Незавершенные: {counters.data.overdue}
+                      </Tag>
+                    )}
+                  </Space>
                 ) : null
               }
             />
@@ -391,5 +413,6 @@ export default function OperationsPage() {
         </Suspense>
       </Modal>
     </StickyPageHeader>
+    </>
   );
 }

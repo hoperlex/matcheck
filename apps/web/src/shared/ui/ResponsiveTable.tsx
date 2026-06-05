@@ -44,6 +44,7 @@ export function ResponsiveTable<T extends object>({
   numbered,
   rowSelection,
   expandable,
+  rowClassName,
 }: {
   items: T[];
   columns: Column<T>[];
@@ -64,6 +65,9 @@ export function ResponsiveTable<T extends object>({
   // toggle через колонку — для этого используется showExpandColumn:false
   // и контролируемый expandedRowKeys на стороне родителя.
   expandable?: TableProps<T>['expandable'];
+  // Кастомный CSS-класс per-row — для подсветки «в процессе» (жёлтый)
+  // или «незавершено» (красный) в Операциях.
+  rowClassName?: (row: T) => string;
 }) {
   const bp = useBreakpoint();
   // Сумма высот всех родительских StickyPageHeader. 0 — sticky-обёртки нет,
@@ -141,6 +145,7 @@ export function ResponsiveTable<T extends object>({
         pagination={{ pageSize: 100, showSizeChanger: false }}
         locale={{ emptyText: emptyText ?? 'Нет данных' }}
         scroll={{ y: tableScrollY }}
+        rowClassName={rowClassName}
         onRow={
           onRowClick
             ? (row) => ({
