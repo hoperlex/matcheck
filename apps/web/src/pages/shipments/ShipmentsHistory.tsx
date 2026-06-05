@@ -55,6 +55,7 @@ import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../sh
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
+import { formatMoneyRu } from '../../shared/utils/formatRu';
 
 type List = z.infer<typeof ShipmentListResponseSchema>;
 type Row = List['items'][number];
@@ -67,6 +68,38 @@ const KIND_LABELS: Record<ShipmentKind, { label: string; color: string }> = {
   transfer: { label: 'Перемещение', color: 'cyan' },
   writeoff: { label: 'Списание', color: 'volcano' },
 };
+
+// Σ qty × price по позициям, где price задан (зеркало deliveryItemsTotal
+// в DeliveriesHistory). Если ни у одной позиции нет цены — null → UI «—».
+function shipmentItemsTotal(items: Row['items'] | undefined): number | null {
+  if (!items?.length) return null;
+  let sum = 0;
+  let hasAny = false;
+  for (const it of items) {
+    const price = it.price !== null && it.price !== '' ? Number(it.price) : null;
+    if (price === null || !Number.isFinite(price)) continue;
+    const qtyRaw = it.qtyActual ?? it.qtyPlanned;
+    const qty = qtyRaw !== null && qtyRaw !== '' ? Number(qtyRaw) : null;
+    if (qty === null || !Number.isFinite(qty)) continue;
+    sum += qty * price;
+    hasAny = true;
+  }
+  return hasAny ? sum : null;
+}
+
+function shipmentItemsVatSum(items: Row['items'] | undefined): number | null {
+  if (!items?.length) return null;
+  let sum = 0;
+  let hasAny = false;
+  for (const it of items) {
+    if (it.vatSum === null || it.vatSum === '') continue;
+    const v = Number(it.vatSum);
+    if (!Number.isFinite(v)) continue;
+    sum += v;
+    hasAny = true;
+  }
+  return hasAny ? sum : null;
+}
 
 const SELECT_WIDTH = 200;
 // Статусы, для которых вместо hard-delete показываем «Пометить на удаление».
@@ -287,10 +320,16 @@ export function ShipmentsHistory({
     return 'Списание';
   };
   const renderCounterpartyCol = (r: Row) => {
-    if (r.kind !== 'contractor' && r.kind !== 'return') return '—';
-    return r.receiverCounterpartyId
-      ? counterpartiesMap.get(r.receiverCounterpartyId) ?? '—'
-      : '—';
+    // Для contractor/return показываем контрагента-получателя; для transfer
+    // — объект-приёмник (destinationLabel вернёт его имя); для writeoff —
+    // «Списание». Это симметрично с колонкой «Поставщик» приёмки: всегда
+    // показываем самую информативную для этого kind точку «куда / кому».
+    if (r.kind === 'contractor' || r.kind === 'return') {
+      return r.receiverCounterpartyId
+        ? counterpartiesMap.get(r.receiverCounterpartyId) ?? '—'
+        : '—';
+    }
+    return destinationLabel(r);
   };
   const resolveDocNumber = (r: Row): string | null => {
     const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
@@ -547,6 +586,10 @@ export function ShipmentsHistory({
   const renderStatusCell = (r: Row) => (
     <Space size={4} wrap>
       <Tag color={r.status.color ?? 'default'}>{r.status.label}</Tag>
+      {/* «Вид» (Подрядчику/Перемещение/Возврат/Списание) — отдельной
+          колонки в журнале больше нет (симметрия с Приёмкой). Чип здесь
+          оставляет важную информацию в шапке строки. */}
+      <Tag color={KIND_LABELS[r.kind].color}>{KIND_LABELS[r.kind].label}</Tag>
       {r.sourceDocumentIds.length === 0 && <Tag color="gold">Без документа</Tag>}
       {isTrash && (
         <PendingDeletionTag
@@ -655,6 +698,11 @@ export function ShipmentsHistory({
           operationsRowClass({ statusCode: r.status.code, dateIso: r.shippedAt })
         }
         columns={[
+          // Симметрия с DeliveriesHistory: тот же порядок — Статус, Авто,
+          // дата, Получатель (зеркало Поставщика приёмки), Объект, Фото,
+          // Сумма НДС, Сумма, Действия. «Вид» (kind) интегрирован чипом
+          // в Статус, «Куда» (destSite для transfer) — в «Получатель»
+          // через destinationLabel.
           {
             title: 'Статус',
             key: 'status',
@@ -665,37 +713,6 @@ export function ShipmentsHistory({
             render: (_: unknown, r: Row) => renderStatusCell(r),
           },
           {
-            title: 'Вид',
-            key: 'kind',
-            sorter: stringSorter<Row>((r) => KIND_LABELS[r.kind].label),
-            render: (_: unknown, r: Row) => (
-              <Tag color={KIND_LABELS[r.kind].color}>{KIND_LABELS[r.kind].label}</Tag>
-            ),
-          },
-          {
-            title: 'Откуда',
-            key: 'site',
-            sorter: stringSorter<Row>((r) => sitesMap.get(r.siteId) ?? null),
-            render: (_: unknown, r: Row) => sitesMap.get(r.siteId) ?? '—',
-          },
-          {
-            title: 'Куда',
-            key: 'dest',
-            sorter: stringSorter<Row>((r) => destinationLabel(r)),
-            render: (_: unknown, r: Row) => destinationLabel(r),
-          },
-          {
-            title: 'Подрядчик/Поставщик',
-            key: 'counterparty',
-            sorter: stringSorter<Row>((r) => {
-              const cp = r.receiverCounterpartyId
-                ? counterpartiesMap.get(r.receiverCounterpartyId)
-                : null;
-              return cp ?? null;
-            }),
-            render: (_: unknown, r: Row) => renderCounterpartyCol(r),
-          },
-          {
             title: 'Авто',
             dataIndex: 'vehiclePlate',
             sorter: stringSorter<Row>((r) => r.vehiclePlate),
@@ -703,18 +720,51 @@ export function ShipmentsHistory({
           {
             title: 'Отгружено',
             dataIndex: 'shippedAt',
-            // defaultSortOrder убран: иначе при каждой перемонтировке
-            // сортировка возвращалась принудительно. Сервер отдаёт
-            // /shipments по updated_at desc — свежие сверху и без явной
-            // сортировки.
             sorter: dateSorter<Row>((r) => r.shippedAt),
             ...dateRangeColumnFilter<Row>((r) => r.shippedAt),
           },
           {
-            title: 'Кол-во',
-            key: 'itemsCount',
-            sorter: numberSorter<Row>((r) => r.items?.length ?? 0),
-            render: (_: unknown, r: Row) => r.items?.length ?? 0,
+            // Зеркало «Поставщик» в Приёмке: внешний контрагент в начале
+            // цепочки. Для shipment внешний — это получатель. Для transfer
+            // показываем объект-приёмник через destinationLabel.
+            title: 'Получатель',
+            key: 'receiver',
+            sorter: stringSorter<Row>((r) => {
+              const cp = r.receiverCounterpartyId
+                ? counterpartiesMap.get(r.receiverCounterpartyId)
+                : null;
+              return cp ?? destinationLabel(r) ?? null;
+            }),
+            render: (_: unknown, r: Row) => renderCounterpartyCol(r),
+          },
+          {
+            title: 'Объект',
+            key: 'site',
+            sorter: stringSorter<Row>((r) => sitesMap.get(r.siteId) ?? null),
+            render: (_: unknown, r: Row) => sitesMap.get(r.siteId) ?? '—',
+          },
+          {
+            title: 'Фото',
+            key: 'photos',
+            width: 80,
+            sorter: numberSorter<Row>((r) => r.photos?.length ?? 0),
+            // Суммарное количество фото обоих этапов (stage='before' + 'after')
+            // — поле stage у shipment_photos добавлено миграцией 0048.
+            render: (_: unknown, r: Row) => r.photos?.length ?? 0,
+          },
+          {
+            title: 'Сумма НДС',
+            key: 'vatSum',
+            width: 120,
+            sorter: numberSorter<Row>((r) => shipmentItemsVatSum(r.items)),
+            render: (_: unknown, r: Row) => formatMoneyRu(shipmentItemsVatSum(r.items)),
+          },
+          {
+            title: 'Сумма',
+            key: 'totalSum',
+            width: 130,
+            sorter: numberSorter<Row>((r) => shipmentItemsTotal(r.items)),
+            render: (_: unknown, r: Row) => formatMoneyRu(shipmentItemsTotal(r.items)),
           },
           {
             title: 'Действия',
@@ -736,8 +786,9 @@ export function ShipmentsHistory({
           <Card style={{ width: '100%' }} size="small">
             <Space direction="vertical" size={4} style={{ width: '100%', position: 'relative' }}>
               <Space wrap>
+                {/* renderStatusCell теперь уже содержит чип «Вид» (kind) —
+                    отдельный Tag здесь убран, иначе чип дублировался. */}
                 {renderStatusCell(r)}
-                <Tag color={KIND_LABELS[r.kind].color}>{KIND_LABELS[r.kind].label}</Tag>
                 <Typography.Text strong>{r.vehiclePlate ?? 'Без номера'}</Typography.Text>
               </Space>
               <Typography.Text type="secondary">

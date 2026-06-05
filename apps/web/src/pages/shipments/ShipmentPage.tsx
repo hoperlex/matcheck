@@ -267,6 +267,11 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     // В режиме isNew записи на сервере и в IDB ещё нет — запрос дал бы 404
     // и завис бы в isLoading. Форма работает только с локальным state.
     enabled: !!shipmentId && !isNew,
+    // Пока форма отгрузки открыта — поллим каждые 5 сек (зеркало
+    // deliveryQuery в KppPage). Без этого Stage2-фото и комментарий
+    // от мобилы не подтягивались до F5 — react-query держал стейл-DTO,
+    // SSE/syncLoop добегали с большой задержкой.
+    refetchInterval: 5000,
   });
 
   // Детали УПД для преднаполнения формы в режиме isNew. Сначала IndexedDB
