@@ -244,10 +244,13 @@ export default function MaterialsPage() {
           emptyText="Нет данных"
           numbered
           onRowClick={(r) => {
+            // from=materials — флажок «после закрытия модалки вернуть
+            // пользователя в Историю поступлений, а не оставить в Операциях».
+            // Обрабатывается в OperationsPage.closeModal.
             if (r.type === 'intake' && r.deliveryId) {
-              navigate(`/operations?type=delivery&delivery=${r.deliveryId}&from=accepted`);
+              navigate(`/operations?type=delivery&delivery=${r.deliveryId}&from=materials`);
             } else if (r.type === 'shipment' && r.shipmentId) {
-              navigate(`/operations?type=shipment&shipment=${r.shipmentId}&from=list`);
+              navigate(`/operations?type=shipment&shipment=${r.shipmentId}&from=materials`);
             }
           }}
           columns={[

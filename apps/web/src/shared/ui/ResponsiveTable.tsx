@@ -81,13 +81,22 @@ export function ResponsiveTable<T extends object>({
     render: wrapRender<T>(col.render),
   });
 
-  // Map ссылок строк на их исходную позицию — comparator колонки «№» лезет
+  // Map ключей строк на их исходную позицию — comparator колонки «№» лезет
   // сюда O(1), без него indexOf давал бы O(n²·log n) при сортировке.
+  // Ключи строковые (через rowKey), а не сами объекты: на страницах, где
+  // items пересоздаются на каждом ререндере (map/sort/filter), ссылки
+  // меняются и Map<T,number> не находила бы их — получался «0» в столбце.
+  const getRowKey = (it: T): string =>
+    typeof rowKey === 'function'
+      ? String(rowKey(it))
+      : String(it[rowKey] as unknown);
   const originalIndex = useMemo(() => {
-    const m = new Map<T, number>();
-    items.forEach((it, i) => m.set(it, i));
+    const m = new Map<string, number>();
+    items.forEach((it, i) => m.set(getRowKey(it), i));
     return m;
-  }, [items]);
+    // getRowKey зависит от rowKey-пропа, items — стабильный массив здесь.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, rowKey]);
 
   const finalColumns: Column<T>[] = numbered
     ? [
@@ -100,12 +109,14 @@ export function ResponsiveTable<T extends object>({
           // снимает сортировку. Нужен, чтобы юзер мог одним кликом
           // развернуть список «снизу вверх», не меняя других сортировок.
           sorter: (a: T, b: T) =>
-            (originalIndex.get(a) ?? 0) - (originalIndex.get(b) ?? 0),
+            (originalIndex.get(getRowKey(a)) ?? 0) -
+            (originalIndex.get(getRowKey(b)) ?? 0),
           // Номер привязан к исходной позиции, а не к текущему индексу в
           // отсортированной таблице. Иначе после DESC-сортировки первая
           // строка получала бы «1» вместо ожидаемых «N, N-1, …» — теряется
           // визуальная подсказка «куда уехала именно эта запись».
-          render: (_: unknown, record: T) => (originalIndex.get(record) ?? -1) + 1,
+          render: (_: unknown, record: T) =>
+            (originalIndex.get(getRowKey(record)) ?? -1) + 1,
         }),
         ...columns.map(decorate),
       ]

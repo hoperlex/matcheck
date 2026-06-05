@@ -130,6 +130,12 @@ export default function OperationsPage() {
   const deliveryModalOpen =
     !MODAL_DISABLED && (Boolean(editDeliveryId) || editDeliveryIsNew);
   const closeDeliveryModal = () => {
+    // from=materials означает «пришёл из Истории поступлений» —
+    // возвращаем туда, а не оставляем в Операциях.
+    if (params.get('from') === 'materials') {
+      navigate('/materials');
+      return;
+    }
     updateUrl({ delivery: null, new: null, upd: null, from: null });
   };
   const editShipmentId = type === 'shipment' ? params.get('shipment') : null;
@@ -138,6 +144,10 @@ export default function OperationsPage() {
   const shipmentModalOpen =
     !MODAL_DISABLED && (Boolean(editShipmentId) || editShipmentIsNew);
   const closeShipmentModal = () => {
+    if (params.get('from') === 'materials') {
+      navigate('/materials');
+      return;
+    }
     updateUrl({ shipment: null, new: null, upd: null, from: null });
   };
 
