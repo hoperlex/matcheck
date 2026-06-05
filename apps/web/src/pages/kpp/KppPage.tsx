@@ -1586,14 +1586,16 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           // В режиме isNew подтверждение МОЛ недоступно — сначала должна
           // появиться сохранённая запись со статусом filled.
           const confirmDisabled = isNew || isConfirmed || !!verifyReason || isPending;
-          // Кнопка «Пометить на удаление» доступна для filled/confirmed_mol в активном режиме.
+          // «Удалить» в UI = soft-delete (mark-deletion на бэке): запись
+          // уходит в корзину, можно восстановить. Доступно для filled/
+          // confirmed_mol в активном режиме.
           const canMarkDeletion =
             !isPending &&
             (loadedDelivery.status.code === 'filled' ||
               loadedDelivery.status.code === 'confirmed_mol');
           const markBlock = canMarkDeletion ? (
             <Popconfirm
-              title="Пометить на удаление?"
+              title="Удалить?"
               description={
                 <Input.TextArea
                   placeholder="Причина (необязательно)"
@@ -1603,7 +1605,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   onChange={(e) => setMarkReason(e.target.value)}
                 />
               }
-              okText="Пометить"
+              okText="Удалить"
+              okButtonProps={{ danger: true }}
               cancelText="Нет"
               onConfirm={() => {
                 const reason = markReason.trim() || null;
@@ -1612,7 +1615,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               }}
             >
               <Button danger icon={<DeleteOutlined />} loading={markDel.isPending}>
-                Пометить на удаление
+                Удалить
               </Button>
             </Popconfirm>
           ) : null;

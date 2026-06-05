@@ -1428,7 +1428,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               loadedShipment.status.code === 'confirmed_mol');
           const markBlock = canMarkDeletion ? (
             <Popconfirm
-              title="Пометить на удаление?"
+              title="Удалить?"
               description={
                 <Input.TextArea
                   placeholder="Причина (необязательно)"
@@ -1438,7 +1438,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   onChange={(e) => setMarkReason(e.target.value)}
                 />
               }
-              okText="Пометить"
+              okText="Удалить"
+              okButtonProps={{ danger: true }}
               cancelText="Нет"
               onConfirm={() => {
                 const reason = markReason.trim() || null;
@@ -1447,7 +1448,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               }}
             >
               <Button danger icon={<DeleteOutlined />} loading={markDel.isPending}>
-                Пометить на удаление
+                Удалить
               </Button>
             </Popconfirm>
           ) : null;
