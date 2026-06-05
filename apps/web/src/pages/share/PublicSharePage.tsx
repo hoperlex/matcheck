@@ -14,16 +14,10 @@ import {
   Spin,
   Table,
   Tag,
-  Tooltip,
   Typography,
   message as antdMessage,
 } from 'antd';
-import {
-  CloseOutlined,
-  EditOutlined,
-  MessageOutlined,
-  SendOutlined,
-} from '@ant-design/icons';
+import { EditOutlined, SendOutlined } from '@ant-design/icons';
 import type {
   PublicShareMessageCreateResponse,
   PublicShareMessageListResponse,
@@ -88,6 +82,16 @@ export default function PublicSharePage() {
   const [data, setData] = useState<PublicSharedEntity | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Грубый mobile-флаг (< 768): на десктопе чат — sidebar 20% справа;
+  // на мобильном — inline-блок на всю ширину снизу под Материалами.
+  const [isMobile, setIsMobile] = useState<boolean>(() =>
+    typeof window === 'undefined' ? false : window.innerWidth < 768,
+  );
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -209,8 +213,15 @@ export default function PublicSharePage() {
           maxWidth: '95vw',
           margin: '0 auto',
           width: '100%',
+          // Двухколоночный layout: основной контент (≈ 80%) + sidebar
+          // чата (≈ 20%, всегда открыт). На мобильном — стек, чат внизу.
+          display: 'flex',
+          flexDirection: isMobile ? 'column' : 'row',
+          gap: 16,
+          alignItems: 'flex-start',
         }}
       >
+        <div style={{ flex: 1, minWidth: 0, width: isMobile ? '100%' : undefined }}>
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
           <Typography.Title level={3} style={{ margin: 0 }}>
             {isDelivery ? 'Приёмка' : 'Отгрузка'} (просмотр)
@@ -346,24 +357,41 @@ export default function PublicSharePage() {
             )}
           </div>
         </Space>
+        </div>
+        {/* Sidebar с чатом — sticky на десктопе (всегда виден при скролле
+            контента), inline на мобильном. Высота: на desktop — почти
+            весь viewport (минус padding); на mobile — фиксированные 500px,
+            чтобы не съесть весь экран. */}
+        <aside
+          style={{
+            width: isMobile ? '100%' : '20%',
+            minWidth: isMobile ? undefined : 280,
+            flexShrink: 0,
+            position: isMobile ? 'static' : 'sticky',
+            top: 16,
+            height: isMobile ? 500 : 'calc(100vh - 32px)',
+          }}
+        >
+          <PublicShareChat token={token} />
+        </aside>
       </Layout.Content>
-      <PublicShareChat token={token} />
     </Layout>
   );
 }
 
 /**
- * Floating-chat-виджет на публичной share-странице (intercom-style).
- * Свёрнут — круглая иконка в правом нижнем углу с tooltip «Связаться с
- * менеджером»; при hover увеличивается. Клик — раскрывается панель с
- * историей переписки и формой отправки.
+ * Sidebar-чат на публичной share-странице. Раньше был FAB-виджет
+ * (свёрнутая круглая иконка → разворачиваемая панель). По запросу
+ * пользователя теперь чат всегда открыт колонкой справа (≈ 20% ширины
+ * страницы на desktop, inline-блок снизу на mobile). Никакой
+ * иконки/expand/collapse нет.
  *
  * Логика отправки: первая отправка — поля Имя+Email (сохраняются в
  * localStorage); вторая и далее — только TextArea с ссылкой «изменить».
- * Polling списка сообщений раз в 30 сек чтобы видеть ответ менеджера.
+ * Polling списка сообщений: 2 сек (эффект мессенджера). Это та же
+ * частота, что в раскрытом FAB-режиме раньше.
  */
 function PublicShareChat({ token }: { token: string }): JSX.Element {
-  const [expanded, setExpanded] = useState(false);
   const [savedSender, setSavedSender] = useState<SavedSender | null>(() => readSavedSender());
   const [editingSender, setEditingSender] = useState(false);
   const [body, setBody] = useState('');
@@ -374,16 +402,6 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [gone, setGone] = useState(false);
-  // Грубый mobile-флаг: ширина < 768. RNB через ResizeObserver — overkill
-  // для одного виджета. Перечитываем при ресайзе.
-  const [isMobile, setIsMobile] = useState<boolean>(() =>
-    typeof window === 'undefined' ? false : window.innerWidth < 768,
-  );
-  useEffect(() => {
-    const onResize = () => setIsMobile(window.innerWidth < 768);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -407,38 +425,25 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
     [token],
   );
 
-  // Адаптивный polling: панель открыта — 2 сек (эффект мессенджера, ответ
-  // менеджера виден через ≤2 сек); закрыта — 30 сек (фоновое обновление
-  // истории без нагрузки на бэк). При возврате фокуса на окно — рефреш
-  // сразу, чтобы из «закрытой» вкладки возвращаться к свежему состоянию.
+  // Polling 2 сек (раньше адаптивно 2/30 в зависимости от expanded;
+  // теперь панель всегда открыта — фоновых режимов нет). Focus →
+  // моментальный рефреш при возврате во вкладку.
   useEffect(() => {
     void fetchMessages();
-    const interval = expanded ? 2_000 : 30_000;
-    const id = window.setInterval(fetchMessages, interval);
+    const id = window.setInterval(fetchMessages, 2_000);
     const onFocus = () => void fetchMessages();
     window.addEventListener('focus', onFocus);
     return () => {
       window.clearInterval(id);
       window.removeEventListener('focus', onFocus);
     };
-  }, [fetchMessages, expanded]);
+  }, [fetchMessages]);
 
-  // Esc закрывает панель.
+  // Автоскролл к низу при новом сообщении.
   useEffect(() => {
-    if (!expanded) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setExpanded(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [expanded]);
-
-  // Автоскролл к низу при новом сообщении (и при первом раскрытии).
-  useEffect(() => {
-    if (!expanded) return;
     if (!scrollRef.current) return;
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages.length, expanded]);
+  }, [messages.length]);
 
   if (gone) return <></>;
 
@@ -487,55 +492,15 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
     }
   };
 
-  const fabSize = isMobile ? 48 : 56;
-
-  // Свёрнутый режим — круглая FAB-иконка.
-  if (!expanded) {
-    return (
-      <Tooltip title="Связаться с менеджером" placement="left">
-        <Button
-          type="primary"
-          shape="circle"
-          icon={<MessageOutlined style={{ fontSize: isMobile ? 20 : 22 }} />}
-          onClick={() => setExpanded(true)}
-          style={{
-            position: 'fixed',
-            right: 24,
-            bottom: 24,
-            width: fabSize,
-            height: fabSize,
-            zIndex: 1000,
-            boxShadow: '0 6px 24px rgba(22, 119, 255, 0.4)',
-            transition: 'transform 0.15s ease',
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.transform = 'scale(1.08)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.transform = 'scale(1)';
-          }}
-        />
-      </Tooltip>
-    );
-  }
-
-  // Развёрнутый режим — панель чата над FAB-местом.
-  const panelWidth = isMobile ? 'calc(100vw - 24px)' : 380;
-  const panelMaxHeight = isMobile ? 'calc(100vh - 80px)' : 'min(520px, calc(100vh - 80px))';
-
   return (
     <div
       style={{
-        position: 'fixed',
-        right: isMobile ? 12 : 24,
-        bottom: isMobile ? 12 : 24,
-        width: panelWidth,
-        maxHeight: panelMaxHeight,
+        width: '100%',
+        height: '100%',
         background: '#fff',
         border: '1px solid #f0f0f0',
         borderRadius: 12,
-        boxShadow: '0 8px 32px rgba(0,0,0,0.16)',
-        zIndex: 1000,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.06)',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
@@ -546,7 +511,7 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
         style={{
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'space-between',
+          justifyContent: 'flex-start',
           padding: '10px 12px',
           background: '#1677ff',
           color: '#fff',
@@ -555,13 +520,6 @@ function PublicShareChat({ token }: { token: string }): JSX.Element {
         <Typography.Text strong style={{ color: '#fff', fontSize: 15 }}>
           Связаться с менеджером
         </Typography.Text>
-        <Button
-          type="text"
-          size="small"
-          icon={<CloseOutlined style={{ color: '#fff' }} />}
-          onClick={() => setExpanded(false)}
-          aria-label="Закрыть"
-        />
       </div>
 
       {/* История сообщений — скроллер. */}
