@@ -177,7 +177,7 @@ export default function StatsPage() {
               sorter: numberSorter<InspectorStatsRow>((r) => r.vehicles),
             },
             {
-              title: 'Сумма без НДС',
+              title: 'Сумма',
               dataIndex: 'sumNoVat',
               width: 180,
               align: 'right' as const,
