@@ -586,10 +586,6 @@ export function ShipmentsHistory({
   const renderStatusCell = (r: Row) => (
     <Space size={4} wrap>
       <Tag color={r.status.color ?? 'default'}>{r.status.label}</Tag>
-      {/* «Вид» (Подрядчику/Перемещение/Возврат/Списание) — отдельной
-          колонки в журнале больше нет (симметрия с Приёмкой). Чип здесь
-          оставляет важную информацию в шапке строки. */}
-      <Tag color={KIND_LABELS[r.kind].color}>{KIND_LABELS[r.kind].label}</Tag>
       {r.sourceDocumentIds.length === 0 && <Tag color="gold">Без документа</Tag>}
       {isTrash && (
         <PendingDeletionTag
@@ -786,8 +782,6 @@ export function ShipmentsHistory({
           <Card style={{ width: '100%' }} size="small">
             <Space direction="vertical" size={4} style={{ width: '100%', position: 'relative' }}>
               <Space wrap>
-                {/* renderStatusCell теперь уже содержит чип «Вид» (kind) —
-                    отдельный Tag здесь убран, иначе чип дублировался. */}
                 {renderStatusCell(r)}
                 <Typography.Text strong>{r.vehiclePlate ?? 'Без номера'}</Typography.Text>
               </Space>
