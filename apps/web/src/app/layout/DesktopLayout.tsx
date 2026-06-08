@@ -70,7 +70,13 @@ export function DesktopLayout() {
 
   const siderWidth = collapsed ? 64 : 240;
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    // Shell зафиксирован в высоту окна (height + overflow:hidden), документ
+    // НЕ скроллится. Скролл живёт внутри Content (overflowY:auto) — это
+    // убирает «внешний» скролл всей страницы. Табличные страницы
+    // самоограничивают высоту (ResponsiveTable scroll.y) и Content не
+    // переполняют; высокие не-табличные (Настройки и т.п.) скроллятся
+    // внутри Content. Паттерн зеркалит MobileLayout.
+    <Layout style={{ height: '100vh', overflow: 'hidden' }}>
       <Sider
         width={240}
         collapsedWidth={64}
@@ -219,8 +225,14 @@ export function DesktopLayout() {
           </div>
         </div>
       </Sider>
-      <Layout style={{ marginInlineStart: siderWidth, transition: 'margin-inline-start 0.2s' }}>
-        <Content style={{ padding: 24, background: '#f5f5f5' }}>
+      <Layout
+        style={{
+          marginInlineStart: siderWidth,
+          transition: 'margin-inline-start 0.2s',
+          height: '100vh',
+        }}
+      >
+        <Content style={{ padding: 24, background: '#f5f5f5', flex: 1, overflowY: 'auto' }}>
           <Outlet />
         </Content>
       </Layout>
