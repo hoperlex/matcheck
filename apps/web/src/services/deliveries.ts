@@ -137,6 +137,7 @@ export function buildUpsertPayload(r: DeliveryRecord): DeliveryUpsert {
     driverName: effective.driverName,
     arrivedAt: effective.arrivedAt,
     comment: effective.comment,
+    inTransit: effective.inTransit ?? false,
     sourceDocumentIds: effective.sourceDocumentIds,
     items: effective.items.map((it) => ({
       id: it.id,

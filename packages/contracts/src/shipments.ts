@@ -63,6 +63,12 @@ export const ShipmentSchema = z.object({
    * См. миграцию 0050.
    */
   purpose: z.string().nullable(),
+  /**
+   * Транзит — отгрузка является частью транзитного рейса (машина
+   * отгрузилась и поехала с другим грузом). Чекбокс на 1 этапе мобилы.
+   * Default false. См. миграцию 0051.
+   */
+  inTransit: z.boolean(),
   siteId: z.string().uuid(),
   receiverCounterpartyId: z.string().uuid().nullable(),
   receiverMolId: z.string().uuid().nullable(),
@@ -129,6 +135,8 @@ export const ShipmentUpsertSchema = z.object({
   comment: z.string().nullable().optional(),
   /** «Тип отгрузки» — см. ShipmentSchema.purpose. */
   purpose: z.string().max(200).nullable().optional(),
+  /** Транзит — см. ShipmentSchema.inTransit. Default false. */
+  inTransit: z.boolean().default(false),
   sourceDocumentIds: z.array(z.string().uuid()).default([]),
   items: z.array(ShipmentUpsertItemSchema).default([]),
   baseVersion: z.number().int().nonnegative().optional(),

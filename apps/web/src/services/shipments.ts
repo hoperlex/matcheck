@@ -142,6 +142,7 @@ export function buildUpsertPayload(r: ShipmentRecord): ShipmentUpsert {
     driverName: effective.driverName,
     shippedAt: effective.shippedAt,
     comment: effective.comment,
+    inTransit: effective.inTransit ?? false,
     sourceDocumentIds: effective.sourceDocumentIds,
     items: effective.items.map((it) => ({
       id: it.id,

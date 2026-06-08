@@ -66,6 +66,12 @@ export const DeliverySchema = z.object({
   arrivedAt: z.string().nullable(),
   inspectorId: z.string().uuid().nullable(),
   comment: z.string().nullable(),
+  /**
+   * Транзит — приёмка является частью транзитного рейса (машина
+   * разгрузилась и поехала с другим грузом). Чекбокс на 1 этапе мобилы.
+   * Default false. См. миграцию 0051.
+   */
+  inTransit: z.boolean(),
   confirmedByMolUserId: z.string().uuid().nullable(),
   confirmedByMolUserEmail: z.string().nullable(),
   confirmedByMolAt: z.string().nullable(),
@@ -127,6 +133,8 @@ export const DeliveryUpsertSchema = z.object({
   driverName: z.string().max(200).nullable().optional(),
   arrivedAt: z.string().nullable().optional(),
   comment: z.string().nullable().optional(),
+  /** Транзит — см. DeliverySchema.inTransit. Default false. */
+  inTransit: z.boolean().default(false),
   sourceDocumentIds: z.array(z.string().uuid()).default([]),
   items: z.array(DeliveryUpsertItemSchema).default([]),
   baseVersion: z.number().int().nonnegative().optional(),

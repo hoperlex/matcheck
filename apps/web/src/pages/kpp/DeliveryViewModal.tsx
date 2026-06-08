@@ -135,6 +135,11 @@ export function DeliveryViewModal({
                 Сумма: {formatMoneyRu(data.docTotalSum)}
               </Tag>
             ) : null}
+            {d.inTransit ? (
+              <Tag style={{ marginInlineEnd: 0 }} color="orange">
+                🚚 Транзит
+              </Tag>
+            ) : null}
             <PendingDeletionTag
               at={d.pendingDeletionAt}
               byEmail={d.pendingDeletionByUserEmail}

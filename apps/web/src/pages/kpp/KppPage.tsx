@@ -367,6 +367,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       arrivedAt: null,
       inspectorId: authUser?.id ?? null,
       comment: null,
+      inTransit: false,
       confirmedByMolUserId: null,
       confirmedByMolUserEmail: null,
       confirmedByMolAt: null,
@@ -1424,6 +1425,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     )}
                 </Tag>
               )}
+              {/* Транзит — рисуется ТОЛЬКО если флаг true (заполнено
+                  инспектором на 1 этапе мобилы). В шапке справа от блока
+                  Сумма / УПД-чипов. См. миграцию 0051. */}
+              {loadedDelivery?.inTransit ? (
+                <Tag color="orange" style={{ marginInlineEnd: 0 }}>
+                  🚚 Транзит
+                </Tag>
+              ) : null}
             </Space>
           );
         })()}

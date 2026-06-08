@@ -395,6 +395,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       status: initialStatus,
       kind: 'contractor',
       purpose: null,
+      inTransit: false,
       siteId: inspectorSiteId ?? SYSTEM_SITE_ID,
       receiverCounterpartyId: null,
       receiverMolId: null,
@@ -1427,6 +1428,16 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   />
                 )}
               </InlineEditChip>
+
+              {/* Транзит — рисуется ТОЛЬКО если флаг true (заполнено
+                  инспектором на 1 этапе мобилы чекбоксом). Read-only тег:
+                  менеджер на портале этот флаг не редактирует.
+                  См. миграцию 0051. */}
+              {loadedShipment?.inTransit ? (
+                <Tag color="orange" style={{ marginInlineEnd: 0 }}>
+                  🚚 Транзит
+                </Tag>
+              ) : null}
 
               {/* УПД/Накладная — read-only чипы (значения приходят от
                   привязки УПД, в этой шапке не редактируются). */}

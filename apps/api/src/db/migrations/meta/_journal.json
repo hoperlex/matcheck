@@ -358,6 +358,13 @@
       "when": 1780878300000,
       "tag": "0050_shipment_purpose",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1780878360000,
+      "tag": "0051_in_transit",
+      "breakpoints": true
     }
   ]
 }

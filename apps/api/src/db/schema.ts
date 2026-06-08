@@ -622,6 +622,10 @@ export const deliveries = pgTable(
     arrivedAt: timestamp('arrived_at', { withTimezone: true }),
     inspectorId: uuid('inspector_id').references(() => users.id, { onDelete: 'set null' }),
     comment: text('comment'),
+    // Транзит — приёмка является частью транзитного рейса (машина
+    // разгрузилась и поехала с другим грузом). Чекбокс на 1 этапе мобилы.
+    // См. миграцию 0051. Default false — legacy-записи в порядке.
+    inTransit: boolean('in_transit').notNull().default(false),
     confirmedByMolUserId: uuid('confirmed_by_mol_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),
@@ -781,6 +785,9 @@ export const shipments = pgTable(
     // Тип text (не enum) — список расширяется без миграции БД.
     // См. миграцию 0050. NULL для legacy и для отгрузок с УПД.
     purpose: text('purpose'),
+    // Транзит — зеркало deliveries.in_transit. Чекбокс на 1 этапе мобилы.
+    // См. миграцию 0051. Default false — legacy-записи в порядке.
+    inTransit: boolean('in_transit').notNull().default(false),
     siteId: uuid('site_id')
       .notNull()
       .references(() => sites.id, { onDelete: 'restrict' }),
