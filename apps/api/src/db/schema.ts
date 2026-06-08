@@ -843,12 +843,13 @@ export const shipments = pgTable(
       'shipments_pending_deletion_chk',
       sql`(${t.pendingDeletionAt} is null and ${t.pendingDeletionByUserId} is null) or (${t.pendingDeletionAt} is not null and ${t.pendingDeletionByUserId} is not null)`,
     ),
-    // Соответствие kind и набора получателей/направления. См. миграцию 0030.
+    // Соответствие kind и набора получателей/направления. См. миграции
+    // 0030 и 0052 (для kind='contractor' допустимы оба NULL = empty-draft).
     check(
       'shipments_kind_links_chk',
       sql`(
         (${t.kind} = 'contractor'
-          AND ((${t.receiverCounterpartyId} IS NOT NULL) <> (${t.receiverMolId} IS NOT NULL))
+          AND NOT (${t.receiverCounterpartyId} IS NOT NULL AND ${t.receiverMolId} IS NOT NULL)
           AND ${t.destSiteId} IS NULL)
         OR (${t.kind} = 'return'
           AND ${t.receiverCounterpartyId} IS NOT NULL

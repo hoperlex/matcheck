@@ -856,7 +856,7 @@ type KindLinksError = {
   message: string;
 };
 function validateKindLinks(input: z.infer<typeof ShipmentUpsertSchema>): KindLinksError | null {
-  const { kind, receiverCounterpartyId, receiverMolId, destSiteId, siteId } = input;
+  const { kind, receiverCounterpartyId, receiverMolId, destSiteId, siteId, sourceDocumentIds } = input;
   // Получатель указан XOR через counterparty или МОЛ (двух одновременно — нельзя).
   const hasContractorReceiver = Boolean(receiverCounterpartyId);
   const hasMolReceiver = Boolean(receiverMolId);
@@ -867,10 +867,18 @@ function validateKindLinks(input: z.infer<typeof ShipmentUpsertSchema>): KindLin
     code: 'receiver_required',
     message,
   });
+  // Empty-draft = отгрузка без привязанной УПД (создана инспектором через
+  // «Создать отгрузку» на мобиле). У таких отгрузок получатель может быть
+  // не указан — менеджер дозaпoлнит на портале. Конфликт с DB-CHECK
+  // shipments_kind_links_chk решается тем, что для contractor допускается
+  // запись без receiver (CHECK не запрещает оба NULL).
+  const isEmptyDraft = !sourceDocumentIds || sourceDocumentIds.length === 0;
 
   if (kind === 'contractor') {
     if (hasBothReceivers) return bad('Укажите получателя одним способом: подрядчик или МОЛ');
-    if (!hasAnyReceiver) return noReceiver('Для отгрузки нужен получатель (подрядчик или МОЛ)');
+    if (!hasAnyReceiver && !isEmptyDraft) {
+      return noReceiver('Для отгрузки нужен получатель (подрядчик или МОЛ)');
+    }
     if (destSiteId) return bad('destSiteId допустим только для перемещения');
     return null;
   }
