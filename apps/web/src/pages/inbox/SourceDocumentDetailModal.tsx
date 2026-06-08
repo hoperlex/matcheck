@@ -821,6 +821,10 @@ function DetailBody({
             min={splitterMin}
             defaultSize={defaultItemsSize()}
             size={controlledTopSize}
+            // antd .ant-splitter-panel по умолчанию overflow:auto — давал лишний
+            // «внешний» скролл панели поверх внутреннего скролла таблицы (наш div
+            // ниже, ref=topPaneRef). Гасим его — остаётся единственный, внутренний.
+            style={{ overflow: 'hidden' }}
           >
             <div
               ref={topPaneRef}
@@ -836,7 +840,10 @@ function DetailBody({
               <div style={{ marginTop: 4 }}>{itemsNode}</div>
             </div>
           </Splitter.Panel>
-          <Splitter.Panel min="20%">
+          {/* style overflow:hidden — гасим дефолтный overflow:auto antd-панели,
+              чтобы не было «внешнего» скролла поверх внутреннего скролла PDF
+              (iframe Chrome-viewer'а). */}
+          <Splitter.Panel min="20%" style={{ overflow: 'hidden' }}>
             <div
               style={{
                 height: '100%',
