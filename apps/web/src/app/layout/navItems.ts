@@ -6,7 +6,6 @@ import {
   FileTextOutlined,
   InboxOutlined,
   SafetyOutlined,
-  SettingOutlined,
 } from '@ant-design/icons';
 import type { UserRole } from '@matcheck/contracts';
 
@@ -63,17 +62,11 @@ export const navItems: NavItem[] = [
     roles: ['admin'],
     icon: ControlOutlined,
   },
-  {
-    key: 'settings',
-    label: 'Настройки',
-    path: '/settings',
-    // Только для inspector_kpp: настройки распознавания УПД-PDF, PWA-кэш,
-    // установка приложения — это всё про устройство инспектора. У admin
-    // есть свой /admin/settings (тот же компонент в админ-меню),
-    // у manager доступа не должно быть.
-    roles: ['inspector_kpp'],
-    icon: SettingOutlined,
-  },
+  // Раздел «Настройки» (/settings) в основной навигации не показываем
+  // никому: способ распознавания УПД фиксируется на стороне сервера
+  // (дефолт — LLM, управляет admin через /admin/settings), а локальное
+  // хранение по умолчанию «Все данные». Ни manager, ни inspector_kpp
+  // переопределять это вручную не должны.
 ];
 
 export function filterByRole(role: UserRole): NavItem[] {

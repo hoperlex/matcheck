@@ -156,17 +156,10 @@ export const router = createBrowserRouter([
           { path: 'settings', element: suspense(<Settings />) },
         ],
       },
-      {
-        // /settings — настройки устройства инспектора (PWA-кэш, синхронизация,
-        // установка приложения, способ распознавания УПД). Manager заходить
-        // не должен; admin использует тот же компонент через /admin/settings.
-        path: 'settings',
-        element: (
-          <ProtectedRoute roles={['inspector_kpp']}>
-            {suspense(<Settings />)}
-          </ProtectedRoute>
-        ),
-      },
+      // Top-level роут /settings убран: раздел «Настройки» больше не
+      // показываем ни manager, ни inspector_kpp. Способ распознавания УПД
+      // и прочие настройки доступны только admin через /admin/settings
+      // (тот же компонент Settings). Прямой заход на /settings уходит в `*`.
       { path: '*', element: <Navigate to="/" replace /> },
     ],
   },
