@@ -351,6 +351,13 @@
       "when": 1780878240000,
       "tag": "0049_shipment_shipped_label_oformlena",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1780878300000,
+      "tag": "0050_shipment_purpose",
+      "breakpoints": true
     }
   ]
 }

@@ -118,6 +118,16 @@ const KIND_OPTIONS: { label: string; value: ShipmentKind }[] = [
   { label: 'Списание', value: 'writeoff' },
 ];
 
+// Семантический «Тип отгрузки» (shipments.purpose, миграция 0050). Мобила
+// записывает один из этих 4 вариантов через dropdown на форме «Новая
+// отгрузка». Менеджер на портале может дозaпoлнить/изменить тот же набор.
+const PURPOSE_OPTIONS = [
+  'Вывоз материала',
+  'Перемещение на объект',
+  'Вывоз мусора',
+  'Другое',
+];
+
 type ListTab = 'expected' | 'accepted';
 
 const trimQty = (s: string) =>
@@ -187,6 +197,10 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const [plate, setPlate] = useState('');
   const [driverName, setDriverName] = useState('');
   const [comment, setComment] = useState('');
+  // «Тип отгрузки» — приходит из shipments.purpose (миграция 0050). Заполняется
+  // инспектором с мобилы в dropdown'е, менеджер может править на портале.
+  // 4 значения см. PURPOSE_OPTIONS ниже + произвольный текст для legacy.
+  const [purpose, setPurpose] = useState<string | null>(null);
   const [linkUpdOpen, setLinkUpdOpen] = useState(false);
   const [linkUpdError, setLinkUpdError] = useState<string | null>(null);
 
@@ -206,6 +220,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       setPlate('');
       setDriverName('');
       setComment('');
+      setPurpose(null);
       hydratedIdRef.current = null;
     }
   }, [shipmentId, inspectorSiteId]);
@@ -337,6 +352,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       setPlate(s.vehiclePlate ?? '');
       setDriverName(s.driverName ?? '');
       setComment(s.comment ?? '');
+      setPurpose(s.purpose ?? null);
       setItems(
         s.items.map((it, idx) => ({
           clientKey: newKey(),
@@ -378,6 +394,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       id: shipmentId,
       status: initialStatus,
       kind: 'contractor',
+      purpose: null,
       siteId: inspectorSiteId ?? SYSTEM_SITE_ID,
       receiverCounterpartyId: null,
       receiverMolId: null,
@@ -570,6 +587,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       driverName: driverName || null,
       shippedAt: loadedShipment.shippedAt ?? new Date().toISOString(),
       comment: comment || null,
+      purpose: purpose || null,
       items: items
         .filter((i) => i.nameRaw.trim().length > 0)
         .map((i) => {
@@ -1169,11 +1187,12 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           error={linkUpdError}
         />
 
-        {/* «Вид отгрузки» (kind) оставлен Segmented'ом — это критичный
-            переключатель, меняющий состав остальных полей. Менять его
-            через chip-popover менее удобно: пользователь должен видеть
-            режим постоянно. Card сжали до padding 8. */}
-        <Card size="small" title="Вид отгрузки" styles={{ body: { padding: 8 } }}>
+        {/* «Вид отгрузки» (kind) скрыт по запросу: для повседневного
+            КПП-сценария Подрядчику (contractor) — единственно нужный
+            режим. Возврат/Перемещение/Списание возвращаются разкомментом
+            блока ниже когда понадобятся. State `kind` остаётся в коде,
+            дефолт 'contractor' выставляется в useEffect-сбросе. */}
+        {/* <Card size="small" title="Вид отгрузки" styles={{ body: { padding: 8 } }}>
           <Segmented
             block
             options={KIND_OPTIONS}
@@ -1187,15 +1206,12 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 setDestSiteId(null);
               }
               if (next === 'return') {
-                // Возврат — только counterparty (поставщик).
                 setReceiverKind('counterparty');
               }
-              // Между сменой kind сбрасываем выбранный id: подрядчики и МОЛ
-              // имеют разные id-пространства, чтобы не отправить чужой.
               setReceiverId(null);
             }}
           />
-        </Card>
+        </Card> */}
 
         {/* Inline-чипы: визуально как в read-only ViewModal'е, клик —
             редактор в Popover. Экономит ~80px вертикально по сравнению
@@ -1381,6 +1397,33 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                     onChange={(e) => setDriverName(e.target.value)}
                     onPressEnter={close}
                     onBlur={close}
+                  />
+                )}
+              </InlineEditChip>
+
+              {/* «Тип отгрузки» — серверное поле shipments.purpose (миграция
+                  0050). Заполняет инспектор с мобилы в dropdown'е на форме
+                  «Новая отгрузка»; менеджер может править. 4 фиксированных
+                  значения см. PURPOSE_OPTIONS. */}
+              <InlineEditChip
+                label="Тип отгрузки"
+                value={purpose}
+                placeholder="— не указан —"
+                width={260}
+              >
+                {(close) => (
+                  <Select
+                    autoFocus
+                    size="small"
+                    style={{ width: '100%' }}
+                    value={purpose}
+                    placeholder="Выберите тип"
+                    allowClear
+                    onChange={(v) => {
+                      setPurpose(v ?? null);
+                      close();
+                    }}
+                    options={PURPOSE_OPTIONS.map((p) => ({ label: p, value: p }))}
                   />
                 )}
               </InlineEditChip>

@@ -540,6 +540,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             sortOrder: s._status.sortOrder,
           },
           kind: s.kind,
+          purpose: s.purpose,
           siteId: s.siteId,
           receiverCounterpartyId: s.receiverCounterpartyId,
           receiverMolId: s.receiverMolId,

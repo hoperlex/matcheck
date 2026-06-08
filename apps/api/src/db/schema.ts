@@ -774,6 +774,13 @@ export const shipments = pgTable(
       .notNull()
       .references(() => statuses.id),
     kind: shipmentKindEnum('kind').notNull(),
+    // Тип отгрузки (purpose) — семантическая категория, отдельная от kind.
+    // Заполняется инспектором на мобиле (dropdown на форме «Новая отгрузка»):
+    // «Вывоз материала», «Перемещение на объект», «Вывоз мусора», «Другое».
+    // На веб-портале — чип «Тип отгрузки: …» в шапке карточки.
+    // Тип text (не enum) — список расширяется без миграции БД.
+    // См. миграцию 0050. NULL для legacy и для отгрузок с УПД.
+    purpose: text('purpose'),
     siteId: uuid('site_id')
       .notNull()
       .references(() => sites.id, { onDelete: 'restrict' }),

@@ -134,6 +134,11 @@ export function ShipmentViewModal({
             {s.vehiclePlate ? (
               <Tag style={{ marginInlineEnd: 0 }}>Авто: {s.vehiclePlate}</Tag>
             ) : null}
+            {s.purpose ? (
+              <Tag style={{ marginInlineEnd: 0 }} color="cyan">
+                Тип отгрузки: {s.purpose}
+              </Tag>
+            ) : null}
             {data.docTotalSum != null ? (
               <Tag style={{ marginInlineEnd: 0 }}>
                 Сумма: {formatMoneyRu(data.docTotalSum)}

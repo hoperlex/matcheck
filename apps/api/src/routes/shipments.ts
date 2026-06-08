@@ -146,6 +146,7 @@ async function buildShipmentDto(app: any, id: string) {
       sortOrder: st.sortOrder,
     },
     kind: s.kind,
+    purpose: s.purpose,
     siteId: s.siteId,
     receiverCounterpartyId: s.receiverCounterpartyId,
     receiverMolId: s.receiverMolId,
@@ -904,6 +905,7 @@ async function createShipment(
       id: input.id,
       statusId,
       kind: input.kind,
+      purpose: input.purpose ?? null,
       siteId: input.siteId,
       receiverCounterpartyId: input.receiverCounterpartyId ?? null,
       receiverMolId: input.receiverMolId ?? null,
@@ -1016,6 +1018,7 @@ async function updateShipment(
     .set({
       statusId: effectiveStatusId,
       kind: input.kind,
+      purpose: input.purpose ?? null,
       siteId: input.siteId,
       receiverCounterpartyId: input.receiverCounterpartyId ?? null,
       receiverMolId: input.receiverMolId ?? null,

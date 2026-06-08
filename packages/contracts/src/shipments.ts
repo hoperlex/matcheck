@@ -54,6 +54,15 @@ export const ShipmentSchema = z.object({
   id: z.string().uuid(),
   status: StatusSchema,
   kind: ShipmentKindSchema,
+  /**
+   * «Тип отгрузки» — семантическая категория, отдельная от kind.
+   * Заполняется инспектором с мобилы в dropdown'е на форме «Новая
+   * отгрузка». 4 значения: «Вывоз материала», «Перемещение на объект»,
+   * «Вывоз мусора», «Другое». На веб-портале — чип «Тип отгрузки: …»
+   * в шапке карточки. NULL для legacy и для отгрузок с УПД.
+   * См. миграцию 0050.
+   */
+  purpose: z.string().nullable(),
   siteId: z.string().uuid(),
   receiverCounterpartyId: z.string().uuid().nullable(),
   receiverMolId: z.string().uuid().nullable(),
@@ -118,6 +127,8 @@ export const ShipmentUpsertSchema = z.object({
   driverName: z.string().max(200).nullable().optional(),
   shippedAt: z.string().nullable().optional(),
   comment: z.string().nullable().optional(),
+  /** «Тип отгрузки» — см. ShipmentSchema.purpose. */
+  purpose: z.string().max(200).nullable().optional(),
   sourceDocumentIds: z.array(z.string().uuid()).default([]),
   items: z.array(ShipmentUpsertItemSchema).default([]),
   baseVersion: z.number().int().nonnegative().optional(),
