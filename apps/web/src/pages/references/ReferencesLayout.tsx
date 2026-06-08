@@ -15,12 +15,14 @@ interface CountResp {
  * подпись + URL для лёгкого count-запроса (limit=1, берём total из ответа).
  * Все эндпоинты возвращают `{ items, total }`, поэтому формат единый.
  */
-// МОЛ и Материалы убраны из навигации по запросу — справочники остаются
-// доступны по прямому URL (роуты сохранены в router.tsx) на случай
-// служебных задач, но в основном UI скрыты.
+// Вкладка «МОЛ» — список из внешней БД ФОТ (read-only), справа от Контрагентов.
+// Старый внутренний справочник «Ответственные лица» (/references/responsible-persons)
+// и «Материалы» убраны из навигации — роуты сохранены в router.tsx, но в
+// основном UI скрыты. countUrl '/mol' отдаёт { total } так же, как остальные.
 const TAB_DEFS: { key: string; label: string; countUrl: string }[] = [
   { key: DEFAULT_TAB, label: 'Объекты', countUrl: '/sites?limit=1' },
   { key: '/references/counterparties', label: 'Контрагенты', countUrl: '/counterparties?limit=1' },
+  { key: '/references/mol', label: 'МОЛ', countUrl: '/mol' },
 ];
 
 export default function ReferencesLayout() {

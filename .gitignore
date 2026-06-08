@@ -73,6 +73,21 @@ web_modules/
 infra/api.env
 infra/api.env.local
 
+# Локальные секреты/сертификаты для разработки. Зеркалит прод-путь
+# /srv/matcheck/secrets (см. infra/docker-compose.prod.yml). Реальные файлы
+# (root.crt, *.pem) НЕ коммитим — в git только .gitkeep и README.
+infra/secrets/*
+!infra/secrets/.gitkeep
+!infra/secrets/README.md
+!infra/secrets/yandex-ca/
+infra/secrets/yandex-ca/*
+!infra/secrets/yandex-ca/.gitkeep
+
+# Подстраховка: сертификаты и приватные ключи не коммитим нигде в репо.
+*.crt
+*.pem
+*.key
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

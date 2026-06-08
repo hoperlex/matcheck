@@ -4,6 +4,7 @@ export * from './bulk.js';
 export * from './counterparties.js';
 export * from './materials.js';
 export * from './responsible-persons.js';
+export * from './mol.js';
 export * from './assets.js';
 export * from './sites.js';
 export * from './shipments.js';

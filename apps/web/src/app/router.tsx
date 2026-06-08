@@ -15,6 +15,7 @@ const Sites = lazy(() => import('../pages/references/Sites'));
 const Counterparties = lazy(() => import('../pages/references/Counterparties'));
 const Materials = lazy(() => import('../pages/references/Materials'));
 const ResponsiblePersons = lazy(() => import('../pages/references/ResponsiblePersons'));
+const MolPersons = lazy(() => import('../pages/references/MolPersons'));
 const Assets = lazy(() => import('../pages/references/Assets'));
 const MaterialsJournal = lazy(() => import('../pages/materials/MaterialsPage'));
 const StatsPage = lazy(() => import('../pages/stats/StatsPage'));
@@ -134,6 +135,7 @@ export const router = createBrowserRouter([
           { index: true, element: <Navigate to="/references/sites" replace /> },
           { path: 'sites', element: suspense(<Sites />) },
           { path: 'counterparties', element: suspense(<Counterparties />) },
+          { path: 'mol', element: suspense(<MolPersons />) },
           { path: 'responsible-persons', element: suspense(<ResponsiblePersons />) },
           { path: 'materials', element: suspense(<Materials />) },
           { path: 'assets', element: suspense(<Assets />) },

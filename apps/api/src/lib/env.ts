@@ -10,6 +10,10 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url().optional(),
   REDIS_URL: z.string().optional(),
 
+  // Внешняя БД ФОТ (read-only) — список МОЛ. Отдельный пул, не основной.
+  // Если не задан — эндпоинт /api/v1/mol отдаёт пустой список с флагом stale.
+  FOT_DATABASE_URL: z.string().url().optional(),
+
   // CORS
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
 
