@@ -620,65 +620,78 @@ export function ShipmentsHistory({
             // продолжает фильтровать, но UI его не выставляет.
             extra={filtersExtra}
           />
-          {tabs && activeTab && onTabChange && (
-            <PageTabs
-              items={tabs}
-              activeKey={activeTab}
-              onChange={onTabChange}
-              extra={
-                bulk.hasSelection ? (
-                  isTrash ? (
-                    <Space size={8}>
-                      <Typography.Text type="secondary">
-                        Выбрано: <b>{bulk.selectedCount}</b>
-                      </Typography.Text>
-                      <Popconfirm
-                        title={`Восстановить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)}?`}
-                        okText="Восстановить"
-                        cancelText="Отмена"
-                        onConfirm={() =>
-                          bulkUnmark.mutate(Array.from(bulk.selectedIds))
-                        }
-                        placement="bottomRight"
-                      >
-                        <Button icon={<UndoOutlined />} loading={bulkUnmark.isPending}>
-                          Восстановить выбранные
-                        </Button>
-                      </Popconfirm>
-                      {isAdmin && (
-                        <Popconfirm
-                          title={`Удалить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)} навсегда?`}
-                          description="Восстановить будет невозможно."
-                          okText="Удалить"
-                          cancelText="Отмена"
-                          okButtonProps={{ danger: true, loading: bulkHard.isPending }}
-                          onConfirm={() =>
-                            bulkHard.mutate(Array.from(bulk.selectedIds))
-                          }
-                          placement="bottomRight"
-                        >
-                          <Button danger icon={<DeleteOutlined />} loading={bulkHard.isPending}>
-                            Удалить навсегда
-                          </Button>
-                        </Popconfirm>
-                      )}
-                      <Button onClick={bulk.clear} disabled={bulkUnmark.isPending || bulkHard.isPending}>
-                        Снять выбор
+          {(() => {
+            // См. комментарий-двойник в DeliveriesHistory: если есть tabs —
+            // bulk-actions переезжают в PageTabs.extra; иначе рисуются
+            // независимой строкой справа от шапки (OperationsPage не
+            // передаёт tabs).
+            const actions = bulk.hasSelection ? (
+              isTrash ? (
+                <Space size={8}>
+                  <Typography.Text type="secondary">
+                    Выбрано: <b>{bulk.selectedCount}</b>
+                  </Typography.Text>
+                  <Popconfirm
+                    title={`Восстановить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)}?`}
+                    okText="Восстановить"
+                    cancelText="Отмена"
+                    onConfirm={() =>
+                      bulkUnmark.mutate(Array.from(bulk.selectedIds))
+                    }
+                    placement="bottomRight"
+                  >
+                    <Button icon={<UndoOutlined />} loading={bulkUnmark.isPending}>
+                      Восстановить выбранные
+                    </Button>
+                  </Popconfirm>
+                  {isAdmin && (
+                    <Popconfirm
+                      title={`Удалить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)} навсегда?`}
+                      description="Восстановить будет невозможно."
+                      okText="Удалить"
+                      cancelText="Отмена"
+                      okButtonProps={{ danger: true, loading: bulkHard.isPending }}
+                      onConfirm={() =>
+                        bulkHard.mutate(Array.from(bulk.selectedIds))
+                      }
+                      placement="bottomRight"
+                    >
+                      <Button danger icon={<DeleteOutlined />} loading={bulkHard.isPending}>
+                        Удалить навсегда
                       </Button>
-                    </Space>
-                  ) : (
-                    <BulkActionInline
-                      selectedCount={bulk.selectedCount}
-                      onClear={bulk.clear}
-                      onDelete={() => bulkMark.mutate(Array.from(bulk.selectedIds))}
-                      deleting={bulkMark.isPending}
-                      confirmTitle={`Пометить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)} на удаление?`}
-                    />
-                  )
-                ) : null
-              }
-            />
-          )}
+                    </Popconfirm>
+                  )}
+                  <Button onClick={bulk.clear} disabled={bulkUnmark.isPending || bulkHard.isPending}>
+                    Снять выбор
+                  </Button>
+                </Space>
+              ) : (
+                <BulkActionInline
+                  selectedCount={bulk.selectedCount}
+                  onClear={bulk.clear}
+                  onDelete={() => bulkMark.mutate(Array.from(bulk.selectedIds))}
+                  deleting={bulkMark.isPending}
+                  confirmTitle={`Пометить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)} на удаление?`}
+                />
+              )
+            ) : null;
+
+            if (tabs && activeTab && onTabChange) {
+              return (
+                <PageTabs
+                  items={tabs}
+                  activeKey={activeTab}
+                  onChange={onTabChange}
+                  extra={actions}
+                />
+              );
+            }
+            return actions ? (
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                {actions}
+              </div>
+            ) : null;
+          })()}
         </Space>
       }
     >
