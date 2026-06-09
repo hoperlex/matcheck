@@ -28,6 +28,10 @@ export function effectiveState(r: DeliveryRecord): Delivery | null {
     if (!r.local) return null;
     return {
       id: r.id,
+      // displayId назначается БД при первом INSERT-е через sequence
+      // (миграция 0059). У pure-local-черновика ещё нет; ставим 0 как
+      // маркер «не присвоено».
+      displayId: 0,
       status: PLACEHOLDER_NOT_FILLED,
       siteId: SYSTEM_SITE_ID,
       supplierId: null,

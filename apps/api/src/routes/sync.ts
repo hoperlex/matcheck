@@ -457,6 +457,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         }),
         deliveries: dRows.map((d) => ({
           id: d.id,
+          displayId: d.displayId,
           status: {
             id: d._status.id,
             entityType: d._status.entityType,
@@ -536,6 +537,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         })),
         shipments: shRows.map((s) => ({
           id: s.id,
+          displayId: s.displayId,
           status: {
             id: s._status.id,
             entityType: s._status.entityType,

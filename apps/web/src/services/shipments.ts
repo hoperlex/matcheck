@@ -33,6 +33,9 @@ export function effectiveState(r: ShipmentRecord): Shipment | null {
     if (!r.local) return null;
     return {
       id: r.id,
+      // displayId назначается БД через sequence (миграция 0059); у
+      // pure-local-черновика ставим 0.
+      displayId: 0,
       status: PLACEHOLDER_NOT_FILLED,
       kind: 'contractor' satisfies ShipmentKind,
       siteId: SYSTEM_SITE_ID,

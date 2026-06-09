@@ -394,6 +394,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     };
     return {
       id: shipmentId,
+      // displayId назначается БД через sequence (миграция 0059); у
+      // виртуальной отгрузки до первого Сохранить ставим 0.
+      displayId: 0,
       status: initialStatus,
       kind: 'contractor',
       purpose: null,

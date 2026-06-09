@@ -2,7 +2,8 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Button, Modal, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography, message } from 'antd';
 import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
-import type { SourceDocument } from '@matcheck/contracts';
+import { useQuery } from '@tanstack/react-query';
+import type { Delivery, Shipment, SourceDocument } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
 import { api, apiDownload } from '../../services/api';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
@@ -150,6 +151,23 @@ export default function OperationsPage() {
     }
     updateUrl({ shipment: null, new: null, upd: null, from: null });
   };
+
+  // Подтягиваем displayId для заголовков модалок «Приёмка #N» / «Отгрузка #N».
+  // Используем тот же queryKey, что и KppPage/ShipmentPage — react-query
+  // делит кэш, дополнительного запроса к серверу не делает (после того, как
+  // соответствующая страница уже загружена).
+  const deliveryHeader = useQuery({
+    queryKey: ['deliveries', editDeliveryId],
+    queryFn: () => api.get<Delivery>(`/deliveries/${editDeliveryId}`),
+    enabled: deliveryModalOpen && !!editDeliveryId,
+    staleTime: 30_000,
+  });
+  const shipmentHeader = useQuery({
+    queryKey: ['shipments', editShipmentId],
+    queryFn: () => api.get<Shipment>(`/shipments/${editShipmentId}`),
+    enabled: shipmentModalOpen && !!editShipmentId,
+    staleTime: 30_000,
+  });
 
   // Экспорт Excel — повторяет логику KppPage.handleExportExcel, но
   // зависит ещё и от type (выбираем deliveries/shipments endpoint).
@@ -349,7 +367,13 @@ export default function OperationsPage() {
       <Modal
         open={deliveryModalOpen}
         onCancel={closeDeliveryModal}
-        title={editDeliveryIsNew ? 'Новая приёмка' : 'Приёмка'}
+        title={
+          editDeliveryIsNew
+            ? 'Новая приёмка'
+            : deliveryHeader.data
+              ? `Приёмка #${deliveryHeader.data.displayId}`
+              : 'Приёмка'
+        }
         width="95vw"
         style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
         styles={{
@@ -386,7 +410,13 @@ export default function OperationsPage() {
       <Modal
         open={shipmentModalOpen}
         onCancel={closeShipmentModal}
-        title={editShipmentIsNew ? 'Новая отгрузка' : 'Отгрузка'}
+        title={
+          editShipmentIsNew
+            ? 'Новая отгрузка'
+            : shipmentHeader.data
+              ? `Отгрузка #${shipmentHeader.data.displayId}`
+              : 'Отгрузка'
+        }
         width="95vw"
         style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
         styles={{

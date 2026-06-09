@@ -694,11 +694,23 @@ export function ShipmentsHistory({
           operationsRowClass({ statusCode: r.status.code, dateIso: r.shippedAt })
         }
         columns={[
-          // Симметрия с DeliveriesHistory: тот же порядок — Статус, Авто,
-          // дата, Получатель (зеркало Поставщика приёмки), Объект, Фото,
-          // Сумма НДС, Сумма, Действия. «Вид» (kind) интегрирован чипом
-          // в Статус, «Куда» (destSite для transfer) — в «Получатель»
-          // через destinationLabel.
+          // Симметрия с DeliveriesHistory: тот же порядок — id, Статус,
+          // Авто, дата, Получатель (зеркало Поставщика приёмки), Объект,
+          // Фото, Сумма НДС, Сумма, Действия. «Вид» (kind) интегрирован
+          // чипом в Статус, «Куда» (destSite для transfer) — в
+          // «Получатель» через destinationLabel.
+          {
+            // Короткий displayId — отдельная нумерация для отгрузок (см.
+            // миграцию 0059). В Ожидаемых не показывается — там УПД.
+            title: 'id',
+            key: 'displayId',
+            width: 80,
+            dataIndex: 'displayId',
+            sorter: numberSorter<Row>((r) => r.displayId),
+            render: (v: number) => (
+              <Typography.Text type="secondary">#{v}</Typography.Text>
+            ),
+          },
           {
             title: 'Статус',
             key: 'status',

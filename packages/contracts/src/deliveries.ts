@@ -56,6 +56,9 @@ export type DeliveryPhoto = z.infer<typeof DeliveryPhotoSchema>;
 
 export const DeliverySchema = z.object({
   id: z.string().uuid(),
+  // Короткий человекочитаемый id для столбца «id» в Принятых и
+  // заголовка модалки «Приёмка #N». Авто-возрастающий, уникальный.
+  displayId: z.number().int().positive(),
   status: StatusSchema,
   siteId: z.string().uuid(),
   supplierId: z.string().uuid().nullable(),

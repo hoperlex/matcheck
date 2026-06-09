@@ -674,6 +674,12 @@ export const deliveries = pgTable(
   'deliveries',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    // Короткий человекочитаемый id для столбца «id» в Принятых и
+    // заголовка модалки «Приёмка #N». Авто-возрастающий через
+    // sequence deliveries_display_id_seq (см. миграцию 0059).
+    // DEFAULT в схеме не указываем — назначается БД, drizzle .values()
+    // его не пишет, и БД использует nextval(seq).
+    displayId: bigint('display_id', { mode: 'number' }).notNull(),
     statusId: uuid('status_id')
       .notNull()
       .references(() => statuses.id),
@@ -841,6 +847,10 @@ export const shipments = pgTable(
   'shipments',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    // Короткий человекочитаемый id — симметрично с deliveries.displayId.
+    // Авто-возрастающий через sequence shipments_display_id_seq
+    // (см. миграцию 0059).
+    displayId: bigint('display_id', { mode: 'number' }).notNull(),
     statusId: uuid('status_id')
       .notNull()
       .references(() => statuses.id),

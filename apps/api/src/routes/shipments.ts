@@ -140,6 +140,7 @@ async function buildShipmentDto(app: any, id: string) {
     .where(eq(shipmentSources.shipmentId, id));
   return {
     id: s.id,
+    displayId: s.displayId,
     status: {
       id: st.id,
       entityType: st.entityType,

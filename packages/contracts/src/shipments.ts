@@ -52,6 +52,8 @@ export type ShipmentPhoto = z.infer<typeof ShipmentPhotoSchema>;
 
 export const ShipmentSchema = z.object({
   id: z.string().uuid(),
+  // Короткий человекочитаемый id — симметрично с DeliverySchema.displayId.
+  displayId: z.number().int().positive(),
   status: StatusSchema,
   kind: ShipmentKindSchema,
   /**

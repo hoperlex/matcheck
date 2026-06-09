@@ -719,6 +719,20 @@ export function DeliveriesHistory({
         }
         columns={[
           {
+            // Короткий человекочитаемый id — серверный авто-возрастающий
+            // displayId (см. миграцию 0059). Помогает быстро находить
+            // приёмку в разговоре «по № id». В Ожидаемых не показывается
+            // — там УПД (другая сущность с другой нумерацией).
+            title: 'id',
+            key: 'displayId',
+            width: 80,
+            dataIndex: 'displayId',
+            sorter: numberSorter<Row>((r) => r.displayId),
+            render: (v: number) => (
+              <Typography.Text type="secondary">#{v}</Typography.Text>
+            ),
+          },
+          {
             title: 'Статус',
             key: 'status',
             // По «требует внимания»: draft/not_filled → filled →

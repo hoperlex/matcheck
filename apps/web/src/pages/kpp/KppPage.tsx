@@ -363,6 +363,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     };
     return {
       id: deliveryId,
+      // displayId назначается БД при INSERT через sequence (см. миграцию
+      // 0059). У виртуальной (ещё не сохранённой) приёмки его нет;
+      // ставим 0 как маркер «не присвоено», UI просто не показывает
+      // «#0» в заголовке для isNew (см. OperationsPage title).
+      displayId: 0,
       status: initialStatus,
       siteId: inspectorSiteId ?? SYSTEM_SITE_ID,
       supplierId: null,
