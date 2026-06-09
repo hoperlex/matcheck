@@ -371,7 +371,7 @@ export default function OperationsPage() {
           editDeliveryIsNew
             ? 'Новая приёмка'
             : deliveryHeader.data
-              ? `Приёмка #${deliveryHeader.data.displayId}`
+              ? `Приёмка ${deliveryHeader.data.displayId}`
               : 'Приёмка'
         }
         width="95vw"
@@ -414,7 +414,7 @@ export default function OperationsPage() {
           editShipmentIsNew
             ? 'Новая отгрузка'
             : shipmentHeader.data
-              ? `Отгрузка #${shipmentHeader.data.displayId}`
+              ? `Отгрузка ${shipmentHeader.data.displayId}`
               : 'Отгрузка'
         }
         width="95vw"

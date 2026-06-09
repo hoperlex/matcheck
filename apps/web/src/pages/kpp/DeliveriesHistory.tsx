@@ -711,7 +711,6 @@ export function DeliveriesHistory({
         loading={list.isLoading}
         rowKey="id"
         rowSelection={isAdmin || !isTrash ? bulk.selection : undefined}
-        numbered
         onRowClick={(r) => onOpen(r.id)}
         emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет приёмок'}
         rowClassName={(r) =>
@@ -721,16 +720,13 @@ export function DeliveriesHistory({
           {
             // Короткий человекочитаемый id — серверный авто-возрастающий
             // displayId (см. миграцию 0059). Помогает быстро находить
-            // приёмку в разговоре «по № id». В Ожидаемых не показывается
+            // приёмку в разговоре «по id». В Ожидаемых не показывается
             // — там УПД (другая сущность с другой нумерацией).
             title: 'id',
             key: 'displayId',
             width: 80,
             dataIndex: 'displayId',
             sorter: numberSorter<Row>((r) => r.displayId),
-            render: (v: number) => (
-              <Typography.Text type="secondary">#{v}</Typography.Text>
-            ),
           },
           {
             title: 'Статус',

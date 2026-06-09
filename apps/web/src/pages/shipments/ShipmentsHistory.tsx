@@ -686,7 +686,6 @@ export function ShipmentsHistory({
         items={filteredItems}
         loading={list.isLoading}
         rowKey="id"
-        numbered
         rowSelection={isAdmin || !isTrash ? bulk.selection : undefined}
         onRowClick={(r) => onOpen(r.id)}
         emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет отгрузок'}
@@ -707,9 +706,6 @@ export function ShipmentsHistory({
             width: 80,
             dataIndex: 'displayId',
             sorter: numberSorter<Row>((r) => r.displayId),
-            render: (v: number) => (
-              <Typography.Text type="secondary">#{v}</Typography.Text>
-            ),
           },
           {
             title: 'Статус',
