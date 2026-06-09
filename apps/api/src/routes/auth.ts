@@ -356,11 +356,19 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       if (!req.user) return reply.code(401).send({ error: 'unauthorized' });
-      const trimmed = req.body.fullName?.trim() || null;
-      await app.db
-        .update(users)
-        .set({ fullName: trimmed, updatedAt: new Date() })
-        .where(eq(users.id, req.user.id));
+      const trimmedName = req.body.fullName?.trim() || null;
+      // phone отсутствует в body → не трогаем поле. Пустая строка после
+      // trim → null (мобила различает «нет контакта» именно по null,
+      // см. PhoneCell в админке).
+      const patch: { fullName: string | null; phone?: string | null; updatedAt: Date } = {
+        fullName: trimmedName,
+        updatedAt: new Date(),
+      };
+      if (req.body.phone !== undefined) {
+        const trimmedPhone = req.body.phone?.trim() ?? '';
+        patch.phone = trimmedPhone.length > 0 ? trimmedPhone : null;
+      }
+      await app.db.update(users).set(patch).where(eq(users.id, req.user.id));
       const [user] = await app.db.select().from(users).where(eq(users.id, req.user.id)).limit(1);
       if (!user) return reply.code(401).send({ error: 'unauthorized' });
       return userToDto(user);

@@ -48,10 +48,13 @@ export const UserDtoSchema = z.object({
 export type UserDto = z.infer<typeof UserDtoSchema>;
 
 // Профиль текущего юзера: то, что он может изменить о себе сам через ЛК.
-// Сейчас — только ФИО. Email и роль через ЛК не меняются: email — это
-// логин (нужна верификация), роль — прерогатива админа.
+// ФИО + контактный телефон. Email и роль через ЛК не меняются: email —
+// это логин (нужна верификация), роль — прерогатива админа. Телефон
+// нужен мобиле для кнопки звонка из шапки материалов; раньше его
+// проставлял только админ, теперь менеджер может вписать сам.
 export const UpdateProfileRequestSchema = z.object({
   fullName: z.string().trim().max(200).nullable(),
+  phone: PhoneSchema,
 });
 export type UpdateProfileRequest = z.infer<typeof UpdateProfileRequestSchema>;
 

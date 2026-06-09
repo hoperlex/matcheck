@@ -11,7 +11,7 @@ import {
   Typography,
   message,
 } from 'antd';
-import { LogoutOutlined } from '@ant-design/icons';
+import { LogoutOutlined, PhoneOutlined } from '@ant-design/icons';
 import type { UserDto } from '@matcheck/contracts';
 import { api, ApiError } from '../services/api';
 import { useAuthStore } from '../stores/auth';
@@ -19,9 +19,11 @@ import { useAuthStore } from '../stores/auth';
 /**
  * Личный кабинет: модалка с двумя секциями.
  *
- * 1. Профиль — редактирование ФИО. Email не меняется через ЛК (это логин,
- *    требующий отдельной верификационной процедуры), роль/объект — задача
- *    админа.
+ * 1. Профиль — редактирование ФИО + контактного телефона. Email не
+ *    меняется через ЛК (это логин, требующий отдельной верификационной
+ *    процедуры), роль/объект — задача админа. Телефон менеджера
+ *    показывается в мобиле в шапке списка материалов 1 Этапа — кнопка
+ *    «Позвонить»; без телефона эта кнопка скрывается.
  *
  * 2. Смена пароля — три поля (текущий / новый / повтор). Текущий пароль
  *    обязателен: даже если у злоумышленника есть активная сессия, без
@@ -40,7 +42,7 @@ export function UserProfileModal({
 }) {
   const user = useAuthStore((s) => s.user);
   const setUser = useAuthStore((s) => s.setUser);
-  const [profileForm] = Form.useForm<{ fullName: string }>();
+  const [profileForm] = Form.useForm<{ fullName: string; phone: string }>();
   const [passwordForm] = Form.useForm<{
     currentPassword: string;
     newPassword: string;
@@ -51,18 +53,25 @@ export function UserProfileModal({
 
   useEffect(() => {
     if (open && user) {
-      profileForm.setFieldsValue({ fullName: user.fullName ?? '' });
+      profileForm.setFieldsValue({
+        fullName: user.fullName ?? '',
+        phone: user.phone ?? '',
+      });
       passwordForm.resetFields();
     }
   }, [open, user, profileForm, passwordForm]);
 
   if (!user) return null;
 
-  async function onSaveProfile(values: { fullName: string }) {
+  async function onSaveProfile(values: { fullName: string; phone: string }) {
     setSavingProfile(true);
     try {
+      // phone: пустая строка после trim → null. Бэк именно по null
+      // понимает «нет контакта» (мобила прячет кнопку звонка).
+      const phoneTrim = values.phone?.trim() || '';
       const updated = await api.patch<UserDto>('/auth/me', {
         fullName: values.fullName?.trim() || null,
+        phone: phoneTrim.length > 0 ? phoneTrim : null,
       });
       setUser(updated);
       message.success('Профиль сохранён');
@@ -145,6 +154,23 @@ export function UserProfileModal({
           rules={[{ max: 200, message: 'Не более 200 символов' }]}
         >
           <Input placeholder="Иванов Иван Иванович" autoComplete="name" />
+        </Form.Item>
+        <Form.Item
+          name="phone"
+          label="Номер телефона"
+          extra={
+            user.role === 'manager'
+              ? 'Используется в мобильном приложении: инспектор сможет позвонить вам со страницы материалов поставки.'
+              : undefined
+          }
+          rules={[{ max: 32, message: 'Не более 32 символов' }]}
+        >
+          <Input
+            placeholder="+7 …"
+            autoComplete="tel"
+            allowClear
+            prefix={<PhoneOutlined style={{ color: '#bfbfbf' }} />}
+          />
         </Form.Item>
         <Button type="primary" htmlType="submit" loading={savingProfile}>
           Сохранить
