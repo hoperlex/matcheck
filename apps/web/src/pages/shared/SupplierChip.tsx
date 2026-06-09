@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react';
 import { Select, Spin, Tag, Tooltip, message } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Supplier } from '@matcheck/contracts';
+import type { Delivery, Shipment, Supplier } from '@matcheck/contracts';
 import { api, ApiError } from '../../services/api';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
+import { upsertServerSnapshot as upsertDeliverySnapshot } from '../../services/deliveries';
+import { upsertServerSnapshot as upsertShipmentSnapshot } from '../../services/shipments';
 
 type ListResp = { items: Supplier[]; total: number };
 
@@ -53,13 +55,23 @@ export function SupplierChip({
   });
   const items = list.data?.items ?? [];
 
-  const setSupplier = useMutation<unknown, Error, string | null>({
+  const setSupplier = useMutation<Delivery | Shipment, Error, string | null>({
     mutationFn: (supplierDirectoryId) =>
-      api.patch(`/${entity === 'delivery' ? 'deliveries' : 'shipments'}/${entityId}/supplier-from-directory`, {
-        supplierDirectoryId,
-      }),
-    onSuccess: async () => {
+      api.patch<Delivery | Shipment>(
+        `/${entity === 'delivery' ? 'deliveries' : 'shipments'}/${entityId}/supplier-from-directory`,
+        { supplierDirectoryId },
+      ),
+    onSuccess: async (updated) => {
       message.success('Поставщик обновлён');
+      // КРИТИЧНО: обновляем IDB server snapshot из ответа бэка. Иначе
+      // следующий save через offline-очередь возьмёт старый supplierId
+      // из IDB и отправит его в /deliveries|/shipments — бэк перезапишет
+      // только что выбранного поставщика обратно. То же делает linkUpd.
+      if (entity === 'delivery') {
+        await upsertDeliverySnapshot([updated as Delivery]);
+      } else {
+        await upsertShipmentSnapshot([updated as Shipment]);
+      }
       await qc.invalidateQueries({ queryKey: invalidateQueryKey });
     },
     onError: (err) => {

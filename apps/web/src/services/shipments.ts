@@ -139,8 +139,15 @@ export function buildUpsertPayload(r: ShipmentRecord): ShipmentUpsert {
     statusCode: effective.status.code as ShipmentStatusCode,
     kind: effective.kind,
     siteId: effective.siteId,
+    // Все три «получателя/поставщика/тип отгрузки» — UI их обновляет
+    // через InlineEditChip, но без этих строк save через offline-очередь
+    // отбрасывал значения, и при повторном открытии Принятой отгрузки
+    // поля возвращались к исходному состоянию.
     receiverCounterpartyId: effective.receiverCounterpartyId,
+    receiverMolId: effective.receiverMolId,
+    supplierId: effective.supplierId,
     destSiteId: effective.destSiteId,
+    purpose: effective.purpose,
     vehiclePlate: effective.vehiclePlate,
     driverName: effective.driverName,
     shippedAt: effective.shippedAt,
@@ -149,13 +156,26 @@ export function buildUpsertPayload(r: ShipmentRecord): ShipmentUpsert {
     sourceDocumentIds: effective.sourceDocumentIds,
     items: effective.items.map((it) => ({
       id: it.id,
+      itemKind: it.itemKind,
       materialId: it.materialId,
+      assetId: it.assetId,
+      inventoryNumber: it.inventoryNumber,
+      serialNumber: it.serialNumber,
       nameRaw: it.nameRaw,
       qtyPlanned: it.qtyPlanned,
       qtyActual: it.qtyActual,
       unit: it.unit,
       comment: it.comment,
       lineNo: it.lineNo,
+      volumeM3: it.volumeM3,
+      massKg: it.massKg,
+      // Цена / ставка НДС / сумма НДС материалов теперь доезжают до
+      // сервера и не теряются на пути IDB → API.
+      price: it.price,
+      vatRate: it.vatRate,
+      vatSum: it.vatSum,
+      volumeConfidence: it.volumeConfidence,
+      groupName: it.groupName,
     })),
     baseVersion: r.version,
   };

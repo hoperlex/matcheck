@@ -137,6 +137,11 @@ export function buildUpsertPayload(r: DeliveryRecord): DeliveryUpsert {
     siteId: effective.siteId,
     supplierId: effective.supplierId,
     contractorId: effective.contractorId,
+    // recipientMolId — МОЛ-получатель приёмки (альтернатива contractorId).
+    // Без этого поля выбор МОЛ в шапке слетал при сохранении: UI его
+    // обновляет, но buildPatch → IDB → buildUpsertPayload терял по пути
+    // к серверу.
+    recipientMolId: effective.recipientMolId,
     vehiclePlate: effective.vehiclePlate,
     driverName: effective.driverName,
     arrivedAt: effective.arrivedAt,
@@ -145,7 +150,11 @@ export function buildUpsertPayload(r: DeliveryRecord): DeliveryUpsert {
     sourceDocumentIds: effective.sourceDocumentIds,
     items: effective.items.map((it) => ({
       id: it.id,
+      itemKind: it.itemKind,
       materialId: it.materialId,
+      assetId: it.assetId,
+      inventoryNumber: it.inventoryNumber,
+      serialNumber: it.serialNumber,
       nameRaw: it.nameRaw,
       qtyPlanned: it.qtyPlanned,
       qtyActual: it.qtyActual,
@@ -154,6 +163,12 @@ export function buildUpsertPayload(r: DeliveryRecord): DeliveryUpsert {
       lineNo: it.lineNo,
       volumeM3: it.volumeM3,
       massKg: it.massKg,
+      // Без price/vatRate/vatSum в payload суммы материалов не доезжали
+      // до сервера. Заполняются вручную через материалы-таблицу или
+      // подтягиваются автоматически от привязанной УПД.
+      price: it.price,
+      vatRate: it.vatRate,
+      vatSum: it.vatSum,
       volumeConfidence: it.volumeConfidence,
       groupName: it.groupName,
     })),
