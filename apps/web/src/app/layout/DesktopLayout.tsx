@@ -19,8 +19,12 @@ export function DesktopLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    return localStorage.getItem(COLLAPSE_KEY) === '1';
+    // По умолчанию sidebar свёрнут — экономит горизонтальное место под
+    // таблицы. Если пользователь развернул его, выбор сохраняется в
+    // localStorage и переживает F5. Только явное значение '0' = раскрыт;
+    // отсутствие ключа или любое другое значение → свёрнут.
+    if (typeof window === 'undefined') return true;
+    return localStorage.getItem(COLLAPSE_KEY) !== '0';
   });
 
   useEffect(() => {
@@ -34,13 +38,17 @@ export function DesktopLayout() {
   const items = filterByRole(user.role).map((n) => ({
     key: n.path,
     icon: createElement(n.icon),
-    // Для «Операции» — если есть подтверждённые за сегодня, рисуем зелёный
-    // Tag «Сегодня: +N» справа от label. При 0 — Tag не рисуем (визуальный шум).
+    // Для «Операции» — зелёный Tag «Сегодня: +N» справа от label.
+    // Раньше при двузначном счётчике (+10, +12 и т.д.) тегу не хватало
+    // места, и antd Menu начинал ellipsis'ить сам label до «Операции...».
+    // Flex-layout с minWidth:0 + whiteSpace:nowrap на тексте и
+    // flexShrink:0 на теге гарантирует, что тег полностью виден, а
+    // текст «Операции» не обрезается. При 0 — Tag не рисуем.
     label:
       n.key === 'operations' && operationsCount > 0 ? (
-        <span>
-          {n.label}
-          <Tag color="green" style={{ marginLeft: 16, marginInlineEnd: 0 }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <span style={{ whiteSpace: 'nowrap' }}>{n.label}</span>
+          <Tag color="green" style={{ marginInlineEnd: 0, flexShrink: 0 }}>
             Сегодня: +{operationsCount}
           </Tag>
         </span>
