@@ -393,6 +393,13 @@
       "when": 1780878600000,
       "tag": "0055_suppliers_counterparties_seed",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1780878660000,
+      "tag": "0056_shipment_supplier_id",
+      "breakpoints": true
     }
   ]
 }

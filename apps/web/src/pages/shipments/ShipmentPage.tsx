@@ -66,6 +66,8 @@ import { InlineEditChip } from '../../shared/ui/InlineEditChip';
 import type { PageTabItem } from '../../shared/ui/PageTabs';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { PhotoGallery } from '../kpp/PhotoGallery';
+import { formatStageTime } from '../kpp/stageTime';
+import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
 import { ShipmentsHistory } from './ShipmentsHistory';
 import { ExpectedOutbound } from './ExpectedOutbound';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
@@ -400,6 +402,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       receiverCounterpartyId: null,
       receiverMolId: null,
       destSiteId: null,
+      supplierId: null,
       vehiclePlate: null,
       driverName: null,
       shippedAt: null,
@@ -776,6 +779,12 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const afterPhotos = useMemo(
     () => mergedPhotos.filter((p) => p.stage === 'after'),
     [mergedPhotos],
+  );
+
+  // Имя поставщика для чипа в шапке. Симметрично с KppPage.
+  const supplierDisplayName = useSupplierDisplayName(
+    loadedShipment?.supplierId ?? null,
+    counterparties,
   );
 
   const verifyReason: string | null = (() => {
@@ -1363,6 +1372,18 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 </InlineEditChip>
               )}
 
+              {/* Чип «Поставщик»: симметрично с приёмкой. См. SupplierChip. */}
+              {loadedShipment && shipmentId && (
+                <SupplierChip
+                  entity="shipment"
+                  entityId={shipmentId}
+                  hasUpd={(loadedShipment.sourceDocumentIds?.length ?? 0) > 0}
+                  displayName={supplierDisplayName}
+                  invalidateQueryKey={['shipments', shipmentId]}
+                  disabled={isInspector}
+                />
+              )}
+
               <InlineEditChip
                 label="Госномер"
                 value={plate || null}
@@ -1509,6 +1530,14 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                         <Typography.Text strong>
                           1 Этап {beforePhotos.length > 0 && `(${beforePhotos.length})`}
                         </Typography.Text>
+                        {(() => {
+                          const t = formatStageTime(beforePhotos);
+                          return t ? (
+                            <Typography.Text type="secondary" style={{ marginInlineStart: 8 }}>
+                              Время: {t}
+                            </Typography.Text>
+                          ) : null;
+                        })()}
                         <div style={{ marginTop: 8 }}>
                           {beforePhotos.length > 0 ? (
                             <PhotoGallery
@@ -1527,6 +1556,14 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                         <Typography.Text strong>
                           2 Этап {afterPhotos.length > 0 && `(${afterPhotos.length})`}
                         </Typography.Text>
+                        {(() => {
+                          const t = formatStageTime(afterPhotos);
+                          return t ? (
+                            <Typography.Text type="secondary" style={{ marginInlineStart: 8 }}>
+                              Время: {t}
+                            </Typography.Text>
+                          ) : null;
+                        })()}
                         <div style={{ marginTop: 8 }}>
                           {afterPhotos.length > 0 ? (
                             <PhotoGallery

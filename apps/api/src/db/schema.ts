@@ -862,6 +862,12 @@ export const shipments = pgTable(
       onDelete: 'set null',
     }),
     destSiteId: uuid('dest_site_id').references(() => sites.id, { onDelete: 'restrict' }),
+    // Поставщик материала, который отгружаем. Зеркало deliveries.supplier_id
+    // — для симметрии шапок «Приёмка / Отгрузка» в портале. Менеджер
+    // выбирает из Справочника → Поставщики; бэк апсертит counterparty
+    // по ИНН (см. PATCH /api/v1/shipments/:id/supplier-from-directory).
+    // Миграция 0056. NULL для transfer/writeoff/return и legacy.
+    supplierId: uuid('supplier_id').references(() => counterparties.id, { onDelete: 'set null' }),
     vehiclePlate: varchar('vehicle_plate', { length: 16 }),
     driverName: text('driver_name'),
     shippedAt: timestamp('shipped_at', { withTimezone: true }),

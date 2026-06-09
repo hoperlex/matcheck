@@ -73,6 +73,14 @@ export const ShipmentSchema = z.object({
   receiverCounterpartyId: z.string().uuid().nullable(),
   receiverMolId: z.string().uuid().nullable(),
   destSiteId: z.string().uuid().nullable(),
+  /**
+   * Поставщик материала, который отгружается. Симметрично
+   * deliveries.supplierId — чтобы шапки «Приёмка» и «Отгрузка» в портале
+   * совпадали по составу. Менеджер выбирает из Справочника → Поставщики,
+   * бэк апсертит counterparty по ИНН и кладёт её id сюда (см. PATCH
+   * /api/v1/shipments/:id/supplier-from-directory). Миграция 0056.
+   */
+  supplierId: z.string().uuid().nullable(),
   vehiclePlate: z.string().nullable(),
   driverName: z.string().nullable(),
   shippedAt: z.string().nullable(),
@@ -129,6 +137,8 @@ export const ShipmentUpsertSchema = z.object({
   receiverCounterpartyId: z.string().uuid().nullable().optional(),
   receiverMolId: z.string().uuid().nullable().optional(),
   destSiteId: z.string().uuid().nullable().optional(),
+  /** Поставщик материала — см. ShipmentSchema.supplierId. */
+  supplierId: z.string().uuid().nullable().optional(),
   vehiclePlate: z.string().max(16).nullable().optional(),
   driverName: z.string().max(200).nullable().optional(),
   shippedAt: z.string().nullable().optional(),

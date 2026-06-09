@@ -79,6 +79,14 @@ export function PhotoGallery({
 
   const sorted = [...photos].sort((a, b) => a.takenAt.localeCompare(b.takenAt));
 
+  // Подписи «Документ» / «Груз/машина» под фото выводим только если у этой
+  // галереи kind проставлен ОСМЫСЛЕННО — т.е. встречается хоть один
+  // 'document' или 'vehicle'. Если же все фото имеют kind='cargo' (default
+  // в БД для старых записей до запуска QR-детекта), значит backfill ещё
+  // не прошёл и kind мы достоверно не знаем — лучше не показывать вообще
+  // подпись, чем подписать документ как «Груз/машина».
+  const showLabels = sorted.some((p) => p.kind === 'document' || p.kind === 'vehicle');
+
   return (
     <div
       style={{
@@ -96,6 +104,7 @@ export function PhotoGallery({
             canDelete={canDelete}
             onDelete={() => del.mutate(p.id)}
             deleting={del.isPending && del.variables === p.id}
+            showLabel={showLabels}
           />
         ))}
       </Image.PreviewGroup>
@@ -103,17 +112,31 @@ export function PhotoGallery({
   );
 }
 
+// Человекочитаемая подпись по photo.kind. Возвращает null, если kind
+// неинформативен ('other' или совсем неизвестное значение) — компонент
+// тогда вообще не рисует подпись.
+function kindLabel(kind: string | undefined): string | null {
+  if (kind === 'document') return 'Документ';
+  if (kind === 'cargo' || kind === 'vehicle') return 'Груз/машина';
+  return null;
+}
+
 function PhotoThumb({
   photo,
   canDelete,
   onDelete,
   deleting,
+  showLabel,
 }: {
   photo: AnyPhoto;
   canDelete: boolean;
   onDelete: () => void;
   deleting: boolean;
+  // false — родитель просит не показывать подпись (kind ненадёжен,
+  // backfill ещё не прошёл). См. PhotoGallery.showLabels.
+  showLabel: boolean;
 }): JSX.Element {
+  const label = showLabel ? kindLabel(photo.kind) : null;
   const [localThumb, setLocalThumb] = useState<string | null>(null);
   const [localFull, setLocalFull] = useState<string | null>(null);
   const [idbChecked, setIdbChecked] = useState(false);
@@ -168,6 +191,7 @@ function PhotoThumb({
 
   if (isUploading) {
     return (
+      <div style={{ width: THUMB_SIZE }}>
       <div
         style={{
           position: 'relative',
@@ -217,10 +241,20 @@ function PhotoThumb({
           </Popconfirm>
         )}
       </div>
+      {label && (
+        <Typography.Text
+          type="secondary"
+          style={{ fontSize: 11, display: 'block', textAlign: 'center', marginTop: 4 }}
+        >
+          {label}
+        </Typography.Text>
+      )}
+      </div>
     );
   }
 
   return (
+    <div style={{ width: THUMB_SIZE }}>
     <div style={{ position: 'relative', width: THUMB_SIZE, height: THUMB_SIZE }}>
       <Image
         src={thumbSrc}
@@ -269,6 +303,15 @@ function PhotoThumb({
           />
         </Popconfirm>
       )}
+    </div>
+    {label && (
+      <Typography.Text
+        type="secondary"
+        style={{ fontSize: 11, display: 'block', textAlign: 'center', marginTop: 4 }}
+      >
+        {label}
+      </Typography.Text>
+    )}
     </div>
   );
 }

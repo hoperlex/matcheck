@@ -3,6 +3,7 @@ import { EditOutlined } from '@ant-design/icons';
 import type { z } from 'zod';
 import type { ShipmentListResponseSchema, ShipmentKind } from '@matcheck/contracts';
 import { PhotoGallery } from '../kpp/PhotoGallery';
+import { formatStageTime } from '../kpp/stageTime';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
@@ -233,6 +234,14 @@ export function ShipmentViewModal({
                               1 Этап{' '}
                               {beforePhotos.length > 0 && `(${beforePhotos.length})`}
                             </Typography.Text>
+                            {(() => {
+                              const t = formatStageTime(beforePhotos);
+                              return t ? (
+                                <Typography.Text type="secondary" style={{ marginInlineStart: 8 }}>
+                                  Время: {t}
+                                </Typography.Text>
+                              ) : null;
+                            })()}
                             <div style={{ marginTop: 8 }}>
                               {beforePhotos.length > 0 ? (
                                 <PhotoGallery
@@ -252,6 +261,14 @@ export function ShipmentViewModal({
                               2 Этап{' '}
                               {afterPhotos.length > 0 && `(${afterPhotos.length})`}
                             </Typography.Text>
+                            {(() => {
+                              const t = formatStageTime(afterPhotos);
+                              return t ? (
+                                <Typography.Text type="secondary" style={{ marginInlineStart: 8 }}>
+                                  Время: {t}
+                                </Typography.Text>
+                              ) : null;
+                            })()}
                             <div style={{ marginTop: 8 }}>
                               {afterPhotos.length > 0 ? (
                                 <PhotoGallery

@@ -547,6 +547,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           receiverCounterpartyId: s.receiverCounterpartyId,
           receiverMolId: s.receiverMolId,
           destSiteId: s.destSiteId,
+          supplierId: s.supplierId,
           vehiclePlate: s.vehiclePlate,
           driverName: s.driverName,
           shippedAt: s.shippedAt?.toISOString() ?? null,

@@ -66,6 +66,8 @@ import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { DeliveriesHistory } from './DeliveriesHistory';
 import { ExpectedUpds } from './ExpectedUpds';
 import { PhotoGallery } from './PhotoGallery';
+import { formatStageTime } from './stageTime';
+import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
 import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
@@ -865,6 +867,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     () => mergedPhotos.filter((p) => p.stage === 'after'),
     [mergedPhotos],
   );
+  // Имя поставщика (counterparty.name) для чипа в шапке. Хук вызывается
+  // безусловно — это требование React rules-of-hooks. Получает supplierId
+  // у delivery (null до загрузки) и список counterparties для лукапа.
+  const supplierDisplayName = useSupplierDisplayName(
+    loadedDelivery?.supplierId ?? null,
+    counterparties,
+  );
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
     if (!siteId) reasons.push('Выберите объект');
@@ -1340,6 +1349,22 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 )}
               </InlineEditChip>
 
+              {/* Чип «Поставщик»: симметрично с отгрузкой. Если у приёмки
+                  привязана УПД (sourceDocumentIds.length > 0), чип
+                  read-only — имя поставщика приходит из УПД (приоритет
+                  УПД, см. бэк endpoint /supplier-from-directory).
+                  Иначе менеджер выбирает из Справочника → Поставщики. */}
+              {loadedDelivery && deliveryId && (
+                <SupplierChip
+                  entity="delivery"
+                  entityId={deliveryId}
+                  hasUpd={(loadedDelivery.sourceDocumentIds?.length ?? 0) > 0}
+                  displayName={supplierDisplayName}
+                  invalidateQueryKey={['deliveries', deliveryId]}
+                  disabled={isInspector}
+                />
+              )}
+
               <InlineEditChip
                 label="Госномер"
                 value={plate || null}
@@ -1487,6 +1512,18 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                         <Typography.Text strong>
                           1 Этап {beforePhotos.length > 0 && `(${beforePhotos.length})`}
                         </Typography.Text>
+                        {/* Время этапа справа от подписи. Берётся от фото
+                            машины/груза (то время, что отображается на
+                            watermark кадра); если фото машины нет — от
+                            последнего документа. См. stageTime.ts. */}
+                        {(() => {
+                          const t = formatStageTime(beforePhotos);
+                          return t ? (
+                            <Typography.Text type="secondary" style={{ marginInlineStart: 8 }}>
+                              Время: {t}
+                            </Typography.Text>
+                          ) : null;
+                        })()}
                         <div style={{ marginTop: 8 }}>
                           {beforePhotos.length > 0 ? (
                             <PhotoGallery
@@ -1504,6 +1541,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                         <Typography.Text strong>
                           2 Этап {afterPhotos.length > 0 && `(${afterPhotos.length})`}
                         </Typography.Text>
+                        {(() => {
+                          const t = formatStageTime(afterPhotos);
+                          return t ? (
+                            <Typography.Text type="secondary" style={{ marginInlineStart: 8 }}>
+                              Время: {t}
+                            </Typography.Text>
+                          ) : null;
+                        })()}
                         <div style={{ marginTop: 8 }}>
                           {afterPhotos.length > 0 ? (
                             <PhotoGallery

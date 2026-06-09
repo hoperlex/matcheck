@@ -26,6 +26,7 @@ import {
   sourceDocumentItems,
   sourceDocuments,
   statuses,
+  suppliers,
   users,
 } from '../db/schema.js';
 import { deleteObject } from '../domain/storage/s3.signer.js';
@@ -1161,6 +1162,150 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       },
     );
   }
+
+  // Ручной выбор поставщика из Справочника → Поставщики (suppliers).
+  // Сценарий: приёмка оформлена в мобиле без УПД («Создать приёмку»),
+  // менеджер на портале хочет указать поставщика напрямую из своего
+  // эталонного списка. При привязанной УПД эта ручка отказывает —
+  // имя поставщика приходит из УПД (приоритет УПД, обсуждено с
+  // пользователем). Бэк по справочнику находит или создаёт служебную
+  // запись в counterparties (с тем же ИНН/именем) и пишет её id в
+  // deliveries.supplier_id; мобила и старая логика DTO не ломаются.
+  //
+  // body.supplierDirectoryId = null → снять поставщика (delivery.supplier_id := null).
+  app.patch(
+    '/api/v1/deliveries/:id/supplier-from-directory',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: z.object({
+          supplierDirectoryId: z.string().uuid().nullable(),
+        }),
+        response: {
+          200: DeliverySchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [d] = await app.db
+        .select({
+          id: deliveries.id,
+          pendingDeletionAt: deliveries.pendingDeletionAt,
+        })
+        .from(deliveries)
+        .where(eq(deliveries.id, req.params.id))
+        .limit(1);
+      if (!d) return reply.code(404).send({ error: 'not_found' });
+      if (d.pendingDeletionAt !== null) {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — мутации запрещены',
+        });
+      }
+
+      // УПД-приоритет: если у приёмки есть привязанная УПД, имя
+      // поставщика «официальное» (из counterparty.supplier_id УПД).
+      // Ручной выбор тут не имеет смысла — отказываем 409, чтобы UI
+      // показал tooltip «Поставщик из УПД».
+      const linked = await app.db
+        .select({ sd: deliverySources.sourceDocumentId })
+        .from(deliverySources)
+        .where(eq(deliverySources.deliveryId, d.id))
+        .limit(1);
+      if (linked.length > 0) {
+        return reply.code(409).send({
+          error: 'upd_takes_priority',
+          message: 'У приёмки привязана УПД — поставщик берётся из неё',
+        });
+      }
+
+      // null → снять поставщика (выбор «— очистить —» в UI).
+      if (req.body.supplierDirectoryId === null) {
+        await app.db
+          .update(deliveries)
+          .set({ supplierId: null, updatedAt: new Date() })
+          .where(eq(deliveries.id, d.id));
+        publishEvent(app, {
+          type: 'delivery_updated',
+          entityId: d.id,
+          ts: new Date().toISOString(),
+        });
+        const dto = await buildDeliveryDto(app, d.id);
+        if (!dto) return reply.code(404).send({ error: 'not_found' });
+        return dto;
+      }
+
+      // Берём поставщика из справочника, нормализуем ИНН (в suppliers
+      // он может быть «грязным» — пробелы, префиксы; см. миграцию 0055).
+      const [src] = await app.db
+        .select({ inn: suppliers.inn, name: suppliers.name })
+        .from(suppliers)
+        .where(eq(suppliers.id, req.body.supplierDirectoryId))
+        .limit(1);
+      if (!src) {
+        return reply.code(404).send({
+          error: 'supplier_not_found',
+          message: 'Поставщик из справочника не найден',
+        });
+      }
+      const innDigits = (src.inn ?? '').replace(/\D+/g, '');
+      const nameTrim = src.name.trim();
+
+      // Ищем counterparty с тем же ИНН. kpp у заказчика в справочнике
+      // нет, поэтому мэтчим только по ИНН (это самый стабильный ключ).
+      // Если несколько с одним ИНН — берём первую попавшуюся (это
+      // редкая ситуация и не критична: справочник перекроет).
+      let counterpartyId: string | null = null;
+      if (innDigits.length > 0) {
+        const [existing] = await app.db
+          .select({ id: counterparties.id })
+          .from(counterparties)
+          .where(eq(counterparties.inn, innDigits))
+          .limit(1);
+        if (existing) counterpartyId = existing.id;
+      }
+      if (!counterpartyId) {
+        // Создаём служебную counterparty: isSupplier=true, нормализованный
+        // ИНН, имя из справочника. Уникальность по (inn, kpp) гарантирует
+        // схема; ON CONFLICT нам не нужен — мы уже проверили выше.
+        const [created] = await app.db
+          .insert(counterparties)
+          .values({
+            inn: innDigits || '0',
+            kpp: null,
+            name: nameTrim,
+            isSupplier: true,
+            isCustomer: false,
+          })
+          .returning({ id: counterparties.id });
+        if (!created) {
+          return reply.code(404).send({
+            error: 'counterparty_create_failed',
+            message: 'Не удалось создать запись о поставщике',
+          });
+        }
+        counterpartyId = created.id;
+      }
+
+      await app.db
+        .update(deliveries)
+        .set({ supplierId: counterpartyId, updatedAt: new Date() })
+        .where(eq(deliveries.id, d.id));
+
+      publishEvent(app, {
+        type: 'delivery_updated',
+        entityId: d.id,
+        ts: new Date().toISOString(),
+      });
+
+      const dto = await buildDeliveryDto(app, d.id);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
+      return dto;
+    },
+  );
 }
 
 async function createDelivery(

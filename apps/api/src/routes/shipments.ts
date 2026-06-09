@@ -16,6 +16,7 @@ import {
   ShipmentUpsertSchema,
 } from '@matcheck/contracts';
 import {
+  counterparties,
   entityDeletions,
   shipments,
   shipmentItems,
@@ -23,6 +24,7 @@ import {
   shipmentSources,
   sourceDocumentItems,
   statuses,
+  suppliers,
   users,
 } from '../db/schema.js';
 import { deleteObject } from '../domain/storage/s3.signer.js';
@@ -152,6 +154,7 @@ async function buildShipmentDto(app: any, id: string) {
     receiverCounterpartyId: s.receiverCounterpartyId,
     receiverMolId: s.receiverMolId,
     destSiteId: s.destSiteId,
+    supplierId: s.supplierId,
     vehiclePlate: s.vehiclePlate,
     driverName: s.driverName,
     shippedAt: s.shippedAt?.toISOString() ?? null,
@@ -843,6 +846,130 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       return { deleted, skipped };
     },
   );
+
+  // Симметрично deliveries: ручной выбор поставщика отгрузки из
+  // Справочника → Поставщики (suppliers). При привязанной УПД ручка
+  // отказывает — имя поставщика идёт из УПД. Бэк upsert-ом ищет/создаёт
+  // counterparty по ИНН и пишет в shipments.supplier_id.
+  app.patch(
+    '/api/v1/shipments/:id/supplier-from-directory',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: z.object({
+          supplierDirectoryId: z.string().uuid().nullable(),
+        }),
+        response: {
+          200: ShipmentSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [s] = await app.db
+        .select({
+          id: shipments.id,
+          pendingDeletionAt: shipments.pendingDeletionAt,
+        })
+        .from(shipments)
+        .where(eq(shipments.id, req.params.id))
+        .limit(1);
+      if (!s) return reply.code(404).send({ error: 'not_found' });
+      if (s.pendingDeletionAt !== null) {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — мутации запрещены',
+        });
+      }
+
+      const linked = await app.db
+        .select({ sd: shipmentSources.sourceDocumentId })
+        .from(shipmentSources)
+        .where(eq(shipmentSources.shipmentId, s.id))
+        .limit(1);
+      if (linked.length > 0) {
+        return reply.code(409).send({
+          error: 'upd_takes_priority',
+          message: 'У отгрузки привязана УПД — поставщик берётся из неё',
+        });
+      }
+
+      if (req.body.supplierDirectoryId === null) {
+        await app.db
+          .update(shipments)
+          .set({ supplierId: null, updatedAt: new Date() })
+          .where(eq(shipments.id, s.id));
+        publishEvent(app, {
+          type: 'shipment_updated',
+          entityId: s.id,
+          ts: new Date().toISOString(),
+        });
+        const dto = await buildShipmentDto(app, s.id);
+        if (!dto) return reply.code(404).send({ error: 'not_found' });
+        return dto;
+      }
+
+      const [src] = await app.db
+        .select({ inn: suppliers.inn, name: suppliers.name })
+        .from(suppliers)
+        .where(eq(suppliers.id, req.body.supplierDirectoryId))
+        .limit(1);
+      if (!src) {
+        return reply.code(404).send({
+          error: 'supplier_not_found',
+          message: 'Поставщик из справочника не найден',
+        });
+      }
+      const innDigits = (src.inn ?? '').replace(/\D+/g, '');
+      const nameTrim = src.name.trim();
+
+      let counterpartyId: string | null = null;
+      if (innDigits.length > 0) {
+        const [existing] = await app.db
+          .select({ id: counterparties.id })
+          .from(counterparties)
+          .where(eq(counterparties.inn, innDigits))
+          .limit(1);
+        if (existing) counterpartyId = existing.id;
+      }
+      if (!counterpartyId) {
+        const [created] = await app.db
+          .insert(counterparties)
+          .values({
+            inn: innDigits || '0',
+            kpp: null,
+            name: nameTrim,
+            isSupplier: true,
+            isCustomer: false,
+          })
+          .returning({ id: counterparties.id });
+        if (!created) {
+          return reply.code(404).send({
+            error: 'counterparty_create_failed',
+            message: 'Не удалось создать запись о поставщике',
+          });
+        }
+        counterpartyId = created.id;
+      }
+
+      await app.db
+        .update(shipments)
+        .set({ supplierId: counterpartyId, updatedAt: new Date() })
+        .where(eq(shipments.id, s.id));
+
+      publishEvent(app, {
+        type: 'shipment_updated',
+        entityId: s.id,
+        ts: new Date().toISOString(),
+      });
+
+      const dto = await buildShipmentDto(app, s.id);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
+      return dto;
+    },
+  );
 }
 
 /**
@@ -920,6 +1047,7 @@ async function createShipment(
       receiverCounterpartyId: input.receiverCounterpartyId ?? null,
       receiverMolId: input.receiverMolId ?? null,
       destSiteId: input.destSiteId ?? null,
+      supplierId: input.supplierId ?? null,
       vehiclePlate: input.vehiclePlate ?? null,
       driverName: input.driverName ?? null,
       shippedAt: input.shippedAt ? new Date(input.shippedAt) : null,
@@ -1034,6 +1162,7 @@ async function updateShipment(
       receiverCounterpartyId: input.receiverCounterpartyId ?? null,
       receiverMolId: input.receiverMolId ?? null,
       destSiteId: input.destSiteId ?? null,
+      supplierId: input.supplierId ?? null,
       vehiclePlate: input.vehiclePlate ?? null,
       driverName: input.driverName ?? null,
       shippedAt: input.shippedAt ? new Date(input.shippedAt) : null,
