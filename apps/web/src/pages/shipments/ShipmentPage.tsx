@@ -1160,34 +1160,6 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           />
         )}
 
-        {loadedShipment?.sourceDocumentIds.length === 0 && !isNew && (
-          <Alert
-            type="info"
-            showIcon
-            message="Отгрузка без УПД"
-            description={
-              <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                <Typography.Text>
-                  Этот документ был оформлен инспектором без выбранной УПД
-                  (только с фото). Когда УПД появится на портале, привяжите
-                  её — позиции подтянутся автоматически.
-                </Typography.Text>
-                {!isInspector && (
-                  <Button
-                    icon={<LinkOutlined />}
-                    onClick={() => {
-                      setLinkUpdError(null);
-                      setLinkUpdOpen(true);
-                    }}
-                  >
-                    Привязать УПД
-                  </Button>
-                )}
-              </Space>
-            }
-          />
-        )}
-
         <LinkSourceDocumentModal
           open={linkUpdOpen}
           onCancel={() => {
@@ -1464,8 +1436,11 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               ) : null}
 
               {/* УПД/Накладная — read-only чипы (значения приходят от
-                  привязки УПД, в этой шапке не редактируются). */}
-              {linkedSource && (
+                  привязки УПД, в этой шапке не редактируются).
+                  Симметрично с KppPage: если УПД нет, рисуем чип
+                  «— без УПД — Привязать» прямо в строке шапки,
+                  не сверху отдельным баннером. */}
+              {linkedSource ? (
                 <>
                   <Tag
                     color={
@@ -1498,6 +1473,28 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                     </Tag>
                   )}
                 </>
+              ) : (
+                <Tag style={{ marginInlineEnd: 0 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    — без УПД —
+                  </Typography.Text>
+                  {!isInspector &&
+                    loadedShipment?.sourceDocumentIds.length === 0 &&
+                    !isNew && (
+                      <Button
+                        type="link"
+                        size="small"
+                        icon={<LinkOutlined />}
+                        style={{ padding: '0 4px', fontSize: 12 }}
+                        onClick={() => {
+                          setLinkUpdError(null);
+                          setLinkUpdOpen(true);
+                        }}
+                      >
+                        Привязать
+                      </Button>
+                    )}
+                </Tag>
               )}
             </Space>
           );

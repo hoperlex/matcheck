@@ -64,13 +64,27 @@ export function LinkSourceDocumentModal({
       open={open}
       onCancel={onCancel}
       title="Привязать УПД"
-      width={900}
+      width="95vw"
+      style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
+      styles={{
+        // Body высоты 95vh минус заголовок (~50) — скролл идёт ВНУТРИ
+        // таблицы (scroll.y ниже), а не на уровне body или страницы.
+        // Раньше при длинном списке УПД таблица выходила за нижний край
+        // экрана и приходилось скроллить всю страницу.
+        body: {
+          padding: '12px 16px',
+          maxHeight: 'calc(95vh - 56px)',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+        },
+      }}
       footer={null}
       destroyOnClose
       maskClosable={false}
       keyboard={false}
     >
-      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      <Space direction="vertical" size="middle" style={{ width: '100%', flex: 1, minHeight: 0 }}>
         {error ? <Alert type="error" message={error} showIcon /> : null}
         {siteId ? (
           <Space>
@@ -82,7 +96,11 @@ export function LinkSourceDocumentModal({
           rowKey="id"
           dataSource={filtered}
           loading={list.isLoading || busy}
-          pagination={{ pageSize: 20, showSizeChanger: false }}
+          pagination={{ pageSize: 50, showSizeChanger: false }}
+          // Скролл внутри tbody — фиксируем высоту с учётом высот шапки
+          // модалки, switch'а «все объекты», заголовка таблицы и пагинации.
+          // ~240px суммарно при 95vh body, остальное — данные.
+          scroll={{ y: 'calc(95vh - 260px)' }}
           onRow={(r) => ({
             onClick: () => {
               if (!busy) onPick(r);
