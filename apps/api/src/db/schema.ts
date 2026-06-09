@@ -303,11 +303,20 @@ export const sites = pgTable(
   'sites',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    code: varchar('code', { length: 5 }).notNull(),
+    // Было varchar(5); расширено до 16 миграцией 0054, чтобы вместить
+    // ФОТ-коды длиннее 5 символов (ПРИМ22 и т.п.).
+    code: varchar('code', { length: 16 }).notNull(),
     name: text('name').notNull(),
     fullName: text('full_name'),
     address: text('address'),
     isActive: boolean('is_active').notNull().default(true),
+    // Если NOT NULL — запись пришла из внешнего источника (JSON-сид от
+    // заказчика). По нему мы UPSERT-аем при будущих обновлениях файла;
+    // через UI такие объекты read-only (PATCH/DELETE возвращают 409
+    // fot_readonly — см. routes/sites.ts). Локально созданные объекты
+    // имеют NULL и редактируются как раньше. Уникальность — partial
+    // unique index из миграции 0054.
+    fotSiteId: bigint('fot_site_id', { mode: 'number' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

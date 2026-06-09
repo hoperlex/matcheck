@@ -379,6 +379,13 @@
       "when": 1780878480000,
       "tag": "0053_responsible_persons_fot_employee_id",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1780878540000,
+      "tag": "0054_sites_seed_from_fot",
+      "breakpoints": true
     }
   ]
 }

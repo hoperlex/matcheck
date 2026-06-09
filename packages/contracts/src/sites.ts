@@ -1,10 +1,14 @@
 import { z } from 'zod';
 
+// Допустимая длина 1-16: исторически было 5, но при сиде объектов из
+// внешнего источника (см. миграция 0054) встречаются коды по 6 символов
+// (ПРИМ22 и т.п.), а также с точкой (МЕ1.0, МЕ2.0) — расширили regex.
+// Менеджер локальные коды короче 5 делать никто не запрещает.
 export const SiteCodeSchema = z
   .string()
   .min(1)
-  .max(5)
-  .regex(/^[A-Za-zА-Яа-я0-9_-]+$/, 'Code allows letters, digits, dash and underscore');
+  .max(16)
+  .regex(/^[A-Za-zА-Яа-я0-9_.\-]+$/, 'Code allows letters, digits, dash, dot and underscore');
 
 export const SiteSchema = z.object({
   id: z.string().uuid(),

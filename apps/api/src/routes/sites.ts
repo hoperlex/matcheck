@@ -12,7 +12,31 @@ import {
   SiteSchema,
   SiteUpsertSchema,
 } from '@matcheck/contracts';
+import { isNotNull } from 'drizzle-orm';
 import { sites, deliveries, SYSTEM_SITE_ID } from '../db/schema.js';
+import type { Db } from '../db/client.js';
+
+// Объект «из ФОТ» — это запись с fot_site_id IS NOT NULL (см. миграцию
+// 0054). Через UI такие нельзя править/удалять: name/address приходят
+// из централизованного источника заказчика, локальные правки затёрло бы
+// следующим обновлением. Аналог isFotResponsiblePerson для МОЛ.
+async function isFotSite(db: Db, id: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: sites.id })
+    .from(sites)
+    .where(and(eq(sites.id, id), isNotNull(sites.fotSiteId)))
+    .limit(1);
+  return row != null;
+}
+
+async function filterFotSiteIds(db: Db, ids: string[]): Promise<string[]> {
+  if (ids.length === 0) return [];
+  const rows = await db
+    .select({ id: sites.id })
+    .from(sites)
+    .where(and(inArray(sites.id, ids), isNotNull(sites.fotSiteId)));
+  return rows.map((r) => r.id);
+}
 
 const ListQuerySchema = z.object({
   q: z.string().optional(),
@@ -139,6 +163,12 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
           .code(409)
           .send({ error: 'system_site_readonly', message: 'Системный объект нельзя редактировать' });
       }
+      if (await isFotSite(app.db, req.params.id)) {
+        return reply.code(409).send({
+          error: 'fot_readonly',
+          message: 'Объект из централизованного справочника нельзя редактировать в MATCHECK',
+        });
+      }
       try {
         const patch: Record<string, unknown> = { updatedAt: new Date() };
         if (req.body.code !== undefined) patch.code = req.body.code;
@@ -192,6 +222,12 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
           .code(409)
           .send({ error: 'system_site_readonly', message: 'Системный объект нельзя удалить' });
       }
+      if (await isFotSite(app.db, req.params.id)) {
+        return reply.code(409).send({
+          error: 'fot_readonly',
+          message: 'Объект из централизованного справочника нельзя удалить в MATCHECK',
+        });
+      }
       // Жёсткое удаление только при отсутствии ссылок из приёмок.
       const [{ count } = { count: 0 }] = await app.db
         .select({ count: drSql<number>`count(*)::int` })
@@ -237,8 +273,16 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
       const systemIds = ids.filter((id) => id === SYSTEM_SITE_ID);
       for (const id of systemIds) skipped.push({ id, reason: 'system_readonly' });
 
+      // 1b) ФОТ-объекты. Тоже помечаем system_readonly (BulkDelete reason
+      //     enum не содержит fot_readonly; смысл «эту запись не положено
+      //     удалять руками» совпадает).
+      const idsNoSystem = ids.filter((id) => id !== SYSTEM_SITE_ID);
+      const fotIds = await filterFotSiteIds(app.db, idsNoSystem);
+      const fotSet = new Set(fotIds);
+      for (const id of fotIds) skipped.push({ id, reason: 'system_readonly' });
+
       // 2) Существование.
-      const candidates = ids.filter((id) => id !== SYSTEM_SITE_ID);
+      const candidates = idsNoSystem.filter((id) => !fotSet.has(id));
       const existingRows = candidates.length
         ? await app.db
             .select({ id: sites.id })
