@@ -104,26 +104,30 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         .from(statuses)
         .orderBy(statuses.entityType, statuses.sortOrder);
 
-      // Источниковые документы: для inspector_kpp фильтруем по своему siteId
-      // и оставляем только не привязанные к приёмке/отгрузке — это сценарий
-      // «Ожидаемые УПД» в мобильном Inbox. Для manager/admin — все документы
-      // в окне effectiveSince.
+      // Источниковые документы: для inspector_kpp фильтруем только по siteId.
+      // Раньше тут был дополнительный фильтр not_exists (отдавать только не
+      // привязанные УПД), но он ломал зеркало «портал ↔ мобила»: после
+      // привязки УПД к приёмке на портале её `updated_at` не менялся,
+      // в дельту /sync она не попадала, и Inbox инспектора залипал
+      // фантомами до logout/login. Теперь:
+      //   1) При INSERT/DELETE в delivery_sources/shipment_sources сервер
+      //      бампает source_documents.updated_at (см. domain/sourceDocuments/touch.ts).
+      //   2) /sync отдаёт инспектору ВСЕ УПД сайта в окне.
+      //   3) Мобила фильтрует Inbox локально по своему junction-кэшу
+      //      (см. IntakeUpdSelectViewModel — фильтр attachedIds), который
+      //      синхронизируется через deliveries[].sourceDocumentIds.
+      // Limit поднят до 1000 — на активном сайте инспектор после долгого
+      // оффлайна может получить большую дельту, 200 обрезало бы важное.
       const sdWhereParts = [gte(sourceDocuments.updatedAt, effectiveSince)];
       if (inspectorOnly && userSiteId) {
         sdWhereParts.push(eq(sourceDocuments.siteId, userSiteId));
-        sdWhereParts.push(
-          drSql`not exists (select 1 from delivery_sources ds where ds.source_document_id = ${sourceDocuments.id})`,
-        );
-        sdWhereParts.push(
-          drSql`not exists (select 1 from shipment_sources ss where ss.source_document_id = ${sourceDocuments.id})`,
-        );
       }
       const sdRows = await app.db
         .select()
         .from(sourceDocuments)
         .where(drAnd(...sdWhereParts))
         .orderBy(desc(sourceDocuments.updatedAt))
-        .limit(200);
+        .limit(1000);
 
       const sdIds = sdRows.map((r) => r.id);
       const sdItemRows = sdIds.length

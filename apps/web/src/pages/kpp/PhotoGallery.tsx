@@ -11,6 +11,7 @@ import type {
 import { api, ApiError } from '../../services/api';
 import { db, type OperationKind } from '../../lib/db';
 import { useAuthStore } from '../../stores/auth';
+import { PhotoDocumentPreview } from './PhotoDocumentPreview';
 
 const THUMB_SIZE = 140;
 // React-query staleTime для presigned URL. Сервер выдаёт URL с TTL 15 мин
@@ -87,6 +88,11 @@ export function PhotoGallery({
   // подпись, чем подписать документ как «Груз/машина».
   const showLabels = sorted.some((p) => p.kind === 'document' || p.kind === 'vehicle');
 
+  // Открытое фото-документ для split-view модалки (фото + распознанные
+  // материалы справа). Только для kind='document'; для cargo/vehicle
+  // работает стандартный antd Image preview через PreviewGroup ниже.
+  const [docPreview, setDocPreview] = useState<{ id: string; src: string } | null>(null);
+
   return (
     <div
       style={{
@@ -105,9 +111,18 @@ export function PhotoGallery({
             onDelete={() => del.mutate(p.id)}
             deleting={del.isPending && del.variables === p.id}
             showLabel={showLabels}
+            onDocumentClick={(src) => setDocPreview({ id: p.id, src })}
           />
         ))}
       </Image.PreviewGroup>
+      {docPreview && (
+        <PhotoDocumentPreview
+          open={!!docPreview}
+          onClose={() => setDocPreview(null)}
+          photoId={docPreview.id}
+          imageSrc={docPreview.src}
+        />
+      )}
     </div>
   );
 }
@@ -127,6 +142,7 @@ function PhotoThumb({
   onDelete,
   deleting,
   showLabel,
+  onDocumentClick,
 }: {
   photo: AnyPhoto;
   canDelete: boolean;
@@ -135,8 +151,13 @@ function PhotoThumb({
   // false — родитель просит не показывать подпись (kind ненадёжен,
   // backfill ещё не прошёл). См. PhotoGallery.showLabels.
   showLabel: boolean;
+  // Для kind='document' клик перехватывается и открывает split-view
+  // модалку с распознанными материалами справа. Стандартный antd preview
+  // в этом случае отключён.
+  onDocumentClick: (fullSrc: string) => void;
 }): JSX.Element {
   const label = showLabel ? kindLabel(photo.kind) : null;
+  const isDocument = photo.kind === 'document';
   const [localThumb, setLocalThumb] = useState<string | null>(null);
   const [localFull, setLocalFull] = useState<string | null>(null);
   const [idbChecked, setIdbChecked] = useState(false);
@@ -258,10 +279,18 @@ function PhotoThumb({
     <div style={{ position: 'relative', width: THUMB_SIZE, height: THUMB_SIZE }}>
       <Image
         src={thumbSrc}
-        preview={{ src: fullSrc }}
+        // У документов перехватываем клик и открываем свою split-view
+        // модалку (фото + распознанные позиции справа), стандартный
+        // antd preview отключаем. У cargo/vehicle всё как раньше.
+        preview={isDocument ? false : { src: fullSrc }}
         width={THUMB_SIZE}
         height={THUMB_SIZE}
-        style={{ objectFit: 'cover', borderRadius: 6 }}
+        style={{
+          objectFit: 'cover',
+          borderRadius: 6,
+          cursor: isDocument ? 'pointer' : undefined,
+        }}
+        onClick={isDocument ? () => onDocumentClick(fullSrc) : undefined}
         placeholder={
           <div
             style={{

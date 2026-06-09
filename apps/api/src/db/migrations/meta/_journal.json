@@ -400,6 +400,20 @@
       "when": 1780878660000,
       "tag": "0056_shipment_supplier_id",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1780878720000,
+      "tag": "0057_source_documents_touch_attached",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1780878780000,
+      "tag": "0058_photo_recognized_items",
+      "breakpoints": true
     }
   ]
 }

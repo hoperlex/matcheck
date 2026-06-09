@@ -32,6 +32,7 @@ import {
   getStatusCodeById,
   resolveStatusId as resolveStatusIdShared,
 } from '../domain/statuses/lookup.js';
+import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
 import { publishEvent } from './events.js';
 
@@ -478,6 +479,16 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         }
       }
 
+      // Сохраняем список привязанных УПД до удаления — после CASCADE
+      // shipment_sources они будут отвязаны, и updated_at нужно
+      // забампать, чтобы /sync вернул УПД в Inbox инспектора.
+      const attachedSdIds = (
+        await app.db
+          .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
+          .from(shipmentSources)
+          .where(eq(shipmentSources.shipmentId, req.params.id))
+      ).map((r: { sourceDocumentId: string }) => r.sourceDocumentId);
+
       // Журнал hard-delete + физическое удаление одной транзакцией:
       // офлайн-клиент узнаёт об удалении через /sync.deletedIds.
       await app.db.transaction(async (tx) => {
@@ -489,6 +500,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         });
         await tx.delete(shipments).where(eq(shipments.id, req.params.id));
       });
+      await touchSourceDocuments(app, attachedSdIds);
       publishEvent(app, {
         type: 'shipment_deleted',
         entityId: req.params.id,
@@ -823,6 +835,12 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
               req.log.warn({ err: s3Err, s3Key: p.s3Key }, 'bulk-hard-delete: s3 delete failed (shipment)');
             }
           }
+          const attachedSdIds = (
+            await app.db
+              .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
+              .from(shipmentSources)
+              .where(eq(shipmentSources.shipmentId, id))
+          ).map((r: { sourceDocumentId: string }) => r.sourceDocumentId);
           await app.db.transaction(async (tx) => {
             await tx.insert(entityDeletions).values({
               entityType: 'shipment',
@@ -832,6 +850,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             });
             await tx.delete(shipments).where(eq(shipments.id, id));
           });
+          await touchSourceDocuments(app, attachedSdIds);
           publishEvent(app, {
             type: 'shipment_deleted',
             entityId: id,
@@ -1096,6 +1115,9 @@ async function createShipment(
       }
       throw err;
     }
+    // Бамп updated_at для привязанных УПД, чтобы они попали в дельту
+    // /sync. См. domain/sourceDocuments/touch.ts.
+    await touchSourceDocuments(app, input.sourceDocumentIds);
   }
   return created;
 }
@@ -1184,6 +1206,13 @@ async function updateShipment(
   if (input.sourceDocumentIds.length) {
     await assertSourcesAvailableForShipment(app, input.sourceDocumentIds, id);
   }
+  // Запоминаем какие УПД были привязаны раньше — нужно бампать
+  // их updated_at тоже (для УПД, которая отвязывается, видимость
+  // в Inbox должна вернуться).
+  const previousSources: { sourceDocumentId: string }[] = await app.db
+    .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
+    .from(shipmentSources)
+    .where(eq(shipmentSources.shipmentId, id));
   await app.db.delete(shipmentSources).where(eq(shipmentSources.shipmentId, id));
   if (input.sourceDocumentIds.length) {
     try {
@@ -1197,6 +1226,13 @@ async function updateShipment(
       throw err;
     }
   }
+  // Бамп updated_at для всех затронутых УПД: и для новопривязанных,
+  // и для тех, которые отвязались.
+  const affected = new Set<string>([
+    ...previousSources.map((p) => p.sourceDocumentId),
+    ...input.sourceDocumentIds,
+  ]);
+  await touchSourceDocuments(app, [...affected]);
 }
 
 // Подтягивает позиции из привязываемых УПД в формате shipment_items.

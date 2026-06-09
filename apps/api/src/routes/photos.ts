@@ -8,18 +8,21 @@ import {
   PhotoGetUrlResponseSchema,
   PhotoPresignRequestSchema,
   PhotoPresignResponseSchema,
+  PhotoRecognitionSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
 import {
   counterparties,
   deliveries,
   deliveryPhotos,
+  photoRecognizedItems,
   shipments,
   shipmentPhotos,
   sites,
 } from '../db/schema.js';
-import { deleteObject, headObject, presign } from '../domain/storage/s3.signer.js';
+import { deleteObject, getObject, headObject, presign } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
+import { parseWaybillBatch } from '../domain/edo/waybill-batch.parser.js';
 import { publishEvent } from './events.js';
 
 // TTL presigned URL для GET/PUT в S3. Поднят с 300с до 900с, чтобы
@@ -520,6 +523,261 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       return { ok: true as const };
     },
   );
+
+  // ── Распознавание материалов из фото-документа ────────────────────────
+  // Используется split-view модалкой в Принятых (клик на фото с
+  // kind='document'). Логика:
+  //   GET  → отдаёт кэш (если есть), иначе 404.
+  //   POST → если кэш есть и без ошибки — отдаёт его без LLM-вызова;
+  //          если нет/failed — синхронно запускает LLM и кэширует.
+  // Идемпотентность: уникальные partial-индексы на (delivery_photo_id) и
+  // (shipment_photo_id) — попытка двойного POST увидит существующую запись.
+
+  app.get(
+    '/api/v1/photos/:id/recognition',
+    {
+      preHandler: [app.authenticate],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: {
+          200: PhotoRecognitionSchema,
+          404: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const found = await findPhoto(app, req.params.id);
+      if (!found) return reply.code(404).send({ error: 'not_found' });
+      if (
+        req.user?.role === 'inspector_kpp' &&
+        (!req.user.siteId || found.parentSiteId !== req.user.siteId)
+      ) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      const cached = await loadRecognition(app, found.kind, req.params.id);
+      if (!cached) return reply.code(404).send({ error: 'not_found' });
+      return cached;
+    },
+  );
+
+  app.post(
+    '/api/v1/photos/:id/recognize',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        querystring: z.object({
+          // ?force=true — заново распознать, даже если кэш есть.
+          force: z.coerce.boolean().optional(),
+        }),
+        response: {
+          200: PhotoRecognitionSchema,
+          404: ErrorResponseSchema,
+          422: ErrorResponseSchema,
+          500: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const found = await findPhoto(app, req.params.id);
+      if (!found) return reply.code(404).send({ error: 'not_found' });
+
+      // Кэш-хит без force и без error_message — отдаём без LLM-вызова.
+      if (!req.query.force) {
+        const cached = await loadRecognition(app, found.kind, req.params.id);
+        if (cached && cached.status === 'done') return cached;
+      }
+
+      // Проверка типа фото: распознаём только документы.
+      const photoKind = await getPhotoKind(app, found.kind, req.params.id);
+      if (photoKind !== 'document') {
+        return reply.code(422).send({
+          error: 'not_a_document',
+          message: 'Распознавание доступно только для фото с kind="document"',
+        });
+      }
+
+      // Скачиваем оригинал из S3 (полное разрешение для LLM; thumb
+      // обрезает и снижает качество). Размер ~1-5 МБ.
+      let buffer: Buffer;
+      try {
+        buffer = await getObject(found.s3Key);
+      } catch (err) {
+        req.log.error({ err, key: found.s3Key }, 's3 get failed for recognize');
+        return reply
+          .code(500)
+          .send({ error: 's3_unavailable', message: 'Не удалось загрузить фото из хранилища' });
+      }
+
+      // Расширение → MIME. Если не угадать, по дефолту image/jpeg —
+      // подавляющее большинство фото с мобилы именно так.
+      const ext = found.s3Key.split('.').pop()?.toLowerCase() ?? 'jpg';
+      const mimeType =
+        ext === 'png' ? 'image/png' :
+        ext === 'webp' ? 'image/webp' :
+        ext === 'heic' ? 'image/heic' :
+        ext === 'heif' ? 'image/heif' :
+        'image/jpeg';
+
+      let llmResult;
+      try {
+        llmResult = await parseWaybillBatch(
+          [{ buffer, mimeType, filename: `photo-${req.params.id}.${ext}` }],
+          { sourceDocumentId: null, bundleId: null },
+        );
+      } catch (err) {
+        req.log.error({ err }, 'parseWaybillBatch failed in recognize');
+        const message = err instanceof Error ? err.message : 'Распознавание не удалось';
+        await upsertRecognition(app, found.kind, req.params.id, {
+          status: 'failed',
+          items: [],
+          docForm: null,
+          docNumber: null,
+          docDate: null,
+          totalSum: null,
+          confidence: null,
+          model: null,
+          errorMessage: message,
+        });
+        return reply.code(500).send({ error: 'recognition_failed', message });
+      }
+
+      // parseWaybillBatch может вернуть несколько документов (если в кадре
+      // несколько форм). Берём первый с непустым items; если все пусты —
+      // возвращаем первый как есть. Для одиночного фото ТТН обычно один.
+      const docs = llmResult.parsed.documents ?? [];
+      const best = docs.find((d) => d.items && d.items.length > 0) ?? docs[0] ?? null;
+
+      const saved = await upsertRecognition(app, found.kind, req.params.id, {
+        status: 'done',
+        items: (best?.items ?? []).map((it) => ({
+          nameRaw: it.nameRaw,
+          qty: it.qty ?? null,
+          unit: it.unit ?? null,
+          invNumber: it.invNumber ?? null,
+          price: it.price ?? null,
+          sum: it.sum ?? null,
+        })),
+        docForm: best?.form ?? null,
+        docNumber: best?.docNumber ?? null,
+        docDate: best?.docDate ?? null,
+        totalSum: best?.totalSum ?? null,
+        confidence: best?.confidence ?? null,
+        model: llmResult.llmProviderId,
+        errorMessage: null,
+      });
+      return saved;
+    },
+  );
+}
+
+// Читает кэш распознавания фото. Возвращает null, если кэша нет.
+async function loadRecognition(
+  app: ReturnType<typeof asZod>,
+  kind: OperationKind,
+  photoId: string,
+): Promise<z.infer<typeof PhotoRecognitionSchema> | null> {
+  const col = kind === 'delivery'
+    ? photoRecognizedItems.deliveryPhotoId
+    : photoRecognizedItems.shipmentPhotoId;
+  const [row] = await app.db
+    .select()
+    .from(photoRecognizedItems)
+    .where(eq(col, photoId))
+    .limit(1);
+  if (!row) return null;
+  return {
+    status: row.errorMessage ? 'failed' : 'done',
+    items: (row.items as z.infer<typeof PhotoRecognitionSchema>['items']) ?? [],
+    docForm: row.docForm,
+    docNumber: row.docNumber,
+    docDate: row.docDate,
+    totalSum: row.totalSum !== null ? Number(row.totalSum) : null,
+    confidence: row.confidence !== null ? Number(row.confidence) : null,
+    model: row.model,
+    errorMessage: row.errorMessage,
+    recognizedAt: row.updatedAt.toISOString(),
+  };
+}
+
+// UPSERT кэша распознавания. Уникальный partial-индекс по
+// delivery_photo_id/shipment_photo_id гарантирует одну запись на фото.
+async function upsertRecognition(
+  app: ReturnType<typeof asZod>,
+  kind: OperationKind,
+  photoId: string,
+  data: {
+    status: 'done' | 'failed';
+    items: z.infer<typeof PhotoRecognitionSchema>['items'];
+    docForm: string | null;
+    docNumber: string | null;
+    docDate: string | null;
+    totalSum: number | null;
+    confidence: number | null;
+    model: string | null;
+    errorMessage: string | null;
+  },
+): Promise<z.infer<typeof PhotoRecognitionSchema>> {
+  const values = {
+    deliveryPhotoId: kind === 'delivery' ? photoId : null,
+    shipmentPhotoId: kind === 'shipment' ? photoId : null,
+    items: data.items,
+    docForm: data.docForm,
+    docNumber: data.docNumber,
+    docDate: data.docDate,
+    totalSum: data.totalSum !== null ? String(data.totalSum) : null,
+    confidence: data.confidence !== null ? String(data.confidence) : null,
+    model: data.model,
+    errorMessage: data.errorMessage,
+    updatedAt: new Date(),
+  };
+  const conflictCol = kind === 'delivery'
+    ? photoRecognizedItems.deliveryPhotoId
+    : photoRecognizedItems.shipmentPhotoId;
+  await app.db
+    .insert(photoRecognizedItems)
+    .values(values)
+    .onConflictDoUpdate({
+      target: conflictCol,
+      targetWhere: kind === 'delivery'
+        ? eq(photoRecognizedItems.deliveryPhotoId, photoId)
+        : eq(photoRecognizedItems.shipmentPhotoId, photoId),
+      set: {
+        items: values.items,
+        docForm: values.docForm,
+        docNumber: values.docNumber,
+        docDate: values.docDate,
+        totalSum: values.totalSum,
+        confidence: values.confidence,
+        model: values.model,
+        errorMessage: values.errorMessage,
+        updatedAt: values.updatedAt,
+      },
+    });
+  const result = await loadRecognition(app, kind, photoId);
+  if (!result) throw new Error('upsertRecognition: запись пропала после insert');
+  return result;
+}
+
+async function getPhotoKind(
+  app: ReturnType<typeof asZod>,
+  opKind: OperationKind,
+  photoId: string,
+): Promise<string | null> {
+  if (opKind === 'delivery') {
+    const [r] = await app.db
+      .select({ kind: deliveryPhotos.kind })
+      .from(deliveryPhotos)
+      .where(eq(deliveryPhotos.id, photoId))
+      .limit(1);
+    return r?.kind ?? null;
+  }
+  const [r] = await app.db
+    .select({ kind: shipmentPhotos.kind })
+    .from(shipmentPhotos)
+    .where(eq(shipmentPhotos.id, photoId))
+    .limit(1);
+  return r?.kind ?? null;
 }
 
 async function presignBoth(

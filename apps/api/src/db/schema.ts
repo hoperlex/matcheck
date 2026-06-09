@@ -70,6 +70,12 @@ export const llmKindEnum = pgEnum('llm_kind', [
 ]);
 export const attachmentRoleEnum = pgEnum('attachment_role', ['original', 'extracted_text']);
 
+// ─── Кэш распознавания позиций фото-документа ─────────────────────────────
+// См. миграцию 0058. Фото живёт либо в delivery_photos, либо в shipment_photos
+// (polymorphic), CHECK гарантирует ровно один FK. UI в split-view модалке
+// читает items для правой панели; LLM-вызов из routes/photos.ts.
+// Объявление будет ниже после deliveryPhotos/shipmentPhotos.
+
 // ─── Statuses (универсальный справочник статусов для разных сущностей) ────
 
 export const statuses = pgTable(
@@ -1016,6 +1022,52 @@ export const shipmentPhotos = pgTable(
     index('shipment_photos_orphan_idx')
       .on(t.takenAt)
       .where(sql`${t.uploadedAt} is null`),
+  ],
+);
+
+// ─── Кэш распознавания фото-документа ─────────────────────────────────────
+// См. миграцию 0058. Polymorphic FK: ровно одна из ссылок — delivery или
+// shipment, гарантировано CHECK photo_recognized_one_photo_chk на уровне БД.
+// items — JSONB-массив { nameRaw, qty, unit, price, sum, invNumber } из
+// LLM-парсера (domain/edo/waybill-batch.parser.ts).
+//
+// Тип items не делаем строго типизированным через $type<...> чтобы не
+// связываться с public-контрактом WaybillBatchParsed: формат может
+// меняться, а кэш — служебный (читается только из routes/photos.ts +
+// возвращается через PhotoRecognitionItemSchema).
+
+export const photoRecognizedItems = pgTable(
+  'photo_recognized_items',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    deliveryPhotoId: uuid('delivery_photo_id').references(() => deliveryPhotos.id, {
+      onDelete: 'cascade',
+    }),
+    shipmentPhotoId: uuid('shipment_photo_id').references(() => shipmentPhotos.id, {
+      onDelete: 'cascade',
+    }),
+    items: jsonb('items').notNull().default(sql`'[]'::jsonb`),
+    docForm: varchar('doc_form', { length: 32 }),
+    docNumber: text('doc_number'),
+    docDate: timestamp('doc_date', { withTimezone: false, mode: 'string' }),
+    totalSum: numeric('total_sum', { precision: 20, scale: 2 }),
+    confidence: numeric('confidence', { precision: 3, scale: 2 }),
+    model: text('model'),
+    errorMessage: text('error_message'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('photo_recognized_delivery_uidx')
+      .on(t.deliveryPhotoId)
+      .where(sql`${t.deliveryPhotoId} is not null`),
+    uniqueIndex('photo_recognized_shipment_uidx')
+      .on(t.shipmentPhotoId)
+      .where(sql`${t.shipmentPhotoId} is not null`),
+    check(
+      'photo_recognized_one_photo_chk',
+      sql`((${t.deliveryPhotoId} IS NOT NULL)::int + (${t.shipmentPhotoId} IS NOT NULL)::int) = 1`,
+    ),
   ],
 );
 

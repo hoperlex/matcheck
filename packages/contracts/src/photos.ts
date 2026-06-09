@@ -65,3 +65,40 @@ export const PhotoConfirmResponseSchema = z.object({
   uploadedAt: z.string(),
 });
 export type PhotoConfirmResponse = z.infer<typeof PhotoConfirmResponseSchema>;
+
+// ─── Распознавание позиций из фото-документа ──────────────────────────────
+// Используется split-view модалкой в портале (раздел Принятые → клик на
+// фото с kind='document'). LLM-парсер тот же, что у накладных
+// (domain/edo/waybill-batch.parser.ts); результат кэшируется в БД
+// (миграция 0058) и повторно отдаётся без LLM-вызова.
+
+// Одна строка таблицы материалов. Цена/сумма/количество — числа, но
+// храним как string|null, чтобы избежать потери точности у numeric:
+// фронт всё равно форматирует как валюту.
+export const PhotoRecognitionItemSchema = z.object({
+  nameRaw: z.string(),
+  qty: z.number().nullable().optional(),
+  unit: z.string().nullable().optional(),
+  invNumber: z.string().nullable().optional(),
+  price: z.number().nullable().optional(),
+  sum: z.number().nullable().optional(),
+});
+export type PhotoRecognitionItem = z.infer<typeof PhotoRecognitionItemSchema>;
+
+export const PhotoRecognitionSchema = z.object({
+  // Статус кэша: done — есть распознанные items; failed — LLM упал
+  // (errorMessage заполнен); processing зарезервирован под асинхронный
+  // режим, но сейчас бэк делает синхронный POST и сразу отдаёт done/failed.
+  status: z.enum(['done', 'failed']),
+  items: z.array(PhotoRecognitionItemSchema),
+  // Метаданные документа.
+  docForm: z.string().nullable(),
+  docNumber: z.string().nullable(),
+  docDate: z.string().nullable(),
+  totalSum: z.number().nullable(),
+  confidence: z.number().nullable(),
+  model: z.string().nullable(),
+  errorMessage: z.string().nullable(),
+  recognizedAt: z.string(),
+});
+export type PhotoRecognition = z.infer<typeof PhotoRecognitionSchema>;

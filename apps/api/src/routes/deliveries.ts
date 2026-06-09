@@ -34,6 +34,7 @@ import {
   getStatusCodeById,
   resolveStatusId as resolveStatusIdShared,
 } from '../domain/statuses/lookup.js';
+import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { publishEvent } from './events.js';
 
 const ListQuerySchema = z.object({
@@ -465,6 +466,17 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         }
       }
 
+      // Сохраняем список привязанных УПД до удаления — после CASCADE
+      // delivery_sources они уже будут отвязаны, но их updated_at нужно
+      // забампать, чтобы /sync вернул их в Inbox инспектора («снова
+      // ожидаемая»).
+      const attachedSdIds = (
+        await app.db
+          .select({ sourceDocumentId: deliverySources.sourceDocumentId })
+          .from(deliverySources)
+          .where(eq(deliverySources.deliveryId, req.params.id))
+      ).map((r: { sourceDocumentId: string }) => r.sourceDocumentId);
+
       // Журнал hard-delete + физическое удаление одной транзакцией:
       // офлайн-клиент узнаёт об удалении через /sync.deletedIds.
       await app.db.transaction(async (tx) => {
@@ -476,6 +488,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         });
         await tx.delete(deliveries).where(eq(deliveries.id, req.params.id));
       });
+      // После удаления delivery (и каскадного удаления junction-строк)
+      // бампаем updated_at УПД, чтобы они вернулись в Inbox инспектора.
+      await touchSourceDocuments(app, attachedSdIds);
       publishEvent(app, {
         type: 'delivery_deleted',
         entityId: req.params.id,
@@ -817,6 +832,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               req.log.warn({ err: s3Err, s3Key: p.s3Key }, 'bulk-hard-delete: s3 delete failed');
             }
           }
+          const attachedSdIds = (
+            await app.db
+              .select({ sourceDocumentId: deliverySources.sourceDocumentId })
+              .from(deliverySources)
+              .where(eq(deliverySources.deliveryId, id))
+          ).map((r: { sourceDocumentId: string }) => r.sourceDocumentId);
           await app.db.transaction(async (tx) => {
             await tx.insert(entityDeletions).values({
               entityType: 'delivery',
@@ -826,6 +847,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             });
             await tx.delete(deliveries).where(eq(deliveries.id, id));
           });
+          await touchSourceDocuments(app, attachedSdIds);
           publishEvent(app, {
             type: 'delivery_deleted',
             entityId: id,
@@ -1373,6 +1395,10 @@ async function createDelivery(
       }
       throw err;
     }
+    // Бамп updated_at для привязанных УПД, чтобы они попали в дельту
+    // /sync и инспектор увидел изменение видимости без logout/login.
+    // См. domain/sourceDocuments/touch.ts.
+    await touchSourceDocuments(app, input.sourceDocumentIds);
   }
   return created;
 }
@@ -1463,6 +1489,13 @@ async function updateDelivery(
   if (input.sourceDocumentIds.length) {
     await assertSourcesAvailableForDelivery(app, input.sourceDocumentIds, id);
   }
+  // Запоминаем какие УПД были привязаны раньше — нужно бампать
+  // их updated_at тоже (для УПД, которая отвязывается, видимость
+  // в Inbox должна вернуться).
+  const previousSources: { sourceDocumentId: string }[] = await app.db
+    .select({ sourceDocumentId: deliverySources.sourceDocumentId })
+    .from(deliverySources)
+    .where(eq(deliverySources.deliveryId, id));
   await app.db.delete(deliverySources).where(eq(deliverySources.deliveryId, id));
   if (input.sourceDocumentIds.length) {
     try {
@@ -1476,6 +1509,13 @@ async function updateDelivery(
       throw err;
     }
   }
+  // Бамп updated_at для всех затронутых УПД: и для новопривязанных,
+  // и для тех, которые отвязались. См. domain/sourceDocuments/touch.ts.
+  const affected = new Set<string>([
+    ...previousSources.map((p) => p.sourceDocumentId),
+    ...input.sourceDocumentIds,
+  ]);
+  await touchSourceDocuments(app, [...affected]);
 }
 
 function isSourceDocumentUniqueViolation(err: unknown): boolean {
