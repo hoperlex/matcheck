@@ -217,11 +217,6 @@ function RecognitionPanel({
         {data.totalSum !== null && (
           <Tag color="green">Итого: {formatMoney(data.totalSum)}</Tag>
         )}
-        {data.confidence !== null && (
-          <Tag color={data.confidence >= 0.7 ? 'green' : data.confidence >= 0.4 ? 'orange' : 'red'}>
-            Уверенность: {Math.round(data.confidence * 100)}%
-          </Tag>
-        )}
       </div>
 
       {data.items.length === 0 ? (

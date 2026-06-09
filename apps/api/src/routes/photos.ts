@@ -22,7 +22,7 @@ import {
 } from '../db/schema.js';
 import { deleteObject, getObject, headObject, presign } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
-import { parseWaybillBatch } from '../domain/edo/waybill-batch.parser.js';
+import { recognizePhotoItems } from '../domain/photos/recognize.js';
 import { publishEvent } from './events.js';
 
 // TTL presigned URL для GET/PUT в S3. Поднят с 300с до 900с, чтобы
@@ -619,14 +619,15 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         ext === 'heif' ? 'image/heif' :
         'image/jpeg';
 
+      // Используем отдельный, более терпимый промпт под split-view
+      // (domain/photos/recognize.ts) — он не требует жёсткой классификации
+      // формы и лучше работает на наклонных фото и нестандартных
+      // накладных, чем parseWaybillBatch.
       let llmResult;
       try {
-        llmResult = await parseWaybillBatch(
-          [{ buffer, mimeType, filename: `photo-${req.params.id}.${ext}` }],
-          { sourceDocumentId: null, bundleId: null },
-        );
+        llmResult = await recognizePhotoItems(buffer, mimeType);
       } catch (err) {
-        req.log.error({ err }, 'parseWaybillBatch failed in recognize');
+        req.log.error({ err }, 'recognizePhotoItems failed');
         const message = err instanceof Error ? err.message : 'Распознавание не удалось';
         await upsertRecognition(app, found.kind, req.params.id, {
           status: 'failed',
@@ -642,15 +643,9 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         return reply.code(500).send({ error: 'recognition_failed', message });
       }
 
-      // parseWaybillBatch может вернуть несколько документов (если в кадре
-      // несколько форм). Берём первый с непустым items; если все пусты —
-      // возвращаем первый как есть. Для одиночного фото ТТН обычно один.
-      const docs = llmResult.parsed.documents ?? [];
-      const best = docs.find((d) => d.items && d.items.length > 0) ?? docs[0] ?? null;
-
       const saved = await upsertRecognition(app, found.kind, req.params.id, {
         status: 'done',
-        items: (best?.items ?? []).map((it) => ({
+        items: llmResult.items.map((it) => ({
           nameRaw: it.nameRaw,
           qty: it.qty ?? null,
           unit: it.unit ?? null,
@@ -658,12 +653,12 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           price: it.price ?? null,
           sum: it.sum ?? null,
         })),
-        docForm: best?.form ?? null,
-        docNumber: best?.docNumber ?? null,
-        docDate: best?.docDate ?? null,
-        totalSum: best?.totalSum ?? null,
-        confidence: best?.confidence ?? null,
-        model: llmResult.llmProviderId,
+        docForm: llmResult.docForm,
+        docNumber: llmResult.docNumber,
+        docDate: llmResult.docDate,
+        totalSum: llmResult.totalSum,
+        confidence: llmResult.confidence,
+        model: llmResult.model,
         errorMessage: null,
       });
       return saved;
