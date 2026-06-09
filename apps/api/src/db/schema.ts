@@ -14,6 +14,7 @@ import {
   uniqueIndex,
   primaryKey,
   check,
+  bigint,
   bigserial,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
@@ -254,6 +255,12 @@ export const responsiblePersons = pgTable(
     phone: text('phone'),
     position: text('position'),
     isActive: boolean('is_active').notNull().default(true),
+    // Если NOT NULL — запись пришла из внешней БД ФОТ (см. routes/mol.ts
+    // и domain/mol/syncFotMol.ts). Локально созданные МОЛ имеют NULL —
+    // они редактируются через UI; ФОТ-записи read-only и обновляются
+    // через UPSERT по этому полю. Уникальность гарантирует partial unique
+    // index (миграция 0053).
+    fotEmployeeId: bigint('fot_employee_id', { mode: 'number' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

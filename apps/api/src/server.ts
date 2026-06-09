@@ -18,7 +18,7 @@ import { counterpartyRoutes } from './routes/counterparties.js';
 import { siteRoutes } from './routes/sites.js';
 import { materialRoutes } from './routes/materials.js';
 import { responsiblePersonRoutes } from './routes/responsiblePersons.js';
-import { molRoutes } from './routes/mol.js';
+import { molRoutes, warmUpFotMolCache } from './routes/mol.js';
 import { assetRoutes } from './routes/assets.js';
 import { sourceDocumentRoutes } from './routes/source-documents.js';
 import { deliveryRoutes } from './routes/deliveries.js';
@@ -97,6 +97,24 @@ export async function buildServer() {
       error: error.name ?? 'internal_error',
       message: env.NODE_ENV === 'production' ? 'Internal error' : error.message,
     });
+  });
+
+  // Подтянуть актуальный список МОЛ из ФОТ и зеркалить в
+  // responsible_persons сразу после регистрации плагинов — чтобы
+  // выпадающие списки во всех формах работали из коробки. Не блокирует
+  // listen (fire-and-forget из onReady-хука), при недоступной ФОТ молча
+  // логирует.
+  app.addHook('onReady', async () => {
+    void warmUpFotMolCache(app.db, app.log);
+    // Каждые 10 мин пересинхронизируем без участия UI. Совпадает с TTL
+    // кэша /mol и матчится с ожиданием «обновился ФОТ → в течение 10 мин
+    // увижу на портале». Не делаем чаще, чтобы не нагружать ФОТ-БД.
+    const FOT_MOL_RESYNC_MS = 10 * 60 * 1000;
+    const timer = setInterval(() => {
+      void warmUpFotMolCache(app.db, app.log);
+    }, FOT_MOL_RESYNC_MS);
+    timer.unref();
+    app.addHook('onClose', async () => clearInterval(timer));
   });
 
   return app;

@@ -19,21 +19,31 @@ export function ResponsiblePersonSelect({
   disabled,
   placeholder = 'Выберите МОЛ',
   activeOnly = true,
+  source = 'all',
 }: {
   value: string | null;
   onChange: (id: string | null) => void;
   disabled?: boolean;
   placeholder?: string;
   activeOnly?: boolean;
+  // Источник МОЛ:
+  //  'fot'   — только зеркало из внешней БД ФОТ (тот же набор, что
+  //            в Справочники → МОЛ). Кнопка «+ Создать ФИО» скрывается,
+  //            потому что ФОТ — read-only.
+  //  'local' — только заведённые в MATCHECK вручную.
+  //  'all'   — без фильтра (поведение по умолчанию).
+  source?: 'fot' | 'local' | 'all';
 }) {
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
   const list = useQuery({
-    queryKey: ['responsible-persons', activeOnly ? 'active' : 'all'],
-    queryFn: () =>
-      api.get<ListResp>(
-        `/responsible-persons?limit=500${activeOnly ? '&activeOnly=true' : ''}`,
-      ),
+    queryKey: ['responsible-persons', activeOnly ? 'active' : 'all', source],
+    queryFn: () => {
+      const params = new URLSearchParams({ limit: '500' });
+      if (activeOnly) params.set('activeOnly', 'true');
+      if (source !== 'all') params.set('source', source);
+      return api.get<ListResp>(`/responsible-persons?${params.toString()}`);
+    },
   });
   const items = list.data?.items ?? [];
 
@@ -58,6 +68,10 @@ export function ResponsiblePersonSelect({
     () => items.some((p) => p.fullName.trim().toLowerCase() === trimmedLower),
     [items, trimmedLower],
   );
+  // При source='fot' создавать МОЛ нельзя — справочник идёт из ФОТ
+  // (sync на бэке). Кнопку «+ Создать ФИО» прячем; в остальном Select
+  // ведёт себя так же, чтобы пользователь не заметил разницы.
+  const canCreate = source !== 'fot';
 
   return (
     <Select
@@ -78,7 +92,7 @@ export function ResponsiblePersonSelect({
       dropdownRender={(menu) => (
         <>
           {menu}
-          {trimmed && !hasExact && (
+          {canCreate && trimmed && !hasExact && (
             <div
               onMouseDown={(e) => {
                 e.preventDefault();

@@ -582,6 +582,7 @@ export function SourceDocumentDetailModal({
                           value={edit.recipientMolId}
                           onChange={(v) => setEdit({ ...edit, recipientMolId: v })}
                           placeholder="Выберите получателя"
+                          source="fot"
                         />
                       )}
                     </Form.Item>

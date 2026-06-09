@@ -372,6 +372,13 @@
       "when": 1780878420000,
       "tag": "0052_shipments_contractor_no_receiver",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1780878480000,
+      "tag": "0053_responsible_persons_fot_employee_id",
+      "breakpoints": true
     }
   ]
 }

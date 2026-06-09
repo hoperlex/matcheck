@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { and, eq, ilike, inArray, sql as drSql } from 'drizzle-orm';
+import { and, eq, ilike, inArray, isNotNull, isNull, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import ExcelJS from 'exceljs';
 import { asZod } from '../lib/fastify.js';
@@ -13,10 +13,23 @@ import {
   ErrorResponseSchema,
 } from '@matcheck/contracts';
 import { entityDeletions, responsiblePersons } from '../db/schema.js';
+import {
+  filterFotResponsiblePersonIds,
+  isFotResponsiblePerson,
+} from '../domain/mol/syncFotMol.js';
 
 const ListQuerySchema = z.object({
   q: z.string().optional(),
   activeOnly: z.coerce.boolean().optional(),
+  // Фильтр по источнику МОЛ:
+  //  fot   — только зеркалированные из внешней БД ФОТ (fot_employee_id IS NOT NULL);
+  //  local — только заведённые в MATCHECK вручную (fot_employee_id IS NULL);
+  //  all   — без фильтра (поведение по умолчанию для обратной совместимости).
+  // Выпадающие списки МОЛ в Документах/Поставках/УПД/Накладной шлют
+  // source=fot, чтобы пользователь выбирал ровно тот набор, что в
+  // Справочники → МОЛ. Импорт-экраны и админ-страницы могут запросить
+  // local/all.
+  source: z.enum(['fot', 'local', 'all']).optional(),
   limit: z.coerce.number().int().positive().max(500).default(100),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
@@ -46,10 +59,12 @@ export async function responsiblePersonRoutes(rawApp: FastifyInstance): Promise<
       },
     },
     async (req) => {
-      const { q, activeOnly, limit, offset } = req.query;
+      const { q, activeOnly, source, limit, offset } = req.query;
       const filters = [];
       if (q) filters.push(ilike(responsiblePersons.fullName, `%${q}%`));
       if (activeOnly) filters.push(eq(responsiblePersons.isActive, true));
+      if (source === 'fot') filters.push(isNotNull(responsiblePersons.fotEmployeeId));
+      else if (source === 'local') filters.push(isNull(responsiblePersons.fotEmployeeId));
       const where = filters.length ? and(...filters) : undefined;
 
       const rows = await app.db
@@ -250,10 +265,22 @@ export async function responsiblePersonRoutes(rawApp: FastifyInstance): Promise<
       schema: {
         params: z.object({ id: z.string().uuid() }),
         body: ResponsiblePersonUpsertSchema.partial(),
-        response: { 200: ResponsiblePersonSchema, 404: ErrorResponseSchema },
+        response: {
+          200: ResponsiblePersonSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
       },
     },
     async (req, reply) => {
+      // Запись из ФОТ редактируется на стороне ФОТ-БД, не в MATCHECK.
+      // Иначе sync на следующем тике затрёт ручные правки.
+      if (await isFotResponsiblePerson(app.db, req.params.id)) {
+        return reply.code(409).send({
+          error: 'fot_readonly',
+          message: 'МОЛ из ФОТ нельзя редактировать в MATCHECK',
+        });
+      }
       const [updated] = await app.db
         .update(responsiblePersons)
         .set({ ...req.body, updatedAt: new Date() })
@@ -271,6 +298,14 @@ export async function responsiblePersonRoutes(rawApp: FastifyInstance): Promise<
       schema: { params: z.object({ id: z.string().uuid() }) },
     },
     async (req, reply) => {
+      // ФОТ-записи не удаляются вручную — увольнение проходит через ФОТ,
+      // sync проставит isActive=false.
+      if (await isFotResponsiblePerson(app.db, req.params.id)) {
+        return reply.code(409).send({
+          error: 'fot_readonly',
+          message: 'МОЛ из ФОТ нельзя удалить в MATCHECK',
+        });
+      }
       // Hard-delete + запись в журнал hard-delete, чтобы офлайн-клиенты
       // удалили локальную копию через /sync.deletedIds.responsiblePersons.
       // siteId=null — это глобальный справочник, не привязан к объекту.
@@ -308,8 +343,14 @@ export async function responsiblePersonRoutes(rawApp: FastifyInstance): Promise<
       },
     },
     async (req) => {
-      const ids = req.body.ids;
+      const requested = req.body.ids;
+      // ФОТ-id-шники в запросе игнорируем (помечаем как skipped с причиной
+      // fot_readonly). Их sync-логика обновляет сама.
+      const fotIds = await filterFotResponsiblePersonIds(app.db, requested);
+      const fotSet = new Set(fotIds);
+      const ids = requested.filter((id) => !fotSet.has(id));
       const result = await app.db.transaction(async (tx) => {
+        if (ids.length === 0) return [] as string[];
         const deleted = await tx
           .delete(responsiblePersons)
           .where(inArray(responsiblePersons.id, ids))
@@ -327,9 +368,14 @@ export async function responsiblePersonRoutes(rawApp: FastifyInstance): Promise<
         return deleted.map((d) => d.id);
       });
       const deletedSet = new Set(result);
-      const skipped = ids
-        .filter((id) => !deletedSet.has(id))
-        .map((id) => ({ id, reason: 'not_found' as const }));
+      const skipped = [
+        // ФОТ-id-шники, которые мы заведомо не трогали.
+        ...fotIds.map((id) => ({ id, reason: 'system_readonly' as const })),
+        // Локальные id, которые не нашлись в таблице на момент DELETE.
+        ...ids
+          .filter((id) => !deletedSet.has(id))
+          .map((id) => ({ id, reason: 'not_found' as const })),
+      ];
       return { deleted: result, skipped };
     },
   );

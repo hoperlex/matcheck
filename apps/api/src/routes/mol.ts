@@ -1,7 +1,9 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import { asZod } from '../lib/fastify.js';
 import { MolListResponseSchema, type MolPerson } from '@matcheck/contracts';
+import type { Db } from '../db/client.js';
 import { getFotPool } from '../db/fot-client.js';
+import { syncFotMolToLocalSerialized } from '../domain/mol/syncFotMol.js';
 
 // Список МОЛ меняется редко (найм/увольнение) — кэшируем, чтобы не дёргать
 // ФОТ-БД на каждый запрос. TTL 10 мин (середина диапазона 5–15 из ТЗ).
@@ -38,6 +40,31 @@ async function fetchFromFot(): Promise<MolPerson[]> {
   }));
 }
 
+/**
+ * Прогрев кэша + первичный sync ФОТ → локальная responsible_persons.
+ * Вызывается из server.ts на старте, чтобы выпадающие списки МОЛ во
+ * всех формах сразу показывали актуальный набор, не дожидаясь первого
+ * запроса в /mol от UI. Молча игнорирует ошибку — при недоступной ФОТ
+ * UI получит stale-кэш на следующем GET /mol.
+ */
+export async function warmUpFotMolCache(db: Db, log: FastifyBaseLogger): Promise<void> {
+  try {
+    if (inflight) {
+      await inflight;
+    } else {
+      inflight = fetchFromFot().finally(() => {
+        inflight = null;
+      });
+      const items = await inflight;
+      cache = { items, fetchedAt: new Date().toISOString() };
+      cacheAt = Date.now();
+      await syncFotMolToLocalSerialized(db, items, log);
+    }
+  } catch (err) {
+    log.warn({ err }, 'warmUpFotMolCache failed (FOT недоступна?)');
+  }
+}
+
 export async function molRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
   app.get(
@@ -60,6 +87,12 @@ export async function molRoutes(rawApp: FastifyInstance): Promise<void> {
         const items = await inflight;
         cache = { items, fetchedAt: new Date().toISOString() };
         cacheAt = Date.now();
+        // Зеркалим свежий список в локальную таблицу responsible_persons
+        // (поле fot_employee_id), чтобы выпадающие МОЛ во всех формах
+        // (Документ/Поставка/УПД/Накладная) показывали тот же набор, что
+        // и Справочники → МОЛ. Не блокирует ответ — sync серилизован
+        // через inflight в syncFotMol.ts.
+        void syncFotMolToLocalSerialized(req.server.db, items, req.log);
         return { items, total: items.length, stale: false, fetchedAt: cache.fetchedAt };
       } catch (err) {
         // ФОТ недоступна — не падаем. Есть кэш — отдаём его с флагом stale;

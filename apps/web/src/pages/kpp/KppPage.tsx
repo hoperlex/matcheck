@@ -263,11 +263,15 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         '/counterparties?limit=500&role=contractor',
       ),
   });
+  // source=fot — берём только тех МОЛ, что синхронизированы из внешней
+  // БД ФОТ (см. /api/v1/mol + domain/mol/syncFotMol.ts). Это тот же
+  // набор, что отображается в Справочники → МОЛ; ручной локальный
+  // справочник в выпадающем списке Получатель не показываем.
   const responsiblePersonsQuery = useQuery({
-    queryKey: ['responsible-persons', 'active'],
+    queryKey: ['responsible-persons', 'active', 'fot'],
     queryFn: () =>
       api.get<{ items: ResponsiblePerson[]; total: number }>(
-        '/responsible-persons?activeOnly=true&limit=500',
+        '/responsible-persons?activeOnly=true&source=fot&limit=500',
       ),
   });
 
