@@ -13,6 +13,8 @@ const KppPage = lazy(() => import('../pages/kpp/KppPage'));
 const ShipmentPage = lazy(() => import('../pages/shipments/ShipmentPage'));
 const Sites = lazy(() => import('../pages/references/Sites'));
 const Counterparties = lazy(() => import('../pages/references/Counterparties'));
+const Suppliers = lazy(() => import('../pages/references/Suppliers'));
+const CustomerCounterparties = lazy(() => import('../pages/references/CustomerCounterparties'));
 const Materials = lazy(() => import('../pages/references/Materials'));
 const ResponsiblePersons = lazy(() => import('../pages/references/ResponsiblePersons'));
 const MolPersons = lazy(() => import('../pages/references/MolPersons'));
@@ -134,8 +136,16 @@ export const router = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="/references/sites" replace /> },
           { path: 'sites', element: suspense(<Sites />) },
-          { path: 'counterparties', element: suspense(<Counterparties />) },
+          // Вкладка «Контрагенты» теперь показывает справочник заказчика
+          // (customer_counterparties), а «Поставщики» — suppliers. Обе —
+          // отдельные таблицы, не операционная counterparties.
+          { path: 'counterparties', element: suspense(<CustomerCounterparties />) },
+          { path: 'suppliers', element: suspense(<Suppliers />) },
           { path: 'mol', element: suspense(<MolPersons />) },
+          // Операционный справочник контрагентов (legacy): завязан на FK
+          // приёмок/отгрузок и sync мобилы. Из вкладок убран, но роут сохранён
+          // для ручного доступа администратором при необходимости.
+          { path: 'counterparties-legacy', element: suspense(<Counterparties />) },
           { path: 'responsible-persons', element: suspense(<ResponsiblePersons />) },
           { path: 'materials', element: suspense(<Materials />) },
           { path: 'assets', element: suspense(<Assets />) },

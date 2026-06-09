@@ -386,6 +386,13 @@
       "when": 1780878540000,
       "tag": "0054_sites_seed_from_fot",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1780878600000,
+      "tag": "0055_suppliers_counterparties_seed",
+      "breakpoints": true
     }
   ]
 }

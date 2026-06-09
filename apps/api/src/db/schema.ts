@@ -242,6 +242,51 @@ export const materials = pgTable(
   ],
 );
 
+// ─── Справочники заказчика (импорт из JSON, миграция 0055) ──────────────────
+// ВАЖНО: это ОТДЕЛЬНЫЕ таблицы, НЕ операционная `counterparties`. Боевая
+// `counterparties` завязана на FK приёмок/отгрузок и sync мобильного клиента,
+// поэтому её НЕ трогаем. Сюда импортируется справочник заказчика (СУ-10):
+// данные могут быть «грязными» (ИНН с запятыми, пробелами, кириллицей,
+// 11-значные) — поэтому `inn` здесь text без строгих констрейнтов и без
+// unique. Редактируется в Справочниках (CRUD). На приёмки/отгрузки/мобилу
+// эти таблицы не влияют. id сохраняются из источника (идемпотентный re-seed).
+
+export const suppliers = pgTable(
+  'suppliers',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    inn: text('inn').notNull().default(''),
+    name: text('name').notNull(),
+    aliases: text('aliases')
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    // Статус проверки службой безопасности заказчика: approved | rejected | null.
+    lastSecurityStatus: varchar('last_security_status', { length: 32 }),
+    foundingDocumentsComment: text('founding_documents_comment'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('supplier_name_idx').on(t.name)],
+);
+
+export const customerCounterparties = pgTable(
+  'customer_counterparties',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    inn: text('inn').notNull().default(''),
+    name: text('name').notNull(),
+    aliases: text('aliases')
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    address: text('address'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('customer_counterparty_name_idx').on(t.name)],
+);
+
 // ─── Справочник МОЛ (материально-ответственные лица собственных бригад) ────
 // См. миграцию 0027. Параллелен counterparties с ролью contractor:
 // получатели материалов и ОС, на которых оформляется документ. Не путать
