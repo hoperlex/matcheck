@@ -205,24 +205,6 @@ export default function SuppliersPage() {
                 '—'
               ),
           },
-          {
-            title: 'Проверка СБ',
-            dataIndex: 'lastSecurityStatus',
-            width: 130,
-            // Сортировка: согласованные → отклонённые → без статуса.
-            sorter: stringSorter<Supplier>((r) => r.lastSecurityStatus),
-            render: (v: string | null) => securityTag(v),
-          },
-          {
-            title: 'Комментарий (учр. док.)',
-            dataIndex: 'foundingDocumentsComment',
-            render: (v: string | null) =>
-              v ? (
-                <Typography.Text>{v}</Typography.Text>
-              ) : (
-                <Typography.Text type="secondary">—</Typography.Text>
-              ),
-          },
           ...(canDelete
             ? [
                 {

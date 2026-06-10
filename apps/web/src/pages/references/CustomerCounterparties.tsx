@@ -199,17 +199,6 @@ export default function CustomerCounterpartiesPage() {
                 '—'
               ),
           },
-          {
-            title: 'Адрес',
-            dataIndex: 'address',
-            sorter: stringSorter<CustomerCounterparty>((r) => r.address),
-            render: (v: string | null) =>
-              v ? (
-                <Typography.Text>{v}</Typography.Text>
-              ) : (
-                <Typography.Text type="secondary">—</Typography.Text>
-              ),
-          },
           ...(canDelete
             ? [
                 {
