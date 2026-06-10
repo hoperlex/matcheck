@@ -421,6 +421,13 @@
       "when": 1780878840000,
       "tag": "0059_deliveries_shipments_display_id",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1780878900000,
+      "tag": "0060_upd_prompt_v6",
+      "breakpoints": true
     }
   ]
 }

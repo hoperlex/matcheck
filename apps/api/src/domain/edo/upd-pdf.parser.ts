@@ -58,8 +58,16 @@ const RESPONSE_JSON_SCHEMA = {
               'Количество (колонка 6 формы УПД). НЕ путать с кодом товара или кодом ОКЕИ (796/006/166 и т.п.).',
           },
           unit: { type: 'string', description: 'Единица измерения текстом' },
-          price: { type: ['number', 'null'], description: 'Цена за единицу' },
-          sum: { type: ['number', 'null'], description: 'Стоимость по строке (без НДС или с НДС)' },
+          price: {
+            type: ['number', 'null'],
+            description:
+              'Цена за единицу С НДС, т.е. price = sum / qty. НЕ значение из колонки 4 «Цена без налога» формы УПД.',
+          },
+          sum: {
+            type: ['number', 'null'],
+            description:
+              'Стоимость С НАЛОГОМ — всего по строке (колонка 9 формы УПД, ПП №1137). НЕ путать с колонкой 5 «Стоимость без налога».',
+          },
           vatRate: {
             type: ['number', 'null'],
             description:
