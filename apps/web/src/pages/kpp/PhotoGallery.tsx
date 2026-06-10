@@ -207,8 +207,37 @@ function PhotoThumb({
     staleTime: URL_STALE,
   });
 
+  // Counter попыток тихого ретрая <img>-загрузки. Cloud.ru S3 иногда
+  // сбрасывает TCP (net::ERR_CONNECTION_RESET) на 1 из 5–6 параллельных
+  // GET к одному bucket'у; новый presigned URL и повторная попытка через
+  // ~500мс ловит 90%+ кейсов. Счётчик локальный, сбрасывается при смене
+  // photo.id (key={p.id} в map → новый mount компонента). MAX_RETRIES=2
+  // — после двух неудач показываем стандартную плитку «битое изображение»
+  // antd, как и сейчас, без новых UI-сообщений.
+  const MAX_RETRIES = 2;
+  const RETRY_DELAY_MS = 500;
+  const [thumbRetries, setThumbRetries] = useState(0);
+  const [previewRetries, setPreviewRetries] = useState(0);
+
   const thumbSrc = localThumb ?? thumbQuery.data?.url ?? '';
   const fullSrc = localFull ?? fullQuery.data?.url ?? thumbSrc;
+
+  const handleThumbError = () => {
+    if (localThumb || !needsRemote) return; // IDB-blob или ещё не пробовали — не наш кейс
+    if (thumbRetries >= MAX_RETRIES) return;
+    setThumbRetries((c) => c + 1);
+    setTimeout(() => {
+      void thumbQuery.refetch();
+    }, RETRY_DELAY_MS);
+  };
+  const handlePreviewError = () => {
+    if (localFull || !needsRemote) return;
+    if (previewRetries >= MAX_RETRIES) return;
+    setPreviewRetries((c) => c + 1);
+    setTimeout(() => {
+      void fullQuery.refetch();
+    }, RETRY_DELAY_MS);
+  };
 
   if (isUploading) {
     return (
@@ -282,7 +311,11 @@ function PhotoThumb({
         // У документов перехватываем клик и открываем свою split-view
         // модалку (фото + распознанные позиции справа), стандартный
         // antd preview отключаем. У cargo/vehicle всё как раньше.
-        preview={isDocument ? false : { src: fullSrc }}
+        preview={
+          isDocument
+            ? false
+            : { src: fullSrc, imgCommonProps: { onError: handlePreviewError } }
+        }
         width={THUMB_SIZE}
         height={THUMB_SIZE}
         style={{
@@ -291,6 +324,7 @@ function PhotoThumb({
           cursor: isDocument ? 'pointer' : undefined,
         }}
         onClick={isDocument ? () => onDocumentClick(fullSrc) : undefined}
+        onError={handleThumbError}
         placeholder={
           <div
             style={{
