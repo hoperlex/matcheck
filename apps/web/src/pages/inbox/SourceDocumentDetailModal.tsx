@@ -409,6 +409,10 @@ export function SourceDocumentDetailModal({
           ) : null
         }
         destroyOnClose
+        // См. DeliveryViewModal: мгновенное скрытие маски убирает
+        // полупрозрачный кадр, сквозь который видна таблица OperationsPage
+        // («вспышка» при закрытии модалки).
+        maskTransitionName=""
       >
         {detail.isLoading && (
           <Space direction="vertical" align="center" style={{ width: '100%', padding: 32 }}>

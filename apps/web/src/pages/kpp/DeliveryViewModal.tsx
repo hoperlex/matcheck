@@ -171,6 +171,13 @@ export function DeliveryViewModal({
         </Space>
       }
       destroyOnClose
+      // Маска и контент модалки fade-out'ятся параллельно за ~200мс.
+      // В середине transition сквозь полупрозрачную маску виден контент
+      // OperationsPage под модалкой — пользователь воспринимает это как
+      // «вспышку таблицы перед закрытием». Отключаем mask-transition —
+      // маска исчезает мгновенно вместе с контентом. Применено симметрично
+      // в ShipmentViewModal и SourceDocumentDetailModal.
+      maskTransitionName=""
     >
       {d ? (
         <Space direction="vertical" size={16} style={{ width: '100%' }}>

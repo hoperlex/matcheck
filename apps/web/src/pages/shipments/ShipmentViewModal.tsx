@@ -178,6 +178,10 @@ export function ShipmentViewModal({
         </Space>
       }
       destroyOnClose
+      // См. комментарий в DeliveryViewModal: убирает «вспышку таблицы»
+      // OperationsPage при закрытии модалки за счёт мгновенного скрытия
+      // маски (без 200мс fade-out, сквозь который виден фон).
+      maskTransitionName=""
     >
       {s ? (
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
