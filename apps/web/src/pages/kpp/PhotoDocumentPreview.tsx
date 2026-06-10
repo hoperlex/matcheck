@@ -74,7 +74,7 @@ export function PhotoDocumentPreview({
       open={open}
       onCancel={onClose}
       footer={null}
-      width="90vw"
+      width="97vw"
       style={{ top: 24 }}
       bodyStyle={{
         padding: 0,
