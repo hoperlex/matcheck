@@ -16,9 +16,12 @@ import { buildAad, decryptField } from '../auth/crypto.js';
  *   - Промпт прошит в код (не из БД admin Промпты), чтобы менеджер
  *     случайно не сломал split-view, правя промпт под накладные.
  *
- * Поддерживается только Google AI Studio. Это намеренно: на 95% инсталляций
- * default-провайдер именно он (см. WaybillUploadModal hint), а возиться с
- * OpenRouter под отдельный сценарий смысла нет.
+ * Поддерживаются два провайдера, как в parseWaybillBatch:
+ *   - google_ai_studio — прямой Gemini API (inline_data parts);
+ *   - openrouter — OpenAI-совместимый Chat Completions с vision (image_url
+ *     data:base64). PDF в OpenRouter не работает, но split-view распознаёт
+ *     только фото (kind='document' приходит с камеры мобильного), так что
+ *     ограничение здесь нерелевантно.
  */
 
 const PROMPT = `Ты — ассистент, который извлекает табличные данные из фото документа.
@@ -114,9 +117,10 @@ export async function recognizePhotoItems(
     .where(eq(llmProviders.isDefault, true))
     .limit(1);
   if (!provider) throw new Error('LLM: не настроен default-провайдер');
-  if (provider.kind !== 'google_ai_studio') {
+  if (provider.kind !== 'google_ai_studio' && provider.kind !== 'openrouter') {
     throw new Error(
-      `Распознавание фото-документа: поддерживается только Google AI Studio. Текущий default — ${provider.kind}. Переключите в Администрировании → LLM провайдеры.`,
+      `Распознавание фото-документа: vision не поддерживается провайдером ${provider.kind}. ` +
+        'Переключите default в Администрировании → LLM провайдеры на Google AI Studio или OpenRouter.',
     );
   }
   const [cred] = await db
@@ -130,40 +134,20 @@ export async function recognizePhotoItems(
     buildAad('llm_provider_credentials', cred.kind),
   );
 
-  const body = {
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { inline_data: { mime_type: mimeType, data: buffer.toString('base64') } },
-          { text: PROMPT },
-        ],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.2,
-      maxOutputTokens: 8192,
-      responseMimeType: 'application/json',
-      responseSchema: RESPONSE_SCHEMA,
-    },
+  const callArgs = {
+    apiBaseUrl: cred.apiBaseUrl,
+    apiKey,
+    model: provider.model,
+    temperature: Number(provider.temperature ?? 0.2),
+    maxTokens: provider.maxTokens ?? 8192,
+    buffer,
+    mimeType,
   };
-  const url = `${cred.apiBaseUrl.replace(/\/$/, '')}/v1beta/models/${provider.model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(600_000),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Gemini HTTP ${res.status}: ${text.slice(0, 500)}`);
-  }
-  const json = (await res.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-  };
-  const raw = json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-  if (!raw) throw new Error('Gemini: пустой ответ');
+  const raw =
+    provider.kind === 'google_ai_studio'
+      ? await callGemini(callArgs)
+      : await callOpenRouter(callArgs);
+  if (!raw) throw new Error(`${provider.kind}: пустой ответ`);
 
   const stripped = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
   let jsonParsed: unknown;
@@ -171,7 +155,7 @@ export async function recognizePhotoItems(
     jsonParsed = JSON.parse(stripped);
   } catch (err) {
     throw new Error(
-      `Gemini: ответ не разобрался как JSON: ${err instanceof Error ? err.message : String(err)}`,
+      `${provider.kind}: ответ не разобрался как JSON: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
   const validated = ResultSchema.parse(jsonParsed);
@@ -186,4 +170,92 @@ export async function recognizePhotoItems(
     model: provider.model,
     rawResponse: raw.slice(0, 2000),
   };
+}
+
+type CallArgs = {
+  apiBaseUrl: string;
+  apiKey: string;
+  model: string;
+  temperature: number;
+  maxTokens: number;
+  buffer: Buffer;
+  mimeType: string;
+};
+
+async function callGemini(args: CallArgs): Promise<string> {
+  const body = {
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          { inline_data: { mime_type: args.mimeType, data: args.buffer.toString('base64') } },
+          { text: PROMPT },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: args.temperature,
+      maxOutputTokens: args.maxTokens,
+      responseMimeType: 'application/json',
+      responseSchema: RESPONSE_SCHEMA,
+    },
+  };
+  const url = `${args.apiBaseUrl.replace(/\/$/, '')}/v1beta/models/${args.model}:generateContent?key=${encodeURIComponent(args.apiKey)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(600_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Gemini HTTP ${res.status}: ${text.slice(0, 500)}`);
+  }
+  const json = (await res.json()) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+  };
+  return json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+}
+
+async function callOpenRouter(args: CallArgs): Promise<string> {
+  // OpenRouter vision: image_url с data:base64. PDF не поддерживается
+  // (см. parseWaybillBatch), но фото-документ всегда image — для split-view
+  // это безопасно. Если попадёт PDF — модель просто вернёт пустой items
+  // или ошибку content-type на стороне провайдера.
+  const dataUrl = `data:${args.mimeType};base64,${args.buffer.toString('base64')}`;
+  const body = {
+    model: args.model,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: dataUrl } },
+          { type: 'text', text: PROMPT },
+        ],
+      },
+    ],
+    temperature: args.temperature,
+    max_tokens: args.maxTokens,
+    response_format: { type: 'json_object' as const },
+  };
+  const url = `${args.apiBaseUrl.replace(/\/$/, '')}/chat/completions`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${args.apiKey}`,
+      'HTTP-Referer': 'https://matcheck.local',
+      'X-Title': 'matcheck',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(600_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`OpenRouter HTTP ${res.status}: ${text.slice(0, 500)}`);
+  }
+  const json = (await res.json()) as {
+    choices?: { message?: { content?: string } }[];
+  };
+  return json.choices?.[0]?.message?.content ?? '';
 }
