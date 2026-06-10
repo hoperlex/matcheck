@@ -10,6 +10,7 @@ import {
 } from '@matcheck/contracts';
 import { users } from '../../db/schema.js';
 import { hashPassword } from '../../domain/auth/password.js';
+import { publishEvent } from '../events.js';
 
 function dto(u: typeof users.$inferSelect) {
   return {
@@ -101,6 +102,22 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(users.id, req.params.id))
         .returning();
       if (!updated) return reply.code(404).send({ error: 'not_found' });
+      // SSE: мобильному клиенту нужно мгновенно узнавать о смене
+      // user.siteId (от этого зависит штамп объекта на фото 1 Этапа).
+      // Эвент шлём только если что-то существенное изменилось — чтобы
+      // не плодить лишние requestImmediateSync. siteId и isActive
+      // достаточно: остальные поля (email/fullName/phone/role) на UI
+      // мобилы напрямую не используются.
+      const siteChanged = patch.siteId !== undefined && updated.siteId !== existing.siteId;
+      const activeChanged =
+        patch.isActive !== undefined && updated.isActive !== existing.isActive;
+      if (siteChanged || activeChanged) {
+        publishEvent(app, {
+          type: 'user_updated',
+          entityId: updated.id,
+          ts: new Date().toISOString(),
+        });
+      }
       return dto(updated);
     },
   );

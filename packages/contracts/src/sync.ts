@@ -50,6 +50,11 @@ export const SseEventSchema = z.object({
     'counterparty_updated',
     'material_updated',
     'site_updated',
+    // user_updated публикуется при PATCH /users/:id. На мобиле обычно
+    // влияет только смена user.siteId (см. SyncRepository.syncOnce →
+    // refreshSiteIdFromServer); клиент тригерит requestImmediateSync,
+    // получает свежий siteId через /me и переписывает tokenStorage.
+    'user_updated',
     'ping',
   ]),
   // ID сущности для событий *_updated / *_deleted. Для ping — отсутствует.
