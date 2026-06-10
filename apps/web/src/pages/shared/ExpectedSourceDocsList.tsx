@@ -21,6 +21,7 @@ import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
+import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
@@ -289,7 +290,7 @@ export function ExpectedSourceDocsList({
             title: 'Поставщик',
             key: 'supplier',
             sorter: stringSorter<SourceDocument>((r) => r.supplierName),
-            render: (_: unknown, r: SourceDocument) => r.supplierName ?? '—',
+            render: (_: unknown, r: SourceDocument) => shortenCounterpartyName(r.supplierName),
           },
           {
             title: 'Подрядчик',

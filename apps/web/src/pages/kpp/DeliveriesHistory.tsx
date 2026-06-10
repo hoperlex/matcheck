@@ -50,6 +50,7 @@ import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
+import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { DeliveryViewModal, type DeliveryViewData } from './DeliveryViewModal';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
@@ -610,7 +611,7 @@ export function DeliveriesHistory({
     return sitesMap.get(id) ?? '—';
   };
   const supplierName = (id: string | null | undefined) =>
-    id ? counterpartiesMap.get(id) ?? '—' : '—';
+    id ? shortenCounterpartyName(counterpartiesMap.get(id)) : '—';
 
   return (
     <>
