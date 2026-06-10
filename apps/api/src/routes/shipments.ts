@@ -260,7 +260,9 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         .select({ id: shipments.id })
         .from(shipments)
         .where(where)
-        .orderBy(desc(shipments.updatedAt))
+        // displayId DESC (не updatedAt) — чтобы отгрузка не «прыгала»
+        // наверх списка при редактировании. Симметрично с deliveries.
+        .orderBy(desc(shipments.displayId))
         .limit(limit)
         .offset(offset);
       const [{ count } = { count: 0 }] = await app.db

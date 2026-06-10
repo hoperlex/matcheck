@@ -260,7 +260,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         .select({ id: deliveries.id })
         .from(deliveries)
         .where(where)
-        .orderBy(desc(deliveries.updatedAt))
+        // Сортировка по displayId DESC (а не updatedAt) — чтобы при
+        // редактировании уже принятой приёмки она не «прыгала» наверх
+        // списка. displayId назначается БД-sequence монотонно (миграция
+        // 0059), поэтому новые сверху, а save существующей запись на
+        // её место. Симметрично с shipments.
+        .orderBy(desc(deliveries.displayId))
         .limit(limit)
         .offset(offset);
       const [{ count } = { count: 0 }] = await app.db
@@ -956,7 +961,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           .leftJoin(contractor, eq(deliveries.contractorId, contractor.id))
           .leftJoin(sites, eq(deliveries.siteId, sites.id))
           .where(and(...conds))
-          .orderBy(desc(deliveries.updatedAt));
+          // Симметрия с list-роутом: displayId DESC даёт стабильный
+          // порядок в Excel-выгрузке (не зависит от свежести правок).
+          .orderBy(desc(deliveries.displayId));
 
         const deliveryIds = rows.map((r) => r.d.id);
         type SrcLink = { deliveryId: string; sourceDocumentId: string };
