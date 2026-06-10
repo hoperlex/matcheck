@@ -56,7 +56,7 @@ import {
   inputNumberParserRu,
 } from '../../shared/utils/formatRu';
 import { LlmCallsDrawer } from './LlmCallsDrawer';
-import { ContractorSelect } from './ContractorSelect';
+import { CustomerCounterpartySelect } from './CustomerCounterpartySelect';
 import { SiteSelect } from './SiteSelect';
 import { ResponsiblePersonSelect } from '../../components/ResponsiblePersonSelect';
 
@@ -565,14 +565,16 @@ export function SourceDocumentDetailModal({
                       />
                       {edit.recipientKind === 'counterparty' ? (
                         sd.direction === 'outbound' ? (
-                          <ContractorSelect
+                          <CustomerCounterpartySelect
                             value={edit.recipientId}
+                            displayName={sd.recipientName ?? null}
                             onChange={(v) => setEdit({ ...edit, recipientId: v })}
                             placeholder="Выберите получателя"
                           />
                         ) : (
-                          <ContractorSelect
+                          <CustomerCounterpartySelect
                             value={edit.contractorId}
+                            displayName={sd.contractorName ?? null}
                             onChange={(v) => setEdit({ ...edit, contractorId: v })}
                             placeholder="Выберите получателя"
                           />

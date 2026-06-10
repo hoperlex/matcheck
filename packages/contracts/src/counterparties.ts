@@ -56,3 +56,24 @@ export const CounterpartyListResponseSchema = z.object({
   items: z.array(CounterpartySchema),
   total: z.number(),
 });
+
+/**
+ * Резолюция «справочный контрагент → операционный counterparty».
+ * Используется веб-портлом, когда пользователь выбирает подрядчика из
+ * справочника заказчика (вкладка «Контрагенты», таблица
+ * `customer_counterparties`, ~151 запись), а в операционной таблице
+ * `counterparties` нужно создать/обновить запись (она FK-цель для
+ * source_documents.contractor_id и т.п.).
+ *
+ * Бэк нормализует ИНН (только цифры; валидно при 10/12 символах), ищет
+ * операционного контрагента сначала по ИНН, затем по lower(name) и
+ * aliases. При наличии помечает isContractor=true; при отсутствии
+ * создаёт новую запись (с placeholder-ИНН, если в справочнике ИНН
+ * отсутствует/«грязный»).
+ */
+export const CounterpartyFromDirectoryRequestSchema = z.object({
+  customerCounterpartyId: z.string().uuid(),
+});
+export type CounterpartyFromDirectoryRequest = z.infer<
+  typeof CounterpartyFromDirectoryRequestSchema
+>;

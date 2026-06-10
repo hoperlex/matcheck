@@ -5,7 +5,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import type { Dayjs } from 'dayjs';
 import type { SourceDirection, UpdDuplicateExisting } from '@matcheck/contracts';
 import { api, ApiError } from '../../services/api';
-import { ContractorSelect } from './ContractorSelect';
+import { CustomerCounterpartySelect } from './CustomerCounterpartySelect';
 import { SiteSelect } from './SiteSelect';
 
 type Stage = 'select' | 'uploading' | 'conflict';
@@ -141,7 +141,7 @@ export function UpdXmlUploadModal({
           <div>
             <Typography.Text strong>Подрядчик</Typography.Text>
             <div style={{ marginTop: 4 }}>
-              <ContractorSelect
+              <CustomerCounterpartySelect
                 value={contractorId}
                 onChange={setContractorId}
                 disabled={stage === 'uploading'}

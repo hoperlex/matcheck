@@ -195,6 +195,11 @@ export const SourceDocumentSchema = z.object({
   siteId: z.string().uuid().nullable(),
   supplierName: z.string().nullable().optional(),
   contractorName: z.string().nullable().optional(),
+  // recipientName актуально для outbound, когда поле «Получатель» —
+  // внешний контрагент, выбранный из справочника. Для inbound поле
+  // обычно null. Используется фронтом для отображения выбранного
+  // контрагента в CustomerCounterpartySelect.
+  recipientName: z.string().nullable().optional(),
   recipientMolName: z.string().nullable().optional(),
   siteName: z.string().nullable().optional(),
   // Пользователь, загрузивший УПД через /upload-upd или /upload-upd-pdf.

@@ -7,6 +7,7 @@ import { publishEvent } from './events.js';
 import {
   BulkDeleteRequestSchema,
   BulkDeleteResponseSchema,
+  CounterpartyFromDirectoryRequestSchema,
   CounterpartyListResponseSchema,
   CounterpartySchema,
   CounterpartyUpsertSchema,
@@ -14,7 +15,7 @@ import {
   PLACEHOLDER_INN_PREFIX,
   isPlaceholderInn,
 } from '@matcheck/contracts';
-import { counterparties } from '../db/schema.js';
+import { counterparties, customerCounterparties } from '../db/schema.js';
 
 /**
  * Генератор placeholder-ИНН для контрагентов, созданных «на лету» без ИНН.
@@ -209,6 +210,110 @@ export async function counterpartyRoutes(rawApp: FastifyInstance): Promise<void>
         }
         throw err;
       }
+    },
+  );
+
+  // Резолюция «справочный контрагент → операционный counterparty».
+  // Веб-портал использует этот эндпоинт, когда юзер выбирает подрядчика
+  // из справочника заказчика (вкладка «Контрагенты», таблица
+  // customer_counterparties, ~151 запись). Эта таблица — отдельный
+  // справочник, FK от source_documents.contractor_id живёт на counterparties.
+  // Сервер находит/создаёт операционного контрагента (с isContractor=true)
+  // и возвращает его. См. CounterpartyFromDirectoryRequestSchema.
+  app.post(
+    '/api/v1/counterparties/from-directory',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        body: CounterpartyFromDirectoryRequestSchema,
+        response: { 200: CounterpartySchema, 404: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      const [src] = await app.db
+        .select()
+        .from(customerCounterparties)
+        .where(eq(customerCounterparties.id, req.body.customerCounterpartyId))
+        .limit(1);
+      if (!src) {
+        return reply
+          .code(404)
+          .send({ error: 'not_found', message: 'customer counterparty not found' });
+      }
+
+      // ИНН в customer_counterparties — «грязный» text (см. миграцию 0055):
+      // запятые, «ИНН …», 11-значные хвосты. Чистим до цифр; принимаем
+      // только канонические длины 10/12, иначе считаем, что ИНН нет.
+      const innRaw = (src.inn ?? '').replace(/\D/g, '');
+      const inn = innRaw.length === 10 || innRaw.length === 12 ? innRaw : null;
+      const name = src.name.trim();
+      const aliases = src.aliases ?? [];
+
+      // 1) Дедуп по ИНН.
+      if (inn) {
+        const [existing] = await app.db
+          .select()
+          .from(counterparties)
+          .where(eq(counterparties.inn, inn))
+          .limit(1);
+        if (existing) {
+          if (!existing.isContractor) {
+            const [upd] = await app.db
+              .update(counterparties)
+              .set({ isContractor: true, updatedAt: new Date() })
+              .where(eq(counterparties.id, existing.id))
+              .returning();
+            return upd ? row(upd) : row(existing);
+          }
+          return row(existing);
+        }
+      }
+
+      // 2) Дедуп по имени / alias (case-insensitive). Если нашёлся
+      // operational counterparty с placeholder-ИНН — апгрейдим его на
+      // настоящий ИНН справочника.
+      const lname = name.toLowerCase();
+      const [byName] = await app.db
+        .select()
+        .from(counterparties)
+        .where(
+          or(
+            drSql`lower(${counterparties.name}) = ${lname}`,
+            drSql`exists (select 1 from unnest(${counterparties.aliases}) as a(v) where lower(a.v) = ${lname})`,
+          ),
+        )
+        .limit(1);
+      if (byName) {
+        const patch: Partial<typeof counterparties.$inferInsert> = {};
+        if (!byName.isContractor) patch.isContractor = true;
+        if (inn && isPlaceholderInn(byName.inn)) patch.inn = inn;
+        if (Object.keys(patch).length > 0) {
+          patch.updatedAt = new Date();
+          const [upd] = await app.db
+            .update(counterparties)
+            .set(patch)
+            .where(eq(counterparties.id, byName.id))
+            .returning();
+          return upd ? row(upd) : row(byName);
+        }
+        return row(byName);
+      }
+
+      // 3) Не нашли — создаём с placeholder-ИНН, если в справочнике пусто.
+      const innToUse = inn ?? generatePlaceholderInn();
+      const [created] = await app.db
+        .insert(counterparties)
+        .values({
+          inn: innToUse,
+          kpp: null,
+          name,
+          aliases,
+          address: src.address ?? null,
+          isContractor: true,
+        })
+        .returning();
+      if (!created) throw new Error('insert failed');
+      return row(created);
     },
   );
 

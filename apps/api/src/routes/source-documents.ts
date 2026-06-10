@@ -136,6 +136,7 @@ async function findOrCreateCounterparty(
 type SdNames = {
   supplierName?: string | null;
   contractorName?: string | null;
+  recipientName?: string | null;
   recipientMolName?: string | null;
   siteName?: string | null;
   // Email и телефон автора УПД (того, кто загрузил через /upload-upd*).
@@ -158,6 +159,7 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     siteId: sd.siteId,
     supplierName: names.supplierName ?? null,
     contractorName: names.contractorName ?? null,
+    recipientName: names.recipientName ?? null,
     recipientMolName: names.recipientMolName ?? null,
     siteName: names.siteName ?? null,
     createdByUserId: sd.createdByUserId,
@@ -231,7 +233,7 @@ async function loadSdNames(
   app: any,
   sd: typeof sourceDocuments.$inferSelect,
 ): Promise<SdNames> {
-  const [supplier, contractor, mol, site, createdBy] = await Promise.all([
+  const [supplier, contractor, recipient, mol, site, createdBy] = await Promise.all([
     sd.supplierId
       ? app.db
           .select({ name: counterparties.name })
@@ -244,6 +246,13 @@ async function loadSdNames(
           .select({ name: counterparties.name })
           .from(counterparties)
           .where(eq(counterparties.id, sd.contractorId))
+          .limit(1)
+      : Promise.resolve([] as { name: string }[]),
+    sd.recipientId
+      ? app.db
+          .select({ name: counterparties.name })
+          .from(counterparties)
+          .where(eq(counterparties.id, sd.recipientId))
           .limit(1)
       : Promise.resolve([] as { name: string }[]),
     sd.recipientMolId
@@ -271,6 +280,7 @@ async function loadSdNames(
   return {
     supplierName: supplier[0]?.name ?? null,
     contractorName: contractor[0]?.name ?? null,
+    recipientName: recipient[0]?.name ?? null,
     recipientMolName: mol[0]?.name ?? null,
     siteName: site[0]?.name ?? null,
     createdByUserEmail: createdBy[0]?.email ?? null,
@@ -468,17 +478,20 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       const where = conditions.length ? and(...conditions) : undefined;
       const supplier = alias(counterparties, 'supplier');
       const contractor = alias(counterparties, 'contractor');
+      const recipient = alias(counterparties, 'recipient');
       const rows = await app.db
         .select({
           sd: sourceDocuments,
           supplierName: supplier.name,
           contractorName: contractor.name,
+          recipientName: recipient.name,
           recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
         .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
+        .leftJoin(recipient, eq(sourceDocuments.recipientId, recipient.id))
         .leftJoin(
           responsiblePersons,
           eq(sourceDocuments.recipientMolId, responsiblePersons.id),
@@ -497,6 +510,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           sdRow(r.sd, {
             supplierName: r.supplierName,
             contractorName: r.contractorName,
+            recipientName: r.recipientName,
             recipientMolName: r.recipientMolName,
             siteName: r.siteName,
           }),
@@ -768,17 +782,20 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     async (req, reply) => {
       const supplier = alias(counterparties, 'supplier');
       const contractor = alias(counterparties, 'contractor');
+      const recipient = alias(counterparties, 'recipient');
       const [row] = await app.db
         .select({
           sd: sourceDocuments,
           supplierName: supplier.name,
           contractorName: contractor.name,
+          recipientName: recipient.name,
           recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
         .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
+        .leftJoin(recipient, eq(sourceDocuments.recipientId, recipient.id))
         .leftJoin(
           responsiblePersons,
           eq(sourceDocuments.recipientMolId, responsiblePersons.id),
@@ -808,6 +825,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         ...sdRow(sd, {
           supplierName: row.supplierName,
           contractorName: row.contractorName,
+          recipientName: row.recipientName,
           recipientMolName: row.recipientMolName,
           siteName: row.siteName,
         }),

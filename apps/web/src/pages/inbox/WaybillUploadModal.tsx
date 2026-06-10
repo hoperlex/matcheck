@@ -24,7 +24,7 @@ import type {
   UpdPdfQueueResponse,
 } from '@matcheck/contracts';
 import { api, apiUploadFiles, ApiError } from '../../services/api';
-import { ContractorSelect } from './ContractorSelect';
+import { CustomerCounterpartySelect } from './CustomerCounterpartySelect';
 import { ResponsiblePersonSelect } from '../../components/ResponsiblePersonSelect';
 import { SiteSelect } from './SiteSelect';
 
@@ -196,7 +196,7 @@ export function WaybillUploadModal({
             disabled={uploading}
           />
           {recipientKind === 'counterparty' ? (
-            <ContractorSelect
+            <CustomerCounterpartySelect
               value={contractorId}
               onChange={setContractorId}
               disabled={uploading}
