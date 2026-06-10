@@ -18,6 +18,7 @@ import { counterpartyRoutes } from './routes/counterparties.js';
 import { supplierRoutes } from './routes/suppliers.js';
 import { customerCounterpartyRoutes } from './routes/customer-counterparties.js';
 import { siteRoutes } from './routes/sites.js';
+import { unitRoutes } from './routes/units.js';
 import { materialRoutes } from './routes/materials.js';
 import { responsiblePersonRoutes } from './routes/responsiblePersons.js';
 import { molRoutes, warmUpFotMolCache } from './routes/mol.js';
@@ -71,6 +72,7 @@ export async function buildServer() {
   await app.register(supplierRoutes);
   await app.register(customerCounterpartyRoutes);
   await app.register(siteRoutes);
+  await app.register(unitRoutes);
   await app.register(materialRoutes);
   await app.register(responsiblePersonRoutes);
   await app.register(molRoutes);

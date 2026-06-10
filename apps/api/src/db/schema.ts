@@ -385,6 +385,32 @@ export const sites = pgTable(
  */
 export const SYSTEM_SITE_ID = '00000000-0000-0000-0000-000000000001';
 
+/**
+ * Справочник единиц измерения для UI-выпадайки. См. миграцию 0062.
+ * Сами позиции (delivery_items/shipment_items/source_document_items) хранят
+ * unit как text БЕЗ FK на этот справочник — нельзя ломать legacy-данные
+ * и мобильный клиент.
+ */
+export const units = pgTable(
+  'units',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    code: varchar('code', { length: 32 }).notNull(),
+    name: varchar('name', { length: 128 }).notNull(),
+    // Код по ОКЕИ — для справки / будущей сверки с УПД (LLM иногда
+    // возвращает ОКЕИ-код вместо текста). Nullable: для нестандартных
+    // единиц («бухта», «мешок») кода в ОКЕИ может не быть.
+    okeiCode: varchar('okei_code', { length: 8 }),
+    isActive: boolean('is_active').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('units_code_unique').on(sql`lower(${t.code})`),
+    index('units_active_idx').on(t.isActive),
+  ],
+);
+
 // ─── ЭДО / Mail / LLM accounts ─────────────────────────────────────────────
 
 export const edoAccounts = pgTable('edo_accounts', {

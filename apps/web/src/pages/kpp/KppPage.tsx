@@ -77,6 +77,7 @@ import {
   inputNumberParserRu,
 } from '../../shared/utils/formatRu';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
+import { UnitSelect } from '../../shared/ui/UnitSelect';
 
 type DraftItem = {
   clientKey: string;
@@ -968,12 +969,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       },
       {
         title: 'Ед.',
-        width: 80,
+        width: 100,
         render: (_: unknown, r: DraftItem) => (
-          <Input
-            size="small"
+          <UnitSelect
             value={r.unit}
-            onChange={(e) => updateField(r.clientKey, { unit: e.target.value })}
+            onChange={(v) => updateField(r.clientKey, { unit: v ?? '' })}
+            style={{ width: '100%' }}
           />
         ),
       },

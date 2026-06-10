@@ -18,6 +18,7 @@ const CustomerCounterparties = lazy(() => import('../pages/references/CustomerCo
 const Materials = lazy(() => import('../pages/references/Materials'));
 const ResponsiblePersons = lazy(() => import('../pages/references/ResponsiblePersons'));
 const MolPersons = lazy(() => import('../pages/references/MolPersons'));
+const Units = lazy(() => import('../pages/references/Units'));
 const Assets = lazy(() => import('../pages/references/Assets'));
 const MaterialsJournal = lazy(() => import('../pages/materials/MaterialsPage'));
 const StatsPage = lazy(() => import('../pages/stats/StatsPage'));
@@ -142,6 +143,7 @@ export const router = createBrowserRouter([
           { path: 'counterparties', element: suspense(<CustomerCounterparties />) },
           { path: 'suppliers', element: suspense(<Suppliers />) },
           { path: 'mol', element: suspense(<MolPersons />) },
+          { path: 'units', element: suspense(<Units />) },
           // Операционный справочник контрагентов (legacy): завязан на FK
           // приёмок/отгрузок и sync мобилы. Из вкладок убран, но роут сохранён
           // для ручного доступа администратором при необходимости.

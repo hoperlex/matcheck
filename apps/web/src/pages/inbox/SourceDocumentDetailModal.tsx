@@ -57,6 +57,7 @@ import {
 } from '../../shared/utils/formatRu';
 import { LlmCallsDrawer } from './LlmCallsDrawer';
 import { CustomerCounterpartySelect } from './CustomerCounterpartySelect';
+import { UnitSelect } from '../../shared/ui/UnitSelect';
 import { SiteSelect } from './SiteSelect';
 import { ResponsiblePersonSelect } from '../../components/ResponsiblePersonSelect';
 
@@ -1221,9 +1222,14 @@ function EditableTable({
           {
             title: 'Ед.',
             dataIndex: 'unit',
-            width: 80,
+            width: 100,
             render: (v: string, _r, i) => (
-              <Input value={v} onChange={(e) => updateItem(i, { unit: e.target.value })} />
+              <UnitSelect
+                value={v}
+                onChange={(nv) => updateItem(i, { unit: nv ?? '' })}
+                style={{ width: '100%' }}
+                size="middle"
+              />
             ),
           },
           {

@@ -30,6 +30,7 @@ const TAB_DEFS: { key: string; label: string; countUrl: string }[] = [
   },
   { key: '/references/suppliers', label: 'Поставщики', countUrl: '/suppliers?limit=1' },
   { key: '/references/mol', label: 'МОЛ', countUrl: '/mol' },
+  { key: '/references/units', label: 'Ед-ы изм.', countUrl: '/units?limit=1' },
 ];
 
 export default function ReferencesLayout() {

@@ -9,6 +9,7 @@ export * from './responsible-persons.js';
 export * from './mol.js';
 export * from './assets.js';
 export * from './sites.js';
+export * from './units.js';
 export * from './shipments.js';
 export * from './reports.js';
 export * from './source-documents.js';

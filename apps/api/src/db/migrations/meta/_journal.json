@@ -435,6 +435,13 @@
       "when": 1780878960000,
       "tag": "0061_upd_prompt_v7",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1780879020000,
+      "tag": "0062_units_seed",
+      "breakpoints": true
     }
   ]
 }
