@@ -388,6 +388,10 @@ export function SourceDocumentDetailModal({
             overflow: 'hidden',
           },
           footer: { padding: '6px 12px' },
+          // См. DeliveryViewModal: убираем «вспышку таблицы» при закрытии
+          // через мгновенное скрытие маски и обёртки.
+          mask: { transitionDuration: '0s' },
+          wrapper: { transitionDuration: '0s' },
         }}
         footer={
           sd ? (
@@ -409,10 +413,7 @@ export function SourceDocumentDetailModal({
           ) : null
         }
         destroyOnClose
-        // См. DeliveryViewModal: мгновенное скрытие маски убирает
-        // полупрозрачный кадр, сквозь который видна таблица OperationsPage
-        // («вспышка» при закрытии модалки).
-        maskTransitionName=""
+        transitionName=""
       >
         {detail.isLoading && (
           <Space direction="vertical" align="center" style={{ width: '100%', padding: 32 }}>

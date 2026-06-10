@@ -161,6 +161,15 @@ export function DeliveryViewModal({
           overflow: 'auto',
         },
         footer: { padding: '8px 16px' },
+        // Отключаем CSS-transition маски и обёртки модалки. Иначе при
+        // destroyOnClose=true сначала синхронно unmount'ится content,
+        // а маска ещё ~300мс fade-out'ится — в этот момент пустая шапка
+        // модалки висит над хорошо видимой таблицей OperationsPage
+        // («вспышка таблицы»). transitionDuration: 0 — маска и обёртка
+        // исчезают мгновенно вместе с контентом. Открытие тоже без
+        // анимации, но это менее заметно (фон тёмный сразу).
+        mask: { transitionDuration: '0s' },
+        wrapper: { transitionDuration: '0s' },
       }}
       footer={
         <Space>
@@ -171,13 +180,11 @@ export function DeliveryViewModal({
         </Space>
       }
       destroyOnClose
-      // Маска и контент модалки fade-out'ятся параллельно за ~200мс.
-      // В середине transition сквозь полупрозрачную маску виден контент
-      // OperationsPage под модалкой — пользователь воспринимает это как
-      // «вспышку таблицы перед закрытием». Отключаем mask-transition —
-      // маска исчезает мгновенно вместе с контентом. Применено симметрично
-      // в ShipmentViewModal и SourceDocumentDetailModal.
-      maskTransitionName=""
+      // См. styles.mask/wrapper выше — transitionDuration: 0 убирает
+      // «вспышку таблицы» (полупрозрачный кадр между unmount контента и
+      // окончанием fade-out маски). transitionName="" отключает zoom
+      // самой обёртки на всякий случай, чтобы не было люфта.
+      transitionName=""
     >
       {d ? (
         <Space direction="vertical" size={16} style={{ width: '100%' }}>

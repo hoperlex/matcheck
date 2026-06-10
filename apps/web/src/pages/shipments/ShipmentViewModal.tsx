@@ -168,6 +168,10 @@ export function ShipmentViewModal({
           overflow: 'auto',
         },
         footer: { padding: '8px 16px' },
+        // См. комментарий в DeliveryViewModal: убираем «вспышку таблицы»
+        // при закрытии через мгновенное скрытие маски и обёртки.
+        mask: { transitionDuration: '0s' },
+        wrapper: { transitionDuration: '0s' },
       }}
       footer={
         <Space>
@@ -178,10 +182,7 @@ export function ShipmentViewModal({
         </Space>
       }
       destroyOnClose
-      // См. комментарий в DeliveryViewModal: убирает «вспышку таблицы»
-      // OperationsPage при закрытии модалки за счёт мгновенного скрытия
-      // маски (без 200мс fade-out, сквозь который виден фон).
-      maskTransitionName=""
+      transitionName=""
     >
       {s ? (
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
