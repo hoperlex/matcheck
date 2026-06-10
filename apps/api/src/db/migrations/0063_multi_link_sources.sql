@@ -3,8 +3,14 @@
 -- приезжает 4-5 рейсами, каждый рейс = своя приёмка).
 --
 -- ЧТО МЕНЯЕМ:
---   - снимаем UNIQUE-индекс delivery_sources.source_document_id;
---   - снимаем UNIQUE-индекс shipment_sources.source_document_id.
+--   - снимаем UNIQUE-constraint delivery_sources.source_document_id;
+--   - снимаем UNIQUE-constraint shipment_sources.source_document_id.
+--
+-- Drizzle через uniqueIndex(...) создал именно CONSTRAINT, а не отдельный
+-- индекс — поэтому `DROP INDEX` падает на dependency check
+-- (2BP01: cannot drop index ... because constraint ... requires it).
+-- Правильный путь — `ALTER TABLE DROP CONSTRAINT`; Postgres сам
+-- удаляет привязанный к constraint индекс.
 --
 -- ЧТО ОСТАЁТСЯ КАК БЫЛО:
 --   - PRIMARY KEY (delivery_id, source_document_id) — не даёт дубль одной
@@ -16,9 +22,11 @@
 --   - Существующие связи 1:1 продолжают работать как раньше.
 --   - В UI режим «несколько поставок» — явный тумблер; по умолчанию
 --     модалка ведёт себя как раньше (фильтр unaccepted=true).
---   - Откат миграции (если в БД нет дубликатов sourceDocumentId)
---     возвращает UNIQUE индекс простой ALTER.
+--   - Откат: ALTER TABLE ... ADD CONSTRAINT ... UNIQUE (если в БД нет
+--     дубликатов sourceDocumentId).
 
-DROP INDEX IF EXISTS "delivery_sources_source_document_id_unique";
+ALTER TABLE "delivery_sources"
+  DROP CONSTRAINT IF EXISTS "delivery_sources_source_document_id_unique";
 --> statement-breakpoint
-DROP INDEX IF EXISTS "shipment_sources_source_document_id_unique";
+ALTER TABLE "shipment_sources"
+  DROP CONSTRAINT IF EXISTS "shipment_sources_source_document_id_unique";
