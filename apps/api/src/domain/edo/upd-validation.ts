@@ -31,11 +31,32 @@ function sumNullable(values: ReadonlyArray<number | null | undefined>): number {
   return round2(acc);
 }
 
+/**
+ * Эффективная налоговая ставка документа из шапочных totalSum/vatSum:
+ *   rate = vatSum / (totalSum − vatSum) × 100
+ *
+ * Используется как fallback в `row_qty_price`, когда LLM не извлекла
+ * vatRate по конкретной строке (графа 7 формы УПД часто визуально
+ * совпадает у всех строк, и LLM иногда заполняет её только на одной).
+ * Возвращает null, если данных шапки не хватает или они некорректны.
+ */
+function effectiveDocVatRate(
+  totalSum: number | null | undefined,
+  vatSum: number | null | undefined,
+): number | null {
+  if (totalSum == null || vatSum == null) return null;
+  if (vatSum <= 0) return 0;
+  const base = totalSum - vatSum;
+  if (base <= 0) return null;
+  return (vatSum / base) * 100;
+}
+
 export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
   const checks: UpdCheck[] = [];
   const items = parsed.items;
   const rowCount = items.length;
   const totalsTolerance = Math.max(ROW_TOLERANCE, rowCount * ROW_TOLERANCE);
+  const docVatRate = effectiveDocVatRate(parsed.totalSum, parsed.vatSum);
 
   // 1) Σ items.sum vs totalSum.
   //
@@ -189,8 +210,14 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
       });
       return;
     }
+    // Если LLM не извлекла vatRate по конкретной строке, берём
+    // эффективную ставку всего документа из шапки. Это покрывает
+    // типовой случай «УПД с одним НДС на все строки».
+    const effectiveRate = vatRate ?? docVatRate;
     const baseFromSum =
-      vatRate != null && vatRate > 0 ? round2((sum * 100) / (100 + vatRate)) : round2(sum);
+      effectiveRate != null && effectiveRate > 0
+        ? round2((sum * 100) / (100 + effectiveRate))
+        : round2(sum);
     const actual = round2(qty * price);
     const diff = round2(Math.abs(baseFromSum - actual));
     const tolerance = round2(Math.max(1, Math.abs(baseFromSum) * 0.001));

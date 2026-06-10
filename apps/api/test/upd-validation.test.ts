@@ -2,6 +2,28 @@ import { describe, it, expect } from 'vitest';
 import { validateUpdTotals } from '../src/domain/edo/upd-validation.js';
 
 describe('validateUpdTotals — сверка арифметики УПД', () => {
+  it('row_qty_price: vatRate в строке null → берётся эффективная ставка из шапки', () => {
+    // Типичный случай УПД ТД-42193: LLM не извлекла vatRate для
+    // одной строки, но шапочные totalSum/vatSum позволяют вычислить
+    // эффективную ставку (тут ≈ 22%). База без НДС считается через
+    // неё. price = 70111.07 (графа 4), sum = 1300139.60 (графа 9):
+    //   base = 1300139.60 × 100 / (100 + 22) ≈ 1065688.20;
+    //   qty × price = 15.2 × 70111.07 = 1065688.26;
+    //   diff ≈ 0.06 → внутри tolerance max(1, 0.1% от base).
+    const r = validateUpdTotals({
+      totalSum: 1300139.6,
+      vatSum: 234451.4,
+      items: [
+        { qty: 15.2, price: 70111.07, sum: 1300139.6, vatRate: null, vatSum: null },
+      ],
+    });
+    const row = r.checks.find((c) => c.name === 'row_qty_price');
+    expect(row?.ok).toBe(true);
+    expect(row?.expected).toBeCloseTo(1065688.2, 1);
+    expect(row?.actual).toBeCloseTo(1065688.26, 1);
+    expect(r.hasMismatch).toBe(false);
+  });
+
   it('всё сходится: price из графы 4 (БЕЗ НДС), sum из графы 9 (С НДС) — промпт v7', () => {
     // После промпта v7 price = графа 4 (без НДС), sum = графа 9 (с НДС).
     // qty × price = 5.5 × 160 = 880 (база без НДС).
@@ -129,21 +151,24 @@ describe('validateUpdTotals — сверка арифметики УПД', () =>
 
   // ──────────── Реальные кейсы из прод-лога llm_calls ────────────
 
-  it('УПД 201/21125720: totalSum и items.sum оба С НДС (промпт v6) → ok', () => {
-    // Реальный документ из лога llm_calls — пересчитан под промпт v6:
-    // items.sum = графа 9 «Стоимость с налогом — всего», цена = sum / qty
-    // (тоже с НДС). Шапочный vatSum остаётся как есть; vat_total
-    // скипается, потому что PDF-флоу не извлекает vatSum по позициям.
+  it('УПД 201/21125720: price из графы 4 (без НДС), sum из графы 9 (с НДС), vatRate в строке null → ok', () => {
+    // Реальный документ из лога llm_calls. Под промпт v7:
+    //   price = графа 4 «Цена без налога» (65.49 и т.д.);
+    //   sum   = графа 9 «Стоимость с налогом — всего».
+    // LLM не извлекла vatRate по позициям; эффективная ставка берётся
+    // из шапки: 29332.28 / (162660.8 − 29332.28) × 100 ≈ 22%.
     // Σ items.sum = 47940 + 28364.5 + 10946.3 + 45980 + 29430 = 162660.80.
+    // Каждая строка: base = sum / 1.22 ≈ qty × price с копеечной
+    // погрешностью из-за округления цены поставщиком.
     const r = validateUpdTotals({
       totalSum: 162660.8,
       vatSum: 29332.28,
       items: [
-        { qty: 600, price: 79.9, sum: 47940, vatRate: null, vatSum: null },
-        { qty: 355, price: 79.9, sum: 28364.5, vatRate: null, vatSum: null },
-        { qty: 137, price: 79.9, sum: 10946.3, vatRate: null, vatSum: null },
-        { qty: 440, price: 104.5, sum: 45980, vatRate: null, vatSum: null },
-        { qty: 180, price: 163.5, sum: 29430, vatRate: null, vatSum: null },
+        { qty: 600, price: 65.49, sum: 47940, vatRate: null, vatSum: null },
+        { qty: 355, price: 65.49, sum: 28364.5, vatRate: null, vatSum: null },
+        { qty: 137, price: 65.49, sum: 10946.3, vatRate: null, vatSum: null },
+        { qty: 440, price: 85.66, sum: 45980, vatRate: null, vatSum: null },
+        { qty: 180, price: 134.02, sum: 29430, vatRate: null, vatSum: null },
       ],
     });
     expect(r.hasMismatch).toBe(false);

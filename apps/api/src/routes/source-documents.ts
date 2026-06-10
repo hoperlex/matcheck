@@ -821,14 +821,35 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .select()
         .from(sourceDocumentAttachments)
         .where(eq(sourceDocumentAttachments.sourceDocumentId, sd.id));
+      // Validation на лету. В БД лежит snapshot первой проверки (момент
+      // распознавания), но логика валидатора иногда меняется (например,
+      // переход на price из графы 4 + sum из графы 9 с пересчётом
+      // qty × price ≈ sum / (1 + ставка/100)). Чтобы Alert «Расхождения
+      // в суммах» отражал актуальную логику, а не устарел вместе с
+      // конкретным документом, пересчитываем validation по текущим
+      // данным items + шапке. Стоимость операции — O(n) по строкам.
+      const liveValidation = validateUpdTotals({
+        totalSum: sd.totalSum != null ? Number(sd.totalSum) : null,
+        vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
+        itemsCount: null,
+        items: items.map((it) => ({
+          qty: it.qty != null ? Number(it.qty) : null,
+          price: it.price != null ? Number(it.price) : null,
+          sum: it.sum != null ? Number(it.sum) : null,
+          vatRate: it.vatRate != null ? Number(it.vatRate) : null,
+          vatSum: it.vatSum != null ? Number(it.vatSum) : null,
+        })),
+      });
+      const base = sdRow(sd, {
+        supplierName: row.supplierName,
+        contractorName: row.contractorName,
+        recipientName: row.recipientName,
+        recipientMolName: row.recipientMolName,
+        siteName: row.siteName,
+      });
       return {
-        ...sdRow(sd, {
-          supplierName: row.supplierName,
-          contractorName: row.contractorName,
-          recipientName: row.recipientName,
-          recipientMolName: row.recipientMolName,
-          siteName: row.siteName,
-        }),
+        ...base,
+        validation: liveValidation,
         items: items.map(itemDto),
         attachments: attachments.map(attachmentDto),
       };
