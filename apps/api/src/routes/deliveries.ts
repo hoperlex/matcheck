@@ -1339,6 +1339,16 @@ async function createDelivery(
   statusId: string,
   inspectorId: string | null,
 ) {
+  // «Ручной внос» на мобиле: инспектор создаёт приёмку сразу со статусом
+  // confirmed_mol (без выбора УПД, минуя 1-2 этап). В этом случае
+  // инспектор = подтверждающий МОЛ, заполняем confirmedByMol* при INSERT,
+  // чтобы веб-портал показал «Подтверждено МОЛ (<инспектор>)» сразу.
+  // Без этого fix'а status='confirmed_mol' создавался без автора, и в
+  // карточке отображался прочерк. Существующий flow (create 'filled' →
+  // update 'confirmed_mol') не затронут — там isFirstConfirm в updateDelivery
+  // уже выставляет эти поля.
+  const isDirectConfirm = input.statusCode === 'confirmed_mol';
+  const now = new Date();
   const [created] = await app.db
     .insert(deliveries)
     .values({
@@ -1354,6 +1364,10 @@ async function createDelivery(
       inspectorId,
       comment: input.comment ?? null,
       inTransit: input.inTransit ?? false,
+      ...(isDirectConfirm && {
+        confirmedByMolUserId: inspectorId,
+        confirmedByMolAt: now,
+      }),
       version: 1,
     })
     .returning();
