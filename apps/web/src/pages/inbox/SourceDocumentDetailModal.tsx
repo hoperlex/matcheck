@@ -458,7 +458,7 @@ export function SourceDocumentDetailModal({
                 style={{ marginBottom: 12 }}
                 type="warning"
                 showIcon
-                message="Расхождения в сумах"
+                message="Расхождения в суммах"
                 description={
                   <ul style={{ margin: 0, paddingLeft: 16 }}>
                     {failedChecks.map((c, i) => (

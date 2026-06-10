@@ -39,19 +39,18 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
 
   // 1) Σ items.sum vs totalSum.
   //
-  // ВАЖНО про базу сравнения. В стандартной форме УПД (ПР № 1137):
-  //   - «Всего к оплате (9)» = сумма С НДС → попадает в parsed.totalSum.
-  //   - Колонка «Стоимость без налога – всего» по строкам → item.sum.
-  //   - parsed.vatSum — общий НДС из шапки.
-  // То есть items.sum это база БЕЗ НДС, а totalSum — С НДС. Сравнивать
-  // их напрямую нельзя — на любом УПД с НДС > 0 будет false-positive
-  // (см. УПД 201/21125720: 162660.80 vs 133328.52 = разница ровно vatSum).
-  // Если шапочный vatSum известен — приводим totalSum к базе «без НДС».
-  // Если vatSum null/0 (документ без НДС или XML-парсер не извлёк) —
-  // сравниваем напрямую.
+  // База сравнения — С НДС. После промпта v6 (миграция 0060):
+  //   - item.sum  = графа 9 формы УПД «Стоимость с налогом — всего» по строке;
+  //   - totalSum  = графа 9 итоговой строки «Всего к оплате» (с НДС).
+  // То есть и слагаемые, и шапочный итог — на одной налоговой базе,
+  // приводить ничего не надо. Раньше items.sum были «без НДС» (графа 5),
+  // и валидатор вычитал vatSum из totalSum, чтобы сверять на «без НДС»;
+  // после v6 такая компенсация стабильно даёт false-positive на любом УПД
+  // с НДС > 0 (см. рапорт пользователя: 1 065 688.20 vs 1 300 139.60 =
+  // ровно vatSum). XML-парсер также давно отдаёт items.sum «с НДС», так
+  // что новая логика симметрична для обоих источников.
   {
     const totalSum = parsed.totalSum ?? null;
-    const vatSum = parsed.vatSum ?? null;
     if (totalSum == null) {
       checks.push({
         name: 'sum_total',
@@ -64,7 +63,7 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
         skipReason: 'no_expected',
       });
     } else {
-      const expected = round2(vatSum != null && vatSum > 0 ? totalSum - vatSum : totalSum);
+      const expected = round2(totalSum);
       const actual = sumNullable(items.map((i) => i.sum ?? null));
       const diff = round2(Math.abs(expected - actual));
       checks.push({
@@ -155,23 +154,28 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
     }
   }
 
-  // 4) Построчно: qty × price ≈ sum.
+  // 4) Построчно: qty × price ≈ sum / (1 + vatRate/100).
   //
-  // Tolerance расширен до max(1₽, 0.1% от sum). Причина: поставщики
-  // обычно печатают цену округлённой до 2 знаков, а сумму строки считают
-  // по неокруглённой. Пример (УПД 201/21125720, строка 1):
-  //   qty=600, price=65.49, sum=39295.08
-  //   qty × price = 39294.00, расхождение 1.08₽
-  //   реальная цена поставщика ≈ 65.4918, округлена до 65.49.
-  // Жёсткий tolerance в копейку давал false-positive почти на каждом
-  // реальном УПД. Расхождения «реальной» ошибки (перепутаны колонки,
-  // qty распознано как код товара) — в десятки раз больше суммы, так
-  // что чувствительность к настоящим багам сохраняется.
+  // После промпта v7 (миграция 0061) price берётся строго из графы 4
+  // формы УПД («Цена за единицу измерения», БЕЗ НДС), а sum — из графы 9
+  // (С НДС). Базы разные, поэтому qty × price нельзя сравнивать с sum
+  // напрямую — нужно сначала привести sum к базе «без НДС»:
+  //   expectedBase = sum × 100 / (100 + vatRate)
+  // Если vatRate не извлечён (XML без ставки или строка «Без НДС» с
+  // vatRate = null) — считаем, что НДС нет и sum = база без НДС.
+  //
+  // Tolerance — max(1₽, 0.1% от expectedBase). Причина: поставщики
+  // печатают цену округлённой до 2 знаков (например, 65.4918 → 65.49),
+  // а сумму строки считают по неокруглённой. Жёсткий tolerance в копейку
+  // давал false-positive почти на каждом реальном УПД. Расхождения
+  // «реальной» ошибки (перепутаны колонки, qty распознано как код
+  // товара) — в десятки раз больше суммы, чувствительность сохраняется.
   items.forEach((it, idx) => {
     const row = idx + 1;
     const qty = it.qty ?? null;
     const price = it.price ?? null;
     const sum = it.sum ?? null;
+    const vatRate = it.vatRate ?? null;
     if (qty == null || price == null || sum == null) {
       checks.push({
         name: 'row_qty_price',
@@ -185,13 +189,15 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
       });
       return;
     }
+    const baseFromSum =
+      vatRate != null && vatRate > 0 ? round2((sum * 100) / (100 + vatRate)) : round2(sum);
     const actual = round2(qty * price);
-    const diff = round2(Math.abs(sum - actual));
-    const tolerance = round2(Math.max(1, Math.abs(sum) * 0.001));
+    const diff = round2(Math.abs(baseFromSum - actual));
+    const tolerance = round2(Math.max(1, Math.abs(baseFromSum) * 0.001));
     checks.push({
       name: 'row_qty_price',
       scope: { row },
-      expected: round2(sum),
+      expected: baseFromSum,
       actual,
       diff,
       tolerance,
@@ -199,18 +205,26 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
     });
   });
 
-  // 5) Построчно: sum × vatRate / 100 ≈ vatSum.
+  // 5) Построчно: vatSum ≈ sum × vatRate / (100 + vatRate).
+  //
+  // sum после промпта v6 — С НДС (графа 9), поэтому НДС извлекается как
+  // sum × rate / (100 + rate), а не sum × rate / 100 (последнее работает
+  // только когда sum — база «без НДС»). Например, sum=1056 с НДС 20% →
+  // vatSum = 1056 × 20 / 120 = 176; формула «× rate / 100» давала бы
+  // 211.20 и стабильный false-positive.
   items.forEach((it, idx) => {
     const row = idx + 1;
     const sum = it.sum ?? null;
     const vatRate = it.vatRate ?? null;
     const vatSum = it.vatSum ?? null;
+    const computeActual = (s: number, r: number): number =>
+      round2((s * r) / (100 + r));
     if (sum == null || vatRate == null || vatSum == null) {
       checks.push({
         name: 'row_vat_rate',
         scope: { row },
         expected: vatSum,
-        actual: sum != null && vatRate != null ? round2((sum * vatRate) / 100) : null,
+        actual: sum != null && vatRate != null ? computeActual(sum, vatRate) : null,
         diff: null,
         tolerance: ROW_TOLERANCE,
         ok: true,
@@ -218,7 +232,7 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
       });
       return;
     }
-    const actual = round2((sum * vatRate) / 100);
+    const actual = computeActual(sum, vatRate);
     const diff = round2(Math.abs(vatSum - actual));
     checks.push({
       name: 'row_vat_rate',

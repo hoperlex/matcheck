@@ -2,15 +2,16 @@ import { describe, it, expect } from 'vitest';
 import { validateUpdTotals } from '../src/domain/edo/upd-validation.js';
 
 describe('validateUpdTotals — сверка арифметики УПД', () => {
-  it('всё сходится: totalSum с НДС, items.sum без НДС (как в УПД ПР № 1137)', () => {
-    // Согласованный кейс с НДС 20%: 880 (без НДС) + 176 (НДС) = 1056 (с НДС).
-    // items.sum это база БЕЗ НДС (так LLM/XML парсер заполняют —
-    // колонка «Стоимость без налога»). qty=5.5 × price=160 = 880.
+  it('всё сходится: price из графы 4 (БЕЗ НДС), sum из графы 9 (С НДС) — промпт v7', () => {
+    // После промпта v7 price = графа 4 (без НДС), sum = графа 9 (с НДС).
+    // qty × price = 5.5 × 160 = 880 (база без НДС).
+    // sum / (1 + 0.2) = 1056 / 1.2 = 880 — совпадает.
+    // vatSum = sum × rate / (100 + rate) = 1056 × 20 / 120 = 176.
     const r = validateUpdTotals({
       totalSum: 1056,
       vatSum: 176,
       itemsCount: 1,
-      items: [{ qty: 5.5, price: 160, sum: 880, vatRate: 20, vatSum: 176 }],
+      items: [{ qty: 5.5, price: 160, sum: 1056, vatRate: 20, vatSum: 176 }],
     });
     expect(r.hasMismatch).toBe(false);
     expect(r.checks.every((c) => c.ok)).toBe(true);
@@ -69,11 +70,13 @@ describe('validateUpdTotals — сверка арифметики УПД', () =>
     expect(row?.diff).toBeCloseTo(0.01, 2);
   });
 
-  it('Построчно НДС: vatRate=20 для sum=1000 ожидает vatSum=200, актуальный 205 → mismatch', () => {
+  it('Построчно НДС: sum=1200 С НДС, ставка 20 → ожидает vatSum=200; 205 → mismatch', () => {
+    // sum уже С НДС (промпт v6), поэтому ожидаемый НДС =
+    // 1200 × 20 / 120 = 200. Парсер положил 205 → diff = 5 → mismatch.
     const r = validateUpdTotals({
       totalSum: null,
       vatSum: null,
-      items: [{ qty: 1, price: 1000, sum: 1000, vatRate: 20, vatSum: 205 }],
+      items: [{ qty: 1, price: 1200, sum: 1200, vatRate: 20, vatSum: 205 }],
     });
     const row = r.checks.find((c) => c.name === 'row_vat_rate');
     expect(row?.ok).toBe(false);
@@ -126,29 +129,28 @@ describe('validateUpdTotals — сверка арифметики УПД', () =>
 
   // ──────────── Реальные кейсы из прод-лога llm_calls ────────────
 
-  it('УПД 201/21125720: totalSum с НДС, items без vatSum, копеечные округления → ok', () => {
-    // Реальный документ из лога llm_calls. Все 4 ложных позитива до фикса:
-    //   sum_total: 162660.80 vs 133328.52 (база С НДС vs БЕЗ НДС → теперь
-    //     expected = 162660.80 − 29332.28 = 133328.52);
-    //   vat_total: 29332.28 vs 0.00 (items.vatSum пусты → теперь skip);
-    //   row_qty_price × 5: расхождения 0.08–1.08₽ (поставщик округлил
-    //     цену → теперь tolerance ≥ 1₽ или 0.1%).
+  it('УПД 201/21125720: totalSum и items.sum оба С НДС (промпт v6) → ok', () => {
+    // Реальный документ из лога llm_calls — пересчитан под промпт v6:
+    // items.sum = графа 9 «Стоимость с налогом — всего», цена = sum / qty
+    // (тоже с НДС). Шапочный vatSum остаётся как есть; vat_total
+    // скипается, потому что PDF-флоу не извлекает vatSum по позициям.
+    // Σ items.sum = 47940 + 28364.5 + 10946.3 + 45980 + 29430 = 162660.80.
     const r = validateUpdTotals({
       totalSum: 162660.8,
       vatSum: 29332.28,
       items: [
-        { qty: 600, price: 65.49, sum: 39295.08, vatRate: null, vatSum: null },
-        { qty: 355, price: 65.49, sum: 23249.59, vatRate: null, vatSum: null },
-        { qty: 137, price: 65.49, sum: 8972.38, vatRate: null, vatSum: null },
-        { qty: 440, price: 85.66, sum: 37688.52, vatRate: null, vatSum: null },
-        { qty: 180, price: 134.02, sum: 24122.95, vatRate: null, vatSum: null },
+        { qty: 600, price: 79.9, sum: 47940, vatRate: null, vatSum: null },
+        { qty: 355, price: 79.9, sum: 28364.5, vatRate: null, vatSum: null },
+        { qty: 137, price: 79.9, sum: 10946.3, vatRate: null, vatSum: null },
+        { qty: 440, price: 104.5, sum: 45980, vatRate: null, vatSum: null },
+        { qty: 180, price: 163.5, sum: 29430, vatRate: null, vatSum: null },
       ],
     });
     expect(r.hasMismatch).toBe(false);
     const sumCheck = r.checks.find((c) => c.name === 'sum_total');
     expect(sumCheck?.ok).toBe(true);
-    expect(sumCheck?.expected).toBeCloseTo(133328.52, 2);
-    expect(sumCheck?.actual).toBeCloseTo(133328.52, 2);
+    expect(sumCheck?.expected).toBeCloseTo(162660.8, 2);
+    expect(sumCheck?.actual).toBeCloseTo(162660.8, 2);
     const vatCheck = r.checks.find((c) => c.name === 'vat_total');
     expect(vatCheck?.ok).toBe(true);
     expect(vatCheck?.skipReason).toBe('no_actual');
