@@ -28,6 +28,15 @@ import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 
 type List = { items: Unit[]; total: number };
 
+function pluralizeUnit(n: number): string {
+  const last = n % 10;
+  const lastTwo = n % 100;
+  if (lastTwo >= 11 && lastTwo <= 14) return 'единиц';
+  if (last === 1) return 'единицу';
+  if (last >= 2 && last <= 4) return 'единицы';
+  return 'единиц';
+}
+
 export default function UnitsPage(): JSX.Element {
   const qc = useQueryClient();
   const role = useAuthStore((s) => s.user?.role);
@@ -44,7 +53,6 @@ export default function UnitsPage(): JSX.Element {
     queryFn: () =>
       api.get<List>(`/units${search ? `?q=${encodeURIComponent(search)}` : ''}`),
   });
-  const items = list.data?.items ?? [];
 
   const openCreate = () => {
     setEditing(null);
@@ -97,9 +105,7 @@ export default function UnitsPage(): JSX.Element {
     onSuccess: (res) => {
       bulk.clear();
       if (res.deleted.length > 0) message.success(`Удалено: ${res.deleted.length}`);
-      if (res.skipped.length > 0) {
-        message.warning(`Пропущено: ${res.skipped.length}`);
-      }
+      if (res.skipped.length > 0) message.warning(`Пропущено: ${res.skipped.length}`);
       void qc.invalidateQueries({ queryKey: ['units'] });
       void qc.invalidateQueries({ queryKey: ['references-counts'] });
     },
@@ -109,41 +115,55 @@ export default function UnitsPage(): JSX.Element {
   return (
     <StickyPageHeader
       header={
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <Typography.Title level={3} style={{ margin: 0, flex: 1 }}>
-            Единицы измерения
-          </Typography.Title>
-          <DebouncedSearch
-            value={search}
-            onChange={setSearch}
-            placeholder="Код или название"
-            width={260}
-          />
-          {canEdit && (
-            <Button type="primary" onClick={openCreate}>
-              Добавить
-            </Button>
-          )}
-          {canDelete && bulk.selection.selectedRowKeys.length > 0 && (
-            <BulkActionInline
-              count={bulk.selection.selectedRowKeys.length}
-              onCancel={bulk.clear}
-              onConfirm={() => bulkDel.mutate(bulk.selectedIds())}
-              loading={bulkDel.isPending}
-              confirmLabel="Удалить выбранные"
-              danger
+        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
+          <Space>
+            <Typography.Title level={3} style={{ margin: 0 }}>
+              Единицы измерения
+            </Typography.Title>
+            <DebouncedSearch
+              placeholder="Код или название"
+              value={search}
+              onChange={setSearch}
+              style={{ width: 240 }}
             />
-          )}
-        </div>
+          </Space>
+          <Space>
+            {canDelete && (
+              <BulkActionInline
+                selectedCount={bulk.selectedCount}
+                onClear={bulk.clear}
+                onDelete={() => bulkDel.mutate(Array.from(bulk.selectedIds))}
+                deleting={bulkDel.isPending}
+                confirmTitle={`Удалить ${bulk.selectedCount} ${pluralizeUnit(bulk.selectedCount)}?`}
+              />
+            )}
+            {canEdit && (
+              <Button type="primary" onClick={openCreate}>
+                Добавить
+              </Button>
+            )}
+          </Space>
+        </Space>
       }
     >
       <ResponsiveTable<Unit>
-        items={items}
+        items={list.data?.items ?? []}
         loading={list.isLoading}
         rowKey="id"
         numbered
         rowSelection={canDelete ? bulk.selection : undefined}
         onRowClick={canEdit ? openEdit : undefined}
+        cardRender={(u) => (
+          <Space direction="vertical" size={2} style={{ width: '100%' }}>
+            <Typography.Text strong>{u.code}</Typography.Text>
+            <Typography.Text type="secondary">{u.name}</Typography.Text>
+            {u.okeiCode && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                ОКЕИ {u.okeiCode}
+              </Typography.Text>
+            )}
+          </Space>
+        )}
         columns={[
           {
             title: 'Код',
@@ -248,6 +268,3 @@ export default function UnitsPage(): JSX.Element {
     </StickyPageHeader>
   );
 }
-
-// JSX type fallback for Space import (used implicitly by antd).
-void Space;
