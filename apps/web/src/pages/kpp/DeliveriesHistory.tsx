@@ -55,6 +55,7 @@ import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { DeliveryViewModal, type DeliveryViewData } from './DeliveryViewModal';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
+import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
@@ -732,6 +733,12 @@ export function DeliveriesHistory({
         rowClassName={(r) =>
           operationsRowClass({ statusCode: r.status.code, dateIso: r.arrivedAt })
         }
+        pagination={{
+          // showTotal рендерится antd'ом слева от номеров страниц — кладём
+          // туда легенду цветов подсветки строк, чтобы пользователь видел
+          // расшифровку прямо на той же линии что и пагинация.
+          showTotal: () => <OperationsRowLegend />,
+        }}
         columns={[
           {
             // Короткий человекочитаемый id — серверный авто-возрастающий

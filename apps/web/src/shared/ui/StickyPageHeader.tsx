@@ -67,10 +67,15 @@ export function StickyPageHeader({
           marginInlineEnd: -24,
           paddingInlineStart: 24,
           paddingInlineEnd: 24,
-          paddingBottom: 12,
+          paddingBottom: 8,
+          // Корневой блок: компенсируем верхний padding Content (12px)
+          // отрицательным margin (-12px) и даём свой небольшой paddingTop,
+          // чтобы заголовок прижимался ближе к верхней границе окна — но
+          // не наезжал на неё. Раньше было -24/16, давало ~16px воздуха
+          // сверху; сейчас -12/6 даёт ~6px — таблица получает +14px места.
           ...(parentHeight === 0
-            ? { marginTop: -24, paddingTop: 16, marginBottom: 8 }
-            : { paddingTop: 12, marginBottom: 8 }),
+            ? { marginTop: -12, paddingTop: 6, marginBottom: 6 }
+            : { paddingTop: 8, marginBottom: 6 }),
         }}
       >
         {header}

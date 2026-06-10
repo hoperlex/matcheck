@@ -56,6 +56,7 @@ import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
+import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 
 type List = z.infer<typeof ShipmentListResponseSchema>;
 type Row = List['items'][number];
@@ -705,6 +706,10 @@ export function ShipmentsHistory({
         rowClassName={(r) =>
           operationsRowClass({ statusCode: r.status.code, dateIso: r.shippedAt })
         }
+        pagination={{
+          // Легенда цветов подсветки строк — см. комментарий в DeliveriesHistory.
+          showTotal: () => <OperationsRowLegend />,
+        }}
         columns={[
           // Симметрия с DeliveriesHistory: тот же порядок — id, Статус,
           // Авто, дата, Получатель (зеркало Поставщика приёмки), Объект,

@@ -240,7 +240,7 @@ export function DesktopLayout() {
           height: '100vh',
         }}
       >
-        <Content style={{ padding: 24, background: '#f5f5f5', flex: 1, overflowY: 'auto' }}>
+        <Content style={{ padding: '12px 24px 8px', background: '#f5f5f5', flex: 1, overflowY: 'auto' }}>
           <Outlet />
         </Content>
       </Layout>

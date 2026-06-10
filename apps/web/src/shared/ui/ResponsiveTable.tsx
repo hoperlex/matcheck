@@ -45,6 +45,7 @@ export function ResponsiveTable<T extends object>({
   rowSelection,
   expandable,
   rowClassName,
+  pagination,
 }: {
   items: T[];
   columns: Column<T>[];
@@ -68,6 +69,12 @@ export function ResponsiveTable<T extends object>({
   // Кастомный CSS-класс per-row — для подсветки «в процессе» (жёлтый)
   // или «незавершено» (красный) в Операциях.
   rowClassName?: (row: T) => string;
+  // Override antd pagination. Используется в DeliveriesHistory /
+  // ShipmentsHistory, чтобы добавить showTotal с легендой цветов
+  // подсветки строк (Сегодня в процессе / Просрочено) — она рендерится
+  // слева от номеров страниц на той же линии. Если undefined — default
+  // `{ pageSize: 100, showSizeChanger: false }`.
+  pagination?: TableProps<T>['pagination'];
 }) {
   const bp = useBreakpoint();
   // Сумма высот всех родительских StickyPageHeader. 0 — sticky-обёртки нет,
@@ -128,13 +135,14 @@ export function ResponsiveTable<T extends object>({
 
   if (bp === 'desktop') {
     // Внутренний tbody-скролл: tbody вписывается в окно, пагинация всегда
-    // видна внизу страницы (не уезжает за границу). Высота = vh минус
-    // sticky-шапка страницы (фильтры) минус ~170px (шапка таблицы ~50 +
-    // пагинация ~64 + вертикальные паддинги Content 48 + воздух). Так
-    // таблица помещается в Content (который теперь сам скролл-контейнер,
-    // см. DesktopLayout) и НЕ переполняет его — внешнего скролла страницы
-    // не остаётся. Было 140 при скролле на уровне документа.
-    const tableScrollY = `calc(100vh - ${stickyOffset + 170}px)`;
+    // видна внизу страницы. Высота = vh минус sticky-шапка страницы минус
+    // ~134px (шапка таблицы ~50 + пагинация ~52 + Content top+bottom
+    // paddings 20 + buffer 12). Раньше было 170 при Content padding 48 —
+    // мы сократили padding до 20 (12 top / 8 bottom в DesktopLayout),
+    // освободив 28px места для строк. Так таблица помещается в Content
+    // (который сам скролл-контейнер, см. DesktopLayout) и НЕ переполняет
+    // его — внешнего скролла страницы не остаётся.
+    const tableScrollY = `calc(100vh - ${stickyOffset + 134}px)`;
     return (
       <Table<T>
         dataSource={items}
@@ -144,7 +152,11 @@ export function ResponsiveTable<T extends object>({
         size="middle"
         rowSelection={rowSelection}
         expandable={expandable}
-        pagination={{ pageSize: 100, showSizeChanger: false }}
+        pagination={
+          pagination === false
+            ? false
+            : { pageSize: 100, showSizeChanger: false, ...(pagination ?? {}) }
+        }
         locale={{ emptyText: emptyText ?? 'Нет данных' }}
         scroll={{ y: tableScrollY }}
         rowClassName={rowClassName}
