@@ -63,25 +63,19 @@ class SourceAlreadyLinkedError extends Error {
   }
 }
 
-// УПД должна быть привязана не более чем к одной приёмке. Проверяем, что
-// заявленные source_document_id не заняты другой приёмкой. excludeDeliveryId
-// нужен для обновления: те же УПД могут уже быть привязаны к текущей приёмке.
+// Раньше: «УПД должна быть привязана не более чем к одной приёмке». После
+// миграции 0063 UNIQUE-индекс снят — одна УПД может висеть у N приёмок
+// (сценарий «несколько поставок»). Функция оставлена как no-op, чтобы
+// не править все колл-сайты: PRIMARY KEY (delivery_id, source_document_id)
+// по-прежнему гарантирует уникальность ПАРЫ — INSERT той же пары вторично
+// упадёт на PK с понятным violation. Параметры сохранены для совместимости.
 async function assertSourcesAvailableForDelivery(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  app: any,
-  sourceDocumentIds: string[],
-  excludeDeliveryId: string | null,
+  _app: any,
+  _sourceDocumentIds: string[],
+  _excludeDeliveryId: string | null,
 ) {
-  if (!sourceDocumentIds.length) return;
-  const conds = [inArray(deliverySources.sourceDocumentId, sourceDocumentIds)];
-  if (excludeDeliveryId) conds.push(ne(deliverySources.deliveryId, excludeDeliveryId));
-  const taken = await app.db
-    .select({ sourceDocumentId: deliverySources.sourceDocumentId })
-    .from(deliverySources)
-    .where(and(...conds));
-  if (taken.length) {
-    throw new SourceAlreadyLinkedError(taken.map((r: { sourceDocumentId: string }) => r.sourceDocumentId));
-  }
+  return;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

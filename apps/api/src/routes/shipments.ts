@@ -64,25 +64,17 @@ class SourceAlreadyLinkedError extends Error {
   }
 }
 
-// УПД должна быть привязана не более чем к одной отгрузке. Проверяем, что
-// заявленные source_document_id не заняты другой отгрузкой. excludeShipmentId
-// нужен для обновления: те же УПД могут уже быть привязаны к текущей отгрузке.
+// См. одноимённую функцию в deliveries.ts. После миграции 0063 одна УПД
+// может быть привязана к N отгрузкам — функция no-op, оставлена ради
+// совместимости с колл-сайтами. PRIMARY KEY (shipment_id, source_document_id)
+// гарантирует уникальность ПАРЫ (повторный INSERT той же пары упадёт на PK).
 async function assertSourcesAvailableForShipment(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  app: any,
-  sourceDocumentIds: string[],
-  excludeShipmentId: string | null,
+  _app: any,
+  _sourceDocumentIds: string[],
+  _excludeShipmentId: string | null,
 ) {
-  if (!sourceDocumentIds.length) return;
-  const conds = [inArray(shipmentSources.sourceDocumentId, sourceDocumentIds)];
-  if (excludeShipmentId) conds.push(ne(shipmentSources.shipmentId, excludeShipmentId));
-  const taken = await app.db
-    .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
-    .from(shipmentSources)
-    .where(and(...conds));
-  if (taken.length) {
-    throw new SourceAlreadyLinkedError(taken.map((r: { sourceDocumentId: string }) => r.sourceDocumentId));
-  }
+  return;
 }
 
 function isSourceDocumentUniqueViolation(err: unknown): boolean {

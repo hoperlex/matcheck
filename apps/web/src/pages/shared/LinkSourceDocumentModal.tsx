@@ -8,6 +8,7 @@ import type {
 } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api } from '../../services/api';
+import { useAuthStore } from '../../stores/auth';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 
@@ -35,14 +36,33 @@ export function LinkSourceDocumentModal({
   error?: string | null;
 }) {
   const [allSites, setAllSites] = useState(false);
+  // «Мои» — оставить только УПД, загруженные текущим пользователем
+  // (createdByUserId === user.id). По умолчанию выключено — менеджеру
+  // обычно нужно видеть весь пул, но при большом списке этот фильтр
+  // помогает быстро найти «свои» УПД. EDO/mail-полученные документы
+  // имеют createdByUserId=null и при включённом «Мои» отфильтруются.
+  const [onlyMine, setOnlyMine] = useState(false);
+  // «Несколько поставок» — показывать в том числе уже привязанные УПД,
+  // чтобы менеджер мог использовать одну УПД для нескольких приёмок/
+  // отгрузок (сценарий: одна УПД на 50 т арматуры доставлена 4-5
+  // рейсами). После миграции 0063 UNIQUE по source_document_id снят —
+  // бэк больше не блокирует повторную привязку. По умолчанию выключено
+  // (поведение 1:1 как раньше). См. комментарий к assertSourcesAvailable*.
+  const [multiple, setMultiple] = useState(false);
+  const currentUserId = useAuthStore((s) => s.user?.id ?? null);
 
   const list = useQuery({
-    queryKey: ['source-documents', 'unaccepted-upd', direction],
+    // Кешируем РАЗНЫЕ ключи под выключенным/включенным «Несколько поставок»
+    // — потому что бэк возвращает разные подмножества (unaccepted vs all).
+    queryKey: ['source-documents', 'link-upd', direction, multiple ? 'all' : 'unaccepted'],
     queryFn: () => {
       const qs = new URLSearchParams({
         kind: 'upd,transport_waybill,os2_transfer',
         direction,
-        unaccepted: 'true',
+        // multiple=true → показываем ВСЕ УПД направления (включая уже
+        // привязанные к другим приёмкам). По умолчанию unaccepted=true
+        // (только свободные) — UX как раньше.
+        unaccepted: multiple ? 'false' : 'true',
         limit: '200',
       });
       return api.get<List>(`/source-documents?${qs.toString()}`);
@@ -52,12 +72,19 @@ export function LinkSourceDocumentModal({
 
   const items = list.data?.items ?? [];
   const filtered = useMemo(() => {
-    if (allSites || !siteId) return items;
-    // Если у приёмки есть siteId — показываем УПД того же объекта плюс УПД
-    // без указанного объекта (siteId=null). Это покрывает случай, когда УПД
-    // распознана без сайта, а диспетчер всё равно должен суметь её привязать.
-    return items.filter((r) => r.siteId === siteId || r.siteId === null);
-  }, [items, siteId, allSites]);
+    let result = items;
+    // Фильтр по объекту (как раньше): УПД того же siteId либо без siteId.
+    if (!allSites && siteId) {
+      result = result.filter((r) => r.siteId === siteId || r.siteId === null);
+    }
+    // Фильтр «Мои»: только УПД, загруженные текущим юзером. Если в
+    // current user нет id (что не должно случаться при открытой модалке) —
+    // фильтр пропускается, чтобы не показать пустой список.
+    if (onlyMine && currentUserId) {
+      result = result.filter((r) => r.createdByUserId === currentUserId);
+    }
+    return result;
+  }, [items, siteId, allSites, onlyMine, currentUserId]);
 
   return (
     <Modal
@@ -86,12 +113,24 @@ export function LinkSourceDocumentModal({
     >
       <Space direction="vertical" size="middle" style={{ width: '100%', flex: 1, minHeight: 0 }}>
         {error ? <Alert type="error" message={error} showIcon /> : null}
-        {siteId ? (
+        <Space size={24} wrap>
+          {siteId ? (
+            <Space>
+              <Switch checked={allSites} onChange={setAllSites} disabled={busy} />
+              <Typography.Text>Показать УПД всех объектов</Typography.Text>
+            </Space>
+          ) : null}
+          {currentUserId ? (
+            <Space>
+              <Switch checked={onlyMine} onChange={setOnlyMine} disabled={busy} />
+              <Typography.Text>Мои</Typography.Text>
+            </Space>
+          ) : null}
           <Space>
-            <Switch checked={allSites} onChange={setAllSites} disabled={busy} />
-            <Typography.Text>Показать УПД всех объектов</Typography.Text>
+            <Switch checked={multiple} onChange={setMultiple} disabled={busy} />
+            <Typography.Text>Несколько поставок</Typography.Text>
           </Space>
-        ) : null}
+        </Space>
         <Table<SourceDocument>
           rowKey="id"
           dataSource={filtered}

@@ -788,8 +788,13 @@ export const deliverySources = pgTable(
       .references(() => sourceDocuments.id, { onDelete: 'restrict' }),
   },
   (t) => [
+    // PK не даёт дубль одной и той же пары (delivery, source_document).
+    // UNIQUE по source_document_id СНЯТ миграцией 0063 — одна УПД может
+    // быть привязана к нескольким приёмкам (сценарий «несколько поставок»:
+    // одна УПД на 50 т арматуры приезжает 4-5 рейсами, каждый рейс =
+    // своя приёмка). В UI это режим «Несколько поставок» в
+    // LinkSourceDocumentModal — явный тумблер у менеджера.
     primaryKey({ columns: [t.deliveryId, t.sourceDocumentId] }),
-    uniqueIndex('delivery_sources_source_document_id_unique').on(t.sourceDocumentId),
   ],
 );
 
@@ -988,8 +993,9 @@ export const shipmentSources = pgTable(
       .references(() => sourceDocuments.id, { onDelete: 'restrict' }),
   },
   (t) => [
+    // См. комментарий в deliverySources: UNIQUE по source_document_id
+    // снят миграцией 0063 (одна УПД → N отгрузок). PK по паре остаётся.
     primaryKey({ columns: [t.shipmentId, t.sourceDocumentId] }),
-    uniqueIndex('shipment_sources_source_document_id_unique').on(t.sourceDocumentId),
   ],
 );
 
