@@ -164,6 +164,34 @@ function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }
           </Space>
         );
       }
+      if (row.parseErrorCode === 'partial_parse') {
+        // Шапка распознана, но позиции/итого не вытащены — типично для
+        // xlsx-УПД на Шаге 2a парсера. Пользователь дозаполнит вручную.
+        const missing = (row.parseErrorDetails as { missing?: string[] } | null)?.missing;
+        return (
+          <Space size={4} wrap>
+            <Tooltip
+              title={
+                missing && missing.length
+                  ? `Не распознаны: ${missing.join(', ')}`
+                  : 'Документ распознан частично — дополните данные вручную'
+              }
+            >
+              <Tag color="gold">распознано частично</Tag>
+            </Tooltip>
+            <Button
+              size="small"
+              type="link"
+              onClick={(e) => {
+                e.stopPropagation();
+                onResolve(row);
+              }}
+            >
+              дополнить
+            </Button>
+          </Space>
+        );
+      }
       return (
         <Space size={4} wrap>
           <Tooltip

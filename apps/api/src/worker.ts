@@ -289,31 +289,36 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     parsed.docDate == null;
   const status: 'parsed' | 'needs_resolution' =
     hasMismatch || isIncomplete ? 'needs_resolution' : 'parsed';
-  const parseErrorCode: 'validation_mismatch' | 'partial_parse' | null = hasMismatch
-    ? 'validation_mismatch'
-    : isIncomplete
-      ? 'partial_parse'
+  // Приоритет: partial_parse важнее validation_mismatch. Если документ
+  // распознан частично (нет позиций или итого) — сверка сумм бессмысленна,
+  // показывать «суммы не сходятся» вводит пользователя в заблуждение.
+  // Семантически правильно сначала добить шапку/позиции, потом проверять
+  // суммы — для xlsx Шага 2a это всегда так.
+  const parseErrorCode: 'validation_mismatch' | 'partial_parse' | null = isIncomplete
+    ? 'partial_parse'
+    : hasMismatch
+      ? 'validation_mismatch'
       : null;
-  const parseErrorDetails = hasMismatch
+  const parseErrorDetails = isIncomplete
     ? {
-        failedChecks: validation.checks
-          .filter((c) => !c.ok)
-          .map((c) => ({
-            name: c.name,
-            scope: c.scope,
-            expected: c.expected,
-            actual: c.actual,
-            diff: c.diff,
-          })),
+        missing: [
+          parsed.docNumber == null ? 'docNumber' : null,
+          parsed.docDate == null ? 'docDate' : null,
+          parsed.totalSum == null ? 'totalSum' : null,
+          parsed.items.length === 0 ? 'items' : null,
+        ].filter(Boolean) as string[],
       }
-    : isIncomplete
+    : hasMismatch
       ? {
-          missing: [
-            parsed.docNumber == null ? 'docNumber' : null,
-            parsed.docDate == null ? 'docDate' : null,
-            parsed.totalSum == null ? 'totalSum' : null,
-            parsed.items.length === 0 ? 'items' : null,
-          ].filter(Boolean) as string[],
+          failedChecks: validation.checks
+            .filter((c) => !c.ok)
+            .map((c) => ({
+              name: c.name,
+              scope: c.scope,
+              expected: c.expected,
+              actual: c.actual,
+              diff: c.diff,
+            })),
         }
       : null;
 
