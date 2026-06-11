@@ -75,6 +75,12 @@ export const DeliverySchema = z.object({
    * Default false. См. миграцию 0051.
    */
   inTransit: z.boolean(),
+  /**
+   * ОС — флаг «основные средства»: накладная относится к движению
+   * объектов ОС, а не материалов. Чекбокс на 1 этапе мобилы. Default
+   * false. Веб-портал показывает бейдж рядом с «Транзит». См. миграцию 0065.
+   */
+  isAssets: z.boolean(),
   confirmedByMolUserId: z.string().uuid().nullable(),
   confirmedByMolUserEmail: z.string().nullable(),
   confirmedByMolAt: z.string().nullable(),
@@ -138,6 +144,8 @@ export const DeliveryUpsertSchema = z.object({
   comment: z.string().nullable().optional(),
   /** Транзит — см. DeliverySchema.inTransit. Default false. */
   inTransit: z.boolean().default(false),
+  /** ОС — см. DeliverySchema.isAssets. Default false. */
+  isAssets: z.boolean().default(false),
   sourceDocumentIds: z.array(z.string().uuid()).default([]),
   items: z.array(DeliveryUpsertItemSchema).default([]),
   baseVersion: z.number().int().nonnegative().optional(),

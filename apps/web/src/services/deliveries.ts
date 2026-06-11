@@ -147,6 +147,7 @@ export function buildUpsertPayload(r: DeliveryRecord): DeliveryUpsert {
     arrivedAt: effective.arrivedAt,
     comment: effective.comment,
     inTransit: effective.inTransit ?? false,
+    isAssets: effective.isAssets ?? false,
     sourceDocumentIds: effective.sourceDocumentIds,
     items: effective.items.map((it) => ({
       id: it.id,

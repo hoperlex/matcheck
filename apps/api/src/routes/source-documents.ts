@@ -37,6 +37,7 @@ import {
   sourceDocuments,
   sourceDocumentItems,
   sourceDocumentAttachments,
+  suppliers,
   users,
 } from '../db/schema.js';
 import { parseUpdXml } from '../domain/edo/upd.parser.js';
@@ -44,6 +45,7 @@ import { validateUpdTotals } from '../domain/edo/upd-validation.js';
 import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { publishEvent } from './events.js';
+import { matchOrCreateSupplier } from '../domain/sourceDocuments/supplierMatcher.js';
 
 const KIND_VALUES = ['upd', 'request', 'transport_waybill', 'os2_transfer'] as const;
 type KindValue = (typeof KIND_VALUES)[number];
@@ -100,6 +102,32 @@ async function findOrCreateMaterial(
     .returning({ id: materials.id });
   if (!created) throw new Error('Failed to create material');
   return created.id;
+}
+
+// Поддерживаемые форматы для /upload-upd-pdf endpoint. JPG/PNG поддержат
+// отдельно через vision-LLM (см. Шаг 4d). Хранение в БД использует тот же
+// origin='manual_pdf' независимо от формата — enum намеренно не расширяем,
+// чтобы не делать миграцию ради метаданных.
+type UpdFileFormat = { ext: 'pdf' | 'xlsx'; mimeType: string };
+
+function detectUpdFileFormat(mime: string, filename: string): UpdFileFormat | null {
+  const m = (mime ?? '').toLowerCase();
+  const f = (filename ?? '').toLowerCase();
+  if (m.includes('pdf') || f.endsWith('.pdf')) {
+    return { ext: 'pdf', mimeType: 'application/pdf' };
+  }
+  if (
+    m.includes('spreadsheetml') ||
+    m.includes('vnd.ms-excel') ||
+    f.endsWith('.xlsx') ||
+    f.endsWith('.xls')
+  ) {
+    return {
+      ext: 'xlsx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    };
+  }
+  return null;
 }
 
 async function findOrCreateCounterparty(
@@ -234,13 +262,23 @@ async function loadSdNames(
   sd: typeof sourceDocuments.$inferSelect,
 ): Promise<SdNames> {
   const [supplier, contractor, recipient, mol, site, createdBy] = await Promise.all([
-    sd.supplierId
+    // Поставщик: приоритет — справочник `suppliers` (для распознанных УПД
+    // после миграции 0064). Fallback — counterparties (исторические УПД и
+    // manual XML). Один из ID должен быть заполнен; если оба null — supplier
+    // в шапке покажется как «не указан».
+    sd.supplierDirectoryId
       ? app.db
-          .select({ name: counterparties.name })
-          .from(counterparties)
-          .where(eq(counterparties.id, sd.supplierId))
+          .select({ name: suppliers.name })
+          .from(suppliers)
+          .where(eq(suppliers.id, sd.supplierDirectoryId))
           .limit(1)
-      : Promise.resolve([] as { name: string }[]),
+      : sd.supplierId
+        ? app.db
+            .select({ name: counterparties.name })
+            .from(counterparties)
+            .where(eq(counterparties.id, sd.supplierId))
+            .limit(1)
+        : Promise.resolve([] as { name: string }[]),
     sd.contractorId
       ? app.db
           .select({ name: counterparties.name })
@@ -477,12 +515,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       }
       const where = conditions.length ? and(...conditions) : undefined;
       const supplier = alias(counterparties, 'supplier');
+      const supplierDir = alias(suppliers, 'supplier_dir');
       const contractor = alias(counterparties, 'contractor');
       const recipient = alias(counterparties, 'recipient');
       const rows = await app.db
         .select({
           sd: sourceDocuments,
-          supplierName: supplier.name,
+          // Поставщик — приоритет справочника (новый путь), fallback на
+          // counterparties (исторические УПД до миграции 0064).
+          supplierName: drSql<string | null>`COALESCE(${supplierDir.name}, ${supplier.name})`,
           contractorName: contractor.name,
           recipientName: recipient.name,
           recipientMolName: responsiblePersons.fullName,
@@ -490,6 +531,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
+        .leftJoin(supplierDir, eq(sourceDocuments.supplierDirectoryId, supplierDir.id))
         .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
         .leftJoin(recipient, eq(sourceDocuments.recipientId, recipient.id))
         .leftJoin(
@@ -587,7 +629,14 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         const cIds = csvUuids(contractorIds);
         if (cIds.length) conditions.push(inArray(sourceDocuments.contractorId, cIds));
         const sIds = csvUuids(supplierIds);
-        if (sIds.length) conditions.push(inArray(sourceDocuments.supplierId, sIds));
+        if (sIds.length) {
+          // ID может быть либо из counterparties (исторические УПД), либо
+          // из suppliers (новые после миграции 0064). Не сужаем выборку
+          // только до старого пути — иначе новые УПД пропадут из экспорта.
+          conditions.push(
+            drSql`(${sourceDocuments.supplierId} in ${sIds} or ${sourceDocuments.supplierDirectoryId} in ${sIds})`,
+          );
+        }
         const stIds = csvUuids(siteIds);
         if (stIds.length) conditions.push(inArray(sourceDocuments.siteId, stIds));
         // unaccepted: документ ещё не привязан к delivery (для inbound) или
@@ -616,16 +665,18 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         }
 
         const supplier = alias(counterparties, 'supplier');
+        const supplierDir = alias(suppliers, 'supplier_dir');
         const contractor = alias(counterparties, 'contractor');
         const rows = await app.db
           .select({
             sd: sourceDocuments,
-            supplierName: supplier.name,
+            supplierName: drSql<string | null>`COALESCE(${supplierDir.name}, ${supplier.name})`,
             contractorName: contractor.name,
             siteName: sites.name,
           })
           .from(sourceDocuments)
           .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
+          .leftJoin(supplierDir, eq(sourceDocuments.supplierDirectoryId, supplierDir.id))
           .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
           .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
           .where(and(...conditions))
@@ -781,12 +832,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     },
     async (req, reply) => {
       const supplier = alias(counterparties, 'supplier');
+      const supplierDir = alias(suppliers, 'supplier_dir');
       const contractor = alias(counterparties, 'contractor');
       const recipient = alias(counterparties, 'recipient');
       const [row] = await app.db
         .select({
           sd: sourceDocuments,
-          supplierName: supplier.name,
+          supplierName: drSql<string | null>`COALESCE(${supplierDir.name}, ${supplier.name})`,
           contractorName: contractor.name,
           recipientName: recipient.name,
           recipientMolName: responsiblePersons.fullName,
@@ -794,6 +846,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
+        .leftJoin(supplierDir, eq(sourceDocuments.supplierDirectoryId, supplierDir.id))
         .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
         .leftJoin(recipient, eq(sourceDocuments.recipientId, recipient.id))
         .leftJoin(
@@ -1111,10 +1164,14 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       };
       const fileData = await mp.file();
       if (!fileData) {
-        return reply.code(400).send({ error: 'no_file', message: 'PDF не приложен' });
+        return reply.code(400).send({ error: 'no_file', message: 'Файл не приложен' });
       }
-      if (!fileData.mimetype.includes('pdf') && !fileData.filename.toLowerCase().endsWith('.pdf')) {
-        return reply.code(400).send({ error: 'bad_mime', message: 'Ожидается PDF файл' });
+      const format = detectUpdFileFormat(fileData.mimetype, fileData.filename);
+      if (!format) {
+        return reply.code(400).send({
+          error: 'bad_mime',
+          message: 'Ожидается PDF или Excel (xlsx) файл',
+        });
       }
 
       const rawFields: Record<string, string | undefined> = {};
@@ -1192,12 +1249,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         counterparty: pdfCp ?? null,
         entityType: 'source-documents',
         entityId: newId,
-        filename: 'source.pdf',
+        filename: `source.${format.ext}`,
       });
       try {
-        await putObject(s3Key, buffer, 'application/pdf');
+        await putObject(s3Key, buffer, format.mimeType);
       } catch (err) {
-        req.log.error({ err }, 's3 putObject failed for upd pdf');
+        req.log.error({ err }, 's3 putObject failed for upd file');
         return reply.code(503).send({ error: 's3_unavailable', message: 'S3 недоступен' });
       }
 
@@ -1227,8 +1284,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       await app.db.insert(sourceDocumentAttachments).values({
         sourceDocumentId: created.id,
         s3Key,
-        filename: fileData.filename || 'source.pdf',
-        mimeType: 'application/pdf',
+        filename: fileData.filename || `source.${format.ext}`,
+        mimeType: format.mimeType,
         sizeBytes: buffer.length,
         role: 'original',
       });
@@ -1806,16 +1863,16 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
               : req.body.totalSum;
       }
       if (req.body.supplier) {
-        const supplierId = await findOrCreateCounterparty(
-          app,
-          {
-            inn: req.body.supplier.inn,
-            kpp: req.body.supplier.kpp ?? null,
-            name: req.body.supplier.name,
-          },
-          'supplier',
-        );
-        upd.supplierId = supplierId;
+        // Ручная правка поставщика — пишем в справочник `suppliers` (тот же
+        // путь, что у распознавания). counterparties не растёт, supplier_id
+        // обнуляем — DTO supplierName собирается через COALESCE.
+        const match = await matchOrCreateSupplier(app, {
+          inn: req.body.supplier.inn ?? null,
+          kpp: req.body.supplier.kpp ?? null,
+          name: req.body.supplier.name,
+        });
+        upd.supplierId = null;
+        upd.supplierDirectoryId = match?.id ?? null;
       }
 
       if (req.body.items) {

@@ -140,6 +140,11 @@ export function DeliveryViewModal({
                 🚚 Транзит
               </Tag>
             ) : null}
+            {d.isAssets ? (
+              <Tag style={{ marginInlineEnd: 0 }} color="purple">
+                📦 ОС
+              </Tag>
+            ) : null}
             <PendingDeletionTag
               at={d.pendingDeletionAt}
               byEmail={d.pendingDeletionByUserEmail}

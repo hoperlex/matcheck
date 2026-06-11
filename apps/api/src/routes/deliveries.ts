@@ -154,6 +154,7 @@ async function buildDeliveryDto(app: any, id: string) {
     inspectorId: d.inspectorId,
     comment: d.comment,
     inTransit: d.inTransit,
+    isAssets: d.isAssets,
     confirmedByMolUserId: d.confirmedByMolUserId,
     confirmedByMolUserEmail: r.molEmail,
     confirmedByMolAt: d.confirmedByMolAt?.toISOString() ?? null,
@@ -1364,6 +1365,7 @@ async function createDelivery(
       inspectorId,
       comment: input.comment ?? null,
       inTransit: input.inTransit ?? false,
+      isAssets: input.isAssets ?? false,
       ...(isDirectConfirm && {
         confirmedByMolUserId: inspectorId,
         confirmedByMolAt: now,
@@ -1488,6 +1490,7 @@ async function updateDelivery(
       arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,
       comment: input.comment ?? null,
       inTransit: input.inTransit ?? false,
+      isAssets: input.isAssets ?? false,
       ...(isFirstConfirm && {
         confirmedByMolUserId: userId,
         confirmedByMolAt: new Date(),

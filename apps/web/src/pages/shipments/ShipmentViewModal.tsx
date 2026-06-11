@@ -145,6 +145,11 @@ export function ShipmentViewModal({
                 🚚 Транзит
               </Tag>
             ) : null}
+            {s.isAssets ? (
+              <Tag style={{ marginInlineEnd: 0 }} color="purple">
+                📦 ОС
+              </Tag>
+            ) : null}
             {data.docTotalSum != null ? (
               <Tag style={{ marginInlineEnd: 0 }}>
                 Сумма: {formatMoneyRu(data.docTotalSum)}

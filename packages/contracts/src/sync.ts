@@ -8,6 +8,7 @@ import { ResponsiblePersonSchema } from './responsible-persons.js';
 import { AssetSchema } from './assets.js';
 import { SiteSchema } from './sites.js';
 import { StatusSchema } from './statuses.js';
+import { UnitSchema } from './units.js';
 
 // Журнал hard-delete операций. Возвращается /sync с фильтром `deleted_at >= since`
 // (для initial-sync без since — пустые массивы; полная история не нужна).
@@ -34,6 +35,10 @@ export const SyncDeltaResponseSchema = z.object({
   // Лейблы и цвета статусов (entity_type='delivery'|'shipment'|…) — клиент
   // использует их вместо хардкода. Меняются редко, отдаются всегда без фильтра.
   statuses: z.array(StatusSchema),
+  // Единицы измерения — справочник для дропдауна «Ед.» в модалке материалов
+  // на мобиле. Меняются редко. На клиенте сохраняются в Room, далее
+  // используются как whitelist при добавлении строк материалов.
+  units: z.array(UnitSchema),
   deletedIds: SyncDeletedIdsSchema,
   serverNow: z.string(),
 });

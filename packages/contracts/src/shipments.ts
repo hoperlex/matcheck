@@ -71,6 +71,12 @@ export const ShipmentSchema = z.object({
    * Default false. См. миграцию 0051.
    */
   inTransit: z.boolean(),
+  /**
+   * ОС — флаг «основные средства»: отгрузка относится к движению ОС,
+   * а не материалов. Чекбокс на 1 этапе мобилы. Default false. Веб-портал
+   * показывает бейдж рядом с «Транзит». См. миграцию 0065.
+   */
+  isAssets: z.boolean(),
   siteId: z.string().uuid(),
   receiverCounterpartyId: z.string().uuid().nullable(),
   receiverMolId: z.string().uuid().nullable(),
@@ -149,6 +155,8 @@ export const ShipmentUpsertSchema = z.object({
   purpose: z.string().max(200).nullable().optional(),
   /** Транзит — см. ShipmentSchema.inTransit. Default false. */
   inTransit: z.boolean().default(false),
+  /** ОС — см. ShipmentSchema.isAssets. Default false. */
+  isAssets: z.boolean().default(false),
   sourceDocumentIds: z.array(z.string().uuid()).default([]),
   items: z.array(ShipmentUpsertItemSchema).default([]),
   baseVersion: z.number().int().nonnegative().optional(),

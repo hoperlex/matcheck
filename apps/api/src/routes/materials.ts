@@ -17,6 +17,7 @@ import {
   deliverySources,
   materials,
   sourceDocuments,
+  suppliers,
 } from '../db/schema.js';
 import { resolveStatusId } from '../domain/statuses/lookup.js';
 
@@ -70,7 +71,17 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
           )!,
         );
       }
-      if (supplierId) conditions.push(eq(sourceDocuments.supplierId, supplierId));
+      if (supplierId) {
+        // Фильтр по поставщику работает и для исторических УПД (FK на
+        // counterparties через supplier_id), и для новых распознанных
+        // (FK на suppliers через supplier_directory_id) — см. миграцию 0064.
+        conditions.push(
+          or(
+            eq(sourceDocuments.supplierId, supplierId),
+            eq(sourceDocuments.supplierDirectoryId, supplierId),
+          )!,
+        );
+      }
       if (from) conditions.push(drSql`${deliveries.arrivedAt} >= ${new Date(from)}`);
       if (to) conditions.push(drSql`${deliveries.arrivedAt} <= ${new Date(to)}`);
 
@@ -87,8 +98,12 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
           qtyPlanned: deliveryItems.qtyPlanned,
           qtyActual: deliveryItems.qtyActual,
           arrivedAt: deliveries.arrivedAt,
-          supplierId: counterparties.id,
-          supplierName: counterparties.name,
+          // Поставщик может приходить либо из counterparties (исторические УПД),
+          // либо из suppliers (новые распознанные после миграции 0064).
+          // COALESCE собирает имя из обоих источников. supplierId — это id
+          // соответствующей записи в той таблице, откуда взято имя.
+          supplierId: drSql<string | null>`COALESCE(${suppliers.id}, ${counterparties.id})`,
+          supplierName: drSql<string | null>`COALESCE(${suppliers.name}, ${counterparties.name})`,
           sourceDocumentId: sourceDocuments.id,
           docNumber: sourceDocuments.docNumber,
           docDate: sourceDocuments.docDate,
@@ -99,6 +114,7 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
         .leftJoin(deliverySources, eq(deliverySources.deliveryId, deliveries.id))
         .leftJoin(sourceDocuments, eq(sourceDocuments.id, deliverySources.sourceDocumentId))
         .leftJoin(counterparties, eq(counterparties.id, sourceDocuments.supplierId))
+        .leftJoin(suppliers, eq(suppliers.id, sourceDocuments.supplierDirectoryId))
         .where(where)
         .orderBy(desc(deliveries.arrivedAt))
         .limit(limit)
@@ -112,6 +128,7 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
         .leftJoin(deliverySources, eq(deliverySources.deliveryId, deliveries.id))
         .leftJoin(sourceDocuments, eq(sourceDocuments.id, deliverySources.sourceDocumentId))
         .leftJoin(counterparties, eq(counterparties.id, sourceDocuments.supplierId))
+        .leftJoin(suppliers, eq(suppliers.id, sourceDocuments.supplierDirectoryId))
         .where(where);
 
       return {

@@ -22,6 +22,7 @@ import {
   sourceDocumentItems,
   sourceDocuments,
   statuses,
+  units,
   users,
 } from '../db/schema.js';
 
@@ -66,6 +67,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           assets: [],
           sites: [],
           statuses: [],
+          units: [],
           sourceDocuments: [],
           deliveries: [],
           shipments: [],
@@ -103,6 +105,17 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         .select()
         .from(statuses)
         .orderBy(statuses.entityType, statuses.sortOrder);
+
+      // Единицы измерения — справочник для дропдауна «Ед.» в модалке
+      // материалов на мобиле. Отдаём активные, отсортированные по name —
+      // мобильный клиент может рендерить как есть. См. таблицу units и
+      // /api/v1/units. Дельта-фильтр не нужен: справочник ~20 строк,
+      // отдаём всегда полностью.
+      const unitRows = await app.db
+        .select()
+        .from(units)
+        .where(eq(units.isActive, true))
+        .orderBy(units.name);
 
       // Источниковые документы: для inspector_kpp фильтруем только по siteId.
       // Раньше тут был дополнительный фильтр not_exists (отдавать только не
@@ -382,6 +395,15 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           color: st.color,
           sortOrder: st.sortOrder,
         })),
+        units: unitRows.map((u) => ({
+          id: u.id,
+          code: u.code,
+          name: u.name,
+          okeiCode: u.okeiCode,
+          isActive: u.isActive,
+          createdAt: u.createdAt.toISOString(),
+          updatedAt: u.updatedAt.toISOString(),
+        })),
         sourceDocuments: sdRows.map((sd) => {
           const creator = sd.createdByUserId ? sdCreatorById.get(sd.createdByUserId) : null;
           return {
@@ -476,6 +498,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           inspectorId: d.inspectorId,
           comment: d.comment,
           inTransit: d.inTransit,
+          isAssets: d.isAssets,
           confirmedByMolUserId: d.confirmedByMolUserId,
           confirmedByMolUserEmail: d._molEmail,
           confirmedByMolAt: d.confirmedByMolAt?.toISOString() ?? null,
@@ -549,6 +572,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           kind: s.kind,
           purpose: s.purpose,
           inTransit: s.inTransit,
+          isAssets: s.isAssets,
           siteId: s.siteId,
           receiverCounterpartyId: s.receiverCounterpartyId,
           receiverMolId: s.receiverMolId,

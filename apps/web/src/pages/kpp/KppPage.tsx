@@ -380,6 +380,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       inspectorId: authUser?.id ?? null,
       comment: null,
       inTransit: false,
+      isAssets: false,
       confirmedByMolUserId: null,
       confirmedByMolUserEmail: null,
       confirmedByMolAt: null,
@@ -1466,6 +1467,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               {loadedDelivery?.inTransit ? (
                 <Tag color="orange" style={{ marginInlineEnd: 0 }}>
                   🚚 Транзит
+                </Tag>
+              ) : null}
+              {/* ОС — флаг «основные средства», рядом с Транзитом. Рисуется
+                  ТОЛЬКО если флаг true. Заполняется инспектором чекбоксом
+                  «ОС» на 1 этапе мобилы. См. миграцию 0065. */}
+              {loadedDelivery?.isAssets ? (
+                <Tag color="purple" style={{ marginInlineEnd: 0 }}>
+                  📦 ОС
                 </Tag>
               ) : null}
             </Space>

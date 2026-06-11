@@ -144,6 +144,7 @@ async function buildShipmentDto(app: any, id: string) {
     kind: s.kind,
     purpose: s.purpose,
     inTransit: s.inTransit,
+    isAssets: s.isAssets,
     siteId: s.siteId,
     receiverCounterpartyId: s.receiverCounterpartyId,
     receiverMolId: s.receiverMolId,
@@ -1076,6 +1077,7 @@ async function createShipment(
       shippedAt: input.shippedAt ? new Date(input.shippedAt) : null,
       inspectorId,
       comment: input.comment ?? null,
+      isAssets: input.isAssets ?? false,
       ...(isDirectConfirm && {
         confirmedByMolUserId: inspectorId,
         confirmedByMolAt: now,
@@ -1188,6 +1190,7 @@ async function updateShipment(
       kind: input.kind,
       purpose: input.purpose ?? null,
       inTransit: input.inTransit ?? false,
+      isAssets: input.isAssets ?? false,
       siteId: input.siteId,
       receiverCounterpartyId: input.receiverCounterpartyId ?? null,
       receiverMolId: input.receiverMolId ?? null,

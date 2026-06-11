@@ -18,8 +18,10 @@ import {
   sourceBundles,
   sourceDocuments,
   sourceDocumentItems,
+  suppliers,
 } from './db/schema.js';
 import { sql as drSql } from 'drizzle-orm';
+import { matchOrCreateSupplier } from './domain/sourceDocuments/supplierMatcher.js';
 import {
   buildQueueConnection,
   S3_CLEANUP_QUEUE,
@@ -29,6 +31,7 @@ import {
 } from './plugins/queue.js';
 import { deleteObject, getObject } from './domain/storage/s3.signer.js';
 import { parseUpdPdf, PdfNoTextError } from './domain/edo/upd-pdf.parser.js';
+import { parseUpdXlsx } from './domain/edo/upd-xlsx.parser.js';
 import {
   parseWaybillBatch,
   type WaybillInputImage,
@@ -142,12 +145,22 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     throw err;
   }
 
+  // Routing по типу файла. s3Key содержит имя «source.{ext}», где ext —
+  // pdf / xlsx (см. detectUpdFileFormat в routes/source-documents.ts).
+  // Excel парсится локально регулярками (без LLM, бесплатно и стабильно);
+  // PDF идёт через pdf-parse → LLM.
+  const isXlsx = /\.xlsx?$/i.test(s3Key);
+
   let parsed: UpdPdfParsed;
   let llmProviderId: string | null = null;
   try {
-    const r = await parseUpdPdf(buffer, { sourceDocumentId });
-    parsed = r.parsed;
-    llmProviderId = r.llmProviderId;
+    if (isXlsx) {
+      parsed = await parseUpdXlsx(buffer);
+    } else {
+      const r = await parseUpdPdf(buffer, { sourceDocumentId });
+      parsed = r.parsed;
+      llmProviderId = r.llmProviderId;
+    }
   } catch (err) {
     if (err instanceof PdfNoTextError) {
       await db
@@ -168,15 +181,22 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     throw err;
   }
 
-  // Контрагенты.
+  // Поставщик — сравниваем со справочником `suppliers` (CRUD в Справочниках).
+  // Если нашли по ИНН/fuzzy name — возвращается id найденной записи; не нашли
+  // — INSERT в справочник (счётчик «Поставщики» вырастает). В counterparties
+  // НЕ пишем — поставщики и контрагенты это разные сущности (см. миграцию
+  // 0064 и supplierMatcher.ts).
   const supplier = parsed.supplier;
-  const supplierId =
-    supplier && supplier.inn && supplier.name
-      ? await findOrCreateCounterparty(
-          { inn: supplier.inn, kpp: supplier.kpp ?? null, name: supplier.name },
-          'supplier',
+  const supplierMatch =
+    supplier && (supplier.inn || supplier.name)
+      ? await matchOrCreateSupplier(
+          { db },
+          { inn: supplier.inn ?? null, kpp: supplier.kpp ?? null, name: supplier.name ?? null },
         )
       : null;
+  const supplierDirectoryId = supplierMatch?.id ?? null;
+
+  // Получатель (покупатель) — операционная сущность, остаётся в counterparties.
   const recipient = parsed.recipient;
   const recipientId =
     recipient && recipient.inn && recipient.name
@@ -186,23 +206,25 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         )
       : null;
 
-  // Проверка дубля. Считаем дублем УПД с тем же (supplier, docNumber,
-  // docDate), уже принятый или ожидающий разрешения. Свою собственную
-  // запись из выборки исключаем.
+  // Проверка дубля. Считаем дублем УПД с тем же (supplier_directory_id,
+  // docNumber, docDate), уже принятый или ожидающий разрешения. Свою
+  // собственную запись из выборки исключаем. Старый supplier_id (FK на
+  // counterparties) больше не участвует в дедупе новых УПД — для них он
+  // всегда NULL; исторические УПД продолжают работать по своему индексу.
   const docDate = parsed.docDate ? new Date(parsed.docDate) : null;
   let duplicate: { id: string } | null = null;
-  if (supplierId && parsed.docNumber && docDate) {
+  if (supplierDirectoryId && parsed.docNumber && docDate) {
     const [existing] = await db
       .select({
         id: sourceDocuments.id,
-        supplierName: counterparties.name,
+        supplierName: suppliers.name,
       })
       .from(sourceDocuments)
-      .leftJoin(counterparties, eq(sourceDocuments.supplierId, counterparties.id))
+      .leftJoin(suppliers, eq(sourceDocuments.supplierDirectoryId, suppliers.id))
       .where(
         and(
           eq(sourceDocuments.kind, 'upd'),
-          eq(sourceDocuments.supplierId, supplierId),
+          eq(sourceDocuments.supplierDirectoryId, supplierDirectoryId),
           eq(sourceDocuments.docNumber, parsed.docNumber),
           eq(sourceDocuments.docDate, docDate),
           inArray(sourceDocuments.status, ['parsed', 'needs_resolution']),
@@ -223,8 +245,10 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             docNumber: parsed.docNumber,
             docDate: parsed.docDate,
           },
-          // supplierId/recipientId важны для последующего показа в UI.
-          supplierId,
+          // supplier_id оставляем NULL — для новых УПД поставщик теперь
+          // живёт в supplier_directory_id (FK на suppliers).
+          supplierId: null,
+          supplierDirectoryId,
           recipientId,
           llmProviderId,
           llmConfidence: parsed.confidence.toString(),
@@ -268,14 +292,17 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       }
     : null;
 
-  // Запись шапки.
+  // Запись шапки. Для новых распознанных УПД поставщик живёт в
+  // supplier_directory_id (FK на suppliers), supplier_id (FK на counterparties)
+  // оставляем NULL — DTO supplierName собирается из COALESCE двух источников.
   await db
     .update(sourceDocuments)
     .set({
       status,
       parseErrorCode,
       parseErrorDetails,
-      supplierId,
+      supplierId: null,
+      supplierDirectoryId,
       recipientId,
       docNumber: parsed.docNumber ?? null,
       docDate,
@@ -537,15 +564,28 @@ async function createSourceDocumentFromWaybill(args: {
 }): Promise<string> {
   const { doc, bundleId, bundle, llmProviderId, attachments } = args;
 
-  // Контрагенты ТН (только при наличии ИНН — без него не плодим дубли).
-  let supplierId: string | null = null;
+  // Контрагенты ТН-2116:
+  //   - shipper (поставщик/отправитель) → сравниваем со справочником
+  //     `suppliers`. Совпало по ИНН или fuzzy-name → переиспользуем; не
+  //     совпало → INSERT в справочник. В counterparties для shipper ничего
+  //     не пишем (см. supplierMatcher.ts, миграция 0064).
+  //   - consignee (грузополучатель) → операционный contractor через
+  //     counterparties, как было раньше.
+  //   - ОС-2 (внутреннее перемещение) — обе стороны внутренние, supplier_id
+  //     остаётся NULL.
+  let supplierDirectoryId: string | null = null;
   let recipientId: string | null = null;
   if (doc.form === 'tn_2116') {
-    if (doc.shipper?.inn && doc.shipper?.name) {
-      supplierId = await findOrCreateCounterparty(
-        { inn: doc.shipper.inn, kpp: null, name: doc.shipper.name },
-        'supplier',
+    if (doc.shipper?.inn || doc.shipper?.name) {
+      const match = await matchOrCreateSupplier(
+        { db },
+        {
+          inn: doc.shipper.inn ?? null,
+          kpp: null,
+          name: doc.shipper.name ?? null,
+        },
       );
+      supplierDirectoryId = match?.id ?? null;
     }
     if (doc.consignee?.inn && doc.consignee?.name) {
       recipientId = await findOrCreateCounterparty(
@@ -574,7 +614,11 @@ async function createSourceDocumentFromWaybill(args: {
       kind,
       direction: bundle.direction,
       status: 'parsed',
-      supplierId,
+      // Поставщик ТН-2116 живёт в справочнике (supplier_directory_id), не в
+      // counterparties — см. supplierMatcher и миграцию 0064. supplier_id
+      // оставляем NULL; DTO supplierName собирается через COALESCE.
+      supplierId: null,
+      supplierDirectoryId,
       recipientId,
       contractorId: bundle.contractorId,
       recipientMolId: bundle.recipientMolId,

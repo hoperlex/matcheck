@@ -547,7 +547,7 @@ export default function InboxPage() {
               extra={
                 <Space size={8}>
                   <Button type="primary" onClick={() => setPdfModalOpen(true)}>
-                    Загрузить УПД (PDF)
+                    Загрузить УПД
                   </Button>
                   <Button type="primary" onClick={() => setTwModalOpen(true)}>
                     Загрузить накладные

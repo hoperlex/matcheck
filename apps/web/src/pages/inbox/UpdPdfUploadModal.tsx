@@ -93,7 +93,11 @@ export function UpdPdfUploadModal({
   const canUpload = !!siteId && rows.length > 0 && !uploading;
 
   const uploadProps: UploadProps = {
-    accept: 'application/pdf',
+    // Принимаем PDF и Excel. Excel парсится локально регулярками (без LLM),
+    // PDF — через pdf-parse + LLM. Бэкенд авто-определяет тип по MIME/расширению
+    // (см. detectUpdFileFormat в routes/source-documents.ts).
+    accept:
+      'application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,.pdf,.xlsx,.xls',
     multiple: true,
     showUploadList: false,
     beforeUpload: (file) => {
@@ -184,7 +188,7 @@ export function UpdPdfUploadModal({
   return (
     <Modal
       open={open}
-      title={`Загрузить УПД (PDF) для ${direction === 'inbound' ? 'приёмки' : 'отгрузки'}`}
+      title={`Загрузить УПД для ${direction === 'inbound' ? 'приёмки' : 'отгрузки'}`}
       onCancel={close}
       maskClosable={false}
       keyboard={false}
@@ -260,12 +264,12 @@ export function UpdPdfUploadModal({
             style={{ width: '100%' }}
           />
         </Form.Item>
-        <Form.Item label="Файлы PDF" required>
+        <Form.Item label="Файлы (PDF / Excel)" required>
           <Upload.Dragger {...uploadProps} disabled={uploading}>
             <p className="ant-upload-drag-icon">
               <InboxOutlined />
             </p>
-            <p className="ant-upload-text">Перетащите PDF-файлы или нажмите для выбора</p>
+            <p className="ant-upload-text">Перетащите PDF или Excel файлы либо нажмите для выбора</p>
             <p className="ant-upload-hint">
               Можно выбрать сразу несколько файлов. Лимит на файл — 10 МБ.
             </p>

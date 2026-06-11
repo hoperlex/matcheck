@@ -499,6 +499,15 @@ export const sourceDocuments = pgTable(
     direction: sourceDirectionEnum('direction').notNull().default('inbound'),
     status: sourceStatusEnum('status').notNull().default('parsed'),
     supplierId: uuid('supplier_id').references(() => counterparties.id, { onDelete: 'set null' }),
+    // Связь со справочником поставщиков (suppliers, 982+ записей, импорт из
+    // JSON заказчика). Для новых распознанных УПД пишем СЮДА, а supplier_id
+    // (на counterparties) оставляем NULL — поставщики ≠ контрагенты. Для
+    // исторических УПД эта колонка NULL, supplier_id заполнен по-старому.
+    // DTO supplierName собирает имя через COALESCE(suppliers.name, counterparties.name).
+    // См. миграцию 0064_supplier_directory_link.
+    supplierDirectoryId: uuid('supplier_directory_id').references(() => suppliers.id, {
+      onDelete: 'set null',
+    }),
     recipientId: uuid('recipient_id').references(() => counterparties.id, { onDelete: 'set null' }),
     contractorId: uuid('contractor_id').references(() => counterparties.id, {
       onDelete: 'set null',
@@ -569,6 +578,14 @@ export const sourceDocuments = pgTable(
       .on(t.supplierId, t.docNumber, t.docDate)
       .where(
         sql`${t.kind} = 'upd' and ${t.supplierId} is not null and ${t.docNumber} is not null and ${t.docDate} is not null`,
+      ),
+    // Параллельный дедуп-индекс для УПД, ссылающихся на справочник suppliers
+    // (новый путь распознавания после 0064). Существующий source_upd_dedup_idx
+    // остаётся работать для исторических УПД, привязанных к counterparties.
+    index('source_upd_dedup_directory_idx')
+      .on(t.supplierDirectoryId, t.docNumber, t.docDate)
+      .where(
+        sql`${t.kind} = 'upd' and ${t.supplierDirectoryId} is not null and ${t.docNumber} is not null and ${t.docDate} is not null`,
       ),
     index('source_contractor_idx')
       .on(t.contractorId)
@@ -725,6 +742,12 @@ export const deliveries = pgTable(
     // разгрузилась и поехала с другим грузом). Чекбокс на 1 этапе мобилы.
     // См. миграцию 0051. Default false — legacy-записи в порядке.
     inTransit: boolean('in_transit').notNull().default(false),
+    // ОС — флаг «основные средства»: накладная относится к движению
+    // объектов основных средств (а не материалов). Чекбокс на 1 этапе
+    // мобилы. См. миграцию 0065. Default false — legacy-записи в порядке.
+    // Ортогонален статусу и kind; используется веб-порталом для бейджа и
+    // будущей отчётности.
+    isAssets: boolean('is_assets').notNull().default(false),
     confirmedByMolUserId: uuid('confirmed_by_mol_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),
@@ -896,6 +919,9 @@ export const shipments = pgTable(
     // Транзит — зеркало deliveries.in_transit. Чекбокс на 1 этапе мобилы.
     // См. миграцию 0051. Default false — legacy-записи в порядке.
     inTransit: boolean('in_transit').notNull().default(false),
+    // ОС — зеркало deliveries.is_assets. Чекбокс на 1 этапе мобилы.
+    // См. миграцию 0065. Default false — legacy-записи в порядке.
+    isAssets: boolean('is_assets').notNull().default(false),
     siteId: uuid('site_id')
       .notNull()
       .references(() => sites.id, { onDelete: 'restrict' }),
