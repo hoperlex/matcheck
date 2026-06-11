@@ -1049,6 +1049,15 @@ async function createShipment(
   statusId: string,
   inspectorId: string | null,
 ) {
+  // «Ручной вынос» на мобиле — зеркало «Ручного внеса» для приёмок: инспектор
+  // создаёт отгрузку сразу со статусом confirmed_mol (без выбора УПД, минуя
+  // 1-2 этап). В этом случае инспектор = подтверждающий МОЛ, заполняем
+  // confirmedByMol* при INSERT, чтобы веб-портал показал «Подтверждено МОЛ
+  // (<инспектор>)» сразу. Существующий flow (create 'shipped' → update
+  // 'confirmed_mol') не затронут — там isFirstConfirm в updateShipment уже
+  // выставляет эти поля.
+  const isDirectConfirm = input.statusCode === 'confirmed_mol';
+  const now = new Date();
   const [created] = await app.db
     .insert(shipments)
     .values({
@@ -1067,6 +1076,10 @@ async function createShipment(
       shippedAt: input.shippedAt ? new Date(input.shippedAt) : null,
       inspectorId,
       comment: input.comment ?? null,
+      ...(isDirectConfirm && {
+        confirmedByMolUserId: inspectorId,
+        confirmedByMolAt: now,
+      }),
       version: 1,
     })
     .returning();
