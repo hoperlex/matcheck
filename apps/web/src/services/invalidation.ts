@@ -2,6 +2,18 @@ import type { QueryClient } from '@tanstack/react-query';
 
 const CHANNEL_NAME = 'matcheck-invalidation';
 
+// Окно throttle для SSE-инвалидации: при шторме событий (несколько
+// менеджеров активно правят приёмки/отгрузки) бэк рассылает пачку
+// `delivery_updated` подряд. Раньше каждое событие сразу дёргало 4
+// invalidateQueries по prefix-keys, и под каждой висели DTO открытой
+// приёмки, список, source-documents, reports — итог: 20–40 параллельных
+// API-запросов забивали HTTP/1.1-pool Chrome, и фото с Cloud.ru S3
+// зависали в очереди до таймаута (ERR_CONNECTION_RESET).
+// Решение: коалесцируем ключи в Set и сбрасываем единым пакетом раз в
+// 500 мс. Финальное состояние UI идентично — react-query всё равно
+// дёрнет refetch с актуальным сервером, просто реже.
+const DEBOUNCE_MS = 500;
+
 let bc: BroadcastChannel | null = null;
 let sse: EventSource | null = null;
 
@@ -17,6 +29,32 @@ export function setupInvalidation(qc: QueryClient): () => void {
     };
   } catch {
     /* BroadcastChannel not supported */
+  }
+
+  // Set хранит JSON-сериализованные ключи, чтобы дедуплицировать
+  // одинаковые приходящие пачкой события (10 delivery_updated подряд
+  // → 1 invalidate ['deliveries']).
+  const pending = new Set<string>();
+  let timer: number | null = null;
+
+  function flush() {
+    timer = null;
+    const keys = Array.from(pending, (s) => JSON.parse(s) as string[]);
+    pending.clear();
+    for (const key of keys) {
+      qc.invalidateQueries({ queryKey: key }).catch(() => undefined);
+      bc?.postMessage({ type: 'invalidate', key });
+    }
+  }
+
+  function schedule(keys: string[][]) {
+    for (const key of keys) pending.add(JSON.stringify(key));
+    // Leading + trailing batch: таймер запускается единожды на пачку и
+    // не сдвигается последующими событиями — иначе непрерывный поток
+    // мог бы откладывать invalidate бесконечно.
+    if (timer === null) {
+      timer = window.setTimeout(flush, DEBOUNCE_MS);
+    }
   }
 
   function connectSse() {
@@ -59,10 +97,7 @@ export function setupInvalidation(qc: QueryClient): () => void {
     } else if (type === 'source_document_updated') {
       keys = [['source-documents'], ['sync']];
     }
-    for (const key of keys) {
-      qc.invalidateQueries({ queryKey: key }).catch(() => undefined);
-      bc?.postMessage({ type: 'invalidate', key });
-    }
+    schedule(keys);
     void evt;
   }
 
@@ -80,6 +115,7 @@ export function setupInvalidation(qc: QueryClient): () => void {
     sse?.close();
     bc?.close();
     clearInterval(fallback);
+    if (timer !== null) window.clearTimeout(timer);
   };
 }
 
