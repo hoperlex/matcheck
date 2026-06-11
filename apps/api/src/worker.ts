@@ -276,8 +276,24 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   });
 
   const hasMismatch = validation.hasMismatch;
-  const status: 'parsed' | 'needs_resolution' = hasMismatch ? 'needs_resolution' : 'parsed';
-  const parseErrorCode: 'validation_mismatch' | null = hasMismatch ? 'validation_mismatch' : null;
+  // Шапка распознана НЕПОЛНО — это нормальный случай для excel-УПД на
+  // Шаге 2a (парсер пока не извлекает позиции и totalSum). Также защищает
+  // от падения UPDATE на CHECK-constraint source_upd_required, который
+  // требует docNumber/docDate/totalSum NOT NULL при status='parsed'.
+  // В таком виде документ записывается со статусом needs_resolution —
+  // пользователь добавит недостающие поля и позиции через UI.
+  const isIncomplete =
+    parsed.items.length === 0 ||
+    parsed.totalSum == null ||
+    parsed.docNumber == null ||
+    parsed.docDate == null;
+  const status: 'parsed' | 'needs_resolution' =
+    hasMismatch || isIncomplete ? 'needs_resolution' : 'parsed';
+  const parseErrorCode: 'validation_mismatch' | 'partial_parse' | null = hasMismatch
+    ? 'validation_mismatch'
+    : isIncomplete
+      ? 'partial_parse'
+      : null;
   const parseErrorDetails = hasMismatch
     ? {
         failedChecks: validation.checks
@@ -290,7 +306,16 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             diff: c.diff,
           })),
       }
-    : null;
+    : isIncomplete
+      ? {
+          missing: [
+            parsed.docNumber == null ? 'docNumber' : null,
+            parsed.docDate == null ? 'docDate' : null,
+            parsed.totalSum == null ? 'totalSum' : null,
+            parsed.items.length === 0 ? 'items' : null,
+          ].filter(Boolean) as string[],
+        }
+      : null;
 
   // Запись шапки. Для новых распознанных УПД поставщик живёт в
   // supplier_directory_id (FK на suppliers), supplier_id (FK на counterparties)

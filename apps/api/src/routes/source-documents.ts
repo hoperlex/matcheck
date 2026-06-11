@@ -210,6 +210,7 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
       | 'pdf_no_text'
       | 'parse_failed'
       | 'internal_error'
+      | 'partial_parse'
       | null) ?? null,
     parseErrorDetails: sd.parseErrorDetails ?? null,
     originalFilename: sd.originalFilename,

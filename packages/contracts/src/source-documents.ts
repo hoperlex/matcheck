@@ -100,6 +100,10 @@ export const SourceParseErrorCodeSchema = z.enum([
   'pdf_no_text',
   'parse_failed',
   'internal_error',
+  // Шапка УПД распознана, но позиции/итого не извлечены — типично для
+  // excel-парсера до Шага 2b. Документ записан со status='needs_resolution',
+  // пользователь добавит позиции через UI.
+  'partial_parse',
   // ТН-pipeline (legacy): ни один файл из пакета не классифицирован как печатная ТН.
   'no_transport_waybill_found',
   // Waybill-batch pipeline: в пакете не найдено ни одного распознаваемого
