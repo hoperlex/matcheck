@@ -24,6 +24,24 @@ export function formatDateRu(input: string | null | undefined): string {
 }
 
 /**
+ * Дата + время в русском виде: `20.05.2026 14:35`. Используется в колонках
+ * таблиц с ISO-строками вида `2026-05-20T14:35:23.105Z`. Время — локальное
+ * (браузерная таймзона), это важно для России (UTC+3): сервер пишет UTC,
+ * пользователь видит московское время. На null/некорректный вход — «—».
+ */
+export function formatDateTimeRu(input: string | null | undefined): string {
+  if (!input) return '—';
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return '—';
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  return `${dd}.${mm}.${yyyy} ${hh}:${min}`;
+}
+
+/**
  * Деньги в русском формате с символом рубля: `310 350,25 ₽`.
  * Принимает число, строку-число (как в БД numeric) или null.
  * Возвращает «—» для null/NaN.

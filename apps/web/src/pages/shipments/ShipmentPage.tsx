@@ -636,7 +636,11 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       baseVersion: loadedShipment.version,
       payload: null,
     });
-    void runSync();
+    // Ждём пока mutation физически уйдёт на сервер и придёт свежий
+    // snapshot через pullSync. Без await invalidateQueries в onSuccess
+    // делает refetch раньше, чем push доехал, и таблица показывает
+    // старый siteId/getReceiver до F5.
+    await runSync();
   };
 
   const save = useMutation({

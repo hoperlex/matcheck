@@ -608,8 +608,15 @@ export function DeliveriesHistory({
   };
   const renderSite = (r: Row) => {
     const { id } = resolveSite(r);
-    if (!id) return '—';
-    return sitesMap.get(id) ?? '—';
+    const name = id ? sitesMap.get(id) ?? '—' : '—';
+    // Truncate в одну строку через antd column ellipsis (колонка-уровень);
+    // здесь оборачиваем в Tooltip, чтобы при наведении был виден полный
+    // текст. Высота строки таблицы остаётся одинаковой для всех записей.
+    return (
+      <Tooltip title={name} placement="topLeft">
+        <span>{name}</span>
+      </Tooltip>
+    );
   };
   const supplierName = (id: string | null | undefined) =>
     id ? shortenCounterpartyName(counterpartiesMap.get(id)) : '—';
@@ -797,6 +804,11 @@ export function DeliveriesHistory({
           {
             title: 'Объект',
             key: 'site',
+            // Длинные имена обрезаются многоточием в одну строку (высота
+            // строки таблицы не растёт), полный текст видно в Tooltip при
+            // наведении — см. renderSite. Единое поведение во всех 4
+            // таблицах раздела «Операции».
+            ellipsis: { showTitle: false },
             sorter: stringSorter<Row>((r) => {
               const { id } = resolveSite(r);
               return id ? sitesMap.get(id) ?? null : null;

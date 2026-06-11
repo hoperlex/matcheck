@@ -301,8 +301,20 @@ export function ExpectedSourceDocsList({
           {
             title: 'Объект',
             key: 'site',
+            // Truncate длинных имён («АЛ13 · ЖК АЛИЯ, БЛОКИ 13А, 13В») в
+            // одну строку: высота строки таблицы не растёт, полный текст
+            // виден в Tooltip при наведении. Единое поведение во всех 4
+            // таблицах раздела «Операции».
+            ellipsis: { showTitle: false },
             sorter: stringSorter<SourceDocument>((r) => r.siteName),
-            render: (_: unknown, r: SourceDocument) => r.siteName ?? '—',
+            render: (_: unknown, r: SourceDocument) => {
+              const name = r.siteName ?? '—';
+              return (
+                <Tooltip title={name} placement="topLeft">
+                  <span>{name}</span>
+                </Tooltip>
+              );
+            },
           },
           {
             title: 'Сумма НДС',

@@ -725,7 +725,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       baseVersion: loadedDelivery.version,
       payload: null,
     });
-    void runSync();
+    // Ждём пока mutation физически уйдёт на сервер и придёт свежий
+    // snapshot через pullSync. Без await invalidateQueries в onSuccess
+    // делает refetch /deliveries раньше, чем mutation push доехал, и
+    // таблица показывает старый siteId/contractorId до F5.
+    await runSync();
   };
 
   const save = useMutation({

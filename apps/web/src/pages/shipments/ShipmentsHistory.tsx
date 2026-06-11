@@ -55,7 +55,7 @@ import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../sh
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
-import { formatMoneyRu } from '../../shared/utils/formatRu';
+import { formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 
 type List = z.infer<typeof ShipmentListResponseSchema>;
@@ -744,6 +744,7 @@ export function ShipmentsHistory({
             dataIndex: 'shippedAt',
             sorter: dateSorter<Row>((r) => r.shippedAt),
             ...dateRangeColumnFilter<Row>((r) => r.shippedAt),
+            render: (v: string | null) => formatDateTimeRu(v),
           },
           {
             // Зеркало «Поставщик» в Приёмке: внешний контрагент в начале
@@ -762,8 +763,20 @@ export function ShipmentsHistory({
           {
             title: 'Объект',
             key: 'site',
+            // Длинные имена («АЛ13 · ЖК АЛИЯ, БЛОКИ 13А, 13В») обрезаются
+            // многоточием в одну строку (высота строки таблицы не растёт),
+            // полный текст видно в Tooltip при наведении. Единое поведение
+            // во всех 4 таблицах раздела «Операции» — best practice antd.
+            ellipsis: { showTitle: false },
             sorter: stringSorter<Row>((r) => sitesMap.get(r.siteId) ?? null),
-            render: (_: unknown, r: Row) => sitesMap.get(r.siteId) ?? '—',
+            render: (_: unknown, r: Row) => {
+              const name = sitesMap.get(r.siteId) ?? '—';
+              return (
+                <Tooltip title={name} placement="topLeft">
+                  <span>{name}</span>
+                </Tooltip>
+              );
+            },
           },
           {
             title: 'Фото',
