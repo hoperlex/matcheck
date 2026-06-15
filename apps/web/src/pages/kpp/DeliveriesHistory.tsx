@@ -58,6 +58,11 @@ import {
   buildInnMatchMap,
   expandDirectoryIdsToOperational,
 } from '../../shared/utils/directoryFilterMap';
+import {
+  FEATURE_VALUES,
+  ShipmentFeatureFilters,
+  type OperationFeature,
+} from '../shipments/ShipmentFeatureFilters';
 import { DeliveryViewModal, type DeliveryViewData } from './DeliveryViewModal';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
@@ -148,17 +153,32 @@ export function DeliveriesHistory({
   const view: View = params.get('trash') === '1' ? 'trash' : 'active';
   const isTrash = view === 'trash';
 
-  const filters: ListFiltersValue & { status: string | null; plate: string } = {
+  // «Признаки» в Принятых приёмках — повторяющиеся ?feature=A&feature=B.
+  // Симметрично с ShipmentsHistory: повторяющиеся ключи через
+  // URLSearchParams.getAll/append, CSV не использую (имена короткие, но
+  // оставляем единообразие). Невалидные значения из URL отбрасываются.
+  const FEATURE_SET = new Set<string>(FEATURE_VALUES);
+  const urlFeatures = params.getAll('feature').filter((v): v is OperationFeature =>
+    FEATURE_SET.has(v),
+  );
+
+  type ExtraFilters = {
+    status: string | null;
+    plate: string;
+    features: OperationFeature[];
+  };
+  const filters: ListFiltersValue & ExtraFilters = {
     contractorIds: parseCsvIds(params.get('contractor')),
     supplierIds: parseCsvIds(params.get('supplier')),
     siteIds: parseCsvIds(params.get('site')),
     q: params.get('q') ?? '',
     status: params.get('status'),
     plate: params.get('plate') ?? '',
+    features: urlFeatures,
   };
 
   const updateFilters = (
-    patch: Partial<ListFiltersValue & { status: string | null; plate: string }>,
+    patch: Partial<ListFiltersValue & ExtraFilters>,
   ) => {
     const next = new URLSearchParams(params);
     const apply = (key: string, val: string | null | undefined) => {
@@ -171,6 +191,10 @@ export function DeliveriesHistory({
     if ('q' in patch) apply('q', patch.q);
     if ('status' in patch) apply('status', patch.status);
     if ('plate' in patch) apply('plate', patch.plate);
+    if ('features' in patch) {
+      next.delete('feature');
+      for (const f of patch.features ?? []) next.append('feature', f);
+    }
     setParams(next, { replace: true });
   };
 
@@ -517,6 +541,29 @@ export function DeliveriesHistory({
         const docNum = resolveDocNumber(r);
         if (!matchText(docNum, filters.q)) return false;
       }
+      // «Признаки» — AND между выбранными. Симметрично с ShipmentsHistory:
+      //   transit  → delivery.in_transit (мобила, 1-й этап приёмки)
+      //   assets   → delivery.is_assets ИЛИ items.some(item_kind='asset')
+      //   upd      → есть привязанный source_document с kind='upd'
+      //   waybill  → есть привязанный source_document с kind='transport_waybill'
+      //              или 'os2_transfer' (ТТН / ОС-2)
+      for (const f of filters.features) {
+        if (f === 'transit' && !r.inTransit) return false;
+        if (f === 'assets') {
+          const hasAsset =
+            r.isAssets || r.items.some((it) => it.itemKind === 'asset');
+          if (!hasAsset) return false;
+        }
+        if (f === 'upd' || f === 'waybill') {
+          const has = r.sourceDocumentIds.some((id) => {
+            const sd = sourceDocsById.get(id);
+            if (!sd) return false;
+            if (f === 'upd') return sd.kind === 'upd';
+            return sd.kind === 'transport_waybill' || sd.kind === 'os2_transfer';
+          });
+          if (!has) return false;
+        }
+      }
       return true;
     });
   }, [
@@ -528,6 +575,7 @@ export function DeliveriesHistory({
     filters.status,
     filters.plate,
     filters.q,
+    filters.features,
     contractorOperationalIds,
     supplierOperationalIds,
   ]);
@@ -724,6 +772,21 @@ export function DeliveriesHistory({
               sitesQuery.isLoading
             }
             searchPlaceholder="Номер документа"
+            tail={
+              // showPurpose=false → purpose-селект не рендерится, поэтому
+              // purposes в onChange-patch'е никогда не приходят. Адаптер
+              // прокидывает только features, чтобы не тащить shipment-
+              // специфичные поля в delivery-фильтр.
+              <ShipmentFeatureFilters
+                value={{ purposes: [], features: filters.features }}
+                onChange={(patch) => {
+                  if ('features' in patch) {
+                    updateFilters({ features: patch.features });
+                  }
+                }}
+                showPurpose={false}
+              />
+            }
             // Инпуты «Статус» и «Номер авто» убраны по UX-запросу: оставлен
             // единый набор фильтров с вкладкой «Ожидаемые». Если фильтры всё
             // ещё в URL (от старой ссылки) — query тянет полный список, а
