@@ -8,6 +8,7 @@ import {
   OperationsCountersResponseSchema,
   ShipmentJournalResponseSchema,
   ShipmentKindSchema,
+  StatsSummaryResponseSchema,
   StockBalanceResponseSchema,
 } from '@matcheck/contracts';
 
@@ -54,6 +55,21 @@ const InspectorStatsQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(500).default(500),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
+
+// Дашборд /stats — KPI + динамика + «требует внимания» одним запросом.
+// from/to — YYYY-MM-DD в МСК. Если не заданы — default 30 дней до сегодня.
+// siteIds/inspectorIds — CSV (как везде в этом файле).
+const StatsSummaryQuerySchema = z.object({
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  siteIds: z.string().optional(),
+  inspectorIds: z.string().optional(),
+});
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function safeDate(v: string | undefined): string | null {
+  return v && DATE_RE.test(v) ? v : null;
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHIPMENT_KIND_RE = /^(contractor|return|transfer|writeoff)$/;
@@ -840,6 +856,346 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         completedToday: Number(r.completedToday ?? 0),
         inProgressToday: Number(r.inProgressToday ?? 0),
         overdue: Number(r.overdue ?? 0),
+      };
+    },
+  );
+
+  // ─── Сводка для дашборда /stats ────────────────────────────────────────
+  //
+  // Один публичный endpoint обслуживает все три виджета сводки: KPI strip,
+  // динамика по дням (stacked bar), «требует внимания». Внутри —
+  // 3 параллельных SQL-запроса через Promise.all для читаемости (один CTE
+  // на 200 строк глазами невозможно проверить). Цена 3 round-trip на
+  // дашборде, открываемом раз в минуту, незначительна.
+  //
+  // Числовая консистентность гарантирована:
+  //   • inProgressToday/overdue — копия SQL из /operations-counters →
+  //     цифры совпадают с шапкой Операций по построению.
+  //   • sumDeliveries — Σ qty × price только по приёмкам (у отгрузок
+  //     цены нет, иначе бы размывало). UI подписан как «Сумма приёмок».
+  //
+  // Безопасность: только SELECT, никаких write-операций. inspector_kpp
+  // принудительно фильтруется по его site_id (как везде в этом файле).
+  app.get(
+    '/api/v1/reports/stats-summary',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        querystring: StatsSummaryQuerySchema,
+        response: { 200: StatsSummaryResponseSchema },
+      },
+    },
+    async (req) => {
+      const sIds = safeUuids(req.query.siteIds);
+      const iIds = safeUuids(req.query.inspectorIds);
+
+      // Default 30 дней до сегодня (включительно). Даты собираем по МСК-дню.
+      const todayMsk = new Date().toLocaleDateString('en-CA', {
+        timeZone: 'Europe/Moscow',
+      });
+      const toStr = safeDate(req.query.to) ?? todayMsk;
+      let fromStr = safeDate(req.query.from);
+      if (!fromStr) {
+        const toDate = new Date(`${toStr}T00:00:00Z`);
+        toDate.setUTCDate(toDate.getUTCDate() - 29);
+        fromStr = toDate.toISOString().slice(0, 10);
+      }
+      // Кол-во дней в периоде (включая обе границы).
+      const days = Math.max(
+        1,
+        Math.round(
+          (Date.parse(`${toStr}T00:00:00Z`) - Date.parse(`${fromStr}T00:00:00Z`)) /
+            86_400_000,
+        ) + 1,
+      );
+
+      // Общие WHERE-фрагменты периода (МСК-день) и опциональных фильтров.
+      // Для дат используем COALESCE(arrived_at|shipped_at, updated_at) —
+      // тот же подход, что в /inspector-stats. Это даёт fallback для
+      // edge-case'а, когда мобила не прислала arrived_at.
+      const dateExprD = `DATE(COALESCE(d.arrived_at, d.updated_at) AT TIME ZONE 'Europe/Moscow')`;
+      const dateExprS = `DATE(COALESCE(s.shipped_at, s.updated_at) AT TIME ZONE 'Europe/Moscow')`;
+
+      const periodD = `${dateExprD} BETWEEN '${fromStr}'::date AND '${toStr}'::date`;
+      const periodS = `${dateExprS} BETWEEN '${fromStr}'::date AND '${toStr}'::date`;
+
+      const extraD: string[] = [`d.pending_deletion_at IS NULL`];
+      const extraS: string[] = [`s.pending_deletion_at IS NULL`];
+      if (sIds.length) {
+        extraD.push(uuidInClause('d.site_id', sIds));
+        extraS.push(uuidInClause('s.site_id', sIds));
+      }
+      if (iIds.length) {
+        extraD.push(uuidInClause('d.inspector_id', iIds));
+        extraS.push(uuidInClause('s.inspector_id', iIds));
+      }
+      const filtersD = extraD.join(' AND ');
+      const filtersS = extraS.join(' AND ');
+
+      // inspector_kpp — серверный enforcement по site_id (как в
+      // /operations-counters). Для admin/manager — пропускаем.
+      const inspectorSiteId =
+        req.user?.role === 'inspector_kpp'
+          ? safeUuid(req.user.siteId ?? undefined)
+          : null;
+      if (req.user?.role === 'inspector_kpp' && !inspectorSiteId) {
+        return {
+          range: { from: fromStr, to: toStr, days },
+          kpi: {
+            deliveries: 0,
+            shipments: 0,
+            vehicles: 0,
+            sumDeliveries: '0',
+            avgPerDay: 0,
+            inProgressToday: 0,
+          },
+          daily: [],
+          attention: {
+            noDocumentDeliveries: 0,
+            noDocumentShipments: 0,
+            noPhotosDeliveries: 0,
+            noPhotosShipments: 0,
+            overdue: 0,
+            mismatchDocs: 0,
+            transit: 0,
+          },
+        };
+      }
+      const inspectorFilterD = inspectorSiteId
+        ? ` AND d.site_id = '${inspectorSiteId}'::uuid`
+        : '';
+      const inspectorFilterS = inspectorSiteId
+        ? ` AND s.site_id = '${inspectorSiteId}'::uuid`
+        : '';
+      const enforceD = `${filtersD}${inspectorFilterD}`;
+      const enforceS = `${filtersS}${inspectorFilterS}`;
+
+      // ─── 1) KPI + daily series ─────────────────────────────────────────
+      const kpiSql = `
+        WITH
+          del AS (
+            SELECT ${dateExprD} AS op_date, d.id
+            FROM deliveries d
+            WHERE ${enforceD} AND ${periodD}
+          ),
+          sh AS (
+            SELECT ${dateExprS} AS op_date, s.id
+            FROM shipments s
+            WHERE ${enforceS} AND ${periodS}
+          ),
+          del_sum AS (
+            SELECT COALESCE(SUM(di.qty_actual::numeric * di.price::numeric), 0) AS s
+            FROM delivery_items di
+            JOIN deliveries d ON d.id = di.delivery_id
+            WHERE di.price IS NOT NULL AND di.qty_actual IS NOT NULL
+              AND ${enforceD} AND ${periodD}
+          )
+        SELECT
+          (SELECT COUNT(*) FROM del)::int AS "deliveries",
+          (SELECT COUNT(*) FROM sh)::int  AS "shipments",
+          ((SELECT COUNT(*) FROM del) + (SELECT COUNT(*) FROM sh))::int AS "vehicles",
+          (SELECT s FROM del_sum)::text   AS "sumDeliveries"
+      `;
+      // Серия по дням через generate_series + LEFT JOIN: ноль-дни тоже
+      // присутствуют в ответе (важно для непрерывной оси X в bar chart).
+      const dailySql = `
+        WITH
+          days AS (
+            SELECT generate_series(
+              '${fromStr}'::date,
+              '${toStr}'::date,
+              '1 day'::interval
+            )::date AS d
+          ),
+          del_by_day AS (
+            SELECT ${dateExprD} AS op_date, COUNT(*)::int AS n
+            FROM deliveries d
+            WHERE ${enforceD} AND ${periodD}
+            GROUP BY ${dateExprD}
+          ),
+          sh_by_day AS (
+            SELECT ${dateExprS} AS op_date, COUNT(*)::int AS n
+            FROM shipments s
+            WHERE ${enforceS} AND ${periodS}
+            GROUP BY ${dateExprS}
+          )
+        SELECT
+          to_char(days.d, 'YYYY-MM-DD')      AS "date",
+          COALESCE(del_by_day.n, 0)::int     AS "deliveries",
+          COALESCE(sh_by_day.n, 0)::int      AS "shipments"
+        FROM days
+        LEFT JOIN del_by_day ON del_by_day.op_date = days.d
+        LEFT JOIN sh_by_day  ON sh_by_day.op_date  = days.d
+        ORDER BY days.d
+      `;
+
+      // ─── 2) inProgressToday / overdue — period-independent ─────────────
+      // Это «сейчас» — не зависит от выбранного периода. SQL — копия
+      // /operations-counters, чтобы цифры в Attention и в шапке Операций
+      // совпадали по построению. Site-фильтр пользовательского периода
+      // тут НЕ применяю (как и в operations-counters).
+      const currentSql = `
+        WITH
+          del_progress_today AS (
+            SELECT COUNT(*)::int AS n
+            FROM deliveries d
+            JOIN statuses st ON st.id = d.status_id
+            WHERE st.entity_type = 'delivery' AND st.code = 'filled'
+              AND d.pending_deletion_at IS NULL
+              AND d.arrived_at IS NOT NULL
+              AND DATE(d.arrived_at AT TIME ZONE 'Europe/Moscow')
+                = DATE(NOW() AT TIME ZONE 'Europe/Moscow')
+              ${inspectorFilterD}
+          ),
+          sh_progress_today AS (
+            SELECT COUNT(*)::int AS n
+            FROM shipments s
+            JOIN statuses st ON st.id = s.status_id
+            WHERE st.entity_type = 'shipment' AND st.code = 'shipped'
+              AND s.pending_deletion_at IS NULL
+              AND s.shipped_at IS NOT NULL
+              AND DATE(s.shipped_at AT TIME ZONE 'Europe/Moscow')
+                = DATE(NOW() AT TIME ZONE 'Europe/Moscow')
+              ${inspectorFilterS}
+          ),
+          del_overdue AS (
+            SELECT COUNT(*)::int AS n
+            FROM deliveries d
+            JOIN statuses st ON st.id = d.status_id
+            WHERE st.entity_type = 'delivery' AND st.code = 'filled'
+              AND d.pending_deletion_at IS NULL
+              AND (d.arrived_at IS NULL OR
+                   DATE(d.arrived_at AT TIME ZONE 'Europe/Moscow')
+                     < DATE(NOW() AT TIME ZONE 'Europe/Moscow'))
+              ${inspectorFilterD}
+          ),
+          sh_overdue AS (
+            SELECT COUNT(*)::int AS n
+            FROM shipments s
+            JOIN statuses st ON st.id = s.status_id
+            WHERE st.entity_type = 'shipment' AND st.code = 'shipped'
+              AND s.pending_deletion_at IS NULL
+              AND (s.shipped_at IS NULL OR
+                   DATE(s.shipped_at AT TIME ZONE 'Europe/Moscow')
+                     < DATE(NOW() AT TIME ZONE 'Europe/Moscow'))
+              ${inspectorFilterS}
+          )
+        SELECT
+          ((SELECT n FROM del_progress_today) + (SELECT n FROM sh_progress_today))::int AS "inProgressToday",
+          ((SELECT n FROM del_overdue)        + (SELECT n FROM sh_overdue))::int        AS "overdue"
+      `;
+
+      // ─── 3) Attention counters — за выбранный период ───────────────────
+      const attentionSql = `
+        WITH
+          del_no_doc AS (
+            SELECT COUNT(*)::int AS n
+            FROM deliveries d
+            WHERE ${enforceD} AND ${periodD}
+              AND NOT EXISTS (
+                SELECT 1 FROM delivery_sources ds WHERE ds.delivery_id = d.id
+              )
+          ),
+          sh_no_doc AS (
+            SELECT COUNT(*)::int AS n
+            FROM shipments s
+            WHERE ${enforceS} AND ${periodS}
+              AND NOT EXISTS (
+                SELECT 1 FROM shipment_sources ss WHERE ss.shipment_id = s.id
+              )
+          ),
+          del_no_photos AS (
+            SELECT COUNT(*)::int AS n
+            FROM deliveries d
+            WHERE ${enforceD} AND ${periodD}
+              AND NOT EXISTS (
+                SELECT 1 FROM delivery_photos dp WHERE dp.delivery_id = d.id
+              )
+          ),
+          sh_no_photos AS (
+            SELECT COUNT(*)::int AS n
+            FROM shipments s
+            WHERE ${enforceS} AND ${periodS}
+              AND NOT EXISTS (
+                SELECT 1 FROM shipment_photos sp WHERE sp.shipment_id = s.id
+              )
+          ),
+          del_transit AS (
+            SELECT COUNT(*)::int AS n
+            FROM deliveries d
+            WHERE ${enforceD} AND ${periodD} AND d.in_transit = TRUE
+          ),
+          sh_transit AS (
+            SELECT COUNT(*)::int AS n
+            FROM shipments s
+            WHERE ${enforceS} AND ${periodS} AND s.in_transit = TRUE
+          ),
+          mismatch AS (
+            SELECT COUNT(*)::int AS n
+            FROM source_documents sd
+            WHERE sd.parse_error_code = 'validation_mismatch'
+              AND DATE(sd.processed_at AT TIME ZONE 'Europe/Moscow')
+                BETWEEN '${fromStr}'::date AND '${toStr}'::date
+              ${
+                sIds.length
+                  ? ` AND ${uuidInClause('sd.site_id', sIds)}`
+                  : ''
+              }
+              ${
+                inspectorSiteId
+                  ? ` AND sd.site_id = '${inspectorSiteId}'::uuid`
+                  : ''
+              }
+          )
+        SELECT
+          (SELECT n FROM del_no_doc)    AS "noDocumentDeliveries",
+          (SELECT n FROM sh_no_doc)     AS "noDocumentShipments",
+          (SELECT n FROM del_no_photos) AS "noPhotosDeliveries",
+          (SELECT n FROM sh_no_photos) AS "noPhotosShipments",
+          (SELECT n FROM mismatch)      AS "mismatchDocs",
+          ((SELECT n FROM del_transit) + (SELECT n FROM sh_transit))::int AS "transit"
+      `;
+
+      const [kpiRows, dailyRows, currentRows, attentionRows] = await Promise.all([
+        execRows(app, kpiSql),
+        execRows(app, dailySql),
+        execRows(app, currentSql),
+        execRows(app, attentionSql),
+      ]);
+
+      const k = kpiRows[0] ?? {};
+      const c = currentRows[0] ?? {};
+      const a = attentionRows[0] ?? {};
+      const deliveries = Number(k.deliveries ?? 0);
+      const shipments = Number(k.shipments ?? 0);
+      const vehicles = Number(k.vehicles ?? deliveries + shipments);
+      const inProgressToday = Number(c.inProgressToday ?? 0);
+      const overdue = Number(c.overdue ?? 0);
+
+      return {
+        range: { from: fromStr, to: toStr, days },
+        kpi: {
+          deliveries,
+          shipments,
+          vehicles,
+          sumDeliveries: String(k.sumDeliveries ?? '0'),
+          avgPerDay: Math.round(((deliveries + shipments) / days) * 100) / 100,
+          inProgressToday,
+        },
+        daily: dailyRows.map((r) => ({
+          date: String(r.date),
+          deliveries: Number(r.deliveries ?? 0),
+          shipments: Number(r.shipments ?? 0),
+        })),
+        attention: {
+          noDocumentDeliveries: Number(a.noDocumentDeliveries ?? 0),
+          noDocumentShipments: Number(a.noDocumentShipments ?? 0),
+          noPhotosDeliveries: Number(a.noPhotosDeliveries ?? 0),
+          noPhotosShipments: Number(a.noPhotosShipments ?? 0),
+          overdue,
+          mismatchDocs: Number(a.mismatchDocs ?? 0),
+          transit: Number(a.transit ?? 0),
+        },
       };
     },
   );

@@ -146,3 +146,81 @@ export const OperationsCountersResponseSchema = z.object({
   overdue: z.number().int().nonnegative(),
 });
 export type OperationsCountersResponse = z.infer<typeof OperationsCountersResponseSchema>;
+
+/**
+ * Сводка для дашборда /stats — KPI + динамика по дням + «требует внимания».
+ * Один запрос обслуживает все три виджета сводки, чтобы не плодить
+ * параллельные шапочные запросы при открытии страницы.
+ *
+ * Гарантии числовой консистентности:
+ *  - inProgressToday / overdue считаются ровно тем же SQL, что и
+ *    /reports/operations-counters → цифры в виджете «Требует внимания»
+ *    и в шапке Операций совпадают по построению.
+ *  - sumDeliveries — Σ qty × price ТОЛЬКО по приёмкам. Отгрузки сюда не
+ *    попадают: в shipment_items цена обычно не заполняется, и суммирование
+ *    давало бы 0 c вводом в заблуждение. Метка в UI — «Сумма приёмок».
+ *
+ * Фильтры query:
+ *  - from / to — границы периода в формате YYYY-MM-DD (МСК-день).
+ *    Default — последние 30 дней до сегодня (включительно).
+ *  - siteIds / inspectorIds — CSV uuid'ов. Опциональны.
+ *  - Для роли inspector_kpp siteId принудительно ограничивается его
+ *    назначенным объектом (как в /operations-counters).
+ */
+export const StatsSummaryRequestSchema = z.object({
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  siteIds: z.string().optional(),
+  inspectorIds: z.string().optional(),
+});
+export type StatsSummaryRequest = z.infer<typeof StatsSummaryRequestSchema>;
+
+const StatsKpiSchema = z.object({
+  deliveries: z.number().int().nonnegative(),
+  shipments: z.number().int().nonnegative(),
+  vehicles: z.number().int().nonnegative(),
+  // Σ qty × price только по приёмкам — у отгрузок цены нет. UI подписывает
+  // эту цифру как «Сумма приёмок», не «Общая сумма», чтобы не путать.
+  sumDeliveries: z.string(),
+  // (deliveries + shipments) / max(1, days).
+  avgPerDay: z.number().nonnegative(),
+  inProgressToday: z.number().int().nonnegative(),
+});
+
+const StatsDailyPointSchema = z.object({
+  date: z.string(), // 'YYYY-MM-DD' в МСК
+  deliveries: z.number().int().nonnegative(),
+  shipments: z.number().int().nonnegative(),
+});
+
+const StatsAttentionSchema = z.object({
+  // Активные приёмки/отгрузки за период с пустым списком source_documents.
+  noDocumentDeliveries: z.number().int().nonnegative(),
+  noDocumentShipments: z.number().int().nonnegative(),
+  // Активные приёмки/отгрузки за период без единого фото.
+  noPhotosDeliveries: z.number().int().nonnegative(),
+  noPhotosShipments: z.number().int().nonnegative(),
+  // Зависшие со вчера и старше (filled/shipped без МОЛ). Не зависит от
+  // выбранного периода — это «сейчас».
+  overdue: z.number().int().nonnegative(),
+  // Документы с расхождением сумм (source_documents.parse_error_code =
+  // 'validation_mismatch') — за период.
+  mismatchDocs: z.number().int().nonnegative(),
+  // Транзитные рейсы за период — суммарно по приёмкам и отгрузкам,
+  // т.к. на проде транзит чаще встречается у приёмок (машина приехала,
+  // частично разгрузилась и поехала дальше с чужим грузом — отсюда
+  // не пустой кузов на 2-м этапе).
+  transit: z.number().int().nonnegative(),
+});
+
+export const StatsSummaryResponseSchema = z.object({
+  range: z.object({
+    from: z.string(),
+    to: z.string(),
+    days: z.number().int().positive(),
+  }),
+  kpi: StatsKpiSchema,
+  daily: z.array(StatsDailyPointSchema),
+  attention: StatsAttentionSchema,
+});
+export type StatsSummaryResponse = z.infer<typeof StatsSummaryResponseSchema>;
