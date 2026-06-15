@@ -29,7 +29,11 @@ function generatePlaceholderInn(): string {
 const ListQuerySchema = z.object({
   q: z.string().optional(),
   role: z.enum(['supplier', 'customer', 'contractor']).optional(),
-  limit: z.coerce.number().int().positive().max(500).default(50),
+  // max поднят с 500 до 5000 — фильтры в Операциях грузят полный список
+  // counterparties для маппинга по ИНН в опции справочников (см.
+  // shared/utils/directoryFilterMap.ts). Прежний потолок отдавал 400
+  // и вызывал паразитный refetch при каждом открытии Принятых.
+  limit: z.coerce.number().int().positive().max(5000).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
 

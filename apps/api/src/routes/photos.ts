@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
@@ -393,6 +394,108 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       } catch {
         return reply.code(500).send({ error: 's3_unavailable', message: 'S3 not configured' });
       }
+    },
+  );
+
+  // Стрим фото через API — миниатюра или оригинал. Веб-портал использует
+  // именно его (не presigned), потому что прямой <img src="https://s3...">
+  // в Cloud.ru нестабилен: часть параллельных GET к одному bucket'у
+  // получает ERR_CONNECTION_RESET и висит до браузерного таймаута. Через
+  // сервер же запросы идут из соседнего датацентра — стабильно.
+  //
+  // Стримит то же тело, что прямой S3, и форвардит conditional headers
+  // (If-None-Match/If-Modified-Since/Range), чтобы браузер мог отдавать
+  // 304 и не качать миниатюру повторно. Cache-Control: private, чтобы
+  // ответ не оседал в общих прокси и не утекал между пользователями.
+  app.get(
+    '/api/v1/photos/:id/content',
+    {
+      preHandler: [app.authenticate],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        querystring: z.object({ thumb: z.coerce.boolean().default(false) }),
+      },
+    },
+    async (req, reply) => {
+      const found = await findPhoto(app, req.params.id);
+      if (!found) return reply.code(404).send({ error: 'not_found' });
+      if (
+        req.user?.role === 'inspector_kpp' &&
+        (!req.user.siteId || found.parentSiteId !== req.user.siteId)
+      ) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      const key = req.query.thumb && found.thumbS3Key ? found.thumbS3Key : found.s3Key;
+
+      let signedUrl: string;
+      try {
+        // Короткий TTL — URL используется сразу в server-side fetch, на клиент
+        // не уходит, поэтому большой запас не нужен.
+        signedUrl = await presign({ method: 'GET', key, expiresIn: 60 });
+      } catch (err) {
+        req.log.warn({ err, key }, 'presign failed for photo content');
+        return reply.code(404).send({ error: 'presign_failed' });
+      }
+
+      const upstreamHeaders: Record<string, string> = {};
+      const range = req.headers.range;
+      if (typeof range === 'string') upstreamHeaders.range = range;
+      const inm = req.headers['if-none-match'];
+      if (typeof inm === 'string') upstreamHeaders['if-none-match'] = inm;
+      const ims = req.headers['if-modified-since'];
+      if (typeof ims === 'string') upstreamHeaders['if-modified-since'] = ims;
+
+      // Жёсткий таймаут 8 сек на upstream-fetch к S3. Без него зависший
+      // Cloud.ru держал бы Node-сокет и file descriptor до системного
+      // таймаута (минуты), а при многих параллельных пользователях это
+      // быстро упирается в ulimit и event-loop. 8 сек выбраны как «больше
+      // нормального p99 thumb-загрузки, но меньше человеческого терпения»:
+      // если S3 не ответил за это время — отдаём 504, клиент покажет
+      // broken-state с кнопкой «Повторить».
+      let upstream: Response;
+      try {
+        upstream = await fetch(signedUrl, {
+          headers: upstreamHeaders,
+          signal: AbortSignal.timeout(8000),
+        });
+      } catch (err) {
+        const aborted =
+          err instanceof DOMException && err.name === 'TimeoutError';
+        req.log.warn({ err, key, aborted }, 'S3 fetch failed for photo content');
+        return reply
+          .code(aborted ? 504 : 502)
+          .send({ error: aborted ? 's3_timeout' : 's3_unavailable' });
+      }
+
+      const ok = upstream.ok || upstream.status === 206 || upstream.status === 304;
+      if (!ok) {
+        req.log.warn({ status: upstream.status, key }, 'S3 returned non-OK for photo content');
+        return reply.code(502).send({ error: 's3_unavailable' });
+      }
+
+      reply.code(upstream.status);
+      for (const h of ['content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified']) {
+        const v = upstream.headers.get(h);
+        if (v) reply.header(h, v);
+      }
+
+      const ext = key.split('.').pop()?.toLowerCase() ?? 'jpg';
+      const mimeFromExt =
+        ext === 'png' ? 'image/png'
+          : ext === 'webp' ? 'image/webp'
+          : ext === 'heic' ? 'image/heic'
+          : ext === 'heif' ? 'image/heif'
+          : 'image/jpeg';
+      reply.header('content-type', upstream.headers.get('content-type') ?? mimeFromExt);
+      // 1 час браузерного кэша. Фото immutable по photoId — после
+      // удаления оно физически исчезает из БД, а новый объект получает
+      // новый UUID и не попадёт в этот кэш.
+      reply.header('cache-control', 'private, max-age=3600');
+
+      if (upstream.status === 304 || !upstream.body) {
+        return reply.send();
+      }
+      return reply.send(Readable.fromWeb(upstream.body as never));
     },
   );
 

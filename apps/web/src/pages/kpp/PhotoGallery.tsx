@@ -1,24 +1,26 @@
 import { useEffect, useState } from 'react';
-import { Button, Image, Popconfirm, Spin, Typography, message } from 'antd';
-import { DeleteOutlined } from '@ant-design/icons';
+import { Button, Image, Popconfirm, Spin, Tooltip, Typography, message } from 'antd';
+import { DeleteOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   DeliveryPhoto,
   PhotoDeleteResponse,
-  PhotoGetUrlResponse,
   ShipmentPhoto,
 } from '@matcheck/contracts';
-import { api, ApiError } from '../../services/api';
+import { api, apiDownload, ApiError } from '../../services/api';
+import { enqueueThumbLoad } from '../../lib/thumbQueue';
 import { db, type OperationKind } from '../../lib/db';
 import { useAuthStore } from '../../stores/auth';
 import { PhotoDocumentPreview } from './PhotoDocumentPreview';
 
 const THUMB_SIZE = 140;
-// React-query staleTime для presigned URL. Сервер выдаёт URL с TTL 15 мин
-// (см. apps/api/src/routes/photos.ts URL_TTL). Обновляем за 2 мин до
-// истечения — оставляем запас на сетевые задержки и дрейф часов между
-// клиентом и сервером.
-const URL_STALE = 13 * 60 * 1000;
+// Фото загружаем через API-прокси /api/v1/photos/:id/content — сервер сам
+// идёт в S3 и стримит файл. Тело фото неизменно по photo.id (после
+// удаления запись физически исчезает из БД), поэтому кэшируем blob в
+// react-query на бесконечность — повторного запроса по тому же id не
+// будет. gcTime 30 мин освобождает память закрытых модалок.
+const PHOTO_STALE = Infinity;
+const PHOTO_GC = 30 * 60 * 1000;
 
 type AnyPhoto = DeliveryPhoto | ShipmentPhoto;
 
@@ -194,50 +196,89 @@ function PhotoThumb({
   // delivery каждые несколько секунд, пока в photos есть хоть один orphan.
   const isUploading = photo.uploadedAt === null && !localThumb;
   const needsRemote = idbChecked && !localThumb && !isUploading;
+
+  // Открыт ли antd-preview (управляемый — нужен, чтобы триггерить
+  // ленивую загрузку оригинала только по требованию). controlled visible
+  // у antd Image поддерживается через preview.visible/onVisibleChange.
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  // Качаем blob миниатюры через API-прокси (сервер стримит S3 → клиент).
+  // Это даёт стабильную загрузку: сервер ↔ S3 в одной сети, нет ERR_-
+  // CONNECTION_RESET от прямых параллельных GET к Cloud.ru. Кэш blob'а
+  // живёт по photo.id (фото immutable), повторного запроса по тому же
+  // id не будет — staleTime: Infinity. retry=2 — два быстрых перезапроса
+  // с экспоненциальным backoff, дальше react-query останавливается и
+  // ниже показываем явный broken-state с кнопкой «Повторить».
+  //
+  // enqueueThumbLoad — глобальная очередь параллельных запросов, лимит 4.
+  // Защищает API: 20 одновременных пользователей с галереями по 10 фото
+  // не превратятся в 200 одновременных стримов S3-прокси.
   const thumbQuery = useQuery({
-    queryKey: ['photo-url', photo.id, 'thumb'],
-    queryFn: () => api.get<PhotoGetUrlResponse>(`/photos/${photo.id}/url?thumb=true`),
+    queryKey: ['photo-blob', photo.id, 'thumb'],
+    queryFn: () =>
+      enqueueThumbLoad(async () => {
+        const { blob } = await apiDownload(`/photos/${photo.id}/content?thumb=true`);
+        return blob;
+      }),
     enabled: needsRemote,
-    staleTime: URL_STALE,
+    staleTime: PHOTO_STALE,
+    gcTime: PHOTO_GC,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(500 * 2 ** attempt, 4000),
+    refetchOnWindowFocus: false,
   });
   const fullQuery = useQuery({
-    queryKey: ['photo-url', photo.id, 'full'],
-    queryFn: () => api.get<PhotoGetUrlResponse>(`/photos/${photo.id}/url`),
-    enabled: needsRemote,
-    staleTime: URL_STALE,
+    queryKey: ['photo-blob', photo.id, 'full'],
+    queryFn: async () => {
+      const { blob } = await apiDownload(`/photos/${photo.id}/content`);
+      return blob;
+    },
+    // Оригинал тяжёлый (1-5 МБ) — грузим только при реальном открытии
+    // preview, не превентивно. До этого пользователь видит миниатюру,
+    // ничего лишнего не качается. enabled триггерится previewOpen из
+    // controlled antd Image, см. ниже onVisibleChange.
+    enabled: needsRemote && previewOpen,
+    staleTime: PHOTO_STALE,
+    gcTime: PHOTO_GC,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(500 * 2 ** attempt, 4000),
+    refetchOnWindowFocus: false,
   });
 
-  // Counter попыток тихого ретрая <img>-загрузки. Cloud.ru S3 иногда
-  // сбрасывает TCP (net::ERR_CONNECTION_RESET) на 1 из 5–6 параллельных
-  // GET к одному bucket'у; новый presigned URL и повторная попытка через
-  // ~500мс ловит 90%+ кейсов. Счётчик локальный, сбрасывается при смене
-  // photo.id (key={p.id} в map → новый mount компонента). MAX_RETRIES=2
-  // — после двух неудач показываем стандартную плитку «битое изображение»
-  // antd, как и сейчас, без новых UI-сообщений.
-  const MAX_RETRIES = 2;
-  const RETRY_DELAY_MS = 500;
-  const [thumbRetries, setThumbRetries] = useState(0);
-  const [previewRetries, setPreviewRetries] = useState(0);
+  // Object URL'ы из blob — живут пока компонент смонтирован; при смене
+  // photo.id (key={p.id} в map → новый mount) старые автоматически
+  // отзываются через cleanup. Без revoke браузер держит blob в памяти
+  // до выгрузки документа — на тысяче фото это заметная утечка.
+  const [thumbObjectUrl, setThumbObjectUrl] = useState<string | null>(null);
+  const [fullObjectUrl, setFullObjectUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!thumbQuery.data) {
+      setThumbObjectUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(thumbQuery.data);
+    setThumbObjectUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [thumbQuery.data]);
+  useEffect(() => {
+    if (!fullQuery.data) {
+      setFullObjectUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(fullQuery.data);
+    setFullObjectUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [fullQuery.data]);
 
-  const thumbSrc = localThumb ?? thumbQuery.data?.url ?? '';
-  const fullSrc = localFull ?? fullQuery.data?.url ?? thumbSrc;
+  const thumbSrc = localThumb ?? thumbObjectUrl ?? '';
+  const fullSrc = localFull ?? fullObjectUrl ?? thumbSrc;
 
-  const handleThumbError = () => {
-    if (localThumb || !needsRemote) return; // IDB-blob или ещё не пробовали — не наш кейс
-    if (thumbRetries >= MAX_RETRIES) return;
-    setThumbRetries((c) => c + 1);
-    setTimeout(() => {
-      void thumbQuery.refetch();
-    }, RETRY_DELAY_MS);
-  };
-  const handlePreviewError = () => {
-    if (localFull || !needsRemote) return;
-    if (previewRetries >= MAX_RETRIES) return;
-    setPreviewRetries((c) => c + 1);
-    setTimeout(() => {
-      void fullQuery.refetch();
-    }, RETRY_DELAY_MS);
-  };
+  // Error-state: явная плитка вместо бесконечного спиннера. retry: 2
+  // в useQuery уже отработал, дальше пользователь сам решает.
+  // Видна когда: нужен серверный thumb (нет localThumb / не uploading) +
+  // запрос упал в isError. Локальные blob этой ветки не достигают.
+  const showThumbError =
+    needsRemote && !localThumb && thumbQuery.isError;
 
   if (isUploading) {
     return (
@@ -303,6 +344,69 @@ function PhotoThumb({
     );
   }
 
+  if (showThumbError) {
+    return (
+      <div style={{ width: THUMB_SIZE }}>
+        <div
+          style={{
+            position: 'relative',
+            width: THUMB_SIZE,
+            height: THUMB_SIZE,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            background: '#fff1f0',
+            border: '1px solid #ffa39e',
+            borderRadius: 6,
+          }}
+        >
+          <WarningOutlined style={{ fontSize: 22, color: '#cf1322' }} />
+          <Typography.Text type="secondary" style={{ fontSize: 11, textAlign: 'center' }}>
+            Не загрузилось
+          </Typography.Text>
+          <Tooltip title="Повторить загрузку">
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              onClick={() => void thumbQuery.refetch()}
+              loading={thumbQuery.isFetching}
+            >
+              Повтор
+            </Button>
+          </Tooltip>
+          {canDelete && (
+            <Popconfirm
+              title="Удалить фото?"
+              okText="Да"
+              cancelText="Нет"
+              okButtonProps={{ danger: true }}
+              onConfirm={onDelete}
+            >
+              <Button
+                danger
+                size="small"
+                shape="circle"
+                icon={<DeleteOutlined />}
+                loading={deleting}
+                style={{ position: 'absolute', top: 4, right: 4, zIndex: 1 }}
+              />
+            </Popconfirm>
+          )}
+        </div>
+        {label && (
+          <Typography.Text
+            type="secondary"
+            style={{ fontSize: 11, display: 'block', textAlign: 'center', marginTop: 4 }}
+          >
+            {label}
+          </Typography.Text>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div style={{ width: THUMB_SIZE }}>
     <div style={{ position: 'relative', width: THUMB_SIZE, height: THUMB_SIZE }}>
@@ -314,7 +418,13 @@ function PhotoThumb({
         preview={
           isDocument
             ? false
-            : { src: fullSrc, imgCommonProps: { onError: handlePreviewError } }
+            : {
+                src: fullSrc,
+                // Controlled visible → enabled fullQuery → ленивая загрузка
+                // оригинала только когда preview реально открыли.
+                visible: previewOpen,
+                onVisibleChange: (vis) => setPreviewOpen(vis),
+              }
         }
         width={THUMB_SIZE}
         height={THUMB_SIZE}
@@ -324,7 +434,6 @@ function PhotoThumb({
           cursor: isDocument ? 'pointer' : undefined,
         }}
         onClick={isDocument ? () => onDocumentClick(fullSrc) : undefined}
-        onError={handleThumbError}
         placeholder={
           <div
             style={{
