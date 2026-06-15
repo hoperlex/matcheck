@@ -45,23 +45,16 @@ export default function AdminUsersPage() {
       patch.mutate({ id: row.id, body: { phone: next.length > 0 ? next : null } });
     };
     return (
-      <Space size={4} align="center">
-        <Input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commit}
-          onPressEnter={(e) => (e.target as HTMLInputElement).blur()}
-          placeholder="+7 …"
-          allowClear
-          style={{ width: 180 }}
-          prefix={<PhoneOutlined style={{ color: '#bfbfbf' }} />}
-        />
-        {row.role === 'manager' && !row.phone && (
-          <Tooltip title="Без телефона мобильный клиент не сможет позвонить менеджеру из шапки списка материалов">
-            <Tag color="orange">нет контакта</Tag>
-          </Tooltip>
-        )}
-      </Space>
+      <Input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onPressEnter={(e) => (e.target as HTMLInputElement).blur()}
+        placeholder="+7 …"
+        allowClear
+        style={{ width: 180 }}
+        prefix={<PhoneOutlined style={{ color: '#bfbfbf' }} />}
+      />
     );
   };
 
