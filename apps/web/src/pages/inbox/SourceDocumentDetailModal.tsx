@@ -1042,11 +1042,12 @@ async function downloadAttachment(
 ): Promise<void> {
   // download=1 заставляет сервер выставить Content-Disposition: attachment
   // даже для PDF/изображений; для xlsx attachment ставится автоматически
-  // по mime-типу (см. routes/source-documents.ts). apiDownload забирает
-  // blob с авторизацией и читает имя из Content-Disposition (fallback —
-  // attachment.filename, если сервер не прислал).
+  // по mime-типу (см. routes/source-documents.ts). apiDownload сам
+  // приклеивает префикс BASE='/api/v1' (см. services/api.ts), поэтому
+  // здесь путь относительный — без `/api/v1/`, иначе получим двойной
+  // префикс и 404 Route not found.
   const { blob, filename } = await apiDownload(
-    `/api/v1/source-documents/${id}/file/raw?attachmentId=${attachment.id}&download=1`,
+    `/source-documents/${id}/file/raw?attachmentId=${attachment.id}&download=1`,
   );
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
