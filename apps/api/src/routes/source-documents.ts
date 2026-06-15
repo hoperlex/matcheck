@@ -951,7 +951,14 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       preHandler: [app.authenticate],
       schema: {
         params: z.object({ id: z.string().uuid() }),
-        querystring: z.object({ attachmentId: z.string().uuid().optional() }),
+        querystring: z.object({
+          attachmentId: z.string().uuid().optional(),
+          // download=1 — явно просим Content-Disposition: attachment вместо
+          // inline. Используется кнопкой «Скачать оригинал» в модалке
+          // деталей УПД (для xlsx attachment ставится автоматически по
+          // mime-типу, см. ниже; флаг нужен в основном для PDF/изображений).
+          download: z.enum(['1']).optional(),
+        }),
       },
     },
     async (req, reply) => {
@@ -1026,9 +1033,20 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         if (v) reply.header(h, v);
       }
       reply.header('content-type', att.mimeType);
+      // PDF и изображения встроены в iframe/<Image> на портале — отдаём
+      // inline, чтобы Chrome открыл свой viewer. Excel браузер inline не
+      // показывает (нет viewer'а) — при inline-CD загрузка iframe запускает
+      // автоматическое скачивание файла. Фронт для xlsx и не подставляет
+      // этот URL в iframe, но даже если по ошибке подставит — серверная
+      // автозащита: для xlsx-mime отдаём attachment и явное `download=1`
+      // — клиент сохранит файл через apiDownload, а не «как-будто-вьюер».
+      const isExcelMime =
+        (att.mimeType?.includes('spreadsheetml') ?? false) ||
+        att.mimeType === 'application/vnd.ms-excel';
+      const wantAttachment = req.query.download === '1' || isExcelMime;
       reply.header(
         'content-disposition',
-        `inline; filename*=UTF-8''${encodeURIComponent(att.filename)}`,
+        `${wantAttachment ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(att.filename)}`,
       );
       reply.header('cache-control', 'private, max-age=300');
 

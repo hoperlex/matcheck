@@ -33,6 +33,8 @@ import {
   BorderHorizontalOutlined,
   BorderVerticleOutlined,
   DeleteOutlined,
+  DownloadOutlined,
+  FileExcelOutlined,
   FilePdfOutlined,
   FileTextOutlined,
   PlusOutlined,
@@ -47,7 +49,7 @@ import type {
 } from '@matcheck/contracts';
 import { getDocumentDisplayStatus } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
-import { api, ApiError } from '../../services/api';
+import { api, apiDownload, ApiError } from '../../services/api';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import {
   formatDateRu,
@@ -878,6 +880,16 @@ function DetailBody({
   );
 }
 
+// Минимальный набор полей attachment, которого хватает для рендера превью.
+// Берём подмножество SourceAttachment — компонент не зависит от других
+// полей DTO (role/s3Key и пр.), это упрощает тесты и переиспользование.
+type AttachmentLike = {
+  id: string;
+  filename: string;
+  mimeType: string | null;
+  sizeBytes: number | null;
+};
+
 // Lightbox-паттерн: одно вложение крупно + полоса миниатюр снизу для
 // переключения. Раньше стекали все вложения 1/N высоты — для ТН с
 // 3–4 фото каждое уменьшалось до нечитаемого размера.
@@ -886,7 +898,7 @@ function OriginalAttachments({
   id,
   compact,
 }: {
-  attachments: ReadonlyArray<{ id: string; filename: string }>;
+  attachments: ReadonlyArray<AttachmentLike>;
   id: string;
   // compact=true — внутри Splitter (правая/нижняя панель), занимает 100% высоты;
   // compact=false — внутри Tabs (узкий экран), фиксированная высота как раньше.
@@ -964,6 +976,14 @@ function OriginalAttachments({
               preview={{ mask: 'Открыть для зума' }}
             />
           </div>
+        ) : isExcelExt(active.filename, active.mimeType) ? (
+          // Excel в браузере inline не открывается (нет встроенного
+          // viewer'а ни у Chrome, ни у Firefox). Раньше URL попадал в
+          // <iframe> — браузер при загрузке iframe запускал автоматическое
+          // скачивание xlsx. Теперь рендерим карточку: иконка + имя +
+          // размер + явная кнопка «Скачать». Распознанные позиции уже
+          // видны в левой/верхней панели «Позиции».
+          <ExcelPreviewCard id={id} attachment={active} />
         ) : (
           <iframe
             key={active.id}
@@ -996,13 +1016,121 @@ function isImageExt(name: string): boolean {
   return /\.(jpe?g|png|webp|gif|bmp|heic|heif)$/i.test(name);
 }
 
+function isExcelExt(name: string, mimeType?: string | null): boolean {
+  if (/\.xlsx?$/i.test(name)) return true;
+  if (!mimeType) return false;
+  return (
+    mimeType.includes('spreadsheetml') ||
+    mimeType === 'application/vnd.ms-excel'
+  );
+}
+
+function isPdfExt(name: string): boolean {
+  return /\.pdf$/i.test(name);
+}
+
+function formatFileSize(bytes: number | null): string | null {
+  if (bytes == null) return null;
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} МБ`;
+}
+
+async function downloadAttachment(
+  id: string,
+  attachment: AttachmentLike,
+): Promise<void> {
+  // download=1 заставляет сервер выставить Content-Disposition: attachment
+  // даже для PDF/изображений; для xlsx attachment ставится автоматически
+  // по mime-типу (см. routes/source-documents.ts). apiDownload забирает
+  // blob с авторизацией и читает имя из Content-Disposition (fallback —
+  // attachment.filename, если сервер не прислал).
+  const { blob, filename } = await apiDownload(
+    `/api/v1/source-documents/${id}/file/raw?attachmentId=${attachment.id}&download=1`,
+  );
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename || attachment.filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function ExcelPreviewCard({
+  id,
+  attachment,
+}: {
+  id: string;
+  attachment: AttachmentLike;
+}) {
+  const [downloading, setDownloading] = useState(false);
+  const size = formatFileSize(attachment.sizeBytes);
+  const handleDownload = async () => {
+    try {
+      setDownloading(true);
+      await downloadAttachment(id, attachment);
+    } catch (err) {
+      message.error(
+        err instanceof Error ? err.message : 'Не удалось скачать файл',
+      );
+    } finally {
+      setDownloading(false);
+    }
+  };
+  return (
+    <div
+      style={{
+        flex: 1,
+        minHeight: 200,
+        border: '1px solid #f0f0f0',
+        background: '#fafafa',
+        borderRadius: 4,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+        gap: 12,
+      }}
+    >
+      <FileExcelOutlined style={{ fontSize: 64, color: '#22863a' }} />
+      <Typography.Text
+        strong
+        style={{ textAlign: 'center', wordBreak: 'break-word' }}
+      >
+        {attachment.filename}
+      </Typography.Text>
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        Excel-файл{size ? ` · ${size}` : ''} · распознан
+      </Typography.Text>
+      <Button
+        type="primary"
+        icon={<DownloadOutlined />}
+        loading={downloading}
+        onClick={handleDownload}
+      >
+        Скачать оригинал
+      </Button>
+      <Typography.Text
+        type="secondary"
+        style={{ fontSize: 11, textAlign: 'center', maxWidth: 380 }}
+      >
+        Браузер не отображает Excel внутри страницы. Реквизиты и позиции
+        документа уже распознаны и доступны в панели «Позиции».
+      </Typography.Text>
+    </div>
+  );
+}
+
 function ThumbBar({
   attachments,
   activeId,
   onSelect,
   id,
 }: {
-  attachments: ReadonlyArray<{ id: string; filename: string }>;
+  attachments: ReadonlyArray<AttachmentLike>;
   activeId: string;
   onSelect: (id: string) => void;
   id: string;
@@ -1021,7 +1149,8 @@ function ThumbBar({
         const isImg = isImageExt(a.filename);
         const isActive = a.id === activeId;
         const thumbUrl = `/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}`;
-        const isPdf = /\.pdf$/i.test(a.filename);
+        const isPdf = isPdfExt(a.filename);
+        const isExcel = isExcelExt(a.filename, a.mimeType);
         return (
           <Tooltip key={a.id} title={a.filename} placement="top">
             <div
@@ -1058,6 +1187,11 @@ function ThumbBar({
                 />
               ) : isPdf ? (
                 <FilePdfOutlined style={{ fontSize: 28, color: '#d4380d' }} />
+              ) : isExcel ? (
+                // Не подставляем xlsx-URL в <img> — браузер всё равно не
+                // сможет его декодировать, а запрос дёрнет /file/raw → 200
+                // и при некоторых настройках вызовет лишнюю сетевую работу.
+                <FileExcelOutlined style={{ fontSize: 28, color: '#22863a' }} />
               ) : (
                 <FileTextOutlined style={{ fontSize: 28, color: '#8c8c8c' }} />
               )}
