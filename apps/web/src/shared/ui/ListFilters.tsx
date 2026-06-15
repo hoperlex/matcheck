@@ -24,6 +24,13 @@ export interface ListFiltersProps {
   loading?: boolean;
   searchPlaceholder?: string;
   extra?: ReactNode;
+  /**
+   * Доп. фильтры, которые рендерятся между стандартными селектами/поиском
+   * и блоком `extra` (обычно кнопки «Новая запись» / «Экспорт»). Сохраняют
+   * единый `Space wrap` родителя — переносятся на следующий ряд на узких
+   * экранах вместе с остальными фильтрами, без поломки layout.
+   */
+  tail?: ReactNode;
 }
 
 const SELECT_WIDTH = 240;
@@ -48,6 +55,7 @@ export function ListFilters({
   loading,
   searchPlaceholder,
   extra,
+  tail,
 }: ListFiltersProps) {
   const showContractor = fields.includes('contractor');
   const showSupplier = fields.includes('supplier');
@@ -120,6 +128,7 @@ export function ListFilters({
           onChange={(v) => onChange({ q: v })}
         />
       )}
+      {tail}
       {extra}
     </Space>
   );

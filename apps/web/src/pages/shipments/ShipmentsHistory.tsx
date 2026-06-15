@@ -51,6 +51,13 @@ import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
 import { ShipmentViewModal, type ShipmentViewData } from './ShipmentViewModal';
+import {
+  FEATURE_VALUES,
+  PURPOSE_VALUES,
+  ShipmentFeatureFilters,
+  type ShipmentFeature,
+  type ShipmentPurpose,
+} from './ShipmentFeatureFilters';
 import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
@@ -135,17 +142,39 @@ export function ShipmentsHistory({
   const view: View = params.get('trash') === '1' ? 'trash' : 'active';
   const isTrash = view === 'trash';
 
-  const filters: ListFiltersValue & { status: string | null; plate: string } = {
+  // Тип отгрузки и Признаки храним как повторяющиеся `?purpose=X&purpose=Y`
+  // и `?feature=A&feature=B` — это нативно поддерживается URLSearchParams
+  // и не требует кодирования запятых внутри значений вроде «Перемещение
+  // на объект» (CSV сломало бы пробелы). Невалидные значения в URL
+  // (например, ?purpose=Foo от старой закладки) игнорируются.
+  const PURPOSE_SET = new Set<string>(PURPOSE_VALUES);
+  const FEATURE_SET = new Set<string>(FEATURE_VALUES);
+  const urlPurposes = params.getAll('purpose').filter((v): v is ShipmentPurpose =>
+    PURPOSE_SET.has(v),
+  );
+  const urlFeatures = params.getAll('feature').filter((v): v is ShipmentFeature =>
+    FEATURE_SET.has(v),
+  );
+
+  type ExtraFilters = {
+    status: string | null;
+    plate: string;
+    purposes: ShipmentPurpose[];
+    features: ShipmentFeature[];
+  };
+  const filters: ListFiltersValue & ExtraFilters = {
     contractorIds: parseCsvIds(params.get('contractor')),
     supplierIds: parseCsvIds(params.get('supplier')),
     siteIds: parseCsvIds(params.get('site')),
     q: params.get('q') ?? '',
     status: params.get('status'),
     plate: params.get('plate') ?? '',
+    purposes: urlPurposes,
+    features: urlFeatures,
   };
 
   const updateFilters = (
-    patch: Partial<ListFiltersValue & { status: string | null; plate: string }>,
+    patch: Partial<ListFiltersValue & ExtraFilters>,
   ) => {
     const next = new URLSearchParams(params);
     const apply = (key: string, val: string | null | undefined) => {
@@ -158,6 +187,14 @@ export function ShipmentsHistory({
     if ('q' in patch) apply('q', patch.q);
     if ('status' in patch) apply('status', patch.status);
     if ('plate' in patch) apply('plate', patch.plate);
+    if ('purposes' in patch) {
+      next.delete('purpose');
+      for (const p of patch.purposes ?? []) next.append('purpose', p);
+    }
+    if ('features' in patch) {
+      next.delete('feature');
+      for (const f of patch.features ?? []) next.append('feature', f);
+    }
     setParams(next, { replace: true });
   };
 
@@ -404,6 +441,36 @@ export function ShipmentsHistory({
         const docNum = resolveDocNumber(r);
         if (!matchText(docNum, filters.q)) return false;
       }
+      // «Тип отгрузки» — OR внутри (выбраны 2 типа → показать оба).
+      // Отгрузка без purpose (legacy / с УПД — там purpose=null) не
+      // попадает ни в один выбранный тип.
+      if (filters.purposes.length > 0) {
+        if (!r.purpose || !filters.purposes.includes(r.purpose as ShipmentPurpose)) {
+          return false;
+        }
+      }
+      // «Признаки» — AND между выбранными (выбраны «ОС» и «УПД» →
+      // показать отгрузки, где есть и то, и другое).
+      for (const f of filters.features) {
+        if (f === 'transit' && !r.inTransit) return false;
+        if (f === 'assets') {
+          // ОС: либо отгрузка целиком помечена флагом isAssets (1-й этап
+          // мобилы, позиций ещё нет), либо в позициях уже есть itemKind=asset.
+          const hasAsset =
+            r.isAssets || r.items.some((it) => it.itemKind === 'asset');
+          if (!hasAsset) return false;
+        }
+        if (f === 'upd' || f === 'waybill') {
+          const has = r.sourceDocumentIds.some((id) => {
+            const sd = sourceDocsById.get(id);
+            if (!sd) return false;
+            if (f === 'upd') return sd.kind === 'upd';
+            // Накладные = ТН-2116 (transport_waybill) + ОС-2 (os2_transfer).
+            return sd.kind === 'transport_waybill' || sd.kind === 'os2_transfer';
+          });
+          if (!has) return false;
+        }
+      }
       return true;
     });
   }, [
@@ -415,6 +482,8 @@ export function ShipmentsHistory({
     filters.status,
     filters.plate,
     filters.q,
+    filters.purposes,
+    filters.features,
   ]);
 
   // Иконка «Поделиться» — показывается всегда, даже в корзине, чтобы
@@ -619,6 +688,12 @@ export function ShipmentsHistory({
             // набор фильтров с вкладкой «Ожидаемые» (Подрядчик/Поставщик/
             // Объект/Номер документа). Старый ?status=/?plate= в URL
             // продолжает фильтровать, но UI его не выставляет.
+            tail={
+              <ShipmentFeatureFilters
+                value={{ purposes: filters.purposes, features: filters.features }}
+                onChange={updateFilters}
+              />
+            }
             extra={filtersExtra}
           />
           {(() => {

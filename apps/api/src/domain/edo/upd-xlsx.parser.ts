@@ -1,31 +1,48 @@
 import { Readable } from 'node:stream';
 import ExcelJS from 'exceljs';
-import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
+import {
+  UpdPdfParsedSchema,
+  type UpdPdfParsed,
+  type UpdPdfItem,
+} from '@matcheck/contracts';
 
-// Локальный парсер УПД из xlsx (без LLM). Поддерживает две формы:
+// Локальный парсер УПД из xlsx (без LLM). Поддерживает обе формы:
 //   А — 1С/Элевел 2026 (новая редакция постановления 1137, графы 1–14 с
 //       подграфами; поля шапки в одной ячейке: «Продавец: <name>»).
 //   Б — 1С 2021 (старая форма, графы 1–11; поля шапки разнесены по соседним
-//       ячейкам той же строки: «Продавец:» + «<name>», далее «Покупатель:»
-//       + «<name>» в той же строке).
+//       ячейкам той же строки: «Продавец:» + «<name>»).
 //
-// Стратегия: для каждой строки worksheet склеиваем все непустые ячейки через
-// пробел → получаем «линию текста», совместимую с регулярками для PDF.
-// Шапка извлекается регулярками, items в этом шаге не парсятся (будет в 2b).
+// Стратегия:
+//  • Собираем все непустые ячейки первого листа в строки (rows[]) с map
+//    col→value, и параллельно текстовую «склейку строки» — она нужна
+//    регуляркам шапки (универсальной для обеих форм).
+//  • Шапку (номер/дату/стороны) ищем по текстовым строкам.
+//  • Табличную часть и итоги ищем через «marker-строку» с номерами граф
+//    («А», «1», «1а», «2», «2а», «3», «4», «5», «7», «8», «9»). Эта строка
+//    одинакова в обеих формах УПД (она и есть стандарт 1137), но excel-
+//    координаты колонок плавают, поэтому маппинг «графа УПД → excel col»
+//    строится по найденной строке. Дальше каждую позицию вытягиваем по
+//    этим колонкам — без хрупкой привязки к конкретным буквам.
 //
 // Используем ExcelJS streaming WorkbookReader — он НЕ вызывает reconcile,
 // который в нестриминговом xlsx.load() падает с TypeError на 1С-выгрузках
-// (баг ExcelJS 4.4: в model.drawings регистрируются имена без объектов).
-// Стриминг устойчив к таким файлам и быстрее: ячейки идут потоком, без
-// построения полной model в памяти.
+// (баг ExcelJS 4.4). Стриминг устойчив к таким файлам и быстрее.
+
+type RawRow = {
+  rowNumber: number;
+  cells: Map<number, ExcelJS.CellValue>;
+  text: string;
+};
 
 export async function parseUpdXlsx(buffer: Buffer): Promise<UpdPdfParsed> {
-  const lines = await collectLines(buffer);
+  const rows = await collectRows(buffer);
+  const lines = rows.map((r) => r.text).filter(Boolean);
 
   const { docNumber, docDate } = parseDocHeader(lines);
   const { supplier, recipient } = parseParties(lines);
+  const { items, totalSum, vatSum, itemsCount } = parseItemsAndTotals(rows);
 
-  const filled = [
+  const filledHeader = [
     docNumber !== null,
     docDate !== null,
     supplier?.inn !== undefined && supplier?.inn !== null,
@@ -33,20 +50,21 @@ export async function parseUpdXlsx(buffer: Buffer): Promise<UpdPdfParsed> {
     recipient?.inn !== undefined && recipient?.inn !== null,
     recipient?.name !== undefined && recipient?.name !== null,
   ].filter(Boolean).length;
-  // 0 заполненных полей → 0; 6/6 → 0.85. Items не парсятся на этом шаге,
-  // поэтому максимум 0.85, не 0.95 (worker'у это нормально — фронт всё равно
-  // покажет «низкая уверенность», пользователь добавит позиции вручную).
-  const confidence = filled === 0 ? 0 : Math.min(0.85, 0.25 + filled * 0.1);
+  // Если есть позиции и итог — высокая уверенность; иначе только шапка
+  // (макс 0.85). 6/6 + items+total → 0.95.
+  const confidenceHeader = filledHeader === 0 ? 0 : Math.min(0.85, 0.25 + filledHeader * 0.1);
+  const confidence =
+    items.length > 0 && totalSum !== null ? Math.max(confidenceHeader, 0.95) : confidenceHeader;
 
   const parsed: UpdPdfParsed = {
     docNumber,
     docDate,
-    totalSum: null,
-    vatSum: null,
-    itemsCount: null,
+    totalSum,
+    vatSum,
+    itemsCount,
     supplier,
     recipient,
-    items: [],
+    items,
     confidence,
   };
   return UpdPdfParsedSchema.parse(parsed);
@@ -54,7 +72,7 @@ export async function parseUpdXlsx(buffer: Buffer): Promise<UpdPdfParsed> {
 
 // ─── Сбор строк ────────────────────────────────────────────────────────────
 
-async function collectLines(buffer: Buffer): Promise<string[]> {
+async function collectRows(buffer: Buffer): Promise<RawRow[]> {
   const stream = Readable.from(buffer);
   // sharedStrings: 'cache' нужен для УПД из 1С — там >100 общих строк, без
   // кэша при стриминге cell.value придёт как индекс, а не текст.
@@ -64,26 +82,26 @@ async function collectLines(buffer: Buffer): Promise<string[]> {
     worksheets: 'emit',
   });
 
-  const lines: string[] = [];
+  const rows: RawRow[] = [];
   let firstSheetDone = false;
   for await (const ws of reader) {
     if (firstSheetDone) break;
     for await (const row of ws) {
+      const cells = new Map<number, ExcelJS.CellValue>();
       const parts: string[] = [];
       row.eachCell({ includeEmpty: false }, (cell) => {
+        const col = typeof cell.col === 'number' ? cell.col : Number(cell.col);
+        if (Number.isFinite(col)) cells.set(col, cell.value);
         const s = cellToString(cell.value);
         if (s) parts.push(s);
       });
-      if (parts.length === 0) continue;
-      // Склейка ячеек одной excel-строки через пробел. Внутренние \n
-      // (многострочные ячейки) сворачиваем в пробел — для регулярок шапки
-      // переносы не нужны.
       const text = parts.join(' ').replace(/\s+/g, ' ').trim();
-      if (text) lines.push(text);
+      if (cells.size === 0) continue;
+      rows.push({ rowNumber: row.number, cells, text });
     }
     firstSheetDone = true;
   }
-  return lines;
+  return rows;
 }
 
 function cellToString(v: ExcelJS.CellValue): string {
@@ -93,11 +111,9 @@ function cellToString(v: ExcelJS.CellValue): string {
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   if (v instanceof Date) return v.toISOString().slice(0, 10);
   if (typeof v === 'object') {
-    // RichText
     if ('richText' in v && Array.isArray((v as ExcelJS.CellRichTextValue).richText)) {
       return (v as ExcelJS.CellRichTextValue).richText.map((r) => r.text).join('');
     }
-    // Formula с результатом — берём результат
     if ('result' in v && (v as ExcelJS.CellFormulaValue).result !== undefined) {
       const r = (v as ExcelJS.CellFormulaValue).result;
       if (r === null || r === undefined) return '';
@@ -106,15 +122,49 @@ function cellToString(v: ExcelJS.CellValue): string {
       if (r instanceof Date) return r.toISOString().slice(0, 10);
       return '';
     }
-    // Hyperlink — берём text
     if ('text' in v) {
       const t = (v as ExcelJS.CellHyperlinkValue).text;
       return typeof t === 'string' ? t : '';
     }
-    // Error — пусто
     if ('error' in v) return '';
   }
   return '';
+}
+
+function normCell(v: ExcelJS.CellValue): string {
+  return cellToString(v).replace(/[\s \n\t]+/g, ' ').trim();
+}
+
+function parseNum(v: ExcelJS.CellValue): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'object' && v !== null && 'result' in v) {
+    return parseNum((v as ExcelJS.CellFormulaValue).result ?? null);
+  }
+  const s = cellToString(v);
+  if (!s) return null;
+  // «1 234,56» / «1234.56» / «1 234 567,89». Убираем пробелы и nbsp,
+  // запятую → точку, отбрасываем всё лишнее (валютные символы, «руб.»).
+  const cleaned = s
+    .replace(/[\s ]/g, '')
+    .replace(/,/g, '.')
+    .replace(/[^0-9.\-]/g, '');
+  if (!cleaned || cleaned === '-' || cleaned === '.') return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseVatRate(v: ExcelJS.CellValue): number | null {
+  const s = cellToString(v).trim();
+  if (!s) return null;
+  // «22%», «20 %», «10%», «0%»
+  const m = /(\d+(?:[.,]\d+)?)\s*%/.exec(s);
+  if (m && m[1]) return Number(m[1].replace(',', '.'));
+  if (/без\s*ндс|без\s*налога/i.test(s)) return 0;
+  // Цифра без % (некоторые 1С-формы)
+  const justNum = parseNum(v);
+  if (justNum !== null && justNum >= 0 && justNum <= 30) return justNum;
+  return null;
 }
 
 // ─── Шапка ─────────────────────────────────────────────────────────────────
@@ -238,17 +288,141 @@ function parseParties(lines: string[]): {
 }
 
 function matchParty(line: string, prefixRe: RegExp, terminatorAlt: RegExp): string | null {
-  // Ищем «Продавец: <name>» где <name> заканчивается перед маркером (2)/«Покупатель:»/
-  // «ИНН/КПП»/«Адрес:» или концом строки. Это покрывает оба варианта:
-  //  - «Продавец: ООО "А" (2)» — обрезается до «ООО "А"».
-  //  - «Продавец: ООО "А" (2) Покупатель: ООО "Б" (6)» — обрезается до «ООО "А"».
   const startMatch = prefixRe.exec(line);
   if (!startMatch) return null;
   const tail = line.slice(startMatch.index + startMatch[0].length);
   const endMatch = terminatorAlt.exec(tail);
   const raw = (endMatch ? tail.slice(0, endMatch.index) : tail).trim();
   if (!raw) return null;
-  // Уберём хвостовые скобочные маркеры вроде « (2)» если они «приклеились» к имени
-  // без пробела.
   return raw.replace(/\s*\(\d+[а-я]?\)\s*$/u, '').trim() || null;
+}
+
+// ─── Табличная часть ───────────────────────────────────────────────────────
+
+// Графы УПД, которые нам нужны для извлечения позиций и итогов.
+// Маркер «1а» (наименование) и «9» (стоимость с налогом) — главные.
+type GraphKey = '1а' | '2а' | '3' | '4' | '5' | '7' | '8' | '9';
+const REQUIRED_GRAPHS: readonly GraphKey[] = ['1а', '3', '5', '9'] as const;
+const ALL_GRAPHS: readonly GraphKey[] = ['1а', '2а', '3', '4', '5', '7', '8', '9'] as const;
+
+function findGraphMarkerRow(rows: RawRow[]): {
+  index: number;
+  graphCols: Map<GraphKey, number>;
+} | null {
+  // Ищем строку, где встречаются значения {1а, 2а, 3, 4, 5, 7, 8, 9} в
+  // разных ячейках. Это строка с номерами граф (одинакова в обеих формах).
+  // Допускаем, что не все номера попадут в одну строку — но «1а», «3», «5»,
+  // «9» обязательны: без них нельзя извлечь позицию.
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    const found = new Map<GraphKey, number>();
+    for (const [col, value] of row.cells) {
+      const s = normCell(value).toLowerCase();
+      for (const g of ALL_GRAPHS) {
+        if (!found.has(g) && s === g.toLowerCase()) {
+          found.set(g, col);
+        }
+      }
+    }
+    const hasAll = REQUIRED_GRAPHS.every((g) => found.has(g));
+    if (hasAll) return { index: i, graphCols: found };
+  }
+  return null;
+}
+
+function isStopWord(s: string): boolean {
+  const t = s.toLowerCase();
+  return (
+    t.startsWith('всего к оплате') ||
+    t === 'всего' ||
+    t.startsWith('итого') ||
+    t.startsWith('документ составлен') ||
+    t.startsWith('руководитель')
+  );
+}
+
+function parseItemsAndTotals(rows: RawRow[]): {
+  items: UpdPdfItem[];
+  totalSum: number | null;
+  vatSum: number | null;
+  itemsCount: number | null;
+} {
+  const marker = findGraphMarkerRow(rows);
+  if (!marker) {
+    return { items: [], totalSum: null, vatSum: null, itemsCount: null };
+  }
+  const { graphCols } = marker;
+  const colName = graphCols.get('1а')!;
+  const colUnit = graphCols.get('2а') ?? null;
+  const colQty = graphCols.get('3')!;
+  const colPrice = graphCols.get('4') ?? null;
+  // «5» — стоимость БЕЗ налога, «9» — стоимость С налогом. В контракт
+  // мы кладём sum=стоимость С налогом (графа 9).
+  const colSumWithTax = graphCols.get('9')!;
+  const colVatRate = graphCols.get('7') ?? null;
+  const colVatSum = graphCols.get('8') ?? null;
+
+  const items: UpdPdfItem[] = [];
+  let totalSum: number | null = null;
+  let vatSum: number | null = null;
+
+  for (let i = marker.index + 1; i < rows.length; i++) {
+    const row = rows[i]!;
+    const nameCell = row.cells.get(colName);
+    const firstColCell = [...row.cells.values()][0];
+    const nameText = normCell(nameCell ?? '');
+    const anyText = normCell(firstColCell ?? '');
+
+    // Итог: ячейка с «Всего к оплате» в любой из ранних колонок таблицы.
+    if (isStopWord(nameText) || isStopWord(anyText)) {
+      totalSum = parseNum(row.cells.get(colSumWithTax) ?? null);
+      if (colVatSum) vatSum = parseNum(row.cells.get(colVatSum) ?? null);
+      break;
+    }
+
+    if (!nameText) continue; // подзаголовок / пустая строка
+
+    const qty = parseNum(row.cells.get(colQty) ?? null);
+    const sumWithTax = parseNum(row.cells.get(colSumWithTax) ?? null);
+    // Подзаголовок с подписями «код», «условное обозначение» и т.п.
+    // отсеиваем: у такой строки нет ни qty, ни sum.
+    if (qty === null && sumWithTax === null) continue;
+
+    if (qty === null) continue; // qty в схеме обязателен — пропускаем
+
+    const price = colPrice !== null ? parseNum(row.cells.get(colPrice) ?? null) : null;
+    const vatRate = colVatRate !== null ? parseVatRate(row.cells.get(colVatRate) ?? null) : null;
+    const vatSumLine = colVatSum !== null ? parseNum(row.cells.get(colVatSum) ?? null) : null;
+
+    let unit = '';
+    if (colUnit !== null) unit = normCell(row.cells.get(colUnit) ?? '');
+    if (!unit) unit = 'шт';
+
+    // Многострочное наименование в 1С часто содержит дублирующий код товара
+    // во второй строке («Розетка ...\n076551-SPL»). Берём только первую
+    // непустую строку как название, остальное теряем (код всё равно лежит
+    // в графе «Б», нам он не нужен в nameRaw).
+    const nameRaw = nameText.replace(/\s+/g, ' ').trim();
+
+    items.push({
+      nameRaw,
+      qty,
+      unit,
+      price: price ?? null,
+      sum: sumWithTax ?? null,
+      vatRate: vatRate ?? null,
+      vatSum: vatSumLine ?? null,
+      volumeM3: null,
+      massKg: null,
+      volumeConfidence: null,
+      groupName: null,
+    });
+  }
+
+  return {
+    items,
+    totalSum,
+    vatSum,
+    itemsCount: items.length > 0 ? items.length : null,
+  };
 }
