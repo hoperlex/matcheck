@@ -1972,6 +1972,24 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   };
   const trashSwitchVisible = tab === 'accepted' && isAdminUser;
 
+  // Жёсткий запрет ренда списка приёмок внутри модалки «Операции».
+  //
+  // KppPage внутри Modal живёт по URL ?delivery=UUID — если она тут, форма
+  // отрисовалась ещё на L1160 (`if (deliveryId) return <Form>`). До этой
+  // ветки мы доходим только когда deliveryId отсутствует. На «своей»
+  // странице /kpp это нормально — показываем список. Но в embedded-режиме
+  // (внутри antd Modal) список рисовать НЕЛЬЗЯ:
+  //
+  // При закрытии модалки (afterClose) родитель OperationsPage чистит URL
+  // от ?delivery= и сбрасывает isClosing. React делает один re-render,
+  // в котором KppPage ВНУТРИ Modal на 1 кадр оказывается без deliveryId —
+  // antd размонтирует children только следующим кадром. Без этого guard'а
+  // на тот кадр пользователь видит «вспышку таблицы» поверх затемнения.
+  //
+  // null здесь безопасен: формы без id всё равно нет, а Modal уже
+  // закрывается — рисовать в нём нечего.
+  if (embedded) return null;
+
   return (
     <StickyPageHeader
       header={

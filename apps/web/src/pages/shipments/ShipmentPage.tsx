@@ -1839,6 +1839,13 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   };
   const trashSwitchVisible = tab === 'accepted';
 
+  // Жёсткий запрет ренда списка отгрузок внутри модалки «Операции» —
+  // зеркало guard'а в KppPage. Если ShipmentPage оказалась здесь в
+  // embedded-режиме без shipmentId, форма выше не вернулась, а список
+  // рисовать нельзя: за 1 frame между обновлением URL и unmount'ом antd
+  // он успевал вспыхнуть таблицей внутри закрывающейся модалки.
+  if (embedded) return null;
+
   return (
     <StickyPageHeader
       header={
