@@ -128,9 +128,43 @@ export default function OperationsPage() {
   const editDeliveryId = type === 'delivery' ? params.get('delivery') : null;
   const editDeliveryIsNew =
     type === 'delivery' && params.get('new') === '1';
+  const editShipmentId = type === 'shipment' ? params.get('shipment') : null;
+  const editShipmentIsNew =
+    type === 'shipment' && params.get('new') === '1';
+
+  // Отложенное закрытие — без него при клике на крестик URL очищался
+  // СРАЗУ, и за время exit-анимации Modal (~200мс) внутри неё успевал
+  // отрендериться KppPage/ShipmentPage без params, который в этом
+  // режиме показывает таблицу списка (см. KppPage.tsx:2036 /
+  // ShipmentPage.tsx:1893). Пользователь видел «вспышку» таблицы
+  // внутри модалки. Решение: в onCancel ставим closing=true (Modal
+  // начинает закрываться), а URL чистим только в afterClose — к тому
+  // моменту exit-анимация уже завершена и children размонтированы.
+  const [deliveryClosing, setDeliveryClosing] = useState(false);
+  const [shipmentClosing, setShipmentClosing] = useState(false);
+
   const deliveryModalOpen =
-    !MODAL_DISABLED && (Boolean(editDeliveryId) || editDeliveryIsNew);
-  const closeDeliveryModal = () => {
+    !MODAL_DISABLED &&
+    (Boolean(editDeliveryId) || editDeliveryIsNew) &&
+    !deliveryClosing;
+  const shipmentModalOpen =
+    !MODAL_DISABLED &&
+    (Boolean(editShipmentId) || editShipmentIsNew) &&
+    !shipmentClosing;
+
+  // Защита от edge-case'а «закрыл, тут же открыл другой документ»:
+  // если URL уже содержит новый id, флаг closing нужно сбросить,
+  // иначе модалка останется невидимой до afterClose предыдущей.
+  useEffect(() => {
+    if (editDeliveryId || editDeliveryIsNew) setDeliveryClosing(false);
+  }, [editDeliveryId, editDeliveryIsNew]);
+  useEffect(() => {
+    if (editShipmentId || editShipmentIsNew) setShipmentClosing(false);
+  }, [editShipmentId, editShipmentIsNew]);
+
+  const closeDeliveryModal = () => setDeliveryClosing(true);
+  const afterDeliveryModalClose = () => {
+    setDeliveryClosing(false);
     // from=materials означает «пришёл из Истории поступлений» —
     // возвращаем туда, а не оставляем в Операциях.
     if (params.get('from') === 'materials') {
@@ -139,12 +173,9 @@ export default function OperationsPage() {
     }
     updateUrl({ delivery: null, new: null, upd: null, from: null });
   };
-  const editShipmentId = type === 'shipment' ? params.get('shipment') : null;
-  const editShipmentIsNew =
-    type === 'shipment' && params.get('new') === '1';
-  const shipmentModalOpen =
-    !MODAL_DISABLED && (Boolean(editShipmentId) || editShipmentIsNew);
-  const closeShipmentModal = () => {
+  const closeShipmentModal = () => setShipmentClosing(true);
+  const afterShipmentModalClose = () => {
+    setShipmentClosing(false);
     if (params.get('from') === 'materials') {
       navigate('/materials');
       return;
@@ -367,6 +398,7 @@ export default function OperationsPage() {
       <Modal
         open={deliveryModalOpen}
         onCancel={closeDeliveryModal}
+        afterClose={afterDeliveryModalClose}
         title={
           editDeliveryIsNew
             ? 'Новая приёмка'
@@ -410,6 +442,7 @@ export default function OperationsPage() {
       <Modal
         open={shipmentModalOpen}
         onCancel={closeShipmentModal}
+        afterClose={afterShipmentModalClose}
         title={
           editShipmentIsNew
             ? 'Новая отгрузка'
