@@ -5,10 +5,12 @@ import { MinusSquareOutlined, PlusSquareOutlined } from '@ant-design/icons';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import type {
   Counterparty,
+  CustomerCounterparty,
   Site,
   SourceDirection,
   SourceDocument,
   SourceDocumentListResponseSchema,
+  Supplier,
   UpdCheck,
   UpdValidation,
 } from '@matcheck/contracts';
@@ -26,6 +28,10 @@ import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
 import { usePrefetchSourceDocumentDetails } from '../../shared/hooks/usePrefetchSourceDocumentDetails';
+import {
+  buildInnMatchMap,
+  expandDirectoryIdsToOperational,
+} from '../../shared/utils/directoryFilterMap';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 
@@ -149,10 +155,24 @@ export function ExpectedSourceDocsList({
     placeholderData: keepPreviousData,
   });
 
+  // Опции селектов фильтра «Подрядчик»/«Поставщик» берём из заказчиковских
+  // справочников; маппинг в FK операций — через ИНН (см. directoryFilterMap).
   const counterpartiesQuery = useQuery({
     queryKey: ['counterparties', 'all'],
     queryFn: () =>
-      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=5000'),
+  });
+  const customerCounterpartiesQuery = useQuery({
+    queryKey: ['customer-counterparties', 'all'],
+    queryFn: () =>
+      api.get<{ items: CustomerCounterparty[]; total: number }>(
+        '/customer-counterparties?limit=5000',
+      ),
+  });
+  const suppliersQuery = useQuery({
+    queryKey: ['suppliers', 'all'],
+    queryFn: () =>
+      api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
   });
   const sitesQuery = useQuery({
     queryKey: ['sites', 'all'],
@@ -160,15 +180,63 @@ export function ExpectedSourceDocsList({
       api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
   });
 
+  const contractorOptions = useMemo(
+    () =>
+      (customerCounterpartiesQuery.data?.items ?? []).map((c) => ({
+        value: c.id,
+        label: c.name,
+      })),
+    [customerCounterpartiesQuery.data],
+  );
+  const supplierOptions = useMemo(
+    () =>
+      (suppliersQuery.data?.items ?? []).map((s) => ({
+        value: s.id,
+        label: s.name,
+      })),
+    [suppliersQuery.data],
+  );
+  const contractorInnMap = useMemo(
+    () =>
+      buildInnMatchMap(
+        customerCounterpartiesQuery.data?.items ?? [],
+        counterpartiesQuery.data?.items ?? [],
+      ),
+    [customerCounterpartiesQuery.data, counterpartiesQuery.data],
+  );
+  const supplierInnMap = useMemo(
+    () =>
+      buildInnMatchMap(
+        suppliersQuery.data?.items ?? [],
+        counterpartiesQuery.data?.items ?? [],
+      ),
+    [suppliersQuery.data, counterpartiesQuery.data],
+  );
+  const contractorOperationalIds = useMemo(
+    () => expandDirectoryIdsToOperational(filters.contractorIds, contractorInnMap),
+    [filters.contractorIds, contractorInnMap],
+  );
+  const supplierOperationalIds = useMemo(
+    () => expandDirectoryIdsToOperational(filters.supplierIds, supplierInnMap),
+    [filters.supplierIds, supplierInnMap],
+  );
+
   const allItems = list.data?.items ?? [];
   const filteredItems = useMemo(() => {
     return allItems.filter((r) => {
-      if (filters.contractorIds.length > 0 && (!r.contractorId || !filters.contractorIds.includes(r.contractorId))) return false;
-      if (filters.supplierIds.length > 0 && (!r.supplierId || !filters.supplierIds.includes(r.supplierId))) return false;
+      if (filters.contractorIds.length > 0 && (!r.contractorId || !contractorOperationalIds.has(r.contractorId))) return false;
+      if (filters.supplierIds.length > 0 && (!r.supplierId || !supplierOperationalIds.has(r.supplierId))) return false;
       if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId))) return false;
       return true;
     });
-  }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds]);
+  }, [
+    allItems,
+    filters.contractorIds,
+    filters.supplierIds,
+    filters.siteIds,
+    contractorOperationalIds,
+    supplierOperationalIds,
+  ]);
 
   // Префетч позиций — фоном после рендера. Раскрытие «+» читает кэш
   // react-query, без обращения к сети (см. usePrefetchSourceDocumentDetails).
@@ -189,9 +257,14 @@ export function ExpectedSourceDocsList({
             value={filters}
             onChange={updateFilters}
             fields={['contractor', 'supplier', 'site', 'q']}
-            counterparties={counterpartiesQuery.data?.items ?? []}
+            contractorOptions={contractorOptions}
+            supplierOptions={supplierOptions}
             sites={sitesQuery.data?.items ?? []}
-            loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
+            loading={
+              customerCounterpartiesQuery.isLoading ||
+              suppliersQuery.isLoading ||
+              sitesQuery.isLoading
+            }
             searchPlaceholder="Номер документа"
             extra={filtersExtra}
           />

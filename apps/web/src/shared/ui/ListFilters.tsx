@@ -8,6 +8,11 @@ export type ListFilterField = 'contractor' | 'supplier' | 'site' | 'q';
 // Селекты Подрядчик/Поставщик/Объект — мульти-выбор. Пустой массив = «все».
 // В URL хранится как CSV: `?contractor=uuid1,uuid2`. Парсинг — на стороне
 // страниц, см. parseCsvIds в shared/utils.
+//
+// Внимание: id'ы в фильтрах «Подрядчик» и «Поставщик» — это id'ы записей
+// СПРАВОЧНИКОВ заказчика (customer_counterparties / suppliers), а НЕ
+// операционных counterparties. Маппинг в реальные FK операций родительские
+// списки делают через buildInnMatchMap (см. shared/utils/directoryFilterMap).
 export interface ListFiltersValue {
   contractorIds: string[];
   supplierIds: string[];
@@ -15,11 +20,25 @@ export interface ListFiltersValue {
   q: string;
 }
 
+export type SelectOption = { value: string; label: string };
+
 export interface ListFiltersProps {
   value: ListFiltersValue;
   onChange: (patch: Partial<ListFiltersValue>) => void;
   fields: ReadonlyArray<ListFilterField>;
-  counterparties: Counterparty[];
+  // Готовые опции селектов: родитель решает, откуда они грузятся
+  // (customer_counterparties для «Подрядчика», suppliers для «Поставщика»).
+  // Это явная инверсия зависимости — раньше ListFilters сам фильтровал
+  // массив Counterparty[] по isContractor/isSupplier и тянул legacy-данные.
+  contractorOptions?: SelectOption[];
+  supplierOptions?: SelectOption[];
+  // Legacy-режим: если передан counterparties (массив операционной таблицы)
+  // и НЕ переданы contractorOptions/supplierOptions, options генерируются
+  // из counterparties по флагам isContractor/isSupplier — для обратной
+  // совместимости с разделом «Документы» (Inbox), где серверная фильтрация
+  // ждёт именно операционные counterparty.id, а не id справочников
+  // заказчика. Новые вызовы должны передавать готовые options.
+  counterparties?: Counterparty[];
   sites: Site[];
   loading?: boolean;
   searchPlaceholder?: string;
@@ -39,8 +58,9 @@ const SEARCH_WIDTH = 220;
 /**
  * Общая панель фильтров для списочных страниц (Приёмка, Отгрузка, Документы).
  * Полностью controlled — состояние хранит родитель (обычно в URL searchParams).
- * Справочники прокидываются через props, чтобы они переиспользовались для резолва
- * имён в столбцах таблицы и не дублировались между несколькими списками на странице.
+ * Опции селектов «Подрядчик» и «Поставщик» теперь приходят сверху уже готовыми
+ * (раньше компонент фильтровал Counterparty[] по флагам isContractor/isSupplier
+ * прямо из операционной таблицы; см. directoryFilterMap для нового маппинга).
  *
  * Селекты в режиме `multiple` — пользователь может выбрать несколько
  * подрядчиков/поставщиков/объектов. `maxTagCount="responsive"` — теги
@@ -50,6 +70,8 @@ export function ListFilters({
   value,
   onChange,
   fields,
+  contractorOptions,
+  supplierOptions,
   counterparties,
   sites,
   loading,
@@ -62,12 +84,19 @@ export function ListFilters({
   const showSite = fields.includes('site');
   const showQ = fields.includes('q');
 
-  const contractorOptions = counterparties
-    .filter((c) => c.isContractor)
-    .map((c) => ({ value: c.id, label: c.name }));
-  const supplierOptions = counterparties
-    .filter((c) => c.isSupplier)
-    .map((c) => ({ value: c.id, label: c.name }));
+  // Legacy fallback — Inbox по-прежнему отправляет операционные
+  // counterparty.id на сервер, поэтому ему нужны options из counterparties.
+  const effectiveContractorOptions: SelectOption[] =
+    contractorOptions ??
+    (counterparties ?? [])
+      .filter((c) => c.isContractor)
+      .map((c) => ({ value: c.id, label: c.name }));
+  const effectiveSupplierOptions: SelectOption[] =
+    supplierOptions ??
+    (counterparties ?? [])
+      .filter((c) => c.isSupplier)
+      .map((c) => ({ value: c.id, label: c.name }));
+
   const siteOptions = sites.map((s) => ({
     value: s.id,
     label: `${s.code} · ${s.name}`,
@@ -87,7 +116,7 @@ export function ListFilters({
           optionFilterProp="label"
           maxTagCount="responsive"
           loading={loading}
-          options={contractorOptions}
+          options={effectiveContractorOptions}
         />
       )}
       {showSupplier && (
@@ -102,7 +131,7 @@ export function ListFilters({
           optionFilterProp="label"
           maxTagCount="responsive"
           loading={loading}
-          options={supplierOptions}
+          options={effectiveSupplierOptions}
         />
       )}
       {showSite && (

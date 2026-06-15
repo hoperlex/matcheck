@@ -25,9 +25,11 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import type {
   BulkDeleteResponse,
   Counterparty,
+  CustomerCounterparty,
   DeliveryListResponseSchema,
   Site,
   SourceDocumentListResponseSchema,
+  Supplier,
 } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { ApiError, api } from '../../services/api';
@@ -52,6 +54,10 @@ import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
+import {
+  buildInnMatchMap,
+  expandDirectoryIdsToOperational,
+} from '../../shared/utils/directoryFilterMap';
 import { DeliveryViewModal, type DeliveryViewData } from './DeliveryViewModal';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
@@ -193,10 +199,30 @@ export function DeliveriesHistory({
     placeholderData: keepPreviousData,
   });
 
+  // Операционная таблица counterparties — нужна для:
+  //   1) резолва имён в колонках «Подрядчик»/«Поставщик» (FK операций
+  //      ссылаются именно на неё);
+  //   2) маппинга «id справочника заказчика → set операционных id по ИНН»,
+  //      см. ниже directoryFilterMap.
+  // Опции селектов фильтра берутся из заказчиковских справочников
+  // (customer_counterparties / suppliers) — это то, что пользователь видит
+  // на вкладках Справочников.
   const counterpartiesQuery = useQuery({
     queryKey: ['counterparties', 'all'],
     queryFn: () =>
-      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=5000'),
+  });
+  const customerCounterpartiesQuery = useQuery({
+    queryKey: ['customer-counterparties', 'all'],
+    queryFn: () =>
+      api.get<{ items: CustomerCounterparty[]; total: number }>(
+        '/customer-counterparties?limit=5000',
+      ),
+  });
+  const suppliersQuery = useQuery({
+    queryKey: ['suppliers', 'all'],
+    queryFn: () =>
+      api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
   });
   const sitesQuery = useQuery({
     queryKey: ['sites', 'all'],
@@ -359,6 +385,45 @@ export function DeliveriesHistory({
     return m;
   }, [sitesQuery.data]);
 
+  // Опции селектов «Подрядчик»/«Поставщик» — берём из заказчиковских
+  // справочников (того, что видно во вкладках Справочники → Контрагенты /
+  // Поставщики). id в URL фильтра — это id записи справочника, не FK операций.
+  const contractorOptions = useMemo(
+    () =>
+      (customerCounterpartiesQuery.data?.items ?? []).map((c) => ({
+        value: c.id,
+        label: c.name,
+      })),
+    [customerCounterpartiesQuery.data],
+  );
+  const supplierOptions = useMemo(
+    () =>
+      (suppliersQuery.data?.items ?? []).map((s) => ({
+        value: s.id,
+        label: s.name,
+      })),
+    [suppliersQuery.data],
+  );
+  // Маппинг «id справочника → set операционных counterparties.id с тем
+  // же нормализованным ИНН». Через этот маппинг фильтр находит реальные
+  // FK операций. См. apps/web/src/shared/utils/directoryFilterMap.ts.
+  const contractorInnMap = useMemo(
+    () =>
+      buildInnMatchMap(
+        customerCounterpartiesQuery.data?.items ?? [],
+        counterpartiesQuery.data?.items ?? [],
+      ),
+    [customerCounterpartiesQuery.data, counterpartiesQuery.data],
+  );
+  const supplierInnMap = useMemo(
+    () =>
+      buildInnMatchMap(
+        suppliersQuery.data?.items ?? [],
+        counterpartiesQuery.data?.items ?? [],
+      ),
+    [suppliersQuery.data, counterpartiesQuery.data],
+  );
+
   const resolveContractor = (r: Row): { id: string | null; inherited: boolean } => {
     if (r.contractorId) return { id: r.contractorId, inherited: false };
     const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
@@ -421,12 +486,26 @@ export function DeliveriesHistory({
     return opts;
   }, [items]);
 
+  // Разворачиваем выбранные id справочников в множество операционных
+  // counterparties.id, по которым реально нужно сверять FK операций.
+  // Пустой Set означает «у выбранных справочных записей нет соответствий
+  // в counterparties по ИНН» → filteredItems вернёт пустой список, что
+  // корректно (никакой подделки данных не происходит).
+  const contractorOperationalIds = useMemo(
+    () => expandDirectoryIdsToOperational(filters.contractorIds, contractorInnMap),
+    [filters.contractorIds, contractorInnMap],
+  );
+  const supplierOperationalIds = useMemo(
+    () => expandDirectoryIdsToOperational(filters.supplierIds, supplierInnMap),
+    [filters.supplierIds, supplierInnMap],
+  );
+
   const filteredItems = useMemo(() => {
     return items.filter((r) => {
       const c = resolveContractor(r);
       const s = resolveSite(r);
-      if (filters.contractorIds.length > 0 && (!c.id || !filters.contractorIds.includes(c.id))) return false;
-      if (filters.supplierIds.length > 0 && (!r.supplierId || !filters.supplierIds.includes(r.supplierId))) return false;
+      if (filters.contractorIds.length > 0 && (!c.id || !contractorOperationalIds.has(c.id))) return false;
+      if (filters.supplierIds.length > 0 && (!r.supplierId || !supplierOperationalIds.has(r.supplierId))) return false;
       if (filters.siteIds.length > 0 && (!s.id || !filters.siteIds.includes(s.id))) return false;
       if (filters.status === 'no_document') {
         if (r.sourceDocumentIds.length !== 0) return false;
@@ -449,6 +528,8 @@ export function DeliveriesHistory({
     filters.status,
     filters.plate,
     filters.q,
+    contractorOperationalIds,
+    supplierOperationalIds,
   ]);
 
   // Возвращает блок кнопок действий в зависимости от вкладки, статуса и прав.
@@ -634,9 +715,14 @@ export function DeliveriesHistory({
             value={filters}
             onChange={updateFilters}
             fields={['contractor', 'supplier', 'site', 'q']}
-            counterparties={counterpartiesQuery.data?.items ?? []}
+            contractorOptions={contractorOptions}
+            supplierOptions={supplierOptions}
             sites={sitesQuery.data?.items ?? []}
-            loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
+            loading={
+              customerCounterpartiesQuery.isLoading ||
+              suppliersQuery.isLoading ||
+              sitesQuery.isLoading
+            }
             searchPlaceholder="Номер документа"
             // Инпуты «Статус» и «Номер авто» убраны по UX-запросу: оставлен
             // единый набор фильтров с вкладкой «Ожидаемые». Если фильтры всё

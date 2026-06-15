@@ -25,11 +25,13 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import type {
   BulkDeleteResponse,
   Counterparty,
+  CustomerCounterparty,
   Shipment,
   ShipmentKind,
   ShipmentListResponseSchema,
   Site,
   SourceDocumentListResponseSchema,
+  Supplier,
 } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { ApiError, api } from '../../services/api';
@@ -64,6 +66,10 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 import { formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
+import {
+  buildInnMatchMap,
+  expandDirectoryIdsToOperational,
+} from '../../shared/utils/directoryFilterMap';
 
 type List = z.infer<typeof ShipmentListResponseSchema>;
 type Row = List['items'][number];
@@ -223,9 +229,24 @@ export function ShipmentsHistory({
     placeholderData: keepPreviousData,
   });
 
+  // Операционные counterparties — для резолва имён в колонке «Получатель»
+  // и для маппинга «id справочника заказчика → set операционных id по ИНН».
+  // Опции селектов фильтра приходят из заказчиковских справочников.
   const counterpartiesQuery = useQuery({
     queryKey: ['counterparties', 'all'],
-    queryFn: () => api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+    queryFn: () => api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=5000'),
+  });
+  const customerCounterpartiesQuery = useQuery({
+    queryKey: ['customer-counterparties', 'all'],
+    queryFn: () =>
+      api.get<{ items: CustomerCounterparty[]; total: number }>(
+        '/customer-counterparties?limit=5000',
+      ),
+  });
+  const suppliersQuery = useQuery({
+    queryKey: ['suppliers', 'all'],
+    queryFn: () =>
+      api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
   });
   const sitesQuery = useQuery({
     queryKey: ['sites', 'all'],
@@ -346,6 +367,43 @@ export function ShipmentsHistory({
     return m;
   }, [sourceDocsQuery.data]);
 
+  // Опции/маппинг для фильтров «Подрядчик» (получатель) и «Поставщик» —
+  // из заказчиковских справочников customer_counterparties / suppliers
+  // (то, что видно во вкладках Справочников). buildInnMatchMap нормализует
+  // ИНН и пропускает плейсхолдеры — см. shared/utils/directoryFilterMap.
+  const contractorOptions = useMemo(
+    () =>
+      (customerCounterpartiesQuery.data?.items ?? []).map((c) => ({
+        value: c.id,
+        label: c.name,
+      })),
+    [customerCounterpartiesQuery.data],
+  );
+  const supplierOptions = useMemo(
+    () =>
+      (suppliersQuery.data?.items ?? []).map((s) => ({
+        value: s.id,
+        label: s.name,
+      })),
+    [suppliersQuery.data],
+  );
+  const contractorInnMap = useMemo(
+    () =>
+      buildInnMatchMap(
+        customerCounterpartiesQuery.data?.items ?? [],
+        counterpartiesQuery.data?.items ?? [],
+      ),
+    [customerCounterpartiesQuery.data, counterpartiesQuery.data],
+  );
+  const supplierInnMap = useMemo(
+    () =>
+      buildInnMatchMap(
+        suppliersQuery.data?.items ?? [],
+        counterpartiesQuery.data?.items ?? [],
+      ),
+    [suppliersQuery.data, counterpartiesQuery.data],
+  );
+
   const destinationLabel = (r: Shipment): string => {
     if (r.kind === 'contractor' || r.kind === 'return') {
       return r.receiverCounterpartyId
@@ -422,12 +480,27 @@ export function ShipmentsHistory({
     return opts;
   }, [items]);
 
+  // Разворачиваем id справочников в множество операционных counterparties.id,
+  // по которым реально нужно сверять FK. Пустой Set ⇒ «выбранным справочным
+  // записям нет соответствий по ИНН» ⇒ filter вернёт пустой список.
+  const contractorOperationalIds = useMemo(
+    () => expandDirectoryIdsToOperational(filters.contractorIds, contractorInnMap),
+    [filters.contractorIds, contractorInnMap],
+  );
+  const supplierOperationalIds = useMemo(
+    () => expandDirectoryIdsToOperational(filters.supplierIds, supplierInnMap),
+    [filters.supplierIds, supplierInnMap],
+  );
+
   const filteredItems = useMemo(() => {
     return items.filter((r) => {
-      if (filters.contractorIds.length > 0 && (!r.receiverCounterpartyId || !filters.contractorIds.includes(r.receiverCounterpartyId))) {
+      if (filters.contractorIds.length > 0 && (!r.receiverCounterpartyId || !contractorOperationalIds.has(r.receiverCounterpartyId))) {
         return false;
       }
-      if (filters.supplierIds.length > 0 && (!r.receiverCounterpartyId || !filters.supplierIds.includes(r.receiverCounterpartyId))) {
+      // Раньше supplier-фильтр сверялся с r.receiverCounterpartyId (баг
+      // копипасты — обе ветки шли по одному полю). FK поставщика в
+      // shipments — r.supplierId (миграция 0056), его и проверяем.
+      if (filters.supplierIds.length > 0 && (!r.supplierId || !supplierOperationalIds.has(r.supplierId))) {
         return false;
       }
       if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId))) return false;
@@ -484,6 +557,8 @@ export function ShipmentsHistory({
     filters.q,
     filters.purposes,
     filters.features,
+    contractorOperationalIds,
+    supplierOperationalIds,
   ]);
 
   // Иконка «Поделиться» — показывается всегда, даже в корзине, чтобы
@@ -680,9 +755,14 @@ export function ShipmentsHistory({
             value={filters}
             onChange={updateFilters}
             fields={['contractor', 'supplier', 'site', 'q']}
-            counterparties={counterpartiesQuery.data?.items ?? []}
+            contractorOptions={contractorOptions}
+            supplierOptions={supplierOptions}
             sites={sitesQuery.data?.items ?? []}
-            loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
+            loading={
+              customerCounterpartiesQuery.isLoading ||
+              suppliersQuery.isLoading ||
+              sitesQuery.isLoading
+            }
             searchPlaceholder="Номер документа"
             // Инпуты «Статус» и «Номер авто» убраны по UX-запросу: единый
             // набор фильтров с вкладкой «Ожидаемые» (Подрядчик/Поставщик/
