@@ -166,6 +166,10 @@ export function DeliveriesHistory({
     status: string | null;
     plate: string;
     features: OperationFeature[];
+    // ?nophoto=1 — deep-link из дашборда «Статистика». В UI селекта нет,
+    // ради единственного use-case городить отдельный псевдо-статус
+    // (как было с no_document) избыточно. Сбрасывается ручной очисткой URL.
+    nophoto: boolean;
   };
   const filters: ListFiltersValue & ExtraFilters = {
     contractorIds: parseCsvIds(params.get('contractor')),
@@ -175,6 +179,7 @@ export function DeliveriesHistory({
     status: params.get('status'),
     plate: params.get('plate') ?? '',
     features: urlFeatures,
+    nophoto: params.get('nophoto') === '1',
   };
 
   const updateFilters = (
@@ -536,6 +541,10 @@ export function DeliveriesHistory({
       } else if (filters.status && r.status.code !== filters.status) {
         return false;
       }
+      // ?nophoto=1 — deep-link из дашборда «Статистика» (counter «Без фото»).
+      // UI-кнопки в списке для этого фильтра нет; сбросить можно очисткой
+      // URL-параметра или переходом по другой ссылке.
+      if (filters.nophoto && (r.photos?.length ?? 0) !== 0) return false;
       if (filters.plate.trim() && !matchText(r.vehiclePlate, filters.plate)) return false;
       if (filters.q.trim()) {
         const docNum = resolveDocNumber(r);
@@ -576,6 +585,7 @@ export function DeliveriesHistory({
     filters.plate,
     filters.q,
     filters.features,
+    filters.nophoto,
     contractorOperationalIds,
     supplierOperationalIds,
   ]);

@@ -1,11 +1,12 @@
-import { useMemo, useState } from 'react';
-import { DatePicker, Select, Space, Typography } from 'antd';
+import { useEffect, useMemo, useState } from 'react';
+import { Collapse, DatePicker, Select, Space, Typography } from 'antd';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import dayjs, { type Dayjs } from 'dayjs';
 import type {
   InspectorStatsResponse,
   InspectorStatsRow,
   Site,
+  StatsSummaryResponse,
 } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
@@ -13,6 +14,11 @@ import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
+import { KpiStrip } from './widgets/KpiStrip';
+import { DailyBarChart } from './widgets/DailyBarChart';
+import { AttentionCounters } from './widgets/AttentionCounters';
+
+const SUMMARY_OPEN_KEY = 'matcheck:stats:summary-open';
 
 // Имя инспектора в таблице: ФИО, иначе email (на случай если ФИО ещё
 // не заполнено в Администрирование → Пользователи).
@@ -34,12 +40,53 @@ export default function StatsPage() {
   // сам нарежет по МСК-границам через AT TIME ZONE.
   const [range, setRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
 
+  // Сворачиваемое состояние сводки — помним между сессиями. Если
+  // пользователь свернул, не раскрываем обратно при каждом refetch.
+  const [summaryOpen, setSummaryOpen] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    const raw = window.localStorage.getItem(SUMMARY_OPEN_KEY);
+    return raw === null ? true : raw === '1';
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SUMMARY_OPEN_KEY, summaryOpen ? '1' : '0');
+    } catch {
+      // ignore quota/private-mode
+    }
+  }, [summaryOpen]);
+
   const sites = useQuery({
     queryKey: ['sites', 'all'],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?limit=500'),
   });
   const dateFrom = range?.[0] ? range[0].startOf('day').toISOString() : undefined;
   const dateTo = range?.[1] ? range[1].endOf('day').toISOString() : undefined;
+
+  // Для summary endpoint'а нужны YYYY-MM-DD (МСК-день), а не ISO. Если
+  // диапазон не задан — не передаём from/to, бэк сам поставит default
+  // 30 дней до сегодня.
+  const summaryFrom = range?.[0] ? range[0].format('YYYY-MM-DD') : undefined;
+  const summaryTo = range?.[1] ? range[1].format('YYYY-MM-DD') : undefined;
+  const summaryQuery = useQuery({
+    queryKey: [
+      'reports',
+      'stats-summary',
+      { siteIds, inspectorIds, from: summaryFrom, to: summaryTo },
+    ],
+    queryFn: () => {
+      const qs = new URLSearchParams();
+      if (siteIds.length) qs.set('siteIds', siteIds.join(','));
+      if (inspectorIds.length) qs.set('inspectorIds', inspectorIds.join(','));
+      if (summaryFrom) qs.set('from', summaryFrom);
+      if (summaryTo) qs.set('to', summaryTo);
+      const qsStr = qs.toString();
+      return api.get<StatsSummaryResponse>(
+        `/reports/stats-summary${qsStr ? `?${qsStr}` : ''}`,
+      );
+    },
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
+  });
 
   const statsQuery = useQuery({
     queryKey: ['reports', 'inspector-stats', { siteIds, inspectorIds, dateFrom, dateTo }],
@@ -127,6 +174,47 @@ export default function StatsPage() {
           </Space>
         }
       >
+        <Collapse
+          activeKey={summaryOpen ? ['summary'] : []}
+          onChange={(keys) => {
+            const arr = Array.isArray(keys) ? keys : [keys];
+            setSummaryOpen(arr.includes('summary'));
+          }}
+          style={{ marginBottom: 12, background: '#fff' }}
+          items={[
+            {
+              key: 'summary',
+              label: (
+                <Typography.Text strong>
+                  Сводка за период
+                  <Typography.Text type="secondary" style={{ marginLeft: 8, fontWeight: 400 }}>
+                    {summaryQuery.data?.range
+                      ? ` ${formatDate(summaryQuery.data.range.from)} — ${formatDate(summaryQuery.data.range.to)} · ${summaryQuery.data.range.days} дн.`
+                      : ''}
+                  </Typography.Text>
+                </Typography.Text>
+              ),
+              children: (
+                <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                  <KpiStrip data={summaryQuery.data} loading={summaryQuery.isLoading} />
+                  <DailyBarChart data={summaryQuery.data} loading={summaryQuery.isLoading} />
+                  <div>
+                    <Typography.Text
+                      type="secondary"
+                      style={{ fontSize: 12, display: 'block', marginBottom: 6 }}
+                    >
+                      Требует внимания
+                    </Typography.Text>
+                    <AttentionCounters
+                      data={summaryQuery.data}
+                      loading={summaryQuery.isLoading}
+                    />
+                  </div>
+                </Space>
+              ),
+            },
+          ]}
+        />
         <ResponsiveTable<InspectorStatsRow>
           items={rows}
           loading={statsQuery.isLoading}

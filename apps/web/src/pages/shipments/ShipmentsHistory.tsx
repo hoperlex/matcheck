@@ -167,6 +167,9 @@ export function ShipmentsHistory({
     plate: string;
     purposes: ShipmentPurpose[];
     features: ShipmentFeature[];
+    // ?nophoto=1 — deep-link из дашборда «Статистика». Симметрично с
+    // DeliveriesHistory.
+    nophoto: boolean;
   };
   const filters: ListFiltersValue & ExtraFilters = {
     contractorIds: parseCsvIds(params.get('contractor')),
@@ -177,6 +180,7 @@ export function ShipmentsHistory({
     plate: params.get('plate') ?? '',
     purposes: urlPurposes,
     features: urlFeatures,
+    nophoto: params.get('nophoto') === '1',
   };
 
   const updateFilters = (
@@ -514,6 +518,8 @@ export function ShipmentsHistory({
         const docNum = resolveDocNumber(r);
         if (!matchText(docNum, filters.q)) return false;
       }
+      // ?nophoto=1 — deep-link из дашборда «Статистика».
+      if (filters.nophoto && (r.photos?.length ?? 0) !== 0) return false;
       // «Тип отгрузки» — OR внутри (выбраны 2 типа → показать оба).
       // Отгрузка без purpose (legacy / с УПД — там purpose=null) не
       // попадает ни в один выбранный тип.
@@ -557,6 +563,7 @@ export function ShipmentsHistory({
     filters.q,
     filters.purposes,
     filters.features,
+    filters.nophoto,
     contractorOperationalIds,
     supplierOperationalIds,
   ]);
