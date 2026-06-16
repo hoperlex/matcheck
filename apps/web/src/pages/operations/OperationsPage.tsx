@@ -139,50 +139,34 @@ export default function OperationsPage() {
   const editShipmentIsNew =
     type === 'shipment' && params.get('new') === '1';
 
-  // Отложенное закрытие — без него при клике на крестик URL очищался
-  // СРАЗУ, и за время exit-анимации Modal (~200мс) внутри неё успевал
-  // отрендериться KppPage/ShipmentPage без params, который в этом
-  // режиме показывает таблицу списка (см. KppPage.tsx:2036 /
-  // ShipmentPage.tsx:1893). Пользователь видел «вспышку» таблицы
-  // внутри модалки. Решение: в onCancel ставим closing=true (Modal
-  // начинает закрываться), а URL чистим только в afterClose — к тому
-  // моменту exit-анимация уже завершена и children размонтированы.
-  const [deliveryClosing, setDeliveryClosing] = useState(false);
-  const [shipmentClosing, setShipmentClosing] = useState(false);
-
+  // URL — единственный источник правды для open. Раньше параллельно
+  // существовал локальный флаг closing (и afterClose как точка очистки
+  // URL). Из-за двух источников при закрытии возникало мигание:
+  //   1) onCancel ставил closing=true → modalOpen=false → Modal закрылся;
+  //   2) afterClose выполнял setClosing(false) ДО того, как updateUrl
+  //      успел применить новый params → ?delivery= ещё в URL →
+  //      editDeliveryId truthy И closing уже false → modalOpen снова
+  //      true на один кадр → модалка мигала.
+  // Защита «слепка таблицы» (ради которой когда-то ввели closing) теперь
+  // не нужна — `if (embedded) return null;` в KppPage / ShipmentPage
+  // перехватывает любой рендер этих компонентов без params.
   const deliveryModalOpen =
-    !MODAL_DISABLED &&
-    (Boolean(editDeliveryId) || editDeliveryIsNew) &&
-    !deliveryClosing;
+    !MODAL_DISABLED && (Boolean(editDeliveryId) || editDeliveryIsNew);
   const shipmentModalOpen =
-    !MODAL_DISABLED &&
-    (Boolean(editShipmentId) || editShipmentIsNew) &&
-    !shipmentClosing;
+    !MODAL_DISABLED && (Boolean(editShipmentId) || editShipmentIsNew);
 
-  // Защита от edge-case'а «закрыл, тут же открыл другой документ»:
-  // если URL уже содержит новый id, флаг closing нужно сбросить,
-  // иначе модалка останется невидимой до afterClose предыдущей.
-  useEffect(() => {
-    if (editDeliveryId || editDeliveryIsNew) setDeliveryClosing(false);
-  }, [editDeliveryId, editDeliveryIsNew]);
-  useEffect(() => {
-    if (editShipmentId || editShipmentIsNew) setShipmentClosing(false);
-  }, [editShipmentId, editShipmentIsNew]);
-
-  const closeDeliveryModal = () => setDeliveryClosing(true);
-  const afterDeliveryModalClose = () => {
-    setDeliveryClosing(false);
-    // from=materials означает «пришёл из Истории поступлений» —
-    // возвращаем туда, а не оставляем в Операциях.
+  // Закрытие — один проход: чистим URL (или уходим на /materials, если
+  // пришли оттуда). Modal видит open=false на следующем рендере и
+  // закрывается. Никакого closing/afterClose — нет места, где модалка
+  // могла бы «вернуться» на кадр.
+  const closeDeliveryModal = () => {
     if (params.get('from') === 'materials') {
       navigate('/materials');
       return;
     }
     updateUrl({ delivery: null, new: null, upd: null, from: null });
   };
-  const closeShipmentModal = () => setShipmentClosing(true);
-  const afterShipmentModalClose = () => {
-    setShipmentClosing(false);
+  const closeShipmentModal = () => {
     if (params.get('from') === 'materials') {
       navigate('/materials');
       return;
@@ -421,7 +405,6 @@ export default function OperationsPage() {
       <Modal
         open={deliveryModalOpen}
         onCancel={closeDeliveryModal}
-        afterClose={afterDeliveryModalClose}
         title={
           editDeliveryIsNew
             ? 'Новая приёмка'
@@ -476,7 +459,6 @@ export default function OperationsPage() {
       <Modal
         open={shipmentModalOpen}
         onCancel={closeShipmentModal}
-        afterClose={afterShipmentModalClose}
         title={
           editShipmentIsNew
             ? 'Новая отгрузка'
