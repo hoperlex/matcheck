@@ -422,6 +422,17 @@ export default function OperationsPage() {
         destroyOnClose
         maskClosable={false}
         keyboard={false}
+        // Отключаем zoom-leave + mask-fade-leave анимации. Причина:
+        // высота body 95vh, и в середине zoom-out (~100мс) центр уже
+        // схлопнулся, а верх ещё виден — пользователь видит белую
+        // горизонтальную полосу с title+крестиком. С transitionName=""
+        // и maskTransitionName="" модалка пропадает мгновенно: нет
+        // промежуточных кадров — нет артефакта. afterClose продолжает
+        // вызываться (он не привязан к длительности анимации). Enter
+        // тоже становится мгновенным — для full-screen modal это
+        // воспринимается как ожидаемое поведение «открылась/закрылась».
+        transitionName=""
+        maskTransitionName=""
       >
         <Suspense
           fallback={
@@ -466,6 +477,11 @@ export default function OperationsPage() {
         destroyOnClose
         maskClosable={false}
         keyboard={false}
+        // См. комментарий у Modal приёмки выше — отключаем zoom-leave
+        // и mask-fade-leave, чтобы убрать промежуточный кадр с белой
+        // полосой title+крестика при закрытии full-screen модалки.
+        transitionName=""
+        maskTransitionName=""
       >
         <Suspense
           fallback={
