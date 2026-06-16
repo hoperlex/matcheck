@@ -353,6 +353,7 @@ export default function PublicSharePage() {
                 columns={itemColumns}
                 size="small"
                 pagination={false}
+                showSorterTooltip={false}
                 // scroll={x:'max-content'} убран — давал горизонтальный
                 // скролл на длинных названиях. Колонка «Наименование»
                 // теперь ellipsis, влезает в ширину страницы (95vw).

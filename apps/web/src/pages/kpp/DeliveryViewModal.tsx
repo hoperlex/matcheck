@@ -293,6 +293,7 @@ export function DeliveryViewModal({
                 size="small"
                 pagination={false}
                 columns={itemColumns}
+                showSorterTooltip={false}
                 // scroll={x:'max-content'} убран — заставлял таблицу
                 // растягиваться по самому длинному названию и плодил
                 // горизонтальный скролл даже на широкой 97vw-модалке.

@@ -1262,6 +1262,7 @@ function ReadOnlyTable({ items, showInvNumber }: { items: Item[]; showInvNumber?
       rowKey="id"
       size="small"
       pagination={false}
+      showSorterTooltip={false}
       // scroll={y} убран — давал внутренний tbody-скролл поверх скролла
       // Splitter.Panel. Тaблица растягивается по содержимому, скроллит
       // только внешняя панель.
@@ -1331,6 +1332,7 @@ function EditableTable({
         rowKey="idx"
         size="small"
         pagination={false}
+        showSorterTooltip={false}
         // scroll={y} убран намеренно: с внутренним tbody-скроллом кнопка
         // «Добавить позицию» уезжала за нижний край панели и её не было
         // видно. Теперь Table растягивается по содержимому, скроллит

@@ -232,6 +232,7 @@ function RecognitionPanel({
           rowKey={(_, i) => String(i)}
           dataSource={data.items}
           pagination={false}
+          showSorterTooltip={false}
           columns={[
             {
               title: '№',

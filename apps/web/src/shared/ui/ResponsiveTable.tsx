@@ -152,6 +152,7 @@ export function ResponsiveTable<T extends object>({
         size="middle"
         rowSelection={rowSelection}
         expandable={expandable}
+        showSorterTooltip={false}
         pagination={
           pagination === false
             ? false

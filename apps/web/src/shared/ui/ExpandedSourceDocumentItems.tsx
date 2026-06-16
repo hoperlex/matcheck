@@ -100,6 +100,7 @@ export function ExpandedSourceDocumentItems({
       rowKey="id"
       size="small"
       pagination={false}
+      showSorterTooltip={false}
       style={{ background: 'transparent' }}
     />
   );

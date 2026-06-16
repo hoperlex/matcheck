@@ -320,6 +320,7 @@ export function ShipmentViewModal({
                 size="small"
                 pagination={false}
                 columns={itemColumns}
+                showSorterTooltip={false}
               />
             )}
           </div>

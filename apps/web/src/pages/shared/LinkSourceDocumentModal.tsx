@@ -136,6 +136,7 @@ export function LinkSourceDocumentModal({
           dataSource={filtered}
           loading={list.isLoading || busy}
           pagination={{ pageSize: 50, showSizeChanger: false }}
+          showSorterTooltip={false}
           // Скролл внутри tbody — фиксируем высоту с учётом высот шапки
           // модалки, switch'а «все объекты», заголовка таблицы и пагинации.
           // ~240px суммарно при 95vh body, остальное — данные.
