@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Button, Modal, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography, message } from 'antd';
 import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
@@ -55,6 +55,13 @@ export default function OperationsPage() {
   const tab: ListTab = params.get('tab') === 'accepted' ? 'accepted' : 'expected';
   const isInspector = authUser?.role === 'inspector_kpp';
   const inspectorWithoutSite = isInspector && !authUser?.siteId;
+
+  // Slot для bulk-actions «Выбрано: N | Удалить выбранные | Снять выбор».
+  // DeliveriesHistory / ShipmentsHistory через portal рисуют actions сюда,
+  // чтобы появление панели НЕ сдвигало фильтры и таблицу вниз. Слот живёт
+  // постоянно в шапке (рядом с переключателем «Удалённые»), занимает 0px
+  // когда выбора нет, и расширяется вправо при появлении actions.
+  const bulkActionsSlotRef = useRef<HTMLDivElement | null>(null);
 
   const updateUrl = (patch: Record<string, string | null>) => {
     const next = new URLSearchParams(params);
@@ -358,18 +365,26 @@ export default function OperationsPage() {
               }
             />
           </div>
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              visibility: trashSwitchVisible ? 'visible' : 'hidden',
-            }}
-          >
-            <Switch checked={trashOn} onChange={setTrash} />
-            <Typography.Text type={trashOn ? undefined : 'secondary'}>
-              Удалённые
-            </Typography.Text>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            {/* Slot для bulk-actions из DeliveriesHistory/ShipmentsHistory
+                через React Portal. При отсутствии выбора — пустой div
+                нулевой ширины, layout не двигается. При выборе строк —
+                actions появляются здесь, рядом со Switch'ом, не толкая
+                таблицу вниз. */}
+            <div ref={bulkActionsSlotRef} style={{ display: 'flex', alignItems: 'center' }} />
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                visibility: trashSwitchVisible ? 'visible' : 'hidden',
+              }}
+            >
+              <Switch checked={trashOn} onChange={setTrash} />
+              <Typography.Text type={trashOn ? undefined : 'secondary'}>
+                Удалённые
+              </Typography.Text>
+            </div>
           </div>
         </div>
       }
@@ -381,9 +396,17 @@ export default function OperationsPage() {
           <ExpectedOutbound onOpen={createFromUpd} filtersExtra={headerExtras} />
         )
       ) : type === 'delivery' ? (
-        <DeliveriesHistory onOpen={onOpenExisting} filtersExtra={headerExtras} />
+        <DeliveriesHistory
+          onOpen={onOpenExisting}
+          filtersExtra={headerExtras}
+          bulkActionsPortalRef={bulkActionsSlotRef}
+        />
       ) : (
-        <ShipmentsHistory onOpen={onOpenExisting} filtersExtra={headerExtras} />
+        <ShipmentsHistory
+          onOpen={onOpenExisting}
+          filtersExtra={headerExtras}
+          bulkActionsPortalRef={bulkActionsSlotRef}
+        />
       )}
 
       {/* Модалка edit-режима Приёмки (этап А). KppPage внутри получает

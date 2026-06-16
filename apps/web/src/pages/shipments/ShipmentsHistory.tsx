@@ -1,5 +1,6 @@
-import type { MouseEvent, ReactNode } from 'react';
-import { useMemo, useState } from 'react';
+import type { MouseEvent, ReactNode, RefObject } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import {
   Button,
@@ -125,12 +126,16 @@ export function ShipmentsHistory({
   activeTab,
   onTabChange,
   filtersExtra,
+  bulkActionsPortalRef,
 }: {
   onOpen: (id: string) => void;
   tabs?: PageTabItem[];
   activeTab?: string;
   onTabChange?: (key: string) => void;
   filtersExtra?: ReactNode;
+  // См. комментарий-двойник в DeliveriesHistory: если задан — bulk-actions
+  // улетают через React Portal в slot OperationsPage и не двигают таблицу.
+  bulkActionsPortalRef?: RefObject<HTMLElement | null>;
 }) {
   const queryClient = useQueryClient();
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
@@ -140,6 +145,13 @@ export function ShipmentsHistory({
   const [params, setParams] = useSearchParams();
   const authUser = useAuthStore((s) => s.user);
   const isAdmin = authUser?.role === 'admin';
+
+  // См. комментарий в DeliveriesHistory: tracking внешнего slot для portal-
+  // режима bulk-actions, чтобы не сдвигать таблицу при выборе строк.
+  const [bulkSlotEl, setBulkSlotEl] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setBulkSlotEl(bulkActionsPortalRef?.current ?? null);
+  }, [bulkActionsPortalRef]);
 
   // Две вкладки: «Активные» (включая отгрузки без УПД) и «Корзина».
   // URL: trash=1 — корзина. Поиск «Без документа» доступен через
@@ -848,6 +860,12 @@ export function ShipmentsHistory({
                   extra={actions}
                 />
               );
+            }
+            // См. DeliveriesHistory: portal-режим — actions улетают в
+            // шапку OperationsPage, таблица не сдвигается. Без ref —
+            // legacy inline-рендер (для других страниц).
+            if (bulkActionsPortalRef) {
+              return bulkSlotEl && actions ? createPortal(actions, bulkSlotEl) : null;
             }
             return actions ? (
               <div style={{ display: 'flex', justifyContent: 'flex-end' }}>

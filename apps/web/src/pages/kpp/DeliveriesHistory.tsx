@@ -1,5 +1,6 @@
-import type { MouseEvent, ReactNode } from 'react';
-import { useMemo, useState } from 'react';
+import type { MouseEvent, ReactNode, RefObject } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import {
   Button,
@@ -130,12 +131,20 @@ export function DeliveriesHistory({
   activeTab,
   onTabChange,
   filtersExtra,
+  bulkActionsPortalRef,
 }: {
   onOpen: (id: string) => void;
   tabs?: PageTabItem[];
   activeTab?: string;
   onTabChange?: (key: string) => void;
   filtersExtra?: ReactNode;
+  // Если задан — bulk-actions рендерятся через React Portal в этот
+  // внешний слот (напр., в header-row OperationsPage), а НЕ строкой
+  // под фильтрами. Это убирает layout shift при выборе строк: таблица
+  // больше не «прыгает» вниз при появлении панели. Если не задан —
+  // поведение прежнее: actions рисуются под фильтрами (для других
+  // страниц, где этот компонент используется без OperationsPage).
+  bulkActionsPortalRef?: RefObject<HTMLElement | null>;
 }) {
   const queryClient = useQueryClient();
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
@@ -145,6 +154,14 @@ export function DeliveriesHistory({
   const [params, setParams] = useSearchParams();
   const authUser = useAuthStore((s) => s.user);
   const isAdmin = authUser?.role === 'admin';
+
+  // Slot для bulk-actions в внешнем header-row родителя. Отслеживаем
+  // через state, потому что ref.current = null до commit phase — портал
+  // на первом рендере не сработает иначе.
+  const [bulkSlotEl, setBulkSlotEl] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setBulkSlotEl(bulkActionsPortalRef?.current ?? null);
+  }, [bulkActionsPortalRef]);
 
   // Две вкладки: «Активные» (включая приёмки без УПД) и «Корзина».
   // URL: trash=1 — корзина. Поиск «Без документа» доступен через
@@ -880,6 +897,12 @@ export function DeliveriesHistory({
                 />
               );
             }
+            // Portal-режим: actions улетают в slot шапки OperationsPage,
+            // под фильтрами ничего не рисуется → таблица не сдвигается.
+            if (bulkActionsPortalRef) {
+              return bulkSlotEl && actions ? createPortal(actions, bulkSlotEl) : null;
+            }
+            // Legacy inline для других страниц.
             return actions ? (
               <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
                 {actions}
