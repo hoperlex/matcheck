@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { RouterProvider } from 'react-router-dom';
 import { ConfigProvider, App as AntApp } from 'antd';
 import ruRU from 'antd/locale/ru_RU';
@@ -17,7 +17,21 @@ dayjs.locale('ru');
 function SideEffects() {
   const qc = useQueryClient();
   const user = useAuthStore((s) => s.user);
+  // Запоминаем id предыдущего юзера. При смене (logout/login/expireSession
+  // в одной вкладке) полностью сбрасываем React Query кэш — иначе данные
+  // одного аккаунта могут «протечь» к следующему через закэшированные
+  // ответы. См. отчёт от 2026-06-16 (Firefox показывал одни и те же 3
+  // вместо 22 для разных пользователей).
+  const prevUserIdRef = useRef<string | null>(null);
   useEffect(() => {
+    const currentId = user?.id ?? null;
+    if (prevUserIdRef.current !== currentId) {
+      // При самом первом монтировании prev = null, current = null или
+      // первый user.id — qc.clear() безопасен (пустой кэш). При смене
+      // user.id или logout (id → null) кэш гарантированно чистый.
+      qc.clear();
+      prevUserIdRef.current = currentId;
+    }
     if (!user) return;
     const teardownInv = setupInvalidation(qc);
     const teardownSync = startSyncLoop();

@@ -16,8 +16,15 @@ import { useAuthStore } from '../../stores/auth';
  */
 export function useOperationsCounters() {
   const userId = useAuthStore((s) => s.user?.id);
+  // userId — суффиксом в queryKey, чтобы при смене пользователя в одной
+  // вкладке React Query не отдавал старые данные предыдущего юзера
+  // (см. отчёт от 2026-06-16: в Firefox разные аккаунты видели один
+  // и тот же закэшированный ответ). Существующие invalidateQueries по
+  // префиксу ['reports','operations-counters'] продолжают работать через
+  // prefix-match React Query — счётчик обновляется после save/delete как
+  // и раньше.
   return useQuery({
-    queryKey: ['reports', 'operations-counters'],
+    queryKey: ['reports', 'operations-counters', userId],
     queryFn: () => api.get<OperationsCountersResponse>('/reports/operations-counters'),
     enabled: !!userId,
     refetchInterval: 30_000,

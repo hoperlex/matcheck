@@ -95,6 +95,30 @@ export async function buildServer() {
   await app.register(shareRoutes);
   await app.register(shareMessageRoutes);
 
+  // Глобальный onSend hook: проставляем no-store / Vary: Authorization на
+  // все API-ответы, чтобы PWA Service Worker / прокси / CDN не отдавали
+  // ответ одного пользователя другому при смене JWT в той же вкладке.
+  // Реальный кейс: в Firefox у разных аккаунтов отображался один и тот
+  // же закэшированный ответ /reports/operations-counters (см. отчёт от
+  // 2026-06-16). Hook идемпотентный: если endpoint сам уже выставил
+  // Cache-Control (SSE /events, photos /content?thumb, share, raw),
+  // мы не затираем — сохраняем осознанные политики кэширования.
+  app.addHook('onSend', async (_req, reply, payload) => {
+    if (!reply.getHeader('cache-control')) {
+      reply.header('cache-control', 'no-store, no-cache, must-revalidate, private');
+    }
+    const existingVary = reply.getHeader('vary');
+    if (existingVary) {
+      const varyStr = String(existingVary);
+      if (!varyStr.toLowerCase().split(',').map((s) => s.trim()).includes('authorization')) {
+        reply.header('vary', `${varyStr}, Authorization`);
+      }
+    } else {
+      reply.header('vary', 'Authorization');
+    }
+    return payload;
+  });
+
   app.setErrorHandler((err, req, reply) => {
     req.log.error({ err }, 'request error');
     if (reply.statusCode < 400) reply.code(500);
