@@ -200,6 +200,44 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         const r = await parseUpdPdf(buffer, { sourceDocumentId });
         parsed = r.parsed;
         llmProviderId = r.llmProviderId;
+        // Расширенный Vision-fallback: text-LLM формально не упал, но
+        // вернул полностью пустой результат — нет ни одной позиции, ни
+        // номера, ни даты. Это типично для сканов: pdf-parse возвращает
+        // 200+ символов OCR-артефактов (порог MIN_TEXT_LENGTH=200 пройден,
+        // PdfNoTextError не кидается), LLM получает мусор и не может
+        // ничего извлечь. До этого фикса такие документы зависали в
+        // partial_parse — теперь повторно пробуем через Vision на
+        // оригинальном PDF (Gemini читает картинку напрямую).
+        // Дополнительный $0.0005 на этот случай оправдан — иначе тупик.
+        const textLlmEmpty =
+          parsed.items.length === 0 &&
+          parsed.docNumber == null &&
+          parsed.docDate == null &&
+          parsed.totalSum == null;
+        if (textLlmEmpty) {
+          log.warn(
+            { confidence: parsed.confidence },
+            'text-LLM returned empty result — retry via vision',
+          );
+          try {
+            const vr = await parseUpdVision(
+              { buffer, mimeType: 'application/pdf', filename: s3Key },
+              { sourceDocumentId },
+            );
+            parsed = vr.parsed;
+            llmProviderId = vr.llmProviderId;
+            parsedViaVision = true;
+          } catch (visionErr) {
+            // Vision не сработал (провайдер не поддерживает PDF /
+            // сетевая ошибка). Не критично: оставляем text-LLM
+            // результат (пустые поля) — документ попадёт в
+            // partial_parse как раньше. Пользователь дополнит руками.
+            log.warn(
+              { visionErr },
+              'text-LLM empty + vision retry failed — keep partial_parse',
+            );
+          }
+        }
       } catch (err) {
         if (err instanceof PdfNoTextError) {
           // PDF-скан без текстового слоя — fallback на Vision. Раньше
