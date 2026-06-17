@@ -30,7 +30,11 @@ import {
   type UpdParseJobData,
 } from './plugins/queue.js';
 import { deleteObject, getObject } from './domain/storage/s3.signer.js';
-import { parseUpdPdf, PdfNoTextError } from './domain/edo/upd-pdf.parser.js';
+import {
+  parseUpdPdf,
+  PdfNoTextError,
+  PdfTextGarbageError,
+} from './domain/edo/upd-pdf.parser.js';
 import { parseUpdVision } from './domain/edo/upd-vision.parser.js';
 import { parseUpdXlsx } from './domain/edo/upd-xlsx.parser.js';
 
@@ -239,12 +243,21 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           }
         }
       } catch (err) {
-        if (err instanceof PdfNoTextError) {
-          // PDF-скан без текстового слоя — fallback на Vision. Раньше
-          // здесь сразу шёл parse_failed, и пользователь видел тупик.
+        // PdfNoTextError — <200 символов в тексте (чистый скан).
+        // PdfTextGarbageError — есть текст 200+, но не похож на УПД
+        //   (OCR-артефакты, нет ключевых слов «счёт-фактура»/«ИНН»/...).
+        // Обе ошибки обрабатываем одинаково: fallback на Vision LLM
+        // по оригинальному PDF (или PNG-страницы, если провайдер
+        // openrouter — см. upd-vision.parser.ts).
+        if (err instanceof PdfNoTextError || err instanceof PdfTextGarbageError) {
+          const isGarbage = err instanceof PdfTextGarbageError;
           log.warn(
-            { textLength: err.textLength },
-            'pdf has no text — falling back to vision LLM',
+            isGarbage
+              ? { textLength: err.textLength, reason: err.reason }
+              : { textLength: err.textLength },
+            isGarbage
+              ? 'pdf text looks like OCR garbage — falling back to vision LLM'
+              : 'pdf has no text — falling back to vision LLM',
           );
           try {
             const r = await parseUpdVision(

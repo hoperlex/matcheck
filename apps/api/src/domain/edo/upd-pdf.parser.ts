@@ -13,6 +13,89 @@ export class PdfNoTextError extends Error {
   }
 }
 
+// Кидается когда pdf-parse вернул >MIN_TEXT_LENGTH символов, но текст
+// похож на OCR-артефакты, а не на нормальный УПД. Worker'у это сигнал
+// сразу делать fallback на Vision, не тратя токены на мусор в text-LLM.
+// До добавления этой ошибки сканированные PDF с «мусорным» text-layer
+// уходили в text-LLM, который возвращал {items:[], confidence:0.1} —
+// документ зависал в partial_parse без каких-либо распознанных полей.
+export class PdfTextGarbageError extends Error {
+  constructor(
+    public textLength: number,
+    public reason: string,
+  ) {
+    super(`PDF text looks like OCR garbage: ${reason}`);
+    this.name = 'PdfTextGarbageError';
+  }
+}
+
+// Эвристика: текст из pdf-parse похож на нормальный УПД или это
+// OCR-артефакты со скана? Чек дешёвый (без LLM), запускается перед
+// отправкой в text-LLM. Возвращает причину если текст похож на мусор.
+//
+// Критерии (любой из):
+//   1) Нет ни одного ключевого слова УПД (счёт-фактура / продавец /
+//      покупатель / ИНН / товар / Всего / накладная). Нормальный УПД
+//      содержит как минимум 2-3 из этих слов.
+//   2) Доля «странных» символов (не буквы/цифры/знаки препинания/пробелы)
+//      превышает 25%. У OCR-мусора такие символы зашкаливают: ý, Ё,
+//      ffi, l=l, ╪ и т.п.
+//   3) Средняя длина «слова» (последовательности букв) меньше 2.5 —
+//      признак того, что распознавание разбило слова на 1-символьные
+//      фрагменты.
+//
+// Возвращает null если текст ОК, или строку с причиной если мусор.
+export function checkPdfTextQuality(cleanText: string): string | null {
+  if (cleanText.length < MIN_TEXT_LENGTH) return null; // отдельная ветка
+  const lower = cleanText.toLowerCase();
+  // Ключевые слова УПД (русский + латинизированные варианты).
+  const upgKeywords = [
+    'счет-фактур',
+    'счёт-фактур',
+    'универсальн',
+    'передаточн',
+    'продавец',
+    'покупател',
+    'грузоотправ',
+    'грузополуч',
+    'инн',
+    'кпп',
+    'товар',
+    'всего к оплате',
+    'наименование',
+    'количеств',
+    'налоговая ставка',
+    'накладная',
+    'договор',
+  ];
+  const hasKeywordCount = upgKeywords.filter((k) => lower.includes(k)).length;
+  if (hasKeywordCount < 2) {
+    return `no_upd_keywords (found ${hasKeywordCount}/2 minimum)`;
+  }
+  // Доля «странных» символов.
+  // Считаем нормальными: кириллицу, латиницу, цифры, пробелы, переводы
+  // строк, знаки препинания и распространённые скобки/единицы измерения.
+  const NORMAL_CHARS = /[a-zA-Zа-яА-ЯёЁ0-9\s.,;:!?()[\]{}"'/\\\-—–_+=%№*<>«»°²³%§®©™]/;
+  let strangeCount = 0;
+  for (const ch of cleanText) {
+    if (!NORMAL_CHARS.test(ch)) strangeCount += 1;
+  }
+  const strangeRatio = strangeCount / cleanText.length;
+  if (strangeRatio > 0.25) {
+    return `strange_chars_ratio ${(strangeRatio * 100).toFixed(1)}%`;
+  }
+  // Средняя длина «слова» (буква-последовательность).
+  const words = cleanText.match(/[a-zA-Zа-яА-ЯёЁ]+/g) ?? [];
+  if (words.length > 0) {
+    const avgWordLen =
+      words.reduce((s, w) => s + w.length, 0) / words.length;
+    if (avgWordLen < 2.5) {
+      return `avg_word_length ${avgWordLen.toFixed(2)} < 2.5`;
+    }
+  }
+  return null;
+}
+
 // JSON-схема ответа LLM. vatRate/vatSum по позициям нужны веб-порталу
 // (колонка «Сумма НДС» в материалах приёмки), модель извлекает их
 // промптом v5+. На уровне шапки vatSum тоже сохранён.
@@ -135,6 +218,14 @@ export async function parseUpdPdf(
     .trim();
   if (cleanText.length < MIN_TEXT_LENGTH) {
     throw new PdfNoTextError(cleanText.length);
+  }
+  // Дополнительная проверка качества текста — отлавливаем OCR-мусор,
+  // который прошёл порог MIN_TEXT_LENGTH (200+ символов), но не похож
+  // на УПД. Если мусор — кидаем PdfTextGarbageError, worker сразу
+  // делает Vision-fallback без бесполезного text-LLM вызова.
+  const garbageReason = checkPdfTextQuality(cleanText);
+  if (garbageReason) {
+    throw new PdfTextGarbageError(cleanText.length, garbageReason);
   }
 
   const [provider, prompt] = await Promise.all([

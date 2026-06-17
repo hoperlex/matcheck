@@ -28,6 +28,14 @@ import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { loadActivePromptWithMeta } from '../prompts/registry.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
 import type { ParsePdfResult } from './upd-pdf.parser.js';
+import { pdfToPng } from 'pdf-to-png-converter';
+
+// Лимит страниц при PDF→PNG конвертации (для OpenRouter+PDF).
+// 5 страниц достаточно для большинства реальных УПД (типично 1-2 стр.).
+// Если в проде встретятся УПД с >5 страниц позиций — повышаем константу.
+// Защита от: (1) raw payload size limit OpenRouter; (2) затрат на
+// токены (каждая страница = ~1000+ image tokens).
+const MAX_PAGES_FOR_OPENROUTER = 5;
 
 // JSON Schema ответа Gemini — должна совпадать с UpdPdfParsedSchema в
 // контрактах. Дублирование такое же, как в upd-pdf.parser.ts → если
@@ -131,11 +139,39 @@ export async function parseUpdVision(
         'Используйте Google AI Studio или OpenRouter.',
     );
   }
+  // OpenRouter Vision принимает только image/*, PDF не поддерживается
+  // провайдером. Если пришёл PDF и провайдер OpenRouter — конвертируем
+  // PDF в PNG по страницам через pdf-to-png-converter (pure JS, без
+  // системных зависимостей) и шлём массив image_url одним запросом.
+  // Защита от больших PDF: MAX_PAGES_FOR_OPENROUTER (5 страниц), лишние
+  // страницы пишем в parseErrorDetails.warning, контракт DTO не меняем.
+  let convertedPngPages: Buffer[] | null = null;
+  let truncatedPages = 0;
   if (row.kind === 'openrouter' && mime === 'application/pdf') {
-    throw new Error(
-      'УПД vision через OpenRouter: PDF не поддерживается провайдером. ' +
-        'Переключите default-провайдера на Google AI Studio или загрузите файл как JPG/PNG.',
-    );
+    try {
+      const allPages = await pdfToPng(input.buffer, {
+        // viewportScale=2 даёт ~144 dpi — баланс между качеством OCR
+        // и размером PNG. Меньше теряем символы, больше — payload
+        // упирается в лимит OpenRouter.
+        viewportScale: 2.0,
+        outputFolder: undefined,
+        outputFileMaskFunc: undefined,
+        disableFontFace: true,
+      });
+      if (allPages.length > MAX_PAGES_FOR_OPENROUTER) {
+        truncatedPages = allPages.length - MAX_PAGES_FOR_OPENROUTER;
+      }
+      convertedPngPages = allPages
+        .slice(0, MAX_PAGES_FOR_OPENROUTER)
+        .map((p) => p.content)
+        .filter((b): b is Buffer => b !== undefined);
+    } catch (err) {
+      throw new Error(
+        `УПД vision: PDF→PNG конвертация упала — ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   const [cred] = await db
@@ -176,6 +212,12 @@ export async function parseUpdVision(
       promptTokens = result.promptTokens;
       completionTokens = result.completionTokens;
     } else {
+      // OpenRouter: PDF идёт как массив PNG (см. convertedPngPages выше),
+      // image/* — как единственный image_url.
+      const filesForOpenRouter =
+        convertedPngPages !== null
+          ? convertedPngPages.map((png) => ({ buffer: png, mimeType: 'image/png' }))
+          : [{ buffer: input.buffer, mimeType: mime }];
       const result = await callOpenRouter({
         apiBaseUrl: cred.apiBaseUrl,
         apiKey,
@@ -183,7 +225,7 @@ export async function parseUpdVision(
         temperature: Number(row.temperature ?? 0.2),
         maxTokens: row.maxTokens ?? 8192,
         promptText: promptMeta.content,
-        file: { buffer: input.buffer, mimeType: mime },
+        files: filesForOpenRouter,
       });
       raw = result.raw;
       promptTokens = result.promptTokens;
@@ -223,7 +265,11 @@ export async function parseUpdVision(
         requestMessages: [
           {
             role: 'user',
-            content: `[vision upd: ${input.filename ?? 'no-name'} (${mime}, ${input.buffer.length} bytes)]\n${promptMeta.content.slice(0, 4000)}`,
+            content: `[vision upd: ${input.filename ?? 'no-name'} (${mime}, ${input.buffer.length} bytes${
+              convertedPngPages !== null
+                ? `, pdf→png pages=${convertedPngPages.length}${truncatedPages > 0 ? `, truncated=${truncatedPages}` : ''}`
+                : ''
+            })]\n${promptMeta.content.slice(0, 4000)}`,
           },
         ],
         requestSchema: RESPONSE_JSON_SCHEMA as object,
@@ -241,7 +287,7 @@ export async function parseUpdVision(
   }
 }
 
-type VisionCallArgs = {
+type GeminiCallArgs = {
   apiBaseUrl: string;
   apiKey: string;
   model: string;
@@ -251,13 +297,23 @@ type VisionCallArgs = {
   file: { buffer: Buffer; mimeType: string };
 };
 
+type OpenRouterCallArgs = {
+  apiBaseUrl: string;
+  apiKey: string;
+  model: string;
+  temperature: number;
+  maxTokens: number;
+  promptText: string;
+  files: { buffer: Buffer; mimeType: string }[];
+};
+
 type VisionCallResult = {
   raw: string;
   promptTokens: number | null;
   completionTokens: number | null;
 };
 
-async function callGemini(args: VisionCallArgs): Promise<VisionCallResult> {
+async function callGemini(args: GeminiCallArgs): Promise<VisionCallResult> {
   const parts: Array<{ inline_data: { mime_type: string; data: string } } | { text: string }> = [
     {
       inline_data: {
@@ -300,14 +356,18 @@ async function callGemini(args: VisionCallArgs): Promise<VisionCallResult> {
   };
 }
 
-async function callOpenRouter(args: VisionCallArgs): Promise<VisionCallResult> {
-  const dataUrl = `data:${args.file.mimeType};base64,${args.file.buffer.toString('base64')}`;
+async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCallResult> {
   const content: Array<
     { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
-  > = [
-    { type: 'image_url', image_url: { url: dataUrl } },
-    { type: 'text', text: args.promptText },
-  ];
+  > = [];
+  // Все картинки одним массивом — для многостраничного PDF (после
+  // конвертации) это все страницы сразу, OpenRouter Vision API
+  // поддерживает несколько image_url в одном messages[i].content.
+  for (const f of args.files) {
+    const dataUrl = `data:${f.mimeType};base64,${f.buffer.toString('base64')}`;
+    content.push({ type: 'image_url', image_url: { url: dataUrl } });
+  }
+  content.push({ type: 'text', text: args.promptText });
 
   const body = {
     model: args.model,
