@@ -35,7 +35,7 @@ import {
   PdfNoTextError,
   PdfTextGarbageError,
 } from './domain/edo/upd-pdf.parser.js';
-import { parseUpdVision } from './domain/edo/upd-vision.parser.js';
+import { parseUpdVision, VisionTimeoutError } from './domain/edo/upd-vision.parser.js';
 import { parseUpdXlsx } from './domain/edo/upd-xlsx.parser.js';
 
 // Минимальная уверенность LLM, при которой запускается дедупликация по
@@ -232,10 +232,14 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             llmProviderId = vr.llmProviderId;
             parsedViaVision = true;
           } catch (visionErr) {
-            // Vision не сработал (провайдер не поддерживает PDF /
-            // сетевая ошибка). Не критично: оставляем text-LLM
-            // результат (пустые поля) — документ попадёт в
-            // partial_parse как раньше. Пользователь дополнит руками.
+            // VisionTimeoutError — fail-fast: пробрасываем во внешний
+            // catch, который пометит parse_failed без BullMQ retry.
+            if (visionErr instanceof VisionTimeoutError) {
+              throw visionErr;
+            }
+            // Прочие ошибки (провайдер не поддерживает PDF / сетевые
+            // глюки) — некритично: оставляем text-LLM результат
+            // (пустые поля), документ попадёт в partial_parse.
             log.warn(
               { visionErr },
               'text-LLM empty + vision retry failed — keep partial_parse',
@@ -268,6 +272,12 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             llmProviderId = r.llmProviderId;
             parsedViaVision = true;
           } catch (visionErr) {
+            // VisionTimeoutError — fail-fast: пробрасываем во внешний
+            // catch, который пометит parse_failed без BullMQ retry с
+            // понятной причиной reason='vision_timeout'.
+            if (visionErr instanceof VisionTimeoutError) {
+              throw visionErr;
+            }
             // Vision тоже не справился (провайдер не поддерживает PDF —
             // например, OpenRouter, или сетевая ошибка). Помечаем
             // parse_failed без retry — на тот же файл retry бесполезен.
@@ -298,6 +308,40 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       }
     }
   } catch (err) {
+    // VisionTimeoutError — fail-fast: помечаем parse_failed СРАЗУ, без
+    // BullMQ retries. По умолчанию queue имеет attempts=3 с exponential
+    // backoff 60с, что при VISION_TIMEOUT_MS=180с дало бы пользователю
+    // 3+1+3+2+3=12 минут ожидания. После таймаута на тот же payload
+    // повторно запрашивать ту же модель бессмысленно — либо она опять
+    // не успеет, либо у неё проблема с этим контентом. Пользователь
+    // получит понятную ошибку и сможет переключить default-модель в
+    // админке или загрузить файл как JPG/PNG (image-flow быстрее).
+    // parseErrorCode='pdf_no_text' — переиспользуем существующий код
+    // из контрактного enum (vision_timeout не добавляем, чтобы не
+    // менять @matcheck/contracts). UI уже умеет показывать pdf_no_text,
+    // подробности — в parseErrorDetails.reason='vision_timeout'.
+    if (err instanceof VisionTimeoutError) {
+      await db
+        .update(sourceDocuments)
+        .set({
+          status: 'parse_failed',
+          parseErrorCode: 'pdf_no_text',
+          parseErrorDetails: {
+            reason: 'vision_timeout',
+            elapsedMs: err.elapsedMs,
+            message: err.message,
+          },
+          processedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceDocuments.id, sourceDocumentId));
+      log.warn(
+        { elapsedMs: err.elapsedMs },
+        'vision timeout — marked parse_failed without retry',
+      );
+      await notifySourceDocumentUpdated(sourceDocumentId);
+      return;
+    }
     log.error({ err }, 'parse failed, will retry');
     throw err;
   }

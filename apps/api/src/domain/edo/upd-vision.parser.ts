@@ -37,6 +37,53 @@ import { pdfToPng } from 'pdf-to-png-converter';
 // токены (каждая страница = ~1000+ image tokens).
 const MAX_PAGES_FOR_OPENROUTER = 5;
 
+// Vision LLM timeout — 180 сек.
+// Уменьшен с 600 сек (10 мин) после проблемы зависания на
+// google/gemini-3-flash-preview: preview-модели на OpenRouter могут
+// надолго подвисать на тяжёлых payload'ах (>2 MB base64). 3 минуты
+// — баланс: достаточно чтобы успеть на нормальный запрос, но даёт
+// быстрый parse_failed с понятной ошибкой timeout, а не «крутит 10
+// минут». Если упрётся в таймаут — worker помечает документ
+// parse_failed и пользователь может либо переключить default-модель
+// на qwen3.6-plus, либо загрузить как JPG/PNG (image-flow быстрее).
+const VISION_TIMEOUT_MS = 180_000;
+
+// viewportScale при рендере PDF в PNG.
+// 1.5 = ~108 dpi — баланс между качеством распознавания и размером
+// payload. Выше (2.0) даёт более чёткое изображение, но PNG в 1.8x
+// больше → preview-модели через OpenRouter могут не успеть в timeout.
+// При необходимости поднимаем до 2.0 для очень мелких документов.
+const PDF_RENDER_SCALE = 1.5;
+
+// Специальный класс для Vision-timeout'а: worker ловит его отдельно
+// и помечает parse_failed СРАЗУ, без BullMQ retries. Без этого
+// при VISION_TIMEOUT_MS=180с и attempts=3 пользователь ждал бы
+// 3+1+3+2+3 = 12 минут (3 timeouts + backoff 60с×1 + 60с×2 между
+// попытками). После timeout повторно запрашивать ту же модель на тот
+// же payload бессмысленно — она либо опять не успеет, либо у неё
+// проблема с этим контентом. Лучше показать пользователю понятную
+// ошибку и предложить альтернативу (другая модель / другой формат).
+export class VisionTimeoutError extends Error {
+  constructor(public readonly elapsedMs: number) {
+    super(
+      `Vision LLM не ответил за ${Math.round(elapsedMs / 1000)}с. ` +
+        'Попробуйте загрузить файл как JPG/PNG (быстрее) ' +
+        'или переключить default-модель в Администрировании → LLM провайдеры.',
+    );
+    this.name = 'VisionTimeoutError';
+  }
+}
+
+// Преобразует «таймаут» fetch (AbortError от AbortSignal.timeout) в
+// VisionTimeoutError. Прочие ошибки прокидывает как есть — они получат
+// обычный retry от BullMQ (например, временный 5xx OpenRouter).
+function rethrowVisionTimeout(err: unknown, startMs: number): never {
+  if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+    throw new VisionTimeoutError(Date.now() - startMs);
+  }
+  throw err instanceof Error ? err : new Error(String(err));
+}
+
 // JSON Schema ответа Gemini — должна совпадать с UpdPdfParsedSchema в
 // контрактах. Дублирование такое же, как в upd-pdf.parser.ts → если
 // контракт расширяется, оба места обновлять синхронно.
@@ -150,10 +197,8 @@ export async function parseUpdVision(
   if (row.kind === 'openrouter' && mime === 'application/pdf') {
     try {
       const allPages = await pdfToPng(input.buffer, {
-        // viewportScale=2 даёт ~144 dpi — баланс между качеством OCR
-        // и размером PNG. Меньше теряем символы, больше — payload
-        // упирается в лимит OpenRouter.
-        viewportScale: 2.0,
+        // См. константу PDF_RENDER_SCALE — баланс качества и размера.
+        viewportScale: PDF_RENDER_SCALE,
         outputFolder: undefined,
         outputFileMaskFunc: undefined,
         disableFontFace: true,
@@ -335,12 +380,18 @@ async function callGemini(args: GeminiCallArgs): Promise<VisionCallResult> {
   };
   const url = `${args.apiBaseUrl.replace(/\/$/, '')}/v1beta/models/${args.model}:generateContent?key=${encodeURIComponent(args.apiKey)}`;
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(600_000),
-  });
+  const startMs = Date.now();
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
+    });
+  } catch (err) {
+    rethrowVisionTimeout(err, startMs);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`Gemini vision HTTP ${res.status}: ${text.slice(0, 500)}`);
@@ -378,17 +429,23 @@ async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCallResul
   };
 
   const url = `${args.apiBaseUrl.replace(/\/$/, '')}/chat/completions`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${args.apiKey}`,
-      'HTTP-Referer': 'https://matcheck.local',
-      'X-Title': 'matcheck',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(600_000),
-  });
+  const startMs = Date.now();
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${args.apiKey}`,
+        'HTTP-Referer': 'https://matcheck.local',
+        'X-Title': 'matcheck',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
+    });
+  } catch (err) {
+    rethrowVisionTimeout(err, startMs);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`OpenRouter vision HTTP ${res.status}: ${text.slice(0, 500)}`);
