@@ -6,6 +6,7 @@ import { SyncDeltaResponseSchema } from '@matcheck/contracts';
 import {
   assets,
   counterparties,
+  customerCounterparties,
   deliveries,
   deliveryItems,
   deliveryPhotos,
@@ -170,6 +171,42 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             .where(sql_in(users.id, sdCreatorIds))
         : [];
       const sdCreatorById = new Map(sdCreators.map((u) => [u.id, u]));
+
+      // Имена поставщика / подрядчика для отображения на мобиле в списке
+      // УПД (см. IntakeUpdSelectScreen.kt: subtitle = "Поставщик: ${row.supplierName ?: "—"}").
+      // До этого фикса бэк отдавал только supplierId/contractorId, а в массиве
+      // counterparties /sync customer_counterparties (справочник «Поставщики»)
+      // вообще не возвращался — мобильный fallback по counterparties[id]
+      // промахивался, и инспектор видел «—».
+      //
+      // Логика как в /source-documents list ([source-documents.ts:527]):
+      // supplierName = COALESCE(customer_counterparties.name, counterparties.name).
+      // contractorName = counterparties.name. Никаких JOIN'ов в основном
+      // запросе sdRows — отдельные SELECT'ы по уникальным UUID'ам:
+      // дешевле для drizzle, не меняет тип sdRows, легко откатить.
+      const sdSupplierIds = Array.from(
+        new Set(sdRows.map((r) => r.supplierId).filter((v): v is string => !!v)),
+      );
+      const sdContractorIds = Array.from(
+        new Set(sdRows.map((r) => r.contractorId).filter((v): v is string => !!v)),
+      );
+      const supplierDirRows = sdSupplierIds.length
+        ? await app.db
+            .select({ id: customerCounterparties.id, name: customerCounterparties.name })
+            .from(customerCounterparties)
+            .where(sql_in(customerCounterparties.id, sdSupplierIds))
+        : [];
+      const supplierDirById = new Map(supplierDirRows.map((r) => [r.id, r.name]));
+      // Один SELECT на counterparties по объединённому списку — supplier-id
+      // (для fallback'а COALESCE) и contractor-id (основной источник).
+      const cpLookupIds = Array.from(new Set([...sdSupplierIds, ...sdContractorIds]));
+      const cpLookupRows = cpLookupIds.length
+        ? await app.db
+            .select({ id: counterparties.id, name: counterparties.name })
+            .from(counterparties)
+            .where(sql_in(counterparties.id, cpLookupIds))
+        : [];
+      const cpNameById = new Map(cpLookupRows.map((r) => [r.id, r.name]));
 
       // Инспектор видит всё в рамках своего объекта (включая записи других
       // инспекторов на том же siteId) — синхронизировано с GET /deliveries,
@@ -406,14 +443,25 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         })),
         sourceDocuments: sdRows.map((sd) => {
           const creator = sd.createdByUserId ? sdCreatorById.get(sd.createdByUserId) : null;
+          // COALESCE-логика как в веб-портале (/source-documents list):
+          // приоритет — справочник «Поставщики» (customer_counterparties),
+          // fallback — operational counterparties.
+          const supplierName =
+            (sd.supplierId &&
+              (supplierDirById.get(sd.supplierId) ?? cpNameById.get(sd.supplierId))) ||
+            null;
+          const contractorName =
+            (sd.contractorId && cpNameById.get(sd.contractorId)) || null;
           return {
           id: sd.id,
           kind: sd.kind,
           direction: sd.direction,
           status: sd.status,
           supplierId: sd.supplierId,
+          supplierName,
           recipientId: sd.recipientId,
           contractorId: sd.contractorId,
+          contractorName,
           recipientMolId: sd.recipientMolId,
           siteId: sd.siteId,
           docNumber: sd.docNumber,
