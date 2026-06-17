@@ -72,6 +72,14 @@ export default function OperationsPage() {
     setParams(next, { replace: true });
   };
 
+  // При смене type (Приёмка/Отгрузка) или tab (Ожидаемые/Принятые)
+  // сбрасываем ?page=N — иначе пользователь окажется на стр.7 нового
+  // раздела с total<350 и пустым экраном. Симметрично с тем, как
+  // DeliveriesHistory/ShipmentsHistory сбрасывают page при смене фильтра.
+  const updateUrlResetPage = (patch: Record<string, string | null>) => {
+    updateUrl({ ...patch, page: null });
+  };
+
   const trashOn = params.get('trash') === '1';
   const isAdminUser = authUser?.role === 'admin';
   const trashSwitchVisible = tab === 'accepted' && isAdminUser;
@@ -303,7 +311,7 @@ export default function OperationsPage() {
             <Tabs
               size="large"
               activeKey={type}
-              onChange={(k) => updateUrl({ type: k })}
+              onChange={(k) => updateUrlResetPage({ type: k })}
               items={[
                 {
                   key: 'delivery',
@@ -328,7 +336,7 @@ export default function OperationsPage() {
             <PageTabs
               items={listTabs}
               activeKey={tab}
-              onChange={(k) => updateUrl({ tab: k })}
+              onChange={(k) => updateUrlResetPage({ tab: k })}
               extra={
                 counters.data && (counters.data.inProgressToday > 0 || counters.data.overdue > 0) ? (
                   <Space size={8} style={{ marginLeft: 40 }}>

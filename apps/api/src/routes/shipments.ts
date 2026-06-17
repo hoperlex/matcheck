@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, gte, inArray, isNotNull, isNull, ne, or, sql as drSql } from 'drizzle-orm';
+import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, ne, or, sql as drSql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
@@ -17,6 +17,7 @@ import {
 } from '@matcheck/contracts';
 import {
   counterparties,
+  customerCounterparties,
   entityDeletions,
   shipments,
   shipmentItems,
@@ -47,9 +48,102 @@ const ListQuerySchema = z.object({
   // Фильтр по наличию привязанной УПД: true — только без документа,
   // false — только с документом, undefined — без фильтра.
   noDocument: z.coerce.boolean().optional(),
+  // ─── server-side фильтры из /operations?type=shipment&tab=accepted ──
+  // CSV id из заказчиковских справочников. Логика парсинга и ИНН-маппинга
+  // симметрична deliveries.ts (см. там подробный комментарий).
+  contractorIds: z.string().optional(),
+  supplierIds: z.string().optional(),
+  siteIds: z.string().optional(),
+  // Поиск по номеру привязанного документа.
+  q: z.string().optional(),
+  // Поиск по госномеру.
+  plate: z.string().optional(),
+  // Признаки отгрузки, AND: transit, assets, upd, waybill.
+  features: z.string().optional(),
+  // Типы отгрузки, OR между выбранными. Передаются как csv. Значения —
+  // русские строки из PURPOSE_VALUES (Вывоз материала / Перемещение / ...).
+  purposes: z.string().optional(),
+  // Диапазон даты отправки (shipped_at).
+  shippedFrom: z.string().datetime().optional(),
+  shippedTo: z.string().datetime().optional(),
+  // ?nophoto=1 — deep-link «Без фото».
+  nophoto: z.coerce.boolean().optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
+
+// ─── Helpers для server-side фильтров (симметрично deliveries.ts) ──────
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function parseUuidCsv(s: string | undefined): string[] {
+  if (!s) return [];
+  return s.split(',').map((v) => v.trim()).filter((v) => UUID_RE.test(v));
+}
+
+function parseCsv(s: string | undefined): string[] {
+  if (!s) return [];
+  return s.split(',').map((v) => v.trim()).filter(Boolean);
+}
+
+const KNOWN_FEATURES = new Set(['transit', 'assets', 'upd', 'waybill']);
+const KNOWN_PURPOSES = new Set([
+  'Вывоз материала',
+  'Перемещение на объект',
+  'Вывоз мусора',
+  'Другое',
+]);
+
+// См. одноимённые функции в deliveries.ts. Дублируем здесь чтобы не
+// плодить shared/-модули ради двух 20-строчных хелперов; общий шаблон
+// expansionDirToOpIds потом легко вынести при появлении 3-го потребителя.
+async function expandCustomerCounterpartyToOpIds(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: any,
+  directoryIds: string[],
+): Promise<string[]> {
+  if (directoryIds.length === 0) return [];
+  const rows = await app.db
+    .select({ id: counterparties.id })
+    .from(counterparties)
+    .innerJoin(
+      customerCounterparties,
+      drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g')
+          = regexp_replace(coalesce(${customerCounterparties.inn}, ''), '[^0-9]', '', 'g')`,
+    )
+    .where(
+      and(
+        inArray(customerCounterparties.id, directoryIds),
+        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') != ''`,
+        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') !~ '^0+$'`,
+      ),
+    );
+  return rows.map((r: { id: string }) => r.id);
+}
+
+async function expandSupplierToOpIds(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: any,
+  directoryIds: string[],
+): Promise<string[]> {
+  if (directoryIds.length === 0) return [];
+  const rows = await app.db
+    .select({ id: counterparties.id })
+    .from(counterparties)
+    .innerJoin(
+      suppliers,
+      drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g')
+          = regexp_replace(coalesce(${suppliers.inn}, ''), '[^0-9]', '', 'g')`,
+    )
+    .where(
+      and(
+        inArray(suppliers.id, directoryIds),
+        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') != ''`,
+        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') !~ '^0+$'`,
+      ),
+    );
+  return rows.map((r: { id: string }) => r.id);
+}
 
 // Статусы, при которых разрешён hard-delete без предварительной пометки.
 const HARD_DELETE_STATUSES = new Set(['draft', 'not_filled']);
@@ -210,7 +304,24 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: { querystring: ListQuerySchema, response: { 200: ShipmentListResponseSchema } },
     },
     async (req) => {
-      const { status, kind, siteId, inspectorId, changedSince, trash, noDocument, limit, offset } = req.query;
+      const {
+        status, kind, siteId, inspectorId, changedSince, trash, noDocument,
+        contractorIds: contractorIdsCsv,
+        supplierIds: supplierIdsCsv,
+        siteIds: siteIdsCsv,
+        q, plate,
+        features: featuresCsv,
+        purposes: purposesCsv,
+        shippedFrom, shippedTo, nophoto,
+        limit, offset,
+      } = req.query;
+
+      const contractorDirIds = parseUuidCsv(contractorIdsCsv);
+      const supplierDirIds = parseUuidCsv(supplierIdsCsv);
+      const siteIdsArr = parseUuidCsv(siteIdsCsv);
+      const featureCodes = parseCsv(featuresCsv).filter((f) => KNOWN_FEATURES.has(f));
+      const purposesArr = parseCsv(purposesCsv).filter((p) => KNOWN_PURPOSES.has(p));
+
       const filters = [];
       filters.push(
         trash ? isNotNull(shipments.pendingDeletionAt) : isNull(shipments.pendingDeletionAt),
@@ -247,6 +358,106 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         );
       }
       if (changedSince) filters.push(gte(shipments.updatedAt, new Date(changedSince)));
+
+      // ─── server-side фильтры из /operations?type=shipment&tab=accepted ─
+      // Логика 1-в-1 с клиентом ShipmentsHistory.tsx → filteredItems. См.
+      // там же комментарии. ВАЖНО: в shipments FK подрядчика — это
+      // receiver_counterparty_id (а не contractor_id как в deliveries),
+      // здесь inheritance из source_document НЕ применяется (на клиенте
+      // тоже без inheritance).
+
+      // siteIds (multi-select)
+      if (siteIdsArr.length > 0) {
+        filters.push(inArray(shipments.siteId, siteIdsArr));
+      }
+
+      // contractorIds: directory ID → operational ID через ИНН-маппинг.
+      // Подрядчик в shipments — это получатель (receiver_counterparty_id).
+      if (contractorDirIds.length > 0) {
+        const opIds = await expandCustomerCounterpartyToOpIds(app, contractorDirIds);
+        if (opIds.length === 0) {
+          filters.push(drSql`false`);
+        } else {
+          filters.push(inArray(shipments.receiverCounterpartyId, opIds));
+        }
+      }
+
+      // supplierIds: directory ID → operational ID через справочник suppliers.
+      if (supplierDirIds.length > 0) {
+        const opIds = await expandSupplierToOpIds(app, supplierDirIds);
+        if (opIds.length === 0) {
+          filters.push(drSql`false`);
+        } else {
+          filters.push(inArray(shipments.supplierId, opIds));
+        }
+      }
+
+      // q: поиск по номеру привязанного source_document.
+      if (q?.trim()) {
+        const needle = `%${q.trim()}%`;
+        filters.push(drSql`EXISTS (
+          SELECT 1 FROM shipment_sources ss_q
+          JOIN source_documents sd_q ON sd_q.id = ss_q.source_document_id
+          WHERE ss_q.shipment_id = ${shipments.id}
+            AND sd_q.doc_number ILIKE ${needle}
+        )`);
+      }
+
+      // plate: ILIKE на госномер.
+      if (plate?.trim()) {
+        filters.push(ilike(shipments.vehiclePlate, `%${plate.trim()}%`));
+      }
+
+      // purposes: OR между выбранными (легаси отгрузки без purpose не
+      // попадают ни в один выбранный тип — это совпадает с клиентским
+      // поведением «purpose=null → не отображается под фильтром»).
+      if (purposesArr.length > 0) {
+        filters.push(inArray(shipments.purpose, purposesArr));
+      }
+
+      // features (AND):
+      //   transit → in_transit = true
+      //   assets  → is_assets = true OR EXISTS shipment_items.item_kind='asset'
+      //   upd     → EXISTS source_document.kind='upd'
+      //   waybill → EXISTS source_document.kind IN ('transport_waybill','os2_transfer')
+      for (const f of featureCodes) {
+        if (f === 'transit') {
+          filters.push(eq(shipments.inTransit, true));
+        } else if (f === 'assets') {
+          filters.push(drSql`(
+            ${shipments.isAssets} = true
+            OR EXISTS (
+              SELECT 1 FROM shipment_items si_a
+              WHERE si_a.shipment_id = ${shipments.id} AND si_a.item_kind = 'asset'
+            )
+          )`);
+        } else if (f === 'upd') {
+          filters.push(drSql`EXISTS (
+            SELECT 1 FROM shipment_sources ss_u
+            JOIN source_documents sd_u ON sd_u.id = ss_u.source_document_id
+            WHERE ss_u.shipment_id = ${shipments.id} AND sd_u.kind = 'upd'
+          )`);
+        } else if (f === 'waybill') {
+          filters.push(drSql`EXISTS (
+            SELECT 1 FROM shipment_sources ss_w
+            JOIN source_documents sd_w ON sd_w.id = ss_w.source_document_id
+            WHERE ss_w.shipment_id = ${shipments.id}
+              AND sd_w.kind IN ('transport_waybill', 'os2_transfer')
+          )`);
+        }
+      }
+
+      // shippedFrom / shippedTo — диапазон даты отправки.
+      if (shippedFrom) filters.push(gte(shipments.shippedAt, new Date(shippedFrom)));
+      if (shippedTo) filters.push(drSql`${shipments.shippedAt} < ${new Date(shippedTo)}`);
+
+      // nophoto: нет связанных фото.
+      if (nophoto) {
+        filters.push(drSql`NOT EXISTS (
+          SELECT 1 FROM shipment_photos sp WHERE sp.shipment_id = ${shipments.id}
+        )`);
+      }
+
       const where = filters.length ? and(...filters) : undefined;
 
       const rows = await app.db

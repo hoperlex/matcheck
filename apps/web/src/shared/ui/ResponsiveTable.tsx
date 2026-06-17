@@ -42,6 +42,7 @@ export function ResponsiveTable<T extends object>({
   emptyText,
   onRowClick,
   numbered,
+  numberedOffset,
   rowSelection,
   expandable,
   rowClassName,
@@ -58,6 +59,10 @@ export function ResponsiveTable<T extends object>({
   // (в пределах текущей страницы пагинации), а в карточном режиме
   // перед содержимым карточки выводится «N.».
   numbered?: boolean;
+  // Базовый offset для нумерации при server-side pagination. На
+  // странице 2 (offset=50) нумерация должна начинаться с 51, а не с 1.
+  // Если не задан — нумерация в рамках принятого items (старое поведение).
+  numberedOffset?: number;
   // Необязательный antd rowSelection для массового выбора строк
   // (см. useBulkSelection). В карточном (mobile) режиме игнорируется.
   rowSelection?: TableProps<T>['rowSelection'];
@@ -126,8 +131,10 @@ export function ResponsiveTable<T extends object>({
           // отсортированной таблице. Иначе после DESC-сортировки первая
           // строка получала бы «1» вместо ожидаемых «N, N-1, …» — теряется
           // визуальная подсказка «куда уехала именно эта запись».
+          // При server-side pagination передаётся numberedOffset = (page-1)*pageSize
+          // — тогда на странице 2 первая строка получит номер 51, не 1.
           render: (_: unknown, record: T) =>
-            (originalIndex.get(getRowKey(record)) ?? -1) + 1,
+            (numberedOffset ?? 0) + (originalIndex.get(getRowKey(record)) ?? -1) + 1,
         }),
         ...columns.map(decorate),
       ]
@@ -186,7 +193,7 @@ export function ResponsiveTable<T extends object>({
           {numbered ? (
             <Space align="start" style={{ width: '100%' }}>
               <Typography.Text type="secondary" style={{ minWidth: 24 }}>
-                {idx + 1}.
+                {(numberedOffset ?? 0) + idx + 1}.
               </Typography.Text>
               <div style={{ flex: 1, minWidth: 0 }}>{cardRender(item)}</div>
             </Space>

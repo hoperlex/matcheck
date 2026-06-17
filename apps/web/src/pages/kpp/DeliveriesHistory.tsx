@@ -55,10 +55,8 @@ import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
-import {
-  buildInnMatchMap,
-  expandDirectoryIdsToOperational,
-} from '../../shared/utils/directoryFilterMap';
+// directoryFilterMap (ИНН-маппинг customer_counterparties → operational
+// counterparties) больше не нужен — фильтрация переехала на сервер.
 import {
   FEATURE_VALUES,
   ShipmentFeatureFilters,
@@ -238,10 +236,63 @@ export function DeliveriesHistory({
   // setView был выпилен — переключатель «Удалённые» теперь живёт в шапке
   // KppPage. Здесь читаем только URL для запроса /deliveries?trash=1.
 
+  // ─── server-side pagination ─────────────────────────────────────────
+  // page хранится в URL (?page=N) — переживает F5, можно share by link.
+  // pageSize фиксированный 50 (см. ETAP 1 в plan-discussion). Стрелки
+  // сортировки в колонках убраны: серверный ORDER BY displayId DESC
+  // не должен спорить с visual hint «можно отсортировать»; на серверной
+  // пагинации клиентская сортировка в рамках страницы стала бы
+  // UX-ловушкой.
+  const PAGE_SIZE = 50;
+  const pageRaw = Number.parseInt(params.get('page') ?? '1', 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+  const setPage = (next: number) => {
+    const np = new URLSearchParams(params);
+    if (next <= 1) np.delete('page');
+    else np.set('page', String(next));
+    setParams(np, { replace: true });
+  };
+  const offset = (page - 1) * PAGE_SIZE;
+
+  // queryKey включает ВСЕ параметры, влияющие на серверный фильтр и
+  // пагинацию. При смене любого — React Query делает новый запрос,
+  // existing invalidateQueries({ queryKey: ['deliveries'] }) по префиксу
+  // продолжит работать.
+  const listQueryKey = [
+    'deliveries',
+    view,
+    page,
+    PAGE_SIZE,
+    {
+      contractor: filters.contractorIds.join(','),
+      supplier: filters.supplierIds.join(','),
+      site: filters.siteIds.join(','),
+      q: filters.q,
+      plate: filters.plate,
+      features: filters.features.join(','),
+      status: filters.status,
+      nophoto: filters.nophoto,
+    },
+  ] as const;
   const list = useQuery({
-    queryKey: ['deliveries', view],
-    queryFn: () =>
-      api.get<List>(view === 'trash' ? '/deliveries?trash=1' : '/deliveries'),
+    queryKey: listQueryKey,
+    queryFn: () => {
+      const qs = new URLSearchParams();
+      qs.set('limit', String(PAGE_SIZE));
+      qs.set('offset', String(offset));
+      if (view === 'trash') qs.set('trash', '1');
+      if (filters.contractorIds.length) qs.set('contractorIds', filters.contractorIds.join(','));
+      if (filters.supplierIds.length) qs.set('supplierIds', filters.supplierIds.join(','));
+      if (filters.siteIds.length) qs.set('siteIds', filters.siteIds.join(','));
+      if (filters.q.trim()) qs.set('q', filters.q.trim());
+      if (filters.plate.trim()) qs.set('plate', filters.plate.trim());
+      if (filters.features.length) qs.set('features', filters.features.join(','));
+      if (filters.nophoto) qs.set('nophoto', '1');
+      // status=no_document — псевдо-значение, мапится на server-side noDocument=true.
+      if (filters.status === 'no_document') qs.set('noDocument', 'true');
+      else if (filters.status) qs.set('status', filters.status);
+      return api.get<List>(`/deliveries?${qs.toString()}`);
+    },
     placeholderData: keepPreviousData,
   });
 
@@ -450,25 +501,10 @@ export function DeliveriesHistory({
       })),
     [suppliersQuery.data],
   );
-  // Маппинг «id справочника → set операционных counterparties.id с тем
-  // же нормализованным ИНН». Через этот маппинг фильтр находит реальные
-  // FK операций. См. apps/web/src/shared/utils/directoryFilterMap.ts.
-  const contractorInnMap = useMemo(
-    () =>
-      buildInnMatchMap(
-        customerCounterpartiesQuery.data?.items ?? [],
-        counterpartiesQuery.data?.items ?? [],
-      ),
-    [customerCounterpartiesQuery.data, counterpartiesQuery.data],
-  );
-  const supplierInnMap = useMemo(
-    () =>
-      buildInnMatchMap(
-        suppliersQuery.data?.items ?? [],
-        counterpartiesQuery.data?.items ?? [],
-      ),
-    [suppliersQuery.data, counterpartiesQuery.data],
-  );
+  // Раньше тут было buildInnMatchMap клиента — теперь ИНН-маппинг
+  // делает сервер в /deliveries (см. expandCustomerCounterpartyToOpIds
+  // в apps/api/src/routes/deliveries.ts). На клиенте остался только
+  // counterpartiesMap (для отображения имён в колонках), его строим выше.
 
   const resolveContractor = (r: Row): { id: string | null; inherited: boolean } => {
     if (r.contractorId) return { id: r.contractorId, inherited: false };
@@ -532,80 +568,21 @@ export function DeliveriesHistory({
     return opts;
   }, [items]);
 
-  // Разворачиваем выбранные id справочников в множество операционных
-  // counterparties.id, по которым реально нужно сверять FK операций.
-  // Пустой Set означает «у выбранных справочных записей нет соответствий
-  // в counterparties по ИНН» → filteredItems вернёт пустой список, что
-  // корректно (никакой подделки данных не происходит).
-  const contractorOperationalIds = useMemo(
-    () => expandDirectoryIdsToOperational(filters.contractorIds, contractorInnMap),
-    [filters.contractorIds, contractorInnMap],
-  );
-  const supplierOperationalIds = useMemo(
-    () => expandDirectoryIdsToOperational(filters.supplierIds, supplierInnMap),
-    [filters.supplierIds, supplierInnMap],
-  );
-
-  const filteredItems = useMemo(() => {
-    return items.filter((r) => {
-      const c = resolveContractor(r);
-      const s = resolveSite(r);
-      if (filters.contractorIds.length > 0 && (!c.id || !contractorOperationalIds.has(c.id))) return false;
-      if (filters.supplierIds.length > 0 && (!r.supplierId || !supplierOperationalIds.has(r.supplierId))) return false;
-      if (filters.siteIds.length > 0 && (!s.id || !filters.siteIds.includes(s.id))) return false;
-      if (filters.status === 'no_document') {
-        if (r.sourceDocumentIds.length !== 0) return false;
-      } else if (filters.status && r.status.code !== filters.status) {
-        return false;
-      }
-      // ?nophoto=1 — deep-link из дашборда «Статистика» (counter «Без фото»).
-      // UI-кнопки в списке для этого фильтра нет; сбросить можно очисткой
-      // URL-параметра или переходом по другой ссылке.
-      if (filters.nophoto && (r.photos?.length ?? 0) !== 0) return false;
-      if (filters.plate.trim() && !matchText(r.vehiclePlate, filters.plate)) return false;
-      if (filters.q.trim()) {
-        const docNum = resolveDocNumber(r);
-        if (!matchText(docNum, filters.q)) return false;
-      }
-      // «Признаки» — AND между выбранными. Симметрично с ShipmentsHistory:
-      //   transit  → delivery.in_transit (мобила, 1-й этап приёмки)
-      //   assets   → delivery.is_assets ИЛИ items.some(item_kind='asset')
-      //   upd      → есть привязанный source_document с kind='upd'
-      //   waybill  → есть привязанный source_document с kind='transport_waybill'
-      //              или 'os2_transfer' (ТТН / ОС-2)
-      for (const f of filters.features) {
-        if (f === 'transit' && !r.inTransit) return false;
-        if (f === 'assets') {
-          const hasAsset =
-            r.isAssets || r.items.some((it) => it.itemKind === 'asset');
-          if (!hasAsset) return false;
-        }
-        if (f === 'upd' || f === 'waybill') {
-          const has = r.sourceDocumentIds.some((id) => {
-            const sd = sourceDocsById.get(id);
-            if (!sd) return false;
-            if (f === 'upd') return sd.kind === 'upd';
-            return sd.kind === 'transport_waybill' || sd.kind === 'os2_transfer';
-          });
-          if (!has) return false;
-        }
-      }
-      return true;
-    });
-  }, [
-    items,
-    sourceDocsById,
-    filters.contractorIds,
-    filters.supplierIds,
-    filters.siteIds,
-    filters.status,
-    filters.plate,
-    filters.q,
-    filters.features,
-    filters.nophoto,
-    contractorOperationalIds,
-    supplierOperationalIds,
-  ]);
+  // Клиентская filteredItems удалена — фильтрация полностью на сервере
+  // (см. apps/api/src/routes/deliveries.ts: contractorIds/supplierIds/
+  // siteIds/q/plate/features/nophoto/status в WHERE). items, что пришёл
+  // из API уже отфильтрован и ограничен 50 строками текущей страницы.
+  //
+  // При смене любого фильтра — сбрасываем page=1 и selection (иначе
+  // пользователь может «удалить выбранные строки» на странице 7,
+  // забыв что они с прошлой выборки). useEffect ниже отслеживает
+  // комбинированный ключ фильтров.
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${view}`;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (page !== 1) setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey]);
 
   // Возвращает блок кнопок действий в зависимости от вкладки, статуса и прав.
   const renderActions = (r: Row) => {
@@ -913,7 +890,7 @@ export function DeliveriesHistory({
       }
     >
       <ResponsiveTable<Row>
-        items={filteredItems}
+        items={items}
         loading={list.isLoading}
         rowKey="id"
         rowSelection={isAdmin || !isTrash ? bulk.selection : undefined}
@@ -922,13 +899,31 @@ export function DeliveriesHistory({
         rowClassName={(r) =>
           operationsRowClass({ statusCode: r.status.code, dateIso: r.arrivedAt })
         }
+        numberedOffset={offset}
         pagination={{
-          // showTotal рендерится antd'ом слева от номеров страниц — кладём
-          // туда легенду цветов подсветки строк, чтобы пользователь видел
-          // расшифровку прямо на той же линии что и пагинация.
+          // Server-side controlled: current/pageSize/total — антд сам
+          // рендерит 1, 2, ... N. При смене страницы вызываем setPage,
+          // queryFn делает новый запрос с offset=(page-1)*PAGE_SIZE.
+          // Bulk-selection чистим при смене страницы — пользователь не
+          // должен случайно удалить «невидимые» выбранные строки.
+          current: page,
+          pageSize: PAGE_SIZE,
+          total: list.data?.total ?? 0,
+          showSizeChanger: false,
+          onChange: (next) => {
+            bulk.clear();
+            setPage(next);
+          },
           showTotal: () => <OperationsRowLegend />,
         }}
         columns={[
+          // ─── sorter/dateRangeColumnFilter из колонок удалены ───
+          // Server-side pagination несовместима с клиентской сортировкой
+          // в рамках одной страницы (UX-ловушка «отсортировал только то
+          // что вижу»). Бэк всегда возвращает ORDER BY displayId DESC
+          // — свежие сверху. Фильтр по диапазону даты прибытия будет
+          // добавлен отдельным UI-элементом (params: arrivedFrom/arrivedTo
+          // уже принимаются сервером).
           {
             // Короткий человекочитаемый id — серверный авто-возрастающий
             // displayId (см. миграцию 0059). Помогает быстро находить
@@ -938,49 +933,29 @@ export function DeliveriesHistory({
             key: 'displayId',
             width: 80,
             dataIndex: 'displayId',
-            sorter: numberSorter<Row>((r) => r.displayId),
           },
           {
             title: 'Статус',
             key: 'status',
-            // По «требует внимания»: draft/not_filled → filled →
-            // confirmed_mol → archived. Активные сверху.
-            sorter: prioritySorter<Row, string>(
-              (r) => r.status.code,
-              ['draft', 'not_filled', 'filled', 'confirmed_mol', 'archived'],
-            ),
             render: (_: unknown, r: Row) => renderStatusCell(r),
           },
           {
             title: 'Авто',
             dataIndex: 'vehiclePlate',
-            sorter: stringSorter<Row>((r) => r.vehiclePlate),
           },
           {
             title: 'Прибытие',
             dataIndex: 'arrivedAt',
-            // defaultSortOrder убран: при перемонтировке сортировка
-            // навязывалась принудительно. /deliveries отдаёт записи по
-            // updated_at desc — свежие сверху и без явной сортировки.
-            sorter: dateSorter<Row>((r) => r.arrivedAt),
-            ...dateRangeColumnFilter<Row>((r) => r.arrivedAt),
             render: (v: string | null) => formatArrival(v),
           },
           {
             title: 'Поставщик',
             key: 'supplier',
-            sorter: stringSorter<Row>((r) =>
-              r.supplierId ? counterpartiesMap.get(r.supplierId) ?? null : null,
-            ),
             render: (_: unknown, r: Row) => supplierName(r.supplierId),
           },
           {
             title: 'Подрядчик',
             key: 'contractor',
-            sorter: stringSorter<Row>((r) => {
-              const { id } = resolveContractor(r);
-              return id ? counterpartiesMap.get(id) ?? null : null;
-            }),
             render: (_: unknown, r: Row) => renderContractor(r),
           },
           {
@@ -991,17 +966,12 @@ export function DeliveriesHistory({
             // наведении — см. renderSite. Единое поведение во всех 4
             // таблицах раздела «Операции».
             ellipsis: { showTitle: false },
-            sorter: stringSorter<Row>((r) => {
-              const { id } = resolveSite(r);
-              return id ? sitesMap.get(id) ?? null : null;
-            }),
             render: (_: unknown, r: Row) => renderSite(r),
           },
           {
             title: 'Фото',
             key: 'photos',
             width: 80,
-            sorter: numberSorter<Row>((r) => r.photos?.length ?? 0),
             // Суммарное количество фото обоих этапов (stage='before' + 'after').
             // r.photos уже агрегирован сервером — отдельно по stage не считаем.
             render: (_: unknown, r: Row) => r.photos?.length ?? 0,
@@ -1010,14 +980,12 @@ export function DeliveriesHistory({
             title: 'Сумма НДС',
             key: 'vatSum',
             width: 120,
-            sorter: numberSorter<Row>((r) => deliveryItemsVatSum(r.items)),
             render: (_: unknown, r: Row) => formatMoneyRu(deliveryItemsVatSum(r.items)),
           },
           {
             title: 'Сумма',
             key: 'totalSum',
             width: 130,
-            sorter: numberSorter<Row>((r) => deliveryItemsTotal(r.items)),
             render: (_: unknown, r: Row) => formatMoneyRu(deliveryItemsTotal(r.items)),
           },
           {

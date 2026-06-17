@@ -16,6 +16,7 @@ import {
 } from '@matcheck/contracts';
 import {
   counterparties,
+  customerCounterparties,
   deliveries,
   deliveryItems,
   deliveryPhotos,
@@ -46,9 +47,111 @@ const ListQuerySchema = z.object({
   // Фильтр по наличию привязанной УПД: true — только без документа,
   // false — только с документом, undefined — без фильтра.
   noDocument: z.coerce.boolean().optional(),
+  // ─── server-side фильтры из /operations?tab=accepted ─────────────────
+  // CSV id из заказчиковских справочников (customer_counterparties и
+  // suppliers). Сервер сам разворачивает их в operational counterparty.id
+  // через ИНН-маппинг — повторяя клиентскую логику directoryFilterMap.ts.
+  // Принимаем как csv (а не повторяющиеся ?contractorIds=) для одного
+  // короткого query-параметра; URL и Network-логи короче.
+  contractorIds: z.string().optional(),
+  supplierIds: z.string().optional(),
+  siteIds: z.string().optional(),
+  // Поиск по номеру привязанного документа (УПД/ТН) — ILIKE.
+  q: z.string().optional(),
+  // Поиск по госномеру — ILIKE.
+  plate: z.string().optional(),
+  // Признаки приёмки, AND между выбранными:
+  //   transit, assets, upd, waybill.
+  features: z.string().optional(),
+  // Диапазон даты прибытия (ISO). Используется для архивных запросов
+  // «приёмки за прошлый месяц», когда нужное >limit/offset назад.
+  arrivedFrom: z.string().datetime().optional(),
+  arrivedTo: z.string().datetime().optional(),
+  // ?nophoto=1 — deep-link «Без фото» из дашборда «Статистика».
+  nophoto: z.coerce.boolean().optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
+
+// UUID-regex для безопасного парсинга csv-параметров из URL. Невалидные
+// значения отбрасываем — иначе Postgres падает на `id IN ('not-uuid')`.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Парсит "a,b,c" в массив UUID, отбрасывая пустые и невалидные значения.
+function parseUuidCsv(s: string | undefined): string[] {
+  if (!s) return [];
+  return s.split(',').map((v) => v.trim()).filter((v) => UUID_RE.test(v));
+}
+
+// Парсит "a,b,c" в массив строк, отбрасывая пустые. Без UUID-валидации —
+// используется для feature-кодов ('transit', 'assets', ...).
+function parseCsv(s: string | undefined): string[] {
+  if (!s) return [];
+  return s.split(',').map((v) => v.trim()).filter(Boolean);
+}
+
+const KNOWN_FEATURES = new Set(['transit', 'assets', 'upd', 'waybill']);
+
+// Маппинг directory-id (customer_counterparties / suppliers) в operational
+// counterparty.id через совпадение нормализованного ИНН. Повторяет логику
+// клиентского directoryFilterMap.ts: ИНН = digits-only, пустой/нулевой
+// (placeholder) ИНН исключается. Возвращает массив operational id;
+// пустой массив = «ни один directory-id не имеет соответствий по ИНН»
+// (что корректно интерпретируется как «фильтр не нашёл ничего», аналогично
+// клиентскому поведению при пустом expandDirectoryIdsToOperational).
+//
+// Делается отдельным SELECT'ом перед основным запросом — drizzle ORM
+// (inArray + drSql) безопасно параметризует UUID, никаких SQL injection.
+// regexp_replace в JOIN-условии при 1000+ counterparties × 1000 справочника
+// — это полный matching, ~ms. На больших объёмах можно добавить
+// функциональный индекс по нормализованному ИНН (отдельная задача).
+async function expandCustomerCounterpartyToOpIds(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: any,
+  directoryIds: string[],
+): Promise<string[]> {
+  if (directoryIds.length === 0) return [];
+  const rows = await app.db
+    .select({ id: counterparties.id })
+    .from(counterparties)
+    .innerJoin(
+      customerCounterparties,
+      drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g')
+          = regexp_replace(coalesce(${customerCounterparties.inn}, ''), '[^0-9]', '', 'g')`,
+    )
+    .where(
+      and(
+        inArray(customerCounterparties.id, directoryIds),
+        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') != ''`,
+        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') !~ '^0+$'`,
+      ),
+    );
+  return rows.map((r: { id: string }) => r.id);
+}
+
+async function expandSupplierToOpIds(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: any,
+  directoryIds: string[],
+): Promise<string[]> {
+  if (directoryIds.length === 0) return [];
+  const rows = await app.db
+    .select({ id: counterparties.id })
+    .from(counterparties)
+    .innerJoin(
+      suppliers,
+      drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g')
+          = regexp_replace(coalesce(${suppliers.inn}, ''), '[^0-9]', '', 'g')`,
+    )
+    .where(
+      and(
+        inArray(suppliers.id, directoryIds),
+        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') != ''`,
+        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') !~ '^0+$'`,
+      ),
+    );
+  return rows.map((r: { id: string }) => r.id);
+}
 
 // Статусы, при которых разрешён hard-delete без предварительной пометки.
 const HARD_DELETE_STATUSES = new Set(['draft', 'not_filled']);
@@ -213,7 +316,24 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: { querystring: ListQuerySchema, response: { 200: DeliveryListResponseSchema } },
     },
     async (req) => {
-      const { status, inspectorId, changedSince, trash, noDocument, limit, offset } = req.query;
+      const {
+        status, inspectorId, changedSince, trash, noDocument,
+        contractorIds: contractorIdsCsv,
+        supplierIds: supplierIdsCsv,
+        siteIds: siteIdsCsv,
+        q, plate,
+        features: featuresCsv,
+        arrivedFrom, arrivedTo, nophoto,
+        limit, offset,
+      } = req.query;
+
+      // CSV → массивы. Для UUID-полей фильтруем регексом — невалидное
+      // отбрасываем, иначе Postgres падает на 'not-uuid' в `= ANY(...)`.
+      const contractorDirIds = parseUuidCsv(contractorIdsCsv);
+      const supplierDirIds = parseUuidCsv(supplierIdsCsv);
+      const siteIdsArr = parseUuidCsv(siteIdsCsv);
+      const featureCodes = parseCsv(featuresCsv).filter((f) => KNOWN_FEATURES.has(f));
+
       const filters = [];
       // По умолчанию показываем только активные документы; trash=true даёт корзину.
       filters.push(
@@ -249,6 +369,115 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         );
       }
       if (changedSince) filters.push(gte(deliveries.updatedAt, new Date(changedSince)));
+
+      // ─── server-side фильтры из /operations?tab=accepted ─────────
+      // Раньше эти фильтры применялись клиентом поверх первых 50 записей,
+      // и пользователь видел «фильтр работает только в видимом окне».
+      // Теперь фильтрация — на сервере, total и pagination считаются по
+      // отфильтрованным данным. Логика 1-в-1 повторяет клиентскую
+      // (см. apps/web/src/pages/kpp/DeliveriesHistory.tsx → filteredItems).
+
+      // siteIds — простой multi-select.
+      if (siteIdsArr.length > 0) {
+        filters.push(inArray(deliveries.siteId, siteIdsArr));
+      }
+
+      // contractorIds: directory ID → operational ID через ИНН-маппинг.
+      // + inheritance: если у приёмки contractor_id NULL, fallback на
+      // contractor_id первого привязанного source_document. Это
+      // воспроизводит resolveContractor() с клиента DeliveriesHistory.tsx.
+      if (contractorDirIds.length > 0) {
+        const opIds = await expandCustomerCounterpartyToOpIds(app, contractorDirIds);
+        if (opIds.length === 0) {
+          // Ни один directory-id не имеет соответствия в counterparties по
+          // ИНН — фильтр должен вернуть пустой результат (как клиент).
+          filters.push(drSql`false`);
+        } else {
+          filters.push(drSql`(
+            ${deliveries.contractorId} = ANY(${opIds}::uuid[])
+            OR (
+              ${deliveries.contractorId} IS NULL
+              AND EXISTS (
+                SELECT 1 FROM delivery_sources ds_c
+                JOIN source_documents sd_c ON sd_c.id = ds_c.source_document_id
+                WHERE ds_c.delivery_id = ${deliveries.id}
+                  AND sd_c.contractor_id = ANY(${opIds}::uuid[])
+              )
+            )
+          )`);
+        }
+      }
+
+      // supplierIds: directory ID → operational ID через ИНН-маппинг по
+      // справочнику suppliers. Без inheritance (на клиенте тоже без него).
+      if (supplierDirIds.length > 0) {
+        const opIds = await expandSupplierToOpIds(app, supplierDirIds);
+        if (opIds.length === 0) {
+          filters.push(drSql`false`);
+        } else {
+          filters.push(inArray(deliveries.supplierId, opIds));
+        }
+      }
+
+      // q: поиск по номеру привязанного source_document (УПД/ТН).
+      if (q?.trim()) {
+        const needle = `%${q.trim()}%`;
+        filters.push(drSql`EXISTS (
+          SELECT 1 FROM delivery_sources ds_q
+          JOIN source_documents sd_q ON sd_q.id = ds_q.source_document_id
+          WHERE ds_q.delivery_id = ${deliveries.id}
+            AND sd_q.doc_number ILIKE ${needle}
+        )`);
+      }
+
+      // plate: ILIKE на госномер.
+      if (plate?.trim()) {
+        filters.push(ilike(deliveries.vehiclePlate, `%${plate.trim()}%`));
+      }
+
+      // features (AND между выбранными):
+      //   transit → in_transit = true
+      //   assets  → is_assets = true OR EXISTS item_kind='asset'
+      //   upd     → EXISTS source_document.kind='upd'
+      //   waybill → EXISTS source_document.kind IN ('transport_waybill','os2_transfer')
+      for (const f of featureCodes) {
+        if (f === 'transit') {
+          filters.push(eq(deliveries.inTransit, true));
+        } else if (f === 'assets') {
+          filters.push(drSql`(
+            ${deliveries.isAssets} = true
+            OR EXISTS (
+              SELECT 1 FROM delivery_items di_a
+              WHERE di_a.delivery_id = ${deliveries.id} AND di_a.item_kind = 'asset'
+            )
+          )`);
+        } else if (f === 'upd') {
+          filters.push(drSql`EXISTS (
+            SELECT 1 FROM delivery_sources ds_u
+            JOIN source_documents sd_u ON sd_u.id = ds_u.source_document_id
+            WHERE ds_u.delivery_id = ${deliveries.id} AND sd_u.kind = 'upd'
+          )`);
+        } else if (f === 'waybill') {
+          filters.push(drSql`EXISTS (
+            SELECT 1 FROM delivery_sources ds_w
+            JOIN source_documents sd_w ON sd_w.id = ds_w.source_document_id
+            WHERE ds_w.delivery_id = ${deliveries.id}
+              AND sd_w.kind IN ('transport_waybill', 'os2_transfer')
+          )`);
+        }
+      }
+
+      // arrivedFrom / arrivedTo — диапазон даты прибытия (archive lookup).
+      if (arrivedFrom) filters.push(gte(deliveries.arrivedAt, new Date(arrivedFrom)));
+      if (arrivedTo) filters.push(drSql`${deliveries.arrivedAt} < ${new Date(arrivedTo)}`);
+
+      // nophoto: нет связанных фото (deep-link из дашборда «Статистика»).
+      if (nophoto) {
+        filters.push(drSql`NOT EXISTS (
+          SELECT 1 FROM delivery_photos dp WHERE dp.delivery_id = ${deliveries.id}
+        )`);
+      }
+
       const where = filters.length ? and(...filters) : undefined;
 
       const rows = await app.db

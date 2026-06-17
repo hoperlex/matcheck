@@ -67,10 +67,8 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 import { formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
-import {
-  buildInnMatchMap,
-  expandDirectoryIdsToOperational,
-} from '../../shared/utils/directoryFilterMap';
+// directoryFilterMap (ИНН-маппинг customer_counterparties → operational
+// counterparties) больше не нужен — фильтрация переехала на сервер.
 
 type List = z.infer<typeof ShipmentListResponseSchema>;
 type Row = List['items'][number];
@@ -238,10 +236,57 @@ export function ShipmentsHistory({
   // setView был выпилен — переключатель «Удалённые» теперь живёт в шапке
   // ShipmentPage. Здесь читаем только URL для запроса /shipments?trash=1.
 
+  // ─── server-side pagination ─────────────────────────────────────────
+  // page хранится в URL (?page=N). pageSize фиксированный 50. См.
+  // подробный комментарий в DeliveriesHistory.tsx — там описаны принципы
+  // (включая отказ от клиентской сортировки в рамках страницы).
+  const PAGE_SIZE = 50;
+  const pageRaw = Number.parseInt(params.get('page') ?? '1', 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+  const setPage = (next: number) => {
+    const np = new URLSearchParams(params);
+    if (next <= 1) np.delete('page');
+    else np.set('page', String(next));
+    setParams(np, { replace: true });
+  };
+  const offset = (page - 1) * PAGE_SIZE;
+
+  const listQueryKey = [
+    'shipments',
+    view,
+    page,
+    PAGE_SIZE,
+    {
+      contractor: filters.contractorIds.join(','),
+      supplier: filters.supplierIds.join(','),
+      site: filters.siteIds.join(','),
+      q: filters.q,
+      plate: filters.plate,
+      purposes: filters.purposes.join(','),
+      features: filters.features.join(','),
+      status: filters.status,
+      nophoto: filters.nophoto,
+    },
+  ] as const;
   const list = useQuery({
-    queryKey: ['shipments', view],
-    queryFn: () =>
-      api.get<List>(view === 'trash' ? '/shipments?trash=1' : '/shipments'),
+    queryKey: listQueryKey,
+    queryFn: () => {
+      const qs = new URLSearchParams();
+      qs.set('limit', String(PAGE_SIZE));
+      qs.set('offset', String(offset));
+      if (view === 'trash') qs.set('trash', '1');
+      if (filters.contractorIds.length) qs.set('contractorIds', filters.contractorIds.join(','));
+      if (filters.supplierIds.length) qs.set('supplierIds', filters.supplierIds.join(','));
+      if (filters.siteIds.length) qs.set('siteIds', filters.siteIds.join(','));
+      if (filters.q.trim()) qs.set('q', filters.q.trim());
+      if (filters.plate.trim()) qs.set('plate', filters.plate.trim());
+      if (filters.purposes.length) qs.set('purposes', filters.purposes.join(','));
+      if (filters.features.length) qs.set('features', filters.features.join(','));
+      if (filters.nophoto) qs.set('nophoto', '1');
+      if (filters.status === 'no_document') qs.set('noDocument', 'true');
+      else if (filters.status) qs.set('status', filters.status);
+      return api.get<List>(`/shipments?${qs.toString()}`);
+    },
     placeholderData: keepPreviousData,
   });
 
@@ -403,22 +448,10 @@ export function ShipmentsHistory({
       })),
     [suppliersQuery.data],
   );
-  const contractorInnMap = useMemo(
-    () =>
-      buildInnMatchMap(
-        customerCounterpartiesQuery.data?.items ?? [],
-        counterpartiesQuery.data?.items ?? [],
-      ),
-    [customerCounterpartiesQuery.data, counterpartiesQuery.data],
-  );
-  const supplierInnMap = useMemo(
-    () =>
-      buildInnMatchMap(
-        suppliersQuery.data?.items ?? [],
-        counterpartiesQuery.data?.items ?? [],
-      ),
-    [suppliersQuery.data, counterpartiesQuery.data],
-  );
+  // Раньше тут было buildInnMatchMap клиента — теперь ИНН-маппинг
+  // делает сервер в /shipments (см. expandCustomerCounterpartyToOpIds
+  // в apps/api/src/routes/shipments.ts). На клиенте остался только
+  // counterpartiesMap (для отображения имён в колонках).
 
   const destinationLabel = (r: Shipment): string => {
     if (r.kind === 'contractor' || r.kind === 'return') {
@@ -496,89 +529,15 @@ export function ShipmentsHistory({
     return opts;
   }, [items]);
 
-  // Разворачиваем id справочников в множество операционных counterparties.id,
-  // по которым реально нужно сверять FK. Пустой Set ⇒ «выбранным справочным
-  // записям нет соответствий по ИНН» ⇒ filter вернёт пустой список.
-  const contractorOperationalIds = useMemo(
-    () => expandDirectoryIdsToOperational(filters.contractorIds, contractorInnMap),
-    [filters.contractorIds, contractorInnMap],
-  );
-  const supplierOperationalIds = useMemo(
-    () => expandDirectoryIdsToOperational(filters.supplierIds, supplierInnMap),
-    [filters.supplierIds, supplierInnMap],
-  );
-
-  const filteredItems = useMemo(() => {
-    return items.filter((r) => {
-      if (filters.contractorIds.length > 0 && (!r.receiverCounterpartyId || !contractorOperationalIds.has(r.receiverCounterpartyId))) {
-        return false;
-      }
-      // Раньше supplier-фильтр сверялся с r.receiverCounterpartyId (баг
-      // копипасты — обе ветки шли по одному полю). FK поставщика в
-      // shipments — r.supplierId (миграция 0056), его и проверяем.
-      if (filters.supplierIds.length > 0 && (!r.supplierId || !supplierOperationalIds.has(r.supplierId))) {
-        return false;
-      }
-      if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId))) return false;
-      if (filters.status === 'no_document') {
-        if (r.sourceDocumentIds.length !== 0) return false;
-      } else if (filters.status && r.status.code !== filters.status) {
-        return false;
-      }
-      if (filters.plate.trim() && !matchText(r.vehiclePlate, filters.plate)) return false;
-      if (filters.q.trim()) {
-        const docNum = resolveDocNumber(r);
-        if (!matchText(docNum, filters.q)) return false;
-      }
-      // ?nophoto=1 — deep-link из дашборда «Статистика».
-      if (filters.nophoto && (r.photos?.length ?? 0) !== 0) return false;
-      // «Тип отгрузки» — OR внутри (выбраны 2 типа → показать оба).
-      // Отгрузка без purpose (legacy / с УПД — там purpose=null) не
-      // попадает ни в один выбранный тип.
-      if (filters.purposes.length > 0) {
-        if (!r.purpose || !filters.purposes.includes(r.purpose as ShipmentPurpose)) {
-          return false;
-        }
-      }
-      // «Признаки» — AND между выбранными (выбраны «ОС» и «УПД» →
-      // показать отгрузки, где есть и то, и другое).
-      for (const f of filters.features) {
-        if (f === 'transit' && !r.inTransit) return false;
-        if (f === 'assets') {
-          // ОС: либо отгрузка целиком помечена флагом isAssets (1-й этап
-          // мобилы, позиций ещё нет), либо в позициях уже есть itemKind=asset.
-          const hasAsset =
-            r.isAssets || r.items.some((it) => it.itemKind === 'asset');
-          if (!hasAsset) return false;
-        }
-        if (f === 'upd' || f === 'waybill') {
-          const has = r.sourceDocumentIds.some((id) => {
-            const sd = sourceDocsById.get(id);
-            if (!sd) return false;
-            if (f === 'upd') return sd.kind === 'upd';
-            // Накладные = ТН-2116 (transport_waybill) + ОС-2 (os2_transfer).
-            return sd.kind === 'transport_waybill' || sd.kind === 'os2_transfer';
-          });
-          if (!has) return false;
-        }
-      }
-      return true;
-    });
-  }, [
-    items,
-    sourceDocsById,
-    filters.contractorIds,
-    filters.supplierIds,
-    filters.siteIds,
-    filters.status,
-    filters.plate,
-    filters.q,
-    filters.purposes,
-    filters.features,
-    filters.nophoto,
-    contractorOperationalIds,
-    supplierOperationalIds,
-  ]);
+  // Клиентская filteredItems удалена — фильтрация полностью на сервере
+  // (см. shipments.ts: contractorIds/supplierIds/siteIds/q/plate/features/
+  // purposes/nophoto/status в WHERE). При смене любого фильтра — сброс
+  // page=1 и очистка selection.
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.purposes.join(',')}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${view}`;
+  useEffect(() => {
+    if (page !== 1) setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey]);
 
   // Иконка «Поделиться» — показывается всегда, даже в корзине, чтобы
   // можно было создать публичную ссылку и без перехода в edit-режим.
@@ -877,7 +836,7 @@ export function ShipmentsHistory({
       }
     >
       <ResponsiveTable<Row>
-        items={filteredItems}
+        items={items}
         loading={list.isLoading}
         rowKey="id"
         rowSelection={isAdmin || !isTrash ? bulk.selection : undefined}
@@ -886,16 +845,25 @@ export function ShipmentsHistory({
         rowClassName={(r) =>
           operationsRowClass({ statusCode: r.status.code, dateIso: r.shippedAt })
         }
+        numberedOffset={offset}
         pagination={{
-          // Легенда цветов подсветки строк — см. комментарий в DeliveriesHistory.
+          // Server-side controlled pagination, симметрично DeliveriesHistory.
+          current: page,
+          pageSize: PAGE_SIZE,
+          total: list.data?.total ?? 0,
+          showSizeChanger: false,
+          onChange: (next) => {
+            bulk.clear();
+            setPage(next);
+          },
           showTotal: () => <OperationsRowLegend />,
         }}
         columns={[
+          // sorter/dateRangeColumnFilter удалены — серверная пагинация
+          // с фиксированной сортировкой ORDER BY displayId DESC.
           // Симметрия с DeliveriesHistory: тот же порядок — id, Статус,
           // Авто, дата, Получатель (зеркало Поставщика приёмки), Объект,
-          // Фото, Сумма НДС, Сумма, Действия. «Вид» (kind) интегрирован
-          // чипом в Статус, «Куда» (destSite для transfer) — в
-          // «Получатель» через destinationLabel.
+          // Фото, Сумма НДС, Сумма, Действия.
           {
             // Короткий displayId — отдельная нумерация для отгрузок (см.
             // миграцию 0059). В Ожидаемых не показывается — там УПД.
@@ -903,27 +871,19 @@ export function ShipmentsHistory({
             key: 'displayId',
             width: 80,
             dataIndex: 'displayId',
-            sorter: numberSorter<Row>((r) => r.displayId),
           },
           {
             title: 'Статус',
             key: 'status',
-            sorter: prioritySorter<Row, string>(
-              (r) => r.status.code,
-              ['draft', 'not_filled', 'filled', 'confirmed_mol', 'shipped', 'archived'],
-            ),
             render: (_: unknown, r: Row) => renderStatusCell(r),
           },
           {
             title: 'Авто',
             dataIndex: 'vehiclePlate',
-            sorter: stringSorter<Row>((r) => r.vehiclePlate),
           },
           {
             title: 'Отгружено',
             dataIndex: 'shippedAt',
-            sorter: dateSorter<Row>((r) => r.shippedAt),
-            ...dateRangeColumnFilter<Row>((r) => r.shippedAt),
             render: (v: string | null) => formatDateTimeRu(v),
           },
           {
@@ -932,12 +892,6 @@ export function ShipmentsHistory({
             // показываем объект-приёмник через destinationLabel.
             title: 'Получатель',
             key: 'receiver',
-            sorter: stringSorter<Row>((r) => {
-              const cp = r.receiverCounterpartyId
-                ? counterpartiesMap.get(r.receiverCounterpartyId)
-                : null;
-              return cp ?? destinationLabel(r) ?? null;
-            }),
             render: (_: unknown, r: Row) => renderCounterpartyCol(r),
           },
           {
@@ -948,7 +902,6 @@ export function ShipmentsHistory({
             // полный текст видно в Tooltip при наведении. Единое поведение
             // во всех 4 таблицах раздела «Операции» — best practice antd.
             ellipsis: { showTitle: false },
-            sorter: stringSorter<Row>((r) => sitesMap.get(r.siteId) ?? null),
             render: (_: unknown, r: Row) => {
               const name = sitesMap.get(r.siteId) ?? '—';
               return (
@@ -962,7 +915,6 @@ export function ShipmentsHistory({
             title: 'Фото',
             key: 'photos',
             width: 80,
-            sorter: numberSorter<Row>((r) => r.photos?.length ?? 0),
             // Суммарное количество фото обоих этапов (stage='before' + 'after')
             // — поле stage у shipment_photos добавлено миграцией 0048.
             render: (_: unknown, r: Row) => r.photos?.length ?? 0,
@@ -971,14 +923,12 @@ export function ShipmentsHistory({
             title: 'Сумма НДС',
             key: 'vatSum',
             width: 120,
-            sorter: numberSorter<Row>((r) => shipmentItemsVatSum(r.items)),
             render: (_: unknown, r: Row) => formatMoneyRu(shipmentItemsVatSum(r.items)),
           },
           {
             title: 'Сумма',
             key: 'totalSum',
             width: 130,
-            sorter: numberSorter<Row>((r) => shipmentItemsTotal(r.items)),
             render: (_: unknown, r: Row) => formatMoneyRu(shipmentItemsTotal(r.items)),
           },
           {
