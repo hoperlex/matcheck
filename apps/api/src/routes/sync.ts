@@ -6,7 +6,6 @@ import { SyncDeltaResponseSchema } from '@matcheck/contracts';
 import {
   assets,
   counterparties,
-  customerCounterparties,
   deliveries,
   deliveryItems,
   deliveryPhotos,
@@ -23,6 +22,7 @@ import {
   sourceDocumentItems,
   sourceDocuments,
   statuses,
+  suppliers,
   units,
   users,
 } from '../db/schema.js';
@@ -174,31 +174,39 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
 
       // Имена поставщика / подрядчика для отображения на мобиле в списке
       // УПД (см. IntakeUpdSelectScreen.kt: subtitle = "Поставщик: ${row.supplierName ?: "—"}").
-      // До этого фикса бэк отдавал только supplierId/contractorId, а в массиве
-      // counterparties /sync customer_counterparties (справочник «Поставщики»)
-      // вообще не возвращался — мобильный fallback по counterparties[id]
-      // промахивался, и инспектор видел «—».
+      // До этого фикса бэк отдавал только supplierId/contractorId, и инспектор
+      // видел «—».
       //
-      // Логика как в /source-documents list ([source-documents.ts:527]):
-      // supplierName = COALESCE(customer_counterparties.name, counterparties.name).
-      // contractorName = counterparties.name. Никаких JOIN'ов в основном
-      // запросе sdRows — отдельные SELECT'ы по уникальным UUID'ам:
-      // дешевле для drizzle, не меняет тип sdRows, легко откатить.
+      // Логика точно как в /source-documents list ([source-documents.ts:527]):
+      //   supplierName = COALESCE(suppliers.name, counterparties.name)
+      // где suppliers — справочник «Поставщики» (JOIN по supplier_directory_id,
+      // основной путь для всех современных УПД), counterparties — legacy
+      // operational таблица (JOIN по supplier_id, fallback для исторических
+      // УПД до миграции 0064). contractorName = counterparties.name по
+      // contractor_id. Никаких JOIN'ов в основном запросе sdRows — отдельные
+      // SELECT'ы по уникальным UUID'ам: дешевле для drizzle, не меняет тип
+      // sdRows, легко откатить.
+      const sdSupplierDirIds = Array.from(
+        new Set(
+          sdRows.map((r) => r.supplierDirectoryId).filter((v): v is string => !!v),
+        ),
+      );
       const sdSupplierIds = Array.from(
         new Set(sdRows.map((r) => r.supplierId).filter((v): v is string => !!v)),
       );
       const sdContractorIds = Array.from(
         new Set(sdRows.map((r) => r.contractorId).filter((v): v is string => !!v)),
       );
-      const supplierDirRows = sdSupplierIds.length
+      // Справочник «Поставщики» (suppliers, не путать с counterparties).
+      const supplierDirRows = sdSupplierDirIds.length
         ? await app.db
-            .select({ id: customerCounterparties.id, name: customerCounterparties.name })
-            .from(customerCounterparties)
-            .where(sql_in(customerCounterparties.id, sdSupplierIds))
+            .select({ id: suppliers.id, name: suppliers.name })
+            .from(suppliers)
+            .where(sql_in(suppliers.id, sdSupplierDirIds))
         : [];
       const supplierDirById = new Map(supplierDirRows.map((r) => [r.id, r.name]));
       // Один SELECT на counterparties по объединённому списку — supplier-id
-      // (для fallback'а COALESCE) и contractor-id (основной источник).
+      // (legacy fallback COALESCE) и contractor-id (основной источник).
       const cpLookupIds = Array.from(new Set([...sdSupplierIds, ...sdContractorIds]));
       const cpLookupRows = cpLookupIds.length
         ? await app.db
@@ -443,12 +451,15 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         })),
         sourceDocuments: sdRows.map((sd) => {
           const creator = sd.createdByUserId ? sdCreatorById.get(sd.createdByUserId) : null;
-          // COALESCE-логика как в веб-портале (/source-documents list):
-          // приоритет — справочник «Поставщики» (customer_counterparties),
-          // fallback — operational counterparties.
+          // COALESCE-логика как в веб-портале (/source-documents list:527):
+          //   supplierName = COALESCE(suppliers.name, counterparties.name)
+          // Приоритет — справочник «Поставщики» (suppliers, JOIN по
+          // supplier_directory_id — основной путь для всех современных УПД,
+          // включая результаты LLM-парсинга PDF). Fallback — legacy
+          // counterparties по supplier_id (исторические УПД до миграции 0064).
           const supplierName =
-            (sd.supplierId &&
-              (supplierDirById.get(sd.supplierId) ?? cpNameById.get(sd.supplierId))) ||
+            (sd.supplierDirectoryId && supplierDirById.get(sd.supplierDirectoryId)) ||
+            (sd.supplierId && cpNameById.get(sd.supplierId)) ||
             null;
           const contractorName =
             (sd.contractorId && cpNameById.get(sd.contractorId)) || null;
