@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Button, Input, Select, Switch, Tag, Tooltip, Typography, Space, message } from 'antd';
-import { EditOutlined, PhoneOutlined } from '@ant-design/icons';
+import { EditOutlined, PhoneOutlined, SearchOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Site, UserAdminPatch, UserDto, UserRole } from '@matcheck/contracts';
 import { api } from '../../services/api';
@@ -13,10 +13,28 @@ const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp'];
 export default function AdminUsersPage() {
   const qc = useQueryClient();
   const [editing, setEditing] = useState<UserDto | null>(null);
+  // Поиск — client-side: бэк /admin/users отдаёт плоский UserDto[] без
+  // пагинации, на проде типично ~40-50 пользователей. Server-side q-фильтр
+  // тут — overkill: лишний round-trip без выгоды по производительности.
+  const [search, setSearch] = useState('');
   const list = useQuery({
     queryKey: ['admin', 'users'],
     queryFn: () => api.get<UserDto[]>('/admin/users'),
   });
+  // toLocaleLowerCase('ru') корректно опускает кириллицу (включая Ё→ё)
+  // в отличие от обычного toLowerCase(), который для русского работает
+  // через generic Unicode-таблицу и в edge-case'ах даёт другую раскладку.
+  // Поиск по email и ФИО — substring, без учёта регистра.
+  const filteredItems = useMemo(() => {
+    const all = list.data ?? [];
+    const q = search.trim().toLocaleLowerCase('ru');
+    if (!q) return all;
+    return all.filter((u) => {
+      const email = u.email.toLocaleLowerCase('ru');
+      const name = (u.fullName ?? '').toLocaleLowerCase('ru');
+      return email.includes(q) || name.includes(q);
+    });
+  }, [list.data, search]);
   const sitesQuery = useQuery({
     queryKey: ['sites', 'active'],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=500'),
@@ -78,10 +96,28 @@ export default function AdminUsersPage() {
 
   return (
     <StickyPageHeader
-      header={<Typography.Title level={3} style={{ margin: 0 }}>Пользователи</Typography.Title>}
+      header={
+        <Space
+          style={{ width: '100%', justifyContent: 'space-between' }}
+          wrap
+          size={[16, 8]}
+        >
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            Пользователи
+          </Typography.Title>
+          <Input
+            placeholder="Поиск по email или ФИО"
+            allowClear
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
+            style={{ width: 320, maxWidth: '100%' }}
+          />
+        </Space>
+      }
     >
       <ResponsiveTable<UserDto>
-        items={list.data ?? []}
+        items={filteredItems}
         loading={list.isLoading}
         rowKey="id"
         numbered
