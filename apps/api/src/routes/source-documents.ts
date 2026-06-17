@@ -104,11 +104,21 @@ async function findOrCreateMaterial(
   return created.id;
 }
 
-// Поддерживаемые форматы для /upload-upd-pdf endpoint. JPG/PNG поддержат
-// отдельно через vision-LLM (см. Шаг 4d). Хранение в БД использует тот же
-// origin='manual_pdf' независимо от формата — enum намеренно не расширяем,
-// чтобы не делать миграцию ради метаданных.
-type UpdFileFormat = { ext: 'pdf' | 'xlsx'; mimeType: string };
+// Поддерживаемые форматы для /upload-upd-pdf endpoint.
+//   pdf  — электронный PDF, парсится через pdf-parse + LLM;
+//   xlsx — Excel, парсится локально регулярками;
+//   jpg/png/webp — фото или скан, парсится через vision-LLM (Gemini);
+// PDF-сканы без текстового слоя автоматически переключаются на vision-LLM
+// в worker.ts (см. PdfNoTextError → parseUpdVision fallback).
+//
+// Хранение в БД использует один origin='manual_pdf' независимо от формата
+// — enum намеренно не расширяем, чтобы не делать миграцию ради метаданных.
+// Контракт SourceDocumentSchema тоже не трогаем — мобила и веб-портал
+// продолжают видеть source_documents без новых полей.
+type UpdFileFormat = {
+  ext: 'pdf' | 'xlsx' | 'jpg' | 'png' | 'webp';
+  mimeType: string;
+};
 
 function detectUpdFileFormat(mime: string, filename: string): UpdFileFormat | null {
   const m = (mime ?? '').toLowerCase();
@@ -126,6 +136,15 @@ function detectUpdFileFormat(mime: string, filename: string): UpdFileFormat | nu
       ext: 'xlsx',
       mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     };
+  }
+  if (m === 'image/jpeg' || m === 'image/jpg' || f.endsWith('.jpg') || f.endsWith('.jpeg')) {
+    return { ext: 'jpg', mimeType: 'image/jpeg' };
+  }
+  if (m === 'image/png' || f.endsWith('.png')) {
+    return { ext: 'png', mimeType: 'image/png' };
+  }
+  if (m === 'image/webp' || f.endsWith('.webp')) {
+    return { ext: 'webp', mimeType: 'image/webp' };
   }
   return null;
 }

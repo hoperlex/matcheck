@@ -93,11 +93,15 @@ export function UpdPdfUploadModal({
   const canUpload = !!siteId && rows.length > 0 && !uploading;
 
   const uploadProps: UploadProps = {
-    // Принимаем PDF и Excel. Excel парсится локально регулярками (без LLM),
-    // PDF — через pdf-parse + LLM. Бэкенд авто-определяет тип по MIME/расширению
-    // (см. detectUpdFileFormat в routes/source-documents.ts).
+    // Принимаем PDF, Excel и изображения (JPG/PNG/WEBP — фото или скан УПД).
+    //   xlsx              → локальные регулярки (без LLM, бесплатно).
+    //   pdf c текстом     → pdf-parse + LLM text-mode (быстро и дёшево).
+    //   pdf-скан          → fallback на Vision LLM в worker.ts (медленнее).
+    //   jpg/png/webp      → сразу Vision LLM.
+    // Бэкенд авто-определяет формат по MIME/расширению — см.
+    // detectUpdFileFormat в routes/source-documents.ts.
     accept:
-      'application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,.pdf,.xlsx,.xls',
+      'application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,image/jpeg,image/png,image/webp,.pdf,.xlsx,.xls,.jpg,.jpeg,.png,.webp',
     multiple: true,
     showUploadList: false,
     beforeUpload: (file) => {
@@ -264,14 +268,17 @@ export function UpdPdfUploadModal({
             style={{ width: '100%' }}
           />
         </Form.Item>
-        <Form.Item label="Файлы (PDF / Excel)" required>
+        <Form.Item label="Файлы (PDF / Excel / фото)" required>
           <Upload.Dragger {...uploadProps} disabled={uploading}>
             <p className="ant-upload-drag-icon">
               <InboxOutlined />
             </p>
-            <p className="ant-upload-text">Перетащите PDF или Excel файлы либо нажмите для выбора</p>
+            <p className="ant-upload-text">
+              Перетащите PDF, Excel или фото (JPG/PNG/WEBP) либо нажмите для выбора
+            </p>
             <p className="ant-upload-hint">
               Можно выбрать сразу несколько файлов. Лимит на файл — 10 МБ.
+              PDF-сканы и фото распознаются медленнее (~30-60 сек на документ).
             </p>
           </Upload.Dragger>
         </Form.Item>

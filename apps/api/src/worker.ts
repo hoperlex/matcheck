@@ -31,7 +31,18 @@ import {
 } from './plugins/queue.js';
 import { deleteObject, getObject } from './domain/storage/s3.signer.js';
 import { parseUpdPdf, PdfNoTextError } from './domain/edo/upd-pdf.parser.js';
+import { parseUpdVision } from './domain/edo/upd-vision.parser.js';
 import { parseUpdXlsx } from './domain/edo/upd-xlsx.parser.js';
+
+// Минимальная уверенность LLM, при которой запускается дедупликация по
+// (supplier_directory_id, doc_number, doc_date). Ниже — пропускаем dedup
+// и оставляем документ в needs_resolution+partial_parse: пользователь сам
+// решит. Защита от галлюцинаций LLM на плохих сканах: на размытом фото
+// модель может «придумать» ИНН/номер/дату, совпасть с чужим УПД, и
+// триггерить ложный «Дубликат УПД». Порог 0.6 эмпирически — выше 0.7
+// будем терять часть нормально распознанных сканов, ниже 0.5 — будут
+// проскакивать галлюцинации (LLM на мусоре часто возвращает ровно 0.5).
+const MIN_DEDUP_CONFIDENCE = 0.6;
 import {
   parseWaybillBatch,
   type WaybillInputImage,
@@ -146,37 +157,96 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   }
 
   // Routing по типу файла. s3Key содержит имя «source.{ext}», где ext —
-  // pdf / xlsx (см. detectUpdFileFormat в routes/source-documents.ts).
-  // Excel парсится локально регулярками (без LLM, бесплатно и стабильно);
-  // PDF идёт через pdf-parse → LLM.
+  // pdf / xlsx / jpg / png / webp (см. detectUpdFileFormat в
+  // routes/source-documents.ts).
+  //
+  //   xlsx          → parseUpdXlsx (локальные регулярки, без LLM).
+  //   pdf c текстом → parseUpdPdf (pdf-parse → LLM text).
+  //   pdf-скан      → parseUpdPdf бросит PdfNoTextError →
+  //                   fallback на parseUpdVision (Gemini Vision).
+  //   jpg/png/webp  → сразу parseUpdVision.
+  //
+  // Vision pipeline переиспользует тот же UpdPdfParsedSchema, что и
+  // текстовый — на уровне DTO они взаимозаменяемы, контракт
+  // SourceDocumentSchema не трогается.
   const isXlsx = /\.xlsx?$/i.test(s3Key);
+  const isImage = /\.(jpe?g|png|webp)$/i.test(s3Key);
+  const imageMime = isImage
+    ? /\.png$/i.test(s3Key)
+      ? 'image/png'
+      : /\.webp$/i.test(s3Key)
+        ? 'image/webp'
+        : 'image/jpeg'
+    : null;
 
   let parsed: UpdPdfParsed;
   let llmProviderId: string | null = null;
+  let parsedViaVision = false;
   try {
     if (isXlsx) {
       parsed = await parseUpdXlsx(buffer);
-    } else {
-      const r = await parseUpdPdf(buffer, { sourceDocumentId });
+    } else if (isImage && imageMime) {
+      // JPG/PNG/WEBP — сразу Vision (текстового слоя у изображений нет).
+      const r = await parseUpdVision(
+        { buffer, mimeType: imageMime, filename: s3Key },
+        { sourceDocumentId },
+      );
       parsed = r.parsed;
       llmProviderId = r.llmProviderId;
+      parsedViaVision = true;
+    } else {
+      // PDF — сначала быстрый text-pipeline.
+      try {
+        const r = await parseUpdPdf(buffer, { sourceDocumentId });
+        parsed = r.parsed;
+        llmProviderId = r.llmProviderId;
+      } catch (err) {
+        if (err instanceof PdfNoTextError) {
+          // PDF-скан без текстового слоя — fallback на Vision. Раньше
+          // здесь сразу шёл parse_failed, и пользователь видел тупик.
+          log.warn(
+            { textLength: err.textLength },
+            'pdf has no text — falling back to vision LLM',
+          );
+          try {
+            const r = await parseUpdVision(
+              { buffer, mimeType: 'application/pdf', filename: s3Key },
+              { sourceDocumentId },
+            );
+            parsed = r.parsed;
+            llmProviderId = r.llmProviderId;
+            parsedViaVision = true;
+          } catch (visionErr) {
+            // Vision тоже не справился (провайдер не поддерживает PDF —
+            // например, OpenRouter, или сетевая ошибка). Помечаем
+            // parse_failed без retry — на тот же файл retry бесполезен.
+            await db
+              .update(sourceDocuments)
+              .set({
+                status: 'parse_failed',
+                parseErrorCode: 'pdf_no_text',
+                parseErrorDetails: {
+                  textLength: err.textLength,
+                  visionError:
+                    visionErr instanceof Error ? visionErr.message : String(visionErr),
+                },
+                processedAt: new Date(),
+                updatedAt: new Date(),
+              })
+              .where(eq(sourceDocuments.id, sourceDocumentId));
+            log.warn(
+              { visionErr },
+              'pdf-no-text + vision fallback failed — marked parse_failed',
+            );
+            await notifySourceDocumentUpdated(sourceDocumentId);
+            return;
+          }
+        } else {
+          throw err;
+        }
+      }
     }
   } catch (err) {
-    if (err instanceof PdfNoTextError) {
-      await db
-        .update(sourceDocuments)
-        .set({
-          status: 'parse_failed',
-          parseErrorCode: 'pdf_no_text',
-          parseErrorDetails: { textLength: err.textLength },
-          processedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(sourceDocuments.id, sourceDocumentId));
-      log.warn({ textLength: err.textLength }, 'pdf has no text — marked parse_failed');
-      await notifySourceDocumentUpdated(sourceDocumentId);
-      return;
-    }
     log.error({ err }, 'parse failed, will retry');
     throw err;
   }
@@ -211,9 +281,18 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // собственную запись из выборки исключаем. Старый supplier_id (FK на
   // counterparties) больше не участвует в дедупе новых УПД — для них он
   // всегда NULL; исторические УПД продолжают работать по своему индексу.
+  //
+  // Confidence-guard: dedup запускается только если LLM уверен в
+  // распознавании (confidence >= MIN_DEDUP_CONFIDENCE = 0.6). При низкой
+  // уверенности — на плохих сканах модель может выдумать ИНН/номер/дату
+  // и случайно совпасть с чужим УПД (ложный «Дубликат УПД»). Документ
+  // в таком случае всё равно сохраняется, но без dedup — попадает в
+  // partial_parse, пользователь может проверить распознанное и дополнить.
   const docDate = parsed.docDate ? new Date(parsed.docDate) : null;
+  const confidence = parsed.confidence ?? 0;
+  const canDedup = confidence >= MIN_DEDUP_CONFIDENCE;
   let duplicate: { id: string } | null = null;
-  if (supplierDirectoryId && parsed.docNumber && docDate) {
+  if (canDedup && supplierDirectoryId && parsed.docNumber && docDate) {
     const [existing] = await db
       .select({
         id: sourceDocuments.id,
@@ -256,9 +335,19 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           updatedAt: new Date(),
         })
         .where(eq(sourceDocuments.id, sourceDocumentId));
-      log.warn({ existingId: existing.id }, 'duplicate detected — needs_resolution');
+      log.warn(
+        { existingId: existing.id, confidence, parsedViaVision },
+        'duplicate detected — needs_resolution',
+      );
       await notifySourceDocumentUpdated(sourceDocumentId);
     }
+  } else if (!canDedup && supplierDirectoryId && parsed.docNumber && docDate) {
+    // Диагностика: distinguishable fields есть, но confidence низкая.
+    // Логируем для аудита частоты срабатывания confidence-guard'а.
+    log.warn(
+      { confidence, parsedViaVision, docNumber: parsed.docNumber },
+      'dedup skipped: confidence below MIN_DEDUP_CONFIDENCE',
+    );
   }
 
   if (duplicate) return;
@@ -299,7 +388,11 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     : hasMismatch
       ? 'validation_mismatch'
       : null;
-  const parseErrorDetails = isIncomplete
+  // confidence и parsedViaVision в parseErrorDetails — диагностика для
+  // UI / администратора (поля опциональные, контракт не меняем).
+  // reason='low_confidence' помечает кейс «модель не уверена в распознавании»
+  // — будущий UI может показать предупреждение «проверьте качество фото».
+  const parseErrorDetails: Record<string, unknown> | null = isIncomplete
     ? {
         missing: [
           parsed.docNumber == null ? 'docNumber' : null,
@@ -307,6 +400,9 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           parsed.totalSum == null ? 'totalSum' : null,
           parsed.items.length === 0 ? 'items' : null,
         ].filter(Boolean) as string[],
+        confidence,
+        parsedViaVision,
+        reason: confidence < MIN_DEDUP_CONFIDENCE ? 'low_confidence' : null,
       }
     : hasMismatch
       ? {
