@@ -22,7 +22,13 @@ RUN pnpm --filter @matcheck/contracts typecheck \
 FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-RUN apk add --no-cache tini && corepack enable && corepack prepare pnpm@9.12.0 --activate
+# tini — корректный init для PID 1.
+# poppler-utils — даёт `pdftoppm`, который domain/edo/upd-vision.parser.ts
+# вызывает через child_process для конвертации PDF-сканов УПД в PNG перед
+# отправкой в OpenRouter Vision (OpenRouter не принимает application/pdf
+# напрямую). Без этого пакета сканированные PDF из 1С будут падать с
+# `parse_failed` reason='pdf_render_error'. На Alpine пакет занимает ~6 МБ.
+RUN apk add --no-cache tini poppler-utils && corepack enable && corepack prepare pnpm@9.12.0 --activate
 # Сохраняем pnpm-структуру монорепо, чтобы workspace-symlinks (@matcheck/contracts) и
 # .pnpm-symlinks (fastify, drizzle и пр.) корректно резолвились в runtime.
 COPY --from=build /repo/package.json /repo/pnpm-workspace.yaml /repo/tsconfig.base.json ./

@@ -21,6 +21,10 @@
 // рядом с каждым парсером, чем городить shared/-зависимость.
 
 import { z } from 'zod';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { db } from '../../db/client.js';
 import { llmCalls, llmProviders, llmProviderCredentials } from '../../db/schema.js';
 import { eq } from 'drizzle-orm';
@@ -28,7 +32,6 @@ import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { loadActivePromptWithMeta } from '../prompts/registry.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
 import type { ParsePdfResult } from './upd-pdf.parser.js';
-import { pdfToPng } from 'pdf-to-png-converter';
 
 // Лимит страниц при PDF→PNG конвертации (для OpenRouter+PDF).
 // 5 страниц достаточно для большинства реальных УПД (типично 1-2 стр.).
@@ -36,6 +39,21 @@ import { pdfToPng } from 'pdf-to-png-converter';
 // Защита от: (1) raw payload size limit OpenRouter; (2) затрат на
 // токены (каждая страница = ~1000+ image tokens).
 const MAX_PAGES_FOR_OPENROUTER = 5;
+
+// DPI рендера PDF в PNG через pdftoppm.
+// 150 dpi — стандарт для распознавания печатных документов: текст
+// чёткий, размер PNG ~200-400 КБ на A4, для preview-моделей через
+// OpenRouter укладывается в timeout. Раньше использовался viewportScale
+// (pdf-to-png-converter, ~108 dpi) — в Poppler параметр прямой.
+const PDF_RENDER_DPI = 150;
+
+// Таймаут на сам рендер PDF в PNG.
+// 75 сек — Poppler обычно справляется с 1-2 страничным УПД за 1-3
+// секунды; такой большой запас — на случай повреждённого/гигантского
+// PDF из 1С с сотней встроенных шрифтов. Если упёрлись — fail-fast
+// через PdfRenderTimeoutError (без BullMQ retry), пользователь видит
+// «Не удалось подготовить PDF к распознаванию» и грузит как JPG.
+const PDF_RENDER_TIMEOUT_MS = 75_000;
 
 // Vision LLM timeout — 180 сек.
 // Уменьшен с 600 сек (10 мин) после проблемы зависания на
@@ -48,12 +66,120 @@ const MAX_PAGES_FOR_OPENROUTER = 5;
 // на qwen3.6-plus, либо загрузить как JPG/PNG (image-flow быстрее).
 const VISION_TIMEOUT_MS = 180_000;
 
-// viewportScale при рендере PDF в PNG.
-// 1.5 = ~108 dpi — баланс между качеством распознавания и размером
-// payload. Выше (2.0) даёт более чёткое изображение, но PNG в 1.8x
-// больше → preview-модели через OpenRouter могут не успеть в timeout.
-// При необходимости поднимаем до 2.0 для очень мелких документов.
-const PDF_RENDER_SCALE = 1.5;
+// Ошибка таймаута рендера PDF→PNG. Отдельный класс, чтобы worker
+// мог пометить документ parse_failed СРАЗУ (без BullMQ retries):
+// повторный запуск pdftoppm на тот же файл даст тот же результат.
+export class PdfRenderTimeoutError extends Error {
+  constructor(public readonly elapsedMs: number) {
+    super(
+      `Не удалось подготовить PDF-скан к распознаванию за ${Math.round(elapsedMs / 1000)}с. ` +
+        'PDF может быть повреждён или слишком большой. ' +
+        'Попробуйте загрузить страницы как JPG/PNG (фото со смартфона).',
+    );
+    this.name = 'PdfRenderTimeoutError';
+  }
+}
+
+// Ошибка рендера PDF→PNG (pdftoppm exit ≠ 0, не запустился, и т.п.).
+// Worker ловит её так же — fail-fast без BullMQ retries: повтор не
+// поможет. В parseErrorDetails.message пользователь увидит причину.
+export class PdfRenderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PdfRenderError';
+  }
+}
+
+// PDF→PNG через системный pdftoppm (poppler-utils). Заменил npm-пакет
+// pdf-to-png-converter, который тянет нативные биндинги (pdfjs-dist +
+// canvas/cairo) — на проде это нестабильно: либо нет системных либ,
+// либо процесс висит на «битых» PDF из 1С. Poppler гарантированно
+// установлен на любом Linux с `apt-get install poppler-utils` и
+// промышленно отрабатывает любые PDF, включая сканы 1С.
+//
+// Возвращает массив PNG (Buffer) до maxPages страниц. Лишние страницы
+// просто не рендерим (через -l). При любой ошибке кидает
+// PdfRenderError; при таймауте PDF_RENDER_TIMEOUT_MS — PdfRenderTimeoutError.
+async function pdfToPngsViaPoppler(
+  pdfBuffer: Buffer,
+  maxPages: number,
+): Promise<Buffer[]> {
+  const dir = await mkdtemp(join(tmpdir(), 'upd-pdf-'));
+  try {
+    const inPath = join(dir, 'in.pdf');
+    const outPrefix = join(dir, 'out');
+    await writeFile(inPath, pdfBuffer);
+
+    // pdftoppm -r 150 -png -f 1 -l N in.pdf out
+    //   → out-1.png, out-2.png, ... (для одной страницы — out-1.png)
+    const args = [
+      '-r',
+      String(PDF_RENDER_DPI),
+      '-png',
+      '-f',
+      '1',
+      '-l',
+      String(maxPages),
+      inPath,
+      outPrefix,
+    ];
+
+    const startMs = Date.now();
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn('pdftoppm', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      const timer = setTimeout(() => {
+        proc.kill('SIGKILL');
+        reject(new PdfRenderTimeoutError(Date.now() - startMs));
+      }, PDF_RENDER_TIMEOUT_MS);
+
+      let stderr = '';
+      proc.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf8');
+      });
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        // ENOENT — самый частый случай: poppler-utils не установлен.
+        const hint =
+          err.message.includes('ENOENT')
+            ? ' (не найден pdftoppm; на сервере: sudo apt-get install -y poppler-utils)'
+            : '';
+        reject(new PdfRenderError(`pdftoppm не запустился: ${err.message}${hint}`));
+      });
+      proc.on('exit', (code) => {
+        clearTimeout(timer);
+        if (code !== 0) {
+          reject(
+            new PdfRenderError(
+              `pdftoppm exit=${code}: ${stderr.trim().slice(0, 300) || '(no stderr)'}`,
+            ),
+          );
+        } else {
+          resolve();
+        }
+      });
+    });
+
+    // Имена файлов: out-1.png, out-2.png ... — сортируем по числовому
+    // суффиксу (лексикографическая сортировка дала бы out-10 перед out-2).
+    const files = (await readdir(dir))
+      .filter((f) => /^out-\d+\.png$/.test(f))
+      .sort((a, b) => {
+        const ai = Number(a.match(/^out-(\d+)\.png$/)![1]);
+        const bi = Number(b.match(/^out-(\d+)\.png$/)![1]);
+        return ai - bi;
+      });
+    if (files.length === 0) {
+      throw new PdfRenderError('pdftoppm завершился успешно, но не создал PNG');
+    }
+    const pages: Buffer[] = [];
+    for (const f of files) pages.push(await readFile(join(dir, f)));
+    return pages;
+  } finally {
+    // Всегда удаляем tmp-директорию, даже при ошибке. force:true чтобы
+    // не падать если pdftoppm уже что-то не создал.
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
 
 // Специальный класс для Vision-timeout'а: worker ловит его отдельно
 // и помечает parse_failed СРАЗУ, без BullMQ retries. Без этого
@@ -187,36 +313,21 @@ export async function parseUpdVision(
     );
   }
   // OpenRouter Vision принимает только image/*, PDF не поддерживается
-  // провайдером. Если пришёл PDF и провайдер OpenRouter — конвертируем
-  // PDF в PNG по страницам через pdf-to-png-converter (pure JS, без
-  // системных зависимостей) и шлём массив image_url одним запросом.
-  // Защита от больших PDF: MAX_PAGES_FOR_OPENROUTER (5 страниц), лишние
-  // страницы пишем в parseErrorDetails.warning, контракт DTO не меняем.
+  // провайдером. Если пришёл PDF и провайдер OpenRouter — рендерим
+  // первые MAX_PAGES_FOR_OPENROUTER страниц в PNG через системный
+  // pdftoppm (poppler-utils) и шлём массив image_url одним запросом.
+  // Лимит страниц зашит в pdftoppm через флаг -l (лишние не рендерим
+  // вовсе — экономия CPU/RAM на больших PDF).
   let convertedPngPages: Buffer[] | null = null;
-  let truncatedPages = 0;
   if (row.kind === 'openrouter' && mime === 'application/pdf') {
-    try {
-      const allPages = await pdfToPng(input.buffer, {
-        // См. константу PDF_RENDER_SCALE — баланс качества и размера.
-        viewportScale: PDF_RENDER_SCALE,
-        outputFolder: undefined,
-        outputFileMaskFunc: undefined,
-        disableFontFace: true,
-      });
-      if (allPages.length > MAX_PAGES_FOR_OPENROUTER) {
-        truncatedPages = allPages.length - MAX_PAGES_FOR_OPENROUTER;
-      }
-      convertedPngPages = allPages
-        .slice(0, MAX_PAGES_FOR_OPENROUTER)
-        .map((p) => p.content)
-        .filter((b): b is Buffer => b !== undefined);
-    } catch (err) {
-      throw new Error(
-        `УПД vision: PDF→PNG конвертация упала — ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
+    // PdfRenderTimeoutError / PdfRenderError пробрасываем как есть —
+    // worker.ts ловит их в верхнем catch и помечает parse_failed без
+    // BullMQ retry (повторный pdftoppm на тот же файл даст тот же
+    // результат — повторять смысла нет).
+    convertedPngPages = await pdfToPngsViaPoppler(
+      input.buffer,
+      MAX_PAGES_FOR_OPENROUTER,
+    );
   }
 
   const [cred] = await db
@@ -312,7 +423,7 @@ export async function parseUpdVision(
             role: 'user',
             content: `[vision upd: ${input.filename ?? 'no-name'} (${mime}, ${input.buffer.length} bytes${
               convertedPngPages !== null
-                ? `, pdf→png pages=${convertedPngPages.length}${truncatedPages > 0 ? `, truncated=${truncatedPages}` : ''}`
+                ? `, pdf→png pages=${convertedPngPages.length}`
                 : ''
             })]\n${promptMeta.content.slice(0, 4000)}`,
           },

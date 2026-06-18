@@ -35,7 +35,12 @@ import {
   PdfNoTextError,
   PdfTextGarbageError,
 } from './domain/edo/upd-pdf.parser.js';
-import { parseUpdVision, VisionTimeoutError } from './domain/edo/upd-vision.parser.js';
+import {
+  parseUpdVision,
+  PdfRenderError,
+  PdfRenderTimeoutError,
+  VisionTimeoutError,
+} from './domain/edo/upd-vision.parser.js';
 import { parseUpdXlsx } from './domain/edo/upd-xlsx.parser.js';
 
 // Минимальная уверенность LLM, при которой запускается дедупликация по
@@ -338,6 +343,38 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       log.warn(
         { elapsedMs: err.elapsedMs },
         'vision timeout — marked parse_failed without retry',
+      );
+      await notifySourceDocumentUpdated(sourceDocumentId);
+      return;
+    }
+    // PdfRenderTimeoutError / PdfRenderError — fail-fast: pdftoppm не
+    // справился с подготовкой PDF к Vision-распознаванию (повреждённый
+    // PDF, отсутствует poppler-utils, гигантский PDF). Повтор запуска
+    // pdftoppm на тот же файл даст тот же результат — BullMQ retry
+    // только впустую съест минуты. Помечаем parse_failed сразу с
+    // понятным сообщением; пользователь может загрузить страницы как
+    // JPG/PNG (image-flow обходит pdftoppm). parseErrorCode='pdf_no_text'
+    // переиспользуем, чтобы не менять контрактный enum; конкретная
+    // причина — в parseErrorDetails.reason.
+    if (err instanceof PdfRenderTimeoutError || err instanceof PdfRenderError) {
+      const isTimeout = err instanceof PdfRenderTimeoutError;
+      await db
+        .update(sourceDocuments)
+        .set({
+          status: 'parse_failed',
+          parseErrorCode: 'pdf_no_text',
+          parseErrorDetails: {
+            reason: isTimeout ? 'pdf_render_timeout' : 'pdf_render_error',
+            ...(isTimeout ? { elapsedMs: err.elapsedMs } : {}),
+            message: err.message,
+          },
+          processedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceDocuments.id, sourceDocumentId));
+      log.warn(
+        { reason: isTimeout ? 'pdf_render_timeout' : 'pdf_render_error', err },
+        'pdf→png failed — marked parse_failed without retry',
       );
       await notifySourceDocumentUpdated(sourceDocumentId);
       return;
