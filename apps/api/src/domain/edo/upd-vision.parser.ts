@@ -55,16 +55,35 @@ const PDF_RENDER_DPI = 150;
 // «Не удалось подготовить PDF к распознаванию» и грузит как JPG.
 const PDF_RENDER_TIMEOUT_MS = 75_000;
 
-// Vision LLM timeout — 180 сек.
-// Уменьшен с 600 сек (10 мин) после проблемы зависания на
-// google/gemini-3-flash-preview: preview-модели на OpenRouter могут
-// надолго подвисать на тяжёлых payload'ах (>2 MB base64). 3 минуты
-// — баланс: достаточно чтобы успеть на нормальный запрос, но даёт
-// быстрый parse_failed с понятной ошибкой timeout, а не «крутит 10
-// минут». Если упрётся в таймаут — worker помечает документ
-// parse_failed и пользователь может либо переключить default-модель
-// на qwen3.6-plus, либо загрузить как JPG/PNG (image-flow быстрее).
-const VISION_TIMEOUT_MS = 180_000;
+// Таймаут одной попытки Vision-вызова. 180 сек — баланс между
+// «нормальный запрос успевает» и «не висим 10 минут на preview-модели».
+// Если уперлись — VisionTimeoutError → fail-fast в worker без BullMQ retry.
+const VISION_ATTEMPT_TIMEOUT_MS = 180_000;
+
+// Общий бюджет времени на parseUpdVision — все попытки суммарно.
+// Защищает от сценария «упёрлись в 180 + ретрай уехал ещё на 180 = 6 минут».
+// Если перед очередной попыткой остаётся меньше 30 сек (минимум для
+// нормального ответа + БД-логирования), мы НЕ начинаем её и кидаем
+// VisionBudgetExceededError. Worker ловит её симметрично VisionTimeoutError
+// — fail-fast, документ → parse_failed, без BullMQ retry.
+const VISION_TOTAL_TIMEOUT_MS = 240_000;
+
+// Количество ВНУТРЕННИХ retry на transient ошибки (обрыв соединения upstream,
+// truncated JSON, HTTP 5xx/429, пустой ответ модели). Реальное наблюдение
+// показало ~10-20% флакушности google/gemini-3-flash-preview через OpenRouter:
+// модель отдаёт ~100-300 байт и закрывает соединение. Один быстрый retry
+// внутри одной задачи (без BullMQ backoff'а) снижает финальный fail-rate
+// до ~2-4% при той же видимой задержке для пользователя.
+//
+// ВАЖНО: retry делается ТОЛЬКО на transient (см. isTransientVisionError ниже).
+// VisionTimeoutError, ZodError на валидном JSON, низкий confidence, ошибки
+// маппинга/БД — НЕ ретраим (повтор не поможет, только потратит бюджет).
+const VISION_TRANSIENT_RETRIES = 1;
+
+// Минимальный бюджет, нужный на ещё одну попытку перед бросанием
+// VisionBudgetExceededError. Меньше 30 сек — нет смысла начинать: даже если
+// модель ответит быстро, нужен запас на parse/Zod/insert llm_calls.
+const VISION_MIN_RETRY_BUDGET_MS = 30_000;
 
 // Ошибка таймаута рендера PDF→PNG. Отдельный класс, чтобы worker
 // мог пометить документ parse_failed СРАЗУ (без BullMQ retries):
@@ -183,7 +202,7 @@ async function pdfToPngsViaPoppler(
 
 // Специальный класс для Vision-timeout'а: worker ловит его отдельно
 // и помечает parse_failed СРАЗУ, без BullMQ retries. Без этого
-// при VISION_TIMEOUT_MS=180с и attempts=3 пользователь ждал бы
+// при VISION_ATTEMPT_TIMEOUT_MS=180с и attempts=3 пользователь ждал бы
 // 3+1+3+2+3 = 12 минут (3 timeouts + backoff 60с×1 + 60с×2 между
 // попытками). После timeout повторно запрашивать ту же модель на тот
 // же payload бессмысленно — она либо опять не успеет, либо у неё
@@ -208,6 +227,48 @@ function rethrowVisionTimeout(err: unknown, startMs: number): never {
     throw new VisionTimeoutError(Date.now() - startMs);
   }
   throw err instanceof Error ? err : new Error(String(err));
+}
+
+// Общий бюджет на parseUpdVision исчерпан между попытками. Симметричен
+// VisionTimeoutError — worker ловит, помечает parse_failed без BullMQ retry.
+// Возникает редко: только когда первая попытка съела почти весь бюджет и
+// retry не помещается. В обычных сценариях retry на transient вписывается
+// в 2× short call ≈ 10-20 сек и до бюджета не доходит.
+export class VisionBudgetExceededError extends Error {
+  constructor(public readonly elapsedMs: number) {
+    super(
+      `Vision-распознавание УПД исчерпало бюджет ${Math.round(
+        VISION_TOTAL_TIMEOUT_MS / 1000,
+      )}с (фактически ${Math.round(elapsedMs / 1000)}с). ` +
+        'Попробуйте загрузить файл как JPG/PNG (быстрее) ' +
+        'или переключить default-модель в Администрировании → LLM провайдеры.',
+    );
+    this.name = 'VisionBudgetExceededError';
+  }
+}
+
+// Классификация ошибок для решения о ретрае. Возвращает true, если ошибка
+// похожа на transient (обрыв соединения, частичный ответ, временная
+// недоступность провайдера) — такие нормально лечатся повтором.
+// Возвращает false для finally-ошибок (таймаут на 180 сек, валидация Zod
+// на корректном JSON, низкий confidence, ошибки маппинга/БД) — повтор не
+// поможет, только потратит бюджет и токены пользователя.
+function isTransientVisionError(err: Error): boolean {
+  // Per-attempt timeout — fail-fast (VisionTimeoutError ловится в worker'е).
+  if (err instanceof VisionTimeoutError) return false;
+  // Битый/обрезанный JSON (truncated response) — основной симптом обрыва
+  // upstream-соединения OpenRouter ↔ Google. Наблюдался в проде ~10-20%.
+  if (err.message.includes('JSON.parse failed')) return true;
+  // Пустой ответ модели (response.choices[0].message.content === '').
+  if (err.message.includes('пустой ответ')) return true;
+  // Транзитные HTTP-ошибки: 5xx (server error) и 429 (rate limit).
+  if (/HTTP (5\d{2}|429)/i.test(err.message)) return true;
+  // Network-level сбои node:fetch: разрыв соединения, DNS, socket hang up.
+  if (/ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|socket hang up|network/i.test(err.message)) {
+    return true;
+  }
+  // Прочее (ZodError, ошибки маппинга, БД и т.п.) — считаем final.
+  return false;
 }
 
 // JSON Schema ответа Gemini — должна совпадать с UpdPdfParsedSchema в
@@ -356,115 +417,157 @@ export async function parseUpdVision(
     'Верни ровно ОДИН JSON-объект на верхнем уровне ({"docNumber":..., "items":[...]}).\n' +
     'НЕ оборачивай его в массив. Ответ должен начинаться с символа `{`, а НЕ с `[`.';
 
-  const startedAt = Date.now();
-  let raw: string | null = null;
-  let parsedZod: UpdPdfParsed | null = null;
-  let promptTokens: number | null = null;
-  let completionTokens: number | null = null;
-  let errorCode: string | null = null;
-  let errorMessage: string | null = null;
+  // Одна попытка распознавания: один LLM-вызов + JSON.parse + unwrap +
+  // Zod-валидация + ВСЕГДА запись отдельной строки в llm_calls (даже на
+  // ошибке). При успехе возвращает ParsePdfResult, при ошибке кидает.
+  // Используется внутри retry-цикла ниже — каждая попытка видна в логах
+  // «Логи распознавания (LLM)» как отдельная запись с пометкой attempt
+  // в requestMessages.content (нумерация с 1).
+  const runOneAttempt = async (attemptNo: number): Promise<ParsePdfResult> => {
+    const attemptStartedAt = Date.now();
+    let raw: string | null = null;
+    let parsedZod: UpdPdfParsed | null = null;
+    let promptTokens: number | null = null;
+    let completionTokens: number | null = null;
+    let errorCode: string | null = null;
+    let errorMessage: string | null = null;
 
-  try {
-    if (row.kind === 'google_ai_studio') {
-      const result = await callGemini({
-        apiBaseUrl: cred.apiBaseUrl,
-        apiKey,
-        model: row.model,
-        temperature: Number(row.temperature ?? 0.2),
-        maxTokens: row.maxTokens ?? 8192,
-        promptText: visionPromptText,
-        file: { buffer: input.buffer, mimeType: mime },
-      });
-      raw = result.raw;
-      promptTokens = result.promptTokens;
-      completionTokens = result.completionTokens;
-    } else {
-      // OpenRouter: PDF идёт как массив PNG (см. convertedPngPages выше),
-      // image/* — как единственный image_url.
-      const filesForOpenRouter =
-        convertedPngPages !== null
-          ? convertedPngPages.map((png) => ({ buffer: png, mimeType: 'image/png' }))
-          : [{ buffer: input.buffer, mimeType: mime }];
-      const result = await callOpenRouter({
-        apiBaseUrl: cred.apiBaseUrl,
-        apiKey,
-        model: row.model,
-        temperature: Number(row.temperature ?? 0.2),
-        maxTokens: row.maxTokens ?? 8192,
-        promptText: visionPromptText,
-        files: filesForOpenRouter,
-      });
-      raw = result.raw;
-      promptTokens = result.promptTokens;
-      completionTokens = result.completionTokens;
-    }
-
-    if (!raw) throw new Error('УПД vision: пустой ответ LLM');
-
-    let jsonParsed: unknown;
     try {
-      jsonParsed = JSON.parse(stripJsonFences(raw));
+      if (row.kind === 'google_ai_studio') {
+        const result = await callGemini({
+          apiBaseUrl: cred.apiBaseUrl,
+          apiKey,
+          model: row.model,
+          temperature: Number(row.temperature ?? 0.2),
+          maxTokens: row.maxTokens ?? 8192,
+          promptText: visionPromptText,
+          file: { buffer: input.buffer, mimeType: mime },
+        });
+        raw = result.raw;
+        promptTokens = result.promptTokens;
+        completionTokens = result.completionTokens;
+      } else {
+        // OpenRouter: PDF идёт как массив PNG (см. convertedPngPages выше),
+        // image/* — как единственный image_url.
+        const filesForOpenRouter =
+          convertedPngPages !== null
+            ? convertedPngPages.map((png) => ({ buffer: png, mimeType: 'image/png' }))
+            : [{ buffer: input.buffer, mimeType: mime }];
+        const result = await callOpenRouter({
+          apiBaseUrl: cred.apiBaseUrl,
+          apiKey,
+          model: row.model,
+          temperature: Number(row.temperature ?? 0.2),
+          maxTokens: row.maxTokens ?? 8192,
+          promptText: visionPromptText,
+          files: filesForOpenRouter,
+        });
+        raw = result.raw;
+        promptTokens = result.promptTokens;
+        completionTokens = result.completionTokens;
+      }
+
+      if (!raw) throw new Error('УПД vision: пустой ответ LLM');
+
+      let jsonParsed: unknown;
+      try {
+        jsonParsed = JSON.parse(stripJsonFences(raw));
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        e.message = `УПД vision: JSON.parse failed (likely truncated): ${e.message}`;
+        throw e;
+      }
+      // Страховка от array-обёртки: Gemini preview-модели иногда возвращают
+      // [{...}] вместо {...}. [{...}] разворачиваем; пустой [] и
+      // многоэлементный [{},{}] пропускаем — это уже не флак формата.
+      if (Array.isArray(jsonParsed) && jsonParsed.length === 1) {
+        jsonParsed = jsonParsed[0];
+      }
+      parsedZod = UpdPdfParsedSchema.parse(jsonParsed);
+      return {
+        parsed: parsedZod,
+        textLength: input.buffer.length,
+        llmProviderId: row.id,
+      };
+    } catch (err) {
+      errorCode = err instanceof z.ZodError ? 'zod_failed' : 'provider_error';
+      errorMessage = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      const latencyMs = Date.now() - attemptStartedAt;
+      // Отдельная запись llm_calls на КАЖДУЮ попытку. В админке видно
+      // «attempt 1 — provider_error (truncated JSON), attempt 2 — ok»
+      // — это сильно упрощает разбор инцидентов на проде.
+      try {
+        await db.insert(llmCalls).values({
+          sourceDocumentId: ctx.sourceDocumentId,
+          providerId: row.id,
+          promptId: promptMeta.id,
+          docKind: 'upd',
+          model: row.model,
+          requestMessages: [
+            {
+              role: 'user',
+              content: `[vision upd attempt=${attemptNo}: ${input.filename ?? 'no-name'} (${mime}, ${input.buffer.length} bytes${
+                convertedPngPages !== null
+                  ? `, pdf→png pages=${convertedPngPages.length}`
+                  : ''
+              })]\n${promptMeta.content.slice(0, 4000)}`,
+            },
+          ],
+          requestSchema: RESPONSE_JSON_SCHEMA as object,
+          responseRaw: raw,
+          responseParsed: parsedZod as unknown as object | null,
+          promptTokens,
+          completionTokens,
+          latencyMs,
+          errorCode,
+          errorMessage,
+        });
+      } catch {
+        /* ignore — лог пропадёт, но основной поток не должен страдать */
+      }
+    }
+  };
+
+  // Retry-цикл с deadline check. Логика:
+  //   * attempt=1: всегда выполняется (исходная попытка).
+  //   * attempt=2..(1+VISION_TRANSIENT_RETRIES): только если предыдущая
+  //     ошибка transient (см. isTransientVisionError) И в общем бюджете
+  //     осталось ≥ VISION_MIN_RETRY_BUDGET_MS на ещё одну попытку.
+  // При исчерпании бюджета бросаем VisionBudgetExceededError — worker
+  // ловит её симметрично VisionTimeoutError (fail-fast, без BullMQ retry).
+  // VisionTimeoutError проходит через retry-цикл насквозь: isTransient=false
+  // → сразу throw → fail-fast в worker.
+  const overallStartMs = Date.now();
+  const deadlineMs = overallStartMs + VISION_TOTAL_TIMEOUT_MS;
+  let lastErr: Error | null = null;
+  for (let attempt = 1; attempt <= 1 + VISION_TRANSIENT_RETRIES; attempt++) {
+    if (attempt > 1) {
+      const remainingMs = deadlineMs - Date.now();
+      if (remainingMs < VISION_MIN_RETRY_BUDGET_MS) {
+        throw new VisionBudgetExceededError(Date.now() - overallStartMs);
+      }
+    }
+    try {
+      return await runOneAttempt(attempt);
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
-      e.message = `УПД vision: JSON.parse failed (likely truncated): ${e.message}`;
+      lastErr = e;
+      if (
+        attempt < 1 + VISION_TRANSIENT_RETRIES &&
+        isTransientVisionError(e)
+      ) {
+        // Логирование этой попытки уже произошло в runOneAttempt.finally —
+        // просто продолжаем к следующей итерации без задержки.
+        continue;
+      }
       throw e;
     }
-    // Страховка от array-обёртки. Gemini preview-модели
-    // (gemini-3-flash-preview и подобные) недетерминированно (наблюдалось
-    // ~20-33% случаев) оборачивают ответ в массив с одним элементом,
-    // даже когда в responseSchema/promptText явно задан объект. Без
-    // unwrap каждая такая загрузка УПД падает на Zod c invalid_type
-    // (expected object, received array) и пользователь видит
-    // «Ошибка распознавания: pdf_no_text» на абсолютно нормальном УПД.
-    // [{...}] → {...}; пустой [] и многоэлементный [{},{}] пропускаем
-    // как есть — это уже не флак формата, а реальная ошибка, и Zod
-    // должен честно её показать.
-    if (Array.isArray(jsonParsed) && jsonParsed.length === 1) {
-      jsonParsed = jsonParsed[0];
-    }
-    parsedZod = UpdPdfParsedSchema.parse(jsonParsed);
-    return {
-      parsed: parsedZod,
-      textLength: input.buffer.length,
-      llmProviderId: row.id,
-    };
-  } catch (err) {
-    errorCode = err instanceof z.ZodError ? 'zod_failed' : 'provider_error';
-    errorMessage = err instanceof Error ? err.message : String(err);
-    throw err;
-  } finally {
-    const latencyMs = Date.now() - startedAt;
-    // Логируем без request-картинки (base64 огромный), как в waybill-batch.
-    try {
-      await db.insert(llmCalls).values({
-        sourceDocumentId: ctx.sourceDocumentId,
-        providerId: row.id,
-        promptId: promptMeta.id,
-        docKind: 'upd',
-        model: row.model,
-        requestMessages: [
-          {
-            role: 'user',
-            content: `[vision upd: ${input.filename ?? 'no-name'} (${mime}, ${input.buffer.length} bytes${
-              convertedPngPages !== null
-                ? `, pdf→png pages=${convertedPngPages.length}`
-                : ''
-            })]\n${promptMeta.content.slice(0, 4000)}`,
-          },
-        ],
-        requestSchema: RESPONSE_JSON_SCHEMA as object,
-        responseRaw: raw,
-        responseParsed: parsedZod as unknown as object | null,
-        promptTokens,
-        completionTokens,
-        latencyMs,
-        errorCode,
-        errorMessage,
-      });
-    } catch {
-      /* ignore */
-    }
   }
+  // Не должно достигаться (либо return из try, либо throw из catch выше),
+  // но TS требует явный throw.
+  throw lastErr ?? new Error('УПД vision: не удалось распознать');
 }
 
 type GeminiCallArgs = {
@@ -522,7 +625,7 @@ async function callGemini(args: GeminiCallArgs): Promise<VisionCallResult> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
+      signal: AbortSignal.timeout(VISION_ATTEMPT_TIMEOUT_MS),
     });
   } catch (err) {
     rethrowVisionTimeout(err, startMs);
@@ -576,7 +679,7 @@ async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCallResul
         'X-Title': 'matcheck',
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
+      signal: AbortSignal.timeout(VISION_ATTEMPT_TIMEOUT_MS),
     });
   } catch (err) {
     rethrowVisionTimeout(err, startMs);

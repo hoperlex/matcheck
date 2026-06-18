@@ -39,6 +39,7 @@ import {
   parseUpdVision,
   PdfRenderError,
   PdfRenderTimeoutError,
+  VisionBudgetExceededError,
   VisionTimeoutError,
 } from './domain/edo/upd-vision.parser.js';
 import { parseUpdXlsx } from './domain/edo/upd-xlsx.parser.js';
@@ -237,9 +238,13 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             llmProviderId = vr.llmProviderId;
             parsedViaVision = true;
           } catch (visionErr) {
-            // VisionTimeoutError — fail-fast: пробрасываем во внешний
-            // catch, который пометит parse_failed без BullMQ retry.
-            if (visionErr instanceof VisionTimeoutError) {
+            // VisionTimeoutError / VisionBudgetExceededError — fail-fast:
+            // пробрасываем во внешний catch, который пометит parse_failed
+            // без BullMQ retry. Оба класса означают, что повтор бесполезен.
+            if (
+              visionErr instanceof VisionTimeoutError ||
+              visionErr instanceof VisionBudgetExceededError
+            ) {
               throw visionErr;
             }
             // Прочие ошибки (провайдер не поддерживает PDF / сетевые
@@ -277,10 +282,13 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             llmProviderId = r.llmProviderId;
             parsedViaVision = true;
           } catch (visionErr) {
-            // VisionTimeoutError — fail-fast: пробрасываем во внешний
-            // catch, который пометит parse_failed без BullMQ retry с
-            // понятной причиной reason='vision_timeout'.
-            if (visionErr instanceof VisionTimeoutError) {
+            // VisionTimeoutError / VisionBudgetExceededError — fail-fast:
+            // пробрасываем во внешний catch (parse_failed без BullMQ retry,
+            // понятная причина reason='vision_timeout' или 'vision_budget').
+            if (
+              visionErr instanceof VisionTimeoutError ||
+              visionErr instanceof VisionBudgetExceededError
+            ) {
               throw visionErr;
             }
             // Vision тоже не справился (провайдер не поддерживает PDF —
@@ -325,14 +333,25 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // из контрактного enum (vision_timeout не добавляем, чтобы не
     // менять @matcheck/contracts). UI уже умеет показывать pdf_no_text,
     // подробности — в parseErrorDetails.reason='vision_timeout'.
-    if (err instanceof VisionTimeoutError) {
+    if (
+      err instanceof VisionTimeoutError ||
+      err instanceof VisionBudgetExceededError
+    ) {
+      // Оба класса означают, что повторный запуск Vision на тот же payload
+      // бесполезен (per-attempt timeout 180с уже исчерпан, или total budget
+      // 240с — даже на retry не хватит). Без этого блока BullMQ сделал бы
+      // 3 attempts × VISION_TOTAL_TIMEOUT_MS + backoff ≈ 13 минут.
+      // reason='vision_timeout' для per-attempt и 'vision_budget' для
+      // total-budget: в админке можно отличить «модель повисла на 180с»
+      // от «retry не уложился в общий бюджет».
+      const isBudget = err instanceof VisionBudgetExceededError;
       await db
         .update(sourceDocuments)
         .set({
           status: 'parse_failed',
           parseErrorCode: 'pdf_no_text',
           parseErrorDetails: {
-            reason: 'vision_timeout',
+            reason: isBudget ? 'vision_budget' : 'vision_timeout',
             elapsedMs: err.elapsedMs,
             message: err.message,
           },
@@ -341,8 +360,8 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         })
         .where(eq(sourceDocuments.id, sourceDocumentId));
       log.warn(
-        { elapsedMs: err.elapsedMs },
-        'vision timeout — marked parse_failed without retry',
+        { elapsedMs: err.elapsedMs, reason: isBudget ? 'vision_budget' : 'vision_timeout' },
+        'vision fail-fast — marked parse_failed without retry',
       );
       await notifySourceDocumentUpdated(sourceDocumentId);
       return;
