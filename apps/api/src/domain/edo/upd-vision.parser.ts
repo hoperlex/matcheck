@@ -344,6 +344,17 @@ export async function parseUpdVision(
   );
   // Используем тот же prompt doc_kind='upd', что и текстовый parser.
   const promptMeta = await loadActivePromptWithMeta('upd');
+  // Хвост-страховка против array-обёртки. Gemini preview-модели иногда
+  // возвращают [{...}] вместо {...} (см. наблюдение по логам ~20-33% флак).
+  // Дублируем требование в промпте — снижает базовую вероятность ошибки;
+  // если она всё-таки случится, unwrap при разборе JSON разворачивает
+  // массив в объект (см. ниже). Хвост добавляется ТОЛЬКО для vision-flow,
+  // прокручиваемый в БД промпт не меняем (text-parser его тоже использует).
+  const visionPromptText =
+    promptMeta.content +
+    '\n\n# КРИТИЧНО: формат ответа\n' +
+    'Верни ровно ОДИН JSON-объект на верхнем уровне ({"docNumber":..., "items":[...]}).\n' +
+    'НЕ оборачивай его в массив. Ответ должен начинаться с символа `{`, а НЕ с `[`.';
 
   const startedAt = Date.now();
   let raw: string | null = null;
@@ -361,7 +372,7 @@ export async function parseUpdVision(
         model: row.model,
         temperature: Number(row.temperature ?? 0.2),
         maxTokens: row.maxTokens ?? 8192,
-        promptText: promptMeta.content,
+        promptText: visionPromptText,
         file: { buffer: input.buffer, mimeType: mime },
       });
       raw = result.raw;
@@ -380,7 +391,7 @@ export async function parseUpdVision(
         model: row.model,
         temperature: Number(row.temperature ?? 0.2),
         maxTokens: row.maxTokens ?? 8192,
-        promptText: promptMeta.content,
+        promptText: visionPromptText,
         files: filesForOpenRouter,
       });
       raw = result.raw;
@@ -397,6 +408,19 @@ export async function parseUpdVision(
       const e = err instanceof Error ? err : new Error(String(err));
       e.message = `УПД vision: JSON.parse failed (likely truncated): ${e.message}`;
       throw e;
+    }
+    // Страховка от array-обёртки. Gemini preview-модели
+    // (gemini-3-flash-preview и подобные) недетерминированно (наблюдалось
+    // ~20-33% случаев) оборачивают ответ в массив с одним элементом,
+    // даже когда в responseSchema/promptText явно задан объект. Без
+    // unwrap каждая такая загрузка УПД падает на Zod c invalid_type
+    // (expected object, received array) и пользователь видит
+    // «Ошибка распознавания: pdf_no_text» на абсолютно нормальном УПД.
+    // [{...}] → {...}; пустой [] и многоэлементный [{},{}] пропускаем
+    // как есть — это уже не флак формата, а реальная ошибка, и Zod
+    // должен честно её показать.
+    if (Array.isArray(jsonParsed) && jsonParsed.length === 1) {
+      jsonParsed = jsonParsed[0];
     }
     parsedZod = UpdPdfParsedSchema.parse(jsonParsed);
     return {

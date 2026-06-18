@@ -518,6 +518,19 @@ export function DeliveriesHistory({
     const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
     return sd?.docNumber ?? null;
   };
+  // Имя поставщика: сначала старое прямое поле deliveries.supplier_id
+  // → counterparties (legacy + ручной выбор), потом fallback на
+  // sourceDocuments.supplierName, которое сервер сам COALESCE-резолвит
+  // через suppliers + counterparties (см. routes/source-documents.ts).
+  // Это симметрично resolveContractor выше: для новых распознанных УПД
+  // поставщик пишется в source_documents.supplier_directory_id, а
+  // deliveries.supplier_id остаётся NULL — без этого fallback колонка
+  // «Поставщик» в таблице была пустой, хотя в карточке/мобиле имя есть.
+  const resolveSupplierName = (r: Row): string | null => {
+    if (r.supplierId) return counterpartiesMap.get(r.supplierId) ?? null;
+    const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
+    return sd?.supplierName ?? null;
+  };
 
   // Собираем готовый снимок для read-only Drawer: уже подставлены имена
   // подрядчика/объекта/поставщика и метаданные привязанного УПД. Drawer
@@ -542,7 +555,7 @@ export function DeliveriesHistory({
     return {
       delivery: r,
       contractorName: contractorId ? counterpartiesMap.get(contractorId) ?? null : null,
-      supplierName: r.supplierId ? counterpartiesMap.get(r.supplierId) ?? null : null,
+      supplierName: resolveSupplierName(r),
       siteName: siteId ? sitesMap.get(siteId) ?? null : null,
       docNumber: sd?.docNumber ?? null,
       docKindLabel: kindLabel,
@@ -751,8 +764,12 @@ export function DeliveriesHistory({
       </Tooltip>
     );
   };
-  const supplierName = (id: string | null | undefined) =>
-    id ? shortenCounterpartyName(counterpartiesMap.get(id)) : '—';
+  // Принимает Row, а не id, потому что нужен fallback на
+  // sourceDocuments.supplierName для новых УПД (см. resolveSupplierName).
+  const renderSupplierName = (r: Row) => {
+    const name = resolveSupplierName(r);
+    return name ? shortenCounterpartyName(name) : '—';
+  };
 
   return (
     <>
@@ -951,7 +968,7 @@ export function DeliveriesHistory({
           {
             title: 'Поставщик',
             key: 'supplier',
-            render: (_: unknown, r: Row) => supplierName(r.supplierId),
+            render: (_: unknown, r: Row) => renderSupplierName(r),
           },
           {
             title: 'Подрядчик',
@@ -1016,7 +1033,7 @@ export function DeliveriesHistory({
                 <Typography.Text strong>{r.vehiclePlate ?? 'Без номера'}</Typography.Text>
               </Space>
               <Typography.Text type="secondary">
-                {supplierName(r.supplierId)} · {r.items?.length ?? 0} стр.
+                {renderSupplierName(r)} · {r.items?.length ?? 0} стр.
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {renderContractor(r)} · {renderSite(r)}
