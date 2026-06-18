@@ -8,6 +8,7 @@ const envSchema = z.object({
 
   // DB / Redis
   DATABASE_URL: z.string().url().optional(),
+  DATABASE_POOL_MAX: z.coerce.number().int().positive().default(30),
   REDIS_URL: z.string().optional(),
 
   // Внешняя БД ФОТ (read-only) — список МОЛ. Отдельный пул, не основной.

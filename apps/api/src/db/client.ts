@@ -14,7 +14,7 @@ export const sql = postgres(connectionString, {
   // утренние пики приёмок. 30 — с запасом 2.5x для штатной работы, влезает
   // в дефолтный max_connections=100 Postgres с буфером ~50 соединений на
   // superuser / бэкапы / ручные psql.
-  max: 30,
+  max: env.DATABASE_POOL_MAX,
   idle_timeout: 30,
   prepare: false,
 });
