@@ -47,16 +47,37 @@ export function UnitSelect({
   });
   const units = list.data?.items ?? [];
 
+  // Нормализация для матчинга legacy-значений со справочником: убираем
+  // регистр, пробелы и не-словарные символы. «М3» / «м3 » / « M3 » → «м3»
+  // — все они мэтчатся с одной записью справочника, и virtual-опция с
+  // суффиксом «(legacy)» в UI больше не показывается.
+  const normalize = (s: string) =>
+    s.trim().toLowerCase().replace(/\s+/g, '').replace(/[^\p{L}\p{N}]/gu, '');
+
   const options = useMemo(() => {
     const map = new Map<string, { value: string; label: string }>();
     for (const u of units) {
       map.set(u.code, { value: u.code, label: u.code });
     }
-    // Legacy: текущий unit не в справочнике — добавляем virtual-опцию,
-    // помеченную «(не из справочника)» в подписи, чтобы пользователь
-    // понимал что это устаревшее значение и мог сменить.
+    // Если value не совпадает с активной записью справочника напрямую,
+    // пробуем найти по нормализованному ключу — это покрывает большую
+    // часть legacy-разнобоя из старых строк (регистр/пробелы/UTF-микс).
     if (value && value.length > 0 && !map.has(value)) {
-      map.set(value, { value, label: `${value} (legacy)` });
+      const normalizedValue = normalize(value);
+      const matched = units.find((u) => normalize(u.code) === normalizedValue);
+      if (matched) {
+        // Точное legacy-значение, нормализуемое в существующий код, —
+        // показываем выбранным официальный код из справочника, чтобы в
+        // колонке «Ед.» отображалось чистое «м3» вместо устаревшего «М3».
+        // ВАЖНО: хранимое в БД значение НЕ меняем здесь (см. onChange):
+        // пока пользователь не сохранит, value остаётся как есть.
+        map.set(value, { value, label: matched.code });
+      } else {
+        // Не нашли в справочнике — показываем как есть, БЕЗ технического
+        // суффикса (legacy). Раздражает пользователей и не несёт смысла
+        // в operational UI: достаточно того, что значение можно сменить.
+        map.set(value, { value, label: value });
+      }
     }
     return Array.from(map.values());
   }, [units, value]);

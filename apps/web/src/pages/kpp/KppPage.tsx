@@ -81,6 +81,12 @@ import { UnitSelect } from '../../shared/ui/UnitSelect';
 
 type DraftItem = {
   clientKey: string;
+  // id строки на сервере (delivery_items.id). null — строка только что
+  // добавлена в UI и ещё не сохранена. Используется кнопкой удаления для
+  // выбора UX-режима: для несохранённых — удаляем сразу, для сохранённых
+  // — через Popconfirm. Сам id в save-payload не передаётся (бэк wipes
+  // and reinserts по deliveryId, генерирует новые UUID).
+  serverId: string | null;
   lineNo: number;
   nameRaw: string;
   qtyPlanned: string | null;
@@ -482,6 +488,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       setItems(
         d.items.map((it, idx) => ({
           clientKey: newKey(),
+          serverId: it.id,
           lineNo: idx + 1,
           nameRaw: it.nameRaw,
           qtyPlanned: it.qtyPlanned,
@@ -539,6 +546,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     setItems(
       detail.items.map((it, idx) => ({
         clientKey: newKey(),
+        // Это items УПД (sourceDocument), а не БД-строки приёмки.
+        // На момент prefill приёмки эти строки ещё не сохранены как
+        // delivery_items — serverId=null до первого сохранения.
+        serverId: null,
         lineNo: idx + 1,
         nameRaw: it.nameRaw,
         qtyPlanned: it.qty,
@@ -635,11 +646,22 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     setItems((prev) => prev.map((it) => (it.clientKey === key ? { ...it, ...patch } : it)));
   };
 
+  // Удаление строки материала из локального state. Сохранение приёмки
+  // (POST /deliveries) делает wipe-and-reinsert по deliveryId, поэтому
+  // удаление здесь автоматически прорастает на сервер при следующем save.
+  // Для несохранённых (serverId=null) строк удаляется сразу — у пользователя
+  // нет данных, которые он мог бы потерять. Для сохранённых вызывающий код
+  // обязан показать Popconfirm (см. ниже в колонке actions).
+  const removeItem = (key: string) => {
+    setItems((prev) => prev.filter((it) => it.clientKey !== key));
+  };
+
   const addItem = () => {
     setItems((prev) => [
       ...prev,
       {
         clientKey: newKey(),
+        serverId: null,
         lineNo: prev.length + 1,
         nameRaw: '',
         qtyPlanned: null,
@@ -769,30 +791,23 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onError: (err: Error) => message.error(err.message),
   });
 
-  // Ручная привязка УПД к приёмке «Без документа» на портале (только admin/manager).
-  // Шлём прямой POST /deliveries с непустым sourceDocumentIds и пустым items —
-  // сервер сам подтянет позиции из УПД и переведёт статус в not_filled. IDB не
-  // трогаем: эта операция выполняется на портале, локальный snapshot инспектора
-  // обновится при следующем pullSync.
+  // Ручная привязка УПД к существующей приёмке (только admin/manager).
+  // Использует выделенный endpoint POST /deliveries/:id/link-source —
+  // он атомарно (1) INSERT в delivery_sources и (2) MERGE items УПД к
+  // существующим (с дедупом по nameRaw+unit+qty), НЕ удаляя ручные
+  // материалы и НЕ меняя статус приёмки (важно для приёмок, уже
+  // подтверждённых МОЛ через мобильное приложение). Старый путь POST
+  // /deliveries с items:[] делал destructive replace и сбрасывал
+  // подтверждение МОЛ — это уничтожало строки, добавленные в мобиле
+  // на 1/2 этапах. IDB не трогаем: операция на портале, локальный
+  // snapshot инспектора обновится при следующем pullSync.
   const linkUpd = useMutation({
     mutationFn: async (upd: SourceDocument): Promise<Delivery> => {
       if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
-      const payload = {
-        id: loadedDelivery.id,
-        statusCode: 'not_filled' as DeliveryStatusCode,
-        siteId: loadedDelivery.siteId,
-        supplierId: upd.supplierId ?? loadedDelivery.supplierId ?? null,
-        contractorId: loadedDelivery.contractorId,
-        recipientMolId: loadedDelivery.recipientMolId,
-        vehiclePlate: loadedDelivery.vehiclePlate,
-        driverName: loadedDelivery.driverName,
-        arrivedAt: loadedDelivery.arrivedAt,
-        comment: loadedDelivery.comment,
-        sourceDocumentIds: [upd.id],
-        items: [],
-        baseVersion: loadedDelivery.version,
-      };
-      return await api.post<Delivery>('/deliveries', payload);
+      return await api.post<Delivery>(
+        `/deliveries/${loadedDelivery.id}/link-source`,
+        { sourceDocumentId: upd.id },
+      );
     },
     onSuccess: async (dto) => {
       await upsertServerSnapshot([dto]);
@@ -1045,6 +1060,53 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           const price = toNum(r.price);
           if (qty === null || price === null) return '—';
           return formatMoneyRu(qty * price);
+        },
+      },
+      {
+        // Удаление строки материала. Для несохранённых строк (serverId=null,
+        // только что добавлены через «+ Материал» или прилетели из УПД-prefill)
+        // — удаление сразу, без подтверждения: пользователь не теряет данных.
+        // Для сохранённых строк (есть serverId из БД) — Popconfirm, потому
+        // что удаление можно «закрепить» только повторным сохранением, и
+        // случайный клик стоит дороже.
+        title: '',
+        key: 'actions',
+        width: 56,
+        align: 'center' as const,
+        render: (_: unknown, r: DraftItem) => {
+          const btn = (
+            <Button
+              type="text"
+              danger
+              size="small"
+              icon={<DeleteOutlined />}
+              aria-label="Удалить строку"
+            />
+          );
+          if (r.serverId) {
+            return (
+              <Popconfirm
+                title="Удалить строку?"
+                description="Изменение применится после сохранения приёмки."
+                okText="Удалить"
+                cancelText="Отмена"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => removeItem(r.clientKey)}
+              >
+                {btn}
+              </Popconfirm>
+            );
+          }
+          return (
+            <Button
+              type="text"
+              danger
+              size="small"
+              icon={<DeleteOutlined />}
+              aria-label="Удалить строку"
+              onClick={() => removeItem(r.clientKey)}
+            />
+          );
         },
       },
     ],

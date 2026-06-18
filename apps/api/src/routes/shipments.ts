@@ -24,6 +24,7 @@ import {
   shipmentPhotos,
   shipmentSources,
   sourceDocumentItems,
+  sourceDocuments,
   statuses,
   suppliers,
   users,
@@ -1185,6 +1186,180 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         .set({ supplierId: counterpartyId, updatedAt: new Date() })
         .where(eq(shipments.id, s.id));
 
+      publishEvent(app, {
+        type: 'shipment_updated',
+        entityId: s.id,
+        ts: new Date().toISOString(),
+      });
+
+      const dto = await buildShipmentDto(app, s.id);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
+      return dto;
+    },
+  );
+
+  // Симметрично POST /api/v1/deliveries/:id/link-source — привязка УПД к
+  // существующей отгрузке без destructive replace shipmentItems. Ручные
+  // материалы из мобилы остаются, строки из УПД добавляются с дедупом
+  // по (nameRaw,unit,qty). Не меняем статус/supplier_id/destSite/прочее.
+  // См. подробные комментарии в routes/deliveries.ts /link-source.
+  app.post(
+    '/api/v1/shipments/:id/link-source',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: z.object({ sourceDocumentId: z.string().uuid() }),
+        response: {
+          200: ShipmentSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [s] = await app.db
+        .select({
+          id: shipments.id,
+          pendingDeletionAt: shipments.pendingDeletionAt,
+        })
+        .from(shipments)
+        .where(eq(shipments.id, req.params.id))
+        .limit(1);
+      if (!s) return reply.code(404).send({ error: 'not_found' });
+      if (s.pendingDeletionAt !== null) {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — мутации запрещены',
+        });
+      }
+      const [src] = await app.db
+        .select({ id: sourceDocuments.id })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, req.body.sourceDocumentId))
+        .limit(1);
+      if (!src) {
+        return reply.code(404).send({
+          error: 'source_document_not_found',
+          message: 'УПД не найдена',
+        });
+      }
+
+      class AlreadyLinkedError extends Error {}
+
+      try {
+        await app.db.transaction(
+          async (
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            tx: any,
+          ) => {
+            const [already] = await tx
+              .select({ shipmentId: shipmentSources.shipmentId })
+              .from(shipmentSources)
+              .where(
+                and(
+                  eq(shipmentSources.shipmentId, s.id),
+                  eq(shipmentSources.sourceDocumentId, src.id),
+                ),
+              )
+              .limit(1);
+            if (already) throw new AlreadyLinkedError();
+            await tx
+              .insert(shipmentSources)
+              .values({ shipmentId: s.id, sourceDocumentId: src.id });
+
+            const existingItems: {
+              nameRaw: string;
+              unit: string;
+              qtyPlanned: string | null;
+              lineNo: number;
+            }[] = await tx
+              .select({
+                nameRaw: shipmentItems.nameRaw,
+                unit: shipmentItems.unit,
+                qtyPlanned: shipmentItems.qtyPlanned,
+                lineNo: shipmentItems.lineNo,
+              })
+              .from(shipmentItems)
+              .where(eq(shipmentItems.shipmentId, s.id));
+
+            const buildKey = (
+              name: string,
+              unit: string,
+              qty: string | null,
+            ): string =>
+              `${name.trim().toLowerCase()}|${unit.trim().toLowerCase()}|${
+                qty == null ? '' : Number(qty).toString()
+              }`;
+            const existingKeys = new Set(
+              existingItems.map((i) =>
+                buildKey(i.nameRaw, i.unit, i.qtyPlanned),
+              ),
+            );
+            const startLineNo =
+              existingItems.length === 0
+                ? 1
+                : Math.max(...existingItems.map((i) => i.lineNo)) + 1;
+
+            const updRows: (typeof sourceDocumentItems.$inferSelect)[] =
+              await tx
+                .select()
+                .from(sourceDocumentItems)
+                .where(eq(sourceDocumentItems.sourceDocumentId, src.id))
+                .orderBy(sourceDocumentItems.lineNo);
+
+            const newRows: (typeof shipmentItems.$inferInsert)[] = [];
+            let lineNo = startLineNo;
+            for (const r of updRows) {
+              if (existingKeys.has(buildKey(r.nameRaw, r.unit, r.qty))) {
+                continue;
+              }
+              newRows.push({
+                shipmentId: s.id,
+                itemKind: 'material' as const,
+                materialId: r.materialId,
+                assetId: null,
+                inventoryNumber: null,
+                serialNumber: null,
+                nameRaw: r.nameRaw,
+                qtyPlanned: r.qty,
+                qtyActual: null,
+                unit: r.unit,
+                comment: null,
+                lineNo: lineNo++,
+                volumeM3: r.volumeM3,
+                massKg: r.massKg,
+                price: r.price,
+                vatRate: r.vatRate,
+                vatSum: r.vatSum,
+                volumeConfidence: r.volumeConfidence,
+                groupName: r.groupName,
+              });
+            }
+            if (newRows.length > 0) {
+              await tx.insert(shipmentItems).values(newRows);
+            }
+
+            await tx
+              .update(shipments)
+              .set({
+                version: drSql`${shipments.version} + 1`,
+                updatedAt: new Date(),
+              })
+              .where(eq(shipments.id, s.id));
+          },
+        );
+      } catch (err) {
+        if (err instanceof AlreadyLinkedError) {
+          return reply.code(409).send({
+            error: 'already_linked',
+            message: 'УПД уже привязана к этой отгрузке',
+          });
+        }
+        throw err;
+      }
+
+      await touchSourceDocuments(app, [src.id]);
       publishEvent(app, {
         type: 'shipment_updated',
         entityId: s.id,

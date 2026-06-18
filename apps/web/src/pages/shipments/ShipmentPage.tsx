@@ -683,28 +683,18 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     onError: (err: Error) => message.error(err.message),
   });
 
-  // Ручная привязка УПД к отгрузке «Без документа» на портале (только admin/manager).
-  // Симметрично linkUpd в KppPage.tsx.
+  // Ручная привязка УПД к существующей отгрузке (только admin/manager).
+  // Симметрично linkUpd в KppPage.tsx. Использует выделенный endpoint
+  // POST /shipments/:id/link-source — атомарный INSERT в shipment_sources
+  // + MERGE items УПД к существующим (с дедупом). НЕ удаляет ручные
+  // материалы и НЕ меняет статус отгрузки (включая confirmed_mol).
   const linkUpd = useMutation({
     mutationFn: async (upd: SourceDocument): Promise<Shipment> => {
       if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
-      const payload = {
-        id: loadedShipment.id,
-        statusCode: 'not_filled' as ShipmentStatusCode,
-        kind: loadedShipment.kind,
-        siteId: loadedShipment.siteId,
-        receiverCounterpartyId: loadedShipment.receiverCounterpartyId,
-        receiverMolId: loadedShipment.receiverMolId,
-        destSiteId: loadedShipment.destSiteId,
-        vehiclePlate: loadedShipment.vehiclePlate,
-        driverName: loadedShipment.driverName,
-        shippedAt: loadedShipment.shippedAt,
-        comment: loadedShipment.comment,
-        sourceDocumentIds: [upd.id],
-        items: [],
-        baseVersion: loadedShipment.version,
-      };
-      return await api.post<Shipment>('/shipments', payload);
+      return await api.post<Shipment>(
+        `/shipments/${loadedShipment.id}/link-source`,
+        { sourceDocumentId: upd.id },
+      );
     },
     onSuccess: async (dto) => {
       await upsertServerSnapshot([dto]);

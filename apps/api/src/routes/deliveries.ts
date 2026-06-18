@@ -1560,6 +1560,214 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       return dto;
     },
   );
+
+  // Привязка УПД к существующей приёмке (приёмка остаётся в своём статусе,
+  // ручные материалы из мобилы НЕ удаляются). Заменяет старый клиентский
+  // путь «POST /api/v1/deliveries с items:[]» в KppPage.tsx → linkUpd,
+  // который через общую логику updateDelivery делал wipe-and-reinsert
+  // delivery_items + downgrade статуса до not_filled — это уничтожало
+  // строки, добавленные инспектором на 1/2 этапах в мобиле.
+  //
+  // Поведение нового endpoint'а:
+  //  1) INSERT в delivery_sources (PK защищает от дубля; если УПД уже
+  //     привязана — 409 «already_linked»).
+  //  2) Подгрузка items УПД (sourceDocumentItems) и существующих items
+  //     приёмки. Дедуп строк УПД по нормализованному (nameRaw,unit,qty)
+  //     — повторный нажим не задвоит строку, и если инспектор уже руками
+  //     внёс ту же позицию, она не задублируется.
+  //  3) INSERT только новых строк (с lineNo = max(existing)+1, ...).
+  //  4) Bump version + updated_at. Статус, supplier_id, contractor_id,
+  //     site_id, comment, photo и пр. — НЕ трогаем (минимальная инвазия).
+  //  5) touchSourceDocuments(УПД) + publishEvent('delivery_updated').
+  //
+  // Всё в одной транзакции — при ошибке откат полный (привязка + items).
+  app.post(
+    '/api/v1/deliveries/:id/link-source',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: z.object({ sourceDocumentId: z.string().uuid() }),
+        response: {
+          200: DeliverySchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [d] = await app.db
+        .select({
+          id: deliveries.id,
+          pendingDeletionAt: deliveries.pendingDeletionAt,
+        })
+        .from(deliveries)
+        .where(eq(deliveries.id, req.params.id))
+        .limit(1);
+      if (!d) return reply.code(404).send({ error: 'not_found' });
+      if (d.pendingDeletionAt !== null) {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — мутации запрещены',
+        });
+      }
+      const [src] = await app.db
+        .select({ id: sourceDocuments.id })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, req.body.sourceDocumentId))
+        .limit(1);
+      if (!src) {
+        return reply.code(404).send({
+          error: 'source_document_not_found',
+          message: 'УПД не найдена',
+        });
+      }
+
+      // Маркер «УПД уже привязана» — бросаем внутри транзакции, ловим
+      // снаружи и отвечаем 409 без падения сервиса (PK нарушение даёт
+      // невнятный 500 без этого хука).
+      class AlreadyLinkedError extends Error {}
+
+      try {
+        await app.db.transaction(
+          async (
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            tx: any,
+          ) => {
+            const [already] = await tx
+              .select({ deliveryId: deliverySources.deliveryId })
+              .from(deliverySources)
+              .where(
+                and(
+                  eq(deliverySources.deliveryId, d.id),
+                  eq(deliverySources.sourceDocumentId, src.id),
+                ),
+              )
+              .limit(1);
+            if (already) throw new AlreadyLinkedError();
+            await tx
+              .insert(deliverySources)
+              .values({ deliveryId: d.id, sourceDocumentId: src.id });
+
+            // Существующие items приёмки (ручные + предыдущие из УПД).
+            // lineNo нужен, чтобы поставить новые позиции В КОНЕЦ списка.
+            const existingItems: {
+              nameRaw: string;
+              unit: string;
+              qtyPlanned: string | null;
+              lineNo: number;
+            }[] = await tx
+              .select({
+                nameRaw: deliveryItems.nameRaw,
+                unit: deliveryItems.unit,
+                qtyPlanned: deliveryItems.qtyPlanned,
+                lineNo: deliveryItems.lineNo,
+              })
+              .from(deliveryItems)
+              .where(eq(deliveryItems.deliveryId, d.id));
+
+            // Ключ дедупликации: нормализованные nameRaw + unit + qty.
+            // Защищает от двух кейсов:
+            //   а) повторный нажим кнопки «Привязать УПД» — позиции из
+            //      УПД уже могут быть в приёмке, не задваиваем;
+            //   б) инспектор руками внёс точно ту же строку, что в УПД,
+            //      — не делаем визуальный дубль.
+            // При несовпадении единицы измерения / количества — строки
+            // считаются разными, и УПД-строка добавляется отдельно.
+            const buildKey = (
+              name: string,
+              unit: string,
+              qty: string | null,
+            ): string =>
+              `${name.trim().toLowerCase()}|${unit.trim().toLowerCase()}|${
+                qty == null ? '' : Number(qty).toString()
+              }`;
+            const existingKeys = new Set(
+              existingItems.map((i) =>
+                buildKey(i.nameRaw, i.unit, i.qtyPlanned),
+              ),
+            );
+            const startLineNo =
+              existingItems.length === 0
+                ? 1
+                : Math.max(...existingItems.map((i) => i.lineNo)) + 1;
+
+            const updRows: (typeof sourceDocumentItems.$inferSelect)[] =
+              await tx
+                .select()
+                .from(sourceDocumentItems)
+                .where(eq(sourceDocumentItems.sourceDocumentId, src.id))
+                .orderBy(sourceDocumentItems.lineNo);
+
+            const newRows: (typeof deliveryItems.$inferInsert)[] = [];
+            let lineNo = startLineNo;
+            for (const r of updRows) {
+              if (existingKeys.has(buildKey(r.nameRaw, r.unit, r.qty))) {
+                continue;
+              }
+              newRows.push({
+                deliveryId: d.id,
+                itemKind: 'material' as const,
+                materialId: r.materialId,
+                assetId: null,
+                inventoryNumber: null,
+                serialNumber: null,
+                nameRaw: r.nameRaw,
+                qtyPlanned: r.qty,
+                qtyActual: null,
+                unit: r.unit,
+                comment: null,
+                lineNo: lineNo++,
+                volumeM3: r.volumeM3,
+                massKg: r.massKg,
+                price: r.price,
+                vatRate: r.vatRate,
+                vatSum: r.vatSum,
+                volumeConfidence: r.volumeConfidence,
+                groupName: r.groupName,
+              });
+            }
+            if (newRows.length > 0) {
+              await tx.insert(deliveryItems).values(newRows);
+            }
+
+            // Bump version+updated_at. Статус и прочие поля приёмки
+            // НЕ ТРОГАЕМ — это критично для confirmed_mol-приёмок:
+            // привязка УПД не должна откатить статус обратно к not_filled.
+            await tx
+              .update(deliveries)
+              .set({
+                version: drSql`${deliveries.version} + 1`,
+                updatedAt: new Date(),
+              })
+              .where(eq(deliveries.id, d.id));
+          },
+        );
+      } catch (err) {
+        if (err instanceof AlreadyLinkedError) {
+          return reply.code(409).send({
+            error: 'already_linked',
+            message: 'УПД уже привязана к этой приёмке',
+          });
+        }
+        throw err;
+      }
+
+      // touchSourceDocuments — чтобы Inbox мобилы обновился, и привязанная
+      // УПД исчезла из ожидаемых у инспектора. Делаем после транзакции,
+      // потому что touch не атомарен с insert (это уже отдельный bump).
+      await touchSourceDocuments(app, [src.id]);
+      publishEvent(app, {
+        type: 'delivery_updated',
+        entityId: d.id,
+        ts: new Date().toISOString(),
+      });
+
+      const dto = await buildDeliveryDto(app, d.id);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
+      return dto;
+    },
+  );
 }
 
 async function createDelivery(
