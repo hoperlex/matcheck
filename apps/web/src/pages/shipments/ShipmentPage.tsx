@@ -63,6 +63,7 @@ import { db, SYSTEM_SITE_ID } from '../../lib/db';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
+import { FlagChip } from '../../shared/ui/FlagChip';
 import type { PageTabItem } from '../../shared/ui/PageTabs';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { PhotoGallery } from '../kpp/PhotoGallery';
@@ -513,15 +514,25 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     navigate(`/operations?type=shipment&shipment=${id}&new=1&upd=${upd.id}&from=list`);
   };
 
-  const photoProps: UploadProps = {
+  // Фабрика photoProps под конкретный stage ('before' = 1 Этап,
+  // 'after' = 2 Этап). Симметрично KppPage: явный выбор этапа на
+  // портале, чтобы менеджер мог дослать фото в правильный раздел
+  // независимо от текущего статуса отгрузки.
+  const makePhotoProps = (stage: 'before' | 'after'): UploadProps => ({
     accept: 'image/*',
     capture: 'environment',
     showUploadList: false,
     beforeUpload: async (file) => {
       if (!shipmentId) return false;
       try {
-        const { uploadPromise } = await capturePhoto('shipment', shipmentId, file, 'cargo');
-        message.success('Фото добавлено');
+        const { uploadPromise } = await capturePhoto(
+          'shipment',
+          shipmentId,
+          file,
+          'cargo',
+          stage,
+        );
+        message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ['photos-local', 'shipment', shipmentId] }),
           queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] }),
@@ -541,7 +552,14 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       }
       return false;
     },
-  };
+  });
+
+  const photoPropsStage1 = makePhotoProps('before');
+  const photoPropsStage2 = makePhotoProps('after');
+  // Кнопка «К 2 Этапу» доступна после фактического подтверждения МОЛ
+  // (status confirmed_mol). До этого 2 этап ведёт инспектор МОЛ на
+  // мобиле, и параллельная съёмка с портала создаёт конфликт.
+  const stage2Enabled = loadedShipment?.status.code === 'confirmed_mol';
 
   const updateField = (key: string, patch: Partial<DraftItem>) => {
     setItems((prev) => prev.map((it) => (it.clientKey === key ? { ...it, ...patch } : it)));
@@ -710,6 +728,21 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     onError: (err: Error) => {
       setLinkUpdError(err.message);
     },
+  });
+
+  // PATCH флагов inTransit/isAssets через
+  // /api/v1/shipments/:id/flags — точечная мутация без побочных эффектов
+  // на items/photos/purpose.
+  const patchFlags = useMutation({
+    mutationFn: async (patch: { inTransit?: boolean; isAssets?: boolean }) => {
+      if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
+      return api.patch<Shipment>(`/shipments/${loadedShipment.id}/flags`, patch);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
+      void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+    },
+    onError: (err: Error) => message.error(err.message),
   });
 
   const markDel = useMutation({
@@ -1421,23 +1454,36 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 )}
               </InlineEditChip>
 
-              {/* Транзит — рисуется ТОЛЬКО если флаг true (заполнено
-                  инспектором на 1 этапе мобилы чекбоксом). Read-only тег:
-                  менеджер на портале этот флаг не редактирует.
-                  См. миграцию 0051. */}
-              {loadedShipment?.inTransit ? (
-                <Tag color="orange" style={{ marginInlineEnd: 0 }}>
-                  🚚 Транзит
-                </Tag>
-              ) : null}
-              {/* ОС — флаг «основные средства», рядом с Транзитом. Рисуется
-                  ТОЛЬКО если флаг true. Заполняется инспектором чекбоксом
-                  «ОС» на 1 этапе мобилы. См. миграцию 0065. */}
-              {loadedShipment?.isAssets ? (
-                <Tag color="purple" style={{ marginInlineEnd: 0 }}>
-                  📦 ОС
-                </Tag>
-              ) : null}
+              {/* Транзит — admin/manager могут поставить/снять прямо
+                  с портала (PATCH /shipments/:id/flags). Inspector_kpp
+                  видит только цветной чип при true и не правит — у него
+                  есть чекбокс «Транзит» на 1 этапе мобилы.
+                  См. миграцию 0051 + FlagChip. */}
+              {loadedShipment && (
+                <FlagChip
+                  label="Транзит"
+                  emoji="🚚"
+                  color="orange"
+                  value={loadedShipment.inTransit}
+                  disabled={isInspector || patchFlags.isPending}
+                  loading={patchFlags.isPending}
+                  onChange={(next) => patchFlags.mutate({ inTransit: next })}
+                />
+              )}
+              {/* ОС — флаг «основные средства», рядом с Транзитом.
+                  Источник — чекбокс «ОС» на 1 этапе мобилы. См. миграцию
+                  0065. */}
+              {loadedShipment && (
+                <FlagChip
+                  label="ОС"
+                  emoji="📦"
+                  color="purple"
+                  value={loadedShipment.isAssets}
+                  disabled={isInspector || patchFlags.isPending}
+                  loading={patchFlags.isPending}
+                  onChange={(next) => patchFlags.mutate({ isAssets: next })}
+                />
+              )}
 
               {/* УПД/Накладная — read-only чипы (значения приходят от
                   привязки УПД, в этой шапке не редактируются).
@@ -1517,11 +1563,28 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               children: (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                   <Space wrap>
-                    <Upload {...photoProps}>
+                    <Upload {...photoPropsStage1}>
                       <Button size="large" icon={<CameraOutlined />}>
-                        Снять фото
+                        К 1 Этапу
                       </Button>
                     </Upload>
+                    <Tooltip
+                      title={
+                        stage2Enabled
+                          ? null
+                          : '2 Этап доступен после подтверждения МОЛ'
+                      }
+                    >
+                      <Upload {...photoPropsStage2} disabled={!stage2Enabled}>
+                        <Button
+                          size="large"
+                          icon={<CameraOutlined />}
+                          disabled={!stage2Enabled}
+                        >
+                          К 2 Этапу
+                        </Button>
+                      </Upload>
+                    </Tooltip>
                     {photosCount === 0 && (
                       <Typography.Text type="secondary">
                         Хотя бы одно фото нужно для сохранения.

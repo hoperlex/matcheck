@@ -1561,6 +1561,75 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     },
   );
 
+  // PATCH флагов приёмки (inTransit/isAssets). Менеджер на портале
+  // правит, если инспектор на мобиле ошибочно поставил/не поставил
+  // соответствующий чекбокс на 1 этапе.
+  //
+  // Минимально-инвазивный endpoint: меняет ТОЛЬКО эти два поля и
+  // updated_at, ничего больше. Не трогает items/photos/status/supplier
+  // и не запускает items wipe-and-reinsert (как делал бы POST /deliveries
+  // upsert). Безопасно для приёмок в любом статусе — мобила следующим
+  // /sync получит обновлённые флаги через sourceDocuments/deliveries
+  // секции, никаких контрактных breaking-изменений.
+  app.patch(
+    '/api/v1/deliveries/:id/flags',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: z
+          .object({
+            inTransit: z.boolean().optional(),
+            isAssets: z.boolean().optional(),
+          })
+          .refine(
+            (b) => b.inTransit !== undefined || b.isAssets !== undefined,
+            { message: 'Минимум одно из полей (inTransit, isAssets) должно быть задано' },
+          ),
+        response: {
+          200: DeliverySchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [d] = await app.db
+        .select({
+          id: deliveries.id,
+          pendingDeletionAt: deliveries.pendingDeletionAt,
+        })
+        .from(deliveries)
+        .where(eq(deliveries.id, req.params.id))
+        .limit(1);
+      if (!d) return reply.code(404).send({ error: 'not_found' });
+      if (d.pendingDeletionAt !== null) {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — мутации запрещены',
+        });
+      }
+
+      const patch: { inTransit?: boolean; isAssets?: boolean; updatedAt: Date } = {
+        updatedAt: new Date(),
+      };
+      if (req.body.inTransit !== undefined) patch.inTransit = req.body.inTransit;
+      if (req.body.isAssets !== undefined) patch.isAssets = req.body.isAssets;
+
+      await app.db.update(deliveries).set(patch).where(eq(deliveries.id, d.id));
+
+      publishEvent(app, {
+        type: 'delivery_updated',
+        entityId: d.id,
+        ts: new Date().toISOString(),
+      });
+
+      const dto = await buildDeliveryDto(app, d.id);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
+      return dto;
+    },
+  );
+
   // Привязка УПД к существующей приёмке (приёмка остаётся в своём статусе,
   // ручные материалы из мобилы НЕ удаляются). Заменяет старый клиентский
   // путь «POST /api/v1/deliveries с items:[]» в KppPage.tsx → linkUpd,

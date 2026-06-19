@@ -1,10 +1,22 @@
 import { useEffect, useState } from 'react';
-import { Button, Image, Popconfirm, Spin, Tooltip, Typography, message } from 'antd';
-import { DeleteOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons';
+import {
+  Button,
+  Image,
+  Popconfirm,
+  Popover,
+  Radio,
+  Space,
+  Spin,
+  Tooltip,
+  Typography,
+  message,
+} from 'antd';
+import { DeleteOutlined, EditOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   DeliveryPhoto,
   PhotoDeleteResponse,
+  PhotoPatchResponse,
   ShipmentPhoto,
 } from '@matcheck/contracts';
 import { api, apiDownload, ApiError } from '../../services/api';
@@ -38,7 +50,12 @@ export function PhotoGallery({
   // даже если пользователь admin. Семантически: «здесь смотрят, не правят».
   readOnly?: boolean;
 }): JSX.Element | null {
-  const canDelete = useAuthStore((s) => s.user?.role === 'admin') && !readOnly;
+  const role = useAuthStore((s) => s.user?.role);
+  const canDelete = role === 'admin' && !readOnly;
+  // Изменение типа фото (kind) — admin или manager. Inspector_kpp правит
+  // тип только на мобиле (или переснимает); менять чужие фото с веба он
+  // не должен.
+  const canEditKind = (role === 'admin' || role === 'manager') && !readOnly;
   const queryClient = useQueryClient();
   const invalidateKey = operationKind === 'shipment' ? 'shipments' : 'deliveries';
 
@@ -78,6 +95,27 @@ export function PhotoGallery({
     onError: (err: Error) => message.error(err.message),
   });
 
+  // Изменение типа фото. Сохраняет только kind; всё остальное
+  // (stage, s3Key, takenAt, file) — нетронуто. Бэк PATCH /api/v1/photos/:id.
+  const patchKind = useMutation<
+    PhotoPatchResponse,
+    Error,
+    { id: string; kind: 'document' | 'cargo' | 'vehicle' | 'other' }
+  >({
+    mutationFn: ({ id, kind }) =>
+      api.patch<PhotoPatchResponse>(`/photos/${id}`, { kind }),
+    onSuccess: async () => {
+      message.success('Тип фото изменён');
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: [invalidateKey, deliveryId] }),
+        queryClient.invalidateQueries({
+          queryKey: ['photos-local', operationKind, deliveryId],
+        }),
+      ]);
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
   if (photos.length === 0) return null;
 
   const sorted = [...photos].sort((a, b) => a.takenAt.localeCompare(b.takenAt));
@@ -95,6 +133,14 @@ export function PhotoGallery({
   // работает стандартный antd Image preview через PreviewGroup ниже.
   const [docPreview, setDocPreview] = useState<{ id: string; src: string } | null>(null);
 
+  // Общий previewOpen-флаг для всей PreviewGroup: при открытии fullscreen
+  // preview ЛЮБОГО фото он становится true → enabled для fullQuery
+  // включается СРАЗУ у всех фото группы. Иначе antd-PreviewGroup листает
+  // через стрелки на соседние фото, у которых local previewOpen остался
+  // false, и preview показывает растянутый thumbnail 140 px вместо
+  // оригинала. Текст на сканах документов в таком виде нечитаем.
+  const [previewOpen, setPreviewOpen] = useState(false);
+
   return (
     <div
       style={{
@@ -104,7 +150,15 @@ export function PhotoGallery({
         width: '100%',
       }}
     >
-      <Image.PreviewGroup>
+      <Image.PreviewGroup
+        preview={{
+          // Group-level callback вызывается на КАЖДОЕ открытие/закрытие
+          // overlay'я, независимо от того, какую миниатюру кликнули и куда
+          // потом листают стрелками. Это и есть единый сигнал «оригиналы
+          // нужны прямо сейчас» для всех PhotoThumb группы.
+          onVisibleChange: (vis) => setPreviewOpen(vis),
+        }}
+      >
         {sorted.map((p) => (
           <PhotoThumb
             key={p.id}
@@ -112,8 +166,12 @@ export function PhotoGallery({
             canDelete={canDelete}
             onDelete={() => del.mutate(p.id)}
             deleting={del.isPending && del.variables === p.id}
+            canEditKind={canEditKind}
+            onChangeKind={(kind) => patchKind.mutate({ id: p.id, kind })}
+            changingKind={patchKind.isPending && patchKind.variables?.id === p.id}
             showLabel={showLabels}
             onDocumentClick={(src) => setDocPreview({ id: p.id, src })}
+            previewOpen={previewOpen}
           />
         ))}
       </Image.PreviewGroup>
@@ -143,13 +201,22 @@ function PhotoThumb({
   canDelete,
   onDelete,
   deleting,
+  canEditKind,
+  onChangeKind,
+  changingKind,
   showLabel,
   onDocumentClick,
+  previewOpen,
 }: {
   photo: AnyPhoto;
   canDelete: boolean;
   onDelete: () => void;
   deleting: boolean;
+  // Может ли пользователь сменить тип фото (kind). Шире, чем canDelete:
+  // admin + manager. Inspector_kpp правит тип только на мобиле.
+  canEditKind: boolean;
+  onChangeKind: (kind: 'document' | 'cargo' | 'vehicle' | 'other') => void;
+  changingKind: boolean;
   // false — родитель просит не показывать подпись (kind ненадёжен,
   // backfill ещё не прошёл). См. PhotoGallery.showLabels.
   showLabel: boolean;
@@ -157,6 +224,11 @@ function PhotoThumb({
   // модалку с распознанными материалами справа. Стандартный antd preview
   // в этом случае отключён.
   onDocumentClick: (fullSrc: string) => void;
+  // Общий для всей PreviewGroup флаг: true, когда у пользователя открыт
+  // fullscreen-overlay (с любым из фото группы). Триггерит ленивую
+  // загрузку оригинала ДЛЯ ВСЕХ фото — чтобы листание стрелками между
+  // фото показывало оригиналы, а не растянутые миниатюры.
+  previewOpen: boolean;
 }): JSX.Element {
   const label = showLabel ? kindLabel(photo.kind) : null;
   const isDocument = photo.kind === 'document';
@@ -197,10 +269,11 @@ function PhotoThumb({
   const isUploading = photo.uploadedAt === null && !localThumb;
   const needsRemote = idbChecked && !localThumb && !isUploading;
 
-  // Открыт ли antd-preview (управляемый — нужен, чтобы триггерить
-  // ленивую загрузку оригинала только по требованию). controlled visible
-  // у antd Image поддерживается через preview.visible/onVisibleChange.
-  const [previewOpen, setPreviewOpen] = useState(false);
+  // previewOpen приходит сверху (из PhotoGallery) — это общий флаг на всю
+  // PreviewGroup, см. комментарий у его объявления в родительском
+  // компоненте. Каждый PhotoThumb не держит свой локальный — иначе
+  // PreviewGroup листает к фото, у которого enabled=false, и antd
+  // показывает растянутую миниатюру вместо оригинала.
 
   // Качаем blob миниатюры через API-прокси (сервер стримит S3 → клиент).
   // Это даёт стабильную загрузку: сервер ↔ S3 в одной сети, нет ERR_-
@@ -420,10 +493,15 @@ function PhotoThumb({
             ? false
             : {
                 src: fullSrc,
-                // Controlled visible → enabled fullQuery → ленивая загрузка
-                // оригинала только когда preview реально открыли.
-                visible: previewOpen,
-                onVisibleChange: (vis) => setPreviewOpen(vis),
+                // visible/onVisibleChange здесь НЕ задаём:
+                // PreviewGroup сам контролирует видимость overlay'я и
+                // дёргает свой собственный onVisibleChange (см.
+                // PhotoGallery → Image.PreviewGroup preview prop).
+                // Локальный controlled-state в PhotoThumb приводил к
+                // тому, что enabled у fullQuery вспыхивал только на том
+                // фото, которое было кликнуто первым, а у соседних
+                // (доступных через стрелки) оставался false → preview
+                // показывал растянутый thumb.
               }
         }
         width={THUMB_SIZE}
@@ -476,14 +554,106 @@ function PhotoThumb({
         </Popconfirm>
       )}
     </div>
-    {label && (
-      <Typography.Text
-        type="secondary"
-        style={{ fontSize: 11, display: 'block', textAlign: 'center', marginTop: 4 }}
-      >
-        {label}
-      </Typography.Text>
-    )}
+    <PhotoLabelRow
+      label={label}
+      canEditKind={canEditKind}
+      currentKind={photo.kind}
+      onChangeKind={onChangeKind}
+      changing={changingKind}
+    />
+    </div>
+  );
+}
+
+/**
+ * Подпись «Документ»/«Груз/машина» под миниатюрой + (для admin/manager)
+ * иконка-карандаш, открывающая Popover для смены kind. Показывается
+ * только в normal-render ветке: в uploading/error состояниях правка
+ * типа не нужна.
+ *
+ * Если подписи нет (showLabel=false — kind не разрешён в этой галерее)
+ * И смена недоступна — компонент не рендерит ничего, чтобы не плодить
+ * пустой DOM-узел.
+ */
+function PhotoLabelRow({
+  label,
+  canEditKind,
+  currentKind,
+  onChangeKind,
+  changing,
+}: {
+  label: string | null;
+  canEditKind: boolean;
+  currentKind: string | undefined;
+  onChangeKind: (kind: 'document' | 'cargo' | 'vehicle' | 'other') => void;
+  changing: boolean;
+}): JSX.Element | null {
+  const [open, setOpen] = useState(false);
+  if (!label && !canEditKind) return null;
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 4,
+        marginTop: 4,
+        minHeight: 16,
+      }}
+    >
+      {label && (
+        <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+          {label}
+        </Typography.Text>
+      )}
+      {canEditKind && (
+        <Popover
+          open={open}
+          onOpenChange={(v) => setOpen(v)}
+          trigger="click"
+          placement="bottom"
+          destroyTooltipOnHide
+          content={
+            <div style={{ width: 200 }}>
+              <Typography.Text
+                type="secondary"
+                style={{ fontSize: 11, display: 'block', marginBottom: 6 }}
+              >
+                Тип фото
+              </Typography.Text>
+              <Radio.Group
+                value={currentKind === 'document' ? 'document' : 'cargo'}
+                onChange={(e) => {
+                  const next = e.target.value as 'document' | 'cargo';
+                  onChangeKind(next);
+                  setOpen(false);
+                }}
+              >
+                <Space direction="vertical">
+                  <Radio value="document">Документ</Radio>
+                  <Radio value="cargo">Груз/машина</Radio>
+                </Space>
+              </Radio.Group>
+            </div>
+          }
+        >
+          <Tooltip title="Изменить тип фото">
+            <Button
+              type="text"
+              size="small"
+              icon={<EditOutlined />}
+              loading={changing}
+              style={{
+                fontSize: 10,
+                color: '#bfbfbf',
+                padding: '0 4px',
+                height: 18,
+                minWidth: 0,
+              }}
+            />
+          </Tooltip>
+        </Popover>
+      )}
     </div>
   );
 }

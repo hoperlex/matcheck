@@ -57,6 +57,23 @@ export type PhotoGetUrlResponse = z.infer<typeof PhotoGetUrlResponseSchema>;
 export const PhotoDeleteResponseSchema = z.object({ ok: z.literal(true) });
 export type PhotoDeleteResponse = z.infer<typeof PhotoDeleteResponseSchema>;
 
+// PATCH /api/v1/photos/:id — изменение только метаданных фото
+// (сейчас — только kind). НЕ трогает stage, s3Key, файл, uploadedBy,
+// takenAt, attachment к delivery/shipment. Используется на веб-портале,
+// чтобы менеджер мог исправить тип фото, если инспектор на мобиле
+// выбрал не ту кнопку («Груз» вместо «Документ» и т.п.). Мобильный
+// клиент это поле не пишет, только читает.
+export const PhotoPatchRequestSchema = z.object({
+  kind: PhotoKindSchema,
+});
+export type PhotoPatchRequest = z.infer<typeof PhotoPatchRequestSchema>;
+
+export const PhotoPatchResponseSchema = z.object({
+  ok: z.literal(true),
+  kind: PhotoKindSchema,
+});
+export type PhotoPatchResponse = z.infer<typeof PhotoPatchResponseSchema>;
+
 // Подтверждение фото после успешного PUT в S3: сервер делает S3.HEAD и,
 // если объект существует, проставляет uploaded_at = now(). Иначе 404 —
 // клиент должен повторить PUT.

@@ -1198,6 +1198,69 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
     },
   );
 
+  // PATCH флагов отгрузки (inTransit/isAssets). Симметрично deliveries
+  // /flags: менеджер на портале правит чекбоксы, ошибочно проставленные
+  // или забытые инспектором на 1 этапе мобилы. Меняет ТОЛЬКО эти два
+  // поля и updated_at — items/photos/status/purpose нетронуты.
+  app.patch(
+    '/api/v1/shipments/:id/flags',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: z
+          .object({
+            inTransit: z.boolean().optional(),
+            isAssets: z.boolean().optional(),
+          })
+          .refine(
+            (b) => b.inTransit !== undefined || b.isAssets !== undefined,
+            { message: 'Минимум одно из полей (inTransit, isAssets) должно быть задано' },
+          ),
+        response: {
+          200: ShipmentSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [s] = await app.db
+        .select({
+          id: shipments.id,
+          pendingDeletionAt: shipments.pendingDeletionAt,
+        })
+        .from(shipments)
+        .where(eq(shipments.id, req.params.id))
+        .limit(1);
+      if (!s) return reply.code(404).send({ error: 'not_found' });
+      if (s.pendingDeletionAt !== null) {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — мутации запрещены',
+        });
+      }
+
+      const patch: { inTransit?: boolean; isAssets?: boolean; updatedAt: Date } = {
+        updatedAt: new Date(),
+      };
+      if (req.body.inTransit !== undefined) patch.inTransit = req.body.inTransit;
+      if (req.body.isAssets !== undefined) patch.isAssets = req.body.isAssets;
+
+      await app.db.update(shipments).set(patch).where(eq(shipments.id, s.id));
+
+      publishEvent(app, {
+        type: 'shipment_updated',
+        entityId: s.id,
+        ts: new Date().toISOString(),
+      });
+
+      const dto = await buildShipmentDto(app, s.id);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
+      return dto;
+    },
+  );
+
   // Симметрично POST /api/v1/deliveries/:id/link-source — привязка УПД к
   // существующей отгрузке без destructive replace shipmentItems. Ручные
   // материалы из мобилы остаются, строки из УПД добавляются с дедупом

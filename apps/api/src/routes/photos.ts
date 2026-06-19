@@ -7,6 +7,8 @@ import {
   PhotoConfirmResponseSchema,
   PhotoDeleteResponseSchema,
   PhotoGetUrlResponseSchema,
+  PhotoPatchRequestSchema,
+  PhotoPatchResponseSchema,
   PhotoPresignRequestSchema,
   PhotoPresignResponseSchema,
   PhotoRecognitionSchema,
@@ -624,6 +626,77 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       }
       TABLES[found.kind].publishUpdated(app, found.operationId);
       return { ok: true as const };
+    },
+  );
+
+  // PATCH /api/v1/photos/:id — изменение только метаданных фото
+  // (сейчас — только kind). Менеджер на портале может исправить тип,
+  // если инспектор на мобиле выбрал не ту кнопку («Груз» вместо
+  // «Документ»). Не трогает stage, файл, takenAt, attachment.
+  //
+  // Мобильный клиент это поле не пишет (только читает), поэтому
+  // безопасно менять с веба — следующий /sync отдаст обновлённый kind,
+  // мобила upsertнет в Room и UI на 2 Этапе/в Архиве подхватит.
+  //
+  // Авторизация — admin/manager (как у большинства мутаций приёмки).
+  // Inspector_kpp не редактирует чужие фото; своё фото он может только
+  // удалить и переснять.
+  app.patch(
+    '/api/v1/photos/:id',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: PhotoPatchRequestSchema,
+        response: {
+          200: PhotoPatchResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const found = await findPhoto(app, req.params.id);
+      if (!found) return reply.code(404).send({ error: 'not_found' });
+
+      // pendingDeletionAt-check симметричен DELETE: пока документ в
+      // отложенном удалении — мутации фото блокируем, чтобы не плодить
+      // изменения, которые через час исчезнут вместе с приёмкой.
+      if (found.kind === 'delivery') {
+        const [parent] = await app.db
+          .select({ pendingDeletionAt: deliveries.pendingDeletionAt })
+          .from(deliveries)
+          .where(eq(deliveries.id, found.operationId))
+          .limit(1);
+        if (parent?.pendingDeletionAt !== null && parent?.pendingDeletionAt !== undefined) {
+          return reply.code(409).send({
+            error: 'pending_deletion',
+            message: 'Документ помечен на удаление — мутации фото запрещены',
+          });
+        }
+        await app.db
+          .update(deliveryPhotos)
+          .set({ kind: req.body.kind })
+          .where(eq(deliveryPhotos.id, req.params.id));
+      } else {
+        const [parent] = await app.db
+          .select({ pendingDeletionAt: shipments.pendingDeletionAt })
+          .from(shipments)
+          .where(eq(shipments.id, found.operationId))
+          .limit(1);
+        if (parent?.pendingDeletionAt !== null && parent?.pendingDeletionAt !== undefined) {
+          return reply.code(409).send({
+            error: 'pending_deletion',
+            message: 'Документ помечен на удаление — мутации фото запрещены',
+          });
+        }
+        await app.db
+          .update(shipmentPhotos)
+          .set({ kind: req.body.kind })
+          .where(eq(shipmentPhotos.id, req.params.id));
+      }
+      TABLES[found.kind].publishUpdated(app, found.operationId);
+      return { ok: true as const, kind: req.body.kind };
     },
   );
 

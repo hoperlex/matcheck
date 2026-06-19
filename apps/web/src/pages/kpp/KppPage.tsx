@@ -62,6 +62,7 @@ import { db } from '../../lib/db';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
+import { FlagChip } from '../../shared/ui/FlagChip';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { DeliveriesHistory } from './DeliveriesHistory';
 import { ExpectedUpds } from './ExpectedUpds';
@@ -599,18 +600,19 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     navigate(`/operations?type=delivery&delivery=${id}&new=1&upd=${upd.id}`);
   };
 
-  const photoProps: UploadProps = {
+  // Фабрика photoProps под конкретный stage ('before' = 1 Этап,
+  // 'after' = 2 Этап). Веб даёт менеджеру явный выбор этапа, чтобы он
+  // мог добавить фото в правильный раздел независимо от статуса
+  // приёмки (раньше stage маппился по status.code — но это путало,
+  // если статус приёмки ещё не дошёл до confirmed_mol, а нужно
+  // дослать фото 2 Этапа после фактической подписи МОЛ).
+  const makePhotoProps = (stage: 'before' | 'after'): UploadProps => ({
     accept: 'image/*',
     capture: 'environment',
     showUploadList: false,
     beforeUpload: async (file) => {
       if (!deliveryId) return false;
       try {
-        // На веб-портале нет UI 1-/2-го этапа (это специфика мобильного),
-        // поэтому маппим по серверному статусу: после подтверждения МОЛ
-        // (2-й этап завершён) — фото попадает в «После», иначе — в «До».
-        const stage =
-          loadedDelivery?.status.code === 'confirmed_mol' ? 'after' : 'before';
         const { uploadPromise } = await capturePhoto(
           'delivery',
           deliveryId,
@@ -618,7 +620,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           'cargo',
           stage,
         );
-        message.success('Фото добавлено');
+        message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
         // Локальный список фото перечитывается сразу из IDB, серверный delivery.photos —
         // после S3-upload + следующего pullSync. Галерея мерджит оба источника по id.
         await Promise.all([
@@ -640,7 +642,15 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       }
       return false;
     },
-  };
+  });
+
+  const photoPropsStage1 = makePhotoProps('before');
+  const photoPropsStage2 = makePhotoProps('after');
+  // Кнопка «К 2 Этапу» доступна после фактического подтверждения МОЛ
+  // (status confirmed_mol). До этого 2 этап ведёт инспектор МОЛ на
+  // мобиле, и добавление фото с портала в этот промежуток создаёт
+  // конфликт ожиданий «кто сейчас собирает 2 этап».
+  const stage2Enabled = loadedDelivery?.status.code === 'confirmed_mol';
 
   const updateField = (key: string, patch: Partial<DraftItem>) => {
     setItems((prev) => prev.map((it) => (it.clientKey === key ? { ...it, ...patch } : it)));
@@ -823,6 +833,22 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onError: (err: Error) => {
       setLinkUpdError(err.message);
     },
+  });
+
+  // Точечный PATCH флагов inTransit/isAssets через
+  // /api/v1/deliveries/:id/flags (backend меняет ТОЛЬКО эти поля и
+  // updated_at). НЕ запускает items wipe-and-reinsert, как полный
+  // POST /deliveries, и не зависит от local-state appearance items.
+  const patchFlags = useMutation({
+    mutationFn: async (patch: { inTransit?: boolean; isAssets?: boolean }) => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      return api.patch<Delivery>(`/deliveries/${loadedDelivery.id}/flags`, patch);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+    },
+    onError: (err: Error) => message.error(err.message),
   });
 
   const markDel = useMutation({
@@ -1527,22 +1553,36 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     )}
                 </Tag>
               )}
-              {/* Транзит — рисуется ТОЛЬКО если флаг true (заполнено
-                  инспектором на 1 этапе мобилы). В шапке справа от блока
-                  Сумма / УПД-чипов. См. миграцию 0051. */}
-              {loadedDelivery?.inTransit ? (
-                <Tag color="orange" style={{ marginInlineEnd: 0 }}>
-                  🚚 Транзит
-                </Tag>
-              ) : null}
-              {/* ОС — флаг «основные средства», рядом с Транзитом. Рисуется
-                  ТОЛЬКО если флаг true. Заполняется инспектором чекбоксом
-                  «ОС» на 1 этапе мобилы. См. миграцию 0065. */}
-              {loadedDelivery?.isAssets ? (
-                <Tag color="purple" style={{ marginInlineEnd: 0 }}>
-                  📦 ОС
-                </Tag>
-              ) : null}
+              {/* Транзит — admin/manager могут поставить/снять прямо
+                  с портала (PATCH /deliveries/:id/flags). Inspector_kpp
+                  видит только цветной чип при true (как раньше), править
+                  не может — для него поле редактируется чекбоксом «Транзит»
+                  на 1 этапе в мобиле. См. миграцию 0051 + новый FlagChip. */}
+              {loadedDelivery && (
+                <FlagChip
+                  label="Транзит"
+                  emoji="🚚"
+                  color="orange"
+                  value={loadedDelivery.inTransit}
+                  disabled={isInspector || patchFlags.isPending}
+                  loading={patchFlags.isPending}
+                  onChange={(next) => patchFlags.mutate({ inTransit: next })}
+                />
+              )}
+              {/* ОС — флаг «основные средства», рядом с Транзитом.
+                  Источник на 1 этапе мобилы — чекбокс «ОС». См. миграцию
+                  0065. Менеджер правит ошибочные значения с портала. */}
+              {loadedDelivery && (
+                <FlagChip
+                  label="ОС"
+                  emoji="📦"
+                  color="purple"
+                  value={loadedDelivery.isAssets}
+                  disabled={isInspector || patchFlags.isPending}
+                  loading={patchFlags.isPending}
+                  onChange={(next) => patchFlags.mutate({ isAssets: next })}
+                />
+              )}
             </Space>
           );
         })()}
@@ -1576,11 +1616,34 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               children: (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                   <Space wrap>
-                    <Upload {...photoProps}>
+                    <Upload {...photoPropsStage1}>
                       <Button size="large" icon={<CameraOutlined />}>
-                        Снять фото
+                        К 1 Этапу
                       </Button>
                     </Upload>
+                    {/* 2 этап — доступен только после фактической подписи
+                        МОЛ (status confirmed_mol). До этого ведёт инспектор
+                        МОЛ на мобиле; параллельная съёмка с портала путает
+                        нумерацию фото. Подсказку в tooltip оставляем
+                        видимой даже у inspector_kpp, чтобы было понятно,
+                        почему кнопка disabled. */}
+                    <Tooltip
+                      title={
+                        stage2Enabled
+                          ? null
+                          : '2 Этап доступен после подтверждения МОЛ'
+                      }
+                    >
+                      <Upload {...photoPropsStage2} disabled={!stage2Enabled}>
+                        <Button
+                          size="large"
+                          icon={<CameraOutlined />}
+                          disabled={!stage2Enabled}
+                        >
+                          К 2 Этапу
+                        </Button>
+                      </Upload>
+                    </Tooltip>
                     {photosCount === 0 && (
                       <Typography.Text type="secondary">
                         Хотя бы одно фото нужно для сохранения.
