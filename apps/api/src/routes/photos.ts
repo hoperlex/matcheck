@@ -574,7 +574,13 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
   app.delete(
     '/api/v1/photos/:id',
     {
-      preHandler: [app.authenticate, app.authorize('admin')],
+      // admin + manager: оба могут редактировать приёмки/отгрузки и
+      // привязывать УПД; удаление отдельного фото — естественная часть
+      // этих прав. Inspector_kpp не правит чужие фото с веба; на мобиле
+      // он удаляет/переснимает через свой UI. pendingDeletionAt-check
+      // ниже сохраняет иммутабельность фото у документов, помеченных
+      // на удаление.
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
         response: {

@@ -1618,7 +1618,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   <Space wrap>
                     <Upload {...photoPropsStage1}>
                       <Button size="large" icon={<CameraOutlined />}>
-                        К 1 Этапу
+                        Добавить фото к 1 Этапу
                       </Button>
                     </Upload>
                     {/* 2 этап — доступен только после фактической подписи
@@ -1640,7 +1640,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                           icon={<CameraOutlined />}
                           disabled={!stage2Enabled}
                         >
-                          К 2 Этапу
+                          Добавить фото ко 2 Этапу
                         </Button>
                       </Upload>
                     </Tooltip>

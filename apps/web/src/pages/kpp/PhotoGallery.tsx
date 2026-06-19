@@ -51,10 +51,11 @@ export function PhotoGallery({
   readOnly?: boolean;
 }): JSX.Element | null {
   const role = useAuthStore((s) => s.user?.role);
-  const canDelete = role === 'admin' && !readOnly;
-  // Изменение типа фото (kind) — admin или manager. Inspector_kpp правит
-  // тип только на мобиле (или переснимает); менять чужие фото с веба он
-  // не должен.
+  // admin + manager: оба полностью редактируют приёмки/отгрузки, удаление
+  // отдельного фото — часть этих прав. Inspector_kpp на веб-портале фото
+  // не правит; на мобиле он удаляет через свой UI.
+  const canDelete = (role === 'admin' || role === 'manager') && !readOnly;
+  // Изменение типа фото (kind) — те же роли. Симметрично canDelete.
   const canEditKind = (role === 'admin' || role === 'manager') && !readOnly;
   const queryClient = useQueryClient();
   const invalidateKey = operationKind === 'shipment' ? 'shipments' : 'deliveries';
