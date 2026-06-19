@@ -11,6 +11,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { setupInvalidation } from './services/invalidation';
 import { startSyncLoop } from './services/sync';
 import { useAuthStore } from './stores/auth';
+import { UpdateBanner } from './shared/ui/UpdateBanner';
 
 dayjs.locale('ru');
 
@@ -56,6 +57,10 @@ export function App() {
           <AuthProvider>
             <SideEffects />
             <RouterProvider router={router} />
+            {/* PWA-баннер обновления. Внутри useRegisterSW (vite-plugin-pwa)
+                и фиксированной позиции снизу-центра. Появляется только при
+                реальном обнаружении нового SW; обычный первый load — null. */}
+            <UpdateBanner />
           </AuthProvider>
         </QueryProvider>
       </AntApp>

@@ -28,7 +28,11 @@ ENV NODE_ENV=production
 # отправкой в OpenRouter Vision (OpenRouter не принимает application/pdf
 # напрямую). Без этого пакета сканированные PDF из 1С будут падать с
 # `parse_failed` reason='pdf_render_error'. На Alpine пакет занимает ~6 МБ.
-RUN apk add --no-cache tini poppler-utils && corepack enable && corepack prepare pnpm@9.12.0 --activate
+# libreoffice — нужен для Excel→PDF→PNG fallback: старые .xls и нестандартные
+# .xlsx из 1С/ERP рендерим в картинку и отправляем в Vision, если структурный
+# Excel-парсер не смог извлечь позиции. font-noto нужен для корректного
+# отображения кириллицы при headless-конвертации.
+RUN apk add --no-cache tini poppler-utils libreoffice font-noto && corepack enable && corepack prepare pnpm@9.12.0 --activate
 # Сохраняем pnpm-структуру монорепо, чтобы workspace-symlinks (@matcheck/contracts) и
 # .pnpm-symlinks (fastify, drizzle и пр.) корректно резолвились в runtime.
 COPY --from=build /repo/package.json /repo/pnpm-workspace.yaml /repo/tsconfig.base.json ./

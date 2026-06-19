@@ -6,7 +6,15 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // 'prompt' (а не 'autoUpdate'): новый service worker встаёт в
+      // waiting и НЕ забирает контроль автоматически. Пользователь видит
+      // баннер «Доступна новая версия» → жмёт «Обновить» → клиентский
+      // код шлёт SW.postMessage('SKIP_WAITING') и делает reload. Без
+      // этого режима автообновление работает «втихую» при следующей
+      // навигации, но открытая вкладка-портал может бесконечно сидеть
+      // на старом JS-бандле и упрётся в 404 от API после deploy
+      // (новые endpoint'ы, удалённые роуты и т.п.).
+      registerType: 'prompt',
       includeAssets: ['favicon.svg', 'favicon.ico', 'apple-touch-icon-180x180.png'],
       manifest: {
         name: 'matcheck — приёмка материалов',
@@ -30,8 +38,9 @@ export default defineConfig({
         ],
       },
       workbox: {
-        skipWaiting: true,
-        clientsClaim: true,
+        // skipWaiting/clientsClaim в prompt-mode НЕ ставим: иначе новый
+        // SW мгновенно активируется и режим теряет смысл. Activation
+        // делает useUpdatePrompt при подтверждении пользователем.
         cleanupOutdatedCaches: true,
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [/^\/api\//],

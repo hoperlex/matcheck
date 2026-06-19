@@ -227,25 +227,27 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         structural = null;
       }
 
-      // Шаг 2: детектор «пустого» результата. Если структурный парсер
-      // не извлёк ни одной осмысленной шапочной информации, идём в
-      // Vision (если LibreOffice доступен). Если есть хоть номер/дата/
-      // поставщик — оставляем результат: даже partial-парс лучше, чем
-      // тратить токены Vision при наличии структурных данных.
-      const isStructuralEmpty =
-        structural == null ||
-        (structural.items.length === 0 &&
-          structural.docNumber == null &&
-          structural.docDate == null &&
-          structural.supplier?.inn == null &&
-          structural.supplier?.name == null);
+      // Шаг 2: fallback на Vision, если структурный парсер не смог извлечь
+      // позиции. Для УПД шапка без строк почти бесполезна: пользователь всё
+      // равно получает partial_parse и вручную добивает табличную часть. Это
+      // ровно кейс старых .xls / нестандартных 1С-Excel: номер, дата и
+      // поставщик находятся, но items=[] из-за плавающей разметки. Поэтому
+      // идём в Excel→PNG→Vision не только при полностью пустой шапке, а при
+      // отсутствии позиций или низкой уверенности.
+      const needsVisionFallback =
+        structural == null || structural.items.length === 0 || structural.confidence < 0.7;
 
-      if (!isStructuralEmpty) {
+      if (!needsVisionFallback) {
         parsed = structural!;
       } else {
         log.warn(
-          { isXls },
-          'Excel structural parse empty — trying LibreOffice→PNG→Vision fallback',
+          {
+            isXls,
+            hasStructural: structural != null,
+            items: structural?.items.length ?? null,
+            confidence: structural?.confidence ?? null,
+          },
+          'Excel structural parse incomplete — trying LibreOffice→PNG→Vision fallback',
         );
         try {
           const pngPages = await convertExcelToPng(buffer, isXls ? 'xls' : 'xlsx');
@@ -1320,4 +1322,3 @@ setTimeout(() => {
     );
   }, PHOTO_ORPHAN_INTERVAL_MS).unref();
 }, PHOTO_ORPHAN_DELAY_MS).unref();
-
