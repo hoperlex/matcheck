@@ -114,12 +114,35 @@ export function PhotoGallery({
         }),
       ]);
     },
-    onError: (err: Error) => message.error(err.message),
+    onError: (err: Error) => {
+      // 404 — две частые причины: (1) backend на этом домене ещё не
+      // задеплоен (нет нового маршрута PATCH /api/v1/photos/:id),
+      // (2) свежезагруженное фото — на момент клика ещё в IDB-id,
+      // server-confirm не успел подменить id. Объясняем явно, чтобы
+      // пользователь не гадал.
+      if (err instanceof ApiError && err.status === 404) {
+        message.error(
+          'Фото пока недоступно для смены типа: либо загрузка не завершилась, либо API-сервер ещё не обновлён.',
+        );
+        return;
+      }
+      message.error(err.message);
+    },
   });
 
   if (photos.length === 0) return null;
 
-  const sorted = [...photos].sort((a, b) => a.takenAt.localeCompare(b.takenAt));
+  // Сортировка фото внутри stage'а (1/2 Этап родитель делит на отдельные
+  // галереи через beforePhotos/afterPhotos): сначала Документы, затем
+  // Груз/машина, в самом конце — фото с неизвестным kind. Внутри каждой
+  // группы — стабильный порядок по takenAt (как было раньше), чтобы при
+  // refetch / смене kind / добавлении нового фото порядок был детерминированным.
+  // Делается на UI-уровне, БД не трогаем — это чистая визуальная группировка.
+  const sorted = [...photos].sort((a, b) => {
+    const rank = kindRank(a.kind) - kindRank(b.kind);
+    if (rank !== 0) return rank;
+    return a.takenAt.localeCompare(b.takenAt);
+  });
 
   // Подписи «Документ» / «Груз/машина» под фото выводим только если у этой
   // галереи kind проставлен ОСМЫСЛЕННО — т.е. встречается хоть один
@@ -195,6 +218,17 @@ function kindLabel(kind: string | undefined): string | null {
   if (kind === 'document') return 'Документ';
   if (kind === 'cargo' || kind === 'vehicle') return 'Груз/машина';
   return null;
+}
+
+// Ранг для сортировки внутри stage'а: Документы первыми, Груз/машина
+// после, всё неизвестное (other / null / нестандартные значения) —
+// в самом конце, чтобы не падать на чужих данных и не мешать обычным
+// фото. Stable secondary key — takenAt; собирается в основном
+// comparator-е выше.
+function kindRank(kind: string | undefined): number {
+  if (kind === 'document') return 0;
+  if (kind === 'cargo' || kind === 'vehicle') return 1;
+  return 2;
 }
 
 function PhotoThumb({
@@ -561,6 +595,11 @@ function PhotoThumb({
       currentKind={photo.kind}
       onChangeKind={onChangeKind}
       changing={changingKind}
+      // PATCH /photos/:id обращается по server-id. Свежезагруженное
+      // фото до момента confirm живёт под локальным IDB-uuid, и сервер
+      // про него ничего не знает → PATCH вернёт 404. Пока uploadedAt
+      // не проставлен, не даём кликать.
+      pendingUpload={photo.uploadedAt === null}
     />
     </div>
   );
@@ -582,15 +621,22 @@ function PhotoLabelRow({
   currentKind,
   onChangeKind,
   changing,
+  pendingUpload,
 }: {
   label: string | null;
   canEditKind: boolean;
   currentKind: string | undefined;
   onChangeKind: (kind: 'document' | 'cargo' | 'vehicle' | 'other') => void;
   changing: boolean;
+  // true — фото ещё не подтверждено сервером (uploadedAt=null). Сервер
+  // не знает про него по тому id, что у нас в галерее (после confirm
+  // photoPipeline перепишет IDB-id на server-id). До этого PATCH
+  // вернул бы 404 — disable-им кнопку, чтобы пользователь не путался.
+  pendingUpload: boolean;
 }): JSX.Element | null {
   const [open, setOpen] = useState(false);
   if (!label && !canEditKind) return null;
+  const editorDisabled = pendingUpload || changing;
   return (
     <div
       style={{
@@ -609,8 +655,16 @@ function PhotoLabelRow({
       )}
       {canEditKind && (
         <Popover
-          open={open}
-          onOpenChange={(v) => setOpen(v)}
+          // Пока фото не подтверждено сервером — Popover не открывается
+          // вовсе (open всегда false). disabled у кнопки + tooltip
+          // объясняют почему. После confirm photoPipeline переподпишет
+          // IDB-id на server-id, при следующем рендере pendingUpload
+          // станет false и UI разблокируется автоматически.
+          open={editorDisabled ? false : open}
+          onOpenChange={(v) => {
+            if (editorDisabled) return;
+            setOpen(v);
+          }}
           trigger="click"
           placement="bottom"
           destroyTooltipOnHide
@@ -638,12 +692,19 @@ function PhotoLabelRow({
             </div>
           }
         >
-          <Tooltip title="Изменить тип фото">
+          <Tooltip
+            title={
+              pendingUpload
+                ? 'Дождитесь окончания загрузки фото'
+                : 'Изменить тип фото'
+            }
+          >
             <Button
               type="text"
               size="small"
               icon={<EditOutlined />}
               loading={changing}
+              disabled={editorDisabled}
               style={{
                 fontSize: 10,
                 color: '#bfbfbf',
