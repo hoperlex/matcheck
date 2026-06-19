@@ -646,7 +646,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
 
   const photoPropsStage1 = makePhotoProps('before');
   const photoPropsStage2 = makePhotoProps('after');
-  // Кнопка «К 2 Этапу» доступна после фактического подтверждения МОЛ
+  // Кнопка «Добавить фото: 2 этап» доступна после фактического подтверждения МОЛ
   // (status confirmed_mol). До этого 2 этап ведёт инспектор МОЛ на
   // мобиле, и добавление фото с портала в этот промежуток создаёт
   // конфликт ожиданий «кто сейчас собирает 2 этап».
@@ -1618,7 +1618,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   <Space wrap>
                     <Upload {...photoPropsStage1}>
                       <Button size="large" icon={<CameraOutlined />}>
-                        Добавить фото к 1 Этапу
+                        Добавить фото: 1 этап
                       </Button>
                     </Upload>
                     {/* 2 этап — доступен только после фактической подписи
@@ -1640,7 +1640,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                           icon={<CameraOutlined />}
                           disabled={!stage2Enabled}
                         >
-                          Добавить фото ко 2 Этапу
+                          Добавить фото: 2 этап
                         </Button>
                       </Upload>
                     </Tooltip>
