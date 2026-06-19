@@ -463,6 +463,13 @@
       "when": 1780921380000,
       "tag": "0065_is_assets",
       "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1781000000000,
+      "tag": "0066_upd_prompt_v8",
+      "breakpoints": true
     }
   ]
 }

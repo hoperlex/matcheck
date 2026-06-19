@@ -30,6 +30,7 @@ import { llmCalls, llmProviders, llmProviderCredentials } from '../../db/schema.
 import { eq } from 'drizzle-orm';
 import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { loadActivePromptWithMeta } from '../prompts/registry.js';
+import { computePdfRenderDpi } from './pdf-render-dpi.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
 import type { ParsePdfResult } from './upd-pdf.parser.js';
 
@@ -38,14 +39,15 @@ import type { ParsePdfResult } from './upd-pdf.parser.js';
 // Если в проде встретятся УПД с >5 страниц позиций — повышаем константу.
 // Защита от: (1) raw payload size limit OpenRouter; (2) затрат на
 // токены (каждая страница = ~1000+ image tokens).
-const MAX_PAGES_FOR_OPENROUTER = 5;
+// Экспорт для регрессионных тестов; в коде parseUpdVision используется
+// напрямую — поведение не меняется.
+export const MAX_PAGES_FOR_OPENROUTER = 5;
 
-// DPI рендера PDF в PNG через pdftoppm.
-// 150 dpi — стандарт для распознавания печатных документов: текст
-// чёткий, размер PNG ~200-400 КБ на A4, для preview-моделей через
-// OpenRouter укладывается в timeout. Раньше использовался viewportScale
-// (pdf-to-png-converter, ~108 dpi) — в Poppler параметр прямой.
-const PDF_RENDER_DPI = 150;
+// DPI рендера PDF в PNG через pdftoppm — теперь адаптивный.
+// Для типовой A4 (8.27×11.69 inch) computePdfRenderDpi даёт 150 — то же
+// что раньше, нулевая регрессия. Для аномально больших страниц (например
+// scanlite3.pdf — 2530×3364 pt) формула снижает DPI так, чтобы итоговый
+// PNG не превышал 2400 px по длинной стороне. См. pdf-render-dpi.ts.
 
 // Таймаут на сам рендер PDF в PNG.
 // 75 сек — Poppler обычно справляется с 1-2 страничным УПД за 1-3
@@ -119,6 +121,13 @@ export class PdfRenderError extends Error {
 // Возвращает массив PNG (Buffer) до maxPages страниц. Лишние страницы
 // просто не рендерим (через -l). При любой ошибке кидает
 // PdfRenderError; при таймауте PDF_RENDER_TIMEOUT_MS — PdfRenderTimeoutError.
+/**
+ * PDF→PNG через системный pdftoppm. Экспортировано для регрессионных
+ * тестов (см. test/upd-vision-multipage.test.ts) — основная логика
+ * не меняется, это публичный alias на ту же функцию.
+ */
+export { pdfToPngsViaPoppler };
+
 async function pdfToPngsViaPoppler(
   pdfBuffer: Buffer,
   maxPages: number,
@@ -129,11 +138,13 @@ async function pdfToPngsViaPoppler(
     const outPrefix = join(dir, 'out');
     await writeFile(inPath, pdfBuffer);
 
-    // pdftoppm -r 150 -png -f 1 -l N in.pdf out
-    //   → out-1.png, out-2.png, ... (для одной страницы — out-1.png)
+    // Адаптивный DPI: для типовой A4 даёт 150 (как hardcoded раньше),
+    // для аномально больших страниц снижает так, чтобы итоговый PNG
+    // не превышал 2400 px по длинной стороне.
+    const dpi = await computePdfRenderDpi(pdfBuffer);
     const args = [
       '-r',
-      String(PDF_RENDER_DPI),
+      String(dpi),
       '-png',
       '-f',
       '1',

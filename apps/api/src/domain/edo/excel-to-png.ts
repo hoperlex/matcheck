@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { computePdfRenderDpi } from './pdf-render-dpi.js';
 
 /**
  * Excel (.xls / .xlsx) → PNG через LibreOffice headless + pdftoppm.
@@ -49,10 +50,9 @@ import { join } from 'node:path';
 // на том же файле даст тот же результат.
 const LIBREOFFICE_CONVERT_TIMEOUT_MS = 90_000;
 
-// DPI для pdftoppm. То же значение, что в upd-vision.parser.ts —
-// баланс между читаемостью текста (мелкие цифры в графах УПД)
-// и размером PNG (большой PNG раздувает токены Vision и payload).
-const PDF_RENDER_DPI = 150;
+// DPI для pdftoppm теперь рассчитывается адаптивно через
+// computePdfRenderDpi (см. ниже использование). Для типового A4
+// результат тот же — 150 DPI, поведение без регрессий.
 const PDF_RENDER_TIMEOUT_MS = 30_000;
 
 const SOFFICE_BIN = 'soffice';
@@ -157,8 +157,13 @@ async function pdfToPngs(dir: string, pdfPath: string): Promise<Buffer[]> {
   // содержит шапку + табличную часть УПД целиком (или хотя бы первые позиции,
   // которых достаточно для распознавания). Если позиций больше — Vision
   // не увидит их, но это симметрично PDF-fallback'у (там тоже лимит).
+  //
+  // DPI адаптивный: для типового A4-PDF после LibreOffice конвертации даёт
+  // 150 (как hardcoded раньше), для аномально больших страниц снижает так,
+  // чтобы PNG не превышал 2400 px по длинной стороне.
+  const dpi = await computePdfRenderDpi(await readFile(pdfPath));
   const outPrefix = join(dir, 'out');
-  const args = ['-r', String(PDF_RENDER_DPI), '-png', '-f', '1', '-l', '1', pdfPath, outPrefix];
+  const args = ['-r', String(dpi), '-png', '-f', '1', '-l', '1', pdfPath, outPrefix];
 
   const startMs = Date.now();
   await new Promise<void>((resolve, reject) => {

@@ -309,23 +309,99 @@ function findGraphMarkerRow(rows: RawRow[]): {
   index: number;
   graphCols: Map<GraphKey, number>;
 } | null {
-  // Ищем строку, где встречаются значения {1а, 2а, 3, 4, 5, 7, 8, 9} в
-  // разных ячейках. Это строка с номерами граф (одинакова в обеих формах).
-  // Допускаем, что не все номера попадут в одну строку — но «1а», «3», «5»,
-  // «9» обязательны: без них нельзя извлечь позицию.
+  // Strict-pass: ищем строку, где буквально присутствуют значения
+  // {1а, 2а, 3, 4, 5, 7, 8, 9} в разных ячейках. Это строка с номерами
+  // граф (одинакова в обеих формах УПД). Минимум — {1а, 3, 5, 9}.
+  // Срабатывает на типичных Элевел/АСФБ-шаблонах.
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
-    const found = new Map<GraphKey, number>();
-    for (const [col, value] of row.cells) {
-      const s = normCell(value).toLowerCase();
-      for (const g of ALL_GRAPHS) {
-        if (!found.has(g) && s === g.toLowerCase()) {
-          found.set(g, col);
-        }
+    const found = scanGraphMarkers(row);
+    if (REQUIRED_GRAPHS.every((g) => found.has(g))) {
+      return { index: i, graphCols: found };
+    }
+  }
+  // Relaxed-pass (fallback): некоторые xls из 1С (особенно после SheetJS
+  // BIFF→OOXML конвертации) теряют буквенные суффиксы подграф — «1а» и
+  // «2а» в строке маркеров приходят как обычные «1» и «2». Strict-pass
+  // тогда не сходится. Тут опираемся на цифровые маркеры {3,4,5,9}
+  // (это графы данных — qty, price, sum_без_НДС, sum_с_НДС, они
+  // обязаны быть номерами), а колонки «1а»/«2а» восстанавливаем по
+  // заголовкам шапки на 1-2 строки выше.
+  //
+  // Это НЕ ослабляет strict-pass: первый цикл всегда отрабатывает
+  // первым и для типовых xlsx найдёт точное совпадение.
+  return findGraphMarkerRowRelaxed(rows);
+}
+
+function scanGraphMarkers(row: RawRow): Map<GraphKey, number> {
+  const found = new Map<GraphKey, number>();
+  for (const [col, value] of row.cells) {
+    const s = normCell(value).toLowerCase();
+    for (const g of ALL_GRAPHS) {
+      if (!found.has(g) && s === g.toLowerCase()) {
+        found.set(g, col);
       }
     }
-    const hasAll = REQUIRED_GRAPHS.every((g) => found.has(g));
-    if (hasAll) return { index: i, graphCols: found };
+  }
+  return found;
+}
+
+// Минимальный набор для relaxed-pass: только цифровые графы данных.
+// Их достаточно, чтобы извлечь qty/price/vatRate/vatSum/sum.
+// Колонки 1а (Наименование) и 2а (ед. изм.) ищем по заголовкам выше.
+const NUMERIC_REQUIRED: readonly GraphKey[] = ['3', '4', '5', '9'] as const;
+
+function findGraphMarkerRowRelaxed(rows: RawRow[]): {
+  index: number;
+  graphCols: Map<GraphKey, number>;
+} | null {
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    const found = scanGraphMarkers(row);
+    if (!NUMERIC_REQUIRED.every((g) => found.has(g))) continue;
+
+    // Восстанавливаем «1а» (Наименование) — самое важное поле.
+    // Ищем в строках выше ячейку, чей текст начинается с «Наимен…».
+    // Без неё позицию извлечь нельзя — пропускаем строку.
+    if (!found.has('1а')) {
+      const c = findColumnByHeader(rows, i, /^наимен/i);
+      if (c === null) continue;
+      found.set('1а', c);
+    }
+    // Восстанавливаем «2а» (условное обозначение единицы измерения).
+    // Паттерн `/^условн/i` — точный префикс подграфы. На «обозна-чение»
+    // с переносом-дефисом не ломается (как было бы при /обознач/).
+    //
+    // Fallback на общий заголовок «Единица измерения» НЕ делаем: в
+    // merged-ячейках Excel кладёт это значение в первую колонку
+    // диапазона, которая на форме 1137 — это графа 2 (Код по ОКЕИ),
+    // а не 2а. Подставленный код перепутает unit с цифрой '796'.
+    // Если подграфы нет — лучше оставить unit пустым; нижний код
+    // подставит дефолт 'шт'.
+    if (!found.has('2а')) {
+      const c = findColumnByHeader(rows, i, /^условн/i);
+      if (c !== null) found.set('2а', c);
+    }
+    return { index: i, graphCols: found };
+  }
+  return null;
+}
+
+// Ищет колонку в одной из ближайших ВЫШЕ строк (typically header rows
+// идут за 1-2 строки до marker-row), значение которой матчит pattern.
+// Возвращает первый match. Если нет — null.
+function findColumnByHeader(
+  rows: RawRow[],
+  markerIdx: number,
+  pattern: RegExp,
+): number | null {
+  // Не больше 3 строк выше: дальше — это шапка документа, не таблицы.
+  for (let k = Math.max(0, markerIdx - 3); k < markerIdx; k++) {
+    const row = rows[k]!;
+    for (const [col, value] of row.cells) {
+      const s = normCell(value);
+      if (pattern.test(s)) return col;
+    }
   }
   return null;
 }
