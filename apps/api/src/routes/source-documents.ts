@@ -116,7 +116,7 @@ async function findOrCreateMaterial(
 // Контракт SourceDocumentSchema тоже не трогаем — мобила и веб-портал
 // продолжают видеть source_documents без новых полей.
 type UpdFileFormat = {
-  ext: 'pdf' | 'xlsx' | 'jpg' | 'png' | 'webp';
+  ext: 'pdf' | 'xlsx' | 'xls' | 'jpg' | 'png' | 'webp';
   mimeType: string;
 };
 
@@ -126,16 +126,23 @@ function detectUpdFileFormat(mime: string, filename: string): UpdFileFormat | nu
   if (m.includes('pdf') || f.endsWith('.pdf')) {
     return { ext: 'pdf', mimeType: 'application/pdf' };
   }
-  if (
-    m.includes('spreadsheetml') ||
-    m.includes('vnd.ms-excel') ||
-    f.endsWith('.xlsx') ||
-    f.endsWith('.xls')
-  ) {
+  // .xlsx — OOXML (zip-based). Сигнатура: 'PK' (50 4B 03 04).
+  // mime: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+  // или короткое 'spreadsheetml' в варианте от браузеров.
+  if (m.includes('spreadsheetml') || f.endsWith('.xlsx')) {
     return {
       ext: 'xlsx',
       mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     };
+  }
+  // .xls — BIFF / OLE2 Compound Document. Сигнатура: D0 CF 11 E0 (LE
+  // = 0xe011cfd0), та самая, что ExcelJS отвергает с invalid signature.
+  // mime: application/vnd.ms-excel. Обрабатываем отдельно — в worker
+  // сначала конвертируется в xlsx-буфер через SheetJS, затем уходит
+  // в обычный parseUpdXlsx. Раньше всё валилось сюда же что и xlsx,
+  // ExcelJS падал на BIFF-сигнатуре с internal_error.
+  if (m === 'application/vnd.ms-excel' || f.endsWith('.xls')) {
+    return { ext: 'xls', mimeType: 'application/vnd.ms-excel' };
   }
   if (m === 'image/jpeg' || m === 'image/jpg' || f.endsWith('.jpg') || f.endsWith('.jpeg')) {
     return { ext: 'jpg', mimeType: 'image/jpeg' };

@@ -43,6 +43,7 @@ import {
   VisionTimeoutError,
 } from './domain/edo/upd-vision.parser.js';
 import { parseUpdXlsx } from './domain/edo/upd-xlsx.parser.js';
+import { convertXlsToXlsxBuffer, XlsConvertError } from './domain/edo/xls-to-xlsx.js';
 
 // Минимальная уверенность LLM, при которой запускается дедупликация по
 // (supplier_directory_id, doc_number, doc_date). Ниже — пропускаем dedup
@@ -171,6 +172,10 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // routes/source-documents.ts).
   //
   //   xlsx          → parseUpdXlsx (локальные регулярки, без LLM).
+  //   xls (BIFF)    → convertXlsToXlsxBuffer (SheetJS) → parseUpdXlsx.
+  //                   ExcelJS не умеет BIFF и падал с "invalid signature
+  //                   0xe011cfd0" — пред-конвертация решает это
+  //                   без LibreOffice в Docker.
   //   pdf c текстом → parseUpdPdf (pdf-parse → LLM text).
   //   pdf-скан      → parseUpdPdf бросит PdfNoTextError →
   //                   fallback на parseUpdVision (Gemini Vision).
@@ -179,7 +184,8 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // Vision pipeline переиспользует тот же UpdPdfParsedSchema, что и
   // текстовый — на уровне DTO они взаимозаменяемы, контракт
   // SourceDocumentSchema не трогается.
-  const isXlsx = /\.xlsx?$/i.test(s3Key);
+  const isXlsx = /\.xlsx$/i.test(s3Key);
+  const isXls = /\.xls$/i.test(s3Key);
   const isImage = /\.(jpe?g|png|webp)$/i.test(s3Key);
   const imageMime = isImage
     ? /\.png$/i.test(s3Key)
@@ -195,6 +201,15 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   try {
     if (isXlsx) {
       parsed = await parseUpdXlsx(buffer);
+    } else if (isXls) {
+      // Старый бинарный .xls (BIFF/OLE2). SheetJS читает BIFF,
+      // переписываем в OOXML-буфер, дальше тот же путь, что у
+      // обычного xlsx. Полностью in-memory, без диска/процессов.
+      // XlsConvertError ловим во внешнем catch — там переводим
+      // в parse_failed с reason='xls_convert_failed', без BullMQ
+      // retry (повтор той же конвертации того же payload бесполезен).
+      const xlsxBuffer = convertXlsToXlsxBuffer(buffer);
+      parsed = await parseUpdXlsx(xlsxBuffer);
     } else if (isImage && imageMime) {
       // JPG/PNG/WEBP — сразу Vision (текстового слоя у изображений нет).
       const r = await parseUpdVision(
@@ -375,6 +390,36 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // JPG/PNG (image-flow обходит pdftoppm). parseErrorCode='pdf_no_text'
     // переиспользуем, чтобы не менять контрактный enum; конкретная
     // причина — в parseErrorDetails.reason.
+    // XlsConvertError — .xls (BIFF) не удалось прочитать SheetJS'ом:
+    // повреждённый файл, нестандартная разновидность BIFF, пустой
+    // workbook. Повтор той же конвертации того же payload бесполезен,
+    // ретраить не имеет смысла. Помечаем parse_failed с понятной
+    // причиной — пользователю показываем «пересохраните как .xlsx»,
+    // в админке reason='xls_convert_failed' для отладки.
+    // parseErrorCode='parse_failed' — обычный код, используем именно
+    // его (не internal_error), чтобы UI показал стандартный alert
+    // вместо «технической ошибки». Контракт SourceParseErrorCode
+    // не меняется.
+    if (err instanceof XlsConvertError) {
+      await db
+        .update(sourceDocuments)
+        .set({
+          status: 'parse_failed',
+          parseErrorCode: 'parse_failed',
+          parseErrorDetails: {
+            reason: 'xls_convert_failed',
+            message: err.message,
+            userHint:
+              'Не удалось прочитать .xls. Пересохраните файл как .xlsx или загрузите PDF/JPG.',
+          },
+          processedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceDocuments.id, sourceDocumentId));
+      log.warn({ err }, 'xls convert failed — marked parse_failed without retry');
+      await notifySourceDocumentUpdated(sourceDocumentId);
+      return;
+    }
     if (err instanceof PdfRenderTimeoutError || err instanceof PdfRenderError) {
       const isTimeout = err instanceof PdfRenderTimeoutError;
       await db
