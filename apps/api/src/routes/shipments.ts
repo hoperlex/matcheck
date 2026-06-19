@@ -35,6 +35,7 @@ import {
   resolveStatusId as resolveStatusIdShared,
 } from '../domain/statuses/lookup.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
+import { isShipmentDowngrade } from '../domain/operations/status-guard.js';
 import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
 import { publishEvent } from './events.js';
 
@@ -1590,11 +1591,16 @@ async function updateShipment(
   userId: string | null,
 ) {
   const id = existing.id;
+  // Защита от downgrade жизненного статуса. См. status-guard.ts:
+  //   confirmed_mol — защищён от ВСЕГО ниже (исторический guard).
+  //   shipped       — защищён от not_filled (новый guard: симметрично
+  //                   delivery, иначе после правок на портале отгрузка
+  //                   пропадает из мобильного Stage 2 у инспектора).
+  // Апгрейды (not_filled → shipped → confirmed_mol) разрешены.
   const existingCode = await getStatusCodeById(app, existing.statusId);
-  const effectiveStatusId =
-    existingCode === 'confirmed_mol' && input.statusCode !== 'confirmed_mol'
-      ? existing.statusId
-      : statusId;
+  const effectiveStatusId = isShipmentDowngrade(existingCode ?? '', input.statusCode)
+    ? existing.statusId
+    : statusId;
   const isFirstConfirm =
     input.statusCode === 'confirmed_mol' && existing.confirmedByMolUserId === null;
 

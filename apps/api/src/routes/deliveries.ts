@@ -36,6 +36,7 @@ import {
   resolveStatusId as resolveStatusIdShared,
 } from '../domain/statuses/lookup.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
+import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { publishEvent } from './events.js';
 
 const ListQuerySchema = z.object({
@@ -1936,13 +1937,17 @@ async function updateDelivery(
   userId: string | null,
 ) {
   const id = existing.id;
-  // Защита от отката: если документ уже подтверждён МОЛ, обычное «Сохранить»
-  // не должно понижать статус обратно до filled/draft.
+  // Защита от downgrade жизненного статуса. См. status-guard.ts:
+  //   confirmed_mol — защищён от ВСЕГО ниже (исторический guard).
+  //   filled        — защищён от not_filled (новый guard: мобильный
+  //                   Stage 2 фильтрует только filled, downgrade
+  //                   из веб-портала уносил приёмку с мобильного
+  //                   2 этапа, инспектор её больше не видел).
+  // Апгрейды (not_filled → filled → confirmed_mol) разрешены.
   const existingCode = await getStatusCodeById(app, existing.statusId);
-  const effectiveStatusId =
-    existingCode === 'confirmed_mol' && input.statusCode !== 'confirmed_mol'
-      ? existing.statusId
-      : statusId;
+  const effectiveStatusId = isDeliveryDowngrade(existingCode ?? '', input.statusCode)
+    ? existing.statusId
+    : statusId;
   // Первичная фиксация аудита подтверждения (идемпотентно: повторное
   // подтверждение не перезаписывает кто/когда).
   const isFirstConfirm =
