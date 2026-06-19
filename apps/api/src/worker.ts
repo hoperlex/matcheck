@@ -44,6 +44,12 @@ import {
 } from './domain/edo/upd-vision.parser.js';
 import { parseUpdXlsx } from './domain/edo/upd-xlsx.parser.js';
 import { convertXlsToXlsxBuffer, XlsConvertError } from './domain/edo/xls-to-xlsx.js';
+import {
+  convertExcelToPng,
+  ExcelConvertError,
+  ExcelConvertTimeoutError,
+  LibreOfficeNotAvailableError,
+} from './domain/edo/excel-to-png.js';
 
 // Минимальная уверенность LLM, при которой запускается дедупликация по
 // (supplier_directory_id, doc_number, doc_date). Ниже — пропускаем dedup
@@ -199,17 +205,90 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   let llmProviderId: string | null = null;
   let parsedViaVision = false;
   try {
-    if (isXlsx) {
-      parsed = await parseUpdXlsx(buffer);
-    } else if (isXls) {
-      // Старый бинарный .xls (BIFF/OLE2). SheetJS читает BIFF,
-      // переписываем в OOXML-буфер, дальше тот же путь, что у
-      // обычного xlsx. Полностью in-memory, без диска/процессов.
-      // XlsConvertError ловим во внешнем catch — там переводим
-      // в parse_failed с reason='xls_convert_failed', без BullMQ
-      // retry (повтор той же конвертации того же payload бесполезен).
-      const xlsxBuffer = convertXlsToXlsxBuffer(buffer);
-      parsed = await parseUpdXlsx(xlsxBuffer);
+    if (isXlsx || isXls) {
+      // Excel-пайплайн: единый для .xlsx (OOXML) и .xls (BIFF/OLE2).
+      // .xls сначала переводим в OOXML-буфер через SheetJS (in-memory,
+      // без диска и LibreOffice). Дальше — общая ветка.
+      const xlsxBuffer = isXls ? convertXlsToXlsxBuffer(buffer) : buffer;
+
+      // Шаг 1: структурный парсер ExcelJS — быстрый, дешёвый, точный
+      // для стандартных шаблонов 1С/Элевел (см. upd-xlsx.parser.ts).
+      let structural: UpdPdfParsed | null = null;
+      try {
+        structural = await parseUpdXlsx(xlsxBuffer);
+      } catch (xlsxErr) {
+        // ExcelJS падает на странных файлах (нестандартный layout,
+        // защищённые workbook'и). Это НЕ повод для internal_error —
+        // отправим документ в Vision-fallback на следующем шаге.
+        log.warn(
+          { err: xlsxErr instanceof Error ? xlsxErr.message : String(xlsxErr) },
+          'parseUpdXlsx threw — will try Excel→Vision fallback',
+        );
+        structural = null;
+      }
+
+      // Шаг 2: детектор «пустого» результата. Если структурный парсер
+      // не извлёк ни одной осмысленной шапочной информации, идём в
+      // Vision (если LibreOffice доступен). Если есть хоть номер/дата/
+      // поставщик — оставляем результат: даже partial-парс лучше, чем
+      // тратить токены Vision при наличии структурных данных.
+      const isStructuralEmpty =
+        structural == null ||
+        (structural.items.length === 0 &&
+          structural.docNumber == null &&
+          structural.docDate == null &&
+          structural.supplier?.inn == null &&
+          structural.supplier?.name == null);
+
+      if (!isStructuralEmpty) {
+        parsed = structural!;
+      } else {
+        log.warn(
+          { isXls },
+          'Excel structural parse empty — trying LibreOffice→PNG→Vision fallback',
+        );
+        try {
+          const pngPages = await convertExcelToPng(buffer, isXls ? 'xls' : 'xlsx');
+          // Берём первую страницу: первый лист Excel почти всегда —
+          // шапка + табличка УПД. Симметрия с PDF Vision-fallback
+          // (там тоже только первая страница, см. PDF_MAX_PAGES в
+          // upd-vision.parser.ts).
+          const r = await parseUpdVision(
+            { buffer: pngPages[0]!, mimeType: 'image/png', filename: s3Key },
+            { sourceDocumentId },
+          );
+          parsed = r.parsed;
+          llmProviderId = r.llmProviderId;
+          parsedViaVision = true;
+        } catch (fbErr) {
+          // LibreOfficeNotAvailableError — фича недоступна, не ошибка.
+          // Падаем в partial_parse с понятной подсказкой (не parse_failed):
+          // пользователь видит «распознано частично», открывает документ,
+          // дополняет вручную. Это лучше, чем «ошибка распознавания».
+          if (fbErr instanceof LibreOfficeNotAvailableError) {
+            log.warn(
+              'LibreOffice not installed — keeping structural empty result as partial_parse',
+            );
+            // Если у нас был хотя бы structural==null vs «пустой» — берём
+            // пустой шаблон, чтобы дальнейший pipeline (валидация/dedup)
+            // не упал на null'ах.
+            parsed = structural ?? emptyParsed();
+          } else if (
+            fbErr instanceof ExcelConvertError ||
+            fbErr instanceof ExcelConvertTimeoutError
+          ) {
+            // Реальная ошибка конвертации (битый файл / soffice упал).
+            // Пробрасываем во внешний catch — он переведёт в parse_failed
+            // с понятной причиной без BullMQ retry.
+            throw fbErr;
+          } else {
+            // Vision LLM упал (timeout / budget / провайдер не отвечает).
+            // VisionTimeoutError / VisionBudgetExceededError обрабатываются
+            // во внешнем catch (там уже есть fail-fast).
+            throw fbErr;
+          }
+        }
+      }
     } else if (isImage && imageMime) {
       // JPG/PNG/WEBP — сразу Vision (текстового слоя у изображений нет).
       const r = await parseUpdVision(
@@ -417,6 +496,37 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         })
         .where(eq(sourceDocuments.id, sourceDocumentId));
       log.warn({ err }, 'xls convert failed — marked parse_failed without retry');
+      await notifySourceDocumentUpdated(sourceDocumentId);
+      return;
+    }
+    // ExcelConvertError / ExcelConvertTimeoutError — LibreOffice/pdftoppm
+    // упали при попытке Excel→PNG→Vision fallback (битый файл, soffice
+    // повис, exit≠0). Fail-fast без BullMQ retry: повтор той же команды
+    // даст тот же результат. parseErrorCode='parse_failed' (общий код,
+    // деталь в reason). userHint советует переснять/загрузить PDF.
+    if (err instanceof ExcelConvertError || err instanceof ExcelConvertTimeoutError) {
+      const isTimeout = err instanceof ExcelConvertTimeoutError;
+      await db
+        .update(sourceDocuments)
+        .set({
+          status: 'parse_failed',
+          parseErrorCode: 'parse_failed',
+          parseErrorDetails: {
+            reason: isTimeout ? 'excel_render_timeout' : 'excel_render_error',
+            ...(isTimeout ? { elapsedMs: err.elapsedMs } : {}),
+            message: err.message,
+            userHint:
+              'Не удалось преобразовать Excel в изображение для распознавания. ' +
+              'Попробуйте сохранить файл как PDF или загрузить фото первой страницы.',
+          },
+          processedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceDocuments.id, sourceDocumentId));
+      log.warn(
+        { err, isTimeout },
+        'excel→png conversion failed — marked parse_failed without retry',
+      );
       await notifySourceDocumentUpdated(sourceDocumentId);
       return;
     }
@@ -850,6 +960,26 @@ async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise
   for (const c of created) {
     await notifySourceDocumentUpdated(c.id);
   }
+}
+
+// «Пустой» UpdPdfParsed для Excel-кейса, когда структурный парсер
+// не нашёл ничего, а Vision fallback недоступен (LibreOffice не
+// установлен в окружении). Документ записывается с partial_parse
+// и пустыми позициями, пользователь добавит вручную через UI.
+// confidence=0.01: не валидно для dedup (порог MIN_DEDUP_CONFIDENCE
+// = 0.6), значит дубли не сработают.
+function emptyParsed(): UpdPdfParsed {
+  return {
+    docNumber: null,
+    docDate: null,
+    totalSum: null,
+    vatSum: null,
+    itemsCount: null,
+    supplier: null,
+    recipient: null,
+    items: [],
+    confidence: 0.01,
+  };
 }
 
 // Защищённый парс docDate от LLM. Промпт просит YYYY-MM-DD, но в проде
