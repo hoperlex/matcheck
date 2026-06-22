@@ -112,6 +112,10 @@ export default function AdminUsersPage() {
             onChange={(e) => setSearch(e.target.value)}
             prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
             style={{ width: 320, maxWidth: '100%' }}
+            // Иначе браузер принимает поле за «логин» и автозаполняет его
+            // email-ом текущего аккаунта (триггерится autofill пароля рядом).
+            autoComplete="off"
+            name="user-search"
           />
         </Space>
       }

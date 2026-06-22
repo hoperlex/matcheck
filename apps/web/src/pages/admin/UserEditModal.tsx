@@ -227,6 +227,11 @@ export function UserEditModal({
               onChange={(e) => setNewPwd(e.target.value)}
               placeholder="Новый пароль"
               maxLength={256}
+              // Без этого браузерный менеджер паролей подставлял в поле
+              // пароль ТЕКУЩЕГО админа (autofill), и при «Применить» чужой
+              // пароль уходил целевому юзеру. new-password подавляет
+              // автозаполнение сохранённых кредов.
+              autoComplete="new-password"
             />
             <Button
               type="primary"
