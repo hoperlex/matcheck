@@ -31,6 +31,7 @@ import { eq } from 'drizzle-orm';
 import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { loadActivePromptWithMeta } from '../prompts/registry.js';
 import { computePdfRenderDpi } from './pdf-render-dpi.js';
+import { prefilterUpdPages, type PrefilterResult } from './upd-page-prefilter.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
 import type { ParsePdfResult } from './upd-pdf.parser.js';
 
@@ -385,22 +386,11 @@ export async function parseUpdVision(
     );
   }
   // OpenRouter Vision принимает только image/*, PDF не поддерживается
-  // провайдером. Если пришёл PDF и провайдер OpenRouter — рендерим
-  // первые MAX_PAGES_FOR_OPENROUTER страниц в PNG через системный
-  // pdftoppm (poppler-utils) и шлём массив image_url одним запросом.
-  // Лимит страниц зашит в pdftoppm через флаг -l (лишние не рендерим
-  // вовсе — экономия CPU/RAM на больших PDF).
+  // провайдером. Если пришёл PDF и провайдер OpenRouter — готовим страницы
+  // через prefilter (см. ниже, после загрузки apiKey: классификатору нужен
+  // ключ). convertedPngPages заполняется там.
   let convertedPngPages: Buffer[] | null = null;
-  if (row.kind === 'openrouter' && mime === 'application/pdf') {
-    // PdfRenderTimeoutError / PdfRenderError пробрасываем как есть —
-    // worker.ts ловит их в верхнем catch и помечает parse_failed без
-    // BullMQ retry (повторный pdftoppm на тот же файл даст тот же
-    // результат — повторять смысла нет).
-    convertedPngPages = await pdfToPngsViaPoppler(
-      input.buffer,
-      MAX_PAGES_FOR_OPENROUTER,
-    );
-  }
+  let prefilter: PrefilterResult | null = null;
 
   const [cred] = await db
     .select()
@@ -414,6 +404,59 @@ export async function parseUpdVision(
     cred.apiKeyEncrypted,
     buildAad('llm_provider_credentials', cred.kind),
   );
+
+  // PDF + OpenRouter: детерминированный prefilter — классификация страниц
+  // (исключаем уверенно-чужие: сертификаты/накладные), авто-поворот
+  // физически-боковых УПД-страниц (OSD, гейт по /Rotate). На любой ошибке
+  // классификации/OSD prefilter сам деградирует к прежнему поведению
+  // (первые MAX_PAGES_FOR_OPENROUTER страниц без поворота) — нулевая
+  // регрессия для рабочих файлов. Рендер исходного PDF внутри prefilter
+  // может бросить — это та же фатальная ситуация, что и раньше (worker
+  // пометит parse_failed).
+  if (row.kind === 'openrouter' && mime === 'application/pdf') {
+    prefilter = await prefilterUpdPages(input.buffer, {
+      apiBaseUrl: cred.apiBaseUrl,
+      apiKey,
+      model: row.model,
+      maxPages: MAX_PAGES_FOR_OPENROUTER,
+    });
+    convertedPngPages = prefilter.pages;
+    // Отдельная запись в llm_calls (docKind='upd_page_classify') — в админке
+    // видно, какие страницы выбраны/исключены и почему. Только когда реально
+    // делали LLM-вызов классификации (одностраничный PDF его не делает).
+    if (prefilter.classifyRan) {
+      try {
+        await db.insert(llmCalls).values({
+          sourceDocumentId: ctx.sourceDocumentId,
+          providerId: row.id,
+          promptId: null,
+          docKind: 'upd_page_classify',
+          model: row.model,
+          requestMessages: [
+            {
+              role: 'user',
+              content: `[upd page classify: ${input.filename ?? 'no-name'}, rendered=${prefilter.totalPages} pages, /Rotate=[${prefilter.perPageRotateFlag.join(',')}]]`,
+            },
+          ],
+          requestSchema: null,
+          responseRaw: prefilter.classifyRaw,
+          responseParsed: {
+            classification: prefilter.classification,
+            selectedPages: prefilter.selectedPages,
+            rotationsApplied: prefilter.rotations,
+            fellBack: prefilter.fellBack,
+          } as object,
+          promptTokens: prefilter.promptTokens,
+          completionTokens: prefilter.completionTokens,
+          latencyMs: prefilter.latencyMs,
+          errorCode: prefilter.classifyError ? 'provider_error' : null,
+          errorMessage: prefilter.classifyError,
+        });
+      } catch {
+        /* ignore — лог не критичен для основного потока */
+      }
+    }
+  }
   // Используем тот же prompt doc_kind='upd', что и текстовый parser.
   const promptMeta = await loadActivePromptWithMeta('upd');
   // Хвост-страховка против array-обёртки. Gemini preview-модели иногда

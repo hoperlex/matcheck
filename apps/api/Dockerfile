@@ -32,7 +32,14 @@ ENV NODE_ENV=production
 # .xlsx из 1С/ERP рендерим в картинку и отправляем в Vision, если структурный
 # Excel-парсер не смог извлечь позиции. font-noto нужен для корректного
 # отображения кириллицы при headless-конвертации.
-RUN apk add --no-cache tini poppler-utils libreoffice font-noto && corepack enable && corepack prepare pnpm@9.12.0 --activate
+# tesseract-ocr + tesseract-ocr-data-osd — даёт `tesseract --psm 0` (OSD,
+# Orientation & Script Detection). domain/edo/upd-page-prefilter.ts вызывает
+# его для определения угла физически-повёрнутых УПД-страниц перед Vision
+# (см. detectRotationOsd). data-osd — модель ориентации (osd.traineddata),
+# без неё `--psm 0` падает. На Alpine это два отдельных пакета из community.
+# ВАЖНО: имена пакетов alpine-специфичны (на Debian/Ubuntu — tesseract-ocr-osd);
+# подтвердить доступность при первом `docker build`.
+RUN apk add --no-cache tini poppler-utils libreoffice font-noto tesseract-ocr tesseract-ocr-data-osd && corepack enable && corepack prepare pnpm@9.12.0 --activate
 # Сохраняем pnpm-структуру монорепо, чтобы workspace-symlinks (@matcheck/contracts) и
 # .pnpm-symlinks (fastify, drizzle и пр.) корректно резолвились в runtime.
 COPY --from=build /repo/package.json /repo/pnpm-workspace.yaml /repo/tsconfig.base.json ./
