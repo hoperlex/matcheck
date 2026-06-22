@@ -72,13 +72,24 @@ services:
     restart: unless-stopped
     env_file:
       - /srv/matcheck/secrets/api.env
+    environment:
+      # Vision-распознавание PDF временно раздувает память: PDF→PNG растры,
+      # base64-payload + JSON, jimp RGBA-битмапы и child-процесс tesseract OSD.
+      # Явно ограничиваем V8 old-space, чтобы упираться предсказуемо в heap,
+      # а не ловить cgroup-OOM. RSS (old-space + external Buffers + tesseract)
+      # покрывается mem_limit ниже с запасом.
+      NODE_OPTIONS: --max-old-space-size=384
     networks: [matcheck-net]
     volumes:
       - /srv/matcheck/secrets/yandex-ca/root.crt:/etc/ssl/yandex/root.crt:ro
     depends_on:
       matcheck-redis:
         condition: service_healthy
-    mem_limit: 500m
+    # 500m не хватало под пиковый растровый payload + tesseract при распознавании
+    # многостраничных PDF-сканов → V8 OOM, worker умирал посреди job. 700m даёт
+    # запас для external-памяти (Buffers/jimp/tesseract) сверх 384m heap.
+    # Затрагивает только этот сервис; nginx и другие compose-проекты не задеты.
+    mem_limit: 700m
     cpus: 1.0
     command: ["node_modules/.bin/tsx", "src/worker.ts"]
     logging:

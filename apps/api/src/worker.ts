@@ -82,7 +82,13 @@ async function notifySourceDocumentUpdated(sourceDocumentId: string): Promise<vo
   });
 }
 
-const CONCURRENCY = 2;
+// 1, не 2: распознавание PDF временно раздувает память (PDF→PNG растры,
+// base64-payload, jimp RGBA-битмапы, child-процесс tesseract OSD). При двух
+// параллельных тяжёлых PDF суммарный RSS перевалил cgroup-лимит воркера и V8
+// падал с «heap out of memory» прямо посреди job → документ зависал в
+// processing. Один воркер за раз убирает параллельные native-пики; это
+// важнее поднятия mem_limit. Throughput для очереди приёмок некритичен.
+const CONCURRENCY = 1;
 // Документы, висящие в processing дольше этого времени, считаем «потерянными»
 // после краша воркера и возвращаем в очередь при старте.
 const STALE_PROCESSING_MS = 10 * 60 * 1000;
