@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { eq } from 'drizzle-orm';
+import { eq, and, ne, isNull } from 'drizzle-orm';
 import { asZod } from '../lib/fastify.js';
 import {
   ChangePasswordRequestSchema,
@@ -12,7 +12,7 @@ import {
   UserDtoSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
-import { users, authEvents } from '../db/schema.js';
+import { users, authEvents, sessions } from '../db/schema.js';
 import { hashPassword, verifyPassword, checkPasswordStrength } from '../domain/auth/password.js';
 import { signAccessToken } from '../domain/auth/jwt.js';
 import {
@@ -426,14 +426,33 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
         .set({
           passwordHash: newHash,
           passwordChangedAt: now,
-          // Инвалидируем все прочие сессии: старые refresh-токены
-          // перестанут работать. Текущая сессия (req.user) останется
-          // активной — токен уже выдан и сравнение sessionsInvalidatedAt
-          // строго больше, не больше-или-равно.
+          // Помечаем момент инвалидации: middleware authenticate отклонит
+          // все access-токены, ВЫДАННЫЕ ДО этого времени (сравнение по iat,
+          // см. plugins/auth.ts). Старый токен текущей сессии тоже протухнет,
+          // но фронт прозрачно получит свежий через refresh (его iat > now),
+          // поэтому пользователь из текущей вкладки не разлогинивается. Вход
+          // новым паролем сразу выдаёт токен с iat > now и работает без
+          // 60-секундной задержки (была багом до фикса).
           sessionsInvalidatedAt: now,
           updatedAt: now,
         })
         .where(eq(users.id, user.id));
+      // Безопасность: убиваем все ДРУГИЕ сессии пользователя в БД — их
+      // access-токены отклонит middleware (session.invalidatedAt), а
+      // refresh-токены перестанут обновляться (refresh.ts проверяет тот же
+      // флаг). Текущая сессия (req.user.sessionId) остаётся живой, чтобы из
+      // активной вкладки пользователя не выбрасывало. Без этого смена пароля
+      // не выкидывала бы старые устройства/украденные refresh-сессии.
+      await app.db
+        .update(sessions)
+        .set({ invalidatedAt: now })
+        .where(
+          and(
+            eq(sessions.userId, user.id),
+            ne(sessions.id, req.user.sessionId),
+            isNull(sessions.invalidatedAt),
+          ),
+        );
       await app.db.insert(authEvents).values({
         userId: user.id,
         event: 'password_changed',

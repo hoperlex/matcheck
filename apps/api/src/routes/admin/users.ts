@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, and, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../../lib/fastify.js';
 import {
@@ -8,7 +8,7 @@ import {
   AdminSetPasswordRequestSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
-import { users } from '../../db/schema.js';
+import { users, sessions } from '../../db/schema.js';
 import { hashPassword } from '../../domain/auth/password.js';
 import { publishEvent } from '../events.js';
 
@@ -144,10 +144,28 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
         .limit(1);
       if (!existing) return reply.code(404).send({ error: 'not_found' });
       const hash = await hashPassword(req.body.newPassword);
+      const now = new Date();
       await app.db
         .update(users)
-        .set({ passwordHash: hash, updatedAt: new Date() })
+        .set({
+          passwordHash: hash,
+          passwordChangedAt: now,
+          sessionsInvalidatedAt: now,
+          // Сброс блокировки: админ сбрасывает пароль обычно именно потому,
+          // что пользователь не может войти (в т.ч. залочен попытками). Без
+          // этого юзер с новым паролем всё равно упёрся бы в lockedUntil.
+          failedLoginCount: 0,
+          lockedUntil: null,
+          updatedAt: now,
+        })
         .where(eq(users.id, existing.id));
+      // Безопасность: админский сброс пароля убивает ВСЕ сессии пользователя
+      // (это не «своя» сессия админа) — старые access/refresh-токены целевого
+      // юзера перестают работать.
+      await app.db
+        .update(sessions)
+        .set({ invalidatedAt: now })
+        .where(and(eq(sessions.userId, existing.id), isNull(sessions.invalidatedAt)));
       return { ok: true as const };
     },
   );

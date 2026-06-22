@@ -57,6 +57,10 @@ export type AccessTokenClaims = {
   role: 'admin' | 'manager' | 'inspector_kpp';
   sid: string;
   aal: 'aal1' | 'aal2';
+  // Issued-at (Unix-секунды). При подписи проставляется автоматически
+  // (.setIssuedAt) и в claims не передаётся; заполняется при verify —
+  // нужен для инвалидации сессий по времени выпуска (см. plugins/auth.ts).
+  iat?: number;
 };
 
 export async function signAccessToken(claims: AccessTokenClaims): Promise<string> {
@@ -83,5 +87,6 @@ export async function verifyAccessToken(token: string): Promise<AccessTokenClaim
     role: payload['role'] as AccessTokenClaims['role'],
     sid: payload['sid'] as string,
     aal: (payload['aal'] as AccessTokenClaims['aal']) ?? 'aal1',
+    iat: payload.iat,
   };
 }

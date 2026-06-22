@@ -95,9 +95,16 @@ export default fp(async (app) => {
         .where(eq(users.id, claims.sub))
         .limit(1);
       if (!user || !user.isActive) return null;
+      // Инвалидация сессий при смене пароля: отклоняем токены, ВЫДАННЫЕ ДО
+      // момента sessionsInvalidatedAt. Сравниваем со временем выпуска токена
+      // (iat, секунды), а НЕ с «сейчас» — иначе свежий токен, полученный при
+      // входе новым паролем, тоже отклонялся бы первые ~60с после смены
+      // (баг: «сменил пароль → не могу войти»). Запас 1с — на округление iat
+      // вниз до секунды, чтобы вход в ту же секунду, что и смена, не отвергался.
       if (
         user.sessionsInvalidatedAt &&
-        user.sessionsInvalidatedAt > new Date(Date.now() - 60_000)
+        claims.iat != null &&
+        claims.iat * 1000 < user.sessionsInvalidatedAt.getTime() - 1000
       ) {
         return null;
       }

@@ -61,7 +61,14 @@ async function request<T>(
     signal: init.signal,
   });
 
-  if (res.status === 401 && !init.retried) {
+  const canRefresh =
+    !init.retried &&
+    res.status === 401 &&
+    path !== '/auth/login' &&
+    path !== '/auth/register' &&
+    path !== '/auth/refresh';
+
+  if (canRefresh) {
     const newToken = await doRefresh();
     if (newToken) {
       useAuthStore.getState().setAccessToken(newToken);
