@@ -35,6 +35,12 @@ const QuerySchema = z.object({
   windowDays: z.coerce.number().int().min(1).max(365).optional(),
 });
 
+// Запас на clock skew между app-сервером и БД + на видимость только что
+// закоммиченных записей. Курсор дельты сдвигаем на него назад, чтобы
+// пограничные записи гарантированно попали в следующую дельту. Повтор
+// безвреден — клиент применяет дельту идемпотентно (saveAggregate по id).
+const SYNC_CURSOR_SAFETY_MS = 3000;
+
 export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
   app.get(
@@ -44,6 +50,13 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: { querystring: QuerySchema, response: { 200: SyncDeltaResponseSchema } },
     },
     async (req) => {
+      // Курсор дельты фиксируем СЕЙЧАС, ДО SELECT'ов (минус буфер), а не
+      // new Date() в КОНЦЕ ответа. Раньше cursor=now в конце создавал гонку:
+      // запись, появившаяся между SELECT'ами и концом запроса, не попадала
+      // ни в текущий ответ, ни в будущие дельты (since уезжал за её
+      // updated_at) — и становилась видна только после logout/login
+      // (initial-sync). Фиксация момента до выборок закрывает гонку.
+      const syncStartedAt = new Date(Date.now() - SYNC_CURSOR_SAFETY_MS);
       const since = req.query.since ? new Date(req.query.since) : null;
       const windowDays = req.query.windowDays ?? 90;
       // effectiveSince — для deliveries/shipments/sourceDocuments:
@@ -60,7 +73,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       if (inspectorOnly && !userSiteId) {
         const now = new Date().toISOString();
         return {
-          cursor: now,
+          cursor: syncStartedAt.toISOString(),
           serverNow: now,
           counterparties: [],
           materials: [],
@@ -374,7 +387,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         .limit(500);
 
       return {
-        cursor: new Date().toISOString(),
+        cursor: syncStartedAt.toISOString(),
         serverNow: new Date().toISOString(),
         deletedIds: {
           deliveries: deletedDeliveryIds,
