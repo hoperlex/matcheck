@@ -1509,7 +1509,10 @@ async function createShipment(
   // выставляет эти поля.
   const isDirectConfirm = input.statusCode === 'confirmed_mol';
   const now = new Date();
-  const [created] = await app.db
+  // Атомарность: шапка + позиции + источники + touch УПД — одна транзакция
+  // (симметрично createDelivery). Либо всё, либо ничего; контракт не меняется.
+  return await app.db.transaction(async (tx: typeof app.db) => {
+  const [created] = await tx
     .insert(shipments)
     .values({
       id: input.id,
@@ -1537,7 +1540,7 @@ async function createShipment(
     .returning();
   if (!created) throw new Error('Failed to insert shipment');
   if (input.items.length) {
-    await app.db.insert(shipmentItems).values(
+    await tx.insert(shipmentItems).values(
       input.items.map((i) => ({
         shipmentId: created.id,
         itemKind: i.itemKind,
@@ -1562,9 +1565,9 @@ async function createShipment(
     );
   }
   if (input.sourceDocumentIds.length) {
-    await assertSourcesAvailableForShipment(app, input.sourceDocumentIds, created.id);
+    await assertSourcesAvailableForShipment({ db: tx }, input.sourceDocumentIds, created.id);
     try {
-      await app.db
+      await tx
         .insert(shipmentSources)
         .values(
           input.sourceDocumentIds.map((sid) => ({ shipmentId: created.id, sourceDocumentId: sid })),
@@ -1577,9 +1580,10 @@ async function createShipment(
     }
     // Бамп updated_at для привязанных УПД, чтобы они попали в дельту
     // /sync. См. domain/sourceDocuments/touch.ts.
-    await touchSourceDocuments(app, input.sourceDocumentIds);
+    await touchSourceDocuments({ db: tx }, input.sourceDocumentIds);
   }
   return created;
+  });
 }
 
 async function updateShipment(
@@ -1601,6 +1605,20 @@ async function updateShipment(
   const effectiveStatusId = isShipmentDowngrade(existingCode ?? '', input.statusCode)
     ? existing.statusId
     : statusId;
+  // Наблюдаемость: status-guard молча оставил прежний статус. Контракт ответа
+  // не меняем (старый клиент не ждёт ошибки), логируем факт. См. status-guard.ts.
+  if (effectiveStatusId !== statusId) {
+    app.log?.warn?.(
+      {
+        entity: 'shipment',
+        id,
+        existingStatus: existingCode,
+        requestedStatus: input.statusCode,
+        effectiveStatus: existingCode,
+      },
+      'status-guard: prevented shipment status downgrade',
+    );
+  }
   const isFirstConfirm =
     input.statusCode === 'confirmed_mol' && existing.confirmedByMolUserId === null;
 
@@ -1638,7 +1656,10 @@ async function updateShipment(
           groupName: i.groupName ?? null,
         }));
 
-  await app.db
+  // Атомарность update: статус/шапка + позиции + источники + touch УПД —
+  // одна транзакция (симметрично updateDelivery).
+  return await app.db.transaction(async (tx: typeof app.db) => {
+  await tx
     .update(shipments)
     .set({
       statusId: effectiveStatusId,
@@ -1663,26 +1684,26 @@ async function updateShipment(
       updatedAt: new Date(),
     })
     .where(eq(shipments.id, id));
-  await app.db.delete(shipmentItems).where(eq(shipmentItems.shipmentId, id));
+  await tx.delete(shipmentItems).where(eq(shipmentItems.shipmentId, id));
   if (itemsForInsert.length) {
-    await app.db.insert(shipmentItems).values(
+    await tx.insert(shipmentItems).values(
       itemsForInsert.map((i) => ({ ...i, shipmentId: id })),
     );
   }
   if (input.sourceDocumentIds.length) {
-    await assertSourcesAvailableForShipment(app, input.sourceDocumentIds, id);
+    await assertSourcesAvailableForShipment({ db: tx }, input.sourceDocumentIds, id);
   }
   // Запоминаем какие УПД были привязаны раньше — нужно бампать
   // их updated_at тоже (для УПД, которая отвязывается, видимость
   // в Inbox должна вернуться).
-  const previousSources: { sourceDocumentId: string }[] = await app.db
+  const previousSources: { sourceDocumentId: string }[] = await tx
     .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
     .from(shipmentSources)
     .where(eq(shipmentSources.shipmentId, id));
-  await app.db.delete(shipmentSources).where(eq(shipmentSources.shipmentId, id));
+  await tx.delete(shipmentSources).where(eq(shipmentSources.shipmentId, id));
   if (input.sourceDocumentIds.length) {
     try {
-      await app.db
+      await tx
         .insert(shipmentSources)
         .values(input.sourceDocumentIds.map((sid) => ({ shipmentId: id, sourceDocumentId: sid })));
     } catch (err) {
@@ -1698,7 +1719,8 @@ async function updateShipment(
     ...previousSources.map((p) => p.sourceDocumentId),
     ...input.sourceDocumentIds,
   ]);
-  await touchSourceDocuments(app, [...affected]);
+  await touchSourceDocuments({ db: tx }, [...affected]);
+  });
 }
 
 // Подтягивает позиции из привязываемых УПД в формате shipment_items.

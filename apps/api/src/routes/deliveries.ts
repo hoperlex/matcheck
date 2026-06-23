@@ -1857,7 +1857,13 @@ async function createDelivery(
   // уже выставляет эти поля.
   const isDirectConfirm = input.statusCode === 'confirmed_mol';
   const now = new Date();
-  const [created] = await app.db
+  // Атомарность: шапка + позиции + источники + touch УПД пишутся в ОДНОЙ
+  // транзакции. Раньше это были отдельные insert'ы — сбой на середине
+  // (constraint/обрыв) оставлял «приёмку без позиций» или 500, что на
+  // мобильном выливалось в исчерпание retry и потерю мутации. Теперь —
+  // либо всё, либо ничего. Контракт ответа не меняется.
+  return await app.db.transaction(async (tx: typeof app.db) => {
+  const [created] = await tx
     .insert(deliveries)
     .values({
       id: input.id,
@@ -1882,7 +1888,7 @@ async function createDelivery(
     .returning();
   if (!created) throw new Error('Failed to insert delivery');
   if (input.items.length) {
-    await app.db.insert(deliveryItems).values(
+    await tx.insert(deliveryItems).values(
       input.items.map((i) => ({
         deliveryId: created.id,
         itemKind: i.itemKind,
@@ -1907,9 +1913,9 @@ async function createDelivery(
     );
   }
   if (input.sourceDocumentIds.length) {
-    await assertSourcesAvailableForDelivery(app, input.sourceDocumentIds, created.id);
+    await assertSourcesAvailableForDelivery({ db: tx }, input.sourceDocumentIds, created.id);
     try {
-      await app.db
+      await tx
         .insert(deliverySources)
         .values(
           input.sourceDocumentIds.map((sid) => ({ deliveryId: created.id, sourceDocumentId: sid })),
@@ -1923,9 +1929,10 @@ async function createDelivery(
     // Бамп updated_at для привязанных УПД, чтобы они попали в дельту
     // /sync и инспектор увидел изменение видимости без logout/login.
     // См. domain/sourceDocuments/touch.ts.
-    await touchSourceDocuments(app, input.sourceDocumentIds);
+    await touchSourceDocuments({ db: tx }, input.sourceDocumentIds);
   }
   return created;
+  });
 }
 
 async function updateDelivery(
@@ -1948,6 +1955,22 @@ async function updateDelivery(
   const effectiveStatusId = isDeliveryDowngrade(existingCode ?? '', input.statusCode)
     ? existing.statusId
     : statusId;
+  // Наблюдаемость: status-guard молча оставляет прежний статус. Контракт
+  // ответа НЕ меняем (старый клиент не ждёт новой ошибки), но логируем факт —
+  // чтобы рассинхрон «клиент думает confirmed_mol, на сервере filled» был
+  // виден в логах. См. status-guard.ts.
+  if (effectiveStatusId !== statusId) {
+    app.log?.warn?.(
+      {
+        entity: 'delivery',
+        id,
+        existingStatus: existingCode,
+        requestedStatus: input.statusCode,
+        effectiveStatus: existingCode,
+      },
+      'status-guard: prevented delivery status downgrade',
+    );
+  }
   // Первичная фиксация аудита подтверждения (идемпотентно: повторное
   // подтверждение не перезаписывает кто/когда).
   const isFirstConfirm =
@@ -1988,7 +2011,11 @@ async function updateDelivery(
           groupName: i.groupName ?? null,
         }));
 
-  await app.db
+  // Атомарность update: статус/шапка + позиции + источники + touch УПД —
+  // одна транзакция (см. createDelivery). Раньше delete items проходил, а
+  // insert падал → приёмка теряла все позиции.
+  return await app.db.transaction(async (tx: typeof app.db) => {
+  await tx
     .update(deliveries)
     .set({
       statusId: effectiveStatusId,
@@ -2010,26 +2037,26 @@ async function updateDelivery(
       updatedAt: new Date(),
     })
     .where(eq(deliveries.id, id));
-  await app.db.delete(deliveryItems).where(eq(deliveryItems.deliveryId, id));
+  await tx.delete(deliveryItems).where(eq(deliveryItems.deliveryId, id));
   if (itemsForInsert.length) {
-    await app.db.insert(deliveryItems).values(
+    await tx.insert(deliveryItems).values(
       itemsForInsert.map((i) => ({ ...i, deliveryId: id })),
     );
   }
   if (input.sourceDocumentIds.length) {
-    await assertSourcesAvailableForDelivery(app, input.sourceDocumentIds, id);
+    await assertSourcesAvailableForDelivery({ db: tx }, input.sourceDocumentIds, id);
   }
   // Запоминаем какие УПД были привязаны раньше — нужно бампать
   // их updated_at тоже (для УПД, которая отвязывается, видимость
   // в Inbox должна вернуться).
-  const previousSources: { sourceDocumentId: string }[] = await app.db
+  const previousSources: { sourceDocumentId: string }[] = await tx
     .select({ sourceDocumentId: deliverySources.sourceDocumentId })
     .from(deliverySources)
     .where(eq(deliverySources.deliveryId, id));
-  await app.db.delete(deliverySources).where(eq(deliverySources.deliveryId, id));
+  await tx.delete(deliverySources).where(eq(deliverySources.deliveryId, id));
   if (input.sourceDocumentIds.length) {
     try {
-      await app.db
+      await tx
         .insert(deliverySources)
         .values(input.sourceDocumentIds.map((sid) => ({ deliveryId: id, sourceDocumentId: sid })));
     } catch (err) {
@@ -2045,7 +2072,8 @@ async function updateDelivery(
     ...previousSources.map((p) => p.sourceDocumentId),
     ...input.sourceDocumentIds,
   ]);
-  await touchSourceDocuments(app, [...affected]);
+  await touchSourceDocuments({ db: tx }, [...affected]);
+  });
 }
 
 function isSourceDocumentUniqueViolation(err: unknown): boolean {
