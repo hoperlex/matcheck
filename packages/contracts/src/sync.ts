@@ -44,6 +44,44 @@ export const SyncDeltaResponseSchema = z.object({
 });
 export type SyncDeltaResponse = z.infer<typeof SyncDeltaResponseSchema>;
 
+// ─── Reconcile (read-only сверка планшет ↔ сервер) ──────────────────────────
+// Клиент шлёт лёгкий список того, что у него локально (id + version), сервер
+// отвечает расхождениями по своему объекту. Сервер НИЧЕГО не меняет — только
+// сообщает, что докачать / переотправить. Применяет решения клиент.
+// Все три типа сравниваются по version (есть у deliveries/shipments/
+// source_documents). Это подготовка под мобильный фоновый reconcile (M4).
+const ReconcileItemSchema = z.object({
+  id: z.string().uuid(),
+  version: z.number().int(),
+});
+
+export const ReconcileRequestSchema = z.object({
+  // max — защита от раздувания тела запроса.
+  deliveries: z.array(ReconcileItemSchema).max(5000).default([]),
+  shipments: z.array(ReconcileItemSchema).max(5000).default([]),
+  sourceDocuments: z.array(ReconcileItemSchema).max(5000).default([]),
+});
+export type ReconcileRequest = z.infer<typeof ReconcileRequestSchema>;
+
+const ReconcilePerTypeSchema = z.object({
+  // Есть на сервере (в зоне видимости/окне), нет у клиента → клиент докачивает.
+  missingOnClient: z.array(
+    z.object({ id: z.string().uuid(), version: z.number().int(), updatedAt: z.string() }),
+  ),
+  // Есть у обоих, но серверная версия новее → клиент устарел, обновляет.
+  staleOnClient: z.array(z.object({ id: z.string().uuid(), serverVersion: z.number().int() })),
+  // Прислал клиент, но на сервере нет → push-потеря, клиент переотправляет.
+  missingOnServer: z.array(z.string().uuid()),
+});
+
+export const ReconcileResponseSchema = z.object({
+  serverNow: z.string(),
+  deliveries: ReconcilePerTypeSchema,
+  shipments: ReconcilePerTypeSchema,
+  sourceDocuments: ReconcilePerTypeSchema,
+});
+export type ReconcileResponse = z.infer<typeof ReconcileResponseSchema>;
+
 export const SseEventSchema = z.object({
   type: z.enum([
     'delivery_updated',

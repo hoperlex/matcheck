@@ -2,7 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import { desc, eq, gte, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
-import { SyncDeltaResponseSchema } from '@matcheck/contracts';
+import {
+  SyncDeltaResponseSchema,
+  ReconcileRequestSchema,
+  ReconcileResponseSchema,
+} from '@matcheck/contracts';
 import {
   assets,
   counterparties,
@@ -704,6 +708,96 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           createdAt: s.createdAt.toISOString(),
           updatedAt: s.updatedAt.toISOString(),
         })),
+      };
+    },
+  );
+
+  // Read-only сверка планшет ↔ сервер. Клиент шлёт лёгкий список своих локальных
+  // записей (id + version), сервер отвечает расхождениями по объекту инспектора.
+  // НИЧЕГО не пишет — только SELECT и сравнение. Подготовка под мобильный
+  // фоновый reconcile (M4): missingOnClient → клиент докачает, staleOnClient →
+  // обновит, missingOnServer → переотправит (push-потеря). Идемпотентность
+  // переотправки — по client-UUID, дублей нет.
+  app.post(
+    '/api/v1/sync/reconcile',
+    {
+      preHandler: [app.authenticate],
+      schema: { body: ReconcileRequestSchema, response: { 200: ReconcileResponseSchema } },
+    },
+    async (req) => {
+      const inspectorOnly = req.user?.role === 'inspector_kpp';
+      const userSiteId = req.user?.siteId ?? null;
+      const noSite = inspectorOnly && !userSiteId;
+      // Окно ограничивает missingOnClient разумным объёмом (то, что клиент и так
+      // должен иметь после initial-sync 90 дней). На missingOnServer не влияет —
+      // там сверяем ровно то, что прислал клиент.
+      const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+
+      type Cli = { id: string; version: number };
+      const reconcile = (
+        serverRows: { id: string; version: number; updatedAt: Date }[],
+        clientItems: Cli[],
+      ) => {
+        const serverIds = new Set(serverRows.map((r) => r.id));
+        const clientMap = new Map(clientItems.map((c) => [c.id, c.version] as const));
+        return {
+          missingOnClient: serverRows
+            .filter((r) => !clientMap.has(r.id))
+            .map((r) => ({ id: r.id, version: r.version, updatedAt: r.updatedAt.toISOString() })),
+          staleOnClient: serverRows
+            .filter((r) => {
+              const cv = clientMap.get(r.id);
+              return cv !== undefined && r.version > cv;
+            })
+            .map((r) => ({ id: r.id, serverVersion: r.version })),
+          missingOnServer: clientItems.filter((c) => !serverIds.has(c.id)).map((c) => c.id),
+        };
+      };
+
+      const delRows = noSite
+        ? []
+        : await app.db
+            .select({
+              id: deliveries.id,
+              version: deliveries.version,
+              updatedAt: deliveries.updatedAt,
+            })
+            .from(deliveries)
+            .where(
+              inspectorOnly && userSiteId
+                ? eqAnd(deliveries.siteId, userSiteId, gte(deliveries.updatedAt, since))
+                : gte(deliveries.updatedAt, since),
+            );
+      const shipRows = noSite
+        ? []
+        : await app.db
+            .select({ id: shipments.id, version: shipments.version, updatedAt: shipments.updatedAt })
+            .from(shipments)
+            .where(
+              inspectorOnly && userSiteId
+                ? eqAnd(shipments.siteId, userSiteId, gte(shipments.updatedAt, since))
+                : gte(shipments.updatedAt, since),
+            );
+      const sdRows = noSite
+        ? []
+        : await app.db
+            .select({
+              id: sourceDocuments.id,
+              version: sourceDocuments.version,
+              updatedAt: sourceDocuments.updatedAt,
+            })
+            .from(sourceDocuments)
+            .where(
+              inspectorOnly && userSiteId
+                ? eqAnd(sourceDocuments.siteId, userSiteId, gte(sourceDocuments.updatedAt, since))
+                : gte(sourceDocuments.updatedAt, since),
+            );
+
+      return {
+        serverNow: new Date().toISOString(),
+        deliveries: reconcile(delRows, req.body.deliveries),
+        shipments: reconcile(shipRows, req.body.shipments),
+        sourceDocuments: reconcile(sdRows, req.body.sourceDocuments),
       };
     },
   );
