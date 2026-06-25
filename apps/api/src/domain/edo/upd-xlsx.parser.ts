@@ -231,6 +231,22 @@ function parseDocHeader(lines: string[]): {
       break;
     }
   }
+  // Fallback — «Подтверждение отгрузки № N от dd.mm.yyyy» (форма АЛЮТЕХ 2026:
+  // УПД-подобный документ-основание без строки «Счёт-фактура»). Графы/позиции
+  // у него стандартные (форма 1137) — отличается только заголовок документа,
+  // поэтому раньше docNumber/docDate выходили null → «распознано частично».
+  if (docNumber === null) {
+    const reConfirm =
+      /Подтверждение\s+отгрузки\s+№\s*(\S+?)\s+от\s+(\d{1,2}\.\d{1,2}\.\d{2,4})/i;
+    for (const line of lines) {
+      const m = reConfirm.exec(line);
+      if (m && m[1] && m[2]) {
+        docNumber = m[1];
+        docDate = parseRuDate(m[2]);
+        break;
+      }
+    }
+  }
   return { docNumber, docDate };
 }
 
@@ -417,6 +433,25 @@ function isStopWord(s: string): boolean {
   );
 }
 
+// Вторая строка заголовков таблицы — буквальные номера граф (1а/1, 2а, 3..9):
+// значение КАЖДОЙ известной колонки равно её граф-ключу. В новой форме 2026
+// эта строка идёт сразу под marker-row и без фильтра попадала в items фейковой
+// позицией (nameRaw="1", qty=3, sum=9) → «суммы не сходятся». Реальная позиция
+// так выглядеть не может: наименование — текст, а не номер графы. Проверяем
+// минимум 3 заполненных колонки и ПОЛНОЕ совпадение всех с граф-ключами.
+function isGraphNumberRow(row: RawRow, graphCols: Map<GraphKey, number>): boolean {
+  let checked = 0;
+  let matched = 0;
+  for (const [key, col] of graphCols) {
+    const v = normCell(row.cells.get(col) ?? '');
+    if (!v) continue;
+    checked++;
+    const numKey = key.replace(/[а-я]/g, ''); // '1а' → '1'
+    if (v === key || v === numKey) matched++;
+  }
+  return checked >= 3 && matched === checked;
+}
+
 function parseItemsAndTotals(rows: RawRow[]): {
   items: UpdPdfItem[];
   totalSum: number | null;
@@ -457,6 +492,8 @@ function parseItemsAndTotals(rows: RawRow[]): {
     }
 
     if (!nameText) continue; // подзаголовок / пустая строка
+    // Строка вторичных номеров граф под marker-row — не позиция (см. фикс 2026).
+    if (isGraphNumberRow(row, graphCols)) continue;
 
     const qty = parseNum(row.cells.get(colQty) ?? null);
     const sumWithTax = parseNum(row.cells.get(colSumWithTax) ?? null);

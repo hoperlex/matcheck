@@ -199,4 +199,56 @@ describe('parseUpdXlsx — регрессия рабочих xlsx-шаблоно
       sum: 3550.7,
     });
   });
+
+  it('АЛЮТЕХ «Подтверждение отгрузки» T56532 (форма 2026: docNumber из «Подтверждение отгрузки №»)', async () => {
+    // Раньше docNumber/docDate были null (заголовок не «Счёт-фактура №») →
+    // «распознано частично», хотя позиции извлекались корректно.
+    const r = await parseUpdXlsx(load('upd-debug', 'alutech-T56532.xlsx'));
+    expect(r.docNumber).toBe('Т5653/2');
+    expect(r.docDate).toBe('2026-06-22');
+    expect(r.totalSum).toBe(4079.48);
+    expect(r.vatSum).toBe(735.64);
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0]).toMatchObject({
+      nameRaw: 'Подкладка рихтовочная 100x62x1',
+      qty: 4,
+      price: 835.96,
+      vatRate: 22,
+      vatSum: 735.64,
+      sum: 4079.48,
+    });
+  });
+
+  it('упд 1877.xls (форма 2026: фейк-строка номеров граф НЕ попадает в items)', async () => {
+    const { convertXlsToXlsxBuffer } = await import('../src/domain/edo/xls-to-xlsx.js');
+    const r = await parseUpdXlsx(convertXlsToXlsxBuffer(load('upd-debug', 'upd-1877.xls')));
+    expect(r.docNumber).toBe('1877/18');
+    expect(r.docDate).toBe('2026-06-22');
+    // Ключевое: ровно 2 реальные позиции. Раньше под marker-row проходила
+    // 3-я фейковая строка номеров граф (nameRaw="1", qty=3, sum=9) →
+    // «суммы не сходятся».
+    expect(r.items).toHaveLength(2);
+    expect(r.items[0].nameRaw).toContain('Стеклопакет');
+    expect(r.items[0]).toMatchObject({ vatRate: 22, vatSum: 554800.01, sum: 3076618.24 });
+    expect(r.items[1].nameRaw).toContain('Доставка');
+    expect(r.totalSum).toBe(3096618.24);
+    expect(r.vatSum).toBe(558406.57);
+  });
+
+  it('ТК-02876.xls (новая .xls, 67 позиций — фиксы 2026 не ломают рабочий файл)', async () => {
+    const { convertXlsToXlsxBuffer } = await import('../src/domain/edo/xls-to-xlsx.js');
+    const r = await parseUpdXlsx(convertXlsToXlsxBuffer(load('upd-debug', 'tk-02876.xls')));
+    expect(r.docNumber).toBe('ТК-02876');
+    expect(r.docDate).toBe('2026-06-23');
+    expect(r.items).toHaveLength(67);
+    expect(r.totalSum).toBe(897131);
+    expect(r.vatSum).toBe(161777.7);
+    expect(r.items[0]).toMatchObject({
+      nameRaw: 'Клапан обратный PatAIR-KP-KO-70-40',
+      qty: 5,
+      vatRate: 22,
+      vatSum: 1370.49,
+      sum: 7600,
+    });
+  });
 });
