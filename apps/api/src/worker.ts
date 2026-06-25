@@ -66,6 +66,10 @@ import {
 } from './domain/edo/waybill-batch.parser.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
 import { validateUpdTotals } from './domain/edo/upd-validation.js';
+import {
+  getExcelVisionFallbackReasons,
+  mergeExcelStructuralWithVision,
+} from './domain/edo/excel-vision-fallback.js';
 import { publishSseEvent } from './domain/sse/redis-bridge.js';
 import { sourceDocumentAttachments } from './db/schema.js';
 import type { UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
@@ -240,8 +244,12 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       // поставщик находятся, но items=[] из-за плавающей разметки. Поэтому
       // идём в Excel→PNG→Vision не только при полностью пустой шапке, а при
       // отсутствии позиций или низкой уверенности.
-      const needsVisionFallback =
-        structural == null || structural.items.length === 0 || structural.confidence < 0.7;
+      // Сильные признаки частичного/сомнительного структурного результата
+      // (см. excel-vision-fallback.ts): нет structural / нет позиций / низкая
+      // уверенность / суммы не сходятся / НДС должен быть, но пуст / пустая
+      // шапка без позиций. Слабые одиночные сигналы Vision НЕ триггерят.
+      const fallbackReasons = getExcelVisionFallbackReasons(structural);
+      const needsVisionFallback = fallbackReasons.length > 0;
 
       if (!needsVisionFallback) {
         parsed = structural!;
@@ -249,11 +257,11 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         log.warn(
           {
             isXls,
-            hasStructural: structural != null,
+            reasons: fallbackReasons,
             items: structural?.items.length ?? null,
             confidence: structural?.confidence ?? null,
           },
-          'Excel structural parse incomplete — trying LibreOffice→PNG→Vision fallback',
+          'excel structural parse incomplete/invalid — trying vision fallback',
         );
         try {
           const pngPages = await convertExcelToPng(buffer, isXls ? 'xls' : 'xlsx');
@@ -265,7 +273,19 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             { buffer: pngPages[0]!, mimeType: 'image/png', filename: s3Key },
             { sourceDocumentId },
           );
-          parsed = r.parsed;
+          // Merge: Vision ДОБИРАЕТ только пустые поля шапки, структурные items
+          // не затираются (см. mergeExcelStructuralWithVision). При пустом/слабом
+          // структурном — берём Vision целиком, как раньше.
+          const merged = mergeExcelStructuralWithVision(structural, r.parsed);
+          parsed = merged.result;
+          if (merged.tookVisionWhole) {
+            log.info('vision fallback success — took vision result whole (structural empty/weak)');
+          } else {
+            log.info(
+              { mergedFields: merged.mergedFields },
+              'vision fallback success — merged empty header fields into structural (items kept)',
+            );
+          }
           llmProviderId = r.llmProviderId;
           parsedViaVision = true;
         } catch (fbErr) {
