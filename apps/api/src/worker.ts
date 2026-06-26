@@ -42,6 +42,7 @@ import {
   VisionBudgetExceededError,
   VisionTimeoutError,
 } from './domain/edo/upd-vision.parser.js';
+import { tryParseUpdBundle } from './domain/edo/upd-bundle.parser.js';
 import { parseUpdXlsx } from './domain/edo/upd-xlsx.parser.js';
 import { convertXlsToXlsxBuffer, XlsConvertError } from './domain/edo/xls-to-xlsx.js';
 import {
@@ -396,13 +397,48 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
               : 'pdf has no text — falling back to vision LLM',
           );
           try {
-            const r = await parseUpdVision(
-              { buffer, mimeType: 'application/pdf', filename: s3Key },
-              { sourceDocumentId },
-            );
-            parsed = r.parsed;
-            llmProviderId = r.llmProviderId;
-            parsedViaVision = true;
+            // Шаг 3 multi-UPD: сначала пробуем как пакет из НЕСКОЛЬКИХ УПД
+            // (один скан = несколько документов одной поставки). Если это не
+            // bundle (один УПД / не OpenRouter / prefilter не сработал) —
+            // tryParseUpdBundle вернёт null, и идём обычным одиночным vision.
+            // Bundle-результат — агрегат: docNumber «487, 488, 489, 490»,
+            // объединённые позиции; сохраняется существующей секцией ниже.
+            let bundle: Awaited<ReturnType<typeof tryParseUpdBundle>> = null;
+            try {
+              bundle = await tryParseUpdBundle(buffer, { sourceDocumentId });
+            } catch (bundleErr) {
+              if (
+                bundleErr instanceof VisionTimeoutError ||
+                bundleErr instanceof VisionBudgetExceededError
+              ) {
+                throw bundleErr;
+              }
+              log.warn(
+                {
+                  bundleErr:
+                    bundleErr instanceof Error ? bundleErr.message : String(bundleErr),
+                },
+                'multi-UPD bundle attempt failed — falling back to single vision',
+              );
+              bundle = null;
+            }
+            if (bundle) {
+              parsed = bundle.parsed;
+              llmProviderId = bundle.llmProviderId;
+              parsedViaVision = true;
+              log.info(
+                { segments: bundle.segments, extracted: bundle.extracted, reasons: bundle.reasons },
+                'multi-UPD bundle recognized — aggregated into one document',
+              );
+            } else {
+              const r = await parseUpdVision(
+                { buffer, mimeType: 'application/pdf', filename: s3Key },
+                { sourceDocumentId },
+              );
+              parsed = r.parsed;
+              llmProviderId = r.llmProviderId;
+              parsedViaVision = true;
+            }
           } catch (visionErr) {
             // VisionTimeoutError / VisionBudgetExceededError — fail-fast:
             // пробрасываем во внешний catch (parse_failed без BullMQ retry,
