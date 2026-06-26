@@ -529,7 +529,10 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           'shipment',
           shipmentId,
           file,
-          'cargo',
+          // Тип по этапу, симметрично мобиле: 1 Этап (before) — «cargo»,
+          // 2 Этап (after) — «vehicle» (машина). Это же включает подпись
+          // «Груз/машина» в галерее 2 Этапа (showLabels).
+          stage === 'after' ? 'vehicle' : 'cargo',
           stage,
         );
         message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
@@ -556,10 +559,13 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
 
   const photoPropsStage1 = makePhotoProps('before');
   const photoPropsStage2 = makePhotoProps('after');
-  // Кнопка «Добавить фото: 2 этап» доступна после фактического подтверждения МОЛ
-  // (status confirmed_mol). До этого 2 этап ведёт инспектор МОЛ на
-  // мобиле, и параллельная съёмка с портала создаёт конфликт.
-  const stage2Enabled = loadedShipment?.status.code === 'confirmed_mol';
+  // Кнопка «Добавить фото: 2 этап» доступна, как только отгрузка собрана
+  // (status shipped), и остаётся доступной после подтверждения МОЛ
+  // (confirmed_mol). Это даёт менеджеру дослать фото 2 Этапа с портала,
+  // не дожидаясь подписи МОЛ. До shipped кнопка заблокирована.
+  const stage2Enabled =
+    loadedShipment?.status.code === 'shipped' ||
+    loadedShipment?.status.code === 'confirmed_mol';
 
   const updateField = (key: string, patch: Partial<DraftItem>) => {
     setItems((prev) => prev.map((it) => (it.clientKey === key ? { ...it, ...patch } : it)));
@@ -1572,7 +1578,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                       title={
                         stage2Enabled
                           ? null
-                          : '2 Этап доступен после подтверждения МОЛ'
+                          : '2 Этап доступен после сборки отгрузки (1 этап)'
                       }
                     >
                       <Upload {...photoPropsStage2} disabled={!stage2Enabled}>

@@ -79,6 +79,40 @@ const TABLES: Record<OperationKind, PhotoTable> = {
   },
 };
 
+/**
+ * Бампает ТОЛЬКО updatedAt родительской приёмки/отгрузки при фото-мутации.
+ *
+ * Зачем: фото лежат в отдельной таблице (delivery_photos/shipment_photos), и
+ * чистое добавление/удаление/смена типа фото раньше не сдвигало
+ * deliveries/shipments.updatedAt. А delta-sync (/api/v1/sync) выбирает
+ * операции именно по updatedAt ≥ since. Поэтому фото, добавленное менеджером
+ * на портале, не попадало в дельту и не доезжало на мобильный планшет —
+ * хотя SSE-событие мобила и получала.
+ *
+ * ВАЖНО — что НЕ делаем:
+ *  - НЕ инкрементируем version: иначе у мобильного draft 2 этапа, держащего
+ *    baseVersion, при следующем upsert возник бы ложный OCC-конфликт.
+ *    updatedAt достаточно, чтобы попасть в delta-выборку.
+ *  - НЕ трогаем статус, items, sourceDocumentIds, pendingDeletionAt.
+ */
+async function touchPhotoParent(
+  app: ReturnType<typeof asZod>,
+  kind: OperationKind,
+  operationId: string,
+): Promise<void> {
+  if (kind === 'delivery') {
+    await app.db
+      .update(deliveries)
+      .set({ updatedAt: new Date() })
+      .where(eq(deliveries.id, operationId));
+  } else {
+    await app.db
+      .update(shipments)
+      .set({ updatedAt: new Date() })
+      .where(eq(shipments.id, operationId));
+  }
+}
+
 export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
 
@@ -216,6 +250,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           thumbS3Key,
           body.contentType,
         );
+        await touchPhotoParent(app, 'delivery', operationId);
         TABLES.delivery.publishUpdated(app, operationId);
         return {
           photoId,
@@ -349,6 +384,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         thumbS3Key,
         body.contentType,
       );
+      await touchPhotoParent(app, 'shipment', operationId);
       TABLES.shipment.publishUpdated(app, operationId);
       return {
         photoId,
@@ -567,6 +603,11 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           .set({ uploadedAt: now })
           .where(eq(shipmentPhotos.id, req.params.id));
       }
+      // Фото стало реальным (uploaded_at проставлен) — бампаем updatedAt
+      // родителя, чтобы delta-sync отдал приёмку/отгрузку с этим фото на
+      // мобилу, и будим клиента SSE-событием (раньше confirm их не слал).
+      await touchPhotoParent(app, found.kind, found.operationId);
+      TABLES[found.kind].publishUpdated(app, found.operationId);
       return { ok: true as const, uploadedAt: now.toISOString() };
     },
   );
@@ -630,6 +671,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           app.log.warn({ err, key: found.thumbS3Key }, 's3 thumb delete failed'),
         );
       }
+      await touchPhotoParent(app, found.kind, found.operationId);
       TABLES[found.kind].publishUpdated(app, found.operationId);
       return { ok: true as const };
     },
@@ -701,6 +743,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           .set({ kind: req.body.kind })
           .where(eq(shipmentPhotos.id, req.params.id));
       }
+      await touchPhotoParent(app, found.kind, found.operationId);
       TABLES[found.kind].publishUpdated(app, found.operationId);
       return { ok: true as const, kind: req.body.kind };
     },

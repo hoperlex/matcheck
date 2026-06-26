@@ -617,7 +617,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           'delivery',
           deliveryId,
           file,
-          'cargo',
+          // Тип по этапу, симметрично мобиле: 1 Этап (before) — «cargo»
+          // (груз/документ), 2 Этап (after) — «vehicle» (машина). Это же
+          // включает подпись «Груз/машина» в галерее 2 Этапа (showLabels).
+          stage === 'after' ? 'vehicle' : 'cargo',
           stage,
         );
         message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
@@ -646,11 +649,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
 
   const photoPropsStage1 = makePhotoProps('before');
   const photoPropsStage2 = makePhotoProps('after');
-  // Кнопка «Добавить фото: 2 этап» доступна после фактического подтверждения МОЛ
-  // (status confirmed_mol). До этого 2 этап ведёт инспектор МОЛ на
-  // мобиле, и добавление фото с портала в этот промежуток создаёт
-  // конфликт ожиданий «кто сейчас собирает 2 этап».
-  const stage2Enabled = loadedDelivery?.status.code === 'confirmed_mol';
+  // Кнопка «Добавить фото: 2 этап» доступна, как только 1 Этап оформлен
+  // (status filled), и остаётся доступной после подтверждения МОЛ
+  // (confirmed_mol). Это даёт менеджеру дослать фото 2 Этапа с портала
+  // (например, «машина уже уехала»), не дожидаясь подписи МОЛ. В not_filled
+  // (1 Этап ещё не сдан) кнопка остаётся заблокированной.
+  const stage2Enabled =
+    loadedDelivery?.status.code === 'filled' ||
+    loadedDelivery?.status.code === 'confirmed_mol';
 
   const updateField = (key: string, patch: Partial<DraftItem>) => {
     setItems((prev) => prev.map((it) => (it.clientKey === key ? { ...it, ...patch } : it)));
@@ -1621,17 +1627,16 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                         Добавить фото: 1 этап
                       </Button>
                     </Upload>
-                    {/* 2 этап — доступен только после фактической подписи
-                        МОЛ (status confirmed_mol). До этого ведёт инспектор
-                        МОЛ на мобиле; параллельная съёмка с портала путает
-                        нумерацию фото. Подсказку в tooltip оставляем
-                        видимой даже у inspector_kpp, чтобы было понятно,
-                        почему кнопка disabled. */}
+                    {/* 2 этап — доступен с момента, как 1 Этап оформлен
+                        (status filled), и далее в confirmed_mol. Заблокирован
+                        только пока приёмка не оформлена (not_filled). Подсказку
+                        в tooltip оставляем видимой, чтобы было понятно, почему
+                        кнопка disabled. */}
                     <Tooltip
                       title={
                         stage2Enabled
                           ? null
-                          : '2 Этап доступен после подтверждения МОЛ'
+                          : '2 Этап доступен после оформления 1 этапа'
                       }
                     >
                       <Upload {...photoPropsStage2} disabled={!stage2Enabled}>
