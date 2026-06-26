@@ -24,7 +24,13 @@ import { llmProviders, llmProviderCredentials } from '../src/db/schema.js';
 import { buildAad, decryptField } from '../src/domain/auth/crypto.js';
 import { prefilterUpdPages } from '../src/domain/edo/upd-page-prefilter.js';
 import { MAX_PAGES_FOR_OPENROUTER } from '../src/domain/edo/upd-vision.parser.js';
-import { segmentUpdPages } from '../src/domain/edo/upd-batch.parser.js';
+import { extractUpdFromPages } from '../src/domain/edo/upd-vision-extract.js';
+import {
+  segmentUpdPages,
+  aggregateUpdDocuments,
+  type ParsedUpdSubdocument,
+} from '../src/domain/edo/upd-batch.parser.js';
+import { loadActivePromptWithMeta } from '../src/domain/prompts/registry.js';
 
 const DEFAULT_PDF = 'docs/debug-upd/сканирование0202.pdf';
 // Корень репозитория: apps/api/scripts → ../../.. (скрипт запускается из
@@ -97,21 +103,86 @@ async function main(): Promise<void> {
     );
   }
 
-  // ── TODO: extract per segment + aggregate ──
-  // Извлечение каждой группы Vision'ом сейчас потребовало бы рефактора
-  // production parseUpdVision (он завязан на БД-провайдеры и делает
-  // prefilter+extract единым непубличным блоком). Делать это в Шаге 1
-  // рискованно. Следующий шаг:
-  //   1) вынести из parseUpdVision минимальный extract(pages: Buffer[]) helper
-  //      БЕЗ изменения текущего одиночного flow;
-  //   2) для каждого segment взять prefilter.pages по его номерам страниц,
-  //      вызвать extract → ParsedUpdSubdocument;
-  //   3) aggregateUpdDocuments(subdocs) → одна агрегированная строка
-  //      (docNumber «487, 488, 489, 490», merged items, subdocs-meta).
-  console.log(
-    '\n[TODO] extract-per-segment + aggregateUpdDocuments — следующий шаг ' +
-      '(нужен безопасный helper extract(pages[]) из parseUpdVision, без правки одиночного flow).',
-  );
+  // ── extract per segment + aggregate (Шаг 2) ──
+  // extractUpdFromPages — OpenRouter image-путь. Для google_ai_studio
+  // (отдельный API-формат) пропускаем: helper рассчитан на OpenRouter,
+  // как и сами PNG-страницы из prefilter.
+  if (provider.kind !== 'openrouter') {
+    console.log(
+      `\n[skip extract] default провайдер = ${provider.kind}; extract-per-segment ` +
+        'реализован для OpenRouter image-пути. Сегменты выше уже показаны.',
+    );
+    console.log('\n=== готово ===\n');
+    return;
+  }
+
+  // Карта «номер страницы → PNG» (prefilter.pages параллелен selectedPages).
+  const pngByPage = new Map<number, Buffer>();
+  prefilter.selectedPages.forEach((p, i) => {
+    const png = prefilter.pages[i];
+    if (png) pngByPage.set(p, png);
+  });
+
+  // Тот же промпт, что в production vision-flow: active 'upd' + хвост про
+  // один JSON-объект (зеркало parseUpdVision; дублируется здесь, т.к. debug).
+  const promptMeta = await loadActivePromptWithMeta('upd');
+  const promptText =
+    promptMeta.content +
+    '\n\n# КРИТИЧНО: формат ответа\n' +
+    'Верни ровно ОДИН JSON-объект на верхнем уровне ({"docNumber":..., "items":[...]}).\n' +
+    'НЕ оборачивай его в массив. Ответ должен начинаться с символа `{`, а НЕ с `[`.';
+
+  console.log('\n── extract per segment ──');
+  const subdocs: ParsedUpdSubdocument[] = [];
+  for (const seg of segments) {
+    const segPages = seg.pages
+      .map((p) => pngByPage.get(p))
+      .filter((b): b is Buffer => b != null);
+    if (segPages.length === 0) {
+      console.log(`  #${seg.segmentIndex}: нет PNG для страниц [${seg.pages.join(', ')}] — пропуск`);
+      continue;
+    }
+    try {
+      const parsed = await extractUpdFromPages(segPages, {
+        apiBaseUrl: cred.apiBaseUrl,
+        apiKey,
+        model: provider.model,
+        temperature: Number(provider.temperature ?? 0.2),
+        maxTokens: provider.maxTokens ?? 8192,
+        promptText,
+      });
+      subdocs.push({ ...parsed, pages: seg.pages, segmentIndex: seg.segmentIndex });
+      console.log(
+        `  #${seg.segmentIndex} [стр. ${seg.pages.join(', ')}]: № ${parsed.docNumber ?? '—'} · ` +
+          `дата ${parsed.docDate ?? '—'} · сумма ${parsed.totalSum ?? '—'} · НДС ${parsed.vatSum ?? '—'} · ` +
+          `позиций ${parsed.items.length} · conf ${parsed.confidence}`,
+      );
+    } catch (err) {
+      console.log(`  #${seg.segmentIndex} [стр. ${seg.pages.join(', ')}]: extract упал — ${(err as Error).message}`);
+    }
+  }
+
+  // ── aggregate ──
+  if (subdocs.length === 0) {
+    console.log('\n[нет распознанных субдокументов — агрегировать нечего]');
+    console.log('\n=== готово ===\n');
+    return;
+  }
+  const agg = aggregateUpdDocuments(subdocs);
+  console.log('\n── aggregate (одна будущая строка в «Документы») ──');
+  console.log(`  docNumber : ${agg.docNumber}`);
+  console.log(`  docDate   : ${agg.docDate}`);
+  console.log(`  totalSum  : ${agg.totalSum}`);
+  console.log(`  vatSum    : ${agg.vatSum}`);
+  console.log(`  itemsCount: ${agg.itemsCount}`);
+  if (agg.reasons.length) console.log(`  reasons   : ${agg.reasons.join('; ')}`);
+  console.log('  subdocs   :');
+  for (const s of agg.subdocs) {
+    console.log(
+      `    № ${s.docNumber ?? '—'} · стр.[${s.pages.join(',')}] · сумма ${s.totalSum ?? '—'} · ` +
+        `НДС ${s.vatSum ?? '—'} · позиции lineNos [${s.itemLineNos.join(',')}]`,
+    );
+  }
 
   console.log('\n=== готово ===\n');
 }

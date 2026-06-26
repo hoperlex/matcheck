@@ -634,7 +634,10 @@ type GeminiCallArgs = {
   file: { buffer: Buffer; mimeType: string };
 };
 
-type OpenRouterCallArgs = {
+// Экспортируется для multi-UPD bundle (Шаг 2): отдельный extract-helper
+// (upd-vision-extract.ts) переиспользует тот же OpenRouter-вызов. Сама
+// parseUpdVision и её поведение не меняются — добавлен только `export`.
+export type OpenRouterCallArgs = {
   apiBaseUrl: string;
   apiKey: string;
   model: string;
@@ -644,7 +647,7 @@ type OpenRouterCallArgs = {
   files: { buffer: Buffer; mimeType: string }[];
 };
 
-type VisionCallResult = {
+export type VisionCallResult = {
   raw: string;
   promptTokens: number | null;
   completionTokens: number | null;
@@ -699,7 +702,7 @@ async function callGemini(args: GeminiCallArgs): Promise<VisionCallResult> {
   };
 }
 
-async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCallResult> {
+export async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCallResult> {
   const content: Array<
     { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
   > = [];
@@ -753,7 +756,7 @@ async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCallResul
   };
 }
 
-function stripJsonFences(s: string): string {
+export function stripJsonFences(s: string): string {
   const trimmed = s.trim();
   if (!trimmed.startsWith('```')) return trimmed;
   const noLead = trimmed.replace(/^```(?:json)?\s*/i, '');
