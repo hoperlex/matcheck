@@ -1167,11 +1167,14 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
     }
 
     const cls = await classifyFile(buffer, a.mimeType ?? '', a.filename);
-    // Создаём документ ТОЛЬКО при детерминированно-уверенной классификации
-    // (structural/явный текст, confidence ≥ 0.85, без потребности в vision).
+    // Детерминированная классификация (needsVision=false — по тексту/расширению,
+    // напр. «Транспортная накладная (форма)»+«Грузоотправитель» или
+    // «Счёт-фактура»+ИНН) — надёжная, создаём документ. Порог confidence
+    // применяется ТОЛЬКО к vision-классификации (Этап 4: ≥0.85), где число
+    // отражает уверенность модели. m15/unknown → needs_review (нет надёжного
+    // парсера / тип не определён).
     const canAutoCreate =
       !cls.needsVision &&
-      cls.confidence >= 0.85 &&
       (cls.detectedKind === 'upd' ||
         cls.detectedKind === 'transport_waybill' ||
         cls.detectedKind === 'os2_transfer');
