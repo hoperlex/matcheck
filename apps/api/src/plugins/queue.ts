@@ -2,14 +2,18 @@ import fp from 'fastify-plugin';
 import { Queue, type ConnectionOptions } from 'bullmq';
 import { loadEnv } from '../lib/env.js';
 
-// Очередь UPD_PARSE_QUEUE используется одной из двух job-форм:
+// Очередь UPD_PARSE_QUEUE используется одной из трёх job-форм:
 //  - sourceDocumentId+s3Key — старый flow УПД (1 файл = 1 source_document).
-//  - bundleId — новый flow накладных: один пакет фото может породить N
+//  - bundleId — flow накладных: один пакет фото может породить N
 //    source_documents (см. source_bundles, waybill-batch.parser.ts,
 //    handleWaybillBundleJob в worker.ts).
+//  - bundleId+mode:'router' — единый вход /upload-documents: классифицируем
+//    каждый файл и роутим в существующие парсеры (handleDocumentRouterJob).
+//    Дискриминатор — поле mode; у старых job его НЕТ, их ветки не меняются.
 export type UpdParseJobData =
-  | { sourceDocumentId: string; s3Key: string; bundleId?: undefined }
-  | { bundleId: string; sourceDocumentId?: undefined; s3Key?: undefined };
+  | { sourceDocumentId: string; s3Key: string; bundleId?: undefined; mode?: undefined }
+  | { bundleId: string; mode?: undefined; sourceDocumentId?: undefined; s3Key?: undefined }
+  | { bundleId: string; mode: 'router'; sourceDocumentId?: undefined; s3Key?: undefined };
 
 export type S3CleanupJobData = {
   s3Keys: string[];

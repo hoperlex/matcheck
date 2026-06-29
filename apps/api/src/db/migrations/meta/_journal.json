@@ -470,6 +470,13 @@
       "when": 1781000000000,
       "tag": "0066_upd_prompt_v8",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1781100000000,
+      "tag": "0067_bundle_import_items",
+      "breakpoints": true
     }
   ]
 }

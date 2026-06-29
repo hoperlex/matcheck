@@ -633,6 +633,11 @@ export const sourceBundles = pgTable(
     parseErrorCode: text('parse_error_code'),
     parseErrorMessage: text('parse_error_message'),
     docCount: integer('doc_count').notNull().default(0),
+    // Тип пакета: 'upd' | 'waybill' | 'mixed'. Для нового единого входа
+    // (/upload-documents) ставится 'mixed'; старые waybill-bundle создавались
+    // до router'а и имеют NULL. Основной дискриминатор маршрута в worker — это
+    // job.data.mode, kind здесь резервный признак для отчётности/диагностики.
+    kind: text('kind'),
     createdByUserId: uuid('created_by_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),
@@ -641,6 +646,35 @@ export const sourceBundles = pgTable(
   },
   (t) => [uniqueIndex('source_bundles_bundle_hash_unique').on(t.bundleHash)],
 );
+
+// Журнал решений единого входа (/upload-documents): одна строка на КАЖДЫЙ
+// загруженный файл пачки — что классификатор определил, каким парсером
+// обработали, что создали. Аудит + источник для страницы результата импорта.
+// Принцип «не пишем наугад»: неуверенные/неопределённые файлы остаются здесь
+// со status='needs_review' и НЕ создают source_documents (операционные данные
+// не портятся). Уверенно распознанные → status='created' + ссылки в
+// createdDocumentIds.
+export const bundleImportItems = pgTable('bundle_import_items', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  bundleId: uuid('bundle_id')
+    .notNull()
+    .references(() => sourceBundles.id, { onDelete: 'cascade' }),
+  sourceFilename: text('source_filename').notNull(),
+  // upd | transport_waybill | os2_transfer | m15 | unknown
+  detectedKind: text('detected_kind'),
+  confidence: numeric('confidence', { precision: 4, scale: 3 }),
+  // parseUpdXlsx | parseUpdPdf | tryParseTextUpdBundle | parseWaybillBatch | none
+  parserUsed: text('parser_used'),
+  // created | needs_review | skipped | failed
+  status: text('status').notNull().default('needs_review'),
+  reason: text('reason'),
+  // ID созданных source_documents (обычно 0 или 1; multi-UPD → один агрегат)
+  createdDocumentIds: jsonb('created_document_ids').$type<string[]>().notNull().default([]),
+  // subdocs, page-ranges, classifier signals, raw counts, provider info
+  metadata: jsonb('metadata'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const sourceDocumentItems = pgTable('source_document_items', {
   id: uuid('id').primaryKey().defaultRandom(),

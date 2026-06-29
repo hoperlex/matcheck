@@ -75,7 +75,9 @@ import {
   mergeExcelStructuralWithVision,
 } from './domain/edo/excel-vision-fallback.js';
 import { publishSseEvent } from './domain/sse/redis-bridge.js';
-import { sourceDocumentAttachments } from './db/schema.js';
+import { sourceDocumentAttachments, bundleImportItems } from './db/schema.js';
+import { createHash } from 'node:crypto';
+import { classifyFile } from './domain/edo/document-router.js';
 import type { UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
 
 // Хелпер: уведомляем подключённых SSE-клиентов о смене статуса УПД через
@@ -148,8 +150,17 @@ async function findOrCreateCounterparty(
 }
 
 async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
-  // Очередь UPD_PARSE_QUEUE обслуживает два вида job: УПД (sourceDocumentId+s3Key)
-  // и накладные batch (bundleId). См. UpdParseJobData в plugins/queue.ts.
+  // Очередь UPD_PARSE_QUEUE обслуживает три вида job: УПД (sourceDocumentId+s3Key),
+  // накладные batch (bundleId) и единый вход (bundleId+mode:'router').
+  // См. UpdParseJobData в plugins/queue.ts.
+  //
+  // Ветка router — ПЕРВАЯ: дискриминатор по полю mode, у старых job его нет,
+  // поэтому существующие ветки (waybill / одиночный УПД) не затрагиваются.
+  if ('mode' in job.data && job.data.mode === 'router' && job.data.bundleId) {
+    const log = logger.child({ bundleId: job.data.bundleId, jobId: job.id, mode: 'router' });
+    await handleDocumentRouterJob(job.data.bundleId, log);
+    return;
+  }
   if ('bundleId' in job.data && job.data.bundleId) {
     const log = logger.child({ bundleId: job.data.bundleId, jobId: job.id });
     await handleWaybillBundleJob(job.data.bundleId, log);
@@ -1069,6 +1080,243 @@ async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise
   for (const c of created) {
     await notifySourceDocumentUpdated(c.id);
   }
+}
+
+// Единый вход «Загрузить документы» (router). Классифицирует КАЖДЫЙ файл пачки
+// и разворачивает его в СУЩЕСТВУЮЩИЙ проверенный flow:
+//   - УПД → одиночная очередь {sourceDocumentId, s3Key} (как «Загрузить УПД»);
+//   - накладная (ТН/ОС-2) → отдельный waybill-bundle {bundleId} (как
+//     «Загрузить накладные»).
+// Router сам документы НЕ парсит и НЕ создаёт «с нуля» — переиспользует рабочий
+// код, поэтому данные не портятся. Каждое решение пишется в bundle_import_items
+// (журнал). Неуверенные / vision-требующие / m15 / unknown → status='needs_review'
+// БЕЗ создания операционных документов (Этап 4 добавит vision-доклассификацию).
+async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promise<void> {
+  const [bundle] = await db
+    .update(sourceBundles)
+    .set({ status: 'processing', updatedAt: new Date() })
+    .where(eq(sourceBundles.id, bundleId))
+    .returning();
+  if (!bundle) {
+    log.warn('router bundle is gone — skipping');
+    return;
+  }
+
+  const [tech] = await db
+    .select({ id: sourceDocuments.id })
+    .from(sourceDocuments)
+    .where(eq(sourceDocuments.bundleId, bundleId))
+    .limit(1);
+  if (!tech) {
+    await db
+      .update(sourceBundles)
+      .set({
+        status: 'parse_failed',
+        parseErrorCode: 'parse_failed',
+        parseErrorMessage: 'нет технической записи source_document для пакета',
+        updatedAt: new Date(),
+      })
+      .where(eq(sourceBundles.id, bundleId));
+    log.warn('router bundle has no technical source_document — parse_failed');
+    return;
+  }
+  const techId = tech.id;
+
+  const attachments = await db
+    .select()
+    .from(sourceDocumentAttachments)
+    .where(eq(sourceDocumentAttachments.sourceDocumentId, techId));
+  if (attachments.length === 0) {
+    await db
+      .update(sourceBundles)
+      .set({
+        status: 'parse_failed',
+        parseErrorCode: 'parse_failed',
+        parseErrorMessage: 'нет приложенных файлов',
+        updatedAt: new Date(),
+      })
+      .where(eq(sourceBundles.id, bundleId));
+    log.warn('router bundle: нет attachments — parse_failed');
+    return;
+  }
+
+  const bundleExpected =
+    bundle.expectedDate instanceof Date
+      ? bundle.expectedDate
+      : bundle.expectedDate
+        ? new Date(bundle.expectedDate)
+        : null;
+
+  let createdCount = 0;
+  let reviewCount = 0;
+
+  for (const a of attachments) {
+    let buffer: Buffer;
+    try {
+      buffer = await getObject(a.s3Key);
+    } catch (err) {
+      log.warn({ err, s3Key: a.s3Key }, 'router: getObject failed');
+      await db.insert(bundleImportItems).values({
+        bundleId,
+        sourceFilename: a.filename,
+        parserUsed: 'none',
+        status: 'failed',
+        reason: 'не удалось скачать файл из S3',
+      });
+      continue;
+    }
+
+    const cls = await classifyFile(buffer, a.mimeType ?? '', a.filename);
+    // Создаём документ ТОЛЬКО при детерминированно-уверенной классификации
+    // (structural/явный текст, confidence ≥ 0.85, без потребности в vision).
+    const canAutoCreate =
+      !cls.needsVision &&
+      cls.confidence >= 0.85 &&
+      (cls.detectedKind === 'upd' ||
+        cls.detectedKind === 'transport_waybill' ||
+        cls.detectedKind === 'os2_transfer');
+
+    if (canAutoCreate && cls.detectedKind === 'upd') {
+      // Разворачиваем в одиночный УПД-flow (тот же путь, что «Загрузить УПД»).
+      const [doc] = await db
+        .insert(sourceDocuments)
+        .values({
+          kind: 'upd',
+          direction: bundle.direction,
+          origin: 'manual_pdf',
+          status: 'queued',
+          contractorId: bundle.contractorId,
+          recipientMolId: bundle.recipientMolId,
+          siteId: bundle.siteId,
+          expectedDate: bundleExpected,
+          originalFilename: a.filename,
+          queuedAt: new Date(),
+          parsedAt: new Date(),
+          createdByUserId: bundle.createdByUserId,
+        })
+        .returning({ id: sourceDocuments.id });
+      const docId = doc!.id;
+      await db.insert(sourceDocumentAttachments).values({
+        sourceDocumentId: docId,
+        s3Key: a.s3Key,
+        filename: a.filename,
+        mimeType: a.mimeType,
+        sizeBytes: a.sizeBytes,
+        role: 'original',
+      });
+      const job = await queue.add('parse', { sourceDocumentId: docId, s3Key: a.s3Key });
+      if (job.id) {
+        await db
+          .update(sourceDocuments)
+          .set({ jobId: job.id })
+          .where(eq(sourceDocuments.id, docId));
+      }
+      await db.insert(bundleImportItems).values({
+        bundleId,
+        sourceFilename: a.filename,
+        detectedKind: 'upd',
+        confidence: cls.confidence.toString(),
+        parserUsed: cls.parserUsed,
+        status: 'created',
+        createdDocumentIds: [docId],
+        reason:
+          cls.updInvoiceCount && cls.updInvoiceCount >= 2
+            ? `УПД-пачка (${cls.updInvoiceCount} счёт-фактур) → агрегат`
+            : 'УПД → одиночный парсер',
+        metadata: { signals: cls.signals, updInvoiceCount: cls.updInvoiceCount ?? null },
+      });
+      createdCount++;
+    } else if (
+      canAutoCreate &&
+      (cls.detectedKind === 'transport_waybill' || cls.detectedKind === 'os2_transfer')
+    ) {
+      // Разворачиваем в waybill-flow: отдельный под-bundle на этот файл
+      // (тот же путь, что «Загрузить накладные»).
+      const subHash = createHash('sha256').update(`router:${bundleId}:${a.s3Key}`).digest('hex');
+      const [subBundle] = await db
+        .insert(sourceBundles)
+        .values({
+          bundleHash: subHash,
+          kind: 'waybill',
+          direction: bundle.direction,
+          siteId: bundle.siteId,
+          contractorId: bundle.contractorId,
+          recipientMolId: bundle.recipientMolId,
+          expectedDate: bundle.expectedDate,
+          status: 'queued',
+          createdByUserId: bundle.createdByUserId,
+        })
+        .returning({ id: sourceBundles.id });
+      const subId = subBundle!.id;
+      const [subTech] = await db
+        .insert(sourceDocuments)
+        .values({
+          kind: 'transport_waybill',
+          direction: bundle.direction,
+          origin: 'manual_pdf',
+          status: 'queued',
+          contractorId: bundle.contractorId,
+          recipientMolId: bundle.recipientMolId,
+          siteId: bundle.siteId,
+          expectedDate: bundleExpected,
+          originalFilename: a.filename,
+          queuedAt: new Date(),
+          bundleId: subId,
+          createdByUserId: bundle.createdByUserId,
+        })
+        .returning({ id: sourceDocuments.id });
+      await db.insert(sourceDocumentAttachments).values({
+        sourceDocumentId: subTech!.id,
+        s3Key: a.s3Key,
+        filename: a.filename,
+        mimeType: a.mimeType,
+        sizeBytes: a.sizeBytes,
+        role: 'original',
+      });
+      await queue.add('parse', { bundleId: subId });
+      await db.insert(bundleImportItems).values({
+        bundleId,
+        sourceFilename: a.filename,
+        detectedKind: cls.detectedKind,
+        confidence: cls.confidence.toString(),
+        parserUsed: 'parseWaybillBatch',
+        status: 'created',
+        createdDocumentIds: [],
+        reason: 'накладная → waybill-парсер',
+        metadata: { signals: cls.signals, subBundleId: subId },
+      });
+      createdCount++;
+    } else {
+      // Неуверенно / vision-требуется / m15 / unknown → журнал needs_review,
+      // операционные данные НЕ трогаем.
+      const reason =
+        cls.detectedKind === 'm15'
+          ? 'М-15 — нет надёжного парсера, нужна ручная проверка'
+          : cls.needsVision
+            ? 'требуется vision-доклассификация (скан/фото/неясный текст)'
+            : 'тип не определён уверенно';
+      await db.insert(bundleImportItems).values({
+        bundleId,
+        sourceFilename: a.filename,
+        detectedKind: cls.detectedKind,
+        confidence: cls.confidence.toString(),
+        parserUsed: 'none',
+        status: 'needs_review',
+        reason,
+        metadata: { signals: cls.signals, needsVision: cls.needsVision },
+      });
+      reviewCount++;
+    }
+  }
+
+  // Техническая запись router-bundle больше не нужна — её attachments
+  // переиспользованы по s3Key в развёрнутых документах (паттерн как у waybill).
+  await db.delete(sourceDocuments).where(eq(sourceDocuments.id, techId));
+  await db
+    .update(sourceBundles)
+    .set({ status: 'parsed', kind: 'mixed', docCount: createdCount, updatedAt: new Date() })
+    .where(eq(sourceBundles.id, bundleId));
+  log.info({ created: createdCount, needsReview: reviewCount }, 'router bundle classified');
 }
 
 // «Пустой» UpdPdfParsed для Excel-кейса, когда структурный парсер

@@ -496,6 +496,62 @@ export const UpdPdfQueueResponseSchema = z.object({
 });
 export type UpdPdfQueueResponse = z.infer<typeof UpdPdfQueueResponseSchema>;
 
+// ──────────── Единый вход «Загрузить документы» (router) ────────────
+// Экспериментальный общий вход: одна кнопка принимает любые поддерживаемые
+// файлы (PDF/Excel/изображения), система сама классифицирует и роутит в
+// существующие парсеры, записывая решение по каждому файлу (журнал
+// bundle_import_items). Старые точечные эндпоинты остаются.
+
+// Запрос — те же поля метаданных, что у УПД/накладных (multipart).
+export const UploadDocumentsRequestSchema = UpdPdfQueueRequestSchema;
+export type UploadDocumentsRequest = z.infer<typeof UploadDocumentsRequestSchema>;
+
+export const UploadDocumentsResponseSchema = z.object({
+  bundleId: z.string().uuid(),
+  // queued | processing | parsed | parse_failed
+  status: z.string(),
+  // true — этот же набор файлов уже загружали (вернули существующий bundle).
+  alreadyExists: z.boolean(),
+});
+export type UploadDocumentsResponse = z.infer<typeof UploadDocumentsResponseSchema>;
+
+// Тип, который классификатор присвоил файлу.
+export const DocClassSchema = z.enum([
+  'upd',
+  'transport_waybill',
+  'os2_transfer',
+  'm15',
+  'unknown',
+]);
+export type DocClass = z.infer<typeof DocClassSchema>;
+
+// Одна строка журнала решений (bundle_import_items): что сделали с файлом.
+export const ImportItemSchema = z.object({
+  id: z.string().uuid(),
+  sourceFilename: z.string(),
+  detectedKind: z.string().nullable(),
+  confidence: z.number().nullable(),
+  parserUsed: z.string().nullable(),
+  // created | needs_review | skipped | failed
+  status: z.string(),
+  reason: z.string().nullable(),
+  createdDocumentIds: z.array(z.string()),
+});
+export type ImportItem = z.infer<typeof ImportItemSchema>;
+
+// Результат импорта пачки: сводка + список файлов с решениями.
+export const ImportResultSchema = z.object({
+  bundleId: z.string().uuid(),
+  status: z.string(),
+  summary: z.object({
+    created: z.number(),
+    needsReview: z.number(),
+    failed: z.number(),
+  }),
+  items: z.array(ImportItemSchema),
+});
+export type ImportResult = z.infer<typeof ImportResultSchema>;
+
 // ──────────── Bulk-удаление source_documents ────────────
 // Тело — массив id. Ответ — те, кого удалили, и те, кого пропустили
 // (с указанием причины). Best-effort: каждая запись — независимая
