@@ -228,6 +228,26 @@ export async function parseUpdPdf(
     throw new PdfTextGarbageError(cleanText.length, garbageReason);
   }
 
+  const { parsed, llmProviderId } = await extractUpdFromText(cleanText, ctx);
+  return {
+    parsed,
+    textLength: cleanText.length,
+    llmProviderId,
+  };
+}
+
+/**
+ * Извлечение УПД из готового текстового слоя через text-LLM. Вынесено из
+ * parseUpdPdf, чтобы переиспользовать в text multi-UPD bundle
+ * (upd-text-bundle.parser.ts): там каждый сегмент-блок одного УПД проходит
+ * ровно этот же вызов. parseUpdPdf остаётся владельцем pdf-parse и проверок
+ * качества текста (PdfNoTextError / PdfTextGarbageError) и делегирует сюда
+ * только финальный LLM-вызов — поведение одиночного пути не меняется.
+ */
+export async function extractUpdFromText(
+  cleanText: string,
+  ctx: { sourceDocumentId: string | null } = { sourceDocumentId: null },
+): Promise<{ parsed: UpdPdfParsed; llmProviderId: string | null }> {
   const [provider, prompt] = await Promise.all([
     loadDefaultProvider(),
     loadActivePromptWithMeta('upd'),
@@ -248,10 +268,8 @@ export async function parseUpdPdf(
       promptId: prompt.id,
     },
   );
-
   return {
     parsed: result.data as UpdPdfParsed,
-    textLength: cleanText.length,
     llmProviderId: provider.id,
   };
 }

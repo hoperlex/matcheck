@@ -43,6 +43,7 @@ import {
   VisionTimeoutError,
 } from './domain/edo/upd-vision.parser.js';
 import { tryParseUpdBundle } from './domain/edo/upd-bundle.parser.js';
+import { tryParseTextUpdBundle } from './domain/edo/upd-text-bundle.parser.js';
 import { parseUpdXlsx } from './domain/edo/upd-xlsx.parser.js';
 import { convertXlsToXlsxBuffer, XlsConvertError } from './domain/edo/xls-to-xlsx.js';
 import {
@@ -65,6 +66,8 @@ import {
   parseWaybillBatch,
   type WaybillInputImage,
 } from './domain/edo/waybill-batch.parser.js';
+import { expandPdfAttachmentsForOpenRouter } from './domain/edo/waybill-pdf.js';
+import { getDefaultProviderKind } from './domain/llm/registry.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
 import { validateUpdTotals } from './domain/edo/upd-validation.js';
 import {
@@ -328,153 +331,185 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       llmProviderId = r.llmProviderId;
       parsedViaVision = true;
     } else {
-      // PDF — сначала быстрый text-pipeline.
+      // PDF — сначала пробуем ТЕКСТОВЫЙ multi-UPD bundle: несколько счёт-фактур
+      // с текстовым слоем в одном файле (ЭДО-пачка) → агрегат «N1, N2, …»,
+      // объединённые позиции. При null (один уникальный УПД, нет текста, не
+      // пакет) идём обычным одиночным text-pipeline ниже БЕЗ изменений.
+      let textBundle: Awaited<ReturnType<typeof tryParseTextUpdBundle>> = null;
       try {
-        const r = await parseUpdPdf(buffer, { sourceDocumentId });
-        parsed = r.parsed;
-        llmProviderId = r.llmProviderId;
-        // Расширенный Vision-fallback: text-LLM формально не упал, но
-        // вернул полностью пустой результат — нет ни одной позиции, ни
-        // номера, ни даты. Это типично для сканов: pdf-parse возвращает
-        // 200+ символов OCR-артефактов (порог MIN_TEXT_LENGTH=200 пройден,
-        // PdfNoTextError не кидается), LLM получает мусор и не может
-        // ничего извлечь. До этого фикса такие документы зависали в
-        // partial_parse — теперь повторно пробуем через Vision на
-        // оригинальном PDF (Gemini читает картинку напрямую).
-        // Дополнительный $0.0005 на этот случай оправдан — иначе тупик.
-        const textLlmEmpty =
-          parsed.items.length === 0 &&
-          parsed.docNumber == null &&
-          parsed.docDate == null &&
-          parsed.totalSum == null;
-        if (textLlmEmpty) {
-          log.warn(
-            { confidence: parsed.confidence },
-            'text-LLM returned empty result — retry via vision',
-          );
-          try {
-            const vr = await parseUpdVision(
-              { buffer, mimeType: 'application/pdf', filename: s3Key },
-              { sourceDocumentId },
-            );
-            parsed = vr.parsed;
-            llmProviderId = vr.llmProviderId;
-            parsedViaVision = true;
-          } catch (visionErr) {
-            // VisionTimeoutError / VisionBudgetExceededError — fail-fast:
-            // пробрасываем во внешний catch, который пометит parse_failed
-            // без BullMQ retry. Оба класса означают, что повтор бесполезен.
-            if (
-              visionErr instanceof VisionTimeoutError ||
-              visionErr instanceof VisionBudgetExceededError
-            ) {
-              throw visionErr;
-            }
-            // Прочие ошибки (провайдер не поддерживает PDF / сетевые
-            // глюки) — некритично: оставляем text-LLM результат
-            // (пустые поля), документ попадёт в partial_parse.
-            log.warn(
-              { visionErr },
-              'text-LLM empty + vision retry failed — keep partial_parse',
-            );
-          }
+        textBundle = await tryParseTextUpdBundle(buffer, { sourceDocumentId });
+      } catch (bundleErr) {
+        if (
+          bundleErr instanceof VisionTimeoutError ||
+          bundleErr instanceof VisionBudgetExceededError
+        ) {
+          throw bundleErr;
         }
-      } catch (err) {
-        // PdfNoTextError — <200 символов в тексте (чистый скан).
-        // PdfTextGarbageError — есть текст 200+, но не похож на УПД
-        //   (OCR-артефакты, нет ключевых слов «счёт-фактура»/«ИНН»/...).
-        // Обе ошибки обрабатываем одинаково: fallback на Vision LLM
-        // по оригинальному PDF (или PNG-страницы, если провайдер
-        // openrouter — см. upd-vision.parser.ts).
-        if (err instanceof PdfNoTextError || err instanceof PdfTextGarbageError) {
-          const isGarbage = err instanceof PdfTextGarbageError;
-          log.warn(
-            isGarbage
-              ? { textLength: err.textLength, reason: err.reason }
-              : { textLength: err.textLength },
-            isGarbage
-              ? 'pdf text looks like OCR garbage — falling back to vision LLM'
-              : 'pdf has no text — falling back to vision LLM',
-          );
-          try {
-            // Шаг 3 multi-UPD: сначала пробуем как пакет из НЕСКОЛЬКИХ УПД
-            // (один скан = несколько документов одной поставки). Если это не
-            // bundle (один УПД / не OpenRouter / prefilter не сработал) —
-            // tryParseUpdBundle вернёт null, и идём обычным одиночным vision.
-            // Bundle-результат — агрегат: docNumber «487, 488, 489, 490»,
-            // объединённые позиции; сохраняется существующей секцией ниже.
-            let bundle: Awaited<ReturnType<typeof tryParseUpdBundle>> = null;
+        log.warn(
+          { bundleErr: bundleErr instanceof Error ? bundleErr.message : String(bundleErr) },
+          'text multi-UPD bundle attempt failed — falling back to single text parse',
+        );
+      }
+      if (textBundle) {
+        parsed = textBundle.parsed;
+        llmProviderId = textBundle.llmProviderId;
+        log.info(
+          {
+            segments: textBundle.segments,
+            extracted: textBundle.extracted,
+            reasons: textBundle.reasons,
+          },
+          'text multi-UPD bundle recognized — aggregated into one document',
+        );
+      } else {
+        // PDF — быстрый одиночный text-pipeline.
+        try {
+          const r = await parseUpdPdf(buffer, { sourceDocumentId });
+          parsed = r.parsed;
+          llmProviderId = r.llmProviderId;
+          // Расширенный Vision-fallback: text-LLM формально не упал, но
+          // вернул полностью пустой результат — нет ни одной позиции, ни
+          // номера, ни даты. Это типично для сканов: pdf-parse возвращает
+          // 200+ символов OCR-артефактов (порог MIN_TEXT_LENGTH=200 пройден,
+          // PdfNoTextError не кидается), LLM получает мусор и не может
+          // ничего извлечь. До этого фикса такие документы зависали в
+          // partial_parse — теперь повторно пробуем через Vision на
+          // оригинальном PDF (Gemini читает картинку напрямую).
+          // Дополнительный $0.0005 на этот случай оправдан — иначе тупик.
+          const textLlmEmpty =
+            parsed.items.length === 0 &&
+            parsed.docNumber == null &&
+            parsed.docDate == null &&
+            parsed.totalSum == null;
+          if (textLlmEmpty) {
+            log.warn(
+              { confidence: parsed.confidence },
+              'text-LLM returned empty result — retry via vision',
+            );
             try {
-              bundle = await tryParseUpdBundle(buffer, { sourceDocumentId });
-            } catch (bundleErr) {
-              if (
-                bundleErr instanceof VisionTimeoutError ||
-                bundleErr instanceof VisionBudgetExceededError
-              ) {
-                throw bundleErr;
-              }
-              log.warn(
-                {
-                  bundleErr:
-                    bundleErr instanceof Error ? bundleErr.message : String(bundleErr),
-                },
-                'multi-UPD bundle attempt failed — falling back to single vision',
-              );
-              bundle = null;
-            }
-            if (bundle) {
-              parsed = bundle.parsed;
-              llmProviderId = bundle.llmProviderId;
-              parsedViaVision = true;
-              log.info(
-                { segments: bundle.segments, extracted: bundle.extracted, reasons: bundle.reasons },
-                'multi-UPD bundle recognized — aggregated into one document',
-              );
-            } else {
-              const r = await parseUpdVision(
+              const vr = await parseUpdVision(
                 { buffer, mimeType: 'application/pdf', filename: s3Key },
                 { sourceDocumentId },
               );
-              parsed = r.parsed;
-              llmProviderId = r.llmProviderId;
+              parsed = vr.parsed;
+              llmProviderId = vr.llmProviderId;
               parsedViaVision = true;
+            } catch (visionErr) {
+              // VisionTimeoutError / VisionBudgetExceededError — fail-fast:
+              // пробрасываем во внешний catch, который пометит parse_failed
+              // без BullMQ retry. Оба класса означают, что повтор бесполезен.
+              if (
+                visionErr instanceof VisionTimeoutError ||
+                visionErr instanceof VisionBudgetExceededError
+              ) {
+                throw visionErr;
+              }
+              // Прочие ошибки (провайдер не поддерживает PDF / сетевые
+              // глюки) — некритично: оставляем text-LLM результат
+              // (пустые поля), документ попадёт в partial_parse.
+              log.warn(
+                { visionErr },
+                'text-LLM empty + vision retry failed — keep partial_parse',
+              );
             }
-          } catch (visionErr) {
-            // VisionTimeoutError / VisionBudgetExceededError — fail-fast:
-            // пробрасываем во внешний catch (parse_failed без BullMQ retry,
-            // понятная причина reason='vision_timeout' или 'vision_budget').
-            if (
-              visionErr instanceof VisionTimeoutError ||
-              visionErr instanceof VisionBudgetExceededError
-            ) {
-              throw visionErr;
-            }
-            // Vision тоже не справился (провайдер не поддерживает PDF —
-            // например, OpenRouter, или сетевая ошибка). Помечаем
-            // parse_failed без retry — на тот же файл retry бесполезен.
-            await db
-              .update(sourceDocuments)
-              .set({
-                status: 'parse_failed',
-                parseErrorCode: 'pdf_no_text',
-                parseErrorDetails: {
-                  textLength: err.textLength,
-                  visionError:
-                    visionErr instanceof Error ? visionErr.message : String(visionErr),
-                },
-                processedAt: new Date(),
-                updatedAt: new Date(),
-              })
-              .where(eq(sourceDocuments.id, sourceDocumentId));
-            log.warn(
-              { visionErr },
-              'pdf-no-text + vision fallback failed — marked parse_failed',
-            );
-            await notifySourceDocumentUpdated(sourceDocumentId);
-            return;
           }
-        } else {
-          throw err;
+        } catch (err) {
+          // PdfNoTextError — <200 символов в тексте (чистый скан).
+          // PdfTextGarbageError — есть текст 200+, но не похож на УПД
+          //   (OCR-артефакты, нет ключевых слов «счёт-фактура»/«ИНН»/...).
+          // Обе ошибки обрабатываем одинаково: fallback на Vision LLM
+          // по оригинальному PDF (или PNG-страницы, если провайдер
+          // openrouter — см. upd-vision.parser.ts).
+          if (err instanceof PdfNoTextError || err instanceof PdfTextGarbageError) {
+            const isGarbage = err instanceof PdfTextGarbageError;
+            log.warn(
+              isGarbage
+                ? { textLength: err.textLength, reason: err.reason }
+                : { textLength: err.textLength },
+              isGarbage
+                ? 'pdf text looks like OCR garbage — falling back to vision LLM'
+                : 'pdf has no text — falling back to vision LLM',
+            );
+            try {
+              // Шаг 3 multi-UPD: сначала пробуем как пакет из НЕСКОЛЬКИХ УПД
+              // (один скан = несколько документов одной поставки). Если это не
+              // bundle (один УПД / не OpenRouter / prefilter не сработал) —
+              // tryParseUpdBundle вернёт null, и идём обычным одиночным vision.
+              // Bundle-результат — агрегат: docNumber «487, 488, 489, 490»,
+              // объединённые позиции; сохраняется существующей секцией ниже.
+              let bundle: Awaited<ReturnType<typeof tryParseUpdBundle>> = null;
+              try {
+                bundle = await tryParseUpdBundle(buffer, { sourceDocumentId });
+              } catch (bundleErr) {
+                if (
+                  bundleErr instanceof VisionTimeoutError ||
+                  bundleErr instanceof VisionBudgetExceededError
+                ) {
+                  throw bundleErr;
+                }
+                log.warn(
+                  {
+                    bundleErr:
+                      bundleErr instanceof Error ? bundleErr.message : String(bundleErr),
+                  },
+                  'multi-UPD bundle attempt failed — falling back to single vision',
+                );
+                bundle = null;
+              }
+              if (bundle) {
+                parsed = bundle.parsed;
+                llmProviderId = bundle.llmProviderId;
+                parsedViaVision = true;
+                log.info(
+                  { segments: bundle.segments, extracted: bundle.extracted, reasons: bundle.reasons },
+                  'multi-UPD bundle recognized — aggregated into one document',
+                );
+              } else {
+                const r = await parseUpdVision(
+                  { buffer, mimeType: 'application/pdf', filename: s3Key },
+                  { sourceDocumentId },
+                );
+                parsed = r.parsed;
+                llmProviderId = r.llmProviderId;
+                parsedViaVision = true;
+              }
+            } catch (visionErr) {
+              // VisionTimeoutError / VisionBudgetExceededError — fail-fast:
+              // пробрасываем во внешний catch (parse_failed без BullMQ retry,
+              // понятная причина reason='vision_timeout' или 'vision_budget').
+              if (
+                visionErr instanceof VisionTimeoutError ||
+                visionErr instanceof VisionBudgetExceededError
+              ) {
+                throw visionErr;
+              }
+              // Vision тоже не справился (провайдер не поддерживает PDF —
+              // например, OpenRouter, или сетевая ошибка). Помечаем
+              // parse_failed без retry — на тот же файл retry бесполезен.
+              await db
+                .update(sourceDocuments)
+                .set({
+                  status: 'parse_failed',
+                  parseErrorCode: 'pdf_no_text',
+                  parseErrorDetails: {
+                    textLength: err.textLength,
+                    visionError:
+                      visionErr instanceof Error ? visionErr.message : String(visionErr),
+                  },
+                  processedAt: new Date(),
+                  updatedAt: new Date(),
+                })
+                .where(eq(sourceDocuments.id, sourceDocumentId));
+              log.warn(
+                { visionErr },
+                'pdf-no-text + vision fallback failed — marked parse_failed',
+              );
+              await notifySourceDocumentUpdated(sourceDocumentId);
+              return;
+            }
+          } else {
+            throw err;
+          }
         }
       }
     }
@@ -942,6 +977,16 @@ async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise
   }
   if (files.length === 0) {
     throw new Error('bundle: не удалось скачать ни одного attachment');
+  }
+
+  // Накладные через OpenRouter: vision принимает только image/* (не PDF) —
+  // конвертируем PDF-вложения в PNG-страницы ПЕРЕД parseWaybillBatch. Gemini
+  // читает PDF нативно, для него не трогаем. Ошибка рендера пробрасывается во
+  // внешний catch → bundle помечается parse_failed без BullMQ-retry.
+  if ((await getDefaultProviderKind()) === 'openrouter') {
+    const expanded = await expandPdfAttachmentsForOpenRouter(files);
+    files.length = 0;
+    files.push(...expanded);
   }
 
   let parsed;

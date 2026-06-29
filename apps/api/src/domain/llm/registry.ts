@@ -12,6 +12,18 @@ export async function loadProviderById(id: string): Promise<LlmProvider> {
   return buildProviderFromRow(row);
 }
 
+// Лёгкая проба: kind default-провайдера без расшифровки ключей и без throw,
+// если ключ не задан. Нужна worker'у, чтобы решить, конвертировать ли PDF
+// накладной в PNG (OpenRouter не принимает PDF — см. waybill-pdf.ts).
+export async function getDefaultProviderKind(): Promise<string | null> {
+  const [row] = await db
+    .select({ kind: llmProviders.kind })
+    .from(llmProviders)
+    .where(eq(llmProviders.isDefault, true))
+    .limit(1);
+  return row?.kind ?? null;
+}
+
 export async function loadDefaultProvider(): Promise<LlmProvider> {
   const [row] = await db
     .select()
