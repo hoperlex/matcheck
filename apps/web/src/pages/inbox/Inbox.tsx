@@ -46,6 +46,7 @@ import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { UpdPdfUploadModal } from './UpdPdfUploadModal';
 import { WaybillUploadModal } from './WaybillUploadModal';
+import { UploadDocumentsModal } from './UploadDocumentsModal';
 import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
 import { UpdResolveDuplicateModal } from './UpdResolveDuplicateModal';
 
@@ -276,6 +277,7 @@ export default function InboxPage() {
 
   const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const [twModalOpen, setTwModalOpen] = useState(false);
+  const [docsModalOpen, setDocsModalOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
 
   // Скачивание xlsx-выгрузки с теми же фильтрами, что и в UI: бэк сам
@@ -574,12 +576,11 @@ export default function InboxPage() {
               searchPlaceholder="Номер документа"
               extra={
                 <Space size={8}>
-                  <Button type="primary" onClick={() => setPdfModalOpen(true)}>
-                    Загрузить УПД
+                  <Button type="primary" onClick={() => setDocsModalOpen(true)}>
+                    Загрузить документы
                   </Button>
-                  <Button type="primary" onClick={() => setTwModalOpen(true)}>
-                    Загрузить накладные
-                  </Button>
+                  <Button onClick={() => setPdfModalOpen(true)}>Загрузить УПД</Button>
+                  <Button onClick={() => setTwModalOpen(true)}>Загрузить накладные</Button>
                   <Button
                     icon={<DownloadOutlined />}
                     onClick={handleExportExcel}
@@ -761,6 +762,11 @@ export default function InboxPage() {
         open={twModalOpen}
         direction={direction}
         onClose={() => setTwModalOpen(false)}
+      />
+      <UploadDocumentsModal
+        open={docsModalOpen}
+        direction={direction}
+        onClose={() => setDocsModalOpen(false)}
       />
       <SourceDocumentDetailModal
         id={selectedId}

@@ -1,3 +1,4 @@
+import type { UploadDocumentsResponse, ImportResult } from '@matcheck/contracts';
 import { useAuthStore } from '../stores/auth';
 
 export class ApiError extends Error {
@@ -234,4 +235,24 @@ export async function apiUploadFiles<T>(
     fd.append(opts.fieldName ?? 'files', f, f.name);
   }
   return request<T>(path, { method: 'POST', body: fd, signal: opts.signal });
+}
+
+// ──────────── Единый вход «Загрузить документы» (router) ────────────
+
+// Загрузка пачки любых документов одним POST → bundleId. Сервер сам
+// классифицирует и роутит каждый файл; результат тянется по bundleId.
+export async function apiUploadDocuments(
+  files: File[],
+  fields: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<UploadDocumentsResponse> {
+  return apiUploadFiles<UploadDocumentsResponse>('/source-documents/upload-documents', files, {
+    fields,
+    signal,
+  });
+}
+
+// Журнал решений по пачке (что классификатор определил, что создано).
+export async function apiGetImportResult(bundleId: string): Promise<ImportResult> {
+  return api.get<ImportResult>(`/source-documents/import-result/${bundleId}`);
 }
