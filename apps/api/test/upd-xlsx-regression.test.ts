@@ -235,6 +235,31 @@ describe('parseUpdXlsx — регрессия рабочих xlsx-шаблоно
     expect(r.vatSum).toBe(558406.57);
   });
 
+  it('упд 1877.xls через SheetJS-fallback (прод-путь: ExcelJS streaming падает с .sheets)', async () => {
+    // Регрессия прод-бага: на проде ExcelJS streaming WorkbookReader падает на
+    // этом сконвертированном .xlsx ("Cannot read properties of undefined (reading
+    // 'sheets')" — worksheet раньше workbook.xml), structural=null → Excel→Vision
+    // на 1-й странице → у документа «на 2 листах» терялась «Доставка» со 2-й.
+    // Локально streaming НЕ падает, поэтому тест форсирует SheetJS-ветку через
+    // UPD_XLSX_READER=sheetjs и проверяет, что она даёт тот же ПОЛНЫЙ результат.
+    const { convertXlsToXlsxBuffer } = await import('../src/domain/edo/xls-to-xlsx.js');
+    const prev = process.env.UPD_XLSX_READER;
+    process.env.UPD_XLSX_READER = 'sheetjs';
+    try {
+      const r = await parseUpdXlsx(convertXlsToXlsxBuffer(load('upd-debug', 'upd-1877.xls')));
+      expect(r.docNumber).toBe('1877/18');
+      expect(r.items).toHaveLength(2);
+      expect(r.items[0].nameRaw).toContain('Стеклопакет');
+      expect(r.items[1].nameRaw).toContain('Доставка');
+      expect(r.items[1]).toMatchObject({ qty: 1, vatRate: 22, vatSum: 3606.56, sum: 20000 });
+      expect(r.totalSum).toBe(3096618.24);
+      expect(r.vatSum).toBe(558406.57);
+    } finally {
+      if (prev === undefined) delete process.env.UPD_XLSX_READER;
+      else process.env.UPD_XLSX_READER = prev;
+    }
+  });
+
   it('ТК-02876.xls (новая .xls, 67 позиций — фиксы 2026 не ломают рабочий файл)', async () => {
     const { convertXlsToXlsxBuffer } = await import('../src/domain/edo/xls-to-xlsx.js');
     const r = await parseUpdXlsx(convertXlsToXlsxBuffer(load('upd-debug', 'tk-02876.xls')));

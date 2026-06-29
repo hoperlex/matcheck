@@ -1,5 +1,6 @@
 import { Readable } from 'node:stream';
 import ExcelJS from 'exceljs';
+import * as XLSX from 'xlsx';
 import {
   UpdPdfParsedSchema,
   type UpdPdfParsed,
@@ -72,7 +73,36 @@ export async function parseUpdXlsx(buffer: Buffer): Promise<UpdPdfParsed> {
 
 // ─── Сбор строк ────────────────────────────────────────────────────────────
 
+// Сбор строк: основной путь — ExcelJS streaming; fallback — SheetJS (см. ниже).
 async function collectRows(buffer: Buffer): Promise<RawRow[]> {
+  // Аварийный/диагностический рубильник: UPD_XLSX_READER=sheetjs форсирует
+  // непотоковое чтение для всех Excel (минуя ExcelJS). По умолчанию — streaming.
+  if (process.env.UPD_XLSX_READER === 'sheetjs') return collectRowsViaSheetJS(buffer);
+  try {
+    return await collectRowsStreaming(buffer);
+  } catch (err) {
+    // ExcelJS streaming WorkbookReader иногда падает на сконвертированных
+    // SheetJS .xlsx с "Cannot read properties of undefined (reading 'sheets')":
+    // worksheet читается раньше workbook.xml (зависит от порядка zip-entries и
+    // тайминга потока), this.model ещё undefined (workbook-reader.js:303).
+    // Среда-зависимо (воспроизводится на проде, не локально) → тестами не
+    // ловится. Раньше это исключение пробрасывалось в worker → structural=null
+    // → Excel→Vision на ПЕРВОЙ странице → у многостраничных УПД («на 2 листах»)
+    // терялись позиции со 2-й страницы (см. УПД 1877: пропадала «Доставка»).
+    // Fallback: читаем те же байты НЕпотоково через SheetJS — детерминированно,
+    // без обращения к workbook-модели. Для УПД-таблицы результат эквивалентен
+    // (strict- или relaxed-pass маркера граф).
+    // Лог через console (parseUpdXlsx — чистая функция без pino-логгера): видно
+    // в docker logs matcheck-worker, на каких файлах ExcelJS streaming падает.
+    console.warn(
+      '[upd-xlsx] ExcelJS streaming reader failed, using SheetJS fallback:',
+      err instanceof Error ? err.message : String(err),
+    );
+    return collectRowsViaSheetJS(buffer);
+  }
+}
+
+async function collectRowsStreaming(buffer: Buffer): Promise<RawRow[]> {
   const stream = Readable.from(buffer);
   // sharedStrings: 'cache' нужен для УПД из 1С — там >100 общих строк, без
   // кэша при стриминге cell.value придёт как индекс, а не текст.
@@ -100,6 +130,44 @@ async function collectRows(buffer: Buffer): Promise<RawRow[]> {
       rows.push({ rowNumber: row.number, cells, text });
     }
     firstSheetDone = true;
+  }
+  return rows;
+}
+
+// Fallback-чтение через SheetJS (детерминированное, непотоковое). Используется,
+// когда ExcelJS streaming бросает (см. collectRows). SheetJS уже умеет и .xls
+// (BIFF), и .xlsx (OOXML), а тот же buffer — это либо оригинальный .xlsx, либо
+// .xls→.xlsx-конвертация из convertXlsToXlsxBuffer; XLSX.read понимает оба.
+//
+// Сырое значение берём из cell.v (число 54032.79), НЕ из cell.w («54,032.79» —
+// форматированная строка en-US сломала бы parseNum двойной точкой). Структура
+// строк (col→value, текстовая склейка) совместима с collectRowsStreaming, так
+// что parseDocHeader/parseParties/parseItemsAndTotals работают без изменений.
+export function collectRowsViaSheetJS(buffer: Buffer): RawRow[] {
+  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+  const sheetName = wb.SheetNames[0];
+  if (!sheetName) return [];
+  const ws = wb.Sheets[sheetName];
+  if (!ws || !ws['!ref']) return [];
+  const range = XLSX.utils.decode_range(ws['!ref']);
+
+  const rows: RawRow[] = [];
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    const cells = new Map<number, ExcelJS.CellValue>();
+    const parts: string[] = [];
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const cell = ws[XLSX.utils.encode_cell({ r, c })];
+      if (!cell || cell.v === null || cell.v === undefined) continue;
+      // c — 0-based в SheetJS; ExcelJS-код ниже ждёт 1-based col → c+1.
+      const col = c + 1;
+      const v = cell.v as ExcelJS.CellValue; // number | string | boolean | Date
+      cells.set(col, v);
+      const s = cellToString(v);
+      if (s) parts.push(s);
+    }
+    if (cells.size === 0) continue;
+    const text = parts.join(' ').replace(/\s+/g, ' ').trim();
+    rows.push({ rowNumber: r + 1, cells, text });
   }
   return rows;
 }
