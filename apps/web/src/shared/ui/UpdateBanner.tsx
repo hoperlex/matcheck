@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Button, Space, Typography } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useUpdatePrompt } from '../../lib/useUpdatePrompt';
@@ -29,6 +30,7 @@ import { useUpdatePrompt } from '../../lib/useUpdatePrompt';
  */
 export function UpdateBanner(): JSX.Element | null {
   const { needRefresh, applyUpdate, dismiss } = useUpdatePrompt();
+  const [applying, setApplying] = useState(false);
   if (!needRefresh) return null;
 
   return (
@@ -56,16 +58,22 @@ export function UpdateBanner(): JSX.Element | null {
     >
       <Typography.Text strong>Доступна новая версия портала</Typography.Text>
       <Space size="small" wrap>
-        <Button size="small" onClick={dismiss}>
+        <Button size="small" onClick={dismiss} disabled={applying}>
           Позже
         </Button>
         <Button
           type="primary"
           size="small"
           icon={<ReloadOutlined />}
-          onClick={applyUpdate}
+          loading={applying}
+          onClick={() => {
+            // Сразу показываем «Обновляю…» и блокируем повтор: reload произойдёт
+            // по controllerchange или fallback-таймеру внутри applyUpdate.
+            setApplying(true);
+            applyUpdate();
+          }}
         >
-          Обновить
+          {applying ? 'Обновляю…' : 'Обновить'}
         </Button>
       </Space>
     </div>

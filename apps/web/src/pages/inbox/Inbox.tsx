@@ -326,18 +326,29 @@ export default function InboxPage() {
       const qs = new URLSearchParams({ direction });
       if (kind !== 'all') qs.set('kind', kind);
       if (filters.q.trim()) qs.set('q', filters.q.trim());
+      // Тянем весь набор (до 2000) — таблица сортирует/фильтрует и пагинирует
+      // КЛИЕНТСКИ по всем строкам. Без limit сервер отдавал дефолтные 50, и при
+      // большем числе документов «хвост» не было видно (новые строки не
+      // появлялись, листать некуда). 2000 — потолок API; при дальнейшем росте
+      // понадобится серверная пагинация.
+      qs.set('limit', '2000');
       return api.get<List>(`/source-documents?${qs.toString()}`);
     },
     // При смене вкладки/фильтра показываем прошлый список, а новые данные
     // подтягиваются «поверх» — без прыжка к Empty и спиннера.
     placeholderData: keepPreviousData,
-    // Поллинг, пока в выдаче есть «живые» документы (queued/processing/
-    // needs_resolution). Когда всё «обработано» — поллинг останавливается.
+    // Поллинг: 4с, пока в выдаче есть «живые» документы (queued/processing/
+    // needs_resolution) — чтобы статус быстро дошёл до «обработано». Когда всё
+    // обработано — поллинг НЕ выключаем полностью, а замедляем до 20с: иначе
+    // документы, созданные/распознанные асинхронно уже ПОСЛЕ остановки (router
+    // создаёт строки с задержкой, parse идёт в фоне), не появлялись бы без
+    // ручного обновления страницы (Ctrl+R).
     refetchInterval: (q) => {
       const items = q.state.data?.items ?? [];
       const hasUnfinished = items.some((x) => UNFINISHED_STATUSES.includes(x.status));
-      return hasUnfinished ? 4000 : false;
+      return hasUnfinished ? 4000 : 20000;
     },
+    refetchIntervalInBackground: false,
   });
 
   const counterpartiesQuery = useQuery({
@@ -599,6 +610,13 @@ export default function InboxPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        // Постраничная навигация (как в «Операциях»): по 50 на страницу, с
+        // переключателем размера. Клиентская — по всему загруженному набору.
+        pagination={{
+          pageSize: 50,
+          showSizeChanger: true,
+          pageSizeOptions: [50, 100, 200],
+        }}
         rowSelection={bulk.selection}
         expandable={{
           // Свою колонку с иконкой не рендерим — ± живёт в столбце «Тип».

@@ -62,10 +62,30 @@ export function useUpdatePrompt(): {
   return {
     needRefresh,
     applyUpdate: () => {
-      // updateServiceWorker(true) посылает SKIP_WAITING и затем
-      // плагин сам делает window.location.reload() при controllerchange.
-      // Не делаем reload вручную сверху — это привело бы к двойному.
+      // updateServiceWorker(true) шлёт SKIP_WAITING. vite-plugin-pwa ДОЛЖЕН сам
+      // перезагрузить страницу по событию `controlling`, НО только если
+      // event.isUpdate === true. А isUpdate = Boolean(navigator.serviceWorker
+      // .controller) на момент загрузки — и он часто false: первый визит,
+      // режим инкогнито, и (иронично) сразу после Ctrl+Shift+R, который
+      // отвязывает контроллер. Тогда плагин reload НЕ делает → баннер висит,
+      // ничего не меняется. Поэтому перезагружаемся сами, надёжно:
+      //   1) как только новый SW взял управление (controllerchange) → reload;
+      //   2) fallback-таймер — на случай, если waiting-воркера нет или
+      //      messageSkipWaiting оказался no-op (controllerchange не наступит).
+      // Флаг `reloaded` гарантирует единственный reload (без циклов).
+      let reloaded = false;
+      const doReload = () => {
+        if (reloaded) return;
+        reloaded = true;
+        window.location.reload();
+      };
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.addEventListener('controllerchange', doReload, { once: true });
+      }
       void updateServiceWorker(true);
+      // Подстраховка: если за 2.5с контроллер не сменился — всё равно
+      // перезагружаемся, чтобы подтянуть новую версию портала.
+      window.setTimeout(doReload, 2500);
     },
     dismiss: () => setNeedRefresh(false),
   };
