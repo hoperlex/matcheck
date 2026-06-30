@@ -77,8 +77,15 @@ import {
 import { publishSseEvent } from './domain/sse/redis-bridge.js';
 import { sourceDocumentAttachments, bundleImportItems } from './db/schema.js';
 import { createHash } from 'node:crypto';
-import { classifyFile } from './domain/edo/document-router.js';
+import { classifyFile, type DocClass } from './domain/edo/document-router.js';
+import { classifyFileVision } from './domain/edo/document-router-vision.js';
 import type { UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
+
+// Порог уверенности vision-доклассификации (Этап 4), при котором роутер
+// АВТО-создаёт документ для needsVision-файла (фото/скан). Ниже порога —
+// needs_review, операционные данные не трогаем. Детерминированный путь
+// (needsVision=false) порогом НЕ ограничивается — он надёжен сам по себе.
+const VISION_AUTO_THRESHOLD = 0.85;
 
 // Хелпер: уведомляем подключённых SSE-клиентов о смене статуса УПД через
 // Redis Pub/Sub (worker в отдельном процессе, in-process bus API ему
@@ -1167,19 +1174,69 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
     }
 
     const cls = await classifyFile(buffer, a.mimeType ?? '', a.filename);
-    // Детерминированная классификация (needsVision=false — по тексту/расширению,
-    // напр. «Транспортная накладная (форма)»+«Грузоотправитель» или
-    // «Счёт-фактура»+ИНН) — надёжная, создаём документ. Порог confidence
-    // применяется ТОЛЬКО к vision-классификации (Этап 4: ≥0.85), где число
-    // отражает уверенность модели. m15/unknown → needs_review (нет надёжного
-    // парсера / тип не определён).
-    const canAutoCreate =
+
+    // Итоговый маршрут файла. Для детерминированной классификации
+    // (needsVision=false — по тексту/расширению) берём её as-is: надёжно,
+    // создаём документ без порога confidence. Для needsVision (скан/фото/
+    // неясный текст) — Этап 4: одна дешёвая vision-доклассификация ТИПА.
+    let routeKind: DocClass = cls.detectedKind;
+    let routeConfidence = cls.confidence;
+    let routeParserUsed: string = cls.parserUsed;
+    let auto =
       !cls.needsVision &&
       (cls.detectedKind === 'upd' ||
         cls.detectedKind === 'transport_waybill' ||
         cls.detectedKind === 'os2_transfer');
+    let visionRan = false;
+    let visionFailed = false;
+    let visionMeta: Record<string, unknown> | null = null;
 
-    if (canAutoCreate && cls.detectedKind === 'upd') {
+    if (cls.needsVision) {
+      visionRan = true;
+      // sourceDocumentId=null намеренно: техническая запись router-bundle
+      // удаляется в конце job, а llm_calls.source_document_id каскадится —
+      // лог классификации привязываем к null, чтобы он пережил удаление
+      // (виден в админке по docKind='router_classify' + имя файла).
+      const v = await classifyFileVision({
+        buffer,
+        mimeType: a.mimeType ?? '',
+        filename: a.filename,
+      }).catch((err) => {
+        log.warn(
+          { err: err instanceof Error ? err.message : String(err), filename: a.filename },
+          'router vision classify threw',
+        );
+        return null;
+      });
+      if (!v || v.error) {
+        visionFailed = true;
+        visionMeta = { error: v?.error ?? 'vision-классификация бросила исключение' };
+      } else {
+        // Что увидела модель — фиксируем всегда (даже ниже порога), чтобы в
+        // журнале было видно «vision: upd 0.72 → на проверку».
+        routeKind = v.detectedKind;
+        routeConfidence = v.confidence;
+        visionMeta = {
+          kind: v.detectedKind,
+          confidence: v.confidence,
+          provider: v.providerKind,
+          pagesSent: v.pagesSent,
+        };
+        // Авто-создание ТОЛЬКО при уверенном одном известном типе. Иначе
+        // (низкий confidence / unknown / m15) — needs_review, данные не пишем.
+        if (
+          v.confidence >= VISION_AUTO_THRESHOLD &&
+          (v.detectedKind === 'upd' ||
+            v.detectedKind === 'transport_waybill' ||
+            v.detectedKind === 'os2_transfer')
+        ) {
+          routeParserUsed = v.detectedKind === 'upd' ? 'parseUpdVision' : 'parseWaybillBatch';
+          auto = true;
+        }
+      }
+    }
+
+    if (auto && routeKind === 'upd') {
       // Разворачиваем в одиночный УПД-flow (тот же путь, что «Загрузить УПД»).
       const [doc] = await db
         .insert(sourceDocuments)
@@ -1218,20 +1275,25 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
         bundleId,
         sourceFilename: a.filename,
         detectedKind: 'upd',
-        confidence: cls.confidence.toString(),
-        parserUsed: cls.parserUsed,
+        confidence: routeConfidence.toString(),
+        parserUsed: routeParserUsed,
         status: 'created',
         createdDocumentIds: [docId],
-        reason:
-          cls.updInvoiceCount && cls.updInvoiceCount >= 2
+        reason: visionRan
+          ? `vision: УПД (уверенность ${routeConfidence.toFixed(2)}) → vision-парсер`
+          : cls.updInvoiceCount && cls.updInvoiceCount >= 2
             ? `УПД-пачка (${cls.updInvoiceCount} счёт-фактур) → агрегат`
             : 'УПД → одиночный парсер',
-        metadata: { signals: cls.signals, updInvoiceCount: cls.updInvoiceCount ?? null },
+        metadata: {
+          signals: cls.signals,
+          updInvoiceCount: cls.updInvoiceCount ?? null,
+          ...(visionMeta ? { vision: visionMeta } : {}),
+        },
       });
       createdCount++;
     } else if (
-      canAutoCreate &&
-      (cls.detectedKind === 'transport_waybill' || cls.detectedKind === 'os2_transfer')
+      auto &&
+      (routeKind === 'transport_waybill' || routeKind === 'os2_transfer')
     ) {
       // Разворачиваем в waybill-flow: отдельный под-bundle на этот файл
       // (тот же путь, что «Загрузить накладные»).
@@ -1280,33 +1342,48 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
       await db.insert(bundleImportItems).values({
         bundleId,
         sourceFilename: a.filename,
-        detectedKind: cls.detectedKind,
-        confidence: cls.confidence.toString(),
+        detectedKind: routeKind,
+        confidence: routeConfidence.toString(),
         parserUsed: 'parseWaybillBatch',
         status: 'created',
         createdDocumentIds: [],
-        reason: 'накладная → waybill-парсер',
-        metadata: { signals: cls.signals, subBundleId: subId },
+        reason: visionRan
+          ? `vision: накладная (уверенность ${routeConfidence.toFixed(2)}) → waybill-парсер`
+          : 'накладная → waybill-парсер',
+        metadata: {
+          signals: cls.signals,
+          subBundleId: subId,
+          ...(visionMeta ? { vision: visionMeta } : {}),
+        },
       });
       createdCount++;
     } else {
       // Неуверенно / vision-требуется / m15 / unknown → журнал needs_review,
-      // операционные данные НЕ трогаем.
+      // операционные данные НЕ трогаем. Лучше лишняя ручная проверка, чем
+      // «тихо ТН как УПД».
       const reason =
-        cls.detectedKind === 'm15'
+        routeKind === 'm15'
           ? 'М-15 — нет надёжного парсера, нужна ручная проверка'
-          : cls.needsVision
-            ? 'требуется vision-доклассификация (скан/фото/неясный текст)'
-            : 'тип не определён уверенно';
+          : visionFailed
+            ? 'vision-доклассификация не удалась — нужна ручная проверка'
+            : visionRan
+              ? routeKind === 'unknown'
+                ? 'vision: тип документа не распознан (фото объекта/прочее) — нужна ручная проверка'
+                : `vision: ${routeKind} с низкой уверенностью (${routeConfidence.toFixed(2)} < ${VISION_AUTO_THRESHOLD}) — нужна ручная проверка`
+              : 'тип не определён уверенно';
       await db.insert(bundleImportItems).values({
         bundleId,
         sourceFilename: a.filename,
-        detectedKind: cls.detectedKind,
-        confidence: cls.confidence.toString(),
+        detectedKind: routeKind,
+        confidence: routeConfidence.toString(),
         parserUsed: 'none',
         status: 'needs_review',
         reason,
-        metadata: { signals: cls.signals, needsVision: cls.needsVision },
+        metadata: {
+          signals: cls.signals,
+          needsVision: cls.needsVision,
+          ...(visionMeta ? { vision: visionMeta } : {}),
+        },
       });
       reviewCount++;
     }
