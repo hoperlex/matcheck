@@ -1754,31 +1754,35 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         bundle = inserted;
       }
 
-      const attachmentsToInsert: Array<{
+      let attachmentsToInsert: Array<{
         s3Key: string;
         filename: string;
         mimeType: string;
         sizeBytes: number;
-      }> = [];
+      }>;
       try {
-        for (let i = 0; i < collected.length; i++) {
-          const f = collected[i]!;
-          const safeName = f.filename.replace(/[/\\]/g, '_').slice(-100) || `file-${i + 1}.bin`;
-          const s3Key = buildS3Key({
-            site: wbSite ?? null,
-            counterparty: wbCp ?? null,
-            entityType: 'source-documents',
-            entityId: bundle.id,
-            filename: `doc-${i + 1}-${safeName}`,
-          });
-          await putObject(s3Key, f.buffer, f.mimetype || 'application/octet-stream');
-          attachmentsToInsert.push({
-            s3Key,
-            filename: safeName,
-            mimeType: f.mimetype || 'application/octet-stream',
-            sizeBytes: f.buffer.length,
-          });
-        }
+        // Параллельная загрузка в S3 (Promise.all сохраняет порядок по индексу).
+        // Раньше файлы лились последовательно в цикле — на пачке это держало
+        // HTTP-ответ десятки секунд и создавало ощущение «зависания».
+        attachmentsToInsert = await Promise.all(
+          collected.map(async (f, i) => {
+            const safeName = f.filename.replace(/[/\\]/g, '_').slice(-100) || `file-${i + 1}.bin`;
+            const s3Key = buildS3Key({
+              site: wbSite ?? null,
+              counterparty: wbCp ?? null,
+              entityType: 'source-documents',
+              entityId: bundle.id,
+              filename: `doc-${i + 1}-${safeName}`,
+            });
+            await putObject(s3Key, f.buffer, f.mimetype || 'application/octet-stream');
+            return {
+              s3Key,
+              filename: safeName,
+              mimeType: f.mimetype || 'application/octet-stream',
+              sizeBytes: f.buffer.length,
+            };
+          }),
+        );
       } catch (err) {
         req.log.error({ err }, 's3 putObject failed for documents bundle');
         await app.db

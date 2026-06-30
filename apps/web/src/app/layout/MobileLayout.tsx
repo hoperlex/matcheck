@@ -1,4 +1,4 @@
-import { useState, createElement } from 'react';
+import { useMemo, useState, createElement } from 'react';
 import { Layout, Drawer, Button, Menu, Tag, Typography } from 'antd';
 import { MenuOutlined, UserOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
@@ -21,33 +21,44 @@ export function MobileLayout() {
   const [open, setOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const counters = useOperationsCounters();
+  const operationsCount = counters.data?.completedToday ?? 0;
+
+  // Мемоизируем меню: без этого label с Tag пересоздаётся на каждом рендере и
+  // antd Menu ремонтирует узел label → тег «Сегодня: +N» мигает. useMemo — до
+  // early-return ниже (порядок хуков).
+  const allItems = useMemo(() => {
+    if (!user) return [];
+    // Drawer-меню — label с Tag «+N» для «Операции».
+    return filterByRole(user.role).map((n) => ({
+      key: n.path,
+      icon: createElement(n.icon),
+      label:
+        n.key === 'operations' && operationsCount > 0 ? (
+          <span>
+            {n.label}
+            <Tag color="green" style={{ marginLeft: 16, marginInlineEnd: 0 }}>
+              Сегодня: +{operationsCount}
+            </Tag>
+          </span>
+        ) : (
+          n.label
+        ),
+    }));
+  }, [user, operationsCount]);
+  // Footer-табы — короткие label без Tag (узкие тач-цели, +N испортит верстку).
+  const tabItems = useMemo(
+    () =>
+      allItems
+        .filter((it) => PRIMARY_KEYS.includes(it.key))
+        .map((it) => {
+          const orig = user ? filterByRole(user.role).find((n) => n.path === it.key) : undefined;
+          return { ...it, label: orig?.label ?? it.label };
+        }),
+    [allItems, user],
+  );
 
   if (!user) return null;
   const displayName = user.fullName?.trim() || user.email;
-  const operationsCount = counters.data?.completedToday ?? 0;
-  // Drawer-меню — label с Tag «+N» для «Операции».
-  const allItems = filterByRole(user.role).map((n) => ({
-    key: n.path,
-    icon: createElement(n.icon),
-    label:
-      n.key === 'operations' && operationsCount > 0 ? (
-        <span>
-          {n.label}
-          <Tag color="green" style={{ marginLeft: 16, marginInlineEnd: 0 }}>
-            Сегодня: +{operationsCount}
-          </Tag>
-        </span>
-      ) : (
-        n.label
-      ),
-  }));
-  // Footer-табы — короткие label без Tag (узкие тач-цели, +N испортит верстку).
-  const tabItems = allItems
-    .filter((it) => PRIMARY_KEYS.includes(it.key))
-    .map((it) => {
-      const orig = filterByRole(user.role).find((n) => n.path === it.key);
-      return { ...it, label: orig?.label ?? it.label };
-    });
 
   const handleLogout = async () => {
     try {

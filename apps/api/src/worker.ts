@@ -1148,167 +1148,184 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
         : null;
 
   let createdCount = 0;
-  let reviewCount = 0;
+  let failedCount = 0;
 
   for (const a of attachments) {
-    let buffer: Buffer;
+    // Per-file изоляция: ошибка одного файла (битый S3 / исключение в
+    // классификации или роутинге) НЕ должна валить весь router-job, иначе
+    // пакет уйдёт в retry с backoff 60с и «зависнет», а остальные файлы не
+    // обработаются. Любой сбой по файлу → failed в журнал, идём дальше.
     try {
-      buffer = await getObject(a.s3Key);
-    } catch (err) {
-      log.warn({ err, s3Key: a.s3Key }, 'router: getObject failed');
-      await db.insert(bundleImportItems).values({
-        bundleId,
-        sourceFilename: a.filename,
-        parserUsed: 'none',
-        status: 'failed',
-        reason: 'не удалось скачать файл из S3',
-      });
-      continue;
-    }
-
-    const cls = await classifyFile(buffer, a.mimeType ?? '', a.filename);
-    // Детерминированная классификация (needsVision=false — по тексту/расширению,
-    // напр. «Транспортная накладная (форма)»+«Грузоотправитель» или
-    // «Счёт-фактура»+ИНН) — надёжная, создаём документ. Порог confidence
-    // применяется ТОЛЬКО к vision-классификации (Этап 4: ≥0.85), где число
-    // отражает уверенность модели. m15/unknown → needs_review (нет надёжного
-    // парсера / тип не определён).
-    const canAutoCreate =
-      !cls.needsVision &&
-      (cls.detectedKind === 'upd' ||
-        cls.detectedKind === 'transport_waybill' ||
-        cls.detectedKind === 'os2_transfer');
-
-    if (canAutoCreate && cls.detectedKind === 'upd') {
-      // Разворачиваем в одиночный УПД-flow (тот же путь, что «Загрузить УПД»).
-      const [doc] = await db
-        .insert(sourceDocuments)
-        .values({
-          kind: 'upd',
-          direction: bundle.direction,
-          origin: 'manual_pdf',
-          status: 'queued',
-          contractorId: bundle.contractorId,
-          recipientMolId: bundle.recipientMolId,
-          siteId: bundle.siteId,
-          expectedDate: bundleExpected,
-          originalFilename: a.filename,
-          queuedAt: new Date(),
-          parsedAt: new Date(),
-          createdByUserId: bundle.createdByUserId,
-        })
-        .returning({ id: sourceDocuments.id });
-      const docId = doc!.id;
-      await db.insert(sourceDocumentAttachments).values({
-        sourceDocumentId: docId,
-        s3Key: a.s3Key,
-        filename: a.filename,
-        mimeType: a.mimeType,
-        sizeBytes: a.sizeBytes,
-        role: 'original',
-      });
-      const job = await queue.add('parse', { sourceDocumentId: docId, s3Key: a.s3Key });
-      if (job.id) {
-        await db
-          .update(sourceDocuments)
-          .set({ jobId: job.id })
-          .where(eq(sourceDocuments.id, docId));
+      let buffer: Buffer;
+      try {
+        buffer = await getObject(a.s3Key);
+      } catch (err) {
+        log.warn({ err, s3Key: a.s3Key }, 'router: getObject failed');
+        await db.insert(bundleImportItems).values({
+          bundleId,
+          sourceFilename: a.filename,
+          parserUsed: 'none',
+          status: 'failed',
+          reason: 'не удалось скачать файл из S3',
+        });
+        failedCount++;
+        continue;
       }
-      await db.insert(bundleImportItems).values({
-        bundleId,
-        sourceFilename: a.filename,
-        detectedKind: 'upd',
-        confidence: cls.confidence.toString(),
-        parserUsed: cls.parserUsed,
-        status: 'created',
-        createdDocumentIds: [docId],
-        reason:
-          cls.updInvoiceCount && cls.updInvoiceCount >= 2
-            ? `УПД-пачка (${cls.updInvoiceCount} счёт-фактур) → агрегат`
-            : 'УПД → одиночный парсер',
-        metadata: { signals: cls.signals, updInvoiceCount: cls.updInvoiceCount ?? null },
-      });
-      createdCount++;
-    } else if (
-      canAutoCreate &&
-      (cls.detectedKind === 'transport_waybill' || cls.detectedKind === 'os2_transfer')
-    ) {
-      // Разворачиваем в waybill-flow: отдельный под-bundle на этот файл
-      // (тот же путь, что «Загрузить накладные»).
-      const subHash = createHash('sha256').update(`router:${bundleId}:${a.s3Key}`).digest('hex');
-      const [subBundle] = await db
-        .insert(sourceBundles)
+
+      const cls = await classifyFile(buffer, a.mimeType ?? '', a.filename);
+
+      // Уверенная накладная (по тексту, без vision) → waybill-парсер.
+      // ВСЁ ОСТАЛЬНОЕ — в УПД-flow (ветка else): УПД-парсер сам покрывает
+      // Excel (parseUpdXlsx), текстовый PDF (parseUpdPdf) и скан/фото/битый
+      // текстовый слой (parseUpdVision, Gemini Vision). Благодаря этому сканы,
+      // фото и PDF с «битыми» глифами 1С НЕ теряются, а распознаются. Главное —
+      // на КАЖДЫЙ файл создаётся видимая строка (12 загрузил → 12 строк), и
+      // ничего не «пропадает».
+      const isWaybill =
+        !cls.needsVision &&
+        (cls.detectedKind === 'transport_waybill' || cls.detectedKind === 'os2_transfer');
+
+      if (isWaybill) {
+        // Разворачиваем в waybill-flow: отдельный под-bundle на этот файл
+        // (тот же путь, что «Загрузить накладные»).
+        const subHash = createHash('sha256').update(`router:${bundleId}:${a.s3Key}`).digest('hex');
+        const [subBundle] = await db
+          .insert(sourceBundles)
+          .values({
+            bundleHash: subHash,
+            kind: 'waybill',
+            direction: bundle.direction,
+            siteId: bundle.siteId,
+            contractorId: bundle.contractorId,
+            recipientMolId: bundle.recipientMolId,
+            expectedDate: bundle.expectedDate,
+            status: 'queued',
+            createdByUserId: bundle.createdByUserId,
+          })
+          .returning({ id: sourceBundles.id });
+        const subId = subBundle!.id;
+        const [subTech] = await db
+          .insert(sourceDocuments)
+          .values({
+            kind: 'transport_waybill',
+            direction: bundle.direction,
+            origin: 'manual_pdf',
+            status: 'queued',
+            contractorId: bundle.contractorId,
+            recipientMolId: bundle.recipientMolId,
+            siteId: bundle.siteId,
+            expectedDate: bundleExpected,
+            originalFilename: a.filename,
+            queuedAt: new Date(),
+            bundleId: subId,
+            createdByUserId: bundle.createdByUserId,
+          })
+          .returning({ id: sourceDocuments.id });
+        await db.insert(sourceDocumentAttachments).values({
+          sourceDocumentId: subTech!.id,
+          s3Key: a.s3Key,
+          filename: a.filename,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+          role: 'original',
+        });
+        await queue.add('parse', { bundleId: subId });
+        await db.insert(bundleImportItems).values({
+          bundleId,
+          sourceFilename: a.filename,
+          detectedKind: cls.detectedKind,
+          confidence: cls.confidence.toString(),
+          parserUsed: 'parseWaybillBatch',
+          status: 'created',
+          createdDocumentIds: [],
+          reason: 'накладная → waybill-парсер',
+          metadata: { signals: cls.signals, subBundleId: subId },
+        });
+        createdCount++;
+      } else {
+        // УПД-flow (одиночный, тот же путь, что «Загрузить УПД»). Сюда попадают:
+        //  - УПД (Excel / текстовый PDF) — детерминированно;
+        //  - сканы, фото, PDF с битым текстовым слоем (needsVision) — handleJob
+        //    распознает их через parseUpdVision;
+        //  - m15 / unknown — пробуем распознать; в худшем случае выйдет черновик
+        //    (partial_parse), но строка не пропадёт и оригинал останется для
+        //    ручной доработки.
+        const [doc] = await db
+          .insert(sourceDocuments)
+          .values({
+            kind: 'upd',
+            direction: bundle.direction,
+            origin: 'manual_pdf',
+            status: 'queued',
+            contractorId: bundle.contractorId,
+            recipientMolId: bundle.recipientMolId,
+            siteId: bundle.siteId,
+            expectedDate: bundleExpected,
+            originalFilename: a.filename,
+            queuedAt: new Date(),
+            parsedAt: new Date(),
+            createdByUserId: bundle.createdByUserId,
+          })
+          .returning({ id: sourceDocuments.id });
+        const docId = doc!.id;
+        await db.insert(sourceDocumentAttachments).values({
+          sourceDocumentId: docId,
+          s3Key: a.s3Key,
+          filename: a.filename,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+          role: 'original',
+        });
+        const job = await queue.add('parse', { sourceDocumentId: docId, s3Key: a.s3Key });
+        if (job.id) {
+          await db
+            .update(sourceDocuments)
+            .set({ jobId: job.id })
+            .where(eq(sourceDocuments.id, docId));
+        }
+        const reason =
+          cls.detectedKind === 'upd' && !cls.needsVision
+            ? cls.updInvoiceCount && cls.updInvoiceCount >= 2
+              ? `УПД-пачка (${cls.updInvoiceCount} счёт-фактур) → агрегат`
+              : 'УПД → одиночный парсер'
+            : cls.needsVision
+              ? 'скан/фото/неясный текст → распознавание через vision'
+              : cls.detectedKind === 'm15'
+                ? 'M-15 → попытка распознавания (нет спец-парсера)'
+                : 'тип неоднозначен → попытка распознавания';
+        await db.insert(bundleImportItems).values({
+          bundleId,
+          sourceFilename: a.filename,
+          detectedKind: cls.detectedKind,
+          confidence: cls.confidence.toString(),
+          parserUsed: cls.needsVision ? 'parseUpdVision' : cls.parserUsed,
+          status: 'created',
+          createdDocumentIds: [docId],
+          reason,
+          metadata: {
+            signals: cls.signals,
+            needsVision: cls.needsVision,
+            updInvoiceCount: cls.updInvoiceCount ?? null,
+          },
+        });
+        createdCount++;
+      }
+    } catch (err) {
+      log.error(
+        { err: err instanceof Error ? err.message : String(err), file: a.filename },
+        'router: ошибка обработки файла — помечаем failed, продолжаем',
+      );
+      await db
+        .insert(bundleImportItems)
         .values({
-          bundleHash: subHash,
-          kind: 'waybill',
-          direction: bundle.direction,
-          siteId: bundle.siteId,
-          contractorId: bundle.contractorId,
-          recipientMolId: bundle.recipientMolId,
-          expectedDate: bundle.expectedDate,
-          status: 'queued',
-          createdByUserId: bundle.createdByUserId,
+          bundleId,
+          sourceFilename: a.filename,
+          parserUsed: 'none',
+          status: 'failed',
+          reason: 'внутренняя ошибка обработки файла',
         })
-        .returning({ id: sourceBundles.id });
-      const subId = subBundle!.id;
-      const [subTech] = await db
-        .insert(sourceDocuments)
-        .values({
-          kind: 'transport_waybill',
-          direction: bundle.direction,
-          origin: 'manual_pdf',
-          status: 'queued',
-          contractorId: bundle.contractorId,
-          recipientMolId: bundle.recipientMolId,
-          siteId: bundle.siteId,
-          expectedDate: bundleExpected,
-          originalFilename: a.filename,
-          queuedAt: new Date(),
-          bundleId: subId,
-          createdByUserId: bundle.createdByUserId,
-        })
-        .returning({ id: sourceDocuments.id });
-      await db.insert(sourceDocumentAttachments).values({
-        sourceDocumentId: subTech!.id,
-        s3Key: a.s3Key,
-        filename: a.filename,
-        mimeType: a.mimeType,
-        sizeBytes: a.sizeBytes,
-        role: 'original',
-      });
-      await queue.add('parse', { bundleId: subId });
-      await db.insert(bundleImportItems).values({
-        bundleId,
-        sourceFilename: a.filename,
-        detectedKind: cls.detectedKind,
-        confidence: cls.confidence.toString(),
-        parserUsed: 'parseWaybillBatch',
-        status: 'created',
-        createdDocumentIds: [],
-        reason: 'накладная → waybill-парсер',
-        metadata: { signals: cls.signals, subBundleId: subId },
-      });
-      createdCount++;
-    } else {
-      // Неуверенно / vision-требуется / m15 / unknown → журнал needs_review,
-      // операционные данные НЕ трогаем.
-      const reason =
-        cls.detectedKind === 'm15'
-          ? 'М-15 — нет надёжного парсера, нужна ручная проверка'
-          : cls.needsVision
-            ? 'требуется vision-доклассификация (скан/фото/неясный текст)'
-            : 'тип не определён уверенно';
-      await db.insert(bundleImportItems).values({
-        bundleId,
-        sourceFilename: a.filename,
-        detectedKind: cls.detectedKind,
-        confidence: cls.confidence.toString(),
-        parserUsed: 'none',
-        status: 'needs_review',
-        reason,
-        metadata: { signals: cls.signals, needsVision: cls.needsVision },
-      });
-      reviewCount++;
+        .catch(() => undefined);
+      failedCount++;
     }
   }
 
@@ -1319,7 +1336,7 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
     .update(sourceBundles)
     .set({ status: 'parsed', kind: 'mixed', docCount: createdCount, updatedAt: new Date() })
     .where(eq(sourceBundles.id, bundleId));
-  log.info({ created: createdCount, needsReview: reviewCount }, 'router bundle classified');
+  log.info({ created: createdCount, failed: failedCount }, 'router bundle classified');
 }
 
 // «Пустой» UpdPdfParsed для Excel-кейса, когда структурный парсер

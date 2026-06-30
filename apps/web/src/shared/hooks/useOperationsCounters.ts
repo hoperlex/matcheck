@@ -28,6 +28,10 @@ export function useOperationsCounters() {
     queryFn: () => api.get<OperationsCountersResponse>('/reports/operations-counters'),
     enabled: !!userId,
     refetchInterval: 30_000,
+    // Без этого каждый возврат фокуса во вкладку запускает лишний refetch,
+    // из-за которого тег «Сегодня: +N» в меню перерисовывается без причины.
+    // Polling раз в 30с и инвалидация после мутаций и так держат данные свежими.
+    refetchOnWindowFocus: false,
     placeholderData: keepPreviousData,
   });
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState, createElement } from 'react';
+import { useEffect, useMemo, useState, createElement } from 'react';
 import { Avatar, Button, Layout, Menu, Tag, Tooltip, Typography } from 'antd';
 import { MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
@@ -32,30 +32,39 @@ export function DesktopLayout() {
   }, [collapsed]);
 
   const counters = useOperationsCounters();
+  const operationsCount = counters.data?.completedToday ?? 0;
+
+  // items мемоизируем: без этого label с JSX-Tag пересоздаётся на КАЖДОМ
+  // рендере (refetch счётчика раз в 30с, навигация и т.п.), и antd Menu
+  // ремонтирует узел label → тег «Сегодня: +N» визуально мигает. Пересборка
+  // только при смене роли или самого числа. useMemo вызываем ДО early-return
+  // ниже, чтобы не нарушить порядок хуков.
+  const items = useMemo(() => {
+    if (!user) return [];
+    return filterByRole(user.role).map((n) => ({
+      key: n.path,
+      icon: createElement(n.icon),
+      // Для «Операции» — зелёный Tag «Сегодня: +N» справа от label.
+      // Раньше при двузначном счётчике (+10, +12 и т.д.) тегу не хватало
+      // места, и antd Menu начинал ellipsis'ить сам label до «Операции...».
+      // Flex-layout с minWidth:0 + whiteSpace:nowrap на тексте и
+      // flexShrink:0 на теге гарантирует, что тег полностью виден, а
+      // текст «Операции» не обрезается. При 0 — Tag не рисуем.
+      label:
+        n.key === 'operations' && operationsCount > 0 ? (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+            <span style={{ whiteSpace: 'nowrap' }}>{n.label}</span>
+            <Tag color="green" style={{ marginInlineEnd: 0, flexShrink: 0 }}>
+              Сегодня: +{operationsCount}
+            </Tag>
+          </span>
+        ) : (
+          n.label
+        ),
+    }));
+  }, [user, operationsCount]);
 
   if (!user) return null;
-  const operationsCount = counters.data?.completedToday ?? 0;
-  const items = filterByRole(user.role).map((n) => ({
-    key: n.path,
-    icon: createElement(n.icon),
-    // Для «Операции» — зелёный Tag «Сегодня: +N» справа от label.
-    // Раньше при двузначном счётчике (+10, +12 и т.д.) тегу не хватало
-    // места, и antd Menu начинал ellipsis'ить сам label до «Операции...».
-    // Flex-layout с minWidth:0 + whiteSpace:nowrap на тексте и
-    // flexShrink:0 на теге гарантирует, что тег полностью виден, а
-    // текст «Операции» не обрезается. При 0 — Tag не рисуем.
-    label:
-      n.key === 'operations' && operationsCount > 0 ? (
-        <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-          <span style={{ whiteSpace: 'nowrap' }}>{n.label}</span>
-          <Tag color="green" style={{ marginInlineEnd: 0, flexShrink: 0 }}>
-            Сегодня: +{operationsCount}
-          </Tag>
-        </span>
-      ) : (
-        n.label
-      ),
-  }));
   const selected = items.find(
     (i) => location.pathname === i.key || (i.key !== '/' && location.pathname.startsWith(i.key)),
   );

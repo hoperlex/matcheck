@@ -86,7 +86,22 @@ export async function classifyFile(
 
   // ── PDF: пробуем текстовый слой ──
   if (/pdf/.test(m) || PDF_RE.test(lower)) {
-    const { pages, full } = await extractPdfText(buffer);
+    let pages: { num: number; text: string }[];
+    let full: string;
+    try {
+      ({ pages, full } = await extractPdfText(buffer));
+    } catch (err) {
+      // pdf-parse падает на битых/защищённых/нестандартных PDF. Это НЕ повод
+      // ронять весь router-job (иначе пакет уйдёт в retry с backoff 60с и
+      // «зависнет» на одном файле). Деградируем в vision-доклассификацию.
+      return {
+        detectedKind: 'unknown',
+        confidence: 0,
+        needsVision: true,
+        parserUsed: 'none',
+        signals: ['pdf:parse_error', err instanceof Error ? err.message.slice(0, 80) : 'unknown'],
+      };
+    }
     if (full.length < MIN_TEXT) {
       // скан без текста — vision
       return {
