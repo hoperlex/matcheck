@@ -364,7 +364,9 @@ export type UpdVisionInput = {
  */
 export async function parseUpdVision(
   input: UpdVisionInput,
-  ctx: { sourceDocumentId: string | null } = { sourceDocumentId: null },
+  ctx: { sourceDocumentId: string | null; promptDocKind?: 'upd' | 'm15' } = {
+    sourceDocumentId: null,
+  },
 ): Promise<ParsePdfResult> {
   const mime = input.mimeType.toLowerCase();
   if (!SUPPORTED_MIMES.has(mime)) {
@@ -457,8 +459,10 @@ export async function parseUpdVision(
       }
     }
   }
-  // Используем тот же prompt doc_kind='upd', что и текстовый parser.
-  const promptMeta = await loadActivePromptWithMeta('upd');
+  // Промпт по типу документа: 'upd' (по умолчанию) или 'm15' (накладная на
+  // отпуск материалов — другая раскладка колонок). Для УПД поведение не
+  // меняется; М-15 получает свой промпт, не затрагивая работающий УПД-путь.
+  const promptMeta = await loadActivePromptWithMeta(ctx.promptDocKind ?? 'upd');
   // Хвост-страховка против array-обёртки. Gemini preview-модели иногда
   // возвращают [{...}] вместо {...} (см. наблюдение по логам ~20-33% флак).
   // Дублируем требование в промпте — снижает базовую вероятность ошибки;
@@ -557,7 +561,7 @@ export async function parseUpdVision(
           sourceDocumentId: ctx.sourceDocumentId,
           providerId: row.id,
           promptId: promptMeta.id,
-          docKind: 'upd',
+          docKind: ctx.promptDocKind ?? 'upd',
           model: row.model,
           requestMessages: [
             {

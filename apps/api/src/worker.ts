@@ -230,7 +230,22 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   let llmProviderId: string | null = null;
   let parsedViaVision = false;
   try {
-    if (isXlsx || isXls) {
+    if (job.data.docKind === 'm15') {
+      // М-15 (накладная на отпуск материалов) — всегда распознаём через vision
+      // отдельным m15-промптом: у сканов/фото нет текстового слоя, а у PDF из
+      // 1С он часто «битый» (нечитаемые глифы). Тип документа уже задан при
+      // создании (transport_waybill → «Накладная»); здесь только извлекаем
+      // позиции и реквизиты — дальше та же логика сохранения, что и для УПД,
+      // поэтому данные пишутся проверенным путём.
+      const mimeForVision = isImage ? imageMime! : 'application/pdf';
+      const r = await parseUpdVision(
+        { buffer, mimeType: mimeForVision, filename: s3Key },
+        { sourceDocumentId, promptDocKind: 'm15' },
+      );
+      parsed = r.parsed;
+      llmProviderId = r.llmProviderId;
+      parsedViaVision = true;
+    } else if (isXlsx || isXls) {
       // Excel-пайплайн: единый для .xlsx (OOXML) и .xls (BIFF/OLE2).
       // .xls сначала переводим в OOXML-буфер через SheetJS (in-memory,
       // без диска и LibreOffice). Дальше — общая ветка.
@@ -1192,7 +1207,61 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
         !cls.needsVision &&
         (cls.detectedKind === 'transport_waybill' || cls.detectedKind === 'os2_transfer');
 
-      if (isWaybill) {
+      if (cls.detectedKind === 'm15') {
+        // М-15 (накладная на отпуск материалов). Создаём документ типа
+        // «Накладная» (transport_waybill — новых enum не вводим) и ставим
+        // одиночный job с docKind:'m15' → handleJob распознает его vision'ом по
+        // форме М-15. Изолировано: УПД/ТН/ОС-2 не затрагиваются.
+        const [doc] = await db
+          .insert(sourceDocuments)
+          .values({
+            kind: 'transport_waybill',
+            direction: bundle.direction,
+            origin: 'manual_pdf',
+            status: 'queued',
+            contractorId: bundle.contractorId,
+            recipientMolId: bundle.recipientMolId,
+            siteId: bundle.siteId,
+            expectedDate: bundleExpected,
+            originalFilename: a.filename,
+            queuedAt: new Date(),
+            parsedAt: new Date(),
+            createdByUserId: bundle.createdByUserId,
+          })
+          .returning({ id: sourceDocuments.id });
+        const docId = doc!.id;
+        await db.insert(sourceDocumentAttachments).values({
+          sourceDocumentId: docId,
+          s3Key: a.s3Key,
+          filename: a.filename,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+          role: 'original',
+        });
+        const job = await queue.add('parse', {
+          sourceDocumentId: docId,
+          s3Key: a.s3Key,
+          docKind: 'm15',
+        });
+        if (job.id) {
+          await db
+            .update(sourceDocuments)
+            .set({ jobId: job.id })
+            .where(eq(sourceDocuments.id, docId));
+        }
+        await db.insert(bundleImportItems).values({
+          bundleId,
+          sourceFilename: a.filename,
+          detectedKind: 'm15',
+          confidence: cls.confidence.toString(),
+          parserUsed: 'parseUpdVision',
+          status: 'created',
+          createdDocumentIds: [docId],
+          reason: 'М-15 (отпуск материалов) → распознавание по форме М-15',
+          metadata: { signals: cls.signals, needsVision: cls.needsVision },
+        });
+        createdCount++;
+      } else if (isWaybill) {
         // Разворачиваем в waybill-flow: отдельный под-bundle на этот файл
         // (тот же путь, что «Загрузить накладные»).
         const subHash = createHash('sha256').update(`router:${bundleId}:${a.s3Key}`).digest('hex');
@@ -1297,9 +1366,7 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
               : 'УПД → одиночный парсер'
             : cls.needsVision
               ? 'скан/фото/неясный текст → распознавание через vision'
-              : cls.detectedKind === 'm15'
-                ? 'M-15 → попытка распознавания (нет спец-парсера)'
-                : 'тип неоднозначен → попытка распознавания';
+              : 'тип неоднозначен → попытка распознавания';
         await db.insert(bundleImportItems).values({
           bundleId,
           sourceFilename: a.filename,

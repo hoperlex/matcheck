@@ -11,7 +11,15 @@ import { loadEnv } from '../lib/env.js';
 //    каждый файл и роутим в существующие парсеры (handleDocumentRouterJob).
 //    Дискриминатор — поле mode; у старых job его НЕТ, их ветки не меняются.
 export type UpdParseJobData =
-  | { sourceDocumentId: string; s3Key: string; bundleId?: undefined; mode?: undefined }
+  // docKind:'m15' — одиночный документ распознаётся как накладная М-15
+  // (отдельный vision-промпт, тип «Накладная»); по умолчанию (нет поля) — УПД.
+  | {
+      sourceDocumentId: string;
+      s3Key: string;
+      docKind?: 'm15';
+      bundleId?: undefined;
+      mode?: undefined;
+    }
   | { bundleId: string; mode?: undefined; sourceDocumentId?: undefined; s3Key?: undefined }
   | { bundleId: string; mode: 'router'; sourceDocumentId?: undefined; s3Key?: undefined };
 

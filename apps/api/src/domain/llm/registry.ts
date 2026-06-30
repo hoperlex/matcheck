@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { llmProviders, llmProviderCredentials } from '../../db/schema.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
@@ -32,6 +32,34 @@ export async function loadDefaultProvider(): Promise<LlmProvider> {
     .limit(1);
   if (!row) throw new Error('No default LLM provider configured');
   return buildProviderFromRow(row);
+}
+
+/**
+ * Все ВКЛЮЧЁННЫЕ (is_active) провайдеры, default — первым. Это цепочка для
+ * fallback: основной (default) пытается распознать первым, и если он упал
+ * (пустой ответ модели, упор в max_tokens, ошибка провайдера) — пробуем
+ * следующий включённый провайдер. Документы, которые УЖЕ распознаются default-
+ * моделью, проходят без изменений (она отвечает первой и успешно); резервная
+ * модель срабатывает ТОЛЬКО при сбое основной.
+ *
+ * Провайдеры без ключа / нереализованного kind молча пропускаются, чтобы один
+ * недонастроенный провайдер не ломал цепочку.
+ */
+export async function loadActiveProvidersOrdered(): Promise<LlmProvider[]> {
+  const rows = await db
+    .select()
+    .from(llmProviders)
+    .where(eq(llmProviders.isActive, true))
+    .orderBy(desc(llmProviders.isDefault));
+  const out: LlmProvider[] = [];
+  for (const row of rows) {
+    try {
+      out.push(await buildProviderFromRow(row));
+    } catch {
+      // нет ключа / kind не реализован — пропускаем, не ломаем цепочку
+    }
+  }
+  return out;
 }
 
 export async function buildProviderFromRow(

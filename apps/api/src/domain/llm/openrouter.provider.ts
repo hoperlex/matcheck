@@ -49,11 +49,24 @@ export class OpenRouterProvider implements LlmProvider {
       throw new Error(`OpenRouter HTTP ${res.status}: ${text.slice(0, 500)}`);
     }
     const json = (await res.json()) as {
-      choices: { message: { content: string } }[];
+      choices?: { message?: { content?: string }; finish_reason?: string }[];
       usage?: { prompt_tokens: number; completion_tokens: number };
     };
-    const raw = json.choices[0]?.message?.content ?? '';
-    if (!raw) throw new Error('OpenRouter: empty completion content');
+    // ВАЖНО: `?.` ставим ПЕРЕД [0]. Иначе при ответе без `choices` (пустой
+    // ответ модели, ошибка провайдера, reasoning-модель исчерпала max_tokens
+    // на «мысли» и не выдала контент) `json.choices[0]` падал с
+    // «Cannot read properties of undefined (reading '0')» → весь документ
+    // уходил в internal_error вместо понятной ошибки/ретрая.
+    const choice = json.choices?.[0];
+    const raw = choice?.message?.content ?? '';
+    if (!raw) {
+      const finish = choice?.finish_reason;
+      throw new Error(
+        `OpenRouter: пустой ответ модели${finish ? ` (finish_reason=${finish})` : ''} — ` +
+          `модель не вернула контент (вероятно, reasoning-модель исчерпала ` +
+          `max_tokens=${body.max_tokens} на размышления; смените модель или поднимите лимит)`,
+      );
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -93,8 +106,8 @@ export class OpenRouterProvider implements LlmProvider {
       });
       if (!res.ok)
         return { ok: false, error: `HTTP ${res.status}: ${(await res.text()).slice(0, 200)}` };
-      const j = (await res.json()) as { choices: { message: { content: string } }[] };
-      return { ok: true, output: j.choices[0]?.message?.content ?? '' };
+      const j = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+      return { ok: true, output: j.choices?.[0]?.message?.content ?? '' };
     } catch (err: unknown) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }

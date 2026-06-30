@@ -1,6 +1,6 @@
 import { PDFParse } from 'pdf-parse';
 import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
-import { loadDefaultProvider } from '../llm/registry.js';
+import { loadActiveProvidersOrdered } from '../llm/registry.js';
 import { loadActivePromptWithMeta } from '../prompts/registry.js';
 import { loggedComplete } from '../llm/logged-complete.js';
 
@@ -248,28 +248,44 @@ export async function extractUpdFromText(
   cleanText: string,
   ctx: { sourceDocumentId: string | null } = { sourceDocumentId: null },
 ): Promise<{ parsed: UpdPdfParsed; llmProviderId: string | null }> {
-  const [provider, prompt] = await Promise.all([
-    loadDefaultProvider(),
+  const [providers, prompt] = await Promise.all([
+    loadActiveProvidersOrdered(),
     loadActivePromptWithMeta('upd'),
   ]);
-  const result = await loggedComplete(
-    provider,
-    {
-      messages: [
-        { role: 'system', content: prompt.content },
-        { role: 'user', content: cleanText.slice(0, 100_000) },
-      ],
-      jsonSchema: RESPONSE_JSON_SCHEMA,
-    },
-    UpdPdfParsedSchema,
-    {
-      sourceDocumentId: ctx.sourceDocumentId,
-      docKind: 'upd',
-      promptId: prompt.id,
-    },
-  );
-  return {
-    parsed: result.data as UpdPdfParsed,
-    llmProviderId: provider.id,
-  };
+  if (providers.length === 0) {
+    throw new Error('Нет активных LLM-провайдеров для распознавания УПД');
+  }
+  // Fallback-цепочка: default-провайдер первым, при его сбое (пустой ответ /
+  // упор в max_tokens / ошибка) — следующий включённый. Каждую попытку логирует
+  // loggedComplete (запись в llm_calls с errorCode), поэтому в журнале видно,
+  // какая модель и почему упала. Успешная первая попытка = прежнее поведение.
+  let lastErr: unknown = null;
+  for (const provider of providers) {
+    try {
+      const result = await loggedComplete(
+        provider,
+        {
+          messages: [
+            { role: 'system', content: prompt.content },
+            { role: 'user', content: cleanText.slice(0, 100_000) },
+          ],
+          jsonSchema: RESPONSE_JSON_SCHEMA,
+        },
+        UpdPdfParsedSchema,
+        {
+          sourceDocumentId: ctx.sourceDocumentId,
+          docKind: 'upd',
+          promptId: prompt.id,
+        },
+      );
+      return {
+        parsed: result.data as UpdPdfParsed,
+        llmProviderId: provider.id,
+      };
+    } catch (err) {
+      lastErr = err;
+      // пробуем следующий включённый провайдер (резервная модель)
+    }
+  }
+  throw lastErr ?? new Error('Все LLM-провайдеры не смогли распознать УПД');
 }

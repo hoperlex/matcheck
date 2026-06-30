@@ -31,6 +31,15 @@ const IMAGE_RE = /\.(jpe?g|png|webp|heic|heif)$/i;
 const EXCEL_RE = /\.(xlsx|xls)$/i;
 const PDF_RE = /\.pdf$/i;
 const MIN_TEXT = 200;
+// Имя файла как офлайн-сигнал М-15 (накладная на отпуск материалов): когда у
+// фото/скана нет текстового слоя или он «битый» (шрифты 1С), тип по содержимому
+// не определить. Маркеры в имени: «М-15», «накладная на отпуск», «отпуск
+// материалов». Используется в fallback-ветках (image/scan/parse_error/ambiguous).
+const M15_NAME_RE = /м-?15|m-?15|накладная на отпуск|отпуск\s+материал/i;
+function m15ByName(signals: string[]): FileClassification {
+  // needsVision=true: М-15 всегда распознаём через vision (своим m15-промптом).
+  return { detectedKind: 'm15', confidence: 0, needsVision: true, parserUsed: 'none', signals };
+}
 
 async function extractPdfText(
   buffer: Buffer,
@@ -75,6 +84,7 @@ export async function classifyFile(
 
   // ── Изображения: текстового слоя нет → vision (Этап 4) ──
   if (IMAGE_RE.test(lower) || /^image\//.test(m)) {
+    if (M15_NAME_RE.test(lower)) return m15ByName(['image', 'name:m15']);
     return {
       detectedKind: 'unknown',
       confidence: 0,
@@ -94,6 +104,7 @@ export async function classifyFile(
       // pdf-parse падает на битых/защищённых/нестандартных PDF. Это НЕ повод
       // ронять весь router-job (иначе пакет уйдёт в retry с backoff 60с и
       // «зависнет» на одном файле). Деградируем в vision-доклассификацию.
+      if (M15_NAME_RE.test(lower)) return m15ByName(['pdf:parse_error', 'name:m15']);
       return {
         detectedKind: 'unknown',
         confidence: 0,
@@ -104,6 +115,7 @@ export async function classifyFile(
     }
     if (full.length < MIN_TEXT) {
       // скан без текста — vision
+      if (M15_NAME_RE.test(lower)) return m15ByName(['pdf:scan', 'name:m15', `textLen:${full.length}`]);
       return {
         detectedKind: 'unknown',
         confidence: 0,
@@ -127,7 +139,9 @@ export async function classifyFile(
         updInvoiceCount: uniq,
       };
     }
-    // М-15 — нет надёжного парсера → честно помечаем, в worker уйдёт в review.
+    // М-15 (накладная на отпуск материалов) — роутер направит в отдельную
+    // ветку и распознает своим vision-промптом m15 (надёжнее текстового парса:
+    // у М-15-PDF из 1С текстовый слой часто «битый»).
     if (/типовая\s+межотраслевая\s+форма\s+№?\s*м-?15|на отпуск материалов на сторону/i.test(full)) {
       return {
         detectedKind: 'm15',
@@ -155,7 +169,10 @@ export async function classifyFile(
         signals: ['text:tn'],
       };
     }
-    // текст есть, но тип неясен — пусть vision доклассифицирует (Этап 4)
+    // текст есть, но тип неясен. М-15 с «битым» текстовым слоем (нечитаемые
+    // глифы 1С) сюда и попадает — ловим по имени файла.
+    if (M15_NAME_RE.test(lower)) return m15ByName(['text:ambiguous', 'name:m15']);
+    // иначе — пусть vision доклассифицирует (Этап 4)
     return {
       detectedKind: 'unknown',
       confidence: 0.3,
