@@ -1147,6 +1147,13 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
         ? new Date(bundle.expectedDate)
         : null;
 
+  // Идемпотентность журнала: при повторной обработке этого bundle (BullMQ
+  // retry или повторная загрузка того же набора файлов — bundleHash совпадает)
+  // старые записи bundle_import_items надо убрать, иначе они НАКАПЛИВАЮТСЯ и
+  // import-result показывает дубли (1 файл → 2-3-4 строки, в т.ч. с reason от
+  // прежних версий кода). Чистим перед заполнением.
+  await db.delete(bundleImportItems).where(eq(bundleImportItems.bundleId, bundleId));
+
   let createdCount = 0;
   let failedCount = 0;
 

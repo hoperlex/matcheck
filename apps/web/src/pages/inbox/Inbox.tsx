@@ -523,7 +523,13 @@ export default function InboxPage() {
   ];
 
   return (
-    <div>
+    // Fragment, а не обёрточный <div>: StickyPageHeader должен быть прямым
+    // потомком Content (как на странице «Операции»). Лишний <div> вокруг
+    // sticky-шапки ломал компенсацию верхнего отступа Content (marginTop:-12
+    // в StickyPageHeader) → страница вырастала выше Content и появлялся ВТОРОЙ
+    // (внешний) скролл поверх внутреннего скролла таблицы. Модалки ниже —
+    // antd-порталы в body, на раскладку не влияют.
+    <>
       <StickyPageHeader
         header={
           <>
@@ -796,6 +802,6 @@ export default function InboxPage() {
         open={!!resolveId}
         onClose={() => setResolveId(null)}
       />
-    </div>
+    </>
   );
 }
