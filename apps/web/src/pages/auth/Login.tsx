@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { Card, Form, Input, Button, Typography, Alert, Space } from 'antd';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import type { LoginResponse } from '@matcheck/contracts';
-import { api, ApiError } from '../../services/api';
+import { api } from '../../services/api';
+import { localizeApiError } from '../../services/errorMessages';
 import { useAuthStore } from '../../stores/auth';
 
 type LocationState = { from?: { pathname: string } };
@@ -11,6 +12,7 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const setAuth = useAuthStore((s) => s.setAuth);
+  const sessionExpired = useAuthStore((s) => s.sessionExpired);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -23,11 +25,7 @@ export default function LoginPage() {
       const from = (location.state as LocationState | null)?.from?.pathname ?? '/';
       navigate(from, { replace: true });
     } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message);
-      } else {
-        setError('Ошибка входа');
-      }
+      setError(localizeApiError(err, 'Ошибка входа'));
     } finally {
       setSubmitting(false);
     }
@@ -51,7 +49,11 @@ export default function LoginPage() {
             </Typography.Title>
             <Typography.Text type="secondary">Приёмка материалов</Typography.Text>
           </div>
-          {error && <Alert type="error" message={error} showIcon />}
+          {error ? (
+            <Alert type="error" message={error} showIcon />
+          ) : sessionExpired ? (
+            <Alert type="warning" message="Сессия истекла — войдите снова" showIcon />
+          ) : null}
           <Form layout="vertical" onFinish={onFinish} disabled={submitting} size="large">
             <Form.Item
               name="email"

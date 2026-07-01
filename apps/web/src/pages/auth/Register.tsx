@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Card, Form, Input, Button, Typography, Alert, Space } from 'antd';
 import { Link, useNavigate } from 'react-router-dom';
-import { api, ApiError } from '../../services/api';
+import { api } from '../../services/api';
+import { localizeApiError } from '../../services/errorMessages';
 
 export default function RegisterPage() {
   const navigate = useNavigate();
@@ -22,8 +23,7 @@ export default function RegisterPage() {
       });
       setSuccess(true);
     } catch (err) {
-      if (err instanceof ApiError) setError(err.message);
-      else setError('Ошибка регистрации');
+      setError(localizeApiError(err, 'Ошибка регистрации'));
     } finally {
       setSubmitting(false);
     }
