@@ -43,6 +43,7 @@ import {
 } from '../../services/shipments';
 import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { StatusIconsCell, StatusLegend } from '../../shared/ui/operationStatusIcon';
 import { operationsRowClass } from '../../shared/utils/operationsRowHighlight';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
@@ -707,18 +708,37 @@ export function ShipmentsHistory({
   };
 
   const renderStatusCell = (r: Row) => (
-    <Space size={4} wrap>
-      <Tag color={r.status.color ?? 'default'}>{r.status.label}</Tag>
-      {r.sourceDocumentIds.length === 0 && <Tag color="gold">Без документа</Tag>}
-      {isTrash && (
-        <PendingDeletionTag
-          at={r.pendingDeletionAt}
-          byEmail={r.pendingDeletionByUserEmail}
-          reason={r.pendingDeletionReason}
-        />
-      )}
-    </Space>
+    <StatusIconsCell
+      code={r.status.code}
+      label={r.status.label}
+      color={r.status.color}
+      noDocument={r.sourceDocumentIds.length === 0}
+      extra={
+        isTrash ? (
+          <PendingDeletionTag
+            at={r.pendingDeletionAt}
+            byEmail={r.pendingDeletionByUserEmail}
+            reason={r.pendingDeletionReason}
+          />
+        ) : undefined
+      }
+    />
   );
+
+  // Легенда значков статуса — из реальных статусов данных (см. Deliveries).
+  const legendStatuses = useMemo(() => {
+    const seen = new Map<string, { code: string; label: string; color: string | null }>();
+    for (const r of items) {
+      if (!seen.has(r.status.code)) {
+        seen.set(r.status.code, {
+          code: r.status.code,
+          label: r.status.label,
+          color: r.status.color,
+        });
+      }
+    }
+    return Array.from(seen.values());
+  }, [items]);
 
   return (
     <>
@@ -832,6 +852,7 @@ export function ShipmentsHistory({
               </div>
             ) : null;
           })()}
+          <StatusLegend statuses={legendStatuses} />
         </Space>
       }
     >
