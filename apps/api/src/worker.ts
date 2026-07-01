@@ -78,6 +78,7 @@ import { publishSseEvent } from './domain/sse/redis-bridge.js';
 import { sourceDocumentAttachments, bundleImportItems } from './db/schema.js';
 import { createHash } from 'node:crypto';
 import { classifyFile } from './domain/edo/document-router.js';
+import { classifyImageKind } from './domain/edo/vision-classifier.js';
 import type { UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
 
 // Хелпер: уведомляем подключённых SSE-клиентов о смене статуса УПД через
@@ -1194,18 +1195,35 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
         continue;
       }
 
-      const cls = await classifyFile(buffer, a.mimeType ?? '', a.filename);
+      let cls = await classifyFile(buffer, a.mimeType ?? '', a.filename);
 
-      // Уверенная накладная (по тексту, без vision) → waybill-парсер.
+      // Vision-доклассификация типа: если детерминированно тип не определён
+      // (фото/скан/битый PDF без маркера в имени → detectedKind='unknown',
+      // needsVision) — спрашиваем модель, что это за документ по изображению.
+      // Так фото М-15/накладной не уходит по умолчанию в УПД (кейс «Су-10
+      // Алюспэйс»). Лёгкий запрос (1 картинка, ≤200 токенов). При неуверенности
+      // (< 0.6) / ошибке classifyImageKind вернёт null или unknown → cls не
+      // меняется, файл идёт прежним путём (УПД-vision) — уже работающие сканы
+      // УПД не затрагиваются.
+      if (cls.detectedKind === 'unknown' && cls.needsVision) {
+        const vc = await classifyImageKind(buffer, a.mimeType ?? '', { sourceDocumentId: null });
+        if (vc && vc.confidence >= 0.6 && vc.kind !== 'unknown') {
+          cls = {
+            ...cls,
+            detectedKind: vc.kind,
+            signals: [...cls.signals, `vision-kind:${vc.kind}:${vc.confidence.toFixed(2)}`],
+          };
+        }
+      }
+
+      // Накладная (по тексту ИЛИ по vision-доклассификации) → waybill-парсер.
       // ВСЁ ОСТАЛЬНОЕ — в УПД-flow (ветка else): УПД-парсер сам покрывает
       // Excel (parseUpdXlsx), текстовый PDF (parseUpdPdf) и скан/фото/битый
-      // текстовый слой (parseUpdVision, Gemini Vision). Благодаря этому сканы,
-      // фото и PDF с «битыми» глифами 1С НЕ теряются, а распознаются. Главное —
-      // на КАЖДЫЙ файл создаётся видимая строка (12 загрузил → 12 строк), и
-      // ничего не «пропадает».
+      // текстовый слой (parseUpdVision). Благодаря этому сканы, фото и PDF с
+      // «битыми» глифами 1С НЕ теряются, а распознаются. Главное — на КАЖДЫЙ
+      // файл создаётся видимая строка (12 загрузил → 12 строк).
       const isWaybill =
-        !cls.needsVision &&
-        (cls.detectedKind === 'transport_waybill' || cls.detectedKind === 'os2_transfer');
+        cls.detectedKind === 'transport_waybill' || cls.detectedKind === 'os2_transfer';
 
       if (cls.detectedKind === 'm15') {
         // М-15 (накладная на отпуск материалов). Создаём документ типа

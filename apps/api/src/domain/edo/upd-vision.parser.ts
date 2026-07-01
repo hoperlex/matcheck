@@ -628,7 +628,7 @@ export async function parseUpdVision(
   throw lastErr ?? new Error('УПД vision: не удалось распознать');
 }
 
-type GeminiCallArgs = {
+export type GeminiCallArgs = {
   apiBaseUrl: string;
   apiKey: string;
   model: string;
@@ -657,7 +657,7 @@ export type VisionCallResult = {
   completionTokens: number | null;
 };
 
-async function callGemini(args: GeminiCallArgs): Promise<VisionCallResult> {
+export async function callGemini(args: GeminiCallArgs): Promise<VisionCallResult> {
   const parts: Array<{ inline_data: { mime_type: string; data: string } } | { text: string }> = [
     {
       inline_data: {
