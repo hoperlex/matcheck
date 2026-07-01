@@ -30,7 +30,10 @@ import { useRegisterSW } from 'virtual:pwa-register/react';
  * делает controllerchange и одну перезагрузку. Дополнительный SW в этой
  * сессии не появится до следующего deploy.
  */
-const UPDATE_POLL_MS = 60 * 60 * 1000;
+// Раз в минуту: после деплоя открытая вкладка должна узнать о новой версии
+// быстро (баннер «Обновить» появляется в течение ~минуты), а не через час.
+// Стоимость — один лёгкий HEAD-запрос sw.js в минуту на вкладку.
+const UPDATE_POLL_MS = 60 * 1000;
 
 export function useUpdatePrompt(): {
   needRefresh: boolean;
@@ -51,8 +54,9 @@ export function useUpdatePrompt(): {
       //
       // Без этого пользователь, не закрывающий вкладку, видит баннер
       // только при следующем спонтанном reload SW'а (после navigate).
-      // Час — компромисс: реже значит «деплой час невидим», чаще —
-      // лишний трафик.
+      // Немедленная первая проверка + минутный интервал: свежий деплой
+      // становится виден почти сразу, а не через час.
+      void registration.update();
       setInterval(() => {
         void registration.update();
       }, UPDATE_POLL_MS);
