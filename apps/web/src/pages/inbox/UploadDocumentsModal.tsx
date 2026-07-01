@@ -202,7 +202,13 @@ export function UploadDocumentsModal({
           </Space>
         )
       }
-      width={720}
+      width="min(720px, 92vw)"
+      centered
+      // Ограничиваем высоту модалки под ~85vh: тело (форма + список файлов)
+      // скроллится ВНУТРИ, а footer с кнопкой «Загрузить N файлов» вынесен из
+      // тела и остаётся виден всегда — не нужно скроллить страницу к кнопке,
+      // даже когда добавлено много файлов.
+      styles={{ body: { maxHeight: '72vh', overflowY: 'auto' } }}
     >
       {inResult ? (
         <ImportResultPanel inProgress={inProgress} result={result} />
