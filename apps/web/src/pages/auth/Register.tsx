@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { Card, Form, Input, Button, Typography, Alert, Space } from 'antd';
+import { Form, Input, Button, Typography, Alert, Space } from 'antd';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../../services/api';
 import { localizeApiError } from '../../services/errorMessages';
+import { AuthLayout } from './AuthLayout';
 
 export default function RegisterPage() {
   const navigate = useNavigate();
@@ -30,20 +31,8 @@ export default function RegisterPage() {
   };
 
   return (
-    <div
-      style={{
-        minHeight: '100dvh',
-        display: 'grid',
-        placeItems: 'center',
-        background: '#f5f5f5',
-        padding: 16,
-      }}
-    >
-      <Card style={{ width: '100%', maxWidth: 420 }}>
-        <Space direction="vertical" style={{ width: '100%' }} size="middle">
-          <Typography.Title level={3} style={{ margin: 0 }}>
-            Регистрация
-          </Typography.Title>
+    <AuthLayout title="Регистрация" subtitle="Создайте аккаунт для доступа к порталу">
+      <Space direction="vertical" style={{ width: '100%' }} size="middle">
           {error && <Alert type="error" message={error} showIcon />}
           {success ? (
             <Space direction="vertical">
@@ -89,11 +78,10 @@ export default function RegisterPage() {
               </Button>
             </Form>
           )}
-          <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-            Уже есть аккаунт? <Link to="/login">Войти</Link>
-          </Typography.Text>
-        </Space>
-      </Card>
-    </div>
+        <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+          Уже есть аккаунт? <Link to="/login">Войти</Link>
+        </Typography.Text>
+      </Space>
+    </AuthLayout>
   );
 }
