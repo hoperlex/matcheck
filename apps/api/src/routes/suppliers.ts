@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { eq, ilike, inArray, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
+import { escapeLike } from '../lib/like.js';
 import {
   BulkDeleteRequestSchema,
   BulkDeleteResponseSchema,
@@ -46,11 +47,12 @@ export async function supplierRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const { q, limit, offset } = req.query;
+      const like = q ? escapeLike(q) : '';
       const where = q
         ? or(
-            ilike(suppliers.name, `%${q}%`),
-            ilike(suppliers.inn, `${q}%`),
-            drSql`exists (select 1 from unnest(${suppliers.aliases}) as a(v) where a.v ilike ${'%' + q + '%'})`,
+            ilike(suppliers.name, `%${like}%`),
+            ilike(suppliers.inn, `${like}%`),
+            drSql`exists (select 1 from unnest(${suppliers.aliases}) as a(v) where a.v ilike ${'%' + like + '%'})`,
           )
         : undefined;
       const rows = await app.db

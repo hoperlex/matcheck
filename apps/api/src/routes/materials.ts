@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, ilike, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
+import { escapeLike } from '../lib/like.js';
 import { publishEvent } from './events.js';
 import {
   MaterialJournalResponseSchema,
@@ -64,10 +65,11 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
       const filledStatusId = await resolveStatusId(app, 'delivery', 'filled');
       const conditions = [eq(deliveries.statusId, filledStatusId)];
       if (q) {
+        const like = escapeLike(q);
         conditions.push(
           or(
-            ilike(deliveryItems.nameRaw, `%${q}%`),
-            ilike(materials.name, `%${q}%`),
+            ilike(deliveryItems.nameRaw, `%${like}%`),
+            ilike(materials.name, `%${like}%`),
           )!,
         );
       }
@@ -159,8 +161,9 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req) => {
       const { q, limit, offset } = req.query;
+      const like = q ? escapeLike(q) : '';
       const where = q
-        ? or(ilike(materials.name, `%${q}%`), ilike(materials.code, `${q}%`))
+        ? or(ilike(materials.name, `%${like}%`), ilike(materials.code, `${like}%`))
         : undefined;
       const rows = await app.db
         .select()

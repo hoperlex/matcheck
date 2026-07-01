@@ -283,7 +283,7 @@ function Bubble({ m }: { m: ShareMessage }) {
         </div>
         {!isManager && m.senderEmail && (
           <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>
-            <a href={`mailto:${m.senderEmail}`}>{m.senderEmail}</a>
+            <a href={`mailto:${encodeURIComponent(m.senderEmail)}`}>{m.senderEmail}</a>
           </div>
         )}
       </div>

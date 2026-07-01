@@ -268,6 +268,10 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/share/:token',
     {
+      // Публичный GET по знанию токена — открытие страницы = 1 запрос. Щедрый
+      // per-IP лимит бережёт от массового скрейпинга при утёкшей ссылке
+      // (fail-open при недоступном Redis). Брутфорс токена нереален (128 бит).
+      config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
       schema: {
         params: z.object({ token: z.string().min(20).max(64) }),
         response: { 200: PublicSharedEntitySchema, 404: ErrorResponseSchema, 410: ErrorResponseSchema },
@@ -464,6 +468,11 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/share/:token/photos/:photoId',
     {
+      // Щедрый per-IP лимит: галерея из 30-50 фото грузится параллельно при
+      // открытии страницы (PublicSharePage → Image.PreviewGroup, src = полный
+      // размер). 300/мин даёт запас на несколько открытий/зрителей за одним
+      // NAT; браузер кэширует полноразмер, поэтому превью не «душится».
+      config: { rateLimit: { max: 300, timeWindow: '1 minute' } },
       schema: {
         params: z.object({
           token: z.string().min(20).max(64),
@@ -544,6 +553,9 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/share/:token/photos/:photoId/thumb',
     {
+      // Тот же щедрый лимит, что и на основном фото-роуте (этот путь — лишь
+      // fallback-делегат на него через app.inject).
+      config: { rateLimit: { max: 300, timeWindow: '1 minute' } },
       schema: {
         params: z.object({
           token: z.string().min(20).max(64),
@@ -572,6 +584,9 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/share/:token/messages',
     {
+      // Polling каждые 2 сек = ~30 запросов/мин на вкладку; 120/мин — запас на
+      // 3-4 вкладки/зрителей за одним NAT (per-IP, fail-open при Redis down).
+      config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
       schema: {
         params: z.object({ token: z.string().min(20).max(64) }),
         response: {

@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { and, eq, ilike, inArray, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
+import { escapeLike } from '../lib/like.js';
 import { publishEvent } from './events.js';
 import {
   BulkDeleteRequestSchema,
@@ -68,11 +69,13 @@ export async function counterpartyRoutes(rawApp: FastifyInstance): Promise<void>
       if (q) {
         // Поиск по name / inn / aliases. aliases — массив текстов; используем
         // EXISTS с UNNEST + ILIKE, чтобы matching работал по любому из алиасов.
+        // escapeLike — чтобы `%`/`_` из ввода искались буквально, а не как wildcard.
+        const like = escapeLike(q);
         filters.push(
           or(
-            ilike(counterparties.name, `%${q}%`),
-            ilike(counterparties.inn, `${q}%`),
-            drSql`exists (select 1 from unnest(${counterparties.aliases}) as a(v) where a.v ilike ${'%' + q + '%'})`,
+            ilike(counterparties.name, `%${like}%`),
+            ilike(counterparties.inn, `${like}%`),
+            drSql`exists (select 1 from unnest(${counterparties.aliases}) as a(v) where a.v ilike ${'%' + like + '%'})`,
           ),
         );
       }

@@ -134,6 +134,7 @@ export default fp(async (app) => {
       if (!roles.includes(req.user.role)) {
         await logUnauthorized(req, 403, `role_required:${roles.join('|')}`, req.user.id);
         reply.code(403).send({ error: 'forbidden', message: 'Insufficient role' });
+        return;
       }
     };
   });
