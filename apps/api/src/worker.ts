@@ -885,7 +885,9 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         sourceDocumentId,
         materialId: await findOrCreateMaterial(it.nameRaw, it.unit),
         nameRaw: it.nameRaw,
-        qty: it.qty.toString(),
+        // qty может быть null для строк-услуг (доставка без количества) —
+        // в БД пишем '0' (колонка NOT NULL), как в waybill-пути.
+        qty: it.qty != null ? it.qty.toString() : '0',
         unit: it.unit,
         price: it.price != null ? it.price.toString() : null,
         sum: it.sum != null ? it.sum.toString() : null,
