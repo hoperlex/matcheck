@@ -132,15 +132,20 @@ const RESPONSE_JSON_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['nameRaw', 'qty', 'unit'],
+        required: ['nameRaw'],
         properties: {
           nameRaw: { type: 'string' },
+          // qty/unit допускают null: строки-услуги (доставка и т.п.) идут без
+          // количества и единицы (прочерки в графах 3/2а формы УПД).
           qty: {
-            type: 'number',
+            type: ['number', 'null'],
             description:
-              'Количество (колонка 6 формы УПД). НЕ путать с кодом товара или кодом ОКЕИ (796/006/166 и т.п.).',
+              'Количество (колонка 6 формы УПД). НЕ путать с кодом товара или кодом ОКЕИ (796/006/166 и т.п.). null для строк-услуг без количества.',
           },
-          unit: { type: 'string', description: 'Единица измерения текстом' },
+          unit: {
+            type: ['string', 'null'],
+            description: 'Единица измерения текстом. null для строк-услуг без единицы.',
+          },
           price: {
             type: ['number', 'null'],
             description:

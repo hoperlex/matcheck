@@ -340,8 +340,22 @@ export const UpdPdfItemSchema = z.preprocess(
   },
   z.object({
     nameRaw: z.string().min(1),
-    qty: z.number(),
-    unit: z.string().default('шт'),
+    // qty/unit допускают null: строки-услуги УПД (доставка, погрузка) идут
+    // без количества и единицы (в графах 3/2а формы прочерки «--»), и модель
+    // честно возвращает null. Нормализуем в 0/'шт' — как уже делают XML-парсер
+    // (upd.parser.ts: `?? 0`, `?? 'шт'`) и waybill-путь воркера. Выходной тип
+    // остаётся number/string, поэтому downstream (воркер, БД, web/mobile) не
+    // меняется. `.default('шт')` не ловил null (только undefined) — отсюда баг.
+    qty: z
+      .number()
+      .nullable()
+      .optional()
+      .transform((v) => v ?? 0),
+    unit: z
+      .string()
+      .nullable()
+      .optional()
+      .transform((v) => (v && v.trim() ? v : 'шт')),
     // price — цена за единицу БЕЗ НДС (графа 4 формы УПД «Цена/тариф
     // за единицу»). Берётся как есть, не как sum/qty. См. промпт v7
     // (миграция 0061).

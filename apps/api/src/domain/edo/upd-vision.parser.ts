@@ -315,11 +315,13 @@ const RESPONSE_JSON_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['nameRaw', 'qty', 'unit'],
+        required: ['nameRaw'],
         properties: {
           nameRaw: { type: 'string' },
-          qty: { type: 'number' },
-          unit: { type: 'string' },
+          // qty/unit допускают null: строки-услуги (доставка и т.п.) идут без
+          // количества и единицы (прочерки в графах 3/2а формы УПД).
+          qty: { type: ['number', 'null'] },
+          unit: { type: ['string', 'null'] },
           price: { type: ['number', 'null'] },
           sum: { type: ['number', 'null'] },
           vatRate: { type: ['number', 'null'] },
