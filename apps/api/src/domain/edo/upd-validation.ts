@@ -197,7 +197,13 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
     const price = it.price ?? null;
     const sum = it.sum ?? null;
     const vatRate = it.vatRate ?? null;
-    if (qty == null || price == null || sum == null) {
+    // qty отсутствует (null) ИЛИ равен 0 — строка без количества (услуга:
+    // доставка, погрузка; в графе 3 формы УПД прочерк). Сверка qty × price
+    // для неё бессмысленна: 0 × price = 0 никогда не сойдётся с ненулевой
+    // базой из графы 5/9 → давало ложный «Расхождения в суммах». Товарные
+    // строки всегда имеют qty > 0, поэтому реальные ошибки не маскируются;
+    // общий итог по документу проверяют sum_total/vat_total.
+    if (qty == null || qty === 0 || price == null || sum == null) {
       checks.push({
         name: 'row_qty_price',
         scope: { row },
