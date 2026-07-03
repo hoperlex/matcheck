@@ -1,5 +1,6 @@
 import type { UploadDocumentsResponse, ImportResult } from '@matcheck/contracts';
 import { useAuthStore } from '../stores/auth';
+import { refreshAccessToken } from './authRefresh';
 
 export class ApiError extends Error {
   constructor(
@@ -22,27 +23,6 @@ export class ConflictError extends ApiError {
 }
 
 const BASE = '/api/v1';
-
-let refreshInFlight: Promise<string | null> | null = null;
-
-async function doRefresh(): Promise<string | null> {
-  if (!refreshInFlight) {
-    refreshInFlight = fetch(`${BASE}/auth/refresh`, {
-      method: 'POST',
-      credentials: 'include',
-    })
-      .then(async (r) => {
-        if (!r.ok) return null;
-        const j = (await r.json()) as { accessToken: string };
-        return j.accessToken;
-      })
-      .catch(() => null)
-      .finally(() => {
-        refreshInFlight = null;
-      });
-  }
-  return refreshInFlight;
-}
 
 async function request<T>(
   path: string,
@@ -70,12 +50,15 @@ async function request<T>(
     path !== '/auth/refresh';
 
   if (canRefresh) {
-    const newToken = await doRefresh();
-    if (newToken) {
-      useAuthStore.getState().setAccessToken(newToken);
+    const r = await refreshAccessToken();
+    if (r.ok) {
+      useAuthStore.getState().setAccessToken(r.accessToken);
       return request<T>(path, { ...init, retried: true });
     }
-    useAuthStore.getState().expireSession();
+    // Разлогиниваем только если сервер явно сказал «сессия мертва» (401 от
+    // /auth/refresh). Транзиент (сеть/429/5xx) сессию не убивает — пробрасываем
+    // 401, следующий sync/refetch повторит запрос, когда refresh снова пройдёт.
+    if (r.sessionDead) useAuthStore.getState().expireSession();
     throw new ApiError(401, 'unauthorized', 'Session expired');
   }
 
@@ -157,17 +140,17 @@ export async function apiDownload(
   });
 
   if (res.status === 401) {
-    const newToken = await doRefresh();
-    if (newToken) {
-      useAuthStore.getState().setAccessToken(newToken);
+    const r = await refreshAccessToken();
+    if (r.ok) {
+      useAuthStore.getState().setAccessToken(r.accessToken);
       const retryHeaders = new Headers();
-      retryHeaders.set('Authorization', `Bearer ${newToken}`);
+      retryHeaders.set('Authorization', `Bearer ${r.accessToken}`);
       res = await fetch(`${BASE}${path}`, {
         headers: retryHeaders,
         credentials: 'include',
       });
     } else {
-      useAuthStore.getState().expireSession();
+      if (r.sessionDead) useAuthStore.getState().expireSession();
       throw new ApiError(401, 'unauthorized', 'Session expired');
     }
   }

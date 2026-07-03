@@ -1,12 +1,18 @@
 import { useAuthStore } from '../stores/auth';
+import { refreshAccessToken } from './authRefresh';
 
 // Обновляем access JWT за 60с до истечения. Это убирает 401 на интервал-driven
 // запросах (sync, focus-refetch react-query): к моменту истечения у клиента
 // уже лежит свежий токен. Реактивный refresh в api.ts остаётся как safety net.
 const SKEW_MS = 60_000;
 
+// Транзиентная осечка refresh (сеть моргнула, 429, 5xx) НЕ должна разлогинивать —
+// refresh-cookie ещё валидна. Вместо expireSession планируем короткий ретрай с
+// backoff; если и он не помог — тихо сдаёмся, реактивный 401 в api.ts подхватит.
+const RETRY_DELAYS_MS = [15_000, 30_000, 60_000];
+
 let timer: number | null = null;
-let inFlight: Promise<string | null> | null = null;
+let retryCount = 0;
 
 function parseExpMs(token: string): number | null {
   try {
@@ -21,23 +27,29 @@ function parseExpMs(token: string): number | null {
   }
 }
 
-async function refreshNow(): Promise<string | null> {
-  if (!inFlight) {
-    inFlight = fetch('/api/v1/auth/refresh', {
-      method: 'POST',
-      credentials: 'include',
-    })
-      .then(async (r) => {
-        if (!r.ok) return null;
-        const j = (await r.json()) as { accessToken: string };
-        return j.accessToken;
-      })
-      .catch(() => null)
-      .finally(() => {
-        inFlight = null;
-      });
+async function attemptRefresh(): Promise<void> {
+  timer = null;
+  const r = await refreshAccessToken();
+  if (r.ok) {
+    retryCount = 0;
+    // setAccessToken → подписка ниже перепланирует на новый exp.
+    useAuthStore.getState().setAccessToken(r.accessToken);
+    return;
   }
-  return inFlight;
+  if (r.sessionDead) {
+    // Сервер явно сказал «сессия мертва» (401 от /auth/refresh) — только тут выходим.
+    retryCount = 0;
+    useAuthStore.getState().expireSession();
+    return;
+  }
+  // Транзиент: сессию не трогаем, планируем ретрай.
+  if (retryCount < RETRY_DELAYS_MS.length) {
+    const delay = RETRY_DELAYS_MS[retryCount] ?? 60_000;
+    retryCount += 1;
+    timer = window.setTimeout(() => void attemptRefresh(), delay);
+  } else {
+    retryCount = 0;
+  }
 }
 
 export function schedulePreemptiveRefresh(): void {
@@ -47,16 +59,7 @@ export function schedulePreemptiveRefresh(): void {
   const expMs = parseExpMs(token);
   if (!expMs) return;
   const delay = Math.max(0, expMs - Date.now() - SKEW_MS);
-  timer = window.setTimeout(async () => {
-    timer = null;
-    const fresh = await refreshNow();
-    if (fresh) {
-      // setAccessToken → подписка ниже перепланирует на новый exp.
-      useAuthStore.getState().setAccessToken(fresh);
-    } else {
-      useAuthStore.getState().expireSession();
-    }
-  }, delay);
+  timer = window.setTimeout(() => void attemptRefresh(), delay);
 }
 
 export function cancelPreemptiveRefresh(): void {
@@ -64,6 +67,7 @@ export function cancelPreemptiveRefresh(): void {
     clearTimeout(timer);
     timer = null;
   }
+  retryCount = 0;
 }
 
 // Авто-перепланирование при каждом изменении токена в store. Подписка

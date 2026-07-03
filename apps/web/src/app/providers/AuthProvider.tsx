@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import type { UserDto } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
 import { api, ApiError } from '../../services/api';
+import { refreshAccessToken } from '../../services/authRefresh';
 // Импорт активирует подписку на store: при появлении/смене access-токена
 // планируется проактивный refresh за 60с до истечения. Без этого 401 на
 // интервал-driven запросах (sync, focus-refetch) копятся в DevTools.
@@ -17,14 +18,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     async function bootstrap() {
       try {
-        const refreshRes = await fetch('/api/v1/auth/refresh', {
-          method: 'POST',
-          credentials: 'include',
-        });
-        if (refreshRes.ok) {
-          const { accessToken } = (await refreshRes.json()) as { accessToken: string };
+        // Через общий refreshAccessToken → под тем же Web Lock, что scheduler и
+        // реактивный 401. Иначе вкладка, грузящаяся пока другая рефрешит, слала бы
+        // конкурентный refresh с той же cookie → reuse-detection убил бы сессию.
+        const r = await refreshAccessToken();
+        if (r.ok) {
           if (cancelled) return;
-          setAccessToken(accessToken);
+          setAccessToken(r.accessToken);
           const me = await api.get<UserDto>('/auth/me');
           if (cancelled) return;
           setUser(me);
