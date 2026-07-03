@@ -2,13 +2,28 @@ import { useMemo, useState } from 'react';
 import { Button, Input, Select, Switch, Tag, Tooltip, Typography, Space, message } from 'antd';
 import { EditOutlined, PhoneOutlined, SearchOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Site, UserAdminPatch, UserDto, UserRole } from '@matcheck/contracts';
+import type {
+  CustomerCounterparty,
+  Site,
+  UserAdminPatch,
+  UserDto,
+  UserRole,
+} from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { roleLabel } from '../../shared/constants/roleLabels';
 import { UserEditModal } from './UserEditModal';
 
-const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp'];
+const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp', 'contractor'];
+
+// ИНН считаем валидным, если после удаления нецифр остаётся непустая
+// не-нулевая строка. Подрядчик без валидного ИНН → скоуп по ИНН вернёт пусто,
+// поэтому такие записи справочника нельзя выбирать при назначении.
+function hasValidInn(inn: string | null | undefined): boolean {
+  const digits = (inn ?? '').replace(/[^0-9]/g, '');
+  return digits.length > 0 && !/^0+$/.test(digits);
+}
 
 export default function AdminUsersPage() {
   const qc = useQueryClient();
@@ -40,6 +55,15 @@ export default function AdminUsersPage() {
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=500'),
   });
   const sites = sitesQuery.data?.items ?? [];
+  // Справочник контрагентов-подрядчиков заказчика — для привязки роли contractor.
+  const customerCpQuery = useQuery({
+    queryKey: ['customer-counterparties', 'all'],
+    queryFn: () =>
+      api.get<{ items: CustomerCounterparty[]; total: number }>(
+        '/customer-counterparties?limit=5000',
+      ),
+  });
+  const customerCps = customerCpQuery.data?.items ?? [];
   const patch = useMutation({
     mutationFn: ({ id, body }: { id: string; body: UserAdminPatch }) =>
       api.patch(`/admin/users/${id}`, body),
@@ -94,6 +118,31 @@ export default function AdminUsersPage() {
     );
   };
 
+  // Селект подрядчика — только для роли contractor (аналог renderSiteCell).
+  // Записи справочника без валидного ИНН задизейблены: скоуп по ИНН вернёт
+  // пусто, подрядчик увидел бы пустоту.
+  const renderContractorCell = (row: UserDto) => {
+    if (row.role !== 'contractor') {
+      return <Typography.Text type="secondary">—</Typography.Text>;
+    }
+    return (
+      <Select<string>
+        value={row.contractorCustomerId ?? undefined}
+        style={{ width: 260 }}
+        placeholder="Не назначен"
+        showSearch
+        optionFilterProp="label"
+        loading={customerCpQuery.isLoading}
+        onChange={(v) => patch.mutate({ id: row.id, body: { contractorCustomerId: v ?? null } })}
+        options={customerCps.map((c) => ({
+          value: c.id,
+          label: `${c.name} · ИНН ${c.inn || '—'}`,
+          disabled: !hasValidInn(c.inn),
+        }))}
+      />
+    );
+  };
+
   return (
     <StickyPageHeader
       header={
@@ -135,7 +184,7 @@ export default function AdminUsersPage() {
                 value={r}
                 style={{ width: 160 }}
                 onChange={(v) => patch.mutate({ id: row.id, body: { role: v } })}
-                options={roles.map((rl) => ({ value: rl, label: rl }))}
+                options={roles.map((rl) => ({ value: rl, label: roleLabel(rl) }))}
               />
             ),
           },
@@ -143,6 +192,11 @@ export default function AdminUsersPage() {
             title: 'Объект',
             dataIndex: 'siteId',
             render: (_: unknown, row: UserDto) => renderSiteCell(row),
+          },
+          {
+            title: 'Подрядчик',
+            dataIndex: 'contractorCustomerId',
+            render: (_: unknown, row: UserDto) => renderContractorCell(row),
           },
           {
             title: 'Активен',
@@ -183,11 +237,14 @@ export default function AdminUsersPage() {
         ]}
         cardRender={(u) => {
           const site = u.siteId ? sites.find((s) => s.id === u.siteId) : null;
+          const contractorCp = u.contractorCustomerId
+            ? customerCps.find((c) => c.id === u.contractorCustomerId)
+            : null;
           return (
             <Space direction="vertical" style={{ width: '100%' }}>
               <Typography.Text strong>{u.email}</Typography.Text>
               <Space wrap>
-                <Tag>{u.role}</Tag>
+                <Tag>{roleLabel(u.role)}</Tag>
                 {u.isActive ? <Tag color="green">активен</Tag> : <Tag color="red">не активен</Tag>}
               </Space>
               {u.role === 'inspector_kpp' && (
@@ -200,6 +257,16 @@ export default function AdminUsersPage() {
                   )}
                 </Space>
               )}
+              {u.role === 'contractor' && (
+                <Space>
+                  <Typography.Text type="secondary">Подрядчик:</Typography.Text>
+                  {contractorCp ? (
+                    <Typography.Text>{contractorCp.name}</Typography.Text>
+                  ) : (
+                    <Tag color="orange">не назначен</Tag>
+                  )}
+                </Space>
+              )}
             </Space>
           );
         }}
@@ -207,6 +274,7 @@ export default function AdminUsersPage() {
       <UserEditModal
         user={editing}
         sites={sites}
+        customerCps={customerCps}
         open={editing !== null}
         onClose={() => setEditing(null)}
       />

@@ -202,6 +202,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const isInspector = authUser?.role === 'inspector_kpp';
   const inspectorSiteId = isInspector ? (authUser?.siteId ?? null) : null;
   const inspectorWithoutSite = isInspector && !inspectorSiteId;
+  // Подрядчик: read-only + справочники закрыты. Не грузим справочные запросы,
+  // чипы disabled, кнопки записи/загрузки фото скрыты; имена берём из DTO.
+  const isContractor = authUser?.role === 'contractor';
 
   const [items, setItems] = useState<DraftItem[]>([]);
   // Inline-edit названия материала: clientKey строки в режиме редактирования.
@@ -264,6 +267,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const sitesQuery = useQuery({
     queryKey: ['sites', 'all'],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
+    enabled: !isContractor,
   });
 
   const counterpartiesQuery = useQuery({
@@ -272,6 +276,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       api.get<{ items: Counterparty[]; total: number }>(
         '/counterparties?limit=500&role=contractor',
       ),
+    enabled: !isContractor,
   });
   // source=fot — берём только тех МОЛ, что синхронизированы из внешней
   // БД ФОТ (см. /api/v1/mol + domain/mol/syncFotMol.ts). Это тот же
@@ -283,6 +288,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       api.get<{ items: ResponsiblePerson[]; total: number }>(
         '/responsible-persons?activeOnly=true&source=fot&limit=500',
       ),
+    enabled: !isContractor,
   });
 
   const sites = sitesQuery.data?.items ?? [];
@@ -933,10 +939,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // Имя поставщика (counterparty.name) для чипа в шапке. Хук вызывается
   // безусловно — это требование React rules-of-hooks. Получает supplierId
   // у delivery (null до загрузки) и список counterparties для лукапа.
-  const supplierDisplayName = useSupplierDisplayName(
-    loadedDelivery?.supplierId ?? null,
-    counterparties,
-  );
+  const supplierDisplayName =
+    useSupplierDisplayName(loadedDelivery?.supplierId ?? null, counterparties) ??
+    // Fallback на имя из DTO (сервер резолвит через JOIN) — нужно роли contractor,
+    // у которой справочник /counterparties закрыт и counterparties пуст.
+    loadedDelivery?.supplierName ??
+    null;
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
     if (!siteId) reasons.push('Выберите объект');
@@ -958,7 +966,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         title: 'Название',
         dataIndex: 'nameRaw',
         render: (_: unknown, r: DraftItem) => {
-          const locked = !!r.materialId;
+          const locked = !!r.materialId || isContractor;
           if (!locked && editingNameKey === r.clientKey) {
             return (
               <Input.TextArea
@@ -1111,6 +1119,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         width: 56,
         align: 'center' as const,
         render: (_: unknown, r: DraftItem) => {
+          // Подрядчик — read-only: удаление строк материалов недоступно.
+          if (isContractor) return null;
           const btn = (
             <Button
               type="text"
@@ -1147,7 +1157,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         },
       },
     ],
-    [editingNameKey],
+    [editingNameKey, isContractor],
   );
 
   const cardRender = (r: DraftItem) => {
@@ -1349,12 +1359,17 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         {(() => {
           const siteLabel = (() => {
             const s = sites.find((x) => x.id === siteId);
-            return s ? `${s.code} · ${s.name}` : null;
+            if (s) return `${s.code} · ${s.name}`;
+            // Fallback на DTO-имя (справочник /sites закрыт для contractor).
+            return loadedDelivery?.siteName ?? null;
           })();
           const recipientLabel = (() => {
             if (recipientKind === 'counterparty') {
               const c = counterparties.find((x) => x.id === contractorId);
-              return c ? `Подрядчик: ${c.name}` : null;
+              if (c) return `Подрядчик: ${c.name}`;
+              return loadedDelivery?.contractorName
+                ? `Подрядчик: ${loadedDelivery.contractorName}`
+                : null;
             }
             const m = responsiblePersons.find((x) => x.id === recipientMolId);
             return m ? `МОЛ: ${m.fullName}` : null;
@@ -1365,7 +1380,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 label="Объект"
                 value={siteLabel}
                 required
-                disabled={isInspector}
+                disabled={isInspector || isContractor}
                 width={320}
               >
                 {(close) => (
@@ -1397,6 +1412,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               <InlineEditChip
                 label="Получатель"
                 value={recipientLabel}
+                disabled={isContractor}
                 width={320}
               >
                 {(close) => (
@@ -1471,7 +1487,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   hasUpd={(loadedDelivery.sourceDocumentIds?.length ?? 0) > 0}
                   displayName={supplierDisplayName}
                   invalidateQueryKey={['deliveries', deliveryId]}
-                  disabled={isInspector}
+                  disabled={isInspector || isContractor}
                 />
               )}
 
@@ -1547,6 +1563,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     — без УПД —
                   </Typography.Text>
                   {!isInspector &&
+                    !isContractor &&
                     loadedDelivery?.sourceDocumentIds.length === 0 &&
                     !isNew && (
                       <Button
@@ -1575,7 +1592,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   emoji="🚚"
                   color="orange"
                   value={loadedDelivery.inTransit}
-                  disabled={isInspector || patchFlags.isPending}
+                  disabled={isInspector || isContractor || patchFlags.isPending}
                   loading={patchFlags.isPending}
                   onChange={(next) => patchFlags.mutate({ inTransit: next })}
                 />
@@ -1589,7 +1606,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   emoji="📦"
                   color="purple"
                   value={loadedDelivery.isAssets}
-                  disabled={isInspector || patchFlags.isPending}
+                  disabled={isInspector || isContractor || patchFlags.isPending}
                   loading={patchFlags.isPending}
                   onChange={(next) => patchFlags.mutate({ isAssets: next })}
                 />
@@ -1626,6 +1643,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               label: `Фото${photosCount ? ` (${photosCount})` : ''}`,
               children: (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  {/* Подрядчик — read-only: загрузка фото недоступна (только просмотр). */}
+                  {!isContractor && (
                   <Space wrap>
                     <Upload {...photoPropsStage1}>
                       <Button size="large" icon={<CameraOutlined />}>
@@ -1660,6 +1679,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       </Typography.Text>
                     )}
                   </Space>
+                  )}
                   {deliveryId && loadedDelivery && (
                     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                       <div>
@@ -1683,6 +1703,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                             <PhotoGallery
                               deliveryId={deliveryId}
                               photos={beforePhotos}
+                              readOnly={isContractor}
                             />
                           ) : (
                             <Typography.Text type="secondary">
@@ -1708,6 +1729,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                             <PhotoGallery
                               deliveryId={deliveryId}
                               photos={afterPhotos}
+                              readOnly={isContractor}
                             />
                           ) : (
                             <Typography.Text type="secondary">
@@ -1730,9 +1752,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           size="small"
           title={`Материалы${items.length ? ` (${items.length})` : ''}`}
           extra={
-            <Button size="small" icon={<PlusOutlined />} onClick={addItem}>
-              Материал
-            </Button>
+            isContractor ? null : (
+              <Button size="small" icon={<PlusOutlined />} onClick={addItem}>
+                Материал
+              </Button>
+            )
           }
           styles={{ body: { padding: 0 } }}
         >
@@ -1823,6 +1847,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       rows={3}
                       value={comment}
                       onChange={(e) => setComment(e.target.value)}
+                      disabled={isContractor}
                     />
                   ),
                 },
@@ -1848,6 +1873,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           // confirmed_mol в активном режиме.
           const canMarkDeletion =
             !isPending &&
+            !isContractor &&
             (loadedDelivery.status.code === 'filled' ||
               loadedDelivery.status.code === 'confirmed_mol');
           const markBlock = canMarkDeletion ? (
@@ -1908,29 +1934,33 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 Отмена
               </Button>
               {markBlock}
-              <Tooltip title={verifyReason ?? ''} placement="top">
-                <span style={{ display: 'inline-flex' }}>
-                  <Button
-                    type="primary"
-                    loading={save.isPending}
-                    disabled={saveDisabled}
-                    onClick={() => save.mutate()}
-                  >
-                    Сохранить
-                  </Button>
-                </span>
-              </Tooltip>
-              <Tooltip title={confirmTooltip} placement="top">
-                <span style={{ display: 'inline-flex' }}>
-                  <Button
-                    loading={confirmMol.isPending}
-                    disabled={confirmDisabled}
-                    onClick={() => confirmMol.mutate()}
-                  >
-                    Подтвердить МОЛ
-                  </Button>
-                </span>
-              </Tooltip>
+              {!isContractor && (
+                <>
+                  <Tooltip title={verifyReason ?? ''} placement="top">
+                    <span style={{ display: 'inline-flex' }}>
+                      <Button
+                        type="primary"
+                        loading={save.isPending}
+                        disabled={saveDisabled}
+                        onClick={() => save.mutate()}
+                      >
+                        Сохранить
+                      </Button>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title={confirmTooltip} placement="top">
+                    <span style={{ display: 'inline-flex' }}>
+                      <Button
+                        loading={confirmMol.isPending}
+                        disabled={confirmDisabled}
+                        onClick={() => confirmMol.mutate()}
+                      >
+                        Подтвердить МОЛ
+                      </Button>
+                    </span>
+                  </Tooltip>
+                </>
+              )}
             </div>
           ) : (
             <div
@@ -1955,33 +1985,37 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 Отмена
               </Button>
               {markBlock && <span style={{ flex: 1, display: 'inline-flex' }}>{markBlock}</span>}
-              <Tooltip title={verifyReason ?? ''} placement="top">
-                <span style={{ flex: 1, display: 'inline-flex' }}>
-                  <Button
-                    type="primary"
-                    size="large"
-                    style={{ flex: 1 }}
-                    loading={save.isPending}
-                    disabled={saveDisabled}
-                    onClick={() => save.mutate()}
-                  >
-                    Сохранить
-                  </Button>
-                </span>
-              </Tooltip>
-              <Tooltip title={confirmTooltip} placement="top">
-                <span style={{ flex: 1, display: 'inline-flex' }}>
-                  <Button
-                    size="large"
-                    style={{ flex: 1 }}
-                    loading={confirmMol.isPending}
-                    disabled={confirmDisabled}
-                    onClick={() => confirmMol.mutate()}
-                  >
-                    Подтвердить МОЛ
-                  </Button>
-                </span>
-              </Tooltip>
+              {!isContractor && (
+                <>
+                  <Tooltip title={verifyReason ?? ''} placement="top">
+                    <span style={{ flex: 1, display: 'inline-flex' }}>
+                      <Button
+                        type="primary"
+                        size="large"
+                        style={{ flex: 1 }}
+                        loading={save.isPending}
+                        disabled={saveDisabled}
+                        onClick={() => save.mutate()}
+                      >
+                        Сохранить
+                      </Button>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title={confirmTooltip} placement="top">
+                    <span style={{ flex: 1, display: 'inline-flex' }}>
+                      <Button
+                        size="large"
+                        style={{ flex: 1 }}
+                        loading={confirmMol.isPending}
+                        disabled={confirmDisabled}
+                        onClick={() => confirmMol.mutate()}
+                      >
+                        Подтвердить МОЛ
+                      </Button>
+                    </span>
+                  </Tooltip>
+                </>
+              )}
             </div>
           );
         })()}

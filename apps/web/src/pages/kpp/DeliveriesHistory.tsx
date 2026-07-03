@@ -153,6 +153,9 @@ export function DeliveriesHistory({
   const [params, setParams] = useSearchParams();
   const authUser = useAuthStore((s) => s.user);
   const isAdmin = authUser?.role === 'admin';
+  // Подрядчик: read-only + справочники закрыты (403). Не грузим справочные
+  // запросы и берём имена из DTO; фильтры/действия записи скрыты.
+  const isContractor = authUser?.role === 'contractor';
 
   // Slot для bulk-actions в внешнем header-row родителя. Отслеживаем
   // через state, потому что ref.current = null до commit phase — портал
@@ -309,6 +312,7 @@ export function DeliveriesHistory({
     queryKey: ['counterparties', 'all'],
     queryFn: () =>
       api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=5000'),
+    enabled: !isContractor,
   });
   const customerCounterpartiesQuery = useQuery({
     queryKey: ['customer-counterparties', 'all'],
@@ -316,16 +320,19 @@ export function DeliveriesHistory({
       api.get<{ items: CustomerCounterparty[]; total: number }>(
         '/customer-counterparties?limit=5000',
       ),
+    enabled: !isContractor,
   });
   const suppliersQuery = useQuery({
     queryKey: ['suppliers', 'all'],
     queryFn: () =>
       api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
+    enabled: !isContractor,
   });
   const sitesQuery = useQuery({
     queryKey: ['sites', 'all'],
     queryFn: () =>
       api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
+    enabled: !isContractor,
   });
   const sourceDocsQuery = useQuery({
     queryKey: ['source-documents', 'all', 'inbound'],
@@ -528,6 +535,9 @@ export function DeliveriesHistory({
   // deliveries.supplier_id остаётся NULL — без этого fallback колонка
   // «Поставщик» в таблице была пустой, хотя в карточке/мобиле имя есть.
   const resolveSupplierName = (r: Row): string | null => {
+    // DTO-имя (сервер резолвит через JOIN) — приоритетно и работает без
+    // справочников (нужно для роли contractor, у которой они закрыты).
+    if (r.supplierName) return r.supplierName;
     if (r.supplierId) return counterpartiesMap.get(r.supplierId) ?? null;
     const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
     return sd?.supplierName ?? null;
@@ -555,9 +565,13 @@ export function DeliveriesHistory({
         : null;
     return {
       delivery: r,
-      contractorName: contractorId ? counterpartiesMap.get(contractorId) ?? null : null,
+      contractorName:
+        r.contractorName ??
+        (contractorId ? counterpartiesMap.get(contractorId) ?? null : null) ??
+        sd?.contractorName ??
+        null,
       supplierName: resolveSupplierName(r),
-      siteName: siteId ? sitesMap.get(siteId) ?? null : null,
+      siteName: r.siteName ?? (siteId ? sitesMap.get(siteId) ?? null : null),
       docNumber: sd?.docNumber ?? null,
       docKindLabel: kindLabel,
       docTotalSum: totalSum,
@@ -600,6 +614,8 @@ export function DeliveriesHistory({
 
   // Возвращает блок кнопок действий в зависимости от вкладки, статуса и прав.
   const renderActions = (r: Row) => {
+    // Подрядчик — read-only: удаление/пометка/восстановление недоступны.
+    if (isContractor) return null;
     const errMsg = deleteErrors[r.id];
     const errIcon = errMsg ? (
       <Tooltip title={errMsg}>
@@ -710,22 +726,27 @@ export function DeliveriesHistory({
           onClick={() => setViewData(buildViewData(r))}
         />
       </Tooltip>
-      <Tooltip title="Редактировать">
-        <Button
-          size="small"
-          shape="circle"
-          icon={<EditOutlined />}
-          onClick={() => onOpen(r.id)}
-        />
-      </Tooltip>
-      <Tooltip title="Поделиться ссылкой">
-        <Button
-          size="small"
-          shape="circle"
-          icon={<ShareAltOutlined />}
-          onClick={() => setShareId(r.id)}
-        />
-      </Tooltip>
+      {/* Подрядчик — read-only: правка и share недоступны. */}
+      {!isContractor && (
+        <Tooltip title="Редактировать">
+          <Button
+            size="small"
+            shape="circle"
+            icon={<EditOutlined />}
+            onClick={() => onOpen(r.id)}
+          />
+        </Tooltip>
+      )}
+      {!isContractor && (
+        <Tooltip title="Поделиться ссылкой">
+          <Button
+            size="small"
+            shape="circle"
+            icon={<ShareAltOutlined />}
+            onClick={() => setShareId(r.id)}
+          />
+        </Tooltip>
+      )}
     </>
   );
 
@@ -766,7 +787,10 @@ export function DeliveriesHistory({
   const renderContractor = (r: Row) => {
     const { id, inherited } = resolveContractor(r);
     if (!id) return '—';
-    const name = counterpartiesMap.get(id) ?? '—';
+    // DTO-имя (прямой подрядчик приёмки) → справочник → имя из привязанного УПД
+    // (унаследованный подрядчик). Первое и последнее не требуют справочников.
+    const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
+    const name = r.contractorName ?? counterpartiesMap.get(id) ?? sd?.contractorName ?? '—';
     return inherited ? (
       <Typography.Text type="secondary">{name}</Typography.Text>
     ) : (
@@ -775,7 +799,7 @@ export function DeliveriesHistory({
   };
   const renderSite = (r: Row) => {
     const { id } = resolveSite(r);
-    const name = id ? sitesMap.get(id) ?? '—' : '—';
+    const name = r.siteName ?? (id ? sitesMap.get(id) : null) ?? '—';
     // Truncate в одну строку через antd column ellipsis (колонка-уровень);
     // здесь оборачиваем в Tooltip, чтобы при наведении был виден полный
     // текст. Высота строки таблицы остаётся одинаковой для всех записей.
@@ -804,7 +828,9 @@ export function DeliveriesHistory({
           <ListFilters
             value={filters}
             onChange={updateFilters}
-            fields={['contractor', 'supplier', 'site', 'q']}
+            // Подрядчик видит один свой срез — справочные фильтры ему не нужны
+            // (и справочники для них закрыты). Оставляем только поиск.
+            fields={isContractor ? ['q'] : ['contractor', 'supplier', 'site', 'q']}
             contractorOptions={contractorOptions}
             supplierOptions={supplierOptions}
             sites={sitesQuery.data?.items ?? []}
@@ -932,7 +958,7 @@ export function DeliveriesHistory({
         items={items}
         loading={list.isLoading}
         rowKey="id"
-        rowSelection={isAdmin || !isTrash ? bulk.selection : undefined}
+        rowSelection={(isAdmin || !isTrash) && !isContractor ? bulk.selection : undefined}
         onRowClick={(r) => onOpen(r.id)}
         emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет приёмок'}
         rowClassName={(r) =>

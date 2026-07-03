@@ -7,9 +7,7 @@ import {
   Card,
   Input,
   Popconfirm,
-  Select,
   Space,
-  Tag,
   Tooltip,
   Typography,
   message,
@@ -28,7 +26,6 @@ import type {
   Counterparty,
   CustomerCounterparty,
   Shipment,
-  ShipmentKind,
   ShipmentListResponseSchema,
   Site,
   SourceDocumentListResponseSchema,
@@ -50,7 +47,6 @@ import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters'
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
-import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
@@ -62,10 +58,7 @@ import {
   type ShipmentFeature,
   type ShipmentPurpose,
 } from './ShipmentFeatureFilters';
-import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
-import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
-import { matchText } from '../../shared/utils/matchText';
 import { formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 // directoryFilterMap (ИНН-маппинг customer_counterparties → operational
@@ -75,13 +68,6 @@ type List = z.infer<typeof ShipmentListResponseSchema>;
 type Row = List['items'][number];
 type SourceList = z.infer<typeof SourceDocumentListResponseSchema>;
 type SourceRow = SourceList['items'][number];
-
-const KIND_LABELS: Record<ShipmentKind, { label: string; color: string }> = {
-  contractor: { label: 'Подрядчику', color: 'geekblue' },
-  return: { label: 'Возврат', color: 'magenta' },
-  transfer: { label: 'Перемещение', color: 'cyan' },
-  writeoff: { label: 'Списание', color: 'volcano' },
-};
 
 // Σ qty × price по позициям, где price задан (зеркало deliveryItemsTotal
 // в DeliveriesHistory). Если ни у одной позиции нет цены — null → UI «—».
@@ -115,7 +101,6 @@ function shipmentItemsVatSum(items: Row['items'] | undefined): number | null {
   return hasAny ? sum : null;
 }
 
-const SELECT_WIDTH = 200;
 // Статусы, для которых вместо hard-delete показываем «Пометить на удаление».
 const SOFT_DELETE_STATUSES = new Set(['filled', 'confirmed_mol']);
 
@@ -144,6 +129,9 @@ export function ShipmentsHistory({
   const [params, setParams] = useSearchParams();
   const authUser = useAuthStore((s) => s.user);
   const isAdmin = authUser?.role === 'admin';
+  // Подрядчик: read-only + справочники закрыты — имена берём из DTO, фильтры/
+  // действия записи скрыты, справочные запросы не грузим.
+  const isContractor = authUser?.role === 'contractor';
 
   // См. комментарий в DeliveriesHistory: tracking внешнего slot для portal-
   // режима bulk-actions, чтобы не сдвигать таблицу при выборе строк.
@@ -297,6 +285,7 @@ export function ShipmentsHistory({
   const counterpartiesQuery = useQuery({
     queryKey: ['counterparties', 'all'],
     queryFn: () => api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=5000'),
+    enabled: !isContractor,
   });
   const customerCounterpartiesQuery = useQuery({
     queryKey: ['customer-counterparties', 'all'],
@@ -304,15 +293,18 @@ export function ShipmentsHistory({
       api.get<{ items: CustomerCounterparty[]; total: number }>(
         '/customer-counterparties?limit=5000',
       ),
+    enabled: !isContractor,
   });
   const suppliersQuery = useQuery({
     queryKey: ['suppliers', 'all'],
     queryFn: () =>
       api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
+    enabled: !isContractor,
   });
   const sitesQuery = useQuery({
     queryKey: ['sites', 'all'],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?limit=500'),
+    enabled: !isContractor,
   });
   const sourceDocsQuery = useQuery({
     queryKey: ['source-documents', 'all', 'outbound'],
@@ -456,6 +448,9 @@ export function ShipmentsHistory({
 
   const destinationLabel = (r: Shipment): string => {
     if (r.kind === 'contractor' || r.kind === 'return') {
+      // DTO-имя получателя (сервер резолвит через JOIN) — работает без
+      // справочника /counterparties, закрытого для роли contractor.
+      if (r.receiverName) return r.receiverName;
       return r.receiverCounterpartyId
         ? counterpartiesMap.get(r.receiverCounterpartyId) ?? '—'
         : '—';
@@ -471,15 +466,12 @@ export function ShipmentsHistory({
     // «Списание». Это симметрично с колонкой «Поставщик» приёмки: всегда
     // показываем самую информативную для этого kind точку «куда / кому».
     if (r.kind === 'contractor' || r.kind === 'return') {
+      if (r.receiverName) return r.receiverName;
       return r.receiverCounterpartyId
         ? counterpartiesMap.get(r.receiverCounterpartyId) ?? '—'
         : '—';
     }
     return destinationLabel(r);
-  };
-  const resolveDocNumber = (r: Row): string | null => {
-    const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
-    return sd?.docNumber ?? null;
   };
 
   // Массовый выбор + три bulk-мутации. Набор кнопок в bulk-bar
@@ -514,22 +506,6 @@ export function ShipmentsHistory({
 
   const items = list.data?.items ?? [];
 
-  // Опции селекта «Статус» собираем из реальных данных и добавляем
-  // псевдо-опцию «Без документа» — это не код статуса в БД, а способ
-  // отфильтровать отгрузки с пустым sourceDocumentIds.
-  const statusOptions = useMemo(() => {
-    const seen = new Map<string, { label: string }>();
-    for (const r of items) {
-      if (!seen.has(r.status.code)) seen.set(r.status.code, { label: r.status.label });
-    }
-    const opts = Array.from(seen.entries()).map(([code, v]) => ({
-      value: code,
-      label: v.label,
-    }));
-    opts.push({ value: 'no_document', label: 'Без документа' });
-    return opts;
-  }, [items]);
-
   // Клиентская filteredItems удалена — фильтрация полностью на сервере
   // (см. shipments.ts: contractorIds/supplierIds/siteIds/q/plate/features/
   // purposes/nophoto/status в WHERE). При смене любого фильтра — сброс
@@ -558,9 +534,8 @@ export function ShipmentsHistory({
   // метаданные привязанного УПД. Модалка сама не лезет в API.
   const buildViewData = (r: Row): ShipmentViewData => {
     const receiverName =
-      r.receiverCounterpartyId
-        ? counterpartiesMap.get(r.receiverCounterpartyId) ?? null
-        : null;
+      r.receiverName ??
+      (r.receiverCounterpartyId ? counterpartiesMap.get(r.receiverCounterpartyId) ?? null : null);
     const destSiteName = r.destSiteId ? sitesMap.get(r.destSiteId) ?? null : null;
     const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
     const kindLabel = sd
@@ -579,7 +554,7 @@ export function ShipmentsHistory({
     return {
       shipment: r,
       receiverName,
-      siteName: sitesMap.get(r.siteId) ?? null,
+      siteName: r.siteName ?? sitesMap.get(r.siteId) ?? null,
       destSiteName,
       docNumber: sd?.docNumber ?? null,
       docKindLabel: kindLabel,
@@ -600,18 +575,23 @@ export function ShipmentsHistory({
           onClick={() => setViewData(buildViewData(r))}
         />
       </Tooltip>
-      <Tooltip title="Редактировать">
-        <Button
-          size="small"
-          shape="circle"
-          icon={<EditOutlined />}
-          onClick={() => onOpen(r.id)}
-        />
-      </Tooltip>
+      {/* Подрядчик — read-only: правка недоступна (share/удаление — в renderActions). */}
+      {!isContractor && (
+        <Tooltip title="Редактировать">
+          <Button
+            size="small"
+            shape="circle"
+            icon={<EditOutlined />}
+            onClick={() => onOpen(r.id)}
+          />
+        </Tooltip>
+      )}
     </>
   );
 
   const renderActions = (r: Row) => {
+    // Подрядчик — read-only: удаление/пометка/восстановление/share недоступны.
+    if (isContractor) return null;
     const errMsg = deleteErrors[r.id];
     const errIcon = errMsg ? (
       <Tooltip title={errMsg}>
@@ -752,7 +732,8 @@ export function ShipmentsHistory({
           <ListFilters
             value={filters}
             onChange={updateFilters}
-            fields={['contractor', 'supplier', 'site', 'q']}
+            // Подрядчик видит один свой срез — справочные фильтры скрыты.
+            fields={isContractor ? ['q'] : ['contractor', 'supplier', 'site', 'q']}
             contractorOptions={contractorOptions}
             supplierOptions={supplierOptions}
             sites={sitesQuery.data?.items ?? []}
@@ -860,7 +841,7 @@ export function ShipmentsHistory({
         items={items}
         loading={list.isLoading}
         rowKey="id"
-        rowSelection={isAdmin || !isTrash ? bulk.selection : undefined}
+        rowSelection={(isAdmin || !isTrash) && !isContractor ? bulk.selection : undefined}
         onRowClick={(r) => onOpen(r.id)}
         emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет отгрузок'}
         rowClassName={(r) =>
@@ -924,7 +905,7 @@ export function ShipmentsHistory({
             // во всех 4 таблицах раздела «Операции» — best practice antd.
             ellipsis: { showTitle: false },
             render: (_: unknown, r: Row) => {
-              const name = sitesMap.get(r.siteId) ?? '—';
+              const name = r.siteName ?? sitesMap.get(r.siteId) ?? '—';
               return (
                 <Tooltip title={name} placement="topLeft">
                   <span>{name}</span>
@@ -976,7 +957,7 @@ export function ShipmentsHistory({
                 <Typography.Text strong>{r.vehiclePlate ?? 'Без номера'}</Typography.Text>
               </Space>
               <Typography.Text type="secondary">
-                {sitesMap.get(r.siteId) ?? '—'} → {destinationLabel(r)}
+                {r.siteName ?? sitesMap.get(r.siteId) ?? '—'} → {destinationLabel(r)}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {renderCounterpartyCol(r)}

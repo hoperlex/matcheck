@@ -111,6 +111,26 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(users.id, req.params.id))
         .returning();
       if (!updated) return reply.code(404).send({ error: 'not_found' });
+
+      // Deploy-safety: смена роли НА contractor инвалидирует все сессии юзера.
+      // Роль читается из БД на каждом запросе, а мобильный клиент обрабатывает
+      // только 401 (на 403 залипает молча). Без инвалидации ошибочно назначенный
+      // мобильному инспектору contractor сломался бы тихо (write→403, sync-scope
+      // пуст). Инвалидация → мобилка ловит 401 → штатный разлогин → при логине с
+      // мобилы contractor получает понятный 403 «web-only». Механизм тот же, что
+      // при смене пароля (см. routes/auth.ts). Архив на планшете не вайпится:
+      // wipe завязан на смену siteId в /auth/me, а не на разлогин.
+      if (nextRole === 'contractor' && existing.role !== 'contractor') {
+        const now = new Date();
+        await app.db
+          .update(users)
+          .set({ sessionsInvalidatedAt: now })
+          .where(eq(users.id, updated.id));
+        await app.db
+          .update(sessions)
+          .set({ invalidatedAt: now })
+          .where(and(eq(sessions.userId, updated.id), isNull(sessions.invalidatedAt)));
+      }
       // SSE: мобильному клиенту нужно мгновенно узнавать о смене
       // user.siteId (от этого зависит штамп объекта на фото 1 Этапа).
       // Эвент шлём только если что-то существенное изменилось — чтобы

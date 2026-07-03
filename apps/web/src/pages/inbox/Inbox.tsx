@@ -31,6 +31,7 @@ import type {
 import { getDocumentDisplayStatus } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api, apiDownload, ApiError } from '../../services/api';
+import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
@@ -86,7 +87,9 @@ function KindTag({ kind }: { kind: Row['kind'] }) {
   return <Tag color="gold">Заявка</Tag>;
 }
 
-function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }) {
+function StatusTag({ row, onResolve }: { row: Row; onResolve?: (r: Row) => void }) {
+  // onResolve не передан (роль contractor) → resolve-кнопки скрыты: дозаполнение
+  // и разрешение дубликатов — write-операции, подрядчику недоступны.
   // Derived-статус: если parsed, но не заполнены получатель/объект/дата
   // поставки — показываем «Черновик» вместо «обработано». UI сразу
   // подскажет пользователю, что документ требует дозаполнения.
@@ -152,16 +155,18 @@ function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }
         return (
           <Space size={4} wrap>
             <Tag color="orange">дубликат</Tag>
-            <Button
-              size="small"
-              type="link"
-              onClick={(e) => {
-                e.stopPropagation();
-                onResolve(row);
-              }}
-            >
-              разрешить
-            </Button>
+            {onResolve && (
+              <Button
+                size="small"
+                type="link"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onResolve(row);
+                }}
+              >
+                разрешить
+              </Button>
+            )}
           </Space>
         );
       }
@@ -180,16 +185,18 @@ function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }
             >
               <Tag color="gold">распознано частично</Tag>
             </Tooltip>
-            <Button
-              size="small"
-              type="link"
-              onClick={(e) => {
-                e.stopPropagation();
-                onResolve(row);
-              }}
-            >
-              дополнить
-            </Button>
+            {onResolve && (
+              <Button
+                size="small"
+                type="link"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onResolve(row);
+                }}
+              >
+                дополнить
+              </Button>
+            )}
           </Space>
         );
       }
@@ -204,16 +211,18 @@ function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }
           >
             <Tag color="gold">суммы не сходятся</Tag>
           </Tooltip>
-          <Button
-            size="small"
-            type="link"
-            onClick={(e) => {
-              e.stopPropagation();
-              onResolve(row);
-            }}
-          >
-            проверить
-          </Button>
+          {onResolve && (
+            <Button
+              size="small"
+              type="link"
+              onClick={(e) => {
+                e.stopPropagation();
+                onResolve(row);
+              }}
+            >
+              проверить
+            </Button>
+          )}
         </Space>
       );
     default:
@@ -223,6 +232,9 @@ function StatusTag({ row, onResolve }: { row: Row; onResolve: (r: Row) => void }
 
 export default function InboxPage() {
   const [params, setParams] = useSearchParams();
+  // Подрядчик: read-only + справочники закрыты. Скрываем write-UI, не грузим
+  // справочные запросы; колонки уже читают имена из DTO документа.
+  const isContractor = useAuthStore((s) => s.user?.role) === 'contractor';
   // direction/kind/q + контрагенты/объект — всё хранится в URL, чтобы фильтры
   // переживали F5 и поддерживали share-able ссылки.
   const direction: SourceDirection =
@@ -355,11 +367,13 @@ export default function InboxPage() {
     queryKey: ['counterparties', 'all'],
     queryFn: () =>
       api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+    enabled: !isContractor,
   });
   const sitesQuery = useQuery({
     queryKey: ['sites', 'all'],
     queryFn: () =>
       api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
+    enabled: !isContractor,
   });
 
   // Лёгкие count-запросы для вкладок «Приёмка / Отгрузка». limit=1 — серверу
@@ -483,6 +497,8 @@ export default function InboxPage() {
   });
 
   const renderDeleteButton = (r: Row) => {
+    // Подрядчик — read-only: удаление документов недоступно.
+    if (isContractor) return null;
     const errMsg = deleteErrors[r.id];
     return (
       <Space size={4} onClick={(e) => e.stopPropagation()}>
@@ -586,18 +602,24 @@ export default function InboxPage() {
             <ListFilters
               value={filters}
               onChange={updateFilters}
-              fields={['contractor', 'supplier', 'site', 'q']}
+              // Подрядчик: только поиск (справочные фильтры не нужны и закрыты).
+              fields={isContractor ? ['q'] : ['contractor', 'supplier', 'site', 'q']}
               counterparties={counterpartiesQuery.data?.items ?? []}
               sites={sitesQuery.data?.items ?? []}
               loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
               searchPlaceholder="Номер документа"
               extra={
                 <Space size={8}>
-                  <Button type="primary" onClick={() => setDocsModalOpen(true)}>
-                    Загрузить документы
-                  </Button>
-                  <Button onClick={() => setPdfModalOpen(true)}>Загрузить УПД</Button>
-                  <Button onClick={() => setTwModalOpen(true)}>Загрузить накладные</Button>
+                  {/* Подрядчик — read-only: загрузку документов не показываем. */}
+                  {!isContractor && (
+                    <>
+                      <Button type="primary" onClick={() => setDocsModalOpen(true)}>
+                        Загрузить документы
+                      </Button>
+                      <Button onClick={() => setPdfModalOpen(true)}>Загрузить УПД</Button>
+                      <Button onClick={() => setTwModalOpen(true)}>Загрузить накладные</Button>
+                    </>
+                  )}
                   <Button
                     icon={<DownloadOutlined />}
                     onClick={handleExportExcel}
@@ -623,7 +645,7 @@ export default function InboxPage() {
           showSizeChanger: true,
           pageSizeOptions: [50, 100, 200],
         }}
-        rowSelection={bulk.selection}
+        rowSelection={isContractor ? undefined : bulk.selection}
         expandable={{
           // Свою колонку с иконкой не рендерим — ± живёт в столбце «Тип».
           showExpandColumn: false,
@@ -676,7 +698,10 @@ export default function InboxPage() {
               ['processing', 'queued', 'needs_resolution', 'parse_failed', 'parsed', 'archived'],
             ),
             render: (_: unknown, r: Row) => (
-              <StatusTag row={r} onResolve={(row) => setResolveId(row.id)} />
+              <StatusTag
+                row={r}
+                onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
+              />
             ),
           },
           {
@@ -749,7 +774,10 @@ export default function InboxPage() {
             <Space direction="vertical" size={2} style={{ width: '100%', position: 'relative' }}>
               <Space size={4} wrap>
                 <KindTag kind={r.kind} />
-                <StatusTag row={r} onResolve={(row) => setResolveId(row.id)} />
+                <StatusTag
+                row={r}
+                onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
+              />
               </Space>
               <Typography.Text strong>
                 {r.docNumber ?? (r.originalFilename ? r.originalFilename : '— без номера —')}

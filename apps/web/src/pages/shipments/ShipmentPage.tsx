@@ -186,6 +186,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const isInspector = authUser?.role === 'inspector_kpp';
   const inspectorSiteId = isInspector ? (authUser?.siteId ?? null) : null;
   const inspectorWithoutSite = isInspector && !inspectorSiteId;
+  // Подрядчик: read-only + справочники закрыты. Не грузим справочные запросы,
+  // чипы disabled, кнопки записи/фото скрыты; имена берём из DTO.
+  const isContractor = authUser?.role === 'contractor';
 
   const [items, setItems] = useState<DraftItem[]>([]);
   // Inline-edit названия материала: см. apps/web/src/pages/kpp/KppPage.tsx.
@@ -232,11 +235,13 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const sitesQuery = useQuery({
     queryKey: ['sites', 'all'],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
+    enabled: !isContractor,
   });
   const counterpartiesQuery = useQuery({
     queryKey: ['counterparties', 'all'],
     queryFn: () =>
       api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+    enabled: !isContractor,
   });
   const responsiblePersonsQuery = useQuery({
     queryKey: ['responsible-persons', 'active'],
@@ -244,6 +249,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       api.get<{ items: ResponsiblePerson[]; total: number }>(
         '/responsible-persons?activeOnly=true&limit=500',
       ),
+    enabled: !isContractor,
   });
 
   const sites = sitesQuery.data?.items ?? [];
@@ -825,10 +831,11 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   );
 
   // Имя поставщика для чипа в шапке. Симметрично с KppPage.
-  const supplierDisplayName = useSupplierDisplayName(
-    loadedShipment?.supplierId ?? null,
-    counterparties,
-  );
+  const supplierDisplayName =
+    useSupplierDisplayName(loadedShipment?.supplierId ?? null, counterparties) ??
+    // Fallback на DTO-имя (нужно роли contractor: /counterparties закрыт).
+    loadedShipment?.supplierName ??
+    null;
 
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
@@ -883,7 +890,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               )}
             </Space>
           );
-          const isEditing = editingNameKey === r.clientKey;
+          const isEditing = !isContractor && editingNameKey === r.clientKey;
           return (
             <Space.Compact direction="vertical" style={{ width: '100%' }}>
               {assetMeta}
@@ -898,9 +905,11 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 />
               ) : (
                 <div
-                  onClick={() => setEditingNameKey(r.clientKey)}
+                  onClick={() => {
+                    if (!isContractor) setEditingNameKey(r.clientKey);
+                  }}
                   style={{
-                    cursor: 'text',
+                    cursor: isContractor ? 'default' : 'text',
                     whiteSpace: 'pre-wrap',
                     minHeight: 22,
                     padding: '4px 0',
@@ -986,7 +995,32 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
         title: '',
         width: 60,
         align: 'right',
-        render: (_: unknown, r: DraftItem) => (
+        render: (_: unknown, r: DraftItem) => {
+          // Подрядчик — read-only: удаление строк материалов недоступно.
+          if (isContractor) return null;
+          return (
+            <Popconfirm
+              title="Удалить позицию?"
+              okText="Да"
+              cancelText="Нет"
+              onConfirm={() => removeItem(r.clientKey)}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          );
+        },
+      },
+    ],
+    [editingNameKey, isContractor],
+  );
+
+  const cardRender = (r: DraftItem) => {
+    const isEditing = !isContractor && editingNameKey === r.clientKey;
+    return (
+    <div style={{ width: '100%' }}>
+      <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+        <Typography.Text strong>№{r.lineNo}</Typography.Text>
+        {!isContractor && (
           <Popconfirm
             title="Удалить позицию?"
             okText="Да"
@@ -995,26 +1029,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           >
             <Button size="small" danger icon={<DeleteOutlined />} />
           </Popconfirm>
-        ),
-      },
-    ],
-    [editingNameKey],
-  );
-
-  const cardRender = (r: DraftItem) => {
-    const isEditing = editingNameKey === r.clientKey;
-    return (
-    <div style={{ width: '100%' }}>
-      <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-        <Typography.Text strong>№{r.lineNo}</Typography.Text>
-        <Popconfirm
-          title="Удалить позицию?"
-          okText="Да"
-          cancelText="Нет"
-          onConfirm={() => removeItem(r.clientKey)}
-        >
-          <Button size="small" danger icon={<DeleteOutlined />} />
-        </Popconfirm>
+        )}
       </Space>
       {r.itemKind === 'asset' && (
         <Space size={4} style={{ marginTop: 4 }} wrap>
@@ -1043,10 +1058,12 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
         />
       ) : (
         <div
-          onClick={() => setEditingNameKey(r.clientKey)}
+          onClick={() => {
+            if (!isContractor) setEditingNameKey(r.clientKey);
+          }}
           style={{
             marginTop: 4,
-            cursor: 'text',
+            cursor: isContractor ? 'default' : 'text',
             whiteSpace: 'pre-wrap',
             minHeight: 22,
           }}
@@ -1244,7 +1261,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
         {(() => {
           const fromLabel = (() => {
             const s = sites.find((x) => x.id === siteId);
-            return s ? `${s.code} · ${s.name}` : null;
+            if (s) return `${s.code} · ${s.name}`;
+            // Fallback на DTO-имя объекта (справочник /sites закрыт для contractor).
+            return loadedShipment?.siteName ?? null;
           })();
           const toLabel = (() => {
             const s = sites.find((x) => x.id === destSiteId);
@@ -1253,8 +1272,10 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           const receiverLabel = (() => {
             if (receiverKind === 'counterparty') {
               const c = counterpartyReceiverOptions.find((x) => x.id === receiverId);
-              return c
-                ? `${kind === 'return' ? 'Поставщик' : 'Подрядчик'}: ${c.name}`
+              if (c) return `${kind === 'return' ? 'Поставщик' : 'Подрядчик'}: ${c.name}`;
+              // Fallback на DTO-имя получателя (справочник /counterparties закрыт).
+              return loadedShipment?.receiverName
+                ? `${kind === 'return' ? 'Поставщик' : 'Подрядчик'}: ${loadedShipment.receiverName}`
                 : null;
             }
             const m = responsiblePersons.find((x) => x.id === receiverId);
@@ -1266,7 +1287,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 label="Откуда"
                 value={fromLabel}
                 required
-                disabled={isInspector}
+                disabled={isInspector || isContractor}
                 width={320}
               >
                 {(close) => (
@@ -1295,6 +1316,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   label="Куда"
                   value={toLabel}
                   required
+                  disabled={isContractor}
                   width={320}
                 >
                   {(close) => (
@@ -1326,6 +1348,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   label="Получатель"
                   value={receiverLabel}
                   required
+                  disabled={isContractor}
                   width={320}
                 >
                   {(close) => (
@@ -1395,7 +1418,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   hasUpd={(loadedShipment.sourceDocumentIds?.length ?? 0) > 0}
                   displayName={supplierDisplayName}
                   invalidateQueryKey={['shipments', shipmentId]}
-                  disabled={isInspector}
+                  disabled={isInspector || isContractor}
                 />
               )}
 
@@ -1403,6 +1426,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 label="Госномер"
                 value={plate || null}
                 placeholder="— не указан —"
+                disabled={isContractor}
                 width={200}
               >
                 {(close) => (
@@ -1423,6 +1447,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 label="Водитель"
                 value={driverName || null}
                 placeholder="— не указан —"
+                disabled={isContractor}
                 width={260}
               >
                 {(close) => (
@@ -1446,6 +1471,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 label="Тип отгрузки"
                 value={purpose}
                 placeholder="— не указан —"
+                disabled={isContractor}
                 width={260}
               >
                 {(close) => (
@@ -1476,7 +1502,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   emoji="🚚"
                   color="orange"
                   value={loadedShipment.inTransit}
-                  disabled={isInspector || patchFlags.isPending}
+                  disabled={isInspector || isContractor || patchFlags.isPending}
                   loading={patchFlags.isPending}
                   onChange={(next) => patchFlags.mutate({ inTransit: next })}
                 />
@@ -1490,7 +1516,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   emoji="📦"
                   color="purple"
                   value={loadedShipment.isAssets}
-                  disabled={isInspector || patchFlags.isPending}
+                  disabled={isInspector || isContractor || patchFlags.isPending}
                   loading={patchFlags.isPending}
                   onChange={(next) => patchFlags.mutate({ isAssets: next })}
                 />
@@ -1540,6 +1566,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                     — без УПД —
                   </Typography.Text>
                   {!isInspector &&
+                    !isContractor &&
                     loadedShipment?.sourceDocumentIds.length === 0 &&
                     !isNew && (
                       <Button
@@ -1573,6 +1600,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               label: `Фото${photosCount ? ` (${photosCount})` : ''}`,
               children: (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  {/* Подрядчик — read-only: загрузка фото недоступна. */}
+                  {!isContractor && (
                   <Space wrap>
                     <Upload {...photoPropsStage1}>
                       <Button size="large" icon={<CameraOutlined />}>
@@ -1602,6 +1631,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                       </Typography.Text>
                     )}
                   </Space>
+                  )}
                   {shipmentId && loadedShipment && (
                     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                       <div>
@@ -1622,6 +1652,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                               deliveryId={shipmentId}
                               photos={beforePhotos}
                               operationKind="shipment"
+                              readOnly={isContractor}
                             />
                           ) : (
                             <Typography.Text type="secondary">
@@ -1648,6 +1679,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                               deliveryId={shipmentId}
                               photos={afterPhotos}
                               operationKind="shipment"
+                              readOnly={isContractor}
                             />
                           ) : (
                             <Typography.Text type="secondary">
@@ -1670,9 +1702,11 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           size="small"
           title={`Материалы${items.length ? ` (${items.length})` : ''}`}
           extra={
-            <Button size="small" icon={<PlusOutlined />} onClick={addItem}>
-              Добавить
-            </Button>
+            isContractor ? null : (
+              <Button size="small" icon={<PlusOutlined />} onClick={addItem}>
+                Добавить
+              </Button>
+            )
           }
           styles={{ body: { padding: 0 } }}
         >
@@ -1703,6 +1737,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   rows={3}
                   value={comment}
                   onChange={(e) => setComment(e.target.value)}
+                  disabled={isContractor}
                 />
               ),
             },
@@ -1723,6 +1758,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           const confirmDisabled = isNew || isConfirmed || !!verifyReason || isPending;
           const canMarkDeletion =
             !isPending &&
+            !isContractor &&
             (loadedShipment.status.code === 'shipped' ||
               loadedShipment.status.code === 'confirmed_mol');
           const markBlock = canMarkDeletion ? (
@@ -1779,29 +1815,33 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               )}
               <Button onClick={() => navigate('/operations?type=shipment')}>Отмена</Button>
               {markBlock}
-              <Tooltip title={verifyReason ?? ''} placement="top">
-                <span style={{ display: 'inline-flex' }}>
-                  <Button
-                    type="primary"
-                    loading={save.isPending}
-                    disabled={saveDisabled}
-                    onClick={() => save.mutate()}
-                  >
-                    Сохранить
-                  </Button>
-                </span>
-              </Tooltip>
-              <Tooltip title={confirmTooltip} placement="top">
-                <span style={{ display: 'inline-flex' }}>
-                  <Button
-                    loading={confirmMol.isPending}
-                    disabled={confirmDisabled}
-                    onClick={() => confirmMol.mutate()}
-                  >
-                    Подтвердить МОЛ
-                  </Button>
-                </span>
-              </Tooltip>
+              {!isContractor && (
+                <>
+                  <Tooltip title={verifyReason ?? ''} placement="top">
+                    <span style={{ display: 'inline-flex' }}>
+                      <Button
+                        type="primary"
+                        loading={save.isPending}
+                        disabled={saveDisabled}
+                        onClick={() => save.mutate()}
+                      >
+                        Сохранить
+                      </Button>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title={confirmTooltip} placement="top">
+                    <span style={{ display: 'inline-flex' }}>
+                      <Button
+                        loading={confirmMol.isPending}
+                        disabled={confirmDisabled}
+                        onClick={() => confirmMol.mutate()}
+                      >
+                        Подтвердить МОЛ
+                      </Button>
+                    </span>
+                  </Tooltip>
+                </>
+              )}
             </div>
           ) : (
             <div
@@ -1826,33 +1866,37 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 Отмена
               </Button>
               {markBlock && <span style={{ flex: 1, display: 'inline-flex' }}>{markBlock}</span>}
-              <Tooltip title={verifyReason ?? ''} placement="top">
-                <span style={{ flex: 1, display: 'inline-flex' }}>
-                  <Button
-                    type="primary"
-                    size="large"
-                    style={{ flex: 1 }}
-                    loading={save.isPending}
-                    disabled={saveDisabled}
-                    onClick={() => save.mutate()}
-                  >
-                    Сохранить
-                  </Button>
-                </span>
-              </Tooltip>
-              <Tooltip title={confirmTooltip} placement="top">
-                <span style={{ flex: 1, display: 'inline-flex' }}>
-                  <Button
-                    size="large"
-                    style={{ flex: 1 }}
-                    loading={confirmMol.isPending}
-                    disabled={confirmDisabled}
-                    onClick={() => confirmMol.mutate()}
-                  >
-                    Подтвердить МОЛ
-                  </Button>
-                </span>
-              </Tooltip>
+              {!isContractor && (
+                <>
+                  <Tooltip title={verifyReason ?? ''} placement="top">
+                    <span style={{ flex: 1, display: 'inline-flex' }}>
+                      <Button
+                        type="primary"
+                        size="large"
+                        style={{ flex: 1 }}
+                        loading={save.isPending}
+                        disabled={saveDisabled}
+                        onClick={() => save.mutate()}
+                      >
+                        Сохранить
+                      </Button>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title={confirmTooltip} placement="top">
+                    <span style={{ flex: 1, display: 'inline-flex' }}>
+                      <Button
+                        size="large"
+                        style={{ flex: 1 }}
+                        loading={confirmMol.isPending}
+                        disabled={confirmDisabled}
+                        onClick={() => confirmMol.mutate()}
+                      >
+                        Подтвердить МОЛ
+                      </Button>
+                    </span>
+                  </Tooltip>
+                </>
+              )}
             </div>
           );
         })()}

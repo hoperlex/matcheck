@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, Modal, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Modal, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography, message } from 'antd';
 import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import type { Delivery, Shipment, SourceDocument } from '@matcheck/contracts';
@@ -54,7 +54,10 @@ export default function OperationsPage() {
   const type: OpType = params.get('type') === 'shipment' ? 'shipment' : 'delivery';
   const tab: ListTab = params.get('tab') === 'accepted' ? 'accepted' : 'expected';
   const isInspector = authUser?.role === 'inspector_kpp';
+  const isContractor = authUser?.role === 'contractor';
   const inspectorWithoutSite = isInspector && !authUser?.siteId;
+  // Подрядчик без привязки к контрагенту видит пустые списки — показываем баннер.
+  const contractorWithoutLink = isContractor && !authUser?.contractorCustomerId;
 
   // Slot для bulk-actions «Выбрано: N | Удалить выбранные | Снять выбор».
   // DeliveriesHistory / ShipmentsHistory через portal рисуют actions сюда,
@@ -268,7 +271,8 @@ export default function OperationsPage() {
   );
   const headerExtras = (
     <Space size={8}>
-      {createButton}
+      {/* Подрядчик — read-only: кнопку создания не показываем. */}
+      {!isContractor && createButton}
       {exportButton}
     </Space>
   );
@@ -381,6 +385,14 @@ export default function OperationsPage() {
         </div>
       }
     >
+      {contractorWithoutLink && (
+        <Alert
+          type="warning"
+          showIcon
+          message="Подрядчик не назначен — обратитесь к администратору."
+          style={{ marginBottom: 12 }}
+        />
+      )}
       {tab === 'expected' ? (
         type === 'delivery' ? (
           <ExpectedUpds onOpen={createFromUpd} filtersExtra={headerExtras} />

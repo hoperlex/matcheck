@@ -22,14 +22,14 @@ export const navItems: NavItem[] = [
     key: 'operations',
     label: 'Операции',
     path: '/operations',
-    roles: ['admin', 'manager', 'inspector_kpp'],
+    roles: ['admin', 'manager', 'inspector_kpp', 'contractor'],
     icon: SafetyOutlined,
   },
   {
     key: 'documents',
     label: 'Документы',
     path: '/documents',
-    roles: ['admin', 'manager'],
+    roles: ['admin', 'manager', 'contractor'],
     icon: FileTextOutlined,
   },
   {

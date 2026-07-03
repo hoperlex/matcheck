@@ -15,11 +15,23 @@ import {
 } from 'antd';
 import { DeleteOutlined, KeyOutlined } from '@ant-design/icons';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { Site, UserAdminPatch, UserDto, UserRole } from '@matcheck/contracts';
+import type {
+  CustomerCounterparty,
+  Site,
+  UserAdminPatch,
+  UserDto,
+  UserRole,
+} from '@matcheck/contracts';
 import { api, ApiError } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
+import { roleLabel } from '../../shared/constants/roleLabels';
 
-const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp'];
+const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp', 'contractor'];
+
+function hasValidInn(inn: string | null | undefined): boolean {
+  const digits = (inn ?? '').replace(/[^0-9]/g, '');
+  return digits.length > 0 && !/^0+$/.test(digits);
+}
 
 /**
  * Редактирование пользователя из таблицы Администрирование → Пользователи.
@@ -34,11 +46,13 @@ const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp'];
 export function UserEditModal({
   user,
   sites,
+  customerCps,
   open,
   onClose,
 }: {
   user: UserDto | null;
   sites: Site[];
+  customerCps: CustomerCounterparty[];
   open: boolean;
   onClose: () => void;
 }) {
@@ -50,6 +64,7 @@ export function UserEditModal({
   const [fullName, setFullName] = useState('');
   const [role, setRole] = useState<UserRole>('manager');
   const [siteId, setSiteId] = useState<string | null>(null);
+  const [contractorCustomerId, setContractorCustomerId] = useState<string | null>(null);
   const [phone, setPhone] = useState('');
   const [isActive, setIsActive] = useState(true);
   const [pwdOpen, setPwdOpen] = useState(false);
@@ -64,6 +79,7 @@ export function UserEditModal({
     setFullName(user.fullName ?? '');
     setRole(user.role);
     setSiteId(user.siteId);
+    setContractorCustomerId(user.contractorCustomerId);
     setPhone(user.phone ?? '');
     setIsActive(user.isActive);
     setPwdOpen(false);
@@ -117,6 +133,8 @@ export function UserEditModal({
       role,
       // inspector_kpp может иметь siteId; для остальных — бэк сам обнулит.
       siteId: role === 'inspector_kpp' ? siteId : null,
+      // contractor привязан к подрядчику; для остальных ролей — null.
+      contractorCustomerId: role === 'contractor' ? contractorCustomerId : null,
       phone: phone.trim() ? phone.trim() : null,
       isActive,
     };
@@ -182,7 +200,7 @@ export function UserEditModal({
           <Select<UserRole>
             value={role}
             onChange={(v) => setRole(v)}
-            options={roles.map((r) => ({ value: r, label: r }))}
+            options={roles.map((r) => ({ value: r, label: roleLabel(r) }))}
           />
         </Form.Item>
         {role === 'inspector_kpp' && (
@@ -195,6 +213,26 @@ export function UserEditModal({
               optionFilterProp="label"
               allowClear
               options={sites.map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` }))}
+            />
+          </Form.Item>
+        )}
+        {role === 'contractor' && (
+          <Form.Item
+            label="Подрядчик"
+            help="Записи без ИНН недоступны — по ИНН строится область видимости."
+          >
+            <Select<string>
+              value={contractorCustomerId ?? undefined}
+              onChange={(v) => setContractorCustomerId(v ?? null)}
+              placeholder="Не назначен"
+              showSearch
+              optionFilterProp="label"
+              allowClear
+              options={customerCps.map((c) => ({
+                value: c.id,
+                label: `${c.name} · ИНН ${c.inn || '—'}`,
+                disabled: !hasValidInn(c.inn),
+              }))}
             />
           </Form.Item>
         )}

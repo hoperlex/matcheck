@@ -4,6 +4,7 @@ import { MenuOutlined, UserOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../stores/auth';
 import { filterByRole } from './navItems';
+import { roleLabel } from '../../shared/constants/roleLabels';
 import { api } from '../../services/api';
 import { UserProfileModal } from '../../components/UserProfileModal';
 import { NotificationsBell } from '../../components/NotificationsBell';
@@ -87,7 +88,7 @@ export function MobileLayout() {
         </Typography.Text>
         <NotificationsBell />
         <Typography.Text code style={{ fontSize: 11 }}>
-          {user.role}
+          {roleLabel(user.role)}
         </Typography.Text>
       </Header>
       <Drawer

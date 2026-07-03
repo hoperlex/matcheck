@@ -116,11 +116,21 @@ export const router = createBrowserRouter([
       {
         path: 'documents',
         element: (
-          <ProtectedRoute roles={['admin', 'manager']}>{suspense(<Inbox />)}</ProtectedRoute>
+          <ProtectedRoute roles={['admin', 'manager', 'contractor']}>
+            {suspense(<Inbox />)}
+          </ProtectedRoute>
         ),
       },
       { path: 'inbox', element: <Navigate to="/documents" replace /> },
-      { path: 'materials', element: suspense(<MaterialsJournal />) },
+      {
+        path: 'materials',
+        // Журнал бьёт по /reports/*, закрытым для contractor — не пускаем его сюда.
+        element: (
+          <ProtectedRoute roles={['admin', 'manager', 'inspector_kpp']}>
+            {suspense(<MaterialsJournal />)}
+          </ProtectedRoute>
+        ),
+      },
       {
         path: 'stats',
         element: (
