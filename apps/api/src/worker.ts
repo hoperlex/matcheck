@@ -70,6 +70,7 @@ import { expandPdfAttachmentsForOpenRouter } from './domain/edo/waybill-pdf.js';
 import { getDefaultProviderKind } from './domain/llm/registry.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
 import { validateUpdTotals } from './domain/edo/upd-validation.js';
+import { normalizeM15ZeroTotals } from './domain/edo/m15-normalize.js';
 import {
   getExcelVisionFallbackReasons,
   mergeExcelStructuralWithVision,
@@ -783,6 +784,12 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   }
 
   if (duplicate) return;
+
+  // Толлинг-М-15 без стоимостной части (итог прописью «Ноль»): доопределяем
+  // totalSum/vatSum в 0, чтобы документ не падал в partial_parse из-за
+  // недетерминизма vision (0 vs null). Для всех прочих документов — no-op.
+  // См. m15-normalize.ts.
+  parsed = normalizeM15ZeroTotals(parsed, job.data.docKind);
 
   // Валидация сумм.
   const validation = validateUpdTotals({
