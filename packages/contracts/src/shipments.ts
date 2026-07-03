@@ -89,6 +89,12 @@ export const ShipmentSchema = z.object({
    * /api/v1/shipments/:id/supplier-from-directory). Миграция 0056.
    */
   supplierId: z.string().uuid().nullable(),
+  // Имена объекта/поставщика/получателя — резолвятся сервером в DTO, чтобы роль
+  // contractor не ходила в закрытые для неё справочники. optional — обратная
+  // совместимость (мобильный клиент их не шлёт при upsert).
+  siteName: z.string().nullable().optional(),
+  supplierName: z.string().nullable().optional(),
+  receiverName: z.string().nullable().optional(),
   vehiclePlate: z.string().nullable(),
   driverName: z.string().nullable(),
   shippedAt: z.string().nullable(),

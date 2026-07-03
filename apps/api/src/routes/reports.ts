@@ -133,7 +133,8 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/reports/stock',
     {
-      preHandler: [app.authenticate],
+      // Глобальные отчёты/журналы подрядчику недоступны — закрываем (403).
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: { querystring: StockQuerySchema, response: { 200: StockBalanceResponseSchema } },
     },
     async (req) => {
@@ -347,7 +348,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/reports/intake',
     {
-      preHandler: [app.authenticate],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: { querystring: IntakeQuerySchema, response: { 200: IntakeJournalResponseSchema } },
     },
     async (req) => {
@@ -468,7 +469,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/reports/shipment',
     {
-      preHandler: [app.authenticate],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: {
         querystring: ShipmentJournalQuerySchema,
         response: { 200: ShipmentJournalResponseSchema },
@@ -757,6 +758,12 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: { response: { 200: OperationsCountersResponseSchema } },
     },
     async (req) => {
+      // contractor — read-only просмотр своих записей; глобальные счётчики
+      // операций ему не показываются (чипы на фронте скрыты). Возвращаем нули,
+      // чтобы не светить агрегаты по всем объектам и не давать фоновой 403.
+      if (req.user?.role === 'contractor') {
+        return { completedToday: 0, inProgressToday: 0, overdue: 0 };
+      }
       const inspectorSiteId =
         req.user?.role === 'inspector_kpp' ? safeUuid(req.user.siteId ?? undefined) : null;
       // Если inspector без назначенного site — возвращаем нули, чтобы не

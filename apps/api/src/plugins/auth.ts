@@ -7,11 +7,15 @@ import { ACCESS_COOKIE_NAME } from '../domain/auth/refresh.js';
 
 export type AuthUser = {
   id: string;
-  role: 'admin' | 'manager' | 'inspector_kpp';
+  role: 'admin' | 'manager' | 'inspector_kpp' | 'contractor';
   // Привязка к объекту. У inspector_kpp определяет область видимости;
   // читаем из БД на каждом запросе, чтобы смена объекта применялась
   // моментально без перевыпуска токена.
   siteId: string | null;
+  // Привязка к подрядчику (id из справочника customer_counterparties).
+  // У роли contractor определяет область видимости (свои приёмки/отгрузки/
+  // документы по всем объектам). Читаем из БД на каждом запросе — как siteId.
+  contractorCustomerId: string | null;
   sessionId: string;
 };
 
@@ -88,6 +92,7 @@ export default fp(async (app) => {
           role: users.role,
           isActive: users.isActive,
           siteId: users.siteId,
+          contractorCustomerId: users.contractorCustomerId,
           sessionsInvalidatedAt: users.sessionsInvalidatedAt,
           passwordChangedAt: users.passwordChangedAt,
         })
@@ -108,7 +113,13 @@ export default fp(async (app) => {
       ) {
         return null;
       }
-      return { id: user.id, role: user.role, siteId: user.siteId, sessionId: claims.sid };
+      return {
+        id: user.id,
+        role: user.role,
+        siteId: user.siteId,
+        contractorCustomerId: user.contractorCustomerId,
+        sessionId: claims.sid,
+      };
     } catch {
       return null;
     }

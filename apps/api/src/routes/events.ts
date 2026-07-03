@@ -43,7 +43,10 @@ export async function eventsRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/events',
     {
-      preHandler: [app.authenticate],
+      // SSE-события шлются всем подключённым без скоупа (id/типы чужих сущностей)
+      // → metadata-leak. contractor не должен подписываться (live-обновления ему
+      // не критичны — списки обновятся на focus-refetch). Закрываем (403).
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
     },
     async (req, reply: FastifyReply) => {
       reply.raw.writeHead(200, {

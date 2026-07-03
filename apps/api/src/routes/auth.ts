@@ -35,9 +35,10 @@ const env = loadEnv();
 function userToDto(u: {
   id: string;
   email: string;
-  role: 'admin' | 'manager' | 'inspector_kpp';
+  role: 'admin' | 'manager' | 'inspector_kpp' | 'contractor';
   isActive: boolean;
   siteId: string | null;
+  contractorCustomerId: string | null;
   phone: string | null;
   fullName: string | null;
   createdAt: Date;
@@ -48,6 +49,7 @@ function userToDto(u: {
     role: u.role,
     isActive: u.isActive,
     siteId: u.siteId,
+    contractorCustomerId: u.contractorCustomerId,
     phone: u.phone,
     fullName: u.fullName,
     createdAt: u.createdAt.toISOString(),
@@ -156,6 +158,7 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
         response: {
           200: LoginResponseSchema,
           401: ErrorResponseSchema,
+          403: ErrorResponseSchema,
           423: ErrorResponseSchema,
           429: ErrorResponseSchema,
         },
@@ -209,6 +212,15 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
         return reply
           .code(401)
           .send({ error: 'account_inactive', message: 'Account is not active' });
+      }
+
+      // contractor — роль только для веб-портала: мобильный клиент её не
+      // поддерживает, а мобильный sync для неё закрыт (403). Отклоняем на входе,
+      // чтобы web-token подрядчика вообще не появлялся у мобильного приложения.
+      if (isMobileClient(req) && user.role === 'contractor') {
+        return reply
+          .code(403)
+          .send({ error: 'web_only_role', message: 'Contractor role is web-only' });
       }
 
       await app.db

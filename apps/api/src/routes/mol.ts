@@ -70,7 +70,7 @@ export async function molRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/mol',
     {
-      preHandler: [app.authenticate],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: { response: { 200: MolListResponseSchema } },
     },
     async (req) => {

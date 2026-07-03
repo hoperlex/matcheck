@@ -181,7 +181,10 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/share-links',
     {
-      preHandler: [app.authenticate],
+      // Отдаёт готовый public share-URL с токеном для сущности по id → это обход
+      // всей модели доступа (рабочая ссылка на чужое). contractor не генерирует
+      // и не смотрит share — закрываем (403).
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: {
         querystring: ListQuerySchema,
         response: { 200: ShareLinkListResponseSchema },

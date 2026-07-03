@@ -16,7 +16,6 @@ import {
 } from '@matcheck/contracts';
 import {
   counterparties,
-  customerCounterparties,
   deliveries,
   deliveryItems,
   deliveryPhotos,
@@ -37,6 +36,12 @@ import {
 } from '../domain/statuses/lookup.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
+import {
+  expandCustomerCounterpartyToOpIds,
+  resolveContractorOpIds,
+  deliveryContractorPredicate,
+  deliveryVisibleToContractor,
+} from '../lib/contractor-scope.js';
 import { publishEvent } from './events.js';
 
 const ListQuerySchema = z.object({
@@ -106,29 +111,8 @@ const KNOWN_FEATURES = new Set(['transit', 'assets', 'upd', 'waybill']);
 // regexp_replace в JOIN-условии при 1000+ counterparties × 1000 справочника
 // — это полный matching, ~ms. На больших объёмах можно добавить
 // функциональный индекс по нормализованному ИНН (отдельная задача).
-async function expandCustomerCounterpartyToOpIds(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  app: any,
-  directoryIds: string[],
-): Promise<string[]> {
-  if (directoryIds.length === 0) return [];
-  const rows = await app.db
-    .select({ id: counterparties.id })
-    .from(counterparties)
-    .innerJoin(
-      customerCounterparties,
-      drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g')
-          = regexp_replace(coalesce(${customerCounterparties.inn}, ''), '[^0-9]', '', 'g')`,
-    )
-    .where(
-      and(
-        inArray(customerCounterparties.id, directoryIds),
-        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') != ''`,
-        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') !~ '^0+$'`,
-      ),
-    );
-  return rows.map((r: { id: string }) => r.id);
-}
+// expandCustomerCounterpartyToOpIds вынесена в lib/contractor-scope.ts —
+// её переиспользует скоупинг роли contractor (тот же ИНН-разворот).
 
 async function expandSupplierToOpIds(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -192,6 +176,14 @@ async function buildDeliveryDto(app: any, id: string) {
   // Для парных приёмок (transfer) подтягиваем плоско дату отгрузки и
   // объект-источник из связанного shipment + sites.
   const pendingUser = alias(users, 'pending_user');
+  // Имена объекта/поставщика/подрядчика — прямо в DTO (для всех ролей).
+  // Нужны, чтобы роль contractor не ходила в закрытые для неё справочники
+  // (/sites, /counterparties): названия берутся из scoped-DTO её записей.
+  // deliverySite — отдельный alias, т.к. sites уже join'ится на объект-источник
+  // парной отгрузки (transfer).
+  const deliverySite = alias(sites, 'delivery_site');
+  const supplierCp = alias(counterparties, 'supplier_cp');
+  const contractorCp = alias(counterparties, 'contractor_cp');
   const rows = await app.db
     .select({
       d: deliveries,
@@ -201,6 +193,9 @@ async function buildDeliveryDto(app: any, id: string) {
       srcShippedAt: shipments.shippedAt,
       srcSiteId: shipments.siteId,
       srcSiteCode: sites.code,
+      siteName: deliverySite.name,
+      supplierName: supplierCp.name,
+      contractorName: contractorCp.name,
     })
     .from(deliveries)
     .innerJoin(statuses, eq(deliveries.statusId, statuses.id))
@@ -208,6 +203,9 @@ async function buildDeliveryDto(app: any, id: string) {
     .leftJoin(pendingUser, eq(deliveries.pendingDeletionByUserId, pendingUser.id))
     .leftJoin(shipments, eq(deliveries.sourceShipmentId, shipments.id))
     .leftJoin(sites, eq(shipments.siteId, sites.id))
+    .leftJoin(deliverySite, eq(deliveries.siteId, deliverySite.id))
+    .leftJoin(supplierCp, eq(deliveries.supplierId, supplierCp.id))
+    .leftJoin(contractorCp, eq(deliveries.contractorId, contractorCp.id))
     .where(eq(deliveries.id, id))
     .limit(1);
   const r = rows[0] as
@@ -219,6 +217,9 @@ async function buildDeliveryDto(app: any, id: string) {
         srcShippedAt: Date | null;
         srcSiteId: string | null;
         srcSiteCode: string | null;
+        siteName: string | null;
+        supplierName: string | null;
+        contractorName: string | null;
       }
     | undefined;
   if (!r) return null;
@@ -252,6 +253,9 @@ async function buildDeliveryDto(app: any, id: string) {
     supplierId: d.supplierId,
     contractorId: d.contractorId,
     recipientMolId: d.recipientMolId,
+    siteName: r.siteName,
+    supplierName: r.supplierName,
+    contractorName: r.contractorName,
     vehiclePlate: d.vehiclePlate,
     driverName: d.driverName,
     arrivedAt: d.arrivedAt?.toISOString() ?? null,
@@ -358,6 +362,16 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           filters.push(drSql`false`);
         } else {
           filters.push(eq(deliveries.siteId, req.user.siteId));
+        }
+      } else if (req.user?.role === 'contractor') {
+        // contractor видит только свои приёмки по всем объектам: contractor_id
+        // приёмки ∈ его operational id ИЛИ унаследован от привязанного УПД.
+        // Без назначенного подрядчика / без совпадений по ИНН — пусто.
+        const opIds = await resolveContractorOpIds(app, req.user);
+        if (!opIds || opIds.length === 0) {
+          filters.push(drSql`false`);
+        } else {
+          filters.push(deliveryContractorPredicate(opIds));
         }
       } else if (inspectorId) {
         filters.push(eq(deliveries.inspectorId, inspectorId));
@@ -523,6 +537,14 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         (!req.user.siteId || dto.siteId !== req.user.siteId)
       ) {
         return reply.code(404).send({ error: 'not_found' });
+      }
+      // contractor видит только свои приёмки (с наследованием от УПД). DTO не
+      // отдаёт унаследованного подрядчика, поэтому проверяем отдельным запросом.
+      if (req.user?.role === 'contractor') {
+        const opIds = await resolveContractorOpIds(app, req.user);
+        if (!opIds || !(await deliveryVisibleToContractor(app, req.params.id, opIds))) {
+          return reply.code(404).send({ error: 'not_found' });
+        }
       }
       return dto;
     },
@@ -1165,6 +1187,14 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             conds.push(drSql`false`);
           } else {
             conds.push(eq(deliveries.siteId, req.user.siteId));
+          }
+        } else if (req.user?.role === 'contractor') {
+          // Экспорт строит свой WHERE отдельно от списка — дублируем скоуп.
+          const opIds = await resolveContractorOpIds(app, req.user);
+          if (!opIds || opIds.length === 0) {
+            conds.push(drSql`false`);
+          } else {
+            conds.push(deliveryContractorPredicate(opIds));
           }
         }
 

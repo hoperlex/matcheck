@@ -49,6 +49,7 @@ import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { publishEvent } from './events.js';
 import { matchOrCreateSupplier } from '../domain/sourceDocuments/supplierMatcher.js';
+import { resolveContractorOpIds } from '../lib/contractor-scope.js';
 
 const KIND_VALUES = ['upd', 'request', 'transport_waybill', 'os2_transfer'] as const;
 type KindValue = (typeof KIND_VALUES)[number];
@@ -523,6 +524,14 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         } else {
           conditions.push(eq(sourceDocuments.siteId, req.user.siteId));
         }
+      } else if (req.user?.role === 'contractor') {
+        // contractor видит только документы своего подрядчика (по contractor_id).
+        const opIds = await resolveContractorOpIds(app, req.user);
+        if (!opIds || opIds.length === 0) {
+          conditions.push(drSql`false`);
+        } else {
+          conditions.push(inArray(sourceDocuments.contractorId, opIds));
+        }
       }
       // Фильтр «непринятые»: УПД считается ожидаемой, пока на неё нет
       // привязки в delivery_sources / shipment_sources. Статус приёмки/
@@ -691,6 +700,14 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             conditions.push(drSql`false`);
           } else {
             conditions.push(eq(sourceDocuments.siteId, req.user.siteId));
+          }
+        } else if (req.user?.role === 'contractor') {
+          // Экспорт строит свой WHERE отдельно — дублируем contractor-скоуп.
+          const opIds = await resolveContractorOpIds(app, req.user);
+          if (!opIds || opIds.length === 0) {
+            conditions.push(drSql`false`);
+          } else {
+            conditions.push(inArray(sourceDocuments.contractorId, opIds));
           }
         }
 
@@ -895,6 +912,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       ) {
         return reply.code(404).send({ error: 'not_found' });
       }
+      // contractor видит только документы своего подрядчика.
+      if (req.user?.role === 'contractor') {
+        const opIds = await resolveContractorOpIds(app, req.user);
+        if (!opIds || !sd.contractorId || !opIds.includes(sd.contractorId)) {
+          return reply.code(404).send({ error: 'not_found' });
+        }
+      }
       const items = await app.db
         .select()
         .from(sourceDocumentItems)
@@ -960,6 +984,18 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           return reply.code(404).send({ error: 'not_found' });
         }
       }
+      // contractor видит файлы только документов своего подрядчика.
+      if (req.user?.role === 'contractor') {
+        const [sd] = await app.db
+          .select({ contractorId: sourceDocuments.contractorId })
+          .from(sourceDocuments)
+          .where(eq(sourceDocuments.id, req.params.id))
+          .limit(1);
+        const opIds = await resolveContractorOpIds(app, req.user);
+        if (!sd || !opIds || !sd.contractorId || !opIds.includes(sd.contractorId)) {
+          return reply.code(404).send({ error: 'not_found' });
+        }
+      }
       const att = await findOriginalAttachment(app, req.params.id);
       if (!att) return reply.code(404).send({ error: 'no_attachment' });
       try {
@@ -999,6 +1035,18 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           .where(eq(sourceDocuments.id, req.params.id))
           .limit(1);
         if (!sd || !req.user.siteId || sd.siteId !== req.user.siteId) {
+          return reply.code(404).send({ error: 'not_found' });
+        }
+      }
+      // contractor видит файлы только документов своего подрядчика.
+      if (req.user?.role === 'contractor') {
+        const [sd] = await app.db
+          .select({ contractorId: sourceDocuments.contractorId })
+          .from(sourceDocuments)
+          .where(eq(sourceDocuments.id, req.params.id))
+          .limit(1);
+        const opIds = await resolveContractorOpIds(app, req.user);
+        if (!sd || !opIds || !sd.contractorId || !opIds.includes(sd.contractorId)) {
           return reply.code(404).send({ error: 'not_found' });
         }
       }

@@ -17,12 +17,12 @@ import {
 } from '@matcheck/contracts';
 import {
   counterparties,
-  customerCounterparties,
   entityDeletions,
   shipments,
   shipmentItems,
   shipmentPhotos,
   shipmentSources,
+  sites,
   sourceDocumentItems,
   sourceDocuments,
   statuses,
@@ -37,6 +37,10 @@ import {
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isShipmentDowngrade } from '../domain/operations/status-guard.js';
 import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
+import {
+  expandCustomerCounterpartyToOpIds,
+  resolveContractorOpIds,
+} from '../lib/contractor-scope.js';
 import { publishEvent } from './events.js';
 
 const ListQuerySchema = z.object({
@@ -96,32 +100,8 @@ const KNOWN_PURPOSES = new Set([
   'Другое',
 ]);
 
-// См. одноимённые функции в deliveries.ts. Дублируем здесь чтобы не
-// плодить shared/-модули ради двух 20-строчных хелперов; общий шаблон
-// expansionDirToOpIds потом легко вынести при появлении 3-го потребителя.
-async function expandCustomerCounterpartyToOpIds(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  app: any,
-  directoryIds: string[],
-): Promise<string[]> {
-  if (directoryIds.length === 0) return [];
-  const rows = await app.db
-    .select({ id: counterparties.id })
-    .from(counterparties)
-    .innerJoin(
-      customerCounterparties,
-      drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g')
-          = regexp_replace(coalesce(${customerCounterparties.inn}, ''), '[^0-9]', '', 'g')`,
-    )
-    .where(
-      and(
-        inArray(customerCounterparties.id, directoryIds),
-        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') != ''`,
-        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') !~ '^0+$'`,
-      ),
-    );
-  return rows.map((r: { id: string }) => r.id);
-}
+// expandCustomerCounterpartyToOpIds вынесена в lib/contractor-scope.ts (3-й
+// потребитель — скоупинг роли contractor). См. импорт выше.
 
 async function expandSupplierToOpIds(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -189,17 +169,28 @@ const resolveStatusId = (app: any, code: string) =>
 async function buildShipmentDto(app: any, id: string) {
   // Два независимых join на users: один на МОЛ, другой на автора soft-delete пометки.
   const pendingUser = alias(users, 'pending_user');
+  // Имена объекта/поставщика/получателя — в DTO, чтобы роль contractor не
+  // ходила в закрытые для неё справочники (/sites, /counterparties).
+  const shipmentSite = alias(sites, 'shipment_site');
+  const supplierCp = alias(counterparties, 'supplier_cp');
+  const receiverCp = alias(counterparties, 'receiver_cp');
   const rows = await app.db
     .select({
       s: shipments,
       st: statuses,
       molEmail: users.email,
       pendingEmail: pendingUser.email,
+      siteName: shipmentSite.name,
+      supplierName: supplierCp.name,
+      receiverName: receiverCp.name,
     })
     .from(shipments)
     .innerJoin(statuses, eq(shipments.statusId, statuses.id))
     .leftJoin(users, eq(shipments.confirmedByMolUserId, users.id))
     .leftJoin(pendingUser, eq(shipments.pendingDeletionByUserId, pendingUser.id))
+    .leftJoin(shipmentSite, eq(shipments.siteId, shipmentSite.id))
+    .leftJoin(supplierCp, eq(shipments.supplierId, supplierCp.id))
+    .leftJoin(receiverCp, eq(shipments.receiverCounterpartyId, receiverCp.id))
     .where(eq(shipments.id, id))
     .limit(1);
   const r = rows[0] as
@@ -208,6 +199,9 @@ async function buildShipmentDto(app: any, id: string) {
         st: StatusRow;
         molEmail: string | null;
         pendingEmail: string | null;
+        siteName: string | null;
+        supplierName: string | null;
+        receiverName: string | null;
       }
     | undefined;
   if (!r) return null;
@@ -246,6 +240,9 @@ async function buildShipmentDto(app: any, id: string) {
     receiverMolId: s.receiverMolId,
     destSiteId: s.destSiteId,
     supplierId: s.supplierId,
+    siteName: r.siteName,
+    supplierName: r.supplierName,
+    receiverName: r.receiverName,
     vehiclePlate: s.vehiclePlate,
     driverName: s.driverName,
     shippedAt: s.shippedAt?.toISOString() ?? null,
@@ -348,6 +345,16 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           filters.push(drSql`false`);
         } else {
           filters.push(eq(shipments.siteId, req.user.siteId));
+        }
+      } else if (req.user?.role === 'contractor') {
+        // contractor видит отгрузки, где он — получатель (receiver_counterparty_id),
+        // по всем объектам, независимо от kind. Наследования от УПД нет (как и у
+        // UI-фильтра). Без назначенного подрядчика / без совпадений — пусто.
+        const opIds = await resolveContractorOpIds(app, req.user);
+        if (!opIds || opIds.length === 0) {
+          filters.push(drSql`false`);
+        } else {
+          filters.push(inArray(shipments.receiverCounterpartyId, opIds));
         }
       } else {
         if (siteId) filters.push(eq(shipments.siteId, siteId));
@@ -501,6 +508,18 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         (!req.user.siteId || dto.siteId !== req.user.siteId)
       ) {
         return reply.code(404).send({ error: 'not_found' });
+      }
+      // contractor видит только отгрузки, где он получатель. DTO уже содержит
+      // receiverCounterpartyId, поэтому проверяем без доп. запроса.
+      if (req.user?.role === 'contractor') {
+        const opIds = await resolveContractorOpIds(app, req.user);
+        if (
+          !opIds ||
+          !dto.receiverCounterpartyId ||
+          !opIds.includes(dto.receiverCounterpartyId)
+        ) {
+          return reply.code(404).send({ error: 'not_found' });
+        }
       }
       return dto;
     },

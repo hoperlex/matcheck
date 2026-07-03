@@ -19,6 +19,7 @@ function dto(u: typeof users.$inferSelect) {
     role: u.role,
     isActive: u.isActive,
     siteId: u.siteId,
+    contractorCustomerId: u.contractorCustomerId,
     phone: u.phone,
     fullName: u.fullName,
     createdAt: u.createdAt.toISOString(),
@@ -94,6 +95,14 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
         patch.siteId = null;
       } else if (req.body.siteId !== undefined) {
         patch.siteId = req.body.siteId;
+      }
+
+      // Симметрично siteId: привязка к подрядчику только у роли contractor.
+      // При смене роли на другую — обнуляем.
+      if (nextRole !== 'contractor') {
+        patch.contractorCustomerId = null;
+      } else if (req.body.contractorCustomerId !== undefined) {
+        patch.contractorCustomerId = req.body.contractorCustomerId;
       }
 
       const [updated] = await app.db

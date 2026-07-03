@@ -27,6 +27,11 @@ import { deleteObject, getObject, headObject, presign } from '../domain/storage/
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { recognizePhotoItems } from '../domain/photos/recognize.js';
 import { publishEvent } from './events.js';
+import {
+  resolveContractorOpIds,
+  deliveryVisibleToContractor,
+} from '../lib/contractor-scope.js';
+import type { AuthUser } from '../plugins/auth.js';
 
 // TTL presigned URL для GET/PUT в S3. Поднят с 300с до 900с, чтобы
 // компенсировать возможный дрейф системных часов API-сервера: при
@@ -425,6 +430,14 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       ) {
         return reply.code(404).send({ error: 'not_found' });
       }
+      // contractor — только фото своих приёмок/отгрузок (по прямому id иначе
+      // достал бы чужое фото; read-only guard GET не ловит).
+      if (
+        req.user?.role === 'contractor' &&
+        !(await photoVisibleToContractor(app, found, req.user))
+      ) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
       const key = req.query.thumb && found.thumbS3Key ? found.thumbS3Key : found.s3Key;
       try {
         const url = await presign({ method: 'GET', key, expiresIn: URL_TTL });
@@ -460,6 +473,12 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       if (
         req.user?.role === 'inspector_kpp' &&
         (!req.user.siteId || found.parentSiteId !== req.user.siteId)
+      ) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      if (
+        req.user?.role === 'contractor' &&
+        !(await photoVisibleToContractor(app, found, req.user))
       ) {
         return reply.code(404).send({ error: 'not_found' });
       }
@@ -779,6 +798,12 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       ) {
         return reply.code(404).send({ error: 'not_found' });
       }
+      if (
+        req.user?.role === 'contractor' &&
+        !(await photoVisibleToContractor(app, found, req.user))
+      ) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
       const cached = await loadRecognition(app, found.kind, req.params.id);
       if (!cached) return reply.code(404).send({ error: 'not_found' });
       return cached;
@@ -1034,6 +1059,10 @@ async function findPhoto(
       s3Key: string;
       thumbS3Key: string | null;
       parentSiteId: string | null;
+      // Получатель родительской отгрузки (для скоупа роли contractor у
+      // shipment-фото). Для delivery-фото всегда null — видимость приёмки
+      // проверяется через deliveryVisibleToContractor по operationId.
+      parentReceiverCounterpartyId: string | null;
     }
   | null
 > {
@@ -1055,6 +1084,7 @@ async function findPhoto(
       s3Key: d.s3Key,
       thumbS3Key: d.thumbS3Key,
       parentSiteId: d.parentSiteId,
+      parentReceiverCounterpartyId: null,
     };
 
   const [s] = await app.db
@@ -1063,6 +1093,7 @@ async function findPhoto(
       thumbS3Key: shipmentPhotos.thumbS3Key,
       operationId: shipmentPhotos.shipmentId,
       parentSiteId: shipments.siteId,
+      parentReceiverCounterpartyId: shipments.receiverCounterpartyId,
     })
     .from(shipmentPhotos)
     .innerJoin(shipments, eq(shipments.id, shipmentPhotos.shipmentId))
@@ -1075,7 +1106,27 @@ async function findPhoto(
       s3Key: s.s3Key,
       thumbS3Key: s.thumbS3Key,
       parentSiteId: s.parentSiteId,
+      parentReceiverCounterpartyId: s.parentReceiverCounterpartyId,
     };
 
   return null;
+}
+
+// Видимо ли фото роли contractor: для delivery-фото — через видимость приёмки
+// (с наследованием подрядчика от УПД), для shipment-фото — по получателю
+// отгрузки. Вызывать только когда req.user.role === 'contractor'.
+async function photoVisibleToContractor(
+  app: FastifyInstance,
+  found: NonNullable<Awaited<ReturnType<typeof findPhoto>>>,
+  user: AuthUser,
+): Promise<boolean> {
+  const opIds = await resolveContractorOpIds(app, user);
+  if (!opIds || opIds.length === 0) return false;
+  if (found.kind === 'delivery') {
+    return deliveryVisibleToContractor(app, found.operationId, opIds);
+  }
+  return (
+    !!found.parentReceiverCounterpartyId &&
+    opIds.includes(found.parentReceiverCounterpartyId)
+  );
 }

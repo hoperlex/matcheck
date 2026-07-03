@@ -35,7 +35,7 @@ export async function assetRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/assets',
     {
-      preHandler: [app.authenticate],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: { querystring: ListQuerySchema, response: { 200: AssetListResponseSchema } },
     },
     async (req) => {

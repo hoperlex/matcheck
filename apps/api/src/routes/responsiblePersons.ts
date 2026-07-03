@@ -52,7 +52,7 @@ export async function responsiblePersonRoutes(rawApp: FastifyInstance): Promise<
   app.get(
     '/api/v1/responsible-persons',
     {
-      preHandler: [app.authenticate],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: {
         querystring: ListQuerySchema,
         response: { 200: ResponsiblePersonListResponseSchema },

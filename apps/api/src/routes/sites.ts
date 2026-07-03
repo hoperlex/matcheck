@@ -67,7 +67,9 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/sites',
     {
-      preHandler: [app.authenticate],
+      // Справочник объектов заказчика — подрядчику не показываем; название
+      // объекта он получает в scoped-DTO своих записей (siteName).
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: { querystring: ListQuerySchema, response: { 200: SiteListResponseSchema } },
     },
     async (req) => {
@@ -97,7 +99,7 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/sites/:id',
     {
-      preHandler: [app.authenticate],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
         response: { 200: SiteSchema, 404: ErrorResponseSchema },

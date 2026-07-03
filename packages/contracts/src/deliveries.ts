@@ -64,6 +64,12 @@ export const DeliverySchema = z.object({
   supplierId: z.string().uuid().nullable(),
   contractorId: z.string().uuid().nullable(),
   recipientMolId: z.string().uuid().nullable(),
+  // Имена объекта/поставщика/подрядчика — резолвятся сервером в DTO, чтобы
+  // роль contractor не ходила в закрытые для неё справочники. optional —
+  // мобильный клиент их не шлёт при upsert и может не знать (обратная совместимость).
+  siteName: z.string().nullable().optional(),
+  supplierName: z.string().nullable().optional(),
+  contractorName: z.string().nullable().optional(),
   vehiclePlate: z.string().nullable(),
   driverName: z.string().nullable(),
   arrivedAt: z.string().nullable(),

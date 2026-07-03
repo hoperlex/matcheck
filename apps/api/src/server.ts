@@ -66,6 +66,20 @@ export async function buildServer() {
   });
   await app.register(authPlugin);
 
+  // Read-only guard для роли contractor. Регистрируем ПОСЛЕ authPlugin, чтобы
+  // req.user был уже прикреплён его onRequest-хуком. Метод-ориентированный:
+  // любой мутирующий запрос (POST/PUT/PATCH/DELETE) от подрядчика → 403, кроме
+  // self-service под /api/v1/auth/ (logout, PATCH /me, смена пароля). Иммунен к
+  // добавлению новых write-эндпоинтов — не нужно закрывать каждый вручную.
+  const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+  app.addHook('onRequest', async (req, reply) => {
+    if (req.user?.role !== 'contractor') return;
+    if (!MUTATING.has(req.method.toUpperCase())) return;
+    if (req.url.startsWith('/api/v1/auth/')) return;
+    req.log.warn({ path: req.url, method: req.method }, 'contractor write blocked (read-only)');
+    return reply.code(403).send({ error: 'forbidden', message: 'Read-only role' });
+  });
+
   await app.register(healthRoutes);
   await app.register(authRoutes);
   await app.register(counterpartyRoutes);

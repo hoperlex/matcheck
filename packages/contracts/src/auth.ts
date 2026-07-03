@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const UserRoleSchema = z.enum(['admin', 'manager', 'inspector_kpp']);
+export const UserRoleSchema = z.enum(['admin', 'manager', 'inspector_kpp', 'contractor']);
 export type UserRole = z.infer<typeof UserRoleSchema>;
 
 export const EmailSchema = z.string().email().max(254).toLowerCase().trim();
@@ -36,6 +36,9 @@ export const UserDtoSchema = z.object({
   // Объект, привязанный к пользователю. Обязателен для inspector_kpp;
   // для admin/manager всегда null.
   siteId: z.string().uuid().nullable(),
+  // Подрядчик (id из справочника customer_counterparties), привязанный к
+  // пользователю. Обязателен для роли contractor; для остальных ролей null.
+  contractorCustomerId: z.string().uuid().nullable(),
   // Контактный телефон (см. RegisterRequestSchema). null, если пользователь
   // не указал.
   phone: z.string().nullable(),
@@ -72,6 +75,9 @@ export const UserAdminPatchSchema = z.object({
   role: UserRoleSchema.optional(),
   isActive: z.boolean().optional(),
   siteId: z.string().uuid().nullable().optional(),
+  // Привязка к подрядчику (справочник customer_counterparties). Проставляется
+  // админом для роли contractor; при смене роли на не-contractor обнуляется.
+  contractorCustomerId: z.string().uuid().nullable().optional(),
   // Админ может править/проставлять телефон уже зарегистрированному
   // пользователю (например для менеджеров, которые регистрировались до
   // добавления поля или забыли заполнить).

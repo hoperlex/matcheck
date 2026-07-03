@@ -50,7 +50,9 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/sync',
     {
-      preHandler: [app.authenticate],
+      // contractor — web-only read-only: sync (офлайн-пакет мобилки) ему не
+      // нужен и без скоупа отдал бы широкий набор данных. Закрываем (403).
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: { querystring: QuerySchema, response: { 200: SyncDeltaResponseSchema } },
     },
     async (req) => {
@@ -721,7 +723,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
   app.post(
     '/api/v1/sync/reconcile',
     {
-      preHandler: [app.authenticate],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: { body: ReconcileRequestSchema, response: { 200: ReconcileResponseSchema } },
     },
     async (req) => {

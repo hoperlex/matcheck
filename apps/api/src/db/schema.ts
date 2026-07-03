@@ -22,7 +22,7 @@ import type { UpdValidation } from '@matcheck/contracts';
 
 // ─── Enums ─────────────────────────────────────────────────────────────────
 
-export const userRoleEnum = pgEnum('user_role', ['admin', 'manager', 'inspector_kpp']);
+export const userRoleEnum = pgEnum('user_role', ['admin', 'manager', 'inspector_kpp', 'contractor']);
 export const shipmentKindEnum = pgEnum('shipment_kind', [
   'contractor',
   'return',
@@ -114,6 +114,15 @@ export const users = pgTable(
     // (определяет область видимости приёмок/отгрузок/документов).
     // Для admin/manager всегда null.
     siteId: uuid('site_id').references(() => sites.id, { onDelete: 'set null' }),
+    // Подрядчик, к которому привязан пользователь. Обязателен для роли
+    // contractor (определяет область видимости: только свои приёмки/отгрузки/
+    // документы по всем объектам). Для остальных ролей всегда null. Ссылается на
+    // справочник заказчика customer_counterparties; в рантайме разворачивается в
+    // операционные counterparties по ИНН (см. lib/contractor-scope.ts).
+    contractorCustomerId: uuid('contractor_customer_id').references(
+      () => customerCounterparties.id,
+      { onDelete: 'set null' },
+    ),
     passwordChangedAt: timestamp('password_changed_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -126,6 +135,9 @@ export const users = pgTable(
   (t) => [
     uniqueIndex('users_email_unique').on(sql`lower(${t.email})`),
     index('users_site_idx').on(t.siteId).where(sql`${t.siteId} is not null`),
+    index('users_contractor_customer_idx')
+      .on(t.contractorCustomerId)
+      .where(sql`${t.contractorCustomerId} is not null`),
   ],
 );
 
