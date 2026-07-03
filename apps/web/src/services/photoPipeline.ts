@@ -154,6 +154,16 @@ export async function uploadPhoto(photoId: string): Promise<void> {
   // вычищена cleanup-job'ом — фото пропадёт. См. apps/api/routes/photos.ts.
   await api.post<PhotoConfirmResponse>(`/photos/${presign.photoId}/confirm`, {});
 
+  // Пользователь мог удалить фото, пока шёл upload (presign/PUT/confirm). Если
+  // исходной IDB-записи уже нет — НЕ воскрешаем её put'ом ниже, а подчищаем
+  // созданную на сервере строку, иначе появится «мёртвый» orphan или воскресшее
+  // confirmed-фото. Проверяем именно по исходному p.id (id-swap делает этот же вызов).
+  const still = await dbi.get('photos', p.id);
+  if (!still) {
+    await api.delete(`/photos/${presign.photoId}`).catch(() => undefined);
+    return;
+  }
+
   // Сервер генерирует photoId сам (см. apps/api/routes/photos.ts: insert с
   // crypto.randomUUID()). Чтобы merged-список в UI не показывал ДВА фото
   // (server + local с разными id), синхронизируем локальный id с серверным —

@@ -60,7 +60,12 @@ export function PhotoGallery({
   const queryClient = useQueryClient();
   const invalidateKey = operationKind === 'shipment' ? 'shipments' : 'deliveries';
 
-  const del = useMutation<PhotoDeleteResponse, Error, string>({
+  const del = useMutation<
+    PhotoDeleteResponse,
+    Error,
+    string,
+    { prevServer: unknown; prevLocal: unknown }
+  >({
     mutationFn: async (id: string) => {
       const dbi = await db();
       const local = await dbi.get('photos', id);
@@ -83,6 +88,27 @@ export function PhotoGallery({
         throw err;
       }
     },
+    // Оптимистично убираем ТОЛЬКО удаляемое фото (по id) из обоих кэшей сразу,
+    // не дожидаясь ответа сервера и следующего 5-сек polling'а. Остальной объект
+    // приёмки/отгрузки и все прочие фото сохраняем как есть (…old + фильтр по id).
+    onMutate: async (id: string) => {
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: [invalidateKey, deliveryId] }),
+        queryClient.cancelQueries({ queryKey: ['photos-local', operationKind, deliveryId] }),
+      ]);
+      const prevServer = queryClient.getQueryData([invalidateKey, deliveryId]);
+      const prevLocal = queryClient.getQueryData(['photos-local', operationKind, deliveryId]);
+      queryClient.setQueryData([invalidateKey, deliveryId], (old) => {
+        if (!old || typeof old !== 'object' || !('photos' in old)) return old;
+        const o = old as { photos?: AnyPhoto[] };
+        if (!Array.isArray(o.photos)) return old;
+        return { ...o, photos: o.photos.filter((p) => p.id !== id) };
+      });
+      queryClient.setQueryData(['photos-local', operationKind, deliveryId], (old) =>
+        Array.isArray(old) ? (old as AnyPhoto[]).filter((p) => p.id !== id) : old,
+      );
+      return { prevServer, prevLocal };
+    },
     onSuccess: async () => {
       message.success('Фото удалено');
       // Инвалидируем оба источника галереи: серверный snapshot приёмки/отгрузки
@@ -93,7 +119,14 @@ export function PhotoGallery({
         queryClient.invalidateQueries({ queryKey: ['photos-local', operationKind, deliveryId] }),
       ]);
     },
-    onError: (err: Error) => message.error(err.message),
+    onError: (err: Error, _id, ctx) => {
+      // Откат оптимистичного удаления: возвращаем прежние снапшоты обоих кэшей.
+      if (ctx) {
+        queryClient.setQueryData([invalidateKey, deliveryId], ctx.prevServer);
+        queryClient.setQueryData(['photos-local', operationKind, deliveryId], ctx.prevLocal);
+      }
+      message.error(err.message);
+    },
   });
 
   // Изменение типа фото. Сохраняет только kind; всё остальное

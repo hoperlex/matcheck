@@ -908,8 +908,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const mergedPhotos: DeliveryPhoto[] = useMemo(() => {
     const server = loadedDelivery?.photos ?? [];
     const local = localPhotosQuery.data ?? [];
+    const localIds = new Set(local.map((lp) => lp.id));
     return [
-      ...server,
+      // Серверные orphan (uploadedAt=null) без локальной IDB-записи не показываем:
+      // это чужая незавершённая загрузка или «мёртвый» orphan (S3-confirm не прошёл /
+      // фото удалено локально) — иначе плитка «Загружается…» висит до часового cleanup.
+      // Свою активную загрузку показывает локальная запись ниже (превью из blob).
+      ...server.filter((sp) => sp.uploadedAt !== null || localIds.has(sp.id)),
       ...local.filter((lp) => !server.some((sp) => sp.id === lp.id)),
     ];
   }, [loadedDelivery?.photos, localPhotosQuery.data]);
