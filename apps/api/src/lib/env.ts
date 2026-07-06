@@ -38,6 +38,13 @@ const envSchema = z.object({
     .default('{"v1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'),
   APP_FIELD_ENCRYPTION_ACTIVE_KEY_VERSION: z.string().default('v1'),
 
+  // Sentry (мониторинг ошибок). instrument.ts читает process.env.SENTRY_* напрямую
+  // (до цепочки модулей); здесь — только для валидации/документации. DSN публичный.
+  SENTRY_DSN: z.string().url().optional(),
+  SENTRY_ENVIRONMENT: z.string().optional(),
+  SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0),
+  SENTRY_RELEASE: z.string().optional(),
+
   // S3 (cloud.ru)
   S3_ENDPOINT: z.string().url().optional(),
   S3_REGION: z.string().default('ru-central-1'),

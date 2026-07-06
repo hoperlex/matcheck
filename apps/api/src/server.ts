@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/node';
 import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
 import {
@@ -160,6 +161,10 @@ export async function buildServer() {
     timer.unref();
     app.addHook('onClose', async () => clearInterval(timer));
   });
+
+  // Sentry: репортинг ошибок Fastify (только 5xx/необработанные). Ставим после
+  // регистрации всех роутов и собственного setErrorHandler — no-op, если DSN не задан.
+  Sentry.setupFastifyErrorHandler(app);
 
   return app;
 }

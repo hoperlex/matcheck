@@ -1,3 +1,5 @@
+import './instrument.js'; // ПЕРВЫМ — Sentry.init до Fastify/http/postgres
+import * as Sentry from '@sentry/node';
 import { buildServer } from './server.js';
 import { loadEnv } from './lib/env.js';
 import { logger } from './lib/logger.js';
@@ -10,6 +12,7 @@ async function main() {
     logger.info({ signal }, 'shutdown signal received');
     try {
       await app.close();
+      await Sentry.close(2000); // дослать буфер событий до выхода
       process.exit(0);
     } catch (err) {
       logger.error({ err }, 'graceful shutdown failed');

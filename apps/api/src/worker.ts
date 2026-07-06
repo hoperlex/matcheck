@@ -8,6 +8,8 @@
  * В docker-compose.prod.yml поднимается отдельным контейнером
  * matcheck-worker, чтобы тяжёлые LLM-вызовы не блокировали event-loop API.
  */
+import './instrument.js'; // ПЕРВЫМ — Sentry.init до bullmq/postgres/undici
+import * as Sentry from '@sentry/node';
 import { Queue, Worker, type Job } from 'bullmq';
 import { and, eq, inArray, lt } from 'drizzle-orm';
 import { logger } from './lib/logger.js';
@@ -1693,6 +1695,11 @@ worker.on('failed', async (job, err) => {
   if (!job) return;
   logger.warn({ jobId: job.id, attempts: job.attemptsMade, err: err.message }, 'job failed');
   if (job.attemptsMade < (job.opts.attempts ?? 1)) return;
+  // Все попытки исчерпаны — репортим в Sentry (payload не прикладываем, только ид/очередь).
+  Sentry.captureException(err, {
+    tags: { queue: UPD_PARSE_QUEUE },
+    extra: { jobId: job.id, attempts: job.attemptsMade },
+  });
   try {
     if ('bundleId' in job.data && job.data.bundleId) {
       const bundleId = job.data.bundleId;
@@ -1754,6 +1761,13 @@ s3CleanupWorker.on('failed', (job, err) => {
     { jobId: job.id, queue: S3_CLEANUP_QUEUE, attempts: job.attemptsMade, err: err.message },
     's3 cleanup job failed',
   );
+  // Cloud.ru бывает flaky (см. s3.signer ретрай) — репортим только исчерпание попыток.
+  if (job.attemptsMade >= (job.opts.attempts ?? 1)) {
+    Sentry.captureException(err, {
+      tags: { queue: S3_CLEANUP_QUEUE },
+      extra: { jobId: job.id, attempts: job.attemptsMade },
+    });
+  }
 });
 
 s3CleanupWorker.on('completed', (job) => {
@@ -1765,6 +1779,7 @@ async function shutdown(signal: string): Promise<void> {
   await worker.close().catch(() => undefined);
   await s3CleanupWorker.close().catch(() => undefined);
   await queue.close().catch(() => undefined);
+  await Sentry.flush(2000).catch(() => undefined); // дослать буфер до выхода
   process.exit(0);
 }
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
