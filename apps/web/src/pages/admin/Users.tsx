@@ -15,7 +15,7 @@ import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { roleLabel } from '../../shared/constants/roleLabels';
 import { UserEditModal } from './UserEditModal';
 
-const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp', 'contractor'];
+const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp', 'contractor', 'monitor'];
 
 // ИНН считаем валидным, если после удаления нецифр остаётся непустая
 // не-нулевая строка. Подрядчик без валидного ИНН → скоуп по ИНН вернёт пусто,

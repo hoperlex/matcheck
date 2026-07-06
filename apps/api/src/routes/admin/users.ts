@@ -98,7 +98,8 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
       }
 
       // Симметрично siteId: привязка к подрядчику только у роли contractor.
-      // При смене роли на другую — обнуляем.
+      // При смене роли на другую (в т.ч. monitor) — обнуляем: monitor ни к чему
+      // не привязан, видит все объекты.
       if (nextRole !== 'contractor') {
         patch.contractorCustomerId = null;
       } else if (req.body.contractorCustomerId !== undefined) {
@@ -112,15 +113,17 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
         .returning();
       if (!updated) return reply.code(404).send({ error: 'not_found' });
 
-      // Deploy-safety: смена роли НА contractor инвалидирует все сессии юзера.
-      // Роль читается из БД на каждом запросе, а мобильный клиент обрабатывает
-      // только 401 (на 403 залипает молча). Без инвалидации ошибочно назначенный
-      // мобильному инспектору contractor сломался бы тихо (write→403, sync-scope
-      // пуст). Инвалидация → мобилка ловит 401 → штатный разлогин → при логине с
-      // мобилы contractor получает понятный 403 «web-only». Механизм тот же, что
-      // при смене пароля (см. routes/auth.ts). Архив на планшете не вайпится:
-      // wipe завязан на смену siteId в /auth/me, а не на разлогин.
-      if (nextRole === 'contractor' && existing.role !== 'contractor') {
+      // Deploy-safety: смена роли на web-only (contractor/monitor) инвалидирует все
+      // сессии юзера. Роль читается из БД на каждом запросе, а мобильный клиент
+      // обрабатывает только 401 (на 403 залипает молча). Без инвалидации ошибочно
+      // назначенная мобильному инспектору web-only-роль сломалась бы тихо (write→403,
+      // sync-scope пуст). Инвалидация → мобилка ловит 401 → штатный разлогин → при
+      // логине с мобилы получает понятный 403 «web-only». Механизм тот же, что при
+      // смене пароля (см. routes/auth.ts). Архив на планшете не вайпится: wipe
+      // завязан на смену siteId в /auth/me, а не на разлогин. Условие «был не-web-only
+      // → стал web-only», чтобы не дёргать при переходах между web-only ролями.
+      const isWebOnly = (r: string): boolean => r === 'contractor' || r === 'monitor';
+      if (isWebOnly(nextRole) && !isWebOnly(existing.role)) {
         const now = new Date();
         await app.db
           .update(users)

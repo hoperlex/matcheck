@@ -55,6 +55,8 @@ export default function OperationsPage() {
   const tab: ListTab = params.get('tab') === 'accepted' ? 'accepted' : 'expected';
   const isInspector = authUser?.role === 'inspector_kpp';
   const isContractor = authUser?.role === 'contractor';
+  // Мониторинг: read-only, не создаёт приёмки/отгрузки (кнопка создания скрыта).
+  const isMonitor = authUser?.role === 'monitor';
   const inspectorWithoutSite = isInspector && !authUser?.siteId;
   // Подрядчик без привязки к контрагенту видит пустые списки — показываем баннер.
   const contractorWithoutLink = isContractor && !authUser?.contractorCustomerId;
@@ -161,10 +163,14 @@ export default function OperationsPage() {
   // Защита «слепка таблицы» (ради которой когда-то ввели closing) теперь
   // не нужна — `if (embedded) return null;` в KppPage / ShipmentPage
   // перехватывает любой рендер этих компонентов без params.
+  // monitor — read-only на данные: редактор ему недоступен даже по прямому URL
+  // (?delivery=/?shipment=). Он работает только через модалку просмотра (клик по
+  // строке / иконка «глаз»), где ставит отметку проверки. Бэкенд дублирует запрет
+  // (read-only guard, 403 на любую запись), это — чтобы не показывать сам редактор.
   const deliveryModalOpen =
-    !MODAL_DISABLED && (Boolean(editDeliveryId) || editDeliveryIsNew);
+    !MODAL_DISABLED && !isMonitor && (Boolean(editDeliveryId) || editDeliveryIsNew);
   const shipmentModalOpen =
-    !MODAL_DISABLED && (Boolean(editShipmentId) || editShipmentIsNew);
+    !MODAL_DISABLED && !isMonitor && (Boolean(editShipmentId) || editShipmentIsNew);
 
   // Закрытие — один проход: чистим URL (или уходим на /materials, если
   // пришли оттуда). Modal видит open=false на следующем рендере и
@@ -271,8 +277,8 @@ export default function OperationsPage() {
   );
   const headerExtras = (
     <Space size={8}>
-      {/* Подрядчик — read-only: кнопку создания не показываем. */}
-      {!isContractor && createButton}
+      {/* Подрядчик и мониторинг — read-only: кнопку создания не показываем. */}
+      {!isContractor && !isMonitor && createButton}
       {exportButton}
     </Space>
   );

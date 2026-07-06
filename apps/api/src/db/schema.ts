@@ -22,7 +22,13 @@ import type { UpdValidation } from '@matcheck/contracts';
 
 // ─── Enums ─────────────────────────────────────────────────────────────────
 
-export const userRoleEnum = pgEnum('user_role', ['admin', 'manager', 'inspector_kpp', 'contractor']);
+export const userRoleEnum = pgEnum('user_role', [
+  'admin',
+  'manager',
+  'inspector_kpp',
+  'contractor',
+  'monitor',
+]);
 export const shipmentKindEnum = pgEnum('shipment_kind', [
   'contractor',
   'return',
@@ -798,6 +804,17 @@ export const deliveries = pgTable(
       onDelete: 'set null',
     }),
     confirmedByMolAt: timestamp('confirmed_by_mol_at', { withTimezone: true }),
+    // Отметка проверки качества (роль «Мониторинг», миграция 0070). Ортогональна
+    // статусу: запись остаётся «Подтверждено МОЛ», а поверх лежит независимая
+    // отметка QC. review_state: NULL = не проверено, 'approved' = проверено,
+    // 'issues' = есть замечания (тогда review_note обязателен). Видна только
+    // admin/manager/monitor (сервер обнуляет в buildDeliveryDto для прочих ролей).
+    reviewState: varchar('review_state', { length: 16 }),
+    reviewNote: text('review_note'),
+    reviewedByUserId: uuid('reviewed_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
     // МОЛ-получатель приёмки (физлицо собственной бригады). Альтернатива
     // contractor_id. CHECK не позволяет заполнить оба одновременно (миграция 0030).
     recipientMolId: uuid('recipient_mol_id').references(() => responsiblePersons.id, {
@@ -996,6 +1013,15 @@ export const shipments = pgTable(
       onDelete: 'set null',
     }),
     confirmedByMolAt: timestamp('confirmed_by_mol_at', { withTimezone: true }),
+    // Отметка проверки качества (роль «Мониторинг», миграция 0070) — зеркало
+    // одноимённых полей deliveries. Ортогональна статусу; видна только
+    // admin/manager/monitor (сервер обнуляет в buildShipmentDto для прочих ролей).
+    reviewState: varchar('review_state', { length: 16 }),
+    reviewNote: text('review_note'),
+    reviewedByUserId: uuid('reviewed_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
     // Soft-delete: см. одноимённые поля в deliveries.
     pendingDeletionAt: timestamp('pending_deletion_at', { withTimezone: true }),
     pendingDeletionByUserId: uuid('pending_deletion_by_user_id').references(() => users.id, {

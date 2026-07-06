@@ -7,6 +7,7 @@ import { formatStageTime } from '../kpp/stageTime';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
+import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
 
 type Row = z.infer<typeof ShipmentListResponseSchema>['items'][number];
 type Item = Row['items'][number];
@@ -109,6 +110,7 @@ export function ShipmentViewModal({
             <Tag style={{ marginInlineEnd: 0 }} color={s.status.color ?? 'default'}>
               {s.status.label}
             </Tag>
+            <ReviewBadge state={s.reviewState} />
             <Tag color={KIND_LABELS[s.kind].color} style={{ marginInlineEnd: 0 }}>
               {KIND_LABELS[s.kind].label}
             </Tag>
@@ -215,6 +217,18 @@ export function ShipmentViewModal({
               </Typography.Text>
             ) : null}
           </Space>
+
+          <ReviewControls
+            entityType="shipment"
+            id={s.id}
+            statusCode={s.status.code}
+            reviewState={s.reviewState}
+            reviewNote={s.reviewNote}
+            reviewedByUserEmail={s.reviewedByUserEmail}
+            reviewedAt={s.reviewedAt}
+            updatedAt={s.updatedAt}
+            pendingDeletion={s.pendingDeletionAt != null}
+          />
 
           {(() => {
             const beforePhotos = s.photos.filter((p) => p.stage !== 'after');

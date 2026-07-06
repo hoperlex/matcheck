@@ -42,7 +42,7 @@ export async function supplierRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/suppliers',
     {
-      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp', 'monitor')],
       schema: { querystring: ListQuerySchema, response: { 200: SupplierListResponseSchema } },
     },
     async (req) => {

@@ -56,7 +56,7 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
     {
       // Журнал всех выданных материалов по всем приёмкам, без скоупа. Раздел
       // «История» подрядчику недоступен — закрываем (403).
-      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp', 'monitor')],
       schema: {
         querystring: JournalQuerySchema,
         response: { 200: MaterialJournalResponseSchema },
@@ -158,7 +158,7 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/materials',
     {
-      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp', 'monitor')],
       schema: { querystring: ListQuerySchema, response: { 200: MaterialListResponseSchema } },
     },
     async (req) => {

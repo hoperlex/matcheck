@@ -7,6 +7,7 @@ import {
   Card,
   Input,
   Popconfirm,
+  Select,
   Space,
   Tooltip,
   Typography,
@@ -51,6 +52,7 @@ import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
 import { ShipmentViewModal, type ShipmentViewData } from './ShipmentViewModal';
+import { ReviewBadge } from '../../shared/ui/ReviewControls';
 import {
   FEATURE_VALUES,
   PURPOSE_VALUES,
@@ -132,6 +134,10 @@ export function ShipmentsHistory({
   // Подрядчик: read-only + справочники закрыты — имена берём из DTO, фильтры/
   // действия записи скрыты, справочные запросы не грузим.
   const isContractor = authUser?.role === 'contractor';
+  // Мониторинг: read-only на данные, видит все объекты, ставит отметку проверки.
+  const isMonitor = authUser?.role === 'monitor';
+  // Менеджмент видит отметку проверки: бейдж, фильтр «С замечаниями».
+  const isManagement = isAdmin || authUser?.role === 'manager' || isMonitor;
 
   // См. комментарий в DeliveriesHistory: tracking внешнего slot для portal-
   // режима bulk-actions, чтобы не сдвигать таблицу при выборе строк.
@@ -169,6 +175,8 @@ export function ShipmentsHistory({
     // ?nophoto=1 — deep-link из дашборда «Статистика». Симметрично с
     // DeliveriesHistory.
     nophoto: boolean;
+    // Фильтр по отметке проверки (менеджмент): approved|issues|none.
+    reviewState: string | null;
   };
   const filters: ListFiltersValue & ExtraFilters = {
     contractorIds: parseCsvIds(params.get('contractor')),
@@ -180,6 +188,7 @@ export function ShipmentsHistory({
     purposes: urlPurposes,
     features: urlFeatures,
     nophoto: params.get('nophoto') === '1',
+    reviewState: params.get('review'),
   };
 
   const updateFilters = (
@@ -204,6 +213,7 @@ export function ShipmentsHistory({
       next.delete('feature');
       for (const f of patch.features ?? []) next.append('feature', f);
     }
+    if ('reviewState' in patch) apply('review', patch.reviewState);
     setParams(next, { replace: true });
   };
 
@@ -255,6 +265,7 @@ export function ShipmentsHistory({
       features: filters.features.join(','),
       status: filters.status,
       nophoto: filters.nophoto,
+      review: filters.reviewState,
     },
   ] as const;
   const list = useQuery({
@@ -274,6 +285,7 @@ export function ShipmentsHistory({
       if (filters.nophoto) qs.set('nophoto', '1');
       if (filters.status === 'no_document') qs.set('noDocument', 'true');
       else if (filters.status) qs.set('status', filters.status);
+      if (filters.reviewState) qs.set('reviewState', filters.reviewState);
       return api.get<List>(`/shipments?${qs.toString()}`);
     },
     placeholderData: keepPreviousData,
@@ -510,7 +522,7 @@ export function ShipmentsHistory({
   // (см. shipments.ts: contractorIds/supplierIds/siteIds/q/plate/features/
   // purposes/nophoto/status в WHERE). При смене любого фильтра — сброс
   // page=1 и очистка selection.
-  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.purposes.join(',')}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${view}`;
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.purposes.join(',')}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${view}`;
   useEffect(() => {
     if (page !== 1) setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -575,8 +587,8 @@ export function ShipmentsHistory({
           onClick={() => setViewData(buildViewData(r))}
         />
       </Tooltip>
-      {/* Подрядчик — read-only: правка недоступна (share/удаление — в renderActions). */}
-      {!isContractor && (
+      {/* Подрядчик и мониторинг — read-only: правка недоступна. */}
+      {!isContractor && !isMonitor && (
         <Tooltip title="Редактировать">
           <Button
             size="small"
@@ -590,8 +602,8 @@ export function ShipmentsHistory({
   );
 
   const renderActions = (r: Row) => {
-    // Подрядчик — read-only: удаление/пометка/восстановление/share недоступны.
-    if (isContractor) return null;
+    // Подрядчик и мониторинг — read-only: удаление/пометка/восстановление недоступны.
+    if (isContractor || isMonitor) return null;
     const errMsg = deleteErrors[r.id];
     const errIcon = errMsg ? (
       <Tooltip title={errMsg}>
@@ -694,13 +706,17 @@ export function ShipmentsHistory({
       color={r.status.color}
       noDocument={r.sourceDocumentIds.length === 0}
       extra={
-        isTrash ? (
-          <PendingDeletionTag
-            at={r.pendingDeletionAt}
-            byEmail={r.pendingDeletionByUserEmail}
-            reason={r.pendingDeletionReason}
-          />
-        ) : undefined
+        <>
+          {/* Бейдж проверки — приходит в DTO только менеджменту (иначе null). */}
+          <ReviewBadge state={r.reviewState} />
+          {isTrash ? (
+            <PendingDeletionTag
+              at={r.pendingDeletionAt}
+              byEmail={r.pendingDeletionByUserEmail}
+              reason={r.pendingDeletionReason}
+            />
+          ) : null}
+        </>
       }
     />
   );
@@ -748,10 +764,27 @@ export function ShipmentsHistory({
             // Объект/Номер документа). Старый ?status=/?plate= в URL
             // продолжает фильтровать, но UI его не выставляет.
             tail={
-              <ShipmentFeatureFilters
-                value={{ purposes: filters.purposes, features: filters.features }}
-                onChange={updateFilters}
-              />
+              <>
+                <ShipmentFeatureFilters
+                  value={{ purposes: filters.purposes, features: filters.features }}
+                  onChange={updateFilters}
+                />
+                {/* Фильтр по отметке проверки — только менеджменту. */}
+                {isManagement && (
+                  <Select
+                    size="small"
+                    style={{ minWidth: 150 }}
+                    value={filters.reviewState ?? 'all'}
+                    onChange={(v) => updateFilters({ reviewState: v === 'all' ? null : v })}
+                    options={[
+                      { value: 'all', label: 'Проверка: все' },
+                      { value: 'issues', label: 'С замечаниями' },
+                      { value: 'approved', label: 'Проверено' },
+                      { value: 'none', label: 'Не проверено' },
+                    ]}
+                  />
+                )}
+              </>
             }
             extra={filtersExtra}
           />
@@ -841,8 +874,12 @@ export function ShipmentsHistory({
         items={items}
         loading={list.isLoading}
         rowKey="id"
-        rowSelection={(isAdmin || !isTrash) && !isContractor ? bulk.selection : undefined}
-        onRowClick={(r) => onOpen(r.id)}
+        rowSelection={
+          (isAdmin || !isTrash) && !isContractor && !isMonitor ? bulk.selection : undefined
+        }
+        // monitor — read-only: клик по строке открывает просмотр (там же —
+        // отметка проверки), а не редактор.
+        onRowClick={(r) => (isMonitor ? setViewData(buildViewData(r)) : onOpen(r.id))}
         emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет отгрузок'}
         rowClassName={(r) =>
           operationsRowClass({ statusCode: r.status.code, dateIso: r.shippedAt })

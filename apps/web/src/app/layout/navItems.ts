@@ -22,7 +22,10 @@ export const navItems: NavItem[] = [
     key: 'operations',
     label: 'Операции',
     path: '/operations',
-    roles: ['admin', 'manager', 'inspector_kpp', 'contractor'],
+    // monitor (мониторинг качества) видит только «Операции» — просматривает
+    // все приёмки/отгрузки и ставит отметку проверки. Отчёты/справочники/
+    // админка ему не открыты (отдельные пункты его роль не включают).
+    roles: ['admin', 'manager', 'inspector_kpp', 'contractor', 'monitor'],
     icon: SafetyOutlined,
   },
   {

@@ -67,17 +67,32 @@ export async function buildServer() {
   });
   await app.register(authPlugin);
 
-  // Read-only guard для роли contractor. Регистрируем ПОСЛЕ authPlugin, чтобы
+  // Read-only guard для web-only ролей. Регистрируем ПОСЛЕ authPlugin, чтобы
   // req.user был уже прикреплён его onRequest-хуком. Метод-ориентированный:
-  // любой мутирующий запрос (POST/PUT/PATCH/DELETE) от подрядчика → 403, кроме
+  // любой мутирующий запрос (POST/PUT/PATCH/DELETE) от read-only роли → 403, кроме
   // self-service под /api/v1/auth/ (logout, PATCH /me, смена пароля). Иммунен к
   // добавлению новых write-эндпоинтов — не нужно закрывать каждый вручную.
+  //   contractor — не пишет вообще ничего;
+  //   monitor    — read-only на данные, НО может ставить отметку проверки
+  //                (PATCH .../review). Разрешаем эти два роута по ШАБЛОНУ роута
+  //                (req.routeOptions.url), а не по сырому url.startsWith — в сыром
+  //                URL id стоит в середине пути, префикс не годится и мог бы
+  //                случайно открыть лишний mutating-эндпоинт.
   const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+  const MONITOR_WRITE_ROUTES = new Set([
+    '/api/v1/deliveries/:id/review',
+    '/api/v1/shipments/:id/review',
+  ]);
   app.addHook('onRequest', async (req, reply) => {
-    if (req.user?.role !== 'contractor') return;
+    const role = req.user?.role;
+    if (role !== 'contractor' && role !== 'monitor') return;
     if (!MUTATING.has(req.method.toUpperCase())) return;
     if (req.url.startsWith('/api/v1/auth/')) return;
-    req.log.warn({ path: req.url, method: req.method }, 'contractor write blocked (read-only)');
+    if (role === 'monitor' && MONITOR_WRITE_ROUTES.has(req.routeOptions?.url ?? '')) return;
+    req.log.warn(
+      { path: req.url, method: req.method, role },
+      'read-only role write blocked',
+    );
     return reply.code(403).send({ error: 'forbidden', message: 'Read-only role' });
   });
 

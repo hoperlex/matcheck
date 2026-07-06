@@ -54,7 +54,7 @@ export async function getJwtKeys(): Promise<Keys> {
 
 export type AccessTokenClaims = {
   sub: string;
-  role: 'admin' | 'manager' | 'inspector_kpp' | 'contractor';
+  role: 'admin' | 'manager' | 'inspector_kpp' | 'contractor' | 'monitor';
   sid: string;
   aal: 'aal1' | 'aal2';
   // Issued-at (Unix-секунды). При подписи проставляется автоматически

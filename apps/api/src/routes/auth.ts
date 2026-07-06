@@ -35,7 +35,7 @@ const env = loadEnv();
 function userToDto(u: {
   id: string;
   email: string;
-  role: 'admin' | 'manager' | 'inspector_kpp' | 'contractor';
+  role: 'admin' | 'manager' | 'inspector_kpp' | 'contractor' | 'monitor';
   isActive: boolean;
   siteId: string | null;
   contractorCustomerId: string | null;
@@ -214,13 +214,13 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
           .send({ error: 'account_inactive', message: 'Account is not active' });
       }
 
-      // contractor — роль только для веб-портала: мобильный клиент её не
-      // поддерживает, а мобильный sync для неё закрыт (403). Отклоняем на входе,
-      // чтобы web-token подрядчика вообще не появлялся у мобильного приложения.
-      if (isMobileClient(req) && user.role === 'contractor') {
+      // contractor и monitor — роли только для веб-портала: мобильный клиент их не
+      // поддерживает, а мобильный sync для них закрыт. Отклоняем на входе, чтобы
+      // web-token такой роли вообще не появлялся у мобильного приложения.
+      if (isMobileClient(req) && (user.role === 'contractor' || user.role === 'monitor')) {
         return reply
           .code(403)
-          .send({ error: 'web_only_role', message: 'Contractor role is web-only' });
+          .send({ error: 'web_only_role', message: 'This role is web-only' });
       }
 
       await app.db

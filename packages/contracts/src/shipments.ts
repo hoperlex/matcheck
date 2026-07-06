@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ShipmentStatusCodeSchema, StatusSchema } from './statuses.js';
 import { VolumeConfidenceSchema } from './source-documents.js';
 import { ItemKindSchema } from './deliveries.js';
+import { ReviewFieldsShape } from './review.js';
 
 export const ShipmentKindSchema = z.enum(['contractor', 'return', 'transfer', 'writeoff']);
 export type ShipmentKind = z.infer<typeof ShipmentKindSchema>;
@@ -103,6 +104,9 @@ export const ShipmentSchema = z.object({
   confirmedByMolUserId: z.string().uuid().nullable(),
   confirmedByMolUserEmail: z.string().nullable(),
   confirmedByMolAt: z.string().nullable(),
+  // Отметка проверки (роль «Мониторинг»). Ортогональна статусу. Видна только
+  // admin/manager/monitor — для прочих ролей сервер отдаёт их null (см. buildShipmentDto).
+  ...ReviewFieldsShape,
   pendingDeletionAt: z.string().nullable(),
   pendingDeletionByUserId: z.string().uuid().nullable(),
   pendingDeletionByUserEmail: z.string().nullable(),

@@ -26,7 +26,7 @@ import { api, ApiError } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
 import { roleLabel } from '../../shared/constants/roleLabels';
 
-const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp', 'contractor'];
+const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp', 'contractor', 'monitor'];
 
 function hasValidInn(inn: string | null | undefined): boolean {
   const digits = (inn ?? '').replace(/[^0-9]/g, '');

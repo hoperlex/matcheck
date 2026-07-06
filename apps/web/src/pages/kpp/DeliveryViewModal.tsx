@@ -6,6 +6,7 @@ import { PhotoGallery } from './PhotoGallery';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
+import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
 
 type Row = z.infer<typeof DeliveryListResponseSchema>['items'][number];
 type Item = Row['items'][number];
@@ -107,6 +108,7 @@ export function DeliveryViewModal({
             <Tag style={{ marginInlineEnd: 0 }} color={d.status.color ?? 'default'}>
               {d.status.label}
             </Tag>
+            <ReviewBadge state={d.reviewState} />
             {d.sourceDocumentIds.length === 0 && (
               <Tag style={{ marginInlineEnd: 0 }} color="gold">
                 Без документа
@@ -217,6 +219,18 @@ export function DeliveryViewModal({
               </Typography.Text>
             ) : null}
           </Space>
+
+          <ReviewControls
+            entityType="delivery"
+            id={d.id}
+            statusCode={d.status.code}
+            reviewState={d.reviewState}
+            reviewNote={d.reviewNote}
+            reviewedByUserEmail={d.reviewedByUserEmail}
+            reviewedAt={d.reviewedAt}
+            updatedAt={d.updatedAt}
+            pendingDeletion={d.pendingDeletionAt != null}
+          />
 
           <Collapse
             // По умолчанию фото раскрыты — основной контент просмотра.

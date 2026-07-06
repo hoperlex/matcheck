@@ -62,7 +62,7 @@ export async function counterpartyRoutes(rawApp: FastifyInstance): Promise<void>
     {
       // Коммерческий справочник заказчика: внешнему подрядчику не показываем
       // (строгая изоляция). Имена контрагентов он получает в scoped-DTO записей.
-      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp', 'monitor')],
       schema: { querystring: ListQuerySchema, response: { 200: CounterpartyListResponseSchema } },
     },
     async (req) => {

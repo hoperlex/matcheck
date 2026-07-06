@@ -40,7 +40,7 @@ export async function customerCounterpartyRoutes(rawApp: FastifyInstance): Promi
   app.get(
     '/api/v1/customer-counterparties',
     {
-      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp', 'monitor')],
       schema: {
         querystring: ListQuerySchema,
         response: { 200: CustomerCounterpartyListResponseSchema },

@@ -7,6 +7,7 @@ export const ROLE_LABELS: Record<UserRole, string> = {
   manager: 'Менеджер',
   inspector_kpp: 'Инспектор КПП',
   contractor: 'Подрядчик',
+  monitor: 'Мониторинг',
 };
 
 export function roleLabel(role: UserRole): string {

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const UserRoleSchema = z.enum(['admin', 'manager', 'inspector_kpp', 'contractor']);
+export const UserRoleSchema = z.enum(['admin', 'manager', 'inspector_kpp', 'contractor', 'monitor']);
 export type UserRole = z.infer<typeof UserRoleSchema>;
 
 export const EmailSchema = z.string().email().max(254).toLowerCase().trim();

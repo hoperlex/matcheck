@@ -13,6 +13,7 @@ import {
   DeliveryStatusCodeSchema,
   DeliveryUpsertSchema,
   ErrorResponseSchema,
+  ReviewRequestSchema,
 } from '@matcheck/contracts';
 import {
   counterparties,
@@ -36,6 +37,7 @@ import {
 } from '../domain/statuses/lookup.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
+import { canSeeReview } from '../lib/review.js';
 import {
   expandCustomerCounterpartyToOpIds,
   resolveContractorOpIds,
@@ -75,6 +77,10 @@ const ListQuerySchema = z.object({
   arrivedTo: z.string().datetime().optional(),
   // ?nophoto=1 — deep-link «Без фото» из дашборда «Статистика».
   nophoto: z.coerce.boolean().optional(),
+  // Фильтр по отметке проверки (роль «Мониторинг» / менеджмент): approved —
+  // «Проверено», issues — «С замечаниями», none — «Не проверено». На фронте
+  // показывается только менеджменту; на бэке — просто предикат по review_state.
+  reviewState: z.enum(['approved', 'issues', 'none']).optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
@@ -171,11 +177,15 @@ const resolveStatusId = (app: any, code: string) =>
   resolveStatusIdShared(app, 'delivery', code);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function buildDeliveryDto(app: any, id: string) {
+async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null) {
+  // Отметку проверки (review_*) видит только менеджмент; для прочих ролей и для
+  // анонимных путей (share) поля обнуляются. viewerRole не передан → скрываем.
+  const showReview = canSeeReview(viewerRole);
   // Два независимых join на users: один на МОЛ, другой на автора soft-delete пометки.
   // Для парных приёмок (transfer) подтягиваем плоско дату отгрузки и
   // объект-источник из связанного shipment + sites.
   const pendingUser = alias(users, 'pending_user');
+  const reviewUser = alias(users, 'review_user');
   // Имена объекта/поставщика/подрядчика — прямо в DTO (для всех ролей).
   // Нужны, чтобы роль contractor не ходила в закрытые для неё справочники
   // (/sites, /counterparties): названия берутся из scoped-DTO её записей.
@@ -190,6 +200,7 @@ async function buildDeliveryDto(app: any, id: string) {
       s: statuses,
       molEmail: users.email,
       pendingEmail: pendingUser.email,
+      reviewEmail: reviewUser.email,
       srcShippedAt: shipments.shippedAt,
       srcSiteId: shipments.siteId,
       srcSiteCode: sites.code,
@@ -201,6 +212,7 @@ async function buildDeliveryDto(app: any, id: string) {
     .innerJoin(statuses, eq(deliveries.statusId, statuses.id))
     .leftJoin(users, eq(deliveries.confirmedByMolUserId, users.id))
     .leftJoin(pendingUser, eq(deliveries.pendingDeletionByUserId, pendingUser.id))
+    .leftJoin(reviewUser, eq(deliveries.reviewedByUserId, reviewUser.id))
     .leftJoin(shipments, eq(deliveries.sourceShipmentId, shipments.id))
     .leftJoin(sites, eq(shipments.siteId, sites.id))
     .leftJoin(deliverySite, eq(deliveries.siteId, deliverySite.id))
@@ -214,6 +226,7 @@ async function buildDeliveryDto(app: any, id: string) {
         s: StatusRow;
         molEmail: string | null;
         pendingEmail: string | null;
+        reviewEmail: string | null;
         srcShippedAt: Date | null;
         srcSiteId: string | null;
         srcSiteCode: string | null;
@@ -266,6 +279,12 @@ async function buildDeliveryDto(app: any, id: string) {
     confirmedByMolUserId: d.confirmedByMolUserId,
     confirmedByMolUserEmail: r.molEmail,
     confirmedByMolAt: d.confirmedByMolAt?.toISOString() ?? null,
+    // review_* — только для менеджмента (см. canSeeReview); иначе null.
+    reviewState: showReview ? (d.reviewState as 'approved' | 'issues' | null) : null,
+    reviewNote: showReview ? d.reviewNote : null,
+    reviewedByUserId: showReview ? d.reviewedByUserId : null,
+    reviewedByUserEmail: showReview ? r.reviewEmail : null,
+    reviewedAt: showReview ? (d.reviewedAt?.toISOString() ?? null) : null,
     pendingDeletionAt: d.pendingDeletionAt?.toISOString() ?? null,
     pendingDeletionByUserId: d.pendingDeletionByUserId,
     pendingDeletionByUserEmail: r.pendingEmail,
@@ -329,6 +348,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         q, plate,
         features: featuresCsv,
         arrivedFrom, arrivedTo, nophoto,
+        reviewState,
         limit, offset,
       } = req.query;
 
@@ -353,6 +373,14 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           noDocument
             ? drSql`not exists (select 1 from delivery_sources ds where ds.delivery_id = ${deliveries.id})`
             : drSql`exists (select 1 from delivery_sources ds where ds.delivery_id = ${deliveries.id})`,
+        );
+      }
+      // Фильтр по отметке проверки. none — не проверено (NULL).
+      if (reviewState) {
+        filters.push(
+          reviewState === 'none'
+            ? isNull(deliveries.reviewState)
+            : eq(deliveries.reviewState, reviewState),
         );
       }
       // inspector_kpp видит приёмки своего объекта (включая созданные другими).
@@ -512,7 +540,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         .from(deliveries)
         .where(where);
 
-      const items = (await Promise.all(rows.map((r) => buildDeliveryDto(app, r.id)))).filter(
+      const items = (await Promise.all(rows.map((r) => buildDeliveryDto(app, r.id, req.user?.role)))).filter(
         (x): x is NonNullable<typeof x> => x !== null,
       );
       return { items, total: count };
@@ -529,7 +557,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       },
     },
     async (req, reply) => {
-      const dto = await buildDeliveryDto(app, req.params.id);
+      const dto = await buildDeliveryDto(app, req.params.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
       // inspector_kpp видит только приёмки своего объекта.
       if (
@@ -546,6 +574,75 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           return reply.code(404).send({ error: 'not_found' });
         }
       }
+      return dto;
+    },
+  );
+
+  // Отметка проверки качества (роль «Мониторинг»). Ортогональна статусу: меняет
+  // ТОЛЬКО review_*, не трогая items/photos/status/version/updated_at — поэтому не
+  // задевает guard переходов, OCC и мобильный sync (review-поля в sync не входят, а
+  // updated_at не двигаем, чтобы не гонять лишние re-pull на планшеты). Ставить/
+  // менять могут admin/manager/monitor; отметка перезаписывается последним
+  // проверившим, история не хранится.
+  app.patch(
+    '/api/v1/deliveries/:id/review',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'monitor')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: ReviewRequestSchema,
+        response: {
+          200: DeliverySchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          422: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [d] = await app.db
+        .select({
+          id: deliveries.id,
+          statusId: deliveries.statusId,
+          pendingDeletionAt: deliveries.pendingDeletionAt,
+        })
+        .from(deliveries)
+        .where(eq(deliveries.id, req.params.id))
+        .limit(1);
+      if (!d) return reply.code(404).send({ error: 'not_found' });
+      if (d.pendingDeletionAt !== null) {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — проверка недоступна',
+        });
+      }
+      // Гейт зрелости: проверять можно только оформленные приёмки
+      // (filled / confirmed_mol). На черновике/не оформленной проверять нечего.
+      const code = await getStatusCodeById(app, d.statusId);
+      if (code !== 'filled' && code !== 'confirmed_mol') {
+        return reply.code(422).send({
+          error: 'not_reviewable',
+          message: 'Приёмка ещё не оформлена — проверка недоступна',
+        });
+      }
+      const note =
+        req.body.note != null && req.body.note.trim().length > 0 ? req.body.note.trim() : null;
+      await app.db
+        .update(deliveries)
+        .set({
+          reviewState: req.body.state,
+          reviewNote: note,
+          reviewedByUserId: req.user?.id ?? null,
+          reviewedAt: new Date(),
+        })
+        .where(eq(deliveries.id, d.id));
+      publishEvent(app, {
+        type: 'delivery_updated',
+        entityId: d.id,
+        ts: new Date().toISOString(),
+      });
+      const dto = await buildDeliveryDto(app, d.id, req.user?.role);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
       return dto;
     },
   );
@@ -608,7 +705,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               });
             }
             if (input.baseVersion !== undefined && input.baseVersion !== existing.version) {
-              const server = await buildDeliveryDto(app, existing.id);
+              const server = await buildDeliveryDto(app, existing.id, req.user?.role);
               return reply.code(409).send({
                 error: 'conflict' as const,
                 serverVersion: existing.version,
@@ -617,14 +714,14 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             }
             await updateDelivery(app, existing, input, statusId, req.user?.id ?? null);
           }
-          const dto = await buildDeliveryDto(app, input.id);
+          const dto = await buildDeliveryDto(app, input.id, req.user?.role);
           if (!dto) return reply.code(404).send({ error: 'not_found' });
           publishEvent(app, { type: 'delivery_updated', entityId: dto.id, ts: new Date().toISOString() });
           return dto;
         }
 
         const created = await createDelivery(app, input, statusId, inspectorId);
-        const dto = await buildDeliveryDto(app, created.id);
+        const dto = await buildDeliveryDto(app, created.id, req.user?.role);
         if (!dto) throw new Error('Delivery missing after create');
         publishEvent(app, { type: 'delivery_updated', entityId: dto.id, ts: new Date().toISOString() });
         return dto;
@@ -813,7 +910,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           updatedAt: new Date(),
         })
         .where(eq(deliveries.id, existing.id));
-      const dto = await buildDeliveryDto(app, existing.id);
+      const dto = await buildDeliveryDto(app, existing.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
       publishEvent(app, { type: 'delivery_updated', entityId: dto.id, ts: new Date().toISOString() });
       return dto;
@@ -874,7 +971,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           updatedAt: new Date(),
         })
         .where(eq(deliveries.id, existing.id));
-      const dto = await buildDeliveryDto(app, existing.id);
+      const dto = await buildDeliveryDto(app, existing.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
       publishEvent(app, { type: 'delivery_updated', entityId: dto.id, ts: new Date().toISOString() });
       return dto;
@@ -1518,7 +1615,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           entityId: d.id,
           ts: new Date().toISOString(),
         });
-        const dto = await buildDeliveryDto(app, d.id);
+        const dto = await buildDeliveryDto(app, d.id, req.user?.role);
         if (!dto) return reply.code(404).send({ error: 'not_found' });
         return dto;
       }
@@ -1586,7 +1683,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         ts: new Date().toISOString(),
       });
 
-      const dto = await buildDeliveryDto(app, d.id);
+      const dto = await buildDeliveryDto(app, d.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
       return dto;
     },
@@ -1655,7 +1752,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         ts: new Date().toISOString(),
       });
 
-      const dto = await buildDeliveryDto(app, d.id);
+      const dto = await buildDeliveryDto(app, d.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
       return dto;
     },
@@ -1863,7 +1960,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         ts: new Date().toISOString(),
       });
 
-      const dto = await buildDeliveryDto(app, d.id);
+      const dto = await buildDeliveryDto(app, d.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
       return dto;
     },

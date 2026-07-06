@@ -64,6 +64,7 @@ import {
   type OperationFeature,
 } from '../shipments/ShipmentFeatureFilters';
 import { DeliveryViewModal, type DeliveryViewData } from './DeliveryViewModal';
+import { ReviewBadge } from '../../shared/ui/ReviewControls';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
@@ -156,6 +157,11 @@ export function DeliveriesHistory({
   // Подрядчик: read-only + справочники закрыты (403). Не грузим справочные
   // запросы и берём имена из DTO; фильтры/действия записи скрыты.
   const isContractor = authUser?.role === 'contractor';
+  // Мониторинг: read-only на данные (как contractor, но видит все объекты и
+  // справочники), из строки открывает просмотр, ставит отметку проверки.
+  const isMonitor = authUser?.role === 'monitor';
+  // Менеджмент видит отметку проверки: бейдж, фильтр «С замечаниями».
+  const isManagement = isAdmin || authUser?.role === 'manager' || isMonitor;
 
   // Slot для bulk-actions в внешнем header-row родителя. Отслеживаем
   // через state, потому что ref.current = null до commit phase — портал
@@ -189,6 +195,8 @@ export function DeliveriesHistory({
     // ради единственного use-case городить отдельный псевдо-статус
     // (как было с no_document) избыточно. Сбрасывается ручной очисткой URL.
     nophoto: boolean;
+    // Фильтр по отметке проверки (менеджмент): approved|issues|none.
+    reviewState: string | null;
   };
   const filters: ListFiltersValue & ExtraFilters = {
     contractorIds: parseCsvIds(params.get('contractor')),
@@ -199,6 +207,7 @@ export function DeliveriesHistory({
     plate: params.get('plate') ?? '',
     features: urlFeatures,
     nophoto: params.get('nophoto') === '1',
+    reviewState: params.get('review'),
   };
 
   const updateFilters = (
@@ -219,6 +228,7 @@ export function DeliveriesHistory({
       next.delete('feature');
       for (const f of patch.features ?? []) next.append('feature', f);
     }
+    if ('reviewState' in patch) apply('review', patch.reviewState);
     setParams(next, { replace: true });
   };
 
@@ -276,6 +286,7 @@ export function DeliveriesHistory({
       features: filters.features.join(','),
       status: filters.status,
       nophoto: filters.nophoto,
+      review: filters.reviewState,
     },
   ] as const;
   const list = useQuery({
@@ -295,6 +306,7 @@ export function DeliveriesHistory({
       // status=no_document — псевдо-значение, мапится на server-side noDocument=true.
       if (filters.status === 'no_document') qs.set('noDocument', 'true');
       else if (filters.status) qs.set('status', filters.status);
+      if (filters.reviewState) qs.set('reviewState', filters.reviewState);
       return api.get<List>(`/deliveries?${qs.toString()}`);
     },
     placeholderData: keepPreviousData,
@@ -605,7 +617,7 @@ export function DeliveriesHistory({
   // пользователь может «удалить выбранные строки» на странице 7,
   // забыв что они с прошлой выборки). useEffect ниже отслеживает
   // комбинированный ключ фильтров.
-  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${view}`;
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${view}`;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (page !== 1) setPage(1);
@@ -614,8 +626,8 @@ export function DeliveriesHistory({
 
   // Возвращает блок кнопок действий в зависимости от вкладки, статуса и прав.
   const renderActions = (r: Row) => {
-    // Подрядчик — read-only: удаление/пометка/восстановление недоступны.
-    if (isContractor) return null;
+    // Подрядчик и мониторинг — read-only: удаление/пометка/восстановление недоступны.
+    if (isContractor || isMonitor) return null;
     const errMsg = deleteErrors[r.id];
     const errIcon = errMsg ? (
       <Tooltip title={errMsg}>
@@ -726,8 +738,8 @@ export function DeliveriesHistory({
           onClick={() => setViewData(buildViewData(r))}
         />
       </Tooltip>
-      {/* Подрядчик — read-only: правка и share недоступны. */}
-      {!isContractor && (
+      {/* Подрядчик и мониторинг — read-only: правка и share недоступны. */}
+      {!isContractor && !isMonitor && (
         <Tooltip title="Редактировать">
           <Button
             size="small"
@@ -737,7 +749,7 @@ export function DeliveriesHistory({
           />
         </Tooltip>
       )}
-      {!isContractor && (
+      {!isContractor && !isMonitor && (
         <Tooltip title="Поделиться ссылкой">
           <Button
             size="small"
@@ -757,13 +769,17 @@ export function DeliveriesHistory({
       color={r.status.color}
       noDocument={r.sourceDocumentIds.length === 0}
       extra={
-        isTrash ? (
-          <PendingDeletionTag
-            at={r.pendingDeletionAt}
-            byEmail={r.pendingDeletionByUserEmail}
-            reason={r.pendingDeletionReason}
-          />
-        ) : undefined
+        <>
+          {/* Бейдж проверки — приходит в DTO только менеджменту (иначе null). */}
+          <ReviewBadge state={r.reviewState} />
+          {isTrash ? (
+            <PendingDeletionTag
+              at={r.pendingDeletionAt}
+              byEmail={r.pendingDeletionByUserEmail}
+              reason={r.pendingDeletionReason}
+            />
+          ) : null}
+        </>
       }
     />
   );
@@ -845,15 +861,32 @@ export function DeliveriesHistory({
               // purposes в onChange-patch'е никогда не приходят. Адаптер
               // прокидывает только features, чтобы не тащить shipment-
               // специфичные поля в delivery-фильтр.
-              <ShipmentFeatureFilters
-                value={{ purposes: [], features: filters.features }}
-                onChange={(patch) => {
-                  if ('features' in patch) {
-                    updateFilters({ features: patch.features });
-                  }
-                }}
-                showPurpose={false}
-              />
+              <>
+                <ShipmentFeatureFilters
+                  value={{ purposes: [], features: filters.features }}
+                  onChange={(patch) => {
+                    if ('features' in patch) {
+                      updateFilters({ features: patch.features });
+                    }
+                  }}
+                  showPurpose={false}
+                />
+                {/* Фильтр по отметке проверки — только менеджменту. */}
+                {isManagement && (
+                  <Select
+                    size="small"
+                    style={{ minWidth: 150 }}
+                    value={filters.reviewState ?? 'all'}
+                    onChange={(v) => updateFilters({ reviewState: v === 'all' ? null : v })}
+                    options={[
+                      { value: 'all', label: 'Проверка: все' },
+                      { value: 'issues', label: 'С замечаниями' },
+                      { value: 'approved', label: 'Проверено' },
+                      { value: 'none', label: 'Не проверено' },
+                    ]}
+                  />
+                )}
+              </>
             }
             // Инпуты «Статус» и «Номер авто» убраны по UX-запросу: оставлен
             // единый набор фильтров с вкладкой «Ожидаемые». Если фильтры всё
@@ -958,8 +991,12 @@ export function DeliveriesHistory({
         items={items}
         loading={list.isLoading}
         rowKey="id"
-        rowSelection={(isAdmin || !isTrash) && !isContractor ? bulk.selection : undefined}
-        onRowClick={(r) => onOpen(r.id)}
+        // monitor — read-only: клик по строке открывает просмотр (там же —
+        // отметка проверки), а не редактор.
+        rowSelection={
+          (isAdmin || !isTrash) && !isContractor && !isMonitor ? bulk.selection : undefined
+        }
+        onRowClick={(r) => (isMonitor ? setViewData(buildViewData(r)) : onOpen(r.id))}
         emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет приёмок'}
         rowClassName={(r) =>
           operationsRowClass({ statusCode: r.status.code, dateIso: r.arrivedAt })
