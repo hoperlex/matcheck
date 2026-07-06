@@ -7,6 +7,8 @@ import {
   ClockCircleOutlined,
   FileExclamationOutlined,
   TagOutlined,
+  SafetyCertificateOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 
 // Значок для кода статуса операции (приёмка/отгрузка). Неизвестный код — общий
@@ -26,7 +28,39 @@ export function statusIconFor(code: string): ReactNode {
 }
 
 export const NO_DOC_COLOR = '#faad14';
+// Цвета значков отметки проверки (роль «Мониторинг»): зелёный «Проверено»,
+// красный «Есть замечания». Совпадают с текстовым ReviewBadge в модалках.
+export const REVIEW_APPROVED_COLOR = '#52c41a';
+export const REVIEW_ISSUES_COLOR = '#ff4d4f';
 const ICON_SIZE = 18;
+
+/**
+ * Компактный значок отметки проверки для столбца «Статус». Для «Проверено»
+ * намеренно НЕ галочка (CheckCircle занята статусом «Подтверждено МОЛ») —
+ * значок «сертификат/качество», чтобы не путать два смысла. `null`/пусто (не
+ * проверено) → ничего не рисуем. Приходит в DTO только менеджменту.
+ */
+export function ReviewStatusIcon({
+  state,
+}: {
+  state: 'approved' | 'issues' | null | undefined;
+}): JSX.Element | null {
+  if (state === 'approved') {
+    return (
+      <Tooltip title="Проверено">
+        <SafetyCertificateOutlined style={{ color: REVIEW_APPROVED_COLOR, fontSize: ICON_SIZE }} />
+      </Tooltip>
+    );
+  }
+  if (state === 'issues') {
+    return (
+      <Tooltip title="Есть замечания">
+        <WarningOutlined style={{ color: REVIEW_ISSUES_COLOR, fontSize: ICON_SIZE }} />
+      </Tooltip>
+    );
+  }
+  return null;
+}
 
 /**
  * Компактная ячейка столбца «Статус»: значки со всплывающей подсказкой (полный
@@ -79,8 +113,12 @@ export function StatusIconsCell({
  */
 export function StatusLegend({
   statuses,
+  showReview = false,
 }: {
   statuses: { code: string; label: string; color: string | null }[];
+  // Показать пункты отметки проверки (Проверено / Есть замечания) — только
+  // менеджменту (admin/manager/monitor), т.к. только он видит эти значки.
+  showReview?: boolean;
 }): JSX.Element | null {
   if (statuses.length === 0) return null;
   return (
@@ -106,6 +144,22 @@ export function StatusLegend({
           Без документа
         </Typography.Text>
       </Space>
+      {showReview && (
+        <>
+          <Space size={4}>
+            <SafetyCertificateOutlined style={{ color: REVIEW_APPROVED_COLOR, fontSize: 15 }} />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Проверено
+            </Typography.Text>
+          </Space>
+          <Space size={4}>
+            <WarningOutlined style={{ color: REVIEW_ISSUES_COLOR, fontSize: 15 }} />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Есть замечания
+            </Typography.Text>
+          </Space>
+        </>
+      )}
     </Space>
   );
 }

@@ -41,7 +41,7 @@ import {
 } from '../../services/deliveries';
 import { useAuthStore } from '../../stores/auth';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
-import { StatusIconsCell, StatusLegend } from '../../shared/ui/operationStatusIcon';
+import { StatusIconsCell, StatusLegend, ReviewStatusIcon } from '../../shared/ui/operationStatusIcon';
 import { operationsRowClass } from '../../shared/utils/operationsRowHighlight';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
@@ -64,7 +64,6 @@ import {
   type OperationFeature,
 } from '../shipments/ShipmentFeatureFilters';
 import { DeliveryViewModal, type DeliveryViewData } from './DeliveryViewModal';
-import { ReviewBadge } from '../../shared/ui/ReviewControls';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
@@ -770,8 +769,9 @@ export function DeliveriesHistory({
       noDocument={r.sourceDocumentIds.length === 0}
       extra={
         <>
-          {/* Бейдж проверки — приходит в DTO только менеджменту (иначе null). */}
-          <ReviewBadge state={r.reviewState} />
+          {/* Значок проверки — приходит в DTO только менеджменту (иначе null →
+              значка нет). Расшифровка — в легенде сверху (showReview). */}
+          <ReviewStatusIcon state={r.reviewState} />
           {isTrash ? (
             <PendingDeletionTag
               at={r.pendingDeletionAt}
@@ -983,7 +983,7 @@ export function DeliveriesHistory({
               </div>
             ) : null;
           })()}
-          <StatusLegend statuses={legendStatuses} />
+          <StatusLegend statuses={legendStatuses} showReview={isManagement} />
         </Space>
       }
     >

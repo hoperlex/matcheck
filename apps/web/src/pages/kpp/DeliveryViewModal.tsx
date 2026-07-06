@@ -7,6 +7,7 @@ import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
+import { useAuthStore } from '../../stores/auth';
 
 type Row = z.infer<typeof DeliveryListResponseSchema>['items'][number];
 type Item = Row['items'][number];
@@ -37,6 +38,9 @@ export function DeliveryViewModal({
   onClose: () => void;
   onEdit: () => void;
 }) {
+  // monitor — read-only: редактор ему недоступен (подавлен в OperationsPage),
+  // поэтому кнопку «Открыть в редакторе» ему не показываем — она вела бы в никуда.
+  const isMonitor = useAuthStore((s) => s.user?.role === 'monitor');
   const d = data?.delivery;
   const before = (d?.photos ?? []).filter((p) => p.stage === 'before');
   const after = (d?.photos ?? []).filter((p) => p.stage === 'after');
@@ -181,9 +185,11 @@ export function DeliveryViewModal({
       footer={
         <Space>
           <Button onClick={onClose}>Закрыть</Button>
-          <Button type="primary" icon={<EditOutlined />} onClick={onEdit}>
-            Открыть в редакторе
-          </Button>
+          {!isMonitor && (
+            <Button type="primary" icon={<EditOutlined />} onClick={onEdit}>
+              Открыть в редакторе
+            </Button>
+          )}
         </Space>
       }
       destroyOnClose
