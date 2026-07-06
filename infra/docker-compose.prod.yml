@@ -102,6 +102,15 @@ services:
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
+      # Sentry (опционально): пусто → бандл без Sentry, source maps не грузятся.
+      # Значения экспортит scripts/deploy.sh из /srv/matcheck/secrets/sentry.web.env.
+      args:
+        VITE_SENTRY_DSN: "${VITE_SENTRY_DSN:-}"
+        VITE_SENTRY_RELEASE: "${VITE_SENTRY_RELEASE:-}"
+        SENTRY_ORG: "${SENTRY_ORG:-}"
+        SENTRY_PROJECT: "${SENTRY_PROJECT:-}"
+      secrets:
+        - sentry_auth_token
     container_name: matcheck-web
     restart: unless-stopped
     networks: [matcheck-net]
@@ -119,3 +128,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+# Sentry auth-token для загрузки source maps веба (build-time). Источник —
+# переменная окружения SENTRY_AUTH_TOKEN (экспортит deploy.sh). Пусто → плагин
+# отключён, секрет в образ не попадает.
+secrets:
+  sentry_auth_token:
+    environment: "SENTRY_AUTH_TOKEN"

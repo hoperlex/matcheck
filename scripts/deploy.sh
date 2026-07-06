@@ -63,6 +63,16 @@ main() {
 
   # ─── 2/6 · build ───
   step "2/6 · build образов (matcheck-api, matcheck-web, matcheck-worker)"
+  # Sentry (веб): публичный DSN + org/project идут build-arg'ами в бандл; auth-token —
+  # секретом для загрузки source maps. Всё опционально: без файла плагин отключён и
+  # сборка не меняется. Файл вне репозитория (режим 600).
+  SENTRY_WEB_ENV="/srv/matcheck/secrets/sentry.web.env"
+  if [ -f "$SENTRY_WEB_ENV" ]; then set -a; . "$SENTRY_WEB_ENV"; set +a; fi
+  export VITE_SENTRY_DSN="${VITE_SENTRY_DSN:-}"
+  export VITE_SENTRY_RELEASE="${VITE_SENTRY_RELEASE:-$COMMIT_AFTER}"
+  export SENTRY_ORG="${SENTRY_ORG:-}"
+  export SENTRY_PROJECT="${SENTRY_PROJECT:-}"
+  export SENTRY_AUTH_TOKEN="${SENTRY_AUTH_TOKEN:-}"
   "${COMPOSE[@]}" build matcheck-api matcheck-web matcheck-worker
 
   # ─── 3/6 · миграции ДО ───

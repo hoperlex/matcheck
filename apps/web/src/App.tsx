@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { RouterProvider } from 'react-router-dom';
+import * as Sentry from '@sentry/react';
 import { ConfigProvider, App as AntApp } from 'antd';
 import ruRU from 'antd/locale/ru_RU';
 import dayjs from 'dayjs';
@@ -33,6 +34,8 @@ function SideEffects() {
       qc.clear();
       prevUserIdRef.current = currentId;
     }
+    // Только id (UUID, не ПДн) — чтобы видеть, чья сессия словила ошибку.
+    Sentry.setUser(user ? { id: user.id } : null);
     if (!user) return;
     const teardownInv = setupInvalidation(qc);
     const teardownSync = startSyncLoop();
@@ -53,16 +56,22 @@ export function App() {
       }}
     >
       <AntApp>
-        <QueryProvider>
-          <AuthProvider>
-            <SideEffects />
-            <RouterProvider router={router} />
-            {/* PWA-баннер обновления. Внутри useRegisterSW (vite-plugin-pwa)
-                и фиксированной позиции снизу-центра. Появляется только при
-                реальном обнаружении нового SW; обычный первый load — null. */}
-            <UpdateBanner />
-          </AuthProvider>
-        </QueryProvider>
+        <Sentry.ErrorBoundary
+          fallback={
+            <div style={{ padding: 24 }}>Произошла ошибка интерфейса. Обновите страницу.</div>
+          }
+        >
+          <QueryProvider>
+            <AuthProvider>
+              <SideEffects />
+              <RouterProvider router={router} />
+              {/* PWA-баннер обновления. Внутри useRegisterSW (vite-plugin-pwa)
+                  и фиксированной позиции снизу-центра. Появляется только при
+                  реальном обнаружении нового SW; обычный первый load — null. */}
+              <UpdateBanner />
+            </AuthProvider>
+          </QueryProvider>
+        </Sentry.ErrorBoundary>
       </AntApp>
     </ConfigProvider>
   );

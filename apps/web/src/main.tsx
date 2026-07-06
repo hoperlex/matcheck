@@ -1,3 +1,4 @@
+import './instrument'; // ПЕРВЫМ — Sentry.init до обёртки router-factory
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App.js';

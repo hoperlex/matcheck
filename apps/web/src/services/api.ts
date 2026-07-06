@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/react';
 import type { UploadDocumentsResponse, ImportResult } from '@matcheck/contracts';
 import { useAuthStore } from '../stores/auth';
 import { refreshAccessToken } from './authRefresh';
@@ -94,7 +95,13 @@ async function request<T>(
       (payload && typeof payload === 'object' && 'error' in payload
         ? String((payload as { error: unknown }).error)
         : null) ?? 'http_error';
-    throw new ApiError(res.status, code, msg, payload);
+    const err = new ApiError(res.status, code, msg, payload);
+    // Репортим только серверные ошибки (5xx) — ожидаемые 4xx (401/403/валидация)
+    // и 409 (обработаны выше) не шлём, чтобы не зашумлять. path без share-токена.
+    if (res.status >= 500) {
+      Sentry.captureException(err, { tags: { area: 'api' }, extra: { path, status: res.status, code } });
+    }
+    throw err;
   }
 
   if (res.status === 204) return undefined as T;

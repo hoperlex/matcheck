@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
+import { sentryVitePlugin } from '@sentry/vite-plugin';
 
 export default defineConfig({
   plugins: [
@@ -60,6 +61,18 @@ export default defineConfig({
       },
       devOptions: { enabled: false },
     }),
+    // Sentry: загрузка source maps на этапе прод-сборки. Полностью ОТКЛЮЧЁН без
+    // SENTRY_AUTH_TOKEN (локальные/dev сборки не затрагиваются). Токен — только в
+    // окружении сборки (BuildKit secret), НЕ в бандл и НЕ в репозиторий. Плагин
+    // идёт последним. filesToDeleteAfterUpload чистит .map из dist после аплоада,
+    // чтобы карты не раздавались nginx (в паре с sourcemap:'hidden').
+    sentryVitePlugin({
+      org: process.env.SENTRY_ORG,
+      project: process.env.SENTRY_PROJECT,
+      authToken: process.env.SENTRY_AUTH_TOKEN,
+      disable: !process.env.SENTRY_AUTH_TOKEN,
+      sourcemaps: { filesToDeleteAfterUpload: ['./dist/**/*.map'] },
+    }),
   ],
   server: {
     port: 5173,
@@ -70,7 +83,10 @@ export default defineConfig({
   },
   build: {
     target: 'es2022',
-    sourcemap: true,
+    // 'hidden' — карты генерируются, но НЕ ссылаются из бандла (нет
+    // sourceMappingURL). Загружаются в Sentry плагином и удаляются из dist,
+    // так что публично (nginx) .map не раздаются. Раньше было true → .map утекали.
+    sourcemap: 'hidden',
   },
   worker: {
     format: 'es',

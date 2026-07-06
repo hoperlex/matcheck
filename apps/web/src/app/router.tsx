@@ -1,5 +1,6 @@
 import { lazy, Suspense, type ReactNode } from 'react';
 import { createBrowserRouter, Navigate, useSearchParams } from 'react-router-dom';
+import * as Sentry from '@sentry/react';
 import { Spin } from 'antd';
 import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from '../shared/ui/ProtectedRoute';
@@ -85,7 +86,11 @@ function suspense(node: React.ReactNode) {
   );
 }
 
-export const router = createBrowserRouter([
+// Обёртка Sentry поверх createBrowserRouter — поведение идентично, добавляет
+// только инструментацию навигации. Без инициализированного Sentry (нет DSN) — no-op.
+const sentryCreateBrowserRouter = Sentry.wrapCreateBrowserRouterV7(createBrowserRouter);
+
+export const router = sentryCreateBrowserRouter([
   { path: '/login', element: suspense(<Login />) },
   { path: '/register', element: suspense(<Register />) },
   // Публичная страница просмотра приёмки/отгрузки по share-токену.
