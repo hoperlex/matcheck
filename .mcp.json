@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "matcheck-db": {
+      "command": "node",
+      "args": ["/root/projects/matcheck/tools/mcp-pg/server.mjs"],
+      "env": {
+        "MATCHECK_DB_RO_URL": "${MATCHECK_DB_RO_URL}",
+        "NODE_EXTRA_CA_CERTS": "/root/projects/matcheck/infra/secrets/yandex-ca/root.crt"
+      }
+    }
+  }
+}

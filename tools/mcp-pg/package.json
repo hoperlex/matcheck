@@ -1,0 +1,18 @@
+{
+  "name": "matcheck-mcp-pg",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Локальный read-only MCP-сервер к Postgres MatCheck (диагностика). Гранты SELECT-only на уровне СУБД + read-only транзакции + guardrails.",
+  "bin": {
+    "matcheck-mcp-pg": "server.mjs"
+  },
+  "scripts": {
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "postgres": "^3.4.9",
+    "zod": "^3.23.8"
+  }
+}
