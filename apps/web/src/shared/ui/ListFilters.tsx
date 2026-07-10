@@ -52,15 +52,17 @@ export interface ListFiltersProps {
   tail?: ReactNode;
 }
 
+// ФИКСИРОВАННАЯ ширина мульти-селектов (не minWidth/эластичная!). Это
+// принципиально в связке с maxTagCount={1} ниже: при mode="multiple" antd рисует
+// теги через rc-overflow. Режим maxTagCount="responsive" оборачивает контейнер в
+// ResizeObserver и на каждый ресайз пересчитывает, сколько тегов влезло. Если
+// ширина поля при этом ЭЛАСТИЧНА (minWidth/maxWidth, ширина зависит от контента),
+// измерение не сходится: показал тег → поле шире → влезло ещё → свернул → уже →
+// повтор каждый кадр. Так все три селекта в одном <Space wrap> «дребезжали»
+// влево-вправо (и по крестику ✕ было не попасть). Фиксированная width делает
+// clientWidth константой, а maxTagCount={1} вовсе отключает responsive-путь и его
+// ResizeObserver. Длинный одиночный тег обрезается эллипсисом ВНУТРИ поля.
 const SELECT_WIDTH = 240;
-// Верхняя граница ширины мульти-селекта — ПОТОЛОК, не постоянная ширина: в
-// обычном состоянии поле остаётся ~SELECT_WIDTH, до потолка дорастает только
-// одиночный очень длинный тег (напр. «САД · ЖК «Садовническая 69»»). Без
-// потолка длинный label растягивал поле произвольно и попадал на «порог
-// переноса» <Space wrap>, раскачивая scrollbar-flicker цикл (см. scrollbarGutter
-// в DesktopLayout/MobileLayout). Самый длинный одиночный label слегка обрежется
-// эллипсисом — это приемлемо.
-const SELECT_MAX_WIDTH = 320;
 const SEARCH_WIDTH = 220;
 
 /**
@@ -71,8 +73,9 @@ const SEARCH_WIDTH = 220;
  * прямо из операционной таблицы; см. directoryFilterMap для нового маппинга).
  *
  * Селекты в режиме `multiple` — пользователь может выбрать несколько
- * подрядчиков/поставщиков/объектов. `maxTagCount="responsive"` — теги
- * адаптивно сворачиваются в «+N», чтобы не растягивать высоту строки.
+ * подрядчиков/поставщиков/объектов. `maxTagCount={1}` — показываем один тег
+ * и «+N» (НЕ "responsive": тот через ResizeObserver зацикливал измерение
+ * ширины и «дребезжал», см. комментарий у SELECT_WIDTH).
  */
 export function ListFilters({
   value,
@@ -115,14 +118,14 @@ export function ListFilters({
       {showContractor && (
         <Select<string[]>
           mode="multiple"
-          style={{ minWidth: SELECT_WIDTH, maxWidth: SELECT_MAX_WIDTH }}
+          style={{ width: SELECT_WIDTH }}
           placeholder="Подрядчик"
           value={value.contractorIds}
           onChange={(v) => onChange({ contractorIds: v })}
           allowClear
           showSearch
           optionFilterProp="label"
-          maxTagCount="responsive"
+          maxTagCount={1}
           loading={loading}
           options={effectiveContractorOptions}
         />
@@ -130,14 +133,14 @@ export function ListFilters({
       {showSupplier && (
         <Select<string[]>
           mode="multiple"
-          style={{ minWidth: SELECT_WIDTH, maxWidth: SELECT_MAX_WIDTH }}
+          style={{ width: SELECT_WIDTH }}
           placeholder="Поставщик"
           value={value.supplierIds}
           onChange={(v) => onChange({ supplierIds: v })}
           allowClear
           showSearch
           optionFilterProp="label"
-          maxTagCount="responsive"
+          maxTagCount={1}
           loading={loading}
           options={effectiveSupplierOptions}
         />
@@ -145,14 +148,14 @@ export function ListFilters({
       {showSite && (
         <Select<string[]>
           mode="multiple"
-          style={{ minWidth: SELECT_WIDTH, maxWidth: SELECT_MAX_WIDTH }}
+          style={{ width: SELECT_WIDTH }}
           placeholder="Объект"
           value={value.siteIds}
           onChange={(v) => onChange({ siteIds: v })}
           allowClear
           showSearch
           optionFilterProp="label"
-          maxTagCount="responsive"
+          maxTagCount={1}
           loading={loading}
           options={siteOptions}
         />
