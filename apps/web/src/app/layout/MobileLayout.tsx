@@ -127,7 +127,19 @@ export function MobileLayout() {
         onClose={() => setProfileOpen(false)}
         onLogout={handleLogout}
       />
-      <Content style={{ padding: 12, background: '#f5f5f5', flex: 1, overflowY: 'auto' }}>
+      <Content
+        style={{
+          padding: 12,
+          background: '#f5f5f5',
+          flex: 1,
+          overflowY: 'auto',
+          // Симметрично DesktopLayout: резервируем полосу прокрутки, чтобы её
+          // появление/исчезновение не меняло ширину контента (иначе фильтры
+          // «дребезжат» при выборе значения). Основной баг на desktop, но
+          // держим оба layout'а одинаковыми.
+          scrollbarGutter: 'stable',
+        }}
+      >
         <Outlet />
       </Content>
       <Footer style={{ padding: 0, background: '#fff', borderTop: '1px solid #f0f0f0' }}>

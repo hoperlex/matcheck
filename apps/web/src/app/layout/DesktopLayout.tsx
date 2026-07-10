@@ -249,7 +249,21 @@ export function DesktopLayout() {
           height: '100vh',
         }}
       >
-        <Content style={{ padding: '12px 24px 8px', background: '#f5f5f5', flex: 1, overflowY: 'auto' }}>
+        <Content
+          style={{
+            padding: '12px 24px 8px',
+            background: '#f5f5f5',
+            flex: 1,
+            overflowY: 'auto',
+            // Полосу прокрутки резервируем всегда: её появление/исчезновение
+            // (контент на границе 100vh) иначе меняло бы ширину Content на
+            // ~15px → строка фильтров в <Space wrap> переносилась → шапка выше
+            // → ResizeObserver в StickyPageHeader пересчитывал высоту таблицы
+            // → контент снова влезал → скроллбар исчезал → цикл на каждом
+            // кадре (инпуты «дребезжали» влево-вправо во всех разделах).
+            scrollbarGutter: 'stable',
+          }}
+        >
           <Outlet />
         </Content>
       </Layout>

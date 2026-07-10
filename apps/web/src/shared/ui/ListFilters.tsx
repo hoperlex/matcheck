@@ -53,6 +53,14 @@ export interface ListFiltersProps {
 }
 
 const SELECT_WIDTH = 240;
+// Верхняя граница ширины мульти-селекта — ПОТОЛОК, не постоянная ширина: в
+// обычном состоянии поле остаётся ~SELECT_WIDTH, до потолка дорастает только
+// одиночный очень длинный тег (напр. «САД · ЖК «Садовническая 69»»). Без
+// потолка длинный label растягивал поле произвольно и попадал на «порог
+// переноса» <Space wrap>, раскачивая scrollbar-flicker цикл (см. scrollbarGutter
+// в DesktopLayout/MobileLayout). Самый длинный одиночный label слегка обрежется
+// эллипсисом — это приемлемо.
+const SELECT_MAX_WIDTH = 320;
 const SEARCH_WIDTH = 220;
 
 /**
@@ -107,7 +115,7 @@ export function ListFilters({
       {showContractor && (
         <Select<string[]>
           mode="multiple"
-          style={{ minWidth: SELECT_WIDTH }}
+          style={{ minWidth: SELECT_WIDTH, maxWidth: SELECT_MAX_WIDTH }}
           placeholder="Подрядчик"
           value={value.contractorIds}
           onChange={(v) => onChange({ contractorIds: v })}
@@ -122,7 +130,7 @@ export function ListFilters({
       {showSupplier && (
         <Select<string[]>
           mode="multiple"
-          style={{ minWidth: SELECT_WIDTH }}
+          style={{ minWidth: SELECT_WIDTH, maxWidth: SELECT_MAX_WIDTH }}
           placeholder="Поставщик"
           value={value.supplierIds}
           onChange={(v) => onChange({ supplierIds: v })}
@@ -137,7 +145,7 @@ export function ListFilters({
       {showSite && (
         <Select<string[]>
           mode="multiple"
-          style={{ minWidth: SELECT_WIDTH }}
+          style={{ minWidth: SELECT_WIDTH, maxWidth: SELECT_MAX_WIDTH }}
           placeholder="Объект"
           value={value.siteIds}
           onChange={(v) => onChange({ siteIds: v })}
