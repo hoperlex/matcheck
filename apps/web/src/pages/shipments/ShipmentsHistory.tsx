@@ -33,6 +33,7 @@ import type {
   Supplier,
 } from '@matcheck/contracts';
 import type { z } from 'zod';
+import dayjs from 'dayjs';
 import { ApiError, api } from '../../services/api';
 import {
   hardDeleteShipment,
@@ -176,6 +177,11 @@ export function ShipmentsHistory({
     nophoto: boolean;
     // Фильтр по отметке проверки (менеджмент): approved|issues|none.
     reviewState: string | null;
+    // Диапазон даты отгрузки — дни (YYYY-MM-DD), пустая строка = граница не
+    // задана. В URL это ?dfrom=/?dto=; конверсия в ISO-границы для сервера —
+    // в queryFn (см. shippedFrom/shippedTo). Симметрично с DeliveriesHistory.
+    dateFrom: string;
+    dateTo: string;
   };
   const filters: ListFiltersValue & ExtraFilters = {
     contractorIds: parseCsvIds(params.get('contractor')),
@@ -188,6 +194,8 @@ export function ShipmentsHistory({
     features: urlFeatures,
     nophoto: params.get('nophoto') === '1',
     reviewState: params.get('review'),
+    dateFrom: params.get('dfrom') ?? '',
+    dateTo: params.get('dto') ?? '',
   };
 
   const updateFilters = (
@@ -213,6 +221,8 @@ export function ShipmentsHistory({
       for (const f of patch.features ?? []) next.append('feature', f);
     }
     if ('reviewState' in patch) apply('review', patch.reviewState);
+    if ('dateFrom' in patch) apply('dfrom', patch.dateFrom);
+    if ('dateTo' in patch) apply('dto', patch.dateTo);
     setParams(next, { replace: true });
   };
 
@@ -265,6 +275,8 @@ export function ShipmentsHistory({
       status: filters.status,
       nophoto: filters.nophoto,
       review: filters.reviewState,
+      dateFrom: filters.dateFrom,
+      dateTo: filters.dateTo,
     },
   ] as const;
   const list = useQuery({
@@ -285,6 +297,15 @@ export function ShipmentsHistory({
       if (filters.status === 'no_document') qs.set('noDocument', 'true');
       else if (filters.status) qs.set('status', filters.status);
       if (filters.reviewState) qs.set('reviewState', filters.reviewState);
+      // Дни → ISO-границы. Сервер сравнивает shipped_at >= shippedFrom AND
+      // shipped_at < shippedTo, поэтому верхняя граница — начало СЛЕДУЮЩЕГО
+      // дня: иначе записи выбранного конечного дня выпали бы из выдачи.
+      if (filters.dateFrom) {
+        qs.set('shippedFrom', dayjs(filters.dateFrom).startOf('day').toISOString());
+      }
+      if (filters.dateTo) {
+        qs.set('shippedTo', dayjs(filters.dateTo).add(1, 'day').startOf('day').toISOString());
+      }
       return api.get<List>(`/shipments?${qs.toString()}`);
     },
     placeholderData: keepPreviousData,
@@ -521,7 +542,7 @@ export function ShipmentsHistory({
   // (см. shipments.ts: contractorIds/supplierIds/siteIds/q/plate/features/
   // purposes/nophoto/status в WHERE). При смене любого фильтра — сброс
   // page=1 и очистка selection.
-  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.purposes.join(',')}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${view}`;
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.purposes.join(',')}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
   useEffect(() => {
     if (page !== 1) setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -749,7 +770,12 @@ export function ShipmentsHistory({
             value={filters}
             onChange={updateFilters}
             // Подрядчик видит один свой срез — справочные фильтры скрыты.
-            fields={isContractor ? ['q'] : ['contractor', 'supplier', 'site', 'q']}
+            // Поиск, авто и даты работают внутри его среза.
+            fields={
+              isContractor
+                ? ['q', 'plate', 'dates']
+                : ['contractor', 'supplier', 'site', 'q', 'plate', 'dates']
+            }
             contractorOptions={contractorOptions}
             supplierOptions={supplierOptions}
             sites={sitesQuery.data?.items ?? []}
@@ -759,9 +785,20 @@ export function ShipmentsHistory({
               sitesQuery.isLoading
             }
             searchPlaceholder="Номер документа"
-            // Инпуты «Статус» и «Номер авто» убраны по UX-запросу: единый
-            // набор фильтров с вкладкой «Ожидаемые» (Подрядчик/Поставщик/
-            // Объект/Номер документа). Старый ?status=/?plate= в URL
+            plate={filters.plate}
+            onPlateChange={(v) => updateFilters({ plate: v })}
+            dateRange={[
+              filters.dateFrom ? dayjs(filters.dateFrom) : null,
+              filters.dateTo ? dayjs(filters.dateTo) : null,
+            ]}
+            onDateRangeChange={(r) =>
+              updateFilters({
+                dateFrom: r?.[0]?.format('YYYY-MM-DD') ?? '',
+                dateTo: r?.[1]?.format('YYYY-MM-DD') ?? '',
+              })
+            }
+            datesPlaceholder={['Отгружено с', 'по']}
+            // Инпут «Статус» убран по UX-запросу: старый ?status= в URL
             // продолжает фильтровать, но UI его не выставляет.
             tail={
               <>

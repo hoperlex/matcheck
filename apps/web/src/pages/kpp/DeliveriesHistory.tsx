@@ -33,6 +33,7 @@ import type {
   Supplier,
 } from '@matcheck/contracts';
 import type { z } from 'zod';
+import dayjs from 'dayjs';
 import { ApiError, api } from '../../services/api';
 import {
   hardDeleteDelivery,
@@ -196,6 +197,11 @@ export function DeliveriesHistory({
     nophoto: boolean;
     // Фильтр по отметке проверки (менеджмент): approved|issues|none.
     reviewState: string | null;
+    // Диапазон даты прибытия — дни (YYYY-MM-DD), пустая строка = граница не
+    // задана. В URL это ?dfrom=/?dto= — короче и читаемее ISO; конверсия в
+    // ISO-границы для сервера живёт в queryFn (см. arrivedFrom/arrivedTo).
+    dateFrom: string;
+    dateTo: string;
   };
   const filters: ListFiltersValue & ExtraFilters = {
     contractorIds: parseCsvIds(params.get('contractor')),
@@ -207,6 +213,8 @@ export function DeliveriesHistory({
     features: urlFeatures,
     nophoto: params.get('nophoto') === '1',
     reviewState: params.get('review'),
+    dateFrom: params.get('dfrom') ?? '',
+    dateTo: params.get('dto') ?? '',
   };
 
   const updateFilters = (
@@ -228,6 +236,8 @@ export function DeliveriesHistory({
       for (const f of patch.features ?? []) next.append('feature', f);
     }
     if ('reviewState' in patch) apply('review', patch.reviewState);
+    if ('dateFrom' in patch) apply('dfrom', patch.dateFrom);
+    if ('dateTo' in patch) apply('dto', patch.dateTo);
     setParams(next, { replace: true });
   };
 
@@ -286,6 +296,8 @@ export function DeliveriesHistory({
       status: filters.status,
       nophoto: filters.nophoto,
       review: filters.reviewState,
+      dateFrom: filters.dateFrom,
+      dateTo: filters.dateTo,
     },
   ] as const;
   const list = useQuery({
@@ -306,6 +318,15 @@ export function DeliveriesHistory({
       if (filters.status === 'no_document') qs.set('noDocument', 'true');
       else if (filters.status) qs.set('status', filters.status);
       if (filters.reviewState) qs.set('reviewState', filters.reviewState);
+      // Дни → ISO-границы. Сервер сравнивает arrived_at >= arrivedFrom AND
+      // arrived_at < arrivedTo, поэтому верхняя граница — начало СЛЕДУЮЩЕГО
+      // дня: иначе записи выбранного конечного дня выпали бы из выдачи.
+      if (filters.dateFrom) {
+        qs.set('arrivedFrom', dayjs(filters.dateFrom).startOf('day').toISOString());
+      }
+      if (filters.dateTo) {
+        qs.set('arrivedTo', dayjs(filters.dateTo).add(1, 'day').startOf('day').toISOString());
+      }
       return api.get<List>(`/deliveries?${qs.toString()}`);
     },
     placeholderData: keepPreviousData,
@@ -616,7 +637,7 @@ export function DeliveriesHistory({
   // пользователь может «удалить выбранные строки» на странице 7,
   // забыв что они с прошлой выборки). useEffect ниже отслеживает
   // комбинированный ключ фильтров.
-  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${view}`;
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (page !== 1) setPage(1);
@@ -845,8 +866,13 @@ export function DeliveriesHistory({
             value={filters}
             onChange={updateFilters}
             // Подрядчик видит один свой срез — справочные фильтры ему не нужны
-            // (и справочники для них закрыты). Оставляем только поиск.
-            fields={isContractor ? ['q'] : ['contractor', 'supplier', 'site', 'q']}
+            // (и справочники для них закрыты). Поиск, авто и даты — оставляем:
+            // они работают внутри его среза.
+            fields={
+              isContractor
+                ? ['q', 'plate', 'dates']
+                : ['contractor', 'supplier', 'site', 'q', 'plate', 'dates']
+            }
             contractorOptions={contractorOptions}
             supplierOptions={supplierOptions}
             sites={sitesQuery.data?.items ?? []}
@@ -856,6 +882,19 @@ export function DeliveriesHistory({
               sitesQuery.isLoading
             }
             searchPlaceholder="Номер документа"
+            plate={filters.plate}
+            onPlateChange={(v) => updateFilters({ plate: v })}
+            dateRange={[
+              filters.dateFrom ? dayjs(filters.dateFrom) : null,
+              filters.dateTo ? dayjs(filters.dateTo) : null,
+            ]}
+            onDateRangeChange={(r) =>
+              updateFilters({
+                dateFrom: r?.[0]?.format('YYYY-MM-DD') ?? '',
+                dateTo: r?.[1]?.format('YYYY-MM-DD') ?? '',
+              })
+            }
+            datesPlaceholder={['Прибытие с', 'по']}
             tail={
               // showPurpose=false → purpose-селект не рендерится, поэтому
               // purposes в onChange-patch'е никогда не приходят. Адаптер
@@ -888,10 +927,9 @@ export function DeliveriesHistory({
                 )}
               </>
             }
-            // Инпуты «Статус» и «Номер авто» убраны по UX-запросу: оставлен
-            // единый набор фильтров с вкладкой «Ожидаемые». Если фильтры всё
-            // ещё в URL (от старой ссылки) — query тянет полный список, а
-            // UI просто не подсвечивает их применёнными.
+            // Инпут «Статус» убран по UX-запросу: если ?status= остался в URL
+            // от старой ссылки — query продолжает фильтровать, а UI просто не
+            // подсвечивает его применённым.
             extra={filtersExtra}
           />
           {(() => {

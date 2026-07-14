@@ -1,9 +1,10 @@
 import type { ReactNode } from 'react';
-import { Select, Space } from 'antd';
+import { DatePicker, Select, Space } from 'antd';
+import type { Dayjs } from 'dayjs';
 import type { Counterparty, Site } from '@matcheck/contracts';
 import { DebouncedSearch } from './DebouncedSearch';
 
-export type ListFilterField = 'contractor' | 'supplier' | 'site' | 'q';
+export type ListFilterField = 'contractor' | 'supplier' | 'site' | 'q' | 'plate' | 'dates';
 
 // Селекты Подрядчик/Поставщик/Объект — мульти-выбор. Пустой массив = «все».
 // В URL хранится как CSV: `?contractor=uuid1,uuid2`. Парсинг — на стороне
@@ -42,6 +43,22 @@ export interface ListFiltersProps {
   sites: Site[];
   loading?: boolean;
   searchPlaceholder?: string;
+  /**
+   * Поиск по госномеру (field 'plate'). Отдельные props, а не поле
+   * ListFiltersValue: фильтр нужен только «Принятым» приёмкам/отгрузкам, где у
+   * записи есть авто. Списки без авто (Документы, Ожидаемые) их не передают.
+   */
+  plate?: string;
+  onPlateChange?: (v: string) => void;
+  /**
+   * Диапазон дат (field 'dates'): прибытие для приёмки, отгрузка для отгрузки.
+   * Значения — дни без времени; конверсию в ISO-границы для сервера делает
+   * родитель (у приёмки и отгрузки разные query-параметры).
+   */
+  dateRange?: [Dayjs | null, Dayjs | null] | null;
+  onDateRangeChange?: (r: [Dayjs | null, Dayjs | null] | null) => void;
+  /** Подписи краёв диапазона, напр. ['Прибытие с', 'по']. */
+  datesPlaceholder?: [string, string];
   extra?: ReactNode;
   /**
    * Доп. фильтры, которые рендерятся между стандартными селектами/поиском
@@ -64,6 +81,10 @@ export interface ListFiltersProps {
 // ResizeObserver. Длинный одиночный тег обрезается эллипсисом ВНУТРИ поля.
 const SELECT_WIDTH = 240;
 const SEARCH_WIDTH = 220;
+// Тоже фиксированная — по той же причине, что и SELECT_WIDTH выше: любое
+// эластичное поле в общем <Space wrap> двигает порог переноса строки и
+// возвращает «дребезг» всей панели.
+const DATES_WIDTH = 260;
 
 /**
  * Общая панель фильтров для списочных страниц (Приёмка, Отгрузка, Документы).
@@ -87,6 +108,11 @@ export function ListFilters({
   sites,
   loading,
   searchPlaceholder,
+  plate,
+  onPlateChange,
+  dateRange,
+  onDateRangeChange,
+  datesPlaceholder,
   extra,
   tail,
 }: ListFiltersProps) {
@@ -94,6 +120,8 @@ export function ListFilters({
   const showSupplier = fields.includes('supplier');
   const showSite = fields.includes('site');
   const showQ = fields.includes('q');
+  const showPlate = fields.includes('plate');
+  const showDates = fields.includes('dates');
 
   // Legacy fallback — Inbox по-прежнему отправляет операционные
   // counterparty.id на сервер, поэтому ему нужны options из counterparties.
@@ -166,6 +194,24 @@ export function ListFilters({
           placeholder={searchPlaceholder ?? 'Номер документа'}
           value={value.q}
           onChange={(v) => onChange({ q: v })}
+        />
+      )}
+      {showPlate && (
+        <DebouncedSearch
+          style={{ width: SEARCH_WIDTH }}
+          placeholder="Номер авто"
+          value={plate}
+          onChange={(v) => onPlateChange?.(v)}
+        />
+      )}
+      {showDates && (
+        <DatePicker.RangePicker
+          style={{ width: DATES_WIDTH }}
+          format="DD.MM.YYYY"
+          allowEmpty={[true, true]}
+          placeholder={datesPlaceholder ?? ['С даты', 'По дату']}
+          value={dateRange as [Dayjs, Dayjs] | null}
+          onChange={(v) => onDateRangeChange?.(v as [Dayjs | null, Dayjs | null] | null)}
         />
       )}
       {tail}
