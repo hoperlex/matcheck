@@ -8,6 +8,7 @@ import {
 } from 'fastify-type-provider-zod';
 import { loadEnv } from './lib/env.js';
 import { logger } from './lib/logger.js';
+import { registerErrorHandler } from './lib/error-handler.js';
 import dbPlugin from './plugins/db.js';
 import redisPlugin from './plugins/redis.js';
 import queuePlugin from './plugins/queue.js';
@@ -149,15 +150,7 @@ export async function buildServer() {
     return payload;
   });
 
-  app.setErrorHandler((err, req, reply) => {
-    req.log.error({ err }, 'request error');
-    if (reply.statusCode < 400) reply.code(500);
-    const error = err as Error & { code?: string };
-    reply.send({
-      error: error.name ?? 'internal_error',
-      message: env.NODE_ENV === 'production' ? 'Internal error' : error.message,
-    });
-  });
+  registerErrorHandler(app);
 
   // Подтянуть актуальный список МОЛ из ФОТ и зеркалить в
   // responsible_persons сразу после регистрации плагинов — чтобы

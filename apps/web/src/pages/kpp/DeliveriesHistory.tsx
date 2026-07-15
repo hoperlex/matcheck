@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import {
+  Alert,
   Button,
   Card,
   Input,
@@ -51,7 +52,6 @@ import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
-import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
@@ -1025,6 +1025,25 @@ export function DeliveriesHistory({
         </Space>
       }
     >
+      {/* Ошибка запроса ЗАМЕНЯЕТ таблицу, а не дополняет её: items внизу —
+          это `list.data?.items ?? []`, и при упавшем запросе таблица молча
+          рисует «Нет приёмок» (а с keepPreviousData — устаревшие строки).
+          Так 500 от фильтра дат месяц выглядел как «данных нет».
+          Ветка живёт в JSX, а не ранним return — иначе поедет порядок
+          хуков (React #310, уже чинили в cfd6941). */}
+      {list.isError ? (
+        <Alert
+          type="error"
+          showIcon
+          message="Не удалось загрузить приёмки"
+          description={list.error instanceof Error ? list.error.message : String(list.error)}
+          action={
+            <Button size="small" danger onClick={() => void list.refetch()}>
+              Повторить
+            </Button>
+          }
+        />
+      ) : (
       <ResponsiveTable<Row>
         items={items}
         loading={list.isLoading}
@@ -1175,6 +1194,7 @@ export function DeliveriesHistory({
           </Card>
         )}
       />
+      )}
     </StickyPageHeader>
     <DeliveryViewModal
       data={viewData}

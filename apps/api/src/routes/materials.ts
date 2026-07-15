@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, ilike, or, sql as drSql } from 'drizzle-orm';
+import { dateRangeConditions } from '../lib/date-range.js';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import { escapeLike } from '../lib/like.js';
@@ -86,8 +87,11 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
           )!,
         );
       }
-      if (from) conditions.push(drSql`${deliveries.arrivedAt} >= ${new Date(from)}`);
-      if (to) conditions.push(drSql`${deliveries.arrivedAt} <= ${new Date(to)}`);
+      // Границы включительные с обеих сторон — журнал принимает from/to как
+      // дни (YYYY-MM-DD), клиент не досылает начало следующего дня.
+      conditions.push(
+        ...dateRangeConditions(deliveries.arrivedAt, from, to, { toInclusive: true }),
+      );
 
       const where = and(...conditions);
 

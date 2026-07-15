@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import {
+  Alert,
   Button,
   Card,
   Input,
@@ -907,6 +908,22 @@ export function ShipmentsHistory({
         </Space>
       }
     >
+      {/* Ошибка ЗАМЕНЯЕТ таблицу — см. тот же комментарий в
+          DeliveriesHistory: `list.data?.items ?? []` иначе рисует
+          «Нет отгрузок» поверх упавшего запроса. */}
+      {list.isError ? (
+        <Alert
+          type="error"
+          showIcon
+          message="Не удалось загрузить отгрузки"
+          description={list.error instanceof Error ? list.error.message : String(list.error)}
+          action={
+            <Button size="small" danger onClick={() => void list.refetch()}>
+              Повторить
+            </Button>
+          }
+        />
+      ) : (
       <ResponsiveTable<Row>
         items={items}
         loading={list.isLoading}
@@ -1052,6 +1069,7 @@ export function ShipmentsHistory({
           </Card>
         )}
       />
+      )}
     </StickyPageHeader>
     <ShareLinkModal
       entityType="shipment"

@@ -44,6 +44,7 @@ import {
   resolveContractorOpIds,
 } from '../lib/contractor-scope.js';
 import { publishEvent } from './events.js';
+import { dateRangeConditions } from '../lib/date-range.js';
 
 const ListQuerySchema = z.object({
   status: ShipmentStatusCodeSchema.optional(),
@@ -483,8 +484,13 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       }
 
       // shippedFrom / shippedTo — диапазон даты отправки.
-      if (shippedFrom) filters.push(gte(shipments.shippedAt, new Date(shippedFrom)));
-      if (shippedTo) filters.push(drSql`${shipments.shippedAt} < ${new Date(shippedTo)}`);
+      // Верхняя граница строгая: клиент шлёт начало следующего дня.
+      filters.push(
+        ...dateRangeConditions(shipments.shippedAt, shippedFrom, shippedTo, {
+          fromField: 'shippedFrom',
+          toField: 'shippedTo',
+        }),
+      );
 
       // nophoto: нет связанных фото.
       if (nophoto) {

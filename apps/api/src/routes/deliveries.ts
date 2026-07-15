@@ -45,6 +45,7 @@ import {
   deliveryVisibleToContractor,
 } from '../lib/contractor-scope.js';
 import { publishEvent } from './events.js';
+import { dateRangeConditions } from '../lib/date-range.js';
 
 const ListQuerySchema = z.object({
   status: DeliveryStatusCodeSchema.optional(),
@@ -511,8 +512,13 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       }
 
       // arrivedFrom / arrivedTo — диапазон даты прибытия (archive lookup).
-      if (arrivedFrom) filters.push(gte(deliveries.arrivedAt, new Date(arrivedFrom)));
-      if (arrivedTo) filters.push(drSql`${deliveries.arrivedAt} < ${new Date(arrivedTo)}`);
+      // Верхняя граница строгая: клиент шлёт начало следующего дня.
+      filters.push(
+        ...dateRangeConditions(deliveries.arrivedAt, arrivedFrom, arrivedTo, {
+          fromField: 'arrivedFrom',
+          toField: 'arrivedTo',
+        }),
+      );
 
       // nophoto: нет связанных фото (deep-link из дашборда «Статистика»).
       if (nophoto) {
