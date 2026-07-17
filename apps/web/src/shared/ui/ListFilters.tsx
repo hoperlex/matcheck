@@ -4,7 +4,14 @@ import type { Dayjs } from 'dayjs';
 import type { Counterparty, Site } from '@matcheck/contracts';
 import { DebouncedSearch } from './DebouncedSearch';
 
-export type ListFilterField = 'contractor' | 'supplier' | 'site' | 'q' | 'plate' | 'dates';
+export type ListFilterField =
+  | 'displayId'
+  | 'contractor'
+  | 'supplier'
+  | 'site'
+  | 'q'
+  | 'plate'
+  | 'dates';
 
 // Селекты Подрядчик/Поставщик/Объект — мульти-выбор. Пустой массив = «все».
 // В URL хранится как CSV: `?contractor=uuid1,uuid2`. Парсинг — на стороне
@@ -44,6 +51,14 @@ export interface ListFiltersProps {
   loading?: boolean;
   searchPlaceholder?: string;
   /**
+   * Точный поиск по короткому id записи (field 'displayId') — колонка «id».
+   * Отдельные props по той же причине, что и plate: короткий id есть только у
+   * приёмок/отгрузок. Значение — строка (то, что набрано), число собирает
+   * родитель при отправке на сервер.
+   */
+  displayId?: string;
+  onDisplayIdChange?: (v: string) => void;
+  /**
    * Поиск по госномеру (field 'plate'). Отдельные props, а не поле
    * ListFiltersValue: фильтр нужен только «Принятым» приёмкам/отгрузкам, где у
    * записи есть авто. Списки без авто (Документы, Ожидаемые) их не передают.
@@ -81,6 +96,9 @@ export interface ListFiltersProps {
 // ResizeObserver. Длинный одиночный тег обрезается эллипсисом ВНУТРИ поля.
 const SELECT_WIDTH = 240;
 const SEARCH_WIDTH = 220;
+// Поиск по id — короткое числовое поле, поэтому уже остальных. Тоже
+// фиксированная ширина: см. комментарий выше про «дребезг».
+const ID_WIDTH = 110;
 // Тоже фиксированная — по той же причине, что и SELECT_WIDTH выше: любое
 // эластичное поле в общем <Space wrap> двигает порог переноса строки и
 // возвращает «дребезг» всей панели.
@@ -108,6 +126,8 @@ export function ListFilters({
   sites,
   loading,
   searchPlaceholder,
+  displayId,
+  onDisplayIdChange,
   plate,
   onPlateChange,
   dateRange,
@@ -116,6 +136,7 @@ export function ListFilters({
   extra,
   tail,
 }: ListFiltersProps) {
+  const showDisplayId = fields.includes('displayId');
   const showContractor = fields.includes('contractor');
   const showSupplier = fields.includes('supplier');
   const showSite = fields.includes('site');
@@ -143,6 +164,18 @@ export function ListFilters({
 
   return (
     <Space wrap size={[8, 8]} style={{ width: '100%' }}>
+      {showDisplayId && (
+        <DebouncedSearch
+          style={{ width: ID_WIDTH }}
+          placeholder="id"
+          value={displayId}
+          onChange={(v) => onDisplayIdChange?.(v)}
+          // Только цифры, не длиннее 15 знаков. 15-значное число заведомо
+          // меньше MAX_SAFE_INTEGER, поэтому .safe() в серверной схеме не
+          // сработает и из UI нельзя получить ошибку валидации.
+          sanitize={(v) => v.replace(/\D/g, '').slice(0, 15)}
+        />
+      )}
       {showContractor && (
         <Select<string[]>
           mode="multiple"

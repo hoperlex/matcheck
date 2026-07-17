@@ -67,6 +67,12 @@ const ListQuerySchema = z.object({
   siteIds: z.string().optional(),
   // Поиск по номеру привязанного документа (УПД/ТН) — ILIKE.
   q: z.string().optional(),
+  // Точный поиск по короткому id приёмки (колонка «id» в Принятых).
+  // Отдельный параметр, а не часть q: у трети документов doc_number
+  // совпадает с чьим-то display_id, и объединение через OR тащило бы в
+  // выдачу посторонние записи. .safe() — display_id это bigint, без него
+  // ?displayId=1e20 прошло бы int().positive() и упало переполнением в PG.
+  displayId: z.coerce.number().int().positive().safe().optional(),
   // Поиск по госномеру — ILIKE.
   plate: z.string().optional(),
   // Признаки приёмки, AND между выбранными:
@@ -346,7 +352,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         contractorIds: contractorIdsCsv,
         supplierIds: supplierIdsCsv,
         siteIds: siteIdsCsv,
-        q, plate,
+        q, displayId, plate,
         features: featuresCsv,
         arrivedFrom, arrivedTo, nophoto,
         reviewState,
@@ -472,6 +478,15 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           WHERE ds_q.delivery_id = ${deliveries.id}
             AND sd_q.doc_number ILIKE ${needle}
         )`);
+      }
+
+      // displayId: точное совпадение по короткому id (уникальный индекс
+      // deliveries_display_id_uidx). Отдельный AND-фильтр, НЕ часть q —
+      // см. комментарий в схеме. Проверка на undefined, а не truthy:
+      // .positive() сейчас делает их равнозначными, но при смене схемы
+      // truthy-проверка молча потеряла бы фильтр.
+      if (displayId !== undefined) {
+        filters.push(eq(deliveries.displayId, displayId));
       }
 
       // plate: ILIKE на госномер.

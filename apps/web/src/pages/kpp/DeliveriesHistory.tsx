@@ -189,6 +189,9 @@ export function DeliveriesHistory({
 
   type ExtraFilters = {
     status: string | null;
+    // Короткий id приёмки (колонка «id»). Строка — это то, что набрано в
+    // поле; на сервер уходит как ?displayId=N (точное совпадение).
+    displayId: string;
     plate: string;
     features: OperationFeature[];
     // ?nophoto=1 — deep-link из дашборда «Статистика». В UI селекта нет,
@@ -209,6 +212,9 @@ export function DeliveriesHistory({
     siteIds: parseCsvIds(params.get('site')),
     q: params.get('q') ?? '',
     status: params.get('status'),
+    // ?id= — короткий человекочитаемый id; модалки ходят по ?delivery=<uuid>,
+    // так что ключ свободен.
+    displayId: params.get('id') ?? '',
     plate: params.get('plate') ?? '',
     features: urlFeatures,
     nophoto: params.get('nophoto') === '1',
@@ -230,6 +236,7 @@ export function DeliveriesHistory({
     if ('siteIds' in patch) apply('site', toCsvIds(patch.siteIds));
     if ('q' in patch) apply('q', patch.q);
     if ('status' in patch) apply('status', patch.status);
+    if ('displayId' in patch) apply('id', patch.displayId);
     if ('plate' in patch) apply('plate', patch.plate);
     if ('features' in patch) {
       next.delete('feature');
@@ -291,6 +298,7 @@ export function DeliveriesHistory({
       supplier: filters.supplierIds.join(','),
       site: filters.siteIds.join(','),
       q: filters.q,
+      displayId: filters.displayId,
       plate: filters.plate,
       features: filters.features.join(','),
       status: filters.status,
@@ -311,6 +319,7 @@ export function DeliveriesHistory({
       if (filters.supplierIds.length) qs.set('supplierIds', filters.supplierIds.join(','));
       if (filters.siteIds.length) qs.set('siteIds', filters.siteIds.join(','));
       if (filters.q.trim()) qs.set('q', filters.q.trim());
+      if (filters.displayId.trim()) qs.set('displayId', filters.displayId.trim());
       if (filters.plate.trim()) qs.set('plate', filters.plate.trim());
       if (filters.features.length) qs.set('features', filters.features.join(','));
       if (filters.nophoto) qs.set('nophoto', '1');
@@ -637,7 +646,7 @@ export function DeliveriesHistory({
   // пользователь может «удалить выбранные строки» на странице 7,
   // забыв что они с прошлой выборки). useEffect ниже отслеживает
   // комбинированный ключ фильтров.
-  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (page !== 1) setPage(1);
@@ -870,8 +879,8 @@ export function DeliveriesHistory({
             // они работают внутри его среза.
             fields={
               isContractor
-                ? ['q', 'plate', 'dates']
-                : ['contractor', 'supplier', 'site', 'q', 'plate', 'dates']
+                ? ['displayId', 'q', 'plate', 'dates']
+                : ['displayId', 'contractor', 'supplier', 'site', 'q', 'plate', 'dates']
             }
             contractorOptions={contractorOptions}
             supplierOptions={supplierOptions}
@@ -882,6 +891,8 @@ export function DeliveriesHistory({
               sitesQuery.isLoading
             }
             searchPlaceholder="Номер документа"
+            displayId={filters.displayId}
+            onDisplayIdChange={(v) => updateFilters({ displayId: v })}
             plate={filters.plate}
             onPlateChange={(v) => updateFilters({ plate: v })}
             dateRange={[

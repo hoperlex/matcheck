@@ -22,6 +22,7 @@ export function DebouncedSearch({
   placeholder,
   style,
   delayMs = 300,
+  sanitize,
 }: {
   value?: string;
   onChange: (v: string) => void;
@@ -29,6 +30,12 @@ export function DebouncedSearch({
   style?: CSSProperties;
   /** Задержка между набором и колбэком, мс. По умолчанию 300. */
   delayMs?: number;
+  /**
+   * Нормализация ввода перед показом (напр. «только цифры» для поиска по
+   * id). Применяется сразу в onChange, а не в родителе: иначе запрещённый
+   * символ висел бы в поле все delayMs до debounce.
+   */
+  sanitize?: (v: string) => string;
 }) {
   const [local, setLocal] = useState(value ?? '');
   // Чтобы не дёргать onChange на каждый рендер, который пришёл от родителя
@@ -57,14 +64,25 @@ export function DebouncedSearch({
       allowClear
       prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
       onChange={(e) => {
-        isTyping.current = true;
-        setLocal(e.target.value);
+        const next = sanitize ? sanitize(e.target.value) : e.target.value;
+        // Ранний выход, если sanitize «съел» ввод (набрали букву в поле id):
+        // значение не изменилось → setLocal не даст рендера → effect по
+        // [local] не сработает. Поставь мы здесь isTyping=true — флаг завис
+        // бы навсегда и убил синхронизацию с внешним value (сброс фильтров,
+        // кнопка «назад» перестали бы обновлять поле).
+        if (next === local) return;
+
+        setLocal(next);
+
         // Очистку (кнопка X) применяем немедленно, без debounce —
         // иначе фильтр продолжает удерживать старое значение пока тикает таймер.
-        if (e.target.value === '') {
+        if (next === '') {
           isTyping.current = false;
           onChange('');
+          return;
         }
+
+        isTyping.current = true;
       }}
     />
   );

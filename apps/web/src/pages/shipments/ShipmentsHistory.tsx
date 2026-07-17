@@ -170,6 +170,9 @@ export function ShipmentsHistory({
 
   type ExtraFilters = {
     status: string | null;
+    // Короткий id отгрузки — симметрично DeliveriesHistory. Нумерация у
+    // отгрузок своя, поэтому один и тот же id есть и там, и здесь.
+    displayId: string;
     plate: string;
     purposes: ShipmentPurpose[];
     features: ShipmentFeature[];
@@ -190,6 +193,7 @@ export function ShipmentsHistory({
     siteIds: parseCsvIds(params.get('site')),
     q: params.get('q') ?? '',
     status: params.get('status'),
+    displayId: params.get('id') ?? '',
     plate: params.get('plate') ?? '',
     purposes: urlPurposes,
     features: urlFeatures,
@@ -212,6 +216,7 @@ export function ShipmentsHistory({
     if ('siteIds' in patch) apply('site', toCsvIds(patch.siteIds));
     if ('q' in patch) apply('q', patch.q);
     if ('status' in patch) apply('status', patch.status);
+    if ('displayId' in patch) apply('id', patch.displayId);
     if ('plate' in patch) apply('plate', patch.plate);
     if ('purposes' in patch) {
       next.delete('purpose');
@@ -270,6 +275,7 @@ export function ShipmentsHistory({
       supplier: filters.supplierIds.join(','),
       site: filters.siteIds.join(','),
       q: filters.q,
+      displayId: filters.displayId,
       plate: filters.plate,
       purposes: filters.purposes.join(','),
       features: filters.features.join(','),
@@ -291,6 +297,7 @@ export function ShipmentsHistory({
       if (filters.supplierIds.length) qs.set('supplierIds', filters.supplierIds.join(','));
       if (filters.siteIds.length) qs.set('siteIds', filters.siteIds.join(','));
       if (filters.q.trim()) qs.set('q', filters.q.trim());
+      if (filters.displayId.trim()) qs.set('displayId', filters.displayId.trim());
       if (filters.plate.trim()) qs.set('plate', filters.plate.trim());
       if (filters.purposes.length) qs.set('purposes', filters.purposes.join(','));
       if (filters.features.length) qs.set('features', filters.features.join(','));
@@ -543,7 +550,7 @@ export function ShipmentsHistory({
   // (см. shipments.ts: contractorIds/supplierIds/siteIds/q/plate/features/
   // purposes/nophoto/status в WHERE). При смене любого фильтра — сброс
   // page=1 и очистка selection.
-  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.plate}|${filters.purposes.join(',')}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.purposes.join(',')}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
   useEffect(() => {
     if (page !== 1) setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -774,8 +781,8 @@ export function ShipmentsHistory({
             // Поиск, авто и даты работают внутри его среза.
             fields={
               isContractor
-                ? ['q', 'plate', 'dates']
-                : ['contractor', 'supplier', 'site', 'q', 'plate', 'dates']
+                ? ['displayId', 'q', 'plate', 'dates']
+                : ['displayId', 'contractor', 'supplier', 'site', 'q', 'plate', 'dates']
             }
             contractorOptions={contractorOptions}
             supplierOptions={supplierOptions}
@@ -786,6 +793,8 @@ export function ShipmentsHistory({
               sitesQuery.isLoading
             }
             searchPlaceholder="Номер документа"
+            displayId={filters.displayId}
+            onDisplayIdChange={(v) => updateFilters({ displayId: v })}
             plate={filters.plate}
             onPlateChange={(v) => updateFilters({ plate: v })}
             dateRange={[

@@ -65,6 +65,9 @@ const ListQuerySchema = z.object({
   siteIds: z.string().optional(),
   // Поиск по номеру привязанного документа.
   q: z.string().optional(),
+  // Точный поиск по короткому id отгрузки — симметрично deliveries.ts
+  // (см. там подробный комментарий). Нумерация у отгрузок своя.
+  displayId: z.coerce.number().int().positive().safe().optional(),
   // Поиск по госномеру.
   plate: z.string().optional(),
   // Признаки отгрузки, AND: transit, assets, upd, waybill.
@@ -326,7 +329,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         contractorIds: contractorIdsCsv,
         supplierIds: supplierIdsCsv,
         siteIds: siteIdsCsv,
-        q, plate,
+        q, displayId, plate,
         features: featuresCsv,
         purposes: purposesCsv,
         shippedFrom, shippedTo, nophoto,
@@ -437,6 +440,12 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           WHERE ss_q.shipment_id = ${shipments.id}
             AND sd_q.doc_number ILIKE ${needle}
         )`);
+      }
+
+      // displayId: точное совпадение по короткому id (уникальный индекс
+      // shipments_display_id_uidx) — симметрично deliveries.ts.
+      if (displayId !== undefined) {
+        filters.push(eq(shipments.displayId, displayId));
       }
 
       // plate: ILIKE на госномер.
