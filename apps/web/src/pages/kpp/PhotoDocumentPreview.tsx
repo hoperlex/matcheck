@@ -80,7 +80,15 @@ export function PhotoDocumentPreview({
 
   const recognize = useMutation<PhotoRecognition, Error, { force?: boolean }>({
     mutationFn: ({ force }) =>
-      api.post<PhotoRecognition>(`/photos/${photoId}/recognize${force ? '?force=true' : ''}`, {}),
+      api.post<PhotoRecognition>(
+        `/photos/${photoId}/recognize${force ? '?force=true' : ''}`,
+        {},
+        {
+          // Распознавание синхронно ждёт LLM (серверный бюджет 600с) — свой
+          // таймаут выше дефолтных 20с, иначе штатная операция оборвётся.
+          timeoutMs: 610_000,
+        },
+      ),
     onSuccess: (data) => {
       qc.setQueryData<PhotoRecognition>(['photo-recognition', photoId], data);
     },

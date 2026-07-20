@@ -1,5 +1,16 @@
 import { useMemo, useState } from 'react';
-import { Button, Input, Select, Switch, Tag, Tooltip, Typography, Space, message } from 'antd';
+import {
+  Alert,
+  Button,
+  Input,
+  Select,
+  Switch,
+  Tag,
+  Tooltip,
+  Typography,
+  Space,
+  message,
+} from 'antd';
 import { EditOutlined, PhoneOutlined, SearchOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
@@ -146,11 +157,7 @@ export default function AdminUsersPage() {
   return (
     <StickyPageHeader
       header={
-        <Space
-          style={{ width: '100%', justifyContent: 'space-between' }}
-          wrap
-          size={[16, 8]}
-        >
+        <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap size={[16, 8]}>
           <Typography.Title level={3} style={{ margin: 0 }}>
             Пользователи
           </Typography.Title>
@@ -169,6 +176,21 @@ export default function AdminUsersPage() {
         </Space>
       }
     >
+      {list.isError && (
+        // Иначе упавший GET показывал бы пустую таблицу «Нет данных», неотличимо
+        // от отсутствия пользователей (симптом «зависшего» раздела при сбое сети).
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="Не удалось загрузить пользователей"
+          action={
+            <Button size="small" onClick={() => void list.refetch()}>
+              Повторить
+            </Button>
+          }
+        />
+      )}
       <ResponsiveTable<UserDto>
         items={filteredItems}
         loading={list.isLoading}
@@ -226,11 +248,7 @@ export default function AdminUsersPage() {
             align: 'right' as const,
             render: (_: unknown, row: UserDto) => (
               <Tooltip title="Редактировать">
-                <Button
-                  type="text"
-                  icon={<EditOutlined />}
-                  onClick={() => setEditing(row)}
-                />
+                <Button type="text" icon={<EditOutlined />} onClick={() => setEditing(row)} />
               </Tooltip>
             ),
           },

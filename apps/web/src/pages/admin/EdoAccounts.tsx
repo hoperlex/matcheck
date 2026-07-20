@@ -29,7 +29,10 @@ export default function AdminEdoAccountsPage() {
 
   const sync = useMutation({
     mutationFn: (id: string) =>
-      api.post<{ imported: number; failed: number }>(`/admin/edo-accounts/${id}/sync`),
+      // Sync ЭДО последовательно тянет XML каждого документа — длиннее дефолта.
+      api.post<{ imported: number; failed: number }>(`/admin/edo-accounts/${id}/sync`, undefined, {
+        timeoutMs: 610_000,
+      }),
     onSuccess: (r) => message.success(`Импортировано: ${r.imported}, ошибок: ${r.failed}`),
     onError: (err: Error) => message.error(err.message),
   });

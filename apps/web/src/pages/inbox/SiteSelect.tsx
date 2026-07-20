@@ -1,4 +1,4 @@
-import { Select } from 'antd';
+import { Button, Select, Spin, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import type { Site } from '@matcheck/contracts';
 import { api } from '../../services/api';
@@ -35,6 +35,21 @@ export function SiteSelect({
         String(opt?.label ?? '')
           .toLowerCase()
           .includes(input.toLowerCase())
+      }
+      // isError отличаем от пустого справочника: раньше упавший GET схлопывался
+      // в пустой список и выглядел как «Нет данных». Теперь — явная ошибка с
+      // «Повторить», иначе сбой сети/таймаут неотличим от отсутствия объектов.
+      notFoundContent={
+        list.isLoading ? (
+          <Spin size="small" />
+        ) : list.isError ? (
+          <div style={{ padding: 8, textAlign: 'center' }}>
+            <Typography.Text type="secondary">Не удалось загрузить</Typography.Text>{' '}
+            <Button size="small" type="link" onClick={() => void list.refetch()}>
+              Повторить
+            </Button>
+          </div>
+        ) : undefined
       }
       options={(list.data?.items ?? []).map((s) => ({
         value: s.id,

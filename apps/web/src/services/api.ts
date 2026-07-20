@@ -25,10 +25,31 @@ export class ConflictError extends ApiError {
 
 const BASE = '/api/v1';
 
+// Таймаут по умолчанию для JSON-запросов. Раньше запросы висели бесконечно:
+// если fetch не завершался (зависший прокси/NAT, исчерпание пула HTTP/1.1),
+// UI показывал вечный спиннер. null отключает таймаут для длинных операций
+// (upload, sync, распознавание) — им бюджет задают явно.
+const DEFAULT_TIMEOUT_MS = 20_000;
+
+// Сообщение для транзиентных сбоев refresh — НЕ «Session expired» (сессия жива).
+function transientRefreshMessage(reason: string): string {
+  switch (reason) {
+    case 'timeout':
+      return 'Превышено время ожидания. Повторите попытку.';
+    case 'rate_limit':
+      return 'Слишком много запросов. Повторите чуть позже.';
+    case 'server':
+      return 'Сервер временно недоступен. Повторите попытку.';
+    default:
+      return 'Нет соединения с сервером. Повторите попытку.';
+  }
+}
+
 async function request<T>(
   path: string,
-  init: RequestInit & { retried?: boolean } = {},
+  init: RequestInit & { retried?: boolean; timeoutMs?: number | null } = {},
 ): Promise<T> {
+  const { retried, timeoutMs, signal: externalSignal, ...fetchInit } = init;
   const headers = new Headers(init.headers);
   if (!headers.has('Content-Type') && init.body && typeof init.body === 'string') {
     headers.set('Content-Type', 'application/json');
@@ -36,15 +57,48 @@ async function request<T>(
   const token = useAuthStore.getState().accessToken;
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers,
-    credentials: 'include',
-    signal: init.signal,
-  });
+  // Таймаут запроса: собственный AbortController, объединённый с внешним signal
+  // (если вызывающий передал свой для отмены). budget=null → без таймаута
+  // (upload/sync/распознавание). timedOut отличает наш таймаут от внешней отмены.
+  const budget = timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : timeoutMs;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer =
+    budget != null
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, budget)
+      : null;
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', onExternalAbort);
+  }
+  const cleanup = () => {
+    if (timer) clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+  };
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      ...fetchInit,
+      headers,
+      credentials: 'include',
+      signal: controller.signal,
+    });
+  } catch (err) {
+    cleanup();
+    // Наш таймаут — отдельный код 'timeout' (retry-предикаты его не ретраят и
+    // отличают от 4xx/5xx). Внешняя отмена (AbortError) пробрасывается как есть.
+    if (timedOut) throw new ApiError(0, 'timeout', 'Превышено время ожидания запроса');
+    throw err;
+  }
+  cleanup();
 
   const canRefresh =
-    !init.retried &&
+    !retried &&
     res.status === 401 &&
     path !== '/auth/login' &&
     path !== '/auth/register' &&
@@ -56,11 +110,19 @@ async function request<T>(
       useAuthStore.getState().setAccessToken(r.accessToken);
       return request<T>(path, { ...init, retried: true });
     }
-    // Разлогиниваем только если сервер явно сказал «сессия мертва» (401 от
-    // /auth/refresh). Транзиент (сеть/429/5xx) сессию не убивает — пробрасываем
-    // 401, следующий sync/refetch повторит запрос, когда refresh снова пройдёт.
-    if (r.sessionDead) useAuthStore.getState().expireSession();
-    throw new ApiError(401, 'unauthorized', 'Session expired');
+    // Разлогиниваем ТОЛЬКО если сервер явно сказал «сессия мертва» (401 от
+    // /auth/refresh). Транзиент (timeout/сеть/429/5xx) сессию не убивает и НЕ
+    // выдаёт ложное «Session expired» — пробрасываем ошибку по причине,
+    // следующий sync/refetch повторит, когда refresh снова пройдёт.
+    if (r.sessionDead) {
+      useAuthStore.getState().expireSession();
+      throw new ApiError(401, 'unauthorized', 'Session expired');
+    }
+    throw new ApiError(
+      0,
+      r.reason === 'timeout' ? 'timeout' : r.reason,
+      transientRefreshMessage(r.reason),
+    );
   }
 
   if (res.status === 409) {
@@ -99,7 +161,10 @@ async function request<T>(
     // Репортим только серверные ошибки (5xx) — ожидаемые 4xx (401/403/валидация)
     // и 409 (обработаны выше) не шлём, чтобы не зашумлять. path без share-токена.
     if (res.status >= 500) {
-      Sentry.captureException(err, { tags: { area: 'api' }, extra: { path, status: res.status, code } });
+      Sentry.captureException(err, {
+        tags: { area: 'api' },
+        extra: { path, status: res.status, code },
+      });
     }
     throw err;
   }
@@ -108,24 +173,32 @@ async function request<T>(
   return (await res.json()) as T;
 }
 
+// opts.timeoutMs: number — свой бюджет; null — без таймаута (длинные операции);
+// omit — дефолт 20с. Нужен для распознавания (600с), sync почты/ЭДО, теста
+// LLM-провайдера — иначе дефолт оборвал бы штатную длинную операцию.
+type ReqOpts = { timeoutMs?: number | null };
 export const api = {
-  get: <T>(path: string) => request<T>(path),
-  post: <T>(path: string, body?: unknown) =>
+  get: <T>(path: string, opts?: ReqOpts) => request<T>(path, { timeoutMs: opts?.timeoutMs }),
+  post: <T>(path: string, body?: unknown, opts?: ReqOpts) =>
     request<T>(path, {
       method: 'POST',
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      timeoutMs: opts?.timeoutMs,
     }),
-  put: <T>(path: string, body?: unknown) =>
+  put: <T>(path: string, body?: unknown, opts?: ReqOpts) =>
     request<T>(path, {
       method: 'PUT',
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      timeoutMs: opts?.timeoutMs,
     }),
-  patch: <T>(path: string, body?: unknown) =>
+  patch: <T>(path: string, body?: unknown, opts?: ReqOpts) =>
     request<T>(path, {
       method: 'PATCH',
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      timeoutMs: opts?.timeoutMs,
     }),
-  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+  delete: <T>(path: string, opts?: ReqOpts) =>
+    request<T>(path, { method: 'DELETE', timeoutMs: opts?.timeoutMs }),
 };
 
 /**
@@ -134,9 +207,7 @@ export const api = {
  * для xlsx-экспорта, CSV и других бинарных загрузок, где обычный api.get<T>
  * не подходит (тот ждёт JSON).
  */
-export async function apiDownload(
-  path: string,
-): Promise<{ blob: Blob; filename: string }> {
+export async function apiDownload(path: string): Promise<{ blob: Blob; filename: string }> {
   const headers = new Headers();
   const token = useAuthStore.getState().accessToken;
   if (token) headers.set('Authorization', `Bearer ${token}`);
@@ -156,9 +227,16 @@ export async function apiDownload(
         headers: retryHeaders,
         credentials: 'include',
       });
-    } else {
-      if (r.sessionDead) useAuthStore.getState().expireSession();
+    } else if (r.sessionDead) {
+      useAuthStore.getState().expireSession();
       throw new ApiError(401, 'unauthorized', 'Session expired');
+    } else {
+      // Транзиент — сессия жива, не выдаём ложное «Session expired».
+      throw new ApiError(
+        0,
+        r.reason === 'timeout' ? 'timeout' : r.reason,
+        transientRefreshMessage(r.reason),
+      );
     }
   }
 
@@ -197,7 +275,9 @@ export async function apiUploadFile<T>(
     fd.append(k, v);
   }
   fd.append(opts.fieldName ?? 'file', file, file.name);
-  return request<T>(path, { method: 'POST', body: fd, signal: opts.signal });
+  // timeoutMs:null — файлы до 10 МБ на медленной сети грузятся дольше 20с;
+  // дефолтный таймаут оборвал бы штатную загрузку. Отмена — через opts.signal.
+  return request<T>(path, { method: 'POST', body: fd, signal: opts.signal, timeoutMs: null });
 }
 
 /**
@@ -224,7 +304,8 @@ export async function apiUploadFiles<T>(
   for (const f of files) {
     fd.append(opts.fieldName ?? 'files', f, f.name);
   }
-  return request<T>(path, { method: 'POST', body: fd, signal: opts.signal });
+  // timeoutMs:null — пакет файлов может грузиться дольше дефолта; отмена через signal.
+  return request<T>(path, { method: 'POST', body: fd, signal: opts.signal, timeoutMs: null });
 }
 
 // ──────────── Единый вход «Загрузить документы» (router) ────────────

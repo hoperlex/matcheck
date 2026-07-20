@@ -63,8 +63,7 @@ export default function AdminLlmProvidersPage() {
 
   const creds = useQuery({
     queryKey: ['admin', 'llm-provider-credentials'],
-    queryFn: () =>
-      api.get<LlmProviderCredentialDto[]>('/admin/llm-provider-credentials'),
+    queryFn: () => api.get<LlmProviderCredentialDto[]>('/admin/llm-provider-credentials'),
   });
 
   const credsByKind = useMemo(() => {
@@ -138,6 +137,9 @@ export default function AdminLlmProvidersPage() {
     mutationFn: (id: string) =>
       api.post<{ ok: boolean; output?: string; error?: string; durationMs: number }>(
         `/admin/llm-providers/${id}/test`,
+        undefined,
+        // Тест провайдера ходит в LLM (до ~20с) — свой таймаут выше дефолта.
+        { timeoutMs: 60_000 },
       ),
     onSuccess: (r) => {
       if (r.ok) message.success(`OK (${r.durationMs} мс): ${r.output ?? ''}`);

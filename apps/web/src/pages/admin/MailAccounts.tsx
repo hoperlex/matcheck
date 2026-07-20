@@ -38,7 +38,10 @@ export default function AdminMailAccountsPage() {
   });
   const sync = useMutation({
     mutationFn: (id: string) =>
-      api.post<{ imported: number; failed: number }>(`/admin/mail-accounts/${id}/sync`),
+      // Sync почты обрабатывает до 50 сообщений последовательно с LLM — длиннее дефолта.
+      api.post<{ imported: number; failed: number }>(`/admin/mail-accounts/${id}/sync`, undefined, {
+        timeoutMs: 610_000,
+      }),
     onSuccess: (r) => message.success(`Импорт: ${r.imported}, ошибок: ${r.failed}`),
     onError: (err: Error) => message.error(err.message),
   });
