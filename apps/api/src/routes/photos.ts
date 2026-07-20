@@ -26,6 +26,7 @@ import {
 import { deleteObject, getObject, headObject, presign } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { recognizePhotoItems } from '../domain/photos/recognize.js';
+import { buildExistingPhotoPresign } from '../domain/photos/presign-existing.js';
 import { publishEvent } from './events.js';
 import {
   resolveContractorOpIds,
@@ -182,21 +183,9 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           )
           .limit(1);
         if (existing) {
-          const uploadUrl = await presign({
-            method: 'PUT',
-            key: existing.s3Key,
-            expiresIn: URL_TTL,
-            contentType: body.contentType,
-          }).catch(() => '');
-          return {
-            photoId: existing.id,
-            s3Key: existing.s3Key,
-            thumbS3Key: existing.thumbS3Key,
-            uploadUrl: uploadUrl || '',
-            thumbUploadUrl: null,
-            expiresIn: URL_TTL,
-            alreadyExists: true,
-          };
+          return buildExistingPhotoPresign(existing, URL_TTL, (s3Key, thumbS3Key) =>
+            presignBoth(app, s3Key, thumbS3Key, body.contentType),
+          );
         }
 
         // Подтягиваем site.code и контрагента для иерархии в S3:
@@ -304,21 +293,9 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         )
         .limit(1);
       if (existing) {
-        const uploadUrl = await presign({
-          method: 'PUT',
-          key: existing.s3Key,
-          expiresIn: URL_TTL,
-          contentType: body.contentType,
-        }).catch(() => '');
-        return {
-          photoId: existing.id,
-          s3Key: existing.s3Key,
-          thumbS3Key: existing.thumbS3Key,
-          uploadUrl: uploadUrl || '',
-          thumbUploadUrl: null,
-          expiresIn: URL_TTL,
-          alreadyExists: true,
-        };
+        return buildExistingPhotoPresign(existing, URL_TTL, (s3Key, thumbS3Key) =>
+          presignBoth(app, s3Key, thumbS3Key, body.contentType),
+        );
       }
 
       // Иерархия S3 для отгрузки: контрагент определяется по kind.
