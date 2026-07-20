@@ -68,6 +68,16 @@ export type PhotoRecord = {
   thumbS3Key?: string;
   takenAt: number;
   uploaded: boolean;
+  // Управление фоновой отправкой (A2). Отсутствие полей = поведение 'pending'
+  // (совместимо со старыми записями — миграция версии IDB не нужна, индексов
+  // по этим полям нет).
+  // 'blocked' — терминальная ошибка (приёмка удалена/forbidden), авто-повтор
+  // остановлен, но blob сохранён.
+  uploadState?: 'pending' | 'blocked';
+  uploadAttempts?: number;
+  // Барьер backoff: retryPendingUploads пропускает запись, пока now < nextRetryAt.
+  nextRetryAt?: number;
+  lastUploadError?: { status?: number; code: string; at: number };
 };
 
 export type ReferenceRecord =
