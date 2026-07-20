@@ -20,7 +20,7 @@ import type {
   ShipmentPhoto,
 } from '@matcheck/contracts';
 import { api, apiDownload, ApiError } from '../../services/api';
-import { enqueueThumbLoad } from '../../lib/thumbQueue';
+import { enqueueThumbLoad, enqueueFullLoad } from '../../lib/thumbQueue';
 import { db, type OperationKind } from '../../lib/db';
 import { useAuthStore } from '../../stores/auth';
 import { PhotoDocumentPreview } from './PhotoDocumentPreview';
@@ -136,8 +136,7 @@ export function PhotoGallery({
     Error,
     { id: string; kind: 'document' | 'cargo' | 'vehicle' | 'other' }
   >({
-    mutationFn: ({ id, kind }) =>
-      api.patch<PhotoPatchResponse>(`/photos/${id}`, { kind }),
+    mutationFn: ({ id, kind }) => api.patch<PhotoPatchResponse>(`/photos/${id}`, { kind }),
     onSuccess: async () => {
       message.success('Тип фото изменён');
       await Promise.all([
@@ -370,10 +369,13 @@ function PhotoThumb({
   });
   const fullQuery = useQuery({
     queryKey: ['photo-blob', photo.id, 'full'],
-    queryFn: async () => {
-      const { blob } = await apiDownload(`/photos/${photo.id}/content`);
-      return blob;
-    },
+    // enqueueFullLoad — очередь с лимитом 3: previewOpen включает fullQuery у
+    // ВСЕХ фото группы разом, без лимита это шквал тяжёлых оригиналов к API/S3.
+    queryFn: () =>
+      enqueueFullLoad(async () => {
+        const { blob } = await apiDownload(`/photos/${photo.id}/content`);
+        return blob;
+      }),
     // Оригинал тяжёлый (1-5 МБ) — грузим только при реальном открытии
     // preview, не превентивно. До этого пользователь видит миниатюру,
     // ничего лишнего не качается. enabled триггерится previewOpen из
@@ -418,69 +420,68 @@ function PhotoThumb({
   // в useQuery уже отработал, дальше пользователь сам решает.
   // Видна когда: нужен серверный thumb (нет localThumb / не uploading) +
   // запрос упал в isError. Локальные blob этой ветки не достигают.
-  const showThumbError =
-    needsRemote && !localThumb && thumbQuery.isError;
+  const showThumbError = needsRemote && !localThumb && thumbQuery.isError;
 
   if (isUploading) {
     return (
       <div style={{ width: THUMB_SIZE }}>
-      <div
-        style={{
-          position: 'relative',
-          width: THUMB_SIZE,
-          height: THUMB_SIZE,
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 6,
-          background: '#fafafa',
-          border: '1px dashed #d9d9d9',
-          borderRadius: 6,
-        }}
-      >
-        <Spin size="small" />
-        <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-          Загружается…
-        </Typography.Text>
-        {/* Кнопка удаления для orphan-фото: серверная запись есть, локального
+        <div
+          style={{
+            position: 'relative',
+            width: THUMB_SIZE,
+            height: THUMB_SIZE,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            background: '#fafafa',
+            border: '1px dashed #d9d9d9',
+            borderRadius: 6,
+          }}
+        >
+          <Spin size="small" />
+          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+            Загружается…
+          </Typography.Text>
+          {/* Кнопка удаления для orphan-фото: серверная запись есть, локального
             blob нет, реальный PUT в S3 не подтвердился (timeout, дабл-клик,
             обрыв сети). Без этой кнопки пользователь должен ждать час, пока
             фоновая job photoOrphanCleanup сама удалит. */}
-        {canDelete && (
-          <Popconfirm
-            title="Удалить незавершённую загрузку?"
-            description="Фото не было загружено в S3. Запись будет удалена."
-            okText="Да, удалить"
-            cancelText="Нет"
-            okButtonProps={{ danger: true }}
-            onConfirm={onDelete}
+          {canDelete && (
+            <Popconfirm
+              title="Удалить незавершённую загрузку?"
+              description="Фото не было загружено в S3. Запись будет удалена."
+              okText="Да, удалить"
+              cancelText="Нет"
+              okButtonProps={{ danger: true }}
+              onConfirm={onDelete}
+            >
+              <Button
+                danger
+                size="small"
+                shape="circle"
+                icon={<DeleteOutlined />}
+                loading={deleting}
+                style={{
+                  position: 'absolute',
+                  top: 4,
+                  right: 4,
+                  background: 'rgba(255, 255, 255, 0.9)',
+                  zIndex: 1,
+                }}
+              />
+            </Popconfirm>
+          )}
+        </div>
+        {label && (
+          <Typography.Text
+            type="secondary"
+            style={{ fontSize: 11, display: 'block', textAlign: 'center', marginTop: 4 }}
           >
-            <Button
-              danger
-              size="small"
-              shape="circle"
-              icon={<DeleteOutlined />}
-              loading={deleting}
-              style={{
-                position: 'absolute',
-                top: 4,
-                right: 4,
-                background: 'rgba(255, 255, 255, 0.9)',
-                zIndex: 1,
-              }}
-            />
-          </Popconfirm>
+            {label}
+          </Typography.Text>
         )}
-      </div>
-      {label && (
-        <Typography.Text
-          type="secondary"
-          style={{ fontSize: 11, display: 'block', textAlign: 'center', marginTop: 4 }}
-        >
-          {label}
-        </Typography.Text>
-      )}
       </div>
     );
   }
@@ -550,90 +551,90 @@ function PhotoThumb({
 
   return (
     <div style={{ width: THUMB_SIZE }}>
-    <div style={{ position: 'relative', width: THUMB_SIZE, height: THUMB_SIZE }}>
-      <Image
-        src={thumbSrc}
-        // У документов перехватываем клик и открываем свою split-view
-        // модалку (фото + распознанные позиции справа), стандартный
-        // antd preview отключаем. У cargo/vehicle всё как раньше.
-        preview={
-          isDocument
-            ? false
-            : {
-                src: fullSrc,
-                // visible/onVisibleChange здесь НЕ задаём:
-                // PreviewGroup сам контролирует видимость overlay'я и
-                // дёргает свой собственный onVisibleChange (см.
-                // PhotoGallery → Image.PreviewGroup preview prop).
-                // Локальный controlled-state в PhotoThumb приводил к
-                // тому, что enabled у fullQuery вспыхивал только на том
-                // фото, которое было кликнуто первым, а у соседних
-                // (доступных через стрелки) оставался false → preview
-                // показывал растянутый thumb.
-              }
-        }
-        width={THUMB_SIZE}
-        height={THUMB_SIZE}
-        style={{
-          objectFit: 'cover',
-          borderRadius: 6,
-          cursor: isDocument ? 'pointer' : undefined,
-        }}
-        onClick={isDocument ? () => onDocumentClick(fullSrc) : undefined}
-        placeholder={
-          <div
-            style={{
-              width: THUMB_SIZE,
-              height: THUMB_SIZE,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: '#fafafa',
-              borderRadius: 6,
-            }}
+      <div style={{ position: 'relative', width: THUMB_SIZE, height: THUMB_SIZE }}>
+        <Image
+          src={thumbSrc}
+          // У документов перехватываем клик и открываем свою split-view
+          // модалку (фото + распознанные позиции справа), стандартный
+          // antd preview отключаем. У cargo/vehicle всё как раньше.
+          preview={
+            isDocument
+              ? false
+              : {
+                  src: fullSrc,
+                  // visible/onVisibleChange здесь НЕ задаём:
+                  // PreviewGroup сам контролирует видимость overlay'я и
+                  // дёргает свой собственный onVisibleChange (см.
+                  // PhotoGallery → Image.PreviewGroup preview prop).
+                  // Локальный controlled-state в PhotoThumb приводил к
+                  // тому, что enabled у fullQuery вспыхивал только на том
+                  // фото, которое было кликнуто первым, а у соседних
+                  // (доступных через стрелки) оставался false → preview
+                  // показывал растянутый thumb.
+                }
+          }
+          width={THUMB_SIZE}
+          height={THUMB_SIZE}
+          style={{
+            objectFit: 'cover',
+            borderRadius: 6,
+            cursor: isDocument ? 'pointer' : undefined,
+          }}
+          onClick={isDocument ? () => onDocumentClick(fullSrc) : undefined}
+          placeholder={
+            <div
+              style={{
+                width: THUMB_SIZE,
+                height: THUMB_SIZE,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: '#fafafa',
+                borderRadius: 6,
+              }}
+            >
+              <Spin size="small" />
+            </div>
+          }
+        />
+        {canDelete && (
+          <Popconfirm
+            title="Удалить фото?"
+            description="Файл будет удалён из хранилища без возможности восстановления."
+            okText="Да, удалить"
+            cancelText="Нет"
+            okButtonProps={{ danger: true }}
+            onConfirm={onDelete}
           >
-            <Spin size="small" />
-          </div>
-        }
+            <Button
+              danger
+              size="small"
+              shape="circle"
+              icon={<DeleteOutlined />}
+              loading={deleting}
+              style={{
+                position: 'absolute',
+                top: 4,
+                right: 4,
+                background: 'rgba(255, 255, 255, 0.9)',
+                zIndex: 1,
+              }}
+            />
+          </Popconfirm>
+        )}
+      </div>
+      <PhotoLabelRow
+        label={label}
+        canEditKind={canEditKind}
+        currentKind={photo.kind}
+        onChangeKind={onChangeKind}
+        changing={changingKind}
+        // PATCH /photos/:id обращается по server-id. Свежезагруженное
+        // фото до момента confirm живёт под локальным IDB-uuid, и сервер
+        // про него ничего не знает → PATCH вернёт 404. Пока uploadedAt
+        // не проставлен, не даём кликать.
+        pendingUpload={photo.uploadedAt === null}
       />
-      {canDelete && (
-        <Popconfirm
-          title="Удалить фото?"
-          description="Файл будет удалён из хранилища без возможности восстановления."
-          okText="Да, удалить"
-          cancelText="Нет"
-          okButtonProps={{ danger: true }}
-          onConfirm={onDelete}
-        >
-          <Button
-            danger
-            size="small"
-            shape="circle"
-            icon={<DeleteOutlined />}
-            loading={deleting}
-            style={{
-              position: 'absolute',
-              top: 4,
-              right: 4,
-              background: 'rgba(255, 255, 255, 0.9)',
-              zIndex: 1,
-            }}
-          />
-        </Popconfirm>
-      )}
-    </div>
-    <PhotoLabelRow
-      label={label}
-      canEditKind={canEditKind}
-      currentKind={photo.kind}
-      onChangeKind={onChangeKind}
-      changing={changingKind}
-      // PATCH /photos/:id обращается по server-id. Свежезагруженное
-      // фото до момента confirm живёт под локальным IDB-uuid, и сервер
-      // про него ничего не знает → PATCH вернёт 404. Пока uploadedAt
-      // не проставлен, не даём кликать.
-      pendingUpload={photo.uploadedAt === null}
-    />
     </div>
   );
 }
@@ -726,11 +727,7 @@ function PhotoLabelRow({
           }
         >
           <Tooltip
-            title={
-              pendingUpload
-                ? 'Дождитесь окончания загрузки фото'
-                : 'Изменить тип фото'
-            }
+            title={pendingUpload ? 'Дождитесь окончания загрузки фото' : 'Изменить тип фото'}
           >
             <Button
               type="text"

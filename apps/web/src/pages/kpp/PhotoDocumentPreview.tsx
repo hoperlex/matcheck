@@ -1,9 +1,10 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, Button, Modal, Spin, Table, Tag, Typography, message } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PhotoRecognition, PhotoRecognitionItem } from '@matcheck/contracts';
-import { api, ApiError } from '../../services/api';
+import { api, apiDownload, ApiError } from '../../services/api';
+import { enqueueFullLoad } from '../../lib/thumbQueue';
 
 /**
  * Split-view модалка просмотра фото-документа: слева увеличенное фото,
@@ -30,6 +31,38 @@ export function PhotoDocumentPreview({
 }): JSX.Element {
   const qc = useQueryClient();
 
+  // Оригинал документа. imageSrc, переданный из PhotoGallery, — это миниатюра
+  // (320px): фото-документ открывается по клику при previewOpen=false, поэтому
+  // fullQuery галереи не стартовал, и текст скана на миниатюре нечитаем. Грузим
+  // оригинал сами по photoId. Тот же query-ключ, что у PhotoThumb.fullQuery →
+  // react-query переиспользует кэш в обе стороны; та же очередь-лимитер.
+  const fullBlob = useQuery({
+    queryKey: ['photo-blob', photoId, 'full'],
+    queryFn: () =>
+      enqueueFullLoad(async () => {
+        const { blob } = await apiDownload(`/photos/${photoId}/content`);
+        return blob;
+      }),
+    enabled: open,
+    staleTime: Infinity,
+    gcTime: 30 * 60 * 1000,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(500 * 2 ** attempt, 4000),
+    refetchOnWindowFocus: false,
+  });
+  const [fullUrl, setFullUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!fullBlob.data) {
+      setFullUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(fullBlob.data);
+    setFullUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [fullBlob.data]);
+  // Оригинал когда загружен, иначе переданная миниатюра как быстрый плейсхолдер.
+  const displaySrc = fullUrl ?? imageSrc;
+
   const recognition = useQuery<PhotoRecognition | null>({
     queryKey: ['photo-recognition', photoId],
     queryFn: async () => {
@@ -47,10 +80,7 @@ export function PhotoDocumentPreview({
 
   const recognize = useMutation<PhotoRecognition, Error, { force?: boolean }>({
     mutationFn: ({ force }) =>
-      api.post<PhotoRecognition>(
-        `/photos/${photoId}/recognize${force ? '?force=true' : ''}`,
-        {},
-      ),
+      api.post<PhotoRecognition>(`/photos/${photoId}/recognize${force ? '?force=true' : ''}`, {}),
     onSuccess: (data) => {
       qc.setQueryData<PhotoRecognition>(['photo-recognition', photoId], data);
     },
@@ -97,17 +127,36 @@ export function PhotoDocumentPreview({
           overflow: 'auto',
         }}
       >
-        {imageSrc ? (
-          <img
-            src={imageSrc}
-            alt="Документ"
-            style={{
-              maxWidth: '100%',
-              maxHeight: '100%',
-              objectFit: 'contain',
-              userSelect: 'none',
-            }}
-          />
+        {displaySrc ? (
+          <div style={{ position: 'relative', maxWidth: '100%', maxHeight: '100%' }}>
+            <img
+              src={displaySrc}
+              alt="Документ"
+              style={{
+                maxWidth: '100%',
+                maxHeight: '100%',
+                objectFit: 'contain',
+                userSelect: 'none',
+                // Пока грузится оригинал — показываем миниатюру приглушённой,
+                // чтобы было видно, что идёт загрузка более чёткой версии.
+                opacity: fullUrl ? 1 : 0.5,
+                transition: 'opacity 0.2s',
+              }}
+            />
+            {!fullUrl && (
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Spin tip="Загрузка оригинала…" />
+              </div>
+            )}
+          </div>
         ) : (
           <Spin />
         )}
@@ -149,7 +198,15 @@ function RecognitionPanel({
 }): JSX.Element {
   if (isLoading) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, paddingTop: 48 }}>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 8,
+          paddingTop: 48,
+        }}
+      >
         <Spin />
         <Typography.Text type="secondary">Распознаём материалы…</Typography.Text>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -174,9 +231,7 @@ function RecognitionPanel({
     );
   }
   if (!data) {
-    return (
-      <Typography.Text type="secondary">Нет данных.</Typography.Text>
-    );
+    return <Typography.Text type="secondary">Нет данных.</Typography.Text>;
   }
   if (data.status === 'failed') {
     return (
@@ -196,7 +251,14 @@ function RecognitionPanel({
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'baseline',
+          marginBottom: 8,
+        }}
+      >
         <Typography.Title level={5} style={{ margin: 0 }}>
           Материалы {data.items.length > 0 && `(${data.items.length})`}
         </Typography.Title>
@@ -209,14 +271,16 @@ function RecognitionPanel({
       <div style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {data.docForm && (
           <Tag color="geekblue">
-            {data.docForm === 'tn_2116' ? 'ТТН (1-Т)' : data.docForm === 'os2' ? 'ОС-2' : data.docForm}
+            {data.docForm === 'tn_2116'
+              ? 'ТТН (1-Т)'
+              : data.docForm === 'os2'
+                ? 'ОС-2'
+                : data.docForm}
           </Tag>
         )}
         {data.docNumber && <Tag>№ {data.docNumber}</Tag>}
         {data.docDate && <Tag>{data.docDate}</Tag>}
-        {data.totalSum !== null && (
-          <Tag color="green">Итого: {formatMoney(data.totalSum)}</Tag>
-        )}
+        {data.totalSum !== null && <Tag color="green">Итого: {formatMoney(data.totalSum)}</Tag>}
       </div>
 
       {data.items.length === 0 ? (
