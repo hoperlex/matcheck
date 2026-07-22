@@ -453,7 +453,8 @@ export default function OperationsPage() {
         footer={null}
         destroyOnClose
         maskClosable={false}
-        keyboard={false}
+        // ESC закрывает модалку через тот же onCancel, что и крестик.
+        keyboard
         // Отключаем zoom-leave + mask-fade-leave анимации. Причина:
         // высота body 95vh, и в середине zoom-out (~100мс) центр уже
         // схлопнулся, а верх ещё виден — пользователь видит белую
@@ -507,7 +508,8 @@ export default function OperationsPage() {
         footer={null}
         destroyOnClose
         maskClosable={false}
-        keyboard={false}
+        // ESC закрывает модалку через тот же onCancel, что и крестик.
+        keyboard
         // См. комментарий у Modal приёмки выше — отключаем zoom-leave
         // и mask-fade-leave, чтобы убрать промежуточный кадр с белой
         // полосой title+крестика при закрытии full-screen модалки.
