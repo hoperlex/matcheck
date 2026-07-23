@@ -1,6 +1,7 @@
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { loadEnv } from '../lib/env.js';
+import { recordQuery } from '../lib/request-metrics.js';
 import * as schema from './schema.js';
 
 const env = loadEnv();
@@ -17,6 +18,10 @@ export const sql = postgres(connectionString, {
   max: env.DATABASE_POOL_MAX,
   idle_timeout: 30,
   prepare: false,
+  // Волна 0A: считаем SQL на HTTP-запрос (baseline для N+1). `debug` вызывается
+  // postgres-js на каждый запрос; ставим ТОЛЬКО при включённом флаге — иначе
+  // хук не задаётся и оверхед нулевой.
+  ...(env.REQUEST_METRICS_ENABLED ? { debug: () => recordQuery() } : {}),
 });
 
 export const db = drizzle(sql, { schema, casing: 'snake_case' });

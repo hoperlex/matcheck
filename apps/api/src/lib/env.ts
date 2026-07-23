@@ -6,6 +6,11 @@ const envSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 
+  // Волна 0A: инструментовка запросов (число SQL/длительность/размер ответа на
+  // HTTP-вызов) для baseline перед оптимизациями. Выключено по умолчанию —
+  // нулевой оверхед; включать временно на staging/проде для замера пика.
+  REQUEST_METRICS_ENABLED: z.coerce.boolean().default(false),
+
   // DB / Redis
   DATABASE_URL: z.string().url().optional(),
   DATABASE_POOL_MAX: z.coerce.number().int().positive().default(30),

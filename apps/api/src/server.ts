@@ -14,6 +14,7 @@ import redisPlugin from './plugins/redis.js';
 import queuePlugin from './plugins/queue.js';
 import securityPlugin from './plugins/security.js';
 import authPlugin from './plugins/auth.js';
+import metricsPlugin from './plugins/metrics.js';
 import { healthRoutes } from './routes/health.js';
 import { authRoutes } from './routes/auth.js';
 import { counterpartyRoutes } from './routes/counterparties.js';
@@ -61,6 +62,9 @@ export async function buildServer() {
 
   await app.register(redisPlugin);
   await app.register(dbPlugin);
+  // Волна 0A: метрики per-request. Регистрируем до authPlugin, чтобы ALS-контекст
+  // (счётчик SQL) был активен уже на attachUser. No-op при выключенном флаге.
+  await app.register(metricsPlugin);
   await app.register(queuePlugin);
   await app.register(securityPlugin);
   await app.register(multipart, {

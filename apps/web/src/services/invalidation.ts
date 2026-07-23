@@ -14,6 +14,39 @@ const CHANNEL_NAME = 'matcheck-invalidation';
 // дёрнет refetch с актуальным сервером, просто реже.
 const DEBOUNCE_MS = 500;
 
+// Волна 0B: узкая инвалидация reports по сущности. Отчёты в
+// apps/api/src/routes/reports.ts читают разные таблицы:
+//  - /reports/intake   — только deliveries;
+//  - /reports/shipment — только shipments;
+//  - operations-counters / inspector-stats / stats-summary — обе.
+// Поэтому событие приёмки инвалидирует всё, КРОМЕ журнала отгрузок, и
+// наоборот. Материалы/Статистика/счётчики остаются свежими (их ключи,
+// зависящие от изменённой сущности, инвалидируются). Префикс из 2
+// элементов накрывает реальные ключи с 3-м элементом (userId/фильтры).
+const DELIVERY_REPORTS: string[][] = [
+  ['reports', 'operations-counters'],
+  ['reports', 'intake'],
+  ['reports', 'inspector-stats'],
+  ['reports', 'stats-summary'],
+];
+const SHIPMENT_REPORTS: string[][] = [
+  ['reports', 'operations-counters'],
+  ['reports', 'shipment'],
+  ['reports', 'inspector-stats'],
+  ['reports', 'stats-summary'],
+];
+
+// Ключи для fallback-рефетча, когда SSE молча оборвался (см. ниже).
+const FALLBACK_KEYS: string[][] = [
+  ['deliveries'],
+  ['shipments'],
+  ['source-documents'],
+  ['reports'],
+];
+
+const RECONNECT_MIN_MS = 5000;
+const RECONNECT_MAX_MS = 30000;
+
 let bc: BroadcastChannel | null = null;
 let sse: EventSource | null = null;
 
@@ -36,6 +69,14 @@ export function setupInvalidation(qc: QueryClient): () => void {
   // → 1 invalidate ['deliveries']).
   const pending = new Set<string>();
   let timer: number | null = null;
+
+  // Здоровье SSE + backoff переподключения. sseConnected гейтит
+  // fallback-рефетч (при живом SSE лишняя периодика не нужна). Таймер
+  // reconnect хранится, чтобы отменить его при teardown/logout — иначе
+  // отложенный connectSse оживил бы поток после выхода.
+  let sseConnected = false;
+  let reconnectTimer: number | null = null;
+  let reconnectDelay = RECONNECT_MIN_MS;
 
   function flush() {
     timer = null;
@@ -60,6 +101,10 @@ export function setupInvalidation(qc: QueryClient): () => void {
   function connectSse() {
     if (sse) sse.close();
     sse = new EventSource('/api/v1/events', { withCredentials: true });
+    sse.onopen = () => {
+      sseConnected = true;
+      reconnectDelay = RECONNECT_MIN_MS;
+    };
     sse.addEventListener('delivery_updated', (evt) => {
       handle('delivery_updated', evt);
     });
@@ -76,9 +121,19 @@ export function setupInvalidation(qc: QueryClient): () => void {
       handle('source_document_updated', evt);
     });
     sse.onerror = () => {
+      sseConnected = false;
       sse?.close();
       sse = null;
-      setTimeout(connectSse, 5000);
+      // Экспоненциальный backoff вместо фиксированных 5с — не долбим
+      // /events при длительном обрыве (в т.ч. 403 у ролей без доступа).
+      if (reconnectTimer === null) {
+        const delay = reconnectDelay;
+        reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+        reconnectTimer = window.setTimeout(() => {
+          reconnectTimer = null;
+          connectSse();
+        }, delay);
+      }
     };
   }
 
@@ -88,14 +143,11 @@ export function setupInvalidation(qc: QueryClient): () => void {
       // source-documents: вкладка «Ожидаемые» зависит от привязок в
       // delivery_sources — после создания/удаления приёмки список
       // ожидаемых УПД должен перечитаться.
-      // reports: раздел «Материалы» (Stock/Intake/Shipment) агрегируется
-      // из delivery_items — без инвалидации показывал бы старые данные
-      // до F5 (особенно «Сумма НДС» сразу после Завершить 2 Этап в мобиле).
-      keys = [['deliveries'], ['source-documents'], ['sync'], ['reports']];
+      keys = [['deliveries'], ['source-documents'], ...DELIVERY_REPORTS];
     } else if (type === 'shipment_updated' || type === 'shipment_deleted') {
-      keys = [['shipments'], ['source-documents'], ['sync'], ['reports']];
+      keys = [['shipments'], ['source-documents'], ...SHIPMENT_REPORTS];
     } else if (type === 'source_document_updated') {
-      keys = [['source-documents'], ['sync']];
+      keys = [['source-documents']];
     }
     schedule(keys);
     void evt;
@@ -103,19 +155,32 @@ export function setupInvalidation(qc: QueryClient): () => void {
 
   connectSse();
 
-  // Fallback timer: invalidate every 5 minutes in case SSE silently breaks
+  // Fallback: если SSE молча оборвался (в проде поток «молчит» из-за
+  // прокси/буферизации), разделы должны обновляться без F5. Раньше здесь
+  // дёргался no-op ['sync'] — при мёртвом SSE ничего не рефетчилось. Теперь
+  // рефетчим реальные ключи, НО только когда SSE не подключён — при живом
+  // потоке лишней периодической нагрузки нет.
   const fallback = window.setInterval(
     () => {
-      qc.invalidateQueries({ queryKey: ['sync'] }).catch(() => undefined);
+      if (sseConnected) return;
+      for (const key of FALLBACK_KEYS) {
+        qc.invalidateQueries({ queryKey: key }).catch(() => undefined);
+      }
     },
     5 * 60 * 1000,
   );
 
   return () => {
     sse?.close();
+    sse = null;
+    sseConnected = false;
     bc?.close();
     clearInterval(fallback);
     if (timer !== null) window.clearTimeout(timer);
+    if (reconnectTimer !== null) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
   };
 }
 
