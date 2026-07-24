@@ -31,7 +31,6 @@ import {
   suppliers,
   users,
 } from '../db/schema.js';
-import { deleteObject } from '../domain/storage/s3.signer.js';
 import {
   getStatusCodeById,
   resolveStatusId as resolveStatusIdShared,
@@ -1255,37 +1254,54 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
               continue;
             }
           }
-          const photos = await app.db
-            .select({
-              s3Key: shipmentPhotos.s3Key,
-              thumbS3Key: shipmentPhotos.thumbS3Key,
-            })
-            .from(shipmentPhotos)
-            .where(eq(shipmentPhotos.shipmentId, id));
-          for (const p of photos) {
-            try {
-              await deleteObject(p.s3Key);
-              if (p.thumbS3Key) await deleteObject(p.thumbS3Key);
-            } catch (s3Err) {
-              req.log.warn({ err: s3Err, s3Key: p.s3Key }, 'bulk-hard-delete: s3 delete failed (shipment)');
+          // Удаление одной транзакцией + дочистка S3 через outbox (Волна 1D):
+          // FOR UPDATE блокирует конкурентную загрузку фото, S3-ключи собираются
+          // под блокировкой и пишутся в s3_cleanup_outbox, touch — в той же
+          // транзакции. Синхронного S3 нет.
+          const done = await app.db.transaction(async (tx) => {
+            const locked = await tx
+              .select({ id: shipments.id })
+              .from(shipments)
+              .where(eq(shipments.id, id))
+              .for('update')
+              .limit(1);
+            if (locked.length === 0) return false; // удалена конкурентно
+
+            const photos = await tx
+              .select({ s3Key: shipmentPhotos.s3Key, thumbS3Key: shipmentPhotos.thumbS3Key })
+              .from(shipmentPhotos)
+              .where(eq(shipmentPhotos.shipmentId, id));
+            const keySet = new Set<string>();
+            for (const p of photos) {
+              if (p.s3Key) keySet.add(p.s3Key);
+              if (p.thumbS3Key) keySet.add(p.thumbS3Key);
             }
-          }
-          const attachedSdIds = (
-            await app.db
-              .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
-              .from(shipmentSources)
-              .where(eq(shipmentSources.shipmentId, id))
-          ).map((r: { sourceDocumentId: string }) => r.sourceDocumentId);
-          await app.db.transaction(async (tx) => {
+            const attachedSdIds = (
+              await tx
+                .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
+                .from(shipmentSources)
+                .where(eq(shipmentSources.shipmentId, id))
+            ).map((r: { sourceDocumentId: string }) => r.sourceDocumentId);
+
             await tx.insert(entityDeletions).values({
               entityType: 'shipment',
               entityId: id,
               siteId: existing.siteId,
               deletedByUserId: req.user?.id ?? null,
             });
+            if (keySet.size > 0) {
+              await tx.insert(s3CleanupOutbox).values(
+                Array.from(keySet, (s3Key) => ({ s3Key, entityType: 'shipment', entityId: id })),
+              );
+            }
+            await touchSourceDocuments({ db: tx }, attachedSdIds);
             await tx.delete(shipments).where(eq(shipments.id, id));
+            return true;
           });
-          await touchSourceDocuments(app, attachedSdIds);
+          if (!done) {
+            skipped.push({ id, reason: 'not_found' });
+            continue;
+          }
           publishEvent(app, {
             type: 'shipment_deleted',
             entityId: id,
