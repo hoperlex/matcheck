@@ -126,6 +126,13 @@ async function execRows(app: any, sqlText: string): Promise<Record<string, unkno
   return (res as { rows?: Record<string, unknown>[] }).rows ?? (res as Record<string, unknown>[]);
 }
 
+type OperationsCounters = { completedToday: number; inProgressToday: number; overdue: number };
+
+// Волна 2 — in-memory single-flight для operations-counters. При промахе кэша
+// несколько одновременных запросов с одним ключом ждут ОДИН запрос к БД, а не
+// бьют все разом (thundering herd на истёкший ключ). Ключ = role/site + МСК-дата.
+const countersInflight = new Map<string, Promise<OperationsCounters>>();
+
 export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
 
@@ -778,78 +785,88 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         ? `AND s.site_id = '${inspectorSiteId}'::uuid`
         : '';
 
-      // del/sh_progress (filled/shipped, без МОЛ) делим по дате arrived_at /
-      // shipped_at: today = МСК-день совпадает с сегодняшним; overdue =
-      // строго раньше. NULL-дата уходит в overdue (на всякий — давно
-      // забытая запись без даты прибытия).
-      const rows = await execRows(
-        app,
-        `
-        WITH
+      // Волна 2 — Redis-кэш (необязательный, TTL ~20с + jitter) + single-flight.
+      // Ключ включает МСК-дату: на смене суток по Москве ключ меняется →
+      // «сегодня»-счётчики сбрасываются даже если TTL ещё не истёк. Любая ошибка
+      // Redis → прозрачный fallback на прямой запрос к БД (endpoint не падает).
+      const moscowDate = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Europe/Moscow',
+      }).format(new Date());
+      const cacheKey = `opcounters:${inspectorSiteId ?? 'all'}:${moscowDate}`;
+
+      // Границы «сегодня по Москве» вычисляет Postgres (bounds CTE) → SARGABLE
+      // сравнение col >= today_start AND col < today_start+1day (индексируемо),
+      // вместо DATE(col AT TZ ...) над каждой строкой. Числа идентичны прежним
+      // (проверено на проде: del_done 83=83, overdue 1=1). NULL-дата → overdue.
+      const runCounters = async (): Promise<OperationsCounters> => {
+        const rows = await execRows(
+          app,
+          `
+        WITH bounds AS (
+          SELECT (date_trunc('day', now() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow') AS today_start
+        ),
           del_done AS (
             SELECT COUNT(*)::int AS n
             FROM deliveries d
             JOIN statuses st ON st.id = d.status_id
+            CROSS JOIN bounds b
             WHERE st.entity_type = 'delivery' AND st.code = 'confirmed_mol'
               AND d.pending_deletion_at IS NULL
-              AND d.confirmed_by_mol_at IS NOT NULL
-              AND DATE(d.confirmed_by_mol_at AT TIME ZONE 'Europe/Moscow')
-                = DATE(NOW() AT TIME ZONE 'Europe/Moscow')
+              AND d.confirmed_by_mol_at >= b.today_start
+              AND d.confirmed_by_mol_at < b.today_start + interval '1 day'
               ${siteFilterD}
           ),
           sh_done AS (
             SELECT COUNT(*)::int AS n
             FROM shipments s
             JOIN statuses st ON st.id = s.status_id
+            CROSS JOIN bounds b
             WHERE st.entity_type = 'shipment' AND st.code = 'confirmed_mol'
               AND s.pending_deletion_at IS NULL
-              AND s.confirmed_by_mol_at IS NOT NULL
-              AND DATE(s.confirmed_by_mol_at AT TIME ZONE 'Europe/Moscow')
-                = DATE(NOW() AT TIME ZONE 'Europe/Moscow')
+              AND s.confirmed_by_mol_at >= b.today_start
+              AND s.confirmed_by_mol_at < b.today_start + interval '1 day'
               ${siteFilterS}
           ),
           del_progress_today AS (
             SELECT COUNT(*)::int AS n
             FROM deliveries d
             JOIN statuses st ON st.id = d.status_id
+            CROSS JOIN bounds b
             WHERE st.entity_type = 'delivery' AND st.code = 'filled'
               AND d.pending_deletion_at IS NULL
-              AND d.arrived_at IS NOT NULL
-              AND DATE(d.arrived_at AT TIME ZONE 'Europe/Moscow')
-                = DATE(NOW() AT TIME ZONE 'Europe/Moscow')
+              AND d.arrived_at >= b.today_start
+              AND d.arrived_at < b.today_start + interval '1 day'
               ${siteFilterD}
           ),
           sh_progress_today AS (
             SELECT COUNT(*)::int AS n
             FROM shipments s
             JOIN statuses st ON st.id = s.status_id
+            CROSS JOIN bounds b
             WHERE st.entity_type = 'shipment' AND st.code = 'shipped'
               AND s.pending_deletion_at IS NULL
-              AND s.shipped_at IS NOT NULL
-              AND DATE(s.shipped_at AT TIME ZONE 'Europe/Moscow')
-                = DATE(NOW() AT TIME ZONE 'Europe/Moscow')
+              AND s.shipped_at >= b.today_start
+              AND s.shipped_at < b.today_start + interval '1 day'
               ${siteFilterS}
           ),
           del_overdue AS (
             SELECT COUNT(*)::int AS n
             FROM deliveries d
             JOIN statuses st ON st.id = d.status_id
+            CROSS JOIN bounds b
             WHERE st.entity_type = 'delivery' AND st.code = 'filled'
               AND d.pending_deletion_at IS NULL
-              AND (d.arrived_at IS NULL OR
-                   DATE(d.arrived_at AT TIME ZONE 'Europe/Moscow')
-                     < DATE(NOW() AT TIME ZONE 'Europe/Moscow'))
+              AND (d.arrived_at IS NULL OR d.arrived_at < b.today_start)
               ${siteFilterD}
           ),
           sh_overdue AS (
             SELECT COUNT(*)::int AS n
             FROM shipments s
             JOIN statuses st ON st.id = s.status_id
+            CROSS JOIN bounds b
             WHERE st.entity_type = 'shipment' AND st.code = 'shipped'
               AND s.pending_deletion_at IS NULL
-              AND (s.shipped_at IS NULL OR
-                   DATE(s.shipped_at AT TIME ZONE 'Europe/Moscow')
-                     < DATE(NOW() AT TIME ZONE 'Europe/Moscow'))
+              AND (s.shipped_at IS NULL OR s.shipped_at < b.today_start)
               ${siteFilterS}
           )
         SELECT
@@ -857,13 +874,39 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           ((SELECT n FROM del_progress_today) + (SELECT n FROM sh_progress_today))::int   AS "inProgressToday",
           ((SELECT n FROM del_overdue) + (SELECT n FROM sh_overdue))::int                 AS "overdue"
         `,
-      );
-      const r = rows[0] ?? {};
-      return {
-        completedToday: Number(r.completedToday ?? 0),
-        inProgressToday: Number(r.inProgressToday ?? 0),
-        overdue: Number(r.overdue ?? 0),
+        );
+        const r = rows[0] ?? {};
+        return {
+          completedToday: Number(r.completedToday ?? 0),
+          inProgressToday: Number(r.inProgressToday ?? 0),
+          overdue: Number(r.overdue ?? 0),
+        };
       };
+
+      // 1) Пробуем кэш.
+      try {
+        const cached = await app.redis.get(cacheKey);
+        if (cached) return JSON.parse(cached) as OperationsCounters;
+      } catch (err) {
+        req.log.warn({ err }, 'operations-counters: redis get failed, fallback to db');
+      }
+
+      // 2) Промах → single-flight: один запрос к БД на ключ, остальные ждут его.
+      let inflight = countersInflight.get(cacheKey);
+      if (!inflight) {
+        inflight = (async () => {
+          const result = await runCounters();
+          try {
+            const ttl = 20 + Math.floor(Math.random() * 10); // jitter 20..29с
+            await app.redis.set(cacheKey, JSON.stringify(result), 'EX', ttl);
+          } catch (err) {
+            req.log.warn({ err }, 'operations-counters: redis set failed');
+          }
+          return result;
+        })().finally(() => countersInflight.delete(cacheKey));
+        countersInflight.set(cacheKey, inflight);
+      }
+      return inflight;
     },
   );
 
