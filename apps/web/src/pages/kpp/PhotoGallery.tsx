@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Button,
   Image,
@@ -187,7 +187,32 @@ export function PhotoGallery({
   // Открытое фото-документ для split-view модалки (фото + распознанные
   // материалы справа). Только для kind='document'; для cargo/vehicle
   // работает стандартный antd Image preview через PreviewGroup ниже.
+  // Данные (docPreview) и видимость (docPreviewOpen) разделены намеренно:
+  // rc-dialog вызывает afterClose только при переходе open true→false. Если
+  // закрытие сразу обнулять docPreview, компонент размонтируется без этого
+  // перехода и afterClose (возврат фокуса) не отработает. Поэтому закрытие
+  // меняет только open, а очистку данных делаем в afterClose.
   const [docPreview, setDocPreview] = useState<{ id: string; src: string } | null>(null);
+  const [docPreviewOpen, setDocPreviewOpen] = useState(false);
+  const galleryRef = useRef<HTMLDivElement>(null);
+
+  // После закрытия вложенной модалки просмотра документа rc-dialog возвращает
+  // фокус на document.body (миниатюра-триггер — не focusable <img>), из-за чего
+  // следующий ESC не доходит до внешней модалки «Приёмка»/«Отгрузка». Возвращаем
+  // фокус на её .ant-modal-wrap — именно у него tabIndex=-1 и навешан onKeyDown
+  // с обработкой ESC (rc-dialog@9.6.0). Тогда следующий keydown(ESC) снова
+  // приходит на этот обработчик и модалка закрывается. В full-page режиме
+  // (embedded=false) внешней модалки нет — closest вернёт null, focus — no-op.
+  const restoreOuterModalFocus = () => {
+    galleryRef.current
+      ?.closest<HTMLElement>('.ant-modal-wrap')
+      ?.focus({ preventScroll: true });
+  };
+  // afterClose (после полного закрытия): вернуть фокус, затем очистить данные.
+  const handleDocPreviewAfterClose = () => {
+    restoreOuterModalFocus();
+    setDocPreview(null);
+  };
 
   // Общий previewOpen-флаг для всей PreviewGroup: при открытии fullscreen
   // preview ЛЮБОГО фото он становится true → enabled для fullQuery
@@ -199,6 +224,7 @@ export function PhotoGallery({
 
   return (
     <div
+      ref={galleryRef}
       style={{
         display: 'grid',
         gridTemplateColumns: `repeat(auto-fill, ${THUMB_SIZE}px)`,
@@ -226,15 +252,19 @@ export function PhotoGallery({
             onChangeKind={(kind) => patchKind.mutate({ id: p.id, kind })}
             changingKind={patchKind.isPending && patchKind.variables?.id === p.id}
             showLabel={showLabels}
-            onDocumentClick={(src) => setDocPreview({ id: p.id, src })}
+            onDocumentClick={(src) => {
+              setDocPreview({ id: p.id, src });
+              setDocPreviewOpen(true);
+            }}
             previewOpen={previewOpen}
           />
         ))}
       </Image.PreviewGroup>
       {docPreview && (
         <PhotoDocumentPreview
-          open={!!docPreview}
-          onClose={() => setDocPreview(null)}
+          open={docPreviewOpen}
+          onClose={() => setDocPreviewOpen(false)}
+          afterClose={handleDocPreviewAfterClose}
           photoId={docPreview.id}
           imageSrc={docPreview.src}
         />

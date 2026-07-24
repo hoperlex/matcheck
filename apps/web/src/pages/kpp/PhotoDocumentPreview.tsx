@@ -21,11 +21,15 @@ import { enqueueFullLoad } from '../../lib/thumbQueue';
 export function PhotoDocumentPreview({
   open,
   onClose,
+  afterClose,
   photoId,
   imageSrc,
 }: {
   open: boolean;
   onClose: () => void;
+  // Вызывается после полного закрытия модалки (rc-dialog afterClose). PhotoGallery
+  // использует его, чтобы вернуть фокус во внешнюю модалку приёмки/отгрузки.
+  afterClose?: () => void;
   photoId: string;
   imageSrc: string;
 }): JSX.Element {
@@ -111,6 +115,7 @@ export function PhotoDocumentPreview({
     <Modal
       open={open}
       onCancel={onClose}
+      afterClose={afterClose}
       footer={null}
       width="97vw"
       style={{ top: 24 }}
