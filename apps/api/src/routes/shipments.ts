@@ -173,20 +173,19 @@ function isSourceDocumentUniqueViolation(err: unknown): boolean {
 const resolveStatusId = (app: any, code: string) =>
   resolveStatusIdShared(app, 'shipment', code);
 
+// Заголовочный select отгрузки (шапка + плоские join-поля). Один и тот же набор
+// колонок/join'ов для одиночного (buildShipmentDto) и батч-пути
+// (buildShipmentDtosBatch) — чтобы форма DTO гарантированно совпадала. WHERE
+// (по id или inArray) навешивает вызывающий. Имена объекта/поставщика/получателя
+// — в DTO, чтобы роль contractor не ходила в закрытые справочники.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function buildShipmentDto(app: any, id: string, viewerRole?: string | null) {
-  // Отметку проверки (review_*) видит только менеджмент; для прочих ролей и для
-  // анонимных путей (share) поля обнуляются. viewerRole не передан → скрываем.
-  const showReview = canSeeReview(viewerRole);
-  // Два независимых join на users: один на МОЛ, другой на автора soft-delete пометки.
+function selectShipmentHeaders(app: any) {
   const pendingUser = alias(users, 'pending_user');
   const reviewUser = alias(users, 'review_user');
-  // Имена объекта/поставщика/получателя — в DTO, чтобы роль contractor не
-  // ходила в закрытые для неё справочники (/sites, /counterparties).
   const shipmentSite = alias(sites, 'shipment_site');
   const supplierCp = alias(counterparties, 'supplier_cp');
   const receiverCp = alias(counterparties, 'receiver_cp');
-  const rows = await app.db
+  return app.db
     .select({
       s: shipments,
       st: statuses,
@@ -204,37 +203,31 @@ async function buildShipmentDto(app: any, id: string, viewerRole?: string | null
     .leftJoin(reviewUser, eq(shipments.reviewedByUserId, reviewUser.id))
     .leftJoin(shipmentSite, eq(shipments.siteId, shipmentSite.id))
     .leftJoin(supplierCp, eq(shipments.supplierId, supplierCp.id))
-    .leftJoin(receiverCp, eq(shipments.receiverCounterpartyId, receiverCp.id))
-    .where(eq(shipments.id, id))
-    .limit(1);
-  const r = rows[0] as
-    | {
-        s: typeof shipments.$inferSelect;
-        st: StatusRow;
-        molEmail: string | null;
-        pendingEmail: string | null;
-        reviewEmail: string | null;
-        siteName: string | null;
-        supplierName: string | null;
-        receiverName: string | null;
-      }
-    | undefined;
-  if (!r) return null;
+    .leftJoin(receiverCp, eq(shipments.receiverCounterpartyId, receiverCp.id));
+}
+
+type ShipmentHeaderRow = {
+  s: typeof shipments.$inferSelect;
+  st: StatusRow;
+  molEmail: string | null;
+  pendingEmail: string | null;
+  reviewEmail: string | null;
+  siteName: string | null;
+  supplierName: string | null;
+  receiverName: string | null;
+};
+
+// Чистая сборка DTO из уже полученных данных — ЕДИНСТВЕННЫЙ источник формы
+// ответа (общий для одиночного и батч-пути). Форму DTO менять только здесь.
+function assembleShipmentDto(
+  r: ShipmentHeaderRow,
+  items: (typeof shipmentItems.$inferSelect)[],
+  photos: (typeof shipmentPhotos.$inferSelect)[],
+  sources: { sourceDocumentId: string }[],
+  showReview: boolean,
+) {
   const s = r.s;
   const st = r.st;
-  const items: (typeof shipmentItems.$inferSelect)[] = await app.db
-    .select()
-    .from(shipmentItems)
-    .where(eq(shipmentItems.shipmentId, id))
-    .orderBy(shipmentItems.lineNo);
-  const photos: (typeof shipmentPhotos.$inferSelect)[] = await app.db
-    .select()
-    .from(shipmentPhotos)
-    .where(eq(shipmentPhotos.shipmentId, id));
-  const sources: { sourceDocumentId: string }[] = await app.db
-    .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
-    .from(shipmentSources)
-    .where(eq(shipmentSources.shipmentId, id));
   return {
     id: s.id,
     displayId: s.displayId,
@@ -312,6 +305,98 @@ async function buildShipmentDto(app: any, id: string, viewerRole?: string | null
     createdAt: s.createdAt.toISOString(),
     updatedAt: s.updatedAt.toISOString(),
   };
+}
+
+// Одиночный DTO отгрузки (GET /:id, ответы мутаций, share). Внешнее поведение
+// не изменилось — та же форма через общий assembleShipmentDto.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function buildShipmentDto(app: any, id: string, viewerRole?: string | null) {
+  const showReview = canSeeReview(viewerRole);
+  const rows = await selectShipmentHeaders(app).where(eq(shipments.id, id)).limit(1);
+  const r = rows[0] as ShipmentHeaderRow | undefined;
+  if (!r) return null;
+  const items: (typeof shipmentItems.$inferSelect)[] = await app.db
+    .select()
+    .from(shipmentItems)
+    .where(eq(shipmentItems.shipmentId, id))
+    .orderBy(shipmentItems.lineNo);
+  const photos: (typeof shipmentPhotos.$inferSelect)[] = await app.db
+    .select()
+    .from(shipmentPhotos)
+    .where(eq(shipmentPhotos.shipmentId, id));
+  const sources: { sourceDocumentId: string }[] = await app.db
+    .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
+    .from(shipmentSources)
+    .where(eq(shipmentSources.shipmentId, id));
+  return assembleShipmentDto(r, items, photos, sources, showReview);
+}
+
+// Батч-построение DTO для списка: ~5 запросов на страницу вместо 4×N (устранение
+// N+1). Форма каждого элемента идентична buildShipmentDto (общий assembleShipmentDto).
+// Порядок страницы — по входному ids; ORDER BY items/sources повторяет одиночный
+// PK-скан (lineNo и sourceDocumentId) — sourceDocumentIds[0] не меняется.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: string | null) {
+  if (ids.length === 0) return [];
+  const showReview = canSeeReview(viewerRole);
+  const headerRows = (await selectShipmentHeaders(app).where(
+    inArray(shipments.id, ids),
+  )) as ShipmentHeaderRow[];
+  const itemRows: (typeof shipmentItems.$inferSelect)[] = await app.db
+    .select()
+    .from(shipmentItems)
+    .where(inArray(shipmentItems.shipmentId, ids))
+    .orderBy(shipmentItems.shipmentId, shipmentItems.lineNo);
+  const photoRows: (typeof shipmentPhotos.$inferSelect)[] = await app.db
+    .select()
+    .from(shipmentPhotos)
+    .where(inArray(shipmentPhotos.shipmentId, ids))
+    .orderBy(shipmentPhotos.shipmentId, shipmentPhotos.id);
+  const sourceRows: { shipmentId: string; sourceDocumentId: string }[] = await app.db
+    .select({
+      shipmentId: shipmentSources.shipmentId,
+      sourceDocumentId: shipmentSources.sourceDocumentId,
+    })
+    .from(shipmentSources)
+    .where(inArray(shipmentSources.shipmentId, ids))
+    .orderBy(shipmentSources.shipmentId, shipmentSources.sourceDocumentId);
+
+  const headerById = new Map<string, ShipmentHeaderRow>();
+  for (const r of headerRows) headerById.set(r.s.id, r);
+  const itemsById = new Map<string, (typeof shipmentItems.$inferSelect)[]>();
+  for (const it of itemRows) {
+    const arr = itemsById.get(it.shipmentId);
+    if (arr) arr.push(it);
+    else itemsById.set(it.shipmentId, [it]);
+  }
+  const photosById = new Map<string, (typeof shipmentPhotos.$inferSelect)[]>();
+  for (const p of photoRows) {
+    const arr = photosById.get(p.shipmentId);
+    if (arr) arr.push(p);
+    else photosById.set(p.shipmentId, [p]);
+  }
+  const sourcesById = new Map<string, { sourceDocumentId: string }[]>();
+  for (const sc of sourceRows) {
+    const arr = sourcesById.get(sc.shipmentId);
+    if (arr) arr.push(sc);
+    else sourcesById.set(sc.shipmentId, [sc]);
+  }
+
+  const result: ReturnType<typeof assembleShipmentDto>[] = [];
+  for (const id of ids) {
+    const r = headerById.get(id);
+    if (!r) continue;
+    result.push(
+      assembleShipmentDto(
+        r,
+        itemsById.get(id) ?? [],
+        photosById.get(id) ?? [],
+        sourcesById.get(id) ?? [],
+        showReview,
+      ),
+    );
+  }
+  return result;
 }
 
 export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
@@ -524,8 +609,12 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         .from(shipments)
         .where(where);
 
-      const items = (await Promise.all(rows.map((r) => buildShipmentDto(app, r.id, req.user?.role)))).filter(
-        (x): x is NonNullable<typeof x> => x !== null,
+      // Батч вместо Promise.all(buildShipmentDto×N): ~5 запросов на страницу
+      // вместо ~4×N (устранение N+1). Порядок страницы — по rows (displayId DESC).
+      const items = await buildShipmentDtosBatch(
+        app,
+        rows.map((r: { id: string }) => r.id),
+        req.user?.role,
       );
       return { items, total: count };
     },

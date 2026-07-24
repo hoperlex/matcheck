@@ -183,25 +183,23 @@ async function assertSourcesAvailableForDelivery(
 const resolveStatusId = (app: any, code: string) =>
   resolveStatusIdShared(app, 'delivery', code);
 
+// Заголовочный select приёмки (шапка + плоские join-поля). Один и тот же набор
+// колонок/join'ов для одиночного (buildDeliveryDto) и батч-пути
+// (buildDeliveryDtosBatch) — чтобы форма DTO гарантированно совпадала. WHERE
+// (по id или inArray) навешивает вызывающий.
+// Два независимых join на users: МОЛ и автор soft-delete пометки. Для парных
+// приёмок (transfer) плоско тянем дату отгрузки и объект-источник из shipment+sites.
+// deliverySite — отдельный alias, т.к. sites уже join'ится на объект-источник.
+// Имена объекта/поставщика/подрядчика — прямо в DTO (для всех ролей), чтобы
+// contractor не ходил в закрытые справочники.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null) {
-  // Отметку проверки (review_*) видит только менеджмент; для прочих ролей и для
-  // анонимных путей (share) поля обнуляются. viewerRole не передан → скрываем.
-  const showReview = canSeeReview(viewerRole);
-  // Два независимых join на users: один на МОЛ, другой на автора soft-delete пометки.
-  // Для парных приёмок (transfer) подтягиваем плоско дату отгрузки и
-  // объект-источник из связанного shipment + sites.
+function selectDeliveryHeaders(app: any) {
   const pendingUser = alias(users, 'pending_user');
   const reviewUser = alias(users, 'review_user');
-  // Имена объекта/поставщика/подрядчика — прямо в DTO (для всех ролей).
-  // Нужны, чтобы роль contractor не ходила в закрытые для неё справочники
-  // (/sites, /counterparties): названия берутся из scoped-DTO её записей.
-  // deliverySite — отдельный alias, т.к. sites уже join'ится на объект-источник
-  // парной отгрузки (transfer).
   const deliverySite = alias(sites, 'delivery_site');
   const supplierCp = alias(counterparties, 'supplier_cp');
   const contractorCp = alias(counterparties, 'contractor_cp');
-  const rows = await app.db
+  return app.db
     .select({
       d: deliveries,
       s: statuses,
@@ -224,40 +222,34 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
     .leftJoin(sites, eq(shipments.siteId, sites.id))
     .leftJoin(deliverySite, eq(deliveries.siteId, deliverySite.id))
     .leftJoin(supplierCp, eq(deliveries.supplierId, supplierCp.id))
-    .leftJoin(contractorCp, eq(deliveries.contractorId, contractorCp.id))
-    .where(eq(deliveries.id, id))
-    .limit(1);
-  const r = rows[0] as
-    | {
-        d: typeof deliveries.$inferSelect;
-        s: StatusRow;
-        molEmail: string | null;
-        pendingEmail: string | null;
-        reviewEmail: string | null;
-        srcShippedAt: Date | null;
-        srcSiteId: string | null;
-        srcSiteCode: string | null;
-        siteName: string | null;
-        supplierName: string | null;
-        contractorName: string | null;
-      }
-    | undefined;
-  if (!r) return null;
+    .leftJoin(contractorCp, eq(deliveries.contractorId, contractorCp.id));
+}
+
+type DeliveryHeaderRow = {
+  d: typeof deliveries.$inferSelect;
+  s: StatusRow;
+  molEmail: string | null;
+  pendingEmail: string | null;
+  reviewEmail: string | null;
+  srcShippedAt: Date | null;
+  srcSiteId: string | null;
+  srcSiteCode: string | null;
+  siteName: string | null;
+  supplierName: string | null;
+  contractorName: string | null;
+};
+
+// Чистая сборка DTO из уже полученных данных — ЕДИНСТВЕННЫЙ источник формы
+// ответа (общий для одиночного и батч-пути). Форму DTO менять только здесь.
+function assembleDeliveryDto(
+  r: DeliveryHeaderRow,
+  items: (typeof deliveryItems.$inferSelect)[],
+  photos: (typeof deliveryPhotos.$inferSelect)[],
+  sources: { sourceDocumentId: string }[],
+  showReview: boolean,
+) {
   const d = r.d;
   const s = r.s;
-  const items: (typeof deliveryItems.$inferSelect)[] = await app.db
-    .select()
-    .from(deliveryItems)
-    .where(eq(deliveryItems.deliveryId, id))
-    .orderBy(deliveryItems.lineNo);
-  const photos: (typeof deliveryPhotos.$inferSelect)[] = await app.db
-    .select()
-    .from(deliveryPhotos)
-    .where(eq(deliveryPhotos.deliveryId, id));
-  const sources: { sourceDocumentId: string }[] = await app.db
-    .select({ sourceDocumentId: deliverySources.sourceDocumentId })
-    .from(deliverySources)
-    .where(eq(deliverySources.deliveryId, id));
   return {
     id: d.id,
     displayId: d.displayId,
@@ -336,6 +328,99 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),
   };
+}
+
+// Одиночный DTO приёмки (GET /:id, ответы мутаций, share). Внешнее поведение
+// не изменилось — та же форма через общий assembleDeliveryDto.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null) {
+  const showReview = canSeeReview(viewerRole);
+  const rows = await selectDeliveryHeaders(app).where(eq(deliveries.id, id)).limit(1);
+  const r = rows[0] as DeliveryHeaderRow | undefined;
+  if (!r) return null;
+  const items: (typeof deliveryItems.$inferSelect)[] = await app.db
+    .select()
+    .from(deliveryItems)
+    .where(eq(deliveryItems.deliveryId, id))
+    .orderBy(deliveryItems.lineNo);
+  const photos: (typeof deliveryPhotos.$inferSelect)[] = await app.db
+    .select()
+    .from(deliveryPhotos)
+    .where(eq(deliveryPhotos.deliveryId, id));
+  const sources: { sourceDocumentId: string }[] = await app.db
+    .select({ sourceDocumentId: deliverySources.sourceDocumentId })
+    .from(deliverySources)
+    .where(eq(deliverySources.deliveryId, id));
+  return assembleDeliveryDto(r, items, photos, sources, showReview);
+}
+
+// Батч-построение DTO для списка: ~5 запросов на страницу вместо 4×N (устранение
+// N+1). Форма каждого элемента идентична buildDeliveryDto (общий assembleDeliveryDto).
+// Порядок страницы сохраняется по входному массиву ids (IN не гарантирует порядок).
+// ORDER BY items/sources повторяет порядок одиночного PK-скана (lineNo и
+// sourceDocumentId) — sourceDocumentIds[0] у мультидок-приёмок не меняется.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: string | null) {
+  if (ids.length === 0) return [];
+  const showReview = canSeeReview(viewerRole);
+  const headerRows = (await selectDeliveryHeaders(app).where(
+    inArray(deliveries.id, ids),
+  )) as DeliveryHeaderRow[];
+  const itemRows: (typeof deliveryItems.$inferSelect)[] = await app.db
+    .select()
+    .from(deliveryItems)
+    .where(inArray(deliveryItems.deliveryId, ids))
+    .orderBy(deliveryItems.deliveryId, deliveryItems.lineNo);
+  const photoRows: (typeof deliveryPhotos.$inferSelect)[] = await app.db
+    .select()
+    .from(deliveryPhotos)
+    .where(inArray(deliveryPhotos.deliveryId, ids))
+    .orderBy(deliveryPhotos.deliveryId, deliveryPhotos.id);
+  const sourceRows: { deliveryId: string; sourceDocumentId: string }[] = await app.db
+    .select({
+      deliveryId: deliverySources.deliveryId,
+      sourceDocumentId: deliverySources.sourceDocumentId,
+    })
+    .from(deliverySources)
+    .where(inArray(deliverySources.deliveryId, ids))
+    .orderBy(deliverySources.deliveryId, deliverySources.sourceDocumentId);
+
+  const headerById = new Map<string, DeliveryHeaderRow>();
+  for (const r of headerRows) headerById.set(r.d.id, r);
+  const itemsById = new Map<string, (typeof deliveryItems.$inferSelect)[]>();
+  for (const it of itemRows) {
+    const arr = itemsById.get(it.deliveryId);
+    if (arr) arr.push(it);
+    else itemsById.set(it.deliveryId, [it]);
+  }
+  const photosById = new Map<string, (typeof deliveryPhotos.$inferSelect)[]>();
+  for (const p of photoRows) {
+    const arr = photosById.get(p.deliveryId);
+    if (arr) arr.push(p);
+    else photosById.set(p.deliveryId, [p]);
+  }
+  const sourcesById = new Map<string, { sourceDocumentId: string }[]>();
+  for (const sc of sourceRows) {
+    const arr = sourcesById.get(sc.deliveryId);
+    if (arr) arr.push(sc);
+    else sourcesById.set(sc.deliveryId, [sc]);
+  }
+
+  const result: ReturnType<typeof assembleDeliveryDto>[] = [];
+  for (const id of ids) {
+    const r = headerById.get(id);
+    if (!r) continue;
+    result.push(
+      assembleDeliveryDto(
+        r,
+        itemsById.get(id) ?? [],
+        photosById.get(id) ?? [],
+        sourcesById.get(id) ?? [],
+        showReview,
+      ),
+    );
+  }
+  return result;
 }
 
 export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
@@ -561,8 +646,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         .from(deliveries)
         .where(where);
 
-      const items = (await Promise.all(rows.map((r) => buildDeliveryDto(app, r.id, req.user?.role)))).filter(
-        (x): x is NonNullable<typeof x> => x !== null,
+      // Батч вместо Promise.all(buildDeliveryDto×N): ~5 запросов на страницу
+      // вместо ~4×N (устранение N+1). Порядок страницы — по rows (displayId DESC).
+      const items = await buildDeliveryDtosBatch(
+        app,
+        rows.map((r: { id: string }) => r.id),
+        req.user?.role,
       );
       return { items, total: count };
     },
