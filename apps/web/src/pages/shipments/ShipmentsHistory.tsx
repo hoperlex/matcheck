@@ -30,7 +30,6 @@ import type {
   Shipment,
   ShipmentListResponseSchema,
   Site,
-  SourceDocumentListResponseSchema,
   Supplier,
 } from '@matcheck/contracts';
 import type { z } from 'zod';
@@ -69,8 +68,6 @@ import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 
 type List = z.infer<typeof ShipmentListResponseSchema>;
 type Row = List['items'][number];
-type SourceList = z.infer<typeof SourceDocumentListResponseSchema>;
-type SourceRow = SourceList['items'][number];
 
 // Σ qty × price по позициям, где price задан (зеркало deliveryItemsTotal
 // в DeliveriesHistory). Если ни у одной позиции нет цены — null → UI «—».
@@ -346,12 +343,6 @@ export function ShipmentsHistory({
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?limit=500'),
     enabled: !isContractor,
   });
-  const sourceDocsQuery = useQuery({
-    queryKey: ['source-documents', 'all', 'outbound'],
-    queryFn: () =>
-      api.get<SourceList>('/source-documents?direction=outbound&limit=1000'),
-  });
-
   const clearErr = (id: string) => {
     setDeleteErrors((prev) => {
       if (!(id in prev)) return prev;
@@ -455,11 +446,6 @@ export function ShipmentsHistory({
     for (const s of sitesQuery.data?.items ?? []) m.set(s.id, `${s.code} · ${s.name}`);
     return m;
   }, [sitesQuery.data]);
-  const sourceDocsById = useMemo(() => {
-    const m = new Map<string, SourceRow>();
-    for (const s of sourceDocsQuery.data?.items ?? []) m.set(s.id, s);
-    return m;
-  }, [sourceDocsQuery.data]);
 
   // Опции/маппинг для фильтров «Подрядчик» (получатель) и «Поставщик» —
   // из заказчиковских справочников customer_counterparties / suppliers
@@ -577,7 +563,7 @@ export function ShipmentsHistory({
       r.receiverName ??
       (r.receiverCounterpartyId ? counterpartiesMap.get(r.receiverCounterpartyId) ?? null : null);
     const destSiteName = r.destSiteId ? sitesMap.get(r.destSiteId) ?? null : null;
-    const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
+    const sd = r.primarySourceDocument ?? null;
     const kindLabel = sd
       ? sd.kind === 'upd'
         ? 'УПД'
@@ -1025,13 +1011,15 @@ export function ShipmentsHistory({
             title: 'Сумма НДС',
             key: 'vatSum',
             width: 120,
-            render: (_: unknown, r: Row) => formatMoneyRu(shipmentItemsVatSum(r.items)),
+            render: (_: unknown, r: Row) =>
+              formatMoneyRu(r.itemsVatSum ?? shipmentItemsVatSum(r.items)),
           },
           {
             title: 'Сумма',
             key: 'totalSum',
             width: 130,
-            render: (_: unknown, r: Row) => formatMoneyRu(shipmentItemsTotal(r.items)),
+            render: (_: unknown, r: Row) =>
+              formatMoneyRu(r.itemsTotal ?? shipmentItemsTotal(r.items)),
           },
           {
             title: 'Действия',

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ShipmentStatusCodeSchema, StatusSchema } from './statuses.js';
-import { VolumeConfidenceSchema } from './source-documents.js';
+import { VolumeConfidenceSchema, PrimarySourceDocumentSchema } from './source-documents.js';
 import { ItemKindSchema } from './deliveries.js';
 import { ReviewFieldsShape } from './review.js';
 
@@ -115,6 +115,13 @@ export const ShipmentSchema = z.object({
   sourceDocumentIds: z.array(z.string().uuid()),
   items: z.array(ShipmentItemSchema),
   photos: z.array(ShipmentPhotoSchema),
+  // ── Волна 1B: аддитивные предподсчёты для списка «Операции» — зеркало
+  // DeliverySchema. Все optional (обратная совместимость), заполняет сервер. ──
+  itemCount: z.number().int().nonnegative().optional(),
+  photoCount: z.number().int().nonnegative().optional(),
+  itemsTotal: z.number().nullable().optional(),
+  itemsVatSum: z.number().nullable().optional(),
+  primarySourceDocument: PrimarySourceDocumentSchema.nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { DeliveryStatusCodeSchema, StatusSchema } from './statuses.js';
-import { VolumeConfidenceSchema } from './source-documents.js';
+import { VolumeConfidenceSchema, PrimarySourceDocumentSchema } from './source-documents.js';
 import { ReviewFieldsShape } from './review.js';
 
 export const ItemKindSchema = z.enum(['material', 'asset']);
@@ -109,6 +109,18 @@ export const DeliverySchema = z.object({
   sourceShipmentSiteCode: z.string().nullable(),
   items: z.array(DeliveryItemSchema),
   photos: z.array(DeliveryPhotoSchema),
+  // ── Волна 1B: аддитивные предподсчёты для списка «Операции». Все optional —
+  // обратная совместимость: мобильный клиент (ignoreUnknownKeys) и старый web
+  // их игнорируют; заполняет сервер. Списку не нужно итерировать items[] ради
+  // сумм, а primarySourceDocument снимает запрос source-documents?limit=1000. ──
+  itemCount: z.number().int().nonnegative().optional(),
+  photoCount: z.number().int().nonnegative().optional(),
+  // Σ qty×price и Σ vatSum по позициям — считает сервер той же формулой, что
+  // раньше клиент (deliveryItemsTotal/deliveryItemsVatSum). null = ни у одной
+  // позиции нет цены/НДС (UI показывает «—»).
+  itemsTotal: z.number().nullable().optional(),
+  itemsVatSum: z.number().nullable().optional(),
+  primarySourceDocument: PrimarySourceDocumentSchema.nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

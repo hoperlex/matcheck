@@ -248,6 +248,25 @@ export const SourceDocumentListResponseSchema = z.object({
   total: z.number(),
 });
 
+// Компактный снимок «основного» документа-источника операции — первого
+// элемента sourceDocumentIds (по возрастанию sourceDocumentId, тот же порядок,
+// что и в массиве). Нужен спискам «Операции», чтобы показать номер/контрагента/
+// поставщика/сумму привязанного документа БЕЗ отдельной выгрузки всего
+// справочника документов (раньше фронт тянул source-documents?limit=1000).
+// supplierName/contractorName сервер резолвит тем же COALESCE, что и в
+// GET /source-documents: supplierName = COALESCE(suppliers.name,
+// counterparties.name); contractorName = counterparties.name по contractor_id.
+export const PrimarySourceDocumentSchema = z.object({
+  id: z.string().uuid(),
+  kind: SourceKindSchema,
+  docNumber: z.string().nullable(),
+  totalSum: z.string().nullable(),
+  contractorId: z.string().uuid().nullable(),
+  supplierName: z.string().nullable(),
+  contractorName: z.string().nullable(),
+});
+export type PrimarySourceDocument = z.infer<typeof PrimarySourceDocumentSchema>;
+
 export const ManualUpdUploadRequestSchema = z.object({
   xml: z.string().min(1).max(10_000_000),
   direction: SourceDirectionSchema,

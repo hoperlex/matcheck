@@ -14,7 +14,9 @@ import {
   DeliveryUpsertSchema,
   ErrorResponseSchema,
   ReviewRequestSchema,
+  type PrimarySourceDocument,
 } from '@matcheck/contracts';
+import { computeItemsTotal, computeItemsVatSum } from '../lib/operation-sums.js';
 import {
   counterparties,
   deliveries,
@@ -247,9 +249,41 @@ function assembleDeliveryDto(
   photos: (typeof deliveryPhotos.$inferSelect)[],
   sources: { sourceDocumentId: string }[],
   showReview: boolean,
+  primaryDoc: PrimarySourceDocument | null = null,
 ) {
   const d = r.d;
   const s = r.s;
+  const mappedItems = items.map((i) => ({
+    id: i.id,
+    itemKind: i.itemKind,
+    materialId: i.materialId,
+    assetId: i.assetId,
+    inventoryNumber: i.inventoryNumber,
+    serialNumber: i.serialNumber,
+    nameRaw: i.nameRaw,
+    qtyPlanned: i.qtyPlanned,
+    qtyActual: i.qtyActual,
+    unit: i.unit,
+    comment: i.comment,
+    lineNo: i.lineNo,
+    volumeM3: i.volumeM3,
+    massKg: i.massKg,
+    price: i.price,
+    vatRate: i.vatRate,
+    vatSum: i.vatSum,
+    volumeConfidence: i.volumeConfidence as 'low' | 'medium' | 'high' | null,
+    groupName: i.groupName,
+  }));
+  const mappedPhotos = photos.map((p) => ({
+    id: p.id,
+    kind: p.kind,
+    stage: p.stage,
+    s3Key: p.s3Key,
+    thumbS3Key: p.thumbS3Key,
+    contentHash: p.contentHash,
+    takenAt: p.takenAt.toISOString(),
+    uploadedAt: p.uploadedAt?.toISOString() ?? null,
+  }));
   return {
     id: d.id,
     displayId: d.displayId,
@@ -294,37 +328,14 @@ function assembleDeliveryDto(
     sourceShipmentShippedAt: r.srcShippedAt?.toISOString() ?? null,
     sourceShipmentSiteId: r.srcSiteId,
     sourceShipmentSiteCode: r.srcSiteCode,
-    items: items.map((i) => ({
-      id: i.id,
-      itemKind: i.itemKind,
-      materialId: i.materialId,
-      assetId: i.assetId,
-      inventoryNumber: i.inventoryNumber,
-      serialNumber: i.serialNumber,
-      nameRaw: i.nameRaw,
-      qtyPlanned: i.qtyPlanned,
-      qtyActual: i.qtyActual,
-      unit: i.unit,
-      comment: i.comment,
-      lineNo: i.lineNo,
-      volumeM3: i.volumeM3,
-      massKg: i.massKg,
-      price: i.price,
-      vatRate: i.vatRate,
-      vatSum: i.vatSum,
-      volumeConfidence: i.volumeConfidence as 'low' | 'medium' | 'high' | null,
-      groupName: i.groupName,
-    })),
-    photos: photos.map((p) => ({
-      id: p.id,
-      kind: p.kind,
-      stage: p.stage,
-      s3Key: p.s3Key,
-      thumbS3Key: p.thumbS3Key,
-      contentHash: p.contentHash,
-      takenAt: p.takenAt.toISOString(),
-      uploadedAt: p.uploadedAt?.toISOString() ?? null,
-    })),
+    items: mappedItems,
+    photos: mappedPhotos,
+    // Волна 1B — предподсчёты для списка «Операции» (см. DeliverySchema).
+    itemCount: mappedItems.length,
+    photoCount: mappedPhotos.length,
+    itemsTotal: computeItemsTotal(mappedItems),
+    itemsVatSum: computeItemsVatSum(mappedItems),
+    primarySourceDocument: primaryDoc,
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),
   };
@@ -406,10 +417,46 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
     else sourcesById.set(sc.deliveryId, [sc]);
   }
 
+  // Волна 1B — primarySourceDocument: «основной» документ = первый из
+  // sourceDocumentIds (sourcesById[*] уже отсортирован по sourceDocumentId,
+  // как sourceDocumentIds[0] на клиенте). Имена резолвим тем же COALESCE, что
+  // GET /source-documents: supplierName = COALESCE(suppliers.name,
+  // counterparties.name); contractorName = counterparties.name по contractor_id.
+  // +1 запрос на страницу (набор уникальных первых документов) — константа.
+  const primaryIdByDelivery = new Map<string, string>();
+  for (const id of ids) {
+    const first = sourcesById.get(id)?.[0]?.sourceDocumentId;
+    if (first) primaryIdByDelivery.set(id, first);
+  }
+  const primaryDocById = new Map<string, PrimarySourceDocument>();
+  const uniquePrimaryIds = [...new Set(primaryIdByDelivery.values())];
+  if (uniquePrimaryIds.length) {
+    const sdSupplier = alias(counterparties, 'sd_supplier');
+    const sdSupplierDir = alias(suppliers, 'sd_supplier_dir');
+    const sdContractor = alias(counterparties, 'sd_contractor');
+    const sdRows = (await app.db
+      .select({
+        id: sourceDocuments.id,
+        kind: sourceDocuments.kind,
+        docNumber: sourceDocuments.docNumber,
+        totalSum: sourceDocuments.totalSum,
+        contractorId: sourceDocuments.contractorId,
+        supplierName: drSql<string | null>`COALESCE(${sdSupplierDir.name}, ${sdSupplier.name})`,
+        contractorName: sdContractor.name,
+      })
+      .from(sourceDocuments)
+      .leftJoin(sdSupplier, eq(sourceDocuments.supplierId, sdSupplier.id))
+      .leftJoin(sdSupplierDir, eq(sourceDocuments.supplierDirectoryId, sdSupplierDir.id))
+      .leftJoin(sdContractor, eq(sourceDocuments.contractorId, sdContractor.id))
+      .where(inArray(sourceDocuments.id, uniquePrimaryIds))) as PrimarySourceDocument[];
+    for (const sd of sdRows) primaryDocById.set(sd.id, sd);
+  }
+
   const result: ReturnType<typeof assembleDeliveryDto>[] = [];
   for (const id of ids) {
     const r = headerById.get(id);
     if (!r) continue;
+    const primaryId = primaryIdByDelivery.get(id);
     result.push(
       assembleDeliveryDto(
         r,
@@ -417,6 +464,7 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
         photosById.get(id) ?? [],
         sourcesById.get(id) ?? [],
         showReview,
+        (primaryId ? primaryDocById.get(primaryId) : null) ?? null,
       ),
     );
   }

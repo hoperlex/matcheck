@@ -30,7 +30,6 @@ import type {
   CustomerCounterparty,
   DeliveryListResponseSchema,
   Site,
-  SourceDocumentListResponseSchema,
   Supplier,
 } from '@matcheck/contracts';
 import type { z } from 'zod';
@@ -71,8 +70,6 @@ import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
-type SourceList = z.infer<typeof SourceDocumentListResponseSchema>;
-type SourceRow = SourceList['items'][number];
 
 const SELECT_WIDTH = 200;
 // Статусы, для которых вместо hard-delete показываем «Пометить на удаление».
@@ -375,12 +372,6 @@ export function DeliveriesHistory({
       api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
     enabled: !isContractor,
   });
-  const sourceDocsQuery = useQuery({
-    queryKey: ['source-documents', 'all', 'inbound'],
-    queryFn: () =>
-      api.get<SourceList>('/source-documents?direction=inbound&limit=1000'),
-  });
-
   const clearErr = (id: string) => {
     setDeleteErrors((prev) => {
       if (!(id in prev)) return prev;
@@ -514,12 +505,6 @@ export function DeliveriesHistory({
 
   const items = list.data?.items ?? [];
 
-  const sourceDocsById = useMemo(() => {
-    const m = new Map<string, SourceRow>();
-    for (const s of sourceDocsQuery.data?.items ?? []) m.set(s.id, s);
-    return m;
-  }, [sourceDocsQuery.data]);
-
   const counterpartiesMap = useMemo(() => {
     const m = new Map<string, string>();
     for (const c of counterpartiesQuery.data?.items ?? []) m.set(c.id, c.name);
@@ -557,14 +542,14 @@ export function DeliveriesHistory({
 
   const resolveContractor = (r: Row): { id: string | null; inherited: boolean } => {
     if (r.contractorId) return { id: r.contractorId, inherited: false };
-    const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
+    const sd = r.primarySourceDocument ?? null;
     return { id: sd?.contractorId ?? null, inherited: !!sd?.contractorId };
   };
   const resolveSite = (r: Row): { id: string | null; inherited: boolean } => {
     return { id: r.siteId, inherited: false };
   };
   const resolveDocNumber = (r: Row): string | null => {
-    const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
+    const sd = r.primarySourceDocument ?? null;
     return sd?.docNumber ?? null;
   };
   // Имя поставщика: сначала старое прямое поле deliveries.supplier_id
@@ -580,7 +565,7 @@ export function DeliveriesHistory({
     // справочников (нужно для роли contractor, у которой они закрыты).
     if (r.supplierName) return r.supplierName;
     if (r.supplierId) return counterpartiesMap.get(r.supplierId) ?? null;
-    const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
+    const sd = r.primarySourceDocument ?? null;
     return sd?.supplierName ?? null;
   };
 
@@ -590,7 +575,7 @@ export function DeliveriesHistory({
   const buildViewData = (r: Row): DeliveryViewData => {
     const { id: contractorId } = resolveContractor(r);
     const { id: siteId } = resolveSite(r);
-    const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
+    const sd = r.primarySourceDocument ?? null;
     const kindLabel = sd
       ? sd.kind === 'upd'
         ? 'УПД'
@@ -835,7 +820,7 @@ export function DeliveriesHistory({
     if (!id) return '—';
     // DTO-имя (прямой подрядчик приёмки) → справочник → имя из привязанного УПД
     // (унаследованный подрядчик). Первое и последнее не требуют справочников.
-    const sd = r.sourceDocumentIds[0] ? sourceDocsById.get(r.sourceDocumentIds[0]) : null;
+    const sd = r.primarySourceDocument ?? null;
     const name = r.contractorName ?? counterpartiesMap.get(id) ?? sd?.contractorName ?? '—';
     return inherited ? (
       <Typography.Text type="secondary">{name}</Typography.Text>
@@ -1150,13 +1135,15 @@ export function DeliveriesHistory({
             title: 'Сумма НДС',
             key: 'vatSum',
             width: 120,
-            render: (_: unknown, r: Row) => formatMoneyRu(deliveryItemsVatSum(r.items)),
+            render: (_: unknown, r: Row) =>
+              formatMoneyRu(r.itemsVatSum ?? deliveryItemsVatSum(r.items)),
           },
           {
             title: 'Сумма',
             key: 'totalSum',
             width: 130,
-            render: (_: unknown, r: Row) => formatMoneyRu(deliveryItemsTotal(r.items)),
+            render: (_: unknown, r: Row) =>
+              formatMoneyRu(r.itemsTotal ?? deliveryItemsTotal(r.items)),
           },
           {
             title: 'Действия',
