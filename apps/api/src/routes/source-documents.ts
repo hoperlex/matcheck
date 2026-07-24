@@ -78,11 +78,37 @@ const KindFilterSchema = z
   })
   .optional();
 
+// Волна 1C: поля серверной сортировки Inbox (совпадают с колонками таблицы).
+const SORT_FIELDS = [
+  'kind',
+  'status',
+  'docNumber',
+  'docDate',
+  'expectedDate',
+  'siteName',
+  'contractorName',
+  'supplierName',
+  'vatSum',
+  'totalSum',
+] as const;
+
 const ListQuerySchema = z.object({
   kind: KindFilterSchema,
   direction: z.enum(['inbound', 'outbound']).optional(),
   q: z.string().trim().min(1).max(200).optional(),
   unaccepted: z.coerce.boolean().optional(),
+  // Волна 1C — серверные фильтры/сортировка под будущую серверную пагинацию
+  // Inbox. ВСЕ опциональные: при отсутствии параметров поведение эндпоинта
+  // (фильтры/сортировка/offset/total) не меняется. Текущий Inbox их не шлёт.
+  contractorIds: z.string().optional(),
+  supplierIds: z.string().optional(),
+  siteIds: z.string().optional(),
+  docDateFrom: z.string().optional(),
+  docDateTo: z.string().optional(),
+  expectedDateFrom: z.string().optional(),
+  expectedDateTo: z.string().optional(),
+  sort: z.enum(SORT_FIELDS).optional(),
+  order: z.enum(['asc', 'desc']).optional(),
   limit: z.coerce.number().int().positive().max(2000).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
@@ -504,7 +530,23 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       schema: { querystring: ListQuerySchema, response: { 200: SourceDocumentListResponseSchema } },
     },
     async (req) => {
-      const { kind, direction, q, unaccepted, limit, offset } = req.query;
+      const {
+        kind,
+        direction,
+        q,
+        unaccepted,
+        limit,
+        offset,
+        contractorIds,
+        supplierIds,
+        siteIds,
+        docDateFrom,
+        docDateTo,
+        expectedDateFrom,
+        expectedDateTo,
+        sort,
+        order,
+      } = req.query;
       const conditions = [];
       if (kind && kind.length > 0) {
         const first = kind[0];
@@ -552,11 +594,62 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           conditions.push(drSql`${sourceDocuments.id} not in ${linkedToShipment}`);
         }
       }
+      // Волна 1C — серверные фильтры (contractor/supplier/site/даты). Опциональны:
+      // добавляются в conditions, только если параметр задан → при пустых
+      // параметрах WHERE не меняется. Логика повторяет экспорт (supplier матчит
+      // и counterparties, и справочник suppliers — как в export.xlsx).
+      const csvIds = (raw: string | undefined): string[] =>
+        (raw ?? '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+      const fContractor = csvIds(contractorIds);
+      if (fContractor.length) conditions.push(inArray(sourceDocuments.contractorId, fContractor));
+      const fSupplier = csvIds(supplierIds);
+      if (fSupplier.length) {
+        conditions.push(
+          drSql`(${sourceDocuments.supplierId} in ${fSupplier} or ${sourceDocuments.supplierDirectoryId} in ${fSupplier})`,
+        );
+      }
+      const fSite = csvIds(siteIds);
+      if (fSite.length) conditions.push(inArray(sourceDocuments.siteId, fSite));
+      // Диапазоны дат (docDate/expectedDate — timestamp без TZ, mode:date).
+      // Включительно по дню: >= from и < to+1день.
+      if (docDateFrom) conditions.push(drSql`${sourceDocuments.docDate} >= ${docDateFrom}::date`);
+      if (docDateTo)
+        conditions.push(drSql`${sourceDocuments.docDate} < (${docDateTo}::date + interval '1 day')`);
+      if (expectedDateFrom)
+        conditions.push(drSql`${sourceDocuments.expectedDate} >= ${expectedDateFrom}::date`);
+      if (expectedDateTo)
+        conditions.push(
+          drSql`${sourceDocuments.expectedDate} < (${expectedDateTo}::date + interval '1 day')`,
+        );
       const where = conditions.length ? and(...conditions) : undefined;
       const supplier = alias(counterparties, 'supplier');
       const supplierDir = alias(suppliers, 'supplier_dir');
       const contractor = alias(counterparties, 'contractor');
       const recipient = alias(counterparties, 'recipient');
+      // Волна 1C — динамическая сортировка (совпадает с клиентскими sorter'ами:
+      // приоритет для kind/status, NULLS LAST, tie-breaker по id для детерминизма).
+      // Без sort — прежний порядок parsed_at DESC (+ id).
+      const dirNulls = drSql.raw(order === 'desc' ? 'desc nulls last' : 'asc nulls last');
+      const kindPriority = drSql`case ${sourceDocuments.kind} when 'upd' then 0 when 'request' then 1 when 'transport_waybill' then 2 when 'os2_transfer' then 3 else 4 end`;
+      const statusPriority = drSql`case ${sourceDocuments.status} when 'processing' then 0 when 'queued' then 1 when 'needs_resolution' then 2 when 'parse_failed' then 3 when 'parsed' then 4 when 'archived' then 5 else 6 end`;
+      const sortExprMap = {
+        kind: kindPriority,
+        status: statusPriority,
+        docNumber: drSql`${sourceDocuments.docNumber}`,
+        docDate: drSql`${sourceDocuments.docDate}`,
+        expectedDate: drSql`${sourceDocuments.expectedDate}`,
+        siteName: drSql`${sites.name}`,
+        contractorName: drSql`${contractor.name}`,
+        supplierName: drSql`coalesce(${supplierDir.name}, ${supplier.name})`,
+        vatSum: drSql`${sourceDocuments.vatSum}`,
+        totalSum: drSql`${sourceDocuments.totalSum}`,
+      } as const;
+      const orderByArgs = sort
+        ? [drSql`${sortExprMap[sort]} ${dirNulls}`, desc(sourceDocuments.id)]
+        : [desc(sourceDocuments.parsedAt), desc(sourceDocuments.id)];
       const rows = await app.db
         .select({
           sd: sourceDocuments,
@@ -579,7 +672,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         )
         .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
         .where(where)
-        .orderBy(desc(sourceDocuments.parsedAt))
+        .orderBy(...orderByArgs)
         .limit(limit)
         .offset(offset);
       const [{ count } = { count: 0 }] = await app.db
