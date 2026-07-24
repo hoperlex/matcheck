@@ -22,6 +22,7 @@ import {
   deliveryPhotos,
   deliverySources,
   entityDeletions,
+  s3CleanupOutbox,
   shipments,
   sites,
   sourceDocumentItems,
@@ -912,45 +913,57 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         );
       }
 
-      // Удаляем S3-объекты фото перед каскадным удалением записей.
-      const photos = await app.db
-        .select({ s3Key: deliveryPhotos.s3Key, thumbS3Key: deliveryPhotos.thumbS3Key })
-        .from(deliveryPhotos)
-        .where(eq(deliveryPhotos.deliveryId, req.params.id));
-      for (const p of photos) {
-        try {
-          await deleteObject(p.s3Key);
-          if (p.thumbS3Key) await deleteObject(p.thumbS3Key);
-        } catch (err) {
-          req.log.warn({ err, s3Key: p.s3Key }, 'failed to delete s3 object');
-        }
-      }
-
-      // Сохраняем список привязанных УПД до удаления — после CASCADE
-      // delivery_sources они уже будут отвязаны, но их updated_at нужно
-      // забампать, чтобы /sync вернул их в Inbox инспектора («снова
-      // ожидаемая»).
-      const attachedSdIds = (
-        await app.db
-          .select({ sourceDocumentId: deliverySources.sourceDocumentId })
-          .from(deliverySources)
-          .where(eq(deliverySources.deliveryId, req.params.id))
-      ).map((r: { sourceDocumentId: string }) => r.sourceDocumentId);
-
-      // Журнал hard-delete + физическое удаление одной транзакцией:
-      // офлайн-клиент узнаёт об удалении через /sync.deletedIds.
+      // Удаление одной транзакцией + гарантированная дочистка S3 через outbox.
+      // Порядок критичен для сохранности фото:
+      //  1) SELECT ... FOR UPDATE блокирует строку приёмки. Конкурентная загрузка
+      //     фото (INSERT в delivery_photos) берёт на родителе FK-лок FOR KEY SHARE,
+      //     конфликтующий с FOR UPDATE → ждёт нас и падает после DELETE. Значит
+      //     между чтением ключей и cascade-delete новое фото не проскользнёт.
+      //  2) S3-ключи собираем ВНУТРИ транзакции (под блокировкой) и пишем в
+      //     s3_cleanup_outbox — воркер дочистит их позже. Недоступность Redis/S3
+      //     в этот момент задание не теряет (в отличие от прежнего sync-удаления).
+      //  3) touchSourceDocuments — в ТОЙ ЖЕ транзакции (touch.ts требует tx):
+      //     /sync вернёт привязанные УПД в Inbox инспектора.
       await app.db.transaction(async (tx) => {
+        const locked = await tx
+          .select({ id: deliveries.id })
+          .from(deliveries)
+          .where(eq(deliveries.id, req.params.id))
+          .for('update')
+          .limit(1);
+        if (locked.length === 0) return; // удалена конкурентно — no-op
+
+        const photos = await tx
+          .select({ s3Key: deliveryPhotos.s3Key, thumbS3Key: deliveryPhotos.thumbS3Key })
+          .from(deliveryPhotos)
+          .where(eq(deliveryPhotos.deliveryId, req.params.id));
+        const keySet = new Set<string>();
+        for (const p of photos) {
+          if (p.s3Key) keySet.add(p.s3Key);
+          if (p.thumbS3Key) keySet.add(p.thumbS3Key);
+        }
+
+        const attachedSdIds = (
+          await tx
+            .select({ sourceDocumentId: deliverySources.sourceDocumentId })
+            .from(deliverySources)
+            .where(eq(deliverySources.deliveryId, req.params.id))
+        ).map((r: { sourceDocumentId: string }) => r.sourceDocumentId);
+
         await tx.insert(entityDeletions).values({
           entityType: 'delivery',
           entityId: existing.id,
           siteId: existing.siteId,
           deletedByUserId: req.user?.id ?? null,
         });
+        if (keySet.size > 0) {
+          await tx.insert(s3CleanupOutbox).values(
+            Array.from(keySet, (s3Key) => ({ s3Key, entityType: 'delivery', entityId: existing.id })),
+          );
+        }
+        await touchSourceDocuments({ db: tx }, attachedSdIds);
         await tx.delete(deliveries).where(eq(deliveries.id, req.params.id));
       });
-      // После удаления delivery (и каскадного удаления junction-строк)
-      // бампаем updated_at УПД, чтобы они вернулись в Inbox инспектора.
-      await touchSourceDocuments(app, attachedSdIds);
       publishEvent(app, {
         type: 'delivery_deleted',
         entityId: req.params.id,

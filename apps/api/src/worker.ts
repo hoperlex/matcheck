@@ -11,12 +11,13 @@
 import './instrument.js'; // ПЕРВЫМ — Sentry.init до bullmq/postgres/undici
 import * as Sentry from '@sentry/node';
 import { Queue, Worker, type Job } from 'bullmq';
-import { and, eq, inArray, lt } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, lte, or } from 'drizzle-orm';
 import { logger } from './lib/logger.js';
 import { db } from './db/client.js';
 import {
   counterparties,
   materials,
+  s3CleanupOutbox,
   sourceBundles,
   sourceDocuments,
   sourceDocumentItems,
@@ -1638,6 +1639,85 @@ async function handleS3Cleanup(job: Job<S3CleanupJobData>): Promise<void> {
   log.info({ total: s3Keys.length, failed }, 's3 cleanup done');
 }
 
+// ─── S3 cleanup outbox consumer (Волна 1D) ──────────────────────────────────
+// Надёжная дочистка S3 при удалении приёмок/отгрузок. Задания пишутся в
+// s3_cleanup_outbox В ОДНОЙ транзакции с удалением операции (см. routes), поэтому
+// не зависят от доступности Redis в момент удаления. Здесь обрабатываем батчами:
+// FOR UPDATE SKIP LOCKED → пометка processing_at (лизинг) → идемпотентный DELETE
+// объекта в S3 → успех: строка удаляется; ошибка: attempts++ и next_attempt_at
+// с backoff. Зависшие processing (краш воркера) возвращаются в очередь по лизингу.
+const OUTBOX_BATCH = 50;
+const OUTBOX_LEASE_MS = 5 * 60 * 1000;
+const OUTBOX_MAX_ATTEMPTS = 12;
+const OUTBOX_INTERVAL_MS = 15 * 1000;
+
+async function processS3CleanupOutbox(): Promise<void> {
+  const log = logger.child({ task: 's3-cleanup-outbox' });
+  const now = new Date();
+  const leaseCutoff = new Date(now.getTime() - OUTBOX_LEASE_MS);
+
+  // 1) Атомарно забираем батч готовых строк и помечаем processing_at.
+  const claimed = await db.transaction(async (tx) => {
+    const rows = await tx
+      .select({
+        id: s3CleanupOutbox.id,
+        s3Key: s3CleanupOutbox.s3Key,
+        attempts: s3CleanupOutbox.attempts,
+      })
+      .from(s3CleanupOutbox)
+      .where(
+        and(
+          lte(s3CleanupOutbox.nextAttemptAt, now),
+          or(isNull(s3CleanupOutbox.processingAt), lt(s3CleanupOutbox.processingAt, leaseCutoff)),
+        ),
+      )
+      .orderBy(s3CleanupOutbox.createdAt)
+      .limit(OUTBOX_BATCH)
+      .for('update', { skipLocked: true });
+    if (rows.length === 0) return [] as typeof rows;
+    await tx
+      .update(s3CleanupOutbox)
+      .set({ processingAt: now })
+      .where(
+        inArray(
+          s3CleanupOutbox.id,
+          rows.map((r) => r.id),
+        ),
+      );
+    return rows;
+  });
+  if (claimed.length === 0) return;
+
+  // 2) Вне транзакции удаляем каждый ключ (идемпотентно: DELETE отсутствующего
+  //    объекта в S3 = успех). Успех → строка убирается; ошибка → backoff.
+  let ok = 0;
+  let failed = 0;
+  for (const row of claimed) {
+    try {
+      await deleteObject(row.s3Key);
+      await db.delete(s3CleanupOutbox).where(eq(s3CleanupOutbox.id, row.id));
+      ok += 1;
+    } catch (err) {
+      failed += 1;
+      const attempts = row.attempts + 1;
+      const parked = attempts >= OUTBOX_MAX_ATTEMPTS;
+      const backoffMs = Math.min(2 ** attempts * 1000, 60 * 60 * 1000);
+      const nextAttemptAt = new Date(Date.now() + (parked ? 24 * 60 * 60 * 1000 : backoffMs));
+      await db
+        .update(s3CleanupOutbox)
+        .set({
+          attempts,
+          nextAttemptAt,
+          lastError: err instanceof Error ? err.message : String(err),
+          processingAt: null,
+        })
+        .where(eq(s3CleanupOutbox.id, row.id));
+      log.warn({ err, s3Key: row.s3Key, attempts, parked }, 's3 cleanup outbox delete failed');
+    }
+  }
+  log.info({ ok, failed }, 's3 cleanup outbox batch done');
+}
+
 async function recoverStaleProcessing(): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_PROCESSING_MS);
   const stale = await db
@@ -1813,3 +1893,16 @@ setTimeout(() => {
     );
   }, PHOTO_ORPHAN_INTERVAL_MS).unref();
 }, PHOTO_ORPHAN_DELAY_MS).unref();
+
+// Periodic S3 cleanup outbox consumer (Волна 1D). Первый прогон через 10с от
+// старта, далее каждые 15с. unref — не держит процесс при завершении.
+setTimeout(() => {
+  void processS3CleanupOutbox().catch((err) =>
+    logger.error({ err }, 's3 cleanup outbox failed'),
+  );
+  setInterval(() => {
+    void processS3CleanupOutbox().catch((err) =>
+      logger.error({ err }, 's3 cleanup outbox failed'),
+    );
+  }, OUTBOX_INTERVAL_MS).unref();
+}, 10 * 1000).unref();

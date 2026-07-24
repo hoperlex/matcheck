@@ -1239,6 +1239,36 @@ export const entityDeletions = pgTable(
   ],
 );
 
+// ─── S3 cleanup outbox (transactional) ──────────────────────────────────────
+// Надёжная дочистка S3-объектов при удалении приёмки/отгрузки. Строки пишутся
+// В ТОЙ ЖЕ транзакции, что и удаление операции (см. routes/deliveries|shipments),
+// поэтому недоступность Redis/S3 в момент удаления не теряет задание — воркер
+// заберёт его позже. Обработка воркером: батч под FOR UPDATE SKIP LOCKED →
+// пометка processing_at → идемпотентный DELETE S3-объекта → успех: строка
+// удаляется; ошибка: attempts++ и next_attempt_at с backoff. processing_at —
+// лизинг: зависшие после краша воркера строки возвращаются в очередь по истечении.
+export const s3CleanupOutbox = pgTable(
+  's3_cleanup_outbox',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    s3Key: text('s3_key').notNull(),
+    // Трассировка источника (не FK — операция уже удалена каскадом).
+    entityType: text('entity_type').notNull(),
+    entityId: uuid('entity_id').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    lastError: text('last_error'),
+    processingAt: timestamp('processing_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Выборка готовых к обработке: next_attempt_at <= now() среди «свободных».
+    index('s3_cleanup_outbox_ready_idx')
+      .on(t.nextAttemptAt)
+      .where(sql`${t.processingAt} is null`),
+  ],
+);
+
 // ─── Share-tokens (публичные ссылки на просмотр приёмки/отгрузки) ─────────
 
 // Менеджер генерирует ссылку, отправляет внешнему получателю (например,

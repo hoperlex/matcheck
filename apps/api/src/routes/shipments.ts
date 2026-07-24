@@ -19,6 +19,7 @@ import {
 import {
   counterparties,
   entityDeletions,
+  s3CleanupOutbox,
   shipments,
   shipmentItems,
   shipmentPhotos,
@@ -890,41 +891,51 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         );
       }
 
-      const photos = await app.db
-        .select({ s3Key: shipmentPhotos.s3Key, thumbS3Key: shipmentPhotos.thumbS3Key })
-        .from(shipmentPhotos)
-        .where(eq(shipmentPhotos.shipmentId, req.params.id));
-      for (const p of photos) {
-        try {
-          await deleteObject(p.s3Key);
-          if (p.thumbS3Key) await deleteObject(p.thumbS3Key);
-        } catch (err) {
-          req.log.warn({ err, s3Key: p.s3Key }, 'failed to delete s3 object');
-        }
-      }
-
-      // Сохраняем список привязанных УПД до удаления — после CASCADE
-      // shipment_sources они будут отвязаны, и updated_at нужно
-      // забампать, чтобы /sync вернул УПД в Inbox инспектора.
-      const attachedSdIds = (
-        await app.db
-          .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
-          .from(shipmentSources)
-          .where(eq(shipmentSources.shipmentId, req.params.id))
-      ).map((r: { sourceDocumentId: string }) => r.sourceDocumentId);
-
-      // Журнал hard-delete + физическое удаление одной транзакцией:
-      // офлайн-клиент узнаёт об удалении через /sync.deletedIds.
+      // Удаление одной транзакцией + гарантированная дочистка S3 через outbox
+      // (симметрично deliveries — см. подробный комментарий там). FOR UPDATE на
+      // строке отгрузки блокирует конкурентную загрузку фото → между чтением
+      // ключей и cascade-delete новое фото не проскользнёт; S3-ключи в outbox
+      // чистит воркер; touch — в той же транзакции.
       await app.db.transaction(async (tx) => {
+        const locked = await tx
+          .select({ id: shipments.id })
+          .from(shipments)
+          .where(eq(shipments.id, req.params.id))
+          .for('update')
+          .limit(1);
+        if (locked.length === 0) return; // удалена конкурентно — no-op
+
+        const photos = await tx
+          .select({ s3Key: shipmentPhotos.s3Key, thumbS3Key: shipmentPhotos.thumbS3Key })
+          .from(shipmentPhotos)
+          .where(eq(shipmentPhotos.shipmentId, req.params.id));
+        const keySet = new Set<string>();
+        for (const p of photos) {
+          if (p.s3Key) keySet.add(p.s3Key);
+          if (p.thumbS3Key) keySet.add(p.thumbS3Key);
+        }
+
+        const attachedSdIds = (
+          await tx
+            .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
+            .from(shipmentSources)
+            .where(eq(shipmentSources.shipmentId, req.params.id))
+        ).map((r: { sourceDocumentId: string }) => r.sourceDocumentId);
+
         await tx.insert(entityDeletions).values({
           entityType: 'shipment',
           entityId: existing.id,
           siteId: existing.siteId,
           deletedByUserId: req.user?.id ?? null,
         });
+        if (keySet.size > 0) {
+          await tx.insert(s3CleanupOutbox).values(
+            Array.from(keySet, (s3Key) => ({ s3Key, entityType: 'shipment', entityId: existing.id })),
+          );
+        }
+        await touchSourceDocuments({ db: tx }, attachedSdIds);
         await tx.delete(shipments).where(eq(shipments.id, req.params.id));
       });
-      await touchSourceDocuments(app, attachedSdIds);
       publishEvent(app, {
         type: 'shipment_deleted',
         entityId: req.params.id,
