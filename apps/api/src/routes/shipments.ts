@@ -7,6 +7,7 @@ import {
   BulkDeleteRequestSchema,
   BulkDeleteResponseSchema,
   ErrorResponseSchema,
+  OperationCommentPatchSchema,
   ShipmentConflictResponseSchema,
   ShipmentKindSchema,
   ShipmentListResponseSchema,
@@ -15,6 +16,8 @@ import {
   ShipmentStatusCodeSchema,
   ShipmentUpsertSchema,
   ReviewRequestSchema,
+  mergeOperationComment,
+  normalizeRawComment,
   type PrimarySourceDocument,
 } from '@matcheck/contracts';
 import { computeItemsTotal, computeItemsVatSum } from '../lib/operation-sums.js';
@@ -1544,6 +1547,110 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       });
 
       const dto = await buildShipmentDto(app, s.id, req.user?.role);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
+      return dto;
+    },
+  );
+
+  // Зеркало PATCH /api/v1/deliveries/:id/comment — правка комментария с портала
+  // (admin/manager, только «Подтверждено МОЛ»). Мобильный клиент пишет отгрузкам
+  // тот же структурированный формат «1 Этап / 2 Этап / Примечание», что и
+  // приёмкам (DispatchStage1/2FormViewModel), поэтому логика общая: слот-мерж
+  // под FOR UPDATE, raw-режим для неразбираемых строк, version не бампаем.
+  // Подробное обоснование — в комментарии к endpoint'у приёмок.
+  app.patch(
+    '/api/v1/shipments/:id/comment',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: OperationCommentPatchSchema,
+        response: {
+          200: ShipmentSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      type Outcome =
+        | { kind: 'ok' }
+        | { kind: 'not_found' }
+        | { kind: 'conflict'; error: string; message: string; details?: unknown };
+
+      const outcome: Outcome = await app.db.transaction(async (tx) => {
+        const [s] = await tx
+          .select({
+            id: shipments.id,
+            comment: shipments.comment,
+            statusId: shipments.statusId,
+            pendingDeletionAt: shipments.pendingDeletionAt,
+          })
+          .from(shipments)
+          .where(eq(shipments.id, req.params.id))
+          .for('update')
+          .limit(1);
+        if (!s) return { kind: 'not_found' };
+        if (s.pendingDeletionAt !== null) {
+          return {
+            kind: 'conflict',
+            error: 'pending_deletion',
+            message: 'Документ помечен на удаление — мутации запрещены',
+          };
+        }
+
+        const [st] = await tx
+          .select({ code: statuses.code })
+          .from(statuses)
+          .where(eq(statuses.id, s.statusId))
+          .limit(1);
+        if (st?.code !== 'confirmed_mol') {
+          return {
+            kind: 'conflict',
+            error: 'stages_not_completed',
+            message: 'Комментарий можно править только после подтверждения МОЛ',
+          };
+        }
+
+        let next: string | null;
+        if (req.body.comment !== undefined) {
+          next = normalizeRawComment(req.body.comment);
+        } else {
+          const merged = mergeOperationComment(s.comment, req.body);
+          if (!merged.ok) {
+            return {
+              kind: 'conflict',
+              error: 'comment_not_canonical',
+              message: 'Комментарий изменился и больше не разбирается по этапам',
+              details: { currentComment: s.comment },
+            };
+          }
+          next = merged.comment;
+        }
+
+        await tx
+          .update(shipments)
+          .set({ comment: next, updatedAt: new Date() })
+          .where(eq(shipments.id, s.id));
+        return { kind: 'ok' };
+      });
+
+      if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'not_found' });
+      if (outcome.kind === 'conflict') {
+        return reply.code(409).send({
+          error: outcome.error,
+          message: outcome.message,
+          ...(outcome.details !== undefined ? { details: outcome.details } : {}),
+        });
+      }
+
+      publishEvent(app, {
+        type: 'shipment_updated',
+        entityId: req.params.id,
+        ts: new Date().toISOString(),
+      });
+
+      const dto = await buildShipmentDto(app, req.params.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
       return dto;
     },

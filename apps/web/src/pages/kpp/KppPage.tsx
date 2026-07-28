@@ -57,7 +57,8 @@ import {
   upsertServerSnapshot,
 } from '../../services/deliveries';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
-import { runSync } from '../../services/sync';
+import { runSyncIfIdle, runSyncUnlocked } from '../../services/sync';
+import { runExclusive } from '../../services/syncLock';
 import { db } from '../../lib/db';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
@@ -71,7 +72,7 @@ import { formatStageTime } from './stageTime';
 import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
-import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
+import { OperationCommentSection } from '../../shared/ui/OperationCommentSection';
 import {
   formatMoneyRu,
   inputNumberFormatterRu,
@@ -214,6 +215,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const [editingNameKey, setEditingNameKey] = useState<string | null>(null);
   const [plate, setPlate] = useState('');
   const [comment, setComment] = useState('');
+  // Флаги блока «Комментарий»: незакоммиченный ввод в поле «текстом целиком»
+  // (защита от гидратации поллингом) и идущий PATCH /:id/comment (блокирует
+  // футер, чтобы два пути записи не переплетались).
+  const [commentRawDirty, setCommentRawDirty] = useState(false);
+  const [commentSaving, setCommentSaving] = useState(false);
   const [siteId, setSiteId] = useState<string | null>(inspectorSiteId);
   // Получатель приёмки: подрядчик ИЛИ МОЛ собственной бригады. CHECK на сервере
   // не позволяет заполнить оба одновременно. Переключатель — Segmented в карточке.
@@ -297,10 +303,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
 
   const deliveryQuery = useQuery({
     queryKey: ['deliveries', deliveryId],
-    queryFn: async (): Promise<Delivery> => {
+    queryFn: async ({ signal }): Promise<Delivery> => {
       if (!deliveryId) throw new Error('no delivery id');
       try {
-        const remote = await api.get<Delivery>(`/deliveries/${deliveryId}`);
+        // signal — чтобы queryClient.cancelQueries() перед PATCH комментария
+        // реально обрывал запрос: иначе запоздавший ответ записал бы в IDB
+        // устаревший snapshot поверх свежей правки.
+        const remote = await api.get<Delivery>(`/deliveries/${deliveryId}`, { signal });
         await upsertServerSnapshot([remote]);
         return remote;
       } catch (err) {
@@ -472,7 +481,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       hydratedIdRef.current = d.id;
       lastSyncedUpdatedAtRef.current = d.updatedAt;
       setPlate(d.vehiclePlate ?? '');
-      setComment(d.comment ?? '');
+      // Пока менеджер набирает комментарий в поле «текстом целиком», поллинг не
+      // должен затирать ввод. Остальные поля гидратируются как раньше.
+      if (!commentRawDirty) setComment(d.comment ?? '');
       // siteId/contractorId подхватываются один раз — последующее редактирование
       // ведётся через локальный state. Для inspector_kpp siteId всегда фиксирован
       // на назначенном объекте.
@@ -525,7 +536,16 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         .then(setSelectedUpd)
         .catch(() => undefined);
     }
-  }, [deliveryQuery.data, selectedUpd, isInspector, inspectorSiteId]);
+  }, [deliveryQuery.data, selectedUpd, isInspector, inspectorSiteId, commentRawDirty]);
+
+  // Свежий серверный комментарий. Обновляется и после GET, и после PATCH
+  // /:id/comment — buildPatch читает именно его, а не loadedDelivery.comment из
+  // кеша React Query: между PATCH и ближайшим refetch кеш ещё хранит старую
+  // строку, и футерное «Сохранить» откатило бы правку.
+  const latestServerCommentRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (deliveryQuery.data) latestServerCommentRef.current = deliveryQuery.data.comment;
+  }, [deliveryQuery.data]);
 
   // Гидратация формы в режиме isNew по выбранному УПД. items/contractorId/siteId
   // подставляются из SourceDocumentDetail один раз — далее редактирование идёт
@@ -645,7 +665,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           });
           void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
         });
-        void runSync();
+        // Fire-and-forget: если лок занят (идёт sync или правка комментария) —
+        // пропускаем, фото догрузится следующим проходом. Ждущий вариант
+        // выстроил бы очередь из нескольких полных синхронизаций.
+        void runSyncIfIdle();
       } catch (err) {
         message.error(`Не удалось добавить фото: ${(err as Error).message}`);
       }
@@ -708,16 +731,15 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const buildPatch = (nextCode: DeliveryStatusCode): Partial<Delivery> => {
     if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
     const nextStatus: Status = { ...loadedDelivery.status, code: nextCode };
-    // Если серверный comment структурирован (multiline «1 Этап:…/2 Этап:…»
-    // от мобильного клиента), отправляем его как есть, минуя local state.
-    // Иначе мы рискуем затереть свежее обновление от мобилы (2 Этап,
-    // дописанный после открытия страницы): refetch не обновляет local
-    // state, save отправил бы устаревший текст.
-    const serverComment = loadedDelivery.comment ?? '';
-    const serverParsed = parseDeliveryComment(serverComment);
-    const effectiveComment = serverParsed.hasStructure
-      ? serverComment || null
-      : (comment || null);
+    // Комментарий футер отправляет ТОЛЬКО при создании приёмки. У существующего
+    // документа он правится узким PATCH /:id/comment (admin/manager, статус
+    // «Подтверждено МОЛ»), а сюда подставляется свежее серверное значение из
+    // ref. Иначе футер стал бы обходным путём мимо прав и статусного гейта и,
+    // как раньше, мог затереть «2 Этап», дописанный мобилой после открытия
+    // страницы: refetch не обновляет local state.
+    const effectiveComment = isNew
+      ? comment || null
+      : (latestServerCommentRef.current ?? loadedDelivery.comment ?? null);
     return {
       status: nextStatus,
       siteId: siteId ?? loadedDelivery.siteId,
@@ -759,22 +781,28 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     };
   };
 
-  const persistStatus = async (nextCode: DeliveryStatusCode) => {
-    if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
-    await applyLocalEdit(loadedDelivery.id, buildPatch(nextCode));
-    await enqueueMutation({
-      id: crypto.randomUUID(),
-      kind: 'delivery_upsert',
-      entityId: loadedDelivery.id,
-      baseVersion: loadedDelivery.version,
-      payload: null,
+  const persistStatus = async (nextCode: DeliveryStatusCode) =>
+    // Вся цепочка — под общим локом: формирование патча, запись overlay в IDB,
+    // постановка в очередь и push. Иначе PATCH /:id/comment (в том числе из
+    // соседней вкладки) может вклиниться между applyLocalEdit и push и получить
+    // затирание свежего комментария уже отправленным payload'ом.
+    // runSyncUnlocked, а не runSync: Web Locks не реентерабельны.
+    runExclusive(async () => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      await applyLocalEdit(loadedDelivery.id, buildPatch(nextCode));
+      await enqueueMutation({
+        id: crypto.randomUUID(),
+        kind: 'delivery_upsert',
+        entityId: loadedDelivery.id,
+        baseVersion: loadedDelivery.version,
+        payload: null,
+      });
+      // Ждём пока mutation физически уйдёт на сервер и придёт свежий
+      // snapshot через pullSync. Без await invalidateQueries в onSuccess
+      // делает refetch /deliveries раньше, чем mutation push доехал, и
+      // таблица показывает старый siteId/contractorId до F5.
+      await runSyncUnlocked();
     });
-    // Ждём пока mutation физически уйдёт на сервер и придёт свежий
-    // snapshot через pullSync. Без await invalidateQueries в onSuccess
-    // делает refetch /deliveries раньше, чем mutation push доехал, и
-    // таблица показывает старый siteId/contractorId до F5.
-    await runSync();
-  };
 
   const save = useMutation({
     mutationFn: async () => {
@@ -1777,84 +1805,34 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           )}
         </Card>
 
-        {(() => {
-          // Мобильный пишет comment как multiline с маркерами «1 Этап: "…"»,
-          // «2 Этап: "…"», «Примечание: …» (см. parseDeliveryComment). Если
-          // маркеры найдены — рендерим read-only-секции по этапам. Иначе
-          // (приёмка, созданная/правленая с веба) — оставляем общий textarea.
-          //
-          // Источник для парсинга — серверный loadedDelivery.comment (он
-          // обновляется при refetch каждые 5 сек), а не local state `comment`:
-          // последний фиксируется при первой гидратации и не подтягивает
-          // обновления от мобилы (например 2 Этап, дописанный после
-          // открытия страницы — иначе появляется только после F5).
-          const sourceComment =
-            loadedDelivery?.comment !== undefined && loadedDelivery?.comment !== null
-              ? loadedDelivery.comment
-              : comment;
-          const parsed = parseDeliveryComment(sourceComment);
-          if (parsed.hasStructure) {
-            const empty = (
-              <Typography.Text type="secondary">— нет —</Typography.Text>
-            );
-            return (
-              <Collapse
-                size="small"
-                // Свёрнут по умолчанию, как и Фото — экономия места в Modal.
-                defaultActiveKey={[]}
-                items={[
-                  {
-                    key: 'comment',
-                    label: 'Комментарий',
-                    children: (
-                      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                        <div>
-                          <Typography.Text strong>1 Этап</Typography.Text>
-                          <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
-                            {parsed.stage1 ?? empty}
-                          </div>
-                        </div>
-                        <div>
-                          <Typography.Text strong>2 Этап</Typography.Text>
-                          <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
-                            {parsed.stage2 ?? empty}
-                          </div>
-                        </div>
-                        {parsed.note !== null && (
-                          <div>
-                            <Typography.Text strong>Примечание</Typography.Text>
-                            <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
-                              {parsed.note}
-                            </div>
-                          </div>
-                        )}
-                      </Space>
-                    ),
-                  },
-                ]}
-              />
-            );
-          }
-          return (
-            <Collapse
-              size="small"
-              items={[
-                {
-                  key: 'comment',
-                  label: 'Комментарий',
-                  children: (
-                    <Input.TextArea
-                      rows={3}
-                      value={comment}
-                      onChange={(e) => setComment(e.target.value)}
-                      disabled={isContractor}
-                    />
-                  ),
-                },
-              ]}
-            />
-          );
-        })()}
+        {/* Источник для парсинга — серверный comment (обновляется рефетчем
+            каждые 5 сек), а не local state: последний фиксируется при первой
+            гидратации и не подтягивает обновления от мобилы (например 2 Этап,
+            дописанный после открытия страницы). */}
+        <OperationCommentSection
+          entityType="delivery"
+          id={loadedDelivery.id}
+          statusCode={loadedDelivery.status.code}
+          isNew={isNew}
+          isContractor={isContractor}
+          serverComment={loadedDelivery.comment ?? (isNew ? comment || null : null)}
+          rawValue={comment}
+          onRawChange={setComment}
+          onRawDirtyChange={setCommentRawDirty}
+          pendingDeletion={isPending}
+          externalSaving={save.isPending || confirmMol.isPending}
+          onPendingChange={setCommentSaving}
+          onSaved={(dto) => {
+            // Синхронно, ещё под локом: кеш React Query и ref — источники, из
+            // которых футерное «Сохранить» берёт комментарий; lastSyncedUpdatedAt
+            // пиним, чтобы наш же PATCH не вызвал ре-гидратацию confirmed_mol и
+            // не сбросил несохранённые правки материалов.
+            queryClient.setQueryData(['deliveries', deliveryId], dto);
+            latestServerCommentRef.current = dto.comment;
+            lastSyncedUpdatedAtRef.current = dto.updatedAt;
+            setComment(dto.comment ?? '');
+          }}
+        />
 
         {(() => {
           const isConfirmed = loadedDelivery.status.code === 'confirmed_mol';
@@ -1864,10 +1842,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               ? `Подтверждено: ${loadedDelivery.confirmedByMolUserEmail ?? '—'}, ${formatMolDate(loadedDelivery.confirmedByMolAt)}`
               : (verifyReason ?? 'Подтвердить документ как МОЛ');
           // Помеченный документ — read-only: блокируем Save и Подтвердить МОЛ.
-          const saveDisabled = !!verifyReason || isPending;
+          const saveDisabled = !!verifyReason || isPending || commentSaving;
           // В режиме isNew подтверждение МОЛ недоступно — сначала должна
           // появиться сохранённая запись со статусом filled.
-          const confirmDisabled = isNew || isConfirmed || !!verifyReason || isPending;
+          const confirmDisabled =
+            isNew || isConfirmed || !!verifyReason || isPending || commentSaving;
           // «Удалить» в UI = soft-delete (mark-deletion на бэке): запись
           // уходит в корзину, можно восстановить. Доступно для filled/
           // confirmed_mol в активном режиме.

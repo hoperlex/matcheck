@@ -1,6 +1,7 @@
 import { db, SYSTEM_SITE_ID, type DeliveryRecord, type MutationRecord } from '../lib/db';
 import type { Delivery, DeliveryStatusCode, DeliveryUpsert, Status } from '@matcheck/contracts';
 import { api } from './api';
+import { isStaleSnapshot } from './snapshotFreshness';
 
 const PLACEHOLDER_NOT_FILLED: Status = {
   id: '',
@@ -60,6 +61,9 @@ export async function upsertServerSnapshot(items: Delivery[]): Promise<void> {
   for (const item of items) {
     const existing = await tx.store.get(item.id);
     if (existing) {
+      // Запоздавший polling-GET не должен затирать более свежий snapshot
+      // (например, только что применённую правку комментария).
+      if (isStaleSnapshot(existing.server, item)) continue;
       await tx.store.put({
         ...existing,
         server: item,
@@ -76,6 +80,41 @@ export async function upsertServerSnapshot(items: Delivery[]): Promise<void> {
         lastSyncedAt: Date.now(),
       });
     }
+  }
+  await tx.done;
+}
+
+/**
+ * Применение DTO, полученного узким PATCH-ом (например /:id/comment), ОДНОЙ
+ * IDB-транзакцией: снимок + чистка local-overlay.
+ *
+ * Почему мало одного upsertServerSnapshot: в effectiveState overlay побеждает
+ * server (`{...r.server, ...r.local}`), а `comment` входит в overlay футерного
+ * сохранения. Оставленный там стейл-ключ вернул бы старый текст при следующем
+ * push из очереди. Ключи, которых в overlay нет, не добавляем — иначе overlay
+ * начнёт навязывать значение, которого пользователь не менял.
+ *
+ * Вызывать под локом syncLock — иначе между этой записью и push'ем очереди
+ * успевает вклиниться фоновый sync.
+ */
+export async function reconcileServerSnapshot(item: Delivery): Promise<void> {
+  const d = await db();
+  const tx = d.transaction('deliveries', 'readwrite');
+  const existing = await tx.store.get(item.id);
+  if (!isStaleSnapshot(existing?.server, item)) {
+    const local =
+      existing?.local && 'comment' in existing.local
+        ? { ...existing.local, comment: item.comment }
+        : (existing?.local ?? null);
+    await tx.store.put({
+      id: item.id,
+      tombstone: existing?.tombstone ?? false,
+      ...existing,
+      server: item,
+      local,
+      version: item.version,
+      lastSyncedAt: Date.now(),
+    });
   }
   await tx.done;
 }

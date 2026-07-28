@@ -176,29 +176,37 @@ async function request<T>(
 // opts.timeoutMs: number — свой бюджет; null — без таймаута (длинные операции);
 // omit — дефолт 20с. Нужен для распознавания (600с), sync почты/ЭДО, теста
 // LLM-провайдера — иначе дефолт оборвал бы штатную длинную операцию.
-type ReqOpts = { timeoutMs?: number | null };
+// opts.signal: AbortSignal — внешняя отмена. Нужен для queryFn детальных
+// запросов: queryClient.cancelQueries() сам fetch не прерывает, и запоздавший
+// polling-GET успевал записать в IndexedDB устаревший snapshot поверх свежей
+// правки. request объединяет его со своим таймаут-контроллером.
+type ReqOpts = { timeoutMs?: number | null; signal?: AbortSignal };
 export const api = {
-  get: <T>(path: string, opts?: ReqOpts) => request<T>(path, { timeoutMs: opts?.timeoutMs }),
+  get: <T>(path: string, opts?: ReqOpts) =>
+    request<T>(path, { timeoutMs: opts?.timeoutMs, signal: opts?.signal }),
   post: <T>(path: string, body?: unknown, opts?: ReqOpts) =>
     request<T>(path, {
       method: 'POST',
       body: body !== undefined ? JSON.stringify(body) : undefined,
       timeoutMs: opts?.timeoutMs,
+      signal: opts?.signal,
     }),
   put: <T>(path: string, body?: unknown, opts?: ReqOpts) =>
     request<T>(path, {
       method: 'PUT',
       body: body !== undefined ? JSON.stringify(body) : undefined,
       timeoutMs: opts?.timeoutMs,
+      signal: opts?.signal,
     }),
   patch: <T>(path: string, body?: unknown, opts?: ReqOpts) =>
     request<T>(path, {
       method: 'PATCH',
       body: body !== undefined ? JSON.stringify(body) : undefined,
       timeoutMs: opts?.timeoutMs,
+      signal: opts?.signal,
     }),
   delete: <T>(path: string, opts?: ReqOpts) =>
-    request<T>(path, { method: 'DELETE', timeoutMs: opts?.timeoutMs }),
+    request<T>(path, { method: 'DELETE', timeoutMs: opts?.timeoutMs, signal: opts?.signal }),
 };
 
 /**
