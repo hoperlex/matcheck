@@ -58,9 +58,7 @@ import {
 } from '../../services/shipments';
 import { AssetTag } from '../../shared/ui/AssetTag';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
-import { runSyncIfIdle, runSyncUnlocked } from '../../services/sync';
-import { runExclusive } from '../../services/syncLock';
-import { OperationCommentSection } from '../../shared/ui/OperationCommentSection';
+import { runSync } from '../../services/sync';
 import { db, SYSTEM_SITE_ID } from '../../lib/db';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
@@ -206,8 +204,6 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const [plate, setPlate] = useState('');
   const [driverName, setDriverName] = useState('');
   const [comment, setComment] = useState('');
-  // Идёт PATCH /:id/comment — блокирует футер, чтобы два пути записи не переплетались.
-  const [commentSaving, setCommentSaving] = useState(false);
   // «Тип отгрузки» — приходит из shipments.purpose (миграция 0050). Заполняется
   // инспектором с мобилы в dropdown'е, менеджер может править на портале.
   // 4 значения см. PURPOSE_OPTIONS ниже + произвольный текст для legacy.
@@ -280,13 +276,10 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
 
   const shipmentQuery = useQuery({
     queryKey: ['shipments', shipmentId],
-    queryFn: async ({ signal }): Promise<Shipment> => {
+    queryFn: async (): Promise<Shipment> => {
       if (!shipmentId) throw new Error('no shipment id');
       try {
-        // signal — чтобы queryClient.cancelQueries() перед PATCH комментария
-        // реально обрывал запрос: иначе запоздавший ответ записал бы в IDB
-        // устаревший snapshot поверх свежей правки.
-        const remote = await api.get<Shipment>(`/shipments/${shipmentId}`, { signal });
+        const remote = await api.get<Shipment>(`/shipments/${shipmentId}`);
         await upsertServerSnapshot([remote]);
         return remote;
       } catch (err) {
@@ -390,15 +383,6 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       );
     }
   }, [shipmentQuery.data, isInspector, inspectorSiteId]);
-
-  // Свежий серверный комментарий. Обновляется и после GET, и после PATCH
-  // /:id/comment — buildPatch читает именно его, а не loadedShipment.comment из
-  // кеша React Query: между PATCH и ближайшим refetch кеш ещё хранит старую
-  // строку, и футерное «Сохранить» откатило бы правку.
-  const latestServerCommentRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (shipmentQuery.data) latestServerCommentRef.current = shipmentQuery.data.comment;
-  }, [shipmentQuery.data]);
 
   // В режиме isNew серверной записи ещё нет — собираем «виртуальный» Shipment
   // из дефолтов, чтобы существующий JSX (status, photos, version и т. д.) работал
@@ -571,10 +555,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           });
           void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
         });
-        // Fire-and-forget: если лок занят (идёт sync или правка комментария) —
-        // пропускаем, фото догрузится следующим проходом. Ждущий вариант
-        // выстроил бы очередь из нескольких полных синхронизаций.
-        void runSyncIfIdle();
+        void runSync();
       } catch (err) {
         message.error(`Не удалось добавить фото: ${(err as Error).message}`);
       }
@@ -644,17 +625,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       vehiclePlate: plate || null,
       driverName: driverName || null,
       shippedAt: loadedShipment.shippedAt ?? new Date().toISOString(),
-      // Комментарий футер отправляет ТОЛЬКО при создании отгрузки. У существующего
-      // документа он правится узким PATCH /:id/comment (admin/manager, статус
-      // «Подтверждено МОЛ»), а сюда подставляется свежее серверное значение из
-      // ref. Иначе футер стал бы обходным путём мимо прав и статусного гейта и
-      // затирал бы структурированный комментарий с мобилы: local state
-      // фиксируется при первой гидратации и обновления «2 Этапа» не подхватывает.
-      // Ключ нельзя просто опустить — updateShipment пишет `input.comment ?? null`
-      // и занулит колонку.
-      comment: isNew
-        ? comment || null
-        : (latestServerCommentRef.current ?? loadedShipment.comment ?? null),
+      comment: comment || null,
       purpose: purpose || null,
       items: items
         .filter((i) => i.nameRaw.trim().length > 0)
@@ -685,28 +656,22 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     };
   };
 
-  const persistStatus = async (nextCode: ShipmentStatusCode) =>
-    // Вся цепочка — под общим локом: формирование патча, запись overlay в IDB,
-    // постановка в очередь и push. Иначе PATCH /:id/comment (в том числе из
-    // соседней вкладки) может вклиниться между applyLocalEdit и push и получить
-    // затирание свежего комментария уже отправленным payload'ом.
-    // runSyncUnlocked, а не runSync: Web Locks не реентерабельны.
-    runExclusive(async () => {
-      if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
-      await applyLocalEdit(loadedShipment.id, buildPatch(nextCode));
-      await enqueueMutation({
-        id: crypto.randomUUID(),
-        kind: 'shipment_upsert',
-        entityId: loadedShipment.id,
-        baseVersion: loadedShipment.version,
-        payload: null,
-      });
-      // Ждём пока mutation физически уйдёт на сервер и придёт свежий
-      // snapshot через pullSync. Без await invalidateQueries в onSuccess
-      // делает refetch раньше, чем push доехал, и таблица показывает
-      // старый siteId/getReceiver до F5.
-      await runSyncUnlocked();
+  const persistStatus = async (nextCode: ShipmentStatusCode) => {
+    if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
+    await applyLocalEdit(loadedShipment.id, buildPatch(nextCode));
+    await enqueueMutation({
+      id: crypto.randomUUID(),
+      kind: 'shipment_upsert',
+      entityId: loadedShipment.id,
+      baseVersion: loadedShipment.version,
+      payload: null,
     });
+    // Ждём пока mutation физически уйдёт на сервер и придёт свежий
+    // snapshot через pullSync. Без await invalidateQueries в onSuccess
+    // делает refetch раньше, чем push доехал, и таблица показывает
+    // старый siteId/getReceiver до F5.
+    await runSync();
+  };
 
   const save = useMutation({
     mutationFn: async () => {
@@ -1761,32 +1726,22 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           )}
         </Card>
 
-        {/* Источник для парсинга — серверный comment (обновляется рефетчем
-            каждые 5 сек), а не local state: последний фиксируется при первой
-            гидратации и не подтягивает обновления от мобилы (например 2 Этап,
-            дописанный после открытия страницы).
-            onRawDirtyChange не передаём: гидратация формы отгрузки одноразовая
-            (hydratedIdRef), поллинг setComment уже не вызывает — затирать ввод
-            нечем, в отличие от KppPage с ре-гидратацией по updatedAt. */}
-        <OperationCommentSection
-          entityType="shipment"
-          id={loadedShipment.id}
-          statusCode={loadedShipment.status.code}
-          isNew={isNew}
-          isContractor={isContractor}
-          serverComment={loadedShipment.comment ?? (isNew ? comment || null : null)}
-          rawValue={comment}
-          onRawChange={setComment}
-          pendingDeletion={isPending}
-          externalSaving={save.isPending || confirmMol.isPending}
-          onPendingChange={setCommentSaving}
-          onSaved={(dto) => {
-            // Синхронно, ещё под локом: кеш React Query и ref — источники, из
-            // которых футерное «Сохранить» берёт комментарий.
-            queryClient.setQueryData(['shipments', shipmentId], dto);
-            latestServerCommentRef.current = dto.comment;
-            setComment(dto.comment ?? '');
-          }}
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: 'comment',
+              label: 'Комментарий',
+              children: (
+                <Input.TextArea
+                  rows={3}
+                  value={comment}
+                  onChange={(e) => setComment(e.target.value)}
+                  disabled={isContractor}
+                />
+              ),
+            },
+          ]}
         />
 
         {(() => {
@@ -1797,11 +1752,10 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               ? `Подтверждено: ${loadedShipment.confirmedByMolUserEmail ?? '—'}, ${formatMolDate(loadedShipment.confirmedByMolAt)}`
               : (verifyReason ?? 'Подтвердить документ как МОЛ');
           // Помеченный документ — read-only: блокируем Save и Подтвердить МОЛ.
-          const saveDisabled = !!verifyReason || isPending || commentSaving;
+          const saveDisabled = !!verifyReason || isPending;
           // В режиме isNew подтверждение МОЛ недоступно — сначала должна
           // появиться сохранённая запись со статусом shipped.
-          const confirmDisabled =
-            isNew || isConfirmed || !!verifyReason || isPending || commentSaving;
+          const confirmDisabled = isNew || isConfirmed || !!verifyReason || isPending;
           const canMarkDeletion =
             !isPending &&
             !isContractor &&

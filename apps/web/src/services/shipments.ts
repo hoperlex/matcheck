@@ -7,7 +7,6 @@ import type {
   Status,
 } from '@matcheck/contracts';
 import { api } from './api';
-import { isStaleSnapshot } from './snapshotFreshness';
 
 const PLACEHOLDER_NOT_FILLED: Status = {
   id: '',
@@ -66,9 +65,6 @@ export async function upsertServerSnapshot(items: Shipment[]): Promise<void> {
   for (const item of items) {
     const existing = await tx.store.get(item.id);
     if (existing) {
-      // Запоздавший polling-GET не должен затирать более свежий snapshot
-      // (например, только что применённую правку комментария).
-      if (isStaleSnapshot(existing.server, item)) continue;
       await tx.store.put({
         ...existing,
         server: item,
@@ -85,33 +81,6 @@ export async function upsertServerSnapshot(items: Shipment[]): Promise<void> {
         lastSyncedAt: Date.now(),
       });
     }
-  }
-  await tx.done;
-}
-
-/**
- * Зеркало reconcileServerSnapshot из services/deliveries.ts — применение DTO
- * узкого PATCH-а одной IDB-транзакцией (снимок + чистка стейл-ключа comment
- * в local-overlay). Вызывать под локом syncLock.
- */
-export async function reconcileServerSnapshot(item: Shipment): Promise<void> {
-  const d = await db();
-  const tx = d.transaction('shipments', 'readwrite');
-  const existing = await tx.store.get(item.id);
-  if (!isStaleSnapshot(existing?.server, item)) {
-    const local =
-      existing?.local && 'comment' in existing.local
-        ? { ...existing.local, comment: item.comment }
-        : (existing?.local ?? null);
-    await tx.store.put({
-      id: item.id,
-      tombstone: existing?.tombstone ?? false,
-      ...existing,
-      server: item,
-      local,
-      version: item.version,
-      lastSyncedAt: Date.now(),
-    });
   }
   await tx.done;
 }

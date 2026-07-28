@@ -13,10 +13,7 @@ import {
   DeliveryStatusCodeSchema,
   DeliveryUpsertSchema,
   ErrorResponseSchema,
-  OperationCommentPatchSchema,
   ReviewRequestSchema,
-  mergeOperationComment,
-  normalizeRawComment,
   type PrimarySourceDocument,
 } from '@matcheck/contracts';
 import { computeItemsTotal, computeItemsVatSum } from '../lib/operation-sums.js';
@@ -1941,133 +1938,6 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       });
 
       const dto = await buildDeliveryDto(app, d.id, req.user?.role);
-      if (!dto) return reply.code(404).send({ error: 'not_found' });
-      return dto;
-    },
-  );
-
-  // Правка комментария с портала (admin/manager, только «Подтверждено МОЛ»).
-  //
-  // Почему отдельный endpoint, а не общий upsert POST /api/v1/deliveries:
-  // тот делает wipe-and-reinsert delivery_items (уничтожил бы строки, внесённые
-  // инспектором), требует statusCode и открыт мобильному inspector_kpp — RBAC
-  // туда не навесить. Тот же приём, что у /flags и /link-source.
-  //
-  // Два режима тела (XOR, см. OperationCommentPatchSchema):
-  //   • слотовый {stage1?,stage2?,note?} — сервер читает ТЕКУЩУЮ строку под
-  //     FOR UPDATE, подменяет только присланные слоты и пересобирает. Так
-  //     правка «Примечания» с портала не откатывает «2 Этап», который мобила
-  //     дописала уже после того, как менеджер открыл карточку.
-  //   • raw {comment} — строка целиком, байт-в-байт. Для комментариев, которые
-  //     не разбираются по этапам без потерь (legacy, ввод с веба).
-  //
-  // version НЕ бампаем (как в /flags): мобильный клиент на 409 OCC паркует
-  // мутацию до ручного разрешения конфликта инспектором, и каждая правка
-  // комментария выбивала бы его с открытой формы. Для доставки правки на
-  // мобилу достаточно updated_at — /sync фильтрует по нему.
-  app.patch(
-    '/api/v1/deliveries/:id/comment',
-    {
-      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
-      schema: {
-        params: z.object({ id: z.string().uuid() }),
-        body: OperationCommentPatchSchema,
-        response: {
-          200: DeliverySchema,
-          404: ErrorResponseSchema,
-          409: ErrorResponseSchema,
-        },
-      },
-    },
-    async (req, reply) => {
-      // Все проверки — ВНУТРИ транзакции и ПОСЛЕ блокировки строки: иначе между
-      // проверкой и UPDATE документ успевают пометить на удаление или сменить
-      // статус, а два параллельных слот-патча теряют одну из правок.
-      type Outcome =
-        | { kind: 'ok' }
-        | { kind: 'not_found' }
-        | { kind: 'conflict'; error: string; message: string; details?: unknown };
-
-      const outcome: Outcome = await app.db.transaction(async (tx) => {
-        const [d] = await tx
-          .select({
-            id: deliveries.id,
-            comment: deliveries.comment,
-            statusId: deliveries.statusId,
-            pendingDeletionAt: deliveries.pendingDeletionAt,
-          })
-          .from(deliveries)
-          .where(eq(deliveries.id, req.params.id))
-          .for('update')
-          .limit(1);
-        if (!d) return { kind: 'not_found' };
-        if (d.pendingDeletionAt !== null) {
-          return {
-            kind: 'conflict',
-            error: 'pending_deletion',
-            message: 'Документ помечен на удаление — мутации запрещены',
-          };
-        }
-
-        // Гейт зрелости: править комментарий можно только у завершённой операции
-        // («Подтверждено МОЛ»). Сюда же попадает ручной внос/вынос — мобила
-        // создаёт его сразу подтверждённым, минуя этапы, и это тоже завершённая
-        // операция. Отдельных признаков «этап 1/2 пройден» в БД нет.
-        const [st] = await tx
-          .select({ code: statuses.code })
-          .from(statuses)
-          .where(eq(statuses.id, d.statusId))
-          .limit(1);
-        if (st?.code !== 'confirmed_mol') {
-          return {
-            kind: 'conflict',
-            error: 'stages_not_completed',
-            message: 'Комментарий можно править только после подтверждения МОЛ',
-          };
-        }
-
-        let next: string | null;
-        if (req.body.comment !== undefined) {
-          next = normalizeRawComment(req.body.comment);
-        } else {
-          const merged = mergeOperationComment(d.comment, req.body);
-          if (!merged.ok) {
-            // Строка не разбирается по этапам без потерь (legacy-хвост, лишние
-            // пробелы). Слепая пересборка съела бы неизвестный текст — отдаём
-            // клиенту актуальную строку, он предложит править её целиком.
-            return {
-              kind: 'conflict',
-              error: 'comment_not_canonical',
-              message: 'Комментарий изменился и больше не разбирается по этапам',
-              details: { currentComment: d.comment },
-            };
-          }
-          next = merged.comment;
-        }
-
-        await tx
-          .update(deliveries)
-          .set({ comment: next, updatedAt: new Date() })
-          .where(eq(deliveries.id, d.id));
-        return { kind: 'ok' };
-      });
-
-      if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'not_found' });
-      if (outcome.kind === 'conflict') {
-        return reply.code(409).send({
-          error: outcome.error,
-          message: outcome.message,
-          ...(outcome.details !== undefined ? { details: outcome.details } : {}),
-        });
-      }
-
-      publishEvent(app, {
-        type: 'delivery_updated',
-        entityId: req.params.id,
-        ts: new Date().toISOString(),
-      });
-
-      const dto = await buildDeliveryDto(app, req.params.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
       return dto;
     },

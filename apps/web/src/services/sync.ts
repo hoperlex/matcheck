@@ -9,9 +9,9 @@ import {
 import { getSetting, setSetting } from '../lib/db';
 import { useAuthStore } from '../stores/auth';
 import { retryPendingUploads } from './photoPipeline';
-import { runExclusive, tryRunExclusive } from './syncLock';
 
 const CURSOR_KEY = 'sync_cursor';
+const RUNNING = { value: false };
 
 export async function pullSync(): Promise<void> {
   const cursor = await getSetting<string>(CURSOR_KEY);
@@ -99,13 +99,10 @@ export async function pushPendingMutations(): Promise<{ pushed: number; conflict
   return { pushed, conflicts };
 }
 
-/**
- * Тело синхронизации БЕЗ захвата лока. Вызывать только из контекста, который
- * лок уже держит (см. persistStatus в KppPage/ShipmentPage): Web Locks не
- * реентерабельны — повторный запрос того же лока изнутри даст дедлок.
- */
-export async function runSyncUnlocked(): Promise<void> {
+export async function runSync(): Promise<void> {
+  if (RUNNING.value) return;
   if (!useAuthStore.getState().accessToken) return;
+  RUNNING.value = true;
   try {
     await pushPendingMutations();
     await pullSync();
@@ -119,39 +116,21 @@ export async function runSyncUnlocked(): Promise<void> {
       return;
     }
     console.warn('sync failed', err);
+  } finally {
+    RUNNING.value = false;
   }
-}
-
-/**
- * Явный sync: ДОЖИДАЕТСЯ освобождения лока. Для действий пользователя, где
- * важно, чтобы мутация физически уехала (сохранение карточки, разрешение
- * конфликта, кнопка «Синхронизировать сейчас»).
- */
-export async function runSync(): Promise<void> {
-  if (!useAuthStore.getState().accessToken) return;
-  await runExclusive(runSyncUnlocked);
-}
-
-/**
- * Фоновый sync: пропускается, если лок занят (прежнее поведение флага RUNNING).
- * Для интервала/online/visibility и fire-and-forget дозагрузки фото — иначе
- * ждущие вызовы выстроили бы очередь из нескольких полных проходов.
- */
-export async function runSyncIfIdle(): Promise<void> {
-  if (!useAuthStore.getState().accessToken) return;
-  await tryRunExclusive(runSyncUnlocked);
 }
 
 let intervalHandle: number | null = null;
 
 export function startSyncLoop(intervalMs = 60_000): () => void {
   if (intervalHandle) clearInterval(intervalHandle);
-  void runSyncIfIdle();
-  intervalHandle = window.setInterval(() => void runSyncIfIdle(), intervalMs);
+  void runSync();
+  intervalHandle = window.setInterval(() => void runSync(), intervalMs);
 
-  const onOnline = () => void runSyncIfIdle();
+  const onOnline = () => void runSync();
   const onVisibility = () => {
-    if (document.visibilityState === 'visible') void runSyncIfIdle();
+    if (document.visibilityState === 'visible') void runSync();
   };
   window.addEventListener('online', onOnline);
   document.addEventListener('visibilitychange', onVisibility);
