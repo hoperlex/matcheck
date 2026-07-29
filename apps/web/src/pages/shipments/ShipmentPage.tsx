@@ -64,6 +64,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
 import { FlagChip } from '../../shared/ui/FlagChip';
+import { ReviewControls } from '../../shared/ui/ReviewControls';
 import type { PageTabItem } from '../../shared/ui/PageTabs';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { PhotoGallery } from '../kpp/PhotoGallery';
@@ -1587,6 +1588,24 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
             </Space>
           );
         })()}
+
+        {/* Отметка проверки качества. Компонент сам гейтит видимость по роли
+            (admin/manager/monitor) — для inspector_kpp и contractor вернёт
+            null. В режиме isNew не показываем: записи ещё нет на сервере,
+            PATCH /shipments/:id/review дал бы 404. */}
+        {!isNew && loadedShipment && (
+          <ReviewControls
+            entityType="shipment"
+            id={loadedShipment.id}
+            statusCode={loadedShipment.status.code}
+            reviewState={loadedShipment.reviewState}
+            reviewNote={loadedShipment.reviewNote}
+            reviewedByUserEmail={loadedShipment.reviewedByUserEmail}
+            reviewedAt={loadedShipment.reviewedAt}
+            updatedAt={loadedShipment.updatedAt}
+            pendingDeletion={isPending}
+          />
+        )}
 
         <Collapse
           size="small"

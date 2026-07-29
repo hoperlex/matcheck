@@ -63,6 +63,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
 import { FlagChip } from '../../shared/ui/FlagChip';
+import { ReviewControls } from '../../shared/ui/ReviewControls';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { DeliveriesHistory } from './DeliveriesHistory';
 import { ExpectedUpds } from './ExpectedUpds';
@@ -1614,6 +1615,24 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             </Space>
           );
         })()}
+
+        {/* Отметка проверки качества. Компонент сам гейтит видимость по роли
+            (admin/manager/monitor) — для inspector_kpp и contractor вернёт
+            null. В режиме isNew не показываем: записи ещё нет на сервере,
+            PATCH /deliveries/:id/review дал бы 404. */}
+        {!isNew && loadedDelivery && (
+          <ReviewControls
+            entityType="delivery"
+            id={loadedDelivery.id}
+            statusCode={loadedDelivery.status.code}
+            reviewState={loadedDelivery.reviewState}
+            reviewNote={loadedDelivery.reviewNote}
+            reviewedByUserEmail={loadedDelivery.reviewedByUserEmail}
+            reviewedAt={loadedDelivery.reviewedAt}
+            updatedAt={loadedDelivery.updatedAt}
+            pendingDeletion={isPending}
+          />
+        )}
 
         <LinkSourceDocumentModal
           open={linkUpdOpen}
