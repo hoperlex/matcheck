@@ -547,7 +547,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         sort,
         order,
       } = req.query;
-      const conditions = [];
+      // Техническая запись пакета — служебная: она живёт от загрузки до
+      // разбора и не является документом. В списке ей делать нечего.
+      const conditions = [eq(sourceDocuments.isTechnical, false)];
       if (kind && kind.length > 0) {
         const first = kind[0];
         if (kind.length === 1 && first) {
@@ -1715,6 +1717,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .insert(sourceDocuments)
         .values({
           kind: 'transport_waybill',
+          // Служебная запись: исключается из /sync, списка и экспорта. Флагом,
+          // а не по kind — у реальных накладных тот же kind.
+          isTechnical: true,
           direction,
           origin: 'manual_pdf',
           contractorId: contractorId ?? null,
@@ -1945,6 +1950,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .insert(sourceDocuments)
         .values({
           kind: 'transport_waybill',
+          // Служебная запись пакета: воркер удалит её и развернёт реальные
+          // документы. Из /sync, списка и экспорта исключается по флагу.
+          isTechnical: true,
           direction,
           origin: 'manual_pdf',
           contractorId: contractorId ?? null,

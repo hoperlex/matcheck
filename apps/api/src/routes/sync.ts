@@ -151,7 +151,14 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       //      синхронизируется через deliveries[].sourceDocumentIds.
       // Limit поднят до 1000 — на активном сайте инспектор после долгого
       // оффлайна может получить большую дельту, 200 обрезало бы важное.
-      const sdWhereParts = [gte(sourceDocuments.updatedAt, effectiveSince)];
+      // Техническая запись пакета (kind='transport_waybill', status='queued')
+      // живёт от загрузки документов до разбора и удаляется воркером. Инспектору
+      // она не нужна и раньше уезжала на планшет, где висела фантомом до
+      // logout/login. Фильтр по флагу, а не по kind: у реальных ТН тот же kind.
+      const sdWhereParts = [
+        gte(sourceDocuments.updatedAt, effectiveSince),
+        eq(sourceDocuments.isTechnical, false),
+      ];
       if (inspectorOnly && userSiteId) {
         sdWhereParts.push(eq(sourceDocuments.siteId, userSiteId));
       }
@@ -836,9 +843,19 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             })
             .from(sourceDocuments)
             .where(
+              // Технические записи из сверки исключаем: клиент их не получает
+              // (см. фильтр дельты), и без этого reconcile объявлял бы их
+              // «отсутствующими на клиенте» на каждом проходе.
               inspectorOnly && userSiteId
-                ? eqAnd(sourceDocuments.siteId, userSiteId, gte(sourceDocuments.updatedAt, since))
-                : gte(sourceDocuments.updatedAt, since),
+                ? drAnd(
+                    eq(sourceDocuments.siteId, userSiteId),
+                    gte(sourceDocuments.updatedAt, since),
+                    eq(sourceDocuments.isTechnical, false),
+                  )
+                : drAnd(
+                    gte(sourceDocuments.updatedAt, since),
+                    eq(sourceDocuments.isTechnical, false),
+                  ),
             );
 
       const delExisting = await existingIdsFor(
@@ -871,9 +888,18 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             .select({ id: sourceDocuments.id })
             .from(sourceDocuments)
             .where(
+              // Тоже без технических: для клиента их не существует, и он не
+              // должен переотправлять их как «пропавшие на сервере».
               inspectorOnly && userSiteId
-                ? eqAnd(sourceDocuments.siteId, userSiteId, inArray(sourceDocuments.id, chunk))
-                : inArray(sourceDocuments.id, chunk),
+                ? drAnd(
+                    eq(sourceDocuments.siteId, userSiteId),
+                    inArray(sourceDocuments.id, chunk),
+                    eq(sourceDocuments.isTechnical, false),
+                  )
+                : drAnd(
+                    inArray(sourceDocuments.id, chunk),
+                    eq(sourceDocuments.isTechnical, false),
+                  ),
             ),
         req.body.sourceDocuments.map((c) => c.id),
       );

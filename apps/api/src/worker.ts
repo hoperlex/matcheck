@@ -16,6 +16,7 @@ import { logger } from './lib/logger.js';
 import { db } from './db/client.js';
 import {
   counterparties,
+  entityDeletions,
   materials,
   s3CleanupOutbox,
   sourceBundles,
@@ -1093,8 +1094,22 @@ async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise
   }
 
   // Удаляем техническую запись — она больше не нужна, её attachments уже
-  // продублированы в реальные source_documents.
-  await db.delete(sourceDocuments).where(eq(sourceDocuments.id, techId));
+  // продублированы в реальные source_documents. Вместе с tombstone: клиент,
+  // получивший её до внедрения фильтра `is_technical`, должен узнать об
+  // удалении через /sync.deletedIds.
+  await db.transaction(async (tx) => {
+    const [tech] = await tx
+      .select({ siteId: sourceDocuments.siteId })
+      .from(sourceDocuments)
+      .where(eq(sourceDocuments.id, techId))
+      .limit(1);
+    await tx.insert(entityDeletions).values({
+      entityType: 'source_document',
+      entityId: techId,
+      siteId: tech?.siteId ?? null,
+    });
+    await tx.delete(sourceDocuments).where(eq(sourceDocuments.id, techId));
+  });
 
   await db
     .update(sourceBundles)
@@ -1318,6 +1333,8 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
           .insert(sourceDocuments)
           .values({
             kind: 'transport_waybill',
+            // Служебная запись sub-пакета — тоже вне выдачи инспектору.
+            isTechnical: true,
             direction: bundle.direction,
             origin: 'manual_pdf',
             status: 'queued',
@@ -1439,7 +1456,23 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
 
   // Техническая запись router-bundle больше не нужна — её attachments
   // переиспользованы по s3Key в развёрнутых документах (паттерн как у waybill).
-  await db.delete(sourceDocuments).where(eq(sourceDocuments.id, techId));
+  //
+  // Удаляем вместе с tombstone: клиент, успевший получить эту запись до
+  // внедрения фильтра `is_technical`, узнает об удалении через
+  // /sync.deletedIds, а не будет держать её фантомом до logout/login.
+  await db.transaction(async (tx) => {
+    const [tech] = await tx
+      .select({ siteId: sourceDocuments.siteId })
+      .from(sourceDocuments)
+      .where(eq(sourceDocuments.id, techId))
+      .limit(1);
+    await tx.insert(entityDeletions).values({
+      entityType: 'source_document',
+      entityId: techId,
+      siteId: tech?.siteId ?? null,
+    });
+    await tx.delete(sourceDocuments).where(eq(sourceDocuments.id, techId));
+  });
   await db
     .update(sourceBundles)
     .set({ status: 'parsed', kind: 'mixed', docCount: createdCount, updatedAt: new Date() })
