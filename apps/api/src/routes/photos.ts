@@ -28,6 +28,7 @@ import { buildS3Key } from '../domain/storage/s3.path.js';
 import { recognizePhotoItems } from '../domain/photos/recognize.js';
 import { buildExistingPhotoPresign } from '../domain/photos/presign-existing.js';
 import { publishEvent } from './events.js';
+import { FOREIGN_SITE_RESPONSE } from '../domain/operations/foreign-site.js';
 import {
   resolveContractorOpIds,
   deliveryVisibleToContractor,
@@ -125,7 +126,8 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
   app.post(
     '/api/v1/photos/presign',
     {
-      preHandler: [app.authenticate],
+      // contractor/monitor — read-only роли: загрузка фото им недоступна.
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: {
         body: PhotoPresignRequestSchema,
         response: {
@@ -161,8 +163,17 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           .where(eq(deliveries.id, operationId))
           .limit(1);
         if (!d) return reply.code(404).send({ error: 'delivery_not_found' });
-        if (req.user?.role === 'inspector_kpp' && d.inspectorId !== req.user.id) {
-          return reply.code(403).send({ error: 'forbidden' });
+        // Порядок важен: сначала объект, потом автор. Инспектор после перевода
+        // на другой объект остаётся автором прежних приёмок, и без site-check
+        // он мог бы догружать фото на объект, где уже не работает
+        // (см. domain/operations/foreign-site.ts).
+        if (req.user?.role === 'inspector_kpp') {
+          if (d.siteId !== req.user.siteId) {
+            return reply.code(403).send(FOREIGN_SITE_RESPONSE);
+          }
+          if (d.inspectorId !== req.user.id) {
+            return reply.code(403).send({ error: 'forbidden' });
+          }
         }
         // Помеченный на удаление документ — read-only.
         if (d.pendingDeletionAt !== null) {
@@ -272,8 +283,14 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(shipments.id, operationId))
         .limit(1);
       if (!s) return reply.code(404).send({ error: 'shipment_not_found' });
-      if (req.user?.role === 'inspector_kpp' && s.inspectorId !== req.user.id) {
-        return reply.code(403).send({ error: 'forbidden' });
+      // Site-check до owner-check — зеркало ветки приёмок выше.
+      if (req.user?.role === 'inspector_kpp') {
+        if (s.siteId !== req.user.siteId) {
+          return reply.code(403).send(FOREIGN_SITE_RESPONSE);
+        }
+        if (s.inspectorId !== req.user.id) {
+          return reply.code(403).send({ error: 'forbidden' });
+        }
       }
       if (s.pendingDeletionAt !== null) {
         return reply.code(409).send({
@@ -540,11 +557,16 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
   app.post(
     '/api/v1/photos/:id/confirm',
     {
-      preHandler: [app.authenticate],
+      // contractor/monitor — read-only роли (симметрично presign).
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
         response: {
           200: PhotoConfirmResponseSchema,
+          // 403 — foreign_site (чужой объект) либо forbidden (чужой автор):
+          // тот же контракт, что у presign, иначе клиент не отличает «нельзя»
+          // от «нет такого фото».
+          403: ErrorResponseSchema,
           404: ErrorResponseSchema,
           500: ErrorResponseSchema,
         },
@@ -553,12 +575,15 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const found = await findPhoto(app, req.params.id);
       if (!found) return reply.code(404).send({ error: 'not_found' });
-      // Та же owner-проверка, что и в GET URL.
-      if (
-        req.user?.role === 'inspector_kpp' &&
-        (!req.user.siteId || found.parentSiteId !== req.user.siteId)
-      ) {
-        return reply.code(404).send({ error: 'not_found' });
+      // Порядок и коды — как в presign: сначала объект, затем автор. Раньше
+      // здесь был 404 на чужой объект и не было проверки автора вовсе.
+      if (req.user?.role === 'inspector_kpp') {
+        if (!req.user.siteId || found.parentSiteId !== req.user.siteId) {
+          return reply.code(403).send(FOREIGN_SITE_RESPONSE);
+        }
+        if (found.parentInspectorId !== req.user.id) {
+          return reply.code(403).send({ error: 'forbidden' });
+        }
       }
 
       // Если уже подтверждено — отдаём существующий uploaded_at без S3-вызова.
@@ -1036,6 +1061,9 @@ async function findPhoto(
       s3Key: string;
       thumbS3Key: string | null;
       parentSiteId: string | null;
+      // Автор родительской приёмки/отгрузки — нужен owner-check в confirm
+      // (симметрия с presign, где автор проверяется по самой записи).
+      parentInspectorId: string | null;
       // Получатель родительской отгрузки (для скоупа роли contractor у
       // shipment-фото). Для delivery-фото всегда null — видимость приёмки
       // проверяется через deliveryVisibleToContractor по operationId.
@@ -1049,6 +1077,7 @@ async function findPhoto(
       thumbS3Key: deliveryPhotos.thumbS3Key,
       operationId: deliveryPhotos.deliveryId,
       parentSiteId: deliveries.siteId,
+      parentInspectorId: deliveries.inspectorId,
     })
     .from(deliveryPhotos)
     .innerJoin(deliveries, eq(deliveries.id, deliveryPhotos.deliveryId))
@@ -1061,6 +1090,7 @@ async function findPhoto(
       s3Key: d.s3Key,
       thumbS3Key: d.thumbS3Key,
       parentSiteId: d.parentSiteId,
+      parentInspectorId: d.parentInspectorId,
       parentReceiverCounterpartyId: null,
     };
 
@@ -1070,6 +1100,7 @@ async function findPhoto(
       thumbS3Key: shipmentPhotos.thumbS3Key,
       operationId: shipmentPhotos.shipmentId,
       parentSiteId: shipments.siteId,
+      parentInspectorId: shipments.inspectorId,
       parentReceiverCounterpartyId: shipments.receiverCounterpartyId,
     })
     .from(shipmentPhotos)
@@ -1083,6 +1114,7 @@ async function findPhoto(
       s3Key: s.s3Key,
       thumbS3Key: s.thumbS3Key,
       parentSiteId: s.parentSiteId,
+      parentInspectorId: s.parentInspectorId,
       parentReceiverCounterpartyId: s.parentReceiverCounterpartyId,
     };
 

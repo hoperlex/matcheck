@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { desc, eq, gte, sql as drSql } from 'drizzle-orm';
+import { desc, eq, gte, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
@@ -238,8 +238,17 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       // Инспектор видит всё в рамках своего объекта (включая записи других
       // инспекторов на том же siteId) — синхронизировано с GET /deliveries,
       // см. коммит 1833b9d. До этого фильтр был по inspectorId.
-      // Окно effectiveSince применяется и при initial-sync (windowDays), и при
-      // дельта-sync (since).
+      //
+      // Окно: при дельта-sync — строго updated_at >= since. При initial-sync
+      // дополнительно отдаём НЕЗАВЕРШЁННЫЕ приёмки (`filled` — ожидают 2 Этапа)
+      // любого возраста: их список на мобиле не ограничен датой, и после
+      // очистки базы (смена аккаунта/объекта) старая незакрытая приёмка иначе
+      // не приехала бы вовсе. Расширять это на дельту нельзя — клиент листает,
+      // пока ответ «длинный», и такие записи возвращались бы бесконечно.
+      const deliveryWindow =
+        since === null
+          ? or(gte(deliveries.updatedAt, effectiveSince), eq(statuses.code, 'filled'))!
+          : gte(deliveries.updatedAt, effectiveSince);
       const dRowsJoined = await app.db
         .select({ d: deliveries, s: statuses, molEmail: users.email })
         .from(deliveries)
@@ -247,8 +256,8 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         .leftJoin(users, eq(deliveries.confirmedByMolUserId, users.id))
         .where(
           inspectorOnly && userSiteId
-            ? eqAnd(deliveries.siteId, userSiteId, gte(deliveries.updatedAt, effectiveSince))
-            : gte(deliveries.updatedAt, effectiveSince),
+            ? eqAnd(deliveries.siteId, userSiteId, deliveryWindow)
+            : deliveryWindow,
         )
         .orderBy(desc(deliveries.updatedAt))
         .limit(500);
@@ -299,6 +308,11 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         : [];
 
       // ── Shipments (симметрично deliveries: видимость по siteId + окно) ──
+      // Незавершённые отгрузки на initial-sync — `shipped` (ожидают 2 Этапа).
+      const shipmentWindow =
+        since === null
+          ? or(gte(shipments.updatedAt, effectiveSince), eq(statuses.code, 'shipped'))!
+          : gte(shipments.updatedAt, effectiveSince);
       const shRowsJoined = await app.db
         .select({ s: shipments, st: statuses, molEmail: users.email })
         .from(shipments)
@@ -306,8 +320,8 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         .leftJoin(users, eq(shipments.confirmedByMolUserId, users.id))
         .where(
           inspectorOnly && userSiteId
-            ? eqAnd(shipments.siteId, userSiteId, gte(shipments.updatedAt, effectiveSince))
-            : gte(shipments.updatedAt, effectiveSince),
+            ? eqAnd(shipments.siteId, userSiteId, shipmentWindow)
+            : shipmentWindow,
         )
         .orderBy(desc(shipments.updatedAt))
         .limit(500);
@@ -730,17 +744,16 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       const inspectorOnly = req.user?.role === 'inspector_kpp';
       const userSiteId = req.user?.siteId ?? null;
       const noSite = inspectorOnly && !userSiteId;
-      // Окно ограничивает missingOnClient разумным объёмом (то, что клиент и так
-      // должен иметь после initial-sync 90 дней). На missingOnServer не влияет —
-      // там сверяем ровно то, что прислал клиент.
+      // Окно ограничивает ТОЛЬКО missingOnClient/staleOnClient разумным объёмом
+      // (то, что клиент и так должен иметь после initial-sync 90 дней).
       const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
       type Cli = { id: string; version: number };
       const reconcile = (
         serverRows: { id: string; version: number; updatedAt: Date }[],
         clientItems: Cli[],
+        existingIds: Set<string>,
       ) => {
-        const serverIds = new Set(serverRows.map((r) => r.id));
         const clientMap = new Map(clientItems.map((c) => [c.id, c.version] as const));
         return {
           missingOnClient: serverRows
@@ -752,10 +765,40 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
               return cv !== undefined && r.version > cv;
             })
             .map((r) => ({ id: r.id, serverVersion: r.version })),
-          missingOnServer: clientItems.filter((c) => !serverIds.has(c.id)).map((c) => c.id),
+          // Существование присланных id проверяем ОТДЕЛЬНЫМ запросом без окна
+          // (см. existingIdsFor). Раньше здесь сверялись с оконной выборкой, и
+          // любая живая запись старше 90 дней объявлялась «пропавшей на
+          // сервере» — клиент переотправлял её через M4b push-recovery.
+          missingOnServer: clientItems.filter((c) => !existingIds.has(c.id)).map((c) => c.id),
         };
       };
 
+      /**
+       * Множество id, которые реально есть на сервере в зоне видимости
+       * пользователя. Без временного окна; скоуп по объекту сохраняем — чужая
+       * запись честно считается отсутствующей, клиент её переотправит и получит
+       * 403 `foreign_site`, после чего удалит локально.
+       */
+      const existingIdsFor = async (
+        fetchChunk: (chunk: string[]) => Promise<{ id: string }[]>,
+        ids: string[],
+      ): Promise<Set<string>> => {
+        const found = new Set<string>();
+        if (noSite) return found;
+        for (let i = 0; i < ids.length; i += RECONCILE_ID_CHUNK) {
+          const chunk = ids.slice(i, i + RECONCILE_ID_CHUNK);
+          if (chunk.length === 0) continue;
+          for (const row of await fetchChunk(chunk)) found.add(row.id);
+        }
+        return found;
+      };
+
+      // Окно 90 дней ПЛЮС все ожидающие 2 Этапа (`filled`) независимо от
+      // возраста: список 2 Этапа на мобиле по дате не ограничен, и старая
+      // незакрытая приёмка должна доезжать на любой планшет объекта. В /sync
+      // это допустимо только на initial-sync (иначе клиент листает бесконечно),
+      // а здесь безопасно — reconcile отдаёт плоский список id+version.
+      const delOpenOrRecent = or(gte(deliveries.updatedAt, since), eq(statuses.code, 'filled'))!;
       const delRows = noSite
         ? []
         : await app.db
@@ -765,20 +808,23 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
               updatedAt: deliveries.updatedAt,
             })
             .from(deliveries)
+            .innerJoin(statuses, eq(deliveries.statusId, statuses.id))
             .where(
               inspectorOnly && userSiteId
-                ? eqAnd(deliveries.siteId, userSiteId, gte(deliveries.updatedAt, since))
-                : gte(deliveries.updatedAt, since),
+                ? eqAnd(deliveries.siteId, userSiteId, delOpenOrRecent)
+                : delOpenOrRecent,
             );
+      const shipOpenOrRecent = or(gte(shipments.updatedAt, since), eq(statuses.code, 'shipped'))!;
       const shipRows = noSite
         ? []
         : await app.db
             .select({ id: shipments.id, version: shipments.version, updatedAt: shipments.updatedAt })
             .from(shipments)
+            .innerJoin(statuses, eq(shipments.statusId, statuses.id))
             .where(
               inspectorOnly && userSiteId
-                ? eqAnd(shipments.siteId, userSiteId, gte(shipments.updatedAt, since))
-                : gte(shipments.updatedAt, since),
+                ? eqAnd(shipments.siteId, userSiteId, shipOpenOrRecent)
+                : shipOpenOrRecent,
             );
       const sdRows = noSite
         ? []
@@ -795,11 +841,48 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
                 : gte(sourceDocuments.updatedAt, since),
             );
 
+      const delExisting = await existingIdsFor(
+        (chunk) =>
+          app.db
+            .select({ id: deliveries.id })
+            .from(deliveries)
+            .where(
+              inspectorOnly && userSiteId
+                ? eqAnd(deliveries.siteId, userSiteId, inArray(deliveries.id, chunk))
+                : inArray(deliveries.id, chunk),
+            ),
+        req.body.deliveries.map((c) => c.id),
+      );
+      const shipExisting = await existingIdsFor(
+        (chunk) =>
+          app.db
+            .select({ id: shipments.id })
+            .from(shipments)
+            .where(
+              inspectorOnly && userSiteId
+                ? eqAnd(shipments.siteId, userSiteId, inArray(shipments.id, chunk))
+                : inArray(shipments.id, chunk),
+            ),
+        req.body.shipments.map((c) => c.id),
+      );
+      const sdExisting = await existingIdsFor(
+        (chunk) =>
+          app.db
+            .select({ id: sourceDocuments.id })
+            .from(sourceDocuments)
+            .where(
+              inspectorOnly && userSiteId
+                ? eqAnd(sourceDocuments.siteId, userSiteId, inArray(sourceDocuments.id, chunk))
+                : inArray(sourceDocuments.id, chunk),
+            ),
+        req.body.sourceDocuments.map((c) => c.id),
+      );
+
       return {
         serverNow: new Date().toISOString(),
-        deliveries: reconcile(delRows, req.body.deliveries),
-        shipments: reconcile(shipRows, req.body.shipments),
-        sourceDocuments: reconcile(sdRows, req.body.sourceDocuments),
+        deliveries: reconcile(delRows, req.body.deliveries, delExisting),
+        shipments: reconcile(shipRows, req.body.shipments, shipExisting),
+        sourceDocuments: reconcile(sdRows, req.body.sourceDocuments, sdExisting),
       };
     },
   );
@@ -811,6 +894,13 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 function sql_in<T extends AnyPgColumn>(col: T, ids: string[]) {
   return inArray(col, ids);
 }
+
+/**
+ * Размер пачки id в existence-запросе reconcile. Клиент может прислать до 5000
+ * записей на тип (ReconcileRequestSchema), а в один IN всё это класть незачем —
+ * бьём на пачки, чтобы план запроса оставался предсказуемым.
+ */
+const RECONCILE_ID_CHUNK = 1000;
 function eqAnd<T extends AnyPgColumn>(col: T, val: string, more: SQL): SQL {
   return drAnd(eq(col, val), more)!;
 }

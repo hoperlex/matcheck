@@ -39,6 +39,7 @@ import {
 } from '../domain/statuses/lookup.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isShipmentDowngrade } from '../domain/operations/status-guard.js';
+import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
 import { canSeeReview } from '../lib/review.js';
 import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
 import {
@@ -769,12 +770,17 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
   app.post(
     '/api/v1/shipments',
     {
-      preHandler: [app.authenticate],
+      // contractor/monitor — read-only роли: upsert им недоступен. Раньше здесь
+      // был только authenticate, и запись формально проходила по любой роли.
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: {
         body: ShipmentUpsertSchema,
         response: {
           200: ShipmentSchema,
           400: ErrorResponseSchema,
+          // 403 — foreign_site: инспектор пытается изменить отгрузку чужого
+          // объекта (см. domain/operations/foreign-site.ts).
+          403: ErrorResponseSchema,
           404: ErrorResponseSchema,
           // 409 — либо OCC-конфликт (Conflict), либо pending_deletion (Error).
           409: z.union([ShipmentConflictResponseSchema, ErrorResponseSchema]),
@@ -789,8 +795,12 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       const input = req.body;
       const inspectorId = req.user?.role === 'inspector_kpp' ? req.user.id : (req.user?.id ?? null);
 
-      // inspector_kpp всегда работает в рамках своего объекта-источника;
-      // вход из body игнорируется и заменяется значением из БД.
+      // inspector_kpp работает строго в рамках своего объекта-источника.
+      // Раньше здесь была тихая подмена input.siteId — см. комментарий в
+      // deliveries.ts: офлайн-отгрузка объекта A после перевода инспектора на B
+      // молча создавалась на B. Теперь несовпадение — 403, а не переклейка.
+      // Проверка стоит ДО validateKindLinks: тот читает siteId и без сверки
+      // валидировал бы transfer по «чужому» объекту.
       if (req.user?.role === 'inspector_kpp') {
         if (!req.user.siteId) {
           return reply.code(400).send({
@@ -798,7 +808,9 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             message: 'Объект не назначен — обратитесь к администратору',
           });
         }
-        input.siteId = req.user.siteId;
+        if (input.siteId !== req.user.siteId) {
+          return reply.code(403).send(FOREIGN_SITE_RESPONSE);
+        }
       }
 
       // Статус процесса и наличие УПД — независимые измерения.
@@ -828,6 +840,16 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           if (!existing) {
             await createShipment(app, input, statusId, inspectorId);
           } else {
+            // Инспектор редактирует только записи СВОЕГО объекта. Раньше проверки
+            // не было, и upsert чужой отгрузки молча переносил её на объект
+            // отправителя (см. domain/operations/foreign-site.ts).
+            if (req.user?.role === 'inspector_kpp') {
+              if (existing.siteId !== req.user.siteId) {
+                return reply.code(403).send(FOREIGN_SITE_RESPONSE);
+              }
+              // Объект-источник существующей отгрузки для инспектора фиксирован.
+              input.siteId = existing.siteId;
+            }
             // Помеченные документы — read-only до восстановления или окончательного удаления.
             if (existing.pendingDeletionAt !== null) {
               return reply.code(409).send({
@@ -843,7 +865,16 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
                 server: server!,
               });
             }
-            await updateShipment(app, existing, input, statusId, req.user?.id ?? null);
+            await updateShipment(
+              app,
+              existing,
+              input,
+              statusId,
+              req.user?.id ?? null,
+              // Для инспектора апдейт идёт с условием по объекту — чтобы между
+              // чтением existing и UPDATE менеджер не успел перенести запись.
+              req.user?.role === 'inspector_kpp' ? existing.siteId : null,
+            );
           }
           if (input.kind === 'transfer') {
             await syncPairedTransferDelivery(app, input.id);
@@ -869,6 +900,10 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             message: 'УПД уже привязана к другой отгрузке',
             details: { sourceDocumentIds: err.sourceDocumentIds },
           });
+        }
+        // Объект записи сменился между проверкой и UPDATE — транзакция откатана.
+        if (err instanceof ForeignSiteError) {
+          return reply.code(403).send(FOREIGN_SITE_RESPONSE);
         }
         throw err;
       }
@@ -1880,6 +1915,12 @@ async function updateShipment(
   input: z.infer<typeof ShipmentUpsertSchema>,
   statusId: string,
   userId: string | null,
+  /**
+   * Объект-источник, которому отгрузка обязана принадлежать в момент UPDATE.
+   * Не null только для inspector_kpp — см. updateDelivery в deliveries.ts.
+   * Ноль задетых строк → [ForeignSiteError] и откат транзакции.
+   */
+  expectedSiteId: string | null = null,
 ) {
   const id = existing.id;
   // Защита от downgrade жизненного статуса. См. status-guard.ts:
@@ -1946,7 +1987,7 @@ async function updateShipment(
   // Атомарность update: статус/шапка + позиции + источники + touch УПД —
   // одна транзакция (симметрично updateDelivery).
   return await app.db.transaction(async (tx: typeof app.db) => {
-  await tx
+  const updatedRows = await tx
     .update(shipments)
     .set({
       statusId: effectiveStatusId,
@@ -1970,7 +2011,15 @@ async function updateShipment(
       version: drSql`${shipments.version} + 1`,
       updatedAt: new Date(),
     })
-    .where(eq(shipments.id, id));
+    .where(
+      expectedSiteId
+        ? and(eq(shipments.id, id), eq(shipments.siteId, expectedSiteId))
+        : eq(shipments.id, id),
+    )
+    .returning({ id: shipments.id });
+  // Объект отгрузки изменился после чтения existing — прерываем транзакцию,
+  // маршрут отдаст 403 foreign_site (см. domain/operations/foreign-site.ts).
+  if (updatedRows.length === 0) throw new ForeignSiteError();
   await tx.delete(shipmentItems).where(eq(shipmentItems.shipmentId, id));
   if (itemsForInsert.length) {
     await tx.insert(shipmentItems).values(

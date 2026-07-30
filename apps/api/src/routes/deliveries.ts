@@ -37,6 +37,7 @@ import {
   getStatusCodeById,
   resolveStatusId as resolveStatusIdShared,
 } from '../domain/statuses/lookup.js';
+import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { canSeeReview } from '../lib/review.js';
@@ -808,11 +809,16 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
   app.post(
     '/api/v1/deliveries',
     {
-      preHandler: [app.authenticate],
+      // contractor/monitor — read-only роли: upsert им недоступен. Раньше здесь
+      // был только authenticate, и запись формально проходила по любой роли.
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
       schema: {
         body: DeliveryUpsertSchema,
         response: {
           200: DeliverySchema,
+          // 403 — foreign_site: инспектор пытается изменить приёмку чужого
+          // объекта (см. domain/operations/foreign-site.ts).
+          403: ErrorResponseSchema,
           404: ErrorResponseSchema,
           // 409 — либо OCC-конфликт (Conflict), либо pending_deletion (Error).
           409: z.union([ConflictResponseSchema, ErrorResponseSchema]),
@@ -824,8 +830,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       const input = req.body;
       const inspectorId = req.user?.role === 'inspector_kpp' ? req.user.id : (req.user?.id ?? null);
 
-      // inspector_kpp всегда создаёт/редактирует приёмки своего объекта,
-      // независимо от того, что прислал клиент.
+      // inspector_kpp работает строго в рамках своего объекта. Раньше здесь
+      // была ТИХАЯ подмена input.siteId, и приёмка, созданная офлайн на объекте
+      // A и отправленная после перевода инспектора на B, молча создавалась на B
+      // (клиент отправляет очередь до того, как узнает новый siteId с /me).
+      // Теперь несовпадение — явная ошибка, а не переклейка объекта.
       if (req.user?.role === 'inspector_kpp') {
         if (!req.user.siteId) {
           return reply.code(400).send({
@@ -833,7 +842,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             message: 'Объект не назначен — обратитесь к администратору',
           });
         }
-        input.siteId = req.user.siteId;
+        if (input.siteId !== req.user.siteId) {
+          return reply.code(403).send(FOREIGN_SITE_RESPONSE);
+        }
       }
 
       // Статус процесса и наличие УПД — независимые измерения: инспектор
@@ -855,6 +866,17 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             // Create as upsert with explicit id (для офлайн-черновиков с локально сгенерированным id)
             await createDelivery(app, input, statusId, inspectorId);
           } else {
+            // Инспектор редактирует только записи СВОЕГО объекта. Раньше проверки
+            // не было, и upsert чужой приёмки молча переносил её на объект
+            // отправителя (см. domain/operations/foreign-site.ts).
+            if (req.user?.role === 'inspector_kpp') {
+              if (existing.siteId !== req.user.siteId) {
+                return reply.code(403).send(FOREIGN_SITE_RESPONSE);
+              }
+              // Объект существующей записи не меняем: для инспектора он
+              // фиксирован, что бы ни прислал клиент.
+              input.siteId = existing.siteId;
+            }
             // Помеченные документы — read-only до восстановления или окончательного удаления.
             if (existing.pendingDeletionAt !== null) {
               return reply.code(409).send({
@@ -870,7 +892,16 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
                 server: server!,
               });
             }
-            await updateDelivery(app, existing, input, statusId, req.user?.id ?? null);
+            await updateDelivery(
+              app,
+              existing,
+              input,
+              statusId,
+              req.user?.id ?? null,
+              // Для инспектора апдейт идёт с условием по объекту — чтобы между
+              // чтением existing и UPDATE менеджер не успел перенести запись.
+              req.user?.role === 'inspector_kpp' ? existing.siteId : null,
+            );
           }
           const dto = await buildDeliveryDto(app, input.id, req.user?.role);
           if (!dto) return reply.code(404).send({ error: 'not_found' });
@@ -890,6 +921,10 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             message: 'УПД уже привязана к другой приёмке',
             details: { sourceDocumentIds: err.sourceDocumentIds },
           });
+        }
+        // Объект записи сменился между проверкой и UPDATE — транзакция откатана.
+        if (err instanceof ForeignSiteError) {
+          return reply.code(403).send(FOREIGN_SITE_RESPONSE);
         }
         throw err;
       }
@@ -2254,6 +2289,13 @@ async function updateDelivery(
   input: z.infer<typeof DeliveryUpsertSchema>,
   statusId: string,
   userId: string | null,
+  /**
+   * Объект, которому запись обязана принадлежать в момент UPDATE. Не null
+   * только для inspector_kpp: `existing` читается вне транзакции, и без этого
+   * условия менеджер мог успеть перенести приёмку между проверкой и апдейтом.
+   * Ноль задетых строк → [ForeignSiteError] и откат транзакции.
+   */
+  expectedSiteId: string | null = null,
 ) {
   const id = existing.id;
   // Защита от downgrade жизненного статуса. См. status-guard.ts:
@@ -2327,7 +2369,7 @@ async function updateDelivery(
   // одна транзакция (см. createDelivery). Раньше delete items проходил, а
   // insert падал → приёмка теряла все позиции.
   return await app.db.transaction(async (tx: typeof app.db) => {
-  await tx
+  const updatedRows = await tx
     .update(deliveries)
     .set({
       statusId: effectiveStatusId,
@@ -2348,7 +2390,15 @@ async function updateDelivery(
       version: drSql`${deliveries.version} + 1`,
       updatedAt: new Date(),
     })
-    .where(eq(deliveries.id, id));
+    .where(
+      expectedSiteId
+        ? and(eq(deliveries.id, id), eq(deliveries.siteId, expectedSiteId))
+        : eq(deliveries.id, id),
+    )
+    .returning({ id: deliveries.id });
+  // Объект записи изменился после чтения existing — прерываем транзакцию,
+  // маршрут отдаст 403 foreign_site (см. domain/operations/foreign-site.ts).
+  if (updatedRows.length === 0) throw new ForeignSiteError();
   await tx.delete(deliveryItems).where(eq(deliveryItems.deliveryId, id));
   if (itemsForInsert.length) {
     await tx.insert(deliveryItems).values(
