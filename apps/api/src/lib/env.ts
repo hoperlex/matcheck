@@ -50,6 +50,25 @@ const envSchema = z.object({
   SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0),
   SENTRY_RELEASE: z.string().optional(),
 
+  // Почтовый канал приёма документов.
+  //
+  // MAIL_POLL_ENABLED — главный выключатель: без него отдельный процесс
+  // mail-worker не опрашивает ничего, даже если у ящика включён poll_enabled.
+  // Две независимые защиты нужны, чтобы включение опроса было осознанным
+  // действием, а не следствием деплоя.
+  MAIL_POLL_ENABLED: z.coerce.boolean().default(false),
+  MAIL_POLL_INTERVAL_SEC: z.coerce.number().int().positive().default(120),
+  MAIL_POLL_MAX_MESSAGES: z.coerce.number().int().positive().default(50),
+  MAIL_POLL_LEASE_SEC: z.coerce.number().int().positive().default(900),
+  // Письмо целиком: берётся с запасом к памяти процесса — оно существует
+  // сырым буфером, MIME-структурой и декодированными вложениями сразу.
+  MAIL_LETTER_MAX_BYTES: z.coerce.number().int().positive().default(50 * 1024 * 1024),
+  MAIL_ATTACHMENT_MAX_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
+  // Защита от zip-бомбы в xlsx: три независимых предела.
+  MAIL_XLSX_MAX_ENTRIES: z.coerce.number().int().positive().default(512),
+  MAIL_XLSX_MAX_INFLATED_BYTES: z.coerce.number().int().positive().default(100 * 1024 * 1024),
+  MAIL_XLSX_MAX_RATIO: z.coerce.number().int().positive().default(200),
+
   // S3 (cloud.ru)
   S3_ENDPOINT: z.string().url().optional(),
   S3_REGION: z.string().default('ru-central-1'),

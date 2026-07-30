@@ -98,6 +98,45 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  matcheck-mail-worker:
+    # Опрос почтовых ящиков (приём УПД от подрядчиков). Тот же образ, что у API,
+    # но запускает src/mail-worker.ts.
+    #
+    # Отдельный контейнер, а не задача в matcheck-worker: тот работает с
+    # concurrency = 1 и занят распознаванием PDF по несколько минут — IMAP-сессия
+    # и разбор MIME встали бы в ту же очередь.
+    #
+    # Сам по себе ничего не опрашивает: нужен MAIL_POLL_ENABLED=true в api.env И
+    # ящик с включённым poll_enabled. Без них процесс лишь обслуживает ручной
+    # запуск «проверить сейчас» из админки.
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    image: matcheck-matcheck-api
+    container_name: matcheck-mail-worker
+    restart: unless-stopped
+    env_file:
+      - /srv/matcheck/secrets/api.env
+    environment:
+      # Письмо живёт в памяти сырым буфером, MIME-структурой и декодированными
+      # вложениями одновременно, поэтому heap ограничиваем явно, а лимит письма
+      # (MAIL_LETTER_MAX_BYTES) держим кратно ниже mem_limit.
+      NODE_OPTIONS: --max-old-space-size=320
+    networks: [matcheck-net]
+    volumes:
+      - /srv/matcheck/secrets/yandex-ca/root.crt:/etc/ssl/yandex/root.crt:ro
+    depends_on:
+      matcheck-redis:
+        condition: service_healthy
+    mem_limit: 512m
+    cpus: 0.5
+    command: ["node_modules/.bin/tsx", "src/mail-worker.ts"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
   matcheck-web:
     build:
       context: ..

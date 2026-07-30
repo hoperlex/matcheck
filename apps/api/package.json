@@ -9,6 +9,8 @@
     "start": "node --enable-source-maps dist/index.js",
     "worker": "tsx src/worker.ts",
     "worker:dev": "tsx watch src/worker.ts",
+    "mail-worker": "tsx src/mail-worker.ts",
+    "mail-worker:dev": "tsx watch src/mail-worker.ts",
     "worker:start": "node --enable-source-maps dist/worker.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",

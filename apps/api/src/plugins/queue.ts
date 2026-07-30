@@ -29,12 +29,17 @@ export type S3CleanupJobData = {
 
 export const UPD_PARSE_QUEUE = 'upd-parse';
 export const S3_CLEANUP_QUEUE = 's3-cleanup';
+export const MAIL_POLL_QUEUE = 'mail-poll';
+
+/** Ручной запрос «проверить ящик сейчас» из админки. */
+export type MailPollJobData = { accountId: string };
 
 declare module 'fastify' {
   interface FastifyInstance {
     queues: {
       updParse: Queue<UpdParseJobData>;
       s3Cleanup: Queue<S3CleanupJobData>;
+      mailPoll: Queue<MailPollJobData>;
     };
   }
 }
@@ -73,7 +78,20 @@ export default fp(async (app) => {
     },
   });
 
-  app.decorate('queues', { updParse, s3Cleanup });
+  // Опрос почтового ящика по кнопке из админки. Обслуживается ОТДЕЛЬНЫМ
+  // процессом (src/mail-worker.ts): IMAP не должен конкурировать за воркер
+  // распознавания, который работает с concurrency = 1.
+  const mailPoll = new Queue<MailPollJobData>(MAIL_POLL_QUEUE, {
+    connection: buildQueueConnection(),
+    defaultJobOptions: {
+      attempts: 2,
+      backoff: { type: 'exponential', delay: 30_000 },
+      removeOnComplete: { age: 24 * 60 * 60, count: 200 },
+      removeOnFail: { age: 7 * 24 * 60 * 60 },
+    },
+  });
+
+  app.decorate('queues', { updParse, s3Cleanup, mailPoll });
   app.addHook('onClose', async () => {
     try {
       await updParse.close();
@@ -85,7 +103,12 @@ export default fp(async (app) => {
     } catch {
       /* ignore */
     }
+    try {
+      await mailPoll.close();
+    } catch {
+      /* ignore */
+    }
   });
 
-  app.log.info({ queues: [UPD_PARSE_QUEUE, S3_CLEANUP_QUEUE] }, 'queues ready');
+  app.log.info({ queues: [UPD_PARSE_QUEUE, S3_CLEANUP_QUEUE, MAIL_POLL_QUEUE] }, 'queues ready');
 });

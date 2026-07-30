@@ -29,9 +29,30 @@ export type LeaseHandle = {
  */
 export async function acquirePollLease(
   db: Db,
-  params: { accountId: string; owner: string; ttlSeconds: number },
+  params: {
+    accountId: string;
+    owner: string;
+    ttlSeconds: number;
+    /**
+     * Требовать включённого `poll_enabled`. Автоопрос — да; ручной запуск
+     * «проверить сейчас» — нет: администратору нужно проверить доступы ДО
+     * того, как ящик будет включён в постоянный опрос.
+     */
+    requirePollEnabled?: boolean;
+  },
 ): Promise<LeaseHandle | null> {
   const token = crypto.randomUUID();
+  const conditions = [
+    eq(mailAccounts.id, params.accountId),
+    eq(mailAccounts.isActive, true),
+    // Свободен либо лиз истёк. Условие целиком считается базой, поэтому двум
+    // воркерам одновременно ящик не достанется.
+    or(isNull(mailAccounts.pollLeaseUntil), lt(mailAccounts.pollLeaseUntil, drSql`now()`)),
+  ];
+  if (params.requirePollEnabled !== false) {
+    conditions.push(eq(mailAccounts.pollEnabled, true));
+  }
+
   const [row] = await db
     .update(mailAccounts)
     .set({
@@ -40,16 +61,7 @@ export async function acquirePollLease(
       pollLeaseUntil: drSql`now() + make_interval(secs => ${params.ttlSeconds})`,
       updatedAt: new Date(),
     })
-    .where(
-      and(
-        eq(mailAccounts.id, params.accountId),
-        eq(mailAccounts.isActive, true),
-        eq(mailAccounts.pollEnabled, true),
-        // Свободен либо лиз истёк. Условие целиком считается базой, поэтому
-        // двум воркерам одновременно ящик не достанется.
-        or(isNull(mailAccounts.pollLeaseUntil), lt(mailAccounts.pollLeaseUntil, drSql`now()`)),
-      ),
-    )
+    .where(and(...conditions))
     .returning({ id: mailAccounts.id });
 
   return row ? { accountId: params.accountId, owner: params.owner, token } : null;
