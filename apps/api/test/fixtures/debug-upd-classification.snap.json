@@ -1,0 +1,628 @@
+{
+  "1221312.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "1697.pdf": {
+    "confidence": 0.3,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "text:ambiguous",
+    ],
+  },
+  "201_2112636922_202606260947_117572_PRINTER2.TXT.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "tryParseTextUpdBundle",
+    "signals": [
+      "text:upd",
+      "invoices:5",
+    ],
+    "updInvoiceCount": 5,
+  },
+  "5303397567129394215.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "85072371.PDF": {
+    "confidence": 0.8,
+    "detectedKind": "transport_waybill",
+    "needsVision": false,
+    "parserUsed": "parseWaybillBatch",
+    "signals": [
+      "text:tn",
+    ],
+  },
+  "IMG_0001 (1).pdf": {
+    "confidence": 0.3,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "text:ambiguous",
+    ],
+  },
+  "IMG_0002 (1).pdf": {
+    "confidence": 0.3,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "text:ambiguous",
+    ],
+  },
+  "scanlite3.pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:12",
+    ],
+  },
+  "Алия.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "tryParseTextUpdBundle",
+    "signals": [
+      "text:upd",
+      "invoices:15",
+    ],
+    "updInvoiceCount": 15,
+  },
+  "М-15 № 168 от 26.06.2026 г. на отпуск материалов Алюпром-Алюспэйс .pdf": {
+    "confidence": 0,
+    "detectedKind": "m15",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "name:m15",
+      "textLen:12",
+    ],
+  },
+  "М-15 № 170 от 26.06.2026 г. на отпуск материалов Алюпром-Алюспэйс .pdf": {
+    "confidence": 0,
+    "detectedKind": "m15",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "text:ambiguous",
+      "name:m15",
+    ],
+  },
+  "Реализация товаров и услуг № 22083 от 25 июня 2026 г .XLS": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "Реализация товаров и услуг № 22160 от 26 июня 2026 г .XLS": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "Су-10 06.07..pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:51",
+    ],
+  },
+  "Су-10 06.07.pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:51",
+    ],
+  },
+  "Су-10 Алюспэйс фрнарь 001.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "Су-10 Фридриха Энгельса 22.06..pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:77",
+    ],
+  },
+  "Т56532_20260622112337_Подтверждение_отгрузки.XLSX": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "Т56822_20260623075352_Подтверждение_отгрузки.XLSX": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "Т57292_20260624073054_Подтверждение_отгрузки.XLSX": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "ТранспортнаяНакладнаяУПД Реализация товаров и услуг №ТН0006251866.pdf": {
+    "confidence": 0.8,
+    "detectedKind": "transport_waybill",
+    "needsVision": false,
+    "parserUsed": "parseWaybillBatch",
+    "signals": [
+      "text:tn",
+    ],
+  },
+  "ТранспортнаяНакладнаяУПД Реализация товаров и услуг №ТН0006281148.pdf": {
+    "confidence": 0.8,
+    "detectedKind": "transport_waybill",
+    "needsVision": false,
+    "parserUsed": "parseWaybillBatch",
+    "signals": [
+      "text:tn",
+    ],
+  },
+  "ТранспортнаяНакладнаяУПД Реализация товаров и услуг №ТН0006290197.pdf": {
+    "confidence": 0.8,
+    "detectedKind": "transport_waybill",
+    "needsVision": false,
+    "parserUsed": "parseWaybillBatch",
+    "signals": [
+      "text:tn",
+    ],
+  },
+  "УПД (статус 1) № 258 от 2 июля 2026 г.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД (статус 1) № 262 от 7 июля 2026 г.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД (статус 1) № 273 от 9 июля 2026 г.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД № ТК-02815 от 18 июня 2026 г..xls": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "УПД № ТК-02876 от 23 июня 2026 г..xls": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "УПД № ЭИ00-0041581 от 29 мая 2026 г..xlsx": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "УПД № ЭИ00-0041610 от 29 мая 2026 г. (1).xlsx": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "УПД № ЭИ00-0041610 от 29 мая 2026 г. (2).xlsx": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "УПД № ЭИ00-0041610 от 29 мая 2026 г. (3).xlsx": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "УПД № ЭИ00-0041610 от 29 мая 2026 г..xlsx": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "УПД №100000.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №116 от 30.09.25.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №11618 от 24.10.25.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №1223-004_1 от 23.12.25.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №18266 от 19.12.25.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №24 от 13.01.26.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №UT-3843 от 30.12.25.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №КА-1518 от 07.11.25.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №М-1789 от 19.05.26.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №МО1812-00014_4 от 18.12.25.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №ТРМ-МЛН131832 от 10.04.26.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №УТ-1160 от 26.12.25.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №УТ-2217 от 14.05.26.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №УТ-22170000.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №УТ-6564 от 14.10.25.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №Х-3655 от 06.10.25 (1).pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №Х-3655 от 06.10.25.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД №ЦБ-641 от 13.03.26.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "УПД_214_СУ_10_Борисовские_пруды_сб_20_06_.pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:64",
+    ],
+  },
+  "Универсальный передаточный документ (УПД) 51458 от 07.07.2026 (1).pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "Универсальный передаточный документ (УПД) 51458 от 07.07.2026 (2).pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "Универсальный передаточный документ (УПД) 51458 от 07.07.2026.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
+  },
+  "зиларт.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "tryParseTextUpdBundle",
+    "signals": [
+      "text:upd",
+      "invoices:4",
+    ],
+    "updInvoiceCount": 4,
+  },
+  "сканирование.pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:12",
+    ],
+  },
+  "сканирование0043.pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:25",
+    ],
+  },
+  "сканирование0055.pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:25",
+    ],
+  },
+  "сканирование0202.pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:51",
+    ],
+  },
+  "су-10 АсфБ.xlsx": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+  "упд 1877.xls": {
+    "confidence": 0.99,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdXlsx",
+    "signals": [
+      "ext:excel",
+    ],
+  },
+}

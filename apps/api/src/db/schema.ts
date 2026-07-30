@@ -451,8 +451,33 @@ export const mailAccounts = pgTable('mail_accounts', {
   username: text('username').notNull(),
   passwordEncrypted: text('password_encrypted').notNull(),
   folder: text('folder').notNull().default('INBOX'),
-  lastUid: integer('last_uid'),
+  // IMAP UID доходит до 2^32-1 — int4 переполняется.
+  lastUid: bigint('last_uid', { mode: 'number' }),
+  // Смена UIDVALIDITY означает, что прежние UID больше не действительны и
+  // watermark надо сбрасывать, иначе письма пропускаются или дублируются.
+  uidValidity: bigint('uid_validity', { mode: 'number' }),
   isActive: boolean('is_active').notNull().default(true),
+  // 'request' — исторический ящик заявок (письмо сразу разбирается LLM);
+  // 'document' — ящик подрядчиков, письма попадают в карантин и ждут оператора.
+  purpose: text('purpose').notNull().default('request'),
+  // Поллинг включается ОТДЕЛЬНО от is_active: ящик можно завести и проверить
+  // до того, как его начнёт опрашивать воркер.
+  pollEnabled: boolean('poll_enabled').notNull().default(false),
+  // Лиз с владельцем и токеном: снять или продлить может только тот экземпляр
+  // воркера, который его взял, поэтому перезапущенный процесс не отбирает лиз
+  // у живого.
+  pollLeaseOwner: uuid('poll_lease_owner'),
+  pollLeaseToken: uuid('poll_lease_token'),
+  pollLeaseUntil: timestamp('poll_lease_until', { withTimezone: true }),
+  // Предзаполнение карточки разбора, если для письма не нашлось правила.
+  defaultSiteId: uuid('default_site_id').references(() => sites.id, { onDelete: 'set null' }),
+  defaultDirection: sourceDirectionEnum('default_direction'),
+  defaultContractorId: uuid('default_contractor_id').references(() => counterparties.id, {
+    onDelete: 'set null',
+  }),
+  // Антишумовой фильтр отправителей, НЕ подтверждение личности: From
+  // подделывается, поэтому автообработка по нему одному невозможна.
+  senderAllowlist: text('sender_allowlist').array(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -570,6 +595,12 @@ export const sourceDocuments = pgTable(
       onDelete: 'set null',
     }),
     version: integer('version').notNull().default(1),
+    // Техническая запись пакета: создаётся при загрузке, живёт до разбора и
+    // удаляется воркером. Флаг, а не эвристика «kind + наличие bundle»: у
+    // реальных ТН тот же kind. Такие записи исключаются из /sync, списка и
+    // экспорта — иначе они уезжают на планшет и висят там фантомом.
+    isTechnical: boolean('is_technical').notNull().default(false),
+    dispatchGeneration: integer('dispatch_generation').notNull().default(0),
     // Ссылка на пакет загрузки (см. sourceBundles). Один пакет может породить
     // N source_documents — например ТН-2116 + ОС-2 из одной пачки фото.
     bundleId: uuid('bundle_id').references((): AnyPgColumn => sourceBundles.id, {
@@ -637,6 +668,22 @@ export const sourceBundles = pgTable(
   {
     id: uuid('id').primaryKey().defaultRandom(),
     bundleHash: varchar('bundle_hash', { length: 64 }).notNull(),
+    // Хеш только от байтов файлов (то же, что bundle_hash) — вынесен отдельно,
+    // потому что bundle_hash уходит вместе со старым unique.
+    contentHash: varchar('content_hash', { length: 64 }),
+    // Ключ идемпотентности СО SCOPE: объект, направление, получатель, дата
+    // плюс content_hash. Уникальность по одному лишь bundle_hash склеивает тот
+    // же УПД, загруженный на разные объекты, и молча возвращает чужой пакет.
+    // NOT NULL + UNIQUE навешивает contract-миграция, после перевода writers.
+    idempotencyKey: text('idempotency_key'),
+    origin: sourceOriginEnum('origin'),
+    // Sub-пакет накладной ссылается на родительский.
+    parentBundleId: uuid('parent_bundle_id').references((): AnyPgColumn => sourceBundles.id, {
+      onDelete: 'set null',
+    }),
+    // Счётчик НАМЕРЕННЫХ запусков разбора: входит в dispatch ID, поэтому
+    // повторный разбор получает новый jobId и реально выполняется.
+    dispatchGeneration: integer('dispatch_generation').notNull().default(0),
     direction: sourceDirectionEnum('direction').notNull(),
     siteId: uuid('site_id').references(() => sites.id, { onDelete: 'set null' }),
     contractorId: uuid('contractor_id').references(() => counterparties.id, {
@@ -662,7 +709,14 @@ export const sourceBundles = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex('source_bundles_bundle_hash_unique').on(t.bundleHash)],
+  (t) => [
+    uniqueIndex('source_bundles_bundle_hash_unique').on(t.bundleHash),
+    // Пока обычный: уникальным станет в contract-миграции.
+    index('source_bundles_idempotency_key_idx').on(t.idempotencyKey),
+    index('source_bundles_parent_idx')
+      .on(t.parentBundleId)
+      .where(sql`${t.parentBundleId} is not null`),
+  ],
 );
 
 // Журнал решений единого входа (/upload-documents): одна строка на КАЖДЫЙ
@@ -1267,6 +1321,210 @@ export const s3CleanupOutbox = pgTable(
       .on(t.nextAttemptAt)
       .where(sql`${t.processingAt} is null`),
   ],
+);
+
+// ─── Job outbox (надёжная постановка задач в очередь) ─────────────────────
+
+// Задание пишется в ТОЙ ЖЕ транзакции, что и бизнес-запись (пакет, документ),
+// поэтому недоступность Redis в момент коммита больше не оставляет пакет в
+// статусе queued без job. Consumer в воркере разбирает строки батчем
+// (FOR UPDATE SKIP LOCKED + лизинг) и ставит их в BullMQ.
+//
+// dedupe_key — ДИСПЕТЧЕРСКИЙ идентификатор попытки (`bundle:<id>:parse:<gen>`),
+// а не идентификатор сущности: BullMQ хранит завершённые jobs сутки
+// (removeOnComplete), поэтому jobId вида `bundle:<id>` заставил бы намеренный
+// повторный разбор молча не запуститься. Он же передаётся в queue.add как
+// jobId, поэтому повторная обработка ТОЙ ЖЕ строки outbox дубля не создаёт.
+export const jobOutbox = pgTable(
+  'job_outbox',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    queue: text('queue').notNull(),
+    jobName: text('job_name').notNull(),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    dedupeKey: text('dedupe_key').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    lastError: text('last_error'),
+    processingAt: timestamp('processing_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Одна попытка диспетчеризации — одна строка.
+    uniqueIndex('job_outbox_dedupe_key_unique').on(t.dedupeKey),
+    // Выборка готовых к отправке среди «свободных» (как у s3_cleanup_outbox).
+    index('job_outbox_ready_idx')
+      .on(t.nextAttemptAt)
+      .where(sql`${t.processingAt} is null`),
+  ],
+);
+
+// ─── Почтовый канал приёма документов ─────────────────────────────────────
+
+// mail_receipts — ТОЛЬКО транспорт: что удалось забрать из IMAP. Строка
+// создаётся ДО загрузки тела письма, поэтому падению на fetch/MIME/S3 есть
+// куда записать попытку.
+export const mailReceipts = pgTable(
+  'mail_receipts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    mailAccountId: uuid('mail_account_id')
+      .notNull()
+      .references(() => mailAccounts.id, { onDelete: 'cascade' }),
+    uid: bigint('uid', { mode: 'number' }).notNull(),
+    uidValidity: bigint('uid_validity', { mode: 'number' }).notNull(),
+    // fetching | parsed | skipped_by_size | fetch_failed | parse_failed | vanished
+    // Терминальные двигают watermark; fetch_failed/parse_failed — только после
+    // исчерпания попыток.
+    status: text('status').notNull().default('fetching'),
+    rfc822Size: bigint('rfc822_size', { mode: 'number' }),
+    rawS3Key: text('raw_s3_key'),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('mail_receipts_uid_unique').on(t.mailAccountId, t.uidValidity, t.uid),
+    index('mail_receipts_status_idx').on(t.mailAccountId, t.status),
+  ],
+);
+
+// mail_messages — ТОЛЬКО бизнес-состояние письма. Строка создаётся для
+// КАЖДОГО разобранного письма, включая ignored/no_attachments/rejected_sender:
+// иначе эти исходы негде хранить и письмо пропадает из наблюдаемости.
+export const mailMessages = pgTable(
+  'mail_messages',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    mailAccountId: uuid('mail_account_id')
+      .notNull()
+      .references(() => mailAccounts.id, { onDelete: 'cascade' }),
+    receiptId: uuid('receipt_id').references(() => mailReceipts.id, { onDelete: 'set null' }),
+    // sha256 от СЫРОГО .eml, не от Message-ID: хеш по заголовку позволил бы
+    // отправителю подделать Message-ID настоящего письма и добиться того, что
+    // подлинный УПД молча отбросится как дубль.
+    messageHash: varchar('message_hash', { length: 64 }).notNull(),
+    messageIdHeader: text('message_id_header'),
+    fromAddress: text('from_address'),
+    subject: text('subject'),
+    receivedAt: timestamp('received_at', { withTimezone: true }),
+    // quarantined | resolving | ingested | rejected | ignored | no_attachments | rejected_sender
+    status: text('status').notNull().default('quarantined'),
+    rejectReason: text('reject_reason'),
+    bundleId: uuid('bundle_id').references(() => sourceBundles.id, { onDelete: 'set null' }),
+    // Токен саги resolve: T2 закрывается только своим токеном, поэтому
+    // повторный resolve чужой попытки не «докатывает» её наполовину.
+    resolveToken: uuid('resolve_token'),
+    resolveStartedAt: timestamp('resolve_started_at', { withTimezone: true }),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    suggestedSiteId: uuid('suggested_site_id').references(() => sites.id, { onDelete: 'set null' }),
+    suggestedDirection: sourceDirectionEnum('suggested_direction'),
+    rawS3Key: text('raw_s3_key'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('mail_messages_hash_unique').on(t.mailAccountId, t.messageHash),
+    index('mail_messages_status_idx').on(t.status, t.createdAt),
+    // Для компенсации зависших саг.
+    index('mail_messages_resolving_idx')
+      .on(t.resolveStartedAt)
+      .where(sql`status = 'resolving'`),
+  ],
+);
+
+// Нормализованная таблица, не jsonb: даёт FK, индексы и атомарный restore
+// вложения вместо перезаписи json-массива.
+export const mailAttachments = pgTable(
+  'mail_attachments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    mailMessageId: uuid('mail_message_id')
+      .notNull()
+      .references(() => mailMessages.id, { onDelete: 'cascade' }),
+    idx: integer('idx').notNull(),
+    filename: text('filename'),
+    declaredMime: text('declared_mime'),
+    sniffedMime: text('sniffed_mime'),
+    sizeBytes: bigint('size_bytes', { mode: 'number' }).notNull().default(0),
+    sha256: varchar('sha256', { length: 64 }),
+    stagingS3Key: text('staging_s3_key'),
+    // kept | suspected_signature | skipped | restored
+    // Фильтр подписей ничего не удаляет: признаки по отдельности («< 25 КБ»,
+    // имя image001) отбросили бы и настоящий скан.
+    state: text('state').notNull().default('kept'),
+    skipReason: text('skip_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('mail_attachments_message_idx_unique').on(t.mailMessageId, t.idx),
+    index('mail_attachments_staging_key_idx')
+      .on(t.stagingS3Key)
+      .where(sql`${t.stagingS3Key} is not null`),
+  ],
+);
+
+// Правила предзаполнения карточки разбора. Матчинг темы — substring/glob,
+// НЕ regex: выражение приходит от пользователя и regex открывает ReDoS.
+export const mailRoutes = pgTable(
+  'mail_routes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    mailAccountId: uuid('mail_account_id')
+      .notNull()
+      .references(() => mailAccounts.id, { onDelete: 'cascade' }),
+    // from | subject
+    matchType: text('match_type').notNull(),
+    matchValue: text('match_value').notNull(),
+    siteId: uuid('site_id').references(() => sites.id, { onDelete: 'set null' }),
+    direction: sourceDirectionEnum('direction'),
+    contractorId: uuid('contractor_id').references(() => counterparties.id, {
+      onDelete: 'set null',
+    }),
+    // admin-only: manager через «запомнить маршрут» создаёт правило только с
+    // auto_process = false. Автообработка требует проверенных SPF/DKIM/DMARC.
+    autoProcess: boolean('auto_process').notNull().default(false),
+    priority: integer('priority').notNull().default(100),
+    isActive: boolean('is_active').notNull().default(true),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('mail_routes_account_idx')
+      .on(t.mailAccountId, t.priority)
+      .where(sql`is_active = true`),
+  ],
+);
+
+// Provenance пакета отдельной таблицей: один пакет может прийти вручную И
+// несколькими письмами, поэтому одиночные mail_account_id/message_id в самом
+// пакете были бы неверны.
+export const ingestEvents = pgTable(
+  'ingest_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bundleId: uuid('bundle_id')
+      .notNull()
+      .references(() => sourceBundles.id, { onDelete: 'cascade' }),
+    // manual | mail
+    channel: text('channel').notNull(),
+    mailMessageId: uuid('mail_message_id').references(() => mailMessages.id, {
+      onDelete: 'set null',
+    }),
+    actorUserId: uuid('actor_user_id').references(() => users.id, { onDelete: 'set null' }),
+    // Попытка загрузить тот же контент в другой scope — фиксируем, а не
+    // молча возвращаем чужой пакет.
+    crossScopeOf: uuid('cross_scope_of').references((): AnyPgColumn => sourceBundles.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('ingest_events_bundle_idx').on(t.bundleId, t.createdAt)],
 );
 
 // ─── Share-tokens (публичные ссылки на просмотр приёмки/отгрузки) ─────────

@@ -83,6 +83,10 @@ import { sourceDocumentAttachments, bundleImportItems } from './db/schema.js';
 import { createHash } from 'node:crypto';
 import { classifyFile } from './domain/edo/document-router.js';
 import { classifyImageKind } from './domain/edo/vision-classifier.js';
+import {
+  processJobOutbox,
+  OUTBOX_INTERVAL_MS as JOB_OUTBOX_INTERVAL_MS,
+} from './domain/jobs/job-outbox.js';
 import type { UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
 
 // Хелпер: уведомляем подключённых SSE-клиентов о смене статуса УПД через
@@ -1906,3 +1910,20 @@ setTimeout(() => {
     );
   }, OUTBOX_INTERVAL_MS).unref();
 }, 10 * 1000).unref();
+
+// Periodic job outbox consumer (приём УПД из почты, этап 3).
+//
+// На таблицу job_outbox пока НИКТО не пишет: consumer вводится заранее, чтобы
+// к моменту перевода writers он уже был проверен в бою. Пустой батч не делает
+// ничего и не логируется. Первый прогон через 12с от старта (со сдвигом
+// относительно s3-cleanup, чтобы две периодики не будили БД одновременно).
+setTimeout(() => {
+  const runJobOutbox = () =>
+    void processJobOutbox({
+      db,
+      queues: { [UPD_PARSE_QUEUE]: queue },
+      log: logger.child({ task: 'job-outbox' }),
+    }).catch((err) => logger.error({ err }, 'job outbox consumer failed'));
+  runJobOutbox();
+  setInterval(runJobOutbox, JOB_OUTBOX_INTERVAL_MS).unref();
+}, 12 * 1000).unref();

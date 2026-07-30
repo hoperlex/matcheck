@@ -9,7 +9,7 @@ import {
 } from '@matcheck/contracts';
 import { mailAccounts } from '../../db/schema.js';
 import { buildAad, encryptToString } from '../../domain/auth/crypto.js';
-import { runMailSyncForAccount } from '../../domain/jobs/mail-poller.js';
+import { runMailSyncForAccount } from '../../domain/jobs/mail-requests.js';
 
 function dto(a: typeof mailAccounts.$inferSelect) {
   return {
