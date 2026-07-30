@@ -10,6 +10,10 @@ export const MailAccountDtoSchema = z.object({
   folder: z.string(),
   lastUid: z.number().nullable(),
   isActive: z.boolean(),
+  /** 'request' — заявки, 'document' — УПД от подрядчиков (карантин). */
+  purpose: z.string(),
+  /** Автоопрос ящика. Включается отдельно от isActive и осознанно. */
+  pollEnabled: z.boolean(),
   createdAt: z.string(),
 });
 export type MailAccountDto = z.infer<typeof MailAccountDtoSchema>;
@@ -94,5 +98,23 @@ export const MailAccountUpsertSchema = z.object({
   password: z.string().min(1).optional(),
   folder: z.string().default('INBOX'),
   isActive: z.boolean().default(true),
+  purpose: MailAccountPurposeSchema.default('request'),
+  // Автоопрос по умолчанию выключен: ящик сначала заводят и проверяют
+  // доступы кнопкой, и только потом включают постоянный опрос.
+  pollEnabled: z.boolean().default(false),
 });
 export type MailAccountUpsert = z.infer<typeof MailAccountUpsertSchema>;
+
+/** Частичное обновление: пароль передаётся только если его меняют. */
+export const MailAccountPatchSchema = MailAccountUpsertSchema.partial();
+export type MailAccountPatch = z.infer<typeof MailAccountPatchSchema>;
+
+/**
+ * Ответ на «проверить сейчас»: опрос выполняется отдельным процессом, поэтому
+ * запрос лишь ставит задачу в очередь.
+ */
+export const MailPollQueuedSchema = z.object({
+  queued: z.literal(true),
+  jobId: z.string(),
+});
+export type MailPollQueued = z.infer<typeof MailPollQueuedSchema>;
