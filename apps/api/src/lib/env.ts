@@ -60,10 +60,16 @@ const envSchema = z.object({
   MAIL_POLL_INTERVAL_SEC: z.coerce.number().int().positive().default(120),
   MAIL_POLL_MAX_MESSAGES: z.coerce.number().int().positive().default(50),
   MAIL_POLL_LEASE_SEC: z.coerce.number().int().positive().default(900),
-  // Письмо целиком: берётся с запасом к памяти процесса — оно существует
-  // сырым буфером, MIME-структурой и декодированными вложениями сразу.
-  MAIL_LETTER_MAX_BYTES: z.coerce.number().int().positive().default(50 * 1024 * 1024),
-  MAIL_ATTACHMENT_MAX_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
+  // Письмо целиком. Держится кратно ниже памяти контейнера: письмо существует
+  // сырым буфером, MIME-структурой и декодированными вложениями ОДНОВРЕМЕННО,
+  // то есть пик втрое выше самого размера. На VPS память общая с соседними
+  // проектами, и вытеснение чужого процесса дороже, чем пропуск письма.
+  //
+  // Письмо крупнее предела не теряется: оно не скачивается и попадает в список
+  // незабранных, где оператор может поднять лимит и затребовать повтор.
+  MAIL_LETTER_MAX_BYTES: z.coerce.number().int().positive().default(20 * 1024 * 1024),
+  // Вложение по определению меньше письма — держим предел согласованным.
+  MAIL_ATTACHMENT_MAX_BYTES: z.coerce.number().int().positive().default(15 * 1024 * 1024),
   // Защита от zip-бомбы в xlsx: три независимых предела.
   MAIL_XLSX_MAX_ENTRIES: z.coerce.number().int().positive().default(512),
   MAIL_XLSX_MAX_INFLATED_BYTES: z.coerce.number().int().positive().default(100 * 1024 * 1024),

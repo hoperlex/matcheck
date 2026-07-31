@@ -120,15 +120,20 @@ services:
     environment:
       # Письмо живёт в памяти сырым буфером, MIME-структурой и декодированными
       # вложениями одновременно, поэтому heap ограничиваем явно, а лимит письма
-      # (MAIL_LETTER_MAX_BYTES) держим кратно ниже mem_limit.
-      NODE_OPTIONS: --max-old-space-size=320
+      # (MAIL_LETTER_MAX_BYTES, 20 МБ) держим кратно ниже mem_limit.
+      #
+      # Значения занижены осознанно: VPS делит ~4 ГБ с соседними проектами и уже
+      # уходит в swap. Вытеснить чужой процесс дороже, чем пропустить редкое
+      # большое письмо — оно не теряется, а попадает в список незабранных с
+      # кнопкой повтора.
+      NODE_OPTIONS: --max-old-space-size=256
     networks: [matcheck-net]
     volumes:
       - /srv/matcheck/secrets/yandex-ca/root.crt:/etc/ssl/yandex/root.crt:ro
     depends_on:
       matcheck-redis:
         condition: service_healthy
-    mem_limit: 512m
+    mem_limit: 384m
     cpus: 0.5
     command: ["node_modules/.bin/tsx", "src/mail-worker.ts"]
     logging:

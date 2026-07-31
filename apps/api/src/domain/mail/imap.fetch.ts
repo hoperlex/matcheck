@@ -36,7 +36,9 @@ export type FetchLimits = {
 };
 
 export const DEFAULT_FETCH_LIMITS: FetchLimits = {
-  maxLetterBytes: 50 * 1024 * 1024,
+  // Согласовано с MAIL_LETTER_MAX_BYTES: письмо держится в памяти сырым
+  // буфером, MIME-структурой и вложениями сразу, поэтому пик втрое выше.
+  maxLetterBytes: 20 * 1024 * 1024,
 };
 
 export type FetchDecision =
