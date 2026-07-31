@@ -64,7 +64,9 @@
         "enum": [
           "admin",
           "manager",
-          "inspector_kpp"
+          "inspector_kpp",
+          "contractor",
+          "monitor"
         ]
       },
       "UserDto": {
@@ -82,7 +84,9 @@
             "enum": [
               "admin",
               "manager",
-              "inspector_kpp"
+              "inspector_kpp",
+              "contractor",
+              "monitor"
             ]
           },
           "isActive": {
@@ -95,6 +99,25 @@
             ],
             "format": "uuid"
           },
+          "contractorCustomerId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fullName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "createdAt": {
             "type": "string"
           }
@@ -105,6 +128,9 @@
           "role",
           "isActive",
           "siteId",
+          "contractorCustomerId",
+          "phone",
+          "fullName",
           "createdAt"
         ]
       },
@@ -166,7 +192,9 @@
                 "enum": [
                   "admin",
                   "manager",
-                  "inspector_kpp"
+                  "inspector_kpp",
+                  "contractor",
+                  "monitor"
                 ]
               },
               "isActive": {
@@ -179,6 +207,25 @@
                 ],
                 "format": "uuid"
               },
+              "contractorCustomerId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "phone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "fullName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "createdAt": {
                 "type": "string"
               }
@@ -189,6 +236,9 @@
               "role",
               "isActive",
               "siteId",
+              "contractorCustomerId",
+              "phone",
+              "fullName",
               "createdAt"
             ]
           },
@@ -332,12 +382,38 @@
             "type": "string",
             "format": "uuid"
           },
+          "itemKind": {
+            "type": "string",
+            "enum": [
+              "material",
+              "asset"
+            ]
+          },
           "materialId": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
+          },
+          "assetId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "inventoryNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serialNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "nameRaw": {
             "type": "string"
@@ -378,6 +454,24 @@
               "null"
             ]
           },
+          "price": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vatRate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vatSum": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "volumeConfidence": {
             "type": [
               "string",
@@ -398,7 +492,11 @@
         },
         "required": [
           "id",
+          "itemKind",
           "materialId",
+          "assetId",
+          "inventoryNumber",
+          "serialNumber",
           "nameRaw",
           "qtyPlanned",
           "qtyActual",
@@ -407,6 +505,9 @@
           "lineNo",
           "volumeM3",
           "massKg",
+          "price",
+          "vatRate",
+          "vatSum",
           "volumeConfidence",
           "groupName"
         ]
@@ -426,6 +527,14 @@
               "vehicle",
               "other"
             ]
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "before",
+              "after"
+            ],
+            "default": "before"
           },
           "s3Key": {
             "type": "string"
@@ -468,6 +577,10 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "displayId": {
+            "type": "integer",
+            "exclusiveMinimum": 0
           },
           "status": {
             "type": "object",
@@ -522,6 +635,31 @@
             ],
             "format": "uuid"
           },
+          "recipientMolId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "siteName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "supplierName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contractorName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "vehiclePlate": {
             "type": [
               "string",
@@ -553,6 +691,12 @@
               "null"
             ]
           },
+          "inTransit": {
+            "type": "boolean"
+          },
+          "isAssets": {
+            "type": "boolean"
+          },
           "confirmedByMolUserId": {
             "type": [
               "string",
@@ -567,6 +711,41 @@
             ]
           },
           "confirmedByMolAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewState": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "approved",
+              "issues"
+            ]
+          },
+          "reviewNote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewedByUserId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reviewedByUserEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewedAt": {
             "type": [
               "string",
               "null"
@@ -607,6 +786,32 @@
               "format": "uuid"
             }
           },
+          "sourceShipmentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "sourceShipmentShippedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sourceShipmentSiteId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "sourceShipmentSiteCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "items": {
             "type": "array",
             "items": {
@@ -616,12 +821,38 @@
                   "type": "string",
                   "format": "uuid"
                 },
+                "itemKind": {
+                  "type": "string",
+                  "enum": [
+                    "material",
+                    "asset"
+                  ]
+                },
                 "materialId": {
                   "type": [
                     "string",
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "assetId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "inventoryNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "serialNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "nameRaw": {
                   "type": "string"
@@ -662,6 +893,24 @@
                     "null"
                   ]
                 },
+                "price": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "vatRate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "vatSum": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "volumeConfidence": {
                   "type": [
                     "string",
@@ -682,7 +931,11 @@
               },
               "required": [
                 "id",
+                "itemKind",
                 "materialId",
+                "assetId",
+                "inventoryNumber",
+                "serialNumber",
                 "nameRaw",
                 "qtyPlanned",
                 "qtyActual",
@@ -691,6 +944,9 @@
                 "lineNo",
                 "volumeM3",
                 "massKg",
+                "price",
+                "vatRate",
+                "vatSum",
                 "volumeConfidence",
                 "groupName"
               ]
@@ -713,6 +969,14 @@
                     "vehicle",
                     "other"
                   ]
+                },
+                "stage": {
+                  "type": "string",
+                  "enum": [
+                    "before",
+                    "after"
+                  ],
+                  "default": "before"
                 },
                 "s3Key": {
                   "type": "string"
@@ -750,6 +1014,87 @@
               ]
             }
           },
+          "itemCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "photoCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "itemsTotal": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "itemsVatSum": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "primarySourceDocument": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "upd",
+                  "request",
+                  "transport_waybill",
+                  "os2_transfer"
+                ]
+              },
+              "docNumber": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "totalSum": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "contractorId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "supplierName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "contractorName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "docNumber",
+              "totalSum",
+              "contractorId",
+              "supplierName",
+              "contractorName"
+            ]
+          },
           "createdAt": {
             "type": "string"
           },
@@ -759,15 +1104,19 @@
         },
         "required": [
           "id",
+          "displayId",
           "status",
           "siteId",
           "supplierId",
           "contractorId",
+          "recipientMolId",
           "vehiclePlate",
           "driverName",
           "arrivedAt",
           "inspectorId",
           "comment",
+          "inTransit",
+          "isAssets",
           "confirmedByMolUserId",
           "confirmedByMolUserEmail",
           "confirmedByMolAt",
@@ -777,6 +1126,10 @@
           "pendingDeletionReason",
           "version",
           "sourceDocumentIds",
+          "sourceShipmentId",
+          "sourceShipmentShippedAt",
+          "sourceShipmentSiteId",
+          "sourceShipmentSiteCode",
           "items",
           "photos",
           "createdAt",
@@ -817,6 +1170,13 @@
             ],
             "format": "uuid"
           },
+          "recipientMolId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "vehiclePlate": {
             "type": [
               "string",
@@ -843,6 +1203,14 @@
               "null"
             ]
           },
+          "inTransit": {
+            "type": "boolean",
+            "default": false
+          },
+          "isAssets": {
+            "type": "boolean",
+            "default": false
+          },
           "sourceDocumentIds": {
             "type": "array",
             "items": {
@@ -860,12 +1228,41 @@
                   "type": "string",
                   "format": "uuid"
                 },
+                "itemKind": {
+                  "type": "string",
+                  "enum": [
+                    "material",
+                    "asset"
+                  ],
+                  "default": "material"
+                },
                 "materialId": {
                   "type": [
                     "string",
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "assetId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "inventoryNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 200
+                },
+                "serialNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 200
                 },
                 "nameRaw": {
                   "type": "string",
@@ -904,6 +1301,24 @@
                   ]
                 },
                 "massKg": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "price": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "vatRate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "vatSum": {
                   "type": [
                     "string",
                     "null"
@@ -955,6 +1370,10 @@
                 "id": {
                   "type": "string",
                   "format": "uuid"
+                },
+                "displayId": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0
                 },
                 "status": {
                   "type": "object",
@@ -1009,6 +1428,31 @@
                   ],
                   "format": "uuid"
                 },
+                "recipientMolId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "siteName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "supplierName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "contractorName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "vehiclePlate": {
                   "type": [
                     "string",
@@ -1040,6 +1484,12 @@
                     "null"
                   ]
                 },
+                "inTransit": {
+                  "type": "boolean"
+                },
+                "isAssets": {
+                  "type": "boolean"
+                },
                 "confirmedByMolUserId": {
                   "type": [
                     "string",
@@ -1054,6 +1504,41 @@
                   ]
                 },
                 "confirmedByMolAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reviewState": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "approved",
+                    "issues"
+                  ]
+                },
+                "reviewNote": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reviewedByUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "reviewedByUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reviewedAt": {
                   "type": [
                     "string",
                     "null"
@@ -1094,6 +1579,32 @@
                     "format": "uuid"
                   }
                 },
+                "sourceShipmentId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "sourceShipmentShippedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "sourceShipmentSiteId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "sourceShipmentSiteCode": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "items": {
                   "type": "array",
                   "items": {
@@ -1103,12 +1614,38 @@
                         "type": "string",
                         "format": "uuid"
                       },
+                      "itemKind": {
+                        "type": "string",
+                        "enum": [
+                          "material",
+                          "asset"
+                        ]
+                      },
                       "materialId": {
                         "type": [
                           "string",
                           "null"
                         ],
                         "format": "uuid"
+                      },
+                      "assetId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "inventoryNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "serialNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       },
                       "nameRaw": {
                         "type": "string"
@@ -1149,6 +1686,24 @@
                           "null"
                         ]
                       },
+                      "price": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatRate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
                       "volumeConfidence": {
                         "type": [
                           "string",
@@ -1169,7 +1724,11 @@
                     },
                     "required": [
                       "id",
+                      "itemKind",
                       "materialId",
+                      "assetId",
+                      "inventoryNumber",
+                      "serialNumber",
                       "nameRaw",
                       "qtyPlanned",
                       "qtyActual",
@@ -1178,6 +1737,9 @@
                       "lineNo",
                       "volumeM3",
                       "massKg",
+                      "price",
+                      "vatRate",
+                      "vatSum",
                       "volumeConfidence",
                       "groupName"
                     ]
@@ -1200,6 +1762,14 @@
                           "vehicle",
                           "other"
                         ]
+                      },
+                      "stage": {
+                        "type": "string",
+                        "enum": [
+                          "before",
+                          "after"
+                        ],
+                        "default": "before"
                       },
                       "s3Key": {
                         "type": "string"
@@ -1237,6 +1807,87 @@
                     ]
                   }
                 },
+                "itemCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "photoCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "itemsTotal": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "itemsVatSum": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "primarySourceDocument": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "upd",
+                        "request",
+                        "transport_waybill",
+                        "os2_transfer"
+                      ]
+                    },
+                    "docNumber": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "totalSum": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "contractorId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "supplierName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "contractorName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "docNumber",
+                    "totalSum",
+                    "contractorId",
+                    "supplierName",
+                    "contractorName"
+                  ]
+                },
                 "createdAt": {
                   "type": "string"
                 },
@@ -1246,15 +1897,19 @@
               },
               "required": [
                 "id",
+                "displayId",
                 "status",
                 "siteId",
                 "supplierId",
                 "contractorId",
+                "recipientMolId",
                 "vehiclePlate",
                 "driverName",
                 "arrivedAt",
                 "inspectorId",
                 "comment",
+                "inTransit",
+                "isAssets",
                 "confirmedByMolUserId",
                 "confirmedByMolUserEmail",
                 "confirmedByMolAt",
@@ -1264,6 +1919,10 @@
                 "pendingDeletionReason",
                 "version",
                 "sourceDocumentIds",
+                "sourceShipmentId",
+                "sourceShipmentShippedAt",
+                "sourceShipmentSiteId",
+                "sourceShipmentSiteCode",
                 "items",
                 "photos",
                 "createdAt",
@@ -1310,6 +1969,10 @@
               "id": {
                 "type": "string",
                 "format": "uuid"
+              },
+              "displayId": {
+                "type": "integer",
+                "exclusiveMinimum": 0
               },
               "status": {
                 "type": "object",
@@ -1364,6 +2027,31 @@
                 ],
                 "format": "uuid"
               },
+              "recipientMolId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "siteName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "supplierName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "contractorName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "vehiclePlate": {
                 "type": [
                   "string",
@@ -1395,6 +2083,12 @@
                   "null"
                 ]
               },
+              "inTransit": {
+                "type": "boolean"
+              },
+              "isAssets": {
+                "type": "boolean"
+              },
               "confirmedByMolUserId": {
                 "type": [
                   "string",
@@ -1409,6 +2103,41 @@
                 ]
               },
               "confirmedByMolAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reviewState": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "approved",
+                  "issues"
+                ]
+              },
+              "reviewNote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reviewedByUserId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "reviewedByUserEmail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reviewedAt": {
                 "type": [
                   "string",
                   "null"
@@ -1449,6 +2178,32 @@
                   "format": "uuid"
                 }
               },
+              "sourceShipmentId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "sourceShipmentShippedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sourceShipmentSiteId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "sourceShipmentSiteCode": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "items": {
                 "type": "array",
                 "items": {
@@ -1458,12 +2213,38 @@
                       "type": "string",
                       "format": "uuid"
                     },
+                    "itemKind": {
+                      "type": "string",
+                      "enum": [
+                        "material",
+                        "asset"
+                      ]
+                    },
                     "materialId": {
                       "type": [
                         "string",
                         "null"
                       ],
                       "format": "uuid"
+                    },
+                    "assetId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "inventoryNumber": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "serialNumber": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     },
                     "nameRaw": {
                       "type": "string"
@@ -1504,6 +2285,24 @@
                         "null"
                       ]
                     },
+                    "price": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "vatRate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "vatSum": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
                     "volumeConfidence": {
                       "type": [
                         "string",
@@ -1524,7 +2323,11 @@
                   },
                   "required": [
                     "id",
+                    "itemKind",
                     "materialId",
+                    "assetId",
+                    "inventoryNumber",
+                    "serialNumber",
                     "nameRaw",
                     "qtyPlanned",
                     "qtyActual",
@@ -1533,6 +2336,9 @@
                     "lineNo",
                     "volumeM3",
                     "massKg",
+                    "price",
+                    "vatRate",
+                    "vatSum",
                     "volumeConfidence",
                     "groupName"
                   ]
@@ -1555,6 +2361,14 @@
                         "vehicle",
                         "other"
                       ]
+                    },
+                    "stage": {
+                      "type": "string",
+                      "enum": [
+                        "before",
+                        "after"
+                      ],
+                      "default": "before"
                     },
                     "s3Key": {
                       "type": "string"
@@ -1592,6 +2406,87 @@
                   ]
                 }
               },
+              "itemCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "photoCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "itemsTotal": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "itemsVatSum": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "primarySourceDocument": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "upd",
+                      "request",
+                      "transport_waybill",
+                      "os2_transfer"
+                    ]
+                  },
+                  "docNumber": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "totalSum": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "contractorId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "uuid"
+                  },
+                  "supplierName": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "contractorName": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "docNumber",
+                  "totalSum",
+                  "contractorId",
+                  "supplierName",
+                  "contractorName"
+                ]
+              },
               "createdAt": {
                 "type": "string"
               },
@@ -1601,15 +2496,19 @@
             },
             "required": [
               "id",
+              "displayId",
               "status",
               "siteId",
               "supplierId",
               "contractorId",
+              "recipientMolId",
               "vehiclePlate",
               "driverName",
               "arrivedAt",
               "inspectorId",
               "comment",
+              "inTransit",
+              "isAssets",
               "confirmedByMolUserId",
               "confirmedByMolUserEmail",
               "confirmedByMolAt",
@@ -1619,6 +2518,10 @@
               "pendingDeletionReason",
               "version",
               "sourceDocumentIds",
+              "sourceShipmentId",
+              "sourceShipmentShippedAt",
+              "sourceShipmentSiteId",
+              "sourceShipmentSiteCode",
               "items",
               "photos",
               "createdAt",
@@ -1648,12 +2551,38 @@
             "type": "string",
             "format": "uuid"
           },
+          "itemKind": {
+            "type": "string",
+            "enum": [
+              "material",
+              "asset"
+            ]
+          },
           "materialId": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
+          },
+          "assetId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "inventoryNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serialNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "nameRaw": {
             "type": "string"
@@ -1694,6 +2623,24 @@
               "null"
             ]
           },
+          "price": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vatRate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vatSum": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "volumeConfidence": {
             "type": [
               "string",
@@ -1714,7 +2661,11 @@
         },
         "required": [
           "id",
+          "itemKind",
           "materialId",
+          "assetId",
+          "inventoryNumber",
+          "serialNumber",
           "nameRaw",
           "qtyPlanned",
           "qtyActual",
@@ -1723,6 +2674,9 @@
           "lineNo",
           "volumeM3",
           "massKg",
+          "price",
+          "vatRate",
+          "vatSum",
           "volumeConfidence",
           "groupName"
         ]
@@ -1742,6 +2696,14 @@
               "vehicle",
               "other"
             ]
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "before",
+              "after"
+            ],
+            "default": "before"
           },
           "s3Key": {
             "type": "string"
@@ -1784,6 +2746,10 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "displayId": {
+            "type": "integer",
+            "exclusiveMinimum": 0
           },
           "status": {
             "type": "object",
@@ -1829,11 +2795,30 @@
               "writeoff"
             ]
           },
+          "purpose": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "inTransit": {
+            "type": "boolean"
+          },
+          "isAssets": {
+            "type": "boolean"
+          },
           "siteId": {
             "type": "string",
             "format": "uuid"
           },
           "receiverCounterpartyId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "receiverMolId": {
             "type": [
               "string",
               "null"
@@ -1846,6 +2831,31 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "supplierId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "siteName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "supplierName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "receiverName": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "vehiclePlate": {
             "type": [
@@ -1897,6 +2907,41 @@
               "null"
             ]
           },
+          "reviewState": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "approved",
+              "issues"
+            ]
+          },
+          "reviewNote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewedByUserId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reviewedByUserEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "pendingDeletionAt": {
             "type": [
               "string",
@@ -1941,12 +2986,38 @@
                   "type": "string",
                   "format": "uuid"
                 },
+                "itemKind": {
+                  "type": "string",
+                  "enum": [
+                    "material",
+                    "asset"
+                  ]
+                },
                 "materialId": {
                   "type": [
                     "string",
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "assetId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "inventoryNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "serialNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "nameRaw": {
                   "type": "string"
@@ -1987,6 +3058,24 @@
                     "null"
                   ]
                 },
+                "price": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "vatRate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "vatSum": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "volumeConfidence": {
                   "type": [
                     "string",
@@ -2007,7 +3096,11 @@
               },
               "required": [
                 "id",
+                "itemKind",
                 "materialId",
+                "assetId",
+                "inventoryNumber",
+                "serialNumber",
                 "nameRaw",
                 "qtyPlanned",
                 "qtyActual",
@@ -2016,6 +3109,9 @@
                 "lineNo",
                 "volumeM3",
                 "massKg",
+                "price",
+                "vatRate",
+                "vatSum",
                 "volumeConfidence",
                 "groupName"
               ]
@@ -2038,6 +3134,14 @@
                     "vehicle",
                     "other"
                   ]
+                },
+                "stage": {
+                  "type": "string",
+                  "enum": [
+                    "before",
+                    "after"
+                  ],
+                  "default": "before"
                 },
                 "s3Key": {
                   "type": "string"
@@ -2075,6 +3179,87 @@
               ]
             }
           },
+          "itemCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "photoCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "itemsTotal": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "itemsVatSum": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "primarySourceDocument": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "upd",
+                  "request",
+                  "transport_waybill",
+                  "os2_transfer"
+                ]
+              },
+              "docNumber": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "totalSum": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "contractorId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "supplierName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "contractorName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "docNumber",
+              "totalSum",
+              "contractorId",
+              "supplierName",
+              "contractorName"
+            ]
+          },
           "createdAt": {
             "type": "string"
           },
@@ -2084,11 +3269,17 @@
         },
         "required": [
           "id",
+          "displayId",
           "status",
           "kind",
+          "purpose",
+          "inTransit",
+          "isAssets",
           "siteId",
           "receiverCounterpartyId",
+          "receiverMolId",
           "destSiteId",
+          "supplierId",
           "vehiclePlate",
           "driverName",
           "shippedAt",
@@ -2145,7 +3336,21 @@
             ],
             "format": "uuid"
           },
+          "receiverMolId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "destSiteId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "supplierId": {
             "type": [
               "string",
               "null"
@@ -2178,6 +3383,21 @@
               "null"
             ]
           },
+          "purpose": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "inTransit": {
+            "type": "boolean",
+            "default": false
+          },
+          "isAssets": {
+            "type": "boolean",
+            "default": false
+          },
           "sourceDocumentIds": {
             "type": "array",
             "items": {
@@ -2195,12 +3415,41 @@
                   "type": "string",
                   "format": "uuid"
                 },
+                "itemKind": {
+                  "type": "string",
+                  "enum": [
+                    "material",
+                    "asset"
+                  ],
+                  "default": "material"
+                },
                 "materialId": {
                   "type": [
                     "string",
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "assetId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "inventoryNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 200
+                },
+                "serialNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 200
                 },
                 "nameRaw": {
                   "type": "string",
@@ -2239,6 +3488,24 @@
                   ]
                 },
                 "massKg": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "price": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "vatRate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "vatSum": {
                   "type": [
                     "string",
                     "null"
@@ -2292,6 +3559,10 @@
                   "type": "string",
                   "format": "uuid"
                 },
+                "displayId": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0
+                },
                 "status": {
                   "type": "object",
                   "properties": {
@@ -2336,11 +3607,30 @@
                     "writeoff"
                   ]
                 },
+                "purpose": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "inTransit": {
+                  "type": "boolean"
+                },
+                "isAssets": {
+                  "type": "boolean"
+                },
                 "siteId": {
                   "type": "string",
                   "format": "uuid"
                 },
                 "receiverCounterpartyId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "receiverMolId": {
                   "type": [
                     "string",
                     "null"
@@ -2353,6 +3643,31 @@
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "supplierId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "siteName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "supplierName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "receiverName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "vehiclePlate": {
                   "type": [
@@ -2404,6 +3719,41 @@
                     "null"
                   ]
                 },
+                "reviewState": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "approved",
+                    "issues"
+                  ]
+                },
+                "reviewNote": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reviewedByUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "reviewedByUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reviewedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "pendingDeletionAt": {
                   "type": [
                     "string",
@@ -2448,12 +3798,38 @@
                         "type": "string",
                         "format": "uuid"
                       },
+                      "itemKind": {
+                        "type": "string",
+                        "enum": [
+                          "material",
+                          "asset"
+                        ]
+                      },
                       "materialId": {
                         "type": [
                           "string",
                           "null"
                         ],
                         "format": "uuid"
+                      },
+                      "assetId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "inventoryNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "serialNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       },
                       "nameRaw": {
                         "type": "string"
@@ -2494,6 +3870,24 @@
                           "null"
                         ]
                       },
+                      "price": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatRate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
                       "volumeConfidence": {
                         "type": [
                           "string",
@@ -2514,7 +3908,11 @@
                     },
                     "required": [
                       "id",
+                      "itemKind",
                       "materialId",
+                      "assetId",
+                      "inventoryNumber",
+                      "serialNumber",
                       "nameRaw",
                       "qtyPlanned",
                       "qtyActual",
@@ -2523,6 +3921,9 @@
                       "lineNo",
                       "volumeM3",
                       "massKg",
+                      "price",
+                      "vatRate",
+                      "vatSum",
                       "volumeConfidence",
                       "groupName"
                     ]
@@ -2545,6 +3946,14 @@
                           "vehicle",
                           "other"
                         ]
+                      },
+                      "stage": {
+                        "type": "string",
+                        "enum": [
+                          "before",
+                          "after"
+                        ],
+                        "default": "before"
                       },
                       "s3Key": {
                         "type": "string"
@@ -2582,6 +3991,87 @@
                     ]
                   }
                 },
+                "itemCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "photoCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "itemsTotal": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "itemsVatSum": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "primarySourceDocument": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "upd",
+                        "request",
+                        "transport_waybill",
+                        "os2_transfer"
+                      ]
+                    },
+                    "docNumber": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "totalSum": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "contractorId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "supplierName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "contractorName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "docNumber",
+                    "totalSum",
+                    "contractorId",
+                    "supplierName",
+                    "contractorName"
+                  ]
+                },
                 "createdAt": {
                   "type": "string"
                 },
@@ -2591,11 +4081,17 @@
               },
               "required": [
                 "id",
+                "displayId",
                 "status",
                 "kind",
+                "purpose",
+                "inTransit",
+                "isAssets",
                 "siteId",
                 "receiverCounterpartyId",
+                "receiverMolId",
                 "destSiteId",
+                "supplierId",
                 "vehiclePlate",
                 "driverName",
                 "shippedAt",
@@ -2657,6 +4153,10 @@
                 "type": "string",
                 "format": "uuid"
               },
+              "displayId": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
               "status": {
                 "type": "object",
                 "properties": {
@@ -2701,11 +4201,30 @@
                   "writeoff"
                 ]
               },
+              "purpose": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "inTransit": {
+                "type": "boolean"
+              },
+              "isAssets": {
+                "type": "boolean"
+              },
               "siteId": {
                 "type": "string",
                 "format": "uuid"
               },
               "receiverCounterpartyId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "receiverMolId": {
                 "type": [
                   "string",
                   "null"
@@ -2718,6 +4237,31 @@
                   "null"
                 ],
                 "format": "uuid"
+              },
+              "supplierId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "siteName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "supplierName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "receiverName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "vehiclePlate": {
                 "type": [
@@ -2769,6 +4313,41 @@
                   "null"
                 ]
               },
+              "reviewState": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "approved",
+                  "issues"
+                ]
+              },
+              "reviewNote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reviewedByUserId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "reviewedByUserEmail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reviewedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "pendingDeletionAt": {
                 "type": [
                   "string",
@@ -2813,12 +4392,38 @@
                       "type": "string",
                       "format": "uuid"
                     },
+                    "itemKind": {
+                      "type": "string",
+                      "enum": [
+                        "material",
+                        "asset"
+                      ]
+                    },
                     "materialId": {
                       "type": [
                         "string",
                         "null"
                       ],
                       "format": "uuid"
+                    },
+                    "assetId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "inventoryNumber": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "serialNumber": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     },
                     "nameRaw": {
                       "type": "string"
@@ -2859,6 +4464,24 @@
                         "null"
                       ]
                     },
+                    "price": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "vatRate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "vatSum": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
                     "volumeConfidence": {
                       "type": [
                         "string",
@@ -2879,7 +4502,11 @@
                   },
                   "required": [
                     "id",
+                    "itemKind",
                     "materialId",
+                    "assetId",
+                    "inventoryNumber",
+                    "serialNumber",
                     "nameRaw",
                     "qtyPlanned",
                     "qtyActual",
@@ -2888,6 +4515,9 @@
                     "lineNo",
                     "volumeM3",
                     "massKg",
+                    "price",
+                    "vatRate",
+                    "vatSum",
                     "volumeConfidence",
                     "groupName"
                   ]
@@ -2910,6 +4540,14 @@
                         "vehicle",
                         "other"
                       ]
+                    },
+                    "stage": {
+                      "type": "string",
+                      "enum": [
+                        "before",
+                        "after"
+                      ],
+                      "default": "before"
                     },
                     "s3Key": {
                       "type": "string"
@@ -2947,6 +4585,87 @@
                   ]
                 }
               },
+              "itemCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "photoCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "itemsTotal": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "itemsVatSum": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "primarySourceDocument": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "upd",
+                      "request",
+                      "transport_waybill",
+                      "os2_transfer"
+                    ]
+                  },
+                  "docNumber": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "totalSum": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "contractorId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "uuid"
+                  },
+                  "supplierName": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "contractorName": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "docNumber",
+                  "totalSum",
+                  "contractorId",
+                  "supplierName",
+                  "contractorName"
+                ]
+              },
               "createdAt": {
                 "type": "string"
               },
@@ -2956,11 +4675,17 @@
             },
             "required": [
               "id",
+              "displayId",
               "status",
               "kind",
+              "purpose",
+              "inTransit",
+              "isAssets",
               "siteId",
               "receiverCounterpartyId",
+              "receiverMolId",
               "destSiteId",
+              "supplierId",
               "vehiclePlate",
               "driverName",
               "shippedAt",
@@ -2992,7 +4717,9 @@
         "type": "string",
         "enum": [
           "upd",
-          "request"
+          "request",
+          "transport_waybill",
+          "os2_transfer"
         ]
       },
       "SourceOrigin": {
@@ -3099,6 +4826,12 @@
               "string",
               "null"
             ]
+          },
+          "inventoryNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -3116,7 +4849,8 @@
           "volumeM3",
           "massKg",
           "volumeConfidence",
-          "groupName"
+          "groupName",
+          "inventoryNumber"
         ]
       },
       "SourceAttachment": {
@@ -3172,7 +4906,9 @@
             "type": "string",
             "enum": [
               "upd",
-              "request"
+              "request",
+              "transport_waybill",
+              "os2_transfer"
             ]
           },
           "direction": {
@@ -3214,6 +4950,13 @@
             ],
             "format": "uuid"
           },
+          "recipientMolId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "siteId": {
             "type": [
               "string",
@@ -3233,7 +4976,38 @@
               "null"
             ]
           },
+          "recipientName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recipientMolName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "siteName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdByUserId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "createdByUserEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdByUserPhone": {
             "type": [
               "string",
               "null"
@@ -3316,7 +5090,10 @@
               "validation_mismatch",
               "pdf_no_text",
               "parse_failed",
-              "internal_error"
+              "internal_error",
+              "partial_parse",
+              "no_transport_waybill_found",
+              "no_waybill_found"
             ]
           },
           "parseErrorDetails": {
@@ -3458,6 +5235,7 @@
           "supplierId",
           "recipientId",
           "contractorId",
+          "recipientMolId",
           "siteId",
           "docNumber",
           "docDate",
@@ -3492,7 +5270,9 @@
             "type": "string",
             "enum": [
               "upd",
-              "request"
+              "request",
+              "transport_waybill",
+              "os2_transfer"
             ]
           },
           "direction": {
@@ -3534,6 +5314,13 @@
             ],
             "format": "uuid"
           },
+          "recipientMolId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "siteId": {
             "type": [
               "string",
@@ -3553,7 +5340,38 @@
               "null"
             ]
           },
+          "recipientName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recipientMolName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "siteName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdByUserId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "createdByUserEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdByUserPhone": {
             "type": [
               "string",
               "null"
@@ -3636,7 +5454,10 @@
               "validation_mismatch",
               "pdf_no_text",
               "parse_failed",
-              "internal_error"
+              "internal_error",
+              "partial_parse",
+              "no_transport_waybill_found",
+              "no_waybill_found"
             ]
           },
           "parseErrorDetails": {
@@ -3855,6 +5676,12 @@
                     "string",
                     "null"
                   ]
+                },
+                "inventoryNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -3872,7 +5699,8 @@
                 "volumeM3",
                 "massKg",
                 "volumeConfidence",
-                "groupName"
+                "groupName",
+                "inventoryNumber"
               ]
             }
           },
@@ -3930,6 +5758,7 @@
           "supplierId",
           "recipientId",
           "contractorId",
+          "recipientMolId",
           "siteId",
           "docNumber",
           "docDate",
@@ -3971,7 +5800,9 @@
                   "type": "string",
                   "enum": [
                     "upd",
-                    "request"
+                    "request",
+                    "transport_waybill",
+                    "os2_transfer"
                   ]
                 },
                 "direction": {
@@ -4013,6 +5844,13 @@
                   ],
                   "format": "uuid"
                 },
+                "recipientMolId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
                 "siteId": {
                   "type": [
                     "string",
@@ -4032,7 +5870,38 @@
                     "null"
                   ]
                 },
+                "recipientName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "recipientMolName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "siteName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "createdByUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "createdByUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "createdByUserPhone": {
                   "type": [
                     "string",
                     "null"
@@ -4115,7 +5984,10 @@
                     "validation_mismatch",
                     "pdf_no_text",
                     "parse_failed",
-                    "internal_error"
+                    "internal_error",
+                    "partial_parse",
+                    "no_transport_waybill_found",
+                    "no_waybill_found"
                   ]
                 },
                 "parseErrorDetails": {
@@ -4257,6 +6129,7 @@
                 "supplierId",
                 "recipientId",
                 "contractorId",
+                "recipientMolId",
                 "siteId",
                 "docNumber",
                 "docDate",
@@ -4365,6 +6238,13 @@
           "thumbContentHash": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "before",
+              "after"
+            ]
           }
         },
         "required": [
@@ -4481,6 +6361,13 @@
           "name": {
             "type": "string"
           },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
           "address": {
             "type": [
               "string",
@@ -4543,6 +6430,13 @@
                 },
                 "name": {
                   "type": "string"
+                },
+                "aliases": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
                 },
                 "address": {
                   "type": [
@@ -4678,6 +6572,257 @@
           "total"
         ]
       },
+      "ResponsiblePerson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "fullName",
+          "phone",
+          "position",
+          "isActive",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "ResponsiblePersonUpsert": {
+        "type": "object",
+        "properties": {
+          "fullName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "position": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "isActive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "fullName"
+        ]
+      },
+      "ResponsiblePersonListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "fullName": {
+                  "type": "string"
+                },
+                "phone": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "position": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "isActive": {
+                  "type": "boolean"
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "fullName",
+                "phone",
+                "position",
+                "isActive",
+                "createdAt",
+                "updatedAt"
+              ]
+            }
+          },
+          "total": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ]
+      },
+      "Asset": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "name",
+          "unit",
+          "isActive",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "AssetUpsert": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16,
+            "default": "шт"
+          },
+          "isActive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "AssetListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "code": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
+                "unit": {
+                  "type": "string"
+                },
+                "isActive": {
+                  "type": "boolean"
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "code",
+                "name",
+                "unit",
+                "isActive",
+                "createdAt",
+                "updatedAt"
+              ]
+            }
+          },
+          "total": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ]
+      },
       "Site": {
         "type": "object",
         "properties": {
@@ -4747,12 +6892,28 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          "responsiblePersons": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "assets": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         },
         "required": [
           "deliveries",
           "shipments",
-          "sourceDocuments"
+          "sourceDocuments",
+          "responsiblePersons",
+          "assets"
         ]
       },
       "SyncDeltaResponse": {
@@ -4769,6 +6930,10 @@
                 "id": {
                   "type": "string",
                   "format": "uuid"
+                },
+                "displayId": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0
                 },
                 "status": {
                   "type": "object",
@@ -4823,6 +6988,31 @@
                   ],
                   "format": "uuid"
                 },
+                "recipientMolId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "siteName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "supplierName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "contractorName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "vehiclePlate": {
                   "type": [
                     "string",
@@ -4854,6 +7044,12 @@
                     "null"
                   ]
                 },
+                "inTransit": {
+                  "type": "boolean"
+                },
+                "isAssets": {
+                  "type": "boolean"
+                },
                 "confirmedByMolUserId": {
                   "type": [
                     "string",
@@ -4868,6 +7064,41 @@
                   ]
                 },
                 "confirmedByMolAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reviewState": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "approved",
+                    "issues"
+                  ]
+                },
+                "reviewNote": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reviewedByUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "reviewedByUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reviewedAt": {
                   "type": [
                     "string",
                     "null"
@@ -4908,6 +7139,32 @@
                     "format": "uuid"
                   }
                 },
+                "sourceShipmentId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "sourceShipmentShippedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "sourceShipmentSiteId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "sourceShipmentSiteCode": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "items": {
                   "type": "array",
                   "items": {
@@ -4917,12 +7174,38 @@
                         "type": "string",
                         "format": "uuid"
                       },
+                      "itemKind": {
+                        "type": "string",
+                        "enum": [
+                          "material",
+                          "asset"
+                        ]
+                      },
                       "materialId": {
                         "type": [
                           "string",
                           "null"
                         ],
                         "format": "uuid"
+                      },
+                      "assetId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "inventoryNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "serialNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       },
                       "nameRaw": {
                         "type": "string"
@@ -4963,6 +7246,24 @@
                           "null"
                         ]
                       },
+                      "price": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatRate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
                       "volumeConfidence": {
                         "type": [
                           "string",
@@ -4983,7 +7284,11 @@
                     },
                     "required": [
                       "id",
+                      "itemKind",
                       "materialId",
+                      "assetId",
+                      "inventoryNumber",
+                      "serialNumber",
                       "nameRaw",
                       "qtyPlanned",
                       "qtyActual",
@@ -4992,6 +7297,9 @@
                       "lineNo",
                       "volumeM3",
                       "massKg",
+                      "price",
+                      "vatRate",
+                      "vatSum",
                       "volumeConfidence",
                       "groupName"
                     ]
@@ -5014,6 +7322,14 @@
                           "vehicle",
                           "other"
                         ]
+                      },
+                      "stage": {
+                        "type": "string",
+                        "enum": [
+                          "before",
+                          "after"
+                        ],
+                        "default": "before"
                       },
                       "s3Key": {
                         "type": "string"
@@ -5051,6 +7367,87 @@
                     ]
                   }
                 },
+                "itemCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "photoCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "itemsTotal": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "itemsVatSum": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "primarySourceDocument": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "upd",
+                        "request",
+                        "transport_waybill",
+                        "os2_transfer"
+                      ]
+                    },
+                    "docNumber": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "totalSum": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "contractorId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "supplierName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "contractorName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "docNumber",
+                    "totalSum",
+                    "contractorId",
+                    "supplierName",
+                    "contractorName"
+                  ]
+                },
                 "createdAt": {
                   "type": "string"
                 },
@@ -5060,15 +7457,19 @@
               },
               "required": [
                 "id",
+                "displayId",
                 "status",
                 "siteId",
                 "supplierId",
                 "contractorId",
+                "recipientMolId",
                 "vehiclePlate",
                 "driverName",
                 "arrivedAt",
                 "inspectorId",
                 "comment",
+                "inTransit",
+                "isAssets",
                 "confirmedByMolUserId",
                 "confirmedByMolUserEmail",
                 "confirmedByMolAt",
@@ -5078,6 +7479,10 @@
                 "pendingDeletionReason",
                 "version",
                 "sourceDocumentIds",
+                "sourceShipmentId",
+                "sourceShipmentShippedAt",
+                "sourceShipmentSiteId",
+                "sourceShipmentSiteCode",
                 "items",
                 "photos",
                 "createdAt",
@@ -5093,6 +7498,10 @@
                 "id": {
                   "type": "string",
                   "format": "uuid"
+                },
+                "displayId": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0
                 },
                 "status": {
                   "type": "object",
@@ -5138,11 +7547,30 @@
                     "writeoff"
                   ]
                 },
+                "purpose": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "inTransit": {
+                  "type": "boolean"
+                },
+                "isAssets": {
+                  "type": "boolean"
+                },
                 "siteId": {
                   "type": "string",
                   "format": "uuid"
                 },
                 "receiverCounterpartyId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "receiverMolId": {
                   "type": [
                     "string",
                     "null"
@@ -5155,6 +7583,31 @@
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "supplierId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "siteName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "supplierName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "receiverName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "vehiclePlate": {
                   "type": [
@@ -5206,6 +7659,41 @@
                     "null"
                   ]
                 },
+                "reviewState": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "approved",
+                    "issues"
+                  ]
+                },
+                "reviewNote": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reviewedByUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "reviewedByUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reviewedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "pendingDeletionAt": {
                   "type": [
                     "string",
@@ -5250,12 +7738,38 @@
                         "type": "string",
                         "format": "uuid"
                       },
+                      "itemKind": {
+                        "type": "string",
+                        "enum": [
+                          "material",
+                          "asset"
+                        ]
+                      },
                       "materialId": {
                         "type": [
                           "string",
                           "null"
                         ],
                         "format": "uuid"
+                      },
+                      "assetId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "inventoryNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "serialNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       },
                       "nameRaw": {
                         "type": "string"
@@ -5296,6 +7810,24 @@
                           "null"
                         ]
                       },
+                      "price": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatRate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
                       "volumeConfidence": {
                         "type": [
                           "string",
@@ -5316,7 +7848,11 @@
                     },
                     "required": [
                       "id",
+                      "itemKind",
                       "materialId",
+                      "assetId",
+                      "inventoryNumber",
+                      "serialNumber",
                       "nameRaw",
                       "qtyPlanned",
                       "qtyActual",
@@ -5325,6 +7861,9 @@
                       "lineNo",
                       "volumeM3",
                       "massKg",
+                      "price",
+                      "vatRate",
+                      "vatSum",
                       "volumeConfidence",
                       "groupName"
                     ]
@@ -5347,6 +7886,14 @@
                           "vehicle",
                           "other"
                         ]
+                      },
+                      "stage": {
+                        "type": "string",
+                        "enum": [
+                          "before",
+                          "after"
+                        ],
+                        "default": "before"
                       },
                       "s3Key": {
                         "type": "string"
@@ -5384,6 +7931,87 @@
                     ]
                   }
                 },
+                "itemCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "photoCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "itemsTotal": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "itemsVatSum": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "primarySourceDocument": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "upd",
+                        "request",
+                        "transport_waybill",
+                        "os2_transfer"
+                      ]
+                    },
+                    "docNumber": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "totalSum": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "contractorId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "supplierName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "contractorName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "docNumber",
+                    "totalSum",
+                    "contractorId",
+                    "supplierName",
+                    "contractorName"
+                  ]
+                },
                 "createdAt": {
                   "type": "string"
                 },
@@ -5393,11 +8021,17 @@
               },
               "required": [
                 "id",
+                "displayId",
                 "status",
                 "kind",
+                "purpose",
+                "inTransit",
+                "isAssets",
                 "siteId",
                 "receiverCounterpartyId",
+                "receiverMolId",
                 "destSiteId",
+                "supplierId",
                 "vehiclePlate",
                 "driverName",
                 "shippedAt",
@@ -5432,7 +8066,9 @@
                   "type": "string",
                   "enum": [
                     "upd",
-                    "request"
+                    "request",
+                    "transport_waybill",
+                    "os2_transfer"
                   ]
                 },
                 "direction": {
@@ -5474,6 +8110,13 @@
                   ],
                   "format": "uuid"
                 },
+                "recipientMolId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
                 "siteId": {
                   "type": [
                     "string",
@@ -5493,7 +8136,38 @@
                     "null"
                   ]
                 },
+                "recipientName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "recipientMolName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "siteName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "createdByUserId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "createdByUserEmail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "createdByUserPhone": {
                   "type": [
                     "string",
                     "null"
@@ -5576,7 +8250,10 @@
                     "validation_mismatch",
                     "pdf_no_text",
                     "parse_failed",
-                    "internal_error"
+                    "internal_error",
+                    "partial_parse",
+                    "no_transport_waybill_found",
+                    "no_waybill_found"
                   ]
                 },
                 "parseErrorDetails": {
@@ -5795,6 +8472,12 @@
                           "string",
                           "null"
                         ]
+                      },
+                      "inventoryNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       }
                     },
                     "required": [
@@ -5812,7 +8495,8 @@
                       "volumeM3",
                       "massKg",
                       "volumeConfidence",
-                      "groupName"
+                      "groupName",
+                      "inventoryNumber"
                     ]
                   }
                 },
@@ -5870,6 +8554,7 @@
                 "supplierId",
                 "recipientId",
                 "contractorId",
+                "recipientMolId",
                 "siteId",
                 "docNumber",
                 "docDate",
@@ -5916,6 +8601,13 @@
                 },
                 "name": {
                   "type": "string"
+                },
+                "aliases": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
                 },
                 "address": {
                   "type": [
@@ -5990,6 +8682,93 @@
                 "code",
                 "name",
                 "unit",
+                "createdAt",
+                "updatedAt"
+              ]
+            }
+          },
+          "responsiblePersons": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "fullName": {
+                  "type": "string"
+                },
+                "phone": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "position": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "isActive": {
+                  "type": "boolean"
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "fullName",
+                "phone",
+                "position",
+                "isActive",
+                "createdAt",
+                "updatedAt"
+              ]
+            }
+          },
+          "assets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "code": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
+                "unit": {
+                  "type": "string"
+                },
+                "isActive": {
+                  "type": "boolean"
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "code",
+                "name",
+                "unit",
+                "isActive",
                 "createdAt",
                 "updatedAt"
               ]
@@ -6082,6 +8861,48 @@
               ]
             }
           },
+          "units": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "okeiCode": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "isActive": {
+                  "type": "boolean"
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "code",
+                "name",
+                "okeiCode",
+                "isActive",
+                "createdAt",
+                "updatedAt"
+              ]
+            }
+          },
           "deletedIds": {
             "type": "object",
             "properties": {
@@ -6105,12 +8926,28 @@
                   "type": "string",
                   "format": "uuid"
                 }
+              },
+              "responsiblePersons": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "assets": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                }
               }
             },
             "required": [
               "deliveries",
               "shipments",
-              "sourceDocuments"
+              "sourceDocuments",
+              "responsiblePersons",
+              "assets"
             ]
           },
           "serverNow": {
@@ -6124,8 +8961,11 @@
           "sourceDocuments",
           "counterparties",
           "materials",
+          "responsiblePersons",
+          "assets",
           "sites",
           "statuses",
+          "units",
           "deletedIds",
           "serverNow"
         ]
@@ -6145,6 +8985,7 @@
               "counterparty_updated",
               "material_updated",
               "site_updated",
+              "user_updated",
               "ping"
             ]
           },
@@ -6477,7 +9318,9 @@
               "type": "string",
               "enum": [
                 "upd",
-                "request"
+                "request",
+                "transport_waybill",
+                "os2_transfer"
               ],
               "description": "Тип документа"
             },
@@ -7221,6 +10064,166 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MaterialListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/responsible-persons": {
+      "get": {
+        "tags": [
+          "References"
+        ],
+        "summary": "Справочник МОЛ (материально-ответственных лиц)",
+        "description": "Руководители собственных бригад — получатели материалов и ОС параллельно подрядчикам. Не путать с пользователями системы (deliveries.confirmedByMolUserId).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Поиск по ФИО"
+            },
+            "required": false,
+            "name": "q",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "required": false,
+            "name": "activeOnly",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "required": false,
+            "name": "offset",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Список МОЛ",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponsiblePersonListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets": {
+      "get": {
+        "tags": [
+          "References"
+        ],
+        "summary": "Справочник ОС (основных средств)",
+        "description": "Оборудование, инструмент, техника. Используется в позициях документов как item_kind=\"asset\" (параллельно материалам). Конкретный экземпляр в строке документа уточняется через inventory_number / serial_number.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Поиск по названию или коду"
+            },
+            "required": false,
+            "name": "q",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "required": false,
+            "name": "activeOnly",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "required": false,
+            "name": "offset",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Список ОС",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetListResponse"
                 }
               }
             }
