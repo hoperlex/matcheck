@@ -155,7 +155,12 @@ export function MailReviewModal({
       open={!!messageId}
       onCancel={onClose}
       title="Разбор письма"
-      width={980}
+      // Почти во весь экран: оператор сверяет скан документа с выбором объекта,
+      // и в маленьком окне предпросмотр бесполезен — приходилось бы скачивать
+      // файл. Тело со своим скроллом, чтобы шапка и кнопки оставались на месте.
+      width="85vw"
+      style={{ top: '7.5vh', maxWidth: '85vw', paddingBottom: 0 }}
+      styles={{ body: { height: 'calc(85vh - 108px)', overflow: 'hidden', paddingTop: 12 } }}
       destroyOnClose
       footer={
         <Space>
@@ -184,17 +189,17 @@ export function MailReviewModal({
       }
     >
       {data && (
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Descriptions size="small" column={2} bordered>
+        <div
+          style={{ display: 'flex', flexDirection: 'column', gap: 10, height: '100%', minHeight: 0 }}
+        >
+          <Descriptions size="small" column={3} bordered>
             <Descriptions.Item label="От кого">{data.fromAddress ?? '—'}</Descriptions.Item>
             <Descriptions.Item label="Получено">
               {data.receivedAt ? dayjs(data.receivedAt).format('DD.MM.YYYY HH:mm') : '—'}
             </Descriptions.Item>
-            <Descriptions.Item label="Тема" span={2}>
+            <Descriptions.Item label="Ящик">{data.accountName}</Descriptions.Item>
+            <Descriptions.Item label="Тема" span={3}>
               {data.subject ?? '—'}
-            </Descriptions.Item>
-            <Descriptions.Item label="Ящик" span={2}>
-              {data.accountName}
             </Descriptions.Item>
           </Descriptions>
 
@@ -225,10 +230,22 @@ export function MailReviewModal({
             />
           )}
 
-          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-            <div style={{ flex: '1 1 320px', minWidth: 280 }}>
+          {/* Две колонки на всю оставшуюся высоту: слева решение оператора,
+              справа документ. Скроллится каждая отдельно — список вложений не
+              уводит предпросмотр за край экрана. */}
+          <div style={{ display: 'flex', gap: 16, flex: 1, minHeight: 0 }}>
+            <div
+              style={{
+                width: 380,
+                flexShrink: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 12,
+                overflowY: 'auto',
+              }}
+            >
               <Typography.Text strong>Вложения ({data.attachments.length})</Typography.Text>
-              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {data.attachments.map((a) => (
                   <div
                     key={a.id}
@@ -273,11 +290,9 @@ export function MailReviewModal({
                   </div>
                 ))}
               </div>
-            </div>
 
-            <div style={{ flex: '1 1 380px', minWidth: 320 }}>
               <Typography.Text strong>Куда отправить</Typography.Text>
-              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <SiteSelect value={siteId} onChange={setSiteId} />
                 <Segmented
                   block
@@ -301,35 +316,58 @@ export function MailReviewModal({
                   </Typography.Text>
                 </div>
               </div>
+            </div>
 
-              {activeUrl && active && (
-                <div style={{ marginTop: 12, height: 320, border: '1px solid #f0f0f0' }}>
-                  {IMAGE_RE.test(active.filename ?? '') ? (
-                    <Image
-                      src={activeUrl}
-                      wrapperStyle={{ width: '100%', height: '100%' }}
-                      style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                      preview={{ mask: 'Открыть' }}
-                    />
-                  ) : PDF_RE.test(active.filename ?? '') ? (
-                    <iframe
-                      key={active.id}
-                      src={activeUrl}
-                      title={active.filename ?? 'Вложение'}
-                      style={{ width: '100%', height: '100%', border: 0 }}
-                    />
-                  ) : (
-                    <div style={{ padding: 16 }}>
-                      <Typography.Text type="secondary">
-                        Предпросмотр недоступен — скачайте файл.
-                      </Typography.Text>
-                    </div>
-                  )}
+            {/* Предпросмотр занимает всю оставшуюся ширину и высоту: оператор
+                сверяет объект по самому документу, а не по имени файла. */}
+            <div
+              style={{
+                flex: 1,
+                minWidth: 0,
+                border: '1px solid #f0f0f0',
+                borderRadius: 6,
+                overflow: 'hidden',
+                background: '#fafafa',
+              }}
+            >
+              {activeUrl && active ? (
+                IMAGE_RE.test(active.filename ?? '') ? (
+                  <Image
+                    src={activeUrl}
+                    wrapperStyle={{
+                      width: '100%',
+                      height: '100%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                    style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                    preview={{ mask: 'Открыть' }}
+                  />
+                ) : PDF_RE.test(active.filename ?? '') ? (
+                  <iframe
+                    key={active.id}
+                    src={activeUrl}
+                    title={active.filename ?? 'Вложение'}
+                    style={{ width: '100%', height: '100%', border: 0 }}
+                  />
+                ) : (
+                  <div style={{ padding: 16 }}>
+                    <Typography.Text type="secondary">
+                      Предпросмотр недоступен — скачайте файл кнопкой слева.
+                    </Typography.Text>
+                  </div>
+                )
+              ) : (
+                <div style={{ padding: 16 }}>
+                  <Typography.Text type="secondary">
+                    Выберите вложение слева, чтобы посмотреть его.
+                  </Typography.Text>
                 </div>
               )}
             </div>
           </div>
-        </Space>
+        </div>
       )}
     </Modal>
   );
