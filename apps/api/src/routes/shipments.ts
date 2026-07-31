@@ -838,7 +838,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             .where(eq(shipments.id, input.id))
             .limit(1);
           if (!existing) {
-            await createShipment(app, input, statusId, inspectorId);
+            await createShipment(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
           } else {
             // Инспектор редактирует только записи СВОЕГО объекта. Раньше проверки
             // не было, и upsert чужой отгрузки молча переносил её на объект
@@ -885,7 +885,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           return dto;
         }
 
-        const created = await createShipment(app, input, statusId, inspectorId);
+        const created = await createShipment(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
         if (input.kind === 'transfer') {
           await syncPairedTransferDelivery(app, created.id);
         }
@@ -1821,6 +1821,8 @@ async function createShipment(
   input: z.infer<typeof ShipmentUpsertSchema>,
   statusId: string,
   inspectorId: string | null,
+  /** Устройство, заведшее запись — см. одноимённый параметр createDelivery. */
+  createdBySessionId: string | null = null,
 ) {
   // «Ручной вынос» на мобиле — зеркало «Ручного внеса» для приёмок: инспектор
   // создаёт отгрузку сразу со статусом confirmed_mol (без выбора УПД, минуя
@@ -1857,6 +1859,7 @@ async function createShipment(
         confirmedByMolUserId: inspectorId,
         confirmedByMolAt: now,
       }),
+      createdBySessionId,
       version: 1,
     })
     .returning();

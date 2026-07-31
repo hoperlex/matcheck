@@ -864,7 +864,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             .limit(1);
           if (!existing) {
             // Create as upsert with explicit id (для офлайн-черновиков с локально сгенерированным id)
-            await createDelivery(app, input, statusId, inspectorId);
+            await createDelivery(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
           } else {
             // Инспектор редактирует только записи СВОЕГО объекта. Раньше проверки
             // не было, и upsert чужой приёмки молча переносил её на объект
@@ -909,7 +909,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           return dto;
         }
 
-        const created = await createDelivery(app, input, statusId, inspectorId);
+        const created = await createDelivery(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
         const dto = await buildDeliveryDto(app, created.id, req.user?.role);
         if (!dto) throw new Error('Delivery missing after create');
         publishEvent(app, { type: 'delivery_updated', entityId: dto.id, ts: new Date().toISOString() });
@@ -2193,6 +2193,13 @@ async function createDelivery(
   input: z.infer<typeof DeliveryUpsertSchema>,
   statusId: string,
   inspectorId: string | null,
+  /**
+   * Сессия, из которой пришёл запрос = устройство, заведшее запись.
+   * Проставляется ТОЛЬКО здесь: updateDelivery поле не трогает, иначе
+   * потерялось бы, каким планшетом запись создана. null — для путей, где
+   * сессии нет (парная transfer-приёмка, серверные сценарии).
+   */
+  createdBySessionId: string | null = null,
 ) {
   // «Ручной внос» на мобиле: инспектор создаёт приёмку сразу со статусом
   // confirmed_mol (без выбора УПД, минуя 1-2 этап). В этом случае
@@ -2230,6 +2237,7 @@ async function createDelivery(
         confirmedByMolUserId: inspectorId,
         confirmedByMolAt: now,
       }),
+      createdBySessionId,
       version: 1,
     })
     .returning();

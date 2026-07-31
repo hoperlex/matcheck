@@ -885,12 +885,29 @@ export const deliveries = pgTable(
       onDelete: 'set null',
     }),
     pendingDeletionReason: text('pending_deletion_reason'),
+    // Каким устройством заведена запись. Служебное поле: в DTO и /sync не
+    // выводится, контракт не меняет. Сессия — это одно устройство между
+    // логинами, поэтому пара «сессия + её last_seen_ua» отвечает на вопрос,
+    // какой планшет объекта перестал присылать записи: без этого на объекте с
+    // четырьмя планшетами молчащий полностью маскируется соседями.
+    //
+    // Заполняется ТОЛЬКО при создании — upsert его не трогает, иначе потерялось
+    // бы, кто запись завёл. NULL допустим: исторические записи и парные
+    // transfer-приёмки, которые создаёт сервер, а не планшет.
+    createdBySessionId: uuid('created_by_session_id').references(() => sessions.id, {
+      onDelete: 'set null',
+    }),
     version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index('deliveries_site_idx').on(t.siteId, t.updatedAt),
+    // Составной: запросы здоровья парка всегда идут парой «устройство + окно
+    // времени», отдельные индексы по каждому полю тут дали бы хуже.
+    index('deliveries_created_by_session_idx')
+      .on(t.createdBySessionId, t.createdAt)
+      .where(sql`${t.createdBySessionId} is not null`),
     index('deliveries_contractor_idx')
       .on(t.contractorId)
       .where(sql`${t.contractorId} is not null`),
@@ -1082,12 +1099,20 @@ export const shipments = pgTable(
       onDelete: 'set null',
     }),
     pendingDeletionReason: text('pending_deletion_reason'),
+    // Каким устройством заведена запись — зеркало одноимённого поля deliveries.
+    // Служебное: в DTO и /sync не выводится, заполняется только при создании.
+    createdBySessionId: uuid('created_by_session_id').references(() => sessions.id, {
+      onDelete: 'set null',
+    }),
     version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index('shipment_site_updated_idx').on(t.siteId, t.updatedAt),
+    index('shipments_created_by_session_idx')
+      .on(t.createdBySessionId, t.createdAt)
+      .where(sql`${t.createdBySessionId} is not null`),
     index('shipment_kind_idx').on(t.kind),
     index('shipment_inspector_idx').on(t.inspectorId),
     index('shipment_dest_site_idx')
