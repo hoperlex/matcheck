@@ -118,3 +118,100 @@ export const MailPollQueuedSchema = z.object({
   jobId: z.string(),
 });
 export type MailPollQueued = z.infer<typeof MailPollQueuedSchema>;
+
+// ─── Разбор почты ─────────────────────────────────────────────────────────
+// Экран для писем, которые НЕ прошли автоматически: объект не указан, кодов
+// несколько, код неизвестен или тот же комплект уже лежит на другой площадке.
+// Письмо с явным маркером сюда не попадает — оно становится документом само.
+
+/** Вложение письма в карточке разбора. */
+export const MailAttachmentDtoSchema = z.object({
+  id: z.string().uuid(),
+  idx: z.number(),
+  filename: z.string().nullable(),
+  /** Тип по сигнатуре файла, а не по заявленному в письме. */
+  mimeType: z.string().nullable(),
+  sizeBytes: z.number(),
+  state: MailAttachmentStateSchema,
+  /** Почему отброшено — показывается оператору рядом с кнопкой «Вернуть». */
+  skipReason: z.string().nullable(),
+  /** Пойдёт ли вложение в пакет при подтверждении. */
+  willBeIngested: z.boolean(),
+});
+export type MailAttachmentDto = z.infer<typeof MailAttachmentDtoSchema>;
+
+/** Строка списка «Разбор почты». */
+export const MailMessageDtoSchema = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  accountName: z.string(),
+  fromAddress: z.string().nullable(),
+  subject: z.string().nullable(),
+  receivedAt: z.string().nullable(),
+  status: MailMessageStatusSchema,
+  /** `cross_scope_conflict` и прочие причины остановки. */
+  rejectReason: z.string().nullable(),
+  /** Подсказка матчера: код в теме, название объекта, имя файла. */
+  suggestedSiteId: z.string().uuid().nullable(),
+  suggestedSiteCode: z.string().nullable(),
+  suggestedSiteName: z.string().nullable(),
+  /** Сколько вложений уйдёт в пакет (без отброшенных и подозрительных). */
+  attachmentsCount: z.number(),
+  /** Всего вложений, включая отброшенные. */
+  attachmentsTotal: z.number(),
+  bundleId: z.string().uuid().nullable(),
+  lastError: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type MailMessageDto = z.infer<typeof MailMessageDtoSchema>;
+
+export const MailMessageDetailSchema = MailMessageDtoSchema.extend({
+  attachments: z.array(MailAttachmentDtoSchema),
+});
+export type MailMessageDetail = z.infer<typeof MailMessageDetailSchema>;
+
+export const MailMessageListResponseSchema = z.object({
+  items: z.array(MailMessageDtoSchema),
+  total: z.number(),
+});
+export type MailMessageListResponse = z.infer<typeof MailMessageListResponseSchema>;
+
+/**
+ * Фильтр списка. `pending` — то, что ждёт человека; остальное для истории.
+ */
+export const MailReviewFilterSchema = z.enum(['pending', 'ingested', 'rejected', 'all']);
+export type MailReviewFilter = z.infer<typeof MailReviewFilterSchema>;
+
+/**
+ * Сводка для вкладки. `configured = false` (ни одного активного ящика с
+ * документами) прячет вкладку целиком: пока почта не заведена, интерфейс
+ * «Документов» остаётся прежним.
+ */
+export const MailReviewSummarySchema = z.object({
+  pending: z.number(),
+  configured: z.boolean(),
+});
+export type MailReviewSummary = z.infer<typeof MailReviewSummarySchema>;
+
+/** Подтверждение письма оператором: объект обязателен, остальное — как в УПД. */
+export const MailResolveRequestSchema = z.object({
+  siteId: z.string().uuid(),
+  direction: z.enum(['inbound', 'outbound']).default('inbound'),
+  contractorId: z.string().uuid().nullable().optional(),
+  /** `null` — документ уйдёт инспектору в группу «остальные». */
+  expectedDate: z.string().nullable().optional(),
+});
+export type MailResolveRequest = z.infer<typeof MailResolveRequestSchema>;
+
+export const MailResolveResponseSchema = z.object({
+  /** `ingested` — создан пакет, `reused` — тот же комплект уже загружен. */
+  outcome: z.enum(['ingested', 'reused']),
+  bundleId: z.string().uuid(),
+  documentId: z.string().uuid().nullable(),
+});
+export type MailResolveResponse = z.infer<typeof MailResolveResponseSchema>;
+
+export const MailRejectRequestSchema = z.object({
+  reason: z.string().max(500).optional(),
+});
+export type MailRejectRequest = z.infer<typeof MailRejectRequestSchema>;

@@ -10,6 +10,7 @@ import ReferencesLayout from '../pages/references/ReferencesLayout';
 const Login = lazy(() => import('../pages/auth/Login'));
 const Register = lazy(() => import('../pages/auth/Register'));
 const Inbox = lazy(() => import('../pages/inbox/Inbox'));
+const MailReview = lazy(() => import('../pages/inbox/MailReview'));
 const KppPage = lazy(() => import('../pages/kpp/KppPage'));
 const ShipmentPage = lazy(() => import('../pages/shipments/ShipmentPage'));
 const Sites = lazy(() => import('../pages/references/Sites'));
@@ -124,6 +125,14 @@ export const router = sentryCreateBrowserRouter([
           <ProtectedRoute roles={['admin', 'manager', 'contractor']}>
             {suspense(<Inbox />)}
           </ProtectedRoute>
+        ),
+      },
+      {
+        // Разбор почты — только для тех, кто заводит документы: подрядчику
+        // чужие письма видеть нельзя.
+        path: 'documents/mail',
+        element: (
+          <ProtectedRoute roles={['admin', 'manager']}>{suspense(<MailReview />)}</ProtectedRoute>
         ),
       },
       { path: 'inbox', element: <Navigate to="/documents" replace /> },

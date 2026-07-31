@@ -16,7 +16,7 @@
 // статусе resolving нигде не показывается, а повтор проходит начисто.
 
 import { createHash, randomUUID } from 'node:crypto';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
   ingestEvents,
@@ -32,6 +32,15 @@ import { buildS3Key } from '../storage/s3.path.js';
 import { UPD_PARSE_QUEUE } from '../../plugins/queue.js';
 
 export type CopyObject = (srcKey: string, dstKey: string) => Promise<void>;
+
+/**
+ * Состояния вложений, попадающих в пакет.
+ *
+ * `restored` — вложение, которое фильтр счёл подписью в письме, а оператор
+ * вернул на экране разбора. Без него возврат был бы бесполезен: письмо всё
+ * равно ушло бы в пакет без этого файла.
+ */
+export const INGESTABLE_ATTACHMENT_STATES = ['kept', 'restored'] as const;
 
 export type ResolveDeps = {
   db: Db;
@@ -125,12 +134,16 @@ export async function resolveMailMessage(
   if (message.status !== 'quarantined') return { outcome: 'not_quarantined' };
 
   // Берём только пригодные вложения: отброшенные и подозрительные на подпись
-  // в пакет не идут, но остаются у письма и возвращаются оператором.
+  // в пакет не идут, но остаются у письма и возвращаются оператором — после
+  // возврата вложение получает состояние `restored` и участвует наравне.
   const attachments = await db
     .select()
     .from(mailAttachments)
     .where(
-      and(eq(mailAttachments.mailMessageId, message.id), eq(mailAttachments.state, 'kept')),
+      and(
+        eq(mailAttachments.mailMessageId, message.id),
+        inArray(mailAttachments.state, [...INGESTABLE_ATTACHMENT_STATES]),
+      ),
     )
     .orderBy(asc(mailAttachments.idx));
   if (attachments.length === 0) return { outcome: 'no_attachments' };

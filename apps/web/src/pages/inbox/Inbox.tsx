@@ -1,6 +1,6 @@
 import type { MouseEvent } from 'react';
 import { useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Button,
   Card,
@@ -16,6 +16,7 @@ import {
   DownloadOutlined,
   ExclamationCircleOutlined,
   LoadingOutlined,
+  MailOutlined,
   MinusSquareOutlined,
   PlusSquareOutlined,
   WarningOutlined,
@@ -77,6 +78,24 @@ function pluralizeDoc(n: number): string {
   if (last === 1) return 'документ';
   if (last >= 2 && last <= 4) return 'документа';
   return 'документов';
+}
+
+/**
+ * Откуда документ взялся. Раньше в карточке печаталось сырое значение
+ * (`manual_pdf`) — для пользователя это ничего не значило, а с приходом почты
+ * различать источник стало нужно: у почтовых документов не заполнен подрядчик.
+ */
+function originLabel(origin: string): string {
+  switch (origin) {
+    case 'mail':
+      return 'Из почты';
+    case 'edo_diadoc':
+      return 'ЭДО Диадок';
+    case 'manual_xml':
+      return 'Загружен вручную (XML)';
+    default:
+      return 'Загружен вручную';
+  }
 }
 
 function KindTag({ kind }: { kind: Row['kind'] }) {
@@ -232,6 +251,7 @@ function StatusTag({ row, onResolve }: { row: Row; onResolve?: (r: Row) => void 
 
 export default function InboxPage() {
   const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
   // Подрядчик: read-only + справочники закрыты. Скрываем write-UI, не грузим
   // справочные запросы; колонки уже читают имена из DTO документа.
   const isContractor = useAuthStore((s) => s.user?.role) === 'contractor';
@@ -390,6 +410,17 @@ export default function InboxPage() {
       api.get<{ total: number }>('/source-documents?direction=outbound&limit=1'),
   });
 
+  // Сводка почтового канала. Пока ящик с документами не заведён, вкладка
+  // «Разбор почты» не показывается — страница выглядит ровно как раньше.
+  // Подрядчику её нет никогда: чужие письма ему видеть нельзя.
+  const mailSummaryQuery = useQuery({
+    queryKey: ['mail-review-summary'],
+    queryFn: () =>
+      api.get<{ pending: number; configured: boolean }>('/mail/review/summary'),
+    enabled: !isContractor,
+    staleTime: 5 * 60_000,
+  });
+
   // Оптимистическое удаление: строка мгновенно исчезает из таблицы, тост
   // показывается сразу, а DELETE-запрос летит в фоне. При ошибке (например
   // has_references) откатываем кэш через snapshot и показываем тост ошибки.
@@ -533,9 +564,15 @@ export default function InboxPage() {
     return '—';
   };
 
+  const mailSummary = mailSummaryQuery.data;
   const docsTabs: PageTabItem[] = [
     { key: 'inbound', label: 'Приёмка', count: inboundCountQuery.data?.total ?? null },
     { key: 'outbound', label: 'Отгрузка', count: outboundCountQuery.data?.total ?? null },
+    // Показываем вкладку и когда ящик уже отключили, но письма в разборе
+    // остались — иначе к ним не вернуться.
+    ...(mailSummary && (mailSummary.configured || mailSummary.pending > 0)
+      ? [{ key: 'mail', label: 'Разбор почты', count: mailSummary.pending }]
+      : []),
   ];
 
   return (
@@ -567,7 +604,13 @@ export default function InboxPage() {
                 <PageTabs
                   items={docsTabs}
                   activeKey={direction}
-                  onChange={(k) => updateParams({ direction: k === 'outbound' ? 'outbound' : null })}
+                  onChange={(k) => {
+                    if (k === 'mail') {
+                      navigate('/documents/mail');
+                      return;
+                    }
+                    updateParams({ direction: k === 'outbound' ? 'outbound' : null });
+                  }}
                 />
               </div>
               {bulk.hasSelection && (
@@ -682,6 +725,13 @@ export default function InboxPage() {
                     }}
                   />
                   <KindTag kind={r.kind} />
+                  {/* Происхождение отмечаем только у почтовых: у них не
+                      заполнен подрядчик, и это объясняет пустую колонку. */}
+                  {r.origin === 'mail' && (
+                    <Tooltip title="Пришёл по почте от подрядчика">
+                      <MailOutlined style={{ color: '#8c8c8c' }} />
+                    </Tooltip>
+                  )}
                 </Space>
               );
             },
@@ -792,7 +842,7 @@ export default function InboxPage() {
                 {r.siteName ?? '—'} · {r.contractorName ?? '—'} · {r.supplierName ?? '—'}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {r.origin}
+                {originLabel(r.origin)}
               </Typography.Text>
               <div
                 style={{ position: 'absolute', top: 0, right: 0 }}
