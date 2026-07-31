@@ -148,7 +148,7 @@ suite('письмо → документ без участия менеджер�
     const [bundleRow] = await sql<{ id: string }[]>`
       SELECT id FROM source_bundles WHERE site_id = ${siteId}`;
     const jobs = await sql`
-      SELECT id FROM job_outbox WHERE dedupe_key = ${`bundle:${bundleRow!.id}:parse:0`}`;
+      SELECT id FROM job_outbox WHERE dedupe_key = ${`bundle~${bundleRow!.id}~parse~0`}`;
     expect(jobs).toHaveLength(1);
 
     // Письмо принято, менеджер не потребовался.

@@ -1330,7 +1330,7 @@ export const s3CleanupOutbox = pgTable(
 // статусе queued без job. Consumer в воркере разбирает строки батчем
 // (FOR UPDATE SKIP LOCKED + лизинг) и ставит их в BullMQ.
 //
-// dedupe_key — ДИСПЕТЧЕРСКИЙ идентификатор попытки (`bundle:<id>:parse:<gen>`),
+// dedupe_key — ДИСПЕТЧЕРСКИЙ идентификатор попытки (`bundle~<id>~parse~<gen>`),
 // а не идентификатор сущности: BullMQ хранит завершённые jobs сутки
 // (removeOnComplete), поэтому jobId вида `bundle:<id>` заставил бы намеренный
 // повторный разбор молча не запуститься. Он же передаётся в queue.add как

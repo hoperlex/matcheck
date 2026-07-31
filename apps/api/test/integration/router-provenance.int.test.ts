@@ -81,8 +81,8 @@ suite('провенанс документов из единого входа (�
     const bundles = await db<{ id: string }[]>`
       SELECT id FROM source_bundles WHERE site_id = ${siteId}`;
     const keys = [
-      ...docs.map((d) => `doc:${d.id}:parse:0`),
-      ...bundles.map((b) => `bundle:${b.id}:parse:0`),
+      ...docs.map((d) => `doc~${d.id}~parse~0`),
+      ...bundles.map((b) => `bundle~${b.id}~parse~0`),
     ];
     if (keys.length > 0) {
       await db`DELETE FROM job_outbox WHERE dedupe_key = ANY(${keys})`;
@@ -185,7 +185,7 @@ suite('провенанс документов из единого входа (�
 
     const [doc] = await realDocs();
     const [job] = await db<{ dedupe_key: string; payload: { sourceDocumentId: string } }[]>`
-      SELECT dedupe_key, payload FROM job_outbox WHERE dedupe_key = ${`doc:${doc!.id}:parse:0`}`;
+      SELECT dedupe_key, payload FROM job_outbox WHERE dedupe_key = ${`doc~${doc!.id}~parse~0`}`;
     expect(job).toBeTruthy();
     expect(job!.payload.sourceDocumentId).toBe(doc!.id);
     // Ключ задания сохранён в самом документе — по нему repair найдёт его
@@ -212,9 +212,9 @@ suite('провенанс документов из единого входа (�
     const [doc] = await db<{ status: string; job_id: string }[]>`
       SELECT status, job_id FROM source_documents WHERE id = ${id}`;
     expect(doc!.status).toBe('queued');
-    expect(doc!.job_id).toBe(`doc:${id}:parse:0`);
+    expect(doc!.job_id).toBe(`doc~${id}~parse~0`);
     const jobs = await db`
-      SELECT id FROM job_outbox WHERE dedupe_key = ${`doc:${id}:parse:0`}`;
+      SELECT id FROM job_outbox WHERE dedupe_key = ${`doc~${id}~parse~0`}`;
     expect(jobs).toHaveLength(1);
   });
 
@@ -237,7 +237,7 @@ suite('провенанс документов из единого входа (�
     expect(sub).toMatchObject({ origin: 'mail', parent_bundle_id: bundleId });
     // Задание дочернего пакета тоже идёт через outbox.
     const [subJob] = await db<{ payload: { bundleId: string } }[]>`
-      SELECT payload FROM job_outbox WHERE dedupe_key = ${`bundle:${sub!.id}:parse:0`}`;
+      SELECT payload FROM job_outbox WHERE dedupe_key = ${`bundle~${sub!.id}~parse~0`}`;
     expect(subJob!.payload.bundleId).toBe(sub!.id);
     const [subTech] = await db<{ origin: string; is_technical: boolean }[]>`
       SELECT origin, is_technical FROM source_documents WHERE bundle_id = ${sub!.id}`;

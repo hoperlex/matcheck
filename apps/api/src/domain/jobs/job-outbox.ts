@@ -12,7 +12,7 @@ import { jobOutbox } from '../../db/schema.js';
  * транзакции с пакетом, а доставку в BullMQ берёт на себя consumer воркера.
  *
  * Дедупликация — по `dedupeKey`, который является идентификатором ПОПЫТКИ
- * диспетчеризации (`bundle:<id>:parse:<generation>`), а не сущности. Он же
+ * диспетчеризации (`bundle~<id>~parse~<generation>`), а не сущности. Он же
  * передаётся в `queue.add` как `jobId`: BullMQ не создаст второй job с тем же
  * идентификатором, поэтому повторная обработка той же строки безопасна.
  * Идентификатор сущности здесь не годится — BullMQ держит завершённые jobs
@@ -26,13 +26,29 @@ import { jobOutbox } from '../../db/schema.js';
  * его как второй запуск и документ распознается дважды.
  *
  * `generation` — счётчик НАМЕРЕННЫХ перезапусков. Repair его не трогает.
+ *
+ * Разделитель — `~`, а НЕ двоеточие: BullMQ строит из jobId ключи Redis и
+ * отвергает идентификаторы с `:` ошибкой «Custom Id cannot contain :». С
+ * двоеточиями задания молча не доставлялись, а документы висели в queued.
  */
+const KEY_SEP = '~';
+
+/** Символы, запрещённые BullMQ в custom job id. */
+const FORBIDDEN_IN_JOB_ID = /:/;
+
+function assertValidKey(key: string): string {
+  if (FORBIDDEN_IN_JOB_ID.test(key)) {
+    throw new Error(`недопустимый ключ задания: ${key}`);
+  }
+  return key;
+}
+
 export function dispatchKeyOf(sourceDocumentId: string, generation = 0): string {
-  return `doc:${sourceDocumentId}:parse:${generation}`;
+  return assertValidKey(['doc', sourceDocumentId, 'parse', generation].join(KEY_SEP));
 }
 
 export function bundleDispatchKeyOf(bundleId: string, generation = 0): string {
-  return `bundle:${bundleId}:parse:${generation}`;
+  return assertValidKey(['bundle', bundleId, 'parse', generation].join(KEY_SEP));
 }
 
 export const OUTBOX_BATCH = 50;

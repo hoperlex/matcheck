@@ -27,7 +27,7 @@ import {
   sourceDocumentAttachments,
   sourceDocuments,
 } from '../../db/schema.js';
-import { enqueueJob } from '../jobs/job-outbox.js';
+import { bundleDispatchKeyOf, enqueueJob } from '../jobs/job-outbox.js';
 import { buildS3Key } from '../storage/s3.path.js';
 import { UPD_PARSE_QUEUE } from '../../plugins/queue.js';
 
@@ -308,7 +308,7 @@ export async function resolveMailMessage(
       queue: UPD_PARSE_QUEUE,
       jobName: 'parse',
       payload: { bundleId, mode: 'router' },
-      dedupeKey: `bundle:${bundleId}:parse:0`,
+      dedupeKey: bundleDispatchKeyOf(bundleId),
     });
 
     await tx

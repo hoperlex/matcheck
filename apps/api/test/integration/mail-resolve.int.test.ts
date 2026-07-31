@@ -111,7 +111,7 @@ suite('письмо → пакет документов (реальный Postgr
     // Ищем по ключу своего пакета: таблица общая для параллельных наборов.
     const jobs = await sql<{ dedupe_key: string; payload: { bundleId: string } }[]>`
       SELECT dedupe_key, payload FROM job_outbox
-      WHERE dedupe_key = ${`bundle:${res.bundleId}:parse:0`}`;
+      WHERE dedupe_key = ${`bundle~${res.bundleId}~parse~0`}`;
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.payload.bundleId).toBe(res.bundleId);
 
@@ -202,7 +202,7 @@ suite('письмо → пакет документов (реальный Postgr
     const [staleBundle] = await sql<{ id: string }[]>`
       SELECT id FROM source_bundles WHERE site_id = ${siteA}`;
     expect(
-      await sql`SELECT id FROM job_outbox WHERE dedupe_key = ${`bundle:${staleBundle!.id}:parse:0`}`,
+      await sql`SELECT id FROM job_outbox WHERE dedupe_key = ${`bundle~${staleBundle!.id}~parse~0`}`,
     ).toHaveLength(0);
   });
 
