@@ -70,8 +70,12 @@ export const MailMessageStatusSchema = z.enum([
 export type MailMessageStatus = z.infer<typeof MailMessageStatusSchema>;
 
 /**
- * Состояние вложения (`mail_attachments`). Фильтр подписей ничего не удаляет:
- * подозрительное помечается `suspected_signature` и возвращается оператором.
+ * Состояние вложения (`mail_attachments`).
+ *
+ * `suspected_signature` — картинка из подписи письма: мелкая (< 25 КБ) либо со
+ * штампованным именем почтового клиента. Файл не удаляется, виден оператору и
+ * возвращается кнопкой; после возврата состояние `restored`, и вложение идёт в
+ * пакет наравне с `kept`.
  */
 export const MailAttachmentStateSchema = z.enum([
   'kept',

@@ -7,9 +7,10 @@
 // 1. Тип определяется СОДЕРЖИМЫМ, а не расширением. Подрядчики переименовывают
 //    файлы («скан.pdf», внутри которого JPEG) — это норма, и отбрасывать такое
 //    нельзя. А вот исполняемое под видом накладной пройти не должно.
-// 2. Фильтр ничего не удаляет молча. Подозрительное помечается и остаётся
-//    доступным оператору: признаки подписи по отдельности («меньше 25 КБ»,
-//    «имя image001») отбросили бы и настоящий скан УПД.
+// 2. Фильтр ничего не удаляет. Подозрительное помечается и остаётся доступным
+//    оператору — безопасность держится на ОБРАТИМОСТИ решения, а не на
+//    строгости условия. Ошиблись — оператор возвращает файл одной кнопкой, и
+//    он идёт в пакет наравне с остальными.
 // 3. xlsx — это ZIP, а значит вектор для zip-бомбы. Проверяем ДО распаковки:
 //    число элементов, суммарный распакованный размер и степень сжатия. Ratio
 //    ловит то, что первые два пропустят: 50 КБ, разжимающиеся в гигабайт.
@@ -18,6 +19,16 @@
 
 /** Состояние вложения — совпадает с `mail_attachments.state`. */
 export type AttachmentState = 'kept' | 'suspected_signature' | 'skipped';
+
+/**
+ * Состояния, при которых вложение остаётся видимым оператору.
+ *
+ * Письмо, где есть хоть одно такое, идёт в разбор. Считать только по `kept`
+ * нельзя: письмо, целиком состоящее из картинок подписи, получило бы статус
+ * `no_attachments` — а он не показывается в разборе и удаляется уборкой вместе
+ * с файлами. То есть письмо исчезло бы молча.
+ */
+export const REVIEWABLE_ATTACHMENT_STATES = ['kept', 'suspected_signature'] as const;
 
 export type AttachmentLimits = {
   /** Максимальный размер одного вложения. */
@@ -44,10 +55,6 @@ export type AttachmentInput = {
   filename: string | null;
   declaredMime: string | null;
   buffer: Buffer;
-  /** Вложение лежит в multipart/related — типично для картинок вёрстки письма. */
-  isRelated?: boolean;
-  /** На его Content-ID ссылается html-часть — то есть это картинка вёрстки. */
-  cidReferenced?: boolean;
 };
 
 export type AttachmentVerdict = {
@@ -70,6 +77,12 @@ const SUPPORTED = new Set([
 ]);
 
 const ZIP_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/**
+ * Имена картинок, которые генерирует почтовый клиент, а не отправитель.
+ * Регулярка якорная и без ветвлений: вход недоверенный, ReDoS исключён.
+ */
+const MAIL_CLIENT_STAMP_RE = /^(?:outlookemoji-|mailrusigimg[-_])/i;
 
 function startsWith(buf: Buffer, bytes: readonly number[], offset = 0): boolean {
   if (buf.length < offset + bytes.length) return false;
@@ -207,16 +220,32 @@ export function classifyAttachment(
     }
   }
 
-  // Подпись отсеиваем ТОЛЬКО по совокупности признаков. Каждый по отдельности
-  // встречается и у настоящих сканов: скан бывает мелким, а картинка из
-  // вёрстки — крупной.
-  const looksLikeSignature =
-    input.isRelated === true &&
-    input.cidReferenced === true &&
-    sniffed.startsWith('image/') &&
-    buffer.length < limits.signatureMaxBytes;
-  if (looksLikeSignature) {
-    return { state: 'suspected_signature', sniffedMime: sniffed, reason: 'inline_image_in_html' };
+  // ─── Картинки подписи и вёрстки письма ───────────────────────────────────
+  //
+  // Признаки MIME-структуры (multipart/related плюс ссылка из html по
+  // Content-ID) на реальной почте не работают: Outlook и mail.ru кладут иконки
+  // подписи в multipart/mixed без Content-ID, а html-части у письма может не
+  // быть вовсе. На боевом ящике прежнее условие не сработало НИ РАЗУ — 43
+  // иконки от 121 байта ушли бы в распознавание как документы.
+  //
+  // Поэтому решает размер, а не структура. Настоящий документ так не выглядит:
+  // самое лёгкое изображение корпуса docs/debug-upd — 139 КБ, самый лёгкий PDF
+  // на проде — 48 КБ. Скан А4 в 25 КБ нечитаем, и распознавание вернуло бы по
+  // нему мусор, даже будь это действительно документ.
+  //
+  // Порог применяется ТОЛЬКО к изображениям: самый лёгкий реальный документ —
+  // xlsx-подтверждение отгрузки на 10 КБ, и оно обязано остаться документом.
+  const isImage = sniffed.startsWith('image/');
+  if (isImage && buffer.length < limits.signatureMaxBytes) {
+    return { state: 'suspected_signature', sniffedMime: sniffed, reason: 'small_image' };
+  }
+
+  // Штамп, который вставляет в тело письма сам почтовый клиент: Outlook —
+  // `OutlookEmoji-<время><uuid>`, mail.ru — `mailrusigimg_<id>`. Имя генерирует
+  // клиент, у скана его быть не может, поэтому размер здесь не важен: на проде
+  // такие «эмодзи» весят 174 КБ и приходят по восемь штук на письмо.
+  if (isImage && MAIL_CLIENT_STAMP_RE.test(input.filename ?? '')) {
+    return { state: 'suspected_signature', sniffedMime: sniffed, reason: 'mail_client_stamp' };
   }
 
   return { state: 'kept', sniffedMime: sniffed };

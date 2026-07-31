@@ -178,17 +178,17 @@ suite('приём письма в карантин (реальный PostgreSQL)
   });
 
   it('картинка подписи помечается, но сохраняется рядом с документом', async () => {
+    // Конверт как на реальной почте: иконка лежит обычным вложением, без
+    // Content-ID и без html-части. Прежний фильтр требовал признаков
+    // multipart/related и на таком письме не срабатывал.
     const parsed = mail({
       subject: 'Объект: ЗИЛ33',
-      html: '<p>Добрый день</p><img src="cid:logo@sign">',
       attachments: [
         attachment({ content: PDF }),
         attachment({
           filename: 'image001.png',
           contentType: 'image/png',
           content: PNG_SMALL,
-          related: true,
-          cid: 'logo@sign',
         }),
       ],
     });
@@ -204,6 +204,47 @@ suite('приём письма в карантин (реальный PostgreSQL)
     // Подозрительное тоже лежит в хранилище: оператор возвращает его одним
     // действием, ничего не потеряно.
     expect(atts[1]!.staging_s3_key).not.toBeNull();
+  });
+
+  it('письмо только из картинок подписи остаётся в разборе', async () => {
+    // Иначе оно получило бы no_attachments: этот статус не показывается
+    // оператору и удаляется уборкой вместе с файлами — письмо исчезло бы молча.
+    const parsed = mail({
+      subject: 'Коммерческое предложение',
+      attachments: [
+        attachment({ filename: 'image001.png', contentType: 'image/png', content: PNG_SMALL }),
+      ],
+    });
+    const result = await run(parsed);
+    expect(result.outcome).toBe('stored');
+    if (result.outcome !== 'stored') return;
+    expect(result.status).toBe('quarantined');
+    expect(result.keptAttachments).toBe(0);
+
+    const [att] = await sql<{ state: string; staging_s3_key: string | null }[]>`
+      SELECT state, staging_s3_key FROM mail_attachments
+      WHERE mail_message_id = ${result.messageId}`;
+    expect(att).toMatchObject({ state: 'suspected_signature' });
+    expect(att!.staging_s3_key).not.toBeNull();
+  });
+
+  it('имя картинки подписи не подсказывает объект', async () => {
+    // Иконка в пакет не идёт, и её имя не должно влиять на выбор площадки:
+    // иначе логотип с «говорящим» именем отправил бы документы не туда.
+    const parsed = mail({
+      subject: 'Документы по поставке',
+      attachments: [
+        attachment({ content: PDF, filename: 'upd.pdf' }),
+        attachment({ filename: 'АЛ13.png', contentType: 'image/png', content: PNG_SMALL }),
+      ],
+    });
+    const result = await run(parsed);
+    expect(result.outcome).toBe('stored');
+    if (result.outcome !== 'stored') return;
+
+    const [msg] = await sql<{ suggested_site_id: string | null }[]>`
+      SELECT suggested_site_id FROM mail_messages WHERE id = ${result.messageId}`;
+    expect(msg!.suggested_site_id).toBeNull();
   });
 
   it('непригодное вложение не попадает в хранилище, но причина сохраняется', async () => {

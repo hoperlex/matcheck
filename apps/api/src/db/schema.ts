@@ -1485,8 +1485,10 @@ export const mailAttachments = pgTable(
     sha256: varchar('sha256', { length: 64 }),
     stagingS3Key: text('staging_s3_key'),
     // kept | suspected_signature | skipped | restored
-    // Фильтр подписей ничего не удаляет: признаки по отдельности («< 25 КБ»,
-    // имя image001) отбросили бы и настоящий скан.
+    // Фильтр подписей ничего не удаляет: мелкая картинка (< 25 КБ) и штамп
+    // почтового клиента откладываются, файл остаётся в хранилище и виден
+    // оператору. Ошибка обратима кнопкой «Вернуть» — состояние `restored`
+    // идёт в пакет наравне с `kept`.
     state: text('state').notNull().default('kept'),
     skipReason: text('skip_reason'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

@@ -77,6 +77,27 @@ function letterWith(subject: string, text = ''): ParsedMail {
   } as unknown as ParsedMail;
 }
 
+/** Письмо, где вложение только одно и это иконка подписи. */
+function letterWithOnlySignature(subject: string): ParsedMail {
+  const icon = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(2000, 0x11),
+  ]);
+  return {
+    ...letterWith(subject),
+    attachments: [
+      {
+        type: 'attachment',
+        filename: 'image001.png',
+        contentType: 'image/png',
+        content: icon,
+        related: false,
+        size: icon.length,
+      },
+    ],
+  } as unknown as ParsedMail;
+}
+
 suite('письмо → документ без участия менеджера (реальный PostgreSQL)', () => {
   let sql: ReturnType<typeof postgres>;
   let db: Db;
@@ -156,6 +177,32 @@ suite('письмо → документ без участия менеджер�
       SELECT status FROM mail_messages WHERE mail_account_id = ${accountId}`;
     expect(msg!.status).toBe('ingested');
     expect(copyObject).toHaveBeenCalledTimes(1);
+  });
+
+  it('явный объект, но только картинки подписи — автопрохода нет', async () => {
+    // Объект указан верно, однако документов в письме нет: одни иконки. Создать
+    // пакет не из чего, поэтому письмо ждёт оператора, а не превращается в
+    // пустой документ.
+    const result = await pollMailAccount(
+      {
+        db,
+        putObject,
+        copyObject,
+        parseMime: async () => letterWithOnlySignature(`Объект: ${siteCode}`),
+        openMailbox: async () => mailboxWith([1]),
+      },
+      await account(),
+      { owner },
+    );
+
+    expect(result).toMatchObject({ stored: 1, autoResolved: 0, quarantined: 1 });
+    expect(await sql`SELECT id FROM source_bundles WHERE site_id = ${siteId}`).toHaveLength(0);
+    expect(copyObject).not.toHaveBeenCalled();
+
+    // Письмо осталось в разборе — оператор вернёт файл, если это был документ.
+    const [msg] = await sql<{ status: string }[]>`
+      SELECT status FROM mail_messages WHERE mail_account_id = ${accountId}`;
+    expect(msg!.status).toBe('quarantined');
   });
 
   it('письмо без указания объекта ждёт в разборе', async () => {

@@ -271,7 +271,9 @@ export function MailReviewModal({
                       </Typography.Text>
                     </div>
                     <Space size={4} onClick={(e) => e.stopPropagation()}>
-                      {!a.willBeIngested && (
+                      {/* Только отложенное как подпись: отброшенное по типу или
+                          размеру в хранилище не залито, возвращать нечего. */}
+                      {a.state === 'suspected_signature' && (
                         <Button
                           size="small"
                           icon={<UndoOutlined />}

@@ -282,21 +282,53 @@ export async function mailReviewRoutes(rawApp: FastifyInstance): Promise<void> {
       preHandler: staff,
       schema: {
         params: z.object({ id: z.string().uuid(), attachmentId: z.string().uuid() }),
-        response: { 200: z.object({ ok: z.literal(true) }), 404: ErrorResponseSchema },
+        response: {
+          200: z.object({ ok: z.literal(true) }),
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+        },
       },
     },
     async (req, reply) => {
-      const updated = await app.db
-        .update(mailAttachments)
-        .set({ state: 'restored', skipReason: null })
+      const [att] = await app.db
+        .select({
+          state: mailAttachments.state,
+          stagingS3Key: mailAttachments.stagingS3Key,
+          messageStatus: mailMessages.status,
+        })
+        .from(mailAttachments)
+        .innerJoin(mailMessages, eq(mailMessages.id, mailAttachments.mailMessageId))
         .where(
           and(
             eq(mailAttachments.id, req.params.attachmentId),
             eq(mailAttachments.mailMessageId, req.params.id),
           ),
         )
-        .returning({ id: mailAttachments.id });
-      if (updated.length === 0) return reply.code(404).send({ error: 'not_found' });
+        .limit(1);
+      if (!att) return reply.code(404).send({ error: 'not_found' });
+
+      // Возвращать можно только то, что реально можно положить в пакет.
+      // Отброшенное (`skipped`) в хранилище не заливается вовсе — восстановив
+      // его, мы получили бы строку, которая считается пригодной, а копировать
+      // нечего. А у принятого письма пакет уже собран: менять состав постфактум
+      // значит врать о том, что ушло в распознавание.
+      if (att.messageStatus !== 'quarantined') {
+        return reply.code(400).send({
+          error: 'not_quarantined',
+          message: 'Письмо уже обработано — состав вложений изменить нельзя',
+        });
+      }
+      if (att.state !== 'suspected_signature' || !att.stagingS3Key) {
+        return reply.code(400).send({
+          error: 'not_restorable',
+          message: 'Вернуть можно только вложение, отложенное как подпись в письме',
+        });
+      }
+
+      await app.db
+        .update(mailAttachments)
+        .set({ state: 'restored', skipReason: null })
+        .where(eq(mailAttachments.id, req.params.attachmentId));
       return { ok: true as const };
     },
   );

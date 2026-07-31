@@ -22,6 +22,7 @@ import { matchSite, type SiteMatch, type SiteRef } from '../sourceDocuments/site
 import {
   classifyAttachment,
   DEFAULT_ATTACHMENT_LIMITS,
+  REVIEWABLE_ATTACHMENT_STATES,
   type AttachmentLimits,
 } from './attachment-filter.js';
 import { parseDeliveryDateHint } from './letter-hints.js';
@@ -83,12 +84,6 @@ export function buildMailAttachmentKey(
   return `mail/${p.accountId}/${p.uidValidity}/${p.uid}/att-${idx + 1}-${safeName(filename, idx)}`;
 }
 
-/** Ссылается ли html-часть письма на этот cid — признак картинки вёрстки. */
-function isCidReferenced(html: string, cid: string | undefined): boolean {
-  if (!cid) return false;
-  return html.includes(cid);
-}
-
 export async function ingestLetter(
   deps: IngestDeps,
   params: IngestParams,
@@ -114,7 +109,6 @@ export async function ingestLetter(
   if (duplicate) return { outcome: 'duplicate', messageId: duplicate.id };
 
   const parsed = await parseMime(params.raw);
-  const html = typeof parsed.html === 'string' ? parsed.html : '';
   const text = parsed.text ?? '';
 
   // Решения по вложениям принимаются до записи в БД, чтобы одна транзакция
@@ -126,8 +120,6 @@ export async function ingestLetter(
         filename: att.filename ?? null,
         declaredMime: att.contentType ?? null,
         buffer: att.content,
-        isRelated: att.related === true,
-        cidReferenced: isCidReferenced(html, att.cid),
       },
       limits,
     );
@@ -149,17 +141,25 @@ export async function ingestLetter(
     stagingKeys.set(idx, key);
   }
 
+  // Имена только пригодных вложений: подозрительное в пакет не идёт, и его имя
+  // не должно влиять на подсказку объекта. Иначе иконка `АЛ13.png` из подписи
+  // подставила бы оператору чужую площадку.
   const filenames = decided
-    .filter((d) => d.verdict.state !== 'skipped')
+    .filter((d) => d.verdict.state === 'kept')
     .map((d) => d.att.filename ?? '')
     .filter(Boolean);
   const match = matchSite({ subject: parsed.subject ?? null, body: text, filenames }, params.sites);
   const expectedDate = parseDeliveryDateHint(`${parsed.subject ?? ''}\n${text}`);
 
   const keptAttachments = decided.filter((d) => d.verdict.state === 'kept').length;
+  const reviewable = decided.filter((d) =>
+    (REVIEWABLE_ATTACHMENT_STATES as readonly string[]).includes(d.verdict.state),
+  ).length;
   // Письмо без единого пригодного вложения в разбор не попадает: иначе список
-  // оператора зарастёт перепиской и рассылками.
-  const status = keptAttachments > 0 ? 'quarantined' : 'no_attachments';
+  // оператора зарастёт перепиской и рассылками. Но подозрение на подпись — это
+  // не «нет вложений», а «решает человек»: такое письмо остаётся в разборе с
+  // кнопкой «Вернуть». Иначе оно ушло бы в no_attachments и удалилось уборкой.
+  const status = reviewable > 0 ? 'quarantined' : 'no_attachments';
   const suggestedSiteId =
     match.decision === 'explicit'
       ? match.siteId

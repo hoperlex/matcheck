@@ -120,10 +120,13 @@ suite('разбор почты: API (реальный PostgreSQL)', () => {
       RETURNING id`;
     const states = opts.states ?? ['kept'];
     for (const [i, state] of states.entries()) {
+      // Отброшенное в хранилище не заливается — ключа у него нет, как и в бою
+      // (см. ingest-message.ts: skipped пропускается до putObject).
+      const stagingKey = state === 'skipped' ? null : `mail/staging/${msg!.id}/${i}`;
       await sql`INSERT INTO mail_attachments
           (mail_message_id, idx, filename, sniffed_mime, size_bytes, sha256, staging_s3_key, state, skip_reason)
         VALUES (${msg!.id}, ${i}, ${`upd-${i}.pdf`}, 'application/pdf', 1000,
-          ${sha(`${marker}-${i}`)}, ${`mail/staging/${msg!.id}/${i}`}, ${state},
+          ${sha(`${marker}-${i}`)}, ${stagingKey}, ${state},
           ${state === 'suspected_signature' ? 'похоже на подпись в письме' : null})`;
     }
     return msg!.id;
@@ -231,6 +234,43 @@ suite('разбор почты: API (реальный PostgreSQL)', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json()).toMatchObject({ error: 'no_attachments' });
     expect(copyObject).not.toHaveBeenCalled();
+  });
+
+  it('отброшенное вложение вернуть нельзя — его нет в хранилище', async () => {
+    // `skipped` в хранилище не заливается. Восстановив его, мы получили бы
+    // строку, которая считается пригодной, а копировать нечего.
+    const id = await letter({ states: ['skipped'] });
+    const detail = (await get(`/api/v1/mail/messages/${id}`)).json() as {
+      attachments: { id: string }[];
+    };
+
+    const res = await post(
+      `/api/v1/mail/messages/${id}/attachments/${detail.attachments[0]!.id}/restore`,
+    );
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: 'not_restorable' });
+    const [att] = await sql<{ state: string }[]>`
+      SELECT state FROM mail_attachments WHERE mail_message_id = ${id}`;
+    expect(att!.state).toBe('skipped');
+  });
+
+  it('у принятого письма состав вложений менять нельзя', async () => {
+    // Пакет уже собран: возврат постфактум врал бы о том, что ушло в
+    // распознавание.
+    const id = await letter({ states: ['kept', 'suspected_signature'] });
+    const detail = (await get(`/api/v1/mail/messages/${id}`)).json() as {
+      attachments: { id: string; state: string }[];
+    };
+    const suspected = detail.attachments.find((a) => a.state === 'suspected_signature')!;
+    expect((await post(`/api/v1/mail/messages/${id}/resolve`, { siteId: siteA })).statusCode).toBe(
+      200,
+    );
+
+    const res = await post(`/api/v1/mail/messages/${id}/attachments/${suspected.id}/restore`);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: 'not_quarantined' });
   });
 
   it('возвращённое вложение участвует в пакете наравне с остальными', async () => {

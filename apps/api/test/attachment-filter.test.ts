@@ -35,10 +35,25 @@ function readFirstByExt(ext: string): Buffer {
   return read(name);
 }
 
+/**
+ * Файл, на котором держится смысл теста, берётся по ТОЧНОМУ имени и с проверкой
+ * размера: «первый подходящий по расширению» однажды сменится, и тест тихо
+ * потеряет смысл, оставаясь зелёным.
+ */
+function readExact(name: string, expectedBytes: number): Buffer {
+  const buf = read(name);
+  if (buf.length !== expectedBytes) {
+    throw new Error(`${name}: ожидалось ${expectedBytes} Б, получено ${buf.length} Б`);
+  }
+  return buf;
+}
+
 const REAL_PDF = read('зиларт.pdf');
-const REAL_JPEG = read('5303397567129394215.jpg');
+const REAL_JPEG = readExact('5303397567129394215.jpg', 139_301);
 const REAL_XLSX = readFirstByExt('.xlsx');
 const REAL_XLS = readFirstByExt('.xls');
+/** Самый лёгкий настоящий документ корпуса — легче порога подписи. */
+const SMALL_XLSX = readExact('Т56532_20260622112337_Подтверждение_отгрузки.XLSX', 10_077);
 
 /** Минимальный PNG (8-байтовая сигнатура + добивка до нужного размера). */
 function png(size: number): Buffer {
@@ -195,62 +210,103 @@ describe('xlsx как ZIP-контейнер', () => {
   });
 });
 
-describe('подписи отсеиваются только по совокупности признаков', () => {
+describe('мелкие картинки — подпись, а не документ', () => {
   const small = png(8 * 1024);
-
-  it('мелкая картинка + related + ссылка из html → подозрение на подпись', () => {
-    const v = classifyAttachment({
-      filename: 'image001.png',
-      declaredMime: 'image/png',
-      buffer: small,
-      isRelated: true,
-      cidReferenced: true,
+  const classify = (over: { filename?: string; buffer?: Buffer; mime?: string } = {}) =>
+    classifyAttachment({
+      filename: over.filename ?? 'скан.png',
+      declaredMime: over.mime ?? 'image/png',
+      buffer: over.buffer ?? small,
     });
-    expect(v).toMatchObject({ state: 'suspected_signature' });
+
+  it('иконка из multipart/mixed без Content-ID помечается', () => {
+    // Ровно тот случай, что ушёл в прод: прежнее условие требовало признаков
+    // MIME-структуры, а Outlook кладёт иконки подписи без Content-ID — и 43
+    // картинки от 121 байта уехали в распознавание как документы.
+    const v = classifyAttachment({
+      filename: 'image003.png',
+      declaredMime: 'image/png',
+      buffer: png(6 * 1024),
+    });
+    expect(v).toMatchObject({ state: 'suspected_signature', reason: 'small_image' });
   });
 
-  it('мелкая картинка без ссылки из html остаётся документом', () => {
-    // Настоящий скан бывает мелким — одного размера недостаточно.
+  it('граница порога: на байт меньше — подпись, ровно порог — документ', () => {
+    const limit = DEFAULT_ATTACHMENT_LIMITS.signatureMaxBytes;
+    expect(classify({ buffer: png(limit - 1) }).state).toBe('suspected_signature');
+    expect(classify({ buffer: png(limit) }).state).toBe('kept');
+  });
+
+  it('порог берётся из лимитов, а не зашит в код', () => {
+    const v = classifyAttachment(
+      { filename: 'скан.jpg', declaredMime: 'image/jpeg', buffer: REAL_JPEG },
+      { ...DEFAULT_ATTACHMENT_LIMITS, signatureMaxBytes: 200 * 1024 },
+    );
+    expect(v.state).toBe('suspected_signature');
+  });
+
+  it('реальный скан УПД остаётся документом', () => {
+    expect(classify({ filename: 'скан.jpg', mime: 'image/jpeg', buffer: REAL_JPEG }).state).toBe(
+      'kept',
+    );
+  });
+
+  it('реальный xlsx на 10 КБ остаётся документом', () => {
+    // Порог применяется ТОЛЬКО к картинкам: самое лёгкое подтверждение отгрузки
+    // весит меньше иконки подписи, и потерять его нельзя.
+    expect(SMALL_XLSX.length).toBeLessThan(DEFAULT_ATTACHMENT_LIMITS.signatureMaxBytes);
     const v = classifyAttachment({
-      filename: 'скан.png',
-      declaredMime: 'image/png',
-      buffer: small,
-      isRelated: true,
-      cidReferenced: false,
+      filename: 'Подтверждение_отгрузки.XLSX',
+      declaredMime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      buffer: SMALL_XLSX,
     });
     expect(v.state).toBe('kept');
   });
 
-  it('мелкая картинка вне multipart/related остаётся документом', () => {
-    const v = classifyAttachment({
-      filename: 'скан.png',
-      declaredMime: 'image/png',
-      buffer: small,
-      isRelated: false,
-      cidReferenced: true,
-    });
-    expect(v.state).toBe('kept');
+  it('мелкий PDF остаётся документом', () => {
+    const tinyPdf = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(1024, 0x20)]);
+    expect(classify({ filename: 'счёт.pdf', mime: 'application/pdf', buffer: tinyPdf }).state).toBe(
+      'kept',
+    );
   });
 
-  it('крупная картинка из вёрстки остаётся документом', () => {
-    const v = classifyAttachment({
-      filename: 'image002.png',
-      declaredMime: 'image/png',
-      buffer: png(200 * 1024),
-      isRelated: true,
-      cidReferenced: true,
-    });
-    expect(v.state).toBe('kept');
-  });
-
-  it('реальный скан УПД не путается с подписью', () => {
-    const v = classifyAttachment({
-      filename: 'скан.jpg',
-      declaredMime: 'image/jpeg',
+  it('штамп почтового клиента — подпись независимо от размера', () => {
+    // На проде такие «эмодзи» весят 174 КБ и приходят по восемь штук на письмо.
+    const v = classify({
+      filename: 'OutlookEmoji-1756819099770fa910edb.jpg',
+      mime: 'image/jpeg',
       buffer: REAL_JPEG,
-      isRelated: true,
-      cidReferenced: true,
     });
-    expect(v.state).toBe('kept');
+    expect(v).toMatchObject({ state: 'suspected_signature', reason: 'mail_client_stamp' });
+    expect(classify({ filename: 'mailrusigimg_4821.png', buffer: png(200 * 1024) }).state).toBe(
+      'suspected_signature',
+    );
+  });
+
+  it('имя image00N само по себе документ не отбрасывает', () => {
+    // Outlook даёт такое имя и вставленному в тело скану: в проде есть
+    // image008.jpg на 82 КБ, и это может быть фотография документа.
+    expect(classify({ filename: 'image002.png', buffer: png(200 * 1024) }).state).toBe('kept');
+  });
+
+  it('обычное имя того же размера — документ', () => {
+    // Ловит неякорную регулярку: «скан-outlookemoji» подписью быть не должен.
+    expect(
+      classify({ filename: 'скан-outlookemoji.jpg', mime: 'image/jpeg', buffer: REAL_JPEG }).state,
+    ).toBe('kept');
+  });
+
+  it('непригодный тип остаётся отброшенным, а не подписью', () => {
+    // Порядок проверок: тип решается раньше подписи.
+    const exe = Buffer.concat([Buffer.from([0x4d, 0x5a]), Buffer.alloc(2048, 0)]);
+    expect(classifyAttachment({ filename: 'a.png', declaredMime: 'image/png', buffer: exe })).toMatchObject(
+      { state: 'skipped', reason: 'unsupported_type' },
+    );
+  });
+
+  it('пустое вложение — отброшено, а не подпись', () => {
+    expect(
+      classifyAttachment({ filename: 'empty.png', declaredMime: 'image/png', buffer: Buffer.alloc(0) }),
+    ).toMatchObject({ state: 'skipped', reason: 'empty' });
   });
 });
