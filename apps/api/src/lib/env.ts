@@ -68,6 +68,11 @@ const envSchema = z.object({
   MAIL_XLSX_MAX_ENTRIES: z.coerce.number().int().positive().default(512),
   MAIL_XLSX_MAX_INFLATED_BYTES: z.coerce.number().int().positive().default(100 * 1024 * 1024),
   MAIL_XLSX_MAX_RATIO: z.coerce.number().int().positive().default(200),
+  // Срок хранения разобранной почты. Удаляются только письма, с которыми уже
+  // разобрались; карантинные ждут человека сколько угодно. Сами документы
+  // лежат отдельно, в постоянных ключах пакета, и уборкой не затрагиваются.
+  // 0 отключает уборку.
+  MAIL_RETENTION_DAYS: z.coerce.number().int().min(0).default(90),
 
   // S3 (cloud.ru)
   S3_ENDPOINT: z.string().url().optional(),

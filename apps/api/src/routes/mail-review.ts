@@ -18,13 +18,16 @@ import {
   ErrorResponseSchema,
   MailMessageDetailSchema,
   MailMessageListResponseSchema,
+  MailReceiptListResponseSchema,
   MailRejectRequestSchema,
+  MailReplayResponseSchema,
   MailResolveRequestSchema,
   MailResolveResponseSchema,
   MailReviewFilterSchema,
   MailReviewSummarySchema,
 } from '@matcheck/contracts';
-import { mailAccounts, mailAttachments, mailMessages, sites } from '../db/schema.js';
+import { mailAccounts, mailAttachments, mailMessages, mailReceipts, sites } from '../db/schema.js';
+import { REPLAYABLE_STATUSES, requestReplay } from '../domain/mail/replay.js';
 import {
   INGESTABLE_ATTACHMENT_STATES,
   resolveMailMessage,
@@ -353,6 +356,88 @@ export async function mailReviewRoutes(rawApp: FastifyInstance): Promise<void> {
         default:
           return reply.code(404).send({ error: 'not_quarantined' });
       }
+    },
+  );
+
+  // Письма, которые не удалось забрать. После исчерпания попыток граница ящика
+  // их перешагнула, и обычный проход к ним не вернётся — отсюда и кнопка
+  // повторного забора.
+  app.get(
+    '/api/v1/mail/receipts',
+    {
+      preHandler: staff,
+      schema: {
+        querystring: z.object({
+          /** `problems` — только требующие внимания; `all` — весь журнал. */
+          scope: z.enum(['problems', 'all']).default('problems'),
+          limit: z.coerce.number().int().min(1).max(500).default(200),
+        }),
+        response: { 200: MailReceiptListResponseSchema },
+      },
+    },
+    async (req) => {
+      const problems = inArray(mailReceipts.status, [...REPLAYABLE_STATUSES]);
+      const where = req.query.scope === 'problems' ? problems : undefined;
+
+      const rows = await app.db
+        .select({ r: mailReceipts, accountName: mailAccounts.name })
+        .from(mailReceipts)
+        .innerJoin(mailAccounts, eq(mailAccounts.id, mailReceipts.mailAccountId))
+        .where(where)
+        .orderBy(desc(mailReceipts.updatedAt))
+        .limit(req.query.limit);
+
+      const [total] = await app.db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(mailReceipts)
+        .where(where);
+
+      return {
+        items: rows.map(({ r, accountName }) => ({
+          id: r.id,
+          accountId: r.mailAccountId,
+          accountName,
+          uid: r.uid,
+          status: r.status as never,
+          sizeBytes: r.rfc822Size,
+          attempts: r.attempts,
+          lastError: r.lastError,
+          replayRequested: r.replayRequestedAt !== null,
+          canReplay: (REPLAYABLE_STATUSES as readonly string[]).includes(r.status),
+          createdAt: r.createdAt.toISOString(),
+          updatedAt: r.updatedAt.toISOString(),
+        })),
+        total: total?.n ?? 0,
+      };
+    },
+  );
+
+  // Повторный забор. Письмо не скачивается прямо сейчас: запись помечается, а
+  // заберёт её ближайший проход поллера — точечно по UID, не сдвигая границу.
+  app.post(
+    '/api/v1/mail/receipts/:id/replay',
+    {
+      preHandler: staff,
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: {
+          202: MailReplayResponseSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const result = await requestReplay(app.db, req.params.id);
+      if (!result.ok) {
+        if (result.reason === 'not_found') return reply.code(404).send({ error: 'not_found' });
+        return reply.code(400).send({
+          error: 'not_replayable',
+          message: 'Повторить можно только письмо, которое не удалось скачать',
+        });
+      }
+      reply.code(202);
+      return { requested: true as const, uid: result.uid };
     },
   );
 

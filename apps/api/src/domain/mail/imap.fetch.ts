@@ -164,20 +164,66 @@ export async function fetchHeadlines(
   )) {
     // Сервер может вернуть письмо с UID ниже запрошенного, если ящик пуст.
     if (msg.uid < fromUid) continue;
-    out.push({
-      uid: msg.uid,
-      size: typeof msg.size === 'number' ? msg.size : null,
-      messageId: msg.envelope?.messageId ?? null,
-      subject: msg.envelope?.subject ?? null,
-      from: msg.envelope?.from?.[0]?.address ?? null,
-      receivedAt: msg.internalDate instanceof Date ? msg.internalDate : (msg.envelope?.date ?? null),
-      structure: msg.bodyStructure ?? null,
-    });
+    out.push(toHeadline(msg));
     if (out.length >= maxMessages) break;
   }
   // По возрастанию UID: watermark двигается по непрерывному префиксу, и от
   // порядка зависит, какое письмо потеряется при сбое.
   return out.sort((a, b) => a.uid - b.uid);
+}
+
+/**
+ * Метаданные конкретных писем — для повторного забора.
+ *
+ * Обычный проход идёт диапазоном от границы вверх и к письму ниже неё уже не
+ * вернётся. Здесь запрашиваются ровно перечисленные UID, поэтому граница не
+ * трогается и соседние письма не перечитываются.
+ *
+ * Метаданные нужны и при повторе: письмо могло быть пропущено по размеру, и
+ * решение «качать или нет» принимается заново — уже с текущим лимитом.
+ */
+export async function fetchHeadlinesFor(
+  client: ImapLike,
+  uids: readonly number[],
+): Promise<MessageHeadline[]> {
+  if (uids.length === 0) return [];
+  const wanted = new Set(uids);
+  const out: MessageHeadline[] = [];
+  for await (const msg of client.fetch(
+    uids.join(','),
+    { uid: true, envelope: true, size: true, bodyStructure: true, internalDate: true },
+    { uid: true },
+  )) {
+    // Сервер вправе прислать соседей по диапазону — берём только своё.
+    if (!wanted.has(msg.uid)) continue;
+    out.push(toHeadline(msg));
+  }
+  return out.sort((a, b) => a.uid - b.uid);
+}
+
+type RawMessage = {
+  uid: number;
+  size?: number;
+  envelope?: {
+    messageId?: string;
+    subject?: string;
+    from?: { address?: string }[];
+    date?: Date;
+  };
+  bodyStructure?: unknown;
+  internalDate?: Date;
+};
+
+function toHeadline(msg: RawMessage): MessageHeadline {
+  return {
+    uid: msg.uid,
+    size: typeof msg.size === 'number' ? msg.size : null,
+    messageId: msg.envelope?.messageId ?? null,
+    subject: msg.envelope?.subject ?? null,
+    from: msg.envelope?.from?.[0]?.address ?? null,
+    receivedAt: msg.internalDate instanceof Date ? msg.internalDate : (msg.envelope?.date ?? null),
+    structure: (msg.bodyStructure as MessageHeadline['structure']) ?? null,
+  };
 }
 
 /**

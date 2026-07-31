@@ -36,11 +36,13 @@ import {
 import {
   decideFetch,
   fetchHeadlines,
+  fetchHeadlinesFor,
   fetchSource,
   DEFAULT_FETCH_LIMITS,
   type FetchLimits,
   type ImapLike,
 } from '../mail/imap.fetch.js';
+import { clearReplayFlag, loadReplayTargets } from '../mail/replay.js';
 import { resolveMailMessage, type CopyObject } from '../mail/resolve-message.js';
 import { computeWatermark, needsWatermarkReset } from '../mail/watermark.js';
 import type { SiteRef } from '../sourceDocuments/siteHint.js';
@@ -79,6 +81,8 @@ export type PollOptions = {
    * потребуется временно вернуть ручное подтверждение.
    */
   autoResolve?: boolean;
+  /** Сколько писем дозабирать за проход по запросу оператора. */
+  maxReplay?: number;
 };
 
 export type PollResult = {
@@ -92,6 +96,8 @@ export type PollResult = {
   autoResolved: number;
   /** Письма, оставшиеся в разборе: объект неясен или конфликт. */
   quarantined: number;
+  /** Письма, забранные повторно по запросу оператора. */
+  replayed: number;
   watermarkBefore: number;
   watermarkAfter: number;
   uidValidityReset: boolean;
@@ -104,6 +110,7 @@ const EMPTY_RESULT: Omit<PollResult, 'watermarkBefore' | 'watermarkAfter'> = {
   failed: 0,
   autoResolved: 0,
   quarantined: 0,
+  replayed: 0,
   uidValidityReset: false,
 };
 
@@ -170,15 +177,31 @@ export async function pollMailAccount(
     }
 
     const headlines = await fetchHeadlines(client, watermarkBefore + 1, maxMessages);
-    const siteRefs = headlines.length > 0 ? await loadSites(db) : [];
+    // Письма, запрошенные оператором к повторному забору: лежат НИЖЕ границы,
+    // обычный проход к ним не вернётся.
+    const replayTargets = await loadReplayTargets(db, {
+      accountId: account.id,
+      uidValidity,
+      limit: options.maxReplay ?? 20,
+    });
+    // Справочник нужен и дозабору: без него матчер не определит объект и
+    // повторно забранное письмо ушло бы в разбор даже с явным маркером.
+    const siteRefs =
+      headlines.length > 0 || replayTargets.length > 0 ? await loadSites(db) : [];
 
     let stored = 0;
     let duplicates = 0;
     let failed = 0;
     let autoResolved = 0;
     let quarantined = 0;
+    let replayed = 0;
 
-    for (const headline of headlines) {
+    /**
+     * Один письмо: транспорт, приём в карантин и, при явном объекте,
+     * автосоздание пакета. Общая процедура для обычного прохода и для
+     * повторного забора — иначе у дозабора появилась бы своя копия правил.
+     */
+    const processHeadline = async (headline: (typeof headlines)[number]): Promise<void> => {
       const receipt = await startReceipt(db, {
         accountId: account.id,
         uidValidity,
@@ -197,14 +220,14 @@ export async function pollMailAccount(
             receipt.id,
             decision.reason === 'skipped_by_size' ? 'skipped_by_size' : 'parsed',
           );
-          continue;
+          return;
         }
 
         const raw = await fetchSource(client, headline.uid);
         if (!raw) {
           // Письмо удалили или перенесли между фазами — штатная ситуация.
           await completeReceipt(db, receipt.id, 'vanished');
-          continue;
+          return;
         }
 
         const outcome = await ingestLetter(
@@ -277,6 +300,32 @@ export async function pollMailAccount(
           'mail poll: письмо не обработано',
         );
       }
+    };
+
+    // Дозабор идёт первым. Отметка снимается в любом случае — иначе письмо,
+    // которое не забирается в принципе, дозабирали бы каждый проход, вытесняя
+    // новые.
+    if (replayTargets.length > 0) {
+      const replayHeadlines = await fetchHeadlinesFor(
+        client,
+        replayTargets.map((t) => t.uid),
+      );
+      const byUid = new Map(replayHeadlines.map((h) => [h.uid, h]));
+      for (const target of replayTargets) {
+        const headline = byUid.get(target.uid);
+        if (headline) {
+          await processHeadline(headline);
+          replayed += 1;
+        } else {
+          // Письма больше нет в ящике — повторять нечего.
+          await completeReceipt(db, target.receiptId, 'vanished');
+        }
+        await clearReplayFlag(db, target.receiptId);
+      }
+    }
+
+    for (const headline of headlines) {
+      await processHeadline(headline);
     }
 
     // Границу считаем по журналу, а не по счётчикам цикла: в журнале уже учтены
@@ -301,6 +350,7 @@ export async function pollMailAccount(
       failed,
       autoResolved,
       quarantined,
+      replayed,
       watermarkBefore,
       watermarkAfter,
       uidValidityReset: reset,

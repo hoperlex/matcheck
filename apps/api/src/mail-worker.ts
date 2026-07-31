@@ -30,6 +30,7 @@ import {
 } from './domain/jobs/mail-poll-runner.js';
 import { DEFAULT_FETCH_LIMITS } from './domain/mail/imap.fetch.js';
 import { openMailbox } from './domain/mail/imap.connect.js';
+import { purgeOldMail, purgeOldReceipts } from './domain/mail/retention.js';
 import { copyObject, putObject } from './domain/storage/s3.signer.js';
 import { loadEnv } from './lib/env.js';
 import { logger } from './lib/logger.js';
@@ -92,9 +93,35 @@ if (env.MAIL_POLL_ENABLED) {
   log.info('автоопрос выключен (MAIL_POLL_ENABLED=false); доступен только ручной запуск');
 }
 
+// Уборка старых писем. Раз в сутки от старта: срок хранения измеряется днями,
+// чаще смысла нет. Файлы удаляются не здесь — их ключи уходят в очередь
+// s3_cleanup_outbox, которую разбирает основной воркер с ретраями.
+const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
+let retentionTimer: NodeJS.Timeout | null = null;
+if (env.MAIL_RETENTION_DAYS > 0) {
+  const sweep = async () => {
+    const purged = await purgeOldMail({ db, retentionDays: env.MAIL_RETENTION_DAYS, log });
+    const receipts = await purgeOldReceipts({ db, retentionDays: env.MAIL_RETENTION_DAYS, log });
+    if (purged.messages || receipts) {
+      log.info({ ...purged, receipts }, 'уборка почты завершена');
+    }
+  };
+  // Через 5 минут после старта: не мешаем первому проходу поллера.
+  setTimeout(() => {
+    void sweep().catch((err) => log.error({ err }, 'уборка почты упала'));
+    retentionTimer = setInterval(
+      () => void sweep().catch((err) => log.error({ err }, 'уборка почты упала')),
+      RETENTION_INTERVAL_MS,
+    );
+    retentionTimer.unref();
+  }, 5 * 60 * 1000).unref();
+  log.info({ retentionDays: env.MAIL_RETENTION_DAYS }, 'уборка почты включена');
+}
+
 async function shutdown(signal: string): Promise<void> {
   log.info({ signal }, 'mail-worker: завершение');
   if (timer) clearInterval(timer);
+  if (retentionTimer) clearInterval(retentionTimer);
   await worker.close().catch(() => undefined);
   process.exit(0);
 }

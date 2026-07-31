@@ -1406,12 +1406,20 @@ export const mailReceipts = pgTable(
     rawS3Key: text('raw_s3_key'),
     attempts: integer('attempts').notNull().default(0),
     lastError: text('last_error'),
+    // Оператор попросил забрать письмо заново. Отдельная отметка, а не статус
+    // `fetching`: тот же статус стоит у попытки, которая идёт прямо сейчас.
+    // Письмо с исчерпанными попытками watermark уже перешагнул, и вернуться к
+    // нему можно только точечным дозабором по UID.
+    replayRequestedAt: timestamp('replay_requested_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('mail_receipts_uid_unique').on(t.mailAccountId, t.uidValidity, t.uid),
     index('mail_receipts_status_idx').on(t.mailAccountId, t.status),
+    index('mail_receipts_replay_idx')
+      .on(t.mailAccountId, t.uidValidity, t.uid)
+      .where(sql`replay_requested_at is not null`),
   ],
 );
 

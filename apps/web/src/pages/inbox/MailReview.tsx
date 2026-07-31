@@ -8,6 +8,7 @@ import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
+import { MailFetchProblems } from './MailFetchProblems';
 import { MailReviewModal } from './MailReviewModal';
 
 type List = { items: MailMessageDto[]; total: number };
@@ -116,6 +117,9 @@ export default function MailReview() {
           </>
         }
       >
+        {/* Незабранные письма — выше списка: пока они висят, часть документов
+            вообще не дошла до портала. */}
+        <MailFetchProblems />
         {summary.data && !summary.data.configured && (
           <Alert
             style={{ marginBottom: 12 }}

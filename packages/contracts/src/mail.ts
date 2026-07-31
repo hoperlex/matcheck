@@ -215,3 +215,40 @@ export const MailRejectRequestSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 export type MailRejectRequest = z.infer<typeof MailRejectRequestSchema>;
+
+// ─── Проблемные заборы ────────────────────────────────────────────────────
+// Письма, которые не удалось скачать: слишком большое, обрыв связи, битый
+// MIME. После исчерпания попыток такая запись терминальна и граница ящика её
+// перешагивает — без повторного забора письмо не вернуть.
+
+/** Строка списка проблемных заборов. */
+export const MailReceiptDtoSchema = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  accountName: z.string(),
+  uid: z.number(),
+  status: MailReceiptStatusSchema,
+  /** Размер письма в байтах — по нему видно, поднимать ли лимит. */
+  sizeBytes: z.number().nullable(),
+  attempts: z.number(),
+  lastError: z.string().nullable(),
+  /** Повтор уже запрошен и ждёт ближайшего прохода. */
+  replayRequested: z.boolean(),
+  /** Можно ли запросить повтор: успешные и исчезнувшие письма не повторяют. */
+  canReplay: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type MailReceiptDto = z.infer<typeof MailReceiptDtoSchema>;
+
+export const MailReceiptListResponseSchema = z.object({
+  items: z.array(MailReceiptDtoSchema),
+  total: z.number(),
+});
+export type MailReceiptListResponse = z.infer<typeof MailReceiptListResponseSchema>;
+
+export const MailReplayResponseSchema = z.object({
+  requested: z.literal(true),
+  uid: z.number(),
+});
+export type MailReplayResponse = z.infer<typeof MailReplayResponseSchema>;
