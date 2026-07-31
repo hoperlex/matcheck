@@ -12,7 +12,11 @@
 //   * лиз освобождается в finally — упавший проход не запирает ящик до
 //     истечения срока.
 //
-// Пакет документов здесь не создаётся: письмо доводится до карантина.
+// Письмо с ЯВНО указанным объектом (`Объект: КОД`) сразу становится пакетом и
+// уходит в распознавание — менеджер не участвует. Всё остальное — объект не
+// указан, кодов несколько, тот же комплект уже лежит на другой площадке —
+// остаётся в разборе. Ошибка создания пакета письмо не теряет: оно ждёт
+// оператора, а транспортная часть уже завершена.
 
 import { eq } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
@@ -37,6 +41,7 @@ import {
   type FetchLimits,
   type ImapLike,
 } from '../mail/imap.fetch.js';
+import { resolveMailMessage, type CopyObject } from '../mail/resolve-message.js';
 import { computeWatermark, needsWatermarkReset } from '../mail/watermark.js';
 import type { SiteRef } from '../sourceDocuments/siteHint.js';
 
@@ -52,6 +57,8 @@ export type MailboxSession = {
 export type PollDeps = Pick<IngestDeps, 'db' | 'putObject' | 'parseMime'> & {
   /** Подключение к IMAP. Подменяется в тестах. */
   openMailbox: (account: MailAccountRow) => Promise<MailboxSession>;
+  /** Копирование staging → постоянные ключи при создании пакета. */
+  copyObject?: CopyObject;
   log?: { info?: (o: unknown, m?: string) => void; warn?: (o: unknown, m?: string) => void };
 };
 
@@ -66,6 +73,12 @@ export type PollOptions = {
    * выключенным автоопросом — так проверяют доступы до включения.
    */
   manual?: boolean;
+  /**
+   * Автоматически превращать письмо в пакет, когда подрядчик указал объект
+   * явно. Выключение оставляет все письма в разборе — на случай, если
+   * потребуется временно вернуть ручное подтверждение.
+   */
+  autoResolve?: boolean;
 };
 
 export type PollResult = {
@@ -75,6 +88,10 @@ export type PollResult = {
   stored: number;
   duplicates: number;
   failed: number;
+  /** Письма, ставшие пакетами без участия человека. */
+  autoResolved: number;
+  /** Письма, оставшиеся в разборе: объект неясен или конфликт. */
+  quarantined: number;
   watermarkBefore: number;
   watermarkAfter: number;
   uidValidityReset: boolean;
@@ -85,6 +102,8 @@ const EMPTY_RESULT: Omit<PollResult, 'watermarkBefore' | 'watermarkAfter'> = {
   stored: 0,
   duplicates: 0,
   failed: 0,
+  autoResolved: 0,
+  quarantined: 0,
   uidValidityReset: false,
 };
 
@@ -156,6 +175,8 @@ export async function pollMailAccount(
     let stored = 0;
     let duplicates = 0;
     let failed = 0;
+    let autoResolved = 0;
+    let quarantined = 0;
 
     for (const headline of headlines) {
       const receipt = await startReceipt(db, {
@@ -206,6 +227,46 @@ export async function pollMailAccount(
           'parsed',
           outcome.outcome === 'stored' ? outcome.rawS3Key : null,
         );
+
+        // Письмо забрано и разобрано — транспортная часть закончена. Дальше
+        // бизнес-шаг: если подрядчик указал объект ЯВНО, письмо сразу
+        // становится пакетом и уходит в распознавание. Всё остальное
+        // (объект не указан, несколько кодов, конфликт) ждёт оператора.
+        if (
+          outcome.outcome === 'stored' &&
+          outcome.status === 'quarantined' &&
+          options.autoResolve !== false
+        ) {
+          if (outcome.match.decision === 'explicit' && deps.copyObject) {
+            try {
+              const resolved = await resolveMailMessage(
+                { db, copyObject: deps.copyObject, log: deps.log },
+                {
+                  messageId: outcome.messageId,
+                  siteId: outcome.match.siteId,
+                  expectedDate: outcome.expectedDate,
+                  // Автопроход: подтвердившего человека нет.
+                  actorUserId: null,
+                },
+              );
+              if (resolved.outcome === 'ingested' || resolved.outcome === 'reused') {
+                autoResolved += 1;
+              } else {
+                quarantined += 1;
+              }
+            } catch (err) {
+              // Ошибка создания пакета письмо не теряет: оно остаётся в
+              // разборе, и оператор доведёт его вручную.
+              quarantined += 1;
+              deps.log?.warn?.(
+                { err, accountId: account.id, uid: headline.uid },
+                'mail poll: автосоздание пакета не удалось, письмо ждёт в разборе',
+              );
+            }
+          } else {
+            quarantined += 1;
+          }
+        }
       } catch (err) {
         failed += 1;
         // Транспорт и разбор различаем по тому, дошли ли до тела письма:
@@ -238,6 +299,8 @@ export async function pollMailAccount(
       stored,
       duplicates,
       failed,
+      autoResolved,
+      quarantined,
       watermarkBefore,
       watermarkAfter,
       uidValidityReset: reset,

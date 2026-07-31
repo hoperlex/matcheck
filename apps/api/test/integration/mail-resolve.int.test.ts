@@ -57,7 +57,6 @@ suite('письмо → пакет документов (реальный Postgr
   beforeEach(async () => {
     await sql`DELETE FROM source_documents WHERE site_id = ANY(${createdSites})`;
     await sql`DELETE FROM source_bundles WHERE site_id = ANY(${createdSites})`;
-    await sql`DELETE FROM job_outbox`;
     await sql`DELETE FROM mail_accounts WHERE host = ${HOST}`;
     const [acc] = await sql<{ id: string }[]>`
       INSERT INTO mail_accounts (name, host, port, use_tls, username, password_encrypted, folder, purpose)
@@ -109,10 +108,11 @@ suite('письмо → пакет документов (реальный Postgr
     expect(copyObject).toHaveBeenCalledTimes(1);
 
     // Задание на разбор лежит в outbox — не потеряется при недоступном Redis.
+    // Ищем по ключу своего пакета: таблица общая для параллельных наборов.
     const jobs = await sql<{ dedupe_key: string; payload: { bundleId: string } }[]>`
-      SELECT dedupe_key, payload FROM job_outbox`;
+      SELECT dedupe_key, payload FROM job_outbox
+      WHERE dedupe_key = ${`bundle:${res.bundleId}:parse:0`}`;
     expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.dedupe_key).toBe(`bundle:${res.bundleId}:parse:0`);
     expect(jobs[0]!.payload.bundleId).toBe(res.bundleId);
 
     const [msg] = await sql<{ status: string; bundle_id: string }[]>`
@@ -199,7 +199,11 @@ suite('письмо → пакет документов (реальный Postgr
     expect(msg!.status).toBe('resolving');
     // Документов и заданий не появилось.
     expect(await sql`SELECT id FROM source_documents WHERE site_id = ${siteA}`).toHaveLength(0);
-    expect(await sql`SELECT id FROM job_outbox`).toHaveLength(0);
+    const [staleBundle] = await sql<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE site_id = ${siteA}`;
+    expect(
+      await sql`SELECT id FROM job_outbox WHERE dedupe_key = ${`bundle:${staleBundle!.id}:parse:0`}`,
+    ).toHaveLength(0);
   });
 
   it('отклонённое письмо принять нельзя', async () => {

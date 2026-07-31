@@ -30,7 +30,7 @@ import {
 } from './domain/jobs/mail-poll-runner.js';
 import { DEFAULT_FETCH_LIMITS } from './domain/mail/imap.fetch.js';
 import { openMailbox } from './domain/mail/imap.connect.js';
-import { putObject } from './domain/storage/s3.signer.js';
+import { copyObject, putObject } from './domain/storage/s3.signer.js';
 import { loadEnv } from './lib/env.js';
 import { logger } from './lib/logger.js';
 import { buildQueueConnection, MAIL_POLL_QUEUE, type MailPollJobData } from './plugins/queue.js';
@@ -46,6 +46,8 @@ const deps: RunnerDeps = {
   putObject,
   parseMime: (raw) => simpleParser(raw),
   openMailbox,
+  // Нужен для автосоздания пакета: staging → постоянные ключи.
+  copyObject,
   log,
   onError: (err) => Sentry.captureException(err, { tags: { service: 'mail-worker' } }),
 };
