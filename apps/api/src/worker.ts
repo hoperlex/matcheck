@@ -972,10 +972,14 @@ async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise
   // Техническая source_document, под которой висят attachments пакета.
   // Она создаётся при загрузке (kind='transport_waybill', status='queued')
   // и после распознавания будет заменена на N реальных документов.
+  //
+  // Фильтр по is_technical обязателен: реальные документы тоже несут bundleId,
+  // и без него повтор задания взял бы уже разобранный документ и продублировал
+  // пачку.
   const [tech] = await db
     .select({ id: sourceDocuments.id })
     .from(sourceDocuments)
-    .where(eq(sourceDocuments.bundleId, bundleId))
+    .where(and(eq(sourceDocuments.bundleId, bundleId), eq(sourceDocuments.isTechnical, true)))
     .limit(1);
   if (!tech) {
     await db
@@ -1138,7 +1142,10 @@ async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise
 // код, поэтому данные не портятся. Каждое решение пишется в bundle_import_items
 // (журнал). Неуверенные / vision-требующие / m15 / unknown → status='needs_review'
 // БЕЗ создания операционных документов (Этап 4 добавит vision-доклассификацию).
-async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promise<void> {
+// Экспортируется ради теста провенанса: проверяется, что документы наследуют
+// происхождение пакета, получают связь с ним и что повтор задания не удваивает
+// пачку. В проде вызывается только из handleJob.
+export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promise<void> {
   const [bundle] = await db
     .update(sourceBundles)
     .set({ status: 'processing', updatedAt: new Date() })
@@ -1149,10 +1156,11 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
     return;
   }
 
+  // Только служебная запись — см. пояснение в handleWaybillBundleJob.
   const [tech] = await db
     .select({ id: sourceDocuments.id })
     .from(sourceDocuments)
-    .where(eq(sourceDocuments.bundleId, bundleId))
+    .where(and(eq(sourceDocuments.bundleId, bundleId), eq(sourceDocuments.isTechnical, true)))
     .limit(1);
   if (!tech) {
     await db
@@ -1193,6 +1201,11 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
       : bundle.expectedDate
         ? new Date(bundle.expectedDate)
         : null;
+
+  // Происхождение наследуется от пакета: документ, приехавший письмом, должен
+  // остаться почтовым и после разбора. У пакетов, загруженных кнопкой,
+  // origin не заполнен — для них поведение прежнее.
+  const bundleOrigin = bundle.origin ?? 'manual_pdf';
 
   // Идемпотентность журнала: при повторной обработке этого bundle (BullMQ
   // retry или повторная загрузка того же набора файлов — bundleHash совпадает)
@@ -1266,7 +1279,7 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
           .values({
             kind: 'transport_waybill',
             direction: bundle.direction,
-            origin: 'manual_pdf',
+            origin: bundleOrigin,
             status: 'queued',
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
@@ -1275,6 +1288,10 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
             originalFilename: a.filename,
             queuedAt: new Date(),
             parsedAt: new Date(),
+            // Связь с пакетом: без неё от документа не дойти до истории
+            // загрузки, а сам пакет выглядит осиротевшим и повторная загрузка
+            // того же комплекта запускала бы разбор заново.
+            bundleId,
             createdByUserId: bundle.createdByUserId,
           })
           .returning({ id: sourceDocuments.id });
@@ -1320,6 +1337,9 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
             bundleHash: subHash,
             kind: 'waybill',
             direction: bundle.direction,
+            // Дочерний пакет наследует происхождение родителя — иначе накладная
+            // из письма после разбора выглядела бы загруженной вручную.
+            origin: bundle.origin,
             siteId: bundle.siteId,
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
@@ -1336,7 +1356,7 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
             // Служебная запись sub-пакета — тоже вне выдачи инспектору.
             isTechnical: true,
             direction: bundle.direction,
-            origin: 'manual_pdf',
+            origin: bundleOrigin,
             status: 'queued',
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
@@ -1382,7 +1402,7 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
           .values({
             kind: 'upd',
             direction: bundle.direction,
-            origin: 'manual_pdf',
+            origin: bundleOrigin,
             status: 'queued',
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
@@ -1391,6 +1411,7 @@ async function handleDocumentRouterJob(bundleId: string, log: WorkerLog): Promis
             originalFilename: a.filename,
             queuedAt: new Date(),
             parsedAt: new Date(),
+            bundleId,
             createdByUserId: bundle.createdByUserId,
           })
           .returning({ id: sourceDocuments.id });
@@ -1597,7 +1618,8 @@ async function createSourceDocumentFromWaybill(args: {
       docDate,
       totalSum: doc.totalSum != null ? doc.totalSum.toString() : null,
       expectedDate: bundleExpected,
-      origin: 'manual_pdf',
+      // Наследуем от пакета: накладная из письма остаётся почтовой.
+      origin: bundle.origin ?? 'manual_pdf',
       llmProviderId,
       llmConfidence: doc.confidence.toString(),
       parsedAt: new Date(),
@@ -1829,11 +1851,13 @@ worker.on('failed', async (job, err) => {
           updatedAt: new Date(),
         })
         .where(eq(sourceBundles.id, bundleId));
-      // Помечаем и техническую source_document, если она ещё жива.
+      // Помечаем и техническую source_document, если она ещё жива. Именно
+      // техническую: реальные документы пакета разобрались успешно, метить их
+      // ошибкой нельзя.
       const [tech] = await db
         .select({ id: sourceDocuments.id })
         .from(sourceDocuments)
-        .where(eq(sourceDocuments.bundleId, bundleId))
+        .where(and(eq(sourceDocuments.bundleId, bundleId), eq(sourceDocuments.isTechnical, true)))
         .limit(1);
       if (tech) {
         await db
