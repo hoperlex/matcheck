@@ -48,6 +48,17 @@ main() {
   cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   COMPOSE=(docker compose -f infra/docker-compose.prod.yml)
 
+  # Почтовый воркер подхватывается, только если его уже подняли руками.
+  #
+  # Пока почта не запущена, контейнера нет — и деплой о нём не знает. Но как
+  # только его подняли, он ОБЯЗАН обновляться вместе с остальными: иначе приём
+  # писем молча остался бы на коде того дня, когда контейнер запустили, и
+  # расхождение обнаружилось бы через недели.
+  SERVICES=(matcheck-api matcheck-web matcheck-worker)
+  if [ -n "$("${COMPOSE[@]}" ps -aq matcheck-mail-worker 2>/dev/null)" ]; then
+    SERVICES+=(matcheck-mail-worker)
+  fi
+
   STATUS_BEFORE=""
   STATUS_AFTER=""
   trap 'rm -f "${STATUS_BEFORE:-}" "${STATUS_AFTER:-}"' EXIT
@@ -62,7 +73,7 @@ main() {
   git log --oneline -1
 
   # ─── 2/6 · build ───
-  step "2/6 · build образов (matcheck-api, matcheck-web, matcheck-worker)"
+  step "2/6 · build образов (${SERVICES[*]})"
   # Sentry (веб): публичный DSN + org/project идут build-arg'ами в бандл; auth-token —
   # секретом для загрузки source maps. Всё опционально: без файла плагин отключён и
   # сборка не меняется. Файл вне репозитория (режим 600).
@@ -73,7 +84,7 @@ main() {
   export SENTRY_ORG="${SENTRY_ORG:-}"
   export SENTRY_PROJECT="${SENTRY_PROJECT:-}"
   export SENTRY_AUTH_TOKEN="${SENTRY_AUTH_TOKEN:-}"
-  "${COMPOSE[@]}" build matcheck-api matcheck-web matcheck-worker
+  "${COMPOSE[@]}" build "${SERVICES[@]}"
 
   # ─── 3/6 · миграции ДО ───
   step "3/6 · миграции — статус ДО"
@@ -100,7 +111,7 @@ main() {
 
   # ─── 6/6 · up -d ───
   step "6/6 · пересоздание контейнеров"
-  "${COMPOSE[@]}" up -d --force-recreate matcheck-api matcheck-web matcheck-worker
+  "${COMPOSE[@]}" up -d --force-recreate "${SERVICES[@]}"
 
   # ─── Сводка ───
   echo
@@ -114,7 +125,7 @@ main() {
     printf "  %s ${GREEN}✓${NC} %s → %s\n"            "$(pad 'Git pull')"       "$COMMIT_BEFORE" "$COMMIT_AFTER"
   fi
 
-  printf "  %s ${GREEN}✓${NC} %s\n"                   "$(pad 'Сборка образов')" "matcheck-api, matcheck-web, matcheck-worker"
+  printf "  %s ${GREEN}✓${NC} %s\n"                   "$(pad 'Сборка образов')" "${SERVICES[*]}"
 
   if (( PENDING_BEFORE == 0 )); then
     printf "  %s ${GREEN}✓${NC} нет новых (всего в БД: %d)\n" "$(pad 'Миграции')" "$APPLIED_AFTER"
@@ -128,7 +139,7 @@ main() {
       "$(pad 'Миграции')" "$PENDING_BEFORE" "$APPLIED_NOW" "$PENDING_AFTER"
   fi
 
-  printf "  %s ${GREEN}✓${NC} matcheck-api, matcheck-web, matcheck-worker up\n" "$(pad 'Контейнеры')"
+  printf "  %s ${GREEN}✓${NC} %s up\n" "$(pad 'Контейнеры')" "${SERVICES[*]}"
   echo
   echo "${BOLD}${GREEN}  Деплой завершён успешно${NC}"
   echo
