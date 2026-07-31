@@ -81,13 +81,17 @@ import {
 } from './domain/edo/excel-vision-fallback.js';
 import { publishSseEvent } from './domain/sse/redis-bridge.js';
 import { sourceDocumentAttachments, bundleImportItems } from './db/schema.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { classifyFile } from './domain/edo/document-router.js';
 import { classifyImageKind } from './domain/edo/vision-classifier.js';
 import {
+  bundleDispatchKeyOf,
+  dispatchKeyOf,
+  enqueueJob,
   processJobOutbox,
   OUTBOX_INTERVAL_MS as JOB_OUTBOX_INTERVAL_MS,
 } from './domain/jobs/job-outbox.js';
+import { repairStuckJobs, STUCK_INTERVAL_MS } from './domain/jobs/stuck-jobs.js';
 import type { UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
 
 // Хелпер: уведомляем подключённых SSE-клиентов о смене статуса УПД через
@@ -1274,9 +1278,13 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
         // «Накладная» (transport_waybill — новых enum не вводим) и ставим
         // одиночный job с docKind:'m15' → handleJob распознает его vision'ом по
         // форме М-15. Изолировано: УПД/ТН/ОС-2 не затрагиваются.
-        const [doc] = await db
-          .insert(sourceDocuments)
-          .values({
+        // Идентификатор задаём сами: тогда ключ задания известен до вставки и
+        // документ вместе с заданием попадает в БД одной транзакцией.
+        const docId = randomUUID();
+        const dedupeKey = dispatchKeyOf(docId);
+        await db.transaction(async (tx) => {
+          await tx.insert(sourceDocuments).values({
+            id: docId,
             kind: 'transport_waybill',
             direction: bundle.direction,
             origin: bundleOrigin,
@@ -1288,33 +1296,28 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
             originalFilename: a.filename,
             queuedAt: new Date(),
             parsedAt: new Date(),
+            jobId: dedupeKey,
             // Связь с пакетом: без неё от документа не дойти до истории
             // загрузки, а сам пакет выглядит осиротевшим и повторная загрузка
             // того же комплекта запускала бы разбор заново.
             bundleId,
             createdByUserId: bundle.createdByUserId,
-          })
-          .returning({ id: sourceDocuments.id });
-        const docId = doc!.id;
-        await db.insert(sourceDocumentAttachments).values({
-          sourceDocumentId: docId,
-          s3Key: a.s3Key,
-          filename: a.filename,
-          mimeType: a.mimeType,
-          sizeBytes: a.sizeBytes,
-          role: 'original',
+          });
+          await tx.insert(sourceDocumentAttachments).values({
+            sourceDocumentId: docId,
+            s3Key: a.s3Key,
+            filename: a.filename,
+            mimeType: a.mimeType,
+            sizeBytes: a.sizeBytes,
+            role: 'original',
+          });
+          await enqueueJob(tx as unknown as typeof db, {
+            queue: UPD_PARSE_QUEUE,
+            jobName: 'parse',
+            payload: { sourceDocumentId: docId, s3Key: a.s3Key, docKind: 'm15' },
+            dedupeKey,
+          });
         });
-        const job = await queue.add('parse', {
-          sourceDocumentId: docId,
-          s3Key: a.s3Key,
-          docKind: 'm15',
-        });
-        if (job.id) {
-          await db
-            .update(sourceDocuments)
-            .set({ jobId: job.id })
-            .where(eq(sourceDocuments.id, docId));
-        }
         await db.insert(bundleImportItems).values({
           bundleId,
           sourceFilename: a.filename,
@@ -1331,27 +1334,27 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
         // Разворачиваем в waybill-flow: отдельный под-bundle на этот файл
         // (тот же путь, что «Загрузить накладные»).
         const subHash = createHash('sha256').update(`router:${bundleId}:${a.s3Key}`).digest('hex');
-        const [subBundle] = await db
-          .insert(sourceBundles)
-          .values({
+        const subId = randomUUID();
+        const subTechId = randomUUID();
+        await db.transaction(async (tx) => {
+          await tx.insert(sourceBundles).values({
+            id: subId,
             bundleHash: subHash,
             kind: 'waybill',
             direction: bundle.direction,
             // Дочерний пакет наследует происхождение родителя — иначе накладная
             // из письма после разбора выглядела бы загруженной вручную.
             origin: bundle.origin,
+            parentBundleId: bundleId,
             siteId: bundle.siteId,
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
             expectedDate: bundle.expectedDate,
             status: 'queued',
             createdByUserId: bundle.createdByUserId,
-          })
-          .returning({ id: sourceBundles.id });
-        const subId = subBundle!.id;
-        const [subTech] = await db
-          .insert(sourceDocuments)
-          .values({
+          });
+          await tx.insert(sourceDocuments).values({
+            id: subTechId,
             kind: 'transport_waybill',
             // Служебная запись sub-пакета — тоже вне выдачи инспектору.
             isTechnical: true,
@@ -1366,17 +1369,22 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
             queuedAt: new Date(),
             bundleId: subId,
             createdByUserId: bundle.createdByUserId,
-          })
-          .returning({ id: sourceDocuments.id });
-        await db.insert(sourceDocumentAttachments).values({
-          sourceDocumentId: subTech!.id,
-          s3Key: a.s3Key,
-          filename: a.filename,
-          mimeType: a.mimeType,
-          sizeBytes: a.sizeBytes,
-          role: 'original',
+          });
+          await tx.insert(sourceDocumentAttachments).values({
+            sourceDocumentId: subTechId,
+            s3Key: a.s3Key,
+            filename: a.filename,
+            mimeType: a.mimeType,
+            sizeBytes: a.sizeBytes,
+            role: 'original',
+          });
+          await enqueueJob(tx as unknown as typeof db, {
+            queue: UPD_PARSE_QUEUE,
+            jobName: 'parse',
+            payload: { bundleId: subId },
+            dedupeKey: bundleDispatchKeyOf(subId, 0),
+          });
         });
-        await queue.add('parse', { bundleId: subId });
         await db.insert(bundleImportItems).values({
           bundleId,
           sourceFilename: a.filename,
@@ -1397,9 +1405,11 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
         //  - m15 / unknown — пробуем распознать; в худшем случае выйдет черновик
         //    (partial_parse), но строка не пропадёт и оригинал останется для
         //    ручной доработки.
-        const [doc] = await db
-          .insert(sourceDocuments)
-          .values({
+        const docId = randomUUID();
+        const dedupeKey = dispatchKeyOf(docId);
+        await db.transaction(async (tx) => {
+          await tx.insert(sourceDocuments).values({
+            id: docId,
             kind: 'upd',
             direction: bundle.direction,
             origin: bundleOrigin,
@@ -1411,26 +1421,25 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
             originalFilename: a.filename,
             queuedAt: new Date(),
             parsedAt: new Date(),
+            jobId: dedupeKey,
             bundleId,
             createdByUserId: bundle.createdByUserId,
-          })
-          .returning({ id: sourceDocuments.id });
-        const docId = doc!.id;
-        await db.insert(sourceDocumentAttachments).values({
-          sourceDocumentId: docId,
-          s3Key: a.s3Key,
-          filename: a.filename,
-          mimeType: a.mimeType,
-          sizeBytes: a.sizeBytes,
-          role: 'original',
+          });
+          await tx.insert(sourceDocumentAttachments).values({
+            sourceDocumentId: docId,
+            s3Key: a.s3Key,
+            filename: a.filename,
+            mimeType: a.mimeType,
+            sizeBytes: a.sizeBytes,
+            role: 'original',
+          });
+          await enqueueJob(tx as unknown as typeof db, {
+            queue: UPD_PARSE_QUEUE,
+            jobName: 'parse',
+            payload: { sourceDocumentId: docId, s3Key: a.s3Key },
+            dedupeKey,
+          });
         });
-        const job = await queue.add('parse', { sourceDocumentId: docId, s3Key: a.s3Key });
-        if (job.id) {
-          await db
-            .update(sourceDocuments)
-            .set({ jobId: job.id })
-            .where(eq(sourceDocuments.id, docId));
-        }
         const reason =
           cls.detectedKind === 'upd' && !cls.needsVision
             ? cls.updInvoiceCount && cls.updInvoiceCount >= 2
@@ -1777,7 +1786,9 @@ async function processS3CleanupOutbox(): Promise<void> {
   log.info({ ok, failed }, 's3 cleanup outbox batch done');
 }
 
-async function recoverStaleProcessing(): Promise<void> {
+// Экспортируется ради теста: проверяется, что возвращённый в очередь документ
+// получает тот же ключ задания, что и подбор зависших записей.
+export async function recoverStaleProcessing(): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_PROCESSING_MS);
   const stale = await db
     .select({ id: sourceDocuments.id })
@@ -1803,8 +1814,23 @@ async function recoverStaleProcessing(): Promise<void> {
     );
     const s3Key = (att as { s3_key?: string } | undefined)?.s3_key;
     if (s3Key) {
-      // Воркер сам кладёт в свою очередь — connection переиспользуется.
-      await queue.add('parse', { sourceDocumentId: s.id, s3Key });
+      // Через outbox и под ТЕМ ЖЕ ключом, что использует подбор зависших
+      // записей. Раньше здесь стоял прямой queue.add без jobId: задание
+      // получало случайный идентификатор, и если документ снова застревал в
+      // queued, repair добавлял второе — документ распознавался дважды.
+      const dedupeKey = dispatchKeyOf(s.id);
+      await db.transaction(async (tx) => {
+        await tx
+          .update(sourceDocuments)
+          .set({ jobId: dedupeKey })
+          .where(eq(sourceDocuments.id, s.id));
+        await enqueueJob(tx as unknown as typeof db, {
+          queue: UPD_PARSE_QUEUE,
+          jobName: 'parse',
+          payload: { sourceDocumentId: s.id, s3Key },
+          dedupeKey,
+        });
+      });
     }
   }
   logger.warn({ count: stale.length }, 'recovered stale processing documents');
@@ -1968,12 +1994,10 @@ setTimeout(() => {
   }, OUTBOX_INTERVAL_MS).unref();
 }, 10 * 1000).unref();
 
-// Periodic job outbox consumer (приём УПД из почты, этап 3).
-//
-// На таблицу job_outbox пока НИКТО не пишет: consumer вводится заранее, чтобы
-// к моменту перевода writers он уже был проверен в бою. Пустой батч не делает
-// ничего и не логируется. Первый прогон через 12с от старта (со сдвигом
-// относительно s3-cleanup, чтобы две периодики не будили БД одновременно).
+// Periodic job outbox consumer: доставляет в BullMQ задания, записанные в одной
+// транзакции с документами (router и приём писем). Пустой батч не делает ничего
+// и не логируется. Первый прогон через 12с от старта (со сдвигом относительно
+// s3-cleanup, чтобы две периодики не будили БД одновременно).
 setTimeout(() => {
   const runJobOutbox = () =>
     void processJobOutbox({
@@ -1984,3 +2008,19 @@ setTimeout(() => {
   runJobOutbox();
   setInterval(runJobOutbox, JOB_OUTBOX_INTERVAL_MS).unref();
 }, 12 * 1000).unref();
+
+// Подбор записей, застрявших в queued без задания. Outbox закрывает разрыв
+// «БД записала — Redis не принял», но не случай «задание доставлено и потеряно
+// вместе с воркером». Раз в 10 минут, порог 45 минут — при CONCURRENCY=1
+// запись законно ждёт своей очереди долго. Первый прогон через минуту:
+// сразу после старта очередь ещё разбирается, торопиться некуда.
+setTimeout(() => {
+  const runRepair = () =>
+    void repairStuckJobs({
+      db,
+      queue: UPD_PARSE_QUEUE,
+      log: logger.child({ task: 'stuck-jobs' }),
+    }).catch((err) => logger.error({ err }, 'stuck jobs repair failed'));
+  runRepair();
+  setInterval(runRepair, STUCK_INTERVAL_MS).unref();
+}, 60 * 1000).unref();

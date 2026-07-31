@@ -20,6 +20,21 @@ import { jobOutbox } from '../../db/schema.js';
  * запустился бы.
  */
 
+/**
+ * Ключи диспетчеризации. Формат общий для writers и для repair: пересоздание
+ * задания зависшей записи обязано попасть в тот же ключ, иначе BullMQ примет
+ * его как второй запуск и документ распознается дважды.
+ *
+ * `generation` — счётчик НАМЕРЕННЫХ перезапусков. Repair его не трогает.
+ */
+export function dispatchKeyOf(sourceDocumentId: string, generation = 0): string {
+  return `doc:${sourceDocumentId}:parse:${generation}`;
+}
+
+export function bundleDispatchKeyOf(bundleId: string, generation = 0): string {
+  return `bundle:${bundleId}:parse:${generation}`;
+}
+
 export const OUTBOX_BATCH = 50;
 export const OUTBOX_LEASE_MS = 5 * 60 * 1000;
 export const OUTBOX_MAX_ATTEMPTS = 12;
