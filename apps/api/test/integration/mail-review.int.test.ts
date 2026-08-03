@@ -18,11 +18,13 @@ import type { AuthUser } from '../../src/plugins/auth.js';
 
 const copyObject = vi.fn<(src: string, dst: string) => Promise<void>>();
 const presign = vi.fn<(o: unknown) => Promise<string>>();
+const getObject = vi.fn<(key: string) => Promise<Buffer>>();
 
 // Роут тянет S3 напрямую — подменяем модуль целиком, иначе тест полезет в сеть.
 vi.mock('../../src/domain/storage/s3.signer.js', () => ({
   copyObject: (src: string, dst: string) => copyObject(src, dst),
   presign: (o: unknown) => presign(o),
+  getObject: (key: string) => getObject(key),
 }));
 
 const { mailReviewRoutes } = await import('../../src/routes/mail-review.js');
@@ -99,6 +101,7 @@ suite('разбор почты: API (реальный PostgreSQL)', () => {
     accountId = acc!.id;
     copyObject.mockReset().mockResolvedValue(undefined);
     presign.mockReset().mockResolvedValue('https://s3.example/signed');
+    getObject.mockReset().mockResolvedValue(Buffer.alloc(0));
     currentUser = { id: operatorId, role: 'manager' } as AuthUser;
   });
 
@@ -109,14 +112,18 @@ suite('разбор почты: API (реальный PostgreSQL)', () => {
       states?: string[];
       suggestedSiteId?: string | null;
       status?: string;
+      /** `null` — оригинал письма не сохранён (старые записи до появления S3-ключа). */
+      rawS3Key?: string | null;
     } = {},
   ): Promise<string> {
     const marker = randomUUID();
+    const rawKey = opts.rawS3Key === undefined ? `mail/raw/${marker}.eml` : opts.rawS3Key;
     const [msg] = await sql<{ id: string }[]>`
       INSERT INTO mail_messages
-        (mail_account_id, message_hash, subject, from_address, status, suggested_site_id)
+        (mail_account_id, message_hash, subject, from_address, status, suggested_site_id, raw_s3_key)
       VALUES (${accountId}, ${sha(marker)}, ${opts.subject ?? 'УПД за июль'},
-        'snab@podryad.ru', ${opts.status ?? 'quarantined'}, ${opts.suggestedSiteId ?? null})
+        'snab@podryad.ru', ${opts.status ?? 'quarantined'}, ${opts.suggestedSiteId ?? null},
+        ${rawKey})
       RETURNING id`;
     const states = opts.states ?? ['kept'];
     for (const [i, state] of states.entries()) {
@@ -393,6 +400,91 @@ suite('разбор почты: API (реальный PostgreSQL)', () => {
       expect.objectContaining({ key: expect.stringContaining('mail/staging/') }),
     );
     fetchSpy.mockRestore();
+  });
+
+  // ─── Текст письма ────────────────────────────────────────────────────────
+  // Объект подрядчики часто называют в теле, а не в теме, поэтому оператор
+  // обязан видеть текст — включая html-письма, где текстовой части нет.
+
+  const htmlOnlyEml = (bodyHtml: string) =>
+    Buffer.from(
+      [
+        'From: snab@podryad.ru',
+        'Subject: UPD',
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/alternative; boundary="b1"',
+        '',
+        '--b1',
+        'Content-Type: text/html; charset=utf-8',
+        '',
+        bodyHtml,
+        '--b1--',
+        '',
+      ].join('\r\n'),
+      'utf8',
+    );
+
+  it('текст отдаётся даже у html-письма без текстовой части', async () => {
+    const id = await letter();
+    getObject.mockResolvedValue(
+      htmlOnlyEml('<html><body><p>Объект - Волоколамское ш., вл. 93-97</p></body></html>'),
+    );
+
+    const res = await get(`/api/v1/mail/messages/${id}/body`);
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { text: string; truncated: boolean };
+    expect(body.text).toContain('Волоколамское ш., вл. 93-97');
+    expect(body.truncated).toBe(false);
+  });
+
+  it('разметка наружу не уходит — ни своя, ни чужая', async () => {
+    const id = await letter();
+    getObject.mockResolvedValue(
+      htmlOnlyEml('<div onclick="x()">Объект: ЗИЛ33<script>alert(1)</script></div>'),
+    );
+
+    const res = await get(`/api/v1/mail/messages/${id}/body`);
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as Record<string, unknown>;
+    // Отдаём ровно два поля: html-части в ответе нет вовсе.
+    expect(Object.keys(body).sort()).toEqual(['text', 'truncated']);
+    expect(body.text).toContain('Объект: ЗИЛ33');
+    expect(body.text).not.toContain('<script>');
+    expect(body.text).not.toContain('onclick');
+  });
+
+  it('длинное письмо обрезается и об этом сказано', async () => {
+    const id = await letter();
+    getObject.mockResolvedValue(htmlOnlyEml(`<p>${'я'.repeat(25_000)}</p>`));
+
+    const res = await get(`/api/v1/mail/messages/${id}/body`);
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { text: string; truncated: boolean };
+    expect(body.text).toHaveLength(20_000);
+    expect(body.truncated).toBe(true);
+  });
+
+  it('письмо без сохранённого оригинала — 404, а не пустой текст', async () => {
+    const id = await letter({ rawS3Key: null });
+
+    const res = await get(`/api/v1/mail/messages/${id}/body`);
+
+    expect(res.statusCode).toBe(404);
+    expect(getObject).not.toHaveBeenCalled();
+  });
+
+  it('недоступное хранилище — 502, карточка при этом живёт', async () => {
+    const id = await letter();
+    getObject.mockRejectedValue(new Error('S3 GET failed: HTTP 503'));
+
+    const res = await get(`/api/v1/mail/messages/${id}/body`);
+
+    expect(res.statusCode).toBe(502);
+    // Ошибка чтения тела не мешает разбирать письмо дальше.
+    expect((await get(`/api/v1/mail/messages/${id}`)).statusCode).toBe(200);
   });
 
   it('чужое вложение по идентификатору письма не отдаётся', async () => {

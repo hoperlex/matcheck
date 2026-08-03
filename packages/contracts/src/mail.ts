@@ -174,6 +174,21 @@ export const MailMessageDetailSchema = MailMessageDtoSchema.extend({
 });
 export type MailMessageDetail = z.infer<typeof MailMessageDetailSchema>;
 
+/**
+ * Текст письма для экрана разбора. Отдаётся отдельным запросом: тело в БД не
+ * хранится, оно достаётся из сохранённого оригинала письма.
+ *
+ * Только текст — разметка письма приходит от кого угодно и в интерфейс не
+ * попадает ни в каком виде. `truncated` означает, что показан лишь начальный
+ * кусок; об этом пишем оператору, иначе он решит, что объект в письме не
+ * указан.
+ */
+export const MailMessageBodySchema = z.object({
+  text: z.string(),
+  truncated: z.boolean(),
+});
+export type MailMessageBody = z.infer<typeof MailMessageBodySchema>;
+
 export const MailMessageListResponseSchema = z.object({
   items: z.array(MailMessageDtoSchema),
   total: z.number(),

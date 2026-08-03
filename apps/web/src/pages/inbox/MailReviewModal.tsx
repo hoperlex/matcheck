@@ -16,7 +16,11 @@ import {
 import { DownloadOutlined, FileTextOutlined, UndoOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import dayjs from 'dayjs';
-import type { MailMessageDetail, MailResolveResponse } from '@matcheck/contracts';
+import type {
+  MailMessageBody,
+  MailMessageDetail,
+  MailResolveResponse,
+} from '@matcheck/contracts';
 import { api, apiDownload } from '../../services/api';
 import type { ApiError } from '../../services/api';
 import { SiteSelect } from './SiteSelect';
@@ -63,6 +67,16 @@ export function MailReviewModal({
     queryKey: ['mail-message', messageId],
     queryFn: () => api.get<MailMessageDetail>(`/mail/messages/${messageId}`),
     enabled: !!messageId,
+  });
+
+  // Тело письма в БД не хранится — оно достаётся из сохранённого оригинала,
+  // поэтому запрос отдельный и без повторов: недоступное хранилище не должно
+  // задерживать карточку.
+  const body = useQuery({
+    queryKey: ['mail-message-body', messageId],
+    queryFn: () => api.get<MailMessageBody>(`/mail/messages/${messageId}/body`),
+    enabled: !!messageId,
+    retry: false,
   });
 
   // Подсказку подставляем при открытии, но пользователь волен её сменить.
@@ -244,6 +258,48 @@ export function MailReviewModal({
                 overflowY: 'auto',
               }}
             >
+              {/* Текст письма: объект подрядчики часто называют именно в теле,
+                  а не в теме. Грузится отдельным запросом — сбой чтения письма
+                  из хранилища не должен ломать разбор целиком. */}
+              <Typography.Text strong>Текст письма</Typography.Text>
+              <div
+                style={{
+                  border: '1px solid #f0f0f0',
+                  borderRadius: 6,
+                  background: '#fafafa',
+                  padding: '6px 8px',
+                  maxHeight: 180,
+                  overflowY: 'auto',
+                  fontSize: 13,
+                  whiteSpace: 'pre-wrap',
+                  overflowWrap: 'anywhere',
+                }}
+              >
+                {body.isPending ? (
+                  <Typography.Text type="secondary">Загружаем текст письма…</Typography.Text>
+                ) : body.isError ? (
+                  <Typography.Text type="secondary">
+                    Не удалось прочитать текст письма. Вложения и разбор это не затрагивает.
+                  </Typography.Text>
+                ) : body.data?.text ? (
+                  <>
+                    {body.data.text}
+                    {body.data.truncated && (
+                      <Typography.Paragraph
+                        type="secondary"
+                        style={{ fontSize: 12, marginBottom: 0, marginTop: 8 }}
+                      >
+                        Показаны первые 20 000 символов.
+                      </Typography.Paragraph>
+                    )}
+                  </>
+                ) : (
+                  <Typography.Text type="secondary">
+                    В письме нет текста — только вложения.
+                  </Typography.Text>
+                )}
+              </div>
+
               <Typography.Text strong>Вложения ({data.attachments.length})</Typography.Text>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {data.attachments.map((a) => (

@@ -291,6 +291,25 @@ suite('приём письма в карантин (реальный PostgreSQL)
     expect(result.expectedDate).toBe('2026-08-05');
   });
 
+  it('html-письмо без текстовой части: объект и дата берутся из вёрстки', async () => {
+    // Outlook и mail.ru шлют письмо одной html-частью, и mailparser текст в
+    // таком случае не собирает. Пока тело читали как `parsed.text`, объект и
+    // дата из него терялись — решение принималось по одной теме.
+    const parsed = mail({
+      subject: 'Документы по заказу 1693257',
+      text: '',
+      html: '<html><body><p>Объект: ЗИЛ33</p><p>Дата поставки: 05.08.2026</p></body></html>',
+      attachments: [attachment({ content: PDF })],
+    });
+
+    const result = await run(parsed);
+
+    expect(result.outcome).toBe('stored');
+    if (result.outcome !== 'stored') return;
+    expect(result.match).toMatchObject({ decision: 'explicit', code: 'ЗИЛ33' });
+    expect(result.expectedDate).toBe('2026-08-05');
+  });
+
   it('сбой S3 не оставляет письмо в базе — повтор проходит начисто', async () => {
     putObject.mockRejectedValueOnce(new Error('S3 недоступен'));
     const parsed = mail({ subject: 'Объект: ЗИЛ33', attachments: [attachment({ content: PDF })] });

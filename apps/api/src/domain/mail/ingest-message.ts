@@ -25,6 +25,7 @@ import {
   REVIEWABLE_ATTACHMENT_STATES,
   type AttachmentLimits,
 } from './attachment-filter.js';
+import { extractPlainText } from './body-text.js';
 import { parseDeliveryDateHint } from './letter-hints.js';
 
 export type PutObject = (key: string, body: Buffer, contentType: string) => Promise<void>;
@@ -109,7 +110,9 @@ export async function ingestLetter(
   if (duplicate) return { outcome: 'duplicate', messageId: duplicate.id };
 
   const parsed = await parseMime(params.raw);
-  const text = parsed.text ?? '';
+  // Только через extractPlainText: у html-письма без текстовой части
+  // `parsed.text` пуст, и объект с датой искались бы по одной теме.
+  const text = extractPlainText(parsed);
 
   // Решения по вложениям принимаются до записи в БД, чтобы одна транзакция
   // сохранила согласованную картину.

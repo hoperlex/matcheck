@@ -13,9 +13,11 @@
 import { Readable } from 'node:stream';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
+import { simpleParser } from 'mailparser';
 import { z } from 'zod';
 import {
   ErrorResponseSchema,
+  MailMessageBodySchema,
   MailMessageDetailSchema,
   MailMessageListResponseSchema,
   MailReceiptListResponseSchema,
@@ -27,16 +29,23 @@ import {
   MailReviewSummarySchema,
 } from '@matcheck/contracts';
 import { mailAccounts, mailAttachments, mailMessages, mailReceipts, sites } from '../db/schema.js';
+import { extractPlainText } from '../domain/mail/body-text.js';
 import { REPLAYABLE_STATUSES, requestReplay } from '../domain/mail/replay.js';
 import {
   INGESTABLE_ATTACHMENT_STATES,
   resolveMailMessage,
 } from '../domain/mail/resolve-message.js';
-import { copyObject, presign } from '../domain/storage/s3.signer.js';
+import { copyObject, getObject, presign } from '../domain/storage/s3.signer.js';
 import { asZod } from '../lib/fastify.js';
 
 /** Статусы, ждущие человека. Остальные фильтры — для истории и разбора инцидентов. */
 const PENDING_STATUSES = ['quarantined'] as const;
+
+/**
+ * Предел показа текста письма. Больше оператору не нужно: объект и дата стоят
+ * в начале, а пересланная ветка на сотни килобайт только мешает.
+ */
+const MAIL_BODY_MAX_CHARS = 20_000;
 
 type MessageRow = typeof mailMessages.$inferSelect;
 type AttachmentRow = typeof mailAttachments.$inferSelect;
@@ -208,6 +217,64 @@ export async function mailReviewRoutes(rawApp: FastifyInstance): Promise<void> {
         ...dto(row.m, row.accountName, row.siteCode, row.siteName, counts),
         attachments: atts.map(attachmentDto),
       };
+    },
+  );
+
+  // Текст письма. В БД тело не хранится — берём из сохранённого оригинала,
+  // поэтому ручка отдельная: её сбой не должен ломать карточку целиком, а
+  // качать .eml на каждую строку списка незачем.
+  //
+  // Наружу уходит только текст. Разметка письма приходит от кого угодно, и
+  // отдавать её в интерфейс нельзя ни в каком виде.
+  app.get(
+    '/api/v1/mail/messages/:id/body',
+    {
+      preHandler: staff,
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: {
+          200: MailMessageBodySchema,
+          404: ErrorResponseSchema,
+          422: ErrorResponseSchema,
+          502: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [row] = await app.db
+        .select({ rawS3Key: mailMessages.rawS3Key })
+        .from(mailMessages)
+        .where(eq(mailMessages.id, req.params.id))
+        .limit(1);
+      if (!row) return reply.code(404).send({ error: 'not_found' });
+      if (!row.rawS3Key) {
+        return reply
+          .code(404)
+          .send({ error: 'raw_missing', message: 'Оригинал письма не сохранён' });
+      }
+
+      let raw: Buffer;
+      try {
+        raw = await getObject(row.rawS3Key);
+      } catch (err) {
+        req.log.warn({ err, key: row.rawS3Key }, 'S3 get failed (mail body)');
+        return reply.code(502).send({ error: 's3_unavailable' });
+      }
+
+      let text: string;
+      try {
+        text = extractPlainText(await simpleParser(raw, { keepCidLinks: true }));
+      } catch (err) {
+        // Наружу только факт: подробности разбора чужого письма оператору
+        // ничего не говорят, а в логе они нужны.
+        req.log.warn({ err, messageId: req.params.id }, 'не удалось разобрать письмо');
+        return reply
+          .code(422)
+          .send({ error: 'parse_failed', message: 'Не удалось прочитать текст письма' });
+      }
+
+      const truncated = text.length > MAIL_BODY_MAX_CHARS;
+      return { text: truncated ? text.slice(0, MAIL_BODY_MAX_CHARS) : text, truncated };
     },
   );
 
