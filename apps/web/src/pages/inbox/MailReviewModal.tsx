@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   Alert,
   Button,
+  Collapse,
   DatePicker,
   Descriptions,
   Image,
@@ -23,6 +24,7 @@ import type {
 } from '@matcheck/contracts';
 import { api, apiDownload } from '../../services/api';
 import type { ApiError } from '../../services/api';
+import { pickActiveAttachment, splitAttachments } from './attachmentGroups';
 import { SiteSelect } from './SiteSelect';
 
 const IMAGE_RE = /\.(jpe?g|png|webp|gif|bmp|heic|tiff?)$/i;
@@ -84,7 +86,7 @@ export function MailReviewModal({
     if (!detail.data) return;
     setSiteId(detail.data.suggestedSiteId ?? null);
     setConflict(null);
-    setActiveId(detail.data.attachments.find((a) => a.willBeIngested)?.id ?? null);
+    setActiveId(pickActiveAttachment(detail.data.attachments));
   }, [detail.data]);
 
   const invalidate = () => {
@@ -143,10 +145,63 @@ export function MailReviewModal({
 
   const data = detail.data;
   const ingestable = data?.attachments.filter((a) => a.willBeIngested) ?? [];
+  const {
+    documents,
+    hidden,
+    hiddenLabel,
+    hiddenOpenByDefault,
+  } = splitAttachments(data?.attachments ?? []);
   const active = data?.attachments.find((a) => a.id === activeId) ?? null;
   const activeUrl = active
     ? `/api/v1/mail/messages/${messageId}/attachments/${active.id}/raw`
     : null;
+
+  /** Одна строка вложения — общая для документов и для свёрнутых подписей. */
+  const renderAttachment = (a: MailMessageDetail['attachments'][number]) => (
+    <div
+      key={a.id}
+      onClick={() => setActiveId(a.id)}
+      style={{
+        border: `1px solid ${a.id === activeId ? '#1677ff' : '#f0f0f0'}`,
+        borderRadius: 6,
+        padding: '6px 8px',
+        cursor: 'pointer',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+      }}
+    >
+      <FileTextOutlined />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {a.filename ?? `Файл ${a.idx + 1}`}
+        </div>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {Math.max(1, Math.round(a.sizeBytes / 1024))} КБ {stateTag(a.state)}
+          {a.skipReason ? ` · ${a.skipReason}` : ''}
+        </Typography.Text>
+      </div>
+      <Space size={4} onClick={(e) => e.stopPropagation()}>
+        {/* Только отложенное как подпись: отброшенное по типу или размеру в
+            хранилище не залито, возвращать нечего. */}
+        {a.state === 'suspected_signature' && (
+          <Button
+            size="small"
+            icon={<UndoOutlined />}
+            loading={restore.isPending}
+            onClick={() => restore.mutate(a.id)}
+          >
+            Вернуть
+          </Button>
+        )}
+        <Button
+          size="small"
+          icon={<DownloadOutlined />}
+          onClick={() => void download(a.id, a.filename)}
+        />
+      </Space>
+    </div>
+  );
 
   const download = async (attachmentId: string, filename: string | null) => {
     try {
@@ -248,6 +303,8 @@ export function MailReviewModal({
               справа документ. Скроллится каждая отдельно — список вложений не
               уводит предпросмотр за край экрана. */}
           <div style={{ display: 'flex', gap: 16, flex: 1, minHeight: 0 }}>
+            {/* Колонка не скроллится целиком: у каждой зоны своя прокрутка,
+                иначе список вложений «съезжает» вместе с выбором объекта. */}
             <div
               style={{
                 width: 380,
@@ -255,20 +312,25 @@ export function MailReviewModal({
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 12,
-                overflowY: 'auto',
+                minHeight: 0,
               }}
             >
               {/* Текст письма: объект подрядчики часто называют именно в теле,
                   а не в теме. Грузится отдельным запросом — сбой чтения письма
                   из хранилища не должен ломать разбор целиком. */}
-              <Typography.Text strong>Текст письма</Typography.Text>
+              <Typography.Text strong style={{ flexShrink: 0 }}>
+                Текст письма
+              </Typography.Text>
               <div
                 style={{
+                  // Забирает всё свободное место и НЕ сжимается: без явного
+                  // минимума список вложений выдавливал текст в одну строку.
+                  flex: '1 1 auto',
+                  minHeight: 150,
                   border: '1px solid #f0f0f0',
                   borderRadius: 6,
                   background: '#fafafa',
                   padding: '6px 8px',
-                  maxHeight: 180,
                   overflowY: 'auto',
                   fontSize: 13,
                   whiteSpace: 'pre-wrap',
@@ -300,57 +362,51 @@ export function MailReviewModal({
                 )}
               </div>
 
-              <Typography.Text strong>Вложения ({data.attachments.length})</Typography.Text>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {data.attachments.map((a) => (
-                  <div
-                    key={a.id}
-                    onClick={() => setActiveId(a.id)}
-                    style={{
-                      border: `1px solid ${a.id === activeId ? '#1677ff' : '#f0f0f0'}`,
-                      borderRadius: 6,
-                      padding: '6px 8px',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                    }}
-                  >
-                    <FileTextOutlined />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {a.filename ?? `Файл ${a.idx + 1}`}
-                      </div>
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        {Math.max(1, Math.round(a.sizeBytes / 1024))} КБ {stateTag(a.state)}
-                        {a.skipReason ? ` · ${a.skipReason}` : ''}
-                      </Typography.Text>
-                    </div>
-                    <Space size={4} onClick={(e) => e.stopPropagation()}>
-                      {/* Только отложенное как подпись: отброшенное по типу или
-                          размеру в хранилище не залито, возвращать нечего. */}
-                      {a.state === 'suspected_signature' && (
-                        <Button
-                          size="small"
-                          icon={<UndoOutlined />}
-                          loading={restore.isPending}
-                          onClick={() => restore.mutate(a.id)}
-                        >
-                          Вернуть
-                        </Button>
-                      )}
-                      <Button
-                        size="small"
-                        icon={<DownloadOutlined />}
-                        onClick={() => void download(a.id, a.filename)}
-                      />
-                    </Space>
-                  </div>
-                ))}
+              {/* Вложения не растягиваются: место в колонке принадлежит тексту
+                  письма. Подписи свёрнуты — в боевых письмах их бывает 16 штук
+                  на один документ, и вперемешку они прячут и текст, и сам УПД. */}
+              <Typography.Text strong style={{ flexShrink: 0 }}>
+                Вложения ({data.attachments.length})
+              </Typography.Text>
+              <div
+                style={{
+                  flexShrink: 0,
+                  maxHeight: '40%',
+                  overflowY: 'auto',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                }}
+              >
+                {documents.map(renderAttachment)}
+
+                {hiddenLabel && (
+                  <Collapse
+                    size="small"
+                    defaultActiveKey={hiddenOpenByDefault ? ['hidden'] : []}
+                    items={[
+                      {
+                        key: 'hidden',
+                        label: (
+                          <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                            {hiddenLabel}
+                          </Typography.Text>
+                        ),
+                        children: (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {hidden.map(renderAttachment)}
+                          </div>
+                        ),
+                      },
+                    ]}
+                  />
+                )}
               </div>
 
-              <Typography.Text strong>Куда отправить</Typography.Text>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <Typography.Text strong style={{ flexShrink: 0 }}>
+                Куда отправить
+              </Typography.Text>
+              <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <SiteSelect value={siteId} onChange={setSiteId} />
                 <Segmented
                   block
