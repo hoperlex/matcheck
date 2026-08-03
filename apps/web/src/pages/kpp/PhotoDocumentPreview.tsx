@@ -7,6 +7,14 @@ import { api, apiDownload, ApiError } from '../../services/api';
 import { enqueueFullLoad } from '../../lib/thumbQueue';
 
 /**
+ * Пороги качества снимка по длинной стороне. Те же числа использует
+ * apps/api/scripts/audit-photo-dims.ts: типичное фото документа с планшета ~2048px,
+ * камера с заниженной настройкой размера отдаёт ~800px.
+ */
+const LOW_RES_PX = 1280;
+const SUSPECT_RES_PX = 1600;
+
+/**
  * Split-view модалка просмотра фото-документа: слева увеличенное фото,
  * справа таблица распознанных позиций. Открывается из PhotoGallery
  * при клике на превью с kind='document'. Для kind='cargo'/'vehicle'
@@ -66,6 +74,14 @@ export function PhotoDocumentPreview({
   }, [fullBlob.data]);
   // Оригинал когда загружен, иначе переданная миниатюра как быстрый плейсхолдер.
   const displaySrc = fullUrl ?? imageSrc;
+
+  // Размеры показанного кадра. Храним вместе с src: пока грузится оригинал, в <img>
+  // стоит миниатюра 320px, и её naturalWidth нельзя выдавать за разрешение фото —
+  // иначе каждое открытие на мгновение обвиняет камеру в «низком разрешении».
+  const [dims, setDims] = useState<{ src: string; w: number; h: number } | null>(null);
+  useEffect(() => setDims(null), [photoId]);
+  const fullDims = dims && fullUrl && dims.src === fullUrl ? dims : null;
+  const longestSide = fullDims ? Math.max(fullDims.w, fullDims.h) : null;
 
   const recognition = useQuery<PhotoRecognition | null>({
     queryKey: ['photo-recognition', photoId],
@@ -133,7 +149,9 @@ export function PhotoDocumentPreview({
       <div
         style={{
           flex: '1 1 60%',
-          background: '#000',
+          // Нейтральный светлый фон: на чёрном не видно границы листа, а мелкий кадр
+          // читался как «фото в чёрной рамке», хотя рамка — это фон панели.
+          background: '#f5f5f5',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -141,13 +159,22 @@ export function PhotoDocumentPreview({
         }}
       >
         {displaySrc ? (
-          <div style={{ position: 'relative', maxWidth: '100%', maxHeight: '100%' }}>
+          <div style={{ position: 'relative', width: '100%', height: '100%' }}>
             <img
               src={displaySrc}
               alt="Документ"
+              onLoad={(e) =>
+                setDims({
+                  src: e.currentTarget.currentSrc || e.currentTarget.src,
+                  w: e.currentTarget.naturalWidth,
+                  h: e.currentTarget.naturalHeight,
+                })
+              }
               style={{
-                maxWidth: '100%',
-                maxHeight: '100%',
+                // width/height обязательны: без них objectFit не работает вовсе, и
+                // кадр мельче панели рисовался в натуральную величину по центру.
+                width: '100%',
+                height: '100%',
                 objectFit: 'contain',
                 userSelect: 'none',
                 // Пока грузится оригинал — показываем миниатюру приглушённой,
@@ -156,7 +183,30 @@ export function PhotoDocumentPreview({
                 transition: 'opacity 0.2s',
               }}
             />
-            {!fullUrl && (
+            {fullDims && longestSide !== null && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 8,
+                  left: 8,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '2px 8px',
+                  borderRadius: 4,
+                  background: 'rgba(255, 255, 255, 0.85)',
+                }}
+              >
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {fullDims.w}×{fullDims.h} px
+                </Typography.Text>
+                {longestSide < LOW_RES_PX && <Tag color="warning">низкое разрешение</Tag>}
+                {longestSide >= LOW_RES_PX && longestSide < SUSPECT_RES_PX && (
+                  <Tag>проверьте камеру</Tag>
+                )}
+              </div>
+            )}
+            {!fullUrl && !fullBlob.isError && (
               <div
                 style={{
                   position: 'absolute',
@@ -167,6 +217,22 @@ export function PhotoDocumentPreview({
                 }}
               >
                 <Spin tip="Загрузка оригинала…" />
+              </div>
+            )}
+            {fullBlob.isError && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 8,
+                  left: 8,
+                  padding: '2px 8px',
+                  borderRadius: 4,
+                  background: 'rgba(255, 255, 255, 0.85)',
+                }}
+              >
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  Оригинал не загрузился — показана миниатюра
+                </Typography.Text>
               </div>
             )}
           </div>
