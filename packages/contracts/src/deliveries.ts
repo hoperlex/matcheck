@@ -163,6 +163,13 @@ export const DeliveryUpsertSchema = z.object({
   vehiclePlate: z.string().max(16).nullable().optional(),
   driverName: z.string().max(200).nullable().optional(),
   arrivedAt: z.string().nullable().optional(),
+  /**
+   * Момент, когда инспектор фактически подтвердил приёмку на планшете
+   * (завершил 2 Этап или ручной внос). Опционально: сборки до 1.0.33 его не
+   * шлют, для них сервер ставит своё время. Длину ограничиваем — строка
+   * приходит с устройства. Разбор и клампы — domain/operations/confirmed-at.ts.
+   */
+  confirmedByMolAt: z.string().max(64).nullable().optional(),
   comment: z.string().nullable().optional(),
   /** Транзит — см. DeliverySchema.inTransit. Default false. */
   inTransit: z.boolean().default(false),

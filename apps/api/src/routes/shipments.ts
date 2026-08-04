@@ -39,6 +39,7 @@ import {
 } from '../domain/statuses/lookup.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isShipmentDowngrade } from '../domain/operations/status-guard.js';
+import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
 import { canSeeReview } from '../lib/review.js';
 import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
@@ -1833,6 +1834,19 @@ async function createShipment(
   // выставляет эти поля.
   const isDirectConfirm = input.statusCode === 'confirmed_mol';
   const now = new Date();
+  // Время подтверждения — с планшета (момент нажатия «Завершить»), а не время
+  // приёма мутации: при офлайне они расходятся на часы. Старые сборки поля не
+  // шлют — для них resolveConfirmedAt вернёт `now`, как было раньше.
+  const confirmedAtCandidate = isDirectConfirm
+    ? resolveConfirmedAt({
+        raw: input.confirmedByMolAt,
+        lowerBound: input.shippedAt,
+        now,
+        log: app.log,
+        entity: 'shipment',
+        id: input.id,
+      })
+    : null;
   // Атомарность: шапка + позиции + источники + touch УПД — одна транзакция
   // (симметрично createDelivery). Либо всё, либо ничего; контракт не меняется.
   return await app.db.transaction(async (tx: typeof app.db) => {
@@ -1857,7 +1871,7 @@ async function createShipment(
       isAssets: input.isAssets ?? false,
       ...(isDirectConfirm && {
         confirmedByMolUserId: inspectorId,
-        confirmedByMolAt: now,
+        confirmedByMolAt: confirmedAtCandidate,
       }),
       createdBySessionId,
       version: 1,
@@ -1950,8 +1964,21 @@ async function updateShipment(
       'status-guard: prevented shipment status downgrade',
     );
   }
-  const isFirstConfirm =
-    input.statusCode === 'confirmed_mol' && existing.confirmedByMolUserId === null;
+  // Идемпотентность через COALESCE в самом UPDATE, а не по прочитанному до
+  // транзакции `existing` (симметрично updateDelivery): два параллельных
+  // запроса оба сочли бы себя первыми. Время — с планшета, см. confirmed-at.ts.
+  const wantsConfirm = input.statusCode === 'confirmed_mol';
+  const confirmedAtCandidate = wantsConfirm
+    ? resolveConfirmedAt({
+        raw: input.confirmedByMolAt,
+        lowerBound: input.shippedAt ?? existing.shippedAt,
+        log: app.log,
+        entity: 'shipment',
+        id,
+      })
+    : null;
+  // ISO-строка с явным приведением: postgres.js не биндит Date внутри sql``.
+  const confirmedAtIso = confirmedAtCandidate?.toISOString() ?? null;
 
   // Ручная привязка УПД к отгрузке без документа на портале: клиент шлёт
   // непустой sourceDocumentIds и пустой items — сервер подтягивает позиции
@@ -2007,9 +2034,11 @@ async function updateShipment(
       driverName: input.driverName ?? null,
       shippedAt: input.shippedAt ? new Date(input.shippedAt) : null,
       comment: input.comment ?? null,
-      ...(isFirstConfirm && {
-        confirmedByMolUserId: userId,
-        confirmedByMolAt: new Date(),
+      // COALESCE, а не условная запись: первое подтверждение побеждает даже при
+      // повторной или параллельной мутации.
+      ...(wantsConfirm && {
+        confirmedByMolUserId: drSql`COALESCE(${shipments.confirmedByMolUserId}, ${userId}::uuid)`,
+        confirmedByMolAt: drSql`COALESCE(${shipments.confirmedByMolAt}, ${confirmedAtIso}::timestamptz)`,
       }),
       version: drSql`${shipments.version} + 1`,
       updatedAt: new Date(),
