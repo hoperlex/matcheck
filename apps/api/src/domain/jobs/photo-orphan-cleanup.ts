@@ -19,9 +19,15 @@ import { db } from '../../db/client.js';
 import { deliveryPhotos, shipmentPhotos } from '../../db/schema.js';
 import { headObject } from '../storage/s3.signer.js';
 
-// Запись считается orphan'ом если taken_at старше этой границы И uploaded_at
+// Запись считается orphan'ом если created_at старше этой границы И uploaded_at
 // до сих пор null. 1 час даёт WorkManager на Android несколько попыток
 // confirm даже при отсутствии сети.
+//
+// Именно created_at, а не taken_at: с версии 1.0.33 планшет присылает
+// собственное время съёмки, и у фото, снятого вчера в офлайне и попавшего на
+// сервер только что, taken_at сразу оказался бы «старше часа» — запись
+// удалили бы до того, как клиент успеет сделать PUT. created_at — момент
+// presign, то есть ровно «сколько прошло с создания записи».
 const ORPHAN_THRESHOLD_MS = 60 * 60 * 1000;
 
 type CleanupStats = {
@@ -31,6 +37,17 @@ type CleanupStats = {
   errors: number;
 };
 
+/**
+ * Условие выборки orphan'ов. Вынесено, чтобы тест мог проверить ровно тот
+ * предикат, по которому job удаляет записи: перепутать здесь created_at с
+ * taken_at — значит снести свежие офлайн-фото.
+ */
+export const deliveryOrphanCondition = (cutoff: Date) =>
+  and(isNull(deliveryPhotos.uploadedAt), lt(deliveryPhotos.createdAt, cutoff));
+
+export const shipmentOrphanCondition = (cutoff: Date) =>
+  and(isNull(shipmentPhotos.uploadedAt), lt(shipmentPhotos.createdAt, cutoff));
+
 export async function cleanupPhotoOrphans(log: Logger): Promise<CleanupStats> {
   const cutoff = new Date(Date.now() - ORPHAN_THRESHOLD_MS);
   const stats: CleanupStats = { checked: 0, confirmed: 0, deleted: 0, errors: 0 };
@@ -38,7 +55,7 @@ export async function cleanupPhotoOrphans(log: Logger): Promise<CleanupStats> {
   const deliveryOrphans = await db
     .select({ id: deliveryPhotos.id, s3Key: deliveryPhotos.s3Key })
     .from(deliveryPhotos)
-    .where(and(isNull(deliveryPhotos.uploadedAt), lt(deliveryPhotos.takenAt, cutoff)));
+    .where(deliveryOrphanCondition(cutoff));
 
   for (const p of deliveryOrphans) {
     stats.checked++;
@@ -63,7 +80,7 @@ export async function cleanupPhotoOrphans(log: Logger): Promise<CleanupStats> {
   const shipmentOrphans = await db
     .select({ id: shipmentPhotos.id, s3Key: shipmentPhotos.s3Key })
     .from(shipmentPhotos)
-    .where(and(isNull(shipmentPhotos.uploadedAt), lt(shipmentPhotos.takenAt, cutoff)));
+    .where(shipmentOrphanCondition(cutoff));
 
   for (const p of shipmentOrphans) {
     stats.checked++;

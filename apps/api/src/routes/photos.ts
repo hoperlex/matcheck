@@ -29,6 +29,7 @@ import { recognizePhotoItems } from '../domain/photos/recognize.js';
 import { buildExistingPhotoPresign } from '../domain/photos/presign-existing.js';
 import { publishEvent } from './events.js';
 import { FOREIGN_SITE_RESPONSE } from '../domain/operations/foreign-site.js';
+import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import {
   resolveContractorOpIds,
   deliveryVisibleToContractor,
@@ -245,6 +246,18 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
             thumbS3Key,
             contentHash: body.contentHash,
             idempotencyKey: body.idempotencyKey,
+            // Время съёмки — с планшета. Без него (старые сборки, веб-фронт)
+            // остаётся defaultNow(), то есть прежнее поведение.
+            ...(body.takenAt
+              ? {
+                  takenAt: resolveConfirmedAt({
+                    raw: body.takenAt,
+                    log: app.log,
+                    entity: 'delivery',
+                    id: photoId,
+                  }),
+                }
+              : {}),
           })
           .returning();
         if (!created) throw new Error('Failed to insert photo');
@@ -373,6 +386,17 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           thumbS3Key,
           contentHash: body.contentHash,
           idempotencyKey: body.idempotencyKey,
+          // Симметрично приёмкам: время съёмки с планшета, иначе defaultNow().
+          ...(body.takenAt
+            ? {
+                takenAt: resolveConfirmedAt({
+                  raw: body.takenAt,
+                  log: app.log,
+                  entity: 'shipment',
+                  id: photoId,
+                }),
+              }
+            : {}),
         })
         .returning();
       if (!created) throw new Error('Failed to insert shipment photo');

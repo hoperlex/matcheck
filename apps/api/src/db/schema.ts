@@ -1023,8 +1023,10 @@ export const deliveryPhotos = pgTable(
     uniqueIndex('delivery_photo_idempotency_unique')
       .on(t.deliveryId, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} is not null`),
+    // По created_at, а не takenAt: с 1.0.33 время съёмки присылает планшет и
+    // у офлайн-фото оно может быть суточной давности (см. photo-orphan-cleanup).
     index('delivery_photos_orphan_idx')
-      .on(t.takenAt)
+      .on(t.createdAt)
       .where(sql`${t.uploadedAt} is null`),
   ],
 );
@@ -1238,8 +1240,10 @@ export const shipmentPhotos = pgTable(
     uniqueIndex('shipment_photo_idempotency_unique')
       .on(t.shipmentId, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} is not null`),
+    // По created_at, а не takenAt: с 1.0.33 время съёмки присылает планшет и
+    // у офлайн-фото оно может быть суточной давности (см. photo-orphan-cleanup).
     index('shipment_photos_orphan_idx')
-      .on(t.takenAt)
+      .on(t.createdAt)
       .where(sql`${t.uploadedAt} is null`),
   ],
 );
