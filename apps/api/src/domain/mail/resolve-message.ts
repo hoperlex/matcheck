@@ -15,7 +15,7 @@
 // Падение между шагами не оставляет «наполовину принятого» письма: пакет в
 // статусе resolving нигде не показывается, а повтор проходит начисто.
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
@@ -30,6 +30,12 @@ import {
 import { bundleDispatchKeyOf, enqueueJob } from '../jobs/job-outbox.js';
 import { buildS3Key } from '../storage/s3.path.js';
 import { UPD_PARSE_QUEUE } from '../../plugins/queue.js';
+import { contentHashOf, idempotencyKeyOf, safeName } from '../sourceDocuments/bundle-key.js';
+
+// Ключи пакета переехали в domain/sourceDocuments/bundle-key.ts: тот же формат
+// нужен и кнопке менеджера, и публичной странице поставщика. Ре-экспорт — ради
+// существующих импортов и тестов почтового модуля.
+export { contentHashOf, idempotencyKeyOf };
 
 export type CopyObject = (srcKey: string, dstKey: string) => Promise<void>;
 
@@ -67,47 +73,6 @@ export type ResolveOutcome =
   | { outcome: 'cross_scope'; conflictingBundleId: string }
   | { outcome: 'no_attachments' }
   | { outcome: 'not_quarantined' };
-
-/**
- * Хеш содержимого пакета. Считается ровно так же, как в `/upload-documents`:
- * sha256 от отсортированных sha256 файлов через `|`. Совпадение формата
- * обязательно — иначе один и тот же комплект, пришедший письмом и руками,
- * создаст два пакета.
- */
-export function contentHashOf(fileHashes: readonly string[]): string {
-  return createHash('sha256').update([...fileHashes].sort().join('|')).digest('hex');
-}
-
-/**
- * Канонический ключ идемпотентности со scope.
- *
- * Формат совпадает с backfill миграции 0074 (префикс `v1|manual|` исторический
- * и канал не обозначает): один и тот же комплект на один и тот же объект — это
- * один пакет, каким бы путём он ни пришёл.
- */
-export function idempotencyKeyOf(scope: {
-  siteId: string | null;
-  direction: string;
-  contractorId?: string | null;
-  recipientMolId?: string | null;
-  expectedDate?: string | null;
-  contentHash: string;
-}): string {
-  return [
-    'v1|manual',
-    scope.siteId ?? '',
-    scope.direction,
-    scope.contractorId ?? '',
-    scope.recipientMolId ?? '',
-    scope.expectedDate ?? '',
-    scope.contentHash,
-  ].join('|');
-}
-
-function safeName(filename: string | null, idx: number): string {
-  const base = (filename ?? '').replace(/[/\\]/g, '_').trim().slice(-100);
-  return base || `file-${idx + 1}.bin`;
-}
 
 /**
  * Создаёт пакет документов из письма.

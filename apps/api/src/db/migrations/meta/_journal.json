@@ -561,6 +561,13 @@
       "when": 1781800006000,
       "tag": "0080_photo_orphan_idx_created_at",
       "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1781800007000,
+      "tag": "0081_public_upload",
+      "breakpoints": true
     }
   ]
 }

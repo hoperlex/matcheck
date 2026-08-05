@@ -44,6 +44,7 @@ import { appSettingsRoutes } from './routes/admin/settings.js';
 import { promptRoutes } from './routes/admin/prompts.js';
 import { shareRoutes } from './routes/share.js';
 import { shareMessageRoutes } from './routes/share-messages.js';
+import { publicUploadRoutes } from './routes/public-upload.js';
 
 export async function buildServer() {
   const env = loadEnv();
@@ -131,6 +132,8 @@ export async function buildServer() {
   await app.register(promptRoutes);
   await app.register(shareRoutes);
   await app.register(shareMessageRoutes);
+  // Единственный namespace без авторизации (см. plugins/auth.ts).
+  await app.register(publicUploadRoutes);
 
   // Глобальный onSend hook: проставляем no-store / Vary: Authorization на
   // все API-ответы, чтобы PWA Service Worker / прокси / CDN не отдавали

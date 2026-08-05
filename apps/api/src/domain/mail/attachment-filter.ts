@@ -182,6 +182,50 @@ export function inspectZip(buffer: Buffer): ZipInspection {
 }
 
 /**
+ * Действительно ли ZIP-контейнер — это книга Excel.
+ *
+ * `sniffMime` отдаёт xlsx-MIME ЛЮБОМУ zip (сигнатура `PK\x03\x04` общая для
+ * xlsx, docx, pptx, jar и обычного архива), а `inspectZip` смотрит только на
+ * размеры. Для почты этого достаточно — там отправитель известен. Для
+ * публичной загрузки от неизвестного отправителя нет: переименованный docx или
+ * архив с чем угодно внутри дошёл бы до парсера как «таблица».
+ *
+ * Проверяем по именам записей central directory: у OOXML обязателен
+ * `[Content_Types].xml`, а книгу Excel от документа Word отличает `xl/`.
+ */
+export function isXlsxContainer(buffer: Buffer): boolean {
+  const tailStart = Math.max(0, buffer.length - (22 + 0xffff));
+  let eocd = -1;
+  for (let i = buffer.length - 22; i >= tailStart; i--) {
+    if (buffer.readUInt32LE(i) === EOCD_SIGNATURE) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) return false;
+
+  const cdOffset = buffer.readUInt32LE(eocd + 16);
+  if (cdOffset === ZIP64_MARKER || cdOffset >= buffer.length) return false;
+
+  let hasContentTypes = false;
+  let hasWorkbook = false;
+  let p = cdOffset;
+  while (p + 46 <= buffer.length && buffer.readUInt32LE(p) === CD_ENTRY_SIGNATURE) {
+    const nameLen = buffer.readUInt16LE(p + 28);
+    const extraLen = buffer.readUInt16LE(p + 30);
+    const commentLen = buffer.readUInt16LE(p + 32);
+    const name = buffer.subarray(p + 46, p + 46 + nameLen).toString('latin1');
+    if (name === '[Content_Types].xml') hasContentTypes = true;
+    // xl/workbook.xml — обычная книга; xl/workbook.bin — формат xlsb, который
+    // тоже приходит от 1С.
+    if (name === 'xl/workbook.xml' || name === 'xl/workbook.bin') hasWorkbook = true;
+    if (hasContentTypes && hasWorkbook) return true;
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return false;
+}
+
+/**
  * Решение по одному вложению.
  *
  * `skipped` — файл конвейеру не подходит (не тот тип, слишком большой,

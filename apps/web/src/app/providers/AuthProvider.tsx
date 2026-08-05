@@ -8,13 +8,29 @@ import { refreshAccessToken } from '../../services/authRefresh';
 // интервал-driven запросах (sync, focus-refetch) копятся в DevTools.
 import '../../services/authScheduler';
 
+/**
+ * Страницы, которые работают без логина.
+ *
+ * На них bootstrap не нужен и вреден: POST /auth/refresh без cookie всё равно
+ * вернёт 401, а до его завершения провайдер рендерит null — на медленной
+ * мобильной сети поставщик несколько секунд смотрит на белый экран.
+ */
+const PUBLIC_PATH_PREFIXES = ['/share/', '/uploads'];
+
+function isPublicPath(pathname: string): boolean {
+  return PUBLIC_PATH_PREFIXES.some((p) => pathname === p || pathname.startsWith(p));
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const setAuth = useAuthStore((s) => s.setAuth);
   const setAccessToken = useAuthStore((s) => s.setAccessToken);
   const setUser = useAuthStore((s) => s.setUser);
-  const [bootstrapped, setBootstrapped] = useState(false);
+  const [bootstrapped, setBootstrapped] = useState(() =>
+    isPublicPath(window.location.pathname),
+  );
 
   useEffect(() => {
+    if (isPublicPath(window.location.pathname)) return;
     let cancelled = false;
     async function bootstrap() {
       try {

@@ -31,6 +31,7 @@ const AdminEdoAccounts = lazy(() => import('../pages/admin/EdoAccounts'));
 const AdminMailAccounts = lazy(() => import('../pages/admin/MailAccounts'));
 const Settings = lazy(() => import('../pages/settings/Settings'));
 const PublicSharePage = lazy(() => import('../pages/share/PublicSharePage'));
+const PublicUploadPage = lazy(() => import('../pages/public-upload/PublicUploadPage'));
 const OperationsPage = lazy(() => import('../pages/operations/OperationsPage'));
 
 // Feature flag-страховка: если выставлен VITE_OPERATIONS_MODAL_DISABLED=1,
@@ -97,6 +98,9 @@ export const router = sentryCreateBrowserRouter([
   // Публичная страница просмотра приёмки/отгрузки по share-токену.
   // Вне ProtectedRoute: доступ по знанию unguessable токена, без логина.
   { path: '/share/:token', element: suspense(<PublicSharePage />) },
+  // Публичная загрузка документов поставщиком: ссылку рассылают наружу,
+  // логина у поставщика нет и не будет. Тоже вне ProtectedRoute.
+  { path: '/uploads', element: suspense(<PublicUploadPage />) },
   {
     path: '/',
     element: (

@@ -38,6 +38,16 @@ const PUBLIC_PATHS = new Set([
   '/api/v1/auth/refresh',
 ]);
 
+/**
+ * Namespace роутов, открытых без авторизации.
+ *
+ * Отсутствие `preHandler: app.authenticate` роут публичным НЕ делает: ниже
+ * висит глобальный onRequest-хук, который режет всё, чего нет в этом списке.
+ * Поэтому каждый публичный вход обязан лежать под этим префиксом — и весь
+ * публичный периметр проверяется одним grep по 'api/v1/public'.
+ */
+const PUBLIC_ROUTE_PREFIX = '/api/v1/public/';
+
 export default fp(async (app) => {
   async function logUnauthorized(
     req: FastifyRequest,
@@ -151,6 +161,14 @@ export default fp(async (app) => {
   });
 
   app.addHook('onRequest', async (req, reply) => {
+    // Матчим ШАБЛОН роута, а не сырой req.url: сырой можно подделать
+    // (`/api/v1/public/../sites`), шаблон выдаёт роутер уже после матчинга.
+    // На 404 routeOptions.url отсутствует — поведение прежнее, 401.
+    // req.user при этом НЕ заполняется: залогиненный пользователь, открывший
+    // публичную страницу, не получает на ней скрытых привилегий.
+    if (req.routeOptions?.url?.startsWith(PUBLIC_ROUTE_PREFIX)) {
+      return;
+    }
     if (PUBLIC_PATHS.has(req.url.split('?')[0] ?? '') || req.url.startsWith('/health')) {
       return;
     }

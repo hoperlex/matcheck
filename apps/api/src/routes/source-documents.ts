@@ -30,6 +30,7 @@ import {
   counterparties,
   deliverySources,
   entityDeletions,
+  ingestEvents,
   llmCalls,
   materials,
   responsiblePersons,
@@ -49,6 +50,8 @@ import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { publishEvent } from './events.js';
 import { matchOrCreateSupplier } from '../domain/sourceDocuments/supplierMatcher.js';
+import { collectUploadParts, uploadLimitMessage } from '../domain/sourceDocuments/collect-upload.js';
+import { ingestDocumentsBundle } from '../domain/sourceDocuments/ingest-bundle.js';
 import { resolveContractorOpIds } from '../lib/contractor-scope.js';
 
 const KIND_VALUES = ['upd', 'request', 'transport_waybill', 'os2_transfer'] as const;
@@ -228,7 +231,29 @@ type SdNames = {
   // для кнопки звонка в шапке списка материалов.
   createdByUserEmail?: string | null;
   createdByUserPhone?: string | null;
+  // Документ пришёл с публичной страницы (от поставщика). Считается по
+  // наличию ingest_event с channel='public' у КОРНЕВОГО пакета.
+  fromSupplierPortal?: boolean;
 };
+
+/**
+ * Пришёл ли документ с публичной страницы загрузки.
+ *
+ * EXISTS, а не JOIN: на пакете может быть несколько публичных отправок (тот же
+ * комплект прислали повторно), и обычное соединение размножило бы строки
+ * документа — поехали бы и пагинация, и total.
+ *
+ * COALESCE(parent_bundle_id, id): накладные router разворачивает в ДОЧЕРНИЙ
+ * пакет, и реальный документ ТН/ОС-2 висит уже на нём — событие приёма лежит
+ * на родителе.
+ */
+const fromSupplierPortalSql = drSql<boolean>`exists (
+  select 1
+    from ${ingestEvents} ie
+    join ${sourceBundles} b on b.id = ${sourceDocuments.bundleId}
+   where ie.bundle_id = coalesce(b.parent_bundle_id, b.id)
+     and ie.channel = 'public'
+)`;
 
 function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
   return {
@@ -276,6 +301,7 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     createdAt: sd.createdAt.toISOString(),
     updatedAt: sd.updatedAt.toISOString(),
     validation: sd.validation ?? null,
+    fromSupplierPortal: names.fromSupplierPortal ?? false,
   };
 }
 
@@ -662,6 +688,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           recipientName: recipient.name,
           recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
+          fromSupplierPortal: fromSupplierPortalSql,
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
@@ -689,6 +716,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             recipientName: r.recipientName,
             recipientMolName: r.recipientMolName,
             siteName: r.siteName,
+            fromSupplierPortal: r.fromSupplierPortal,
           }),
         ),
         total: count,
@@ -985,6 +1013,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           recipientName: recipient.name,
           recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
+          fromSupplierPortal: fromSupplierPortalSql,
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
@@ -1048,12 +1077,54 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         recipientName: row.recipientName,
         recipientMolName: row.recipientMolName,
         siteName: row.siteName,
+        fromSupplierPortal: row.fromSupplierPortal,
       });
+
+      // Кто прислал документ через публичную страницу. Телефон отправителя —
+      // персональные данные, а этот роут висит на голом authenticate: его
+      // видят и инспектор своего объекта, и monitor. Отдаём только тем, кто
+      // реально работает с поставщиками.
+      let submitter: { name: string; phone: string | null; submittedAt: string } | null = null;
+      if (
+        row.fromSupplierPortal &&
+        (req.user?.role === 'admin' || req.user?.role === 'manager')
+      ) {
+        // Отправок на одном пакете может быть несколько (тот же комплект
+        // прислали повторно) — показываем последнюю.
+        const [ev] = await app.db
+          .select({
+            name: ingestEvents.submitterName,
+            phone: ingestEvents.submitterPhone,
+            createdAt: ingestEvents.createdAt,
+          })
+          .from(ingestEvents)
+          .where(
+            and(
+              eq(ingestEvents.channel, 'public'),
+              drSql`${ingestEvents.bundleId} = (
+                select coalesce(b.parent_bundle_id, b.id)
+                  from ${sourceBundles} b
+                 where b.id = ${sd.bundleId}
+              )`,
+            ),
+          )
+          .orderBy(desc(ingestEvents.createdAt))
+          .limit(1);
+        if (ev?.name) {
+          submitter = {
+            name: ev.name,
+            phone: ev.phone,
+            submittedAt: ev.createdAt.toISOString(),
+          };
+        }
+      }
+
       return {
         ...base,
         validation: liveValidation,
         items: items.map(itemDto),
         attachments: attachments.map(attachmentDto),
+        submitter,
       };
     },
   );
@@ -1773,44 +1844,34 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
     },
     async (req, reply) => {
-      const mp = req as unknown as {
-        files: (opts?: { limits?: { files?: number; fileSize?: number } }) => AsyncIterable<{
-          filename: string;
-          mimetype: string;
-          toBuffer: () => Promise<Buffer>;
-          fields: Record<string, { value?: string } | undefined>;
-        }>;
-      };
-
-      const collected: Array<{ filename: string; mimetype: string; buffer: Buffer }> = [];
-      const rawFields: Record<string, string | undefined> = {};
-      let lastFields: Record<string, { value?: string } | undefined> = {};
-      for await (const part of mp.files({ limits: { files: 20, fileSize: 10 * 1024 * 1024 } })) {
-        lastFields = part.fields;
-        const buf = await part.toBuffer();
-        if (buf.length === 0) continue;
-        const mime = (part.mimetype ?? '').toLowerCase();
-        // Единый вход принимает шире, чем накладные: + Excel (.xls/.xlsx).
-        const isImage =
-          mime.startsWith('image/') || /\.(jpg|jpeg|png|webp|heic|heif)$/i.test(part.filename);
-        const isPdf = mime.includes('pdf') || /\.pdf$/i.test(part.filename);
-        const isExcel =
-          mime.includes('spreadsheetml') ||
-          mime === 'application/vnd.ms-excel' ||
-          /\.(xlsx|xls)$/i.test(part.filename);
-        if (!isImage && !isPdf && !isExcel) continue;
-        collected.push({ filename: part.filename, mimetype: part.mimetype, buffer: buf });
+      // Разбор тела и запись пакета вынесены в domain/sourceDocuments:
+      // тем же ядром пользуется публичная страница поставщика. Здесь остаётся
+      // только контракт HTTP. Режимы 'legacy' сохраняют прежнее поведение
+      // внутреннего входа: молчаливое отбрасывание неподдерживаемых файлов,
+      // перезапуск осиротевшего пакета без окна ожидания, queue.add напрямую.
+      const collected = await collectUploadParts(
+        req,
+        {
+          maxFiles: 20,
+          maxFileBytes: 10 * 1024 * 1024,
+          maxTotalBytes: 20 * 1024 * 1024,
+          maxFields: 20,
+          maxFieldBytes: 4096,
+          maxParts: 50,
+        },
+        'legacy',
+      );
+      if (!collected.ok) {
+        return reply.code(413).send({
+          error: collected.error,
+          message: uploadLimitMessage(collected.error),
+        });
       }
-      for (const [k, v] of Object.entries(lastFields)) {
-        if (v && typeof v === 'object' && 'value' in v && typeof v.value === 'string') {
-          rawFields[k] = v.value;
-        }
-      }
-      if (collected.length === 0) {
+      if (collected.accepted.length === 0) {
         return reply.code(400).send({ error: 'no_files', message: 'Не приложен ни один файл' });
       }
 
-      const meta = UpdPdfQueueRequestSchema.safeParse(rawFields);
+      const meta = UpdPdfQueueRequestSchema.safeParse(collected.fields);
       if (!meta.success) {
         return reply.code(400).send({
           error: 'bad_request',
@@ -1819,174 +1880,46 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       }
       const { direction, contractorId, recipientMolId, siteId, expectedDate } = meta.data;
 
-      // Идемпотентность по совокупному хешу пакета (как у upload-waybill).
-      const fileHashes = collected
-        .map((f) => createHash('sha256').update(f.buffer).digest('hex'))
-        .sort();
-      const bundleHash = createHash('sha256').update(fileHashes.join('|')).digest('hex');
-
-      const [existingBundle] = await app.db
-        .select()
-        .from(sourceBundles)
-        .where(eq(sourceBundles.bundleHash, bundleHash))
-        .limit(1);
-      if (existingBundle) {
-        const [existingDoc] = await app.db
-          .select({ id: sourceDocuments.id })
-          .from(sourceDocuments)
-          .where(eq(sourceDocuments.bundleId, existingBundle.id))
-          .limit(1);
-        if (existingDoc) {
-          return UploadDocumentsResponseSchema.parse({
-            bundleId: existingBundle.id,
-            status: existingBundle.status,
-            alreadyExists: true,
-          });
-        }
-        // осиротевший bundle — перезапускаем ниже
-      }
-
-      const [wbSite] = await app.db
-        .select({ code: sites.code })
-        .from(sites)
-        .where(eq(sites.id, siteId))
-        .limit(1);
-      const [wbCp] = contractorId
-        ? await app.db
-            .select({ inn: counterparties.inn, name: counterparties.name })
-            .from(counterparties)
-            .where(eq(counterparties.id, contractorId))
-            .limit(1)
-        : [];
-
-      let bundle: typeof sourceBundles.$inferSelect;
-      if (existingBundle) {
-        const [updated] = await app.db
-          .update(sourceBundles)
-          .set({
-            kind: 'mixed',
-            direction,
-            siteId,
-            contractorId: contractorId ?? null,
-            recipientMolId: recipientMolId ?? null,
-            expectedDate: expectedDate ? new Date(expectedDate) : null,
-            status: 'queued',
-            parseErrorCode: null,
-            parseErrorMessage: null,
-            docCount: 0,
-            createdByUserId: req.user?.id ?? existingBundle.createdByUserId,
-            updatedAt: new Date(),
-          })
-          .where(eq(sourceBundles.id, existingBundle.id))
-          .returning();
-        if (!updated) throw new Error('Failed to update existing source_bundle');
-        bundle = updated;
-      } else {
-        const [inserted] = await app.db
-          .insert(sourceBundles)
-          .values({
-            bundleHash,
-            kind: 'mixed',
-            direction,
-            siteId,
-            contractorId: contractorId ?? null,
-            recipientMolId: recipientMolId ?? null,
-            expectedDate: expectedDate ? new Date(expectedDate) : null,
-            status: 'queued',
-            createdByUserId: req.user?.id ?? null,
-          })
-          .returning();
-        if (!inserted) throw new Error('Failed to insert source_bundles');
-        bundle = inserted;
-      }
-
-      let attachmentsToInsert: Array<{
-        s3Key: string;
-        filename: string;
-        mimeType: string;
-        sizeBytes: number;
-      }>;
-      try {
-        // Параллельная загрузка в S3 (Promise.all сохраняет порядок по индексу).
-        // Раньше файлы лились последовательно в цикле — на пачке это держало
-        // HTTP-ответ десятки секунд и создавало ощущение «зависания».
-        attachmentsToInsert = await Promise.all(
-          collected.map(async (f, i) => {
-            const safeName = f.filename.replace(/[/\\]/g, '_').slice(-100) || `file-${i + 1}.bin`;
-            const s3Key = buildS3Key({
-              site: wbSite ?? null,
-              counterparty: wbCp ?? null,
-              entityType: 'source-documents',
-              entityId: bundle.id,
-              filename: `doc-${i + 1}-${safeName}`,
-            });
-            await putObject(s3Key, f.buffer, f.mimetype || 'application/octet-stream');
-            return {
-              s3Key,
-              filename: safeName,
-              mimeType: f.mimetype || 'application/octet-stream',
-              sizeBytes: f.buffer.length,
-            };
-          }),
-        );
-      } catch (err) {
-        req.log.error({ err }, 's3 putObject failed for documents bundle');
-        await app.db
-          .update(sourceBundles)
-          .set({
-            status: 'parse_failed',
-            parseErrorCode: 'internal_error',
-            parseErrorMessage: 's3_unavailable',
-            updatedAt: new Date(),
-          })
-          .where(eq(sourceBundles.id, bundle.id));
-        return reply.code(503).send({ error: 's3_unavailable', message: 'S3 недоступен' });
-      }
-
-      // Техническая source_document пакета (kind временный, worker её удалит и
-      // развернёт реальные документы по классификации). attachments висят на ней.
-      const now = new Date();
-      const [tech] = await app.db
-        .insert(sourceDocuments)
-        .values({
-          kind: 'transport_waybill',
-          // Служебная запись пакета: воркер удалит её и развернёт реальные
-          // документы. Из /sync, списка и экспорта исключается по флагу.
-          isTechnical: true,
+      const result = await ingestDocumentsBundle(
+        { db: app.db, queue: app.queues.updParse, log: req.log },
+        {
+          files: collected.accepted,
           direction,
-          origin: 'manual_pdf',
-          contractorId: contractorId ?? null,
-          recipientMolId: recipientMolId ?? null,
           siteId,
-          expectedDate: expectedDate ? new Date(expectedDate) : null,
-          status: 'queued',
-          contentHash: bundleHash,
-          originalFilename: collected[0]?.filename ?? null,
-          queuedAt: now,
-          parsedAt: now,
-          bundleId: bundle.id,
-          createdByUserId: req.user?.id ?? null,
-        })
-        .returning();
-      if (!tech) throw new Error('Failed to insert technical source_document');
-
-      await app.db.insert(sourceDocumentAttachments).values(
-        attachmentsToInsert.map((a) => ({
-          sourceDocumentId: tech.id,
-          s3Key: a.s3Key,
-          filename: a.filename,
-          mimeType: a.mimeType,
-          sizeBytes: a.sizeBytes,
-          role: 'original' as const,
-        })),
+          contractorId,
+          recipientMolId,
+          expectedDate,
+          actorUserId: req.user?.id ?? null,
+          dispatch: 'direct',
+          concurrency: 'legacy',
+        },
       );
 
-      // В очередь с mode:'router' — worker направит в handleDocumentRouterJob.
-      await app.queues.updParse.add('parse', { bundleId: bundle.id, mode: 'router' });
+      if (result.outcome === 's3_unavailable') {
+        return reply.code(503).send({ error: 's3_unavailable', message: 'S3 недоступен' });
+      }
+      if (result.outcome === 'cross_scope') {
+        // Раньше здесь молча возвращался чужой пакет: тот же комплект,
+        // загруженный на другой объект или дату, «прилипал» к первой загрузке
+        // и уезжал не тому инспектору.
+        return reply.code(409).send({
+          error: 'cross_scope',
+          message:
+            'Этот же комплект файлов уже загружен на другой объект или дату. ' +
+            'Проверьте выбранный объект и дату поставки.',
+        });
+      }
+      if (result.outcome === 'reused') {
+        return UploadDocumentsResponseSchema.parse({
+          bundleId: result.bundleId,
+          status: result.status,
+          alreadyExists: true,
+        });
+      }
 
       reply.code(201);
       return UploadDocumentsResponseSchema.parse({
-        bundleId: bundle.id,
+        bundleId: result.bundleId,
         status: 'queued',
         alreadyExists: false,
       });

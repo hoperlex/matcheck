@@ -11,17 +11,13 @@ import {
   Spin,
   Tag,
   Typography,
-  Upload,
   message,
 } from 'antd';
 import {
-  InboxOutlined,
-  FileTextOutlined,
   CheckCircleTwoTone,
   CloseCircleTwoTone,
   LoadingOutlined,
 } from '@ant-design/icons';
-import type { UploadFile, UploadProps } from 'antd';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Dayjs } from 'dayjs';
 import type { SourceDirection, ImportItem, ImportResult } from '@matcheck/contracts';
@@ -29,8 +25,7 @@ import { apiUploadDocuments, apiGetImportResult, ApiError } from '../../services
 import { CustomerCounterpartySelect } from './CustomerCounterpartySelect';
 import { ResponsiblePersonSelect } from '../../components/ResponsiblePersonSelect';
 import { SiteSelect } from './SiteSelect';
-
-type FileRow = { uid: string; file: File };
+import { FileDropList, pluralFiles, type FileRow } from './upload/FileDropList';
 
 /**
  * Единый вход «Загрузить документы» (рядом со старыми точечными кнопками).
@@ -117,22 +112,6 @@ export function UploadDocumentsModal({
   const result = resultQuery.data;
   const inProgress =
     inResult && (!result || (result.status !== 'parsed' && result.status !== 'parse_failed'));
-
-  const uploadProps: UploadProps = {
-    accept:
-      'application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,image/jpeg,image/png,image/webp,.pdf,.xlsx,.xls,.jpg,.jpeg,.png,.webp',
-    multiple: true,
-    showUploadList: false,
-    beforeUpload: (file) => {
-      const fileLike = file as unknown as File;
-      setRows((prev) => [
-        ...prev,
-        { uid: `${fileLike.name}-${fileLike.size}-${Date.now()}-${Math.random()}`, file: fileLike },
-      ]);
-      return false;
-    },
-    fileList: [] as UploadFile[],
-  };
 
   async function startUpload() {
     if (!siteId) return;
@@ -272,49 +251,15 @@ export function UploadDocumentsModal({
               />
             </Form.Item>
             <Form.Item label="Файлы (PDF / Excel / фото)" required>
-              <Upload.Dragger {...uploadProps} disabled={uploading}>
-                <p className="ant-upload-drag-icon">
-                  <InboxOutlined />
-                </p>
-                <p className="ant-upload-text">
-                  Перетащите любые документы поставки либо нажмите для выбора
-                </p>
-                <p className="ant-upload-hint">
-                  УПД, накладные, Excel, фото — вперемешку. Можно сразу несколько. Лимит на файл — 10 МБ.
-                </p>
-              </Upload.Dragger>
+              <FileDropList
+                rows={rows}
+                onChange={setRows}
+                disabled={uploading}
+                accept="application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,image/jpeg,image/png,image/webp,.pdf,.xlsx,.xls,.jpg,.jpeg,.png,.webp"
+                hint="УПД, накладные, Excel, фото — вперемешку. Можно сразу несколько. Лимит на файл — 10 МБ."
+              />
             </Form.Item>
           </Form>
-
-          {rows.length > 0 && (
-            <List
-              size="small"
-              bordered
-              dataSource={rows}
-              renderItem={(r) => (
-                <List.Item
-                  actions={[
-                    !uploading ? (
-                      <Button
-                        type="link"
-                        size="small"
-                        key="remove"
-                        onClick={() => setRows((prev) => prev.filter((x) => x.uid !== r.uid))}
-                      >
-                        Убрать
-                      </Button>
-                    ) : null,
-                  ]}
-                >
-                  <List.Item.Meta
-                    avatar={<FileTextOutlined style={{ fontSize: 20 }} />}
-                    title={r.file.name}
-                    description={formatSize(r.file.size)}
-                  />
-                </List.Item>
-              )}
-            />
-          )}
         </>
       )}
     </Modal>
@@ -393,19 +338,4 @@ function statusLabel(status: string): string {
     default:
       return status;
   }
-}
-
-function pluralFiles(n: number): string {
-  const last = n % 10;
-  const lastTwo = n % 100;
-  if (lastTwo >= 11 && lastTwo <= 14) return 'файлов';
-  if (last === 1) return 'файл';
-  if (last >= 2 && last <= 4) return 'файла';
-  return 'файлов';
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} Б`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
-  return `${(bytes / 1024 / 1024).toFixed(2)} МБ`;
 }

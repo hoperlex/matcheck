@@ -1550,7 +1550,7 @@ export const ingestEvents = pgTable(
     bundleId: uuid('bundle_id')
       .notNull()
       .references(() => sourceBundles.id, { onDelete: 'cascade' }),
-    // manual | mail
+    // manual | mail | public
     channel: text('channel').notNull(),
     mailMessageId: uuid('mail_message_id').references(() => mailMessages.id, {
       onDelete: 'set null',
@@ -1561,9 +1561,31 @@ export const ingestEvents = pgTable(
     crossScopeOf: uuid('cross_scope_of').references((): AnyPgColumn => sourceBundles.id, {
       onDelete: 'set null',
     }),
+    // ─── channel='public': отправка с публичной страницы /uploads ───
+    // Непрозрачный идентификатор обращения — единственное, что уходит наружу.
+    // Внутренний bundle_id поставщику не отдаётся: иначе статус-эндпоинт
+    // принимал бы внутренние UUID и, зная чужой id, аноним опрашивал бы
+    // состояние внутренних пакетов.
+    publicTicket: varchar('public_ticket', { length: 32 }),
+    // Анкета отправителя. Данные недоверенные (никто не авторизован) — только
+    // для показа менеджеру и для связи, ни на что в системе не влияют.
+    submitterName: text('submitter_name'),
+    submitterPhone: text('submitter_phone'),
+    submitterIp: text('submitter_ip'),
+    submitterUserAgent: text('submitter_user_agent'),
+    // Имена файлов ИМЕННО ЭТОЙ отправки и вердикт входного фильтра по каждому:
+    // [{ filename, accepted, reason? }]. Пакет может быть переиспользован, а
+    // те же байты внутри могли быть загружены под другими именами — без
+    // манифеста публичный статус раскрыл бы внутреннее имя файла.
+    submissionManifest: jsonb('submission_manifest'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('ingest_events_bundle_idx').on(t.bundleId, t.createdAt)],
+  (t) => [
+    index('ingest_events_bundle_idx').on(t.bundleId, t.createdAt),
+    uniqueIndex('ingest_events_public_ticket_unique')
+      .on(t.publicTicket)
+      .where(sql`${t.publicTicket} is not null`),
+  ],
 );
 
 // ─── Share-tokens (публичные ссылки на просмотр приёмки/отгрузки) ─────────

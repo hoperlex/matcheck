@@ -234,12 +234,32 @@ export const SourceDocumentSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   validation: UpdValidationSchema.nullable(),
+  // Документ пришёл с публичной страницы /uploads (от поставщика).
+  // Признак — наличие ingest_event с channel='public' у КОРНЕВОГО пакета:
+  // накладные router разворачивает в дочерний пакет, и по прямому bundle_id
+  // событие не найдётся. Поле optional: схема используется не только в
+  // detail-роуте, но и в /sync и в PATCH-ответах, а producers, которые его не
+  // считают, не должны падать на валидации ответа.
+  fromSupplierPortal: z.boolean().optional(),
 });
 export type SourceDocument = z.infer<typeof SourceDocumentSchema>;
+
+/** Анкета отправителя публичной загрузки. Недоверенные данные, только показ. */
+export const SourceSubmitterSchema = z.object({
+  name: z.string(),
+  phone: z.string().nullable(),
+  submittedAt: z.string(),
+});
+export type SourceSubmitter = z.infer<typeof SourceSubmitterSchema>;
 
 export const SourceDocumentDetailSchema = SourceDocumentSchema.extend({
   items: z.array(SourceItemSchema),
   attachments: z.array(SourceAttachmentSchema),
+  // Последняя публичная отправка этого комплекта. Заполняется ТОЛЬКО для
+  // admin|manager: GET /source-documents/:id доступен всем аутентифицированным
+  // (включая инспектора и monitor), а телефон отправителя — персональные
+  // данные. Optional по той же причине, что и fromSupplierPortal.
+  submitter: SourceSubmitterSchema.nullable().optional(),
 });
 export type SourceDocumentDetail = z.infer<typeof SourceDocumentDetailSchema>;
 

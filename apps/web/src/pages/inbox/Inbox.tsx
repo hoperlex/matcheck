@@ -17,6 +17,7 @@ import {
   ExclamationCircleOutlined,
   LoadingOutlined,
   MailOutlined,
+  CloudUploadOutlined,
   MinusSquareOutlined,
   PlusSquareOutlined,
   WarningOutlined,
@@ -85,7 +86,10 @@ function pluralizeDoc(n: number): string {
  * (`manual_pdf`) — для пользователя это ничего не значило, а с приходом почты
  * различать источник стало нужно: у почтовых документов не заполнен подрядчик.
  */
-function originLabel(origin: string): string {
+function originLabel(origin: string, fromSupplierPortal?: boolean): string {
+  // Публичная загрузка не отдельный origin (он уходит мобильному клиенту и
+  // менять его enum рискованно) — признак живёт рядом, на событии приёма.
+  if (fromSupplierPortal) return 'От поставщика (по ссылке)';
   switch (origin) {
     case 'mail':
       return 'Из почты';
@@ -732,6 +736,14 @@ export default function InboxPage() {
                       <MailOutlined style={{ color: '#8c8c8c' }} />
                     </Tooltip>
                   )}
+                  {/* Загружен самим поставщиком через публичную ссылку: у таких
+                      документов подрядчик тоже не заполнен, а отправителя видно
+                      в карточке. */}
+                  {r.fromSupplierPortal && (
+                    <Tooltip title="Загружен поставщиком через публичную ссылку">
+                      <CloudUploadOutlined style={{ color: '#8c8c8c' }} />
+                    </Tooltip>
+                  )}
                 </Space>
               );
             },
@@ -842,7 +854,7 @@ export default function InboxPage() {
                 {r.siteName ?? '—'} · {r.contractorName ?? '—'} · {r.supplierName ?? '—'}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {originLabel(r.origin)}
+                {originLabel(r.origin, r.fromSupplierPortal)}
               </Typography.Text>
               <div
                 style={{ position: 'absolute', top: 0, right: 0 }}
