@@ -33,9 +33,6 @@ vi.mock('../../src/domain/storage/s3.path.js', () => ({
   buildS3Key: (o: { entityId: string; filename: string }) => `test/${o.entityId}/${o.filename}`,
 }));
 
-// Фича по умолчанию выключена — включаем до загрузки роутов (env кэшируется).
-process.env.PUBLIC_UPLOAD_ENABLED = 'true';
-
 const { publicUploadRoutes } = await import('../../src/routes/public-upload.js');
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -86,8 +83,7 @@ suite('публичная загрузка документов (реальны�
   const FIELDS = {
     siteId,
     expectedDate: '2026-08-10',
-    submitterName: 'ООО «Ромашка»',
-    submitterPhone: '+7 900 000-00-00',
+    comment: 'две машины, вторая после обеда',
   };
 
   beforeAll(async () => {
@@ -195,17 +191,16 @@ suite('публичная загрузка документов (реальны�
       {
         channel: string;
         public_ticket: string;
-        submitter_name: string;
-        submitter_phone: string;
+        submission_comment: string | null;
+        submitter_ip: string | null;
         submission_manifest: Array<{ filename: string; accepted: boolean }>;
       }[]
-    >`SELECT channel, public_ticket, submitter_name, submitter_phone, submission_manifest
+    >`SELECT channel, public_ticket, submission_comment, submitter_ip, submission_manifest
         FROM ingest_events WHERE bundle_id = ${bundle!.id}`;
     expect(ev).toMatchObject({
       channel: 'public',
       public_ticket: body.ticket,
-      submitter_name: 'ООО «Ромашка»',
-      submitter_phone: '+7 900 000-00-00',
+      submission_comment: 'две машины, вторая после обеда',
     });
     expect(ev!.submission_manifest).toEqual([{ filename: 'upd.pdf', accepted: true }]);
 
@@ -261,14 +256,36 @@ suite('публичная загрузка документов (реальны�
     expect(res.statusCode).toBe(400);
   });
 
-  it('имя из пробелов не проходит', async () => {
-    const res = await upload(onePdf('name'), { ...FIELDS, submitterName: '    ' });
+  it('комментарий необязателен', async () => {
+    const res = await upload(onePdf('nocomment'), { siteId, expectedDate: FIELDS.expectedDate });
+    expect(res.statusCode).toBe(201);
+
+    const [ev] = await sql<{ submission_comment: string | null }[]>`
+      SELECT ie.submission_comment FROM ingest_events ie
+        JOIN source_bundles b ON b.id = ie.bundle_id
+       WHERE b.site_id = ${siteId}`;
+    expect(ev!.submission_comment).toBeNull();
+  });
+
+  it('комментарий из одних пробелов сохраняется как NULL, а не пустой строкой', async () => {
+    // Иначе в карточке документа у менеджера появится пустой тег.
+    const res = await upload(onePdf('blank'), { ...FIELDS, comment: '     ' });
+    expect(res.statusCode).toBe(201);
+
+    const [ev] = await sql<{ submission_comment: string | null }[]>`
+      SELECT ie.submission_comment FROM ingest_events ie
+        JOIN source_bundles b ON b.id = ie.bundle_id
+       WHERE b.site_id = ${siteId}`;
+    expect(ev!.submission_comment).toBeNull();
+  });
+
+  it('слишком длинный комментарий отклоняется', async () => {
+    const res = await upload(onePdf('long'), { ...FIELDS, comment: 'я'.repeat(501) });
     expect(res.statusCode).toBe(400);
   });
 
   it('без даты поставки не принимаем', async () => {
-    const { siteId: s, submitterName, submitterPhone } = FIELDS;
-    const res = await upload(onePdf('nodate'), { siteId: s, submitterName, submitterPhone });
+    const res = await upload(onePdf('nodate'), { siteId });
     expect(res.statusCode).toBe(400);
   });
 
@@ -298,7 +315,28 @@ suite('публичная загрузка документов (реальны�
     expect(mocks.putObject).not.toHaveBeenCalled();
   });
 
-  it('те же файлы на другой объект → 409 и НИ ОДНОГО нового события', async () => {
+  it('разные поставки с разными файлами — два независимых пакета', async () => {
+    // Обычный случай при отправке нескольких машин за один заход: у каждой
+    // поставки свой объект, своя дата и свои документы.
+    const first = await upload(onePdf('load-a', 'upd-a.pdf'));
+    const second = await upload(onePdf('load-b', 'upd-b.pdf'), {
+      ...FIELDS,
+      siteId: otherSiteId,
+      expectedDate: '2026-08-11',
+    });
+    expect([first.statusCode, second.statusCode]).toEqual([201, 201]);
+    expect(second.json().ticket).not.toBe(first.json().ticket);
+
+    const bundles = await sql<{ site_id: string }[]>`
+      SELECT site_id FROM source_bundles WHERE site_id in (${siteId}, ${otherSiteId})`;
+    expect(bundles).toHaveLength(2);
+    expect(await ownEventCount()).toBe(2);
+  });
+
+  it('одинаковый комплект в двух поставках → 409 и НИ ОДНОГО нового события', async () => {
+    // Побайтово одинаковый набор файлов не может относиться к двум поставкам:
+    // bundle_hash уникален глобально. На практике это значит, что человек
+    // приложил один и тот же документ дважды, — и ему об этом говорят.
     await upload(onePdf('cross'));
     const eventsBefore = await ownEventCount();
 
@@ -308,7 +346,7 @@ suite('публичная загрузка документов (реальны�
 
     // ingest_events.bundle_id NOT NULL: привязать отклонённую попытку было бы
     // можно только к ЧУЖОМУ пакету — он бы получил тег «от поставщика» и
-    // чужую анкету. Поэтому событие не пишется вовсе.
+    // чужой комментарий. Поэтому событие не пишется вовсе.
     expect(await ownEventCount()).toBe(eventsBefore);
   });
 

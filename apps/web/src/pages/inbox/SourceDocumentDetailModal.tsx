@@ -365,19 +365,16 @@ export function SourceDocumentDetailModal({
               {sd.supplierName ? (
                 <Tag style={{ marginInlineEnd: 0 }}>Поставщик: {sd.supplierName}</Tag>
               ) : null}
-              {/* Кто прислал документ через публичную ссылку. Приходит только
-                  admin/manager: телефон отправителя — персональные данные. */}
-              {sd.submitter ? (
-                <Tooltip
-                  title={
-                    sd.submitter.phone
-                      ? `Телефон: ${sd.submitter.phone}`
-                      : 'Телефон не указан'
-                  }
-                >
-                  <Tag color="cyan" style={{ marginInlineEnd: 0 }}>
-                    Прислал: {sd.submitter.name}
-                    {sd.submitter.phone ? `, ${sd.submitter.phone}` : ''}
+              {/* Комментарий поставщика к поставке — приходит с публичной
+                  страницы загрузки. Длинный текст обрезаем тегом, целиком
+                  показываем в подсказке. */}
+              {sd.submission?.comment ? (
+                <Tooltip title={sd.submission.comment}>
+                  <Tag
+                    color="cyan"
+                    style={{ marginInlineEnd: 0, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis' }}
+                  >
+                    Комментарий поставщика: {sd.submission.comment}
                   </Tag>
                 </Tooltip>
               ) : null}

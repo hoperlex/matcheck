@@ -27,7 +27,6 @@ import { bundleImportItems, ingestEvents, sites, sourceBundles } from '../db/sch
 import { SYSTEM_SITE_ID } from '../db/schema.js';
 import { collectUploadParts, uploadLimitMessage } from '../domain/sourceDocuments/collect-upload.js';
 import { ingestDocumentsBundle } from '../domain/sourceDocuments/ingest-bundle.js';
-import { loadEnv } from '../lib/env.js';
 
 /** Лимиты публичной загрузки. Строже внутренних: вход открыт всем. */
 const PUBLIC_LIMITS = {
@@ -37,7 +36,10 @@ const PUBLIC_LIMITS = {
   // и при его превышении наружу уходит HTML-413 мимо API — держимся ниже.
   maxTotalBytes: 20 * 1024 * 1024,
   maxFields: 10,
-  maxFieldBytes: 1024,
+  // Лимит применяется к КАЖДОМУ полю по отдельности. Комментарий — 500
+  // символов, и кириллица в UTF-8 занимает по два байта на символ, то есть
+  // до 1000 байт; 2048 берём запасом на эмодзи и прочие многобайтовые символы.
+  maxFieldBytes: 2048,
   maxParts: 25,
 } as const;
 
@@ -77,7 +79,6 @@ function clientIpOf(req: { headers: Record<string, unknown>; ip: string }): stri
 
 export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
-  const env = loadEnv();
 
   /**
    * Глобальный потолок фичи поверх per-IP лимита.
@@ -92,21 +93,15 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
     keyGenerator: () => 'public-upload:global',
   });
 
-  // Выключатель фичи: при PUBLIC_UPLOAD_ENABLED=false роут снаружи выглядит
-  // несуществующим (404, а не 403 — не подтверждаем, что страница есть).
-  const DISABLED = { error: 'not_found', message: 'Страница недоступна' } as const;
-
   // ──────────── Справочник объектов для формы ────────────
   app.get(
     '/api/v1/public/sites',
     {
       // Открытие страницы = один запрос, остальное отдаёт кэш.
       config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
-      schema: { response: { 200: PublicSiteListResponseSchema, 404: ErrorResponseSchema } },
+      schema: { response: { 200: PublicSiteListResponseSchema } },
     },
     async (_req, reply) => {
-      if (!env.PUBLIC_UPLOAD_ENABLED) return reply.code(404).send(DISABLED);
-
       const now = Date.now();
       if (!sitesCache || now - sitesCache.at > SITES_CACHE_TTL_MS) {
         const rows = await app.db
@@ -128,13 +123,14 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
   app.post(
     '/api/v1/public/upload-documents',
     {
-      // Визит поставщика = одна пачка. 5 за 10 минут покрывает ретраи и
-      // водителя с несколькими поставками, но не блокирует офис подрядчика,
-      // сидящий за одним внешним IP. ban не используем: он отдаёт 403, а UI
-      // объясняет пользователю только 429.
+      // Один визит = до 10 поставок, каждая уходит отдельным запросом, плюс
+      // запас на повторы неудачных. Выше не поднимаем: лимит считает запросы,
+      // а каждый запрос — до 20 МБ, то есть 20 на адрес это уже 400 МБ за
+      // десять минут. Офис подрядчика за одним внешним IP при этом не
+      // блокируется. ban не используем: он отдаёт 403, а UI объясняет только 429.
       config: {
         rateLimit: {
-          max: 5,
+          max: 20,
           timeWindow: '10 minutes',
           keyGenerator: (req) => `public-upload:${clientIpOf(req as never)}`,
         },
@@ -143,7 +139,6 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
         response: {
           201: PublicUploadResponseSchema,
           400: ErrorResponseSchema,
-          404: ErrorResponseSchema,
           409: ErrorResponseSchema,
           413: ErrorResponseSchema,
           429: ErrorResponseSchema,
@@ -152,8 +147,6 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
       },
     },
     async (req, reply) => {
-      if (!env.PUBLIC_UPLOAD_ENABLED) return reply.code(404).send(DISABLED);
-
       const globalCheck = await globalUploadLimit(req);
       if (!globalCheck.isAllowed) {
         return reply.code(429).send({
@@ -230,8 +223,7 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
           concurrency: 'reserve',
           publicSubmission: {
             ticket,
-            submitterName: meta.data.submitterName,
-            submitterPhone: meta.data.submitterPhone,
+            comment: meta.data.comment ?? null,
             ip: clientIpOf(req),
             userAgent: (req.headers['user-agent'] as string | undefined) ?? null,
             manifest: [
@@ -292,8 +284,6 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
       },
     },
     async (req, reply) => {
-      if (!env.PUBLIC_UPLOAD_ENABLED) return reply.code(404).send(DISABLED);
-
       // Поиск по тикету, а не по id пакета: так эндпоинт по построению видит
       // только публичные отправки и не может отдать состояние внутренней.
       const [event] = await app.db

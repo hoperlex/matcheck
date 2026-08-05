@@ -60,8 +60,7 @@ describe('publicApi', () => {
       publicUploadDocuments([], {
         siteId: 's',
         expectedDate: '2026-08-10',
-        submitterName: 'ООО Ромашка',
-        submitterPhone: '+70000000000',
+        comment: '',
         website: '',
       }),
     ).rejects.toMatchObject({
@@ -101,8 +100,7 @@ describe('publicApi', () => {
       publicUploadDocuments([], {
         siteId: 's',
         expectedDate: '2026-08-10',
-        submitterName: 'ООО Ромашка',
-        submitterPhone: '+70000000000',
+        comment: '',
         website: '',
       }),
     ).rejects.toMatchObject({

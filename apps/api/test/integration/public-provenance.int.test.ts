@@ -12,8 +12,8 @@
  *     прислали повторно). Обычный LEFT JOIN размножил бы строки документа —
  *     поехали бы пагинация и total.
  *
- * Плюс проверка периметра: анкету отправителя (в ней телефон) видят только
- * admin и manager, хотя сам роут карточки доступен всем аутентифицированным.
+ * Плюс проверка того, что комментарий поставщика доходит до карточки документа
+ * и виден всем, кто вообще видит документ, — персональных данных в нём нет.
  */
 import { randomUUID } from 'node:crypto';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -94,13 +94,13 @@ suite('провенанс публичной загрузки (реальный 
   });
 
   /** Пакет + событие публичной отправки. Возвращает id пакета. */
-  async function publicBundle(hash: string, submitter = 'ООО «Поставщик»'): Promise<string> {
+  async function publicBundle(hash: string, comment = 'две машины, вторая после обеда'): Promise<string> {
     const id = randomUUID();
     await sql`INSERT INTO source_bundles (id, bundle_hash, kind, direction, site_id, status)
       VALUES (${id}, ${hash}, 'mixed', 'inbound', ${siteId}, 'parsed')`;
     await sql`INSERT INTO ingest_events
-        (bundle_id, channel, public_ticket, submitter_name, submitter_phone, submission_manifest)
-      VALUES (${id}, 'public', ${randomUUID().slice(0, 22)}, ${submitter}, '+7 900 111-22-33',
+        (bundle_id, channel, public_ticket, submission_comment, submitter_ip, submission_manifest)
+      VALUES (${id}, 'public', ${randomUUID().slice(0, 22)}, ${comment}, '203.0.113.7',
               ${JSON.stringify([{ filename: 'a.pdf', accepted: true }])}::jsonb)`;
     return id;
   }
@@ -142,7 +142,7 @@ suite('провенанс публичной загрузки (реальный 
     expect(row.fromSupplierPortal).toBe(true);
 
     const card = await detail(docId);
-    expect(card.json().submitter).toMatchObject({ name: 'ООО «Поставщик»' });
+    expect(card.json().submission).toMatchObject({ comment: 'две машины, вторая после обеда' });
   });
 
   it('внутренняя загрузка признака не получает', async () => {
@@ -153,15 +153,15 @@ suite('провенанс публичной загрузки (реальный 
 
     const row = (await list()).json().items.find((r: { id: string }) => r.id === docId);
     expect(row.fromSupplierPortal).toBe(false);
-    expect((await detail(docId)).json().submitter).toBeNull();
+    expect((await detail(docId)).json().submission).toBeNull();
   });
 
   it('две отправки на пакет НЕ дублируют документ в списке', async () => {
-    const bundleId = await publicBundle('hash-twice', 'Первый отправитель');
+    const bundleId = await publicBundle('hash-twice', 'первый комментарий');
     await sql`INSERT INTO ingest_events
-        (bundle_id, channel, public_ticket, submitter_name, submitter_phone, submission_manifest)
-      VALUES (${bundleId}, 'public', ${randomUUID().slice(0, 22)}, 'Второй отправитель',
-              '+7 900 999-88-77', ${JSON.stringify([{ filename: 'b.pdf', accepted: true }])}::jsonb)`;
+        (bundle_id, channel, public_ticket, submission_comment, submitter_ip, submission_manifest)
+      VALUES (${bundleId}, 'public', ${randomUUID().slice(0, 22)}, 'второй комментарий',
+              '203.0.113.8', ${JSON.stringify([{ filename: 'b.pdf', accepted: true }])}::jsonb)`;
     const docId = await document(bundleId);
 
     const body = (await list()).json();
@@ -169,20 +169,21 @@ suite('провенанс публичной загрузки (реальный 
     expect(matches).toHaveLength(1);
     expect(body.total).toBe(1);
 
-    // В карточке — последняя отправка: кто прислал комплект в последний раз.
+    // В карточке — последняя отправка: комментарий из самой свежей.
     const card = await detail(docId);
-    expect(card.json().submitter.name).toBe('Второй отправитель');
+    expect(card.json().submission.comment).toBe('второй комментарий');
   });
 
-  it('инспектору анкета отправителя не отдаётся', async () => {
-    const bundleId = await publicBundle('hash-role');
+  it('инспектор видит комментарий поставщика', async () => {
+    // Контактов больше нет, персональных данных в отправке не осталось —
+    // комментарий про поставку инспектору на объекте как раз полезен.
+    const bundleId = await publicBundle('hash-role', 'машина после обеда');
     const docId = await document(bundleId);
 
     currentUser = inspector;
     const card = await detail(docId);
     expect(card.statusCode).toBe(200);
-    // Признак «от поставщика» безобиден, а телефон — персональные данные.
     expect(card.json().fromSupplierPortal).toBe(true);
-    expect(card.json().submitter).toBeNull();
+    expect(card.json().submission.comment).toBe('машина после обеда');
   });
 });

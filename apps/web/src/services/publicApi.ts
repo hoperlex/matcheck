@@ -78,8 +78,8 @@ export async function publicUploadDocuments(
   fields: {
     siteId: string;
     expectedDate: string;
-    submitterName: string;
-    submitterPhone: string;
+    /** Свободный комментарий к поставке; пустая строка = без комментария. */
+    comment: string;
     /** Honeypot: всегда пустая строка у человека. */
     website: string;
   },

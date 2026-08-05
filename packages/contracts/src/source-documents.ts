@@ -244,22 +244,21 @@ export const SourceDocumentSchema = z.object({
 });
 export type SourceDocument = z.infer<typeof SourceDocumentSchema>;
 
-/** Анкета отправителя публичной загрузки. Недоверенные данные, только показ. */
-export const SourceSubmitterSchema = z.object({
-  name: z.string(),
-  phone: z.string().nullable(),
+/** Публичная отправка: комментарий поставщика и время. Недоверенный текст. */
+export const SourceSubmissionSchema = z.object({
+  comment: z.string().nullable(),
   submittedAt: z.string(),
 });
-export type SourceSubmitter = z.infer<typeof SourceSubmitterSchema>;
+export type SourceSubmission = z.infer<typeof SourceSubmissionSchema>;
 
 export const SourceDocumentDetailSchema = SourceDocumentSchema.extend({
   items: z.array(SourceItemSchema),
   attachments: z.array(SourceAttachmentSchema),
-  // Последняя публичная отправка этого комплекта. Заполняется ТОЛЬКО для
-  // admin|manager: GET /source-documents/:id доступен всем аутентифицированным
-  // (включая инспектора и monitor), а телефон отправителя — персональные
-  // данные. Optional по той же причине, что и fromSupplierPortal.
-  submitter: SourceSubmitterSchema.nullable().optional(),
+  // Последняя публичная отправка этого комплекта: комментарий поставщика и
+  // время. Персональных данных здесь нет, поэтому доступно всем, кто видит
+  // документ. Optional по той же причине, что и fromSupplierPortal: схема
+  // используется ещё и в /sync, и в PATCH-ответах, где поле не считается.
+  submission: SourceSubmissionSchema.nullable().optional(),
 });
 export type SourceDocumentDetail = z.infer<typeof SourceDocumentDetailSchema>;
 

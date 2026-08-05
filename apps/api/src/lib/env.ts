@@ -86,19 +86,6 @@ const envSchema = z.object({
   // приёмки и фото не затрагиваются; письма в разборе не удаляются никогда.
   MAIL_RETENTION_DAYS: z.coerce.number().int().min(0).default(0),
 
-  // Публичная страница загрузки документов поставщиком (/uploads).
-  //
-  // Главный выключатель фичи: при false все три роута /api/v1/public/*
-  // отдают 404, будто их нет. Нужен как реакция на абьюз — вход открыт всему
-  // интернету, и выключить его надо уметь без выката образа.
-  //
-  // Парсер явный, НЕ z.coerce.boolean(): тот превращает в true любую непустую
-  // строку, включая "false" — то есть попытка выключить фичу включила бы её.
-  PUBLIC_UPLOAD_ENABLED: z
-    .enum(['true', 'false'])
-    .default('false')
-    .transform((v) => v === 'true'),
-
   // S3 (cloud.ru)
   S3_ENDPOINT: z.string().url().optional(),
   S3_REGION: z.string().default('ru-central-1'),

@@ -144,12 +144,12 @@ describe('collectUploadParts — поля и файлы за один прохо
   it('поля возвращаются вместе с файлами', async () => {
     const res = await run(
       'strict',
-      { siteId: 'S-1', expectedDate: '2026-08-06', submitterName: 'ООО Ромашка' },
+      { siteId: 'S-1', expectedDate: '2026-08-06', comment: 'вторая машина' },
       [{ field: 'files', filename: 'a.pdf', contentType: 'application/pdf', content: pdf() }],
     );
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.fields).toMatchObject({ siteId: 'S-1', submitterName: 'ООО Ромашка' });
+    expect(res.fields).toMatchObject({ siteId: 'S-1', comment: 'вторая машина' });
     expect(res.accepted).toHaveLength(1);
   });
 

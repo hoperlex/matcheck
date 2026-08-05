@@ -1080,21 +1080,16 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         fromSupplierPortal: row.fromSupplierPortal,
       });
 
-      // Кто прислал документ через публичную страницу. Телефон отправителя —
-      // персональные данные, а этот роут висит на голом authenticate: его
-      // видят и инспектор своего объекта, и monitor. Отдаём только тем, кто
-      // реально работает с поставщиками.
-      let submitter: { name: string; phone: string | null; submittedAt: string } | null = null;
-      if (
-        row.fromSupplierPortal &&
-        (req.user?.role === 'admin' || req.user?.role === 'manager')
-      ) {
+      // Комментарий поставщика к поставке. Персональных данных здесь нет
+      // (контактные поля убраны миграцией 0082), поэтому отдаём всем, кто
+      // вообще видит документ — инспектору на объекте он тоже полезен.
+      let submission: { comment: string | null; submittedAt: string } | null = null;
+      if (row.fromSupplierPortal) {
         // Отправок на одном пакете может быть несколько (тот же комплект
         // прислали повторно) — показываем последнюю.
         const [ev] = await app.db
           .select({
-            name: ingestEvents.submitterName,
-            phone: ingestEvents.submitterPhone,
+            comment: ingestEvents.submissionComment,
             createdAt: ingestEvents.createdAt,
           })
           .from(ingestEvents)
@@ -1110,12 +1105,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           )
           .orderBy(desc(ingestEvents.createdAt))
           .limit(1);
-        if (ev?.name) {
-          submitter = {
-            name: ev.name,
-            phone: ev.phone,
-            submittedAt: ev.createdAt.toISOString(),
-          };
+        if (ev) {
+          submission = { comment: ev.comment, submittedAt: ev.createdAt.toISOString() };
         }
       }
 
@@ -1124,7 +1115,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         validation: liveValidation,
         items: items.map(itemDto),
         attachments: attachments.map(attachmentDto),
-        submitter,
+        submission,
       };
     },
   );

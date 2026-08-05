@@ -44,10 +44,10 @@ import {
 
 export type IngestFile = { filename: string; mimeType: string; buffer: Buffer };
 
-/** Анкета публичной отправки. Данные недоверенные — только аудит и показ. */
+/** Публичная отправка. Данные недоверенные — только аудит и показ. */
 export type PublicSubmission = {
-  submitterName: string;
-  submitterPhone: string | null;
+  /** Свободный комментарий поставщика к этой поставке; null — не заполнен. */
+  comment: string | null;
   ip: string | null;
   userAgent: string | null;
   /** Судьба файлов ИМЕННО ЭТОЙ отправки по входному фильтру. */
@@ -125,8 +125,7 @@ async function recordPublicSubmission(
     bundleId,
     channel: 'public',
     publicTicket: submission.ticket,
-    submitterName: submission.submitterName,
-    submitterPhone: submission.submitterPhone,
+    submissionComment: submission.comment,
     submitterIp: submission.ip,
     submitterUserAgent: submission.userAgent,
     submissionManifest: submission.manifest,
@@ -424,8 +423,7 @@ export async function ingestDocumentsBundle(
           bundleId: bundle.id,
           channel: 'public',
           publicTicket: publicSubmission.ticket,
-          submitterName: publicSubmission.submitterName,
-          submitterPhone: publicSubmission.submitterPhone,
+          submissionComment: publicSubmission.comment,
           submitterIp: publicSubmission.ip,
           submitterUserAgent: publicSubmission.userAgent,
           submissionManifest: publicSubmission.manifest,
