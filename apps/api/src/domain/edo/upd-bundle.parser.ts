@@ -21,7 +21,7 @@ import type { UpdPdfParsed } from '@matcheck/contracts';
 import { db } from '../../db/client.js';
 import { llmProviders, llmProviderCredentials } from '../../db/schema.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
-import { loadActivePromptWithMeta } from '../prompts/registry.js';
+import { resolvePrompt, type PromptOverride } from '../prompts/registry.js';
 import { prefilterUpdPages } from './upd-page-prefilter.js';
 import {
   MAX_PAGES_FOR_OPENROUTER,
@@ -100,9 +100,12 @@ function buildVisionPromptText(content: string): string {
  */
 export async function tryParseUpdBundle(
   buffer: Buffer,
-  ctx: { sourceDocumentId: string | null },
+  ctx: {
+    sourceDocumentId: string | null;
+    /** Только для офлайн-сверки версий промпта (scripts/upd-prompt-ab.ts). */
+    promptOverride?: PromptOverride;
+  },
 ): Promise<UpdBundleResult | null> {
-  void ctx; // зарезервировано под будущее persist subdocs/llm_calls
 
   // ── дешёвый гейт: только многостраничные PDF могут быть пакетом УПД ──
   // Одностраничные (самый частый случай скана) выходят здесь же, до рендера
@@ -162,7 +165,9 @@ export async function tryParseUpdBundle(
     if (png) pngByPage.set(p, png);
   });
 
-  const promptText = buildVisionPromptText((await loadActivePromptWithMeta('upd')).content);
+  const promptText = buildVisionPromptText(
+    (await resolvePrompt('upd', ctx.promptOverride)).content,
+  );
 
   // ── извлечение каждого УПД по своей группе страниц ──
   const subdocs: ParsedUpdSubdocument[] = [];
@@ -176,7 +181,7 @@ export async function tryParseUpdBundle(
         apiBaseUrl: cred.apiBaseUrl,
         apiKey,
         model: provider.model,
-        temperature: Number(provider.temperature ?? 0.2),
+        temperature: ctx.promptOverride?.temperature ?? Number(provider.temperature ?? 0.2),
         maxTokens: provider.maxTokens ?? 8192,
         promptText,
       });
@@ -204,6 +209,7 @@ export async function tryParseUpdBundle(
     itemsCount: agg.itemsCount,
     supplier: agg.supplier,
     recipient: agg.recipient,
+    consignee: agg.consignee,
     items: agg.items,
     confidence: agg.confidence,
   };

@@ -62,6 +62,21 @@ function clean(s: string | null | undefined): string | null {
   return t.length ? t : null;
 }
 
+/**
+ * Отрезает адрес от названия в графах вида «наименование и его адрес».
+ *
+ * Форма 1137 печатает грузоотправителя и грузополучателя одной строкой:
+ * «ООО "СУ-10", Россия, 117335, Город Москва, ул. Вавилова, дом 69/75, …».
+ * Название юрлица идёт первым и заканчивается на первой запятой — дальше
+ * всегда адрес. В названиях запятая практически не встречается (кавычки,
+ * дефисы — да), поэтому режем по первой.
+ */
+function nameBeforeAddress(s: string | null): string | null {
+  if (!s) return null;
+  const head = s.split(',')[0];
+  return clean(head);
+}
+
 // Разбивает строку с N числами на ровно `count` частей. Учитывает русский
 // формат «1 992.33» (пробел как разделитель тысяч). При неоднозначности
 // выбирает разбиение, лучше всего удовлетворяющее арифметической связи
@@ -168,8 +183,12 @@ export function parseUpdText(text: string): UpdPdfParsed {
   }
 
   // Продавец / Покупатель — название (single-line, c опциональным тегом «(2)» / «(6)»).
+  // Грузополучатель (графа 4) идёт в форме между ними и печатается ВМЕСТЕ с
+  // адресом одной строкой: «Грузополучатель и его адрес ООО "СУ-10", Россия,
+  // 117335, Город Москва, …». ИНН у этой графы формой не предусмотрен.
   let supplierName: string | null = null;
   let recipientName: string | null = null;
+  let consigneeName: string | null = null;
   for (const line of lines) {
     if (!supplierName) {
       const m = /^Продавец\s+(.+?)(?:\s*\(2\))?$/.exec(line);
@@ -179,8 +198,15 @@ export function parseUpdText(text: string): UpdPdfParsed {
       const m = /^Покупатель\s+(.+?)(?:\s*\(6\))?$/.exec(line);
       if (m?.[1]) recipientName = clean(m[1]);
     }
-    if (supplierName && recipientName) break;
+    if (!consigneeName) {
+      const m = /^Грузополучатель(?:\s+и\s+его\s+адрес)?\s+(.+?)(?:\s*\(4\))?$/.exec(line);
+      if (m?.[1]) consigneeName = nameBeforeAddress(clean(m[1]));
+    }
+    if (supplierName && recipientName && consigneeName) break;
   }
+  // «он же» в графе 4 отсылает к покупателю (графа 6) — так эту пометку
+  // печатает 1С, когда товар едет самому покупателю.
+  if (consigneeName && /^он\s+же$/i.test(consigneeName)) consigneeName = recipientName;
 
   // ИНН/КПП: маркер (2б) — поставщик, (6б) — получатель.
   let supplierInn: string | null = null;
@@ -359,6 +385,9 @@ export function parseUpdText(text: string): UpdPdfParsed {
       recipientInn || recipientName
         ? { inn: recipientInn, kpp: recipientKpp, name: recipientName }
         : null,
+    // Графа 4 идёт без ИНН — сторона уезжает в consignee_name_raw, FK у неё
+    // не будет (см. schema.ts, sourceDocuments.consigneeId).
+    consignee: consigneeName ? { inn: null, kpp: null, name: consigneeName } : null,
     items,
     confidence,
   };

@@ -152,6 +152,7 @@ export type AggregatedUpdDocument = {
   itemsCount: number;
   supplier: UpdPdfParsed['supplier'];
   recipient: UpdPdfParsed['recipient'];
+  consignee: UpdPdfParsed['consignee'];
   items: UpdPdfItem[];
   confidence: number;
   subdocs: AggregatedSubdocMeta[];
@@ -256,6 +257,7 @@ export function aggregateUpdDocuments(
   };
   const supplier = resolveParty((d) => d.supplier, 'suppliers');
   const recipient = resolveParty((d) => d.recipient, 'recipients');
+  const consignee = resolveParty((d) => d.consignee, 'consignees');
 
   // confidence — консервативно минимум по субдокументам.
   const confidence = Math.min(...ordered.map((d) => d.confidence));
@@ -268,6 +270,7 @@ export function aggregateUpdDocuments(
     itemsCount: items.length,
     supplier,
     recipient,
+    consignee,
     items,
     confidence,
     subdocs,

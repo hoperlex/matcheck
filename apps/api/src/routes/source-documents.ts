@@ -90,6 +90,8 @@ const SORT_FIELDS = [
   'expectedDate',
   'siteName',
   'contractorName',
+  'buyerName',
+  'consigneeName',
   'supplierName',
   'vatSum',
   'totalSum',
@@ -226,6 +228,11 @@ type SdNames = {
   recipientName?: string | null;
   recipientMolName?: string | null;
   siteName?: string | null;
+  // Стороны самого документа. Имя приходит из COALESCE(*_name_raw, имя
+  // контрагента): графу 4 печатают без ИНН, и тогда FK у стороны нет,
+  // а показать её всё равно нужно.
+  buyerName?: string | null;
+  consigneeName?: string | null;
   // Email и телефон автора УПД (того, кто загрузил через /upload-upd*).
   // Для EDO/mail-полученных — null. Используется мобильным клиентом
   // для кнопки звонка в шапке списка материалов.
@@ -271,6 +278,10 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     recipientName: names.recipientName ?? null,
     recipientMolName: names.recipientMolName ?? null,
     siteName: names.siteName ?? null,
+    buyerId: sd.buyerId,
+    buyerName: names.buyerName ?? sd.buyerNameRaw ?? null,
+    consigneeId: sd.consigneeId,
+    consigneeName: names.consigneeName ?? sd.consigneeNameRaw ?? null,
     createdByUserId: sd.createdByUserId,
     createdByUserEmail: names.createdByUserEmail ?? null,
     createdByUserPhone: names.createdByUserPhone ?? null,
@@ -344,7 +355,8 @@ async function loadSdNames(
   app: any,
   sd: typeof sourceDocuments.$inferSelect,
 ): Promise<SdNames> {
-  const [supplier, contractor, recipient, mol, site, createdBy] = await Promise.all([
+  const [supplier, contractor, recipient, buyer, consignee, mol, site, createdBy] =
+    await Promise.all([
     // Поставщик: приоритет — справочник `suppliers` (для распознанных УПД
     // после миграции 0064). Fallback — counterparties (исторические УПД и
     // manual XML). Один из ID должен быть заполнен; если оба null — supplier
@@ -376,6 +388,23 @@ async function loadSdNames(
           .where(eq(counterparties.id, sd.recipientId))
           .limit(1)
       : Promise.resolve([] as { name: string }[]),
+    // Стороны документа: запрашиваем имя только когда сторона нормализована.
+    // Если ИНН в документе не было, FK пустой — имя возьмётся из *_name_raw
+    // ниже, в sdRow.
+    sd.buyerId
+      ? app.db
+          .select({ name: counterparties.name })
+          .from(counterparties)
+          .where(eq(counterparties.id, sd.buyerId))
+          .limit(1)
+      : Promise.resolve([] as { name: string }[]),
+    sd.consigneeId
+      ? app.db
+          .select({ name: counterparties.name })
+          .from(counterparties)
+          .where(eq(counterparties.id, sd.consigneeId))
+          .limit(1)
+      : Promise.resolve([] as { name: string }[]),
     sd.recipientMolId
       ? app.db
           .select({ name: responsiblePersons.fullName })
@@ -402,6 +431,10 @@ async function loadSdNames(
     supplierName: supplier[0]?.name ?? null,
     contractorName: contractor[0]?.name ?? null,
     recipientName: recipient[0]?.name ?? null,
+    // Источник истины — распознанный текст; имя контрагента лишь fallback для
+    // исторических строк, где *_name_raw пуст (см. бэкфилл в миграции 0083).
+    buyerName: sd.buyerNameRaw ?? buyer[0]?.name ?? null,
+    consigneeName: sd.consigneeNameRaw ?? consignee[0]?.name ?? null,
     recipientMolName: mol[0]?.name ?? null,
     siteName: site[0]?.name ?? null,
     createdByUserEmail: createdBy[0]?.email ?? null,
@@ -657,6 +690,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       const supplierDir = alias(suppliers, 'supplier_dir');
       const contractor = alias(counterparties, 'contractor');
       const recipient = alias(counterparties, 'recipient');
+      // Стороны документа: покупатель (графа 6) и грузополучатель (графа 4).
+      const buyer = alias(counterparties, 'buyer');
+      const consignee = alias(counterparties, 'consignee');
       // Волна 1C — динамическая сортировка (совпадает с клиентскими sorter'ами:
       // приоритет для kind/status, NULLS LAST, tie-breaker по id для детерминизма).
       // Без sort — прежний порядок parsed_at DESC (+ id).
@@ -671,6 +707,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         expectedDate: drSql`${sourceDocuments.expectedDate}`,
         siteName: drSql`${sites.name}`,
         contractorName: drSql`${contractor.name}`,
+        // Сортируем по тому же выражению, что показываем.
+        buyerName: drSql`coalesce(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
+        consigneeName: drSql`coalesce(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
         supplierName: drSql`coalesce(${supplierDir.name}, ${supplier.name})`,
         vatSum: drSql`${sourceDocuments.vatSum}`,
         totalSum: drSql`${sourceDocuments.totalSum}`,
@@ -686,6 +725,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           supplierName: drSql<string | null>`COALESCE(${supplierDir.name}, ${supplier.name})`,
           contractorName: contractor.name,
           recipientName: recipient.name,
+          // Показываем распознанный текст, имя контрагента — fallback для
+          // исторических строк (бэкфилл миграции 0083 заполнил только FK).
+          buyerName: drSql<string | null>`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
+          consigneeName: drSql<string | null>`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
           recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
           fromSupplierPortal: fromSupplierPortalSql,
@@ -695,6 +738,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .leftJoin(supplierDir, eq(sourceDocuments.supplierDirectoryId, supplierDir.id))
         .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
         .leftJoin(recipient, eq(sourceDocuments.recipientId, recipient.id))
+        .leftJoin(buyer, eq(sourceDocuments.buyerId, buyer.id))
+        .leftJoin(consignee, eq(sourceDocuments.consigneeId, consignee.id))
         .leftJoin(
           responsiblePersons,
           eq(sourceDocuments.recipientMolId, responsiblePersons.id),
@@ -714,6 +759,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             supplierName: r.supplierName,
             contractorName: r.contractorName,
             recipientName: r.recipientName,
+            buyerName: r.buyerName,
+            consigneeName: r.consigneeName,
             recipientMolName: r.recipientMolName,
             siteName: r.siteName,
             fromSupplierPortal: r.fromSupplierPortal,
@@ -837,17 +884,24 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         const supplier = alias(counterparties, 'supplier');
         const supplierDir = alias(suppliers, 'supplier_dir');
         const contractor = alias(counterparties, 'contractor');
+        // Стороны документа — те же колонки, что на экране Документов.
+        const buyer = alias(counterparties, 'buyer');
+        const consignee = alias(counterparties, 'consignee');
         const rows = await app.db
           .select({
             sd: sourceDocuments,
             supplierName: drSql<string | null>`COALESCE(${supplierDir.name}, ${supplier.name})`,
             contractorName: contractor.name,
+            buyerName: drSql<string | null>`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
+            consigneeName: drSql<string | null>`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
             siteName: sites.name,
           })
           .from(sourceDocuments)
           .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
           .leftJoin(supplierDir, eq(sourceDocuments.supplierDirectoryId, supplierDir.id))
           .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
+          .leftJoin(buyer, eq(sourceDocuments.buyerId, buyer.id))
+          .leftJoin(consignee, eq(sourceDocuments.consigneeId, consignee.id))
           .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
           .where(and(...conditions))
           .orderBy(desc(sourceDocuments.parsedAt));
@@ -884,7 +938,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           { header: 'Дата', key: 'docDate', width: 12 },
           { header: 'Дата поставки', key: 'expectedDate', width: 14 },
           { header: 'Объект', key: 'siteName', width: 24 },
-          { header: 'Подрядчик', key: 'contractorName', width: 28 },
+          { header: 'Покупатель', key: 'buyerName', width: 28 },
+          { header: 'Грузополучатель', key: 'consigneeName', width: 28 },
           { header: 'Поставщик', key: 'supplierName', width: 28 },
           { header: 'Наименование', key: 'nameRaw', width: 40 },
           { header: 'Кол-во', key: 'qty', width: 10 },
@@ -922,7 +977,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             docDate: fmtDateRu(sd.docDate),
             expectedDate: fmtDateRu(sd.expectedDate),
             siteName: r.siteName ?? '',
-            contractorName: r.contractorName ?? '',
+            buyerName: r.buyerName ?? '',
+            consigneeName: r.consigneeName ?? '',
             supplierName: r.supplierName ?? '',
             nameRaw: '',
             qty: null,
@@ -950,7 +1006,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
               docDate: '',
               expectedDate: '',
               siteName: '',
-              contractorName: '',
+              buyerName: '',
+              consigneeName: '',
               supplierName: '',
               nameRaw: it.nameRaw,
               qty: Number(it.qty),
@@ -1005,12 +1062,19 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       const supplierDir = alias(suppliers, 'supplier_dir');
       const contractor = alias(counterparties, 'contractor');
       const recipient = alias(counterparties, 'recipient');
+      // Стороны документа: покупатель (графа 6) и грузополучатель (графа 4).
+      const buyer = alias(counterparties, 'buyer');
+      const consignee = alias(counterparties, 'consignee');
       const [row] = await app.db
         .select({
           sd: sourceDocuments,
           supplierName: drSql<string | null>`COALESCE(${supplierDir.name}, ${supplier.name})`,
           contractorName: contractor.name,
           recipientName: recipient.name,
+          // Показываем распознанный текст, имя контрагента — fallback для
+          // исторических строк (бэкфилл миграции 0083 заполнил только FK).
+          buyerName: drSql<string | null>`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
+          consigneeName: drSql<string | null>`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
           recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
           fromSupplierPortal: fromSupplierPortalSql,
@@ -1020,6 +1084,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .leftJoin(supplierDir, eq(sourceDocuments.supplierDirectoryId, supplierDir.id))
         .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
         .leftJoin(recipient, eq(sourceDocuments.recipientId, recipient.id))
+        .leftJoin(buyer, eq(sourceDocuments.buyerId, buyer.id))
+        .leftJoin(consignee, eq(sourceDocuments.consigneeId, consignee.id))
         .leftJoin(
           responsiblePersons,
           eq(sourceDocuments.recipientMolId, responsiblePersons.id),
@@ -1075,6 +1141,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         supplierName: row.supplierName,
         contractorName: row.contractorName,
         recipientName: row.recipientName,
+        buyerName: row.buyerName,
+        consigneeName: row.consigneeName,
         recipientMolName: row.recipientMolName,
         siteName: row.siteName,
         fromSupplierPortal: row.fromSupplierPortal,

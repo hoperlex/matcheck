@@ -1197,6 +1197,13 @@
               "null"
             ]
           },
+          "confirmedByMolAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
           "comment": {
             "type": [
               "string",
@@ -3377,6 +3384,13 @@
               "null"
             ]
           },
+          "confirmedByMolAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
           "comment": {
             "type": [
               "string",
@@ -4994,6 +5008,32 @@
               "null"
             ]
           },
+          "buyerId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "buyerName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "consigneeId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "consigneeName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "createdByUserId": {
             "type": [
               "string",
@@ -5225,6 +5265,9 @@
               "checkedAt",
               "checks"
             ]
+          },
+          "fromSupplierPortal": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -5358,6 +5401,32 @@
               "null"
             ]
           },
+          "buyerId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "buyerName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "consigneeId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "consigneeName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "createdByUserId": {
             "type": [
               "string",
@@ -5589,6 +5658,9 @@
               "checkedAt",
               "checks"
             ]
+          },
+          "fromSupplierPortal": {
+            "type": "boolean"
           },
           "items": {
             "type": "array",
@@ -5748,6 +5820,27 @@
                 "role"
               ]
             }
+          },
+          "submission": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "comment": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "submittedAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "comment",
+              "submittedAt"
+            ]
           }
         },
         "required": [
@@ -5883,6 +5976,32 @@
                   ]
                 },
                 "siteName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "buyerId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "buyerName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "consigneeId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "consigneeName": {
                   "type": [
                     "string",
                     "null"
@@ -6119,6 +6238,9 @@
                     "checkedAt",
                     "checks"
                   ]
+                },
+                "fromSupplierPortal": {
+                  "type": "boolean"
                 }
               },
               "required": [
@@ -6234,6 +6356,10 @@
           "contentType": {
             "type": "string",
             "default": "image/jpeg"
+          },
+          "takenAt": {
+            "type": "string",
+            "maxLength": 64
           },
           "thumbContentHash": {
             "type": "string",
@@ -8154,6 +8280,32 @@
                     "null"
                   ]
                 },
+                "buyerId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "buyerName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "consigneeId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "consigneeName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "createdByUserId": {
                   "type": [
                     "string",
@@ -8386,6 +8538,9 @@
                     "checks"
                   ]
                 },
+                "fromSupplierPortal": {
+                  "type": "boolean"
+                },
                 "items": {
                   "type": "array",
                   "items": {
@@ -8544,6 +8699,27 @@
                       "role"
                     ]
                   }
+                },
+                "submission": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "comment": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "submittedAt": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "comment",
+                    "submittedAt"
+                  ]
                 }
               },
               "required": [

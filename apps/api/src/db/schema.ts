@@ -558,6 +558,23 @@ export const sourceDocuments = pgTable(
     recipientMolId: uuid('recipient_mol_id').references(() => responsiblePersons.id, {
       onDelete: 'set null',
     }),
+    // ─── Стороны САМОГО документа (распознаются), а не операционные получатели ───
+    //
+    // recipient_id и contractor_id выбирает человек: первый — получатель
+    // отгрузки, второй — подрядчик на объекте, и на нём висят права роли
+    // contractor, ключ идемпотентности пакета и путь в S3. Покупатель и
+    // грузополучатель из шапки УПД — совсем другая сущность, поэтому у них
+    // свои колонки.
+    //
+    // *_name_raw — источник истины, а FK лишь нормализация: графу 4 печатают
+    // без ИНН («Грузополучатель и его адрес ООО "СУ-10", Россия, …»), а
+    // counterparties.inn NOT NULL — связать такую сторону не с чем.
+    buyerId: uuid('buyer_id').references(() => counterparties.id, { onDelete: 'set null' }),
+    buyerNameRaw: text('buyer_name_raw'),
+    consigneeId: uuid('consignee_id').references(() => counterparties.id, {
+      onDelete: 'set null',
+    }),
+    consigneeNameRaw: text('consignee_name_raw'),
     siteId: uuid('site_id').references(() => sites.id, { onDelete: 'set null' }),
     docNumber: text('doc_number'),
     docDate: timestamp('doc_date', { withTimezone: false, mode: 'date' }),

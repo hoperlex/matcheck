@@ -8,6 +8,7 @@ import type {
 } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api } from '../../services/api';
+import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { useAuthStore } from '../../stores/auth';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
@@ -168,12 +169,12 @@ export function LinkSourceDocumentModal({
             {
               title: 'Поставщик',
               key: 'supplier',
-              render: (_: unknown, r: SourceDocument) => r.supplierName ?? '—',
+              render: (_: unknown, r: SourceDocument) => shortenCounterpartyName(r.supplierName),
             },
             {
               title: 'Подрядчик',
               key: 'contractor',
-              render: (_: unknown, r: SourceDocument) => r.contractorName ?? '—',
+              render: (_: unknown, r: SourceDocument) => shortenCounterpartyName(r.contractorName),
             },
             {
               title: 'Объект',

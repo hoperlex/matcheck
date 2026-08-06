@@ -36,3 +36,22 @@ export async function loadActivePrompt(docKind: PromptDocKind): Promise<string> 
   const p = await loadActivePromptWithMeta(docKind);
   return p.content;
 }
+
+/**
+ * Промпт и температура, заданные в обход БД.
+ *
+ * Нужны ровно одному потребителю — scripts/upd-prompt-ab.ts, который гоняет
+ * две версии промпта по корпусу и сравнивает результат. Без этого сверить
+ * новую версию можно было бы только сделав её активной, то есть на проде.
+ *
+ * Боевые пути override не передают: undefined = прежнее поведение (активный
+ * промпт из БД, температура из настроек провайдера).
+ */
+export type PromptOverride = { prompt?: ActivePrompt; temperature?: number };
+
+export async function resolvePrompt(
+  docKind: PromptDocKind,
+  override?: PromptOverride,
+): Promise<ActivePrompt> {
+  return override?.prompt ?? (await loadActivePromptWithMeta(docKind));
+}

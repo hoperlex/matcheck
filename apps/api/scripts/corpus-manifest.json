@@ -1,0 +1,501 @@
+{
+  "note": "Манифест корпуса для scripts/upd-prompt-ab.ts. Правьте руками и ставьте source: \"manual\" — такие строки генератор не перезаписывает. kind: unknown у сканов и фото — их тип надо проставить глазами, иначе они не попадут в сверку.",
+  "entries": [
+    {
+      "filename": "1221312.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "1697.pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "text:ambiguous"
+    },
+    {
+      "filename": "201_2112636922_202606260947_117572_PRINTER2.TXT.pdf",
+      "kind": "upd",
+      "parsePath": "multi_upd",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:5"
+    },
+    {
+      "filename": "5303397567129394215.jpg",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "image"
+    },
+    {
+      "filename": "85072371.PDF",
+      "kind": "transport_waybill",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "text:tn"
+    },
+    {
+      "filename": "IMG_0001 (1).pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "text:ambiguous"
+    },
+    {
+      "filename": "IMG_0002 (1).pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "text:ambiguous"
+    },
+    {
+      "filename": "scanlite3.pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "pdf:scan; textLen:12"
+    },
+    {
+      "filename": "Алия.pdf",
+      "kind": "upd",
+      "parsePath": "multi_upd",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:15"
+    },
+    {
+      "filename": "М-15 № 168 от 26.06.2026 г. на отпуск материалов Алюпром-Алюспэйс .pdf",
+      "kind": "m15",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "pdf:scan; name:m15; textLen:12"
+    },
+    {
+      "filename": "М-15 № 170 от 26.06.2026 г. на отпуск материалов Алюпром-Алюспэйс .pdf",
+      "kind": "m15",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "text:ambiguous; name:m15"
+    },
+    {
+      "filename": "Реализация товаров и услуг № 22083 от 25 июня 2026 г .XLS",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "Реализация товаров и услуг № 22160 от 26 июня 2026 г .XLS",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "Су-10 06.07..pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "pdf:scan; textLen:51"
+    },
+    {
+      "filename": "Су-10 06.07.pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "pdf:scan; textLen:51"
+    },
+    {
+      "filename": "Су-10 Алюспэйс фрнарь 001.jpg",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "image"
+    },
+    {
+      "filename": "Су-10 Фридриха Энгельса 22.06..pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "pdf:scan; textLen:77"
+    },
+    {
+      "filename": "Т56532_20260622112337_Подтверждение_отгрузки.XLSX",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "Т56822_20260623075352_Подтверждение_отгрузки.XLSX",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "Т57292_20260624073054_Подтверждение_отгрузки.XLSX",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "ТранспортнаяНакладнаяУПД Реализация товаров и услуг №ТН0006251866.pdf",
+      "kind": "transport_waybill",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "text:tn"
+    },
+    {
+      "filename": "ТранспортнаяНакладнаяУПД Реализация товаров и услуг №ТН0006281148.pdf",
+      "kind": "transport_waybill",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "text:tn"
+    },
+    {
+      "filename": "ТранспортнаяНакладнаяУПД Реализация товаров и услуг №ТН0006290197.pdf",
+      "kind": "transport_waybill",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "text:tn"
+    },
+    {
+      "filename": "УПД (статус 1) № 258 от 2 июля 2026 г.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД (статус 1) № 262 от 7 июля 2026 г.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД (статус 1) № 273 от 9 июля 2026 г.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД № ТК-02815 от 18 июня 2026 г..xls",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "УПД № ТК-02876 от 23 июня 2026 г..xls",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "УПД № ЭИ00-0041581 от 29 мая 2026 г..xlsx",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "УПД № ЭИ00-0041610 от 29 мая 2026 г. (1).xlsx",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "УПД № ЭИ00-0041610 от 29 мая 2026 г. (2).xlsx",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "УПД № ЭИ00-0041610 от 29 мая 2026 г. (3).xlsx",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "УПД № ЭИ00-0041610 от 29 мая 2026 г..xlsx",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "УПД №100000.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №116 от 30.09.25.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №11618 от 24.10.25.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №1223-004_1 от 23.12.25.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №18266 от 19.12.25.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №24 от 13.01.26.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №UT-3843 от 30.12.25.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №КА-1518 от 07.11.25.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №М-1789 от 19.05.26.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №МО1812-00014_4 от 18.12.25.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №ТРМ-МЛН131832 от 10.04.26.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №УТ-1160 от 26.12.25.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №УТ-2217 от 14.05.26.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №УТ-22170000.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №УТ-6564 от 14.10.25.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №Х-3655 от 06.10.25 (1).pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №Х-3655 от 06.10.25.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД №ЦБ-641 от 13.03.26.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "УПД_214_СУ_10_Борисовские_пруды_сб_20_06_.pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "pdf:scan; textLen:64"
+    },
+    {
+      "filename": "Универсальный передаточный документ (УПД) 51458 от 07.07.2026 (1).pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "Универсальный передаточный документ (УПД) 51458 от 07.07.2026 (2).pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "Универсальный передаточный документ (УПД) 51458 от 07.07.2026.pdf",
+      "kind": "upd",
+      "parsePath": "text_pdf",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:1"
+    },
+    {
+      "filename": "зиларт.pdf",
+      "kind": "upd",
+      "parsePath": "multi_upd",
+      "hasConsignee": true,
+      "source": "guess",
+      "note": "text:upd; invoices:4"
+    },
+    {
+      "filename": "сканирование.pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "pdf:scan; textLen:12"
+    },
+    {
+      "filename": "сканирование0043.pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "pdf:scan; textLen:25"
+    },
+    {
+      "filename": "сканирование0055.pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "pdf:scan; textLen:25"
+    },
+    {
+      "filename": "сканирование0202.pdf",
+      "kind": "unknown",
+      "parsePath": "vision",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "pdf:scan; textLen:51"
+    },
+    {
+      "filename": "су-10 АсфБ.xlsx",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    },
+    {
+      "filename": "упд 1877.xls",
+      "kind": "upd",
+      "parsePath": "excel",
+      "hasConsignee": null,
+      "source": "guess",
+      "note": "ext:excel"
+    }
+  ]
+}

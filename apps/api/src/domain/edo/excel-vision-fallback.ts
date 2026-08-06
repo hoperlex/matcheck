@@ -112,6 +112,7 @@ export function mergeExcelStructuralWithVision(
     itemsCount: fill(structural.itemsCount, vision.itemsCount, 'itemsCount'),
     supplier: fill(structural.supplier, vision.supplier, 'supplier'),
     recipient: fill(structural.recipient, vision.recipient, 'recipient'),
+    consignee: fill(structural.consignee, vision.consignee, 'consignee'),
     // КЛЮЧЕВОЕ: структурные позиции не затираем.
     items: structural.items,
     // Не завышаем уверенность слепо: max(structural, min(vision, 0.9)).

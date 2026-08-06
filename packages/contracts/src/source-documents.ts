@@ -206,6 +206,18 @@ export const SourceDocumentSchema = z.object({
   recipientName: z.string().nullable().optional(),
   recipientMolName: z.string().nullable().optional(),
   siteName: z.string().nullable().optional(),
+  // Стороны САМОГО документа: покупатель (графа 6) и грузополучатель (графа 4).
+  // Не путать с contractorId/recipientId — те выбирает человек, эти извлекает
+  // распознавание. Имена приходят из *_name_raw, поэтому buyerName может быть
+  // заполнен при пустом buyerId: графу 4 часто печатают без ИНН, а связать
+  // сторону с контрагентом без ИНН нельзя.
+  //
+  // Все четыре optional: схема общая с /sync и PATCH-ответами, и producers,
+  // которые эти поля не собирают, не должны падать на валидации.
+  buyerId: z.string().uuid().nullable().optional(),
+  buyerName: z.string().nullable().optional(),
+  consigneeId: z.string().uuid().nullable().optional(),
+  consigneeName: z.string().nullable().optional(),
   // Пользователь, загрузивший УПД через /upload-upd или /upload-upd-pdf.
   // Для EDO/mail-полученных — NULL (нет конкретного юзера). Мобильный
   // клиент использует createdByUserPhone для кнопки звонка из шапки
@@ -426,6 +438,11 @@ export const UpdPdfParsedSchema = z.object({
   itemsCount: z.number().int().nonnegative().nullable().optional(),
   supplier: UpdPdfPartySchema.nullable().optional(),
   recipient: UpdPdfPartySchema.nullable().optional(),
+  // Грузополучатель (графа 4). Появился в промпте v9; на v8 и старше приходит
+  // undefined, поэтому optional — иначе воркер помечал бы parse_failed всё,
+  // что разобрано прежним промптом. ИНН в графе 4 печатают редко: сторона
+  // сохраняется как текст (consignee_name_raw), а FK — только когда ИНН есть.
+  consignee: UpdPdfPartySchema.nullable().optional(),
   items: z.array(UpdPdfItemSchema),
   // confidence — обязательное. Без default: если LLM не вернёт поле,
   // Zod бросит ошибку парсинга, воркер пометит документ parse_failed.

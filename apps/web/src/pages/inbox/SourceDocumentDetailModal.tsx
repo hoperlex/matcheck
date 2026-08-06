@@ -51,6 +51,7 @@ import { getDocumentDisplayStatus } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
 import { api, apiDownload, ApiError } from '../../services/api';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
+import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import {
   formatDateRu,
   formatMoneyRu,
@@ -356,14 +357,26 @@ export function SourceDocumentDetailModal({
               {sd.siteName ? (
                 <Tag style={{ marginInlineEnd: 0 }}>Объект: {sd.siteName}</Tag>
               ) : null}
-              {sd.contractorName ? (
-                <Tag style={{ marginInlineEnd: 0 }}>Подрядчик: {sd.contractorName}</Tag>
+              {/* Стороны документа — покупатель, грузополучатель, поставщик:
+                  то, что распознано в шапке УПД. Подрядчик (выбор менеджера)
+                  живёт ниже, в поле «Получатель» формы редактирования. */}
+              {sd.buyerName ? (
+                <Tag style={{ marginInlineEnd: 0 }}>
+                  Покупатель: {shortenCounterpartyName(sd.buyerName)}
+                </Tag>
+              ) : null}
+              {sd.consigneeName ? (
+                <Tag style={{ marginInlineEnd: 0 }}>
+                  Грузополучатель: {shortenCounterpartyName(sd.consigneeName)}
+                </Tag>
               ) : null}
               {sd.recipientMolName ? (
                 <Tag style={{ marginInlineEnd: 0 }}>МОЛ: {sd.recipientMolName}</Tag>
               ) : null}
               {sd.supplierName ? (
-                <Tag style={{ marginInlineEnd: 0 }}>Поставщик: {sd.supplierName}</Tag>
+                <Tag style={{ marginInlineEnd: 0 }}>
+                  Поставщик: {shortenCounterpartyName(sd.supplierName)}
+                </Tag>
               ) : null}
               {/* Комментарий поставщика к поставке — приходит с публичной
                   страницы загрузки. Длинный текст обрезаем тегом, целиком
@@ -1305,7 +1318,7 @@ function ReadOnlyHeader({ sd }: { sd: SourceDocumentDetail }) {
         {sd.recipientMolName
           ? `${sd.recipientMolName} (МОЛ)`
           : sd.contractorName
-            ? `${sd.contractorName} (подрядчик)`
+            ? `${shortenCounterpartyName(sd.contractorName)} (подрядчик)`
             : '—'}
       </Typography.Text>
       <Typography.Text>

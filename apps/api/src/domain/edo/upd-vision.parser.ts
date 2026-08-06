@@ -29,7 +29,7 @@ import { db } from '../../db/client.js';
 import { llmCalls, llmProviders, llmProviderCredentials } from '../../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
-import { loadActivePromptWithMeta } from '../prompts/registry.js';
+import { resolvePrompt, type PromptOverride } from '../prompts/registry.js';
 import { computePdfRenderDpi } from './pdf-render-dpi.js';
 import { prefilterUpdPages, type PrefilterResult } from './upd-page-prefilter.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
@@ -311,6 +311,16 @@ const RESPONSE_JSON_SCHEMA = {
         name: { type: ['string', 'null'] },
       },
     },
+    // Грузополучатель (графа 4). Промпт v8 и старше про него не спрашивают —
+    // тогда модель просто вернёт null, схема это допускает.
+    consignee: {
+      type: ['object', 'null'],
+      properties: {
+        inn: { type: ['string', 'null'] },
+        kpp: { type: ['string', 'null'] },
+        name: { type: ['string', 'null'] },
+      },
+    },
     items: {
       type: 'array',
       items: {
@@ -366,7 +376,12 @@ export type UpdVisionInput = {
  */
 export async function parseUpdVision(
   input: UpdVisionInput,
-  ctx: { sourceDocumentId: string | null; promptDocKind?: 'upd' | 'm15' } = {
+  ctx: {
+    sourceDocumentId: string | null;
+    promptDocKind?: 'upd' | 'm15';
+    /** Только для офлайн-сверки версий промпта (scripts/upd-prompt-ab.ts). */
+    promptOverride?: PromptOverride;
+  } = {
     sourceDocumentId: null,
   },
 ): Promise<ParsePdfResult> {
@@ -464,7 +479,11 @@ export async function parseUpdVision(
   // Промпт по типу документа: 'upd' (по умолчанию) или 'm15' (накладная на
   // отпуск материалов — другая раскладка колонок). Для УПД поведение не
   // меняется; М-15 получает свой промпт, не затрагивая работающий УПД-путь.
-  const promptMeta = await loadActivePromptWithMeta(ctx.promptDocKind ?? 'upd');
+  const promptMeta = await resolvePrompt(ctx.promptDocKind ?? 'upd', ctx.promptOverride);
+  // Температура: обычно из настроек провайдера. Скрипт сверки версий промпта
+  // прижимает её к нулю, чтобы отличать эффект правки промпта от разброса
+  // самой модели.
+  const temperature = ctx.promptOverride?.temperature ?? Number(row.temperature ?? 0.2);
   // Хвост-страховка против array-обёртки. Gemini preview-модели иногда
   // возвращают [{...}] вместо {...} (см. наблюдение по логам ~20-33% флак).
   // Дублируем требование в промпте — снижает базовую вероятность ошибки;
@@ -498,7 +517,7 @@ export async function parseUpdVision(
           apiBaseUrl: cred.apiBaseUrl,
           apiKey,
           model: row.model,
-          temperature: Number(row.temperature ?? 0.2),
+          temperature,
           maxTokens: row.maxTokens ?? 8192,
           promptText: visionPromptText,
           file: { buffer: input.buffer, mimeType: mime },
@@ -517,7 +536,7 @@ export async function parseUpdVision(
           apiBaseUrl: cred.apiBaseUrl,
           apiKey,
           model: row.model,
-          temperature: Number(row.temperature ?? 0.2),
+          temperature,
           maxTokens: row.maxTokens ?? 8192,
           promptText: visionPromptText,
           files: filesForOpenRouter,

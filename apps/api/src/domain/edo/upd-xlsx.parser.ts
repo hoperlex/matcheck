@@ -40,7 +40,7 @@ export async function parseUpdXlsx(buffer: Buffer): Promise<UpdPdfParsed> {
   const lines = rows.map((r) => r.text).filter(Boolean);
 
   const { docNumber, docDate } = parseDocHeader(lines);
-  const { supplier, recipient } = parseParties(lines);
+  const { supplier, recipient, consignee } = parseParties(lines);
   const { items, totalSum, vatSum, itemsCount } = parseItemsAndTotals(rows);
 
   const filledHeader = [
@@ -65,6 +65,7 @@ export async function parseUpdXlsx(buffer: Buffer): Promise<UpdPdfParsed> {
     itemsCount,
     supplier,
     recipient,
+    consignee,
     items,
     confidence,
   };
@@ -325,9 +326,11 @@ type Party = { inn: string | null; kpp: string | null; name: string | null };
 function parseParties(lines: string[]): {
   supplier: Party | null;
   recipient: Party | null;
+  consignee: Party | null;
 } {
   let supplierName: string | null = null;
   let recipientName: string | null = null;
+  let consigneeName: string | null = null;
   let supplierInn: string | null = null;
   let supplierKpp: string | null = null;
   let recipientInn: string | null = null;
@@ -360,7 +363,17 @@ function parseParties(lines: string[]): {
         recipientKpp = m[2] ?? null;
       }
     }
+    // Грузополучатель (графа 4). ИНН формой не предусмотрен, а название
+    // печатается вместе с адресом — режем по первой запятой (см.
+    // nameBeforeAddress в upd-pdf-local.parser.ts, правило то же).
+    if (!consigneeName) {
+      const m = matchParty(line, /Грузополучатель(?:\s+и\s+его\s+адрес)?:?\s*/, /\(4\)|Покупатель:|ИНН|Валюта:/);
+      if (m) consigneeName = m.split(',')[0]?.trim() || null;
+    }
   }
+
+  // «он же» в графе 4 = покупатель (так это печатает 1С).
+  if (consigneeName && /^он\s+же$/i.test(consigneeName)) consigneeName = recipientName;
 
   const supplier = supplierInn || supplierName
     ? { inn: supplierInn, kpp: supplierKpp, name: supplierName }
@@ -368,7 +381,8 @@ function parseParties(lines: string[]): {
   const recipient = recipientInn || recipientName
     ? { inn: recipientInn, kpp: recipientKpp, name: recipientName }
     : null;
-  return { supplier, recipient };
+  const consignee = consigneeName ? { inn: null, kpp: null, name: consigneeName } : null;
+  return { supplier, recipient, consignee };
 }
 
 function matchParty(line: string, prefixRe: RegExp, terminatorAlt: RegExp): string | null {

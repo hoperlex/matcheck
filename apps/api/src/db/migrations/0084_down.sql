@@ -1,0 +1,11 @@
+-- Откат 0084: удаляем УПД-промпт v9.
+--
+-- Перед откатом убедиться, что активен НЕ v9, иначе разбор останется без
+-- активного промпта и упадёт с «Активный промпт для doc_kind=upd не найден»:
+--   UPDATE prompts SET is_active = true WHERE doc_kind = 'upd' AND name = 'default v8';
+--
+-- В meta/_journal.json НЕ регистрируется. Применять вручную:
+--   psql "$DATABASE_URL" -1 -f apps/api/src/db/migrations/0084_down.sql
+--   DELETE FROM drizzle.__drizzle_migrations WHERE hash = '<sha256 файла 0084>';
+
+DELETE FROM "prompts" WHERE "doc_kind" = 'upd' AND "name" = 'default v9' AND "is_active" = false;

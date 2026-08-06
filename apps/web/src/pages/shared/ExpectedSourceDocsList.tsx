@@ -369,7 +369,7 @@ export function ExpectedSourceDocsList({
             title: 'Подрядчик',
             key: 'contractor',
             sorter: stringSorter<SourceDocument>((r) => r.contractorName),
-            render: (_: unknown, r: SourceDocument) => r.contractorName ?? '—',
+            render: (_: unknown, r: SourceDocument) => shortenCounterpartyName(r.contractorName),
           },
           {
             title: 'Объект',
@@ -416,12 +416,12 @@ export function ExpectedSourceDocsList({
                 {r.validation?.hasMismatch ? <MismatchTag v={r.validation} /> : null}
               </Space>
               <Typography.Text type="secondary">
-                {r.supplierName ?? '—'}
+                {shortenCounterpartyName(r.supplierName)}
                 {r.totalSum ? ` · ${r.totalSum} ₽` : ''}
                 {r.vatSum ? ` (НДС ${r.vatSum} ₽)` : ''}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {r.contractorName ?? '—'} · {r.siteName ?? '—'}
+                {shortenCounterpartyName(r.contractorName)} · {r.siteName ?? '—'}
               </Typography.Text>
             </Space>
           </Card>

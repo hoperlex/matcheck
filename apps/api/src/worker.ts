@@ -163,7 +163,14 @@ async function findOrCreateCounterparty(
   return created.id;
 }
 
-async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
+/**
+ * Обработчик задания очереди UPD_PARSE_QUEUE.
+ *
+ * Экспортируется ради интеграционных тестов границы сохранения (какие поля
+ * документа реально оказываются в БД после разбора). В проде вызывается
+ * только через BullMQ-воркер, объявленный ниже.
+ */
+export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // Очередь UPD_PARSE_QUEUE обслуживает три вида job: УПД (sourceDocumentId+s3Key),
   // накладные batch (bundleId) и единый вход (bundleId+mode:'router').
   // См. UpdParseJobData в plugins/queue.ts.
@@ -721,6 +728,30 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         )
       : null;
 
+  // Стороны САМОГО документа — покупатель (графа 6) и грузополучатель (графа 4).
+  //
+  // Имя пишем всегда, когда распознали: графу 4 печатают без ИНН, а
+  // counterparties.inn NOT NULL — связать такую сторону не с чем, и без
+  // *_name_raw она бы просто потерялась. FK — только когда есть и ИНН, и имя.
+  //
+  // Роль 'customer', а НЕ isContractor: список подрядчиков (фильтр «Подрядчик»,
+  // /counterparties?role=contractor, справочник на планшете) должен оставаться
+  // тем, что выбирают люди, иначе туда натечёт каждый грузополучатель из УПД.
+  const consignee = parsed.consignee;
+  const consigneeId =
+    consignee && consignee.inn && consignee.name
+      ? await findOrCreateCounterparty(
+          { inn: consignee.inn, kpp: consignee.kpp ?? null, name: consignee.name },
+          'customer',
+        )
+      : null;
+  const documentParties = {
+    buyerId: recipientId,
+    buyerNameRaw: recipient?.name ?? null,
+    consigneeId,
+    consigneeNameRaw: consignee?.name ?? null,
+  };
+
   // Проверка дубля. Считаем дублем УПД с тем же (supplier_directory_id,
   // docNumber, docDate), уже принятый или ожидающий разрешения. Свою
   // собственную запись из выборки исключаем. Старый supplier_id (FK на
@@ -774,6 +805,10 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           supplierId: null,
           supplierDirectoryId,
           recipientId,
+          // Дубль — тоже распознанный документ, и в списке он виден. Стороны
+          // пишем здесь же: этот UPDATE терминальный, до записи шапки ниже
+          // выполнение не доходит.
+          ...documentParties,
           llmProviderId,
           llmConfidence: parsed.confidence.toString(),
           processedAt: new Date(),
@@ -881,6 +916,7 @@ async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       supplierId: null,
       supplierDirectoryId,
       recipientId,
+      ...documentParties,
       docNumber: parsed.docNumber ?? null,
       docDate,
       totalSum: parsed.totalSum != null ? parsed.totalSum.toString() : null,
@@ -1569,12 +1605,17 @@ async function createSourceDocumentFromWaybill(args: {
   //     `suppliers`. Совпало по ИНН или fuzzy-name → переиспользуем; не
   //     совпало → INSERT в справочник. В counterparties для shipper ничего
   //     не пишем (см. supplierMatcher.ts, миграция 0064).
-  //   - consignee (грузополучатель) → операционный contractor через
-  //     counterparties, как было раньше.
+  //   - consignee (грузополучатель) → сторона ДОКУМЕНТА: consignee_id +
+  //     consignee_name_raw. Раньше он писался в recipient_id, но recipient —
+  //     операционный получатель отгрузки (его выбирает человек), и колонка
+  //     «Покупатель» показывала бы грузополучателя накладной. Смена безопасна:
+  //     на бою recipient_id пуст у всех накладных — путь не срабатывал ни разу
+  //     (условие inn && name, а ИНН в разделе 2 распознаётся редко).
   //   - ОС-2 (внутреннее перемещение) — обе стороны внутренние, supplier_id
   //     остаётся NULL.
   let supplierDirectoryId: string | null = null;
-  let recipientId: string | null = null;
+  let consigneeId: string | null = null;
+  let consigneeNameRaw: string | null = null;
   if (doc.form === 'tn_2116') {
     if (doc.shipper?.inn || doc.shipper?.name) {
       const match = await matchOrCreateSupplier(
@@ -1587,8 +1628,9 @@ async function createSourceDocumentFromWaybill(args: {
       );
       supplierDirectoryId = match?.id ?? null;
     }
+    consigneeNameRaw = doc.consignee?.name ?? null;
     if (doc.consignee?.inn && doc.consignee?.name) {
-      recipientId = await findOrCreateCounterparty(
+      consigneeId = await findOrCreateCounterparty(
         { inn: doc.consignee.inn, kpp: null, name: doc.consignee.name },
         'customer',
       );
@@ -1619,7 +1661,8 @@ async function createSourceDocumentFromWaybill(args: {
       // оставляем NULL; DTO supplierName собирается через COALESCE.
       supplierId: null,
       supplierDirectoryId,
-      recipientId,
+      consigneeId,
+      consigneeNameRaw,
       contractorId: bundle.contractorId,
       recipientMolId: bundle.recipientMolId,
       siteId: bundle.siteId,

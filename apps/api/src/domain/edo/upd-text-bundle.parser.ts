@@ -14,6 +14,7 @@
 import { PDFParse } from 'pdf-parse';
 import type { UpdPdfParsed } from '@matcheck/contracts';
 import { extractUpdFromText } from './upd-pdf.parser.js';
+import type { PromptOverride } from '../prompts/registry.js';
 import { aggregateUpdDocuments, type ParsedUpdSubdocument } from './upd-batch.parser.js';
 import type { UpdBundleResult } from './upd-bundle.parser.js';
 
@@ -109,7 +110,9 @@ export function segmentUpdText(pages: PdfPage[]): TextUpdSegment[] {
  */
 export async function tryParseTextUpdBundle(
   buffer: Buffer,
-  ctx: { sourceDocumentId: string | null },
+  // promptOverride уходит насквозь в extractUpdFromText — только для
+  // офлайн-сверки версий промпта (scripts/upd-prompt-ab.ts).
+  ctx: { sourceDocumentId: string | null; promptOverride?: PromptOverride },
 ): Promise<UpdBundleResult | null> {
   // ── извлечение постраничного текста (один вызов pdf-parse) ──
   const parser = new PDFParse({ data: new Uint8Array(buffer) });
@@ -160,6 +163,7 @@ export async function tryParseTextUpdBundle(
     itemsCount: agg.itemsCount,
     supplier: agg.supplier,
     recipient: agg.recipient,
+    consignee: agg.consignee,
     items: agg.items,
     confidence: agg.confidence,
   };

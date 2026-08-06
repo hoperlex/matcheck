@@ -1,7 +1,7 @@
 import { PDFParse } from 'pdf-parse';
 import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { loadActiveProvidersOrdered } from '../llm/registry.js';
-import { loadActivePromptWithMeta } from '../prompts/registry.js';
+import { resolvePrompt, type PromptOverride } from '../prompts/registry.js';
 import { loggedComplete } from '../llm/logged-complete.js';
 
 const MIN_TEXT_LENGTH = 200;
@@ -128,6 +128,16 @@ const RESPONSE_JSON_SCHEMA = {
         name: { type: ['string', 'null'] },
       },
     },
+    // Грузополучатель (графа 4). Промпт v8 и старше про него не спрашивают —
+    // тогда модель просто вернёт null, схема это допускает.
+    consignee: {
+      type: ['object', 'null'],
+      properties: {
+        inn: { type: ['string', 'null'] },
+        kpp: { type: ['string', 'null'] },
+        name: { type: ['string', 'null'] },
+      },
+    },
     items: {
       type: 'array',
       items: {
@@ -207,7 +217,11 @@ export type ParsePdfResult = {
 // к долгим LLM-вызовам (5–10 минут на тяжёлых документах).
 export async function parseUpdPdf(
   buffer: Buffer,
-  ctx: { sourceDocumentId: string | null } = { sourceDocumentId: null },
+  ctx: {
+    sourceDocumentId: string | null;
+    /** Только для офлайн-сверки версий промпта (scripts/upd-prompt-ab.ts). */
+    promptOverride?: PromptOverride;
+  } = { sourceDocumentId: null },
 ): Promise<ParsePdfResult> {
   const parser = new PDFParse({ data: new Uint8Array(buffer) });
   let text = '';
@@ -251,11 +265,15 @@ export async function parseUpdPdf(
  */
 export async function extractUpdFromText(
   cleanText: string,
-  ctx: { sourceDocumentId: string | null } = { sourceDocumentId: null },
+  ctx: {
+    sourceDocumentId: string | null;
+    /** Только для офлайн-сверки версий промпта (scripts/upd-prompt-ab.ts). */
+    promptOverride?: PromptOverride;
+  } = { sourceDocumentId: null },
 ): Promise<{ parsed: UpdPdfParsed; llmProviderId: string | null }> {
   const [providers, prompt] = await Promise.all([
     loadActiveProvidersOrdered(),
-    loadActivePromptWithMeta('upd'),
+    resolvePrompt('upd', ctx.promptOverride),
   ]);
   if (providers.length === 0) {
     throw new Error('Нет активных LLM-провайдеров для распознавания УПД');

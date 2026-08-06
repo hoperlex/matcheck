@@ -44,6 +44,7 @@ import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
 import { usePrefetchSourceDocumentDetails } from '../../shared/hooks/usePrefetchSourceDocumentDetails';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
+import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
@@ -796,17 +797,28 @@ export default function InboxPage() {
             sorter: stringSorter<Row>((r) => r.siteName),
             render: (v: string | null | undefined) => v ?? '—',
           },
+          // Три стороны документа в том же порядке, что в шапке УПД:
+          // покупатель (графа 6), грузополучатель (графа 4), продавец (графа 2).
+          // Это распознанные значения, а не выбранный менеджером подрядчик
+          // (contractorName) — он остался в фильтре шапки и в карточке.
+          // shortenCounterpartyName сам отдаёт «—» на пустом значении.
           {
-            title: 'Подрядчик',
-            dataIndex: 'contractorName',
-            sorter: stringSorter<Row>((r) => r.contractorName),
-            render: (v: string | null | undefined) => v ?? '—',
+            title: 'Покупатель',
+            dataIndex: 'buyerName',
+            sorter: stringSorter<Row>((r) => r.buyerName),
+            render: (v: string | null | undefined) => shortenCounterpartyName(v),
+          },
+          {
+            title: 'Грузополучатель',
+            dataIndex: 'consigneeName',
+            sorter: stringSorter<Row>((r) => r.consigneeName),
+            render: (v: string | null | undefined) => shortenCounterpartyName(v),
           },
           {
             title: 'Поставщик',
             dataIndex: 'supplierName',
             sorter: stringSorter<Row>((r) => r.supplierName),
-            render: (v: string | null | undefined) => v ?? '—',
+            render: (v: string | null | undefined) => shortenCounterpartyName(v),
           },
           {
             title: 'Сумма НДС',
@@ -851,7 +863,9 @@ export default function InboxPage() {
                   : ''}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {r.siteName ?? '—'} · {r.contractorName ?? '—'} · {r.supplierName ?? '—'}
+                {r.siteName ?? '—'} · {shortenCounterpartyName(r.buyerName)} ·{' '}
+                {shortenCounterpartyName(r.consigneeName)} ·{' '}
+                {shortenCounterpartyName(r.supplierName)}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {originLabel(r.origin, r.fromSupplierPortal)}
