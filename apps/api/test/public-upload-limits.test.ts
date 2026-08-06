@@ -11,10 +11,17 @@
  * Отдельно проверяется, что превышение лимитов даёт типизированный отказ, а не
  * исключение: общий error-handler намеренно игнорирует err.statusCode, поэтому
  * непойманная ошибка multipart превращается в 500 «reach files limit».
+ *
+ * В конце файла — отдельный набор про НАСТОЯЩИЙ @fastify/rate-limit на роуте
+ * публичной загрузки. Он живёт здесь, а не в интеграционных тестах, потому что
+ * не требует ни Postgres, ни S3 и должен гоняться на каждом прогоне.
  */
+import { randomUUID } from 'node:crypto';
 import { deflateRawSync } from 'node:zlib';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
+import rateLimit from '@fastify/rate-limit';
+import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   collectUploadParts,
@@ -22,6 +29,7 @@ import {
   type CollectResult,
   type UploadLimits,
 } from '../src/domain/sourceDocuments/collect-upload.js';
+import { publicUploadRoutes } from '../src/routes/public-upload.js';
 
 const BOUNDARY = '----matcheckLimits';
 
@@ -360,5 +368,68 @@ describe('collectUploadParts — режим legacy (внутренний вхо�
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.accepted).toHaveLength(1);
+  });
+});
+
+describe('публичная загрузка — глобальный лимитер пропускает обычный запрос', () => {
+  /**
+   * Стенд с НАСТОЯЩИМ @fastify/rate-limit — в этом весь смысл набора.
+   *
+   * Заглушка лимитера здесь бесполезна: проверяется именно трактовка ответа
+   * библиотеки. Её контракт неочевиден — `isAllowed: true` означает «ключ в
+   * allowList», а не «запрос пропущен», и проверка по `!isAllowed` полгода
+   * отдавала 429 на КАЖДУЮ отправку поставщика.
+   *
+   * Postgres и S3 не нужны: глобальная проверка стоит первой, а отказ
+   * `no_files` формируется до обращения к таблице sites.
+   */
+  async function publicApp(): Promise<FastifyInstance> {
+    const instance = Fastify({ logger: false });
+    // Без zod-компиляторов app.ready() падает: у роутов объявлены схемы ответа.
+    instance.setValidatorCompiler(validatorCompiler);
+    instance.setSerializerCompiler(serializerCompiler);
+    await instance.register(multipart, { limits: { fileSize: 10 * 1024 * 1024, files: 10 } });
+    // Без redis — in-memory store: счётчик живёт внутри одного теста.
+    await instance.register(rateLimit, { global: false });
+    instance.decorate('db', {} as never);
+    instance.decorate('queues', {} as never);
+    await instance.register(publicUploadRoutes);
+    await instance.ready();
+    return instance;
+  }
+
+  function postEmpty(instance: FastifyInstance, ip = '10.55.0.7') {
+    const { body, headers } = multipartBody(
+      { siteId: randomUUID(), expectedDate: '2026-08-06', website: '' },
+      [],
+    );
+    return instance.inject({
+      method: 'POST',
+      url: '/api/v1/public/upload-documents',
+      payload: body,
+      headers: { ...headers, 'x-real-ip': ip },
+    });
+  }
+
+  it('первый запрос доходит до разбора формы, а не до 429', async () => {
+    app = await publicApp();
+    const res = await postEmpty(app);
+    // Утверждение намеренно точное: not.toBe(429) осталось бы зелёным и при
+    // 404, и при 500, и при сломанном multipart.
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('no_files');
+  });
+
+  it('per-IP потолок срабатывает на 21-м запросе, а не раньше', async () => {
+    // Заодно проверяет, что глобальный лимитер (200/час) не путается с
+    // per-IP (20 за 10 минут): раньше отличить их было невозможно — 429
+    // приходил всегда и от первого же запроса.
+    app = await publicApp();
+    const codes: number[] = [];
+    for (let i = 0; i < 21; i += 1) {
+      codes.push((await postEmpty(app)).statusCode);
+    }
+    expect(codes.slice(0, 20)).toEqual(Array(20).fill(400));
+    expect(codes[20]).toBe(429);
   });
 });

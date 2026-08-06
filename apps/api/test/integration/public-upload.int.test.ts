@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   putObject: vi.fn(),
   presign: vi.fn(),
   queueAdd: vi.fn(),
+  rateLimit: vi.fn(),
 }));
 
 vi.mock('../../src/domain/storage/s3.signer.js', () => ({
@@ -73,6 +74,23 @@ function pdf(marker: string): Buffer {
   return Buffer.from(`%PDF-1.4\n%${marker}\n1 0 obj\n<<>>\nendobj\ntrailer\n%%EOF\n`);
 }
 
+/**
+ * Ответ @fastify/rate-limit после обычного запроса — полный набор полей ветки
+ * `isAllowed: false`, включая обязательный timeWindow. ttlInSeconds библиотека
+ * считает как Math.ceil(ttl / 1000), поэтому пара согласована.
+ */
+const RATE_LIMIT_OK = {
+  isAllowed: false,
+  key: 'public-upload:global',
+  max: 200,
+  timeWindow: 3_600_000,
+  remaining: 199,
+  ttl: 3_600_000,
+  ttlInSeconds: 3600,
+  isExceeded: false,
+  isBanned: false,
+} as const;
+
 suite('публичная загрузка документов (реальный PostgreSQL)', () => {
   let sql: ReturnType<typeof postgres>;
   let app: FastifyInstance;
@@ -94,9 +112,13 @@ suite('публичная загрузка документов (реальны�
     await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
     app.decorate('db', drizzle(sql) as never);
     app.decorate('queues', { updParse: { add: mocks.queueAdd } } as never);
-    // Лимитеры в этом наборе не проверяются (нужен Redis) — заглушка
-    // повторяет контракт createRateLimit: «разрешено».
-    app.decorate('createRateLimit', () => async () => ({ isAllowed: true, key: 'test' }) as never);
+    // Redis здесь нет, поэтому лимитер — заглушка. Она обязана выглядеть в
+    // точности как ответ @fastify/rate-limit: `isAllowed: true` у библиотеки
+    // означает «ключ в allowList», а вовсе не «пропущен», и вне allowList
+    // приходит `isAllowed: false` + `isExceeded`. Мок, отвечавший
+    // `{ isAllowed: true }`, описывал несуществующий контракт и прикрывал
+    // проверку, которая отдавала 429 на каждую отправку.
+    app.decorate('createRateLimit', () => mocks.rateLimit as never);
     await app.register(publicUploadRoutes);
     await app.ready();
 
@@ -142,6 +164,9 @@ suite('публичная загрузка документов (реальны�
   beforeEach(async () => {
     mocks.putObject.mockReset().mockResolvedValue(undefined);
     mocks.queueAdd.mockReset().mockResolvedValue(undefined);
+    // Сброс обязателен: кейс на превышение подменяет ответ разово, и без
+    // reset «перегрузка» протекла бы в следующий тест набора.
+    mocks.rateLimit.mockReset().mockResolvedValue(RATE_LIMIT_OK);
     await cleanup();
   });
 
@@ -396,6 +421,30 @@ suite('публичная загрузка документов (реальны�
       SELECT s3_key FROM s3_cleanup_outbox WHERE entity_id = ${bundle!.id}`;
     expect(cleanupRows.length).toBe(1);
     await sql`DELETE FROM s3_cleanup_outbox WHERE entity_id = ${bundle!.id}`;
+  });
+
+  it('глобальный потолок исчерпан → 429 без единой записи и без S3', async () => {
+    mocks.rateLimit.mockResolvedValueOnce({ ...RATE_LIMIT_OK, remaining: 0, isExceeded: true });
+
+    const before = await ownEventCount();
+    const res = await upload(onePdf('overload'));
+    expect(res.statusCode).toBe(429);
+    expect(res.json()).toMatchObject({ error: 'too_many_requests' });
+
+    // Заголовки описывают ГЛОБАЛЬНЫЙ потолок. Per-IP хук успевает положить свои
+    // (limit 20, остаток по адресу) до обработчика, и без перезаписи ответ
+    // противоречил бы сам себе: retry-after час при reset десять минут.
+    expect(res.headers['retry-after']).toBe('3600');
+    expect(res.headers['x-ratelimit-limit']).toBe('200');
+    expect(res.headers['x-ratelimit-remaining']).toBe('0');
+    expect(res.headers['x-ratelimit-reset']).toBe('3600');
+
+    // Отказ до единой записи: ни файла в S3, ни пакета, ни события.
+    expect(mocks.putObject).not.toHaveBeenCalled();
+    const bundles = await sql<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE site_id = ${siteId}`;
+    expect(bundles.length).toBe(0);
+    expect(await ownEventCount()).toBe(before);
   });
 
   it('статус по тикету не раскрывает внутренности', async () => {

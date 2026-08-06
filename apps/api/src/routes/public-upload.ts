@@ -86,6 +86,11 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
    * Два config.rateLimit на одном роуте не складываются: первый хук помечает
    * запрос внутренним флагом, второй молча пропускается. Поэтому второй
    * лимитер создаётся вручную и проверяется в обработчике.
+   *
+   * ВНИМАНИЕ на контракт ответа: isAllowed === true означает «ключ в allowList,
+   * лимит к нему не применяется», а НЕ «запрос пропущен». allowList у нас не
+   * настроен, поэтому isAllowed всегда false, и превышение показывает только
+   * isExceeded. Проверка по !isAllowed отдавала 429 на каждый запрос.
    */
   const globalUploadLimit = app.createRateLimit({
     max: 200,
@@ -148,11 +153,25 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
     },
     async (req, reply) => {
       const globalCheck = await globalUploadLimit(req);
-      if (!globalCheck.isAllowed) {
-        return reply.code(429).send({
-          error: 'too_many_requests',
-          message: 'Сервис временно перегружен. Попробуйте через несколько минут.',
-        });
+      if (!globalCheck.isAllowed && globalCheck.isExceeded) {
+        req.log.warn(
+          { ttl: globalCheck.ttlInSeconds, ip: clientIpOf(req) },
+          'public upload: global limit exceeded',
+        );
+        // Per-IP хук отработал в onRequest и уже положил в ответ СВОИ цифры
+        // (limit 20, остаток по адресу). Оставить их — значит отдать 429 с
+        // заголовками, которые противоречат и коду ответа, и retry-after.
+        // Отказ глобальный, поэтому и заголовки описывают глобальный потолок.
+        return reply
+          .code(429)
+          .header('x-ratelimit-limit', String(globalCheck.max))
+          .header('x-ratelimit-remaining', '0')
+          .header('x-ratelimit-reset', String(globalCheck.ttlInSeconds))
+          .header('retry-after', String(globalCheck.ttlInSeconds))
+          .send({
+            error: 'too_many_requests',
+            message: 'Сервис временно перегружен. Попробуйте через несколько минут.',
+          });
       }
 
       // Поля формы приходят по ходу чтения потока, поэтому honeypot и объект
