@@ -2,6 +2,7 @@ import { PDFParse } from 'pdf-parse';
 import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { loadActiveProvidersOrdered } from '../llm/registry.js';
 import { resolvePrompt, type PromptOverride } from '../prompts/registry.js';
+import { parseUpdText } from './upd-pdf-local.parser.js';
 import { loggedComplete } from '../llm/logged-complete.js';
 
 const MIN_TEXT_LENGTH = 200;
@@ -210,6 +211,8 @@ export type ParsePdfResult = {
   parsed: UpdPdfParsed;
   textLength: number;
   llmProviderId: string | null;
+  /** Стороны, добранные из текста, когда модель их не вернула. */
+  partiesFilledFromText?: FilledParty[];
 };
 
 // Извлечение текста из PDF + распознавание через LLM. Вызывается из воркера
@@ -247,11 +250,12 @@ export async function parseUpdPdf(
     throw new PdfTextGarbageError(cleanText.length, garbageReason);
   }
 
-  const { parsed, llmProviderId } = await extractUpdFromText(cleanText, ctx);
+  const { parsed, llmProviderId, partiesFilledFromText } = await extractUpdFromText(cleanText, ctx);
   return {
     parsed,
     textLength: cleanText.length,
     llmProviderId,
+    partiesFilledFromText,
   };
 }
 
@@ -270,7 +274,12 @@ export async function extractUpdFromText(
     /** Только для офлайн-сверки версий промпта (scripts/upd-prompt-ab.ts). */
     promptOverride?: PromptOverride;
   } = { sourceDocumentId: null },
-): Promise<{ parsed: UpdPdfParsed; llmProviderId: string | null }> {
+): Promise<{
+  parsed: UpdPdfParsed;
+  llmProviderId: string | null;
+  /** Стороны, которых не было в ответе модели и которые взяты из текста. */
+  partiesFilledFromText: FilledParty[];
+}> {
   const [providers, prompt] = await Promise.all([
     loadActiveProvidersOrdered(),
     resolvePrompt('upd', ctx.promptOverride),
@@ -301,9 +310,15 @@ export async function extractUpdFromText(
           promptId: prompt.id,
         },
       );
+      // Модель иногда возвращает позиции и суммы, но молчит про стороны —
+      // наблюдалось на УПД из 1С (5 случаев из 96 вызовов). Текст при этом
+      // содержит и продавца, и покупателя, и грузополучателя, поэтому добираем
+      // их регулярками — бесплатно и без второго обращения к модели.
+      const filled = fillPartiesFromText(result.data as UpdPdfParsed, cleanText);
       return {
-        parsed: result.data as UpdPdfParsed,
+        parsed: filled.parsed,
         llmProviderId: provider.id,
+        partiesFilledFromText: filled.filled,
       };
     } catch (err) {
       lastErr = err;
@@ -311,4 +326,49 @@ export async function extractUpdFromText(
     }
   }
   throw lastErr ?? new Error('Все LLM-провайдеры не смогли распознать УПД');
+}
+
+export type FilledParty = 'supplier' | 'recipient' | 'consignee';
+
+/** Сторона считается пустой, если у неё нет ни ИНН, ни названия. */
+function isEmptyParty(p: UpdPdfParsed['supplier']): boolean {
+  if (p == null) return true;
+  return !p.inn?.trim() && !p.name?.trim();
+}
+
+/**
+ * Дозаполняет ПУСТЫЕ стороны документа разбором того же текста регулярками.
+ *
+ * Частично распознанную сторону (например, имя без ИНН) не трогаем: модель
+ * видела документ целиком, а локальный парсер — эвристика по маркерам формы
+ * 1137, и подменять ею результат модели незачем.
+ *
+ * Ничего, кроме сторон, не меняется: позиции, суммы, номер и дата остаются от
+ * модели. Сбой локального парсера не должен ронять уже разобранный документ,
+ * поэтому он обёрнут в try/catch.
+ */
+export function fillPartiesFromText(
+  parsed: UpdPdfParsed,
+  cleanText: string,
+): { parsed: UpdPdfParsed; filled: FilledParty[] } {
+  const missing: FilledParty[] = (['supplier', 'recipient', 'consignee'] as const).filter((k) =>
+    isEmptyParty(parsed[k]),
+  );
+  if (missing.length === 0) return { parsed, filled: [] };
+
+  let local: UpdPdfParsed;
+  try {
+    local = parseUpdText(cleanText);
+  } catch {
+    return { parsed, filled: [] };
+  }
+
+  const next = { ...parsed };
+  const filled: FilledParty[] = [];
+  for (const key of missing) {
+    if (isEmptyParty(local[key])) continue;
+    next[key] = local[key];
+    filled.push(key);
+  }
+  return { parsed: filled.length > 0 ? next : parsed, filled };
 }

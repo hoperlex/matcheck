@@ -74,6 +74,7 @@ import { expandPdfAttachmentsForOpenRouter } from './domain/edo/waybill-pdf.js';
 import { getDefaultProviderKind } from './domain/llm/registry.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
 import { validateUpdTotals } from './domain/edo/upd-validation.js';
+import { chooseBetterUpdResult, mergeParties } from './domain/edo/upd-result-compare.js';
 import { normalizeM15ZeroTotals } from './domain/edo/m15-normalize.js';
 import {
   getExcelVisionFallbackReasons,
@@ -86,6 +87,7 @@ import { classifyFile } from './domain/edo/document-router.js';
 import { classifyImageKind } from './domain/edo/vision-classifier.js';
 import {
   bundleDispatchKeyOf,
+  documentSecondPassKeyOf,
   dispatchKeyOf,
   enqueueJob,
   processJobOutbox,
@@ -164,6 +166,136 @@ async function findOrCreateCounterparty(
 }
 
 /**
+ * Чем разобран документ. Нужен, чтобы решать про второй проход: булев
+ * `parsedViaVision` для этого не годится — у структурного Excel он тоже false,
+ * и слабый .xlsx ушёл бы в vision как PDF.
+ */
+type ParseMode =
+  | 'text'
+  | 'text_bundle'
+  | 'vision_pdf'
+  | 'vision_bundle'
+  | 'image_vision'
+  | 'excel_structural'
+  | 'excel_vision'
+  | 'm15_vision'
+  | 'second_pass_vision';
+
+/**
+ * Режимы, для которых имеет смысл второй проход картинкой.
+ *
+ * Только одиночный текстовый PDF:
+ *   * excel_* — у Excel свой vision-fallback внутри ветки, и на проде он даёт
+ *     100% (28 из 28 документов разобраны полностью);
+ *   * text_bundle / vision_bundle — это агрегат НЕСКОЛЬКИХ УПД из одного файла,
+ *     одиночный vision склеил бы их в один документ;
+ *   * vision_* и image_vision — картинка уже была, повторять нечем.
+ */
+const SECOND_PASS_MODES: ReadonlySet<ParseMode> = new Set<ParseMode>(['text']);
+
+/** Слабый результат: документ формально разобран, но пользоваться им нельзя. */
+function weakParseReasons(parsed: UpdPdfParsed, hasMismatch: boolean): string[] {
+  const reasons: string[] = [];
+  if (parsed.items.length === 0) reasons.push('no_items');
+  if (parsed.totalSum == null) reasons.push('no_total');
+  if (parsed.docNumber == null) reasons.push('no_doc_number');
+  if (parsed.docDate == null) reasons.push('no_doc_date');
+  if ((parsed.confidence ?? 0) < 0.5) reasons.push('low_confidence');
+  if (hasMismatch) reasons.push('validation_mismatch');
+  return reasons;
+}
+
+/**
+ * Заказывает второй проход: пишет состояние документа и задание в ОДНОЙ
+ * транзакции через outbox.
+ *
+ * Почему не «обновить строку, потом queue.add»: между ними есть окно, в котором
+ * недоступность Redis оставит документ с пометкой «повтор заказан», но без
+ * задания — навсегда. Ровно для этого в проекте есть transactional outbox.
+ *
+ * Возвращает false, если повтор уже заказывался: `second_pass` заполняется
+ * только здесь, поэтому непустое значение = «одна попытка уже была». Без этого
+ * документ, который плохо читается обоими путями, гонял бы задания по кругу.
+ */
+async function queueSecondPass(args: {
+  sourceDocumentId: string;
+  s3Key: string;
+  reasons: string[];
+  values: Record<string, unknown>;
+}): Promise<boolean> {
+  const [current] = await db
+    .select({ secondPass: sourceDocuments.secondPass })
+    .from(sourceDocuments)
+    .where(eq(sourceDocuments.id, args.sourceDocumentId))
+    .limit(1);
+  if (!current || current.secondPass != null) return false;
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(sourceDocuments)
+      .set({
+        ...args.values,
+        secondPass: {
+          state: 'queued',
+          mode: 'vision',
+          requestedAt: new Date().toISOString(),
+          reasons: args.reasons,
+        },
+      })
+      .where(eq(sourceDocuments.id, args.sourceDocumentId));
+    await enqueueJob(tx as unknown as typeof db, {
+      queue: UPD_PARSE_QUEUE,
+      jobName: 'parse',
+      payload: { sourceDocumentId: args.sourceDocumentId, s3Key: args.s3Key, pass: 'vision' },
+      dedupeKey: documentSecondPassKeyOf(args.sourceDocumentId),
+    });
+  });
+  return true;
+}
+
+/** Снимок сохранённого разбора — база сравнения для второго прохода. */
+async function loadParsedBaseline(sourceDocumentId: string): Promise<UpdPdfParsed | null> {
+  const [doc] = await db
+    .select()
+    .from(sourceDocuments)
+    .where(eq(sourceDocuments.id, sourceDocumentId))
+    .limit(1);
+  if (!doc) return null;
+  const items = await db
+    .select()
+    .from(sourceDocumentItems)
+    .where(eq(sourceDocumentItems.sourceDocumentId, sourceDocumentId))
+    .orderBy(sourceDocumentItems.lineNo);
+  const num = (v: string | null): number | null => (v == null ? null : Number(v));
+  return {
+    docNumber: doc.docNumber,
+    docDate: doc.docDate ? doc.docDate.toISOString().slice(0, 10) : null,
+    totalSum: num(doc.totalSum),
+    vatSum: num(doc.vatSum),
+    itemsCount: null,
+    // Стороны восстанавливаем из *_name_raw: FK может быть пустым (графу 4
+    // печатают без ИНН), а для слияния важно именно имя.
+    supplier: null,
+    recipient: doc.buyerNameRaw ? { inn: null, kpp: null, name: doc.buyerNameRaw } : null,
+    consignee: doc.consigneeNameRaw ? { inn: null, kpp: null, name: doc.consigneeNameRaw } : null,
+    items: items.map((i) => ({
+      nameRaw: i.nameRaw,
+      qty: num(i.qty),
+      unit: i.unit,
+      price: num(i.price),
+      sum: num(i.sum),
+      vatRate: num(i.vatRate),
+      vatSum: num(i.vatSum),
+      volumeM3: num(i.volumeM3),
+      massKg: num(i.massKg),
+      volumeConfidence: (i.volumeConfidence as 'low' | 'medium' | 'high' | null) ?? null,
+      groupName: i.groupName,
+    })),
+    confidence: doc.llmConfidence != null ? Number(doc.llmConfidence) : 0,
+  };
+}
+
+/**
  * Обработчик задания очереди UPD_PARSE_QUEUE.
  *
  * Экспортируется ради интеграционных тестов границы сохранения (какие поля
@@ -192,7 +324,16 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     return;
   }
   const { sourceDocumentId, s3Key } = job.data;
-  const log = logger.child({ sourceDocumentId, jobId: job.id });
+  const secondPassJob = job.data.pass === 'vision';
+  const log = logger.child({
+    sourceDocumentId,
+    jobId: job.id,
+    ...(secondPassJob ? { pass: 'vision' } : {}),
+  });
+
+  // Второй проход сравнивает свой результат с уже сохранённым, поэтому снимок
+  // делается ДО того, как документ уйдёт в processing и начнётся разбор.
+  const baseline = secondPassJob ? await loadParsedBaseline(sourceDocumentId) : null;
 
   // Переводим в processing + считаем attempt. Если кто-то уже удалил
   // документ через DELETE /:id, returning() вернёт пустой массив — выходим.
@@ -250,8 +391,21 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   let parsed: UpdPdfParsed;
   let llmProviderId: string | null = null;
   let parsedViaVision = false;
+  let parseMode: ParseMode = 'text';
   try {
-    if (job.data.docKind === 'm15') {
+    if (secondPassJob) {
+      // Второй проход: сразу картинка, без текстового пути и bundle-попыток —
+      // именно они и дали слабый результат на первом заходе.
+      const mimeForVision = isImage ? imageMime! : 'application/pdf';
+      const r = await parseUpdVision(
+        { buffer, mimeType: mimeForVision, filename: s3Key },
+        { sourceDocumentId },
+      );
+      parsed = r.parsed;
+      llmProviderId = r.llmProviderId;
+      parsedViaVision = true;
+      parseMode = 'second_pass_vision';
+    } else if (job.data.docKind === 'm15') {
       // М-15 (накладная на отпуск материалов) — всегда распознаём через vision
       // отдельным m15-промптом: у сканов/фото нет текстового слоя, а у PDF из
       // 1С он часто «битый» (нечитаемые глифы). Тип документа уже задан при
@@ -266,6 +420,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       parsed = r.parsed;
       llmProviderId = r.llmProviderId;
       parsedViaVision = true;
+      parseMode = 'm15_vision';
     } else if (isXlsx || isXls) {
       // Excel-пайплайн: единый для .xlsx (OOXML) и .xls (BIFF/OLE2).
       // .xls сначала переводим в OOXML-буфер через SheetJS (in-memory,
@@ -304,6 +459,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
 
       if (!needsVisionFallback) {
         parsed = structural!;
+        parseMode = 'excel_structural';
       } else {
         log.warn(
           {
@@ -339,6 +495,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           }
           llmProviderId = r.llmProviderId;
           parsedViaVision = true;
+          parseMode = 'excel_vision';
         } catch (fbErr) {
           // LibreOfficeNotAvailableError — фича недоступна, не ошибка.
           // Падаем в partial_parse с понятной подсказкой (не parse_failed):
@@ -352,6 +509,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             // пустой шаблон, чтобы дальнейший pipeline (валидация/dedup)
             // не упал на null'ах.
             parsed = structural ?? emptyParsed();
+            parseMode = 'excel_structural';
           } else if (
             fbErr instanceof ExcelConvertError ||
             fbErr instanceof ExcelConvertTimeoutError
@@ -377,6 +535,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       parsed = r.parsed;
       llmProviderId = r.llmProviderId;
       parsedViaVision = true;
+      parseMode = 'image_vision';
     } else {
       // PDF — сначала пробуем ТЕКСТОВЫЙ multi-UPD bundle: несколько счёт-фактур
       // с текстовым слоем в одном файле (ЭДО-пачка) → агрегат «N1, N2, …»,
@@ -400,6 +559,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       if (textBundle) {
         parsed = textBundle.parsed;
         llmProviderId = textBundle.llmProviderId;
+        parseMode = 'text_bundle';
         log.info(
           {
             segments: textBundle.segments,
@@ -414,6 +574,15 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           const r = await parseUpdPdf(buffer, { sourceDocumentId });
           parsed = r.parsed;
           llmProviderId = r.llmProviderId;
+          if (r.partiesFilledFromText?.length) {
+            // Модель промолчала про стороны, хотя они есть в тексте. Документ
+            // выглядит разобранным, и без этой записи понять, что стороны
+            // пришли не от LLM, можно было бы только сверкой llm_calls с БД.
+            log.warn(
+              { filled: r.partiesFilledFromText },
+              'parties recovered from text — LLM returned empty parties',
+            );
+          }
           // Расширенный Vision-fallback: text-LLM формально не упал, но
           // вернул полностью пустой результат — нет ни одной позиции, ни
           // номера, ни даты. Это типично для сканов: pdf-parse возвращает
@@ -441,6 +610,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
               parsed = vr.parsed;
               llmProviderId = vr.llmProviderId;
               parsedViaVision = true;
+              parseMode = 'vision_pdf';
             } catch (visionErr) {
               // VisionTimeoutError / VisionBudgetExceededError — fail-fast:
               // пробрасываем во внешний catch, который пометит parse_failed
@@ -507,6 +677,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
                 parsed = bundle.parsed;
                 llmProviderId = bundle.llmProviderId;
                 parsedViaVision = true;
+                parseMode = 'vision_bundle';
                 log.info(
                   { segments: bundle.segments, extracted: bundle.extracted, reasons: bundle.reasons },
                   'multi-UPD bundle recognized — aggregated into one document',
@@ -519,6 +690,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
                 parsed = r.parsed;
                 llmProviderId = r.llmProviderId;
                 parsedViaVision = true;
+                parseMode = 'vision_pdf';
               }
             } catch (visionErr) {
               // VisionTimeoutError / VisionBudgetExceededError — fail-fast:
@@ -554,6 +726,27 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
               await notifySourceDocumentUpdated(sourceDocumentId);
               return;
             }
+          } else if (!secondPassJob) {
+            // Любая другая ошибка текстового разбора — например обрыв JSON по
+            // лимиту токенов на большом УПД (оба прод-parse_failed были именно
+            // такими). Раньше она улетала наверх и документ падал, хотя картинка
+            // его читает. Заказываем второй проход и выходим: сам документ
+            // остаётся в queued до его выполнения.
+            const message = err instanceof Error ? err.message : String(err);
+            log.warn({ err: message }, 'text parse failed — queueing vision second pass');
+            const queued = await queueSecondPass({
+              sourceDocumentId,
+              s3Key,
+              reasons: ['text_parse_error'],
+              values: {
+                status: 'queued',
+                parseErrorCode: null,
+                parseErrorDetails: { textParseError: message },
+                updatedAt: new Date(),
+              },
+            });
+            if (queued) return;
+            throw err;
           } else {
             throw err;
           }
@@ -561,6 +754,49 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       }
     }
   } catch (err) {
+    // Второй проход упал — сохранённый разбор важнее причины падения. Он уже
+    // лежит в БД, и первый проход мог дать пользователю рабочий документ:
+    // затирать его статусом parse_failed из-за неудачной попытки улучшить
+    // нельзя. Помечаем попытку завершённой и выходим, документ не трогаем.
+    if (secondPassJob) {
+      const message = err instanceof Error ? err.message : String(err);
+      const secondPassState = {
+        state: 'done',
+        mode: 'vision',
+        outcome: 'vision_failed',
+        error: message,
+        finishedAt: new Date().toISOString(),
+      };
+      // Baseline пуст только если первый проход упал целиком (текстовый разбор
+      // бросил исключение) — тогда документ действительно не разобран, и
+      // parse_failed честен. Во всех остальных случаях данные первого прохода
+      // остаются как есть: статус, позиции и стороны не трогаем.
+      const baselineEmpty =
+        baseline == null || (baseline.items.length === 0 && baseline.docNumber == null);
+      await db
+        .update(sourceDocuments)
+        .set(
+          baselineEmpty
+            ? {
+                status: 'parse_failed',
+                parseErrorCode: 'parse_failed',
+                parseErrorDetails: { reason: 'second_pass_failed', message },
+                secondPass: secondPassState,
+                processedAt: new Date(),
+                updatedAt: new Date(),
+              }
+            : { secondPass: secondPassState, updatedAt: new Date() },
+        )
+        .where(eq(sourceDocuments.id, sourceDocumentId));
+      log.warn(
+        { err: message, baselineEmpty },
+        baselineEmpty
+          ? 'vision second pass failed and baseline is empty — parse_failed'
+          : 'vision second pass failed — baseline kept',
+      );
+      await notifySourceDocumentUpdated(sourceDocumentId);
+      return;
+    }
     // VisionTimeoutError — fail-fast: помечаем parse_failed СРАЗУ, без
     // BullMQ retries. По умолчанию queue имеет attempts=3 с exponential
     // backoff 60с, что при VISION_TIMEOUT_MS=180с дало бы пользователю
@@ -703,6 +939,39 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     throw err;
   }
 
+  // ─── Второй проход: принимаем результат, только если он лучше ─────────────
+  //
+  // Vision вызывали ради улучшения, но он умеет и ухудшать: выдумать строки,
+  // потерять итог, вернуть пустую шапку. Сравниваем с сохранённым разбором по
+  // явным критериям (upd-result-compare.ts) и при проигрыше просто закрываем
+  // попытку, не трогая документ.
+  if (secondPassJob && baseline) {
+    const decision = chooseBetterUpdResult(baseline, parsed);
+    if (decision.winner === 'base') {
+      await db
+        .update(sourceDocuments)
+        .set({
+          secondPass: {
+            state: 'done',
+            mode: 'vision',
+            outcome: 'kept_baseline',
+            reasons: decision.reasons,
+            finishedAt: new Date().toISOString(),
+          },
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceDocuments.id, sourceDocumentId));
+      log.info({ reasons: decision.reasons }, 'vision second pass worse than baseline — kept');
+      await notifySourceDocumentUpdated(sourceDocumentId);
+      return;
+    }
+    // Победил vision — но стороны берём объединением: активный промпт v8
+    // грузополучателя не запрашивает вовсе, и без слияния успешный второй
+    // проход стёр бы сторону, добранную из текста на первом заходе.
+    parsed = mergeParties(parsed, baseline);
+    log.info({ reasons: decision.reasons }, 'vision second pass better than baseline — replacing');
+  }
+
   // Поставщик — сравниваем со справочником `suppliers` (CRUD в Справочниках).
   // Если нашли по ИНН/fuzzy name — возвращается id найденной записи; не нашли
   // — INSERT в справочник (счётчик «Поставщики» вырастает). В counterparties
@@ -767,6 +1036,30 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   const docDate = parsed.docDate ? new Date(parsed.docDate) : null;
   const confidence = parsed.confidence ?? 0;
   const canDedup = confidence >= MIN_DEDUP_CONFIDENCE;
+
+  // ─── Решение о втором проходе — ДО дедупликации ───────────────────────────
+  //
+  // Ветка дубля ниже завершается своим UPDATE и возвращается, до конца функции
+  // выполнение не доходит. Если оценивать качество после неё, слабо разобранный
+  // дубль (у наших двух прод-дублей вообще нет позиций) второго шанса не
+  // получит. Поэтому считаем здесь, а ставим задание вместе с записью
+  // результата — в одной транзакции, в обеих ветках.
+  const preValidation = validateUpdTotals({
+    totalSum: parsed.totalSum ?? null,
+    vatSum: parsed.vatSum ?? null,
+    itemsCount: parsed.itemsCount ?? null,
+    items: parsed.items.map((i) => ({
+      qty: i.qty ?? null,
+      price: i.price ?? null,
+      sum: i.sum ?? null,
+      vatRate: i.vatRate ?? null,
+      vatSum: i.vatSum ?? null,
+    })),
+  });
+  const weakReasons = weakParseReasons(parsed, preValidation.hasMismatch);
+  const wantSecondPass =
+    !secondPassJob && weakReasons.length > 0 && SECOND_PASS_MODES.has(parseMode);
+
   let duplicate: { id: string } | null = null;
   if (canDedup && supplierDirectoryId && parsed.docNumber && docDate) {
     const [existing] = await db
@@ -789,34 +1082,47 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       .limit(1);
     if (existing) {
       duplicate = { id: existing.id };
-      await db
-        .update(sourceDocuments)
-        .set({
-          status: 'needs_resolution',
-          parseErrorCode: 'duplicate_upd',
-          parseErrorDetails: {
-            existingId: existing.id,
-            supplierName: existing.supplierName,
-            docNumber: parsed.docNumber,
-            docDate: parsed.docDate,
-          },
-          // supplier_id оставляем NULL — для новых УПД поставщик теперь
-          // живёт в supplier_directory_id (FK на suppliers).
-          supplierId: null,
-          supplierDirectoryId,
-          recipientId,
-          // Дубль — тоже распознанный документ, и в списке он виден. Стороны
-          // пишем здесь же: этот UPDATE терминальный, до записи шапки ниже
-          // выполнение не доходит.
-          ...documentParties,
-          llmProviderId,
-          llmConfidence: parsed.confidence.toString(),
-          processedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(sourceDocuments.id, sourceDocumentId));
+      const duplicateValues = {
+        status: 'needs_resolution' as const,
+        parseErrorCode: 'duplicate_upd' as const,
+        parseErrorDetails: {
+          existingId: existing.id,
+          supplierName: existing.supplierName,
+          docNumber: parsed.docNumber,
+          docDate: parsed.docDate,
+        },
+        // supplier_id оставляем NULL — для новых УПД поставщик теперь
+        // живёт в supplier_directory_id (FK на suppliers).
+        supplierId: null,
+        supplierDirectoryId,
+        recipientId,
+        // Дубль — тоже распознанный документ, и в списке он виден. Стороны
+        // пишем здесь же: этот UPDATE терминальный, до записи шапки ниже
+        // выполнение не доходит.
+        ...documentParties,
+        llmProviderId,
+        llmConfidence: parsed.confidence.toString(),
+        processedAt: new Date(),
+        updatedAt: new Date(),
+      };
+      // Слабый дубль тоже заслуживает второго прохода: у обоих прод-дублей нет
+      // ни одной позиции, и без повтора они так и останутся пустыми карточками.
+      const queued = wantSecondPass
+        ? await queueSecondPass({
+            sourceDocumentId,
+            s3Key,
+            reasons: weakReasons,
+            values: duplicateValues,
+          })
+        : false;
+      if (!queued) {
+        await db
+          .update(sourceDocuments)
+          .set(duplicateValues)
+          .where(eq(sourceDocuments.id, sourceDocumentId));
+      }
       log.warn(
-        { existingId: existing.id, confidence, parsedViaVision },
+        { existingId: existing.id, confidence, parsedViaVision, secondPassQueued: queued },
         'duplicate detected — needs_resolution',
       );
       await notifySourceDocumentUpdated(sourceDocumentId);
@@ -907,27 +1213,50 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // Запись шапки. Для новых распознанных УПД поставщик живёт в
   // supplier_directory_id (FK на suppliers), supplier_id (FK на counterparties)
   // оставляем NULL — DTO supplierName собирается из COALESCE двух источников.
-  await db
-    .update(sourceDocuments)
-    .set({
-      status,
-      parseErrorCode,
-      parseErrorDetails,
-      supplierId: null,
-      supplierDirectoryId,
-      recipientId,
-      ...documentParties,
-      docNumber: parsed.docNumber ?? null,
-      docDate,
-      totalSum: parsed.totalSum != null ? parsed.totalSum.toString() : null,
-      vatSum: parsed.vatSum != null ? parsed.vatSum.toString() : null,
-      llmProviderId,
-      llmConfidence: parsed.confidence.toString(),
-      validation,
-      processedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(sourceDocuments.id, sourceDocumentId));
+  const headerValues = {
+    status,
+    parseErrorCode,
+    parseErrorDetails,
+    supplierId: null,
+    supplierDirectoryId,
+    recipientId,
+    ...documentParties,
+    docNumber: parsed.docNumber ?? null,
+    docDate,
+    totalSum: parsed.totalSum != null ? parsed.totalSum.toString() : null,
+    vatSum: parsed.vatSum != null ? parsed.vatSum.toString() : null,
+    llmProviderId,
+    llmConfidence: parsed.confidence.toString(),
+    validation,
+    processedAt: new Date(),
+    updatedAt: new Date(),
+    // Второй проход, дошедший сюда, победил сравнение — фиксируем исход, иначе
+    // recovery посчитал бы попытку незавершённой и поставил её заново.
+    ...(secondPassJob
+      ? {
+          secondPass: {
+            state: 'done',
+            mode: 'vision',
+            outcome: 'replaced',
+            finishedAt: new Date().toISOString(),
+          },
+        }
+      : {}),
+  };
+  const secondPassQueued = wantSecondPass
+    ? await queueSecondPass({ sourceDocumentId, s3Key, reasons: weakReasons, values: headerValues })
+    : false;
+  if (!secondPassQueued) {
+    await db
+      .update(sourceDocuments)
+      .set(headerValues)
+      .where(eq(sourceDocuments.id, sourceDocumentId));
+  } else {
+    log.warn(
+      { reasons: weakReasons, parseMode },
+      'weak parse — vision second pass queued as separate job',
+    );
+  }
 
   // Удаляем возможные старые позиции (если это повторный прогон после
   // resolve-duplicate/replace) и вставляем новые.
@@ -1834,7 +2163,7 @@ async function processS3CleanupOutbox(): Promise<void> {
 export async function recoverStaleProcessing(): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_PROCESSING_MS);
   const stale = await db
-    .select({ id: sourceDocuments.id })
+    .select({ id: sourceDocuments.id, secondPass: sourceDocuments.secondPass })
     .from(sourceDocuments)
     .where(and(eq(sourceDocuments.status, 'processing'), lt(sourceDocuments.updatedAt, cutoff)));
   if (stale.length === 0) return;
@@ -1861,7 +2190,10 @@ export async function recoverStaleProcessing(): Promise<void> {
       // записей. Раньше здесь стоял прямой queue.add без jobId: задание
       // получало случайный идентификатор, и если документ снова застревал в
       // queued, repair добавлял второе — документ распознавался дважды.
-      const dedupeKey = dispatchKeyOf(s.id);
+      // Второй проход восстанавливаем вторым проходом: обычное задание вернуло
+      // бы документ на текстовый путь, который уже дал слабый результат.
+      const pendingSecondPass = (s.secondPass as { state?: string } | null)?.state === 'queued';
+      const dedupeKey = pendingSecondPass ? documentSecondPassKeyOf(s.id) : dispatchKeyOf(s.id);
       await db.transaction(async (tx) => {
         await tx
           .update(sourceDocuments)
@@ -1870,7 +2202,9 @@ export async function recoverStaleProcessing(): Promise<void> {
         await enqueueJob(tx as unknown as typeof db, {
           queue: UPD_PARSE_QUEUE,
           jobName: 'parse',
-          payload: { sourceDocumentId: s.id, s3Key },
+          payload: pendingSecondPass
+            ? { sourceDocumentId: s.id, s3Key, pass: 'vision' as const }
+            : { sourceDocumentId: s.id, s3Key },
           dedupeKey,
         });
       });
@@ -1944,6 +2278,47 @@ worker.on('failed', async (job, err) => {
       return;
     }
     if (job.data.sourceDocumentId) {
+      // Второй проход — попытка УЛУЧШИТЬ уже сохранённый разбор. Его крах не
+      // повод обнулять результат первого прохода: документ мог быть вполне
+      // рабочим. Помечаем попытку завершённой и оставляем данные как есть;
+      // parse_failed остаётся только для документов, у которых сохранять
+      // нечего (первый проход не дал ни позиций, ни номера).
+      if (job.data.pass === 'vision') {
+        const [doc] = await db
+          .select({ docNumber: sourceDocuments.docNumber, status: sourceDocuments.status })
+          .from(sourceDocuments)
+          .where(eq(sourceDocuments.id, job.data.sourceDocumentId))
+          .limit(1);
+        const [item] = await db
+          .select({ id: sourceDocumentItems.id })
+          .from(sourceDocumentItems)
+          .where(eq(sourceDocumentItems.sourceDocumentId, job.data.sourceDocumentId))
+          .limit(1);
+        const baselineEmpty = !doc || (doc.docNumber == null && !item);
+        await db
+          .update(sourceDocuments)
+          .set({
+            secondPass: {
+              state: 'done',
+              mode: 'vision',
+              outcome: 'vision_failed',
+              error: err.message,
+              finishedAt: new Date().toISOString(),
+            },
+            ...(baselineEmpty
+              ? {
+                  status: 'parse_failed' as const,
+                  parseErrorCode: 'internal_error' as const,
+                  parseErrorDetails: { message: err.message, reason: 'second_pass_failed' },
+                  processedAt: new Date(),
+                }
+              : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(sourceDocuments.id, job.data.sourceDocumentId));
+        await notifySourceDocumentUpdated(job.data.sourceDocumentId);
+        return;
+      }
       await db
         .update(sourceDocuments)
         .set({

@@ -575,6 +575,16 @@ export const sourceDocuments = pgTable(
       onDelete: 'set null',
     }),
     consigneeNameRaw: text('consignee_name_raw'),
+    // Состояние второго прохода распознавания (текст → картинка).
+    //
+    // Отдельная колонка, а НЕ parse_error_details: те перезаписываются целиком
+    // в конце каждого разбора и при успехе становятся null — маркер «повтор уже
+    // заказан» там бы не пережил собственный успешный проход, и документ гонял
+    // бы задания по кругу.
+    //
+    // { state: 'queued'|'done', requestedAt, mode: 'vision',
+    //   outcome?: 'replaced'|'kept_baseline'|'vision_failed', error?: string }
+    secondPass: jsonb('second_pass'),
     siteId: uuid('site_id').references(() => sites.id, { onDelete: 'set null' }),
     docNumber: text('doc_number'),
     docDate: timestamp('doc_date', { withTimezone: false, mode: 'date' }),

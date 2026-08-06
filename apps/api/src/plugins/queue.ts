@@ -17,6 +17,11 @@ export type UpdParseJobData =
       sourceDocumentId: string;
       s3Key: string;
       docKind?: 'm15';
+      // pass:'vision' — ВТОРОЙ проход по тому же файлу: текстовый разбор дал
+      // слабый результат или упал, и документ повторно распознаётся картинкой.
+      // Отдельное задание, а не повтор внутри текущего: воркер работает с
+      // concurrency=1, и удлинять им первый разбор нельзя.
+      pass?: 'vision';
       bundleId?: undefined;
       mode?: undefined;
     }

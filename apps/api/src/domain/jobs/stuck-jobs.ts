@@ -29,7 +29,12 @@ import {
   sourceDocumentAttachments,
   sourceDocuments,
 } from '../../db/schema.js';
-import { bundleDispatchKeyOf, dispatchKeyOf, enqueueJob } from './job-outbox.js';
+import {
+  bundleDispatchKeyOf,
+  dispatchKeyOf,
+  documentSecondPassKeyOf,
+  enqueueJob,
+} from './job-outbox.js';
 
 /** Сколько запись должна провисеть в `queued`, чтобы считаться потерянной. */
 export const STUCK_AFTER_MINUTES = 45;
@@ -66,6 +71,7 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
       id: sourceDocuments.id,
       s3Key: sourceDocumentAttachments.s3Key,
       kind: sourceDocuments.kind,
+      secondPass: sourceDocuments.secondPass,
     })
     .from(sourceDocuments)
     .innerJoin(
@@ -90,11 +96,18 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
     // У документа может быть несколько вложений — задание нужно одно.
     if (seenDocs.has(doc.id)) continue;
     seenDocs.add(doc.id);
+    // Незавершённый второй проход восстанавливаем именно как второй проход.
+    // Обычное задание здесь вернуло бы документ на текстовый путь — тот самый,
+    // который уже дал слабый результат и породил повтор.
+    const pendingSecondPass =
+      (doc.secondPass as { state?: string } | null)?.state === 'queued';
     await enqueueJob(db, {
       queue: deps.queue,
       jobName: 'parse',
-      payload: { sourceDocumentId: doc.id, s3Key: doc.s3Key },
-      dedupeKey: dispatchKeyOf(doc.id),
+      payload: pendingSecondPass
+        ? { sourceDocumentId: doc.id, s3Key: doc.s3Key, pass: 'vision' as const }
+        : { sourceDocumentId: doc.id, s3Key: doc.s3Key },
+      dedupeKey: pendingSecondPass ? documentSecondPassKeyOf(doc.id) : dispatchKeyOf(doc.id),
     });
     documents += 1;
   }

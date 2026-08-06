@@ -51,6 +51,19 @@ export function bundleDispatchKeyOf(bundleId: string, generation = 0): string {
   return assertValidKey(['bundle', bundleId, 'parse', generation].join(KEY_SEP));
 }
 
+/**
+ * Ключ ВТОРОГО прохода документа (повторное распознавание картинкой).
+ *
+ * Отдельный от ключей пакета: второй проход адресует конкретный документ, а не
+ * загрузку. Он же служит защитой от дублей — BullMQ не создаст второе задание с
+ * тем же jobId, а `onConflictDoNothing` по dedupe_key не создаст вторую строку
+ * outbox. Восстановление зависших заданий обязано использовать ЭТОТ же ключ,
+ * иначе документ распознается дважды.
+ */
+export function documentSecondPassKeyOf(sourceDocumentId: string): string {
+  return assertValidKey(['doc', sourceDocumentId, 'parse', 'vision'].join(KEY_SEP));
+}
+
 export const OUTBOX_BATCH = 50;
 export const OUTBOX_LEASE_MS = 5 * 60 * 1000;
 export const OUTBOX_MAX_ATTEMPTS = 12;
