@@ -15,6 +15,8 @@ import {
   ShipmentStatusCodeSchema,
   ShipmentUpsertSchema,
   ReviewRequestSchema,
+  SHIPMENT_HARD_DELETE_STATUSES,
+  SHIPMENT_SOFT_DELETE_STATUSES,
   type PrimarySourceDocument,
 } from '@matcheck/contracts';
 import { computeItemsTotal, computeItemsVatSum } from '../lib/operation-sums.js';
@@ -139,10 +141,8 @@ async function expandSupplierToOpIds(
   return rows.map((r: { id: string }) => r.id);
 }
 
-// Статусы, при которых разрешён hard-delete без предварительной пометки.
-const HARD_DELETE_STATUSES = new Set(['draft', 'not_filled']);
-// Статусы, для которых соответственно требуется soft-delete (mark → admin hard).
-const SOFT_DELETE_STATUSES = new Set(['filled', 'confirmed_mol']);
+// Наборы статусов удаления (hard без пометки / soft через mark → admin hard)
+// живут в @matcheck/contracts — общий источник с фронтом, см. statuses.ts.
 
 type StatusRow = typeof statuses.$inferSelect;
 
@@ -943,7 +943,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         }
       } else {
         const code = (await getStatusCodeById(app, existing.statusId)) ?? '';
-        if (!HARD_DELETE_STATUSES.has(code)) {
+        if (!SHIPMENT_HARD_DELETE_STATUSES.has(code)) {
           return reply.code(409).send({
             error: 'must_mark_first',
             message: 'Сначала пометьте документ на удаление',
@@ -1067,7 +1067,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       }
 
       const code = (await getStatusCodeById(app, existing.statusId)) ?? '';
-      if (!SOFT_DELETE_STATUSES.has(code)) {
+      if (!SHIPMENT_SOFT_DELETE_STATUSES.has(code)) {
         return reply.code(400).send({
           error: 'cannot_mark_status',
           message: 'Пометка на удаление возможна только для статусов «Оформлена» и «Подтверждено МОЛ»',
@@ -1198,7 +1198,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             continue;
           }
           const code = (await getStatusCodeById(app, existing.statusId)) ?? '';
-          if (!SOFT_DELETE_STATUSES.has(code)) {
+          if (!SHIPMENT_SOFT_DELETE_STATUSES.has(code)) {
             skipped.push({ id, reason: 'wrong_status' });
             continue;
           }
@@ -1330,7 +1330,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           const isPending = existing.pendingDeletionAt !== null;
           if (!isPending) {
             const code = (await getStatusCodeById(app, existing.statusId)) ?? '';
-            if (!HARD_DELETE_STATUSES.has(code)) {
+            if (!SHIPMENT_HARD_DELETE_STATUSES.has(code)) {
               skipped.push({ id, reason: 'must_mark_first' });
               continue;
             }

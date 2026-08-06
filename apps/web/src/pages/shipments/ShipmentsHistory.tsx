@@ -32,6 +32,7 @@ import type {
   Site,
   Supplier,
 } from '@matcheck/contracts';
+import { SHIPMENT_SOFT_DELETE_STATUSES } from '@matcheck/contracts';
 import type { z } from 'zod';
 import dayjs from 'dayjs';
 import { ApiError, api } from '../../services/api';
@@ -101,8 +102,8 @@ function shipmentItemsVatSum(items: Row['items'] | undefined): number | null {
   return hasAny ? sum : null;
 }
 
-// Статусы, для которых вместо hard-delete показываем «Пометить на удаление».
-const SOFT_DELETE_STATUSES = new Set(['filled', 'confirmed_mol']);
+// Статусы, для которых вместо hard-delete показываем «Пометить на удаление»,
+// берём из @matcheck/contracts — общий источник с сервером (см. statuses.ts).
 
 export function ShipmentsHistory({
   onOpen,
@@ -659,7 +660,7 @@ export function ShipmentsHistory({
       );
     }
 
-    if (SOFT_DELETE_STATUSES.has(r.status.code)) {
+    if (SHIPMENT_SOFT_DELETE_STATUSES.has(r.status.code)) {
       return (
         <Space size={4} onClick={(e) => e.stopPropagation()}>
           {errIcon}

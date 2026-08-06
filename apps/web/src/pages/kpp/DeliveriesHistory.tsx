@@ -32,6 +32,7 @@ import type {
   Site,
   Supplier,
 } from '@matcheck/contracts';
+import { DELIVERY_SOFT_DELETE_STATUSES } from '@matcheck/contracts';
 import type { z } from 'zod';
 import dayjs from 'dayjs';
 import { ApiError, api } from '../../services/api';
@@ -72,8 +73,8 @@ type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
 
 const SELECT_WIDTH = 200;
-// Статусы, для которых вместо hard-delete показываем «Пометить на удаление».
-const SOFT_DELETE_STATUSES = new Set(['filled', 'confirmed_mol']);
+// Статусы, для которых вместо hard-delete показываем «Пометить на удаление»,
+// берём из @matcheck/contracts — общий источник с сервером (см. statuses.ts).
 
 const ARRIVAL_DATE_FMT = new Intl.DateTimeFormat('ru-RU', {
   day: '2-digit',
@@ -683,7 +684,7 @@ export function DeliveriesHistory({
     }
 
     // Активная вкладка.
-    if (SOFT_DELETE_STATUSES.has(r.status.code)) {
+    if (DELIVERY_SOFT_DELETE_STATUSES.has(r.status.code)) {
       return (
         <Space size={4} onClick={(e) => e.stopPropagation()}>
           {errIcon}
