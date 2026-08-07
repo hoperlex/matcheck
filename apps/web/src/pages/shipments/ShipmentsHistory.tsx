@@ -63,6 +63,7 @@ import {
 } from './ShipmentFeatureFilters';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
+import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 // directoryFilterMap (ИНН-маппинг customer_counterparties → operational
 // counterparties) больше не нужен — фильтрация переехала на сервер.
@@ -982,6 +983,27 @@ export function ShipmentsHistory({
             title: 'Получатель',
             key: 'receiver',
             render: (_: unknown, r: Row) => renderCounterpartyCol(r),
+          },
+          // Стороны из шапки привязанного УПД — тот же набор, что в «Документах»
+          // и «Ожидаемых». Берутся от primarySourceDocument, то есть от ПЕРВОГО
+          // привязанного документа, без агрегации по всем.
+          {
+            title: 'Покупатель',
+            key: 'buyer',
+            render: (_: unknown, r: Row) =>
+              shortenCounterpartyName(r.primarySourceDocument?.buyerName ?? null),
+          },
+          {
+            title: 'Грузополучатель',
+            key: 'consignee',
+            render: (_: unknown, r: Row) =>
+              shortenCounterpartyName(r.primarySourceDocument?.consigneeName ?? null),
+          },
+          {
+            title: 'Поставщик',
+            key: 'supplier',
+            render: (_: unknown, r: Row) =>
+              shortenCounterpartyName(r.primarySourceDocument?.supplierName ?? null),
           },
           {
             title: 'Объект',

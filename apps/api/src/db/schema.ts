@@ -569,6 +569,17 @@ export const sourceDocuments = pgTable(
     recipientMolId: uuid('recipient_mol_id').references(() => responsiblePersons.id, {
       onDelete: 'set null',
     }),
+    // Кто проставил получателя (contractor_id либо МОЛ) у inbound-документа:
+    //   null         — не задавали ни человек, ни автоматика;
+    //   'manual'     — человек: подрядчик, МОЛ или явная очистка поля;
+    //   'auto_buyer' — резолвер по ИНН покупателя из графы 6.
+    //
+    // Нужно, чтобы второй проход распознавания не возвращал подрядчика, которого
+    // менеджер сознательно очистил: одного «contractor_id is null» для этого не
+    // хватает. RBAC роли contractor значение 'auto_buyer' НЕ признаёт —
+    // содержимое публично загруженного файла недоверенное, см. lib/contractor-scope.ts.
+    // Только для direction='inbound'; см. миграцию 0088.
+    recipientSource: text('recipient_source').$type<'manual' | 'auto_buyer'>(),
     // ─── Стороны САМОГО документа (распознаются), а не операционные получатели ───
     //
     // recipient_id и contractor_id выбирает человек: первый — получатель
@@ -755,8 +766,16 @@ export const sourceBundles = pgTable(
   },
   (t) => [
     uniqueIndex('source_bundles_bundle_hash_unique').on(t.bundleHash),
-    // Пока обычный: уникальным станет в contract-миграции.
-    index('source_bundles_idempotency_key_idx').on(t.idempotencyKey),
+    // Канонический ключ пакета. Частичный: пакеты накладных и строки,
+    // созданные до перевода writers, живут с NULL и под уникальность не идут.
+    uniqueIndex('source_bundles_idempotency_key_unique')
+      .on(t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} is not null`),
+    // Поиск пакета-двойника: та же пачка файлов в другом scope. Нужен ради
+    // пометки менеджеру, переиспользование идёт по ключу выше.
+    index('source_bundles_content_hash_idx')
+      .on(t.contentHash)
+      .where(sql`${t.contentHash} is not null`),
     index('source_bundles_parent_idx')
       .on(t.parentBundleId)
       .where(sql`${t.parentBundleId} is not null`),

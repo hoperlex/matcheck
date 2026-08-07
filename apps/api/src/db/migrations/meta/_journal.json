@@ -605,6 +605,20 @@
       "breakpoints": true
     },
     {
+      "idx": 87,
+      "version": "7",
+      "when": 1781800013000,
+      "tag": "0087_bundle_identity_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1781800014000,
+      "tag": "0088_recipient_source",
+      "breakpoints": true
+    },
+    {
       "idx": 89,
       "version": "7",
       "when": 1781800015000,

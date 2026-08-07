@@ -1104,11 +1104,29 @@ export function DeliveriesHistory({
             dataIndex: 'arrivedAt',
             render: (v: string | null) => formatArrival(v),
           },
+          // Стороны из шапки привязанного УПД — тот же набор, что в «Документах»
+          // и «Ожидаемых»: покупатель (графа 6), грузополучатель (графа 4),
+          // продавец (графа 2). Берутся от primarySourceDocument, то есть от
+          // ПЕРВОГО привязанного документа, без агрегации по всем.
+          {
+            title: 'Покупатель',
+            key: 'buyer',
+            render: (_: unknown, r: Row) =>
+              shortenCounterpartyName(r.primarySourceDocument?.buyerName ?? null),
+          },
+          {
+            title: 'Грузополучатель',
+            key: 'consignee',
+            render: (_: unknown, r: Row) =>
+              shortenCounterpartyName(r.primarySourceDocument?.consigneeName ?? null),
+          },
           {
             title: 'Поставщик',
             key: 'supplier',
             render: (_: unknown, r: Row) => renderSupplierName(r),
           },
+          // Подрядчик здесь — подрядчик ПРИЁМКИ, со своей логикой наследования
+          // из документа (см. renderContractor), а не колонка из общего набора.
           {
             title: 'Подрядчик',
             key: 'contractor',

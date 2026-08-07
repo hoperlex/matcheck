@@ -358,21 +358,115 @@ suite('публичная загрузка документов (реальны�
     expect(await ownEventCount()).toBe(2);
   });
 
-  it('одинаковый комплект в двух поставках → 409 и НИ ОДНОГО нового события', async () => {
-    // Побайтово одинаковый набор файлов не может относиться к двум поставкам:
-    // bundle_hash уникален глобально. На практике это значит, что человек
-    // приложил один и тот же документ дважды, — и ему об этом говорят.
-    await upload(onePdf('cross'));
-    const eventsBefore = await ownEventCount();
+  it('одинаковый комплект на другой объект → 201 и отдельный пакет с пометкой', async () => {
+    // Раньше это был отказ 409: bundle_hash хранил чистый хеш содержимого под
+    // глобальным UNIQUE, поэтому та же пачка физически не могла существовать
+    // на двух объектах. На проде из-за этого нельзя было загрузить документ,
+    // который сам же и удалили. Поставщик такие отказы видеть не должен.
+    const first = await upload(onePdf('cross'));
+    expect(first.statusCode).toBe(201);
 
     const res = await upload(onePdf('cross'), { ...FIELDS, siteId: otherSiteId });
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error).toBe('cross_scope');
+    expect(res.statusCode).toBe(201);
+    expect(res.json().ticket).not.toBe(first.json().ticket);
 
-    // ingest_events.bundle_id NOT NULL: привязать отклонённую попытку было бы
-    // можно только к ЧУЖОМУ пакету — он бы получил тег «от поставщика» и
-    // чужой комментарий. Поэтому событие не пишется вовсе.
-    expect(await ownEventCount()).toBe(eventsBefore);
+    // Два пакета: одинаковое содержимое, разная идентичность.
+    const bundles = await sql<{ id: string; bundle_hash: string; content_hash: string }[]>`
+      SELECT id, bundle_hash, content_hash FROM source_bundles
+      WHERE site_id in (${siteId}, ${otherSiteId}) ORDER BY created_at`;
+    expect(bundles).toHaveLength(2);
+    expect(bundles[0]!.content_hash).toBe(bundles[1]!.content_hash);
+    expect(bundles[0]!.bundle_hash).not.toBe(bundles[1]!.bundle_hash);
+
+    // Менеджеру остаётся след: у второго события ссылка на первый пакет.
+    const [event] = await sql<{ cross_scope_of: string | null }[]>`
+      SELECT cross_scope_of FROM ingest_events WHERE bundle_id = ${bundles[1]!.id}`;
+    expect(event!.cross_scope_of).toBe(bundles[0]!.id);
+  });
+
+  it('тот же комплект на тот же объект, но другую дату → отдельный пакет', async () => {
+    // Ровно тот сценарий, что воспроизвели на проде: документ загрузили,
+    // удалили, а повторная загрузка на новую дату упиралась в 409.
+    const first = await upload(onePdf('same-site-other-date'));
+    expect(first.statusCode).toBe(201);
+
+    const res = await upload(onePdf('same-site-other-date'), {
+      ...FIELDS,
+      expectedDate: '2026-08-12',
+    });
+    expect(res.statusCode).toBe(201);
+
+    const bundles = await sql<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE site_id = ${siteId}`;
+    expect(bundles).toHaveLength(2);
+  });
+
+  it('единственный документ удалён → тот же комплект грузится заново', async () => {
+    await upload(onePdf('reupload-after-delete'));
+    const [bundle] = await sql<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE site_id = ${siteId}`;
+    // Пакет остаётся, документов в нём больше нет — так выглядит удаление
+    // документа менеджером.
+    await sql`DELETE FROM source_documents WHERE bundle_id = ${bundle!.id}`;
+    // Пакет должен выйти из orphan-grace, иначе повтор считается параллельной
+    // загрузкой и честно возвращает reused.
+    await sql`UPDATE source_bundles SET updated_at = now() - interval '5 minutes'
+      WHERE id = ${bundle!.id}`;
+
+    const res = await upload(onePdf('reupload-after-delete'));
+    expect(res.statusCode).toBe(201);
+
+    // Пакет переиспользован (scope тот же), документ создан заново.
+    const bundles = await sql<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE site_id = ${siteId}`;
+    expect(bundles).toHaveLength(1);
+    const [{ count: docs }] = await sql<{ count: string }[]>`
+      SELECT count(*) FROM source_documents WHERE bundle_id = ${bundle!.id}`;
+    expect(Number(docs)).toBe(1);
+  });
+
+  it('пакет накладных с тем же bundle_hash не подхватывается', async () => {
+    // /upload-waybill пишет bundle_hash без idempotency_key — ровно как
+    // legacy-пакеты единого входа. Без сужения по kind ручная загрузка
+    // переиспользовала бы чужой пакет накладных.
+    await upload(onePdf('waybill-lookalike'));
+    const [bundle] = await sql<{ id: string; bundle_hash: string; content_hash: string }[]>`
+      SELECT id, bundle_hash, content_hash FROM source_bundles WHERE site_id = ${siteId}`;
+    await sql`DELETE FROM source_documents WHERE bundle_id = ${bundle!.id}`;
+    // Превращаем его в «пакет накладных без ключей» с чистым хешем содержимого.
+    await sql`UPDATE source_bundles
+      SET kind = 'waybill', idempotency_key = NULL, content_hash = NULL,
+          bundle_hash = ${bundle!.content_hash}, updated_at = now() - interval '5 minutes'
+      WHERE id = ${bundle!.id}`;
+
+    const res = await upload(onePdf('waybill-lookalike'));
+    expect(res.statusCode).toBe(201);
+
+    // Свой пакет, а не чужой: строк стало две.
+    const bundles = await sql<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE site_id = ${siteId}`;
+    expect(bundles).toHaveLength(2);
+  });
+
+  it('пакет ДО перехода на identity-хеш переиспользуется, а не считается чужим', async () => {
+    // Так выглядят пакеты, загруженные до этой правки: ключа нет, content_hash
+    // пуст, а bundle_hash хранит ЧИСТЫЙ хеш содержимого. Найти их можно только
+    // по нему — отсюда отдельная ветка поиска.
+    await upload(onePdf('legacy-key'));
+    const [bundle] = await sql<{ id: string; content_hash: string }[]>`
+      SELECT id, content_hash FROM source_bundles WHERE site_id = ${siteId}`;
+    await sql`UPDATE source_bundles
+      SET idempotency_key = NULL, content_hash = NULL, bundle_hash = ${bundle!.content_hash}
+      WHERE id = ${bundle!.id}`;
+
+    const res = await upload(onePdf('legacy-key'));
+    expect(res.statusCode).toBe(201);
+
+    const rows = await sql<{ idempotency_key: string | null }[]>`
+      SELECT idempotency_key FROM source_bundles WHERE site_id = ${siteId}`;
+    expect(rows).toHaveLength(1);
+    // Ключ дозаполняется на месте.
+    expect(rows[0]!.idempotency_key).toBeTruthy();
   });
 
   it('пакет того же scope без idempotency_key переиспользуется, а не считается чужим', async () => {

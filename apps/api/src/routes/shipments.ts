@@ -409,6 +409,8 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
     const sdSupplier = alias(counterparties, 'sd_supplier');
     const sdSupplierDir = alias(suppliers, 'sd_supplier_dir');
     const sdContractor = alias(counterparties, 'sd_contractor');
+    const sdBuyer = alias(counterparties, 'sd_buyer');
+    const sdConsignee = alias(counterparties, 'sd_consignee');
     const sdRows = (await app.db
       .select({
         id: sourceDocuments.id,
@@ -418,11 +420,21 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
         contractorId: sourceDocuments.contractorId,
         supplierName: drSql<string | null>`COALESCE(${sdSupplierDir.name}, ${sdSupplier.name})`,
         contractorName: sdContractor.name,
+        // Стороны из шапки УПД — тем же COALESCE, что в основном DTO
+        // (sdRow в routes/source-documents.ts). Именно COALESCE, а не голый
+        // JOIN: графу 4 печатают без ИНН, связать её не с чем, и грузополучатель
+        // жил бы только в *_name_raw — в историях операций он бы исчез.
+        buyerName: drSql<string | null>`COALESCE(${sourceDocuments.buyerNameRaw}, ${sdBuyer.name})`,
+        consigneeName: drSql<
+          string | null
+        >`COALESCE(${sourceDocuments.consigneeNameRaw}, ${sdConsignee.name})`,
       })
       .from(sourceDocuments)
       .leftJoin(sdSupplier, eq(sourceDocuments.supplierId, sdSupplier.id))
       .leftJoin(sdSupplierDir, eq(sourceDocuments.supplierDirectoryId, sdSupplierDir.id))
       .leftJoin(sdContractor, eq(sourceDocuments.contractorId, sdContractor.id))
+      .leftJoin(sdBuyer, eq(sourceDocuments.buyerId, sdBuyer.id))
+      .leftJoin(sdConsignee, eq(sourceDocuments.consigneeId, sdConsignee.id))
       .where(inArray(sourceDocuments.id, uniquePrimaryIds))) as PrimarySourceDocument[];
     for (const sd of sdRows) primaryDocById.set(sd.id, sd);
   }

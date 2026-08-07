@@ -16,7 +16,7 @@
 // статусе resolving нигде не показывается, а повтор проходит начисто.
 
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql as drSql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
   ingestEvents,
@@ -31,6 +31,7 @@ import { bundleDispatchKeyOf, enqueueJob } from '../jobs/job-outbox.js';
 import { buildS3Key } from '../storage/s3.path.js';
 import { UPD_PARSE_QUEUE } from '../../plugins/queue.js';
 import { contentHashOf, idempotencyKeyOf, safeName } from '../sourceDocuments/bundle-key.js';
+import { manualRecipientSource } from '../sourceDocuments/resolve-contractor.js';
 
 // Ключи пакета переехали в domain/sourceDocuments/bundle-key.ts: тот же формат
 // нужен и кнопке менеджера, и публичной странице поставщика. Ре-экспорт — ради
@@ -115,14 +116,23 @@ export async function resolveMailMessage(
 
   const contentHash = contentHashOf(attachments.map((a) => a.sha256 ?? ''));
 
-  // Тот же комплект уже загружен? Пока уникальность держится на bundle_hash,
-  // объект в неё не входит, поэтому проверяем scope вручную: пакет чужого
-  // объекта переиспользовать нельзя — это и есть тот дефект, из-за которого
-  // один и тот же УПД «прилипал» к первой площадке.
+  // Тот же комплект уже загружен? Ищем по content_hash, а НЕ по bundle_hash:
+  // ручные и публичные загрузки теперь пишут в bundle_hash хеш scope +
+  // содержимого, и поиск по чистому содержимому их бы не нашёл — письмо с тем
+  // же комплектом создало бы дубль на том же объекте.
+  //
+  // Пакет своего объекта приоритетнее: только его можно переиспользовать.
+  // Порядок задан явно — строк с одним content_hash теперь бывает несколько,
+  // и без сортировки выбор был бы случайным.
   const [existing] = await db
     .select()
     .from(sourceBundles)
-    .where(eq(sourceBundles.bundleHash, contentHash))
+    .where(eq(sourceBundles.contentHash, contentHash))
+    .orderBy(
+      drSql`case when ${sourceBundles.siteId} = ${params.siteId} then 0 else 1 end`,
+      asc(sourceBundles.createdAt),
+      asc(sourceBundles.id),
+    )
     .limit(1);
   if (existing) {
     if (existing.siteId !== params.siteId) {
@@ -234,6 +244,13 @@ export async function resolveMailMessage(
         direction,
         origin: 'mail',
         contractorId: params.contractorId ?? null,
+        // Подрядчика выбрал менеджер при разборе письма — для автоподстановки
+        // документ уже решённый, см. manualRecipientSource.
+        recipientSource: manualRecipientSource({
+          direction,
+          contractorId: params.contractorId ?? null,
+          recipientMolId: null,
+        }),
         siteId: params.siteId,
         expectedDate: params.expectedDate ? new Date(params.expectedDate) : null,
         status: 'queued',

@@ -5055,6 +5055,16 @@
             ],
             "format": "uuid"
           },
+          "recipientSource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "manual",
+              "auto_buyer"
+            ]
+          },
           "siteId": {
             "type": [
               "string",
@@ -5447,6 +5457,16 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "recipientSource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "manual",
+              "auto_buyer"
+            ]
           },
           "siteId": {
             "type": [
@@ -6027,6 +6047,16 @@
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "recipientSource": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "manual",
+                    "auto_buyer"
+                  ]
                 },
                 "siteId": {
                   "type": [
@@ -8354,6 +8384,16 @@
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "recipientSource": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "manual",
+                    "auto_buyer"
+                  ]
                 },
                 "siteId": {
                   "type": [

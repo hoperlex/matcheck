@@ -8,7 +8,7 @@ import type {
 } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api } from '../../services/api';
-import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
+import { documentPartyColumns } from '../../shared/ui/documentPartyColumns';
 import { useAuthStore } from '../../stores/auth';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
@@ -166,16 +166,8 @@ export function LinkSourceDocumentModal({
               dataIndex: 'docDate',
               render: (v: string | null) => v ?? '—',
             },
-            {
-              title: 'Поставщик',
-              key: 'supplier',
-              render: (_: unknown, r: SourceDocument) => shortenCounterpartyName(r.supplierName),
-            },
-            {
-              title: 'Подрядчик',
-              key: 'contractor',
-              render: (_: unknown, r: SourceDocument) => shortenCounterpartyName(r.contractorName),
-            },
+            // Единый набор сторон — как в «Документах» и «Ожидаемых».
+            ...documentPartyColumns<SourceDocument>((r) => r),
             {
               title: 'Объект',
               key: 'site',

@@ -187,6 +187,22 @@ export const UpdValidationSchema = z.object({
 });
 export type UpdValidation = z.infer<typeof UpdValidationSchema>;
 
+/**
+ * Происхождение получателя inbound-документа (contractor_id либо МОЛ).
+ *
+ *  null        — получателя не задавали ни человек, ни автоматика;
+ *  'manual'    — задал человек: подрядчик, МОЛ или явная очистка поля;
+ *  'auto_buyer'— подставлен резолвером из покупателя (графа 6) распознанного УПД.
+ *
+ * Только для direction='inbound': у outbound получатель — recipient_id, а
+ * contractor_id там наш отправитель и «Черновиком» документ из-за него не станет.
+ *
+ * Значение 'auto_buyer' НЕ даёт прав роли contractor: содержимое файла с
+ * публичной страницы недоверенное, см. lib/contractor-scope.ts.
+ */
+export const RecipientSourceSchema = z.enum(['manual', 'auto_buyer']);
+export type RecipientSource = z.infer<typeof RecipientSourceSchema>;
+
 export const SourceDocumentSchema = z.object({
   id: z.string().uuid(),
   kind: SourceKindSchema,
@@ -196,6 +212,9 @@ export const SourceDocumentSchema = z.object({
   recipientId: z.string().uuid().nullable(),
   contractorId: z.string().uuid().nullable(),
   recipientMolId: z.string().uuid().nullable(),
+  // Optional по той же причине, что fromSupplierPortal ниже: схема общая с
+  // /sync и PATCH-ответами.
+  recipientSource: RecipientSourceSchema.nullable().optional(),
   siteId: z.string().uuid().nullable(),
   supplierName: z.string().nullable().optional(),
   contractorName: z.string().nullable().optional(),
@@ -287,6 +306,11 @@ export const SourceDocumentListResponseSchema = z.object({
 // supplierName/contractorName сервер резолвит тем же COALESCE, что и в
 // GET /source-documents: supplierName = COALESCE(suppliers.name,
 // counterparties.name); contractorName = counterparties.name по contractor_id.
+//
+// buyerName/consigneeName — стороны из шапки УПД, теми же выражениями, что в
+// основном DTO: COALESCE(*_name_raw, counterparties.name). Именно COALESCE, а не
+// голый JOIN: графу 4 печатают без ИНН, связать такую сторону не с чем, и без
+// *_name_raw грузополучатель исчезал бы ровно в историях операций.
 export const PrimarySourceDocumentSchema = z.object({
   id: z.string().uuid(),
   kind: SourceKindSchema,
@@ -295,6 +319,8 @@ export const PrimarySourceDocumentSchema = z.object({
   contractorId: z.string().uuid().nullable(),
   supplierName: z.string().nullable(),
   contractorName: z.string().nullable(),
+  buyerName: z.string().nullable(),
+  consigneeName: z.string().nullable(),
 });
 export type PrimarySourceDocument = z.infer<typeof PrimarySourceDocumentSchema>;
 

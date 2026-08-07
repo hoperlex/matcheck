@@ -24,6 +24,7 @@ import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../sh
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
+import { documentPartyColumns } from '../../shared/ui/documentPartyColumns';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
@@ -359,18 +360,10 @@ export function ExpectedSourceDocsList({
             ...dateRangeColumnFilter<SourceDocument>((r) => r.expectedDate),
             render: (v: string | null) => formatDateRu(v),
           },
-          {
-            title: 'Поставщик',
-            key: 'supplier',
-            sorter: stringSorter<SourceDocument>((r) => r.supplierName),
-            render: (_: unknown, r: SourceDocument) => shortenCounterpartyName(r.supplierName),
-          },
-          {
-            title: 'Подрядчик',
-            key: 'contractor',
-            sorter: stringSorter<SourceDocument>((r) => r.contractorName),
-            render: (_: unknown, r: SourceDocument) => shortenCounterpartyName(r.contractorName),
-          },
+          // Тот же набор сторон, что в «Документах»: раньше здесь была пара
+          // «Поставщик / Подрядчик», и один документ выглядел на двух экранах
+          // по-разному. См. shared/ui/documentPartyColumns.
+          ...documentPartyColumns<SourceDocument>((r) => r),
           {
             title: 'Объект',
             key: 'site',
@@ -421,7 +414,12 @@ export function ExpectedSourceDocsList({
                 {r.vatSum ? ` (НДС ${r.vatSum} ₽)` : ''}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {shortenCounterpartyName(r.contractorName)} · {r.siteName ?? '—'}
+                {shortenCounterpartyName(r.buyerName)} ·{' '}
+                {shortenCounterpartyName(r.consigneeName)} · {r.siteName ?? '—'}
+              </Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                Подрядчик: {shortenCounterpartyName(r.contractorName ?? r.recipientMolName)}
+                {r.recipientSource === 'auto_buyer' ? ' (автоматически)' : ''}
               </Typography.Text>
             </Space>
           </Card>

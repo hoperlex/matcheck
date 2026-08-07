@@ -514,6 +514,10 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           contractorId: sd.contractorId,
           contractorName,
           recipientMolId: sd.recipientMolId,
+          // Мобильному клиенту поле не нужно, но /sync собирает документы по той
+          // же SourceDocumentDetailSchema, что и портал: пропущенное поле молча
+          // разошлось бы с DTO при первом же ужесточении схемы.
+          recipientSource: sd.recipientSource ?? null,
           siteId: sd.siteId,
           docNumber: sd.docNumber,
           docDate: sd.docDate?.toISOString().slice(0, 10) ?? null,

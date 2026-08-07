@@ -19,7 +19,7 @@
 //                резервирования против одновременных запросов: публичный вход
 //                открыт всем, две вкладки с одним комплектом реальны.
 
-import { and, eq, isNull, sql as drSql } from 'drizzle-orm';
+import { and, asc, eq, isNull, ne, sql as drSql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
   counterparties,
@@ -31,10 +31,12 @@ import {
   sourceDocuments,
 } from '../../db/schema.js';
 import { bundleDispatchKeyOf, enqueueJob, type JobQueue } from '../jobs/job-outbox.js';
+import { manualRecipientSource } from './resolve-contractor.js';
 import { buildS3Key } from '../storage/s3.path.js';
 import { putObject } from '../storage/s3.signer.js';
 import { UPD_PARSE_QUEUE } from '../../plugins/queue.js';
 import {
+  bundleIdentityHashOf,
   contentHashOf,
   expectedDateKeyOf,
   fileHashOf,
@@ -80,8 +82,6 @@ export type IngestBundleParams = {
 export type IngestBundleResult =
   | { outcome: 'created'; bundleId: string; ticket: string | null }
   | { outcome: 'reused'; bundleId: string; status: string; ticket: string | null }
-  /** Те же байты, но другой объект/дата/получатель — чужой пакет не отдаём. */
-  | { outcome: 'cross_scope'; existingBundleId: string }
   | { outcome: 's3_unavailable'; bundleId: string };
 
 /**
@@ -113,6 +113,30 @@ async function hasDocuments(db: Db, bundleId: string): Promise<boolean> {
     .where(eq(sourceDocuments.bundleId, bundleId))
     .limit(1);
   return !!row;
+}
+
+/**
+ * Пакет-двойник: та же пачка файлов, уже загруженная в ДРУГОМ scope.
+ *
+ * Нужен только ради пометки менеджеру (`ingest_events.cross_scope_of`) — на
+ * приём он не влияет. Раньше такой пакет означал отказ: `bundle_hash` был
+ * чистым хешем содержимого под UNIQUE, и второй объект/дата упирались в чужую
+ * строку. Теперь дубль содержимого — законная ситуация, поэтому строк с одним
+ * `content_hash` бывает несколько и порядок обязан быть детерминированным,
+ * иначе ссылка скакала бы от прогона к прогону.
+ */
+async function findContentTwin(
+  db: Db,
+  contentHash: string,
+  selfBundleId: string,
+): Promise<string | null> {
+  const [twin] = await db
+    .select({ id: sourceBundles.id })
+    .from(sourceBundles)
+    .where(and(eq(sourceBundles.contentHash, contentHash), ne(sourceBundles.id, selfBundleId)))
+    .orderBy(asc(sourceBundles.createdAt), asc(sourceBundles.id))
+    .limit(1);
+  return twin?.id ?? null;
 }
 
 /** Событие приёма публичной отправки. Новая отправка — новое событие и тикет. */
@@ -176,12 +200,17 @@ export async function ingestDocumentsBundle(
     expectedDate,
     contentHash,
   });
+  // Идентичность пакета = scope + содержимое. Раньше в bundle_hash писали
+  // чистый contentHash, и та же пачка на другой объект/дату упиралась в чужую
+  // строку под UNIQUE — приходил отказ, даже если документы прежнего пакета
+  // давно удалили.
+  const identityHash = bundleIdentityHashOf(idempotencyKey);
 
   // ─── 1. Поиск существующего пакета ────────────────────────────────────────
   //
-  // Сначала по scoped-ключу. Если не нашли — по содержимому: до перевода
-  // writers ключ не заполнялся, поэтому у всех ранее загруженных пакетов он
-  // NULL, и поиск только по ключу принял бы свой же пакет за чужой scope.
+  // Три шага, и все три — про ОДИН И ТОТ ЖЕ scope. Пакет другого объекта или
+  // другой даты здесь больше не рассматривается вовсе: он законно существует
+  // отдельно.
   let existing: BundleRow | undefined;
   const [byKey] = await db
     .select()
@@ -190,24 +219,52 @@ export async function ingestDocumentsBundle(
     .limit(1);
   existing = byKey;
 
+  // Страховка от гонки: ключ мог не записаться, а identity-строка уже есть.
+  // Ключ при этом дозаполняем — иначе следующая загрузка не увидит пакет по
+  // ключу, а вставка упрётся в UNIQUE по bundle_hash и получит 23505 вместо
+  // мирного «проиграл гонку».
   if (!existing) {
-    const [byHash] = await db
+    const [byIdentity] = await db
       .select()
       .from(sourceBundles)
-      .where(eq(sourceBundles.bundleHash, contentHash))
+      .where(eq(sourceBundles.bundleHash, identityHash))
       .limit(1);
-    if (byHash) {
-      if (!scopeMatches(byHash, params)) {
-        return { outcome: 'cross_scope', existingBundleId: byHash.id };
-      }
-      // Свой scope, ключа просто ещё нет — дозаполняем и переиспользуем.
-      if (!byHash.idempotencyKey) {
+    if (byIdentity) {
+      if (!byIdentity.idempotencyKey) {
         await db
           .update(sourceBundles)
           .set({ idempotencyKey, contentHash })
-          .where(and(eq(sourceBundles.id, byHash.id), isNull(sourceBundles.idempotencyKey)));
+          .where(and(eq(sourceBundles.id, byIdentity.id), isNull(sourceBundles.idempotencyKey)));
       }
-      existing = byHash;
+      existing = byIdentity;
+    }
+  }
+
+  // Legacy: пакеты, загруженные до перевода writers на scoped-ключ. У них и
+  // ключ, и content_hash пустые, а bundle_hash хранит ЧИСТЫЙ хеш содержимого —
+  // найти их можно только так. Условие сужено намеренно: `/upload-waybill`
+  // тоже пишет bundle_hash без ключей, и без фильтра ручная загрузка
+  // переиспользовала бы пакет накладных.
+  if (!existing) {
+    const [legacy] = await db
+      .select()
+      .from(sourceBundles)
+      .where(
+        and(
+          eq(sourceBundles.bundleHash, contentHash),
+          isNull(sourceBundles.idempotencyKey),
+          eq(sourceBundles.kind, 'mixed'),
+          isNull(sourceBundles.parentBundleId),
+        ),
+      )
+      .limit(1);
+    // Чужой scope — не наш пакет: молча создадим свой.
+    if (legacy && scopeMatches(legacy, params)) {
+      await db
+        .update(sourceBundles)
+        .set({ idempotencyKey, contentHash })
+        .where(and(eq(sourceBundles.id, legacy.id), isNull(sourceBundles.idempotencyKey)));
+      existing = legacy;
     }
   }
 
@@ -288,32 +345,39 @@ export async function ingestDocumentsBundle(
     bundle = updated;
     generation = updated.dispatchGeneration;
   } else {
-    const inserted = reserve
-      ? await db
-          .insert(sourceBundles)
-          .values({ bundleHash: contentHash, contentHash, idempotencyKey, ...bundleValues, createdByUserId: params.actorUserId })
-          // Уникальность держится на bundle_hash: одновременный запрос с тем
-          // же комплектом не должен получить SQL-ошибку — он просто проиграл
-          // гонку и дальше переиспользует чужой пакет.
-          .onConflictDoNothing({ target: sourceBundles.bundleHash })
-          .returning()
-      : await db
-          .insert(sourceBundles)
-          .values({ bundleHash: contentHash, contentHash, idempotencyKey, ...bundleValues, createdByUserId: params.actorUserId })
-          .returning();
+    // Конфликт подавляем по idempotency_key: он канонический и уникален
+    // частичным индексом. По bundle_hash подавлять нельзя — при выкате старый
+    // и новый код считают его по-разному, и одновременные запросы получили бы
+    // не «проигрыш в гонке», а 23505. Ключ же обе версии считают одинаково.
+    // Подавление ставится в ОБА режима: во внутреннем его не было вовсе.
+    const insertValues = {
+      bundleHash: identityHash,
+      contentHash,
+      idempotencyKey,
+      ...bundleValues,
+      createdByUserId: params.actorUserId,
+    };
+    const inserted = await db
+      .insert(sourceBundles)
+      .values(insertValues)
+      // where — предикат ЧАСТИЧНОГО индекса, без него Postgres не сопоставит
+      // конфликт с `... WHERE idempotency_key IS NOT NULL`.
+      .onConflictDoNothing({
+        target: sourceBundles.idempotencyKey,
+        where: drSql`${sourceBundles.idempotencyKey} is not null`,
+      })
+      .returning();
 
     const [created] = inserted;
     if (!created) {
-      // Гонку выиграл другой запрос. Перечитываем и решаем по scope.
+      // Гонку выиграл другой запрос — он в том же scope по построению ключа,
+      // поэтому проверять scope больше не нужно.
       const [winner] = await db
         .select()
         .from(sourceBundles)
-        .where(eq(sourceBundles.bundleHash, contentHash))
+        .where(eq(sourceBundles.idempotencyKey, idempotencyKey))
         .limit(1);
       if (!winner) throw new Error('ingest: пакет исчез после конфликта вставки');
-      if (!scopeMatches(winner, params)) {
-        return { outcome: 'cross_scope', existingBundleId: winner.id };
-      }
       if (publicSubmission) await recordPublicSubmission(db, winner.id, publicSubmission);
       return {
         outcome: 'reused',
@@ -379,6 +443,11 @@ export async function ingestDocumentsBundle(
     return { outcome: 's3_unavailable', bundleId: bundle.id };
   }
 
+  // Та же пачка уже загружена в другом scope? Приём это не останавливает —
+  // раньше здесь был отказ 409, из-за которого нельзя было загрузить файл,
+  // удалённый из системы. Теперь просто оставляем менеджеру ссылку на двойник.
+  const twinBundleId = await findContentTwin(db, contentHash, bundle.id);
+
   // ─── 5. Записи о пакете + задание ─────────────────────────────────────────
   try {
     await db.transaction(async (tx) => {
@@ -394,6 +463,9 @@ export async function ingestDocumentsBundle(
           origin: 'manual_pdf',
           contractorId,
           recipientMolId,
+          // Получателя задал человек в форме загрузки — фиксируем это, чтобы
+          // автоподстановка считала документ уже решённым, а не нетронутым.
+          recipientSource: manualRecipientSource({ direction, contractorId, recipientMolId }),
           siteId,
           expectedDate: expectedDate ? new Date(expectedDate) : null,
           status: 'queued',
@@ -427,6 +499,17 @@ export async function ingestDocumentsBundle(
           submitterIp: publicSubmission.ip,
           submitterUserAgent: publicSubmission.userAgent,
           submissionManifest: publicSubmission.manifest,
+          crossScopeOf: twinBundleId,
+        });
+      } else if (twinBundleId) {
+        // Внутренняя загрузка событий обычно не пишет — сам факт виден по
+        // created_by_user_id пакета. Но ссылку на двойник хранить больше негде,
+        // а раньше об этом случае сообщал отказ 409.
+        await tx.insert(ingestEvents).values({
+          bundleId: bundle.id,
+          channel: 'manual',
+          actorUserId: params.actorUserId,
+          crossScopeOf: twinBundleId,
         });
       }
 

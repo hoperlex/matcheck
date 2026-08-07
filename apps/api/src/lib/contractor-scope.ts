@@ -1,6 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import { and, eq, inArray, sql as drSql } from 'drizzle-orm';
-import { counterparties, customerCounterparties, deliveries } from '../db/schema.js';
+import {
+  counterparties,
+  customerCounterparties,
+  deliveries,
+  sourceDocuments,
+} from '../db/schema.js';
 import type { AuthUser } from '../plugins/auth.js';
 
 // Скоупинг видимости по подрядчику (роль contractor). Аналог inspector_kpp→siteId,
@@ -58,21 +63,99 @@ export async function resolveContractorOpIds(
 }
 
 /**
+ * Автоподставленный подрядчик правом доступа не является.
+ *
+ * recipient_source='auto_buyer' ставит воркер, вычитав ИНН покупателя из шапки
+ * УПД, пришедшего с публичной страницы /uploads. Страница открыта всем: файл
+ * недоверенный, и его содержимое не должно превращаться в область видимости —
+ * иначе достаточно прислать УПД с чужим ИНН, чтобы его подрядчик увидел
+ * поставщиков и суммы. Для менеджера подстановка полноценна (снимает «Черновик»,
+ * видна в колонке), для RBAC — нет.
+ *
+ * Ограничение снимается, когда появятся именные ссылки загрузки: там подрядчик
+ * будет свойством канала, а не содержимого файла.
+ */
+
+/**
+ * Предикат видимости ДОКУМЕНТА для подрядчика: contractor_id ∈ opIds и получателя
+ * проставил не резолвер. Вызывать только при непустом opIds — на пустом массиве
+ * вызывающий пушит `false` (подрядчик видит пусто, как inspector без объекта).
+ *
+ * Существует, чтобы правило «auto_buyer не даёт доступа» жило в одном месте:
+ * раньше условие писалось руками в пяти роутах source-documents.ts, и добавить
+ * туда исключение построчно значило бы однажды его пропустить.
+ */
+export function sourceDocumentContractorPredicate(opIds: string[]) {
+  return and(
+    inArray(sourceDocuments.contractorId, opIds),
+    drSql`${sourceDocuments.recipientSource} IS DISTINCT FROM 'auto_buyer'`,
+  )!;
+}
+
+/**
+ * Литерал `ARRAY['…','…']::uuid[]` для сравнений вида `= ANY(...)`.
+ *
+ * Подставлять JS-массив прямо в шаблон нельзя: drizzle разворачивает его в
+ * список плейсхолдеров (`($1, $2)`), и Postgres получает не литерал массива, а
+ * отдельные значения — запрос падает с «malformed array literal». В обычных
+ * условиях выручает `inArray()`, но внутри EXISTS ниже колонка адресуется через
+ * алиас `sd_c`, до которого билдер не достаёт, — там нужен именно этот литерал.
+ */
+function uuidArray(ids: string[]) {
+  return drSql`ARRAY[${drSql.join(
+    ids.map((id) => drSql`${id}`),
+    drSql`, `,
+  )}]::uuid[]`;
+}
+
+/**
+ * То же правило для уже загруженной строки — детальный роут, скачивание
+ * оригинала, PATCH. Держим рядом с SQL-предикатом, чтобы два представления
+ * одного правила нельзя было развести по недосмотру.
+ */
+export function sourceDocumentVisibleToContractor(
+  sd: { contractorId: string | null; recipientSource: string | null },
+  opIds: string[] | null,
+): boolean {
+  if (!opIds || !sd.contractorId || !opIds.includes(sd.contractorId)) return false;
+  return sd.recipientSource !== 'auto_buyer';
+}
+
+/**
  * Наследующий предикат видимости приёмки для подрядчика: приёмка «его», если её
  * contractor_id ∈ opIds, ЛИБО у приёмки contractor_id пуст, но привязанный
  * документ (УПД) имеет contractor_id ∈ opIds. Повторяет UI-фильтр «Подрядчик»
  * (deliveries.ts). Вызывать только при непустом opIds.
+ *
+ * Ветки различаются намеренно. deliveries.contractor_id записан при сохранении
+ * приёмки: форма подставляет его из УПД при гидратации, но нажимает «Сохранить»
+ * авторизованный инспектор — это решение человека, и оно остаётся основанием
+ * для доступа. Вторая ветка — молчаливое наследование из документа, и вот там
+ * автоподстановка подтверждением не считается.
  */
-export function deliveryContractorPredicate(opIds: string[]) {
+export function deliveryContractorPredicate(
+  opIds: string[],
+  opts: { purpose: 'rbac' | 'ui-filter' } = { purpose: 'rbac' },
+) {
+  const ids = uuidArray(opIds);
+  // Единственное различие двух режимов. Для RBAC автоподставленный подрядчик
+  // основанием доступа не является, а для фильтра «Подрядчик» в списке — ещё
+  // как: менеджер ищет все приёмки этого подрядчика, включая те, где значение
+  // подставил резолвер. Дефолт — строгий: забытый аргумент сужает видимость,
+  // а не расширяет.
+  const inherited =
+    opts.purpose === 'rbac'
+      ? drSql` AND sd_c.recipient_source IS DISTINCT FROM 'auto_buyer'`
+      : drSql``;
   return drSql`(
-    ${deliveries.contractorId} = ANY(${opIds}::uuid[])
+    ${deliveries.contractorId} = ANY(${ids})
     OR (
       ${deliveries.contractorId} IS NULL
       AND EXISTS (
         SELECT 1 FROM delivery_sources ds_c
         JOIN source_documents sd_c ON sd_c.id = ds_c.source_document_id
         WHERE ds_c.delivery_id = ${deliveries.id}
-          AND sd_c.contractor_id = ANY(${opIds}::uuid[])
+          AND sd_c.contractor_id = ANY(${ids})${inherited}
       )
     )
   )`;

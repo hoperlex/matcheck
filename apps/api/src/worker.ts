@@ -27,6 +27,10 @@ import {
 import { sql as drSql } from 'drizzle-orm';
 import { matchOrCreateSupplier } from './domain/sourceDocuments/supplierMatcher.js';
 import {
+  autoAssignContractorFromBuyer,
+  manualRecipientSource,
+} from './domain/sourceDocuments/resolve-contractor.js';
+import {
   buildQueueConnection,
   S3_CLEANUP_QUEUE,
   UPD_PARSE_QUEUE,
@@ -1252,6 +1256,29 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       .update(sourceDocuments)
       .set(headerValues)
       .where(eq(sourceDocuments.id, sourceDocumentId));
+
+    // Автоподстановка подрядчика по покупателю — только для публичной загрузки.
+    //
+    // Отдельным UPDATE после записи шапки, а не полем в headerValues: условие
+    // «получателя ещё никто не задавал» должно проверяться в момент записи,
+    // иначе менеджер, выбравший подрядчика между разбором и сохранением,
+    // молча потеряет свой выбор. Все guard'ы — внутри, см. resolve-contractor.ts.
+    //
+    // Заказан второй проход — не трогаем: документ ещё не в финальном виде,
+    // подставим по итогам победившего прохода.
+    const autoAssign = await autoAssignContractorFromBuyer(db, {
+      sourceDocumentId,
+      status,
+      confidence,
+      minConfidence: MIN_DEDUP_CONFIDENCE,
+      buyerInn: recipient?.inn ?? null,
+    });
+    if (autoAssign.assigned) {
+      log.info(
+        { contractorId: autoAssign.contractorId, contractorName: autoAssign.name },
+        'contractor auto-assigned from buyer INN',
+      );
+    }
   } else {
     log.warn(
       { reasons: weakReasons, parseMode },
@@ -1802,6 +1829,7 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
             status: 'queued',
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
+            recipientSource: manualRecipientSource(bundle),
             siteId: bundle.siteId,
             expectedDate: bundleExpected,
             originalFilename: a.filename,
@@ -1874,6 +1902,7 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
             status: 'queued',
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
+            recipientSource: manualRecipientSource(bundle),
             siteId: bundle.siteId,
             expectedDate: bundleExpected,
             originalFilename: a.filename,
@@ -1936,6 +1965,7 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
             status: 'queued',
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
+            recipientSource: manualRecipientSource(bundle),
             siteId: bundle.siteId,
             expectedDate: bundleExpected,
             originalFilename: a.filename,
@@ -2138,6 +2168,7 @@ async function createSourceDocumentFromWaybill(args: {
       consigneeNameRaw,
       contractorId: bundle.contractorId,
       recipientMolId: bundle.recipientMolId,
+      recipientSource: manualRecipientSource(bundle),
       siteId: bundle.siteId,
       docNumber: doc.docNumber ?? null,
       docDate,

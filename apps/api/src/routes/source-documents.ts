@@ -52,7 +52,13 @@ import { publishEvent } from './events.js';
 import { matchOrCreateSupplier } from '../domain/sourceDocuments/supplierMatcher.js';
 import { collectUploadParts, uploadLimitMessage } from '../domain/sourceDocuments/collect-upload.js';
 import { ingestDocumentsBundle } from '../domain/sourceDocuments/ingest-bundle.js';
-import { resolveContractorOpIds } from '../lib/contractor-scope.js';
+import { fromSupplierPortalSql } from '../domain/sourceDocuments/public-origin.js';
+import { manualRecipientSource } from '../domain/sourceDocuments/resolve-contractor.js';
+import {
+  resolveContractorOpIds,
+  sourceDocumentContractorPredicate,
+  sourceDocumentVisibleToContractor,
+} from '../lib/contractor-scope.js';
 
 const KIND_VALUES = ['upd', 'request', 'transport_waybill', 'os2_transfer'] as const;
 type KindValue = (typeof KIND_VALUES)[number];
@@ -243,25 +249,6 @@ type SdNames = {
   fromSupplierPortal?: boolean;
 };
 
-/**
- * Пришёл ли документ с публичной страницы загрузки.
- *
- * EXISTS, а не JOIN: на пакете может быть несколько публичных отправок (тот же
- * комплект прислали повторно), и обычное соединение размножило бы строки
- * документа — поехали бы и пагинация, и total.
- *
- * COALESCE(parent_bundle_id, id): накладные router разворачивает в ДОЧЕРНИЙ
- * пакет, и реальный документ ТН/ОС-2 висит уже на нём — событие приёма лежит
- * на родителе.
- */
-const fromSupplierPortalSql = drSql<boolean>`exists (
-  select 1
-    from ${ingestEvents} ie
-    join ${sourceBundles} b on b.id = ${sourceDocuments.bundleId}
-   where ie.bundle_id = coalesce(b.parent_bundle_id, b.id)
-     and ie.channel = 'public'
-)`;
-
 function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
   return {
     id: sd.id,
@@ -272,6 +259,7 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     recipientId: sd.recipientId,
     contractorId: sd.contractorId,
     recipientMolId: sd.recipientMolId,
+    recipientSource: sd.recipientSource ?? null,
     siteId: sd.siteId,
     supplierName: names.supplierName ?? null,
     contractorName: names.contractorName ?? null,
@@ -633,7 +621,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         if (!opIds || opIds.length === 0) {
           conditions.push(drSql`false`);
         } else {
-          conditions.push(inArray(sourceDocuments.contractorId, opIds));
+          conditions.push(sourceDocumentContractorPredicate(opIds));
         }
       }
       // Фильтр «непринятые»: УПД считается ожидаемой, пока на неё нет
@@ -877,7 +865,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           if (!opIds || opIds.length === 0) {
             conditions.push(drSql`false`);
           } else {
-            conditions.push(inArray(sourceDocuments.contractorId, opIds));
+            conditions.push(sourceDocumentContractorPredicate(opIds));
           }
         }
 
@@ -1105,7 +1093,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // contractor видит только документы своего подрядчика.
       if (req.user?.role === 'contractor') {
         const opIds = await resolveContractorOpIds(app, req.user);
-        if (!opIds || !sd.contractorId || !opIds.includes(sd.contractorId)) {
+        if (!sourceDocumentVisibleToContractor(sd, opIds)) {
           return reply.code(404).send({ error: 'not_found' });
         }
       }
@@ -1212,12 +1200,17 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // contractor видит файлы только документов своего подрядчика.
       if (req.user?.role === 'contractor') {
         const [sd] = await app.db
-          .select({ contractorId: sourceDocuments.contractorId })
+          .select({
+            contractorId: sourceDocuments.contractorId,
+            // Без recipient_source проверка пропустила бы автоподставленного
+            // подрядчика и отдала оригинал файла — см. contractor-scope.ts.
+            recipientSource: sourceDocuments.recipientSource,
+          })
           .from(sourceDocuments)
           .where(eq(sourceDocuments.id, req.params.id))
           .limit(1);
         const opIds = await resolveContractorOpIds(app, req.user);
-        if (!sd || !opIds || !sd.contractorId || !opIds.includes(sd.contractorId)) {
+        if (!sd || !sourceDocumentVisibleToContractor(sd, opIds)) {
           return reply.code(404).send({ error: 'not_found' });
         }
       }
@@ -1266,12 +1259,17 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // contractor видит файлы только документов своего подрядчика.
       if (req.user?.role === 'contractor') {
         const [sd] = await app.db
-          .select({ contractorId: sourceDocuments.contractorId })
+          .select({
+            contractorId: sourceDocuments.contractorId,
+            // Без recipient_source проверка пропустила бы автоподставленного
+            // подрядчика и отдала оригинал файла — см. contractor-scope.ts.
+            recipientSource: sourceDocuments.recipientSource,
+          })
           .from(sourceDocuments)
           .where(eq(sourceDocuments.id, req.params.id))
           .limit(1);
         const opIds = await resolveContractorOpIds(app, req.user);
-        if (!sd || !opIds || !sd.contractorId || !opIds.includes(sd.contractorId)) {
+        if (!sd || !sourceDocumentVisibleToContractor(sd, opIds)) {
           return reply.code(404).send({ error: 'not_found' });
         }
       }
@@ -1422,6 +1420,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           supplierId,
           recipientId,
           contractorId,
+          recipientSource: manualRecipientSource({
+            direction: req.body.direction,
+            contractorId,
+            recipientMolId: null,
+          }),
           siteId,
           docNumber: parsed.docNumber,
           docDate,
@@ -1589,6 +1592,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           origin: 'manual_pdf',
           contractorId: contractorId ?? null,
           recipientMolId: recipientMolId ?? null,
+          // Получателя выбрал человек в форме — см. manualRecipientSource.
+          recipientSource: manualRecipientSource({
+            direction,
+            contractorId: contractorId ?? null,
+            recipientMolId: recipientMolId ?? null,
+          }),
           siteId,
           expectedDate: expectedDate ? new Date(expectedDate) : null,
           status: 'queued',
@@ -1854,6 +1863,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           origin: 'manual_pdf',
           contractorId: contractorId ?? null,
           recipientMolId: recipientMolId ?? null,
+          // Получателя выбрал человек в форме — см. manualRecipientSource.
+          recipientSource: manualRecipientSource({
+            direction,
+            contractorId: contractorId ?? null,
+            recipientMolId: recipientMolId ?? null,
+          }),
           siteId,
           expectedDate: expectedDate ? new Date(expectedDate) : null,
           status: 'queued',
@@ -1957,17 +1972,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       if (result.outcome === 's3_unavailable') {
         return reply.code(503).send({ error: 's3_unavailable', message: 'S3 недоступен' });
       }
-      if (result.outcome === 'cross_scope') {
-        // Раньше здесь молча возвращался чужой пакет: тот же комплект,
-        // загруженный на другой объект или дату, «прилипал» к первой загрузке
-        // и уезжал не тому инспектору.
-        return reply.code(409).send({
-          error: 'cross_scope',
-          message:
-            'Этот же комплект файлов уже загружен на другой объект или дату. ' +
-            'Проверьте выбранный объект и дату поставки.',
-        });
-      }
+      // Отказа cross_scope больше нет. Он появился как защита от «прилипания»
+      // к чужому пакету, но лечил следствие: bundle_hash был чистым хешем
+      // содержимого под UNIQUE, поэтому тот же комплект физически не мог
+      // существовать на двух объектах. Теперь в bundle_hash лежит хеш scope +
+      // содержимого, пакеты по построению разные, и прилипать не к чему.
       if (result.outcome === 'reused') {
         return UploadDocumentsResponseSchema.parse({
           bundleId: result.bundleId,
@@ -2314,6 +2323,25 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       if (req.body.recipientId !== undefined) upd.recipientId = req.body.recipientId;
       if (req.body.recipientMolId !== undefined) upd.recipientMolId = req.body.recipientMolId;
       if (req.body.siteId !== undefined) upd.siteId = req.body.siteId;
+
+      // Пометка «получателя задал человек» — только когда пара получателя
+      // ДЕЙСТВИТЕЛЬНО изменилась. Форма карточки кладёт contractorId в тело при
+      // каждом сохранении, даже если правили одну дату (см. onSave в
+      // SourceDocumentDetailModal), поэтому проверка на `!== undefined` снимала
+      // бы метку auto_buyer с любого документа при первом же открытии карточки.
+      //
+      // Только inbound: у outbound получатель — recipient_id, а contractor_id
+      // там наш отправитель, и на «Черновик» он не влияет.
+      if (sd.direction === 'inbound') {
+        const nextContractorId =
+          upd.contractorId !== undefined ? upd.contractorId : sd.contractorId;
+        const nextMolId =
+          upd.recipientMolId !== undefined ? upd.recipientMolId : sd.recipientMolId;
+        const recipientChanged =
+          (nextContractorId ?? null) !== (sd.contractorId ?? null) ||
+          (nextMolId ?? null) !== (sd.recipientMolId ?? null);
+        if (recipientChanged) upd.recipientSource = 'manual';
+      }
       if (req.body.totalSum !== undefined) {
         upd.totalSum =
           req.body.totalSum === null
