@@ -243,4 +243,104 @@ suite('провенанс документов из единого входа (�
       SELECT origin, is_technical FROM source_documents WHERE bundle_id = ${sub!.id}`;
     expect(subTech).toMatchObject({ origin: 'mail', is_technical: true });
   });
+
+  // ─── Реестр входных файлов ────────────────────────────────────────────────
+  //
+  // До реестра перечень принятых файлов жил только в attachments служебной
+  // записи, а она удаляется в конце разбора — вместе с attachments по каскаду.
+  // Файл, упавший при обработке, не оставлял следов: пакет помечался parsed,
+  // документа не было, и перезапускать было нечего.
+
+  /** Пакет нового формата: строки реестра есть, служебной записи нет. */
+  async function bundleWithRegistry(files: string[]): Promise<string> {
+    const hash = createHash('sha256').update(randomUUID()).digest('hex');
+    const [bundle] = await db<{ id: string }[]>`
+      INSERT INTO source_bundles
+        (bundle_hash, kind, direction, site_id, status, active_upload_generation)
+      VALUES (${hash}, 'mixed', 'inbound', ${siteId}, 'queued', 0)
+      RETURNING id`;
+    for (const name of files) {
+      await db`INSERT INTO bundle_import_items
+          (bundle_id, source_filename, input_s3_key, mime_type, size_bytes,
+           upload_generation, status)
+        VALUES (${bundle!.id}, ${name}, ${`upload/${bundle!.id}/${name}`},
+          'application/pdf', 1000, 0, 'accepted')`;
+    }
+    return bundle!.id;
+  }
+
+  const registryRows = (bundleId: string) => db<
+    { source_filename: string; status: string; created_document_ids: string[] }[]
+  >`SELECT source_filename, status, created_document_ids FROM bundle_import_items
+      WHERE bundle_id = ${bundleId} ORDER BY source_filename`;
+
+  it('пакет без служебной записи разбирается по реестру', async () => {
+    const bundleId = await bundleWithRegistry(['a.pdf', 'b.pdf']);
+
+    await handleDocumentRouterJob(bundleId, log);
+
+    expect(await realDocs()).toHaveLength(2);
+    const rows = await registryRows(bundleId);
+    expect(rows.map((r) => r.status)).toEqual(['created', 'created']);
+    // Строки те же самые, а не вторая пара: реестр обновляется на месте.
+    expect(rows).toHaveLength(2);
+  });
+
+  it('повторный прогон не разбирает уже созданные файлы заново', async () => {
+    const bundleId = await bundleWithRegistry(['a.pdf', 'b.pdf']);
+    await handleDocumentRouterJob(bundleId, log);
+    const first = await realDocs();
+    expect(first).toHaveLength(2);
+
+    await handleDocumentRouterJob(bundleId, log);
+
+    // Раньше повтор либо дублировал документы, либо упирался в отсутствие
+    // служебной записи и отдавал parse_failed. Теперь — идемпотентный успех.
+    const second = await realDocs();
+    expect(second.map((d) => d.id).sort()).toEqual(first.map((d) => d.id).sort());
+    expect(await registryRows(bundleId)).toHaveLength(2);
+    const [bundle] = await db<{ status: string; doc_count: number }[]>`
+      SELECT status, doc_count FROM source_bundles WHERE id = ${bundleId}`;
+    expect(bundle).toMatchObject({ status: 'parsed', doc_count: 2 });
+  });
+
+  it('упавший файл остаётся в реестре видимым отказом', async () => {
+    const bundleId = await bundleWithRegistry(['ok.pdf', 'bad.pdf']);
+    classifyFile.mockImplementation((_buf: unknown, _mime: unknown, filename: string) => {
+      if (filename === 'bad.pdf') throw new Error('классификация упала');
+      return {
+        detectedKind: 'upd',
+        confidence: 0.95,
+        needsVision: false,
+        parserUsed: 'parseUpdPdf',
+        signals: ['test'],
+      };
+    });
+
+    await handleDocumentRouterJob(bundleId, log);
+
+    // Ключевое: строка упавшего файла ПЕРЕЖИВАЕТ разбор — по ней менеджер
+    // увидит отказ и сможет перезапустить или завести документ руками.
+    const rows = await registryRows(bundleId);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.source_filename === 'bad.pdf')?.status).toBe('failed');
+    expect(rows.find((r) => r.source_filename === 'ok.pdf')?.status).toBe('created');
+    expect(await realDocs()).toHaveLength(1);
+  });
+
+  it('строки прошлого поколения загрузки в разбор не идут', async () => {
+    const bundleId = await bundleWithRegistry(['live.pdf']);
+    // Файл брошенной попытки: поколение меньше активного.
+    await db`INSERT INTO bundle_import_items
+        (bundle_id, source_filename, input_s3_key, mime_type, size_bytes,
+         upload_generation, status)
+      VALUES (${bundleId}, 'abandoned.pdf', ${`upload/${bundleId}/abandoned.pdf`},
+        'application/pdf', 1000, -1, 'accepted')`;
+
+    await handleDocumentRouterJob(bundleId, log);
+
+    expect(await realDocs()).toHaveLength(1);
+    const rows = await registryRows(bundleId);
+    expect(rows.find((r) => r.source_filename === 'abandoned.pdf')?.status).toBe('accepted');
+  });
 });

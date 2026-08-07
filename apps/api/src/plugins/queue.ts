@@ -36,6 +36,23 @@ export const UPD_PARSE_QUEUE = 'upd-parse';
 export const S3_CLEANUP_QUEUE = 's3-cleanup';
 export const MAIL_POLL_QUEUE = 'mail-poll';
 
+/**
+ * Опции заданий распознавания — ОДНИ на все экземпляры очереди.
+ *
+ * Экземпляров два: этот, в API, и «лёгкий клиент» в воркере, через который идёт
+ * весь outbox. У воркерского они не задавались вовсе, а дефолтный attempts в
+ * BullMQ равен нулю — то есть публичная загрузка, почта, дочерние задания
+ * router'а и второй проход работали БЕЗ ретраев: одна транзиентная ошибка
+ * (S3 5xx, обрыв к БД, невезучий ответ провайдера) сразу давала parse_failed.
+ * Отсюда общая константа: разъехаться снова уже нельзя.
+ */
+export const UPD_PARSE_JOB_OPTIONS = {
+  attempts: 3,
+  backoff: { type: 'exponential' as const, delay: 60_000 },
+  removeOnComplete: { age: 24 * 60 * 60, count: 1000 },
+  removeOnFail: { age: 7 * 24 * 60 * 60 },
+};
+
 /** Ручной запрос «проверить ящик сейчас» из админки. */
 export type MailPollJobData = { accountId: string };
 
@@ -62,12 +79,7 @@ export function buildQueueConnection(): ConnectionOptions {
 export default fp(async (app) => {
   const updParse = new Queue<UpdParseJobData>(UPD_PARSE_QUEUE, {
     connection: buildQueueConnection(),
-    defaultJobOptions: {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 60_000 },
-      removeOnComplete: { age: 24 * 60 * 60, count: 1000 },
-      removeOnFail: { age: 7 * 24 * 60 * 60 },
-    },
+    defaultJobOptions: UPD_PARSE_JOB_OPTIONS,
   });
 
   // Очередь для асинхронной чистки S3-объектов при удалении документов.

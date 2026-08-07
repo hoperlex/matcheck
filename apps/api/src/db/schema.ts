@@ -711,6 +711,12 @@ export const sourceBundles = pgTable(
     // Счётчик НАМЕРЕННЫХ запусков разбора: входит в dispatch ID, поэтому
     // повторный разбор получает новый jobId и реально выполняется.
     dispatchGeneration: integer('dispatch_generation').notNull().default(0),
+    // Счётчик попыток ЗАГРУЗКИ (не разбора). Инкрементируется при приёме и при
+    // takeover брошенной попытки; блокировка строки пакета сериализует
+    // конкурентов, поэтому отдельный счётчик не нужен. Текущее значение — то,
+    // которое считается «живым»: строки реестра и попытки с меньшим поколением
+    // относятся к брошенным загрузкам и в разбор не идут.
+    activeUploadGeneration: integer('active_upload_generation').notNull().default(0),
     direction: sourceDirectionEnum('direction').notNull(),
     siteId: uuid('site_id').references(() => sites.id, { onDelete: 'set null' }),
     contractorId: uuid('contractor_id').references(() => counterparties.id, {
@@ -746,34 +752,109 @@ export const sourceBundles = pgTable(
   ],
 );
 
-// Журнал решений единого входа (/upload-documents): одна строка на КАЖДЫЙ
-// загруженный файл пачки — что классификатор определил, каким парсером
-// обработали, что создали. Аудит + источник для страницы результата импорта.
-// Принцип «не пишем наугад»: неуверенные/неопределённые файлы остаются здесь
-// со status='needs_review' и НЕ создают source_documents (операционные данные
-// не портятся). Уверенно распознанные → status='created' + ссылки в
-// createdDocumentIds.
-export const bundleImportItems = pgTable('bundle_import_items', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  bundleId: uuid('bundle_id')
-    .notNull()
-    .references(() => sourceBundles.id, { onDelete: 'cascade' }),
-  sourceFilename: text('source_filename').notNull(),
-  // upd | transport_waybill | os2_transfer | m15 | unknown
-  detectedKind: text('detected_kind'),
-  confidence: numeric('confidence', { precision: 4, scale: 3 }),
-  // parseUpdXlsx | parseUpdPdf | tryParseTextUpdBundle | parseWaybillBatch | none
-  parserUsed: text('parser_used'),
-  // created | needs_review | skipped | failed
-  status: text('status').notNull().default('needs_review'),
-  reason: text('reason'),
-  // ID созданных source_documents (обычно 0 или 1; multi-UPD → один агрегат)
-  createdDocumentIds: jsonb('created_document_ids').$type<string[]>().notNull().default([]),
-  // subdocs, page-ranges, classifier signals, raw counts, provider info
-  metadata: jsonb('metadata'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+// Попытка ЗАГРУЗКИ пакета: uploading → accepted | abandoned.
+//
+// Между резервированием пакета и финальной транзакцией лежит заливка в S3.
+// Без явного состояния попытки это окно неразличимо снаружи: пакет в queued
+// может означать и «файлы ещё летят», и «процесс умер на середине». Первое
+// нельзя трогать, второе нужно вычистить — отсюда lease владельца.
+//
+// lease_until нужен и для fencing: медленная попытка, потерявшая владение,
+// не имеет права завершиться успехом, поэтому финальная транзакция проверяет
+// generation = source_bundles.active_upload_generation.
+export const bundleUploadAttempts = pgTable(
+  'bundle_upload_attempts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bundleId: uuid('bundle_id')
+      .notNull()
+      .references(() => sourceBundles.id, { onDelete: 'cascade' }),
+    generation: integer('generation').notNull(),
+    // uploading | accepted | abandoned
+    state: text('state').notNull().default('uploading'),
+    leaseUntil: timestamp('lease_until', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('bundle_upload_attempts_generation_unique').on(t.bundleId, t.generation),
+    // Sweeper ищет только просроченные незавершённые попытки.
+    index('bundle_upload_attempts_stale_idx')
+      .on(t.leaseUntil)
+      .where(sql`${t.state} = 'uploading'`),
+  ],
+);
+
+// Реестр входных файлов пачки: одна ПОСТОЯННАЯ строка на КАЖДЫЙ принятый файл —
+// что классификатор определил, каким парсером обработали, что создали и чем всё
+// закончилось. Аудит, источник страницы результата импорта и единственное
+// место, по которому можно сверить «всё принятое дошло до результата».
+//
+// Раньше это был журнал одного прогона: router очищал его перед каждым разбором,
+// а перечень файлов жил в attachments служебной записи, которая удаляется в
+// конце. Файл, упавший при разборе, не оставлял следов вообще. Теперь строка
+// заводится при приёме и переживает и разбор, и удаление служебной записи.
+//
+// Принцип «не пишем наугад» сохраняется: неуверенные файлы остаются со
+// status='needs_review' и НЕ создают source_documents.
+export const bundleImportItems = pgTable(
+  'bundle_import_items',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bundleId: uuid('bundle_id')
+      .notNull()
+      .references(() => sourceBundles.id, { onDelete: 'cascade' }),
+    sourceFilename: text('source_filename').notNull(),
+    // Ключ объекта в S3 — идентификатор входного файла, по которому идёт upsert
+    // и повторный прогон отличает уже обработанное. NOT NULL навесит
+    // contract-миграция: у legacy-строк ключа нет и восстановить его неоткуда.
+    inputS3Key: text('input_s3_key'),
+    mimeType: varchar('mime_type', { length: 255 }),
+    sizeBytes: integer('size_bytes'),
+    // Поколение попытки загрузки: строки прошлых поколений относятся к
+    // брошенным загрузкам и в разбор не идут.
+    uploadGeneration: integer('upload_generation'),
+    // upd | transport_waybill | os2_transfer | m15 | unknown
+    detectedKind: text('detected_kind'),
+    confidence: numeric('confidence', { precision: 4, scale: 3 }),
+    // parseUpdXlsx | parseUpdPdf | tryParseTextUpdBundle | parseWaybillBatch | none
+    parserUsed: text('parser_used'),
+    // uploading | accepted | created | needs_review | skipped | failed
+    status: text('status').notNull().default('needs_review'),
+    reason: text('reason'),
+    // ID созданных source_documents (обычно 0 или 1; multi-UPD → один агрегат)
+    createdDocumentIds: jsonb('created_document_ids').$type<string[]>().notNull().default([]),
+    // Накладная разворачивается в ДОЧЕРНИЙ пакет, поэтому у итогового документа
+    // bundle_id уже не родительский — связь на sub-пакет нужна явная.
+    subBundleId: uuid('sub_bundle_id').references((): AnyPgColumn => sourceBundles.id, {
+      onDelete: 'set null',
+    }),
+    // КОНЕЧНОЕ состояние файла, а не решение router'а: status='created' значит
+    // лишь «дочернее задание поставлено», документ после этого ещё может уйти в
+    // parse_failed. Счётчики и «Требует внимания» смотрят сюда.
+    effectiveStatus: text('effective_status'),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    resolvedByUserId: uuid('resolved_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    // Документ, заведённый менеджером вручную по этому файлу.
+    manualDocumentId: uuid('manual_document_id').references((): AnyPgColumn => sourceDocuments.id, {
+      onDelete: 'set null',
+    }),
+    metadata: jsonb('metadata'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Ключ upsert'а. Частичный: legacy-строки с NULL под него не попадают.
+    uniqueIndex('bundle_import_items_input_file_unique')
+      .on(t.bundleId, t.inputS3Key, t.uploadGeneration)
+      .where(sql`${t.inputS3Key} is not null`),
+    index('bundle_import_items_unresolved_idx')
+      .on(t.effectiveStatus)
+      .where(sql`${t.effectiveStatus} is not null and ${t.resolvedAt} is null`),
+  ],
+);
 
 export const sourceDocumentItems = pgTable('source_document_items', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -1403,6 +1484,12 @@ export const jobOutbox = pgTable(
     nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
     lastError: text('last_error'),
     processingAt: timestamp('processing_at', { withTimezone: true }),
+    // Ставит ТОЛЬКО сторож/recovery: разрешает снять завершённый job с тем же
+    // jobId и поставить его заново. Обычная доставка так делать не вправе —
+    // существующий job для неё означает «уже доставлено», иначе падение между
+    // queue.add и удалением строки привело бы к повторному выполнению уже
+    // отработавшего задания.
+    replaceTerminal: boolean('replace_terminal').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

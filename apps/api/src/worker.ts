@@ -11,7 +11,7 @@
 import './instrument.js'; // ПЕРВЫМ — Sentry.init до bullmq/postgres/undici
 import * as Sentry from '@sentry/node';
 import { Queue, Worker, type Job } from 'bullmq';
-import { and, eq, inArray, isNull, lt, lte, or } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, lt, lte, or } from 'drizzle-orm';
 import { logger } from './lib/logger.js';
 import { db } from './db/client.js';
 import {
@@ -30,6 +30,7 @@ import {
   buildQueueConnection,
   S3_CLEANUP_QUEUE,
   UPD_PARSE_QUEUE,
+  UPD_PARSE_JOB_OPTIONS,
   type S3CleanupJobData,
   type UpdParseJobData,
 } from './plugins/queue.js';
@@ -1502,6 +1503,149 @@ async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise
   }
 }
 
+/**
+ * Входной файл пачки для router'а.
+ *
+ * Источников два, и это временно: пакеты нового формата описаны реестром
+ * (bundle_import_items), старые — только attachments служебной записи. Поля
+ * совпадают с attachments намеренно, чтобы ветки маршрутизации не знали, откуда
+ * пришёл файл.
+ */
+type RouterInputFile = {
+  s3Key: string;
+  filename: string;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  /** Строка реестра. NULL — legacy-пакет, строку придётся создавать вставкой. */
+  registryItemId: string | null;
+  uploadGeneration: number | null;
+  /** Файл уже разобран прошлым прогоном: повторять его нельзя — будет дубль. */
+  alreadyCreated: boolean;
+};
+
+/**
+ * Что разбирать: реестр текущего поколения, иначе attachments служебной записи.
+ *
+ * Реестр — источник истины для пакетов, принятых новым кодом: он переживает и
+ * разбор, и удаление служебной записи, поэтому повторный запуск возможен всегда.
+ * Fallback нужен на время выката (старые пакеты реестра не имеют) и после него —
+ * для пакетов, принятых до миграции.
+ */
+async function loadRouterInputs(
+  bundleId: string,
+  activeUploadGeneration: number,
+  techId: string | null,
+): Promise<RouterInputFile[]> {
+  const registry = await db
+    .select({
+      id: bundleImportItems.id,
+      s3Key: bundleImportItems.inputS3Key,
+      filename: bundleImportItems.sourceFilename,
+      mimeType: bundleImportItems.mimeType,
+      sizeBytes: bundleImportItems.sizeBytes,
+      uploadGeneration: bundleImportItems.uploadGeneration,
+      status: bundleImportItems.status,
+    })
+    .from(bundleImportItems)
+    .where(
+      and(
+        eq(bundleImportItems.bundleId, bundleId),
+        isNotNull(bundleImportItems.inputS3Key),
+        // Строки прошлых поколений относятся к брошенным загрузкам.
+        eq(bundleImportItems.uploadGeneration, activeUploadGeneration),
+      ),
+    );
+
+  if (registry.length > 0) {
+    return registry.map((r) => ({
+      s3Key: r.s3Key as string,
+      filename: r.filename,
+      mimeType: r.mimeType,
+      sizeBytes: r.sizeBytes,
+      registryItemId: r.id,
+      uploadGeneration: r.uploadGeneration,
+      alreadyCreated: r.status === 'created',
+    }));
+  }
+
+  if (!techId) return [];
+
+  const attachments = await db
+    .select()
+    .from(sourceDocumentAttachments)
+    .where(eq(sourceDocumentAttachments.sourceDocumentId, techId));
+  return attachments.map((a) => ({
+    s3Key: a.s3Key,
+    filename: a.filename,
+    mimeType: a.mimeType,
+    sizeBytes: a.sizeBytes,
+    registryItemId: null,
+    uploadGeneration: null,
+    alreadyCreated: false,
+  }));
+}
+
+/** Решение router'а по файлу — то, что отличается между ветками. */
+type ImportItemOutcome = {
+  detectedKind?: string | null;
+  confidence?: string | null;
+  parserUsed?: string | null;
+  status: string;
+  reason?: string | null;
+  createdDocumentIds?: string[];
+  subBundleId?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+/**
+ * Записывает решение по файлу в реестр.
+ *
+ * Для пакетов нового формата строка уже существует (заведена при приёме) —
+ * обновляем её по id. Для legacy-пакетов строки нет, вставляем. Раньше журнал
+ * очищался целиком перед каждым прогоном; теперь строка постоянная, иначе файл,
+ * упавший при разборе, не оставлял бы следов вообще.
+ *
+ * Принимает tx: в ветках, создающих документ, запись обязана быть в ОДНОЙ
+ * транзакции с документом и заданием очереди — иначе крах между ними оставит
+ * файл незакрытым, и повтор создаст второй документ.
+ */
+async function recordImportItem(
+  tx: typeof db,
+  bundleId: string,
+  file: RouterInputFile,
+  outcome: ImportItemOutcome,
+): Promise<void> {
+  const values = {
+    detectedKind: outcome.detectedKind ?? null,
+    confidence: outcome.confidence ?? null,
+    parserUsed: outcome.parserUsed ?? null,
+    status: outcome.status,
+    reason: outcome.reason ?? null,
+    createdDocumentIds: outcome.createdDocumentIds ?? [],
+    subBundleId: outcome.subBundleId ?? null,
+    metadata: outcome.metadata ?? null,
+    updatedAt: new Date(),
+  };
+
+  if (file.registryItemId) {
+    await tx
+      .update(bundleImportItems)
+      .set(values)
+      .where(eq(bundleImportItems.id, file.registryItemId));
+    return;
+  }
+
+  await tx.insert(bundleImportItems).values({
+    bundleId,
+    sourceFilename: file.filename,
+    inputS3Key: file.s3Key,
+    mimeType: file.mimeType,
+    sizeBytes: file.sizeBytes,
+    uploadGeneration: file.uploadGeneration,
+    ...values,
+  });
+}
+
 // Единый вход «Загрузить документы» (router). Классифицирует КАЖДЫЙ файл пачки
 // и разворачивает его в СУЩЕСТВУЮЩИЙ проверенный flow:
 //   - УПД → одиночная очередь {sourceDocumentId, s3Key} (как «Загрузить УПД»);
@@ -1526,41 +1670,29 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
   }
 
   // Только служебная запись — см. пояснение в handleWaybillBundleJob.
+  // С переходом на реестр она перестала быть обязательной: пакеты нового
+  // формата разбираются и без неё, поэтому её отсутствие больше не фатально.
   const [tech] = await db
     .select({ id: sourceDocuments.id })
     .from(sourceDocuments)
     .where(and(eq(sourceDocuments.bundleId, bundleId), eq(sourceDocuments.isTechnical, true)))
     .limit(1);
-  if (!tech) {
-    await db
-      .update(sourceBundles)
-      .set({
-        status: 'parse_failed',
-        parseErrorCode: 'parse_failed',
-        parseErrorMessage: 'нет технической записи source_document для пакета',
-        updatedAt: new Date(),
-      })
-      .where(eq(sourceBundles.id, bundleId));
-    log.warn('router bundle has no technical source_document — parse_failed');
-    return;
-  }
-  const techId = tech.id;
+  const techId = tech?.id ?? null;
 
-  const attachments = await db
-    .select()
-    .from(sourceDocumentAttachments)
-    .where(eq(sourceDocumentAttachments.sourceDocumentId, techId));
-  if (attachments.length === 0) {
+  const inputs = await loadRouterInputs(bundleId, bundle.activeUploadGeneration, techId);
+  if (inputs.length === 0) {
     await db
       .update(sourceBundles)
       .set({
         status: 'parse_failed',
         parseErrorCode: 'parse_failed',
-        parseErrorMessage: 'нет приложенных файлов',
+        parseErrorMessage: techId
+          ? 'нет приложенных файлов'
+          : 'нет ни реестра входных файлов, ни технической записи source_document',
         updatedAt: new Date(),
       })
       .where(eq(sourceBundles.id, bundleId));
-    log.warn('router bundle: нет attachments — parse_failed');
+    log.warn('router bundle: нечего разбирать — parse_failed');
     return;
   }
 
@@ -1576,17 +1708,33 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
   // origin не заполнен — для них поведение прежнее.
   const bundleOrigin = bundle.origin ?? 'manual_pdf';
 
-  // Идемпотентность журнала: при повторной обработке этого bundle (BullMQ
-  // retry или повторная загрузка того же набора файлов — bundleHash совпадает)
-  // старые записи bundle_import_items надо убрать, иначе они НАКАПЛИВАЮТСЯ и
-  // import-result показывает дубли (1 файл → 2-3-4 строки, в т.ч. с reason от
-  // прежних версий кода). Чистим перед заполнением.
-  await db.delete(bundleImportItems).where(eq(bundleImportItems.bundleId, bundleId));
+  // Идемпотентность журнала. Раньше здесь стоял безусловный DELETE всех строк
+  // пакета: иначе при повторном прогоне они НАКАПЛИВАЛИСЬ и import-result
+  // показывал дубли (1 файл → 2-3-4 строки, в т.ч. с reason от прежних версий
+  // кода). Строки нового формата постоянны и обновляются на месте, поэтому под
+  // снос идут только legacy-строки — те, что без поколения загрузки.
+  //
+  // Именно поколение, а не ключ файла: у legacy-пакетов ключ теперь тоже
+  // проставляется (он берётся из attachments), но частичный unique-индекс их
+  // не удержит — NULL в upload_generation Postgres считает различными
+  // значениями, и повтор всё равно наплодил бы дубли.
+  await db
+    .delete(bundleImportItems)
+    .where(
+      and(eq(bundleImportItems.bundleId, bundleId), isNull(bundleImportItems.uploadGeneration)),
+    );
 
   let createdCount = 0;
   let failedCount = 0;
 
-  for (const a of attachments) {
+  for (const a of inputs) {
+    // Файл уже разобран прошлым прогоном (крах в середине пачки, BullMQ retry,
+    // ручной перезапуск). Повторять нельзя — получим второй документ на тот же
+    // файл; именно поэтому пачку раньше было невозможно доделать.
+    if (a.alreadyCreated) {
+      createdCount++;
+      continue;
+    }
     // Per-file изоляция: ошибка одного файла (битый S3 / исключение в
     // классификации или роутинге) НЕ должна валить весь router-job, иначе
     // пакет уйдёт в retry с backoff 60с и «зависнет», а остальные файлы не
@@ -1597,9 +1745,7 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
         buffer = await getObject(a.s3Key);
       } catch (err) {
         log.warn({ err, s3Key: a.s3Key }, 'router: getObject failed');
-        await db.insert(bundleImportItems).values({
-          bundleId,
-          sourceFilename: a.filename,
+        await recordImportItem(db, bundleId, a, {
           parserUsed: 'none',
           status: 'failed',
           reason: 'не удалось скачать файл из S3',
@@ -1682,17 +1828,17 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
             payload: { sourceDocumentId: docId, s3Key: a.s3Key, docKind: 'm15' },
             dedupeKey,
           });
-        });
-        await db.insert(bundleImportItems).values({
-          bundleId,
-          sourceFilename: a.filename,
-          detectedKind: 'm15',
-          confidence: cls.confidence.toString(),
-          parserUsed: 'parseUpdVision',
-          status: 'created',
-          createdDocumentIds: [docId],
-          reason: 'М-15 (отпуск материалов) → распознавание по форме М-15',
-          metadata: { signals: cls.signals, needsVision: cls.needsVision },
+          // В ТОЙ ЖЕ транзакции, что документ и задание: иначе крах между ними
+          // оставит файл незакрытым в реестре, и повтор создаст второй документ.
+          await recordImportItem(tx as unknown as typeof db, bundleId, a, {
+            detectedKind: 'm15',
+            confidence: cls.confidence.toString(),
+            parserUsed: 'parseUpdVision',
+            status: 'created',
+            createdDocumentIds: [docId],
+            reason: 'М-15 (отпуск материалов) → распознавание по форме М-15',
+            metadata: { signals: cls.signals, needsVision: cls.needsVision },
+          });
         });
         createdCount++;
       } else if (isWaybill) {
@@ -1749,17 +1895,18 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
             payload: { bundleId: subId },
             dedupeKey: bundleDispatchKeyOf(subId, 0),
           });
-        });
-        await db.insert(bundleImportItems).values({
-          bundleId,
-          sourceFilename: a.filename,
-          detectedKind: cls.detectedKind,
-          confidence: cls.confidence.toString(),
-          parserUsed: 'parseWaybillBatch',
-          status: 'created',
-          createdDocumentIds: [],
-          reason: 'накладная → waybill-парсер',
-          metadata: { signals: cls.signals, subBundleId: subId },
+          await recordImportItem(tx as unknown as typeof db, bundleId, a, {
+            detectedKind: cls.detectedKind,
+            confidence: cls.confidence.toString(),
+            parserUsed: 'parseWaybillBatch',
+            status: 'created',
+            createdDocumentIds: [],
+            // Итоговый документ появится в ДОЧЕРНЕМ пакете, поэтому связь на
+            // него явная: по bundle_id родителя его не найти.
+            subBundleId: subId,
+            reason: 'накладная → waybill-парсер',
+            metadata: { signals: cls.signals, subBundleId: subId },
+          });
         });
         createdCount++;
       } else {
@@ -1772,6 +1919,14 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
         //    ручной доработки.
         const docId = randomUUID();
         const dedupeKey = dispatchKeyOf(docId);
+        const reason =
+          cls.detectedKind === 'upd' && !cls.needsVision
+            ? cls.updInvoiceCount && cls.updInvoiceCount >= 2
+              ? `УПД-пачка (${cls.updInvoiceCount} счёт-фактур) → агрегат`
+              : 'УПД → одиночный парсер'
+            : cls.needsVision
+              ? 'скан/фото/неясный текст → распознавание через vision'
+              : 'тип неоднозначен → попытка распознавания';
         await db.transaction(async (tx) => {
           await tx.insert(sourceDocuments).values({
             id: docId,
@@ -1804,29 +1959,19 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
             payload: { sourceDocumentId: docId, s3Key: a.s3Key },
             dedupeKey,
           });
-        });
-        const reason =
-          cls.detectedKind === 'upd' && !cls.needsVision
-            ? cls.updInvoiceCount && cls.updInvoiceCount >= 2
-              ? `УПД-пачка (${cls.updInvoiceCount} счёт-фактур) → агрегат`
-              : 'УПД → одиночный парсер'
-            : cls.needsVision
-              ? 'скан/фото/неясный текст → распознавание через vision'
-              : 'тип неоднозначен → попытка распознавания';
-        await db.insert(bundleImportItems).values({
-          bundleId,
-          sourceFilename: a.filename,
-          detectedKind: cls.detectedKind,
-          confidence: cls.confidence.toString(),
-          parserUsed: cls.needsVision ? 'parseUpdVision' : cls.parserUsed,
-          status: 'created',
-          createdDocumentIds: [docId],
-          reason,
-          metadata: {
-            signals: cls.signals,
-            needsVision: cls.needsVision,
-            updInvoiceCount: cls.updInvoiceCount ?? null,
-          },
+          await recordImportItem(tx as unknown as typeof db, bundleId, a, {
+            detectedKind: cls.detectedKind,
+            confidence: cls.confidence.toString(),
+            parserUsed: cls.needsVision ? 'parseUpdVision' : cls.parserUsed,
+            status: 'created',
+            createdDocumentIds: [docId],
+            reason,
+            metadata: {
+              signals: cls.signals,
+              needsVision: cls.needsVision,
+              updInvoiceCount: cls.updInvoiceCount ?? null,
+            },
+          });
         });
         createdCount++;
       }
@@ -1835,39 +1980,38 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
         { err: err instanceof Error ? err.message : String(err), file: a.filename },
         'router: ошибка обработки файла — помечаем failed, продолжаем',
       );
-      await db
-        .insert(bundleImportItems)
-        .values({
-          bundleId,
-          sourceFilename: a.filename,
-          parserUsed: 'none',
-          status: 'failed',
-          reason: 'внутренняя ошибка обработки файла',
-        })
-        .catch(() => undefined);
+      await recordImportItem(db, bundleId, a, {
+        parserUsed: 'none',
+        status: 'failed',
+        reason: 'внутренняя ошибка обработки файла',
+      }).catch(() => undefined);
       failedCount++;
     }
   }
 
   // Техническая запись router-bundle больше не нужна — её attachments
   // переиспользованы по s3Key в развёрнутых документах (паттерн как у waybill).
+  // Перечень принятых файлов от её удаления больше не страдает: он живёт в
+  // реестре, а не в attachments.
   //
   // Удаляем вместе с tombstone: клиент, успевший получить эту запись до
   // внедрения фильтра `is_technical`, узнает об удалении через
   // /sync.deletedIds, а не будет держать её фантомом до logout/login.
-  await db.transaction(async (tx) => {
-    const [tech] = await tx
-      .select({ siteId: sourceDocuments.siteId })
-      .from(sourceDocuments)
-      .where(eq(sourceDocuments.id, techId))
-      .limit(1);
-    await tx.insert(entityDeletions).values({
-      entityType: 'source_document',
-      entityId: techId,
-      siteId: tech?.siteId ?? null,
+  if (techId) {
+    await db.transaction(async (tx) => {
+      const [tech] = await tx
+        .select({ siteId: sourceDocuments.siteId })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, techId))
+        .limit(1);
+      await tx.insert(entityDeletions).values({
+        entityType: 'source_document',
+        entityId: techId,
+        siteId: tech?.siteId ?? null,
+      });
+      await tx.delete(sourceDocuments).where(eq(sourceDocuments.id, techId));
     });
-    await tx.delete(sourceDocuments).where(eq(sourceDocuments.id, techId));
-  });
+  }
   await db
     .update(sourceBundles)
     .set({ status: 'parsed', kind: 'mixed', docCount: createdCount, updatedAt: new Date() })
@@ -2217,7 +2361,15 @@ const connection = buildQueueConnection();
 
 // Лёгкий клиент к собственной очереди, чтобы recovery мог положить
 // потерянные джобы обратно.
-const queue = new Queue<UpdParseJobData>(UPD_PARSE_QUEUE, { connection });
+//
+// defaultJobOptions обязательны: через этот экземпляр идёт ВЕСЬ outbox —
+// публичная загрузка, почта, дочерние задания router'а, второй проход. Без них
+// BullMQ берёт свой дефолт attempts=0, и любая транзиентная ошибка сразу давала
+// parse_failed без единой повторной попытки.
+const queue = new Queue<UpdParseJobData>(UPD_PARSE_QUEUE, {
+  connection,
+  defaultJobOptions: UPD_PARSE_JOB_OPTIONS,
+});
 
 const worker = new Worker<UpdParseJobData>(UPD_PARSE_QUEUE, handleJob, {
   connection,
