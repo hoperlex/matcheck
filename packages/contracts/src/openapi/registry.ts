@@ -257,8 +257,7 @@ registry.registerPath({
       content: { 'application/json': { schema: LoginResponse } },
     },
     401: errResp('Неверные учётные данные или аккаунт неактивен'),
-    423: errResp('Аккаунт временно заблокирован'),
-    429: errorRefs[429],
+    403: errorRefs[403],
   },
 });
 
@@ -282,6 +281,10 @@ registry.registerPath({
       content: { 'application/json': { schema: RefreshResponse } },
     },
     401: errResp('Refresh-token отсутствует, истёк или инвалидирован'),
+    429: errResp(
+      'Слишком часто. Сессия ЖИВА — токены сбрасывать нельзя, нужен повтор позже. ' +
+        'Разлогинивать пользователя следует только на 401.',
+    ),
   },
 });
 

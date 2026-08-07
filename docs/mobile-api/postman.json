@@ -192,8 +192,8 @@
                                                     "_postman_previewlanguage": "json"
                                                 },
                                                 {
-                                                    "id": "26c94d97-8ea3-48c3-8cdf-f15d5b7b0066",
-                                                    "name": "Аккаунт временно заблокирован",
+                                                    "id": "fd66365a-9cd1-4c2f-8214-b0f63fb617ba",
+                                                    "name": "Роль только для веб-портала (contractor/monitor)",
                                                     "originalRequest": {
                                                         "url": {
                                                             "path": [
@@ -239,75 +239,15 @@
                                                             }
                                                         }
                                                     },
-                                                    "status": "Locked (WebDAV) (RFC 4918)",
-                                                    "code": 423,
+                                                    "status": "Forbidden",
+                                                    "code": 403,
                                                     "header": [
                                                         {
                                                             "key": "Content-Type",
                                                             "value": "application/json"
                                                         }
                                                     ],
-                                                    "body": "{\n  \"error\": \"<string>\",\n  \"message\": \"<string>\",\n  \"details\": \"\"\n}",
-                                                    "cookie": [],
-                                                    "_postman_previewlanguage": "json"
-                                                },
-                                                {
-                                                    "id": "d2684209-d38b-46a0-9a37-690d6c7fe9de",
-                                                    "name": "Превышен rate-limit",
-                                                    "originalRequest": {
-                                                        "url": {
-                                                            "path": [
-                                                                "api",
-                                                                "v1",
-                                                                "auth",
-                                                                "login"
-                                                            ],
-                                                            "host": [
-                                                                "{{baseUrl}}"
-                                                            ],
-                                                            "query": [],
-                                                            "variable": []
-                                                        },
-                                                        "header": [
-                                                            {
-                                                                "disabled": false,
-                                                                "description": {
-                                                                    "content": " (This can only be one of mobile)",
-                                                                    "type": "text/plain"
-                                                                },
-                                                                "key": "x-client-type",
-                                                                "value": "mobile"
-                                                            },
-                                                            {
-                                                                "key": "Content-Type",
-                                                                "value": "application/json"
-                                                            },
-                                                            {
-                                                                "key": "Accept",
-                                                                "value": "application/json"
-                                                            }
-                                                        ],
-                                                        "method": "POST",
-                                                        "body": {
-                                                            "mode": "raw",
-                                                            "raw": "{\n  \"email\": \"<email>\",\n  \"password\": \"<string>\"\n}",
-                                                            "options": {
-                                                                "raw": {
-                                                                    "headerFamily": "json",
-                                                                    "language": "json"
-                                                                }
-                                                            }
-                                                        }
-                                                    },
-                                                    "status": "Too Many Requests",
-                                                    "code": 429,
-                                                    "header": [
-                                                        {
-                                                            "key": "Content-Type",
-                                                            "value": "application/json"
-                                                        }
-                                                    ],
-                                                    "body": "{\n  \"error\": \"<string>\",\n  \"message\": \"<string>\",\n  \"details\": \"\"\n}",
+                                                    "body": "{\n  \"error\": \"web_only_role\",\n  \"message\": \"This role is web-only\"\n}",
                                                     "cookie": [],
                                                     "_postman_previewlanguage": "json"
                                                 }
@@ -456,6 +396,53 @@
                                                         }
                                                     ],
                                                     "body": "{\n  \"error\": \"<string>\",\n  \"message\": \"<string>\",\n  \"details\": \"\"\n}",
+                                                    "cookie": [],
+                                                    "_postman_previewlanguage": "json"
+                                                },
+                                                {
+                                                    "id": "5807b736-e819-40b3-8926-9983ebe3fc90",
+                                                    "name": "Слишком часто — сессия ЖИВА, токены не сбрасывать",
+                                                    "originalRequest": {
+                                                        "url": {
+                                                            "path": [
+                                                                "api",
+                                                                "v1",
+                                                                "auth",
+                                                                "refresh"
+                                                            ],
+                                                            "host": [
+                                                                "{{baseUrl}}"
+                                                            ],
+                                                            "query": [],
+                                                            "variable": []
+                                                        },
+                                                        "header": [
+                                                            {
+                                                                "disabled": false,
+                                                                "description": {
+                                                                    "content": " (This can only be one of mobile)",
+                                                                    "type": "text/plain"
+                                                                },
+                                                                "key": "x-client-type",
+                                                                "value": "mobile"
+                                                            },
+                                                            {
+                                                                "key": "Accept",
+                                                                "value": "application/json"
+                                                            }
+                                                        ],
+                                                        "method": "POST",
+                                                        "body": {}
+                                                    },
+                                                    "status": "Too Many Requests",
+                                                    "code": 429,
+                                                    "header": [
+                                                        {
+                                                            "key": "Content-Type",
+                                                            "value": "application/json"
+                                                        }
+                                                    ],
+                                                    "body": "{\n  \"error\": \"rate_limit_exceeded\",\n  \"message\": \"Слишком много запросов. Повторите через 42 сек.\"\n}",
                                                     "cookie": [],
                                                     "_postman_previewlanguage": "json"
                                                 }

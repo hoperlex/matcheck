@@ -1083,6 +1083,18 @@
                   "string",
                   "null"
                 ]
+              },
+              "buyerName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "consigneeName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1092,7 +1104,9 @@
               "totalSum",
               "contractorId",
               "supplierName",
-              "contractorName"
+              "contractorName",
+              "buyerName",
+              "consigneeName"
             ]
           },
           "createdAt": {
@@ -1883,6 +1897,18 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "buyerName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "consigneeName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -1892,7 +1918,9 @@
                     "totalSum",
                     "contractorId",
                     "supplierName",
-                    "contractorName"
+                    "contractorName",
+                    "buyerName",
+                    "consigneeName"
                   ]
                 },
                 "createdAt": {
@@ -2482,6 +2510,18 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "buyerName": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "consigneeName": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -2491,7 +2531,9 @@
                   "totalSum",
                   "contractorId",
                   "supplierName",
-                  "contractorName"
+                  "contractorName",
+                  "buyerName",
+                  "consigneeName"
                 ]
               },
               "createdAt": {
@@ -3255,6 +3297,18 @@
                   "string",
                   "null"
                 ]
+              },
+              "buyerName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "consigneeName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -3264,7 +3318,9 @@
               "totalSum",
               "contractorId",
               "supplierName",
-              "contractorName"
+              "contractorName",
+              "buyerName",
+              "consigneeName"
             ]
           },
           "createdAt": {
@@ -4074,6 +4130,18 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "buyerName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "consigneeName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -4083,7 +4151,9 @@
                     "totalSum",
                     "contractorId",
                     "supplierName",
-                    "contractorName"
+                    "contractorName",
+                    "buyerName",
+                    "consigneeName"
                   ]
                 },
                 "createdAt": {
@@ -4668,6 +4738,18 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "buyerName": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "consigneeName": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -4677,7 +4759,9 @@
                   "totalSum",
                   "contractorId",
                   "supplierName",
-                  "contractorName"
+                  "contractorName",
+                  "buyerName",
+                  "consigneeName"
                 ]
               },
               "createdAt": {
@@ -7562,6 +7646,18 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "buyerName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "consigneeName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -7571,7 +7667,9 @@
                     "totalSum",
                     "contractorId",
                     "supplierName",
-                    "contractorName"
+                    "contractorName",
+                    "buyerName",
+                    "consigneeName"
                   ]
                 },
                 "createdAt": {
@@ -8126,6 +8224,18 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "buyerName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "consigneeName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -8135,7 +8245,9 @@
                     "totalSum",
                     "contractorId",
                     "supplierName",
-                    "contractorName"
+                    "contractorName",
+                    "buyerName",
+                    "consigneeName"
                   ]
                 },
                 "createdAt": {
@@ -9234,18 +9346,8 @@
               }
             }
           },
-          "423": {
-            "description": "Аккаунт временно заблокирован",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Превышен rate-limit",
+          "403": {
+            "description": "Доступ запрещён (недостаточно прав)",
             "content": {
               "application/json": {
                 "schema": {
@@ -9292,6 +9394,16 @@
           },
           "401": {
             "description": "Refresh-token отсутствует, истёк или инвалидирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Слишком часто. Сессия ЖИВА — токены сбрасывать нельзя, нужен повтор позже. Разлогинивать пользователя следует только на 401.",
             "content": {
               "application/json": {
                 "schema": {

@@ -22,3 +22,19 @@ export class HttpError extends Error {
 export function badRequest(message: string): HttpError {
   return new HttpError(400, message);
 }
+
+/**
+ * Превышение rate-limit. Отдельный класс нужен ради `name`: errorHandler
+ * отдаёт наружу именно его как поле `error`, а фронт локализует сообщения по
+ * этому коду. Голый HttpError представился бы клиенту как «HttpError».
+ *
+ * Без такого класса @fastify/rate-limit вообще не мог отдать 429: он бросает
+ * результат errorResponseBuilder как ошибку, а errorHandler признаёт статус
+ * только у HttpError — простой объект превращался в 500 internal_error.
+ */
+export class RateLimitError extends HttpError {
+  constructor(message: string) {
+    super(429, message);
+    this.name = 'rate_limit_exceeded';
+  }
+}

@@ -34,6 +34,12 @@ const envSchema = z.object({
   COOKIE_DOMAIN: z.string().optional(),
   COOKIE_SECURE: z.coerce.boolean().default(false),
 
+  // Базовый шаг нарастающей паузы после неверного пароля: n-я подряд неудача
+  // ждёт BASE * 2^(n-1), но не дольше 30 секунд. Единственное, что тормозит
+  // перебор на /auth/login — блокировки аккаунта там больше нет, см. auth.ts.
+  // В тестах ставим 1, иначе набор из полутора десятков неудач спит минутами.
+  AUTH_BACKOFF_BASE_MS: z.coerce.number().int().nonnegative().default(1000),
+
   // CSRF
   CSRF_SECRET: z.string().min(32).optional(),
 

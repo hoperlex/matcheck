@@ -133,7 +133,18 @@ export const users = pgTable(
       .notNull()
       .defaultNow(),
     sessionsInvalidatedAt: timestamp('sessions_invalidated_at', { withTimezone: true }),
+    // Длина текущей серии неверных паролей. Единственное её назначение —
+    // нарастающая пауза перед ответом (см. backoffSleep в routes/auth.ts).
+    // Вход аккаунт НЕ блокирует: верный пароль пускает всегда.
     failedLoginCount: integer('failed_login_count').notNull().default(0),
+    // Время последней неудачи. Серия «протухает» после часа без единой
+    // ошибки — тогда счётчик начинается заново. Без этой отметки счётчик
+    // копился месяцами и складывал ошибки, разделённые неделями.
+    lastFailedLoginAt: timestamp('last_failed_login_at', { withTimezone: true }),
+    // Историческая блокировка аккаунта на 30 минут после 10 неудач. Больше не
+    // выставляется никогда (требование: верные логин и пароль пускают всегда).
+    // Колонка оставлена, чтобы не гонять миграцию ради удаления; её продолжает
+    // обнулять админский сброс пароля.
     lockedUntil: timestamp('locked_until', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

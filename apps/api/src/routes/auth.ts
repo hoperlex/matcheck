@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { eq, and, ne, isNull } from 'drizzle-orm';
+import { eq, and, ne, isNull, sql } from 'drizzle-orm';
 import { asZod } from '../lib/fastify.js';
 import {
   ChangePasswordRequestSchema,
@@ -14,6 +14,7 @@ import {
 } from '@matcheck/contracts';
 import { users, authEvents, sessions } from '../db/schema.js';
 import { hashPassword, verifyPassword, checkPasswordStrength } from '../domain/auth/password.js';
+import { withVerifySlot } from '../domain/auth/verify-queue.js';
 import { signAccessToken } from '../domain/auth/jwt.js';
 import {
   createSessionAndRefresh,
@@ -56,10 +57,41 @@ function userToDto(u: {
   };
 }
 
+/**
+ * Пауза перед ответом на неверный пароль: n-я подряд неудача ждёт
+ * BASE * 2^(n-1), но не дольше 30 секунд. Это ЕДИНСТВЕННОЕ, что тормозит
+ * перебор на /auth/login — ни блокировки аккаунта, ни rate-limit там больше
+ * нет, потому что оба отказывали и тем, кто вводил верный пароль.
+ */
 async function backoffSleep(failed: number) {
-  if (failed <= 0) return;
-  const ms = Math.min(30_000, 1000 * 2 ** Math.min(failed - 1, 5));
+  if (failed <= 0 || env.AUTH_BACKOFF_BASE_MS === 0) return;
+  const ms = Math.min(30_000, env.AUTH_BACKOFF_BASE_MS * 2 ** Math.min(failed - 1, 5));
   await new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Считает текущую неудачу и возвращает длину серии вместе с ней: первая
+ * неудача даёт 1. Серия протухает после часа без единой ошибки — иначе
+ * счётчик копился месяцами и складывал ошибки, разделённые неделями.
+ *
+ * Инкремент делает Postgres в одном UPDATE: читать-затем-писать нельзя, две
+ * параллельные попытки увидели бы одно и то же значение и одна затёрла бы
+ * другую.
+ */
+async function registerLoginFailure(app: FastifyInstance, userId: string): Promise<number> {
+  const [row] = await app.db
+    .update(users)
+    .set({
+      failedLoginCount: sql`CASE
+        WHEN ${users.lastFailedLoginAt} IS NULL
+          OR ${users.lastFailedLoginAt} < now() - interval '1 hour' THEN 1
+        ELSE ${users.failedLoginCount} + 1
+      END`,
+      lastFailedLoginAt: sql`now()`,
+    })
+    .where(eq(users.id, userId))
+    .returning({ failedLoginCount: users.failedLoginCount });
+  return row?.failedLoginCount ?? 1;
 }
 
 // Mobile-клиенты (Android/iOS) не могут хранить HttpOnly-cookie между запросами,
@@ -143,24 +175,25 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
     },
   );
 
+  // Вход. Ни одного ограничителя, способного отказать ДО проверки пароля:
+  // верные логин и пароль пускают всегда. Раньше здесь стояли два таких, и оба
+  // били по своим же — burst-лимит с ключом по IP (общий на офисный NAT, где
+  // сидят десятки пользователей) и блокировка аккаунта на 30 минут по счётчику,
+  // который не сбрасывался неделями. Человек с правильным паролем получал 429
+  // или 423 и не понимал, какой из отказов про что.
+  //
+  // Что осталось против перебора: нарастающая пауза перед ответом на неверный
+  // пароль (backoffSleep) и очередь bcrypt-проверок (withVerifySlot), которая
+  // задерживает, но никому не отказывает.
   app.post(
     '/api/v1/auth/login',
     {
-      preHandler: createBurstyRateLimit({
-        burst: 5,
-        burstWindowSec: 900,
-        slowWindowSec: 60,
-        keyPrefix: 'login',
-        noun: 'входа',
-      }),
       schema: {
         body: LoginRequestSchema,
         response: {
           200: LoginResponseSchema,
           401: ErrorResponseSchema,
           403: ErrorResponseSchema,
-          423: ErrorResponseSchema,
-          429: ErrorResponseSchema,
         },
       },
     },
@@ -168,33 +201,16 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
       const { email, password } = req.body;
       const [user] = await app.db.select().from(users).where(eq(users.email, email)).limit(1);
 
-      if (user?.lockedUntil && user.lockedUntil > new Date()) {
-        await app.db.insert(authEvents).values({
-          userId: user.id,
-          event: 'login_blocked_locked',
-          ip: req.ip,
-        });
-        return reply
-          .code(423)
-          .send({ error: 'account_locked', message: 'Account temporarily locked' });
-      }
-
-      const ok = await verifyPassword(password, user?.passwordHash ?? null);
+      const ok = await withVerifySlot(() => verifyPassword(password, user?.passwordHash ?? null));
       if (!user || !ok) {
-        const failed = (user?.failedLoginCount ?? 0) + 1;
-        await backoffSleep(failed);
         if (user) {
-          const lockedUntil = failed >= 10 ? new Date(Date.now() + 30 * 60_000) : null;
-          await app.db
-            .update(users)
-            .set({ failedLoginCount: failed, lockedUntil })
-            .where(eq(users.id, user.id));
           await app.db.insert(authEvents).values({
             userId: user.id,
             event: 'login_failure',
             ip: req.ip,
             userAgent: req.headers['user-agent'] ?? null,
           });
+          await backoffSleep(await registerLoginFailure(app, user.id));
         } else {
           await app.db.insert(authEvents).values({
             emailHash: sha256Hex(email),
@@ -202,6 +218,10 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
             ip: req.ip,
             userAgent: req.headers['user-agent'] ?? null,
           });
+          // Считать серию не по чему — пользователя нет. Держим паузу как у
+          // первой неудачи существующего аккаунта, чтобы мгновенный ответ не
+          // выдавал «такого email у нас не заводили».
+          await backoffSleep(1);
         }
         return reply
           .code(401)
@@ -223,9 +243,13 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
           .send({ error: 'web_only_role', message: 'This role is web-only' });
       }
 
+      // Успешный вход обнуляет всё, что влияло на паузы: следующая опечатка
+      // снова стоит один базовый шаг, а не тридцать секунд. lockedUntil больше
+      // никогда не выставляется, но старые значения из БД надо гасить — иначе
+      // они останутся висеть в админке навсегда.
       await app.db
         .update(users)
-        .set({ failedLoginCount: 0, lockedUntil: null })
+        .set({ failedLoginCount: 0, lastFailedLoginAt: null, lockedUntil: null })
         .where(eq(users.id, user.id));
 
       const refresh = await createSessionAndRefresh(
@@ -264,7 +288,15 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
     '/api/v1/auth/refresh',
     {
       config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
-      schema: { response: { 200: RefreshResponseSchema, 401: ErrorResponseSchema } },
+      schema: {
+        response: {
+          200: RefreshResponseSchema,
+          401: ErrorResponseSchema,
+          // 429 отдаёт плагин rate-limit. Клиенту важно не спутать его с 401:
+          // сессия жива, нужен повтор позже, токены сбрасывать нельзя.
+          429: ErrorResponseSchema,
+        },
+      },
     },
     async (req, reply) => {
       const mobile = isMobileClient(req);

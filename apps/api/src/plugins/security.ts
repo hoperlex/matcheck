@@ -4,6 +4,20 @@ import cors from '@fastify/cors';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import { loadEnv } from '../lib/env.js';
+import { RateLimitError } from '../lib/http-error.js';
+
+/**
+ * Ответ на превышение лимита. Вынесен наружу, чтобы тесты проверяли ровно ту
+ * функцию, которую использует боевой плагин, а не свою копию.
+ *
+ * Плагин бросает возвращённое значение как ошибку, поэтому это должен быть
+ * HttpError — иначе errorHandler не увидит статуса и отдаст 500 (так и было
+ * до этой правки на всех роутах с config.rateLimit).
+ */
+export function rateLimitErrorResponse(ctx: { ttl: number }): RateLimitError {
+  const retryAfterSec = Math.max(1, Math.ceil(ctx.ttl / 1000));
+  return new RateLimitError(`Слишком много запросов. Повторите через ${retryAfterSec} сек.`);
+}
 
 export default fp(async (app) => {
   const env = loadEnv();
@@ -43,5 +57,6 @@ export default fp(async (app) => {
     nameSpace: 'matcheck-rl:',
     keyGenerator: (req) => `${req.ip}`,
     skipOnError: true,
+    errorResponseBuilder: (_req, ctx) => rateLimitErrorResponse(ctx),
   });
 });
