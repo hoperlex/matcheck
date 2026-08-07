@@ -910,7 +910,14 @@ export const bundleImportItems = pgTable(
     // Поколение попытки загрузки: строки прошлых поколений относятся к
     // брошенным загрузкам и в разбор не идут.
     uploadGeneration: integer('upload_generation'),
-    // upd | transport_waybill | os2_transfer | m15 | unknown
+    // Что собирались делать с файлом, известно уже при приёме:
+    //   auto       — классифицировать и распознать, если тип подтверждён;
+    //   store_only — файл из зоны «Дополнительные документы»: только сохранить.
+    // Отвечает на другой вопрос, чем status («чем кончилось»), поэтому колонка
+    // отдельная: у skipped иначе неразличимы «человек сказал не распознавать» и
+    // «тип определить не удалось».
+    processingMode: text('processing_mode').notNull().default('auto'),
+    // upd | transport_waybill | os2_transfer | m15 | supplementary | unknown
     detectedKind: text('detected_kind'),
     confidence: numeric('confidence', { precision: 4, scale: 3 }),
     // parseUpdXlsx | parseUpdPdf | tryParseTextUpdBundle | parseWaybillBatch | none

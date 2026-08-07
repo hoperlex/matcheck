@@ -11,6 +11,7 @@ const Login = lazy(() => import('../pages/auth/Login'));
 const Register = lazy(() => import('../pages/auth/Register'));
 const Inbox = lazy(() => import('../pages/inbox/Inbox'));
 const MailReview = lazy(() => import('../pages/inbox/MailReview'));
+const ExtraOnlyBundles = lazy(() => import('../pages/inbox/ExtraOnlyBundles'));
 const KppPage = lazy(() => import('../pages/kpp/KppPage'));
 const ShipmentPage = lazy(() => import('../pages/shipments/ShipmentPage'));
 const Sites = lazy(() => import('../pages/references/Sites'));
@@ -146,6 +147,15 @@ export const router = sentryCreateBrowserRouter([
         path: 'documents/mail',
         element: (
           <ProtectedRoute roles={['admin', 'manager']}>{suspense(<MailReview />)}</ProtectedRoute>
+        ),
+      },
+      {
+        // Комплекты без распознанных документов — тоже инструмент разбора.
+        path: 'documents/extra-only',
+        element: (
+          <ProtectedRoute roles={['admin', 'manager']}>
+            {suspense(<ExtraOnlyBundles />)}
+          </ProtectedRoute>
         ),
       },
       { path: 'inbox', element: <Navigate to="/documents" replace /> },

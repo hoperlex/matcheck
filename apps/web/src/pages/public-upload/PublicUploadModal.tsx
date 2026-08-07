@@ -31,13 +31,8 @@ import {
   type DeliveryState,
   type QueuePatch,
 } from './submitQueue';
+import { MAX_FILES, filesProblem } from './uploadLimits';
 
-const MAX_FILES = 10;
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
-// Держим ниже nginx client_max_body_size: иначе он оборвёт запрос сам и
-// ответит HTML-страницей, которую наша обработка ошибок увидит как «сервис
-// недоступен» вместо понятного «слишком большой объём».
-const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 const MAX_COMMENT = 500;
 
 const ACCEPT =
@@ -59,6 +54,13 @@ type DeliveryDraft = {
   expectedDate: Dayjs | null;
   comment: string;
   rows: FileRow[];
+  /**
+   * Вторая зона: сертификаты, паспорта качества и прочее, что сохраняется без
+   * распознавания. Хранится в том же черновике, поэтому автоматически попадает
+   * в снимок очереди отправки — иначе при отправке из очереди эти файлы просто
+   * не уехали бы.
+   */
+  extraRows: FileRow[];
   state: DeliveryState;
   // Номер обращения от сервера. На экране НЕ показывается — поставщику он ничего
   // не говорит, а менеджеру в портале и так не виден (живёт в
@@ -78,21 +80,24 @@ function emptyDraft(): DeliveryDraft {
     expectedDate: null,
     comment: '',
     rows: [],
+    extraRows: [],
     state: 'draft',
   };
+}
+
+/**
+ * Все файлы поставки: обе зоны уезжают ОДНИМ запросом, и лимиты сервер считает
+ * по нему целиком — значит и проверять их надо вместе.
+ */
+function allFiles(d: DeliveryDraft): FileRow[] {
+  return [...d.rows, ...d.extraRows];
 }
 
 /** Что мешает отправить конкретную поставку; null — всё в порядке. */
 function draftProblem(d: DeliveryDraft): string | null {
   if (!d.siteId) return 'Выберите объект';
   if (!d.expectedDate) return 'Укажите дату поставки';
-  if (d.rows.length === 0) return 'Приложите хотя бы один документ';
-  if (d.rows.length > MAX_FILES) return `Не больше ${MAX_FILES} файлов в одной поставке`;
-  const big = d.rows.find((r) => r.file.size > MAX_FILE_BYTES);
-  if (big) return `Файл «${big.file.name}» больше 10 МБ`;
-  const total = d.rows.reduce((sum, r) => sum + r.file.size, 0);
-  if (total > MAX_TOTAL_BYTES) return 'Суммарный объём поставки больше 20 МБ';
-  return null;
+  return filesProblem(allFiles(d).map((r) => ({ name: r.file.name, size: r.file.size })));
 }
 
 export function PublicUploadModal({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -163,6 +168,7 @@ export function PublicUploadModal({ open, onClose }: { open: boolean; onClose: (
               comment: d.comment,
               website: honeypot,
             },
+            d.extraRows.map((r) => r.file),
           );
         },
         onUpdate: applyQueuePatch,
@@ -349,7 +355,8 @@ function pluralDeliveries(n: number): string {
 function panelTitle(d: DeliveryDraft, index: number) {
   const parts: string[] = [];
   if (d.expectedDate) parts.push(d.expectedDate.format('DD.MM.YYYY'));
-  if (d.rows.length > 0) parts.push(`${d.rows.length} ${pluralFiles(d.rows.length)}`);
+  const filesCount = allFiles(d).length;
+  if (filesCount > 0) parts.push(`${filesCount} ${pluralFiles(filesCount)}`);
 
   return (
     <Space size={8} wrap>
@@ -444,17 +451,44 @@ function DeliveryFields({
           disabled={locked}
         />
       </Form.Item>
-      <Form.Item label="Документы" required>
+      <Form.Item label="УПД и накладные" required>
         <FileDropList
           rows={draft.rows}
           onChange={(rows) => onChange({ rows })}
           disabled={locked}
           accept={ACCEPT}
-          hint={`До ${MAX_FILES} файлов, каждый не больше 10 МБ. Можно сфотографировать документы телефоном.`}
+          title="Перетащите УПД и накладные либо нажмите для выбора"
+          hint={`Всего до ${MAX_FILES} файлов, каждый не больше 10 МБ. Можно сфотографировать документы телефоном.`}
+          canAdd={(f) => guardOtherZone(draft.extraRows, f)}
+        />
+      </Form.Item>
+      <Form.Item
+        label="Дополнительные документы"
+        extra="Сертификаты, паспорта качества, спецификации, акты и другие файлы. Они сохранятся без распознавания."
+      >
+        <FileDropList
+          rows={draft.extraRows}
+          onChange={(extraRows) => onChange({ extraRows })}
+          disabled={locked}
+          accept={ACCEPT}
+          title="Перетащите дополнительные документы либо нажмите для выбора"
+          hint="Эти файлы не распознаются — они просто сохранятся вместе с поставкой."
+          canAdd={(f) => guardOtherZone(draft.rows, f)}
         />
       </Form.Item>
     </Form>
   );
+}
+
+/**
+ * Один и тот же файл в обеих зонах — противоречивое указание. Сервер сведёт его
+ * к «только сохранить», но человеку честнее сказать сразу.
+ */
+function guardOtherZone(other: FileRow[], f: File): boolean {
+  const key = `${f.name}:${f.size}`;
+  if (!other.some((r) => `${r.file.name}:${r.file.size}` === key)) return true;
+  message.warning(`Файл «${f.name}» уже добавлен в другую зону`);
+  return false;
 }
 
 function rejectLabel(reason: string): string {

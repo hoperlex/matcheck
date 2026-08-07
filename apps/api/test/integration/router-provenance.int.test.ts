@@ -170,9 +170,14 @@ suite('провенанс документов из единого входа (�
     expect(await realDocs()).toHaveLength(1);
     const [bundle] = await db<{ status: string; parse_error_code: string | null }[]>`
       SELECT status, parse_error_code FROM source_bundles WHERE id = ${bundleId}`;
-    // Служебной записи уже нет — повтор честно сообщает, что разбирать нечего,
-    // вместо тихого дублирования.
-    expect(bundle!.status).toBe('parse_failed');
+    // Служебной записи уже нет, но строки реестра от первого прогона живы:
+    // повтор видит по ним, что файл уже разобран, и закрывает пакет как
+    // разобранный. Раньше эти строки сносились перед каждым прогоном, и повтор
+    // объявлял пакет parse_failed, а журнал импорта оставался пустым.
+    expect(bundle!.status).toBe('parsed');
+    const rows = await registryRows(bundleId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe('created');
   });
 
   it('задание на распознавание пишется в БД, а не напрямую в Redis', async () => {
@@ -270,8 +275,14 @@ suite('провенанс документов из единого входа (�
   }
 
   const registryRows = (bundleId: string) => db<
-    { source_filename: string; status: string; created_document_ids: string[] }[]
-  >`SELECT source_filename, status, created_document_ids FROM bundle_import_items
+    {
+      source_filename: string;
+      status: string;
+      detected_kind: string | null;
+      created_document_ids: string[];
+    }[]
+  >`SELECT source_filename, status, detected_kind, created_document_ids
+      FROM bundle_import_items
       WHERE bundle_id = ${bundleId} ORDER BY source_filename`;
 
   it('пакет без служебной записи разбирается по реестру', async () => {
@@ -304,7 +315,7 @@ suite('провенанс документов из единого входа (�
     expect(bundle).toMatchObject({ status: 'parsed', doc_count: 2 });
   });
 
-  it('упавший файл остаётся в реестре видимым отказом', async () => {
+  it('сбой классификации сохраняет файл, а не прячет его', async () => {
     const bundleId = await bundleWithRegistry(['ok.pdf', 'bad.pdf']);
     classifyFile.mockImplementation((_buf: unknown, _mime: unknown, filename: string) => {
       if (filename === 'bad.pdf') throw new Error('классификация упала');
@@ -319,13 +330,56 @@ suite('провенанс документов из единого входа (�
 
     await handleDocumentRouterJob(bundleId, log);
 
-    // Ключевое: строка упавшего файла ПЕРЕЖИВАЕТ разбор — по ней менеджер
-    // увидит отказ и сможет перезапустить или завести документ руками.
+    // Строка упавшего файла ПЕРЕЖИВАЕТ разбор, и статус у неё skipped, а не
+    // failed: дополнительные файлы поставки отбираются именно по skipped, и с
+    // failed файл пропал бы из виду совсем. Ошибка при этом видна в reason.
     const rows = await registryRows(bundleId);
     expect(rows).toHaveLength(2);
-    expect(rows.find((r) => r.source_filename === 'bad.pdf')?.status).toBe('failed');
+    const bad = rows.find((r) => r.source_filename === 'bad.pdf');
+    expect(bad?.status).toBe('skipped');
+    expect(bad?.detected_kind).toBe('unknown');
     expect(rows.find((r) => r.source_filename === 'ok.pdf')?.status).toBe('created');
     expect(await realDocs()).toHaveLength(1);
+  });
+
+  it('неопознанный файл сохраняется, а не превращается в пустой УПД', async () => {
+    const bundleId = await bundleWithRegistry(['mystery.pdf']);
+    classifyFile.mockResolvedValue({
+      detectedKind: 'unknown',
+      confidence: 0,
+      needsVision: false,
+      parserUsed: 'none',
+      signals: ['text:ambiguous'],
+    });
+
+    await handleDocumentRouterJob(bundleId, log);
+
+    // Раньше такой файл уходил в УПД-flow и оседал пустым черновиком.
+    expect(await realDocs()).toHaveLength(0);
+    const rows = await registryRows(bundleId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'skipped', detected_kind: 'unknown' });
+  });
+
+  it('файл зоны «Дополнительные документы» не читается из S3 и не распознаётся', async () => {
+    const bundleId = await bundleWithRegistry(['cert.pdf']);
+    await db`UPDATE bundle_import_items SET processing_mode = 'store_only'
+              WHERE bundle_id = ${bundleId}`;
+    classifyFile.mockClear();
+
+    await handleDocumentRouterJob(bundleId, log);
+
+    // Ни классификации, ни документа, ни дочернего задания: человек уже сказал,
+    // что распознавать файл не надо. Корневое router-задание при этом,
+    // разумеется, отработало — иначе строка осталась бы в accepted.
+    expect(classifyFile).not.toHaveBeenCalled();
+    expect(await realDocs()).toHaveLength(0);
+    const jobs = await db<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM job_outbox
+       WHERE payload->>'sourceDocumentId' IS NOT NULL`;
+    expect(jobs[0]!.n).toBe('0');
+    const rows = await registryRows(bundleId);
+    expect(rows[0]).toMatchObject({ status: 'skipped', detected_kind: null });
   });
 
   it('строки прошлого поколения загрузки в разбор не идут', async () => {

@@ -11,8 +11,20 @@
 
 import { PDFParse } from 'pdf-parse';
 import { countUniqueUpdInvoices } from './upd-text-bundle.parser.js';
+import { parseUpdXlsx } from './upd-xlsx.parser.js';
 
-export type DocClass = 'upd' | 'transport_waybill' | 'os2_transfer' | 'm15' | 'unknown';
+// 'supplementary' — сопроводительный документ качества: сертификат, паспорт
+// качества, декларация о соответствии, протокол испытаний. Реквизиты из него не
+// нужны, распознавание не запускается — файл просто хранится и показывается
+// менеджеру. Раньше такие файлы уходили в УПД-flow и оседали пустыми
+// черновиками, попутно занимая слот воркера и тратя vision-вызовы.
+export type DocClass =
+  | 'upd'
+  | 'transport_waybill'
+  | 'os2_transfer'
+  | 'm15'
+  | 'supplementary'
+  | 'unknown';
 
 export type FileClassification = {
   detectedKind: DocClass;
@@ -36,6 +48,12 @@ const MIN_TEXT = 200;
 // не определить. Маркеры в имени: «М-15», «накладная на отпуск», «отпуск
 // материалов». Используется в fallback-ветках (image/scan/parse_error/ambiguous).
 const M15_NAME_RE = /м-?15|m-?15|накладная на отпуск|отпуск\s+материал/i;
+// Маркеры сопроводительных документов качества. Перечень намеренно узкий:
+// только качество и соответствие. «Акт» и «спецификация» сюда НЕ входят — в них
+// бывают позиции и суммы, и увести их из распознавания значило бы потерять
+// данные.
+const SUPPLEMENTARY_RE =
+  /сертификат\s+(соответстви|качеств)|паспорт\s+качеств|декларац\w*\s+о\s+соответстви|протокол\s+испытани/i;
 function m15ByName(signals: string[]): FileClassification {
   // needsVision=true: М-15 всегда распознаём через vision (своим m15-промптом).
   return { detectedKind: 'm15', confidence: 0, needsVision: true, parserUsed: 'none', signals };
@@ -71,14 +89,40 @@ export async function classifyFile(
   const lower = filename.toLowerCase();
   const m = (mime || '').toLowerCase();
 
-  // ── Excel: у нас это всегда УПД/реализация, structural-парсер детерминирован ──
+  // ── Excel: УПД/реализация, но только если книга на него похожа ──
+  //
+  // Раньше расширения хватало, и любая таблица — спецификация, прайс, реестр —
+  // становилась УПД и оседала пустым черновиком. Проверяем структурно тем же
+  // парсером, который потом и будет разбирать файл: confidence === 0 означает,
+  // что не нашлось НИ ОДНОГО поля шапки (ни номера, ни даты, ни сторон).
+  // Условие намеренно узкое — книга хоть с чем-то распознанным остаётся УПД,
+  // как и раньше. Сбой парсера тоже оставляет прежнее поведение: потерять
+  // распознаваемое хуже, чем принять лишний файл.
   if (/spreadsheetml|ms-excel/.test(m) || EXCEL_RE.test(lower)) {
+    let looksLikeUpd = true;
+    let signal = 'ext:excel';
+    try {
+      const probe = await parseUpdXlsx(buffer);
+      looksLikeUpd = probe.confidence > 0 || probe.items.length > 0;
+      if (!looksLikeUpd) signal = 'excel:not-upd';
+    } catch {
+      signal = 'excel:probe-failed';
+    }
+    if (!looksLikeUpd) {
+      return {
+        detectedKind: 'unknown',
+        confidence: 0,
+        needsVision: false,
+        parserUsed: 'none',
+        signals: [signal],
+      };
+    }
     return {
       detectedKind: 'upd',
       confidence: 0.99,
       needsVision: false,
       parserUsed: 'parseUpdXlsx',
-      signals: ['ext:excel'],
+      signals: [signal],
     };
   }
 
@@ -113,9 +157,26 @@ export async function classifyFile(
         signals: ['pdf:parse_error', err instanceof Error ? err.message.slice(0, 80) : 'unknown'],
       };
     }
+    // УПД-маркер проверяем ДО порога: он решает приоритет и ниже, и в ветке
+    // короткого текста — сертификат не должен перехватить документ, в котором
+    // есть «счёт-фактура».
+    const hasUpd = /сч[её]т-фактур|универсальный передаточн/i.test(full);
+
     if (full.length < MIN_TEXT) {
       // скан без текста — vision
       if (M15_NAME_RE.test(lower)) return m15ByName(['pdf:scan', 'name:m15', `textLen:${full.length}`]);
+      // У сертификата текстовый слой часто короткий: пара строк заголовка и
+      // номера. Без этой ветки он ушёл бы в vision — то есть в лишний вызов
+      // модели ради файла, который распознавать не нужно.
+      if (!hasUpd && SUPPLEMENTARY_RE.test(full)) {
+        return {
+          detectedKind: 'supplementary',
+          confidence: 0.9,
+          needsVision: false,
+          parserUsed: 'none',
+          signals: ['pdf:scan', 'text:supplementary', `textLen:${full.length}`],
+        };
+      }
       return {
         detectedKind: 'unknown',
         confidence: 0,
@@ -127,7 +188,6 @@ export async function classifyFile(
     // УПД имеет ПРИОРИТЕТ: «Счёт-фактура»/«Универсальный передаточный» — даже
     // если в теле упоминается транспортная накладная (раздел «Данные о
     // транспортировке»). Иначе УПД-пачки ложно ушли бы в накладные.
-    const hasUpd = /сч[её]т-фактур|универсальный передаточн/i.test(full);
     if (hasUpd) {
       const uniq = countUniqueUpdInvoices(pages);
       return {
@@ -167,6 +227,18 @@ export async function classifyFile(
         needsVision: false,
         parserUsed: 'parseWaybillBatch',
         signals: ['text:tn'],
+      };
+    }
+    // Сопроводительный документ качества. Проверяется ПОСЛЕ всех известных
+    // форм: так ветка ловит ровно то, что раньше уходило в unknown, и не может
+    // перехватить УПД, М-15, ОС-2 или ТН, где сертификат лишь упомянут.
+    if (SUPPLEMENTARY_RE.test(full)) {
+      return {
+        detectedKind: 'supplementary',
+        confidence: 0.9,
+        needsVision: false,
+        parserUsed: 'none',
+        signals: ['text:supplementary'],
       };
     }
     // текст есть, но тип неясен. М-15 с «битым» текстовым слоем (нечитаемые

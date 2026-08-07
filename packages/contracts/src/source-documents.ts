@@ -282,9 +282,31 @@ export const SourceSubmissionSchema = z.object({
 });
 export type SourceSubmission = z.infer<typeof SourceSubmissionSchema>;
 
+// Файл поставки, сохранённый БЕЗ распознавания: либо человек положил его в
+// зону «Дополнительные документы», либо тип определить не удалось. s3Key
+// намеренно не отдаём — ссылка выдаётся отдельным маршрутом с проверкой прав.
+export const ExtraFileSchema = z.object({
+  id: z.string().uuid(),
+  /** Пакет, которому принадлежит файл: корневой пакет поставки. */
+  bundleId: z.string().uuid(),
+  filename: z.string(),
+  mimeType: z.string().nullable(),
+  sizeBytes: z.number().nullable(),
+  /** null — файл из второй зоны формы, классификация не запускалась. */
+  detectedKind: z.string().nullable(),
+  reason: z.string().nullable(),
+});
+export type ExtraFile = z.infer<typeof ExtraFileSchema>;
+
 export const SourceDocumentDetailSchema = SourceDocumentSchema.extend({
   items: z.array(SourceItemSchema),
   attachments: z.array(SourceAttachmentSchema),
+  // Файлы поставки, которые не распознавались. Показываются у любого документа
+  // комплекта: карточка одна на все типы, а сертификат относится к поставке
+  // целиком. `.default([])` без внешнего `.optional()` — входное поле остаётся
+  // необязательным (схема переиспользуется ответами PATCH/POST, где его нет), а
+  // на выходе массив обязателен и фронту не нужен `?? []`.
+  extraFiles: z.array(ExtraFileSchema).default([]),
   // Последняя публичная отправка этого комплекта: комментарий поставщика и
   // время. Персональных данных здесь нет, поэтому доступно всем, кто видит
   // документ. Optional по той же причине, что и fromSupplierPortal: схема
@@ -614,6 +636,9 @@ export const DocClassSchema = z.enum([
   'transport_waybill',
   'os2_transfer',
   'm15',
+  // Документ о качестве или соответствии: сертификат, паспорт качества,
+  // декларация, протокол испытаний. Реквизиты из него не берут.
+  'supplementary',
   'unknown',
 ]);
 export type DocClass = z.infer<typeof DocClassSchema>;
@@ -622,7 +647,8 @@ export type DocClass = z.infer<typeof DocClassSchema>;
 export const ImportItemSchema = z.object({
   id: z.string().uuid(),
   sourceFilename: z.string(),
-  detectedKind: z.string().nullable(),
+  // null у файлов из зоны «Дополнительные документы»: их не классифицируют.
+  detectedKind: DocClassSchema.nullable(),
   confidence: z.number().nullable(),
   parserUsed: z.string().nullable(),
   // created | needs_review | skipped | failed
@@ -640,10 +666,35 @@ export const ImportResultSchema = z.object({
     created: z.number(),
     needsReview: z.number(),
     failed: z.number(),
+    // Сохранены без распознавания: вторая зона формы и файлы с неопознанным
+    // типом. Без отдельного счётчика менеджер решил бы, что файл потерялся.
+    skipped: z.number(),
   }),
   items: z.array(ImportItemSchema),
 });
 export type ImportResult = z.infer<typeof ImportResultSchema>;
+
+// ──────────── Комплекты без распознанных документов ────────────
+// Поставка, в которой ни одного документа не появилось: прислали только
+// сертификаты, либо тип ни одного файла определить не удалось. Карточки
+// документа у такой поставки нет, и это единственная точка входа к её файлам.
+
+export const ExtraOnlyBundleSchema = z.object({
+  bundleId: z.string().uuid(),
+  siteName: z.string().nullable(),
+  expectedDate: z.string().nullable(),
+  createdAt: z.string(),
+  /** Комментарий поставщика из публичной отправки; null — внутренняя загрузка. */
+  comment: z.string().nullable(),
+  files: z.array(ExtraFileSchema),
+});
+export type ExtraOnlyBundle = z.infer<typeof ExtraOnlyBundleSchema>;
+
+export const ExtraOnlyBundleListResponseSchema = z.object({
+  items: z.array(ExtraOnlyBundleSchema),
+  total: z.number(),
+});
+export type ExtraOnlyBundleListResponse = z.infer<typeof ExtraOnlyBundleListResponseSchema>;
 
 // ──────────── Bulk-удаление source_documents ────────────
 // Тело — массив id. Ответ — те, кого удалили, и те, кого пропустили

@@ -579,6 +579,9 @@ export default function InboxPage() {
     ...(mailSummary && (mailSummary.configured || mailSummary.pending > 0)
       ? [{ key: 'mail', label: 'Разбор почты', count: mailSummary.pending }]
       : []),
+    // Комплекты, из которых не создано ни одного документа: их файлы в списке
+    // «Документы» не появятся вовсе, и это единственный путь к ним.
+    ...(isContractor ? [] : [{ key: 'extra-only', label: 'Без документов', count: null }]),
   ];
 
   return (
@@ -613,6 +616,10 @@ export default function InboxPage() {
                   onChange={(k) => {
                     if (k === 'mail') {
                       navigate('/documents/mail');
+                      return;
+                    }
+                    if (k === 'extra-only') {
+                      navigate('/documents/extra-only');
                       return;
                     }
                     updateParams({ direction: k === 'outbound' ? 'outbound' : null });

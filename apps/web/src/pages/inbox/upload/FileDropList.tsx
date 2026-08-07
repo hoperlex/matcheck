@@ -17,12 +17,22 @@ export function FileDropList({
   disabled,
   accept,
   hint,
+  title = 'Перетащите документы поставки либо нажмите для выбора',
+  canAdd,
 }: {
   rows: FileRow[];
   onChange: (next: FileRow[]) => void;
   disabled?: boolean;
   accept: string;
   hint: string;
+  /** Текст в дропзоне: зон в форме две, и они должны различаться на глаз. */
+  title?: string;
+  /**
+   * Разрешено ли добавить файл. Нужно, чтобы один и тот же файл не попал в обе
+   * зоны сразу: сервер такой запрос переживёт (сведёт к «только сохранить»), но
+   * человеку честнее сказать сразу.
+   */
+  canAdd?: (file: File) => boolean;
 }) {
   const uploadProps: UploadProps = {
     accept,
@@ -30,6 +40,7 @@ export function FileDropList({
     showUploadList: false,
     beforeUpload: (file) => {
       const fileLike = file as unknown as File;
+      if (canAdd && !canAdd(fileLike)) return false;
       onChange([
         ...rows,
         {
@@ -49,9 +60,7 @@ export function FileDropList({
         <p className="ant-upload-drag-icon">
           <InboxOutlined />
         </p>
-        <p className="ant-upload-text">
-          Перетащите документы поставки либо нажмите для выбора
-        </p>
+        <p className="ant-upload-text">{title}</p>
         <p className="ant-upload-hint">{hint}</p>
       </Upload.Dragger>
 

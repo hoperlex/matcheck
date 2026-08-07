@@ -116,6 +116,38 @@ describe('publicApi', () => {
     });
   });
 
+  it('файлы второй зоны уезжают под именем extraFiles', async () => {
+    // Режим обработки едет ИМЕНЕМ части: текстовые поля сервер читает раньше
+    // файлов, поэтому пофайловый признак отдельным полем не выразить.
+    const fetchMock = vi.fn(async () => jsonResponse({ ticket: 't', accepted: 2, rejected: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await publicUploadDocuments(
+      [new File(['upd'], 'upd.pdf', { type: 'application/pdf' })],
+      { siteId: 's', expectedDate: '2026-08-10', comment: '', website: '' },
+      [new File(['cert'], 'cert.pdf', { type: 'application/pdf' })],
+    );
+
+    const form = lastCall(fetchMock).init.body as FormData;
+    expect(form.getAll('files').map((f) => (f as File).name)).toEqual(['upd.pdf']);
+    expect(form.getAll('extraFiles').map((f) => (f as File).name)).toEqual(['cert.pdf']);
+  });
+
+  it('без второй зоны запрос остаётся прежним', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ ticket: 't', accepted: 1, rejected: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await publicUploadDocuments([new File(['upd'], 'upd.pdf')], {
+      siteId: 's',
+      expectedDate: '2026-08-10',
+      comment: '',
+      website: '',
+    });
+
+    const form = lastCall(fetchMock).init.body as FormData;
+    expect(form.getAll('extraFiles')).toEqual([]);
+  });
+
   it('тикет в URL статуса экранируется', async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({

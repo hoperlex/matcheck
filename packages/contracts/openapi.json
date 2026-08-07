@@ -5925,6 +5925,59 @@
               ]
             }
           },
+          "extraFiles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "bundleId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "filename": {
+                  "type": "string"
+                },
+                "mimeType": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "sizeBytes": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "detectedKind": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "bundleId",
+                "filename",
+                "mimeType",
+                "sizeBytes",
+                "detectedKind",
+                "reason"
+              ]
+            },
+            "default": []
+          },
           "submission": {
             "type": [
               "object",
@@ -8851,6 +8904,59 @@
                       "role"
                     ]
                   }
+                },
+                "extraFiles": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "bundleId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "filename": {
+                        "type": "string"
+                      },
+                      "mimeType": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "sizeBytes": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "detectedKind": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "bundleId",
+                      "filename",
+                      "mimeType",
+                      "sizeBytes",
+                      "detectedKind",
+                      "reason"
+                    ]
+                  },
+                  "default": []
                 },
                 "submission": {
                   "type": [

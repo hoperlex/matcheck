@@ -193,6 +193,24 @@ describe('collectUploadParts — поля и файлы за один прохо
     if (!captured?.ok) return;
     expect(captured.fields.siteId).toBe('LATE');
   });
+
+  it('имя части задаёт режим: extraFiles — только сохранить, остальные — распознавать', async () => {
+    // Режим едет именем части, потому что текстовые поля читаются раньше
+    // файлов и пофайловый признак отдельным полем не выразить. Умолчание
+    // важно: мобильный клиент и старые сборки веба шлют одно поле `files`.
+    const res = await run('strict', {}, [
+      { field: 'files', filename: 'upd.pdf', contentType: 'application/pdf', content: pdf('1') },
+      { field: 'extraFiles', filename: 'cert.pdf', contentType: 'application/pdf', content: pdf('2') },
+      { field: 'attachment', filename: 'other.pdf', contentType: 'application/pdf', content: pdf('3') },
+    ]);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.accepted.map((f) => [f.filename, f.processingMode])).toEqual([
+      ['upd.pdf', 'auto'],
+      ['cert.pdf', 'store_only'],
+      ['other.pdf', 'auto'],
+    ]);
+  });
 });
 
 describe('collectUploadParts — лимиты дают отказ, а не исключение', () => {

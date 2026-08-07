@@ -20,7 +20,13 @@ import {
   pdfToPngsViaPoppler,
 } from './upd-vision.parser.js';
 
-export type ImageDocKind = 'upd' | 'transport_waybill' | 'os2_transfer' | 'm15' | 'unknown';
+export type ImageDocKind =
+  | 'upd'
+  | 'transport_waybill'
+  | 'os2_transfer'
+  | 'm15'
+  | 'supplementary'
+  | 'unknown';
 
 const CLASSIFY_PROMPT = `Определи ТИП документа на изображении и ответь СТРОГО одним JSON-объектом: {"kind": "<тип>", "confidence": <0..1>}.
 
@@ -28,14 +34,15 @@ const CLASSIFY_PROMPT = `Определи ТИП документа на изо�
 - "upd" — счёт-фактура / универсальный передаточный документ (УПД) по форме ПП №1137 (заголовок «Счёт-фактура №…», графы 1–11).
 - "transport_waybill" — транспортная накладная (ТН, форма 2116) ИЛИ накладная на внутреннее перемещение основных средств (форма ОС-2).
 - "m15" — накладная на отпуск материалов на сторону (типовая форма М-15, заголовок «на отпуск материалов»).
-- "unknown" — не удаётся уверенно определить, либо это другой документ (сертификат, спецификация, акт и т.п.).
+- "supplementary" — документ о качестве или соответствии: сертификат соответствия, сертификат качества, паспорт качества, декларация о соответствии, протокол испытаний. Реквизиты поставки из него не берут.
+- "unknown" — не удаётся уверенно определить, либо это другой документ (спецификация, акт и т.п.).
 
 Ориентируйся на ЗАГОЛОВОК и структуру таблицы. confidence — твоя уверенность от 0 до 1. Отвечай ТОЛЬКО JSON, без пояснений.`;
 
 const MAX_TOKENS = 200;
 const TEMPERATURE = 0;
 
-function normalizeKind(k: string | undefined): ImageDocKind {
+export function normalizeKind(k: string | undefined): ImageDocKind {
   switch ((k ?? '').trim().toLowerCase()) {
     case 'upd':
       return 'upd';
@@ -53,6 +60,11 @@ function normalizeKind(k: string | undefined): ImageDocKind {
     case 'м-15':
     case 'м15':
       return 'm15';
+    case 'supplementary':
+    case 'certificate':
+    case 'сертификат':
+    case 'паспорт качества':
+      return 'supplementary';
     default:
       return 'unknown';
   }

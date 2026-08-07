@@ -122,6 +122,36 @@ export function sourceDocumentVisibleToContractor(
 }
 
 /**
+ * Видит ли пользователь этот документ вообще.
+ *
+ * Правило одно на все маршруты документа — карточку, `/file`, `/file/raw` и
+ * ссылку на дополнительный файл. Раньше оно было скопировано в каждый из них
+ * слово в слово, и следующая правка ролей неминуемо разошлась бы с одной из
+ * копий: маршрут со старой проверкой отдал бы файл документа, которого человек
+ * не видит.
+ *
+ * Принимает УЖЕ ЗАГРУЖЕННУЮ строку: в карточке она всё равно выбирается, и
+ * повторный запрос в БД был бы лишним.
+ */
+export async function sourceDocumentVisible(
+  app: FastifyInstance,
+  user: AuthUser | undefined,
+  sd: { siteId: string | null; contractorId: string | null; recipientSource: string | null },
+): Promise<boolean> {
+  // inspector_kpp видит только документы своего объекта.
+  if (user?.role === 'inspector_kpp') {
+    return !!user.siteId && sd.siteId === user.siteId;
+  }
+  // contractor видит только документы своего подрядчика — и только там, где
+  // подрядчик проставлен человеком, а не автоподстановкой.
+  if (user?.role === 'contractor') {
+    const opIds = await resolveContractorOpIds(app, user);
+    return sourceDocumentVisibleToContractor(sd, opIds);
+  }
+  return true;
+}
+
+/**
  * Наследующий предикат видимости приёмки для подрядчика: приёмка «его», если её
  * contractor_id ∈ opIds, ЛИБО у приёмки contractor_id пуст, но привязанный
  * документ (УПД) имеет contractor_id ∈ opIds. Повторяет UI-фильтр «Подрядчик»

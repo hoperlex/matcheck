@@ -20,8 +20,11 @@
 //                открыт всем, две вкладки с одним комплектом реальны.
 
 import { and, asc, eq, isNull, ne, sql as drSql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import type { Db } from '../../db/client.js';
+import { selectRegistryRows } from './bundle-import-registry.js';
 import {
+  bundleImportItems,
   counterparties,
   ingestEvents,
   s3CleanupOutbox,
@@ -41,10 +44,23 @@ import {
   expectedDateKeyOf,
   fileHashOf,
   idempotencyKeyOf,
+  processingModesHashOf,
   safeName,
 } from './bundle-key.js';
 
-export type IngestFile = { filename: string; mimeType: string; buffer: Buffer };
+export type IngestFile = {
+  filename: string;
+  mimeType: string;
+  buffer: Buffer;
+  /**
+   * Что делать с файлом после приёма:
+   *   auto       — классифицировать и распознать, если тип подтверждён;
+   *   store_only — файл из зоны «Дополнительные документы»: только сохранить.
+   * Необязательное: канал, который про зоны не знает (мобильный клиент), шлёт
+   * файлы без режима, и это ровно auto.
+   */
+  processingMode?: 'auto' | 'store_only';
+};
 
 /** Публичная отправка. Данные недоверенные — только аудит и показ. */
 export type PublicSubmission = {
@@ -106,13 +122,44 @@ function scopeMatches(bundle: BundleRow, params: IngestBundleParams): boolean {
   );
 }
 
-async function hasDocuments(db: Db, bundleId: string): Promise<boolean> {
-  const [row] = await db
+/**
+ * Пакет уже отработан — новой работы по нему нет.
+ *
+ * Два основания, и второе появилось вместе с зоной «Дополнительные документы».
+ *
+ * 1. У пакета есть документ — на нём самом или в ДОЧЕРНЕМ пакете. Дочерний
+ *    нужен потому, что накладные router разворачивает в отдельный пакет, и
+ *    реальный документ ТН/ОС-2 висит уже на нём: без этой ветки повторная
+ *    отправка тех же накладных заливала бы их заново.
+ * 2. Документов нет вовсе, но пачка разобрана и КАЖДЫЙ её файл сохранён без
+ *    распознавания. Так выглядит поставка из одних сертификатов: документов она
+ *    не создаёт, а техническая запись после разбора удаляется — без этой ветки
+ *    такая пачка при каждой отправке считалась бы брошенной и лилась заново.
+ *
+ * Чего здесь намеренно НЕТ: пофайлового восстановления. Если один документ
+ * пачки жив, а второй менеджер удалил, повторная загрузка второй не воссоздаст —
+ * ровно как и до появления этой функции.
+ */
+async function bundleAlreadyProcessed(db: Db, bundle: BundleRow): Promise<boolean> {
+  const [own] = await db
     .select({ id: sourceDocuments.id })
     .from(sourceDocuments)
-    .where(eq(sourceDocuments.bundleId, bundleId))
+    .where(eq(sourceDocuments.bundleId, bundle.id))
     .limit(1);
-  return !!row;
+  if (own) return true;
+
+  const child = alias(sourceBundles, 'child_bundle');
+  const [inChild] = await db
+    .select({ id: sourceDocuments.id })
+    .from(sourceDocuments)
+    .innerJoin(child, eq(child.id, sourceDocuments.bundleId))
+    .where(eq(child.parentBundleId, bundle.id))
+    .limit(1);
+  if (inChild) return true;
+
+  if (bundle.status !== 'parsed') return false;
+  const rows = await selectRegistryRows(db, bundle.id, bundle.activeUploadGeneration);
+  return rows.length > 0 && rows.every((r) => r.status === 'skipped');
 }
 
 /**
@@ -180,6 +227,44 @@ async function scheduleS3Cleanup(
   }
 }
 
+type HashedFile = IngestFile & { fileHash: string; processingMode: 'auto' | 'store_only' };
+
+/**
+ * Один и тот же файл, попавший в ОБЕ зоны формы, сводится к `store_only`.
+ *
+ * Иначе в бакет лягут две копии одних байтов, а в реестре появятся две строки
+ * на один документ — и вторая из них ещё и уедет на распознавание. UI такого не
+ * допускает, но приём открыт наружу и полагаться на клиента нельзя.
+ *
+ * Дубли ВНУТРИ одной зоны не трогаем: их поведение прежнее, а схлопывание
+ * изменило бы content_hash и разорвало узнавание ранее загруженных пакетов.
+ */
+function mergeSameFileAcrossZones(files: readonly IngestFile[]): HashedFile[] {
+  const hashed: HashedFile[] = files.map((f) => ({
+    ...f,
+    fileHash: fileHashOf(f.buffer),
+    processingMode: f.processingMode ?? 'auto',
+  }));
+
+  const mixed = new Set<string>();
+  const modes = new Map<string, Set<string>>();
+  for (const f of hashed) {
+    const seen = modes.get(f.fileHash) ?? new Set<string>();
+    seen.add(f.processingMode);
+    modes.set(f.fileHash, seen);
+    if (seen.size > 1) mixed.add(f.fileHash);
+  }
+  if (mixed.size === 0) return hashed;
+
+  const kept = new Set<string>();
+  return hashed.flatMap((f) => {
+    if (!mixed.has(f.fileHash)) return [f];
+    if (kept.has(f.fileHash)) return [];
+    kept.add(f.fileHash);
+    return [{ ...f, processingMode: 'store_only' as const }];
+  });
+}
+
 export async function ingestDocumentsBundle(
   deps: IngestBundleDeps,
   params: IngestBundleParams,
@@ -191,7 +276,8 @@ export async function ingestDocumentsBundle(
   const expectedDate = params.expectedDate ?? null;
   const reserve = params.concurrency === 'reserve';
 
-  const contentHash = contentHashOf(files.map((f) => fileHashOf(f.buffer)));
+  const hashed = mergeSameFileAcrossZones(files);
+  const contentHash = contentHashOf(hashed.map((f) => f.fileHash));
   const idempotencyKey = idempotencyKeyOf({
     siteId,
     direction,
@@ -199,6 +285,7 @@ export async function ingestDocumentsBundle(
     recipientMolId,
     expectedDate,
     contentHash,
+    modesHash: processingModesHashOf(hashed),
   });
   // Идентичность пакета = scope + содержимое. Раньше в bundle_hash писали
   // чистый contentHash, и та же пачка на другой объект/дату упиралась в чужую
@@ -269,7 +356,7 @@ export async function ingestDocumentsBundle(
   }
 
   // ─── 2. Пакет уже есть и разобран — новой работы нет ──────────────────────
-  if (existing && (await hasDocuments(db, existing.id))) {
+  if (existing && (await bundleAlreadyProcessed(db, existing))) {
     if (publicSubmission) await recordPublicSubmission(db, existing.id, publicSubmission);
     return {
       outcome: 'reused',
@@ -405,7 +492,7 @@ export async function ingestDocumentsBundle(
     : [];
 
   const uploads = await Promise.allSettled(
-    files.map(async (f, i) => {
+    hashed.map(async (f, i) => {
       const name = safeName(f.filename, i);
       const s3Key = buildS3Key({
         site: site ?? null,
@@ -420,6 +507,7 @@ export async function ingestDocumentsBundle(
         filename: name,
         mimeType: f.mimeType || 'application/octet-stream',
         sizeBytes: f.buffer.length,
+        processingMode: f.processingMode,
       };
     }),
   );
@@ -487,6 +575,42 @@ export async function ingestDocumentsBundle(
           mimeType: a.mimeType,
           sizeBytes: a.sizeBytes,
           role: 'original' as const,
+        })),
+      );
+
+      // Реестр входных файлов заводится ЗДЕСЬ, а не воркером при разборе.
+      //
+      // Причина — идемпотентность. Строки, созданные воркером, поколения не
+      // имеют, а служебная запись после разбора удаляется: повторный
+      // router-job не нашёл бы ни реестра, ни attachments и переклассифицировал
+      // бы всё заново, включая файлы, которые распознавать не просили. Строка,
+      // созданная в одной транзакции с документами, переживает и разбор, и
+      // удаление служебной записи.
+      //
+      // DELETE перед вставкой — про рестарт брошенного пакета: сюда приём
+      // попадает только если пакет НЕ признан обработанным, значит строки
+      // прошлой попытки этого же поколения не в счёт. Без него вставка упёрлась
+      // бы в bundle_import_items_input_file_unique (ключи S3 при повторной
+      // заливке те же), а строка `created` от удалённого документа заставила бы
+      // router пропустить файл как терминальный.
+      await tx
+        .delete(bundleImportItems)
+        .where(
+          and(
+            eq(bundleImportItems.bundleId, bundle.id),
+            eq(bundleImportItems.uploadGeneration, bundle.activeUploadGeneration),
+          ),
+        );
+      await tx.insert(bundleImportItems).values(
+        succeeded.map((a) => ({
+          bundleId: bundle.id,
+          sourceFilename: a.filename,
+          inputS3Key: a.s3Key,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+          uploadGeneration: bundle.activeUploadGeneration,
+          processingMode: a.processingMode,
+          status: 'accepted' as const,
         })),
       );
 

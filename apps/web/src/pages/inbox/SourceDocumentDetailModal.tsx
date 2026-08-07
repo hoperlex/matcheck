@@ -58,6 +58,7 @@ import {
   inputNumberFormatterRu,
   inputNumberParserRu,
 } from '../../shared/utils/formatRu';
+import { ExtraFilesBlock } from './ExtraFilesBlock';
 import { LlmCallsDrawer } from './LlmCallsDrawer';
 import { CustomerCounterpartySelect } from './CustomerCounterpartySelect';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
@@ -501,6 +502,9 @@ export function SourceDocumentDetailModal({
                   </ul>
                 }
               />
+            )}
+            {sd.extraFiles.length > 0 && (
+              <ExtraFilesBlock files={sd.extraFiles} documentId={id!} />
             )}
 
             <DetailBody

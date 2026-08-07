@@ -2,7 +2,9 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
+import ExcelJS from 'exceljs';
 import { classifyFile } from '../src/domain/edo/document-router.js';
+import { makeTextPdf } from './helpers/make-pdf.js';
 
 /**
  * Детерминированный классификатор единого входа — офлайн, без LLM.
@@ -54,6 +56,66 @@ describe('document-router classifyFile — детерминированная м
   it('фото (jpg) → needsVision', async () => {
     const c = await classifyFile(Buffer.from([0xff, 0xd8, 0xff]), 'image/jpeg', 'photo.jpg');
     expect(c.needsVision).toBe(true);
+    expect(c.detectedKind).toBe('unknown');
+  });
+});
+
+describe('document-router — сопроводительные документы и Excel', () => {
+  const CERT_HEADER = 'Сертификат соответствия № РОСС RU.НА37.Н12345';
+
+  it('текстовый сертификат → supplementary, без vision', async () => {
+    const pdf = makeTextPdf([
+      CERT_HEADER,
+      'Орган по сертификации продукции, аккредитованный в установленном порядке.',
+      'Продукция: смеси сухие строительные напольные. Изготовитель ООО «Ромашка».',
+      'Соответствует требованиям технического регламента и национальных стандартов.',
+      'Срок действия сертификата: с 01.02.2026 по 01.02.2029 включительно.',
+    ]);
+    const c = await classifyFile(pdf, 'application/pdf', 'cert.pdf');
+    expect(c.detectedKind).toBe('supplementary');
+    expect(c.needsVision).toBe(false);
+  });
+
+  it('КОРОТКИЙ сертификат (текста меньше порога) → supplementary, а не vision', async () => {
+    // Текстовый слой сертификата часто состоит из пары строк заголовка. Без
+    // отдельной ветки такой файл ушёл бы в vision — то есть в лишний вызов
+    // модели ради файла, который распознавать не нужно.
+    const pdf = makeTextPdf([CERT_HEADER]);
+    const c = await classifyFile(pdf, 'application/pdf', 'cert-short.pdf');
+    expect(c.detectedKind).toBe('supplementary');
+    expect(c.needsVision).toBe(false);
+  });
+
+  it('УПД с упоминанием сертификата остаётся upd', async () => {
+    const pdf = makeTextPdf([
+      'Счёт-фактура № 1877 от 05.02.2026',
+      'Продавец: ООО «Ромашка». Покупатель: ООО «Стройка».',
+      'К поставке приложен сертификат соответствия на всю партию продукции.',
+      'Всего к оплате: 123 456,78 руб., в том числе НДС 20 576,13 руб.',
+    ]);
+    const c = await classifyFile(pdf, 'application/pdf', 'upd.pdf');
+    expect(c.detectedKind).toBe('upd');
+  });
+
+  it('XLSX без реквизитов УПД → unknown (не создаём пустой документ)', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Спецификация');
+    ws.addRow(['Спецификация к договору поставки']);
+    ws.addRow(['Наименование', 'Кол-во']);
+    ws.addRow(['Профиль монтажный', 10]);
+    const buf = Buffer.from(await wb.xlsx.writeBuffer());
+
+    const c = await classifyFile(
+      buf,
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'spec.xlsx',
+    );
+    expect(c.detectedKind).toBe('unknown');
+    expect(c.needsVision).toBe(false);
+  });
+
+  it('нечитаемая книга → unknown: сохраняем файл, а не заводим пустой УПД', async () => {
+    const c = await classifyFile(Buffer.from('not a workbook'), '', 'broken.xlsx');
     expect(c.detectedKind).toBe('unknown');
   });
 });

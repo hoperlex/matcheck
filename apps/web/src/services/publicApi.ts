@@ -83,12 +83,17 @@ export async function publicUploadDocuments(
     /** Honeypot: всегда пустая строка у человека. */
     website: string;
   },
+  /** Зона «Дополнительные документы»: сохранить, но не распознавать. */
+  extraFiles: File[] = [],
 ): Promise<PublicUploadResponse> {
   const form = new FormData();
   // Текстовые поля идут ДО файлов: сервер читает поток по частям и
-  // разбирает форму по мере поступления.
+  // разбирает форму по мере поступления. По этой же причине режим обработки
+  // передаётся ИМЕНЕМ части, а не отдельным полем — к моменту чтения файла
+  // сервер уже знает, из какой он зоны.
   for (const [k, v] of Object.entries(fields)) form.append(k, v);
   for (const f of files) form.append('files', f, f.name);
+  for (const f of extraFiles) form.append('extraFiles', f, f.name);
   return parse<PublicUploadResponse>(await publicFetch('/upload-documents', {
     method: 'POST',
     body: form,

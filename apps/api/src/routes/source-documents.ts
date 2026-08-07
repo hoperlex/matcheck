@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, ilike, inArray, sql as drSql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, isNull, sql as drSql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
@@ -22,6 +22,7 @@ import {
   UpdResolveDuplicateRequestSchema,
   UploadDocumentsResponseSchema,
   ImportResultSchema,
+  ExtraOnlyBundleListResponseSchema,
   ErrorResponseSchema,
   getDocumentDisplayStatus,
   getDocumentDisplayStatusLabel,
@@ -55,9 +56,14 @@ import { ingestDocumentsBundle } from '../domain/sourceDocuments/ingest-bundle.j
 import { fromSupplierPortalSql } from '../domain/sourceDocuments/public-origin.js';
 import { manualRecipientSource } from '../domain/sourceDocuments/resolve-contractor.js';
 import {
+  selectExtraFiles,
+  selectRegistryRows,
+  type RegistryRow,
+} from '../domain/sourceDocuments/bundle-import-registry.js';
+import {
   resolveContractorOpIds,
   sourceDocumentContractorPredicate,
-  sourceDocumentVisibleToContractor,
+  sourceDocumentVisible,
 } from '../lib/contractor-scope.js';
 
 const KIND_VALUES = ['upd', 'request', 'transport_waybill', 'os2_transfer'] as const;
@@ -334,6 +340,51 @@ function attachmentDto(a: typeof sourceDocumentAttachments.$inferSelect) {
     sizeBytes: a.sizeBytes,
     role: a.role,
   };
+}
+
+// Файл поставки, сохранённый без распознавания. s3Key наружу не отдаём: ссылку
+// выдаёт отдельный маршрут, который заново проверяет права.
+function extraFileDto(r: RegistryRow) {
+  return {
+    id: r.id,
+    bundleId: r.bundleId,
+    filename: r.filename,
+    mimeType: r.mimeType,
+    sizeBytes: r.sizeBytes,
+    detectedKind: r.detectedKind,
+    reason: r.reason,
+  };
+}
+
+/**
+ * Общая выдача ссылки на дополнительный файл — для маршрута от документа и для
+ * маршрута от пакета.
+ *
+ * Права вызывающий проверяет сам, здесь — принадлежность файла: строка обязана
+ * входить в ЭФФЕКТИВНЫЙ набор корневого пакета и быть терминальным `skipped` с
+ * живым ключом S3. Иначе по угаданному itemId достали бы файл брошенной попытки
+ * загрузки или чужого статуса.
+ */
+async function presignExtraFile(
+  app: FastifyInstance,
+  log: { warn: (o: unknown, m?: string) => void },
+  bundleId: string | null,
+  itemId: string,
+): Promise<
+  | { ok: true; url: string; filename: string; mimeType: string | null }
+  | { ok: false; error: 'not_found' | 'presign_failed' }
+> {
+  if (!bundleId) return { ok: false, error: 'not_found' };
+  const files = await selectExtraFiles(app.db, bundleId);
+  const file = files.find((f) => f.id === itemId);
+  if (!file || !file.s3Key) return { ok: false, error: 'not_found' };
+  try {
+    const url = await presign({ method: 'GET', key: file.s3Key, expiresIn: 3600 });
+    return { ok: true, url, filename: file.filename, mimeType: file.mimeType };
+  } catch (err) {
+    log.warn({ err, key: file.s3Key }, 'presign failed (extra)');
+    return { ok: false, error: 'presign_failed' };
+  }
 }
 
 // Подтягивает имена supplier/contractor/site по ID документа. Используется
@@ -1083,19 +1134,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .limit(1);
       if (!row) return reply.code(404).send({ error: 'not_found' });
       const sd = row.sd;
-      // inspector_kpp видит только документы своего объекта.
-      if (
-        req.user?.role === 'inspector_kpp' &&
-        (!req.user.siteId || sd.siteId !== req.user.siteId)
-      ) {
+      if (!(await sourceDocumentVisible(app, req.user, sd))) {
         return reply.code(404).send({ error: 'not_found' });
-      }
-      // contractor видит только документы своего подрядчика.
-      if (req.user?.role === 'contractor') {
-        const opIds = await resolveContractorOpIds(app, req.user);
-        if (!sourceDocumentVisibleToContractor(sd, opIds)) {
-          return reply.code(404).send({ error: 'not_found' });
-        }
       }
       const items = await app.db
         .select()
@@ -1166,13 +1206,51 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         }
       }
 
+      // Файлы поставки, сохранённые без распознавания. Берутся с КОРНЕВОГО
+      // пакета: накладные router разворачивает в дочерний, а сертификаты висят
+      // на родителе — иначе в карточке накладной блок был бы пуст. У документа
+      // без пакета (загружен поштучно) дополнительных файлов быть не может.
+      const extraFiles = sd.bundleId ? await selectExtraFiles(app.db, sd.bundleId) : [];
+
       return {
         ...base,
         validation: liveValidation,
         items: items.map(itemDto),
         attachments: attachments.map(attachmentDto),
+        extraFiles: extraFiles.map(extraFileDto),
         submission,
       };
+    },
+  );
+
+  // Ссылка на дополнительный файл поставки, открытая из карточки документа.
+  // Права те же, что у оригинала документа: сам файл ими и защищён.
+  app.get(
+    '/api/v1/source-documents/:id/extra/:itemId/url',
+    {
+      preHandler: [app.authenticate],
+      schema: {
+        params: z.object({ id: z.string().uuid(), itemId: z.string().uuid() }),
+        response: { 200: SourceDocumentFileResponseSchema, 404: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      const [sd] = await app.db
+        .select({
+          bundleId: sourceDocuments.bundleId,
+          siteId: sourceDocuments.siteId,
+          contractorId: sourceDocuments.contractorId,
+          recipientSource: sourceDocuments.recipientSource,
+        })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, req.params.id))
+        .limit(1);
+      if (!sd || !(await sourceDocumentVisible(app, req.user, sd))) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      const link = await presignExtraFile(app, req.log, sd.bundleId, req.params.itemId);
+      if (!link.ok) return reply.code(404).send({ error: link.error });
+      return { url: link.url, filename: link.filename, mimeType: link.mimeType };
     },
   );
 
@@ -1186,33 +1264,21 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       },
     },
     async (req, reply) => {
-      // inspector_kpp видит файлы только документов своего объекта.
-      if (req.user?.role === 'inspector_kpp') {
-        const [sd] = await app.db
-          .select({ siteId: sourceDocuments.siteId })
-          .from(sourceDocuments)
-          .where(eq(sourceDocuments.id, req.params.id))
-          .limit(1);
-        if (!sd || !req.user.siteId || sd.siteId !== req.user.siteId) {
-          return reply.code(404).send({ error: 'not_found' });
-        }
-      }
-      // contractor видит файлы только документов своего подрядчика.
-      if (req.user?.role === 'contractor') {
-        const [sd] = await app.db
-          .select({
-            contractorId: sourceDocuments.contractorId,
-            // Без recipient_source проверка пропустила бы автоподставленного
-            // подрядчика и отдала оригинал файла — см. contractor-scope.ts.
-            recipientSource: sourceDocuments.recipientSource,
-          })
-          .from(sourceDocuments)
-          .where(eq(sourceDocuments.id, req.params.id))
-          .limit(1);
-        const opIds = await resolveContractorOpIds(app, req.user);
-        if (!sd || !sourceDocumentVisibleToContractor(sd, opIds)) {
-          return reply.code(404).send({ error: 'not_found' });
-        }
+      // Права те же, что у карточки документа: одно правило на все маршруты,
+      // иначе следующая правка ролей разойдётся с одной из копий.
+      const [visible] = await app.db
+        .select({
+          siteId: sourceDocuments.siteId,
+          contractorId: sourceDocuments.contractorId,
+          // Без recipient_source проверка пропустила бы автоподставленного
+          // подрядчика и отдала оригинал файла — см. contractor-scope.ts.
+          recipientSource: sourceDocuments.recipientSource,
+        })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, req.params.id))
+        .limit(1);
+      if (!visible || !(await sourceDocumentVisible(app, req.user, visible))) {
+        return reply.code(404).send({ error: 'not_found' });
       }
       const att = await findOriginalAttachment(app, req.params.id);
       if (!att) return reply.code(404).send({ error: 'no_attachment' });
@@ -1245,33 +1311,21 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       },
     },
     async (req, reply) => {
-      // inspector_kpp видит файлы только документов своего объекта.
-      if (req.user?.role === 'inspector_kpp') {
-        const [sd] = await app.db
-          .select({ siteId: sourceDocuments.siteId })
-          .from(sourceDocuments)
-          .where(eq(sourceDocuments.id, req.params.id))
-          .limit(1);
-        if (!sd || !req.user.siteId || sd.siteId !== req.user.siteId) {
-          return reply.code(404).send({ error: 'not_found' });
-        }
-      }
-      // contractor видит файлы только документов своего подрядчика.
-      if (req.user?.role === 'contractor') {
-        const [sd] = await app.db
-          .select({
-            contractorId: sourceDocuments.contractorId,
-            // Без recipient_source проверка пропустила бы автоподставленного
-            // подрядчика и отдала оригинал файла — см. contractor-scope.ts.
-            recipientSource: sourceDocuments.recipientSource,
-          })
-          .from(sourceDocuments)
-          .where(eq(sourceDocuments.id, req.params.id))
-          .limit(1);
-        const opIds = await resolveContractorOpIds(app, req.user);
-        if (!sd || !sourceDocumentVisibleToContractor(sd, opIds)) {
-          return reply.code(404).send({ error: 'not_found' });
-        }
+      // Права те же, что у карточки документа: одно правило на все маршруты,
+      // иначе следующая правка ролей разойдётся с одной из копий.
+      const [visible] = await app.db
+        .select({
+          siteId: sourceDocuments.siteId,
+          contractorId: sourceDocuments.contractorId,
+          // Без recipient_source проверка пропустила бы автоподставленного
+          // подрядчика и отдала оригинал файла — см. contractor-scope.ts.
+          recipientSource: sourceDocuments.recipientSource,
+        })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, req.params.id))
+        .limit(1);
+      if (!visible || !(await sourceDocumentVisible(app, req.user, visible))) {
+        return reply.code(404).send({ error: 'not_found' });
       }
       // Если передан attachmentId — отдаём именно его (нужно для пакетов
       // ТН, где несколько фото в одном source_document). Иначе fallback на
@@ -2003,35 +2057,145 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     async (req, reply) => {
       const { bundleId } = req.params as { bundleId: string };
       const [bundle] = await app.db
-        .select({ id: sourceBundles.id, status: sourceBundles.status })
+        .select({
+          id: sourceBundles.id,
+          status: sourceBundles.status,
+          activeUploadGeneration: sourceBundles.activeUploadGeneration,
+        })
         .from(sourceBundles)
         .where(eq(sourceBundles.id, bundleId))
         .limit(1);
       if (!bundle) {
         return reply.code(404).send({ error: 'not_found', message: 'Пакет не найден' });
       }
-      const rows = await app.db
-        .select()
-        .from(bundleImportItems)
-        .where(eq(bundleImportItems.bundleId, bundleId))
-        .orderBy(bundleImportItems.createdAt);
+      // Только строки живой загрузки. Раньше брались все строки пакета, и у
+      // перезалитого пакета рядом с активным поколением оказались бы строки
+      // прошлой попытки — сводка и список показали бы каждый файл дважды.
+      const rows = await selectRegistryRows(app.db, bundleId, bundle.activeUploadGeneration);
 
-      const items = rows.map((r) => ({
-        id: r.id,
-        sourceFilename: r.sourceFilename,
-        detectedKind: r.detectedKind,
-        confidence: r.confidence != null ? Number(r.confidence) : null,
-        parserUsed: r.parserUsed,
-        status: r.status,
-        reason: r.reason,
-        createdDocumentIds: Array.isArray(r.createdDocumentIds) ? r.createdDocumentIds : [],
-      }));
+      const items = [...rows]
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .map((r) => ({
+          id: r.id,
+          sourceFilename: r.filename,
+          detectedKind: r.detectedKind,
+          confidence: r.confidence != null ? Number(r.confidence) : null,
+          parserUsed: r.parserUsed,
+          status: r.status,
+          reason: r.reason,
+          createdDocumentIds: Array.isArray(r.createdDocumentIds) ? r.createdDocumentIds : [],
+        }));
       const summary = {
         created: items.filter((i) => i.status === 'created').length,
         needsReview: items.filter((i) => i.status === 'needs_review').length,
         failed: items.filter((i) => i.status === 'failed').length,
+        skipped: items.filter((i) => i.status === 'skipped').length,
       };
       return ImportResultSchema.parse({ bundleId, status: bundle.status, summary, items });
+    },
+  );
+
+  // ──────────── Комплекты без распознанных документов ────────────
+  //
+  // Поставка, из которой не появилось ни одного документа: прислали только
+  // сертификаты, либо тип ни одного файла определить не удалось. Карточки у неё
+  // нет, и это единственный способ добраться до её файлов. Ограничено
+  // admin/manager: инструмент разбора, а не витрина для объекта.
+  app.get(
+    '/api/v1/source-bundles/extra-only',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        querystring: z.object({
+          limit: z.coerce.number().int().min(1).max(200).default(50),
+          offset: z.coerce.number().int().min(0).default(0),
+        }),
+        response: { 200: ExtraOnlyBundleListResponseSchema },
+      },
+    },
+    async (req) => {
+      // Пакет попадает сюда, когда у него нет документов ни своих, ни в
+      // дочернем пакете (накладные разворачиваются именно туда), но есть хотя
+      // бы один файл, сохранённый без распознавания. Дочерний пакет
+      // адресуется алиасом прямо в SQL: alias() из drizzle рендерит только имя
+      // алиаса и в сырой подзапрос не годится.
+      const noDocuments = drSql`not exists (
+        select 1 from ${sourceDocuments} sd where sd.bundle_id = ${sourceBundles.id}
+      ) and not exists (
+        select 1
+          from ${sourceDocuments} sd
+          join ${sourceBundles} cb on cb.id = sd.bundle_id
+         where cb.parent_bundle_id = ${sourceBundles.id}
+      ) and exists (
+        select 1
+          from ${bundleImportItems} bi
+         where bi.bundle_id = ${sourceBundles.id}
+           and bi.status = 'skipped'
+           and bi.input_s3_key is not null
+      )`;
+      const where = and(isNull(sourceBundles.parentBundleId), noDocuments);
+
+      const [counted] = await app.db
+        .select({ total: drSql<number>`count(*)::int` })
+        .from(sourceBundles)
+        .where(where);
+      const total = counted?.total ?? 0;
+
+      const rows = await app.db
+        .select({
+          bundleId: sourceBundles.id,
+          activeUploadGeneration: sourceBundles.activeUploadGeneration,
+          siteName: sites.name,
+          expectedDate: sourceBundles.expectedDate,
+          createdAt: sourceBundles.createdAt,
+          comment: ingestEvents.submissionComment,
+        })
+        .from(sourceBundles)
+        .leftJoin(sites, eq(sites.id, sourceBundles.siteId))
+        // Публичных отправок на пакете может быть несколько — берём последнюю.
+        .leftJoin(
+          ingestEvents,
+          drSql`${ingestEvents.id} = (
+            select ie.id from ${ingestEvents} ie
+             where ie.bundle_id = ${sourceBundles.id} and ie.channel = 'public'
+             order by ie.created_at desc
+             limit 1
+          )`,
+        )
+        .where(where)
+        .orderBy(desc(sourceBundles.createdAt))
+        .limit(req.query.limit)
+        .offset(req.query.offset);
+
+      const items = await Promise.all(
+        rows.map(async (b) => ({
+          bundleId: b.bundleId,
+          siteName: b.siteName,
+          expectedDate: b.expectedDate ? new Date(b.expectedDate).toISOString().slice(0, 10) : null,
+          createdAt: b.createdAt.toISOString(),
+          comment: b.comment,
+          files: (await selectExtraFiles(app.db, b.bundleId)).map(extraFileDto),
+        })),
+      );
+      return { items, total: total ?? 0 };
+    },
+  );
+
+  // Ссылка на дополнительный файл из раздела выше: документа, к которому можно
+  // было бы привязать права, у такого пакета нет.
+  app.get(
+    '/api/v1/source-bundles/:bundleId/extra/:itemId/url',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ bundleId: z.string().uuid(), itemId: z.string().uuid() }),
+        response: { 200: SourceDocumentFileResponseSchema, 404: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      const link = await presignExtraFile(app, req.log, req.params.bundleId, req.params.itemId);
+      if (!link.ok) return reply.code(404).send({ error: link.error });
+      return { url: link.url, filename: link.filename, mimeType: link.mimeType };
     },
   );
 

@@ -11,7 +11,7 @@
 import './instrument.js'; // ПЕРВЫМ — Sentry.init до bullmq/postgres/undici
 import * as Sentry from '@sentry/node';
 import { Queue, Worker, type Job } from 'bullmq';
-import { and, eq, inArray, isNotNull, isNull, lt, lte, or } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, lte, or } from 'drizzle-orm';
 import { logger } from './lib/logger.js';
 import { db } from './db/client.js';
 import {
@@ -88,7 +88,8 @@ import {
 import { publishSseEvent } from './domain/sse/redis-bridge.js';
 import { sourceDocumentAttachments, bundleImportItems } from './db/schema.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { classifyFile } from './domain/edo/document-router.js';
+import { classifyFile, type FileClassification } from './domain/edo/document-router.js';
+import { selectRegistryRows } from './domain/sourceDocuments/bundle-import-registry.js';
 import { classifyImageKind } from './domain/edo/vision-classifier.js';
 import {
   bundleDispatchKeyOf,
@@ -1546,70 +1547,72 @@ type RouterInputFile = {
   /** Строка реестра. NULL — legacy-пакет, строку придётся создавать вставкой. */
   registryItemId: string | null;
   uploadGeneration: number | null;
-  /** Файл уже разобран прошлым прогоном: повторять его нельзя — будет дубль. */
-  alreadyCreated: boolean;
+  /**
+   * Статус строки реестра на входе в прогон.
+   *
+   * Терминальных состояний два, и повторять нельзя ни одно: `created` дал бы
+   * второй документ на тот же файл, `skipped` — лишнюю работу над файлом,
+   * который распознавать не нужно. Хранится именно статус, а не булев флаг:
+   * дальше по нему решается, увеличивать ли счётчик созданных.
+   */
+  status: string | null;
+  /** `store_only` — файл из зоны «Дополнительные документы»: не распознаём. */
+  processingMode: string;
 };
 
 /**
- * Что разбирать: реестр текущего поколения, иначе attachments служебной записи.
+ * Что разбирать: реестр живой загрузки, иначе attachments служебной записи.
  *
- * Реестр — источник истины для пакетов, принятых новым кодом: он переживает и
- * разбор, и удаление служебной записи, поэтому повторный запуск возможен всегда.
- * Fallback нужен на время выката (старые пакеты реестра не имеют) и после него —
- * для пакетов, принятых до миграции.
+ * Реестр — источник истины: он заводится при приёме, переживает и разбор, и
+ * удаление служебной записи, поэтому повторный запуск возможен всегда. Fallback
+ * на attachments остаётся для пакетов, принятых до этого.
+ *
+ * Источник возвращается наружу: от него зависит, чистить ли legacy-строки
+ * журнала перед прогоном (см. вызов).
  */
 async function loadRouterInputs(
   bundleId: string,
   activeUploadGeneration: number,
   techId: string | null,
-): Promise<RouterInputFile[]> {
-  const registry = await db
-    .select({
-      id: bundleImportItems.id,
-      s3Key: bundleImportItems.inputS3Key,
-      filename: bundleImportItems.sourceFilename,
-      mimeType: bundleImportItems.mimeType,
-      sizeBytes: bundleImportItems.sizeBytes,
-      uploadGeneration: bundleImportItems.uploadGeneration,
-      status: bundleImportItems.status,
-    })
-    .from(bundleImportItems)
-    .where(
-      and(
-        eq(bundleImportItems.bundleId, bundleId),
-        isNotNull(bundleImportItems.inputS3Key),
-        // Строки прошлых поколений относятся к брошенным загрузкам.
-        eq(bundleImportItems.uploadGeneration, activeUploadGeneration),
-      ),
-    );
+): Promise<{ files: RouterInputFile[]; source: 'registry' | 'attachments' }> {
+  const registry = await selectRegistryRows(db, bundleId, activeUploadGeneration);
 
   if (registry.length > 0) {
-    return registry.map((r) => ({
-      s3Key: r.s3Key as string,
-      filename: r.filename,
-      mimeType: r.mimeType,
-      sizeBytes: r.sizeBytes,
-      registryItemId: r.id,
-      uploadGeneration: r.uploadGeneration,
-      alreadyCreated: r.status === 'created',
-    }));
+    return {
+      source: 'registry',
+      files: registry.map((r) => ({
+        s3Key: r.s3Key as string,
+        filename: r.filename,
+        mimeType: r.mimeType,
+        sizeBytes: r.sizeBytes,
+        registryItemId: r.id,
+        uploadGeneration: r.uploadGeneration,
+        status: r.status,
+        processingMode: r.processingMode,
+      })),
+    };
   }
 
-  if (!techId) return [];
+  if (!techId) return { files: [], source: 'attachments' };
 
   const attachments = await db
     .select()
     .from(sourceDocumentAttachments)
     .where(eq(sourceDocumentAttachments.sourceDocumentId, techId));
-  return attachments.map((a) => ({
-    s3Key: a.s3Key,
-    filename: a.filename,
-    mimeType: a.mimeType,
-    sizeBytes: a.sizeBytes,
-    registryItemId: null,
-    uploadGeneration: null,
-    alreadyCreated: false,
-  }));
+  return {
+    source: 'attachments',
+    files: attachments.map((a) => ({
+      s3Key: a.s3Key,
+      filename: a.filename,
+      mimeType: a.mimeType,
+      sizeBytes: a.sizeBytes,
+      registryItemId: null,
+      uploadGeneration: null,
+      status: null,
+      // Пакеты, принятые до появления зон, знали только один режим.
+      processingMode: 'auto',
+    })),
+  };
 }
 
 /** Решение router'а по файлу — то, что отличается между ветками. */
@@ -1706,7 +1709,11 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
     .limit(1);
   const techId = tech?.id ?? null;
 
-  const inputs = await loadRouterInputs(bundleId, bundle.activeUploadGeneration, techId);
+  const { files: inputs, source: inputsSource } = await loadRouterInputs(
+    bundleId,
+    bundle.activeUploadGeneration,
+    techId,
+  );
   if (inputs.length === 0) {
     await db
       .update(sourceBundles)
@@ -1738,30 +1745,54 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
   // Идемпотентность журнала. Раньше здесь стоял безусловный DELETE всех строк
   // пакета: иначе при повторном прогоне они НАКАПЛИВАЛИСЬ и import-result
   // показывал дубли (1 файл → 2-3-4 строки, в т.ч. с reason от прежних версий
-  // кода). Строки нового формата постоянны и обновляются на месте, поэтому под
-  // снос идут только legacy-строки — те, что без поколения загрузки.
+  // кода).
   //
-  // Именно поколение, а не ключ файла: у legacy-пакетов ключ теперь тоже
-  // проставляется (он берётся из attachments), но частичный unique-индекс их
-  // не удержит — NULL в upload_generation Postgres считает различными
-  // значениями, и повтор всё равно наплодил бы дубли.
-  await db
-    .delete(bundleImportItems)
-    .where(
-      and(eq(bundleImportItems.bundleId, bundleId), isNull(bundleImportItems.uploadGeneration)),
-    );
+  // Чистим ТОЛЬКО когда входы взяты из attachments: там recordImportItem идёт
+  // вставкой, и без чистки повтор наплодил бы дубли (NULL в upload_generation
+  // частичный unique-индекс не удерживает — Postgres считает NULL различными).
+  // Если же входы пришли из реестра, эти самые строки и есть источник истины:
+  // снести их значило бы обновлять несуществующие записи и остаться с пустым
+  // журналом импорта.
+  if (inputsSource === 'attachments') {
+    await db
+      .delete(bundleImportItems)
+      .where(
+        and(eq(bundleImportItems.bundleId, bundleId), isNull(bundleImportItems.uploadGeneration)),
+      );
+  }
 
   let createdCount = 0;
   let failedCount = 0;
 
   for (const a of inputs) {
-    // Файл уже разобран прошлым прогоном (крах в середине пачки, BullMQ retry,
-    // ручной перезапуск). Повторять нельзя — получим второй документ на тот же
-    // файл; именно поэтому пачку раньше было невозможно доделать.
-    if (a.alreadyCreated) {
+    // Файл уже в терминальном состоянии от прошлого прогона (крах в середине
+    // пачки, BullMQ retry, ручной перезапуск). Повторять нельзя: created дал бы
+    // второй документ на тот же файл, skipped — лишний vision-вызов ради файла,
+    // который распознавать не нужно.
+    if (a.status === 'created') {
       createdCount++;
       continue;
     }
+    if (a.status === 'skipped') continue;
+
+    if (a.processingMode === 'store_only') {
+      // Файл из зоны «Дополнительные документы»: сертификат, паспорт качества,
+      // спецификация, акт. Человек уже сказал, что распознавать его не надо,
+      // поэтому его даже не скачивают из S3 — ни классификации, ни vision, ни
+      // дочернего задания. Файл лежит в бакете, строка реестра помнит его, и
+      // менеджер открывает его в карточке поставки.
+      await recordImportItem(db, bundleId, a, {
+        detectedKind: null,
+        parserUsed: 'none',
+        status: 'skipped',
+        createdDocumentIds: [],
+        reason: 'дополнительный документ — загружен без распознавания',
+        metadata: { processingMode: 'store_only' },
+      });
+      // Ни created, ни failed: это штатный исход, а не отказ.
+      continue;
+    }
+
     // Per-file изоляция: ошибка одного файла (битый S3 / исключение в
     // классификации или роутинге) НЕ должна валить весь router-job, иначе
     // пакет уйдёт в retry с backoff 60с и «зависнет», а остальные файлы не
@@ -1781,7 +1812,24 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
         continue;
       }
 
-      let cls = await classifyFile(buffer, a.mimeType ?? '', a.filename);
+      // Сбой самой классификации не должен прятать файл. Раньше исключение
+      // отсюда ловил общий catch файла и писал failed, а дополнительные файлы
+      // поставки отбираются по skipped — файл переставал быть виден вообще.
+      // Считаем такой случай «тип не определён»: ниже он сохранится как
+      // дополнительный. Инфраструктурные сбои (S3, БД) по-прежнему failed.
+      let cls: FileClassification;
+      try {
+        cls = await classifyFile(buffer, a.mimeType ?? '', a.filename);
+      } catch (err) {
+        log.warn({ err, file: a.filename }, 'router: classifyFile failed — сохраняем как прочий');
+        cls = {
+          detectedKind: 'unknown',
+          confidence: 0,
+          needsVision: false,
+          parserUsed: 'none',
+          signals: ['classify:error'],
+        };
+      }
 
       // Vision-доклассификация типа: если детерминированно тип не определён
       // (фото/скан/битый PDF без маркера в имени → detectedKind='unknown',
@@ -1797,19 +1845,61 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
           cls = {
             ...cls,
             detectedKind: vc.kind,
+            // Уверенность тоже от модели: раньше в журнал уезжало исходное 0
+            // или 0.3 — число, к принятому решению отношения не имеющее.
+            confidence: vc.confidence,
             signals: [...cls.signals, `vision-kind:${vc.kind}:${vc.confidence.toFixed(2)}`],
           };
         }
       }
 
       // Накладная (по тексту ИЛИ по vision-доклассификации) → waybill-парсер.
-      // ВСЁ ОСТАЛЬНОЕ — в УПД-flow (ветка else): УПД-парсер сам покрывает
+      // Подтверждённое УПД — в УПД-flow (ветка else): парсер сам покрывает
       // Excel (parseUpdXlsx), текстовый PDF (parseUpdPdf) и скан/фото/битый
       // текстовый слой (parseUpdVision). Благодаря этому сканы, фото и PDF с
       // «битыми» глифами 1С НЕ теряются, а распознаются. Главное — на КАЖДЫЙ
       // файл создаётся видимая строка (12 загрузил → 12 строк).
       const isWaybill =
         cls.detectedKind === 'transport_waybill' || cls.detectedKind === 'os2_transfer';
+
+      if (cls.detectedKind === 'unknown') {
+        // Тип не подтвердил ни текстовый классификатор, ни vision. Раньше такой
+        // файл уходил в УПД-flow «на всякий случай» и почти всегда оседал
+        // пустым черновиком: из 12 таких документов на бою менеджер удалил 10,
+        // а два оставшихся требуют ручного разбора. Теперь файл сохраняется как
+        // дополнительный — он виден в поставке, и ложного УПД не появляется.
+        await recordImportItem(db, bundleId, a, {
+          detectedKind: 'unknown',
+          confidence: cls.confidence.toString(),
+          parserUsed: 'none',
+          status: 'skipped',
+          createdDocumentIds: [],
+          reason: 'тип документа не определён — сохранён как дополнительный',
+          metadata: { signals: cls.signals, needsVision: cls.needsVision },
+        });
+        continue;
+      }
+
+      if (cls.detectedKind === 'supplementary') {
+        // Документ о качестве или соответствии: сертификат, паспорт качества,
+        // декларация, протокол испытаний. Реквизиты из него не нужны, поэтому
+        // ни документа, ни задания — файл просто остаётся в S3, а строка
+        // реестра помнит его и показывает менеджеру в карточке поставки.
+        //
+        // Раньше такой файл уходил в УПД-flow: занимал слот воркера, тратил
+        // vision-вызовы и оседал в списке пустым черновиком.
+        await recordImportItem(db, bundleId, a, {
+          detectedKind: 'supplementary',
+          confidence: cls.confidence.toString(),
+          parserUsed: 'none',
+          status: 'skipped',
+          createdDocumentIds: [],
+          reason: 'сопроводительный документ — распознавание не требуется',
+          metadata: { signals: cls.signals, needsVision: cls.needsVision },
+        });
+        // Ни created, ни failed: это штатный исход, а не отказ.
+        continue;
+      }
 
       if (cls.detectedKind === 'm15') {
         // М-15 (накладная на отпуск материалов). Создаём документ типа
@@ -1941,11 +2031,9 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
       } else {
         // УПД-flow (одиночный, тот же путь, что «Загрузить УПД»). Сюда попадают:
         //  - УПД (Excel / текстовый PDF) — детерминированно;
-        //  - сканы, фото, PDF с битым текстовым слоем (needsVision) — handleJob
-        //    распознает их через parseUpdVision;
-        //  - m15 / unknown — пробуем распознать; в худшем случае выйдет черновик
-        //    (partial_parse), но строка не пропадёт и оригинал останется для
-        //    ручной доработки.
+        //  - сканы и фото, которые vision подтвердил как УПД (needsVision) —
+        //    handleJob распознает их через parseUpdVision.
+        // Неопознанное сюда больше не доходит: оно обработано веткой выше.
         const docId = randomUUID();
         const dedupeKey = dispatchKeyOf(docId);
         const reason =

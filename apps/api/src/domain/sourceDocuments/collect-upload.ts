@@ -74,11 +74,30 @@ export type CollectMode = 'strict' | 'legacy';
 type MultipartPart =
   | {
       type: 'file';
+      fieldname: string;
       filename: string;
       mimetype: string;
       toBuffer: () => Promise<Buffer>;
     }
   | { type: 'field'; fieldname: string; value: unknown };
+
+/**
+ * Имя multipart-части для зоны «Дополнительные документы».
+ *
+ * Режим едет именем части, а не отдельным полем формы: текстовые поля читаются
+ * до файлов (сервер разбирает поток по частям), поэтому сказать «а вот этот
+ * файл — дополнительный» отдельным полем невозможно.
+ */
+export const EXTRA_FILES_FIELD = 'extraFiles';
+
+/**
+ * Любое имя, кроме `extraFiles`, — обычная зона распознавания. Умолчание
+ * важно: мобильное приложение и прежние сборки веба шлют одно поле `files` и
+ * про вторую зону не знают.
+ */
+function processingModeOf(fieldname: string): IngestFile['processingMode'] {
+  return fieldname === EXTRA_FILES_FIELD ? 'store_only' : 'auto';
+}
 
 type MultipartRequest = {
   parts: (opts?: {
@@ -203,6 +222,7 @@ export async function collectUploadParts(
 
       const buffer = await part.toBuffer();
       const filename = safeName(part.filename, accepted.length + rejected.length);
+      const processingMode = processingModeOf(part.fieldname);
 
       totalBytes += buffer.length;
       if (totalBytes > limits.maxTotalBytes) return { ok: false, error: 'total_too_large' };
@@ -212,7 +232,7 @@ export async function collectUploadParts(
         // молча пропускаются, в rejected не попадают.
         if (buffer.length === 0) continue;
         if (!isSupportedLegacy(part.mimetype, part.filename)) continue;
-        accepted.push({ filename: part.filename, mimeType: part.mimetype, buffer });
+        accepted.push({ filename: part.filename, mimeType: part.mimetype, buffer, processingMode });
         continue;
       }
 
@@ -221,7 +241,7 @@ export async function collectUploadParts(
         rejected.push({ filename, reason: verdict.reason });
         continue;
       }
-      accepted.push({ filename, mimeType: verdict.mimeType, buffer });
+      accepted.push({ filename, mimeType: verdict.mimeType, buffer, processingMode });
     }
   } catch (err) {
     return { ok: false, error: limitErrorOf(err) };

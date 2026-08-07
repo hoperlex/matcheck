@@ -24,12 +24,46 @@ export function fileHashOf(buffer: Buffer): string {
 }
 
 /**
+ * Хеш раскладки файлов по зонам формы — или null, если раскладки нет.
+ *
+ * Содержимое пакета не отличает УПД, положенный в зону распознавания, от того
+ * же файла, брошенного в «Дополнительные документы»: хеш байтов один и тот же.
+ * Без этого компонента ошибочно помеченный УПД чинить было бы нечем — повторная
+ * загрузка в правильную зону возвращала бы `reused` и не делала ничего.
+ *
+ * null, пока все файлы `auto`: пачка без дополнительных документов обязана
+ * давать ровно прежний ключ, иначе перестанут узнаваться ВСЕ ранее загруженные
+ * пакеты и повтор старого комплекта создаст дубль.
+ *
+ * Пары сортируются: порядок файлов в форме не должен влиять, как и в
+ * contentHashOf.
+ */
+export function processingModesHashOf(
+  files: readonly { fileHash: string; processingMode: string }[],
+): string | null {
+  if (!files.some((f) => f.processingMode !== 'auto')) return null;
+  return createHash('sha256')
+    .update(
+      files
+        .map((f) => `${f.fileHash}:${f.processingMode}`)
+        .sort()
+        .join('|'),
+    )
+    .digest('hex');
+}
+
+/**
  * Канонический ключ идемпотентности СО SCOPE.
  *
  * Формат совпадает с backfill миграции 0074 (префикс `v1|manual|` исторический
  * и канал не обозначает). Именно scope отличает этот ключ от bundle_hash:
  * уникальность по одному лишь содержимому склеивает тот же УПД, загруженный
  * на разные объекты, и молча возвращает чужой пакет.
+ *
+ * `modesHash` (см. processingModesHashOf) добавляется ТОЛЬКО когда в пачке есть
+ * файлы, помеченные «не распознавать»: тогда формат становится `v2`, и та же
+ * пачка с другой раскладкой по зонам — законно другой пакет. Пачки без таких
+ * файлов сохраняют ключ `v1` байт в байт.
  */
 export function idempotencyKeyOf(scope: {
   siteId: string | null;
@@ -38,16 +72,18 @@ export function idempotencyKeyOf(scope: {
   recipientMolId?: string | null;
   expectedDate?: string | null;
   contentHash: string;
+  modesHash?: string | null;
 }): string {
-  return [
-    'v1|manual',
+  const base = [
     scope.siteId ?? '',
     scope.direction,
     scope.contractorId ?? '',
     scope.recipientMolId ?? '',
     scope.expectedDate ?? '',
     scope.contentHash,
-  ].join('|');
+  ];
+  if (!scope.modesHash) return ['v1|manual', ...base].join('|');
+  return ['v2|manual', ...base, scope.modesHash].join('|');
 }
 
 /**

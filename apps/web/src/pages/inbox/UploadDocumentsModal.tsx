@@ -16,6 +16,8 @@ import {
 import {
   CheckCircleTwoTone,
   CloseCircleTwoTone,
+  ExclamationCircleTwoTone,
+  FileTextOutlined,
   LoadingOutlined,
 } from '@ant-design/icons';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -42,6 +44,9 @@ import { FileDropList, pluralFiles, type FileRow } from './upload/FileDropList';
  *     «Документы» по строке на файл и распознаются в фоне). Это закрывает
  *     жалобу «загрузил — и непонятно, где документы / часть пропала».
  */
+const UPLOAD_ACCEPT =
+  'application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,image/jpeg,image/png,image/webp,.pdf,.xlsx,.xls,.jpg,.jpeg,.png,.webp';
+
 export function UploadDocumentsModal({
   open,
   direction,
@@ -58,6 +63,9 @@ export function UploadDocumentsModal({
   const [siteId, setSiteId] = useState<string | null>(null);
   const [expectedDate, setExpectedDate] = useState<Dayjs | null>(null);
   const [rows, setRows] = useState<FileRow[]>([]);
+  // Вторая зона: файлы, которые нужно только сохранить. Отдельное состояние, а
+  // не флаг на строке, — так режим виден человеку в самой форме.
+  const [extraRows, setExtraRows] = useState<FileRow[]>([]);
   const [uploading, setUploading] = useState(false);
   // bundleId !== null → стадия «Результат».
   const [bundleId, setBundleId] = useState<string | null>(null);
@@ -90,6 +98,7 @@ export function UploadDocumentsModal({
     setSiteId(null);
     setExpectedDate(null);
     setRows([]);
+    setExtraRows([]);
     setUploading(false);
     setBundleId(null);
   }
@@ -104,10 +113,23 @@ export function UploadDocumentsModal({
   // объект/дату — обычно следующая пачка идёт на тот же объект.
   function uploadMore() {
     setRows([]);
+    setExtraRows([]);
     setBundleId(null);
   }
 
-  const canUpload = !!siteId && rows.length > 0 && !uploading;
+  // Лимиты сервер считает по ВСЕМУ запросу, поэтому и здесь зоны складываются.
+  const totalCount = rows.length + extraRows.length;
+  const canUpload = !!siteId && totalCount > 0 && !uploading;
+  // Один файл в обеих зонах — противоречивое указание. Сервер сведёт его к
+  // «только сохранить», но человеку лучше сказать сразу.
+  function fileKey(f: File): string {
+    return `${f.name}:${f.size}`;
+  }
+  function guardDuplicate(other: FileRow[], f: File): boolean {
+    if (!other.some((r) => fileKey(r.file) === fileKey(f))) return true;
+    message.warning(`Файл «${f.name}» уже добавлен в другую зону`);
+    return false;
+  }
   const inResult = bundleId !== null;
   const result = resultQuery.data;
   const inProgress =
@@ -131,6 +153,8 @@ export function UploadDocumentsModal({
           ...recipientFields,
           ...(expectedDate ? { expectedDate: expectedDate.format('YYYY-MM-DD') } : {}),
         },
+        undefined,
+        extraRows.map((r) => r.file),
       );
       // Сразу же обновим список (появится техническая строка пакета), а дальше
       // переключаемся на стадию «Результат» с поллингом журнала.
@@ -176,7 +200,7 @@ export function UploadDocumentsModal({
               {uploading ? 'Загрузка…' : 'Закрыть'}
             </Button>
             <Button type="primary" disabled={!canUpload} loading={uploading} onClick={startUpload}>
-              {rows.length > 0 ? `Загрузить ${rows.length} ${pluralFiles(rows.length)}` : 'Загрузить'}
+              {totalCount > 0 ? `Загрузить ${totalCount} ${pluralFiles(totalCount)}` : 'Загрузить'}
             </Button>
           </Space>
         )
@@ -250,13 +274,29 @@ export function UploadDocumentsModal({
                 style={{ width: '100%' }}
               />
             </Form.Item>
-            <Form.Item label="Файлы (PDF / Excel / фото)" required>
+            <Form.Item label="УПД и накладные" required>
               <FileDropList
                 rows={rows}
                 onChange={setRows}
                 disabled={uploading}
-                accept="application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,image/jpeg,image/png,image/webp,.pdf,.xlsx,.xls,.jpg,.jpeg,.png,.webp"
+                accept={UPLOAD_ACCEPT}
+                title="Перетащите УПД и накладные либо нажмите для выбора"
                 hint="УПД, накладные, Excel, фото — вперемешку. Можно сразу несколько. Лимит на файл — 10 МБ."
+                canAdd={(f) => guardDuplicate(extraRows, f)}
+              />
+            </Form.Item>
+            <Form.Item
+              label="Дополнительные документы"
+              extra="Сертификаты, паспорта качества, спецификации, акты и другие файлы. Они сохранятся без распознавания и будут видны в карточке поставки."
+            >
+              <FileDropList
+                rows={extraRows}
+                onChange={setExtraRows}
+                disabled={uploading}
+                accept={UPLOAD_ACCEPT}
+                title="Перетащите дополнительные документы либо нажмите для выбора"
+                hint="Эти файлы не распознаются — система просто сохранит их вместе с поставкой."
+                canAdd={(f) => guardDuplicate(rows, f)}
               />
             </Form.Item>
           </Form>
@@ -294,16 +334,33 @@ function ImportResultPanel({
     <>
       <Space size="small" wrap style={{ marginBottom: 12 }}>
         <Tag color="default">Файлов: {items.length}</Tag>
-        <Tag color="green">Принято на распознавание: {summary.created}</Tag>
+        {summary.created > 0 && <Tag color="green">Принято на распознавание: {summary.created}</Tag>}
+        {summary.skipped > 0 && <Tag color="blue">Сохранено без распознавания: {summary.skipped}</Tag>}
         {summary.failed > 0 && <Tag color="red">Ошибок: {summary.failed}</Tag>}
       </Space>
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="Документы появились в списке «Документы»"
-        description="Каждый файл — отдельная строка. Сейчас они распознаются в фоне: статус сменится с «в очереди»/«распознаётся» на «обработано». Окно можно закрыть."
-      />
+      {/* Текст строится по сводке: у пачки без распознанных документов прежнее
+          «документы появились в списке» было прямой неправдой. */}
+      {summary.created > 0 ? (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="Документы появились в списке «Документы»"
+          description={
+            summary.skipped > 0
+              ? 'Каждый распознаваемый файл — отдельная строка; статус сменится с «в очереди»/«распознаётся» на «обработано». Остальные файлы сохранены как дополнительные и видны в карточке поставки. Окно можно закрыть.'
+              : 'Каждый файл — отдельная строка. Сейчас они распознаются в фоне: статус сменится с «в очереди»/«распознаётся» на «обработано». Окно можно закрыть.'
+          }
+        />
+      ) : (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="Файлы сохранены, документов из них не создано"
+          description="Распознавать эти файлы не требовалось — они лежат вместе с поставкой. Найти их можно в разделе «Комплекты без документов», а если в этой поставке появится УПД или накладная — и в её карточке."
+        />
+      )}
       <List
         size="small"
         bordered
@@ -324,6 +381,12 @@ function ImportResultPanel({
 
 function statusIcon(status: string) {
   if (status === 'failed') return <CloseCircleTwoTone twoToneColor="#ff4d4f" style={{ fontSize: 18 }} />;
+  // Файл, требующий ручной проверки, зелёной галкой помечать нельзя: с ним ещё
+  // предстоит работа.
+  if (status === 'needs_review') {
+    return <ExclamationCircleTwoTone twoToneColor="#faad14" style={{ fontSize: 18 }} />;
+  }
+  if (status === 'skipped') return <FileTextOutlined style={{ fontSize: 18, color: '#1677ff' }} />;
   return <CheckCircleTwoTone twoToneColor="#52c41a" style={{ fontSize: 18 }} />;
 }
 
@@ -335,6 +398,8 @@ function statusLabel(status: string): string {
       return 'Не удалось обработать файл';
     case 'needs_review':
       return 'Требует ручной проверки';
+    case 'skipped':
+      return 'Сохранено без распознавания';
     default:
       return status;
   }

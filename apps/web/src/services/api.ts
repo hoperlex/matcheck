@@ -1,5 +1,9 @@
 import * as Sentry from '@sentry/react';
-import type { UploadDocumentsResponse, ImportResult } from '@matcheck/contracts';
+import type {
+  UploadDocumentsResponse,
+  ImportResult,
+  ExtraOnlyBundleListResponse,
+} from '@matcheck/contracts';
 import { useAuthStore } from '../stores/auth';
 import { refreshAccessToken } from './authRefresh';
 
@@ -293,6 +297,8 @@ export async function apiUploadFiles<T>(
     fieldName?: string;
     signal?: AbortSignal;
     fields?: Record<string, string>;
+    /** Файлы зоны «Дополнительные документы»: сохранить, но не распознавать. */
+    extraFiles?: File[];
   } = {},
 ): Promise<T> {
   const fd = new FormData();
@@ -303,6 +309,11 @@ export async function apiUploadFiles<T>(
   // .files() итератор, порядок сохраняется.
   for (const f of files) {
     fd.append(opts.fieldName ?? 'files', f, f.name);
+  }
+  // Режим обработки едет ИМЕНЕМ части: текстовые поля сервер читает раньше
+  // файлов, поэтому пофайловый признак отдельным полем не выразить.
+  for (const f of opts.extraFiles ?? []) {
+    fd.append('extraFiles', f, f.name);
   }
   // timeoutMs:null — пакет файлов может грузиться дольше дефолта; отмена через signal.
   return request<T>(path, { method: 'POST', body: fd, signal: opts.signal, timeoutMs: null });
@@ -316,11 +327,41 @@ export async function apiUploadDocuments(
   files: File[],
   fields: Record<string, string>,
   signal?: AbortSignal,
+  extraFiles?: File[],
 ): Promise<UploadDocumentsResponse> {
   return apiUploadFiles<UploadDocumentsResponse>('/source-documents/upload-documents', files, {
     fields,
     signal,
+    extraFiles,
   });
+}
+
+// Ссылка на дополнительный файл поставки — из карточки документа.
+export async function apiGetExtraFileUrl(
+  documentId: string,
+  itemId: string,
+): Promise<{ url: string; filename: string; mimeType: string | null }> {
+  return api.get(`/source-documents/${documentId}/extra/${itemId}/url`);
+}
+
+// То же для комплекта без распознанных документов: карточки у него нет.
+export async function apiGetBundleExtraFileUrl(
+  bundleId: string,
+  itemId: string,
+): Promise<{ url: string; filename: string; mimeType: string | null }> {
+  return api.get(`/source-bundles/${bundleId}/extra/${itemId}/url`);
+}
+
+// Комплекты, из которых не появилось ни одного документа.
+export async function apiGetExtraOnlyBundles(params: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ExtraOnlyBundleListResponse> {
+  const qs = new URLSearchParams();
+  if (params.limit != null) qs.set('limit', String(params.limit));
+  if (params.offset != null) qs.set('offset', String(params.offset));
+  const suffix = qs.toString() ? `?${qs}` : '';
+  return api.get<ExtraOnlyBundleListResponse>(`/source-bundles/extra-only${suffix}`);
 }
 
 // Журнал решений по пачке (что классификатор определил, что создано).
