@@ -51,7 +51,7 @@ const ACCEPT =
  * уходит несколько машин на разные объекты, и раскладывать их по отдельным
  * заходам на страницу неудобно. Каждая уезжает своим запросом (пакет
  * документов в системе и есть «объект + дата + файлы»), поэтому у каждой свой
- * номер обращения и своя судьба: упавшая не тянет за собой остальные.
+ * пакет и своя судьба: упавшая не тянет за собой остальные.
  */
 type DeliveryDraft = {
   id: string;
@@ -60,6 +60,10 @@ type DeliveryDraft = {
   comment: string;
   rows: FileRow[];
   state: DeliveryState;
+  // Номер обращения от сервера. На экране НЕ показывается — поставщику он ничего
+  // не говорит, а менеджеру в портале и так не виден (живёт в
+  // ingest_events.public_ticket). Поле держим, потому что его пишет очередь
+  // отправки и на нём стоят её тесты.
   ticket?: string;
   error?: string;
   rejected?: Array<{ filename: string; reason: PublicRejectReason }>;
@@ -359,9 +363,11 @@ function panelTitle(d: DeliveryDraft, index: number) {
       {d.state === 'sent' && (
         <Space size={4}>
           <CheckCircleTwoTone twoToneColor="#52c41a" />
-          <Typography.Text type="secondary" copyable={{ text: d.ticket }}>
-            № {d.ticket}
-          </Typography.Text>
+          {/* Номер обращения поставщику не показываем: он непрозрачный, ни о чём
+              ему не говорит, и менеджеру в портале тоже не виден. Слово рядом с
+              галочкой оставляем — в свёрнутой панели иначе не отличить
+              отправленную поставку от черновика. */}
+          <Typography.Text type="secondary">принято</Typography.Text>
         </Space>
       )}
       {d.state === 'failed' && (
@@ -387,10 +393,7 @@ function DeliveryFields({
     return (
       <>
         <Typography.Paragraph style={{ marginBottom: draft.rejected?.length ? 12 : 0 }}>
-          Документы приняты и переданы в обработку. Номер обращения:{' '}
-          <Typography.Text strong copyable>
-            {draft.ticket}
-          </Typography.Text>
+          Документы приняты и переданы в обработку.
         </Typography.Paragraph>
         {draft.rejected && draft.rejected.length > 0 && (
           <Alert
