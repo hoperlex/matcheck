@@ -1,13 +1,15 @@
 import type { ReactNode } from 'react';
-import { Grid, Typography } from 'antd';
+import { Button, Grid, Typography } from 'antd';
+import { useNavigate } from 'react-router-dom';
 
 const { useBreakpoint } = Grid;
 
 /**
  * Двухколоночный макет для страниц входа/регистрации. Слева — минималистичная
- * брендовая панель: логотип «М» и надпись «Приёмка материалов». Справа — форма
- * (`children`) с заголовком/подзаголовком. На узких экранах левая панель
- * скрывается, остаётся одна колонка с компактным логотипом сверху.
+ * брендовая панель: логотип «М», надпись «Приёмка материалов» и вход для
+ * поставщика. Справа — форма (`children`) с заголовком/подзаголовком. На узких
+ * экранах левая панель скрывается, остаётся одна колонка с компактным
+ * логотипом сверху.
  *
  * Только оболочка вокруг форм — никакой бизнес-логики. Формы (Login/Register)
  * передают свой контент как `children`; их обработчики и данные не меняются.
@@ -23,6 +25,7 @@ export function AuthLayout({
 }): JSX.Element {
   const screens = useBreakpoint();
   const twoCol = Boolean(screens.lg);
+  const navigate = useNavigate();
 
   return (
     <div style={{ minHeight: '100dvh', display: 'flex', background: '#fff' }}>
@@ -43,6 +46,18 @@ export function AuthLayout({
           <Typography.Title style={{ margin: 0, fontSize: 38, fontWeight: 700 }}>
             Приёмка материалов
           </Typography.Title>
+          {/*
+            Вход для поставщика: логина у него нет и не будет, а документы
+            присылать надо. Ведём на /uploads, где та же форма уже раскрыта, —
+            вместо того чтобы рассылать эту ссылку отдельно.
+
+            navigate, а не <Link><Button/></Link>: обёртка дала бы <a><button>,
+            то есть вложенные интерактивные элементы. Button href отрендерил бы
+            обычную ссылку с полной перезагрузкой вместо SPA-перехода.
+          */}
+          <Button type="primary" size="large" onClick={() => navigate('/uploads')}>
+            Загрузить документы
+          </Button>
         </div>
       )}
 
