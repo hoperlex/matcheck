@@ -624,6 +624,13 @@
       "when": 1781800015000,
       "tag": "0089_last_failed_login_at",
       "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1781800016000,
+      "tag": "0090_password_reset",
+      "breakpoints": true
     }
   ]
 }

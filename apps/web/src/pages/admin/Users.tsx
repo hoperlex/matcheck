@@ -11,10 +11,12 @@ import {
   Space,
   message,
 } from 'antd';
-import { EditOutlined, PhoneOutlined, SearchOutlined } from '@ant-design/icons';
+import { EditOutlined, LinkOutlined, PhoneOutlined, SearchOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   CustomerCounterparty,
+  PasswordResetState,
+  PasswordResetStateListResponse,
   Site,
   UserAdminPatch,
   UserDto,
@@ -25,6 +27,8 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { roleLabel } from '../../shared/constants/roleLabels';
 import { UserEditModal } from './UserEditModal';
+import { PasswordResetLinkModal } from './PasswordResetLinkModal';
+import { formatDateRu } from '../../shared/utils/formatRu';
 
 const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp', 'contractor', 'monitor'];
 
@@ -39,6 +43,7 @@ function hasValidInn(inn: string | null | undefined): boolean {
 export default function AdminUsersPage() {
   const qc = useQueryClient();
   const [editing, setEditing] = useState<UserDto | null>(null);
+  const [resetFor, setResetFor] = useState<UserDto | null>(null);
   // Поиск — client-side: бэк /admin/users отдаёт плоский UserDto[] без
   // пагинации, на проде типично ~40-50 пользователей. Server-side q-фильтр
   // тут — overkill: лишний round-trip без выгоды по производительности.
@@ -75,6 +80,19 @@ export default function AdminUsersPage() {
       ),
   });
   const customerCps = customerCpQuery.data?.items ?? [];
+  // Состояние сброса пароля: заявки от людей и выданные ссылки. Намеренно
+  // отдельным запросом, а не полями в UserDto — тот DTO ходит в мобильное
+  // приложение, и админская механика ему не нужна. Ни токенов, ни URL здесь
+  // нет: только метаданные, ссылку отдаёт reveal по одной.
+  const resetsQuery = useQuery({
+    queryKey: ['admin', 'password-resets'],
+    queryFn: () => api.get<PasswordResetStateListResponse>('/admin/password-resets'),
+  });
+  const resetByUser = useMemo(() => {
+    const map = new Map<string, PasswordResetState>();
+    for (const item of resetsQuery.data?.items ?? []) map.set(item.userId, item);
+    return map;
+  }, [resetsQuery.data]);
   const patch = useMutation({
     mutationFn: ({ id, body }: { id: string; body: UserAdminPatch }) =>
       api.patch(`/admin/users/${id}`, body),
@@ -244,13 +262,34 @@ export default function AdminUsersPage() {
           {
             title: 'Действия',
             key: 'actions',
-            width: 100,
+            width: 140,
             align: 'right' as const,
-            render: (_: unknown, row: UserDto) => (
-              <Tooltip title="Редактировать">
-                <Button type="text" icon={<EditOutlined />} onClick={() => setEditing(row)} />
-              </Tooltip>
-            ),
+            render: (_: unknown, row: UserDto) => {
+              const reset = resetByUser.get(row.id);
+              return (
+                <Space size={0}>
+                  <Tooltip
+                    title={
+                      reset?.requestedAt
+                        ? `Запросил сброс ${formatDateRu(reset.requestedAt)}`
+                        : 'Ссылка на смену пароля'
+                    }
+                  >
+                    <Button
+                      type="text"
+                      // Заявку подсвечиваем: админ должен видеть, кому нужна
+                      // ссылка, не открывая карточки.
+                      danger={Boolean(reset?.requestedAt)}
+                      icon={<LinkOutlined />}
+                      onClick={() => setResetFor(row)}
+                    />
+                  </Tooltip>
+                  <Tooltip title="Редактировать">
+                    <Button type="text" icon={<EditOutlined />} onClick={() => setEditing(row)} />
+                  </Tooltip>
+                </Space>
+              );
+            },
           },
         ]}
         cardRender={(u) => {
@@ -295,7 +334,19 @@ export default function AdminUsersPage() {
         customerCps={customerCps}
         open={editing !== null}
         onClose={() => setEditing(null)}
+        onOpenPasswordReset={(u) => {
+          setEditing(null);
+          setResetFor(u);
+        }}
       />
+      {resetFor ? (
+        <PasswordResetLinkModal
+          user={resetFor}
+          state={resetByUser.get(resetFor.id)}
+          open
+          onClose={() => setResetFor(null)}
+        />
+      ) : null}
     </StickyPageHeader>
   );
 }

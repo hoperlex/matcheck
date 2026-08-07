@@ -189,6 +189,72 @@ export const refreshTokens = pgTable(
   (t) => [uniqueIndex('refresh_token_hash_unique').on(t.tokenHash)],
 );
 
+// ─── Сброс пароля: заявка и ссылка — РАЗНЫЕ сущности ──────────────────────
+//
+// Заявка создаётся публичной формой «Забыли пароль?» и ничего секретного не
+// содержит: она лишь поднимает в админке флаг «человек просит сброс».
+// Ссылку выпускает администратор отдельным действием.
+//
+// Почему не одна таблица. Если бы публичная форма выпускала токен сама, любой
+// знающий чужой email бесконечно обнулял бы уже отправленную человеку ссылку —
+// достаточно дёргать форму. Разделение делает это невозможным физически.
+export const passwordResetRequests = pgTable(
+  'password_reset_requests',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    // Заявка закрывается либо администратором (кнопкой или выдачей ссылки),
+    // либо сама при следующем обычном входе — иначе тег «Запросил сброс»
+    // висел бы вечно у того, кто просто вспомнил пароль.
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    resolvedByUserId: uuid('resolved_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+  },
+  (t) => [
+    // Одна открытая заявка на пользователя: повторное нажатие обновляет дату.
+    uniqueIndex('password_reset_requests_open_unique')
+      .on(t.userId)
+      .where(sql`${t.resolvedAt} is null`),
+  ],
+);
+
+// Ссылка на смену пароля. Токен равносилен паролю — им захватывают аккаунт,
+// поэтому, в отличие от share_tokens, открытым он НЕ хранится: для поиска
+// лежит sha256, для повторного показа администратору — AES-256-GCM-конверт
+// (buildAad('password_reset_tokens', id), id генерируется до шифрования).
+export const passwordResetTokens = pgTable(
+  'password_reset_tokens',
+  {
+    id: uuid('id').primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tokenHash: varchar('token_hash', { length: 64 }).notNull(),
+    tokenEncrypted: text('token_encrypted').notNull(),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('password_reset_tokens_hash_unique').on(t.tokenHash),
+    // Не более одной НЕПОГАШЕННОЙ ссылки на пользователя. Предикат намеренно
+    // без `expires_at > now()`: индексное выражение обязано быть immutable, с
+    // now() миграция не применится вовсе. Плата — выдавая новую ссылку, надо
+    // отзывать все неиспользованные, включая протухшие.
+    uniqueIndex('password_reset_tokens_one_open')
+      .on(t.userId)
+      .where(sql`${t.usedAt} is null and ${t.revokedAt} is null`),
+  ],
+);
+
 export const authEvents = pgTable(
   'auth_events',
   {

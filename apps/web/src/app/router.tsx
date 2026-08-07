@@ -30,6 +30,8 @@ const AdminPrompts = lazy(() => import('../pages/admin/Prompts'));
 const AdminEdoAccounts = lazy(() => import('../pages/admin/EdoAccounts'));
 const AdminMailAccounts = lazy(() => import('../pages/admin/MailAccounts'));
 const Settings = lazy(() => import('../pages/settings/Settings'));
+const ForgotPassword = lazy(() => import('../pages/auth/ForgotPassword'));
+const ResetPassword = lazy(() => import('../pages/auth/ResetPassword'));
 const PublicSharePage = lazy(() => import('../pages/share/PublicSharePage'));
 const PublicUploadPage = lazy(() => import('../pages/public-upload/PublicUploadPage'));
 const OperationsPage = lazy(() => import('../pages/operations/OperationsPage'));
@@ -95,6 +97,13 @@ const sentryCreateBrowserRouter = Sentry.wrapCreateBrowserRouterV7(createBrowser
 export const router = sentryCreateBrowserRouter([
   { path: '/login', element: suspense(<Login />) },
   { path: '/register', element: suspense(<Register />) },
+  // Заявка «Забыли пароль?»: человек без доступа к порталу по определению не
+  // авторизован, поэтому обе страницы вне ProtectedRoute.
+  { path: '/forgot-password', element: suspense(<ForgotPassword />) },
+  // Токен ездит во ФРАГМЕНТЕ (/reset-password#<token>), а не в пути: фрагмент
+  // не уходит на сервер, поэтому не оседает в логах прокси и Referer. Отсюда и
+  // маршрут без параметра.
+  { path: '/reset-password', element: suspense(<ResetPassword />) },
   // Публичная страница просмотра приёмки/отгрузки по share-токену.
   // Вне ProtectedRoute: доступ по знанию unguessable токена, без логина.
   { path: '/share/:token', element: suspense(<PublicSharePage />) },

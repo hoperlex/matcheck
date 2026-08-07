@@ -31,6 +31,7 @@ import {
   statuses,
 } from '../db/schema.js';
 import { getObject } from '../domain/storage/s3.signer.js';
+import { buildPublicUrl } from '../lib/public-url.js';
 
 const TTL_DAYS = 10;
 const TTL_MS = TTL_DAYS * 24 * 60 * 60 * 1000;
@@ -43,16 +44,12 @@ function newToken(): string {
   return randomBytes(16).toString('base64url');
 }
 
-function publicBaseUrl(): string {
-  // Базовый URL для построения ссылки. В проде стоит передавать через env,
-  // в dev/staging fallback — request.protocol/host (см. использование).
-  return process.env.PUBLIC_BASE_URL ?? '';
-}
-
 function buildShareUrl(req: { protocol: string; hostname: string }, token: string): string {
-  const base = publicBaseUrl();
-  if (base) return `${base.replace(/\/$/, '')}/share/${token}`;
-  return `${req.protocol}://${req.hostname}/share/${token}`;
+  // Поведение прежнее: PUBLIC_BASE_URL, иначе протокол и хост запроса. Само
+  // чтение переменной переехало в схему env (lib/public-url.ts), чтобы у
+  // конфигурации был один источник правды — раньше здесь был прямой
+  // process.env мимо валидации.
+  return buildPublicUrl(req, `/share/${token}`);
 }
 
 function rowToShareLink(

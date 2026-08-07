@@ -23,6 +23,13 @@ const envSchema = z.object({
   // CORS
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
 
+  // Внешний адрес портала для ссылок, которые уходят людям наружу (share на
+  // приёмку, сброс пароля). Намеренно НЕ обязателен даже в production: этот
+  // env-файл общий для api, worker и mail-worker, и падение валидации уронило
+  // бы все три процесса разом. Требование проверяется точечно там, где строится
+  // ссылка (см. lib/public-url.ts).
+  PUBLIC_BASE_URL: z.string().url().optional(),
+
   // JWT (Ed25519)
   JWT_PRIVATE_KEY_PEM: z.string().optional(),
   JWT_PUBLIC_KEY_PEM: z.string().optional(),

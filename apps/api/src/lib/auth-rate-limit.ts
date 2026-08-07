@@ -1,6 +1,6 @@
-import type { preHandlerHookHandler } from 'fastify';
+import type { FastifyRequest, preHandlerHookHandler } from 'fastify';
 
-type Noun = 'входа' | 'регистрации';
+type Noun = 'входа' | 'регистрации' | 'сброса пароля';
 
 export interface BurstyRateLimitOptions {
   burst: number;
@@ -8,16 +8,29 @@ export interface BurstyRateLimitOptions {
   slowWindowSec: number;
   keyPrefix: string;
   noun: Noun;
+  /**
+   * Что считаем за «одного клиента». По умолчанию — IP.
+   *
+   * Одного IP мало для сброса пароля: за офисным NAT сидят десятки человек, и
+   * лимит по адресу либо бьёт по всем сразу, либо (если ослабить) позволяет
+   * долбить форму по конкретному email. Поэтому на такие роуты вешаются два
+   * независимых лимитера — по IP и по значению из тела (хэш email или токена).
+   *
+   * Вернуть null — пропустить проверку: значения нет (например, невалидное
+   * тело), и ключ, по которому считать, тоже отсутствует.
+   */
+  keyOf?: (req: FastifyRequest) => string | null;
 }
 
 export function createBurstyRateLimit(opts: BurstyRateLimitOptions): preHandlerHookHandler {
-  const { burst, burstWindowSec, slowWindowSec, keyPrefix, noun } = opts;
+  const { burst, burstWindowSec, slowWindowSec, keyPrefix, noun, keyOf } = opts;
 
   return async function burstyRateLimit(req, reply) {
     const app = req.server;
-    const ip = req.ip;
-    const slowKey = `matcheck-rl:${keyPrefix}:slow:${ip}`;
-    const fastKey = `matcheck-rl:${keyPrefix}:fast:${ip}`;
+    const subject = keyOf ? keyOf(req) : req.ip;
+    if (subject === null) return;
+    const slowKey = `matcheck-rl:${keyPrefix}:slow:${subject}`;
+    const fastKey = `matcheck-rl:${keyPrefix}:fast:${subject}`;
 
     try {
       const count = await app.redis.incr(slowKey);
@@ -40,7 +53,7 @@ export function createBurstyRateLimit(opts: BurstyRateLimitOptions): preHandlerH
         message: `Слишком много попыток ${noun}. Повторите через ${retryAfter} сек.`,
       });
     } catch (err) {
-      app.log.warn({ err, keyPrefix, ip }, 'bursty rate limit skipped (redis error)');
+      app.log.warn({ err, keyPrefix, subject }, 'bursty rate limit skipped (redis error)');
     }
   };
 }

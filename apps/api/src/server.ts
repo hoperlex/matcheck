@@ -40,11 +40,13 @@ import { edoAccountRoutes } from './routes/admin/edo-accounts.js';
 import { mailAccountRoutes } from './routes/admin/mail-accounts.js';
 import { mailReviewRoutes } from './routes/mail-review.js';
 import { userAdminRoutes } from './routes/admin/users.js';
+import { passwordResetAdminRoutes } from './routes/admin/password-resets.js';
 import { appSettingsRoutes } from './routes/admin/settings.js';
 import { promptRoutes } from './routes/admin/prompts.js';
 import { shareRoutes } from './routes/share.js';
 import { shareMessageRoutes } from './routes/share-messages.js';
 import { publicUploadRoutes } from './routes/public-upload.js';
+import { publicPasswordResetRoutes } from './routes/public-password-reset.js';
 
 export async function buildServer() {
   const env = loadEnv();
@@ -128,12 +130,14 @@ export async function buildServer() {
   await app.register(mailAccountRoutes);
   await app.register(mailReviewRoutes);
   await app.register(userAdminRoutes);
+  await app.register(passwordResetAdminRoutes);
   await app.register(appSettingsRoutes);
   await app.register(promptRoutes);
   await app.register(shareRoutes);
   await app.register(shareMessageRoutes);
   // Единственный namespace без авторизации (см. plugins/auth.ts).
   await app.register(publicUploadRoutes);
+  await app.register(publicPasswordResetRoutes);
 
   // Глобальный onSend hook: проставляем no-store / Vary: Authorization на
   // все API-ответы, чтобы PWA Service Worker / прокси / CDN не отдавали

@@ -53,12 +53,14 @@ function redactDeep(value: unknown, depth = 0): unknown {
   return value;
 }
 
-// Вырезаем share-токен из пути и любую query-строку (в т.ч. presigned-подписи).
+// Вырезаем share-токен из пути, любую query-строку (в т.ч. presigned-подписи)
+// и фрагмент. Фрагмент до сервера не доходит, но URL сюда попадает и с фронта
+// через общий Sentry-проект, а во фрагменте ездит токен смены пароля.
 function scrubUrl(url: string | undefined): string | undefined {
   if (!url) return url;
   const noShareToken = url.replace(/\/share\/[^/?#]+/i, '/share/[token]');
-  const q = noShareToken.indexOf('?');
-  return q === -1 ? noShareToken : noShareToken.slice(0, q);
+  const cut = noShareToken.search(/[?#]/);
+  return cut === -1 ? noShareToken : noShareToken.slice(0, cut);
 }
 
 if (dsn) {

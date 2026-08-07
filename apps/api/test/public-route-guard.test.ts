@@ -30,6 +30,12 @@ async function buildApp(): Promise<FastifyInstance> {
 
   app.get('/api/v1/public/sites', async () => ({ ok: 'public' }));
   app.get('/api/v1/public/upload-documents/:ticket', async () => ({ ok: 'public-param' }));
+  // Сброс пароля: три публичных входа и админская изнанка к ним.
+  app.post('/api/v1/public/password-reset/request', async () => ({ ok: 'public' }));
+  app.post('/api/v1/public/password-reset/inspect', async () => ({ ok: 'public' }));
+  app.post('/api/v1/public/password-reset/consume', async () => ({ ok: 'public' }));
+  app.get('/api/v1/admin/password-resets', async () => ({ ok: 'private' }));
+  app.post('/api/v1/admin/password-resets/:id/reveal', async () => ({ ok: 'private' }));
   app.get('/api/v1/sites', async () => ({ ok: 'private' }));
   app.get('/api/v1/source-documents', async () => ({ ok: 'private-list' }));
   await app.ready();
@@ -89,4 +95,24 @@ describe('публичный namespace /api/v1/public/', () => {
     expect([401, 404]).toContain(res.statusCode);
   });
 
+  it.each([
+    '/api/v1/public/password-reset/request',
+    '/api/v1/public/password-reset/inspect',
+    '/api/v1/public/password-reset/consume',
+  ])('сброс пароля: %s открыт без токена', async (url) => {
+    app = await buildApp();
+    const res = await app.inject({ method: 'POST', url, payload: {} });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it.each([
+    ['GET', '/api/v1/admin/password-resets'],
+    ['POST', '/api/v1/admin/password-resets/00000000-0000-0000-0000-000000000000/reveal'],
+  ])('админская изнанка сброса закрыта: %s %s', async (method, url) => {
+    app = await buildApp();
+    // Ссылка на смену пароля равносильна паролю: наружу этот namespace
+    // открываться не должен ни при каких обстоятельствах.
+    const res = await app.inject({ method: method as 'GET' | 'POST', url, payload: {} });
+    expect(res.statusCode).toBe(401);
+  });
 });

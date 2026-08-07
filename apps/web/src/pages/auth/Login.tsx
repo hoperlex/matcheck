@@ -60,6 +60,9 @@ export default function LoginPage() {
           </Button>
         </Form>
         <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+          <Link to="/forgot-password">Забыли пароль?</Link>
+        </Typography.Text>
+        <Typography.Text type="secondary" style={{ fontSize: 13 }}>
           Нет аккаунта? <Link to="/register">Зарегистрироваться</Link>
         </Typography.Text>
       </Space>

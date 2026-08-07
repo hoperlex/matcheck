@@ -20,11 +20,14 @@ const dsn = import.meta.env.VITE_SENTRY_DSN as string | undefined;
 
 const SENSITIVE_HEADERS = ['authorization', 'cookie', 'set-cookie', 'x-csrf-token'];
 
+// Режем share-токен из пути, query-строку и фрагмент. Фрагмент критичен: в нём
+// ездит токен смены пароля (/reset-password#<token>) — он равносилен паролю, и
+// в телеметрии ему делать нечего.
 function scrubUrl(url: string | undefined): string | undefined {
   if (!url) return url;
   const noToken = url.replace(/\/share\/[^/?#]+/i, '/share/[token]');
-  const q = noToken.indexOf('?');
-  return q === -1 ? noToken : noToken.slice(0, q);
+  const cut = noToken.search(/[?#]/);
+  return cut === -1 ? noToken : noToken.slice(0, cut);
 }
 
 if (dsn) {

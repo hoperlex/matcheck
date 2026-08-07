@@ -13,7 +13,7 @@ import {
   Typography,
   message,
 } from 'antd';
-import { DeleteOutlined, KeyOutlined } from '@ant-design/icons';
+import { DeleteOutlined, KeyOutlined, LinkOutlined } from '@ant-design/icons';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type {
   CustomerCounterparty,
@@ -49,12 +49,15 @@ export function UserEditModal({
   customerCps,
   open,
   onClose,
+  onOpenPasswordReset,
 }: {
   user: UserDto | null;
   sites: Site[];
   customerCps: CustomerCounterparty[];
   open: boolean;
   onClose: () => void;
+  /** Открыть окно ссылки на смену пароля вместо этой карточки. */
+  onOpenPasswordReset: (user: UserDto) => void;
 }) {
   const qc = useQueryClient();
   const currentUserId = useAuthStore((s) => s.user?.id ?? null);
@@ -251,9 +254,19 @@ export function UserEditModal({
 
       <Divider style={{ margin: '8px 0 12px' }} />
       {!pwdOpen ? (
-        <Button icon={<KeyOutlined />} onClick={() => setPwdOpen(true)}>
-          Сменить пароль
-        </Button>
+        <Space wrap>
+          <Button icon={<KeyOutlined />} onClick={() => setPwdOpen(true)}>
+            Сменить пароль
+          </Button>
+          {/*
+            Второй путь: вместо того чтобы придумывать пароль за человека и
+            слать его открытым текстом, выдаём одноразовую ссылку — пароль
+            задаст он сам, и мы его не узнаем.
+          */}
+          <Button icon={<LinkOutlined />} onClick={() => onOpenPasswordReset(user)}>
+            Ссылка на смену пароля
+          </Button>
+        </Space>
       ) : (
         <Space direction="vertical" style={{ width: '100%' }}>
           <Typography.Text type="secondary">

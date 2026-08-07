@@ -10,6 +10,7 @@ import {
 } from '@matcheck/contracts';
 import { users, sessions } from '../../db/schema.js';
 import { hashPassword } from '../../domain/auth/password.js';
+import { applyPasswordHash } from '../../domain/auth/apply-password.js';
 import { publishEvent } from '../events.js';
 
 function dto(u: typeof users.$inferSelect) {
@@ -175,29 +176,17 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(users.id, req.params.id))
         .limit(1);
       if (!existing) return reply.code(404).send({ error: 'not_found' });
+      // bcrypt считается до транзакции: держать на нём соединение и блокировку
+      // строки незачем. Дальше общая функция — та же, что применяет пароль,
+      // заданный человеком по ссылке из письма админа. Она гасит ВСЕ сессии
+      // (это не «своя» сессия админа), обнуляет серию неудачных входов вместе
+      // с исторической блокировкой и закрывает открытую заявку на сброс.
       const hash = await hashPassword(req.body.newPassword);
-      const now = new Date();
-      await app.db
-        .update(users)
-        .set({
-          passwordHash: hash,
-          passwordChangedAt: now,
-          sessionsInvalidatedAt: now,
-          // Сброс блокировки: админ сбрасывает пароль обычно именно потому,
-          // что пользователь не может войти (в т.ч. залочен попытками). Без
-          // этого юзер с новым паролем всё равно упёрся бы в lockedUntil.
-          failedLoginCount: 0,
-          lockedUntil: null,
-          updatedAt: now,
-        })
-        .where(eq(users.id, existing.id));
-      // Безопасность: админский сброс пароля убивает ВСЕ сессии пользователя
-      // (это не «своя» сессия админа) — старые access/refresh-токены целевого
-      // юзера перестают работать.
-      await app.db
-        .update(sessions)
-        .set({ invalidatedAt: now })
-        .where(and(eq(sessions.userId, existing.id), isNull(sessions.invalidatedAt)));
+      await applyPasswordHash(app.db, existing.id, hash, {
+        event: 'password_set_by_admin',
+        ip: req.ip,
+        userAgent: req.headers['user-agent'] ?? null,
+      });
       return { ok: true as const };
     },
   );

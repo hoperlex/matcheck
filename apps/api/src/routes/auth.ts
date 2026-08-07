@@ -15,6 +15,7 @@ import {
 import { users, authEvents, sessions } from '../db/schema.js';
 import { hashPassword, verifyPassword, checkPasswordStrength } from '../domain/auth/password.js';
 import { withVerifySlot } from '../domain/auth/verify-queue.js';
+import { closeOpenResetRequest } from '../domain/auth/apply-password.js';
 import { signAccessToken } from '../domain/auth/jwt.js';
 import {
   createSessionAndRefresh,
@@ -251,6 +252,10 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
         .update(users)
         .set({ failedLoginCount: 0, lastFailedLoginAt: null, lockedUntil: null })
         .where(eq(users.id, user.id));
+      // Человек вспомнил пароль сам — гасим его заявку на сброс, иначе тег
+      // «Запросил сброс» висел бы в админке, пока кто-то не закроет вручную.
+      // По частичному индексу обычно задевает ноль строк.
+      await closeOpenResetRequest(app.db, user.id);
 
       const refresh = await createSessionAndRefresh(
         user.id,
