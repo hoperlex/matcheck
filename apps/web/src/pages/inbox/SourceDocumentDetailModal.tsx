@@ -58,7 +58,7 @@ import {
   inputNumberFormatterRu,
   inputNumberParserRu,
 } from '../../shared/utils/formatRu';
-import { ExtraFilesBlock } from './ExtraFilesBlock';
+import { ExtraFilesFooterButton } from './ExtraFilesBlock';
 import { LlmCallsDrawer } from './LlmCallsDrawer';
 import { CustomerCounterpartySelect } from './CustomerCounterpartySelect';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
@@ -428,6 +428,12 @@ export function SourceDocumentDetailModal({
               {role === 'admin' && (
                 <Button onClick={() => setLlmDrawerOpen(true)}>Логи распознавания</Button>
               )}
+              {/* Доп. документы поставки — только скачивание и только отсюда:
+                  в шапке карточки они больше не показываются, чтобы не отнимать
+                  высоту у позиций и превью. Видны всем, кому открылась карточка. */}
+              {sd.extraFiles.length > 0 && (
+                <ExtraFilesFooterButton files={sd.extraFiles} documentId={id!} />
+              )}
               {isMismatchPending && (
                 <Button onClick={() => ack.mutate()} loading={ack.isPending}>
                   Принять как есть
@@ -503,10 +509,6 @@ export function SourceDocumentDetailModal({
                 }
               />
             )}
-            {sd.extraFiles.length > 0 && (
-              <ExtraFilesBlock files={sd.extraFiles} documentId={id!} />
-            )}
-
             <DetailBody
               isWide={isWide}
               layout={layout}

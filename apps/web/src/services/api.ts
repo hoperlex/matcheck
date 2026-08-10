@@ -255,12 +255,47 @@ export async function apiDownload(path: string): Promise<{ blob: Blob; filename:
     throw new ApiError(res.status, 'http_error', msg);
   }
 
-  // Content-Disposition: attachment; filename="documents-inbound-2026-06-02.xlsx"
-  const cd = res.headers.get('Content-Disposition') ?? '';
-  const m = /filename="?([^";]+)"?/i.exec(cd);
-  const filename = m?.[1] ?? '';
+  const filename = parseContentDispositionFilename(
+    res.headers.get('Content-Disposition') ?? '',
+  );
   const blob = await res.blob();
   return { blob, filename };
+}
+
+/** Сохранить полученный Blob на диск под именем `filename`. */
+export function saveBlobAsFile(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * Имя файла из Content-Disposition. Пустая строка — сервер имени не прислал
+ * (или прислал непригодное), тогда вызывающий подставляет своё.
+ *
+ * Форм две, и порядок важен: `filename*=UTF-8''%D0%A1.pdf` (RFC 5987) несёт
+ * не-ASCII и приоритетнее, `filename="…"` — ASCII-совместимый запасной
+ * вариант. Наивная регулярка по `filename` цепляла бы у первой формы хвост
+ * `*=UTF-8''…` целиком: результат непустой, поэтому fallback вызывающего не
+ * срабатывал и файл сохранялся с мусорным именем.
+ */
+export function parseContentDispositionFilename(cd: string): string {
+  const ext = /filename\*=\s*[^']*'[^']*'([^;]+)/i.exec(cd);
+  if (ext?.[1]) {
+    try {
+      // Битый процент-эскейп (%ZZ) — не повод падать: ниже есть обычная форма.
+      return decodeURIComponent(ext[1].trim());
+    } catch {
+      /* пробуем filename= */
+    }
+  }
+  const plain = /filename=\s*"([^"]*)"|filename=\s*([^;]+)/i.exec(cd);
+  return (plain?.[1] ?? plain?.[2] ?? '').trim();
 }
 
 export async function apiUploadFile<T>(
@@ -336,12 +371,14 @@ export async function apiUploadDocuments(
   });
 }
 
-// Ссылка на дополнительный файл поставки — из карточки документа.
-export async function apiGetExtraFileUrl(
+// Скачивание дополнительного файла поставки из карточки документа. Не ссылка
+// на S3, а поток через API: presigned URL отдал бы файл inline (браузер показал
+// бы jpg/pdf вкладкой), а карточке нужно именно сохранение на диск.
+export async function apiDownloadExtraFile(
   documentId: string,
   itemId: string,
-): Promise<{ url: string; filename: string; mimeType: string | null }> {
-  return api.get(`/source-documents/${documentId}/extra/${itemId}/url`);
+): Promise<{ blob: Blob; filename: string }> {
+  return apiDownload(`/source-documents/${documentId}/extra/${itemId}/raw`);
 }
 
 // То же для комплекта без распознанных документов: карточки у него нет.

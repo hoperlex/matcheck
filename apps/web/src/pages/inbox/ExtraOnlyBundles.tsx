@@ -93,7 +93,7 @@ export default function ExtraOnlyBundles() {
                 Комментарий поставщика: {b.comment}
               </Typography.Paragraph>
             )}
-            <ExtraFilesBlock files={b.files} compact />
+            <ExtraFilesBlock files={b.files} />
           </Card>
         ))}
       </Space>

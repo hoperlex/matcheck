@@ -1,60 +1,38 @@
 import { useState } from 'react';
-import { Alert, Button, List, Typography, message } from 'antd';
-import { FileTextOutlined } from '@ant-design/icons';
+import { Button, Dropdown, List, Typography, message } from 'antd';
+import { DownloadOutlined, FileTextOutlined } from '@ant-design/icons';
 import type { ExtraFile } from '@matcheck/contracts';
-import { apiGetBundleExtraFileUrl, apiGetExtraFileUrl } from '../../services/api';
+import {
+  apiDownloadExtraFile,
+  apiGetBundleExtraFileUrl,
+  saveBlobAsFile,
+} from '../../services/api';
 import { formatSize } from './upload/FileDropList';
 
 /**
- * Дополнительные документы поставки: файлы, сохранённые без распознавания.
+ * Дополнительные документы поставки: файлы, сохранённые без распознавания —
+ * сертификаты, паспорта качества и прочие приложения.
  *
- * Два источника — карточка документа и раздел комплектов без документов, —
- * поэтому ссылку выдаёт разный маршрут: в карточке права наследуются от
- * документа, в разделе документа нет вовсе. Отсюда `documentId`/`bundleId`.
+ * Два места показа, и ведут они себя по-разному:
+ *
+ *  - карточка документа — кнопка в футере рядом с «Сохранить»
+ *    (`ExtraFilesFooterButton`). Там только СКАЧИВАНИЕ: файл идёт потоком через
+ *    API с `Content-Disposition: attachment`, вкладки с просмотром не
+ *    открываются и presigned-ссылка на S3 в браузер не попадает;
+ *  - раздел «Комплекты без документов» — список с «Открыть» (`ExtraFilesBlock`).
+ *    Карточки у комплекта нет, поэтому и маршрут другой: права там не
+ *    наследуются от документа.
  *
  * Ссылка запрашивается по клику, а не заранее: presign живёт час, а список
  * может провисеть в открытом окне дольше.
  */
-export function ExtraFilesBlock({
-  files,
-  documentId,
-  compact,
-}: {
-  files: ExtraFile[];
-  documentId?: string;
-  compact?: boolean;
-}) {
-  const list = (
-    <ExtraFilesList files={files} documentId={documentId} />
-  );
-  if (compact) return list;
-  return (
-    <Alert
-      style={{ marginBottom: 12 }}
-      type="info"
-      showIcon={false}
-      message={`Дополнительные документы поставки: ${files.length}`}
-      description={
-        <>
-          <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
-            Эти файлы не распознавались — сертификаты, паспорта качества и прочие приложения.
-          </Typography.Paragraph>
-          {list}
-        </>
-      }
-    />
-  );
-}
-
-function ExtraFilesList({ files, documentId }: { files: ExtraFile[]; documentId?: string }) {
+export function ExtraFilesBlock({ files }: { files: ExtraFile[] }) {
   const [busyId, setBusyId] = useState<string | null>(null);
 
   async function open(f: ExtraFile) {
     setBusyId(f.id);
     try {
-      const link = documentId
-        ? await apiGetExtraFileUrl(documentId, f.id)
-        : await apiGetBundleExtraFileUrl(f.bundleId, f.id);
+      const link = await apiGetBundleExtraFileUrl(f.bundleId, f.id);
       window.open(link.url, '_blank', 'noopener');
     } catch {
       message.error(`Не удалось открыть файл «${f.filename}»`);
@@ -83,6 +61,90 @@ function ExtraFilesList({ files, documentId }: { files: ExtraFile[]; documentId?
         </List.Item>
       )}
     />
+  );
+}
+
+/**
+ * Кнопка доп. документов в футере карточки документа.
+ *
+ * Один файл — кнопка качает его сразу. Несколько — выпадающий список, где
+ * каждый клик скачивает свой файл. Пункта «скачать все» нет намеренно: после
+ * первого `await` пользовательская активация потеряна и браузер вправе
+ * заблокировать остальные автозагрузки, а клик по строке — самостоятельный
+ * жест, который блокировать не за что.
+ */
+export function ExtraFilesFooterButton({
+  files,
+  documentId,
+}: {
+  files: ExtraFile[];
+  documentId: string;
+}) {
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+
+  async function download(f: ExtraFile) {
+    // Без этого второй клик по списку затёр бы downloadingId, и первый же
+    // ответивший запрос снял бы индикатор с ещё качающегося файла.
+    if (downloadingId) return;
+    setDownloadingId(f.id);
+    try {
+      const { blob, filename } = await apiDownloadExtraFile(documentId, f.id);
+      saveBlobAsFile(blob, filename || f.filename);
+    } catch {
+      message.error(`Не удалось скачать файл «${f.filename}»`);
+    } finally {
+      setDownloadingId(null);
+    }
+  }
+
+  const label = `Доп. документы (${files.length})`;
+  const first = files[0];
+  if (files.length === 1 && first) {
+    return (
+      <Button
+        icon={<DownloadOutlined />}
+        loading={downloadingId !== null}
+        onClick={() => void download(first)}
+      >
+        {label}
+      </Button>
+    );
+  }
+
+  return (
+    <Dropdown
+      open={open}
+      // Выбор пункта список не закрывает — сертификаты обычно качают пачкой, а
+      // antd на клик по пункту сам зовёт onOpenChange(false, source:'menu') и
+      // внутренний setOpen(false) (при контролируемом open он не в счёт).
+      // ESC и клик снаружи приходят с source:'trigger' и закрывают как обычно.
+      onOpenChange={(nextOpen, info) => {
+        if (info.source !== 'menu') setOpen(nextOpen);
+      }}
+      menu={{
+        items: files.map((f) => ({
+          key: f.id,
+          disabled: downloadingId !== null,
+          label: (
+            <div>
+              <div>{f.filename}</div>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {describeExtraFile(f)}
+              </Typography.Text>
+            </div>
+          ),
+        })),
+        onClick: ({ key }) => {
+          const f = files.find((x) => x.id === key);
+          if (f) void download(f);
+        },
+      }}
+    >
+      <Button icon={<DownloadOutlined />} loading={downloadingId !== null}>
+        {label}
+      </Button>
+    </Dropdown>
   );
 }
 

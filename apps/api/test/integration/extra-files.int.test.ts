@@ -15,7 +15,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 import postgres from 'postgres';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthUser } from '../../src/plugins/auth.js';
 
 const mocks = vi.hoisted(() => ({
@@ -277,6 +277,114 @@ suite('дополнительные документы поставки (реа�
       url: `/api/v1/source-documents/${docId}/extra/${cert.id}/url`,
     });
     expect(foreign.statusCode).toBe(404);
+  });
+
+  /** Разобранный пакет: документ из первого файла, cert.pdf — во второй зоне. */
+  async function prepareDocWithExtra(): Promise<{ docId: string; certId: string }> {
+    const res = await upload([
+      { field: 'files', filename: 'upd.pdf', content: pdf('1') },
+      { field: 'extraFiles', filename: 'cert.pdf', content: pdf('2') },
+    ]);
+    const { bundleId } = res.json() as { bundleId: string };
+    await sql`UPDATE bundle_import_items SET status = 'skipped'
+               WHERE bundle_id = ${bundleId} AND processing_mode = 'store_only'`;
+    const [doc] = await sql<{ id: string }[]>`UPDATE source_documents
+               SET is_technical = false WHERE bundle_id = ${bundleId} RETURNING id`;
+    const cert = (await registry(bundleId)).find((r) => r.source_filename === 'cert.pdf')!;
+    return { docId: doc!.id, certId: cert.id };
+  }
+
+  const rawUrl = (docId: string, itemId: string) =>
+    `/api/v1/source-documents/${docId}/extra/${itemId}/raw`;
+
+  describe('скачивание дополнительного файла (raw)', () => {
+    afterEach(() => {
+      // Иначе мок утечёт в соседние наборы: fetch тут глобальный.
+      vi.unstubAllGlobals();
+    });
+
+    it('отдаёт файл вложением: тело, тип и имя', async () => {
+      const { docId, certId } = await prepareDocWithExtra();
+      const payload = pdf('2');
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(payload, {
+          status: 200,
+          headers: {
+            'content-length': String(payload.length),
+            'content-type': 'application/pdf',
+          },
+        }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await app.inject({ method: 'GET', url: rawUrl(docId, certId) });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.rawPayload.equals(payload)).toBe(true);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.headers['content-length']).toBe(String(payload.length));
+      expect(res.headers['content-disposition']).toBe(
+        "attachment; filename*=UTF-8''cert.pdf",
+      );
+      expect(fetchMock).toHaveBeenCalledWith('https://s3.example/signed');
+    });
+
+    it('чужой itemId и чужой объект — 404, до S3 дело не доходит', async () => {
+      const { docId, certId } = await prepareDocWithExtra();
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      const alien = await app.inject({ method: 'GET', url: rawUrl(docId, randomUUID()) });
+      expect(alien.statusCode).toBe(404);
+
+      currentUser = foreignInspector;
+      const foreign = await app.inject({ method: 'GET', url: rawUrl(docId, certId) });
+      expect(foreign.statusCode).toBe(404);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('файл не в статусе skipped не отдаётся', async () => {
+      const { docId, certId } = await prepareDocWithExtra();
+      await sql`UPDATE bundle_import_items SET status = 'accepted' WHERE id = ${certId}`;
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await app.inject({ method: 'GET', url: rawUrl(docId, certId) });
+      expect(res.statusCode).toBe(404);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('отказ presign — 404 presign_failed, запроса в S3 нет', async () => {
+      const { docId, certId } = await prepareDocWithExtra();
+      mocks.presign.mockRejectedValueOnce(new Error('signer down'));
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await app.inject({ method: 'GET', url: rawUrl(docId, certId) });
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ error: 'presign_failed' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('S3 недоступен, ответил не-2xx или пустым телом — 502', async () => {
+      const { docId, certId } = await prepareDocWithExtra();
+
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ECONNRESET')));
+      const dead = await app.inject({ method: 'GET', url: rawUrl(docId, certId) });
+      expect(dead.statusCode).toBe(502);
+      expect(dead.json()).toMatchObject({ error: 's3_unavailable' });
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(new Response('denied', { status: 403 })),
+      );
+      const denied = await app.inject({ method: 'GET', url: rawUrl(docId, certId) });
+      expect(denied.statusCode).toBe(502);
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
+      const empty = await app.inject({ method: 'GET', url: rawUrl(docId, certId) });
+      expect(empty.statusCode).toBe(502);
+    });
   });
 
   it('комплект без документов виден в отдельном разделе и отдаёт файлы', async () => {

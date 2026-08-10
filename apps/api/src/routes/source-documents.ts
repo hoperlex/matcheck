@@ -1254,6 +1254,67 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     },
   );
 
+  // Скачивание дополнительного файла поставки: поток через бэкенд с
+  // Content-Disposition: attachment. Presigned-ссылка (маршрут `/url` выше) для
+  // этого не годится — S3 отдаёт файл inline, и браузер jpg/pdf показал бы
+  // вкладкой вместо сохранения. Карточке документа нужно именно сохранение,
+  // поэтому presigned URL наружу здесь не выходит вовсе.
+  app.get(
+    '/api/v1/source-documents/:id/extra/:itemId/raw',
+    {
+      preHandler: [app.authenticate],
+      schema: {
+        params: z.object({ id: z.string().uuid(), itemId: z.string().uuid() }),
+      },
+    },
+    async (req, reply) => {
+      // Права и принадлежность файла — теми же двумя проверками, что и у `/url`.
+      const [sd] = await app.db
+        .select({
+          bundleId: sourceDocuments.bundleId,
+          siteId: sourceDocuments.siteId,
+          contractorId: sourceDocuments.contractorId,
+          recipientSource: sourceDocuments.recipientSource,
+        })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, req.params.id))
+        .limit(1);
+      if (!sd || !(await sourceDocumentVisible(app, req.user, sd))) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      const link = await presignExtraFile(app, req.log, sd.bundleId, req.params.itemId);
+      if (!link.ok) return reply.code(404).send({ error: link.error });
+
+      let upstream: Response;
+      try {
+        upstream = await fetch(link.url);
+      } catch (err) {
+        req.log.warn({ err, itemId: req.params.itemId }, 'S3 fetch failed (extra)');
+        return reply.code(502).send({ error: 's3_unavailable' });
+      }
+      // Условных заголовков не шлём, диапазонов не запрашиваем — 206/304 здесь
+      // взяться неоткуда, любой не-2xx означает проблему на стороне S3. Пустое
+      // тело при 200 — тоже: файлы нулевой длины отсеиваются ещё на приёме.
+      if (!upstream.ok || !upstream.body) {
+        req.log.warn(
+          { status: upstream.status, itemId: req.params.itemId },
+          'S3 returned non-OK for extra download',
+        );
+        return reply.code(502).send({ error: 's3_unavailable' });
+      }
+
+      const len = upstream.headers.get('content-length');
+      if (len) reply.header('content-length', len);
+      reply.header('content-type', link.mimeType ?? 'application/octet-stream');
+      reply.header(
+        'content-disposition',
+        `attachment; filename*=UTF-8''${encodeURIComponent(link.filename)}`,
+      );
+      reply.header('cache-control', 'private, max-age=300');
+      return reply.send(Readable.fromWeb(upstream.body as never));
+    },
+  );
+
   app.get(
     '/api/v1/source-documents/:id/file',
     {
