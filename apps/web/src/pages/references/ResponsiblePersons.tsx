@@ -25,7 +25,7 @@ import type {
   ResponsiblePersonUpsert,
 } from '@matcheck/contracts';
 import { api, apiUploadFile, ApiError } from '../../services/api';
-import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
@@ -42,8 +42,14 @@ export default function ResponsiblePersonsPage() {
   const [search, setSearch] = useState('');
   const [importOpen, setImportOpen] = useState(false);
   const [form] = Form.useForm<ResponsiblePersonUpsert>();
-  const role = useAuthStore((s) => s.user?.role);
-  const canDelete = role === 'admin';
+  // Права страницы. До включения матрицы значения те же, что были у ролей
+  // (правит manager, удаляет admin) — так задан дефолт в PAGE_CATALOG.
+  // «Создавать» и «Редактировать» разведены: раньше обе кнопки жили на одном
+  // флаге, и действие «Создавать» в матрице оказалось бы мёртвым.
+  const { can } = usePermissions();
+  const canCreate = can('references.responsible_persons', 'create');
+  const canEdit = can('references.responsible_persons', 'edit');
+  const canDelete = can('references.responsible_persons', 'delete');
 
   const list = useQuery({
     queryKey: ['responsible-persons', search],
@@ -143,9 +149,11 @@ export default function ResponsiblePersonsPage() {
               />
             )}
             <Button onClick={() => setImportOpen(true)}>Импорт из Excel</Button>
-            <Button type="primary" onClick={() => setOpen(true)}>
-              Добавить
-            </Button>
+            {canCreate && (
+              <Button type="primary" onClick={() => setOpen(true)}>
+                Добавить
+              </Button>
+            )}
           </Space>
         </Space>
       }
@@ -156,7 +164,7 @@ export default function ResponsiblePersonsPage() {
         rowKey="id"
         numbered
         rowSelection={canDelete ? bulk.selection : undefined}
-        onRowClick={openEdit}
+        onRowClick={canEdit ? openEdit : undefined}
         columns={[
           {
             title: 'ФИО',

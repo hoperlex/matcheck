@@ -3,7 +3,8 @@ import { Layout, Drawer, Button, Menu, Tag, Typography } from 'antd';
 import { MenuOutlined, UserOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../stores/auth';
-import { filterByRole } from './navItems';
+import { usePermissionsStore } from '../../stores/permissions';
+import { filterByPermissions } from './navItems';
 import { roleLabel } from '../../shared/constants/roleLabels';
 import { api } from '../../services/api';
 import { UserProfileModal } from '../../components/UserProfileModal';
@@ -16,6 +17,8 @@ const PRIMARY_KEYS = ['/kpp', '/documents'];
 
 export function MobileLayout() {
   const user = useAuthStore((s) => s.user);
+  // Меню перестраивается, когда права приезжают или меняются (polling/focus).
+  const perms = usePermissionsStore((s) => s.perms);
   const clear = useAuthStore((s) => s.clear);
   const navigate = useNavigate();
   const location = useLocation();
@@ -30,7 +33,7 @@ export function MobileLayout() {
   const allItems = useMemo(() => {
     if (!user) return [];
     // Drawer-меню — label с Tag «+N» для «Операции».
-    return filterByRole(user.role).map((n) => ({
+    return filterByPermissions(perms, user.role).map((n) => ({
       key: n.path,
       icon: createElement(n.icon),
       label:
@@ -45,17 +48,19 @@ export function MobileLayout() {
           n.label
         ),
     }));
-  }, [user, operationsCount]);
+  }, [user, perms, operationsCount]);
   // Footer-табы — короткие label без Tag (узкие тач-цели, +N испортит верстку).
   const tabItems = useMemo(
     () =>
       allItems
         .filter((it) => PRIMARY_KEYS.includes(it.key))
         .map((it) => {
-          const orig = user ? filterByRole(user.role).find((n) => n.path === it.key) : undefined;
+          const orig = user
+            ? filterByPermissions(perms, user.role).find((n) => n.path === it.key)
+            : undefined;
           return { ...it, label: orig?.label ?? it.label };
         }),
-    [allItems, user],
+    [allItems, user, perms],
   );
 
   if (!user) return null;

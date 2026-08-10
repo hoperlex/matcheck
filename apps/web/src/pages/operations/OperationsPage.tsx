@@ -3,8 +3,9 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Alert, Button, Modal, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography, message } from 'antd';
 import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
-import type { Delivery, Shipment, SourceDocument } from '@matcheck/contracts';
+import type { Delivery, PageId, Shipment, SourceDocument } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { api, apiDownload } from '../../services/api';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
@@ -51,7 +52,22 @@ export default function OperationsPage() {
   const authUser = useAuthStore((s) => s.user);
   const counters = useOperationsCounters();
 
-  const type: OpType = params.get('type') === 'shipment' ? 'shipment' : 'delivery';
+  const requestedType: OpType = params.get('type') === 'shipment' ? 'shipment' : 'delivery';
+  const { can, canView } = usePermissions();
+  const canSeeDeliveries = canView('operations.deliveries');
+  const canSeeShipments = canView('operations.shipments');
+  // Закрытую вкладку не показываем и не открываем: подменённый вручную
+  // ?type= молча приземляется на доступную половину, а не в отказ.
+  const type: OpType =
+    requestedType === 'shipment'
+      ? canSeeShipments
+        ? 'shipment'
+        : 'delivery'
+      : canSeeDeliveries
+        ? 'delivery'
+        : 'shipment';
+  const page: PageId = type === 'delivery' ? 'operations.deliveries' : 'operations.shipments';
+  const canCreate = can(page, 'create');
   const tab: ListTab = params.get('tab') === 'accepted' ? 'accepted' : 'expected';
   const isInspector = authUser?.role === 'inspector_kpp';
   const isContractor = authUser?.role === 'contractor';
@@ -99,12 +115,28 @@ export default function OperationsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdminUser, trashOn]);
 
+  // ?type= указывает на закрытую половину — приводим URL к тому, что человек
+  // реально видит. Именно updateUrl, а не редирект: страница остаётся та же,
+  // а адрес перестаёт врать (и корректно ложится в закладки).
+  useEffect(() => {
+    if (requestedType !== type) updateUrlResetPage({ type });
+    // updateUrlResetPage намеренно вне зависимостей: он пересоздаётся каждым
+    // рендером и добавил бы лишние срабатывания, а нужен нам только факт
+    // расхождения запрошенного и доступного типа.
+  }, [requestedType, type]);
+
   // Создание / открытие записи. Для обоих типов (delivery/shipment)
   // открываем модалку прямо здесь — добавляем `?delivery=`/`?shipment=`
   // к текущему URL `/operations`. KppPage/ShipmentPage внутри Modal
   // читают эти параметры из useSearchParams.
   // Под feature flag MODAL_DISABLED — всё через старые страницы.
   const createNew = () => {
+    // Кнопка при закрытом «Создавать» не рисуется вовсе; проверка здесь — на
+    // случай вызова из другого места (горячая клавиша, старая ссылка).
+    if (!canCreate) {
+      message.error('Недостаточно прав для создания');
+      return;
+    }
     if (inspectorWithoutSite) {
       message.error('Объект не назначен — обратитесь к администратору');
       return;
@@ -119,6 +151,10 @@ export default function OperationsPage() {
     else navigate(`/shipments?shipment=${id}&new=1`);
   };
   const createFromUpd = (upd: SourceDocument) => {
+    if (!canCreate) {
+      message.error('Недостаточно прав для создания');
+      return;
+    }
     if (inspectorWithoutSite) {
       message.error('Объект не назначен — обратитесь к администратору');
       return;
@@ -277,8 +313,9 @@ export default function OperationsPage() {
   );
   const headerExtras = (
     <Space size={8}>
-      {/* Подрядчик и мониторинг — read-only: кнопку создания не показываем. */}
-      {!isContractor && !isMonitor && createButton}
+      {/* Подрядчик и мониторинг — read-only: кнопку создания не показываем.
+          canCreate — та же проверка по матрице; сервер её дублирует отказом. */}
+      {!isContractor && !isMonitor && canCreate && createButton}
       {exportButton}
     </Space>
   );
@@ -323,18 +360,22 @@ export default function OperationsPage() {
               activeKey={type}
               onChange={(k) => updateUrlResetPage({ type: k })}
               items={[
-                {
-                  key: 'delivery',
-                  label: (
-                    <span style={{ fontSize: 22, fontWeight: 600 }}>Приёмка</span>
-                  ),
-                },
-                {
-                  key: 'shipment',
-                  label: (
-                    <span style={{ fontSize: 22, fontWeight: 600 }}>Отгрузка</span>
-                  ),
-                },
+                ...(canSeeDeliveries
+                  ? [
+                      {
+                        key: 'delivery',
+                        label: <span style={{ fontSize: 22, fontWeight: 600 }}>Приёмка</span>,
+                      },
+                    ]
+                  : []),
+                ...(canSeeShipments
+                  ? [
+                      {
+                        key: 'shipment',
+                        label: <span style={{ fontSize: 22, fontWeight: 600 }}>Отгрузка</span>,
+                      },
+                    ]
+                  : []),
               ]}
               style={{ marginBottom: -12 }}
             />

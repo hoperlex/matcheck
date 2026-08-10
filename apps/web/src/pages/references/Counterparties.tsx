@@ -18,7 +18,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { BulkDeleteResponse, Counterparty, CounterpartyUpsert } from '@matcheck/contracts';
 import { isPlaceholderInn } from '@matcheck/contracts';
 import { api } from '../../services/api';
-import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
@@ -72,8 +72,14 @@ export default function CounterpartiesPage() {
     onError: (err: Error) => message.error(err.message),
   });
 
-  const role = useAuthStore((s) => s.user?.role);
-  const canDelete = role === 'admin';
+  // Права страницы. До включения матрицы значения те же, что были у ролей
+  // (правит manager, удаляет admin) — так задан дефолт в PAGE_CATALOG.
+  // «Создавать» и «Редактировать» разведены: раньше обе кнопки жили на одном
+  // флаге, и действие «Создавать» в матрице оказалось бы мёртвым.
+  const { can } = usePermissions();
+  const canCreate = can('references.counterparties_legacy', 'create');
+  const canEdit = can('references.counterparties_legacy', 'edit');
+  const canDelete = can('references.counterparties_legacy', 'delete');
 
   // Массовое удаление контрагентов.
   const bulk = useBulkSelection<Counterparty>((r) => r.id);
@@ -164,9 +170,11 @@ export default function CounterpartiesPage() {
                 confirmTitle={`Удалить ${bulk.selectedCount} ${pluralizeCp(bulk.selectedCount)}?`}
               />
             )}
-            <Button type="primary" onClick={openCreate}>
-              Добавить
-            </Button>
+            {canCreate && (
+              <Button type="primary" onClick={openCreate}>
+                Добавить
+              </Button>
+            )}
           </Space>
         </Space>
       }
@@ -177,7 +185,7 @@ export default function CounterpartiesPage() {
         rowKey="id"
         numbered
         rowSelection={canDelete ? bulk.selection : undefined}
-        onRowClick={openEdit}
+        onRowClick={canEdit ? openEdit : undefined}
         columns={[
           {
             title: 'ИНН',
@@ -265,7 +273,11 @@ export default function CounterpartiesPage() {
             : []),
         ]}
         cardRender={(r) => (
-          <Card style={{ width: '100%' }} size="small" onClick={() => openEdit(r)}>
+          <Card
+            style={{ width: '100%' }}
+            size="small"
+            onClick={() => canEdit && openEdit(r)}
+          >
             <Space direction="vertical" size={4}>
               <Typography.Text strong>{r.name}</Typography.Text>
               <Typography.Text type="secondary">

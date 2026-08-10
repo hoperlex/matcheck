@@ -29,6 +29,28 @@ export class ConflictError extends ApiError {
 
 const BASE = '/api/v1';
 
+// Подписчики на отказ по матрице прав (403 permission_denied). Регистрация —
+// из permissionsScheduler.ts; здесь только вызов, чтобы api.ts не зависел ни
+// от стора прав, ни от их загрузки.
+type ForbiddenListener = (info: { path: string; code: string }) => void;
+const forbiddenListeners = new Set<ForbiddenListener>();
+
+export function onForbidden(listener: ForbiddenListener): () => void {
+  forbiddenListeners.add(listener);
+  return () => forbiddenListeners.delete(listener);
+}
+
+function notifyForbidden(info: { path: string; code: string }): void {
+  for (const listener of forbiddenListeners) {
+    try {
+      listener(info);
+    } catch {
+      // Подписчик не должен ломать обработку ответа: исходную ошибку API
+      // вызывающий обязан получить в любом случае.
+    }
+  }
+}
+
 // Таймаут по умолчанию для JSON-запросов. Раньше запросы висели бесконечно:
 // если fetch не завершался (зависший прокси/NAT, исчерпание пула HTTP/1.1),
 // UI показывал вечный спиннер. null отключает таймаут для длинных операций
@@ -162,6 +184,13 @@ async function request<T>(
         ? String((payload as { error: unknown }).error)
         : null) ?? 'http_error';
     const err = new ApiError(res.status, code, msg, payload);
+    // Отказ по матрице прав: сообщаем подписчикам, чтобы они перезагрузили
+    // права — раз сервер отказал, наша копия устарела прямо сейчас. Через
+    // callback, а не прямым импортом: permissionsSync ходит голым fetch именно
+    // для того, чтобы не замкнуть цикл api → permissionsSync → api.
+    if (res.status === 403 && code === 'permission_denied') {
+      notifyForbidden({ path, code });
+    }
     // Репортим только серверные ошибки (5xx) — ожидаемые 4xx (401/403/валидация)
     // и 409 (обработаны выше) не шлём, чтобы не зашумлять. path без share-токена.
     if (res.status >= 500) {

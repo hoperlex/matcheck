@@ -4,8 +4,13 @@ import * as Sentry from '@sentry/react';
 import { Spin } from 'antd';
 import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from '../shared/ui/ProtectedRoute';
+import { NoAccess } from '../shared/ui/NoAccess';
+import { homePath } from './layout/navItems';
+import { canView } from '../shared/utils/permissions';
+import { useAuthStore } from '../stores/auth';
+import { usePermissionsStore } from '../stores/permissions';
 import AdminLayout from '../pages/admin/AdminLayout';
-import ReferencesLayout from '../pages/references/ReferencesLayout';
+import ReferencesLayout, { TAB_DEFS as REFERENCE_TABS } from '../pages/references/ReferencesLayout';
 
 const Login = lazy(() => import('../pages/auth/Login'));
 const Register = lazy(() => import('../pages/auth/Register'));
@@ -26,6 +31,7 @@ const Assets = lazy(() => import('../pages/references/Assets'));
 const MaterialsJournal = lazy(() => import('../pages/materials/MaterialsPage'));
 const StatsPage = lazy(() => import('../pages/stats/StatsPage'));
 const AdminUsers = lazy(() => import('../pages/admin/Users'));
+const AdminRoles = lazy(() => import('../pages/admin/roles/RolesPage'));
 const AdminLlmProviders = lazy(() => import('../pages/admin/LlmProviders'));
 const AdminPrompts = lazy(() => import('../pages/admin/Prompts'));
 const AdminEdoAccounts = lazy(() => import('../pages/admin/EdoAccounts'));
@@ -42,6 +48,36 @@ const OperationsPage = lazy(() => import('../pages/operations/OperationsPage'));
 // ShipmentPage без редиректа. По умолчанию edit-режим тоже редиректит на
 // /operations (этап Г): модалка — единственная точка входа в форму.
 const MODAL_DISABLED = import.meta.env.VITE_OPERATIONS_MODAL_DISABLED === '1';
+
+/**
+ * Корень: ведёт на первый доступный человеку раздел.
+ *
+ * Раньше здесь стоял жёсткий Navigate на /operations. С матрицей это давало бы
+ * цикл: закрытые операции → отказ → редирект на корень → снова /operations.
+ */
+function HomeRedirect() {
+  const role = useAuthStore((s) => s.user?.role);
+  const perms = usePermissionsStore((s) => s.perms);
+  const home = homePath(perms, role);
+  if (!home) return <NoAccess title="Нет доступных разделов" />;
+  // Операции живут на одном роуте с ?type=: без параметра страница не знает,
+  // какую вкладку открывать.
+  return <Navigate to={home === '/operations' ? '/operations?type=delivery' : home} replace />;
+}
+
+/**
+ * Вход в «Справочники» — на первую ДОСТУПНУЮ вкладку.
+ *
+ * Жёсткий редирект на /references/sites оставлял бы человека без права на
+ * «Объекты» перед отказом, хотя соседние вкладки ему открыты.
+ */
+function ReferencesHome() {
+  const role = useAuthStore((s) => s.user?.role);
+  const perms = usePermissionsStore((s) => s.perms);
+  const first = REFERENCE_TABS.find((t) => canView(perms, t.page, role));
+  if (!first) return <NoAccess title="Справочники закрыты" />;
+  return <Navigate to={first.key} replace />;
+}
 
 /**
  * Гард для /kpp: всегда редиректит на /operations?type=delivery&…,
@@ -119,24 +155,41 @@ export const router = sentryCreateBrowserRouter([
       </ProtectedRoute>
     ),
     children: [
-      { index: true, element: <Navigate to="/operations?type=delivery" replace /> },
-      { path: 'operations', element: suspense(<OperationsPage />) },
+      { index: true, element: <HomeRedirect /> },
+      {
+        path: 'operations',
+        // Группа, а не страница: на одном роуте живут Приёмки и Отгрузки,
+        // и достаточно доступа к любой из них — какую открыть, решает сама
+        // страница по ?type=.
+        element: <ProtectedRoute group="operations">{suspense(<OperationsPage />)}</ProtectedRoute>,
+      },
       // /kpp и /shipments оставлены для edit-режима (форма приёмки/отгрузки
       // с ?delivery=…/?shipment=… или ?new=1). Без edit-параметров гарды
       // перенаправляют на /operations?type=… — старые закладки и ссылки
       // продолжают работать.
       {
+        // Гейт нужен и здесь: legacy-роуты ведут прямо на форму, минуя
+        // /operations, — без проверки они были бы обходом матрицы по прямой
+        // ссылке из закладок.
         path: 'kpp',
-        element: <KppGuard>{suspense(<KppPage />)}</KppGuard>,
+        element: (
+          <ProtectedRoute page="operations.deliveries">
+            <KppGuard>{suspense(<KppPage />)}</KppGuard>
+          </ProtectedRoute>
+        ),
       },
       {
         path: 'shipments',
-        element: <ShipmentsGuard>{suspense(<ShipmentPage />)}</ShipmentsGuard>,
+        element: (
+          <ProtectedRoute page="operations.shipments">
+            <ShipmentsGuard>{suspense(<ShipmentPage />)}</ShipmentsGuard>
+          </ProtectedRoute>
+        ),
       },
       {
         path: 'documents',
         element: (
-          <ProtectedRoute roles={['admin', 'manager', 'contractor']}>
+          <ProtectedRoute roles={['admin', 'manager', 'contractor']} page="documents.list">
             {suspense(<Inbox />)}
           </ProtectedRoute>
         ),
@@ -146,14 +199,16 @@ export const router = sentryCreateBrowserRouter([
         // чужие письма видеть нельзя.
         path: 'documents/mail',
         element: (
-          <ProtectedRoute roles={['admin', 'manager']}>{suspense(<MailReview />)}</ProtectedRoute>
+          <ProtectedRoute roles={['admin', 'manager']} page="documents.mail">
+            {suspense(<MailReview />)}
+          </ProtectedRoute>
         ),
       },
       {
         // Комплекты без распознанных документов — тоже инструмент разбора.
         path: 'documents/extra-only',
         element: (
-          <ProtectedRoute roles={['admin', 'manager']}>
+          <ProtectedRoute roles={['admin', 'manager']} page="documents.extra_only">
             {suspense(<ExtraOnlyBundles />)}
           </ProtectedRoute>
         ),
@@ -163,7 +218,7 @@ export const router = sentryCreateBrowserRouter([
         path: 'materials',
         // Журнал бьёт по /reports/*, закрытым для contractor — не пускаем его сюда.
         element: (
-          <ProtectedRoute roles={['admin', 'manager', 'inspector_kpp']}>
+          <ProtectedRoute roles={['admin', 'manager', 'inspector_kpp']} page="materials_journal">
             {suspense(<MaterialsJournal />)}
           </ProtectedRoute>
         ),
@@ -171,50 +226,145 @@ export const router = sentryCreateBrowserRouter([
       {
         path: 'stats',
         element: (
-          <ProtectedRoute roles={['admin', 'manager']}>{suspense(<StatsPage />)}</ProtectedRoute>
+          <ProtectedRoute roles={['admin', 'manager']} page="stats">
+            {suspense(<StatsPage />)}
+          </ProtectedRoute>
         ),
       },
       {
         path: 'references',
         element: (
-          <ProtectedRoute roles={['admin', 'manager']}>
+          <ProtectedRoute roles={['admin', 'manager']} group="references">
             <ReferencesLayout />
           </ProtectedRoute>
         ),
         children: [
-          { index: true, element: <Navigate to="/references/sites" replace /> },
-          { path: 'sites', element: suspense(<Sites />) },
+          { index: true, element: <ReferencesHome /> },
+          {
+            path: 'sites',
+            element: (
+              <ProtectedRoute page="references.sites">{suspense(<Sites />)}</ProtectedRoute>
+            ),
+          },
           // Вкладка «Контрагенты» теперь показывает справочник заказчика
           // (customer_counterparties), а «Поставщики» — suppliers. Обе —
           // отдельные таблицы, не операционная counterparties.
-          { path: 'counterparties', element: suspense(<CustomerCounterparties />) },
-          { path: 'suppliers', element: suspense(<Suppliers />) },
-          { path: 'mol', element: suspense(<MolPersons />) },
-          { path: 'units', element: suspense(<Units />) },
+          {
+            path: 'counterparties',
+            element: (
+              <ProtectedRoute page="references.customer_counterparties">
+                {suspense(<CustomerCounterparties />)}
+              </ProtectedRoute>
+            ),
+          },
+          {
+            path: 'suppliers',
+            element: (
+              <ProtectedRoute page="references.suppliers">
+                {suspense(<Suppliers />)}
+              </ProtectedRoute>
+            ),
+          },
+          {
+            path: 'mol',
+            element: (
+              <ProtectedRoute page="references.mol">{suspense(<MolPersons />)}</ProtectedRoute>
+            ),
+          },
+          {
+            path: 'units',
+            element: (
+              <ProtectedRoute page="references.units">{suspense(<Units />)}</ProtectedRoute>
+            ),
+          },
           // Операционный справочник контрагентов (legacy): завязан на FK
           // приёмок/отгрузок и sync мобилы. Из вкладок убран, но роут сохранён
           // для ручного доступа администратором при необходимости.
-          { path: 'counterparties-legacy', element: suspense(<Counterparties />) },
-          { path: 'responsible-persons', element: suspense(<ResponsiblePersons />) },
-          { path: 'materials', element: suspense(<Materials />) },
-          { path: 'assets', element: suspense(<Assets />) },
+          {
+            path: 'counterparties-legacy',
+            element: (
+              <ProtectedRoute page="references.counterparties_legacy">
+                {suspense(<Counterparties />)}
+              </ProtectedRoute>
+            ),
+          },
+          {
+            path: 'responsible-persons',
+            element: (
+              <ProtectedRoute page="references.responsible_persons">
+                {suspense(<ResponsiblePersons />)}
+              </ProtectedRoute>
+            ),
+          },
+          {
+            path: 'materials',
+            element: (
+              <ProtectedRoute page="references.materials">
+                {suspense(<Materials />)}
+              </ProtectedRoute>
+            ),
+          },
+          {
+            path: 'assets',
+            element: (
+              <ProtectedRoute page="references.assets">{suspense(<Assets />)}</ProtectedRoute>
+            ),
+          },
         ],
       },
       {
         path: 'admin',
         element: (
-          <ProtectedRoute roles={['admin']}>
+          <ProtectedRoute roles={['admin']} group="admin">
             <AdminLayout />
           </ProtectedRoute>
         ),
         children: [
           { index: true, element: <Navigate to="/admin/users" replace /> },
-          { path: 'users', element: suspense(<AdminUsers />) },
-          { path: 'llm-providers', element: suspense(<AdminLlmProviders />) },
-          { path: 'prompts', element: suspense(<AdminPrompts />) },
-          { path: 'edo-accounts', element: suspense(<AdminEdoAccounts />) },
-          { path: 'mail-accounts', element: suspense(<AdminMailAccounts />) },
-          { path: 'settings', element: suspense(<Settings />) },
+          {
+            path: 'users',
+            element: <ProtectedRoute page="admin.users">{suspense(<AdminUsers />)}</ProtectedRoute>,
+          },
+          {
+            path: 'roles',
+            element: <ProtectedRoute page="admin.roles">{suspense(<AdminRoles />)}</ProtectedRoute>,
+          },
+          {
+            path: 'llm-providers',
+            element: (
+              <ProtectedRoute page="admin.llm_providers">
+                {suspense(<AdminLlmProviders />)}
+              </ProtectedRoute>
+            ),
+          },
+          {
+            path: 'prompts',
+            element: (
+              <ProtectedRoute page="admin.prompts">{suspense(<AdminPrompts />)}</ProtectedRoute>
+            ),
+          },
+          {
+            path: 'edo-accounts',
+            element: (
+              <ProtectedRoute page="admin.edo_accounts">
+                {suspense(<AdminEdoAccounts />)}
+              </ProtectedRoute>
+            ),
+          },
+          {
+            path: 'mail-accounts',
+            element: (
+              <ProtectedRoute page="admin.mail_accounts">
+                {suspense(<AdminMailAccounts />)}
+              </ProtectedRoute>
+            ),
+          },
+          {
+            path: 'settings',
+            element: (
+              <ProtectedRoute page="admin.settings">{suspense(<Settings />)}</ProtectedRoute>
+            ),
+          },
         ],
       },
       // Top-level роут /settings убран: раздел «Настройки» больше не

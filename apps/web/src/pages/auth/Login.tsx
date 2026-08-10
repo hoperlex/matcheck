@@ -3,6 +3,7 @@ import { Form, Input, Button, Typography, Alert, Space } from 'antd';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import type { LoginResponse } from '@matcheck/contracts';
 import { api } from '../../services/api';
+import { syncPermissions } from '../../services/permissionsSync';
 import { localizeApiError } from '../../services/errorMessages';
 import { useAuthStore } from '../../stores/auth';
 import { AuthLayout } from './AuthLayout';
@@ -23,6 +24,12 @@ export default function LoginPage() {
     try {
       const res = await api.post<LoginResponse>('/auth/login', values);
       setAuth(res.accessToken, res.user);
+      // Права — до перехода на страницу: иначе первый экран после входа
+      // рисуется по дефолтам роли и тут же перестраивается. Загрузку уже
+      // начала подписка permissionsScheduler на смену пользователя, здесь мы
+      // лишь дожидаемся её (single-flight, один сетевой запрос). Отказ не
+      // блокирует вход — работаем по дефолтам, сервер всё равно проверяет сам.
+      await syncPermissions(res.user);
       const from = (location.state as LocationState | null)?.from?.pathname ?? '/';
       navigate(from, { replace: true });
     } catch (err) {

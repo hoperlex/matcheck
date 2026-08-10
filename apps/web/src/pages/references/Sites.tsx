@@ -18,7 +18,7 @@ import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
-import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
@@ -33,9 +33,15 @@ export default function SitesPage() {
   const [editing, setEditing] = useState<Site | null>(null);
   const [search, setSearch] = useState('');
   const [form] = Form.useForm<SiteUpsert>();
-  const role = useAuthStore((s) => s.user?.role);
-  const canEdit = role === 'admin' || role === 'manager';
-  const canDelete = role === 'admin';
+  // Права страницы: до включения матрицы значения совпадают с прежними
+  // (admin+manager правят, удаляет только admin) — их задаёт дефолт
+  // PAGE_CATALOG. «Создавать» и «Редактировать» теперь РАЗНЫЕ права: одна
+  // кнопка «Добавить» и клик по строке раньше жили на одном флаге, и действие
+  // «Создавать» в матрице оказалось бы мёртвым.
+  const { can } = usePermissions();
+  const canCreate = can('references.sites', 'create');
+  const canEdit = can('references.sites', 'edit');
+  const canDelete = can('references.sites', 'delete');
 
   const list = useQuery({
     queryKey: ['sites', search],
@@ -135,7 +141,7 @@ export default function SitesPage() {
                 confirmTitle={`Удалить ${bulk.selectedCount} ${pluralizeObj(bulk.selectedCount)}?`}
               />
             )}
-            {canEdit && (
+            {canCreate && (
               <Button type="primary" onClick={openCreate}>
                 Добавить объект
               </Button>

@@ -1,0 +1,181 @@
+/**
+ * Черновик матрицы прав: состояние ячеек, каскад и дельта для сохранения.
+ *
+ * Вынесено из компонента отдельным модулем без React — здесь живут правила,
+ * которые обязаны совпадать с серверными (routes/admin/role-permissions.ts).
+ * Если они разойдутся, человек увидит одно, а сохранится другое: галочка
+ * «отскочит» после ответа сервера или PATCH вернёт 400 на, казалось бы,
+ * корректный клик.
+ */
+import {
+  PAGE_ACTIONS,
+  type ManagedRole,
+  type PageAction,
+  type PageId,
+  type PagePermissions,
+  type RolePermissionsResponse,
+} from '@matcheck/contracts';
+
+export type CatalogEntry = RolePermissionsResponse['catalog'][number];
+export type Matrix = Record<ManagedRole, Record<PageId, PagePermissions>>;
+export type Change = { role: ManagedRole; page: PageId; action: PageAction; allowed: boolean };
+
+/**
+ * Что можно сделать с ячейкой:
+ *   locked         — нужна мобильному КПП, снять нельзя ни здесь, ни в API;
+ *   not-applicable — действия у страницы нет вовсе (у «Статистики» нет удаления);
+ *   not-in-base    — роли этого не давали и раньше; матрица только сужает,
+ *                    выдать право она не может;
+ *   editable       — обычная галочка.
+ */
+export type CellState = 'locked' | 'not-applicable' | 'not-in-base' | 'editable';
+
+export function cellKey(role: ManagedRole, page: PageId, action: PageAction): string {
+  return `${role}:${page}:${action}`;
+}
+
+export function cellState(
+  entry: CatalogEntry,
+  role: ManagedRole,
+  action: PageAction,
+  lockedCells: ReadonlySet<string>,
+): CellState {
+  if (lockedCells.has(cellKey(role, entry.id, action))) return 'locked';
+  if (!entry.actions.includes(action)) return 'not-applicable';
+  if (!entry.base[action]?.includes(role)) return 'not-in-base';
+  return 'editable';
+}
+
+function clonePage(p: PagePermissions): PagePermissions {
+  return { ...p };
+}
+
+/**
+ * Переключить ячейку с каскадом.
+ *
+ * «Просмотр» — база: без него остальные действия бессмысленны (страницы не
+ * видно), поэтому включение любого действия поднимает просмотр, а снятие
+ * просмотра гасит остальные. Ровно этот же инвариант сервер применяет к
+ * PATCH — иначе он вернул бы 400 view_required на то, что UI показал
+ * допустимым.
+ *
+ * Заблокированные и неприменимые ячейки каскад не трогает.
+ */
+export function applyCell(
+  draft: Matrix,
+  entry: CatalogEntry,
+  role: ManagedRole,
+  action: PageAction,
+  allowed: boolean,
+  lockedCells: ReadonlySet<string>,
+): Matrix {
+  const page = entry.id;
+  const current = draft[role]?.[page];
+  if (!current) return draft;
+  if (cellState(entry, role, action, lockedCells) !== 'editable') return draft;
+
+  const next = clonePage(current);
+  next[action] = allowed;
+
+  if (allowed && action !== 'view') {
+    // Включили действие — просмотр обязан быть включён (если он вообще
+    // доступен роли: иначе получилось бы право, которого нет в базе).
+    if (cellState(entry, role, 'view', lockedCells) === 'editable') next.view = true;
+  }
+  if (!allowed && action === 'view') {
+    for (const a of PAGE_ACTIONS) {
+      if (a === 'view') continue;
+      if (cellState(entry, role, a, lockedCells) !== 'editable') continue;
+      next[a] = false;
+    }
+  }
+
+  return { ...draft, [role]: { ...draft[role], [page]: next } };
+}
+
+/** Групповое переключение действия по всем страницам раздела. */
+export function applyGroup(
+  draft: Matrix,
+  entries: CatalogEntry[],
+  role: ManagedRole,
+  action: PageAction,
+  allowed: boolean,
+  lockedCells: ReadonlySet<string>,
+): Matrix {
+  return entries.reduce(
+    (acc, entry) => applyCell(acc, entry, role, action, allowed, lockedCells),
+    draft,
+  );
+}
+
+/**
+ * Состояние группового чекбокса: все / ничего / частично. Учитываются только
+ * ячейки, которые вообще можно включить, — иначе раздел с одной неприменимой
+ * страницей навсегда застрял бы в «частично».
+ */
+export function groupState(
+  draft: Matrix,
+  entries: CatalogEntry[],
+  role: ManagedRole,
+  action: PageAction,
+  lockedCells: ReadonlySet<string>,
+): { checked: boolean; indeterminate: boolean; disabled: boolean } {
+  const relevant = entries.filter(
+    (e) => cellState(e, role, action, lockedCells) !== 'not-applicable',
+  );
+  if (relevant.length === 0) return { checked: false, indeterminate: false, disabled: true };
+
+  const on = relevant.filter((e) => draft[role]?.[e.id]?.[action]).length;
+  const editable = relevant.some(
+    (e) => cellState(e, role, action, lockedCells) === 'editable',
+  );
+  return {
+    checked: on === relevant.length,
+    indeterminate: on > 0 && on < relevant.length,
+    disabled: !editable,
+  };
+}
+
+/**
+ * Дельта «что менялось» — именно её принимает PATCH.
+ *
+ * Слать матрицу целиком нельзя: два администратора, правящих разные ячейки,
+ * затирали бы правки друг друга. Дельта же конфликтует только на одной и той
+ * же ячейке.
+ */
+export function diffMatrix(server: Matrix, draft: Matrix): Change[] {
+  const out: Change[] = [];
+  for (const role of Object.keys(draft) as ManagedRole[]) {
+    const pages = draft[role];
+    if (!pages) continue;
+    for (const page of Object.keys(pages) as PageId[]) {
+      for (const action of PAGE_ACTIONS) {
+        const before = server[role]?.[page]?.[action];
+        const after = pages[page]?.[action];
+        if (before === undefined || after === undefined) continue;
+        if (before !== after) out.push({ role, page, action, allowed: after });
+      }
+    }
+  }
+  return out;
+}
+
+/** Есть ли несохранённые правки у конкретной роли (точка рядом с её именем). */
+export function roleHasChanges(server: Matrix, draft: Matrix, role: ManagedRole): boolean {
+  return diffMatrix(server, draft).some((c) => c.role === role);
+}
+
+/** Глубокая копия матрицы: черновик правится независимо от ответа сервера. */
+export function cloneMatrix(m: Matrix): Matrix {
+  const out = {} as Matrix;
+  for (const role of Object.keys(m) as ManagedRole[]) {
+    const pages = m[role];
+    if (!pages) continue;
+    const copy = {} as Record<PageId, PagePermissions>;
+    for (const page of Object.keys(pages) as PageId[]) {
+      copy[page] = clonePage(pages[page]!);
+    }
+    out[role] = copy;
+  }
+  return out;
+}

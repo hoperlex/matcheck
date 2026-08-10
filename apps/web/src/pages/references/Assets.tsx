@@ -16,7 +16,7 @@ import { DeleteOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Asset, AssetUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
-import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
@@ -30,8 +30,14 @@ export default function AssetsPage() {
   const [editing, setEditing] = useState<Asset | null>(null);
   const [search, setSearch] = useState('');
   const [form] = Form.useForm<AssetUpsert>();
-  const role = useAuthStore((s) => s.user?.role);
-  const canDelete = role === 'admin';
+  // Права страницы. До включения матрицы значения те же, что были у ролей
+  // (правит manager, удаляет admin) — так задан дефолт в PAGE_CATALOG.
+  // «Создавать» и «Редактировать» разведены: раньше обе кнопки жили на одном
+  // флаге, и действие «Создавать» в матрице оказалось бы мёртвым.
+  const { can } = usePermissions();
+  const canCreate = can('references.assets', 'create');
+  const canEdit = can('references.assets', 'edit');
+  const canDelete = can('references.assets', 'delete');
 
   const list = useQuery({
     queryKey: ['assets', search],
@@ -103,9 +109,11 @@ export default function AssetsPage() {
               onChange={setSearch}
               style={{ width: 240 }}
             />
-            <Button type="primary" onClick={() => setOpen(true)}>
-              Добавить
-            </Button>
+            {canCreate && (
+              <Button type="primary" onClick={() => setOpen(true)}>
+                Добавить
+              </Button>
+            )}
           </Space>
         </Space>
       }
@@ -115,7 +123,7 @@ export default function AssetsPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
-        onRowClick={openEdit}
+        onRowClick={canEdit ? openEdit : undefined}
         columns={[
           { title: 'Код', dataIndex: 'code', sorter: stringSorter<Asset>((r) => r.code) },
           { title: 'Название', dataIndex: 'name', sorter: stringSorter<Asset>((r) => r.name) },
@@ -164,7 +172,11 @@ export default function AssetsPage() {
             : []),
         ]}
         cardRender={(r) => (
-          <Card style={{ width: '100%' }} size="small" onClick={() => openEdit(r)}>
+          <Card
+            style={{ width: '100%' }}
+            size="small"
+            onClick={() => canEdit && openEdit(r)}
+          >
             <Space direction="vertical" size={2}>
               <Space wrap>
                 <Tag color="purple">ОС</Tag>

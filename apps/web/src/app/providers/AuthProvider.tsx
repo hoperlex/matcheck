@@ -3,10 +3,14 @@ import type { UserDto } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
 import { api, ApiError } from '../../services/api';
 import { refreshAccessToken } from '../../services/authRefresh';
+import { syncPermissions } from '../../services/permissionsSync';
 // Импорт активирует подписку на store: при появлении/смене access-токена
 // планируется проактивный refresh за 60с до истечения. Без этого 401 на
 // интервал-driven запросах (sync, focus-refetch) копятся в DevTools.
 import '../../services/authScheduler';
+// Аналогично для прав: подписка на смену пользователя (загрузить/очистить),
+// polling, обновление по focus и после 403.
+import '../../services/permissionsScheduler';
 
 /**
  * Страницы, которые работают без логина.
@@ -44,6 +48,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const me = await api.get<UserDto>('/auth/me');
           if (cancelled) return;
           setUser(me);
+          // Права — ДО снятия bootstrapped, иначе первый кадр рисуется по
+          // дефолтам роли и меню на глазах у человека сужается. Сверку «чей
+          // это ответ» делает syncPermissions: сверять со стором здесь нельзя,
+          // user попадает туда только что и мог уже смениться.
+          //
+          // Запрос к этому моменту, скорее всего, уже в полёте — его запустила
+          // подписка permissionsScheduler на смену пользователя; single-flight
+          // отдаёт обоим один промис, сетевой запрос остаётся один.
+          await syncPermissions(me);
         }
       } catch (err) {
         if (!(err instanceof ApiError)) {

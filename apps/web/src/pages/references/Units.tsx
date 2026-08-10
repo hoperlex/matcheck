@@ -21,7 +21,7 @@ import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
-import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
@@ -39,9 +39,14 @@ function pluralizeUnit(n: number): string {
 
 export default function UnitsPage(): JSX.Element {
   const qc = useQueryClient();
-  const role = useAuthStore((s) => s.user?.role);
-  const canEdit = role === 'admin' || role === 'manager';
-  const canDelete = role === 'admin';
+  // Права страницы. До включения матрицы значения те же, что были у ролей
+  // (правит manager, удаляет admin) — так задан дефолт в PAGE_CATALOG.
+  // «Создавать» и «Редактировать» разведены: раньше обе кнопки жили на одном
+  // флаге, и действие «Создавать» в матрице оказалось бы мёртвым.
+  const { can } = usePermissions();
+  const canCreate = can('references.units', 'create');
+  const canEdit = can('references.units', 'edit');
+  const canDelete = can('references.units', 'delete');
 
   const [editing, setEditing] = useState<Unit | null>(null);
   const [open, setOpen] = useState(false);
@@ -137,7 +142,7 @@ export default function UnitsPage(): JSX.Element {
                 confirmTitle={`Удалить ${bulk.selectedCount} ${pluralizeUnit(bulk.selectedCount)}?`}
               />
             )}
-            {canEdit && (
+            {canCreate && (
               <Button type="primary" onClick={openCreate}>
                 Добавить
               </Button>

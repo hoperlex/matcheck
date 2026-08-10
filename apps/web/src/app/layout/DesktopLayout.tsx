@@ -3,7 +3,8 @@ import { Avatar, Button, Layout, Menu, Tag, Tooltip, Typography } from 'antd';
 import { MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../stores/auth';
-import { filterByRole } from './navItems';
+import { usePermissionsStore } from '../../stores/permissions';
+import { filterByPermissions } from './navItems';
 import { api } from '../../services/api';
 import { UserProfileModal } from '../../components/UserProfileModal';
 import { NotificationsBell } from '../../components/NotificationsBell';
@@ -15,6 +16,8 @@ const COLLAPSE_KEY = 'matcheck.sidebar.collapsed';
 
 export function DesktopLayout() {
   const user = useAuthStore((s) => s.user);
+  // Меню перестраивается, когда права приезжают или меняются (polling/focus).
+  const perms = usePermissionsStore((s) => s.perms);
   const clear = useAuthStore((s) => s.clear);
   const navigate = useNavigate();
   const location = useLocation();
@@ -41,7 +44,7 @@ export function DesktopLayout() {
   // ниже, чтобы не нарушить порядок хуков.
   const items = useMemo(() => {
     if (!user) return [];
-    return filterByRole(user.role).map((n) => ({
+    return filterByPermissions(perms, user.role).map((n) => ({
       key: n.path,
       icon: createElement(n.icon),
       // Для «Операции» — зелёный Tag «Сегодня: +N» справа от label.
@@ -62,7 +65,7 @@ export function DesktopLayout() {
           n.label
         ),
     }));
-  }, [user, operationsCount]);
+  }, [user, perms, operationsCount]);
 
   if (!user) return null;
   const selected = items.find(
