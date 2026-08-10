@@ -44,6 +44,7 @@ import { isShipmentDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
 import { canSeeReview } from '../lib/review.js';
+import { assertPermission } from '../lib/permissions/assert.js';
 import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
 import {
   expandCustomerCounterpartyToOpIds,
@@ -851,8 +852,13 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             .where(eq(shipments.id, input.id))
             .limit(1);
           if (!existing) {
+            // Ветка СОЗДАНИЯ, хотя клиент прислал id: офлайн-запись с планшета
+            // приходит с уже сгенерированным UUID, поэтому create/edit решает
+            // наличие строки в БД, а не наличие input.id.
+            await assertPermission(req, 'operations.shipments', 'create');
             await createShipment(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
           } else {
+            await assertPermission(req, 'operations.shipments', 'edit');
             // Инспектор редактирует только записи СВОЕГО объекта. Раньше проверки
             // не было, и upsert чужой отгрузки молча переносил её на объект
             // отправителя (см. domain/operations/foreign-site.ts).
@@ -898,6 +904,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           return dto;
         }
 
+        await assertPermission(req, 'operations.shipments', 'create');
         const created = await createShipment(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
         if (input.kind === 'transfer') {
           await syncPairedTransferDelivery(app, created.id);

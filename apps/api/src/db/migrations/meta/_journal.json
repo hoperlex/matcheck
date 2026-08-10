@@ -638,6 +638,13 @@
       "when": 1781800017000,
       "tag": "0091_processing_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1781800018000,
+      "tag": "0092_role_permissions",
+      "breakpoints": true
     }
   ]
 }

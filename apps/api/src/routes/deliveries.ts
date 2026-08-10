@@ -44,6 +44,7 @@ import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import { canSeeReview } from '../lib/review.js';
+import { assertPermission } from '../lib/permissions/assert.js';
 import {
   expandCustomerCounterpartyToOpIds,
   resolveContractorOpIds,
@@ -870,8 +871,15 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             .limit(1);
           if (!existing) {
             // Create as upsert with explicit id (для офлайн-черновиков с локально сгенерированным id)
+            //
+            // Матрица прав: это ветка СОЗДАНИЯ, хотя клиент прислал id.
+            // Различать create и edit по наличию input.id нельзя — офлайн-
+            // запись с планшета всегда приходит с уже сгенерированным UUID,
+            // поэтому решает наличие строки в БД.
+            await assertPermission(req, 'operations.deliveries', 'create');
             await createDelivery(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
           } else {
+            await assertPermission(req, 'operations.deliveries', 'edit');
             // Инспектор редактирует только записи СВОЕГО объекта. Раньше проверки
             // не было, и upsert чужой приёмки молча переносил её на объект
             // отправителя (см. domain/operations/foreign-site.ts).
@@ -915,6 +923,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           return dto;
         }
 
+        await assertPermission(req, 'operations.deliveries', 'create');
         const created = await createDelivery(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
         const dto = await buildDeliveryDto(app, created.id, req.user?.role);
         if (!dto) throw new Error('Delivery missing after create');

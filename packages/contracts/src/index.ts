@@ -1,5 +1,6 @@
 export * from './health.js';
 export * from './auth.js';
+export * from './permissions.js';
 export * from './bulk.js';
 export * from './counterparties.js';
 export * from './suppliers.js';

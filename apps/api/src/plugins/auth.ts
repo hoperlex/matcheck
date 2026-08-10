@@ -28,6 +28,17 @@ declare module 'fastify' {
     authorize: (
       ...roles: AuthUser['role'][]
     ) => (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+    /**
+     * Запись отказа в unauthorized_access_log. Вынесена наружу, чтобы
+     * плагин прав писал свои 403 в тот же журнал: расследование инцидента
+     * «пользователь не может работать» должно смотреть в одно место.
+     */
+    logUnauthorized: (
+      req: FastifyRequest,
+      statusCode: number,
+      errorMessage: string,
+      userId?: string,
+    ) => Promise<void>;
   }
 }
 
@@ -134,6 +145,8 @@ export default fp(async (app) => {
       return null;
     }
   }
+
+  app.decorate('logUnauthorized', logUnauthorized);
 
   app.decorate('authenticate', async (req: FastifyRequest, reply: FastifyReply) => {
     const user = await attachUser(req);

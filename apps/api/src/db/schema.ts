@@ -285,6 +285,40 @@ export const unauthorizedAccessLog = pgTable('unauthorized_access_log', {
   ts: timestamp('ts', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Матрица прав ролей: «роль × страница × действие».
+ *
+ * Строка здесь — OVERRIDE, то есть отклонение от дефолта. Её отсутствие
+ * означает «как в коде» (DEFAULT_MATRIX из @matcheck/contracts), а не
+ * «запрещено» — поэтому таблица создаётся пустой и «Сбросить к дефолту»
+ * означает DELETE строк, а не запись сегодняшних значений.
+ *
+ * Роли admin в таблице нет и быть не может (CHECK): она обходит матрицу
+ * целиком, иначе админ способен запереть себя вне вкладки «Роли».
+ *
+ * page_id — без FK и без таблицы-каталога: каталог страниц живёт в коде и
+ * меняется вместе с релизом (см. 0092_role_permissions.sql).
+ */
+export const rolePagePermissions = pgTable(
+  'role_page_permissions',
+  {
+    role: userRoleEnum('role').notNull(),
+    pageId: varchar('page_id', { length: 64 }).notNull(),
+    canView: boolean('can_view').notNull().default(false),
+    canCreate: boolean('can_create').notNull().default(false),
+    canEdit: boolean('can_edit').notNull().default(false),
+    canDelete: boolean('can_delete').notNull().default(false),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedByUserId: uuid('updated_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+  },
+  (t) => [
+    primaryKey({ name: 'role_page_permissions_pkey', columns: [t.role, t.pageId] }),
+    check('role_page_permissions_no_admin', sql`${t.role} <> 'admin'`),
+  ],
+);
+
 // ─── Counterparties / Materials ─────────────────────────────────────────────
 
 export const counterparties = pgTable(

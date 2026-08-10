@@ -14,9 +14,11 @@ import redisPlugin from './plugins/redis.js';
 import queuePlugin from './plugins/queue.js';
 import securityPlugin from './plugins/security.js';
 import authPlugin from './plugins/auth.js';
+import permissionsPlugin from './plugins/permissions.js';
 import metricsPlugin from './plugins/metrics.js';
 import { healthRoutes } from './routes/health.js';
 import { authRoutes } from './routes/auth.js';
+import { meRoutes } from './routes/me.js';
 import { counterpartyRoutes } from './routes/counterparties.js';
 import { supplierRoutes } from './routes/suppliers.js';
 import { customerCounterpartyRoutes } from './routes/customer-counterparties.js';
@@ -42,6 +44,7 @@ import { mailReviewRoutes } from './routes/mail-review.js';
 import { userAdminRoutes } from './routes/admin/users.js';
 import { passwordResetAdminRoutes } from './routes/admin/password-resets.js';
 import { appSettingsRoutes } from './routes/admin/settings.js';
+import { rolePermissionRoutes } from './routes/admin/role-permissions.js';
 import { promptRoutes } from './routes/admin/prompts.js';
 import { shareRoutes } from './routes/share.js';
 import { shareMessageRoutes } from './routes/share-messages.js';
@@ -105,8 +108,15 @@ export async function buildServer() {
     return reply.code(403).send({ error: 'forbidden', message: 'Read-only role' });
   });
 
+  // Матрица прав ролей. ПОСЛЕ read-only-хука: оба хука только запрещают, итог
+  // — конъюнкция, но при таком порядке существующее сообщение 'Read-only role'
+  // и его тесты не меняются ни в одном сценарии. По умолчанию no-op:
+  // PERMISSIONS_ENFORCE=0.
+  await app.register(permissionsPlugin);
+
   await app.register(healthRoutes);
   await app.register(authRoutes);
+  await app.register(meRoutes);
   await app.register(counterpartyRoutes);
   await app.register(supplierRoutes);
   await app.register(customerCounterpartyRoutes);
@@ -132,6 +142,7 @@ export async function buildServer() {
   await app.register(userAdminRoutes);
   await app.register(passwordResetAdminRoutes);
   await app.register(appSettingsRoutes);
+  await app.register(rolePermissionRoutes);
   await app.register(promptRoutes);
   await app.register(shareRoutes);
   await app.register(shareMessageRoutes);

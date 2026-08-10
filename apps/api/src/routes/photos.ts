@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
+import { assertPermission } from '../lib/permissions/assert.js';
 import {
   PhotoConfirmResponseSchema,
   PhotoDeleteResponseSchema,
@@ -456,6 +457,11 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       ) {
         return reply.code(404).send({ error: 'not_found' });
       }
+      // Матрица прав — ПОСЛЕ проверок видимости выше и до обращения к S3.
+      // Порядок принципиален: проверки выше намеренно отвечают 404, чтобы не
+      // раскрывать существование чужого фото. Поставив права первыми, мы
+      // превратили бы этот 404 в 403 и слили бы сам факт наличия записи.
+      await assertPermission(req, pageOfKind(found.kind), 'view');
       const key = req.query.thumb && found.thumbS3Key ? found.thumbS3Key : found.s3Key;
       try {
         const url = await presign({ method: 'GET', key, expiresIn: URL_TTL });
@@ -500,6 +506,8 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       ) {
         return reply.code(404).send({ error: 'not_found' });
       }
+      // См. комментарий о порядке в GET /api/v1/photos/:id/url.
+      await assertPermission(req, pageOfKind(found.kind), 'view');
       const key = req.query.thumb && found.thumbS3Key ? found.thumbS3Key : found.s3Key;
 
       let signedUrl: string;
@@ -610,6 +618,10 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         }
       }
 
+      // Матрица прав — после проверок объекта и автора выше. Подтверждение
+      // загрузки — часть создания фото, поэтому право то же, что у presign.
+      await assertPermission(req, pageOfKind(found.kind), 'create');
+
       // Если уже подтверждено — отдаём существующий uploaded_at без S3-вызова.
       const table = found.kind === 'delivery' ? deliveryPhotos : shipmentPhotos;
       const [row] = await app.db
@@ -679,6 +691,8 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const found = await findPhoto(app, req.params.id);
       if (!found) return reply.code(404).send({ error: 'not_found' });
+
+      await assertPermission(req, pageOfKind(found.kind), 'delete');
 
       // Помеченный документ — read-only; удаление целиком идёт через DELETE /deliveries|shipments/:id.
       if (found.kind === 'delivery') {
@@ -751,6 +765,8 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const found = await findPhoto(app, req.params.id);
       if (!found) return reply.code(404).send({ error: 'not_found' });
+
+      await assertPermission(req, pageOfKind(found.kind), 'edit');
 
       // pendingDeletionAt-check симметричен DELETE: пока документ в
       // отложенном удалении — мутации фото блокируем, чтобы не плодить
@@ -830,6 +846,8 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       ) {
         return reply.code(404).send({ error: 'not_found' });
       }
+      // См. комментарий о порядке в GET /api/v1/photos/:id/url.
+      await assertPermission(req, pageOfKind(found.kind), 'view');
       const cached = await loadRecognition(app, found.kind, req.params.id);
       if (!cached) return reply.code(404).send({ error: 'not_found' });
       return cached;
@@ -857,6 +875,8 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const found = await findPhoto(app, req.params.id);
       if (!found) return reply.code(404).send({ error: 'not_found' });
+
+      await assertPermission(req, pageOfKind(found.kind), 'edit');
 
       // Кэш-хит без force и без error_message — отдаём без LLM-вызова.
       if (!req.query.force) {
@@ -1073,6 +1093,15 @@ async function presignBoth(
     app.log.warn({ err }, 'presign failed — returning empty URLs');
   }
   return { uploadUrl, thumbUploadUrl };
+}
+
+/**
+ * Вид операции → страница матрицы прав. Отдельного права на фото нет:
+ * выбранная гранулярность — «разделы и вкладки», поэтому фото приёмки
+ * управляются правами страницы «Приёмки», фото отгрузки — «Отгрузки».
+ */
+function pageOfKind(kind: OperationKind): 'operations.deliveries' | 'operations.shipments' {
+  return kind === 'shipment' ? 'operations.shipments' : 'operations.deliveries';
 }
 
 async function findPhoto(
