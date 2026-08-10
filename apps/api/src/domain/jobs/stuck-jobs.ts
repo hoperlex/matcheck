@@ -35,6 +35,10 @@ import {
   documentSecondPassKeyOf,
   enqueueJob,
 } from './job-outbox.js';
+import {
+  finalizeStaleRegistryItems,
+  selectBundlesWithStaleItems,
+} from '../sourceDocuments/bundle-import-registry.js';
 
 /** Сколько запись должна провисеть в `queued`, чтобы считаться потерянной. */
 export const STUCK_AFTER_MINUTES = 45;
@@ -50,7 +54,7 @@ export type RepairDeps = {
   log?: { info?: (o: unknown, m?: string) => void; warn?: (o: unknown, m?: string) => void };
 };
 
-export type RepairResult = { documents: number; bundles: number };
+export type RepairResult = { documents: number; bundles: number; finalizedItems: number };
 
 /**
  * Переставляет задания для записей, зависших в `queued`.
@@ -159,5 +163,34 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
       'repair: найдены записи без задания, поставлены заново',
     );
   }
-  return { documents, bundles: repairedBundles };
+
+  const finalizedItems = await finalizeIncompleteBundles(deps);
+  return { documents, bundles: repairedBundles, finalizedItems };
+}
+
+/**
+ * Страховка инварианта завершённости: пакет уже помечен разобранным (или
+ * упавшим), а в реестре остались строки «в процессе».
+ *
+ * Штатно их закрывает сам router-job, но между обновлением строк и пакета есть
+ * окно: крах в нём оставляет файл невидимым — документа нет, а в дополнительные
+ * файлы он не попадает. Порог тот же, что у repair: раньше строка законно может
+ * быть в работе.
+ */
+export async function finalizeIncompleteBundles(deps: RepairDeps): Promise<number> {
+  const bundleIds = await selectBundlesWithStaleItems(deps.db, STUCK_AFTER_MINUTES, STUCK_BATCH);
+  let finalized = 0;
+  for (const bundleId of bundleIds) {
+    const rows = await finalizeStaleRegistryItems(deps.db, bundleId, {
+      reason: 'файл не дошёл до разбора (пакет закрыт без него)',
+    });
+    finalized += rows.length;
+    if (rows.length > 0) {
+      deps.log?.warn?.(
+        { bundleId, files: rows.map((r) => r.filename) },
+        'repair: у закрытого пакета остались незавершённые файлы — помечены failed',
+      );
+    }
+  }
+  return finalized;
 }

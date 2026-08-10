@@ -158,6 +158,14 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       const sdWhereParts = [
         gte(sourceDocuments.updatedAt, effectiveSince),
         eq(sourceDocuments.isTechnical, false),
+        // Заглушка «не распознано» (файл принят, тип определить не удалось)
+        // существует только ради того, чтобы файл не исчез из виду у менеджера.
+        // Реквизитов в ней нет, принять по ней нечего, а мобильный список
+        // приёмки отбирает документы по объекту и дате поставки, без оглядки на
+        // статус, — на планшете КПП такие строки просто засорили бы «Сегодня».
+        // Разобранный вручную документ приедет обычной дельтой: код ошибки
+        // очищается, updated_at бампается.
+        drSql`${sourceDocuments.parseErrorCode} is distinct from 'unrecognized_type'`,
       ];
       if (inspectorOnly && userSiteId) {
         sdWhereParts.push(eq(sourceDocuments.siteId, userSiteId));
@@ -536,6 +544,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             | 'pdf_no_text'
             | 'parse_failed'
             | 'internal_error'
+            | 'unrecognized_type'
             | null) ?? null,
           parseErrorDetails: sd.parseErrorDetails ?? null,
           originalFilename: sd.originalFilename,

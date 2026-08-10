@@ -82,6 +82,9 @@ export const PublicRejectReasonSchema = z.enum([
   'too_large',
   'signature_image',
   'archive_suspicious',
+  // Фото с айфона в формате HEIC. Распознать его конвейер не может, поэтому
+  // отказ идёт сразу, с инструкцией переснять в «Наиболее совместимом».
+  'heic_unsupported',
 ]);
 export type PublicRejectReason = z.infer<typeof PublicRejectReasonSchema>;
 

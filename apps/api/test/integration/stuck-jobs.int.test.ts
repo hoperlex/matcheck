@@ -213,6 +213,6 @@ suite('подбор зависших заданий (реальный PostgreSQL
 
   it('пустой прогон ничего не делает', async () => {
     const res = await repair();
-    expect(res).toEqual({ documents: 0, bundles: 0 });
+    expect(res).toEqual({ documents: 0, bundles: 0, finalizedItems: 0 });
   });
 });

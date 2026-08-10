@@ -30,6 +30,7 @@ import {
   type UploadLimits,
 } from '../src/domain/sourceDocuments/collect-upload.js';
 import { publicUploadRoutes } from '../src/routes/public-upload.js';
+import { PublicRejectReasonSchema } from '@matcheck/contracts';
 
 const BOUNDARY = '----matcheckLimits';
 
@@ -317,6 +318,43 @@ describe('collectUploadParts — режим strict (публичный вход)
     if (!res.ok) return;
     expect(res.accepted).toHaveLength(0);
     expect(res.rejected[0]).toMatchObject({ reason: 'unsupported_type' });
+  });
+
+  it('HEIC отклоняется на входе со своей причиной', async () => {
+    // Айфон по умолчанию снимает в HEIC. Конвейер такой файл принимал, но
+    // распознать не мог никогда: vision работает с jpeg/png/webp/pdf, а по
+    // расширению файл уходил в PDF-ветку и падал на pdftoppm. Отказ сразу, с
+    // инструкцией, честнее тихого parse_failed через минуту.
+    const heic = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x18]),
+      Buffer.from('ftypheic'),
+      Buffer.alloc(60_000, 0x41),
+    ]);
+    const res = await run('strict', {}, [
+      { field: 'files', filename: 'IMG_0042.HEIC', contentType: 'image/heic', content: heic },
+    ]);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.accepted).toHaveLength(0);
+    expect(res.rejected[0]).toMatchObject({ reason: 'heic_unsupported' });
+    // Причина уходит наружу поставщику — она обязана быть в контракте.
+    expect(PublicRejectReasonSchema.safeParse('heic_unsupported').success).toBe(true);
+  });
+
+  it('внутренний вход HEIC по-прежнему принимает', async () => {
+    // Отказ ставится ТОЛЬКО публичной форме: почта и загрузка сотрудником
+    // ведут себя как раньше, менять их поведение задачи не было.
+    const heic = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x18]),
+      Buffer.from('ftypheic'),
+      Buffer.alloc(60_000, 0x41),
+    ]);
+    const res = await run('legacy', {}, [
+      { field: 'files', filename: 'IMG_0042.HEIC', contentType: 'image/heic', content: heic },
+    ]);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.accepted).toHaveLength(1);
   });
 
   it('крошечная картинка отбраковывается как элемент подписи', async () => {

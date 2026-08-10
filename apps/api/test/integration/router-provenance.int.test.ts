@@ -330,19 +330,20 @@ suite('провенанс документов из единого входа (�
 
     await handleDocumentRouterJob(bundleId, log);
 
-    // Строка упавшего файла ПЕРЕЖИВАЕТ разбор, и статус у неё skipped, а не
-    // failed: дополнительные файлы поставки отбираются именно по skipped, и с
-    // failed файл пропал бы из виду совсем. Ошибка при этом видна в reason.
+    // Строка упавшего файла ПЕРЕЖИВАЕТ разбор: исключение в классификации
+    // приравнено к «тип не определён», и файл получает документ «не
+    // распознано» под ручной разбор. С failed он пропал бы из виду совсем.
     const rows = await registryRows(bundleId);
     expect(rows).toHaveLength(2);
     const bad = rows.find((r) => r.source_filename === 'bad.pdf');
-    expect(bad?.status).toBe('skipped');
+    expect(bad?.status).toBe('created');
     expect(bad?.detected_kind).toBe('unknown');
     expect(rows.find((r) => r.source_filename === 'ok.pdf')?.status).toBe('created');
-    expect(await realDocs()).toHaveLength(1);
+    // Два документа: распознанный УПД и заглушка под ручной разбор.
+    expect(await realDocs()).toHaveLength(2);
   });
 
-  it('неопознанный файл сохраняется, а не превращается в пустой УПД', async () => {
+  it('неопознанный файл становится документом «не распознано», а не исчезает', async () => {
     const bundleId = await bundleWithRegistry(['mystery.pdf']);
     classifyFile.mockResolvedValue({
       detectedKind: 'unknown',
@@ -354,11 +355,56 @@ suite('провенанс документов из единого входа (�
 
     await handleDocumentRouterJob(bundleId, log);
 
-    // Раньше такой файл уходил в УПД-flow и оседал пустым черновиком.
-    expect(await realDocs()).toHaveLength(0);
+    // Файл пришёл из ОБЯЗАТЕЛЬНОЙ зоны формы: раньше он уходил в УПД-flow и
+    // оседал пустым черновиком, потом — прятался в дополнительные файлы и
+    // пропадал из «Документов». Теперь по нему есть строка, но пустая и с
+    // явным кодом: распознавать больше нечем, разбирает человек.
+    const docs = await realDocs();
+    expect(docs).toHaveLength(1);
+    const [doc] = await db<
+      { status: string; parse_error_code: string | null; kind: string }[]
+    >`SELECT status, parse_error_code, kind FROM source_documents WHERE id = ${docs[0]!.id}`;
+    expect(doc).toMatchObject({
+      status: 'needs_resolution',
+      parse_error_code: 'unrecognized_type',
+      kind: 'upd',
+    });
+
+    // Файл доступен из карточки — вложение прикреплено.
+    const attachments = await db<{ s3_key: string }[]>`
+      SELECT s3_key FROM source_document_attachments WHERE source_document_id = ${docs[0]!.id}`;
+    expect(attachments).toHaveLength(1);
+
+    // Задание в очередь НЕ ставится: и классификатор, и vision уже отказались,
+    // повторять нечего.
+    const jobs = await db<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM job_outbox
+       WHERE dedupe_key = ${`doc~${docs[0]!.id}~parse~0`}`;
+    expect(jobs[0]!.n).toBe('0');
+
     const rows = await registryRows(bundleId);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ status: 'skipped', detected_kind: 'unknown' });
+    expect(rows[0]).toMatchObject({ status: 'created', detected_kind: 'unknown' });
+  });
+
+  it('пакет не объявляется разобранным, пока есть строки «в процессе»', async () => {
+    const bundleId = await bundleWithRegistry(['live.pdf']);
+    // Строка без ключа S3: во входы разбора она не попадает вовсе (там нужен
+    // ключ), и раньше оставалась в needs_review навсегда — файл не виден ни в
+    // «Документах», ни среди дополнительных, а пакет числится разобранным.
+    await db`INSERT INTO bundle_import_items
+        (bundle_id, source_filename, input_s3_key, mime_type, size_bytes,
+         upload_generation, status)
+      VALUES (${bundleId}, 'ghost.pdf', NULL, 'application/pdf', 1000, 0, 'needs_review')`;
+
+    await handleDocumentRouterJob(bundleId, log);
+
+    const rows = await registryRows(bundleId);
+    const ghost = rows.find((r) => r.source_filename === 'ghost.pdf');
+    expect(ghost?.status).toBe('failed');
+    const [bundle] = await db<{ status: string }[]>`
+      SELECT status FROM source_bundles WHERE id = ${bundleId}`;
+    expect(bundle!.status).toBe('parsed');
   });
 
   it('файл зоны «Дополнительные документы» не читается из S3 и не распознаётся', async () => {

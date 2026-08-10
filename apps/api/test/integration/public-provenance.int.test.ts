@@ -114,8 +114,14 @@ suite('провенанс публичной загрузки (реальный 
     return id;
   }
 
+  // Фильтр по своему объекту обязателен: тестовая БД общая для наборов,
+  // идущих параллельно, и без него в выдачу попадают чужие документы —
+  // проверка «в списке ровно один» ловила бы соседний набор, а не регресс.
   const list = () =>
-    app.inject({ method: 'GET', url: '/api/v1/source-documents?direction=inbound&limit=50' });
+    app.inject({
+      method: 'GET',
+      url: `/api/v1/source-documents?direction=inbound&limit=50&siteIds=${siteId}`,
+    });
   const detail = (id: string) =>
     app.inject({ method: 'GET', url: `/api/v1/source-documents/${id}` });
 

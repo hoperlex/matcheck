@@ -32,12 +32,17 @@ import {
   type QueuePatch,
 } from './submitQueue';
 import { MAX_FILES, filesProblem } from './uploadLimits';
+import { rejectLabel } from './rejectLabel';
 
 const MAX_COMMENT = 500;
 
+// HEIC в списке НЕТ намеренно: распознать его конвейер не умеет, и сервер
+// отказывает по содержимому. Полезный побочный эффект — Safari на iOS, не видя
+// heic в accept, сам отдаёт JPEG. Это подсказка браузеру, а не защита: защита —
+// серверный sniff (см. classifyStrict).
 const ACCEPT =
   'application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,' +
-  'image/jpeg,image/png,image/webp,image/heic,.pdf,.xlsx,.jpg,.jpeg,.png,.webp,.heic';
+  'image/jpeg,image/png,image/webp,.pdf,.xlsx,.jpg,.jpeg,.png,.webp';
 
 /**
  * Одна поставка: объект, дата, комментарий и свой комплект документов.
@@ -491,19 +496,3 @@ function guardOtherZone(other: FileRow[], f: File): boolean {
   return false;
 }
 
-function rejectLabel(reason: string): string {
-  switch (reason) {
-    case 'unsupported_type':
-      return 'неподдерживаемый формат (нужны PDF, фото или .xlsx)';
-    case 'empty':
-      return 'пустой файл';
-    case 'too_large':
-      return 'файл больше 10 МБ';
-    case 'signature_image':
-      return 'слишком маленькое изображение — документ на нём не прочитать';
-    case 'archive_suspicious':
-      return 'файл не удалось прочитать';
-    default:
-      return 'не принят';
-  }
-}

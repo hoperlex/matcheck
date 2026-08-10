@@ -408,6 +408,86 @@ suite('дополнительные документы поставки (реа�
     expect(link.json()).toMatchObject({ filename: 'cert.pdf' });
   });
 
+  it('провалившаяся накладная: файл виден в разделе, хотя строка created', async () => {
+    // Router разворачивает накладную в ДОЧЕРНИЙ пакет и честно пишет
+    // status='created' — задание поставлено. Если дочерний пакет кончился
+    // ничем, конечный исход живёт в effective_status, и файл обязан остаться
+    // видимым: иначе поставщик видит «готово», а документа нет ни одного.
+    const res = await upload([{ field: 'files', filename: 'wb.pdf', content: pdf('w') }]);
+    const { bundleId } = res.json() as { bundleId: string };
+    const subId = randomUUID();
+    await sql`INSERT INTO source_bundles (id, bundle_hash, kind, direction, site_id, status,
+                                          parent_bundle_id)
+      VALUES (${subId}, ${randomUUID()}, 'waybill', 'inbound', ${siteId}, 'parse_failed',
+              ${bundleId})`;
+    // Техническая запись дочернего пакета остаётся для аудита — она НЕ должна
+    // считаться настоящим документом и прятать пакет из раздела.
+    await sql`INSERT INTO source_documents
+        (kind, is_technical, direction, origin, status, site_id, bundle_id, queued_at,
+         parse_error_code)
+      VALUES ('transport_waybill', true, 'inbound', 'manual_pdf', 'parse_failed', ${siteId},
+              ${subId}, now(), 'no_waybill_found')`;
+    await sql`UPDATE bundle_import_items
+                 SET status = 'created', effective_status = 'failed', sub_bundle_id = ${subId}
+               WHERE bundle_id = ${bundleId}`;
+    await sql`UPDATE source_bundles SET status = 'parsed' WHERE id = ${bundleId}`;
+    await sql`DELETE FROM source_documents WHERE bundle_id = ${bundleId} AND is_technical = true`;
+
+    const list = await app.inject({ method: 'GET', url: '/api/v1/source-bundles/extra-only' });
+    const body = list.json() as {
+      items: Array<{ bundleId: string; files: Array<{ id: string; filename: string }> }>;
+    };
+    const entry = body.items.find((b) => b.bundleId === bundleId);
+    expect(entry?.files.map((f) => f.filename)).toEqual(['wb.pdf']);
+
+    // И файл действительно скачивается — иначе видимость ничего не стоит.
+    const link = await app.inject({
+      method: 'GET',
+      url: `/api/v1/source-bundles/${bundleId}/extra/${entry!.files[0]!.id}/url`,
+    });
+    expect(link.statusCode).toBe(200);
+  });
+
+  it('строка, не дошедшая до разбора, тоже видна в разделе', async () => {
+    // Legacy-пакеты и крах router-job в середине пачки оставляли строки в
+    // needs_review: документа нет, в дополнительные файлы такая строка раньше
+    // не попадала — файл исчезал целиком.
+    const res = await upload([{ field: 'files', filename: 'lost.pdf', content: pdf('l') }]);
+    const { bundleId } = res.json() as { bundleId: string };
+    await sql`UPDATE bundle_import_items SET status = 'needs_review' WHERE bundle_id = ${bundleId}`;
+    await sql`UPDATE source_bundles SET status = 'parsed' WHERE id = ${bundleId}`;
+    await sql`DELETE FROM source_documents WHERE bundle_id = ${bundleId} AND is_technical = true`;
+
+    const list = await app.inject({ method: 'GET', url: '/api/v1/source-bundles/extra-only' });
+    const body = list.json() as {
+      items: Array<{ bundleId: string; files: Array<{ filename: string }> }>;
+    };
+    expect(
+      body.items.find((b) => b.bundleId === bundleId)?.files.map((f) => f.filename),
+    ).toEqual(['lost.pdf']);
+  });
+
+  it('пакет с настоящим документом в разделе не показывается', async () => {
+    // Обратная сторона той же правки: живой документ прячет пакет, иначе
+    // раздел «Без документов» превратился бы в копию «Документов».
+    const res = await upload([
+      { field: 'files', filename: 'upd.pdf', content: pdf('1') },
+      { field: 'extraFiles', filename: 'cert.pdf', content: pdf('2') },
+    ]);
+    const { bundleId } = res.json() as { bundleId: string };
+    await sql`UPDATE bundle_import_items SET status = 'skipped'
+               WHERE bundle_id = ${bundleId} AND processing_mode = 'store_only'`;
+    await sql`UPDATE bundle_import_items SET status = 'created'
+               WHERE bundle_id = ${bundleId} AND processing_mode = 'auto'`;
+    await sql`UPDATE source_documents SET is_technical = false
+               WHERE bundle_id = ${bundleId} AND is_technical = true`;
+    await sql`UPDATE source_bundles SET status = 'parsed' WHERE id = ${bundleId}`;
+
+    const list = await app.inject({ method: 'GET', url: '/api/v1/source-bundles/extra-only' });
+    const body = list.json() as { items: Array<{ bundleId: string }> };
+    expect(body.items.find((b) => b.bundleId === bundleId)).toBeUndefined();
+  });
+
   it('журнал импорта считает сохранённые без распознавания', async () => {
     const res = await upload([
       { field: 'files', filename: 'upd.pdf', content: pdf('1') },

@@ -27,6 +27,8 @@ import { bundleImportItems, ingestEvents, sites, sourceBundles } from '../db/sch
 import { SYSTEM_SITE_ID } from '../db/schema.js';
 import { collectUploadParts, uploadLimitMessage } from '../domain/sourceDocuments/collect-upload.js';
 import { ingestDocumentsBundle } from '../domain/sourceDocuments/ingest-bundle.js';
+import { loadEnv } from '../lib/env.js';
+import { fileHashOf } from '../domain/sourceDocuments/bundle-key.js';
 
 /** Лимиты публичной загрузки. Строже внутренних: вход открыт всем. */
 const PUBLIC_LIMITS = {
@@ -79,6 +81,10 @@ function clientIpOf(req: { headers: Record<string, unknown>; ip: string }): stri
 
 export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
+  // Потолки приёма — из окружения: в день массовой загрузки их правят по
+  // фактической глубине очереди, без пересборки образа. Умолчания те же, что
+  // были в коде.
+  const env = loadEnv();
 
   /**
    * Глобальный потолок фичи поверх per-IP лимита.
@@ -93,7 +99,7 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
    * isExceeded. Проверка по !isAllowed отдавала 429 на каждый запрос.
    */
   const globalUploadLimit = app.createRateLimit({
-    max: 200,
+    max: env.PUBLIC_UPLOAD_GLOBAL_MAX,
     timeWindow: '1 hour',
     keyGenerator: () => 'public-upload:global',
   });
@@ -135,7 +141,7 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
       // блокируется. ban не используем: он отдаёт 403, а UI объясняет только 429.
       config: {
         rateLimit: {
-          max: 20,
+          max: env.PUBLIC_UPLOAD_IP_MAX,
           timeWindow: '10 minutes',
           keyGenerator: (req) => `public-upload:${clientIpOf(req as never)}`,
         },
@@ -245,9 +251,19 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
             comment: meta.data.comment ?? null,
             ip: clientIpOf(req),
             userAgent: (req.headers['user-agent'] as string | undefined) ?? null,
+            // Сквозная нумерация + хеш содержимого: без них манифест со
+            // строками реестра строго не сопоставить (одинаковые имена файлов,
+            // схлопывание дублей между зонами). Хеш тот же sha256, что уже
+            // считается для contentHash пакета.
             manifest: [
-              ...collected.accepted.map((f) => ({ filename: f.filename, accepted: true })),
-              ...collected.rejected.map((f) => ({
+              ...collected.accepted.map((f, i) => ({
+                ordinal: i + 1,
+                filename: f.filename,
+                accepted: true,
+                sha256: fileHashOf(f.buffer),
+              })),
+              ...collected.rejected.map((f, i) => ({
+                ordinal: collected.accepted.length + i + 1,
                 filename: f.filename,
                 accepted: false,
                 reason: f.reason,
@@ -268,6 +284,26 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
       // приём для него окончателен. Тот же комплект на другой объект или дату
       // теперь становится отдельным пакетом, а менеджер видит ссылку на
       // двойник через ingest_events.cross_scope_of.
+      // Факты для решения о лимитах: сколько файлов пришло одним запросом и
+      // какой backlog у разбора на этот момент. Решение поднимать потолки
+      // принимается по этим цифрам за пиковый час, а не заранее. Ошибку Redis
+      // глотаем: лог не повод отвечать поставщику 500.
+      let queueDepth: number | null = null;
+      try {
+        queueDepth = (await app.queues.updParse.getWaitingCount?.()) ?? null;
+      } catch {
+        queueDepth = null;
+      }
+      req.log.info(
+        {
+          bundleId: result.bundleId,
+          filesAccepted: collected.accepted.length,
+          filesRejected: collected.rejected.length,
+          updParseWaiting: queueDepth,
+        },
+        'public upload: принято',
+      );
+
       reply.code(201);
       return {
         ticket: result.ticket ?? ticket,

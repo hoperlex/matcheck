@@ -109,6 +109,11 @@ export const SourceParseErrorCodeSchema = z.enum([
   // Waybill-batch pipeline: в пакете не найдено ни одного распознаваемого
   // документа (ни ТН-2116, ни ОС-2). Только рукописное / паспорта качества / прочее.
   'no_waybill_found',
+  // Файл из обязательной зоны формы, тип которого не подтвердили ни текстовый
+  // классификатор, ни vision. Документ заведён пустым (status='needs_resolution')
+  // ТОЛЬКО чтобы файл не исчез из виду: распознавать больше нечем, разбирает
+  // человек и закрывает вопрос кнопкой «Разобрано вручную».
+  'unrecognized_type',
 ]);
 export type SourceParseErrorCode = z.infer<typeof SourceParseErrorCodeSchema>;
 export const SourceDirectionSchema = z.enum(['inbound', 'outbound']);

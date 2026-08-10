@@ -6,7 +6,7 @@
 // BullMQ-воркеров, вешает обработчики сигналов и периодические задачи. Импорт
 // его из роута поднял бы второго воркера прямо в API-процессе.
 
-import { and, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, or, sql as drSql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { bundleImportItems, sourceBundles } from '../../db/schema.js';
 
@@ -25,6 +25,10 @@ export type RegistryRow = {
   parserUsed: string | null;
   createdDocumentIds: string[];
   reason: string | null;
+  // Конечный исход файла, если он расходится с решением router'а: накладная
+  // ушла в дочерний пакет (status='created'), а тот кончился ничем.
+  effectiveStatus: string | null;
+  resolvedAt: Date | null;
   createdAt: Date;
 };
 
@@ -43,6 +47,8 @@ const columns = {
   parserUsed: bundleImportItems.parserUsed,
   createdDocumentIds: bundleImportItems.createdDocumentIds,
   reason: bundleImportItems.reason,
+  effectiveStatus: bundleImportItems.effectiveStatus,
+  resolvedAt: bundleImportItems.resolvedAt,
   createdAt: bundleImportItems.createdAt,
 };
 
@@ -119,15 +125,141 @@ export async function resolveRootBundle(
 }
 
 /**
- * Дополнительные файлы поставки: всё, что сохранено без распознавания.
+ * Дополнительные файлы поставки: всё, из чего не вышло живого документа.
  *
- * Это и файлы из зоны «Дополнительные документы» (processing_mode='store_only'),
- * и файлы, тип которых определить не удалось — второе тоже нужно показать, иначе
- * оно исчезнет из виду. Признак один: терминальный `skipped` с живым ключом S3.
+ * Это файлы из зоны «Дополнительные документы» (processing_mode='store_only'),
+ * сертификаты (`skipped`), файлы, упавшие при обработке (`failed`), строки, не
+ * дошедшие до разбора (`needs_review` — legacy-пакеты до реестра), и накладные,
+ * чей дочерний пакет кончился ничем (`effective_status='failed'` при
+ * status='created'). Всё это иначе не видно нигде: карточки у пакета может не
+ * быть, а в «Документах» такие файлы не появляются.
+ *
+ * Условие «есть ключ S3» обязательно: без него файл не скачать, показывать
+ * нечего.
  */
 export async function selectExtraFiles(db: Db, bundleId: string): Promise<RegistryRow[]> {
   const root = await resolveRootBundle(db, bundleId);
   if (!root) return [];
   const rows = await selectRegistryRows(db, root.id, root.activeUploadGeneration);
-  return rows.filter((r) => r.status === 'skipped' && r.s3Key !== null);
+  return rows.filter((r) => r.s3Key !== null && isExtraFileRow(r));
+}
+
+/** Строка реестра, не давшая живого документа (см. selectExtraFiles). */
+export function isExtraFileRow(r: Pick<RegistryRow, 'status' | 'effectiveStatus'>): boolean {
+  if (r.effectiveStatus === 'failed') return true;
+  return r.status === 'skipped' || r.status === 'failed' || r.status === 'needs_review';
+}
+
+/**
+ * Терминальный провал дочернего пакета накладной → родительская строка реестра.
+ *
+ * Router ставит родительской строке status='created' сразу после постановки
+ * дочернего задания — и это честно: решение принято, задание в очереди. Но если
+ * дочерний пакет кончился ничем (ни ТН, ни ОС-2 не распознаны; исчерпаны
+ * ретраи), файл переставал быть виден вообще: документа нет, строка `created` в
+ * дополнительные файлы не попадает, поставщик видит «готово».
+ *
+ * Конечный исход живёт в effective_status — status трогать нельзя, иначе
+ * повторный прогон router'а («created → пропускаем») развернёт файл во второй
+ * дочерний пакет.
+ */
+export async function markSubBundleItemsFailed(
+  db: Db,
+  subBundleId: string,
+  reason: string,
+): Promise<{ id: string; filename: string }[]> {
+  return db
+    .update(bundleImportItems)
+    .set({ effectiveStatus: 'failed', reason, updatedAt: new Date() })
+    .where(
+      and(
+        eq(bundleImportItems.subBundleId, subBundleId),
+        // Разобранное человеком не переоткрываем.
+        isNull(bundleImportItems.resolvedAt),
+      ),
+    )
+    .returning({ id: bundleImportItems.id, filename: bundleImportItems.sourceFilename });
+}
+
+/**
+ * Статусы строки, означающие «файл до разбора не дошёл». Терминальными их
+ * оставлять нельзя: файл не виден ни в «Документах», ни как дополнительный,
+ * пока кто-нибудь не назовёт его исход.
+ */
+export const NON_TERMINAL_ITEM_STATUSES = ['accepted', 'uploading', 'needs_review'] as const;
+
+/**
+ * Инвариант завершённости пакета: у разобранного пакета не остаётся строк «в
+ * процессе».
+ *
+ * Вызывается в конце router-job (штатный путь), при исчерпании ретраев и
+ * периодически из repair — крах между обновлением строк и пакета иначе оставил
+ * бы файл невидимым навсегда.
+ *
+ * Строки чужих поколений не трогаем: они относятся к брошенным попыткам
+ * загрузки. `upload_generation IS NULL` — legacy-пакеты, принятые до реестра.
+ */
+export async function finalizeStaleRegistryItems(
+  db: Db,
+  bundleId: string,
+  opts?: { reason?: string },
+): Promise<{ id: string; filename: string }[]> {
+  const [bundle] = await db
+    .select({ activeUploadGeneration: sourceBundles.activeUploadGeneration })
+    .from(sourceBundles)
+    .where(eq(sourceBundles.id, bundleId))
+    .limit(1);
+  if (!bundle) return [];
+
+  return db
+    .update(bundleImportItems)
+    .set({
+      status: 'failed',
+      effectiveStatus: 'failed',
+      reason: opts?.reason ?? 'файл не дошёл до разбора',
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(bundleImportItems.bundleId, bundleId),
+        inArray(bundleImportItems.status, [...NON_TERMINAL_ITEM_STATUSES]),
+        or(
+          eq(bundleImportItems.uploadGeneration, bundle.activeUploadGeneration),
+          isNull(bundleImportItems.uploadGeneration),
+        ),
+        // Разобранное человеком не переоткрываем.
+        isNull(bundleImportItems.resolvedAt),
+      ),
+    )
+    .returning({ id: bundleImportItems.id, filename: bundleImportItems.sourceFilename });
+}
+
+/**
+ * Пакеты, которые считаются разобранными, но нарушают инвариант: есть строки
+ * реестра «в процессе». Используется периодической проверкой.
+ */
+export async function selectBundlesWithStaleItems(
+  db: Db,
+  cutoffMinutes: number,
+  limit: number,
+): Promise<string[]> {
+  const rows = await db
+    .select({ id: sourceBundles.id })
+    .from(sourceBundles)
+    .where(
+      and(
+        inArray(sourceBundles.status, ['parsed', 'parse_failed']),
+        drSql`${sourceBundles.updatedAt} < now() - make_interval(mins => ${cutoffMinutes})`,
+        drSql`exists (
+          select 1 from bundle_import_items bi
+           where bi.bundle_id = ${sourceBundles.id}
+             and bi.status in ('accepted', 'uploading', 'needs_review')
+             and bi.resolved_at is null
+             and (bi.upload_generation = ${sourceBundles.activeUploadGeneration}
+                  or bi.upload_generation is null)
+        )`,
+      ),
+    )
+    .limit(limit);
+  return rows.map((r) => r.id);
 }

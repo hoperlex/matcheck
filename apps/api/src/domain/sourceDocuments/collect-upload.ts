@@ -32,7 +32,8 @@ export type RejectReason =
   | 'empty'
   | 'too_large'
   | 'signature_image'
-  | 'archive_suspicious';
+  | 'archive_suspicious'
+  | 'heic_unsupported';
 
 export type RejectedFile = { filename: string; reason: RejectReason };
 
@@ -178,6 +179,14 @@ function classifyStrict(
   }
 
   const sniffed = verdict.sniffedMime ?? sniffMime(buffer);
+  // HEIC с айфона конвейер принимает, но распознать не может НИКОГДА: vision
+  // работает с jpeg/png/webp/pdf, а по расширению файл уходит в PDF-ветку и
+  // падает на pdftoppm. Честный отказ на входе с понятной инструкцией лучше
+  // тихого parse_failed через минуту. Отказ только в strict-режиме: почта и
+  // внутренняя загрузка ведут себя как прежде.
+  if (sniffed === 'image/heic') {
+    return { ok: false, reason: 'heic_unsupported' };
+  }
   // OLE2-сигнатура одинакова у .xls, .doc и .ppt — публично не принимаем
   // ничего из этого семейства: ради редкого .xls разбирать Workbook-стрим
   // не окупается, а пропустить .doc как «таблицу» нельзя.

@@ -89,7 +89,11 @@ import { publishSseEvent } from './domain/sse/redis-bridge.js';
 import { sourceDocumentAttachments, bundleImportItems } from './db/schema.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { classifyFile, type FileClassification } from './domain/edo/document-router.js';
-import { selectRegistryRows } from './domain/sourceDocuments/bundle-import-registry.js';
+import {
+  finalizeStaleRegistryItems,
+  markSubBundleItemsFailed,
+  selectRegistryRows,
+} from './domain/sourceDocuments/bundle-import-registry.js';
 import { classifyImageKind } from './domain/edo/vision-classifier.js';
 import {
   bundleDispatchKeyOf,
@@ -1471,6 +1475,14 @@ async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise
       })
       .where(eq(sourceBundles.id, bundleId));
     log.warn('no waybill found in bundle');
+    // Пакет мог быть развёрнут router'ом из файла родительской поставки —
+    // тогда без этой отметки файл исчезал из виду совсем (документа нет,
+    // родительская строка реестра осталась в created).
+    await markSubBundleItemFailed(
+      bundleId,
+      'накладная не распознана — ни ТН, ни ОС-2 не найдены',
+      log,
+    );
     await notifySourceDocumentUpdated(techId);
     return;
   }
@@ -1625,7 +1637,15 @@ type ImportItemOutcome = {
   createdDocumentIds?: string[];
   subBundleId?: string | null;
   metadata?: Record<string, unknown> | null;
+  // Конечный исход файла, если он отличается от решения router'а. Не задан —
+  // выводится из status (см. recordImportItem).
+  effectiveStatus?: string | null;
 };
+
+// Решения router'а, после которых по файлу больше ничего не произойдёт.
+// Нетерминальные (accepted, uploading, needs_review) означают, что файл до
+// разбора не дошёл — их добивает инвариант завершённости пакета.
+const TERMINAL_ITEM_STATUSES = new Set(['created', 'skipped', 'failed']);
 
 /**
  * Записывает решение по файлу в реестр.
@@ -1654,6 +1674,12 @@ async function recordImportItem(
     createdDocumentIds: outcome.createdDocumentIds ?? [],
     subBundleId: outcome.subBundleId ?? null,
     metadata: outcome.metadata ?? null,
+    // Конечный исход. Для терминальных решений он совпадает с status; ветки,
+    // где исход выясняется позже (дочерний пакет накладной), переписывают его
+    // отдельно. Держать колонку заполненной обязательно: проверка «ни один
+    // принятый файл не потерян» опирается именно на неё.
+    effectiveStatus:
+      outcome.effectiveStatus ?? (TERMINAL_ITEM_STATUSES.has(outcome.status) ? outcome.status : null),
     updatedAt: new Date(),
   };
 
@@ -1676,6 +1702,48 @@ async function recordImportItem(
   });
 }
 
+/**
+ * Обёртка над markSubBundleItemsFailed: ошибку разметки глушим — она не повод
+ * валить обработчик, а исход перепроверит периодическая проверка инварианта.
+ */
+async function markSubBundleItemFailed(
+  subBundleId: string,
+  reason: string,
+  log: WorkerLog,
+): Promise<void> {
+  try {
+    const updated = await markSubBundleItemsFailed(db, subBundleId, reason);
+    if (updated.length > 0) {
+      log.warn({ subBundleId, items: updated.length }, 'sub-bundle failed → строка реестра failed');
+    }
+  } catch (err) {
+    log.error({ err, subBundleId }, 'не удалось пометить строку реестра failed');
+  }
+}
+
+/**
+ * Инвариант завершённости: пакет не считается разобранным, пока в реестре есть
+ * строки «в процессе». Ошибку глушим — она не повод валить разбор, тот же
+ * инвариант перепроверяется периодически (repairStuckJobs).
+ */
+async function closeStaleRegistryItems(
+  bundleId: string,
+  log: WorkerLog,
+  opts?: { reason?: string },
+): Promise<void> {
+  try {
+    const stale = await finalizeStaleRegistryItems(db, bundleId, opts);
+    if (stale.length > 0) {
+      log.warn(
+        { bundleId, files: stale.map((s) => s.filename) },
+        'router: строки реестра не дошли до разбора — помечены failed',
+      );
+    }
+  } catch (err) {
+    log.error({ err, bundleId }, 'не удалось закрыть незавершённые строки реестра');
+  }
+}
+
 // Единый вход «Загрузить документы» (router). Классифицирует КАЖДЫЙ файл пачки
 // и разворачивает его в СУЩЕСТВУЮЩИЙ проверенный flow:
 //   - УПД → одиночная очередь {sourceDocumentId, s3Key} (как «Загрузить УПД»);
@@ -1683,8 +1751,9 @@ async function recordImportItem(
 //     «Загрузить накладные»).
 // Router сам документы НЕ парсит и НЕ создаёт «с нуля» — переиспользует рабочий
 // код, поэтому данные не портятся. Каждое решение пишется в bundle_import_items
-// (журнал). Неуверенные / vision-требующие / m15 / unknown → status='needs_review'
-// БЕЗ создания операционных документов (Этап 4 добавит vision-доклассификацию).
+// (журнал). Файл, тип которого не подтвердили ни классификатор, ни vision,
+// становится документом «не распознано» (needs_resolution) под ручной разбор —
+// молча исчезнуть он не может.
 // Экспортируется ради теста провенанса: проверяется, что документы наследуют
 // происхождение пакета, получают связь с ним и что повтор задания не удваивает
 // пачку. В проде вызывается только из handleJob.
@@ -1815,8 +1884,9 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
       // Сбой самой классификации не должен прятать файл. Раньше исключение
       // отсюда ловил общий catch файла и писал failed, а дополнительные файлы
       // поставки отбираются по skipped — файл переставал быть виден вообще.
-      // Считаем такой случай «тип не определён»: ниже он сохранится как
-      // дополнительный. Инфраструктурные сбои (S3, БД) по-прежнему failed.
+      // Считаем такой случай «тип не определён»: ниже по нему заведётся
+      // документ «не распознано» под ручной разбор. Инфраструктурные сбои
+      // (S3, БД) по-прежнему failed.
       let cls: FileClassification;
       try {
         cls = await classifyFile(buffer, a.mimeType ?? '', a.filename);
@@ -1837,8 +1907,9 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
       // Так фото М-15/накладной не уходит по умолчанию в УПД (кейс «Су-10
       // Алюспэйс»). Лёгкий запрос (1 картинка, ≤200 токенов). При неуверенности
       // (< 0.6) / ошибке classifyImageKind вернёт null или unknown → cls не
-      // меняется, файл идёт прежним путём (УПД-vision) — уже работающие сканы
-      // УПД не затрагиваются.
+      // меняется, и файл попадает в ветку unknown ниже (документ «не
+      // распознано» под ручной разбор). Уже работающие сканы УПД не
+      // затрагиваются: их vision подтверждает как upd.
       if (cls.detectedKind === 'unknown' && cls.needsVision) {
         const vc = await classifyImageKind(buffer, a.mimeType ?? '', { sourceDocumentId: null });
         if (vc && vc.confidence >= 0.6 && vc.kind !== 'unknown') {
@@ -1863,20 +1934,63 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
         cls.detectedKind === 'transport_waybill' || cls.detectedKind === 'os2_transfer';
 
       if (cls.detectedKind === 'unknown') {
-        // Тип не подтвердил ни текстовый классификатор, ни vision. Раньше такой
-        // файл уходил в УПД-flow «на всякий случай» и почти всегда оседал
-        // пустым черновиком: из 12 таких документов на бою менеджер удалил 10,
-        // а два оставшихся требуют ручного разбора. Теперь файл сохраняется как
-        // дополнительный — он виден в поставке, и ложного УПД не появляется.
-        await recordImportItem(db, bundleId, a, {
-          detectedKind: 'unknown',
-          confidence: cls.confidence.toString(),
-          parserUsed: 'none',
-          status: 'skipped',
-          createdDocumentIds: [],
-          reason: 'тип документа не определён — сохранён как дополнительный',
-          metadata: { signals: cls.signals, needsVision: cls.needsVision },
+        // Тип не подтвердил ни текстовый классификатор, ни vision. В УПД-flow
+        // такой файл отправлять нельзя: он почти всегда оседал пустым
+        // черновиком (из 12 таких документов на бою менеджер удалил 10). Но и
+        // прятать его в дополнительные файлы нельзя — он пришёл из ОБЯЗАТЕЛЬНОЙ
+        // зоны формы, где поставщик грузит накладную и УПД; молча исчезнув
+        // оттуда, он теряется для приёмки.
+        //
+        // Поэтому заводим документ-заглушку: строка в «Документах» с тегом «не
+        // распознано», разбирать её будет человек. Задание в очередь НЕ ставим —
+        // распознавать нечем, все автоматические попытки уже исчерпаны.
+        const docId = randomUUID();
+        await db.transaction(async (tx) => {
+          await tx.insert(sourceDocuments).values({
+            id: docId,
+            // Новых видов не вводим: тип неизвестен, а 'upd' — общий вход
+            // раздела «Документы». В UI он подменяется на «—» по коду ошибки.
+            kind: 'upd',
+            direction: bundle.direction,
+            origin: bundleOrigin,
+            status: 'needs_resolution',
+            parseErrorCode: 'unrecognized_type',
+            parseErrorDetails: {
+              message: 'тип документа не определён — требуется ручной разбор',
+              signals: cls.signals,
+            },
+            contractorId: bundle.contractorId,
+            recipientMolId: bundle.recipientMolId,
+            recipientSource: manualRecipientSource(bundle),
+            siteId: bundle.siteId,
+            expectedDate: bundleExpected,
+            originalFilename: a.filename,
+            // Разбор завершён (и не начнётся снова) — processedAt честно
+            // фиксирует момент, дальше документ ждёт человека.
+            processedAt: new Date(),
+            bundleId,
+            createdByUserId: bundle.createdByUserId,
+          });
+          await tx.insert(sourceDocumentAttachments).values({
+            sourceDocumentId: docId,
+            s3Key: a.s3Key,
+            filename: a.filename,
+            mimeType: a.mimeType,
+            sizeBytes: a.sizeBytes,
+            role: 'original',
+          });
+          await recordImportItem(tx as unknown as typeof db, bundleId, a, {
+            detectedKind: 'unknown',
+            confidence: cls.confidence.toString(),
+            parserUsed: 'none',
+            status: 'created',
+            effectiveStatus: 'created',
+            createdDocumentIds: [docId],
+            reason: 'тип документа не определён — требуется ручной разбор',
+            metadata: { signals: cls.signals, needsVision: cls.needsVision },
+          });
         });
+        createdCount++;
         continue;
       }
 
@@ -2130,6 +2244,13 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
       await tx.delete(sourceDocuments).where(eq(sourceDocuments.id, techId));
     });
   }
+  // Инвариант завершённости: пакет объявляется разобранным только после того,
+  // как у КАЖДОЙ его строки активного поколения есть терминальный исход.
+  // Строка, оставшаяся в accepted (крах в середине пачки) или в needs_review
+  // (legacy-строка без ключа S3, до входов вообще не дошедшая), невидима
+  // нигде — ни документа, ни дополнительного файла.
+  await closeStaleRegistryItems(bundleId, log);
+
   await db
     .update(sourceBundles)
     .set({ status: 'parsed', kind: 'mixed', docCount: createdCount, updatedAt: new Date() })
@@ -2525,6 +2646,20 @@ worker.on('failed', async (job, err) => {
           updatedAt: new Date(),
         })
         .where(eq(sourceBundles.id, bundleId));
+      // Пакет мог быть дочерним (накладная из router'а): без этой отметки
+      // родительская строка реестра осталась бы в created и файл исчез бы из
+      // виду. Для не-дочернего пакета обновлять нечего — запрос ничего не
+      // найдёт.
+      await markSubBundleItemFailed(
+        bundleId,
+        `разбор накладной не удался: ${err.message}`,
+        logger,
+      );
+      // Строки самого пакета, не дошедшие до терминального решения (краш
+      // router-job в середине пачки), тоже нельзя оставлять «в процессе».
+      await closeStaleRegistryItems(bundleId, logger, {
+        reason: 'разбор пакета не удался — файл не дошёл до распознавания',
+      });
       // Помечаем и техническую source_document, если она ещё жива. Именно
       // техническую: реальные документы пакета разобрались успешно, метить их
       // ошибкой нельзя.

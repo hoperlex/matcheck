@@ -297,6 +297,7 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
       | 'parse_failed'
       | 'internal_error'
       | 'partial_parse'
+      | 'unrecognized_type'
       | null) ?? null,
     parseErrorDetails: sd.parseErrorDetails ?? null,
     originalFilename: sd.originalFilename,
@@ -693,6 +694,14 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             .from(shipmentSources);
           conditions.push(drSql`${sourceDocuments.id} not in ${linkedToShipment}`);
         }
+        // Нераспознанный файл — заглушка под ручной разбор, реквизитов в ней
+        // нет. В «Ожидаемых» на приёмке и КПП ей не место: инспектор не сможет
+        // по ней ничего принять, а при массовой загрузке фото такие строки
+        // забьют рабочий список. partial_parse остаётся ожидаемой — там шапка
+        // распознана, не хватает только позиций.
+        conditions.push(
+          drSql`${sourceDocuments.parseErrorCode} is distinct from 'unrecognized_type'`,
+        );
       }
       // Волна 1C — серверные фильтры (contractor/supplier/site/даты). Опциональны:
       // добавляются в conditions, только если параметр задан → при пустых
@@ -2180,18 +2189,24 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // бы один файл, сохранённый без распознавания. Дочерний пакет
       // адресуется алиасом прямо в SQL: alias() из drizzle рендерит только имя
       // алиаса и в сырой подзапрос не годится.
+      // Технические записи (служебная строка router-пакета, заглушка дочернего
+      // waybill-пакета) документом не считаются: пакет, где разбор кончился
+      // ничем, отличается от разобранного именно наличием ЖИВОГО документа.
+      // Без этого условия провалившаяся накладная прятала пакет целиком.
       const noDocuments = drSql`not exists (
-        select 1 from ${sourceDocuments} sd where sd.bundle_id = ${sourceBundles.id}
+        select 1 from ${sourceDocuments} sd
+         where sd.bundle_id = ${sourceBundles.id} and not sd.is_technical
       ) and not exists (
         select 1
           from ${sourceDocuments} sd
           join ${sourceBundles} cb on cb.id = sd.bundle_id
-         where cb.parent_bundle_id = ${sourceBundles.id}
+         where cb.parent_bundle_id = ${sourceBundles.id} and not sd.is_technical
       ) and exists (
         select 1
           from ${bundleImportItems} bi
          where bi.bundle_id = ${sourceBundles.id}
-           and bi.status = 'skipped'
+           and (bi.effective_status = 'failed'
+                or bi.status in ('skipped', 'failed', 'needs_review'))
            and bi.input_s3_key is not null
       )`;
       const where = and(isNull(sourceBundles.parentBundleId), noDocuments);
@@ -2516,6 +2531,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         }),
       )
       .optional(),
+    // «Разобрано вручную» — кнопка на документе, тип которого распознать не
+    // удалось (unrecognized_type). Автоматически такой документ из
+    // needs_resolution не выйдет: расхождений в нём нет, пересчитывать нечего,
+    // а без явного завершения он остался бы «живым» навсегда и портал
+    // опрашивал бы его каждые 4 секунды.
+    resolveManually: z.boolean().optional(),
   });
 
   app.patch(
@@ -2652,12 +2673,63 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         upd.parseErrorDetails = null;
       }
 
+      // Завершение ручного разбора нераспознанного файла. Только по явному
+      // флагу: правка полей сама по себе не значит, что человек закончил.
+      const resolvingManually =
+        req.body.resolveManually === true &&
+        sd.status === 'needs_resolution' &&
+        sd.parseErrorCode === 'unrecognized_type';
+      if (resolvingManually) {
+        // Куда переводить — решают сами данные, и выбора тут по сути нет:
+        // ограничение source_upd_required запрещает УПД в статусе `parsed` без
+        // номера, даты и суммы. Менеджер ввёл реквизиты (файл действительно был
+        // документом) — `parsed`; закрыл как есть (сертификат, дубль, мусор) —
+        // `archived`: документ уходит из работы, но остаётся видимым вместе с
+        // файлом, а это и есть вся суть правки.
+        const nextDocNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
+        const nextDocDate = upd.docDate !== undefined ? upd.docDate : sd.docDate;
+        const nextTotalSum = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
+        const complete =
+          nextDocNumber != null && nextDocDate != null && nextTotalSum != null;
+        upd.status = complete ? 'parsed' : 'archived';
+        if (complete) {
+          // Стал полноценным документом — прошлая ошибка распознавания больше
+          // ни на что не влияет.
+          upd.parseErrorCode = null;
+          upd.parseErrorDetails = null;
+        }
+        // В архиве код СОХРАНЯЕТСЯ намеренно, и это не «забыли почистить»: по
+        // нему такие записи не уезжают в /sync на планшет КПП (там документы
+        // отбираются по объекту и дате, без оглядки на статус) и не попадают в
+        // «Ожидаемые». Плюс он объясняет менеджеру, почему документ в архиве.
+      }
+
       const [updated] = await app.db
         .update(sourceDocuments)
         .set(upd)
         .where(eq(sourceDocuments.id, sd.id))
         .returning();
       if (!updated) throw new Error('Failed to update source_document');
+
+      // Отметка в реестре входных файлов: кто и когда закрыл вопрос по файлу.
+      // Без неё повторная проверка инварианта считала бы файл незакрытым, а в
+      // сверке (скрипт по бою) не было бы видно ручных разборов.
+      if (resolvingManually && sd.bundleId) {
+        await app.db
+          .update(bundleImportItems)
+          .set({
+            resolvedAt: new Date(),
+            resolvedByUserId: req.user?.id ?? null,
+            manualDocumentId: sd.id,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(bundleImportItems.bundleId, sd.bundleId),
+              drSql`${bundleImportItems.createdDocumentIds} @> ${JSON.stringify([sd.id])}::jsonb`,
+            ),
+          );
+      }
 
       const attachments = await app.db
         .select()

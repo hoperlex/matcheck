@@ -227,7 +227,17 @@ suite('публичная загрузка документов (реальны�
       public_ticket: body.ticket,
       submission_comment: 'две машины, вторая после обеда',
     });
-    expect(ev!.submission_manifest).toEqual([{ filename: 'upd.pdf', accepted: true }]);
+    // ordinal + sha256 — то, чем запись манифеста сопоставляется со строкой
+    // реестра при сверке «ни один принятый файл не потерян»: по одному имени
+    // это невозможно (имена повторяются, дубли между зонами схлопываются).
+    expect(ev!.submission_manifest).toEqual([
+      {
+        ordinal: 1,
+        filename: 'upd.pdf',
+        accepted: true,
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    ]);
 
     // Задание пишется в outbox в одной транзакции с пакетом, а не в Redis:
     // недоступность очереди не оставит поставщика с «принято» без разбора.

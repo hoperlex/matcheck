@@ -64,6 +64,18 @@ const UNFINISHED_STATUSES: ReadonlyArray<Row['status']> = [
   'needs_resolution',
 ];
 
+/**
+ * «Живой» ли документ — то есть ждём ли мы, что сервер сам изменит его статус.
+ *
+ * Пара (статус, код), а не один статус: нераспознанный файл висит в
+ * needs_resolution до ручного разбора, и по одному статусу опрос на 4 секунды
+ * не выключился бы никогда.
+ */
+function isUnfinished(row: Pick<Row, 'status' | 'parseErrorCode'>): boolean {
+  if (row.status === 'needs_resolution' && row.parseErrorCode === 'unrecognized_type') return false;
+  return UNFINISHED_STATUSES.includes(row.status);
+}
+
 type KindFilter = 'all' | 'upd' | 'request';
 
 /**
@@ -112,7 +124,27 @@ function KindTag({ kind }: { kind: Row['kind'] }) {
   return <Tag color="gold">Заявка</Tag>;
 }
 
-function StatusTag({ row, onResolve }: { row: Row; onResolve?: (r: Row) => void }) {
+/**
+ * Файл из обязательной зоны, тип которого распознать не удалось. Документ по
+ * нему заводится пустым — только чтобы файл не исчез из виду; ни номера, ни
+ * позиций в нём нет, и «УПД» в колонке «Тип» было бы враньём.
+ */
+function isUnrecognized(row: Pick<Row, 'parseErrorCode'>): boolean {
+  // По коду, а не по статусу: закрытый вручную файл уходит в архив, но код при
+  // нём остаётся (по нему запись не уезжает на планшет и не попадает в
+  // «Ожидаемые») — тип у неё так и остался неизвестным.
+  return row.parseErrorCode === 'unrecognized_type';
+}
+
+function StatusTag({
+  row,
+  onResolve,
+  onManualResolve,
+}: {
+  row: Row;
+  onResolve?: (r: Row) => void;
+  onManualResolve?: (r: Row) => void;
+}) {
   // onResolve не передан (роль contractor) → resolve-кнопки скрыты: дозаполнение
   // и разрешение дубликатов — write-операции, подрядчику недоступны.
   // Derived-статус: если parsed, но не заполнены получатель/объект/дата
@@ -176,6 +208,34 @@ function StatusTag({ row, onResolve }: { row: Row; onResolve?: (r: Row) => void 
     case 'archived':
       return <Tag>архив</Tag>;
     case 'needs_resolution':
+      if (row.parseErrorCode === 'unrecognized_type') {
+        // Автоматических попыток больше не будет: и классификатор, и vision уже
+        // отказались. Строка живёт, пока человек не откроет файл и не закроет
+        // вопрос. «Разобрано» без реквизитов уводит документ в архив (файл
+        // остаётся доступным), с введёнными номером, датой и суммой — в
+        // «обработано».
+        return (
+          <Space size={4} wrap>
+            <Tooltip title="Тип документа определить не удалось — откройте файл и разберите вручную">
+              <Tag color="default">не распознано</Tag>
+            </Tooltip>
+            {onManualResolve && (
+              <Tooltip title="Закрыть вопрос по файлу: он уйдёт в архив, но останется доступным">
+                <Button
+                  size="small"
+                  type="link"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onManualResolve(row);
+                  }}
+                >
+                  разобрано
+                </Button>
+              </Tooltip>
+            )}
+          </Space>
+        );
+      }
       if (row.parseErrorCode === 'duplicate_upd') {
         return (
           <Space size={4} wrap>
@@ -383,7 +443,7 @@ export default function InboxPage() {
     // ручного обновления страницы (Ctrl+R).
     refetchInterval: (q) => {
       const items = q.state.data?.items ?? [];
-      const hasUnfinished = items.some((x) => UNFINISHED_STATUSES.includes(x.status));
+      const hasUnfinished = items.some(isUnfinished);
       return hasUnfinished ? 4000 : 20000;
     },
     refetchIntervalInBackground: false,
@@ -414,6 +474,15 @@ export default function InboxPage() {
     queryKey: ['source-documents', 'count', 'outbound'],
     queryFn: () =>
       api.get<{ total: number }>('/source-documents?direction=outbound&limit=1'),
+  });
+  // Счётчик вкладки «Без документов»: сама вкладка есть давно, но пока в ней не
+  // видно числа, туда никто не заглядывает — а именно там оседают файлы, из
+  // которых документа не вышло. Эндпоинт admin/manager-only, подрядчику вкладки
+  // нет вовсе.
+  const extraOnlyCountQuery = useQuery({
+    queryKey: ['source-bundles', 'extra-only', 'count'],
+    queryFn: () => api.get<{ total: number }>('/source-bundles/extra-only?limit=1'),
+    enabled: !isContractor,
   });
 
   // Сводка почтового канала. Пока ящик с документами не заведён, вкладка
@@ -483,6 +552,24 @@ export default function InboxPage() {
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ['source-documents'] });
     },
+  });
+
+  // «Разобрано вручную» для нераспознанного файла: документ уходит из
+  // needs_resolution в «обработано», а в реестре входных файлов отмечается, кто
+  // и когда закрыл вопрос. Без этого действия строка висела бы вечно и держала
+  // опрос списка на 4 секундах.
+  const resolveManually = useMutation({
+    mutationFn: (id: string) =>
+      api.patch<{ id: string; status: string }>(`/source-documents/${id}`, {
+        resolveManually: true,
+      }),
+    onSuccess: (res: { status?: string }) => {
+      message.success(
+        res.status === 'parsed' ? 'Документ помечен обработанным' : 'Файл убран в архив',
+      );
+      void qc.invalidateQueries({ queryKey: ['source-documents'] });
+    },
+    onError: (err: Error) => message.error(err.message),
   });
 
   const allItems = list.data?.items ?? [];
@@ -581,7 +668,15 @@ export default function InboxPage() {
       : []),
     // Комплекты, из которых не создано ни одного документа: их файлы в списке
     // «Документы» не появятся вовсе, и это единственный путь к ним.
-    ...(isContractor ? [] : [{ key: 'extra-only', label: 'Без документов', count: null }]),
+    ...(isContractor
+      ? []
+      : [
+          {
+            key: 'extra-only',
+            label: 'Без документов',
+            count: extraOnlyCountQuery.data?.total ?? null,
+          },
+        ]),
   ];
 
   return (
@@ -737,7 +832,9 @@ export default function InboxPage() {
                       toggleExpand(r.id);
                     }}
                   />
-                  <KindTag kind={r.kind} />
+                  {/* Тип «—»: файл распознать не удалось, и «УПД» здесь ввело
+                      бы в заблуждение — реквизитов в документе нет. */}
+                  {isUnrecognized(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
                   {/* Происхождение отмечаем только у почтовых: у них не
                       заполнен подрядчик, и это объясняет пустую колонку. */}
                   {r.origin === 'mail' && (
@@ -772,6 +869,9 @@ export default function InboxPage() {
               <StatusTag
                 row={r}
                 onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
+                onManualResolve={
+                  isContractor ? undefined : (row) => resolveManually.mutate(row.id)
+                }
               />
             ),
           },
@@ -835,11 +935,14 @@ export default function InboxPage() {
           <Card style={{ width: '100%' }} size="small">
             <Space direction="vertical" size={2} style={{ width: '100%', position: 'relative' }}>
               <Space size={4} wrap>
-                <KindTag kind={r.kind} />
+                {isUnrecognized(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
                 <StatusTag
-                row={r}
-                onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
-              />
+                  row={r}
+                  onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
+                  onManualResolve={
+                    isContractor ? undefined : (row) => resolveManually.mutate(row.id)
+                  }
+                />
               </Space>
               <Typography.Text strong>
                 {r.docNumber ?? (r.originalFilename ? r.originalFilename : '— без номера —')}

@@ -259,4 +259,34 @@ suite('скоуп фото и окно sync (реальный PostgreSQL)', () =
       expect(body.deliveries.missingOnClient.length).toBeGreaterThanOrEqual(503);
     });
   });
+
+  it('заглушка «не распознано» на планшет не уезжает', async () => {
+    // Мобильный список приёмки отбирает документы по объекту и дате поставки,
+    // без оглядки на статус. Заглушка (файл принят, тип не определён) пустая:
+    // принять по ней нечего, а в «Сегодня» на планшете КПП она была бы шумом.
+    // Разбирает такой файл менеджер на портале.
+    const stub = randomUUID();
+    const real = randomUUID();
+    await sql`INSERT INTO source_documents
+        (id, kind, is_technical, direction, origin, status, site_id, parsed_at,
+         parse_error_code, original_filename)
+      VALUES (${stub}, 'upd', false, 'inbound', 'manual_pdf', 'needs_resolution', ${siteA}, now(),
+              'unrecognized_type', 'mystery.pdf')`;
+    await sql`INSERT INTO source_documents
+        (id, kind, is_technical, direction, origin, status, site_id, parsed_at,
+         doc_number, doc_date, total_sum)
+      VALUES (${real}, 'upd', false, 'inbound', 'manual_pdf', 'parsed', ${siteA}, now(),
+              'Д-9', now(), 100)`;
+
+    currentUser = asInspector(inspectorA, siteA);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/sync?windowDays=90' });
+
+    expect(res.statusCode).toBe(200);
+    const ids = (res.json() as { sourceDocuments: { id: string }[] }).sourceDocuments.map(
+      (d) => d.id,
+    );
+    expect(ids).not.toContain(stub);
+    // Обычный документ того же объекта приезжает как раньше — фильтр точечный.
+    expect(ids).toContain(real);
+  });
 });
