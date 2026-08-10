@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Button, Grid, Typography } from 'antd';
+import { Button, Divider, Grid, Typography } from 'antd';
 import { useNavigate } from 'react-router-dom';
 
 const { useBreakpoint } = Grid;
@@ -9,7 +9,7 @@ const { useBreakpoint } = Grid;
  * брендовая панель: логотип «М», надпись «Приёмка материалов» и вход для
  * поставщика. Справа — форма (`children`) с заголовком/подзаголовком. На узких
  * экранах левая панель скрывается, остаётся одна колонка с компактным
- * логотипом сверху.
+ * логотипом сверху, а вход для поставщика переезжает под форму.
  *
  * Только оболочка вокруг форм — никакой бизнес-логики. Формы (Login/Register)
  * передают свой контент как `children`; их обработчики и данные не меняются.
@@ -26,6 +26,7 @@ export function AuthLayout({
   const screens = useBreakpoint();
   const twoCol = Boolean(screens.lg);
   const navigate = useNavigate();
+  const goToUploads = () => navigate('/uploads');
 
   return (
     <div style={{ minHeight: '100dvh', display: 'flex', background: '#fff' }}>
@@ -55,7 +56,7 @@ export function AuthLayout({
             то есть вложенные интерактивные элементы. Button href отрендерил бы
             обычную ссылку с полной перезагрузкой вместо SPA-перехода.
           */}
-          <Button type="primary" size="large" onClick={() => navigate('/uploads')}>
+          <Button type="primary" size="large" onClick={goToUploads}>
             Загрузить документы
           </Button>
         </div>
@@ -87,6 +88,25 @@ export function AuthLayout({
             {subtitle ?? ' '}
           </Typography.Paragraph>
           {children}
+          {/*
+            Тот же вход для поставщика, что и в брендовой панели: на узких
+            экранах панели нет вовсе, а поставщик приходит как раз с телефона —
+            без этого блока портал для него превращается в тупик из формы
+            входа, которой у него не будет.
+
+            Не primary: акцентная кнопка на экране одна — «Войти».
+          */}
+          {!twoCol && (
+            <>
+              <Divider style={{ marginTop: 24, marginBottom: 12 }} />
+              <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                Вы поставщик?
+              </Typography.Text>
+              <Button block size="large" onClick={goToUploads} style={{ marginTop: 8 }}>
+                Загрузить документы
+              </Button>
+            </>
+          )}
         </div>
       </div>
     </div>
