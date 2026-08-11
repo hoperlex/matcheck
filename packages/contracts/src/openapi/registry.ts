@@ -749,6 +749,37 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: 'post',
+  path: '/api/v1/photos/{id}/content',
+  tags: ['Photos'],
+  summary: 'Загрузить файл фото через API (без прямого PUT в S3)',
+  description:
+    'Путь веб-портала: браузер отправляет multipart (часть `file` — JPEG-кадр, ' +
+    'необязательная `thumb` — миниатюра), сервер сам кладёт объекты в S3 и ' +
+    'проставляет `uploaded_at`. Отдельный вызов /confirm при этом не нужен. ' +
+    'Нужен потому, что у бакета нет CORS-правила для origin портала и браузерный ' +
+    'PUT на S3 не проходит preflight. Мобильный клиент остаётся на presign + PUT + ' +
+    'confirm. Idempotent: если фото уже подтверждено, S3 не трогается. ' +
+    'Inspector_kpp может грузить только фото своего объекта (по siteId).',
+  security: bearer,
+  request: { params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: 'Загружено и подтверждено',
+      content: { 'application/json': { schema: PhotoConfirmResponse } },
+    },
+    400: errResp('Файл не приложен, пуст, не JPEG, дубль части или неверный content_hash'),
+    401: errorRefs[401],
+    403: errResp('Фото чужого объекта (foreign_site) либо нет права'),
+    404: errResp('Фото не найдено или было удалено во время загрузки'),
+    409: errResp('Документ помечен на удаление (pending_deletion)'),
+    413: errResp('Файл или миниатюра больше допустимого размера'),
+    500: errResp('Неожиданная ошибка сервера'),
+    503: errResp('S3 недоступна (s3_unavailable) — повторить позже'),
+  },
+});
+
+registry.registerPath({
   method: 'get',
   path: '/api/v1/photos/{id}/url',
   tags: ['Photos'],

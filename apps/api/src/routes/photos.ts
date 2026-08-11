@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import { assertPermission } from '../lib/permissions/assert.js';
@@ -24,7 +25,13 @@ import {
   shipmentPhotos,
   sites,
 } from '../db/schema.js';
-import { deleteObject, getObject, headObject, presign } from '../domain/storage/s3.signer.js';
+import {
+  deleteObject,
+  getObject,
+  headObject,
+  presign,
+  putObject,
+} from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { recognizePhotoItems } from '../domain/photos/recognize.js';
 import { buildExistingPhotoPresign } from '../domain/photos/presign-existing.js';
@@ -45,6 +52,53 @@ import type { AuthUser } from '../plugins/auth.js';
 // безопасный для production TTL: подпись валидна только на конкретный
 // объект, бакет не светим.
 const URL_TTL = 900; // 15 min
+
+// Пределы для POST /photos/:id/content (загрузка через API-прокси).
+// Веб жмёт кадр до ~1,5 МБ и миниатюру до ~0,1 МБ (photoPipeline.capturePhoto:
+// compressInWorker(blob, 1.5, 2048) и (blob, 0.1, 320)), так что запас двукратный.
+// Держим низко осознанно: у контейнера API mem_limit 700m, а буфер каждой части
+// живёт в памяти целиком — дефолтные 10 МБ на файл дали бы до 20 МБ на запрос.
+const PHOTO_MAIN_MAX_BYTES = 2 * 1024 * 1024;
+const PHOTO_THUMB_MAX_BYTES = 256 * 1024;
+
+// limits.fileSize у @fastify/multipart один на все части запроса, поэтому
+// парсеру отдаём предел кадра, а миниатюру проверяем вручную после toBuffer().
+const PHOTO_UPLOAD_PART_LIMITS = { files: 2, fileSize: PHOTO_MAIN_MAX_BYTES };
+
+/**
+ * Ошибки лимитов @fastify/multipart несут statusCode 413, но общий
+ * error-handler намеренно его игнорирует и отдаёт 500 (lib/error-handler.ts).
+ * Для загрузки фото это особенно вредно: веб классифицирует 5xx как retriable
+ * (uploadRetryPolicy.classifyUploadError) и уходит в бесконечный backoff вместо
+ * показа внятной ошибки. Поэтому распознаём коды здесь и отвечаем 413 сами.
+ * Дублирует limitErrorOf из domain/sourceDocuments/collect-upload.ts — тот не
+ * экспортирован и завязан на свой тип CollectError.
+ */
+function multipartLimitMessage(err: unknown): string | null {
+  switch ((err as { code?: string } | null)?.code ?? '') {
+    case 'FST_REQ_FILE_TOO_LARGE':
+      return 'Файл больше допустимого размера';
+    case 'FST_FILES_LIMIT':
+    case 'FST_PARTS_LIMIT':
+    case 'FST_FIELDS_LIMIT':
+      return 'Слишком много частей в запросе';
+    default:
+      return null;
+  }
+}
+
+/** JPEG начинается с FF D8 FF — проверяем сигнатуру, а не только заявленный MIME. */
+function isJpeg(buf: Buffer): boolean {
+  return buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+}
+
+/** Минимальный контракт @fastify/multipart, который нужен этому роуту. */
+type MultipartPart =
+  | { type: 'file'; fieldname: string; toBuffer: () => Promise<Buffer> }
+  | { type: 'field'; fieldname: string };
+type MultipartRequest = {
+  parts: (opts: { limits: { files: number; fileSize: number } }) => AsyncIterableIterator<MultipartPart>;
+};
 
 type OperationKind = 'delivery' | 'shipment';
 
@@ -575,6 +629,230 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         return reply.send();
       }
       return reply.send(Readable.fromWeb(upstream.body as never));
+    },
+  );
+
+  // Загрузка файла через API-прокси: браузер → наш домен → S3. Зеркало GET
+  // выше (GET читает, POST пишет).
+  //
+  // Зачем нужен отдельно от presign+PUT: у бакета cloud.ru нет CORS-правила для
+  // origin портала, поэтому preflight браузерного PUT на s3.cloud.ru не проходит
+  // и файл до S3 не доезжает вовсе. Строка при этом уже создана presign'ом, и
+  // получался тихий сценарий «фото добавилось, но исчезло»: uploaded_at остаётся
+  // null → портал прячет строку своим фильтром → через час её сносит
+  // cleanupPhotoOrphans. Мобильный клиент ходит через OkHttp, preflight не делает
+  // и на presigned PUT остаётся — его поток эта ручка не затрагивает.
+  app.post(
+    '/api/v1/photos/:id/content',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: {
+          200: PhotoConfirmResponseSchema,
+          400: ErrorResponseSchema,
+          403: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          413: ErrorResponseSchema,
+          // 500 — неожиданный сбой БД; 503 — контролируемая недоступность S3.
+          500: ErrorResponseSchema,
+          503: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const found = await findPhoto(app, req.params.id);
+      if (!found) return reply.code(404).send({ error: 'not_found' });
+      // Скоуп и коды — как у presign/confirm: только объект, автор не проверяется.
+      if (
+        req.user?.role === 'inspector_kpp' &&
+        (!req.user.siteId || found.parentSiteId !== req.user.siteId)
+      ) {
+        await app.logUnauthorized(req, 403, 'photo_foreign_site', req.user.id);
+        return reply.code(403).send(FOREIGN_SITE_RESPONSE);
+      }
+      // Право то же, что у presign: загрузка файла — часть создания фото.
+      await assertPermission(req, pageOfKind(found.kind), 'create');
+
+      const parentTable = found.kind === 'delivery' ? deliveries : shipments;
+      const [parentBefore] = await app.db
+        .select({ pendingDeletionAt: parentTable.pendingDeletionAt })
+        .from(parentTable)
+        .where(eq(parentTable.id, found.operationId))
+        .limit(1);
+      if (parentBefore?.pendingDeletionAt != null) {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — мутации фото запрещены',
+        });
+      }
+
+      const table = found.kind === 'delivery' ? deliveryPhotos : shipmentPhotos;
+      const [row] = await app.db
+        .select({ uploadedAt: table.uploadedAt, contentHash: table.contentHash })
+        .from(table)
+        .where(eq(table.id, req.params.id))
+        .limit(1);
+      // Уже подтверждено — идемпотентно отдаём прежний uploaded_at, S3 не трогаем.
+      if (row?.uploadedAt) {
+        return { ok: true as const, uploadedAt: row.uploadedAt.toISOString() };
+      }
+
+      // Разбор частей. Читаем поток ДО КОНЦА даже при ошибке: ранний return из
+      // цикла оставил бы незавершённый запрос висеть. Поэтому копим reject и
+      // отвечаем после цикла, а лишние файловые части сливаем в toBuffer().
+      let main: Buffer | null = null;
+      let thumb: Buffer | null = null;
+      // Поле именно `error` — таков контракт ErrorResponseSchema; с `code`
+      // zod-сериализатор ответа падает, и клиент вместо 400 получает 500.
+      let reject: { error: string; message: string } | null = null;
+      const rejectOnce = (error: string, message: string) => {
+        if (!reject) reject = { error, message };
+      };
+      try {
+        for await (const part of (req as unknown as MultipartRequest).parts({
+          limits: PHOTO_UPLOAD_PART_LIMITS,
+        })) {
+          if (part.type !== 'file') {
+            rejectOnce('unexpected_part', `Неожиданное поле «${part.fieldname}»`);
+            continue;
+          }
+          const buf = await part.toBuffer();
+          if (part.fieldname === 'file') {
+            if (main) rejectOnce('duplicate_part', 'Часть «file» передана дважды');
+            else main = buf;
+          } else if (part.fieldname === 'thumb') {
+            if (thumb) rejectOnce('duplicate_part', 'Часть «thumb» передана дважды');
+            else thumb = buf;
+          } else {
+            rejectOnce('unexpected_part', `Неожиданная часть «${part.fieldname}»`);
+          }
+        }
+      } catch (err) {
+        const limit = multipartLimitMessage(err);
+        if (limit) return reply.code(413).send({ error: 'file_too_large', message: limit });
+        throw err;
+      }
+      if (reject) {
+        return reply.code(400).send(reject);
+      }
+      if (!main) {
+        return reply.code(400).send({ error: 'no_file', message: 'Файл не приложен' });
+      }
+      if (main.length === 0) {
+        return reply.code(400).send({ error: 'empty_file', message: 'Файл пуст' });
+      }
+      if (!isJpeg(main)) {
+        return reply
+          .code(400)
+          .send({ error: 'unsupported_type', message: 'Ожидается JPEG' });
+      }
+      if (thumb && thumb.length > PHOTO_THUMB_MAX_BYTES) {
+        return reply
+          .code(413)
+          .send({ error: 'file_too_large', message: 'Миниатюра больше допустимого размера' });
+      }
+      // Хэш строки посчитан клиентом при захвате — сверяем, чтобы битая передача
+      // не осела в S3 под видом валидного кадра.
+      if (row?.contentHash) {
+        const actual = createHash('sha256').update(main).digest('hex');
+        if (actual !== row.contentHash) {
+          return reply
+            .code(400)
+            .send({ error: 'content_hash_mismatch', message: 'Содержимое не совпадает с заявленным' });
+        }
+      }
+
+      try {
+        await putObject(found.s3Key, main, 'image/jpeg');
+      } catch (err) {
+        req.log.error({ err, key: found.s3Key }, 's3 putObject failed for photo content');
+        return reply.code(503).send({ error: 's3_unavailable', message: 'S3 недоступен' });
+      }
+      // Миниатюра — не «просто необязательная»: GET /content?thumb=true выбирает
+      // thumbS3Key, если он непустой, поэтому ключ без объекта в S3 даёт битую
+      // плитку вместо отката на полный кадр. Не сохранили — зануляем ключ ниже.
+      const writtenKeys = [found.s3Key];
+      let thumbStored = false;
+      if (thumb && found.thumbS3Key) {
+        try {
+          await putObject(found.thumbS3Key, thumb, 'image/jpeg');
+          writtenKeys.push(found.thumbS3Key);
+          thumbStored = true;
+        } catch (err) {
+          req.log.warn(
+            { err, key: found.thumbS3Key },
+            'photo thumb upload failed — сбрасываем thumb_s3_key',
+          );
+        }
+      }
+
+      // Финал одной транзакцией: разрыв между uploaded_at и updatedAt родителя
+      // означал бы, что повторный запрос закоротится по заполненному uploaded_at,
+      // а delta-sync это фото уже никогда не отдаст на планшет.
+      const now = new Date();
+      const outcome = await app.db.transaction(async (tx) => {
+        const [parentNow] = await tx
+          .select({ pendingDeletionAt: parentTable.pendingDeletionAt })
+          .from(parentTable)
+          .where(eq(parentTable.id, found.operationId))
+          .limit(1);
+        // Пометить на удаление могли, пока шёл PUT в S3.
+        if (parentNow?.pendingDeletionAt != null) return 'pending_deletion' as const;
+
+        const updated = await tx
+          .update(table)
+          .set({ uploadedAt: now, ...(thumbStored ? {} : { thumbS3Key: null }) })
+          .where(and(eq(table.id, req.params.id), isNull(table.uploadedAt)))
+          .returning({ id: table.id });
+        if (updated.length === 0) return 'no_rows' as const;
+
+        await tx
+          .update(parentTable)
+          .set({ updatedAt: now })
+          .where(eq(parentTable.id, found.operationId));
+        return 'ok' as const;
+      });
+
+      if (outcome === 'ok') {
+        TABLES[found.kind].publishUpdated(app, found.operationId);
+        return { ok: true as const, uploadedAt: now.toISOString() };
+      }
+
+      // Ноль обновлённых строк сам по себе НЕ означает «запись удалили»: ровно
+      // так же выглядит выигранная гонка параллельного POST. Удалять объекты по
+      // одному этому признаку нельзя — остались бы подтверждённые фото без файла.
+      const [after] = await app.db
+        .select({ uploadedAt: table.uploadedAt })
+        .from(table)
+        .where(eq(table.id, req.params.id))
+        .limit(1);
+      if (outcome === 'no_rows' && after?.uploadedAt) {
+        // Конкурент успел раньше и записал те же байты — отдаём его результат.
+        return { ok: true as const, uploadedAt: after.uploadedAt.toISOString() };
+      }
+      // Запись исчезла или родителя пометили на удаление — только что записанные
+      // объекты осиротели, подчищаем best-effort.
+      if (!after || outcome === 'pending_deletion') {
+        for (const key of writtenKeys) {
+          await deleteObject(key).catch((err: unknown) =>
+            req.log.warn({ err, key }, 'cleanup after failed photo upload'),
+          );
+        }
+        if (outcome === 'pending_deletion') {
+          return reply.code(409).send({
+            error: 'pending_deletion',
+            message: 'Документ помечен на удаление — мутации фото запрещены',
+          });
+        }
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      // Строка на месте и всё ещё не подтверждена — записать не удалось.
+      req.log.warn({ photoId: req.params.id }, 'photo content upload: update affected no rows');
+      return reply
+        .code(503)
+        .send({ error: 'not_confirmed', message: 'Не удалось подтвердить загрузку, повторите' });
     },
   );
 

@@ -349,6 +349,37 @@ export async function apiUploadFile<T>(
 }
 
 /**
+ * Загрузка фото операции через API-прокси: кадр и миниатюра одним POST на
+ * /photos/{id}/content. Прямой PUT в S3 из браузера не проходит preflight —
+ * у бакета нет CORS-правила для origin портала.
+ *
+ * Почему не подходят загрузчики выше: apiUploadFile умеет ровно один файл, а
+ * apiUploadFiles кладёт все файлы под одно имя поля и знает только жёстко
+ * заданное второе имя `extraFiles` (семантика загрузки УПД).
+ *
+ * timeoutMs конечный, а не null: retryPendingUploads держит Web Lock и ждёт
+ * uploadPhoto последовательно, поэтому зависший запрос остановил бы весь цикл
+ * ретраев. 120 с с запасом хватает на ~1,6 МБ даже на медленной мобильной сети,
+ * а таймаут классифицируется как retriable и попадёт в обычный backoff.
+ */
+export async function apiUploadPhoto<T>(
+  path: string,
+  main: Blob,
+  thumb?: Blob | null,
+  opts: { signal?: AbortSignal } = {},
+): Promise<T> {
+  const fd = new FormData();
+  fd.append('file', main, 'photo.jpg');
+  if (thumb) fd.append('thumb', thumb, 'thumb.jpg');
+  return request<T>(path, {
+    method: 'POST',
+    body: fd,
+    signal: opts.signal,
+    timeoutMs: 120_000,
+  });
+}
+
+/**
  * Загрузка пакета файлов одним POST — используется для Транспортной
  * накладной, где юзер прикладывает несколько фото листов (лицевая +
  * оборотная + сопроводительные). Сервер кладёт каждый файл как

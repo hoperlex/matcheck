@@ -3,9 +3,34 @@ import type {
   PhotoConfirmResponse,
   PhotoPresignResponse,
 } from '@matcheck/contracts';
-import { api } from './api';
+import { api, apiUploadPhoto } from './api';
 import { db, type OperationKind } from '../lib/db';
 import { backoffMs, classifyUploadError, toErrorInfo } from './uploadRetryPolicy';
+
+/**
+ * Подписчики на завершение отправки фото. Нужны из-за фонового цикла:
+ * retryPendingUploads зовётся из runSync, и при успехе локальный id меняется на
+ * серверный — а React Query-кэш ['photos-local', ...] об этом не узнаёт и
+ * показывает и серверное фото, и осиротевшую локальную копию под старым id.
+ * Экраны подписываются и инвалидируют свой ключ.
+ */
+type PhotoSettledListener = (operationKind: OperationKind, operationId: string) => void;
+const photoSettledListeners = new Set<PhotoSettledListener>();
+
+export function onPhotoUploadSettled(listener: PhotoSettledListener): () => void {
+  photoSettledListeners.add(listener);
+  return () => photoSettledListeners.delete(listener);
+}
+
+function notifyPhotoSettled(operationKind: OperationKind, operationId: string): void {
+  for (const listener of photoSettledListeners) {
+    try {
+      listener(operationKind, operationId);
+    } catch {
+      // Подписчик не должен ломать цикл отправки.
+    }
+  }
+}
 
 let workerPromise: Promise<Worker> | null = null;
 
@@ -56,13 +81,28 @@ export type CapturedPhoto = {
    */
   id: string;
   /**
-   * Promise успешного завершения S3-upload + /confirm. Резолвится после того,
-   * как IDB-запись переименована на server-id. Вызывающий код подписывается
-   * через .then(...) для повторного invalidate queryClient — без этого UI
-   * продолжит читать запись по old-id, которой в IDB уже нет.
+   * Итог отправки. Резолвится ПОСЛЕ того, как IDB-запись переименована на
+   * server-id: вызывающий код подписывается для повторного invalidate
+   * queryClient, иначе UI продолжит читать запись по old-id, которой в IDB
+   * уже нет.
+   *
+   * Возвращаем `{ ok, error }`, а не отклонённый promise: раньше здесь стоял
+   * `.catch(() => undefined)`, и вызывающий физически не мог узнать о сбое —
+   * фото молча оставалось локальным, а пользователь видел «Фото добавлено».
+   * Результатом вместо reject снимаем и риск unhandled rejection у тех, кто
+   * промис не ждёт.
    */
-  uploadPromise: Promise<void>;
+  uploadPromise: Promise<PhotoUploadOutcome>;
 };
+
+export type PhotoUploadOutcome = { ok: true } | { ok: false; error: unknown };
+
+function settle(promise: Promise<void>): Promise<PhotoUploadOutcome> {
+  return promise.then(
+    () => ({ ok: true }) as const,
+    (error: unknown) => ({ ok: false, error }) as const,
+  );
+}
 
 export async function capturePhoto(
   operationKind: OperationKind,
@@ -89,8 +129,8 @@ export async function capturePhoto(
     // Уже есть локальная запись с этим contentHash. Если она ещё не uploaded —
     // переиспользуем её promise upload'а, а не плодим параллельные попытки.
     const uploadPromise = existing.uploaded
-      ? Promise.resolve()
-      : uploadPhoto(existing.id).catch(() => undefined);
+      ? Promise.resolve({ ok: true } as const)
+      : settle(uploadPhoto(existing.id));
     return { id: existing.id, uploadPromise };
   }
 
@@ -109,9 +149,10 @@ export async function capturePhoto(
     uploaded: false,
   });
 
-  // Best-effort immediate upload — выставляем promise наружу, чтобы UI мог
-  // дождаться обмена local-id на server-id и пере-invalidate queryClient.
-  const uploadPromise = uploadPhoto(id).catch(() => undefined);
+  // Best-effort immediate upload — выставляем результат наружу, чтобы UI мог
+  // дождаться обмена local-id на server-id, пере-invalidate queryClient и
+  // показать ошибку, если отправка не удалась.
+  const uploadPromise = settle(uploadPhoto(id));
   return { id, uploadPromise };
 }
 
@@ -120,6 +161,10 @@ export async function uploadPhoto(photoId: string): Promise<void> {
   const p = await dbi.get('photos', photoId);
   if (!p || p.uploaded || !p.blob) return;
 
+  // Любой исход попытки меняет то, что должна показать галерея: успех — id-swap
+  // и снятие «загружается», провал — новый lastUploadError. Поэтому сигналим и
+  // там, и там; фоновому циклу retryPendingUploads это единственный способ
+  // сообщить UI, что кэш ['photos-local', ...] устарел.
   try {
     const presign = await api.post<PhotoPresignResponse>('/photos/presign', {
       operationKind: p.operationKind,
@@ -135,30 +180,20 @@ export async function uploadPhoto(photoId: string): Promise<void> {
       stage: p.operationKind === 'delivery' ? p.stage : undefined,
     });
 
-    // PUT — по наличию uploadUrl, НЕ по !alreadyExists. После A1 сервер для
-    // orphan-строки (uploaded_at=null) отдаёт alreadyExists:false + свежий
-    // uploadUrl; для реально загруженного — alreadyExists:true + пустой url →
-    // PUT пропускается. Тот же принцип, что в matcheck.mobile.
-    if (presign.uploadUrl) {
-      const r = await fetch(presign.uploadUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'image/jpeg' },
-        body: p.blob,
-      });
-      if (!r.ok) throw new Error(`S3 upload failed: ${r.status}`);
-      if (presign.thumbUploadUrl && p.thumbBlob) {
-        await fetch(presign.thumbUploadUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'image/jpeg' },
-          body: p.thumbBlob,
-        }).catch(() => undefined);
-      }
-    }
-
-    // Confirm обязателен: сервер делает HEAD в S3 и проставляет uploaded_at.
-    // Без него запись остаётся orphan'ом (uploaded_at=null) и через час будет
-    // вычищена cleanup-job'ом — фото пропадёт. См. apps/api/routes/photos.ts.
-    await api.post<PhotoConfirmResponse>(`/photos/${presign.photoId}/confirm`, {});
+    // Байты уходят на НАШ домен, а в S3 их кладёт сервер. Прямой PUT по
+    // presign.uploadUrl из браузера не проходит preflight — у бакета нет
+    // CORS-правила для origin портала, и файл до S3 не доезжал вовсе, оставляя
+    // orphan-строку, которую через час сносил cleanup-job. Поле uploadUrl из
+    // ответа presign веб намеренно не использует; мобильный клиент — использует.
+    //
+    // Отдельный /confirm не нужен: этот эндпоинт сам проставляет uploaded_at и
+    // возвращает тот же контракт. Идемпотентность на стороне сервера — на уже
+    // подтверждённом фото он не трогает S3.
+    await apiUploadPhoto<PhotoConfirmResponse>(
+      `/photos/${presign.photoId}/content`,
+      p.blob,
+      p.thumbBlob,
+    );
 
     // Пользователь мог удалить фото, пока шёл upload (presign/PUT/confirm). Если
     // исходной IDB-записи уже нет — НЕ воскрешаем её put'ом ниже, а подчищаем
@@ -192,6 +227,8 @@ export async function uploadPhoto(photoId: string): Promise<void> {
   } catch (err) {
     await recordUploadFailure(dbi, p.id, err);
     throw err;
+  } finally {
+    notifyPhotoSettled(p.operationKind, p.deliveryId);
   }
 }
 

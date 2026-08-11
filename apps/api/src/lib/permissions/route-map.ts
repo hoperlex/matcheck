@@ -184,6 +184,8 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ],
   // Остальные узнают вид операции только после findPhoto().
   ['POST /api/v1/photos/:id/confirm', inHandler('found.kind + create, после findPhoto.')],
+  // Право то же, что у presign/confirm: загрузка файла — часть создания фото.
+  ['POST /api/v1/photos/:id/content', inHandler('found.kind + create, после findPhoto.')],
   ['PATCH /api/v1/photos/:id', inHandler('found.kind + edit, после findPhoto.')],
   ['POST /api/v1/photos/:id/recognize', inHandler('found.kind + edit, после findPhoto.')],
   ['DELETE /api/v1/photos/:id', inHandler('found.kind + delete, после findPhoto.')],

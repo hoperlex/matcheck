@@ -159,6 +159,12 @@ export const RUNTIME_RULE_COVERAGE: Record<string, { page: PageId; action: PageA
     { page: 'operations.deliveries', action: 'create' },
     { page: 'operations.shipments', action: 'create' },
   ],
+  // Загрузка файла через API-прокси (путь веб-портала) — то же право, что у
+  // presign/confirm: это часть создания фото, а не отдельное действие.
+  'POST /api/v1/photos/:id/content': [
+    { page: 'operations.deliveries', action: 'create' },
+    { page: 'operations.shipments', action: 'create' },
+  ],
   'PATCH /api/v1/photos/:id': [
     { page: 'operations.deliveries', action: 'edit' },
     { page: 'operations.shipments', action: 'edit' },

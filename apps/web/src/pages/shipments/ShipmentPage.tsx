@@ -45,7 +45,7 @@ import type {
 } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
-import { capturePhoto } from '../../services/photoPipeline';
+import { capturePhoto, onPhotoUploadSettled } from '../../services/photoPipeline';
 import {
   applyLocalEdit,
   effectiveState,
@@ -67,7 +67,7 @@ import { FlagChip } from '../../shared/ui/FlagChip';
 import { ReviewControls } from '../../shared/ui/ReviewControls';
 import type { PageTabItem } from '../../shared/ui/PageTabs';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
-import { PhotoGallery } from '../kpp/PhotoGallery';
+import { PhotoGallery, type GalleryPhoto } from '../kpp/PhotoGallery';
 import { formatStageTime } from '../kpp/stageTime';
 import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
 import { ShipmentsHistory } from './ShipmentsHistory';
@@ -318,7 +318,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   // Мерджим оба, чтобы свежеснятое фото показывалось в галерее, не дожидаясь pullSync.
   const localPhotosQuery = useQuery({
     queryKey: ['photos-local', 'shipment', shipmentId],
-    queryFn: async (): Promise<ShipmentPhoto[]> => {
+    queryFn: async (): Promise<GalleryPhoto[]> => {
       if (!shipmentId) return [];
       const dbi = await db();
       const all = await dbi
@@ -334,10 +334,28 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           thumbS3Key: p.thumbS3Key ?? null,
           contentHash: p.contentHash ?? null,
           takenAt: new Date(p.takenAt).toISOString(),
+          // Раньше поля тут не было вовсе, и галерея (undefined !== null)
+          // считала локальное фото загруженным — провал отправки был невиден.
+          uploadedAt: p.uploaded ? new Date(p.takenAt).toISOString() : null,
+          uploadState: p.uploadState,
+          uploadAttempts: p.uploadAttempts,
+          nextRetryAt: p.nextRetryAt,
+          lastUploadError: p.lastUploadError,
         }));
     },
     enabled: !!shipmentId,
   });
+
+  // Симметрично приёмкам: фоновый ретрай меняет локальный id на серверный мимо
+  // react-query, без подписки в галерее осталась бы дублирующая локальная копия.
+  useEffect(() => {
+    if (!shipmentId) return;
+    return onPhotoUploadSettled((operationKind, operationId) => {
+      if (operationKind !== 'shipment' || operationId !== shipmentId) return;
+      void queryClient.invalidateQueries({ queryKey: ['photos-local', 'shipment', shipmentId] });
+      void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
+    });
+  }, [shipmentId, queryClient]);
 
   useEffect(() => {
     const s = shipmentQuery.data;
@@ -542,19 +560,21 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           stage === 'after' ? 'vehicle' : 'cargo',
           stage,
         );
-        message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ['photos-local', 'shipment', shipmentId] }),
           queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] }),
         ]);
-        // После завершения upload IDB-id фото меняется на server-id (см.
-        // photoPipeline.uploadPhoto). Без повторного invalidate galery читает
-        // запись по old-id и зависает на «Загружается…».
-        void uploadPromise.then(() => {
-          void queryClient.invalidateQueries({
-            queryKey: ['photos-local', 'shipment', shipmentId],
-          });
-          void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
+        // Тост — по факту отправки. Инвалидацию делает подписка
+        // onPhotoUploadSettled: она отрабатывает и на успехе, и на ошибке, и на
+        // фоновом ретрае. Симметрично приёмкам.
+        void uploadPromise.then((outcome) => {
+          if (outcome.ok) {
+            message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
+          } else {
+            message.error(
+              'Фото сохранено в браузере, но не отправлено — повторим автоматически',
+            );
+          }
         });
         void runSync();
       } catch (err) {
@@ -805,7 +825,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
 
   // Мерджим серверные photos и локальные IDB-записи по id, чтобы превью
   // свежеснятого фото не пропадало между моментами IDB-put и pullSync.
-  const mergedPhotos: ShipmentPhoto[] = useMemo(() => {
+  const mergedPhotos: GalleryPhoto[] = useMemo(() => {
     const server = loadedShipment?.photos ?? [];
     const local = localPhotosQuery.data ?? [];
     const localIds = new Set(local.map((lp) => lp.id));

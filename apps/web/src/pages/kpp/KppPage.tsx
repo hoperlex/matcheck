@@ -45,7 +45,7 @@ import type {
 import { api, apiDownload } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
 import { SYSTEM_SITE_ID } from '../../lib/db';
-import { capturePhoto } from '../../services/photoPipeline';
+import { capturePhoto, onPhotoUploadSettled } from '../../services/photoPipeline';
 import {
   applyLocalEdit,
   effectiveState,
@@ -67,7 +67,7 @@ import { ReviewControls } from '../../shared/ui/ReviewControls';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { DeliveriesHistory } from './DeliveriesHistory';
 import { ExpectedUpds } from './ExpectedUpds';
-import { PhotoGallery } from './PhotoGallery';
+import { PhotoGallery, type GalleryPhoto } from './PhotoGallery';
 import { formatStageTime } from './stageTime';
 import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
@@ -422,7 +422,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // моментами, мерджим оба источника по id.
   const localPhotosQuery = useQuery({
     queryKey: ['photos-local', 'delivery', deliveryId],
-    queryFn: async (): Promise<DeliveryPhoto[]> => {
+    queryFn: async (): Promise<GalleryPhoto[]> => {
       if (!deliveryId) return [];
       const dbi = await db();
       const all = await dbi
@@ -439,14 +439,34 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           thumbS3Key: p.thumbS3Key ?? null,
           contentHash: p.contentHash ?? null,
           takenAt: new Date(p.takenAt).toISOString(),
-          // Локальное фото отображается из IDB blob, поэтому считаем его
-          // «подтверждённым» с точки зрения PhotoThumb — иначе показался бы
-          // оверлей «Загружается…», хотя превью уже есть.
-          uploadedAt: new Date(p.takenAt).toISOString(),
+          // Раньше здесь безусловно проставлялось непустое значение, чтобы
+          // PhotoThumb не рисовал «Загружается…» поверх готового превью. Побочный
+          // эффект: провалившаяся отправка выглядела как успешная, и фото молча
+          // оставалось только в браузере. Теперь честно: подтверждено — только
+          // когда реально уехало. Состояние «есть blob, но ещё не ушло» галерея
+          // различает по localThumb и lastUploadError.
+          uploadedAt: p.uploaded ? new Date(p.takenAt).toISOString() : null,
+          uploadState: p.uploadState,
+          uploadAttempts: p.uploadAttempts,
+          nextRetryAt: p.nextRetryAt,
+          lastUploadError: p.lastUploadError,
         }));
     },
     enabled: !!deliveryId,
   });
+
+  // Фоновый цикл retryPendingUploads (из runSync) меняет локальный id на
+  // серверный, ничего не зная про react-query. Без этой подписки после удачного
+  // фонового ретрая в галерее оставались бы сразу два фото: серверное и
+  // осиротевшая локальная копия под старым id.
+  useEffect(() => {
+    if (!deliveryId) return;
+    return onPhotoUploadSettled((operationKind, operationId) => {
+      if (operationKind !== 'delivery' || operationId !== deliveryId) return;
+      void queryClient.invalidateQueries({ queryKey: ['photos-local', 'delivery', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+    });
+  }, [deliveryId, queryClient]);
 
   // В статусе confirmed_mol приёмка фактически read-only от мобилы —
   // юзер на портале её не редактирует. Поэтому при любом серверном
@@ -630,21 +650,24 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           stage === 'after' ? 'vehicle' : 'cargo',
           stage,
         );
-        message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
         // Локальный список фото перечитывается сразу из IDB, серверный delivery.photos —
-        // после S3-upload + следующего pullSync. Галерея мерджит оба источника по id.
+        // после отправки и следующего pullSync. Галерея мерджит оба источника по id.
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ['photos-local', 'delivery', deliveryId] }),
           queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] }),
         ]);
-        // После завершения upload IDB-id фото меняется на server-id (см.
-        // photoPipeline.uploadPhoto). Без повторного invalidate galery читает
-        // запись по old-id и зависает на «Загружается…».
-        void uploadPromise.then(() => {
-          void queryClient.invalidateQueries({
-            queryKey: ['photos-local', 'delivery', deliveryId],
-          });
-          void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+        // Тост — по факту отправки, а не по факту сохранения в IDB. Раньше здесь
+        // безусловно писалось «Фото добавлено», и провалившаяся загрузка выглядела
+        // успешной. Инвалидацию делает подписка onPhotoUploadSettled ниже — она
+        // отрабатывает и на успехе, и на ошибке, и на фоновом ретрае.
+        void uploadPromise.then((outcome) => {
+          if (outcome.ok) {
+            message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
+          } else {
+            message.error(
+              'Фото сохранено в браузере, но не отправлено — повторим автоматически',
+            );
+          }
         });
         void runSync();
       } catch (err) {
@@ -912,7 +935,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // Мерджим серверные photos и локальные IDB-записи по id. Это покрывает оба сценария:
   // (а) черновик ещё не на сервере — фото есть только локально;
   // (б) фото только что снято и ещё не подтянуто очередным pullSync.
-  const mergedPhotos: DeliveryPhoto[] = useMemo(() => {
+  const mergedPhotos: GalleryPhoto[] = useMemo(() => {
     const server = loadedDelivery?.photos ?? [];
     const local = localPhotosQuery.data ?? [];
     const localIds = new Set(local.map((lp) => lp.id));

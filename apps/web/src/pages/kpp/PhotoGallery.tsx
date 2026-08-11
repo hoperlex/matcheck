@@ -20,6 +20,7 @@ import type {
   ShipmentPhoto,
 } from '@matcheck/contracts';
 import { api, apiDownload, ApiError } from '../../services/api';
+import { uploadPhoto } from '../../services/photoPipeline';
 import { enqueueThumbLoad, enqueueFullLoad } from '../../lib/thumbQueue';
 import { db, type OperationKind } from '../../lib/db';
 import { useAuthStore } from '../../stores/auth';
@@ -36,6 +37,34 @@ const PHOTO_GC = 30 * 60 * 1000;
 
 type AnyPhoto = DeliveryPhoto | ShipmentPhoto;
 
+/**
+ * Фото в галерее = серверный контракт + локальное состояние отправки из IDB.
+ * Отдельным типом, а не полями в DeliveryPhoto/ShipmentPhoto: те описывают
+ * ответ API и не должны знать про очередь браузера.
+ */
+export type GalleryPhoto = AnyPhoto & {
+  uploadState?: 'pending' | 'blocked';
+  uploadAttempts?: number;
+  nextRetryAt?: number;
+  lastUploadError?: { status?: number; code: string; at: number };
+};
+
+/**
+ * Текст сбоя для плитки. lastUploadError хранит код и статус, но не текст —
+ * пользователю нужен человеческий смысл, а не `network`/`403`.
+ */
+function uploadErrorText(err: { status?: number; code: string }): string {
+  if (err.code === 'network' || err.code === 'timeout') return 'Нет связи с сервером';
+  if (err.code === 'forbidden' || err.status === 403) return 'Нет прав на это фото';
+  if (err.code === 'pending_deletion') return 'Документ помечен на удаление';
+  if (err.code === 'delivery_not_found' || err.code === 'shipment_not_found') {
+    return 'Приёмка не найдена на сервере';
+  }
+  if (err.code === 'file_too_large') return 'Файл слишком большой';
+  if (err.status != null && err.status >= 500) return 'Сервер недоступен';
+  return 'Не удалось отправить';
+}
+
 export function PhotoGallery({
   deliveryId,
   photos,
@@ -43,7 +72,7 @@ export function PhotoGallery({
   readOnly = false,
 }: {
   deliveryId: string;
-  photos: AnyPhoto[];
+  photos: GalleryPhoto[];
   operationKind?: OperationKind;
   // readOnly: галерея используется в просмотре (например, в Истории
   // поступлений → модалка «Фото материала»). Кнопка удаления скрыта,
@@ -305,7 +334,7 @@ function PhotoThumb({
   onDocumentClick,
   previewOpen,
 }: {
-  photo: AnyPhoto;
+  photo: GalleryPhoto;
   canDelete: boolean;
   onDelete: () => void;
   deleting: boolean;
@@ -332,6 +361,21 @@ function PhotoThumb({
   const [localThumb, setLocalThumb] = useState<string | null>(null);
   const [localFull, setLocalFull] = useState<string | null>(null);
   const [idbChecked, setIdbChecked] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+
+  // Ручной повтор отправки. Ошибку не пробрасываем: uploadPhoto уже записал её
+  // в IDB, а перерисовку галереи вызовет подписка на onPhotoUploadSettled в
+  // родительском экране — она же отработает и после фонового ретрая.
+  const retryUpload = async (): Promise<void> => {
+    setRetrying(true);
+    try {
+      await uploadPhoto(photo.id);
+    } catch {
+      // состояние уже зафиксировано в IDB
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -451,6 +495,107 @@ function PhotoThumb({
   // Видна когда: нужен серверный thumb (нет localThumb / не uploading) +
   // запрос упал в isError. Локальные blob этой ветки не достигают.
   const showThumbError = needsRemote && !localThumb && thumbQuery.isError;
+
+  // Отправка не удалась: запись ещё локальная, и по ней есть зафиксированная
+  // ошибка. Раньше это состояние было невидимым — локальному фото проставляли
+  // непустой uploadedAt, галерея считала его загруженным, и пользователь узнавал
+  // о потере только когда фото не появлялось на планшете.
+  //
+  // Смотрим именно lastUploadError, а не uploadState: у ретраибельных сбоев
+  // (сеть, 5xx, таймаут) uploadState не выставляется вовсе — он только у
+  // терминальных. См. recordUploadFailure в photoPipeline.ts.
+  const uploadFailed = photo.uploadedAt === null && !!photo.lastUploadError;
+
+  if (uploadFailed && photo.lastUploadError) {
+    const blocked = photo.uploadState === 'blocked';
+    return (
+      <div style={{ width: THUMB_SIZE }}>
+        <div
+          style={{
+            position: 'relative',
+            width: THUMB_SIZE,
+            height: THUMB_SIZE,
+            borderRadius: 6,
+            overflow: 'hidden',
+            border: '1px solid #ffa39e',
+            background: '#fff1f0',
+          }}
+        >
+          {/* Кадр показываем, если он есть: локальный blob может быть
+              единственной копией, и пользователю важно видеть, какое фото не
+              ушло. Приглушаем, чтобы состояние читалось как проблемное. */}
+          {localThumb && (
+            <img
+              src={localThumb}
+              alt=""
+              style={{
+                width: '100%',
+                height: '100%',
+                objectFit: 'cover',
+                opacity: 0.45,
+              }}
+            />
+          )}
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 4,
+              padding: 4,
+            }}
+          >
+            <WarningOutlined style={{ fontSize: 20, color: '#cf1322' }} />
+            <Typography.Text style={{ fontSize: 11, textAlign: 'center', color: '#cf1322' }}>
+              {uploadErrorText(photo.lastUploadError)}
+            </Typography.Text>
+            {!blocked && (
+              <Tooltip title="Отправить ещё раз">
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  onClick={() => void retryUpload()}
+                  loading={retrying}
+                >
+                  Повторить
+                </Button>
+              </Tooltip>
+            )}
+          </div>
+          {canDelete && (
+            <Popconfirm
+              title="Удалить фото?"
+              description="Локальная копия будет удалена безвозвратно."
+              okText="Да, удалить"
+              cancelText="Нет"
+              okButtonProps={{ danger: true }}
+              onConfirm={onDelete}
+            >
+              <Button
+                danger
+                size="small"
+                shape="circle"
+                icon={<DeleteOutlined />}
+                loading={deleting}
+                style={{ position: 'absolute', top: 4, right: 4, zIndex: 1 }}
+              />
+            </Popconfirm>
+          )}
+        </div>
+        {label && (
+          <Typography.Text
+            type="secondary"
+            style={{ fontSize: 11, display: 'block', textAlign: 'center', marginTop: 4 }}
+          >
+            {label}
+          </Typography.Text>
+        )}
+      </div>
+    );
+  }
 
   if (isUploading) {
     return (
