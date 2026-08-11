@@ -10,8 +10,8 @@
  * меню — молча, без ошибки.
  */
 import { describe, it, expect } from 'vitest';
-import { MANAGED_ROLES, type UserRole } from '@matcheck/contracts';
-import { defaultPermissions } from '../../shared/utils/permissions';
+import { MANAGED_ROLES, PAGE_CATALOG, type UserRole } from '@matcheck/contracts';
+import { can, canView, defaultPermissions } from '../../shared/utils/permissions';
 import { filterByPermissions, filterByRole, homePath, navItems } from './navItems';
 
 const ALL_ROLES: UserRole[] = ['admin', ...MANAGED_ROLES];
@@ -38,6 +38,38 @@ describe('меню по правам == меню по ролям (до суже�
     // Пункт без группы был бы виден всегда — тихая дыра в enforcement.
     for (const item of navItems) {
       expect(item.group).toBeTruthy();
+    }
+  });
+});
+
+describe('нулевой UI-diff: расширение не меняет интерфейс без строки в матрице', () => {
+  // Матрица научилась расширять права, и главный риск теперь — что интерфейс
+  // «поедет» сам собой, до того как администратор что-то выдал. Дефолты обязаны
+  // давать ровно сегодняшнюю картину: и меню, и доступ к каждой странице.
+  it('доступ к страницам при дефолтах совпадает с базовым набором роли', () => {
+    for (const role of ALL_ROLES) {
+      const perms = defaultPermissions(role);
+      for (const page of PAGE_CATALOG) {
+        for (const action of page.actions) {
+          const expected =
+            role === 'admin' ? true : (page.base[action]?.includes(role as never) ?? false);
+          expect(
+            can(perms, page.id, action),
+            `${role}: ${page.id}:${action}`,
+          ).toBe(expected);
+        }
+      }
+    }
+  });
+
+  it('вкладки админки при дефолтах видны только админу', () => {
+    // Раздел «Администрирование» теперь можно выдать любой роли — но только
+    // явной строкой, а не фактом появления кода.
+    for (const page of PAGE_CATALOG.filter((p) => p.group === 'admin')) {
+      for (const role of MANAGED_ROLES) {
+        expect(canView(defaultPermissions(role), page.id), `${role}: ${page.id}`).toBe(false);
+      }
+      expect(canView(defaultPermissions('admin'), page.id)).toBe(true);
     }
   });
 });

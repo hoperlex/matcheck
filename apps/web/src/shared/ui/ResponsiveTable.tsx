@@ -47,6 +47,7 @@ export function ResponsiveTable<T extends object>({
   expandable,
   rowClassName,
   pagination,
+  scrollY,
 }: {
   items: T[];
   columns: Column<T>[];
@@ -80,6 +81,13 @@ export function ResponsiveTable<T extends object>({
   // слева от номеров страниц на той же линии. Если undefined — default
   // `{ pageSize: 100, showSizeChanger: false }`.
   pagination?: TableProps<T>['pagination'];
+  /**
+   * Высота внутреннего скролла tbody. По умолчанию — «во весь экран под
+   * шапкой»: компонент рассчитан на ОДНУ таблицу на странице. `false` убирает
+   * скролл вовсе — для страниц, где таблиц несколько подряд и каждая рисовала
+   * бы свой трек прокрутки (вкладка «Роли»).
+   */
+  scrollY?: string | false;
 }) {
   const bp = useBreakpoint();
   // Сумма высот всех родительских StickyPageHeader. 0 — sticky-обёртки нет,
@@ -149,7 +157,7 @@ export function ResponsiveTable<T extends object>({
     // освободив 28px места для строк. Так таблица помещается в Content
     // (который сам скролл-контейнер, см. DesktopLayout) и НЕ переполняет
     // его — внешнего скролла страницы не остаётся.
-    const tableScrollY = `calc(100vh - ${stickyOffset + 134}px)`;
+    const tableScrollY = scrollY === undefined ? `calc(100vh - ${stickyOffset + 134}px)` : scrollY;
     return (
       <Table<T>
         dataSource={items}
@@ -166,7 +174,7 @@ export function ResponsiveTable<T extends object>({
             : { pageSize: 100, showSizeChanger: false, ...(pagination ?? {}) }
         }
         locale={{ emptyText: emptyText ?? 'Нет данных' }}
-        scroll={{ y: tableScrollY }}
+        scroll={tableScrollY === false ? undefined : { y: tableScrollY }}
         rowClassName={rowClassName}
         onRow={
           onRowClick

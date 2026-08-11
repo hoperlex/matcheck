@@ -241,13 +241,70 @@ suite('матрица прав: админское API (реальный Postgre
     expect(res.json()).toMatchObject({ error: 'locked_cell' });
   });
 
-  it('выдать право, которого нет в коде, нельзя', async () => {
-    // У менеджера нет удаления в справочниках (canDelete = только admin).
+  it('право сверх дефолта выдаётся: матрица умеет расширять', async () => {
+    // У менеджера нет удаления в справочниках (в коде оно только у admin).
+    // Раньше здесь был отказ cannot_grant — теперь это штатная выдача.
     const res = await patch([
       { role: 'manager', page: 'references.sites', action: 'delete', allowed: true },
     ]);
-    expect(res.statusCode).toBe(400);
-    expect(res.json()).toMatchObject({ error: 'cannot_grant' });
+    expect(res.statusCode).toBe(200);
+
+    const row = await rowOf('manager', 'references.sites');
+    expect(row).toMatchObject({ can_delete: true, can_view: true });
+
+    const body = res.json() as { matrix: Record<string, Record<string, Record<string, boolean>>> };
+    expect(body.matrix.manager!['references.sites']).toMatchObject({ delete: true });
+  });
+
+  it('права, ведущие в администраторы, не выдаются никому', async () => {
+    for (const change of [
+      { role: 'manager', page: 'admin.roles', action: 'edit', allowed: true },
+      { role: 'manager', page: 'admin.users', action: 'edit', allowed: true },
+      { role: 'manager', page: 'admin.users', action: 'delete', allowed: true },
+    ]) {
+      const res = await patch([change]);
+      expect(res.statusCode, JSON.stringify(change)).toBe(400);
+      expect(res.json()).toMatchObject({ error: 'never_grantable' });
+    }
+    // Просмотр списка пользователей выдать при этом можно.
+    expect((await patch([
+      { role: 'manager', page: 'admin.users', action: 'view', allowed: true },
+    ])).statusCode).toBe(200);
+  });
+
+  it('ролям без write-scope выдаётся только «Просмотр»', async () => {
+    // На путях записи у contractor и inspector_kpp нет ограничения по своим
+    // данным — выданное create писало бы в чужие объекты.
+    for (const change of [
+      { role: 'contractor', page: 'references.sites', action: 'create', allowed: true },
+      { role: 'inspector_kpp', page: 'documents.list', action: 'edit', allowed: true },
+      { role: 'monitor', page: 'references.units', action: 'delete', allowed: true },
+    ]) {
+      const res = await patch([change]);
+      expect(res.statusCode, JSON.stringify(change)).toBe(400);
+      expect(res.json()).toMatchObject({ error: 'write_not_expandable' });
+    }
+
+    expect((await patch([
+      { role: 'contractor', page: 'references.sites', action: 'view', allowed: true },
+    ])).statusCode).toBe(200);
+  });
+
+  it('снятое базовое право можно вернуть, даже если роли запрещено расширение', async () => {
+    // У monitor operations.*:edit — базовое (отметка проверки). Запрет
+    // write-расширения касается только того, чего в дефолте не было, иначе
+    // снятый review-доступ оказался бы невозвратным.
+    const off = await patch([
+      { role: 'monitor', page: 'operations.deliveries', action: 'edit', allowed: false },
+    ]);
+    expect(off.statusCode).toBe(200);
+    expect(await rowOf('monitor', 'operations.deliveries')).toMatchObject({ can_edit: false });
+
+    const back = await patch([
+      { role: 'monitor', page: 'operations.deliveries', action: 'edit', allowed: true },
+    ]);
+    expect(back.statusCode).toBe(200);
+    expect(await rowOf('monitor', 'operations.deliveries')).toMatchObject({ can_edit: true });
   });
 
   it('роль admin в матрицу не принимается', async () => {

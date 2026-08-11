@@ -13,6 +13,7 @@ import {
   Typography,
   message,
 } from 'antd';
+import { PlusCircleFilled } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   MANAGED_ROLES,
@@ -37,6 +38,7 @@ import {
   cloneMatrix,
   diffMatrix,
   groupState,
+  isExtension,
   roleHasChanges,
   type CatalogEntry,
   type Matrix,
@@ -48,8 +50,14 @@ const ROLE_TABS: UserRole[] = ['admin', ...MANAGED_ROLES];
 const CELL_HINT: Record<string, string> = {
   locked:
     'Требуется мобильному приложению КПП: планшет не показывает ошибку доступа и просто перестанет работать',
-  'not-in-base': 'Роли это действие недоступно и сейчас — матрица умеет только сужать доступ',
+  never:
+    'Это право не выдаётся ни одной роли: через него можно получить полномочия администратора и отобрать доступ у остальных',
+  'write-locked':
+    'Этой роли можно выдать только «Просмотр»: на путях записи у неё нет ограничения по своим данным, и выданное право открыло бы чужие записи',
 };
+
+/** Разделы, выдача прав в которых даёт роли административные экраны. */
+const ADMIN_GROUP: PageGroup = 'admin';
 
 type Row = CatalogEntry;
 
@@ -149,6 +157,9 @@ export default function RolesPage() {
     // колонки, а пустая ячейка читается как «нет такого измерения».
     if (state === 'not-applicable') return null;
     const checked = state === 'locked' ? true : Boolean(draft[role]?.[entry.id]?.[action]);
+    // Право сверх базового набора роли: администратор должен видеть, где он
+    // расширил доступ, а где просто оставил как было.
+    const extension = isExtension(entry, role, action, checked);
     const box = (
       <Checkbox
         checked={checked}
@@ -156,13 +167,23 @@ export default function RolesPage() {
         onChange={(e) => toggleCell(entry, action, e.target.checked)}
       />
     );
-    const hint = CELL_HINT[state];
-    return hint ? (
-      <Tooltip title={hint}>
-        <span>{box}</span>
-      </Tooltip>
+    const hint = extension
+      ? 'Право выдано сверх базового набора роли'
+      : CELL_HINT[state];
+    const wrapped = extension ? (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        {box}
+        <PlusCircleFilled style={{ color: '#fa8c16', fontSize: 11 }} />
+      </span>
     ) : (
       box
+    );
+    return hint ? (
+      <Tooltip title={hint}>
+        <span>{wrapped}</span>
+      </Tooltip>
+    ) : (
+      wrapped
     );
   };
 
@@ -172,6 +193,14 @@ export default function RolesPage() {
   })).filter((g) => g.entries.length > 0);
 
   const isAdminView = adminSelected;
+
+  // Среди несохранённых правок есть выдача прав на раздел «Администрирование».
+  // Такое сохранение подтверждаем отдельно: это полномочия уровня админа.
+  const grantsAdminAccess = changes.some((c) => {
+    if (!c.allowed) return false;
+    const entry = catalog.find((e) => e.id === c.page);
+    return entry?.group === ADMIN_GROUP && !entry.base[c.action]?.includes(c.role);
+  });
 
   return (
     <StickyPageHeader
@@ -219,14 +248,33 @@ export default function RolesPage() {
                   Сбросить к дефолту
                 </Button>
               </Popconfirm>
-              <Button
-                type="primary"
-                disabled={!dirty}
-                loading={save.isPending}
-                onClick={() => save.mutate(changes)}
-              >
-                Сохранить
-              </Button>
+              {grantsAdminAccess ? (
+                <Popconfirm
+                  title="Выдать роли административные права?"
+                  description={
+                    <div style={{ maxWidth: 360 }}>
+                      Роль получит экраны раздела «Администрирование». Это полномочия уровня
+                      администратора — убедитесь, что доступ действительно нужен для работы.
+                    </div>
+                  }
+                  okText="Выдать"
+                  cancelText="Отмена"
+                  onConfirm={() => save.mutate(changes)}
+                >
+                  <Button type="primary" disabled={!dirty} loading={save.isPending}>
+                    Сохранить
+                  </Button>
+                </Popconfirm>
+              ) : (
+                <Button
+                  type="primary"
+                  disabled={!dirty}
+                  loading={save.isPending}
+                  onClick={() => save.mutate(changes)}
+                >
+                  Сохранить
+                </Button>
+              )}
             </Space>
           </Space>
           {!query.data?.enforced && (
@@ -281,10 +329,17 @@ export default function RolesPage() {
             items={entries}
             rowKey={(r) => r.id}
             pagination={false}
+            // Разделов на странице шесть; общий «скролл во весь экран» рисовал
+            // бы трек прокрутки в каждом. Скроллится страница целиком.
+            scrollY={false}
             columns={[
               {
                 title: 'Страница',
                 dataIndex: 'label',
+                // Фиксированная ширина: иначе на широком мониторе название
+                // уезжает влево, а галочки жмутся к правому краю, и строку
+                // тяжело вести глазом до нужной колонки.
+                width: 360,
                 render: (_: unknown, r: Row) => (
                   <Space size={6}>
                     <span>{r.label}</span>
@@ -299,7 +354,7 @@ export default function RolesPage() {
               ...PAGE_ACTIONS.map((action) => ({
                 title: PAGE_ACTION_LABELS[action],
                 key: action,
-                width: 130,
+                align: 'center' as const,
                 render: (_: unknown, r: Row) =>
                   isAdminView ? (
                     <Checkbox checked disabled />

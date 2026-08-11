@@ -6,10 +6,11 @@ import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from '../shared/ui/ProtectedRoute';
 import { NoAccess } from '../shared/ui/NoAccess';
 import { homePath } from './layout/navItems';
+import type { PageId } from '@matcheck/contracts';
 import { canView } from '../shared/utils/permissions';
 import { useAuthStore } from '../stores/auth';
 import { usePermissionsStore } from '../stores/permissions';
-import AdminLayout from '../pages/admin/AdminLayout';
+import AdminLayout, { ADMIN_TABS } from '../pages/admin/AdminLayout';
 import ReferencesLayout, { TAB_DEFS as REFERENCE_TABS } from '../pages/references/ReferencesLayout';
 
 const Login = lazy(() => import('../pages/auth/Login'));
@@ -77,6 +78,42 @@ function ReferencesHome() {
   const first = REFERENCE_TABS.find((t) => canView(perms, t.page, role));
   if (!first) return <NoAccess title="Справочники закрыты" />;
   return <Navigate to={first.key} replace />;
+}
+
+/**
+ * Вход в «Администрирование» — на первую ДОСТУПНУЮ вкладку.
+ *
+ * Жёсткий редирект на /admin/users оставлял бы человека с выданной вкладкой
+ * «Промпты» перед отказом: страницу пользователей ему никто не открывал.
+ */
+function AdminHome() {
+  const role = useAuthStore((s) => s.user?.role);
+  const perms = usePermissionsStore((s) => s.perms);
+  const first = ADMIN_TABS.find((t) => canView(perms, t.page, role));
+  if (!first) return <NoAccess title="Администрирование закрыто" />;
+  return <Navigate to={first.key} replace />;
+}
+
+/**
+ * Страницы раздела «Документы» в порядке пункта меню.
+ *
+ * Меню ведёт на /documents, и он закрыт правом documents.list. Роль, которой
+ * выдали только «Разбор почты», иначе получала бы раздел в меню и отказ на нём.
+ */
+const DOCUMENT_PAGES: { page: PageId; path: string }[] = [
+  { page: 'documents.list', path: '/documents' },
+  { page: 'documents.mail', path: '/documents/mail' },
+  { page: 'documents.extra_only', path: '/documents/extra-only' },
+];
+
+function DocumentsHome({ children }: { children: ReactNode }) {
+  const role = useAuthStore((s) => s.user?.role);
+  const perms = usePermissionsStore((s) => s.perms);
+  if (canView(perms, 'documents.list', role)) return <>{children}</>;
+
+  const fallback = DOCUMENT_PAGES.find((p) => canView(perms, p.page, role));
+  if (!fallback) return <NoAccess title="Документы закрыты" />;
+  return <Navigate to={fallback.path} replace />;
 }
 
 /**
@@ -188,18 +225,14 @@ export const router = sentryCreateBrowserRouter([
       },
       {
         path: 'documents',
-        element: (
-          <ProtectedRoute roles={['admin', 'manager', 'contractor']} page="documents.list">
-            {suspense(<Inbox />)}
-          </ProtectedRoute>
-        ),
+        element: <DocumentsHome>{suspense(<Inbox />)}</DocumentsHome>,
       },
       {
         // Разбор почты — только для тех, кто заводит документы: подрядчику
         // чужие письма видеть нельзя.
         path: 'documents/mail',
         element: (
-          <ProtectedRoute roles={['admin', 'manager']} page="documents.mail">
+          <ProtectedRoute page="documents.mail">
             {suspense(<MailReview />)}
           </ProtectedRoute>
         ),
@@ -208,7 +241,7 @@ export const router = sentryCreateBrowserRouter([
         // Комплекты без распознанных документов — тоже инструмент разбора.
         path: 'documents/extra-only',
         element: (
-          <ProtectedRoute roles={['admin', 'manager']} page="documents.extra_only">
+          <ProtectedRoute page="documents.extra_only">
             {suspense(<ExtraOnlyBundles />)}
           </ProtectedRoute>
         ),
@@ -218,7 +251,7 @@ export const router = sentryCreateBrowserRouter([
         path: 'materials',
         // Журнал бьёт по /reports/*, закрытым для contractor — не пускаем его сюда.
         element: (
-          <ProtectedRoute roles={['admin', 'manager', 'inspector_kpp']} page="materials_journal">
+          <ProtectedRoute page="materials_journal">
             {suspense(<MaterialsJournal />)}
           </ProtectedRoute>
         ),
@@ -226,7 +259,7 @@ export const router = sentryCreateBrowserRouter([
       {
         path: 'stats',
         element: (
-          <ProtectedRoute roles={['admin', 'manager']} page="stats">
+          <ProtectedRoute page="stats">
             {suspense(<StatsPage />)}
           </ProtectedRoute>
         ),
@@ -234,7 +267,7 @@ export const router = sentryCreateBrowserRouter([
       {
         path: 'references',
         element: (
-          <ProtectedRoute roles={['admin', 'manager']} group="references">
+          <ProtectedRoute group="references">
             <ReferencesLayout />
           </ProtectedRoute>
         ),
@@ -315,12 +348,12 @@ export const router = sentryCreateBrowserRouter([
       {
         path: 'admin',
         element: (
-          <ProtectedRoute roles={['admin']} group="admin">
+          <ProtectedRoute group="admin">
             <AdminLayout />
           </ProtectedRoute>
         ),
         children: [
-          { index: true, element: <Navigate to="/admin/users" replace /> },
+          { index: true, element: <AdminHome /> },
           {
             path: 'users',
             element: <ProtectedRoute page="admin.users">{suspense(<AdminUsers />)}</ProtectedRoute>,

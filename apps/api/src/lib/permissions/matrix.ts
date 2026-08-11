@@ -3,6 +3,7 @@ import {
   MANAGED_ROLES,
   PAGE_ACTIONS,
   PAGE_BY_ID,
+  canExpand,
   isActionApplicable,
   isLockedCell,
   type ManagedRole,
@@ -57,16 +58,50 @@ export function isAllowed(
   //    планшеты на объектах (403 мобилка не показывает — залипает молча).
   if (isLockedCell(managed, page, action)) return true;
 
-  // 4. Инвариант «матрица только сужает», зашитый в рантайм: право, которого
-  //    нет в дефолте, не выдаётся никогда — даже если строка в БД говорит
-  //    обратное.
-  if (!DEFAULT_MATRIX[managed]?.[page]?.[action]) return false;
-
-  // 5. И только теперь — сохранённое админом сужение.
+  const base = DEFAULT_MATRIX[managed]?.[page]?.[action] ?? false;
   const row = overrides.get(overrideKey(managed, page));
-  if (row && !row[action]) return false;
+  const stored = row?.[action];
 
-  return true;
+  // 4. Границы РАСШИРЕНИЯ проверяются здесь, а не только в PATCH: строку
+  //    можно записать прямым UPDATE, и тогда единственная преграда — эта.
+  //    Проверяем ровно расширение (дефолт запрещал, строка разрешает), чтобы
+  //    базовое право осталось рабочим: у monitor, например, operations.*:edit
+  //    в дефолте есть ради отметки проверки, и запрет write-расширения не
+  //    должен его отнимать.
+  if (!base && stored === true && !canExpand(managed, page, action)) return false;
+
+  // 5. Строка в БД задаёт итог как есть — и сужение, и расширение.
+  if (stored !== undefined) return stored;
+
+  // 6. Строки нет — «как в коде».
+  return base;
+}
+
+/**
+ * Является ли разрешение РАСШИРЕНИЕМ — то есть правом, которого у роли нет в
+ * дефолте и которое админ выдал явной строкой в БД.
+ *
+ * Ровно на этом различии держится безопасность отметки в plugins/permissions.ts:
+ * обходить allow-list маршрута можно только по явно выданному праву. Отметка на
+ * дефолтных правах открыла бы роли все маршруты ячейки, включая те, что сегодня
+ * закрыты более узким authorize (monitor → редактирование операций, manager →
+ * bulk-hard-delete).
+ */
+export function isExpanded(
+  overrides: OverrideMap,
+  role: UserRole,
+  page: PageId,
+  action: PageAction,
+): boolean {
+  if (role === 'admin') return false;
+  const managed = role as ManagedRole;
+  if (!PAGE_BY_ID[page] || !isActionApplicable(page, action)) return false;
+
+  const base = DEFAULT_MATRIX[managed]?.[page]?.[action] ?? false;
+  if (base) return false;
+  if (overrides.get(overrideKey(managed, page))?.[action] !== true) return false;
+  // isAllowed отсекает never-grantable и запрещённое write-расширение.
+  return isAllowed(overrides, role, page, action);
 }
 
 /**

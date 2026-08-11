@@ -9,6 +9,8 @@
  */
 import {
   PAGE_ACTIONS,
+  canExpand,
+  isNeverGrantable,
   type ManagedRole,
   type PageAction,
   type PageId,
@@ -24,14 +26,21 @@ export type Change = { role: ManagedRole; page: PageId; action: PageAction; allo
  * Что можно сделать с ячейкой:
  *   locked         — нужна мобильному КПП, снять нельзя ни здесь, ни в API;
  *   not-applicable — действия у страницы нет вовсе (у «Статистики» нет удаления);
- *   not-in-base    — роли этого не давали и раньше; матрица только сужает,
- *                    выдать право она не может;
- *   editable       — обычная галочка.
+ *   never          — право не выдаётся никому: через него можно получить
+ *                    полномочия администратора («Роли», правка пользователей);
+ *   write-locked   — роли можно выдать только «Просмотр»: на путях записи у неё
+ *                    нет ограничения по своим данным;
+ *   editable       — обычная галочка (в том числе выдача сверх базовых прав).
  */
-export type CellState = 'locked' | 'not-applicable' | 'not-in-base' | 'editable';
+export type CellState = 'locked' | 'not-applicable' | 'never' | 'write-locked' | 'editable';
 
 export function cellKey(role: ManagedRole, page: PageId, action: PageAction): string {
   return `${role}:${page}:${action}`;
+}
+
+/** Есть ли право у роли ПО УМОЛЧАНИЮ — то есть без строки в матрице. */
+export function baseAllows(entry: CatalogEntry, role: ManagedRole, action: PageAction): boolean {
+  return entry.base[action]?.includes(role) ?? false;
 }
 
 export function cellState(
@@ -42,8 +51,26 @@ export function cellState(
 ): CellState {
   if (lockedCells.has(cellKey(role, entry.id, action))) return 'locked';
   if (!entry.actions.includes(action)) return 'not-applicable';
-  if (!entry.base[action]?.includes(role)) return 'not-in-base';
+  // Базовое право всегда редактируемо: его можно снять и вернуть обратно.
+  // Ограничения ниже — про ВЫДАЧУ того, чего в дефолте не было.
+  if (baseAllows(entry, role, action)) return 'editable';
+  if (isNeverGrantable(entry.id, action)) return 'never';
+  if (!canExpand(role, entry.id, action)) return 'write-locked';
   return 'editable';
+}
+
+/**
+ * Ячейка выдаёт право СВЕРХ базового набора роли. Такие помечаем в интерфейсе:
+ * администратор должен видеть, где он расширил доступ, а где просто оставил
+ * как было.
+ */
+export function isExtension(
+  entry: CatalogEntry,
+  role: ManagedRole,
+  action: PageAction,
+  value: boolean,
+): boolean {
+  return value && !baseAllows(entry, role, action);
 }
 
 function clonePage(p: PagePermissions): PagePermissions {
@@ -78,8 +105,9 @@ export function applyCell(
   next[action] = allowed;
 
   if (allowed && action !== 'view') {
-    // Включили действие — просмотр обязан быть включён (если он вообще
-    // доступен роли: иначе получилось бы право, которого нет в базе).
+    // Включили действие — просмотр обязан быть включён. Если сам просмотр
+    // выдать нельзя (never/write-locked), не трогаем: сервер такую пару всё
+    // равно отклонит, и UI не должен обещать невозможное.
     if (cellState(entry, role, 'view', lockedCells) === 'editable') next.view = true;
   }
   if (!allowed && action === 'view') {

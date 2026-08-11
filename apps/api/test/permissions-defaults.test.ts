@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_MATRIX,
   MANAGED_ROLES,
+  canExpand,
   PAGE_ACTIONS,
   PAGE_CATALOG,
   PAGE_IDS,
@@ -77,12 +78,19 @@ function cell(role: ManagedRole, page: PageId, action: PageAction): string {
  * фикстуры, иначе самое важное право (operations:create через upsert)
  * осталось бы вне проверки.
  */
-function coveredCells(r: RouteRow): { page: PageId; action: PageAction }[] {
+function coveredCells(r: RouteRow, role: ManagedRole): { page: PageId; action: PageAction }[] {
   const key = routeKey(r.method, r.url);
   const rule = ROUTE_PERMISSIONS.get(key);
   if (!rule) return [];
   if (rule.kind === 'static') return [{ page: rule.page, action: rule.action }];
   if (rule.kind === 'always') return [];
+  // legacy: для перечисленных ролей маршрут вне матрицы — доступ у них
+  // исторический и матрицей не управляется (в том числе не сужается).
+  // Остальным ролям он enforced указанной парой, и открыть его может только
+  // явное расширение.
+  if (rule.kind === 'legacy') {
+    return rule.roles.includes(role) ? [] : [{ page: rule.page, action: rule.action }];
+  }
 
   const runtime = RUNTIME_RULE_COVERAGE[key];
   if (!runtime) {
@@ -99,14 +107,18 @@ describe('дефолтная матрица == сегодняшние права
     const lost: string[] = [];
 
     for (const r of await routes()) {
-      // always даёт пустой список — такие маршруты выведены из-под матрицы.
-      // static/dynamic/in-handler дают все пары, которые они могут потребовать.
-      const cells = coveredCells(r);
-      if (cells.length === 0) continue;
+      // always и незарегистрированные — вне матрицы целиком; отсекаем ДО
+      // apiAllows, который на публичных маршрутах (нет ни authorize, ни записи
+      // в INLINE_ROLE_ACCESS) намеренно бросает исключение.
+      const rule = ROUTE_PERMISSIONS.get(routeKey(r.method, r.url));
+      if (!rule || rule.kind === 'always') continue;
 
       for (const role of MANAGED_ROLES) {
         if (!apiAllows(role, r)) continue;
-        for (const { page, action } of cells) {
+        // legacy-для-своей-роли даёт пустой список: для неё этот маршрут тоже
+        // выведен из-под матрицы. static/dynamic/in-handler дают все пары,
+        // которые маршрут может потребовать.
+        for (const { page, action } of coveredCells(r, role)) {
           if (!DEFAULT_MATRIX[role][page][action]) {
             lost.push(`${role} теряет ${page}:${action} (${routeKey(r.method, r.url)})`);
           }
@@ -133,7 +145,7 @@ describe('дефолтная матрица == сегодняшние права
 
           const confirmed = all.some(
             (r) =>
-              coveredCells(r).some((c) => c.page === page && c.action === action) &&
+              coveredCells(r, role).some((c) => c.page === page && c.action === action) &&
               apiAllows(role, r),
           );
 
@@ -184,11 +196,65 @@ describe('дефолтная матрица == сегодняшние права
     ).toEqual([]);
   });
 
-  it('каждый известный разрыв действительно помечен always', () => {
-    const wrong = Object.keys(KNOWN_API_UI_GAPS).filter(
-      (key) => ROUTE_PERMISSIONS.get(key)?.kind !== 'always',
-    );
+  it('каждый известный разрыв выведен из-под матрицы: always или legacy', () => {
+    const wrong = Object.keys(KNOWN_API_UI_GAPS).filter((key) => {
+      const kind = ROUTE_PERMISSIONS.get(key)?.kind;
+      return kind !== 'always' && kind !== 'legacy';
+    });
     expect(wrong, 'Разрыв описан, но маршрут не выведен из-под матрицы').toEqual([]);
+  });
+
+  it('legacy-роли совпадают с фактическим allow-list маршрута', async () => {
+    // Список в реестре — обещание «эти роли ходят сюда сегодня». Разойдись он
+    // с реальностью, и мы либо молча отберём доступ у забытой роли, либо
+    // навсегда выведем из-под матрицы ту, которой там нет.
+    const mismatched: string[] = [];
+
+    for (const r of await routes()) {
+      const key = routeKey(r.method, r.url);
+      const rule = ROUTE_PERMISSIONS.get(key);
+      if (rule?.kind !== 'legacy') continue;
+
+      const actual = MANAGED_ROLES.filter((role) => apiAllows(role, r));
+      const declared = [...rule.roles].sort();
+      if (JSON.stringify(actual.sort()) !== JSON.stringify(declared)) {
+        mismatched.push(`${key}: заявлено [${declared}], фактически [${actual}]`);
+      }
+    }
+
+    expect(mismatched.sort()).toEqual([]);
+  });
+
+  it('расширения фазы 1 не упираются в inline-проверку роли', async () => {
+    // Расширение снимает только app.authorize. Проверка роли ВНУТРИ хендлера
+    // (DELETE операции, mark-deletion и т.п.) остаётся, и выданное право там
+    // просто не сработает — админ увидел бы галочку, которая ничего не делает.
+    // Пока таких ячеек нет, фаза 1 честна; появится — либо в NEVER_GRANTABLE,
+    // либо разбирать capability/scope в хендлере (фаза 3).
+    const broken: string[] = [];
+
+    for (const r of await routes()) {
+      const key = routeKey(r.method, r.url);
+      const rule = ROUTE_PERMISSIONS.get(key);
+      if (rule?.kind !== 'static' && rule?.kind !== 'legacy') continue;
+
+      // Маршрут защищён allow-list'ом — его расширение снимает штатно.
+      if (r.roles.length > 0) continue;
+      const inline = INLINE_ROLE_ACCESS[key];
+      if (!inline) continue;
+
+      for (const role of MANAGED_ROLES) {
+        if (DEFAULT_MATRIX[role][rule.page][rule.action]) continue;
+        if (!canExpand(role, rule.page, rule.action)) continue;
+        if (inline.includes(role)) continue;
+        broken.push(`${role}:${rule.page}:${rule.action} → ${key} проверяет роль внутри`);
+      }
+    }
+
+    expect(
+      broken.sort(),
+      'Право можно выдать, но маршрут всё равно откажет: внутри хендлера своя проверка роли.',
+    ).toEqual([]);
   });
 
   it('каталог согласован: base не содержит неприменимых действий', () => {

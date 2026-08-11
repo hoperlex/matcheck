@@ -19,6 +19,7 @@ import {
   cloneMatrix,
   diffMatrix,
   groupState,
+  isExtension,
   roleHasChanges,
   type CatalogEntry,
   type Matrix,
@@ -49,9 +50,33 @@ describe('состояние ячейки', () => {
     expect(cellState(byId('stats'), 'manager', 'delete', locked)).toBe('not-applicable');
   });
 
-  it('право, которого нет в базе, — матрица только сужает', () => {
-    // Удаление в справочниках есть только у admin, а он вне матрицы.
-    expect(cellState(byId('references.sites'), 'manager', 'delete', locked)).toBe('not-in-base');
+  it('право сверх базы редактируемо: матрица умеет расширять', () => {
+    // Удаление в справочниках сегодня только у admin — теперь его можно выдать
+    // менеджеру.
+    expect(cellState(byId('references.sites'), 'manager', 'delete', locked)).toBe('editable');
+  });
+
+  it('роли без write-scope можно выдать только «Просмотр»', () => {
+    expect(cellState(byId('references.sites'), 'contractor', 'view', locked)).toBe('editable');
+    expect(cellState(byId('references.sites'), 'contractor', 'create', locked)).toBe(
+      'write-locked',
+    );
+    expect(cellState(byId('documents.list'), 'inspector_kpp', 'edit', locked)).toBe('write-locked');
+  });
+
+  it('права, ведущие в администраторы, не выдаются никому', () => {
+    expect(cellState(byId('admin.roles'), 'manager', 'edit', locked)).toBe('never');
+    expect(cellState(byId('admin.users'), 'manager', 'edit', locked)).toBe('never');
+    expect(cellState(byId('admin.users'), 'manager', 'delete', locked)).toBe('never');
+    // Просмотр списка пользователей выдать можно.
+    expect(cellState(byId('admin.users'), 'manager', 'view', locked)).toBe('editable');
+  });
+
+  it('базовое право остаётся редактируемым даже там, где расширение запрещено', () => {
+    // У monitor operations.*:edit базовый (отметка проверки). Если бы правило
+    // про write-расширение делало ячейку disabled, снятый доступ нельзя было
+    // бы вернуть.
+    expect(cellState(byId('operations.deliveries'), 'monitor', 'edit', locked)).toBe('editable');
   });
 
   it('обычная ячейка', () => {
@@ -89,10 +114,25 @@ describe('каскад просмотра', () => {
     expect(diffMatrix(fresh(), after)).toEqual([]);
   });
 
-  it('ячейку вне базы включить нельзя', () => {
+  it('ячейка сверх базы включается и попадает в дельту как расширение', () => {
+    const after = applyCell(fresh(), byId('references.sites'), 'manager', 'delete', true, locked);
+    expect(after.manager['references.sites']!.delete).toBe(true);
+    expect(diffMatrix(fresh(), after)).toEqual([
+      { role: 'manager', page: 'references.sites', action: 'delete', allowed: true },
+    ]);
+    expect(isExtension(byId('references.sites'), 'manager', 'delete', true)).toBe(true);
+    // Базовое право расширением не считается.
+    expect(isExtension(byId('references.sites'), 'manager', 'edit', true)).toBe(false);
+  });
+
+  it('запрещённые к выдаче ячейки не включаются', () => {
     const before = fresh();
-    const after = applyCell(before, byId('references.sites'), 'manager', 'delete', true, locked);
-    expect(after).toBe(before);
+    // never-grantable
+    expect(applyCell(before, byId('admin.users'), 'manager', 'edit', true, locked)).toBe(before);
+    // роль без write-scope
+    expect(applyCell(before, byId('references.sites'), 'contractor', 'create', true, locked)).toBe(
+      before,
+    );
   });
 
   it('каскад не трогает заблокированные ячейки', () => {

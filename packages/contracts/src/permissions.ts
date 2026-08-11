@@ -4,12 +4,14 @@ import { UserRoleSchema, type UserRole } from './auth.js';
 /**
  * Матрица прав ролей: «роль × страница × действие».
  *
- * Ключевой инвариант всей фичи: матрица только СУЖАЕТ. Дефолт (см.
- * PAGE_CATALOG[].base) в точности повторяет права, которые роль имеет
- * сегодня в коде — пересечение навигации веба (navItems.ts + гарды
- * router.tsx) и allow-list'ов API (app.authorize + inline-проверки).
- * Выдать через матрицу право, которого нет в base, невозможно: это
- * проверяется и в PATCH, и в рантайм-резолвере.
+ * Матрица умеет и СУЖАТЬ, и РАСШИРЯТЬ. Дефолт (см. PAGE_CATALOG[].base) в
+ * точности повторяет права, которые роль имеет сегодня в коде — пересечение
+ * навигации веба (navItems.ts + гарды router.tsx) и allow-list'ов API
+ * (app.authorize + inline-проверки). Он остаётся стартовым значением, но
+ * потолком быть перестал: строка в БД задаёт итог как есть.
+ *
+ * Границы расширения — здесь же, в NEVER_GRANTABLE и EXPANDABLE_WRITE_ROLES,
+ * и продублированы в рантайм-резолвере: БД правят и руками.
  *
  * Роли admin здесь нет вовсе — она обходит матрицу целиком (иначе админ
  * способен снять себе доступ к вкладке «Роли» и остаться без пути назад).
@@ -408,6 +410,55 @@ export function cellKey(role: ManagedRole, page: PageId, action: PageAction): st
 
 export function isLockedCell(role: ManagedRole, page: PageId, action: PageAction): boolean {
   return LOCKED_CELLS.has(cellKey(role, page, action));
+}
+
+/**
+ * Права, которые нельзя выдать НИКОГДА и НИКОМУ, даже прямым UPDATE в БД.
+ *
+ * `admin.roles` — сама эта матрица: получив её, роль управляет доступом всех
+ * остальных, включая себя, и вернуть контроль было бы некому.
+ *
+ * `admin.users:edit|delete` — тот же результат окольным путём: PATCH
+ * пользователя принимает любую роль, включая admin, и позволяет сменить пароль
+ * существующему администратору. Открывать это можно будет только вместе с
+ * ограничениями делегата (не назначать admin, не трогать админов и себя).
+ */
+export const NEVER_GRANTABLE: ReadonlySet<string> = new Set<string>([
+  ...PAGE_ACTIONS.map((action) => `admin.roles:${action}`),
+  'admin.users:edit',
+  'admin.users:delete',
+]);
+
+export function isNeverGrantable(page: PageId, action: PageAction): boolean {
+  return NEVER_GRANTABLE.has(`${page}:${action}`);
+}
+
+/**
+ * Кому можно расширять ПРАВА ЗАПИСИ (create/edit/delete).
+ *
+ * Только manager, и это про область видимости, а не про доверие. У него
+ * row-scope нет вовсе — он и сегодня видит все объекты, поэтому выданная
+ * запись не открывает ему чужих данных. У остальных ограничение по своим
+ * данным на путях записи отсутствует: upsert операций сверяет объект только у
+ * inspector_kpp, а маршруты документов не сверяют siteId вовсе — подрядчик или
+ * инспектор с выданным create писали бы куда угодно.
+ *
+ * Снимается в фазе 2, когда появятся write-scope инварианты. «Просмотр»
+ * расширяется всем: чтение везде уже ограничено скоупом роли.
+ */
+export const EXPANDABLE_WRITE_ROLES: ManagedRole[] = ['manager'];
+
+/**
+ * Можно ли ВЫДАТЬ роли право, которого нет в её дефолте.
+ *
+ * Сужение этой функцией не ограничивается — снять можно почти всё (кроме
+ * LOCKED_CELLS, они про работоспособность мобильного клиента).
+ */
+export function canExpand(role: ManagedRole, page: PageId, action: PageAction): boolean {
+  if (!isActionApplicable(page, action)) return false;
+  if (isNeverGrantable(page, action)) return false;
+  if (action === 'view') return true;
+  return EXPANDABLE_WRITE_ROLES.includes(role);
 }
 
 // ──────────────────────────── API-контракты ────────────────────────────

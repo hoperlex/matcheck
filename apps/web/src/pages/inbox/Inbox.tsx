@@ -34,6 +34,7 @@ import { getDocumentDisplayStatus } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api, apiDownload, ApiError } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
@@ -321,6 +322,13 @@ export default function InboxPage() {
   // Подрядчик: read-only + справочники закрыты. Скрываем write-UI, не грузим
   // справочные запросы; колонки уже читают имена из DTO документа.
   const isContractor = useAuthStore((s) => s.user?.role) === 'contractor';
+  // Действия раздела «Документы» — по матрице, а не по роли: их можно выдать
+  // (в отличие от операций и фото, где ограничение роли живёт в скоупе данных
+  // и мобильном клиенте). При дефолтах значения совпадают с прежними:
+  // create/edit/delete у documents.list есть только у manager.
+  const { can: canDo } = usePermissions();
+  const canCreateDocs = canDo('documents.list', 'create');
+  const canDeleteDocs = canDo('documents.list', 'delete');
   // direction/kind/q + контрагенты/объект — всё хранится в URL, чтобы фильтры
   // переживали F5 и поддерживали share-able ссылки.
   const direction: SourceDirection =
@@ -621,8 +629,9 @@ export default function InboxPage() {
   });
 
   const renderDeleteButton = (r: Row) => {
-    // Подрядчик — read-only: удаление документов недоступно.
-    if (isContractor) return null;
+    // Право «Удалять» на странице «Документы»: у подрядчика его нет по
+    // умолчанию, но администратор может выдать.
+    if (!canDeleteDocs) return null;
     const errMsg = deleteErrors[r.id];
     return (
       <Space size={4} onClick={(e) => e.stopPropagation()}>
@@ -761,8 +770,8 @@ export default function InboxPage() {
               searchPlaceholder="Номер документа"
               extra={
                 <Space size={8}>
-                  {/* Подрядчик — read-only: загрузку документов не показываем. */}
-                  {!isContractor && (
+                  {/* Загрузка документов — право «Создавать» на этой странице. */}
+                  {canCreateDocs && (
                     <>
                       <Button type="primary" onClick={() => setDocsModalOpen(true)}>
                         Загрузить документы

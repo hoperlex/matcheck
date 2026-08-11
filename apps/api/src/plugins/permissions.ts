@@ -1,13 +1,22 @@
 import fp from 'fastify-plugin';
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { ManagedRole } from '@matcheck/contracts';
 import { loadEnv } from '../lib/env.js';
-import { isAllowed } from '../lib/permissions/matrix.js';
+import { isAllowed, isExpanded } from '../lib/permissions/matrix.js';
 import { createMatrixStore, type MatrixStore } from '../lib/permissions/store.js';
 import { lookupRule, type RouteRule } from '../lib/permissions/route-map.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
     permissions: MatrixStore & { enforced: boolean };
+  }
+  interface FastifyRequest {
+    /**
+     * Право на этот маршрут РАСШИРЕНО матрицей: в дефолте роли его не было,
+     * админ выдал его явной строкой. Только в этом случае запрос обходит
+     * allow-list маршрута (app.authorize) — см. комментарий у хуков ниже.
+     */
+    permissionExpanded?: boolean;
   }
 }
 
@@ -109,10 +118,26 @@ export default fp(async (app) => {
 
   app.addHook('onRequest', async (req, reply) => {
     const rule = ruleFor(req);
-    if (rule?.kind !== 'static') return;
+    if (rule?.kind !== 'static' && rule?.kind !== 'legacy') return;
+
+    // legacy: роли, у которых доступ к маршруту есть исторически, идут мимо
+    // матрицы целиком — в том числе мимо сужения. Маршрут для них вне матрицы,
+    // и снятая галочка не должна молча отбирать работающий доступ.
+    if (rule.kind === 'legacy' && rule.roles.includes(req.user!.role as ManagedRole)) return;
 
     const overrides = await store.get();
-    if (isAllowed(overrides, req.user!.role, rule.page, rule.action)) return;
+    if (isAllowed(overrides, req.user!.role, rule.page, rule.action)) {
+      // Отметка ставится ТОЛЬКО на явном расширении (дефолт запрещал, админ
+      // выдал). Ставить её на любом разрешении нельзя: одна ячейка охраняет
+      // маршруты с разными allow-list'ами, и тогда monitor получил бы
+      // manager-only правку операций (его operations.*:edit существует ради
+      // отметки проверки), а manager — admin-only bulk-hard-delete. То есть
+      // права расширились бы у всех сразу, без единой строки в БД.
+      if (isExpanded(overrides, req.user!.role, rule.page, rule.action)) {
+        req.permissionExpanded = true;
+      }
+      return;
+    }
     return deny(req, reply, rule.page, rule.action);
   });
 

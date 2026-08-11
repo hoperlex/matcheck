@@ -11,8 +11,10 @@ import {
   PAGE_BY_ID,
   RolePermissionsPatchSchema,
   RolePermissionsResponseSchema,
+  canExpand,
   isActionApplicable,
   isLockedCell,
+  isNeverGrantable,
   type ManagedRole,
   type PageAction,
   type PageId,
@@ -219,13 +221,24 @@ export async function rolePermissionRoutes(rawApp: FastifyInstance): Promise<voi
               'доступа и просто перестанет работать',
           );
         }
-        // Инвариант «матрица только сужает»: выдать право, которого нет в
-        // коде, нельзя. Продублирован в рантайм-резолвере.
-        if (c.allowed && !DEFAULT_MATRIX[c.role][c.page][c.action]) {
+        // Границы РАСШИРЕНИЯ. Проверяем именно расширение (дефолт запрещал,
+        // просят разрешить): возврат ранее снятого базового права — не
+        // расширение и обязан проходить, иначе снятый у monitor'а review-доступ
+        // нельзя было бы вернуть. Те же правила продублированы в резолвере:
+        // строку можно записать и прямым UPDATE.
+        const isExpansion = c.allowed && !DEFAULT_MATRIX[c.role][c.page][c.action];
+        if (isExpansion && isNeverGrantable(c.page, c.action)) {
           throw invalid(
-            'cannot_grant',
-            `Роль «${c.role}» не имеет права ${c.page}:${c.action} и в текущей версии — ` +
-              'матрица умеет только сужать доступ',
+            'never_grantable',
+            `Право ${c.page}:${c.action} не выдаётся ни одной роли: через него можно ` +
+              'получить полномочия администратора и отобрать доступ у остальных',
+          );
+        }
+        if (isExpansion && !canExpand(c.role, c.page, c.action)) {
+          throw invalid(
+            'write_not_expandable',
+            `Роли «${c.role}» можно выдать только «Просмотр»: на путях записи у неё нет ` +
+              'ограничения по своим данным, и выданное право открыло бы чужие записи',
           );
         }
       }

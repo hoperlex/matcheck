@@ -1,5 +1,5 @@
 import type { FastifyRequest } from 'fastify';
-import type { PageAction, PageId } from '@matcheck/contracts';
+import type { ManagedRole, PageAction, PageId } from '@matcheck/contracts';
 
 /**
  * Реестр «маршрут → право». Единственное место, где HTTP-мир связан с
@@ -32,11 +32,31 @@ export type RouteRule =
    */
   | { kind: 'in-handler'; note: string }
   /** Сознательно вне матрицы. */
-  | { kind: 'always'; note: string };
+  | { kind: 'always'; note: string }
+  /**
+   * Разрыв «API щедрее UI»: маршрут доступен ролям из `roles` исторически, хотя
+   * страницы в вебе у них нет.
+   *
+   * Эти роли идут МИМО матрицы — сегодняшний доступ сохраняется, и снятая
+   * галочка его не отбирает (маршрут для них попросту вне матрицы; сузить его
+   * — отдельное согласование, этап 7). Всем остальным ролям маршрут открывает
+   * только явное расширение указанной пары page:action.
+   *
+   * Почему не «добавить роль в base»: base питает и веб-навигацию, поэтому
+   * monitor немедленно увидел бы пункт «История поступлений», а manager —
+   * раздел «Администрирование». Интерфейс изменился бы в день выката.
+   */
+  | { kind: 'legacy'; page: PageId; action: PageAction; roles: ManagedRole[]; note: string };
 
 const st = (page: PageId, action: PageAction): RouteRule => ({ kind: 'static', page, action });
 const always = (note: string): RouteRule => ({ kind: 'always', note });
 const inHandler = (note: string): RouteRule => ({ kind: 'in-handler', note });
+const legacy = (
+  page: PageId,
+  action: PageAction,
+  roles: ManagedRole[],
+  note: string,
+): RouteRule => ({ kind: 'legacy', page, action, roles, note });
 
 /**
  * Обоснования для always-групп, чтобы не повторять текст в каждой строке.
@@ -58,8 +78,9 @@ const SHARE_LINKS =
   'Ссылка-шаринг общая для приёмок и отгрузок — правило «одна страница» неприменимо.';
 const GAP =
   'РАЗРЫВ «API щедрее UI»: роль имеет доступ по API, но страницы в вебе у неё нет. ' +
-  'Сужение отложено до отдельного согласования (этап 7 плана), иначе выкат матрицы ' +
-  'молча отобрал бы действующий доступ.';
+  'Перечисленные роли идут мимо матрицы — сужение отложено до отдельного согласования ' +
+  '(этап 7 плана), иначе выкат молча отобрал бы действующий доступ. Остальным ролям ' +
+  'маршрут открывает явное расширение указанной пары.';
 
 export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // ─────────────────────────── Служебное / auth ───────────────────────────
@@ -177,7 +198,10 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/source-documents/:id/file/raw', always(SD_READ)],
   ['GET /api/v1/source-documents/:id/extra/:itemId/url', always(SD_READ)],
   ['GET /api/v1/source-documents/:id/extra/:itemId/raw', always(SD_READ)],
-  ['GET /api/v1/source-documents/export.xlsx', always(GAP)],
+  [
+    'GET /api/v1/source-documents/export.xlsx',
+    legacy('documents.list', 'view', ['manager', 'inspector_kpp', 'contractor', 'monitor'], GAP),
+  ],
   ['GET /api/v1/source-documents/import-result/:bundleId', st('documents.list', 'view')],
   ['POST /api/v1/source-documents/upload-upd', st('documents.list', 'create')],
   ['POST /api/v1/source-documents/upload-upd-pdf', st('documents.list', 'create')],
@@ -227,7 +251,10 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ],
 
   // ─────────────────────── История поступлений и отчёты ───────────────────
-  ['GET /api/v1/materials/journal', always(GAP)],
+  [
+    'GET /api/v1/materials/journal',
+    legacy('materials_journal', 'view', ['manager', 'inspector_kpp', 'monitor'], GAP),
+  ],
   ['GET /api/v1/reports/intake', st('materials_journal', 'view')],
   ['GET /api/v1/reports/shipment', st('materials_journal', 'view')],
   ['GET /api/v1/reports/stock', st('materials_journal', 'view')],
@@ -332,16 +359,16 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/admin/edo-accounts', st('admin.edo_accounts', 'view')],
   ['POST /api/v1/admin/edo-accounts', st('admin.edo_accounts', 'create')],
   ['DELETE /api/v1/admin/edo-accounts/:id', st('admin.edo_accounts', 'delete')],
-  ['POST /api/v1/admin/edo-accounts/:id/sync', always(GAP)],
+  ['POST /api/v1/admin/edo-accounts/:id/sync', legacy('admin.edo_accounts', 'edit', ['manager'], GAP)],
 
   ['GET /api/v1/admin/mail-accounts', st('admin.mail_accounts', 'view')],
   ['POST /api/v1/admin/mail-accounts', st('admin.mail_accounts', 'create')],
   ['PATCH /api/v1/admin/mail-accounts/:id', st('admin.mail_accounts', 'edit')],
   ['DELETE /api/v1/admin/mail-accounts/:id', st('admin.mail_accounts', 'delete')],
-  ['POST /api/v1/admin/mail-accounts/:id/sync', always(GAP)],
+  ['POST /api/v1/admin/mail-accounts/:id/sync', legacy('admin.mail_accounts', 'edit', ['manager'], GAP)],
   ['POST /api/v1/admin/mail-accounts/:id/poll', st('admin.mail_accounts', 'edit')],
 
-  ['GET /api/v1/admin/settings', always(GAP)],
+  ['GET /api/v1/admin/settings', legacy('admin.settings', 'view', ['manager'], GAP)],
   ['PUT /api/v1/admin/settings', st('admin.settings', 'edit')],
 ]);
 

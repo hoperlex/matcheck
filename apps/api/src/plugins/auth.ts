@@ -165,6 +165,12 @@ export default fp(async (app) => {
         reply.code(401).send({ error: 'unauthorized' });
         return;
       }
+      // Право на этот маршрут выдано матрицей сверх дефолта роли — allow-list
+      // не применяем. Отметку ставит плагин прав, и только для явного
+      // расширения: на дефолтных правах маршрут по-прежнему защищён списком
+      // ролей, иначе выдача одной ячейки открыла бы и соседние маршруты с
+      // более узким доступом.
+      if (req.permissionExpanded) return;
       if (!roles.includes(req.user.role)) {
         await logUnauthorized(req, 403, `role_required:${roles.join('|')}`, req.user.id);
         reply.code(403).send({ error: 'forbidden', message: 'Insufficient role' });

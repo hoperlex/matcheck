@@ -9,10 +9,10 @@ import { NoAccess } from './NoAccess';
 /**
  * Гард роута.
  *
- * `page`/`group` — проверка по матрице прав; `roles` — прежний allow-list,
- * оставлен рабочим для роутов, которых матрица не касается. Когда заданы оба,
- * действуют оба: матрица только СУЖАЕТ, поэтому конъюнкция — единственный
- * безопасный вариант.
+ * Когда задан `page`/`group`, решает ТОЛЬКО матрица: она умеет и сужать, и
+ * расширять, поэтому конъюнкция со старым списком ролей сделала бы выданное
+ * право бесполезным — страница осталась бы закрытой. `roles` работает как
+ * прежде лишь там, где страницы в матрице нет вовсе.
  *
  * Отказ показывает NoAccess, а НЕ редирект на корень: корень ведёт на первый
  * доступный раздел, и при закрытом разделе редирект зациклился бы.
@@ -35,14 +35,14 @@ export function ProtectedRoute({
   if (!user) {
     return <Navigate to="/login" replace state={{ from: location }} />;
   }
+  if (page) {
+    return canView(perms, page, user.role) ? <>{children}</> : <NoAccess />;
+  }
+  if (group) {
+    return canViewGroup(perms, group, user.role) ? <>{children}</> : <NoAccess />;
+  }
   if (roles && !roles.includes(user.role)) {
     return <Navigate to="/" replace />;
-  }
-  if (page && !canView(perms, page, user.role)) {
-    return <NoAccess />;
-  }
-  if (group && !canViewGroup(perms, group, user.role)) {
-    return <NoAccess />;
   }
   return <>{children}</>;
 }
