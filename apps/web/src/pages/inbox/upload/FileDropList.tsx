@@ -19,6 +19,7 @@ export function FileDropList({
   hint,
   title = 'Перетащите документы поставки либо нажмите для выбора',
   canAdd,
+  compact = false,
 }: {
   rows: FileRow[];
   onChange: (next: FileRow[]) => void;
@@ -27,6 +28,13 @@ export function FileDropList({
   hint: string;
   /** Текст в дропзоне: зон в форме две, и они должны различаться на глаз. */
   title?: string;
+  /**
+   * Иконка и текст в строку вместо столбика. Нужно там, где зон в одной форме
+   * две: вертикальный дефолт antd — под 180px на каждую, и поля уезжают за
+   * пределы экрана. Внутренняя модалка «Загрузить документы» им не пользуется и
+   * остаётся с прежним видом.
+   */
+  compact?: boolean;
   /**
    * Разрешено ли добавить файл. Нужно, чтобы один и тот же файл не попал в обе
    * зоны сразу: сервер такой запрос переживёт (сведёт к «только сохранить»), но
@@ -57,11 +65,40 @@ export function FileDropList({
   return (
     <>
       <Upload.Dragger {...uploadProps} disabled={disabled}>
-        <p className="ant-upload-drag-icon">
-          <InboxOutlined />
-        </p>
-        <p className="ant-upload-text">{title}</p>
-        <p className="ant-upload-hint">{hint}</p>
+        {compact ? (
+          // Классы antd оставлены намеренно: из них приходят цвета (иконка —
+          // colorPrimary, hint — вторичный текст). Инлайновые размеры и отступы
+          // перебивают их по специфичности.
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 12,
+              textAlign: 'left',
+            }}
+          >
+            <p className="ant-upload-drag-icon" style={{ margin: 0, lineHeight: 1 }}>
+              <InboxOutlined style={{ fontSize: 24 }} />
+            </p>
+            <div>
+              <p className="ant-upload-text" style={{ fontSize: 14, marginBottom: 0 }}>
+                {title}
+              </p>
+              <p className="ant-upload-hint" style={{ fontSize: 12, margin: 0 }}>
+                {hint}
+              </p>
+            </div>
+          </div>
+        ) : (
+          <>
+            <p className="ant-upload-drag-icon">
+              <InboxOutlined />
+            </p>
+            <p className="ant-upload-text">{title}</p>
+            <p className="ant-upload-hint">{hint}</p>
+          </>
+        )}
       </Upload.Dragger>
 
       {rows.length > 0 && (

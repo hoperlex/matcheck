@@ -2,14 +2,17 @@ import { useState } from 'react';
 import {
   Alert,
   Button,
+  Col,
   Collapse,
   DatePicker,
   Form,
   Input,
   Modal,
   Result,
+  Row,
   Space,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
@@ -185,7 +188,7 @@ export function PublicUploadModal({ open, onClose }: { open: boolean; onClose: (
       setFinished(true);
       if (summary.failed > 0) {
         message.warning(
-          `Принято ${summary.sent} из ${summary.sent + summary.failed}. Исправьте отмеченные поставки и отправьте их ещё раз.`,
+          `Принято ${summary.sent} из ${summary.sent + summary.failed}. Исправьте отмеченные машины и отправьте их ещё раз.`,
         );
       }
     } finally {
@@ -228,9 +231,17 @@ export function PublicUploadModal({ open, onClose }: { open: boolean; onClose: (
       maskClosable={false}
       keyboard={false}
       closable={!sending}
-      width="min(760px, 94vw)"
+      width="90vw"
       centered
-      styles={{ body: { maxHeight: '72vh', overflowY: 'auto' } }}
+      styles={{
+        // Растём по контенту, но не выше 90vh: со свёрнутыми машинами модалка
+        // компактная, с развёрнутыми — упирается в потолок и скроллит только
+        // тело. Флексом, а не calc(90vh - N): высоту шапки и футера тогда не
+        // приходится угадывать, а на телефоне заголовок переносится в две
+        // строки и любое угаданное число врёт.
+        content: { maxHeight: '90vh', display: 'flex', flexDirection: 'column' },
+        body: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' },
+      }}
       footer={footer}
     >
       {allSent ? (
@@ -239,7 +250,7 @@ export function PublicUploadModal({ open, onClose }: { open: boolean; onClose: (
           title={
             drafts.length === 1
               ? 'Документы приняты'
-              : `Приняты все поставки: ${drafts.length}`
+              : `Приняты документы по всем машинам: ${drafts.length}`
           }
           subTitle="Мы передали документы на обработку. Если что-то не удастся прочитать, менеджер свяжется с вами."
         />
@@ -248,8 +259,8 @@ export function PublicUploadModal({ open, onClose }: { open: boolean; onClose: (
           type="info"
           showIcon
           style={{ marginBottom: 12 }}
-          message="Загрузите документы по каждой поставке: УПД, накладные, счета-фактуры."
-          description="Подойдут PDF, фотографии документов и файлы Excel (.xlsx). Если машин несколько — добавьте отдельную поставку на каждую."
+          message="Загрузите документы по каждой машине: УПД, накладные, счета-фактуры."
+          description="Подойдут PDF, фотографии документов и файлы Excel (.xlsx). Если машин несколько — добавьте отдельную карточку на каждую."
         />
       )}
 
@@ -260,18 +271,21 @@ export function PublicUploadModal({ open, onClose }: { open: boolean; onClose: (
           key: d.id,
           label: panelTitle(d, i),
           extra:
-            // Удалять можно только то, что ещё не ушло: принятую поставку
+            // Удалять можно только то, что ещё не ушло: принятую машину
             // отменить нельзя, документы уже в системе.
             drafts.length > 1 && (d.state === 'draft' || d.state === 'failed') && !sending ? (
-              <Button
-                type="text"
-                size="small"
-                icon={<DeleteOutlined />}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeDraft(d.id);
-                }}
-              />
+              <Tooltip title="Удалить машину">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<DeleteOutlined />}
+                  aria-label="Удалить машину"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeDraft(d.id);
+                  }}
+                />
+              </Tooltip>
             ) : null,
           children: (
             <DeliveryFields
@@ -292,12 +306,12 @@ export function PublicUploadModal({ open, onClose }: { open: boolean; onClose: (
           disabled={sending}
           onClick={addDraft}
         >
-          Добавить поставку
+          Добавить машину
         </Button>
       )}
       {drafts.length >= MAX_DELIVERIES && (
         <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-          За один раз можно отправить до {MAX_DELIVERIES} поставок. Отправьте эти, потом добавите ещё.
+          За один раз можно отправить до {MAX_DELIVERIES} машин. Отправьте эти, потом добавите ещё.
         </Typography.Paragraph>
       )}
 
@@ -306,8 +320,8 @@ export function PublicUploadModal({ open, onClose }: { open: boolean; onClose: (
           type="warning"
           showIcon
           style={{ marginTop: 12 }}
-          message={`Не отправлено поставок: ${failedCount}`}
-          description="Исправьте отмеченные поставки и нажмите «Отправить». Уже принятые повторно не отправляются."
+          message={`Не отправлено машин: ${failedCount}`}
+          description="Исправьте отмеченные машины и нажмите «Отправить». Уже принятые повторно не отправляются."
         />
       )}
       {!allSent && firstProblem && !sending && (
@@ -345,16 +359,16 @@ function submitLabel(pendingCount: number, failedCount: number): string {
     return `Отправить ещё раз (${failedCount})`;
   }
   if (pendingCount <= 1) return 'Отправить';
-  return `Отправить ${pendingCount} ${pluralDeliveries(pendingCount)}`;
+  return `Отправить ${pendingCount} ${pluralVehicles(pendingCount)}`;
 }
 
-function pluralDeliveries(n: number): string {
+function pluralVehicles(n: number): string {
   const last = n % 10;
   const lastTwo = n % 100;
-  if (lastTwo >= 11 && lastTwo <= 14) return 'поставок';
-  if (last === 1) return 'поставку';
-  if (last >= 2 && last <= 4) return 'поставки';
-  return 'поставок';
+  if (lastTwo >= 11 && lastTwo <= 14) return 'машин';
+  if (last === 1) return 'машину';
+  if (last >= 2 && last <= 4) return 'машины';
+  return 'машин';
 }
 
 function panelTitle(d: DeliveryDraft, index: number) {
@@ -365,7 +379,7 @@ function panelTitle(d: DeliveryDraft, index: number) {
 
   return (
     <Space size={8} wrap>
-      <span>Поставка {index + 1}</span>
+      <span>Машина {index + 1}</span>
       {parts.length > 0 && <Typography.Text type="secondary">{parts.join(' · ')}</Typography.Text>}
       {d.state === 'sending' && (
         <Tag icon={<LoadingOutlined />} color="processing">
@@ -378,7 +392,7 @@ function panelTitle(d: DeliveryDraft, index: number) {
           {/* Номер обращения поставщику не показываем: он непрозрачный, ни о чём
               ему не говорит, и менеджеру в портале тоже не виден. Слово рядом с
               галочкой оставляем — в свёрнутой панели иначе не отличить
-              отправленную поставку от черновика. */}
+              отправленную машину от черновика. */}
           <Typography.Text type="secondary">принято</Typography.Text>
         </Space>
       )}
@@ -429,58 +443,82 @@ function DeliveryFields({
 
   return (
     <Form layout="vertical">
-      <Form.Item label="Объект поставки" required>
-        <PublicSiteSelect
-          value={draft.siteId}
-          onChange={(siteId) => onChange({ siteId })}
-          disabled={locked}
-        />
-      </Form.Item>
-      <Form.Item label="Дата поставки" required extra="Дата, на которую машина приезжает на объект.">
-        <DatePicker
-          value={draft.expectedDate}
-          onChange={(expectedDate) => onChange({ expectedDate })}
-          format="DD.MM.YYYY"
-          size="large"
-          disabled={locked}
-          style={{ width: '100%' }}
-        />
-      </Form.Item>
-      <Form.Item label="Комментарий" extra="Необязательно. Например: «вторая машина, приедет после обеда».">
-        <Input.TextArea
-          value={draft.comment}
-          onChange={(e) => onChange({ comment: e.target.value })}
-          maxLength={MAX_COMMENT}
-          showCount
-          autoSize={{ minRows: 2, maxRows: 5 }}
-          disabled={locked}
-        />
-      </Form.Item>
-      <Form.Item label="УПД и накладные" required>
-        <FileDropList
-          rows={draft.rows}
-          onChange={(rows) => onChange({ rows })}
-          disabled={locked}
-          accept={ACCEPT}
-          title="Перетащите УПД и накладные либо нажмите для выбора"
-          hint={`Всего до ${MAX_FILES} файлов, каждый не больше 10 МБ. Можно сфотографировать документы телефоном.`}
-          canAdd={(f) => guardOtherZone(draft.extraRows, f)}
-        />
-      </Form.Item>
-      <Form.Item
-        label="Дополнительные документы"
-        extra="Сертификаты, паспорта качества, спецификации, акты и другие файлы. Они сохранятся без распознавания."
-      >
-        <FileDropList
-          rows={draft.extraRows}
-          onChange={(extraRows) => onChange({ extraRows })}
-          disabled={locked}
-          accept={ACCEPT}
-          title="Перетащите дополнительные документы либо нажмите для выбора"
-          hint="Эти файлы не распознаются — они просто сохранятся вместе с поставкой."
-          canAdd={(f) => guardOtherZone(draft.rows, f)}
-        />
-      </Form.Item>
+      {/*
+        Две колонки от xl (окно ≥ 1200px, то есть модалка ≥ ~1080px): реквизиты
+        машины слева, документы справа. Ниже порога — одна колонка, как было:
+        при lg модалка ~890px, и левая колонка вышла бы ~340px — для выпадающего
+        списка объектов тесно. Col смотрит на ширину окна, а не контейнера, но
+        модалка и сама 90vw, так что одно следует из другого.
+      */}
+      <Row gutter={24}>
+        <Col xs={24} xl={10}>
+          <Form.Item label="Объект поставки" required>
+            <PublicSiteSelect
+              value={draft.siteId}
+              onChange={(siteId) => onChange({ siteId })}
+              disabled={locked}
+            />
+          </Form.Item>
+          <Form.Item
+            label="Дата поставки"
+            required
+            extra="Дата, на которую машина приезжает на объект."
+          >
+            <DatePicker
+              value={draft.expectedDate}
+              onChange={(expectedDate) => onChange({ expectedDate })}
+              format="DD.MM.YYYY"
+              size="large"
+              disabled={locked}
+              style={{ width: '100%' }}
+            />
+          </Form.Item>
+          <Form.Item
+            label="Комментарий"
+            extra="Необязательно. Например: «вторая машина, приедет после обеда»."
+            style={{ marginBottom: 0 }}
+          >
+            <Input.TextArea
+              value={draft.comment}
+              onChange={(e) => onChange({ comment: e.target.value })}
+              maxLength={MAX_COMMENT}
+              showCount
+              autoSize={{ minRows: 2, maxRows: 5 }}
+              disabled={locked}
+            />
+          </Form.Item>
+        </Col>
+        <Col xs={24} xl={14}>
+          <Form.Item label="УПД и накладные" required>
+            <FileDropList
+              rows={draft.rows}
+              onChange={(rows) => onChange({ rows })}
+              disabled={locked}
+              accept={ACCEPT}
+              compact
+              title="Перетащите файлы либо нажмите для выбора"
+              hint={`До ${MAX_FILES} файлов, каждый до 10 МБ. Можно сфотографировать телефоном.`}
+              canAdd={(f) => guardOtherZone(draft.extraRows, f)}
+            />
+          </Form.Item>
+          <Form.Item
+            label="Дополнительные документы"
+            extra="Сертификаты, паспорта качества, спецификации, акты и другие файлы. Они сохранятся без распознавания."
+            style={{ marginBottom: 0 }}
+          >
+            <FileDropList
+              rows={draft.extraRows}
+              onChange={(extraRows) => onChange({ extraRows })}
+              disabled={locked}
+              accept={ACCEPT}
+              compact
+              title="Перетащите файлы либо нажмите для выбора"
+              hint="Не распознаются — просто сохранятся вместе с документами машины."
+              canAdd={(f) => guardOtherZone(draft.rows, f)}
+            />
+          </Form.Item>
+        </Col>
+      </Row>
     </Form>
   );
 }
