@@ -1,7 +1,8 @@
 /**
  * Интеграционные тесты (реальный PostgreSQL):
- *  - скоуп фото: presign и confirm обязаны различать «чужой объект» и
- *    «чужой автор» и не пускать read-only роли;
+ *  - скоуп фото: presign и confirm пускают любого инспектора СВОЕГО объекта
+ *    (несколько аккаунтов на объекте — штатный процесс, Этап 1 и Этап 2
+ *    закрывают разные смены), режут чужой объект и не пускают read-only роли;
  *  - окно /sync и /sync/reconcile: незавершённые 2 Этапа доезжают, но дельта
  *    не возвращает их бесконечно (иначе клиент листает без остановки).
  *
@@ -12,7 +13,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 import postgres from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { photoRoutes } from '../../src/routes/photos.js';
 import { syncRoutes } from '../../src/routes/sync.js';
 import type { AuthUser } from '../../src/plugins/auth.js';
@@ -32,6 +33,7 @@ suite('скоуп фото и окно sync (реальный PostgreSQL)', () =
   const inspectorB = randomUUID();
   let filledStatusId: string;
   let confirmedStatusId: string;
+  let shipmentStatusId: string;
 
   // Приёмки: своя, чужая по объекту, своя по объекту но чужого автора.
   let ownDelivery: string;
@@ -39,6 +41,20 @@ suite('скоуп фото и окно sync (реальный PostgreSQL)', () =
   let sameSiteOtherAuthor: string;
   let ownPhotoId: string;
   let foreignPhotoId: string;
+
+  // Отгрузки — отдельная ветка presign, скоуп у неё свой.
+  let foreignSiteShipment: string;
+  let sameSiteOtherAuthorShipment: string;
+
+  // Инлайновые 403 в photos.ts пишутся в unauthorized_access_log через этот
+  // декоратор. Без него роут падал бы в 500 на недекорированном методе, а с
+  // общим моком на весь файл вызовы протекали бы между тестами — отсюда
+  // переменная и очистка в beforeEach.
+  const logUnauthorized = vi.fn(async () => {});
+
+  beforeEach(() => {
+    logUnauthorized.mockClear();
+  });
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, { max: 4 });
@@ -61,6 +77,7 @@ suite('скоуп фото и окно sync (реальный PostgreSQL)', () =
           }
         },
     );
+    app.decorate('logUnauthorized', logUnauthorized as never);
     await app.register(photoRoutes);
     await app.register(syncRoutes);
     await app.ready();
@@ -76,19 +93,26 @@ suite('скоуп фото и окно sync (реальный PostgreSQL)', () =
       SELECT id FROM statuses WHERE entity_type = 'delivery' AND code = 'filled' LIMIT 1`;
     const [c] = await sql<{ id: string }[]>`
       SELECT id FROM statuses WHERE entity_type = 'delivery' AND code = 'confirmed_mol' LIMIT 1`;
+    const [sh] = await sql<{ id: string }[]>`
+      SELECT id FROM statuses WHERE entity_type = 'shipment' AND code = 'shipped' LIMIT 1`;
     filledStatusId = f!.id;
     confirmedStatusId = c!.id;
+    shipmentStatusId = sh!.id;
 
     ownDelivery = await seedDelivery(siteA, inspectorA, filledStatusId);
     foreignSiteDelivery = await seedDelivery(siteB, inspectorB, filledStatusId);
     sameSiteOtherAuthor = await seedDelivery(siteA, inspectorA2, filledStatusId);
     ownPhotoId = await seedPhoto(ownDelivery);
     foreignPhotoId = await seedPhoto(foreignSiteDelivery);
+
+    foreignSiteShipment = await seedShipment(siteB, inspectorB);
+    sameSiteOtherAuthorShipment = await seedShipment(siteA, inspectorA2);
   });
 
   afterAll(async () => {
     await app?.close();
     if (!sql) return;
+    await sql`DELETE FROM shipments WHERE site_id = ${siteA} OR site_id = ${siteB}`;
     await sql`DELETE FROM deliveries WHERE site_id = ${siteA} OR site_id = ${siteB}`;
     await sql`DELETE FROM users WHERE id = ${inspectorA} OR id = ${inspectorA2} OR id = ${inspectorB}`;
     await sql`DELETE FROM sites WHERE id = ${siteA} OR id = ${siteB}`;
@@ -102,11 +126,38 @@ suite('скоуп фото и окно sync (реальный PostgreSQL)', () =
     return id;
   }
 
-  async function seedPhoto(deliveryId: string): Promise<string> {
+  /**
+   * kind='writeoff' — единственный вид отгрузки, которому по
+   * shipments_kind_links_chk не нужны ни контрагент, ни МОЛ, ни объект
+   * назначения. Скоуп фото от вида не зависит, лишние фикстуры ни к чему.
+   */
+  async function seedShipment(siteId: string, inspectorId: string): Promise<string> {
+    const id = randomUUID();
+    await sql`INSERT INTO shipments (id, site_id, inspector_id, status_id, kind, version)
+      VALUES (${id}, ${siteId}, ${inspectorId}, ${shipmentStatusId}, 'writeoff', 1)`;
+    return id;
+  }
+
+  /**
+   * uploaded — фото уже подтверждено. Нужно позитивным confirm-тестам: на
+   * заполненном uploaded_at роут уходит в идемпотентную ветку и отдаёт 200 без
+   * обращения к S3, которого в тестовом окружении нет.
+   */
+  async function seedPhoto(deliveryId: string, uploaded = false): Promise<string> {
     const id = randomUUID();
     await sql`INSERT INTO delivery_photos
-      (id, delivery_id, kind, s3_key, content_hash, idempotency_key, taken_at)
-      VALUES (${id}, ${deliveryId}, 'cargo', ${`k/${id}.jpg`}, ${id.slice(0, 12)}, ${randomUUID()}, now())`;
+      (id, delivery_id, kind, s3_key, content_hash, idempotency_key, taken_at, uploaded_at)
+      VALUES (${id}, ${deliveryId}, 'cargo', ${`k/${id}.jpg`}, ${id.slice(0, 12)}, ${randomUUID()},
+              now(), ${uploaded ? sql`now()` : null})`;
+    return id;
+  }
+
+  async function seedShipmentPhoto(shipmentId: string, uploaded = false): Promise<string> {
+    const id = randomUUID();
+    await sql`INSERT INTO shipment_photos
+      (id, shipment_id, kind, s3_key, content_hash, idempotency_key, taken_at, uploaded_at)
+      VALUES (${id}, ${shipmentId}, 'cargo', ${`k/${id}.jpg`}, ${id.slice(0, 12)}, ${randomUUID()},
+              now(), ${uploaded ? sql`now()` : null})`;
     return id;
   }
 
@@ -118,7 +169,7 @@ suite('скоуп фото и окно sync (реальный PostgreSQL)', () =
     sessionId: randomUUID(),
   });
 
-  const presign = (deliveryId: string) =>
+  const presign = (deliveryId: string, stage?: 'before' | 'after') =>
     app.inject({
       method: 'POST',
       url: '/api/v1/photos/presign',
@@ -130,32 +181,62 @@ suite('скоуп фото и окно sync (реальный PostgreSQL)', () =
         // contentHash по контракту — ровно 64 hex-символа (sha256).
         contentHash: randomUUID().replace(/-/g, '').repeat(2),
         idempotencyKey: randomUUID(),
+        ...(stage ? { stage } : {}),
+      },
+    });
+
+  const presignShipment = (shipmentId: string, stage?: 'before' | 'after') =>
+    app.inject({
+      method: 'POST',
+      url: '/api/v1/photos/presign',
+      payload: {
+        operationKind: 'shipment',
+        operationId: shipmentId,
+        kind: 'cargo',
+        contentType: 'image/jpeg',
+        contentHash: randomUUID().replace(/-/g, '').repeat(2),
+        idempotencyKey: randomUUID(),
+        ...(stage ? { stage } : {}),
       },
     });
 
   const confirm = (photoId: string) =>
     app.inject({ method: 'POST', url: `/api/v1/photos/${photoId}/confirm` });
 
-  it('presign: чужой объект → 403 foreign_site', async () => {
+  it('presign: чужой объект → 403 foreign_site + запись в журнал отказов', async () => {
     currentUser = asInspector(inspectorA, siteA);
     const res = await presign(foreignSiteDelivery);
     expect(res.statusCode).toBe(403);
     expect(res.json()).toMatchObject({ error: 'foreign_site' });
+    expect(logUnauthorized).toHaveBeenCalledWith(
+      expect.anything(),
+      403,
+      'photo_foreign_site',
+      inspectorA,
+    );
   });
 
-  it('presign: свой объект, но чужой автор → 403 forbidden', async () => {
+  it('presign: свой объект, чужой автор — фото 2 этапа проходит (передача смены)', async () => {
+    // Регрессия приёмки 9539: Этап 1 закрыл один аккаунт объекта, Этап 2 —
+    // другой. Owner-check отбивал presign 403-м, статус при этом доезжал, и на
+    // портале «2 Этап» оставался пустым.
     currentUser = asInspector(inspectorA, siteA);
-    const res = await presign(sameSiteOtherAuthor);
-    expect(res.statusCode).toBe(403);
-    expect(res.json()).toMatchObject({ error: 'forbidden' });
+    const res = await presign(sameSiteOtherAuthor, 'after');
+
+    // S3 в тестовом окружении не настроен: маршрут отдаёт 200 с пустыми URL.
+    expect(res.statusCode).toBe(200);
+    const { photoId } = res.json() as { photoId: string };
+    const rows = await sql<{ delivery_id: string; stage: string }[]>`
+      SELECT delivery_id, stage FROM delivery_photos WHERE id = ${photoId}`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ delivery_id: sameSiteOtherAuthor, stage: 'after' });
+    expect(logUnauthorized).not.toHaveBeenCalled();
   });
 
-  it('presign: своя запись своего объекта — доступ есть (не 403)', async () => {
+  it('presign: своя запись своего объекта → 200', async () => {
     currentUser = asInspector(inspectorA, siteA);
     const res = await presign(ownDelivery);
-    // S3 в тестовом окружении не настроен: маршрут отдаёт 200 с пустыми URL.
-    // Нам важно только, что скоуп пропустил.
-    expect(res.statusCode).not.toBe(403);
+    expect(res.statusCode).toBe(200);
   });
 
   it('presign: contractor и monitor не допускаются', async () => {
@@ -172,19 +253,66 @@ suite('скоуп фото и окно sync (реальный PostgreSQL)', () =
     }
   });
 
-  it('confirm: чужой объект → 403 foreign_site (раньше был 404)', async () => {
+  it('confirm: чужой объект → 403 foreign_site + запись в журнал отказов', async () => {
     currentUser = asInspector(inspectorA, siteA);
     const res = await confirm(foreignPhotoId);
     expect(res.statusCode).toBe(403);
     expect(res.json()).toMatchObject({ error: 'foreign_site' });
+    expect(logUnauthorized).toHaveBeenCalledWith(
+      expect.anything(),
+      403,
+      'photo_foreign_site',
+      inspectorA,
+    );
   });
 
-  it('confirm: свой объект, чужой автор → 403 forbidden', async () => {
-    const photoOfOtherAuthor = await seedPhoto(sameSiteOtherAuthor);
+  it('confirm: свой объект, чужой автор → 200', async () => {
+    // Фото уже подтверждено — роут уходит в идемпотентную ветку и до S3
+    // (которого в тестовом окружении нет) не доходит. Проверяем ровно скоуп.
+    const photoOfOtherAuthor = await seedPhoto(sameSiteOtherAuthor, true);
     currentUser = asInspector(inspectorA, siteA);
     const res = await confirm(photoOfOtherAuthor);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true });
+    expect(logUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it('presign отгрузки: чужой объект → 403 foreign_site + запись в журнал отказов', async () => {
+    currentUser = asInspector(inspectorA, siteA);
+    const res = await presignShipment(foreignSiteShipment);
     expect(res.statusCode).toBe(403);
-    expect(res.json()).toMatchObject({ error: 'forbidden' });
+    expect(res.json()).toMatchObject({ error: 'foreign_site' });
+    expect(logUnauthorized).toHaveBeenCalledWith(
+      expect.anything(),
+      403,
+      'photo_foreign_site',
+      inspectorA,
+    );
+  });
+
+  it('presign отгрузки: свой объект, чужой автор → 200', async () => {
+    currentUser = asInspector(inspectorA, siteA);
+    const res = await presignShipment(sameSiteOtherAuthorShipment, 'after');
+
+    expect(res.statusCode).toBe(200);
+    const { photoId } = res.json() as { photoId: string };
+    const rows = await sql<{ shipment_id: string; stage: string }[]>`
+      SELECT shipment_id, stage FROM shipment_photos WHERE id = ${photoId}`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      shipment_id: sameSiteOtherAuthorShipment,
+      stage: 'after',
+    });
+    expect(logUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it('confirm фото отгрузки: свой объект, чужой автор → 200', async () => {
+    const photoOfOtherAuthor = await seedShipmentPhoto(sameSiteOtherAuthorShipment, true);
+    currentUser = asInspector(inspectorA, siteA);
+    const res = await confirm(photoOfOtherAuthor);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true });
+    expect(logUnauthorized).not.toHaveBeenCalled();
   });
 
   it('confirm: contractor не допускается', async () => {

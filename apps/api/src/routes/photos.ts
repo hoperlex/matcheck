@@ -65,7 +65,7 @@ function extensionFor(mime: string): string {
 
 /**
  * Тонкая абстракция: для каждой стороны (delivery|shipment) фиксируем
- * нужную таблицу фото и проверку доступа owner-only для inspector_kpp.
+ * нужную таблицу фото и проверку доступа по объекту для inspector_kpp.
  */
 type PhotoTable = {
   kind: OperationKind;
@@ -155,7 +155,6 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         const [d] = await app.db
           .select({
             id: deliveries.id,
-            inspectorId: deliveries.inspectorId,
             pendingDeletionAt: deliveries.pendingDeletionAt,
             siteId: deliveries.siteId,
             contractorId: deliveries.contractorId,
@@ -165,17 +164,19 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           .where(eq(deliveries.id, operationId))
           .limit(1);
         if (!d) return reply.code(404).send({ error: 'delivery_not_found' });
-        // Порядок важен: сначала объект, потом автор. Инспектор после перевода
-        // на другой объект остаётся автором прежних приёмок, и без site-check
-        // он мог бы догружать фото на объект, где уже не работает
-        // (см. domain/operations/foreign-site.ts).
-        if (req.user?.role === 'inspector_kpp') {
-          if (d.siteId !== req.user.siteId) {
-            return reply.code(403).send(FOREIGN_SITE_RESPONSE);
-          }
-          if (d.inspectorId !== req.user.id) {
-            return reply.code(403).send({ error: 'forbidden' });
-          }
+        // Скоуп — объект, а не автор. Инспектор после перевода на другой объект
+        // остаётся автором прежних приёмок, и без site-check он мог бы догружать
+        // фото туда, где уже не работает (см. domain/operations/foreign-site.ts).
+        //
+        // Автор НЕ проверяется намеренно: POST /api/v1/deliveries его тоже не
+        // проверяет, а на одном объекте штатно работают несколько аккаунтов
+        // (Этап 1 и Этап 2 закрывают разные смены). Пока owner-check тут был,
+        // получалась расходящаяся модель доступа — данные и статус чужой приёмки
+        // своего объекта менять можно, а фото к ней добавить нельзя: статус
+        // доезжал до портала, фото 2 этапа молча оставались на планшете.
+        if (req.user?.role === 'inspector_kpp' && d.siteId !== req.user.siteId) {
+          await app.logUnauthorized(req, 403, 'photo_foreign_site', req.user.id);
+          return reply.code(403).send(FOREIGN_SITE_RESPONSE);
         }
         // Помеченный на удаление документ — read-only.
         if (d.pendingDeletionAt !== null) {
@@ -286,7 +287,6 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       const [s] = await app.db
         .select({
           id: shipments.id,
-          inspectorId: shipments.inspectorId,
           pendingDeletionAt: shipments.pendingDeletionAt,
           siteId: shipments.siteId,
           kind: shipments.kind,
@@ -297,14 +297,10 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(shipments.id, operationId))
         .limit(1);
       if (!s) return reply.code(404).send({ error: 'shipment_not_found' });
-      // Site-check до owner-check — зеркало ветки приёмок выше.
-      if (req.user?.role === 'inspector_kpp') {
-        if (s.siteId !== req.user.siteId) {
-          return reply.code(403).send(FOREIGN_SITE_RESPONSE);
-        }
-        if (s.inspectorId !== req.user.id) {
-          return reply.code(403).send({ error: 'forbidden' });
-        }
+      // Скоуп по объекту, без owner-check — зеркало ветки приёмок выше.
+      if (req.user?.role === 'inspector_kpp' && s.siteId !== req.user.siteId) {
+        await app.logUnauthorized(req, 403, 'photo_foreign_site', req.user.id);
+        return reply.code(403).send(FOREIGN_SITE_RESPONSE);
       }
       if (s.pendingDeletionAt !== null) {
         return reply.code(409).send({
@@ -595,9 +591,8 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         params: z.object({ id: z.string().uuid() }),
         response: {
           200: PhotoConfirmResponseSchema,
-          // 403 — foreign_site (чужой объект) либо forbidden (чужой автор):
-          // тот же контракт, что у presign, иначе клиент не отличает «нельзя»
-          // от «нет такого фото».
+          // 403 — foreign_site (чужой объект): тот же контракт, что у presign,
+          // иначе клиент не отличает «нельзя» от «нет такого фото».
           403: ErrorResponseSchema,
           404: ErrorResponseSchema,
           500: ErrorResponseSchema,
@@ -607,19 +602,20 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const found = await findPhoto(app, req.params.id);
       if (!found) return reply.code(404).send({ error: 'not_found' });
-      // Порядок и коды — как в presign: сначала объект, затем автор. Раньше
-      // здесь был 404 на чужой объект и не было проверки автора вовсе.
-      if (req.user?.role === 'inspector_kpp') {
-        if (!req.user.siteId || found.parentSiteId !== req.user.siteId) {
-          return reply.code(403).send(FOREIGN_SITE_RESPONSE);
-        }
-        if (found.parentInspectorId !== req.user.id) {
-          return reply.code(403).send({ error: 'forbidden' });
-        }
+      // Скоуп и коды — как в presign: только объект, автор не проверяется
+      // (несколько аккаунтов одного объекта работают как один). Раньше здесь
+      // был 404 на чужой объект, затем 404 сменился на 403 и добавился
+      // owner-check — он и ломал передачу Этапа 2 между сменами.
+      if (
+        req.user?.role === 'inspector_kpp' &&
+        (!req.user.siteId || found.parentSiteId !== req.user.siteId)
+      ) {
+        await app.logUnauthorized(req, 403, 'photo_foreign_site', req.user.id);
+        return reply.code(403).send(FOREIGN_SITE_RESPONSE);
       }
 
-      // Матрица прав — после проверок объекта и автора выше. Подтверждение
-      // загрузки — часть создания фото, поэтому право то же, что у presign.
+      // Матрица прав — после проверки объекта выше. Подтверждение загрузки —
+      // часть создания фото, поэтому право то же, что у presign.
       await assertPermission(req, pageOfKind(found.kind), 'create');
 
       // Если уже подтверждено — отдаём существующий uploaded_at без S3-вызова.
@@ -1114,9 +1110,6 @@ async function findPhoto(
       s3Key: string;
       thumbS3Key: string | null;
       parentSiteId: string | null;
-      // Автор родительской приёмки/отгрузки — нужен owner-check в confirm
-      // (симметрия с presign, где автор проверяется по самой записи).
-      parentInspectorId: string | null;
       // Получатель родительской отгрузки (для скоупа роли contractor у
       // shipment-фото). Для delivery-фото всегда null — видимость приёмки
       // проверяется через deliveryVisibleToContractor по operationId.
@@ -1130,7 +1123,6 @@ async function findPhoto(
       thumbS3Key: deliveryPhotos.thumbS3Key,
       operationId: deliveryPhotos.deliveryId,
       parentSiteId: deliveries.siteId,
-      parentInspectorId: deliveries.inspectorId,
     })
     .from(deliveryPhotos)
     .innerJoin(deliveries, eq(deliveries.id, deliveryPhotos.deliveryId))
@@ -1143,7 +1135,6 @@ async function findPhoto(
       s3Key: d.s3Key,
       thumbS3Key: d.thumbS3Key,
       parentSiteId: d.parentSiteId,
-      parentInspectorId: d.parentInspectorId,
       parentReceiverCounterpartyId: null,
     };
 
@@ -1153,7 +1144,6 @@ async function findPhoto(
       thumbS3Key: shipmentPhotos.thumbS3Key,
       operationId: shipmentPhotos.shipmentId,
       parentSiteId: shipments.siteId,
-      parentInspectorId: shipments.inspectorId,
       parentReceiverCounterpartyId: shipments.receiverCounterpartyId,
     })
     .from(shipmentPhotos)
@@ -1167,7 +1157,6 @@ async function findPhoto(
       s3Key: s.s3Key,
       thumbS3Key: s.thumbS3Key,
       parentSiteId: s.parentSiteId,
-      parentInspectorId: s.parentInspectorId,
       parentReceiverCounterpartyId: s.parentReceiverCounterpartyId,
     };
 
