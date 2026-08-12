@@ -160,6 +160,35 @@ suite('приём заявок из почты (реальный PostgreSQL)', (
     expect(after.lastUid).toBe(1);
   });
 
+  it('ИНН поставщика из письма сохраняется на документе', async () => {
+    // Заявка — не УПД: у неё есть только отправитель, и его ИНН раньше уходил
+    // в counterparties, а на самой заявке не оставался. В списке документов
+    // вторая строка ячейки «Поставщик» из-за этого пустовала у почтовых заявок,
+    // если контрагента заводили без реквизитов.
+    const supplierInn = `77${String(Date.now()).slice(-8)}`;
+    mocks.fetchNewMessages.mockResolvedValue([message(21, '<inn@example.org>')]);
+    mocks.parseRequestFromMail.mockResolvedValue({
+      data: {
+        docNumber: 'R-INN',
+        supplier: { inn: supplierInn, kpp: null, name: 'ООО «Поставщик из письма»' },
+        items: [{ nameRaw: 'Цемент М500', qty: 10, unit: 'меш' }],
+        confidence: 0.9,
+      },
+      providerId: 'test-provider',
+      rawPrompt: '',
+    } as ParseOutput);
+
+    const result = await runMailSyncForAccount(app, await account());
+    expect(result).toEqual({ imported: 1, failed: 0 });
+
+    const [row] = await sql<{ supplier_inn_raw: string | null }[]>`
+      select supplier_inn_raw from source_documents where mail_account_id = ${accountId}
+    `;
+    expect(row!.supplier_inn_raw).toBe(supplierInn);
+
+    await sql`delete from counterparties where inn = ${supplierInn}`;
+  });
+
   it('успешный прогон двигает watermark на максимальный UID', async () => {
     mocks.fetchNewMessages.mockResolvedValue([
       message(7, '<x@example.org>'),

@@ -56,6 +56,7 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
+import { partyCell } from '../../shared/ui/documentPartyColumns';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 // directoryFilterMap (ИНН-маппинг customer_counterparties → operational
 // counterparties) больше не нужен — фильтрация переехала на сервер.
@@ -847,6 +848,16 @@ export function DeliveriesHistory({
     const name = resolveSupplierName(r);
     return name ? shortenCounterpartyName(name) : '—';
   };
+  // Та же цепочка источников, что в resolveSupplierName, но с ИНН второй
+  // строкой. ИНН подставляем ТОЛЬКО когда имя пришло от привязанного документа:
+  // у поставщика самой приёмки реквизитов в DTO нет, и дописать к нему ИНН из
+  // УПД значило бы показать чужие — приёмку и документ связывает человек.
+  const renderSupplierCell = (r: Row) => {
+    const own = r.supplierName ?? (r.supplierId ? counterpartiesMap.get(r.supplierId) ?? null : null);
+    if (own) return partyCell(own, null);
+    const sd = r.primarySourceDocument ?? null;
+    return partyCell(sd?.supplierName ?? null, sd?.supplierInn ?? null);
+  };
 
   return (
     <>
@@ -1045,6 +1056,10 @@ export function DeliveriesHistory({
         items={items}
         loading={list.isLoading}
         rowKey="id"
+        // 14 колонок, из них три стороны документа — фиксированные 170px под
+        // ИНН второй строкой. Без явной минимальной ширины остальные ужимались
+        // бы на 1024-1366px в нечитаемую кашу.
+        scrollX={1700}
         // monitor — read-only: клик по строке открывает просмотр (там же —
         // отметка проверки), а не редактор.
         rowSelection={
@@ -1108,22 +1123,36 @@ export function DeliveriesHistory({
           // и «Ожидаемых»: покупатель (графа 6), грузополучатель (графа 4),
           // продавец (графа 2). Берутся от primarySourceDocument, то есть от
           // ПЕРВОГО привязанного документа, без агрегации по всем.
+          // Ячейки двухстрочные (название + ИНН), поэтому ellipsis выключен —
+          // обрезкой и тултипами занимается partyCell.
           {
             title: 'Покупатель',
             key: 'buyer',
+            width: 170,
+            ellipsis: false,
             render: (_: unknown, r: Row) =>
-              shortenCounterpartyName(r.primarySourceDocument?.buyerName ?? null),
+              partyCell(
+                r.primarySourceDocument?.buyerName ?? null,
+                r.primarySourceDocument?.buyerInn ?? null,
+              ),
           },
           {
             title: 'Грузополучатель',
             key: 'consignee',
+            width: 170,
+            ellipsis: false,
             render: (_: unknown, r: Row) =>
-              shortenCounterpartyName(r.primarySourceDocument?.consigneeName ?? null),
+              partyCell(
+                r.primarySourceDocument?.consigneeName ?? null,
+                r.primarySourceDocument?.consigneeInn ?? null,
+              ),
           },
           {
             title: 'Поставщик',
             key: 'supplier',
-            render: (_: unknown, r: Row) => renderSupplierName(r),
+            width: 170,
+            ellipsis: false,
+            render: (_: unknown, r: Row) => renderSupplierCell(r),
           },
           // Подрядчик здесь — подрядчик ПРИЁМКИ, со своей логикой наследования
           // из документа (см. renderContractor), а не колонка из общего набора.

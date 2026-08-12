@@ -1095,6 +1095,24 @@
                   "string",
                   "null"
                 ]
+              },
+              "supplierInn": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "buyerInn": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "consigneeInn": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1106,7 +1124,10 @@
               "supplierName",
               "contractorName",
               "buyerName",
-              "consigneeName"
+              "consigneeName",
+              "supplierInn",
+              "buyerInn",
+              "consigneeInn"
             ]
           },
           "createdAt": {
@@ -1909,6 +1930,24 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "supplierInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "buyerInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "consigneeInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -1920,7 +1959,10 @@
                     "supplierName",
                     "contractorName",
                     "buyerName",
-                    "consigneeName"
+                    "consigneeName",
+                    "supplierInn",
+                    "buyerInn",
+                    "consigneeInn"
                   ]
                 },
                 "createdAt": {
@@ -2522,6 +2564,24 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "supplierInn": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "buyerInn": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "consigneeInn": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -2533,7 +2593,10 @@
                   "supplierName",
                   "contractorName",
                   "buyerName",
-                  "consigneeName"
+                  "consigneeName",
+                  "supplierInn",
+                  "buyerInn",
+                  "consigneeInn"
                 ]
               },
               "createdAt": {
@@ -3309,6 +3372,24 @@
                   "string",
                   "null"
                 ]
+              },
+              "supplierInn": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "buyerInn": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "consigneeInn": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -3320,7 +3401,10 @@
               "supplierName",
               "contractorName",
               "buyerName",
-              "consigneeName"
+              "consigneeName",
+              "supplierInn",
+              "buyerInn",
+              "consigneeInn"
             ]
           },
           "createdAt": {
@@ -4142,6 +4226,24 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "supplierInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "buyerInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "consigneeInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -4153,7 +4255,10 @@
                     "supplierName",
                     "contractorName",
                     "buyerName",
-                    "consigneeName"
+                    "consigneeName",
+                    "supplierInn",
+                    "buyerInn",
+                    "consigneeInn"
                   ]
                 },
                 "createdAt": {
@@ -4750,6 +4855,24 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "supplierInn": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "buyerInn": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "consigneeInn": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -4761,7 +4884,10 @@
                   "supplierName",
                   "contractorName",
                   "buyerName",
-                  "consigneeName"
+                  "consigneeName",
+                  "supplierInn",
+                  "buyerInn",
+                  "consigneeInn"
                 ]
               },
               "createdAt": {
@@ -5128,6 +5254,24 @@
               "null"
             ]
           },
+          "supplierInn": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "buyerInn": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "consigneeInn": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "createdByUserId": {
             "type": [
               "string",
@@ -5227,7 +5371,8 @@
               "internal_error",
               "partial_parse",
               "no_transport_waybill_found",
-              "no_waybill_found"
+              "no_waybill_found",
+              "unrecognized_type"
             ]
           },
           "parseErrorDetails": {
@@ -5531,6 +5676,24 @@
               "null"
             ]
           },
+          "supplierInn": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "buyerInn": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "consigneeInn": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "createdByUserId": {
             "type": [
               "string",
@@ -5630,7 +5793,8 @@
               "internal_error",
               "partial_parse",
               "no_transport_waybill_found",
-              "no_waybill_found"
+              "no_waybill_found",
+              "unrecognized_type"
             ]
           },
           "parseErrorDetails": {
@@ -6174,6 +6338,24 @@
                     "null"
                   ]
                 },
+                "supplierInn": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "buyerInn": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "consigneeInn": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "createdByUserId": {
                   "type": [
                     "string",
@@ -6273,7 +6455,8 @@
                     "internal_error",
                     "partial_parse",
                     "no_transport_waybill_found",
-                    "no_waybill_found"
+                    "no_waybill_found",
+                    "unrecognized_type"
                   ]
                 },
                 "parseErrorDetails": {
@@ -7741,6 +7924,24 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "supplierInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "buyerInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "consigneeInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -7752,7 +7953,10 @@
                     "supplierName",
                     "contractorName",
                     "buyerName",
-                    "consigneeName"
+                    "consigneeName",
+                    "supplierInn",
+                    "buyerInn",
+                    "consigneeInn"
                   ]
                 },
                 "createdAt": {
@@ -8319,6 +8523,24 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "supplierInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "buyerInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "consigneeInn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -8330,7 +8552,10 @@
                     "supplierName",
                     "contractorName",
                     "buyerName",
-                    "consigneeName"
+                    "consigneeName",
+                    "supplierInn",
+                    "buyerInn",
+                    "consigneeInn"
                   ]
                 },
                 "createdAt": {
@@ -8511,6 +8736,24 @@
                     "null"
                   ]
                 },
+                "supplierInn": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "buyerInn": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "consigneeInn": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "createdByUserId": {
                   "type": [
                     "string",
@@ -8610,7 +8853,8 @@
                     "internal_error",
                     "partial_parse",
                     "no_transport_waybill_found",
-                    "no_waybill_found"
+                    "no_waybill_found",
+                    "unrecognized_type"
                   ]
                 },
                 "parseErrorDetails": {
@@ -10775,6 +11019,123 @@
             }
           },
           "500": {
+            "description": "S3 недоступна (s3_unavailable) — повторить позже",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/photos/{id}/content": {
+      "post": {
+        "tags": [
+          "Photos"
+        ],
+        "summary": "Загрузить файл фото через API (без прямого PUT в S3)",
+        "description": "Путь веб-портала: браузер отправляет multipart (часть `file` — JPEG-кадр, необязательная `thumb` — миниатюра), сервер сам кладёт объекты в S3 и проставляет `uploaded_at`. Отдельный вызов /confirm при этом не нужен. Нужен потому, что у бакета нет CORS-правила для origin портала и браузерный PUT на S3 не проходит preflight. Мобильный клиент остаётся на presign + PUT + confirm. Idempotent: если фото уже подтверждено, S3 не трогается. Inspector_kpp может грузить только фото своего объекта (по siteId).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Загружено и подтверждено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhotoConfirmResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Файл не приложен, пуст, не JPEG, дубль части или неверный content_hash",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не авторизовано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Фото чужого объекта (foreign_site) либо нет права",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Фото не найдено или было удалено во время загрузки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Документ помечен на удаление (pending_deletion)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Файл или миниатюра больше допустимого размера",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Неожиданная ошибка сервера",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
             "description": "S3 недоступна (s3_unavailable) — повторить позже",
             "content": {
               "application/json": {

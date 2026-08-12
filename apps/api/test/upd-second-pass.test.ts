@@ -177,4 +177,62 @@ describe('mergeParties — стороны переживают замену ре
     const winner = parsedWith({ supplier: { inn: '1', kpp: null, name: 'A' } });
     expect(mergeParties(winner, parsedWith())).toBe(winner);
   });
+
+  // Ниже — слияние ПОЛЕЙ, а не целых сторон. Без него ИНН, добытый первым
+  // проходом, исчезал при победе vision: сторона с именем не пуста, и правило
+  // «переносим сторону целиком, если её нет» её не трогало. С сохранением ИНН
+  // в source_documents (миграция 0095) такая потеря стала видимой — вторая
+  // строка ячейки в списке просто пустела после второго прохода.
+  it('имя осталось, ИНН пропал → ИНН и КПП добираются из baseline', () => {
+    const baseline = parsedWith({
+      recipient: { inn: '7736255508', kpp: '773601001', name: 'ООО "СУ-10"' },
+    });
+    const winner = parsedWith({
+      recipient: { inn: null, kpp: null, name: 'ООО «СУ-10»' },
+    });
+    const merged = mergeParties(winner, baseline);
+    expect(merged.recipient?.inn).toBe('7736255508');
+    expect(merged.recipient?.kpp).toBe('773601001');
+    // Имя берём победителя: он видел документ последним.
+    expect(merged.recipient?.name).toBe('ООО «СУ-10»');
+  });
+
+  it('другая организация → ИНН не переносится', () => {
+    // Худший исход не «ИНН пустой», а «ИНН чужой»: по нему сверяют документ.
+    const baseline = parsedWith({
+      recipient: { inn: '7736255508', kpp: '773601001', name: 'ООО "СУ-10"' },
+    });
+    const winner = parsedWith({
+      recipient: { inn: null, kpp: null, name: 'ООО "СТРОЙДЕТАЛЬ"' },
+    });
+    const merged = mergeParties(winner, baseline);
+    expect(merged.recipient?.inn ?? null).toBeNull();
+    expect(merged.recipient?.name).toBe('ООО "СТРОЙДЕТАЛЬ"');
+  });
+
+  it('ИНН у обоих, но разные → сторона не дозаполняется', () => {
+    // Имена совпадают (дубли по названию реальны), решает ИНН — он уникален.
+    const baseline = parsedWith({
+      supplier: { inn: '7736255508', kpp: '773601001', name: 'ООО "Компенсатор"' },
+    });
+    const winner = parsedWith({
+      supplier: { inn: '7722466900', kpp: null, name: 'ООО "Компенсатор"' },
+    });
+    const merged = mergeParties(winner, baseline);
+    expect(merged.supplier?.inn).toBe('7722466900');
+    expect(merged.supplier?.kpp ?? null).toBeNull();
+  });
+
+  it('нечитаемый ИНН у победителя → решают имена, ИНН baseline подставляется', () => {
+    // У модели на плохих сканах выпадают цифры: '773625550' не проходит
+    // проверку контрольных сумм, и как признак организации не годится.
+    const baseline = parsedWith({
+      recipient: { inn: '7736255508', kpp: null, name: 'ООО "СУ-10"' },
+    });
+    const winner = parsedWith({
+      recipient: { inn: null, kpp: null, name: 'ООО "СУ-10"' },
+    });
+    const merged = mergeParties(winner, baseline);
+    expect(merged.recipient?.inn).toBe('7736255508');
+  });
 });

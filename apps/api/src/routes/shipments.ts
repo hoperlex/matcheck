@@ -429,6 +429,20 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
         consigneeName: drSql<
           string | null
         >`COALESCE(${sourceDocuments.consigneeNameRaw}, ${sdConsignee.name})`,
+        // ИНН сторон — те же выражения, что в приёмках (deliveries.ts). COALESCE
+        // здесь полный, с raw впереди: sdRow, расставляющий приоритет в основном
+        // DTO, до снимка операции не доходит. NULLIF(BTRIM(…)) — потому что
+        // suppliers.inn объявлен NOT NULL DEFAULT '', и пустая строка иначе
+        // заблокировала бы следующий источник.
+        supplierInn: drSql<
+          string | null
+        >`COALESCE(NULLIF(BTRIM(${sourceDocuments.supplierInnRaw}), ''), NULLIF(BTRIM(${sdSupplierDir.inn}), ''), NULLIF(BTRIM(${sdSupplier.inn}), ''))`,
+        buyerInn: drSql<
+          string | null
+        >`COALESCE(NULLIF(BTRIM(${sourceDocuments.buyerInnRaw}), ''), NULLIF(BTRIM(${sdBuyer.inn}), ''))`,
+        consigneeInn: drSql<
+          string | null
+        >`COALESCE(NULLIF(BTRIM(${sourceDocuments.consigneeInnRaw}), ''), NULLIF(BTRIM(${sdConsignee.inn}), ''))`,
       })
       .from(sourceDocuments)
       .leftJoin(sdSupplier, eq(sourceDocuments.supplierId, sdSupplier.id))

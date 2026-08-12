@@ -86,6 +86,7 @@ function parsedResult(over: {
   items?: ItemInput[];
   confidence?: number;
   consigneeName?: string | null;
+  consigneeInn?: string | null;
 }) {
   const items = over.items ?? [
     { nameRaw: 'Труба стальная', qty: 2, unit: 'шт', price: 100, sum: 200 },
@@ -104,7 +105,7 @@ function parsedResult(over: {
           ? null
           : over.consigneeName === null
             ? null
-            : { inn: null, kpp: null, name: over.consigneeName },
+            : { inn: over.consigneeInn ?? null, kpp: null, name: over.consigneeName },
       items,
       confidence: over.confidence ?? 1,
     },
@@ -116,6 +117,10 @@ function parsedResult(over: {
 suite('второй проход распознавания (реальный PostgreSQL)', () => {
   const db = sql!;
   const siteId = randomUUID();
+  // Грузополучатель с ИНН: воркер нормализует такую сторону в counterparties,
+  // поэтому ИНН уникален (таблицу делят все интеграционные наборы), а запись
+  // удаляется в cleanup вместе с документами.
+  const consigneeInn = `77${String(Date.now()).slice(-8)}`;
 
   beforeAll(async () => {
     await db`INSERT INTO sites (id, code, name) VALUES (${siteId}, ${`SPS${Date.now() % 10000}`}, 'Второй проход')`;
@@ -135,6 +140,7 @@ suite('второй проход распознавания (реальный Po
       SELECT id FROM source_documents WHERE site_id = ${siteId})`;
     await db`DELETE FROM source_documents WHERE site_id = ${siteId}`;
     await db`DELETE FROM source_bundles WHERE site_id = ${siteId}`;
+    await db`DELETE FROM counterparties WHERE inn = ${consigneeInn}`;
   }
 
   beforeEach(async () => {
@@ -170,9 +176,10 @@ suite('второй проход распознавания (реальный Po
         doc_number: string | null;
         total_sum: string | null;
         consignee_name_raw: string | null;
+        consignee_inn_raw: string | null;
         second_pass: { state?: string; outcome?: string } | null;
       }[]
-    >`SELECT status, doc_number, total_sum, consignee_name_raw, second_pass
+    >`SELECT status, doc_number, total_sum, consignee_name_raw, consignee_inn_raw, second_pass
         FROM source_documents WHERE id = ${docId}`;
     return r!;
   }
@@ -253,6 +260,37 @@ suite('второй проход распознавания (реальный Po
     expect(await itemCount(docId)).toBe(1);
     // Ключевое: слияние сторон сохранило то, что нашёл первый проход.
     expect(r.consignee_name_raw).toBe('ООО "АЛЬЯНС"');
+  });
+
+  it('второй проход лучше, но вернул сторону без ИНН → ИНН из первого прохода живёт', async () => {
+    // Отдельно от кейса выше: там сторона у победителя ПУСТАЯ и переносится
+    // целиком, здесь она непустая (имя есть), и старое правило слияния её не
+    // трогало — ИНН, добытый первым проходом, молча пропадал. На экране это
+    // выглядело как пустеющая вторая строка ячейки после второго прохода.
+    const docId = await seedDoc();
+    parseUpdPdf.mockResolvedValue(
+      parsedResult({
+        items: [],
+        totalSum: null,
+        consigneeName: 'ООО "АЛЬЯНС"',
+        consigneeInn: consigneeInn,
+      }),
+    );
+    await handleJob(job(docId));
+    expect((await docRow(docId)).consignee_inn_raw).toBe(consigneeInn);
+
+    // Vision видит имя, но реквизитов не отдаёт — обычное поведение на сканах.
+    parseUpdVision.mockResolvedValue({
+      parsed: parsedResult({ consigneeName: 'ООО «АЛЬЯНС»' }).parsed,
+      llmProviderId: null,
+    });
+    await handleJob(job(docId, 'vision'));
+
+    const r = await docRow(docId);
+    expect(r.second_pass?.outcome).toBe('replaced');
+    expect(r.consignee_inn_raw).toBe(consigneeInn);
+    // Имя — от победителя: он видел документ последним.
+    expect(r.consignee_name_raw).toBe('ООО «АЛЬЯНС»');
   });
 
   it('второй проход хуже → сохранённый разбор остаётся нетронутым', async () => {

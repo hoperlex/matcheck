@@ -242,6 +242,15 @@ export const SourceDocumentSchema = z.object({
   buyerName: z.string().nullable().optional(),
   consigneeId: z.string().uuid().nullable().optional(),
   consigneeName: z.string().nullable().optional(),
+  // ИНН сторон для второй строки ячейки в списке. Сервер собирает их как
+  // COALESCE(*_inn_raw, ИНН справочной записи по FK): распознанный ИНН
+  // приоритетнее, справочник закрывает документы до миграции 0095.
+  //
+  // Optional по той же причине, что и имена: схема общая с /sync и
+  // PATCH-ответами, а /sync ИНН не собирает — мобильному клиенту он не нужен.
+  supplierInn: z.string().nullable().optional(),
+  buyerInn: z.string().nullable().optional(),
+  consigneeInn: z.string().nullable().optional(),
   // Пользователь, загрузивший УПД через /upload-upd или /upload-upd-pdf.
   // Для EDO/mail-полученных — NULL (нет конкретного юзера). Мобильный
   // клиент использует createdByUserPhone для кнопки звонка из шапки
@@ -348,6 +357,12 @@ export const PrimarySourceDocumentSchema = z.object({
   contractorName: z.string().nullable(),
   buyerName: z.string().nullable(),
   consigneeName: z.string().nullable(),
+  // ИНН тех же сторон — второй строкой в ячейке истории операций. Здесь без
+  // optional: оба продюсера (deliveries.ts, shipments.ts) считают их одним
+  // выражением с основным DTO, и пропуск поля был бы дефектом, а не вариантом.
+  supplierInn: z.string().nullable(),
+  buyerInn: z.string().nullable(),
+  consigneeInn: z.string().nullable(),
 });
 export type PrimarySourceDocument = z.infer<typeof PrimarySourceDocumentSchema>;
 

@@ -456,6 +456,22 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
         consigneeName: drSql<
           string | null
         >`COALESCE(${sourceDocuments.consigneeNameRaw}, ${sdConsignee.name})`,
+        // ИНН сторон — вторая строка ячейки в истории. Здесь COALESCE полный
+        // (raw впереди справочника): sdRow, который расставляет этот приоритет
+        // в основном DTO, до снимка операции не доходит.
+        //
+        // NULLIF(BTRIM(…)) на каждом источнике: и распознавание, и справочник
+        // отдают ИНН строкой, а suppliers.inn объявлен NOT NULL DEFAULT '' —
+        // пустая строка иначе заблокировала бы следующий источник.
+        supplierInn: drSql<
+          string | null
+        >`COALESCE(NULLIF(BTRIM(${sourceDocuments.supplierInnRaw}), ''), NULLIF(BTRIM(${sdSupplierDir.inn}), ''), NULLIF(BTRIM(${sdSupplier.inn}), ''))`,
+        buyerInn: drSql<
+          string | null
+        >`COALESCE(NULLIF(BTRIM(${sourceDocuments.buyerInnRaw}), ''), NULLIF(BTRIM(${sdBuyer.inn}), ''))`,
+        consigneeInn: drSql<
+          string | null
+        >`COALESCE(NULLIF(BTRIM(${sourceDocuments.consigneeInnRaw}), ''), NULLIF(BTRIM(${sdConsignee.inn}), ''))`,
       })
       .from(sourceDocuments)
       .leftJoin(sdSupplier, eq(sourceDocuments.supplierId, sdSupplier.id))

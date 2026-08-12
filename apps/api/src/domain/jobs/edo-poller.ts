@@ -64,15 +64,30 @@ export async function runEdoSyncForAccount(
           edoAccountId: account.id,
           providerMessageId: incoming.providerMessageId,
           supplierId,
+          supplierInnRaw: parsed.supplier.inn ?? null,
           recipientId,
+          // Покупатель документа — как на ручном XML-маршруте (upload-upd):
+          // recipient_id здесь всегда собран из parsed.recipient, поэтому копия
+          // в buyer_* переносит именно распознанную сторону, а не операционного
+          // получателя. Без неё колонка «Покупатель» у документов из ЭДО пуста.
+          buyerId: recipientId,
+          buyerNameRaw: parsed.recipient?.name ?? null,
+          buyerInnRaw: parsed.recipient?.inn ?? null,
           docNumber: parsed.docNumber,
           docDate: parsed.docDate ? new Date(parsed.docDate) : null,
           totalSum: parsed.totalSum?.toString() ?? null,
           vatSum: parsed.vatSum?.toString() ?? null,
           status: 'parsed',
         })
+        // Предикат обязан ТОЧНО совпадать с условием частичного индекса
+        // `source_edo_message_unique` (schema.ts: `where edo_account_id is not
+        // null`). Без него PostgreSQL не находит подходящего ограничения и
+        // отвечает 42P10 на КАЖДОМ документе — импорт молча уходит в `failed`.
+        // Тот же дефект уже был на почтовом пути (см. mail-requests.ts); здесь
+        // он не проявлялся только потому, что таблица edo_accounts пуста.
         .onConflictDoNothing({
           target: [sourceDocuments.edoAccountId, sourceDocuments.providerMessageId],
+          where: drSql`${sourceDocuments.edoAccountId} is not null`,
         })
         .returning({ id: sourceDocuments.id });
       if (inserted && parsed.items.length) {

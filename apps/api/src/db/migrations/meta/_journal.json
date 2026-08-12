@@ -659,6 +659,13 @@
       "when": 1781800020000,
       "tag": "0094_page_permission_review",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1781800021000,
+      "tag": "0095_source_documents_party_inn",
+      "breakpoints": true
     }
   ]
 }

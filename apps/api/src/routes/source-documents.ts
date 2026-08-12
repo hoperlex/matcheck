@@ -245,6 +245,12 @@ type SdNames = {
   // а показать её всё равно нужно.
   buyerName?: string | null;
   consigneeName?: string | null;
+  // ИНН сторон из СПРАВОЧНИКА (suppliers.inn / counterparties.inn по FK).
+  // Распознанный ИНН лежит в самом документе и в sdRow идёт первым — здесь
+  // только запасной путь для документов, разобранных до миграции 0095.
+  supplierInn?: string | null;
+  buyerInn?: string | null;
+  consigneeInn?: string | null;
   // Email и телефон автора УПД (того, кто загрузил через /upload-upd*).
   // Для EDO/mail-полученных — null. Используется мобильным клиентом
   // для кнопки звонка в шапке списка материалов.
@@ -254,6 +260,20 @@ type SdNames = {
   // наличию ingest_event с channel='public' у КОРНЕВОГО пакета.
   fromSupplierPortal?: boolean;
 };
+
+/**
+ * Пустая строка — это отсутствие значения, а не значение.
+ *
+ * И распознавание, и справочники отдают ИНН строкой: модель может вернуть '',
+ * а suppliers.inn объявлен NOT NULL DEFAULT '' — в справочнике заказчика таких
+ * записей много. Без нормализации '' выиграл бы у `??` и заблокировал
+ * запасной источник, показав пустую вторую строку там, где ИНН на самом деле
+ * известен.
+ */
+function cleanInn(v: string | null | undefined): string | null {
+  const t = v?.trim();
+  return t ? t : null;
+}
 
 function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
   return {
@@ -276,6 +296,13 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     buyerName: names.buyerName ?? sd.buyerNameRaw ?? null,
     consigneeId: sd.consigneeId,
     consigneeName: names.consigneeName ?? sd.consigneeNameRaw ?? null,
+    // Распознанный ИНН первым, справочный вторым. Порядок обратен именам выше
+    // не по недосмотру: names.*Name уже приходят COALESCE-выражением, где raw
+    // стоит первым, а names.*Inn из loadSdNames — чисто справочные, и они
+    // перебили бы то, что напечатано в документе.
+    supplierInn: cleanInn(sd.supplierInnRaw) ?? cleanInn(names.supplierInn),
+    buyerInn: cleanInn(sd.buyerInnRaw) ?? cleanInn(names.buyerInn),
+    consigneeInn: cleanInn(sd.consigneeInnRaw) ?? cleanInn(names.consigneeInn),
     createdByUserId: sd.createdByUserId,
     createdByUserEmail: names.createdByUserEmail ?? null,
     createdByUserPhone: names.createdByUserPhone ?? null,
@@ -403,17 +430,17 @@ async function loadSdNames(
     // в шапке покажется как «не указан».
     sd.supplierDirectoryId
       ? app.db
-          .select({ name: suppliers.name })
+          .select({ name: suppliers.name, inn: suppliers.inn })
           .from(suppliers)
           .where(eq(suppliers.id, sd.supplierDirectoryId))
           .limit(1)
       : sd.supplierId
         ? app.db
-            .select({ name: counterparties.name })
+            .select({ name: counterparties.name, inn: counterparties.inn })
             .from(counterparties)
             .where(eq(counterparties.id, sd.supplierId))
             .limit(1)
-        : Promise.resolve([] as { name: string }[]),
+        : Promise.resolve([] as { name: string; inn: string | null }[]),
     sd.contractorId
       ? app.db
           .select({ name: counterparties.name })
@@ -433,18 +460,18 @@ async function loadSdNames(
     // ниже, в sdRow.
     sd.buyerId
       ? app.db
-          .select({ name: counterparties.name })
+          .select({ name: counterparties.name, inn: counterparties.inn })
           .from(counterparties)
           .where(eq(counterparties.id, sd.buyerId))
           .limit(1)
-      : Promise.resolve([] as { name: string }[]),
+      : Promise.resolve([] as { name: string; inn: string | null }[]),
     sd.consigneeId
       ? app.db
-          .select({ name: counterparties.name })
+          .select({ name: counterparties.name, inn: counterparties.inn })
           .from(counterparties)
           .where(eq(counterparties.id, sd.consigneeId))
           .limit(1)
-      : Promise.resolve([] as { name: string }[]),
+      : Promise.resolve([] as { name: string; inn: string | null }[]),
     sd.recipientMolId
       ? app.db
           .select({ name: responsiblePersons.fullName })
@@ -475,6 +502,12 @@ async function loadSdNames(
     // исторических строк, где *_name_raw пуст (см. бэкфилл в миграции 0083).
     buyerName: sd.buyerNameRaw ?? buyer[0]?.name ?? null,
     consigneeName: sd.consigneeNameRaw ?? consignee[0]?.name ?? null,
+    // Только справочная часть: распознанный ИНН приоритетнее, и его подставит
+    // sdRow. Здесь плейсхолдер '' из suppliers.inn не отсеиваем — это делает
+    // cleanInn в sdRow, единым правилом для всех трёх сборщиков DTO.
+    supplierInn: supplier[0]?.inn ?? null,
+    buyerInn: buyer[0]?.inn ?? null,
+    consigneeInn: consignee[0]?.inn ?? null,
     recipientMolName: mol[0]?.name ?? null,
     siteName: site[0]?.name ?? null,
     createdByUserEmail: createdBy[0]?.email ?? null,
@@ -777,6 +810,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           // исторических строк (бэкфилл миграции 0083 заполнил только FK).
           buyerName: drSql<string | null>`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
           consigneeName: drSql<string | null>`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
+          // Только справочная часть ИНН: распознанный подставит sdRow, у него
+          // приоритет. NULLIF(BTRIM(…)) обязателен — suppliers.inn объявлен
+          // NOT NULL DEFAULT '', и без него пустая строка справочника выиграла
+          // бы у legacy-контрагента с настоящим ИНН.
+          supplierInn: drSql<string | null>`COALESCE(NULLIF(BTRIM(${supplierDir.inn}), ''), NULLIF(BTRIM(${supplier.inn}), ''))`,
+          buyerInn: drSql<string | null>`NULLIF(BTRIM(${buyer.inn}), '')`,
+          consigneeInn: drSql<string | null>`NULLIF(BTRIM(${consignee.inn}), '')`,
           recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
           fromSupplierPortal: fromSupplierPortalSql,
@@ -809,6 +849,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             recipientName: r.recipientName,
             buyerName: r.buyerName,
             consigneeName: r.consigneeName,
+            supplierInn: r.supplierInn,
+            buyerInn: r.buyerInn,
+            consigneeInn: r.consigneeInn,
             recipientMolName: r.recipientMolName,
             siteName: r.siteName,
             fromSupplierPortal: r.fromSupplierPortal,
@@ -1123,6 +1166,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           // исторических строк (бэкфилл миграции 0083 заполнил только FK).
           buyerName: drSql<string | null>`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
           consigneeName: drSql<string | null>`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
+          // Только справочная часть ИНН: распознанный подставит sdRow, у него
+          // приоритет. NULLIF(BTRIM(…)) обязателен — suppliers.inn объявлен
+          // NOT NULL DEFAULT '', и без него пустая строка справочника выиграла
+          // бы у legacy-контрагента с настоящим ИНН.
+          supplierInn: drSql<string | null>`COALESCE(NULLIF(BTRIM(${supplierDir.inn}), ''), NULLIF(BTRIM(${supplier.inn}), ''))`,
+          buyerInn: drSql<string | null>`NULLIF(BTRIM(${buyer.inn}), '')`,
+          consigneeInn: drSql<string | null>`NULLIF(BTRIM(${consignee.inn}), '')`,
           recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
           fromSupplierPortal: fromSupplierPortalSql,
@@ -1180,6 +1230,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         recipientName: row.recipientName,
         buyerName: row.buyerName,
         consigneeName: row.consigneeName,
+        supplierInn: row.supplierInn,
+        buyerInn: row.buyerInn,
+        consigneeInn: row.consigneeInn,
         recipientMolName: row.recipientMolName,
         siteName: row.siteName,
         fromSupplierPortal: row.fromSupplierPortal,
@@ -1542,7 +1595,21 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           direction: req.body.direction,
           origin: 'manual_xml',
           supplierId,
+          supplierInnRaw: parsed.supplier.inn ?? null,
           recipientId,
+          // Покупатель документа. Раньше XML-путь писал распознанного получателя
+          // только в recipient_id, и в списке колонка «Покупатель» у таких
+          // документов оставалась пустой: бэкфилл миграции 0083 закрыл лишь то,
+          // что было в базе на момент миграции, а новые записи приходили без
+          // buyer_*.
+          //
+          // Здесь копируем не «операционного получателя», а распознанную сторону:
+          // recipientId на этом маршруте всегда собран из parsed.recipient, чем
+          // и отличается от outbound-документов, где то же поле позже правит
+          // человек в карточке. Поэтому копия безопасна для обоих направлений.
+          buyerId: recipientId,
+          buyerNameRaw: parsed.recipient?.name ?? null,
+          buyerInnRaw: parsed.recipient?.inn ?? null,
           contractorId,
           recipientSource: manualRecipientSource({
             direction: req.body.direction,
@@ -2607,6 +2674,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         });
         upd.supplierId = null;
         upd.supplierDirectoryId = match?.id ?? null;
+        // Распознанный ИНН больше не описывает эту сторону: поставщика назвал
+        // человек. Обнуляем, а не пишем сюда введённое значение — колонка
+        // отвечает на вопрос «что стояло в документе», и подмена сделала бы её
+        // непригодной для сверки. DTO после этого возьмёт ИНН из справочной
+        // записи, то есть ровно тот, который человек и выбрал.
+        upd.supplierInnRaw = null;
       }
 
       if (req.body.items) {

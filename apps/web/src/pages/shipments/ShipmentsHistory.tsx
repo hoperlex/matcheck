@@ -63,7 +63,7 @@ import {
 } from './ShipmentFeatureFilters';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
-import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
+import { partyCell } from '../../shared/ui/documentPartyColumns';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 // directoryFilterMap (ИНН-маппинг customer_counterparties → operational
 // counterparties) больше не нужен — фильтрация переехала на сервер.
@@ -925,6 +925,10 @@ export function ShipmentsHistory({
         items={items}
         loading={list.isLoading}
         rowKey="id"
+        // 14 колонок, из них три стороны документа — фиксированные 170px под
+        // ИНН второй строкой. Без явной минимальной ширины остальные ужимались
+        // бы на 1024-1366px в нечитаемую кашу.
+        scrollX={1700}
         rowSelection={
           (isAdmin || !isTrash) && !isContractor && !isMonitor ? bulk.selection : undefined
         }
@@ -987,23 +991,40 @@ export function ShipmentsHistory({
           // Стороны из шапки привязанного УПД — тот же набор, что в «Документах»
           // и «Ожидаемых». Берутся от primarySourceDocument, то есть от ПЕРВОГО
           // привязанного документа, без агрегации по всем.
+          // Ячейки двухстрочные (название + ИНН), поэтому ellipsis выключен —
+          // обрезкой и тултипами занимается partyCell.
           {
             title: 'Покупатель',
             key: 'buyer',
+            width: 170,
+            ellipsis: false,
             render: (_: unknown, r: Row) =>
-              shortenCounterpartyName(r.primarySourceDocument?.buyerName ?? null),
+              partyCell(
+                r.primarySourceDocument?.buyerName ?? null,
+                r.primarySourceDocument?.buyerInn ?? null,
+              ),
           },
           {
             title: 'Грузополучатель',
             key: 'consignee',
+            width: 170,
+            ellipsis: false,
             render: (_: unknown, r: Row) =>
-              shortenCounterpartyName(r.primarySourceDocument?.consigneeName ?? null),
+              partyCell(
+                r.primarySourceDocument?.consigneeName ?? null,
+                r.primarySourceDocument?.consigneeInn ?? null,
+              ),
           },
           {
             title: 'Поставщик',
             key: 'supplier',
+            width: 170,
+            ellipsis: false,
             render: (_: unknown, r: Row) =>
-              shortenCounterpartyName(r.primarySourceDocument?.supplierName ?? null),
+              partyCell(
+                r.primarySourceDocument?.supplierName ?? null,
+                r.primarySourceDocument?.supplierInn ?? null,
+              ),
           },
           {
             title: 'Объект',

@@ -280,6 +280,10 @@ export function ExpectedSourceDocsList({
         loading={list.isLoading}
         rowKey="id"
         numbered
+        // Три стороны документа получили фиксированные 170px под ИНН второй
+        // строкой, и без явной минимальной ширины на 1024-1366px ужимались бы
+        // соседние колонки. 13 колонок: 3×170 фиксированных, остальным от ~110.
+        scrollX={1500}
         expandable={{
           showExpandColumn: false,
           expandedRowKeys: expandedIds,

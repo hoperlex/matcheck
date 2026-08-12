@@ -48,6 +48,8 @@ suite('стороны документа в историях операций (�
   const buyerCpId = randomUUID();
   // ИНН уникален в таблице, а базу делят все интеграционные наборы.
   const buyerInn = `78${String(Date.now()).slice(-8)}`;
+  // ИНН грузополучателя есть только в самом документе: FK у стороны нет.
+  const consigneeRawInn = `79${String(Date.now()).slice(-8)}`;
 
   let manager: AuthUser;
 
@@ -82,11 +84,13 @@ suite('стороны документа в историях операций (�
     // Покупатель нормализован (есть ИНН), грузополучатель — только текстом.
     await sql`INSERT INTO counterparties (id, inn, name, is_customer)
               VALUES (${buyerCpId}, ${buyerInn}, 'ООО «СУ-10»', true)`;
+    // consignee_inn_raw при пустом FK — ровно то, ради чего заведены raw-поля:
+    // ИНН из документа, который связать со справочником не с чем.
     await sql`INSERT INTO source_documents
       (id, kind, direction, status, origin, site_id, doc_number, doc_date, total_sum,
-       buyer_id, consignee_name_raw)
+       buyer_id, consignee_name_raw, consignee_inn_raw)
       VALUES (${docId}, 'upd', 'inbound', 'parsed', 'manual_pdf', ${siteId}, 'H-1',
-              '2026-07-10', 1000.00, ${buyerCpId}, 'ООО «АЛЬЯНС»')`;
+              '2026-07-10', 1000.00, ${buyerCpId}, 'ООО «АЛЬЯНС»', ${consigneeRawInn})`;
 
     await sql`INSERT INTO deliveries (id, site_id, status_id)
       VALUES (${deliveryId}, ${siteId},
@@ -136,5 +140,20 @@ suite('стороны документа в историях операций (�
     const primary = await primaryOf(`/api/v1/shipments?siteId=${siteId}&limit=100`, shipmentId);
     expect(primary.buyerName).toBe('ООО «СУ-10»');
     expect(primary.consigneeName).toBe('ООО «АЛЬЯНС»');
+  });
+
+  it.each([
+    ['приёмок', () => `/api/v1/deliveries?siteId=${siteId}&limit=100`, () => deliveryId],
+    ['отгрузок', () => `/api/v1/shipments?siteId=${siteId}&limit=100`, () => shipmentId],
+  ])('история %s: ИНН сторон — из справочника и из документа', async (_label, url, id) => {
+    const primary = await primaryOf(url(), id());
+    // Покупатель нормализован — ИНН приходит по FK.
+    expect(primary.buyerInn).toBe(buyerInn);
+    // Грузополучатель без FK: единственный источник — consignee_inn_raw. Голый
+    // JOIN отдал бы здесь null при заполненной базе.
+    expect(primary.consigneeInn).toBe(consigneeRawInn);
+    // Поставщика у документа нет вовсе — поле обязано быть null, а не '' и не
+    // отсутствовать: PrimarySourceDocumentSchema требует все три ключа.
+    expect(primary.supplierInn).toBeNull();
   });
 });

@@ -42,9 +42,24 @@ suite('стороны документа в API (реальный PostgreSQL)', 
   // ИНН уникален в пределах таблицы, а базу делят все интеграционные наборы —
   // константа здесь падала бы при повторном прогоне и на чужих контрагентах.
   const consigneeInn = `77${String(Date.now()).slice(-8)}`;
+  // Поставщик из справочника с ПУСТЫМ ИНН (suppliers.inn — NOT NULL DEFAULT '',
+  // таких записей в справочнике заказчика много) и legacy-контрагент с
+  // настоящим: вместе проверяют, что пустая строка не блокирует fallback.
+  const supplierDirId = randomUUID();
+  const supplierCpId = randomUUID();
+  const supplierCpInn = `78${String(Date.now()).slice(-8)}`;
   // Документы: «Альянс» без ИНН в графе 4, «ФСК» — нормализованный контрагент.
   const docWithRawId = randomUUID();
   const docWithFkId = randomUUID();
+  // Документ, у которого ИНН стороны есть и в справочнике, и в самом документе,
+  // причём разные: так видно, какой из источников выигрывает. Живёт на ОТДЕЛЬНОМ
+  // объекте: тесты сортировки ниже сверяют список целиком и ловят каждую лишнюю
+  // строку, а у этого документа половина полей намеренно пуста.
+  const siteInnId = randomUUID();
+  const docInnRawId = randomUUID();
+  const rawConsigneeInn = `79${String(Date.now()).slice(-8)}`;
+  // ИНН, который человек вводит в карточке при ручной правке поставщика.
+  const patchSupplierInn = `76${String(Date.now()).slice(-8)}`;
 
   const manager = { id: randomUUID(), role: 'manager', siteId: null } as unknown as AuthUser;
 
@@ -88,14 +103,28 @@ suite('стороны документа в API (реальный PostgreSQL)', 
        buyer_name_raw, consignee_id)
       VALUES (${docWithFkId}, 'upd', 'inbound', 'parsed', 'manual_pdf', ${siteId}, '2520',
               '2026-07-11', 200.00, 'ООО «Бета»', ${consigneeCpId})`;
+
+    await sql`INSERT INTO sites (id, code, name) VALUES (${siteInnId}, ${`INN${Date.now() % 10000}`}, 'ИНН сторон')`;
+    await sql`INSERT INTO suppliers (id, inn, name) VALUES (${supplierDirId}, '', 'ООО «Поставщик без ИНН»')`;
+    await sql`INSERT INTO counterparties (id, inn, kpp, name, is_supplier)
+              VALUES (${supplierCpId}, ${supplierCpInn}, NULL, 'ООО «Поставщик легаси»', true)`;
+    await sql`INSERT INTO source_documents
+      (id, kind, direction, status, origin, site_id, doc_number, doc_date, total_sum,
+       supplier_id, supplier_directory_id, consignee_id, consignee_inn_raw)
+      VALUES (${docInnRawId}, 'upd', 'inbound', 'parsed', 'manual_pdf', ${siteInnId}, '2521',
+              '2026-07-12', 300.00, ${supplierCpId}, ${supplierDirId}, ${consigneeCpId},
+              ${rawConsigneeInn})`;
   });
 
   afterAll(async () => {
     await app?.close();
     if (!sql) return;
-    await sql`DELETE FROM source_documents WHERE site_id = ${siteId}`;
-    await sql`DELETE FROM sites WHERE id = ${siteId}`;
-    await sql`DELETE FROM counterparties WHERE id = ${consigneeCpId}`;
+    await sql`DELETE FROM source_documents WHERE site_id IN (${siteId}, ${siteInnId})`;
+    await sql`DELETE FROM sites WHERE id IN (${siteId}, ${siteInnId})`;
+    await sql`DELETE FROM counterparties WHERE id IN (${consigneeCpId}, ${supplierCpId})`;
+    // PATCH-тест заводит поставщика в справочнике через matchOrCreateSupplier —
+    // убираем и его, иначе набор оставляет мусор после каждого прогона.
+    await sql`DELETE FROM suppliers WHERE id = ${supplierDirId} OR inn = ${patchSupplierInn}`;
     await sql.end({ timeout: 5 });
   });
 
@@ -132,6 +161,85 @@ suite('стороны документа в API (реальный PostgreSQL)', 
     const body = res.json();
     expect(body.buyerName).toBe('ООО «СУ-10»');
     expect(body.consigneeName).toBe('ООО «АЛЬЯНС»');
+  });
+
+  // ─── ИНН сторон (вторая строка ячейки в списке) ───────────────────────────
+  //
+  // Ловится здесь и больше нигде: у списка, детали и снимка операции свои
+  // запросы, и расходятся они молча — на экране просто пропадает ИНН.
+
+  async function innDoc(): Promise<Record<string, unknown>> {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/source-documents?direction=inbound&limit=200&siteIds=${siteInnId}`,
+    });
+    expect(res.statusCode).toBe(200);
+    const items = (res.json().items as Record<string, unknown>[]).filter(
+      (i) => i.id === docInnRawId,
+    );
+    expect(items).toHaveLength(1);
+    return items[0]!;
+  }
+
+  it('сторона без ИНН и без FK: поле пустое, а не выдуманное', async () => {
+    const items = await listDocs();
+    const raw = items.find((i) => i.id === docWithRawId)!;
+    expect(raw.buyerInn ?? null).toBeNull();
+    expect(raw.consigneeInn ?? null).toBeNull();
+  });
+
+  it('ИНН нормализованной стороны берётся из справочника', async () => {
+    const items = await listDocs();
+    const fk = items.find((i) => i.id === docWithFkId)!;
+    expect(fk.consigneeInn).toBe(consigneeInn);
+  });
+
+  it('ИНН из документа приоритетнее справочного', async () => {
+    // Справочную запись правят люди, а *_inn_raw отвечает на другой вопрос —
+    // что напечатано в документе. Показываем второе.
+    const doc = await innDoc();
+    expect(doc.consigneeInn).toBe(rawConsigneeInn);
+    expect(doc.consigneeInn).not.toBe(consigneeInn);
+  });
+
+  it('пустой ИНН справочника не блокирует legacy-контрагента', async () => {
+    // suppliers.inn — NOT NULL DEFAULT '', и без NULLIF(BTRIM(…)) пустая строка
+    // выиграла бы у counterparties.inn, оставив колонку без ИНН.
+    const doc = await innDoc();
+    expect(doc.supplierInn).toBe(supplierCpInn);
+  });
+
+  it('деталь документа отдаёт те же ИНН, что и список', async () => {
+    // Список, деталь и loadSdNames — три независимых сборщика DTO. Пока их
+    // держали в согласии только глазами, карточка молча показывала пустоту.
+    const fromList = await innDoc();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/source-documents/${docInnRawId}`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.consigneeInn).toBe(fromList.consigneeInn);
+    expect(body.supplierInn).toBe(fromList.supplierInn);
+  });
+
+  it('ручная правка поставщика: ИНН из документа уступает выбранному', async () => {
+    // Поставщика назвал человек — распознанный ИНН эту сторону больше не
+    // описывает. PATCH обнуляет supplier_inn_raw, и DTO показывает ИНН
+    // справочной записи, то есть ровно тот, который человек и ввёл.
+    await sql`UPDATE source_documents SET supplier_inn_raw = '9999999999' WHERE id = ${docInnRawId}`;
+    expect((await innDoc()).supplierInn).toBe('9999999999');
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/source-documents/${docInnRawId}`,
+      payload: {
+        supplier: { inn: patchSupplierInn, name: 'ООО «Поставщик выбранный»' },
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().supplierInn).toBe(patchSupplierInn);
+    expect((await innDoc()).supplierInn).toBe(patchSupplierInn);
   });
 
   it.each(['buyerName', 'consigneeName'])('sort=%s принимается и сортирует', async (field) => {

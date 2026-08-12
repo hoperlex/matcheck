@@ -283,11 +283,20 @@ async function loadParsedBaseline(sourceDocumentId: string): Promise<UpdPdfParse
     totalSum: num(doc.totalSum),
     vatSum: num(doc.vatSum),
     itemsCount: null,
-    // Стороны восстанавливаем из *_name_raw: FK может быть пустым (графу 4
-    // печатают без ИНН), а для слияния важно именно имя.
+    // Стороны восстанавливаем из *_raw: FK может быть пустым (графу 4 печатают
+    // без ИНН), а для слияния важны и имя, и ИНН. ИНН здесь не «для полноты»:
+    // vision часто возвращает сторону с именем, но без реквизитов, и без него
+    // mergeParties нечем было бы дозаполнить победителя (см. mergeParty).
+    //
+    // Поставщик остаётся null: его сторона нужна не для отображения, а для
+    // matchOrCreateSupplier, который на втором проходе отрабатывает заново.
     supplier: null,
-    recipient: doc.buyerNameRaw ? { inn: null, kpp: null, name: doc.buyerNameRaw } : null,
-    consignee: doc.consigneeNameRaw ? { inn: null, kpp: null, name: doc.consigneeNameRaw } : null,
+    recipient: doc.buyerNameRaw
+      ? { inn: doc.buyerInnRaw, kpp: null, name: doc.buyerNameRaw }
+      : null,
+    consignee: doc.consigneeNameRaw
+      ? { inn: doc.consigneeInnRaw, kpp: null, name: doc.consigneeNameRaw }
+      : null,
     items: items.map((i) => ({
       nameRaw: i.nameRaw,
       qty: num(i.qty),
@@ -1029,6 +1038,13 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     buyerNameRaw: recipient?.name ?? null,
     consigneeId,
     consigneeNameRaw: consignee?.name ?? null,
+    // ИНН пишем сырым, как распознали, — ровно по той же причине, что и имя:
+    // сторона без FK (графа 4 без ИНН) иначе осталась бы совсем без реквизитов,
+    // а справочную запись потом правят люди, и она перестаёт отвечать на вопрос
+    // «что стояло в документе». Нормализацию оставляем читателю.
+    supplierInnRaw: supplier?.inn ?? null,
+    buyerInnRaw: recipient?.inn ?? null,
+    consigneeInnRaw: consignee?.inn ?? null,
   };
 
   // Проверка дубля. Считаем дублем УПД с тем же (supplier_directory_id,
@@ -2328,6 +2344,11 @@ async function createSourceDocumentFromWaybill(args: {
   let supplierDirectoryId: string | null = null;
   let consigneeId: string | null = null;
   let consigneeNameRaw: string | null = null;
+  // ИНН сторон накладной. У ОС-2 обе стороны внутренние и ИНН у них нет вовсе
+  // (WaybillInternalPartySchema — только name/department), поэтому поля
+  // остаются null и заполняются лишь в ветке ТН-2116.
+  let supplierInnRaw: string | null = null;
+  let consigneeInnRaw: string | null = null;
   if (doc.form === 'tn_2116') {
     if (doc.shipper?.inn || doc.shipper?.name) {
       const match = await matchOrCreateSupplier(
@@ -2339,8 +2360,10 @@ async function createSourceDocumentFromWaybill(args: {
         },
       );
       supplierDirectoryId = match?.id ?? null;
+      supplierInnRaw = doc.shipper.inn ?? null;
     }
     consigneeNameRaw = doc.consignee?.name ?? null;
+    consigneeInnRaw = doc.consignee?.inn ?? null;
     if (doc.consignee?.inn && doc.consignee?.name) {
       consigneeId = await findOrCreateCounterparty(
         { inn: doc.consignee.inn, kpp: null, name: doc.consignee.name },
@@ -2373,8 +2396,10 @@ async function createSourceDocumentFromWaybill(args: {
       // оставляем NULL; DTO supplierName собирается через COALESCE.
       supplierId: null,
       supplierDirectoryId,
+      supplierInnRaw,
       consigneeId,
       consigneeNameRaw,
+      consigneeInnRaw,
       contractorId: bundle.contractorId,
       recipientMolId: bundle.recipientMolId,
       recipientSource: manualRecipientSource(bundle),

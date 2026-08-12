@@ -95,6 +95,9 @@ export async function runMailSyncForAccount(
           messageId: m.messageId,
           messageReceivedAt: m.receivedAt,
           supplierId,
+          // ИНН поставщика из письма-заявки. Покупателя и грузополучателя в
+          // заявке нет — это не УПД, у неё только отправитель и позиции.
+          supplierInnRaw: data.supplier?.inn ?? null,
           docNumber: data.docNumber ?? null,
           docDate: data.docDate ? new Date(data.docDate) : null,
           expectedDate: data.expectedDate ? new Date(data.expectedDate) : null,
