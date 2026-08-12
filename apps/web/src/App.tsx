@@ -53,6 +53,24 @@ export function App() {
       locale={ruRU}
       theme={{
         token: { colorPrimary: '#1677ff', borderRadius: 8, colorBgLayout: '#f5f5f5' },
+        components: {
+          // Плотные таблицы: на 1080p помещается ~24 строки вместо 17.
+          // Шрифт ячеек 13px против базовых 14 — плотнее, но всё ещё крупнее
+          // тегов (12px), так что иерархия «текст ячейки > тег» сохраняется.
+          // Дефолты antd, которые здесь перекрываются: cellPaddingBlock = 16,
+          // …MD = 12, …SM = 8; все три cellFontSize* равны 14 — size="small"
+          // сам по себе шрифт НЕ уменьшает, только отступы.
+          Table: {
+            cellFontSize: 13,
+            cellFontSizeMD: 13,
+            cellFontSizeSM: 13,
+            cellPaddingBlock: 6,
+            cellPaddingBlockMD: 6,
+            cellPaddingBlockSM: 6,
+            cellPaddingInlineMD: 8,
+            cellPaddingInlineSM: 8,
+          },
+        },
       }}
     >
       <AntApp>

@@ -10,6 +10,7 @@ import {
   Alert,
   Button,
   Collapse,
+  ConfigProvider,
   DatePicker,
   Form,
   Image,
@@ -1370,100 +1371,107 @@ function EditableTable({
 
   return (
     <>
-      <Table<EditItem & { idx: number }>
-        dataSource={edit.items.map((it, idx) => ({ ...it, idx }))}
-        rowKey="idx"
-        size="small"
-        pagination={false}
-        showSorterTooltip={false}
-        // scroll={y} убран намеренно: с внутренним tbody-скроллом кнопка
-        // «Добавить позицию» уезжала за нижний край панели и её не было
-        // видно. Теперь Table растягивается по содержимому, скроллит
-        // внешний контейнер Splitter.Panel — и при auto-scroll к низу
-        // (см. DetailBody) кнопка остаётся в видимой части.
-        rowClassName={(r) => (failedRows.has(r.idx + 1) ? 'matcheck-row-mismatch' : '')}
-        columns={[
-          { title: '№', dataIndex: 'idx', width: 50, render: (idx: number) => idx + 1 },
-          {
-            title: 'Наименование',
-            dataIndex: 'nameRaw',
-            render: (v: string, _r, i) => (
-              <Input value={v} onChange={(e) => updateItem(i, { nameRaw: e.target.value })} />
-            ),
-          },
-          {
-            title: 'Кол-во',
-            dataIndex: 'qty',
-            width: 110,
-            render: (v: string, _r, i) => (
-              <InputNumber
-                value={Number(v)}
-                onChange={(x) => updateItem(i, { qty: String(x ?? 0) })}
-                decimalSeparator=","
-                style={{ width: '100%' }}
-              />
-            ),
-          },
-          {
-            title: 'Ед.',
-            dataIndex: 'unit',
-            width: 100,
-            render: (v: string, _r, i) => (
-              <UnitSelect
-                value={v}
-                onChange={(nv) => updateItem(i, { unit: nv ?? '' })}
-                style={{ width: '100%' }}
-                size="middle"
-              />
-            ),
-          },
-          {
-            title: 'Цена',
-            dataIndex: 'price',
-            width: 160,
-            render: (v: string | null, _r, i) => (
-              <InputNumber
-                value={v != null ? Number(v) : null}
-                onChange={(x) => updateItem(i, { price: x != null ? String(x) : null })}
-                decimalSeparator=","
-                formatter={inputNumberFormatterRu}
-                parser={inputNumberParserRu}
-                addonAfter="₽"
-                style={{ width: '100%' }}
-              />
-            ),
-          },
-          {
-            title: 'Сумма',
-            dataIndex: 'sum',
-            width: 180,
-            render: (v: string | null, _r, i) => (
-              <InputNumber
-                value={v != null ? Number(v) : null}
-                onChange={(x) => updateItem(i, { sum: x != null ? String(x) : null })}
-                decimalSeparator=","
-                formatter={inputNumberFormatterRu}
-                parser={inputNumberParserRu}
-                addonAfter="₽"
-                style={{ width: '100%' }}
-              />
-            ),
-          },
-          {
-            title: '',
-            key: 'rm',
-            width: 50,
-            render: (_v, _r, i) => (
-              <Button
-                danger
-                type="text"
-                icon={<DeleteOutlined />}
-                onClick={() => removeItem(i)}
-              />
-            ),
-          },
-        ]}
-      />
+      {/* componentSize="small" — поля ввода в ячейках 24px, как в остальных
+          таблицах приложения. Без этого строки режима редактирования были бы
+          ~45px против ~34px у соседней таблицы просмотра, и высота прыгала бы
+          при переключении режима. */}
+      <ConfigProvider componentSize="small">
+        <Table<EditItem & { idx: number }>
+          dataSource={edit.items.map((it, idx) => ({ ...it, idx }))}
+          rowKey="idx"
+          size="small"
+          pagination={false}
+          showSorterTooltip={false}
+          // scroll={y} убран намеренно: с внутренним tbody-скроллом кнопка
+          // «Добавить позицию» уезжала за нижний край панели и её не было
+          // видно. Теперь Table растягивается по содержимому, скроллит
+          // внешний контейнер Splitter.Panel — и при auto-scroll к низу
+          // (см. DetailBody) кнопка остаётся в видимой части.
+          rowClassName={(r) => (failedRows.has(r.idx + 1) ? 'matcheck-row-mismatch' : '')}
+          columns={[
+            { title: '№', dataIndex: 'idx', width: 50, render: (idx: number) => idx + 1 },
+            {
+              title: 'Наименование',
+              dataIndex: 'nameRaw',
+              render: (v: string, _r, i) => (
+                <Input value={v} onChange={(e) => updateItem(i, { nameRaw: e.target.value })} />
+              ),
+            },
+            {
+              title: 'Кол-во',
+              dataIndex: 'qty',
+              width: 110,
+              render: (v: string, _r, i) => (
+                <InputNumber
+                  value={Number(v)}
+                  onChange={(x) => updateItem(i, { qty: String(x ?? 0) })}
+                  decimalSeparator=","
+                  style={{ width: '100%' }}
+                />
+              ),
+            },
+            {
+              title: 'Ед.',
+              dataIndex: 'unit',
+              width: 100,
+              // size не задаём: внутри ConfigProvider выше селект берёт тот же
+              // компактный размер, что и соседние поля строки.
+              render: (v: string, _r, i) => (
+                <UnitSelect
+                  value={v}
+                  onChange={(nv) => updateItem(i, { unit: nv ?? '' })}
+                  style={{ width: '100%' }}
+                />
+              ),
+            },
+            {
+              title: 'Цена',
+              dataIndex: 'price',
+              width: 160,
+              render: (v: string | null, _r, i) => (
+                <InputNumber
+                  value={v != null ? Number(v) : null}
+                  onChange={(x) => updateItem(i, { price: x != null ? String(x) : null })}
+                  decimalSeparator=","
+                  formatter={inputNumberFormatterRu}
+                  parser={inputNumberParserRu}
+                  addonAfter="₽"
+                  style={{ width: '100%' }}
+                />
+              ),
+            },
+            {
+              title: 'Сумма',
+              dataIndex: 'sum',
+              width: 180,
+              render: (v: string | null, _r, i) => (
+                <InputNumber
+                  value={v != null ? Number(v) : null}
+                  onChange={(x) => updateItem(i, { sum: x != null ? String(x) : null })}
+                  decimalSeparator=","
+                  formatter={inputNumberFormatterRu}
+                  parser={inputNumberParserRu}
+                  addonAfter="₽"
+                  style={{ width: '100%' }}
+                />
+              ),
+            },
+            {
+              title: '',
+              key: 'rm',
+              width: 50,
+              render: (_v, _r, i) => (
+                <Button
+                  danger
+                  type="text"
+                  icon={<DeleteOutlined />}
+                  onClick={() => removeItem(i)}
+                />
+              ),
+            },
+          ]}
+        />
+      </ConfigProvider>
       <Button
         icon={<PlusOutlined />}
         onClick={addItem}

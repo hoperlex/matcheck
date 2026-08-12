@@ -216,15 +216,22 @@ function StatusTag({
         // остаётся доступным), с введёнными номером, датой и суммой — в
         // «обработано».
         return (
-          <Space size={4} wrap>
+          // wrap={false} во всех составных статусах: с переносом тег и
+          // действие вставали в две строки и высота строки таблицы скакала.
+          <Space size={4} wrap={false}>
             <Tooltip title="Тип документа определить не удалось — откройте файл и разберите вручную">
-              <Tag color="default">не распознано</Tag>
+              <Tag color="default" style={{ marginInlineEnd: 0 }}>
+                не распознано
+              </Tag>
             </Tooltip>
             {onManualResolve && (
               <Tooltip title="Закрыть вопрос по файлу: он уйдёт в архив, но останется доступным">
                 <Button
                   size="small"
                   type="link"
+                  // Без собственных отступов: ссылка-действие стоит вплотную к
+                  // тегу, и пара целиком помещается в ширину колонки «Статус».
+                  style={{ padding: 0, height: 'auto' }}
                   onClick={(e) => {
                     e.stopPropagation();
                     onManualResolve(row);
@@ -239,12 +246,15 @@ function StatusTag({
       }
       if (row.parseErrorCode === 'duplicate_upd') {
         return (
-          <Space size={4} wrap>
-            <Tag color="orange">дубликат</Tag>
+          <Space size={4} wrap={false}>
+            <Tag color="orange" style={{ marginInlineEnd: 0 }}>
+              дубликат
+            </Tag>
             {onResolve && (
               <Button
                 size="small"
                 type="link"
+                style={{ padding: 0, height: 'auto' }}
                 onClick={(e) => {
                   e.stopPropagation();
                   onResolve(row);
@@ -261,7 +271,7 @@ function StatusTag({
         // xlsx-УПД на Шаге 2a парсера. Пользователь дозаполнит вручную.
         const missing = (row.parseErrorDetails as { missing?: string[] } | null)?.missing;
         return (
-          <Space size={4} wrap>
+          <Space size={4} wrap={false}>
             <Tooltip
               title={
                 missing && missing.length
@@ -269,12 +279,15 @@ function StatusTag({
                   : 'Документ распознан частично — дополните данные вручную'
               }
             >
-              <Tag color="gold">распознано частично</Tag>
+              <Tag color="gold" style={{ marginInlineEnd: 0 }}>
+                распознано частично
+              </Tag>
             </Tooltip>
             {onResolve && (
               <Button
                 size="small"
                 type="link"
+                style={{ padding: 0, height: 'auto' }}
                 onClick={(e) => {
                   e.stopPropagation();
                   onResolve(row);
@@ -287,7 +300,7 @@ function StatusTag({
         );
       }
       return (
-        <Space size={4} wrap>
+        <Space size={4} wrap={false}>
           <Tooltip
             title={
               (row.parseErrorDetails as { failedChecks?: unknown[] } | null)?.failedChecks
@@ -295,12 +308,15 @@ function StatusTag({
                 : undefined
             }
           >
-            <Tag color="gold">суммы не сходятся</Tag>
+            <Tag color="gold" style={{ marginInlineEnd: 0 }}>
+              суммы не сходятся
+            </Tag>
           </Tooltip>
           {onResolve && (
             <Button
               size="small"
               type="link"
+              style={{ padding: 0, height: 'auto' }}
               onClick={(e) => {
                 e.stopPropagation();
                 onResolve(row);
@@ -798,6 +814,10 @@ export default function InboxPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        // Колонок 14 (плюс чекбоксы при массовом выборе): четыре фиксированные,
+        // десяти свободным нужно от ~110px. На 1024-1366px скроллим таблицу,
+        // а не жмём колонки; на 1920px вид прежний.
+        scrollX={1600}
         // Постраничная навигация (как в «Операциях»): по 50 на страницу, с
         // переключателем размера. Клиентская — по всему загруженному набору.
         pagination={{
@@ -869,6 +889,10 @@ export default function InboxPage() {
             // до одного «Статус».
             title: 'Статус',
             dataIndex: 'status',
+            // Ширина под самую длинную пару «распознано частично» + «дополнить»
+            // (~227px вместе с отступами ячейки). Уже — и общий ellipsis
+            // обрезал бы действие, которое нужно нажимать.
+            width: 260,
             // По «требует внимания»: активные вверху, архив внизу.
             sorter: prioritySorter<Row, Row['status']>(
               (r) => r.status,

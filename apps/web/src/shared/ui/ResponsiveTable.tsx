@@ -1,4 +1,4 @@
-import { List, Space, Table, Tooltip, Typography, type TableProps } from 'antd';
+import { ConfigProvider, List, Space, Table, Tooltip, Typography, type TableProps } from 'antd';
 import { useMemo, type ReactNode } from 'react';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { useStickyHeaderHeight } from './StickyPageHeader';
@@ -48,6 +48,7 @@ export function ResponsiveTable<T extends object>({
   rowClassName,
   pagination,
   scrollY,
+  scrollX,
 }: {
   items: T[];
   columns: Column<T>[];
@@ -88,6 +89,13 @@ export function ResponsiveTable<T extends object>({
    * бы свой трек прокрутки (вкладка «Роли»).
    */
   scrollY?: string | false;
+  /**
+   * Минимальная ширина таблицы. Табличный режим начинается уже с 1024px (см.
+   * useBreakpoint), а при развёрнутом Sider (240) и padding Content (48) под
+   * таблицу остаётся 736px — десяток колонок сжимается в нечитаемую кашу.
+   * Заданный scrollX включает внутренний горизонтальный скролл вместо сжатия.
+   */
+  scrollX?: number | string;
 }) {
   const bp = useBreakpoint();
   // Сумма высот всех родительских StickyPageHeader. 0 — sticky-обёртки нет,
@@ -151,40 +159,56 @@ export function ResponsiveTable<T extends object>({
   if (bp === 'desktop') {
     // Внутренний tbody-скролл: tbody вписывается в окно, пагинация всегда
     // видна внизу страницы. Высота = vh минус sticky-шапка страницы минус
-    // ~134px (шапка таблицы ~50 + пагинация ~52 + Content top+bottom
-    // paddings 20 + buffer 12). Раньше было 170 при Content padding 48 —
-    // мы сократили padding до 20 (12 top / 8 bottom в DesktopLayout),
-    // освободив 28px места для строк. Так таблица помещается в Content
-    // (который сам скролл-контейнер, см. DesktopLayout) и НЕ переполняет
-    // его — внешнего скролла страницы не остаётся.
-    const tableScrollY = scrollY === undefined ? `calc(100vh - ${stickyOffset + 134}px)` : scrollY;
+    // ~114px (шапка таблицы ~34 + пагинация ~48 + Content top+bottom
+    // paddings 20 + buffer 12). Было 134 при size="middle" — с компактной
+    // плотностью (отступы ячеек 6px) шапка таблицы стала ниже на ~13px, а
+    // пагинация внутри componentSize="small" — на ~8px, место отдаём строкам.
+    // Так таблица помещается в Content (который сам скролл-контейнер, см.
+    // DesktopLayout) и НЕ переполняет его — внешнего скролла не остаётся.
+    const tableScrollY = scrollY === undefined ? `calc(100vh - ${stickyOffset + 114}px)` : scrollY;
+    // Собираем scroll явно: при scrollY === false в объект нельзя класть
+    // y: false — таблицы «Ролей» (шесть подряд на одной странице) получили бы
+    // некорректную высоту вместо скролла страницей.
+    const tableScroll: TableProps<T>['scroll'] =
+      tableScrollY === false
+        ? scrollX === undefined
+          ? undefined
+          : { x: scrollX }
+        : { x: scrollX, y: tableScrollY };
     return (
-      <Table<T>
-        dataSource={items}
-        columns={finalColumns}
-        rowKey={rowKey as TableProps<T>['rowKey']}
-        loading={loading}
-        size="middle"
-        rowSelection={rowSelection}
-        expandable={expandable}
-        showSorterTooltip={false}
-        pagination={
-          pagination === false
-            ? false
-            : { pageSize: 100, showSizeChanger: false, ...(pagination ?? {}) }
-        }
-        locale={{ emptyText: emptyText ?? 'Нет данных' }}
-        scroll={tableScrollY === false ? undefined : { y: tableScrollY }}
-        rowClassName={rowClassName}
-        onRow={
-          onRowClick
-            ? (row) => ({
-                onClick: () => onRowClick(row),
-                style: { cursor: 'pointer' },
-              })
-            : undefined
-        }
-      />
+      // componentSize="small" — контролы в ячейках (Select, Input, InputNumber,
+      // Button, Pagination) становятся 24px вместо 32, Switch — 16px. Иначе
+      // строка упирается в высоту контрола и отступы ячеек её не сжимают.
+      // Обёртка живёт только в desktop-ветке: в карточном режиме ниже нужны
+      // крупные тапабельные зоны. Явный size в конкретной ячейке побеждает.
+      <ConfigProvider componentSize="small">
+        <Table<T>
+          dataSource={items}
+          columns={finalColumns}
+          rowKey={rowKey as TableProps<T>['rowKey']}
+          loading={loading}
+          size="small"
+          rowSelection={rowSelection}
+          expandable={expandable}
+          showSorterTooltip={false}
+          pagination={
+            pagination === false
+              ? false
+              : { pageSize: 100, showSizeChanger: false, ...(pagination ?? {}) }
+          }
+          locale={{ emptyText: emptyText ?? 'Нет данных' }}
+          scroll={tableScroll}
+          rowClassName={rowClassName}
+          onRow={
+            onRowClick
+              ? (row) => ({
+                  onClick: () => onRowClick(row),
+                  style: { cursor: 'pointer' },
+                })
+              : undefined
+          }
+        />
+      </ConfigProvider>
     );
   }
   return (

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Alert, Modal, Space, Switch, Table, Tag, Typography } from 'antd';
+import { Alert, ConfigProvider, Modal, Space, Switch, Table, Tag, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import type {
   SourceDirection,
@@ -9,6 +9,7 @@ import type {
 import type { z } from 'zod';
 import { api } from '../../services/api';
 import { documentPartyColumns } from '../../shared/ui/documentPartyColumns';
+import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { useAuthStore } from '../../stores/auth';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
@@ -51,6 +52,7 @@ export function LinkSourceDocumentModal({
   // (поведение 1:1 как раньше). См. комментарий к assertSourcesAvailable*.
   const [multiple, setMultiple] = useState(false);
   const currentUserId = useAuthStore((s) => s.user?.id ?? null);
+  const bp = useBreakpoint();
 
   const list = useQuery({
     // Кешируем РАЗНЫЕ ключи под выключенным/включенным «Несколько поставок»
@@ -132,55 +134,63 @@ export function LinkSourceDocumentModal({
             <Typography.Text>Несколько поставок</Typography.Text>
           </Space>
         </Space>
-        <Table<SourceDocument>
-          rowKey="id"
-          dataSource={filtered}
-          loading={list.isLoading || busy}
-          pagination={{ pageSize: 50, showSizeChanger: false }}
-          showSorterTooltip={false}
-          // Скролл внутри tbody — фиксируем высоту с учётом высот шапки
-          // модалки, switch'а «все объекты», заголовка таблицы и пагинации.
-          // ~240px суммарно при 95vh body, остальное — данные.
-          scroll={{ y: 'calc(95vh - 260px)' }}
-          onRow={(r) => ({
-            onClick: () => {
-              if (!busy) onPick(r);
-            },
-            style: { cursor: busy ? 'progress' : 'pointer' },
-          })}
-          locale={{
-            emptyText: list.isLoading
-              ? 'Загрузка…'
-              : 'Нет свободных УПД для привязки',
-          }}
-          columns={[
-            {
-              title: 'Номер',
-              dataIndex: 'docNumber',
-              render: (v: string | null) => (
-                <Tag color="blue">{v ?? '— без номера —'}</Tag>
-              ),
-            },
-            {
-              title: 'Дата',
-              dataIndex: 'docDate',
-              render: (v: string | null) => v ?? '—',
-            },
-            // Единый набор сторон — как в «Документах» и «Ожидаемых».
-            ...documentPartyColumns<SourceDocument>((r) => r),
-            {
-              title: 'Объект',
-              key: 'site',
-              render: (_: unknown, r: SourceDocument) => r.siteName ?? '—',
-            },
-            {
-              title: 'Сумма',
-              key: 'total',
-              render: (_: unknown, r: SourceDocument) =>
-                r.totalSum ? `${r.totalSum} ₽` : '—',
-            },
-          ]}
-        />
+        {/* Здесь кликабельна вся строка, и модалку открывают в том числе с
+            телефона (КПП, Отгрузка). С общей плотностью (6px) строка была бы
+            ~34px — мало для пальца, поэтому на мобильной ширине возвращаем
+            крупные отступы: 14px дают ~49px. На десктопе плотность общая. */}
+        <ConfigProvider
+          theme={{ components: { Table: { cellPaddingBlock: bp === 'mobile' ? 14 : 6 } } }}
+        >
+          <Table<SourceDocument>
+            rowKey="id"
+            dataSource={filtered}
+            loading={list.isLoading || busy}
+            pagination={{ pageSize: 50, showSizeChanger: false }}
+            showSorterTooltip={false}
+            // Скролл внутри tbody — фиксируем высоту с учётом высот шапки
+            // модалки, switch'а «все объекты», заголовка таблицы и пагинации.
+            // ~240px суммарно при 95vh body, остальное — данные.
+            scroll={{ y: 'calc(95vh - 260px)' }}
+            onRow={(r) => ({
+              onClick: () => {
+                if (!busy) onPick(r);
+              },
+              style: { cursor: busy ? 'progress' : 'pointer' },
+            })}
+            locale={{
+              emptyText: list.isLoading
+                ? 'Загрузка…'
+                : 'Нет свободных УПД для привязки',
+            }}
+            columns={[
+              {
+                title: 'Номер',
+                dataIndex: 'docNumber',
+                render: (v: string | null) => (
+                  <Tag color="blue">{v ?? '— без номера —'}</Tag>
+                ),
+              },
+              {
+                title: 'Дата',
+                dataIndex: 'docDate',
+                render: (v: string | null) => v ?? '—',
+              },
+              // Единый набор сторон — как в «Документах» и «Ожидаемых».
+              ...documentPartyColumns<SourceDocument>((r) => r),
+              {
+                title: 'Объект',
+                key: 'site',
+                render: (_: unknown, r: SourceDocument) => r.siteName ?? '—',
+              },
+              {
+                title: 'Сумма',
+                key: 'total',
+                render: (_: unknown, r: SourceDocument) =>
+                  r.totalSum ? `${r.totalSum} ₽` : '—',
+              },
+            ]}
+          />
+        </ConfigProvider>
       </Space>
     </Modal>
   );

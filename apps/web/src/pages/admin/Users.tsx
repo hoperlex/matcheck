@@ -28,7 +28,7 @@ import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { roleLabel } from '../../shared/constants/roleLabels';
 import { UserEditModal } from './UserEditModal';
 import { PasswordResetLinkModal } from './PasswordResetLinkModal';
-import { formatDateRu } from '../../shared/utils/formatRu';
+import { formatDateRu, formatDateTimeRu } from '../../shared/utils/formatRu';
 
 const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp', 'contractor', 'monitor'];
 
@@ -123,7 +123,9 @@ export default function AdminUsersPage() {
         onPressEnter={(e) => (e.target as HTMLInputElement).blur()}
         placeholder="+7 …"
         allowClear
-        style={{ width: 180 }}
+        // Ширину задаёт колонка: с фиксированной шириной контрол вылезал за
+        // её границу и обрезался на стыке ячеек.
+        style={{ width: '100%' }}
         prefix={<PhoneOutlined style={{ color: '#bfbfbf' }} />}
       />
     );
@@ -136,7 +138,7 @@ export default function AdminUsersPage() {
     return (
       <Select<string>
         value={row.siteId ?? undefined}
-        style={{ width: 220 }}
+        style={{ width: '100%' }}
         placeholder="Не назначен"
         showSearch
         optionFilterProp="label"
@@ -157,7 +159,7 @@ export default function AdminUsersPage() {
     return (
       <Select<string>
         value={row.contractorCustomerId ?? undefined}
-        style={{ width: 260 }}
+        style={{ width: '100%' }}
         placeholder="Не назначен"
         showSearch
         optionFilterProp="label"
@@ -214,6 +216,9 @@ export default function AdminUsersPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        // Колонок десять; на 1024-1366px без минимальной ширины они сжимаются
+        // до нечитаемых 60px. Скроллим саму таблицу, а не страницу.
+        scrollX={1240}
         columns={[
           { title: 'Email', dataIndex: 'email' },
           {
@@ -222,7 +227,7 @@ export default function AdminUsersPage() {
             render: (r: UserRole, row: UserDto) => (
               <Select
                 value={r}
-                style={{ width: 160 }}
+                style={{ width: '100%' }}
                 onChange={(v) => patch.mutate({ id: row.id, body: { role: v } })}
                 options={roles.map((rl) => ({ value: rl, label: roleLabel(rl) }))}
               />
@@ -241,6 +246,7 @@ export default function AdminUsersPage() {
           {
             title: 'Активен',
             dataIndex: 'isActive',
+            width: 80,
             render: (a: boolean, row: UserDto) => (
               <Switch
                 checked={a}
@@ -248,7 +254,16 @@ export default function AdminUsersPage() {
               />
             ),
           },
-          { title: 'Создан', dataIndex: 'createdAt' },
+          {
+            // Без render в ячейку попадала сырая ISO-строка вида
+            // «2026-08-12T07:31:53.178Z» — обрезанная по ширине колонки и
+            // нечитаемая. Время локальное: сервер пишет UTC, админ смотрит
+            // московское.
+            title: 'Создан',
+            dataIndex: 'createdAt',
+            width: 140,
+            render: (v: string | null) => formatDateTimeRu(v),
+          },
           {
             title: 'Контакт',
             key: 'phone',
@@ -262,7 +277,7 @@ export default function AdminUsersPage() {
           {
             title: 'Действия',
             key: 'actions',
-            width: 140,
+            width: 90,
             align: 'right' as const,
             render: (_: unknown, row: UserDto) => {
               const reset = resetByUser.get(row.id);
