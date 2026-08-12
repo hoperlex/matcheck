@@ -14,7 +14,12 @@
  *      исторические следы).
  *   2. «Soft-deleted» — записи с pending_deletion_at: видны в мобильном /sync,
  *      но скрыты на портале (рассинхрон «на планшете есть, на портале нет»).
- *   3. С --site: полный список операций объекта за период с ключевыми полями —
+ *   3. «Финальный статус без подтверждённого фото» — операции старше двух часов,
+ *      у которых нет ни одного фото с uploaded_at, с разрезом по устройству
+ *      (UA сессии, создавшей запись). Инцидент «ЖК Событие 6.1» 12.08.2026.
+ *   4. «Флот» — планшеты, молчащие больше суток: пока устройство не подключилось,
+ *      его операции на сервере не существуют, и п.3 их не увидит.
+ *   5. С --site: полный список операций объекта за период с ключевыми полями —
  *      чтобы по «дом56»-кейсу глазами сверить, ЕСТЬ ли запись на сервере вообще,
  *      есть ли позиции, какой статус и siteId.
  *
@@ -91,8 +96,77 @@ async function main(): Promise<void> {
     LIMIT 100`;
   table(softDeleted);
 
+  // Инцидент «ЖК Событие 6.1» 12.08.2026: после четырёх суток офлайна планшет
+  // залил ~50 приёмок, семь из них без единого фото. Подготовка кадров падала
+  // на устройстве (нет места / OOM) уже ПОСЛЕ постановки мутации в очередь.
+  //
+  // uploaded_at IS NOT NULL обязателен: строка без него — незавершённый
+  // presign, её через час удалит orphan-cleanup, то есть «фото» там нет.
+  // Отсечка в 2 часа убирает штатное «кадры ещё едут» у свежих операций.
+  console.log(`\n=== 3. Финальный статус БЕЗ подтверждённого фото (старше 2 ч, ${days} дн.) ===`);
+  const noPhotos = await sql`
+    SELECT 'delivery' AS kind, d.display_id AS "displayId", st.code AS status,
+           s.name AS site,
+           to_char(d.created_at, 'YYYY-MM-DD HH24:MI') AS created,
+           sess.last_seen_ua AS "creatorUA"
+    FROM deliveries d
+    JOIN statuses st ON st.id = d.status_id
+    LEFT JOIN sites s ON s.id = d.site_id
+    LEFT JOIN sessions sess ON sess.id = d.created_by_session_id
+    WHERE st.entity_type = 'delivery' AND st.code IN ('filled', 'confirmed_mol')
+      AND d.pending_deletion_at IS NULL
+      AND d.created_at >= now() - (${days} || ' days')::interval
+      AND d.created_at < now() - interval '2 hours'
+      AND NOT EXISTS (
+        SELECT 1 FROM delivery_photos dp
+        WHERE dp.delivery_id = d.id AND dp.uploaded_at IS NOT NULL
+      )
+    UNION ALL
+    SELECT 'shipment' AS kind, sh.display_id AS "displayId", st.code AS status,
+           s.name AS site,
+           to_char(sh.created_at, 'YYYY-MM-DD HH24:MI') AS created,
+           sess.last_seen_ua AS "creatorUA"
+    FROM shipments sh
+    JOIN statuses st ON st.id = sh.status_id
+    LEFT JOIN sites s ON s.id = sh.site_id
+    LEFT JOIN sessions sess ON sess.id = sh.created_by_session_id
+    WHERE st.entity_type = 'shipment' AND st.code IN ('shipped', 'confirmed_mol')
+      AND sh.pending_deletion_at IS NULL
+      AND sh.created_at >= now() - (${days} || ' days')::interval
+      AND sh.created_at < now() - interval '2 hours'
+      AND NOT EXISTS (
+        SELECT 1 FROM shipment_photos sp
+        WHERE sp.shipment_id = sh.id AND sp.uploaded_at IS NOT NULL
+      )
+    ORDER BY created DESC
+    LIMIT 200`;
+  table(noPhotos);
+  console.log(
+    '  creatorUA — устройство, СОЗДАВШЕЕ запись (created_by_session_id).\n' +
+      '  2 Этап мог закрывать другой планшет: отдельного поля для этого нет.',
+  );
+
+  // Пока планшет не подключился, его операции на сервере не существуют вовсе —
+  // счётчик выше их не увидит. Молчащее устройство и есть ранний сигнал:
+  // именно так копился офлайн-буфер на «Событии 6.1».
+  console.log('\n=== 4. Флот: устройства, молчащие больше суток ===');
+  const silentDevices = await sql`
+    SELECT u.email,
+           sess.last_seen_ua AS ua,
+           to_char(sess.last_seen_at, 'YYYY-MM-DD HH24:MI') AS "lastSeen",
+           round(extract(epoch FROM (now() - sess.last_seen_at)) / 3600)::int AS "hoursSilent"
+    FROM sessions sess
+    JOIN users u ON u.id = sess.user_id
+    WHERE sess.invalidated_at IS NULL
+      AND sess.last_seen_ua LIKE 'matcheck-android/%'
+      AND sess.last_seen_at < now() - interval '1 day'
+      AND sess.last_seen_at >= now() - interval '30 days'
+    ORDER BY sess.last_seen_at ASC
+    LIMIT 100`;
+  table(silentDevices);
+
   if (siteArg) {
-    console.log(`\n=== 3. Все операции объекта "${siteArg}" за ${days} дн. (что РЕАЛЬНО есть на сервере) ===`);
+    console.log(`\n=== 5. Все операции объекта "${siteArg}" за ${days} дн. (что РЕАЛЬНО есть на сервере) ===`);
     const bySite = await sql`
       SELECT 'delivery' AS kind, d.display_id AS "displayId", st.code AS status,
              (SELECT count(*)::int FROM delivery_items di WHERE di.delivery_id = d.id) AS items,

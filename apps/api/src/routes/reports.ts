@@ -1154,20 +1154,38 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
                 SELECT 1 FROM shipment_sources ss WHERE ss.shipment_id = s.id
               )
           ),
+          -- «Без фото» = нет ни одного ПОДТВЕРЖДЁННОГО кадра (uploaded_at
+          -- заполнен). Строка без uploaded_at — незавершённый presign: файла
+          -- в S3 может не быть вовсе, и через час её удалит orphan-cleanup.
+          --
+          -- Считаем только операции в финальном статусе и старше 12 часов.
+          -- Фото приезжают отдельным каналом (мутация → presign → PUT →
+          -- confirm) и после долгого офлайна разгружаются часами: 12.08.2026
+          -- планшет «ЖК Событие 6.1» долил кадры через 3.7 часа после того,
+          -- как приёмки уже были на портале. С отсечкой в пару часов счётчик
+          -- показывал бы норму работы, а не проблему.
           del_no_photos AS (
             SELECT COUNT(*)::int AS n
             FROM deliveries d
+            JOIN statuses st ON st.id = d.status_id
             WHERE ${enforceD} AND ${periodD}
+              AND st.entity_type = 'delivery' AND st.code IN ('filled', 'confirmed_mol')
+              AND d.created_at < NOW() - INTERVAL '12 hours'
               AND NOT EXISTS (
-                SELECT 1 FROM delivery_photos dp WHERE dp.delivery_id = d.id
+                SELECT 1 FROM delivery_photos dp
+                WHERE dp.delivery_id = d.id AND dp.uploaded_at IS NOT NULL
               )
           ),
           sh_no_photos AS (
             SELECT COUNT(*)::int AS n
             FROM shipments s
+            JOIN statuses st ON st.id = s.status_id
             WHERE ${enforceS} AND ${periodS}
+              AND st.entity_type = 'shipment' AND st.code IN ('shipped', 'confirmed_mol')
+              AND s.created_at < NOW() - INTERVAL '12 hours'
               AND NOT EXISTS (
-                SELECT 1 FROM shipment_photos sp WHERE sp.shipment_id = s.id
+                SELECT 1 FROM shipment_photos sp
+                WHERE sp.shipment_id = s.id AND sp.uploaded_at IS NOT NULL
               )
           ),
           del_transit AS (

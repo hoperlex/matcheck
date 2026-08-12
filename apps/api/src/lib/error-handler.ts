@@ -14,9 +14,14 @@ const env = loadEnv();
  * НАМЕРЕННО не читаем err.statusCode у произвольных ошибок. Ошибки
  * валидации Fastify/zod несут statusCode=400, и такой «улучшайзинг»
  * поменял бы их ответ с 500 (как сейчас) на 400. Мобильный
- * MutationProcessor.kt на 4xx делает Drop — мутация удаляется из очереди
- * вместе с данными приёмки, тогда как на 5xx он делает Backoff и запись
- * остаётся. Поведение для мобилы должно остаться ровно прежним.
+ * MutationProcessor.kt на 4xx делает Drop, на 5xx — Backoff; менять
+ * классификацию задним числом не нужно, поведение для мобилы должно
+ * остаться ровно прежним.
+ *
+ * Уточнение к прежней редакции этого комментария: Drop давно НЕ удаляет
+ * мутацию. MutationProcessor сохраняет её с conflictPending=true и
+ * lastError, чтобы причина была видна в «Очереди синхронизации» — данные
+ * приёмки при 4xx не теряются.
  */
 export function errorHandler(err: FastifyError, req: FastifyRequest, reply: FastifyReply) {
   req.log.error({ err }, 'request error');
