@@ -351,17 +351,23 @@ export default function RolesPage() {
                   </Space>
                 ),
               },
-              ...PAGE_ACTIONS.map((action) => ({
-                title: PAGE_ACTION_LABELS[action],
-                key: action,
-                align: 'center' as const,
-                render: (_: unknown, r: Row) =>
-                  isAdminView ? (
-                    <Checkbox checked disabled />
-                  ) : (
-                    renderCell(r, action)
-                  ),
-              })),
+              // Колонка рисуется, только если действие осмысленно хотя бы для
+              // одной страницы раздела. Иначе «Проверять» (есть лишь у
+              // Операций) добавил бы пустой столбец во все шесть разделов.
+              // Мобильная карточка ниже фильтрует по тому же признаку, но
+              // построчно.
+              ...PAGE_ACTIONS.filter((action) => entries.some((e) => e.actions.includes(action)))
+                .map((action) => ({
+                  title: PAGE_ACTION_LABELS[action],
+                  key: action,
+                  align: 'center' as const,
+                  render: (_: unknown, r: Row) =>
+                    isAdminView ? (
+                      <Checkbox checked disabled />
+                    ) : (
+                      renderCell(r, action)
+                    ),
+                })),
             ]}
             cardRender={(r) => (
               <Card size="small" style={{ width: '100%' }}>

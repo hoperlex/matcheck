@@ -27,12 +27,14 @@ import { readOverrides, type DbLike } from '../../lib/permissions/store.js';
 import { badRequest } from '../../lib/http-error.js';
 
 /** Колонка таблицы по действию. */
-const COLUMN: Record<PageAction, 'canView' | 'canCreate' | 'canEdit' | 'canDelete'> = {
-  view: 'canView',
-  create: 'canCreate',
-  edit: 'canEdit',
-  delete: 'canDelete',
-};
+const COLUMN: Record<PageAction, 'canView' | 'canCreate' | 'canEdit' | 'canDelete' | 'canReview'> =
+  {
+    view: 'canView',
+    create: 'canCreate',
+    edit: 'canEdit',
+    delete: 'canDelete',
+    review: 'canReview',
+  };
 
 type Change = { role: ManagedRole; page: PageId; action: PageAction; allowed: boolean };
 
@@ -261,14 +263,15 @@ export async function rolePermissionRoutes(rawApp: FastifyInstance): Promise<voi
           const insertValues: Record<string, unknown> = {
             role: w.role,
             pageId: w.page,
-            // INSERT — полная строка из дефолта с наложенной дельтой. Из false
-            // нельзя: первая же правка одной ячейки обнулила бы три остальные.
-            canView: base.view,
-            canCreate: base.create,
-            canEdit: base.edit,
-            canDelete: base.delete,
             updatedByUserId: req.user!.id,
           };
+          // INSERT — полная строка из дефолта с наложенной дельтой. Из false
+          // нельзя: первая же правка одной ячейки обнулила бы остальные.
+          // Цикл по PAGE_ACTIONS, а не перечисление колонок: забытое действие
+          // иначе молча вставлялось бы как «запрещено».
+          for (const action of PAGE_ACTIONS) {
+            insertValues[COLUMN[action]] = base[action];
+          }
           const setValues: Record<string, unknown> = {
             updatedAt: new Date(),
             updatedByUserId: req.user!.id,

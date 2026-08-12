@@ -121,7 +121,10 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
         'офлайн-запись с планшета приходит с уже сгенерированным UUID.',
     ),
   ],
-  ['PATCH /api/v1/deliveries/:id/review', st('operations.deliveries', 'edit')],
+  // Отметка проверки качества — своё действие, не edit: у ячейки edit другой
+  // allow-list (admin/manager), и совмещение делало право монитора базовым,
+  // то есть неспособным быть расширенным до настоящей правки.
+  ['PATCH /api/v1/deliveries/:id/review', st('operations.deliveries', 'review')],
   ['PATCH /api/v1/deliveries/:id/flags', st('operations.deliveries', 'edit')],
   ['PATCH /api/v1/deliveries/:id/supplier-from-directory', st('operations.deliveries', 'edit')],
   ['POST /api/v1/deliveries/:id/link-source', st('operations.deliveries', 'edit')],
@@ -139,7 +142,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // Своего export.xlsx у отгрузок нет: страница Операций выгружает их через
   // /api/v1/source-documents/export.xlsx (см. OperationsPage.tsx).
   ['POST /api/v1/shipments', inHandler('Upsert — см. POST /api/v1/deliveries.')],
-  ['PATCH /api/v1/shipments/:id/review', st('operations.shipments', 'edit')],
+  ['PATCH /api/v1/shipments/:id/review', st('operations.shipments', 'review')],
   ['PATCH /api/v1/shipments/:id/flags', st('operations.shipments', 'edit')],
   ['PATCH /api/v1/shipments/:id/supplier-from-directory', st('operations.shipments', 'edit')],
   ['POST /api/v1/shipments/:id/link-source', st('operations.shipments', 'edit')],

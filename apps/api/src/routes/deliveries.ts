@@ -43,7 +43,7 @@ import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/fo
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
-import { canSeeReview } from '../lib/review.js';
+import { canSeeReviewInMatrix } from '../lib/review.js';
 import { assertPermission } from '../lib/permissions/assert.js';
 import {
   expandCustomerCounterpartyToOpIds,
@@ -348,7 +348,7 @@ function assembleDeliveryDto(
 // не изменилось — та же форма через общий assembleDeliveryDto.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null) {
-  const showReview = canSeeReview(viewerRole);
+  const showReview = await canSeeReviewInMatrix(app, viewerRole, 'operations.deliveries');
   const rows = await selectDeliveryHeaders(app).where(eq(deliveries.id, id)).limit(1);
   const r = rows[0] as DeliveryHeaderRow | undefined;
   if (!r) return null;
@@ -376,7 +376,7 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: string | null) {
   if (ids.length === 0) return [];
-  const showReview = canSeeReview(viewerRole);
+  const showReview = await canSeeReviewInMatrix(app, viewerRole, 'operations.deliveries');
   const headerRows = (await selectDeliveryHeaders(app).where(
     inArray(deliveries.id, ids),
   )) as DeliveryHeaderRow[];

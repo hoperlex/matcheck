@@ -652,6 +652,13 @@
       "when": 1781800019000,
       "tag": "0093_refresh_session_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1781800020000,
+      "tag": "0094_page_permission_review",
+      "breakpoints": true
     }
   ]
 }

@@ -328,6 +328,11 @@ export const rolePagePermissions = pgTable(
     canCreate: boolean('can_create').notNull().default(false),
     canEdit: boolean('can_edit').notNull().default(false),
     canDelete: boolean('can_delete').notNull().default(false),
+    // Отметка проверки качества на Операциях. Отдельное действие, а не часть
+    // canEdit: ячейкой edit помечены маршруты с разными allow-list, и пока
+    // отметка сидела внутри неё, у monitor'а право было базовым — то есть
+    // никогда не считалось расширением и не открывало настоящую правку.
+    canReview: boolean('can_review').notNull().default(false),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     updatedByUserId: uuid('updated_by_user_id').references(() => users.id, {
       onDelete: 'set null',

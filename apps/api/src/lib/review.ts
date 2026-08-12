@@ -1,3 +1,7 @@
+import type { PageId } from '@matcheck/contracts';
+import { isAllowed } from './permissions/matrix.js';
+import type { OverrideMap } from './permissions/matrix.js';
+
 /**
  * Видимость отметки проверки качества (review_state/review_note/кто-когда) на
  * портале. Это внутренняя QC-кухня менеджмента: её видят только admin/manager/
@@ -19,4 +23,36 @@ export function canSeeReview(role: string | null | undefined): boolean {
  */
 export function canReview(role: string | null | undefined): boolean {
   return canSeeReview(role);
+}
+
+/** Минимум от FastifyInstance, нужный для сверки с матрицей. */
+type PermissionsAware = {
+  permissions?: { enforced: boolean; get(): Promise<OverrideMap> };
+};
+
+/**
+ * Видимость review-полей С УЧЁТОМ матрицы прав.
+ *
+ * Список ролей выше отвечает на вопрос «кому эта кухня вообще предназначена», а
+ * матрица — «не сняли ли администратором отметку у этой роли». Итог —
+ * конъюнкция: снятая галочка «Проверять» обязана скрывать и сами поля, иначе
+ * роль продолжала бы видеть чужие оценки качества, потеряв лишь кнопку.
+ *
+ * Расширить видимость эта функция не может: роли вне REVIEW_VISIBLE_ROLES не
+ * получат поля, даже если галочка им выдана. Сегодня расхождения нет —
+ * выдать review можно только manager и monitor, и оба в списке, — но правило
+ * «только сужаем» оставлено намеренно: DTO не место для расширения доступа.
+ *
+ * При выключенном enforcement и в окружениях без плагина прав (часть юнит-тестов
+ * поднимает Fastify без него) поведение прежнее — как до появления матрицы.
+ */
+export async function canSeeReviewInMatrix(
+  app: PermissionsAware,
+  role: string | null | undefined,
+  page: PageId,
+): Promise<boolean> {
+  if (!canSeeReview(role)) return false;
+  const permissions = app.permissions;
+  if (!permissions?.enforced) return true;
+  return isAllowed(await permissions.get(), role as never, page, 'review');
 }

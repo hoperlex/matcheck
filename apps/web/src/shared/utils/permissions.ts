@@ -34,7 +34,13 @@ export type PermissionSet = {
   pages: Record<PageId, PagePermissions>;
 };
 
-const ALL_ALLOWED: PagePermissions = { view: true, create: true, edit: true, delete: true };
+const ALL_ALLOWED: PagePermissions = {
+  view: true,
+  create: true,
+  edit: true,
+  delete: true,
+  review: true,
+};
 
 /**
  * Копия, а не ссылка на DEFAULT_MATRIX: возвращённый набор попадает в стор и

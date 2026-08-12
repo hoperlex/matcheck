@@ -3,17 +3,19 @@ import { Button, Input, Modal, Space, Tag, Tooltip, Typography, message } from '
 import { CheckCircleOutlined, WarningOutlined } from '@ant-design/icons';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../services/api';
-import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../hooks/usePermissions';
 import { formatDateRu } from '../utils/formatRu';
 
 /**
  * Отметка проверки качества (роль «Мониторинг»). Ортогональна операционному
- * статусу приёмки/отгрузки. Ставить/менять могут только admin/manager/monitor;
- * для прочих ролей review-поля вообще не приходят в DTO (null), а сам компонент
- * не рендерит управляющих элементов.
+ * статусу приёмки/отгрузки.
+ *
+ * Право спрашиваем у матрицы (действие `review` страницы Операций), а не у
+ * имени роли: администратор может снять отметку у роли во вкладке «Роли», и
+ * кнопка обязана исчезнуть вместе с правом. Сервер сужает и сами review-поля в
+ * DTO тем же условием (lib/review.ts), так что рассогласования «поля видно,
+ * кнопки нет» не возникает.
  */
-
-const MANAGEMENT_ROLES = new Set(['admin', 'manager', 'monitor']);
 
 // Статусы, при которых доступна проверка (оформленные записи). Симметрично
 // гейту зрелости на бэке (routes/deliveries.ts, shipments.ts).
@@ -62,8 +64,11 @@ export function ReviewControls({
   updatedAt: string;
   pendingDeletion: boolean;
 }) {
-  const role = useAuthStore((s) => s.user?.role);
-  const canManage = role != null && MANAGEMENT_ROLES.has(role);
+  const { can } = usePermissions();
+  const canManage = can(
+    entityType === 'delivery' ? 'operations.deliveries' : 'operations.shipments',
+    'review',
+  );
   const qc = useQueryClient();
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [note, setNote] = useState('');

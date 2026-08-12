@@ -52,6 +52,7 @@ export async function readOverrides(
       canCreate: rolePagePermissions.canCreate,
       canEdit: rolePagePermissions.canEdit,
       canDelete: rolePagePermissions.canDelete,
+      canReview: rolePagePermissions.canReview,
     })
     .from(rolePagePermissions);
 
@@ -67,6 +68,7 @@ export async function readOverrides(
       create: r.canCreate,
       edit: r.canEdit,
       delete: r.canDelete,
+      review: r.canReview,
     });
   }
   return map;

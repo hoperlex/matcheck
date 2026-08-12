@@ -241,11 +241,43 @@ describe('резолвер держит запреты сам, без помощ
   });
 
   it('запрет write-расширения НЕ отнимает базовое право', async () => {
-    // У monitor operations.*:edit базовый (отметка проверки). Правило про
+    // У monitor operations.*:review базовый (отметка проверки). Правило про
     // write-расширение касается только того, чего в дефолте не было.
     app = await buildApp({ role: 'monitor' });
     const body = await perms(app);
-    expect(body.pages['operations.deliveries']).toMatchObject({ view: true, edit: true });
+    expect(body.pages['operations.deliveries']).toMatchObject({ view: true, review: true });
+  });
+
+  it('отметка проверки отделена от правки: у monitor есть review, но не edit', async () => {
+    // Ради этого действие и разводилось. Пока отметка сидела внутри edit,
+    // право монитора было БАЗОВЫМ — то есть никогда не считалось расширением и
+    // не обходило authorize('admin','manager') на flags/link-source/share-link.
+    // Галочка «Редактировать» стояла, означала одну лишь отметку, а выдать
+    // настоящую правку было нечем: включать уже нечего.
+    app = await buildApp({ role: 'monitor' });
+    const body = await perms(app);
+    expect(body.pages['operations.deliveries']).toMatchObject({ review: true, edit: false });
+    expect(body.pages['operations.shipments']).toMatchObject({ review: true, edit: false });
+  });
+
+  it('edit монитору — уже расширение, но пока запрещённое, и review от этого не страдает', async () => {
+    // Разведя действия, мы вернули edit статус расширения: строка в БД теперь
+    // ОТЛИЧАЕТСЯ от дефолта, и резолвер обязан судить её по правилам выдачи
+    // записи. Сегодня они пускают только manager (EXPANDABLE_WRITE_ROLES) —
+    // отсюда edit: false. До разделения этот сценарий был невыразим вовсе:
+    // edit у монитора совпадал с дефолтом и расширением не считался никогда.
+    //
+    // Когда появится write-scope, ожидание здесь станет edit: true — и это
+    // будет ровно та строчка, ради которой затевалась вся работа.
+    app = await buildApp({
+      role: 'monitor',
+      overrides: [row('monitor', 'operations.deliveries', { canView: true, canEdit: true })],
+    });
+    const body = await perms(app);
+    expect(body.pages['operations.deliveries']).toMatchObject({ view: true, edit: false });
+    // Отметка проверки остаётся при своём: запрет расширения касается только
+    // того, чего в дефолте не было.
+    expect(body.pages['operations.deliveries'].review).toBe(true);
   });
 });
 

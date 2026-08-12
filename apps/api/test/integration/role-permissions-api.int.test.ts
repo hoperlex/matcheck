@@ -51,8 +51,14 @@ suite('матрица прав: админское API (реальный Postgre
 
   const rowOf = async (role: string, pageId: string) => {
     const [row] = await sql<
-      { can_view: boolean; can_create: boolean; can_edit: boolean; can_delete: boolean }[]
-    >`SELECT can_view, can_create, can_edit, can_delete
+      {
+        can_view: boolean;
+        can_create: boolean;
+        can_edit: boolean;
+        can_delete: boolean;
+        can_review: boolean;
+      }[]
+    >`SELECT can_view, can_create, can_edit, can_delete, can_review
         FROM role_page_permissions WHERE role = ${role} AND page_id = ${pageId}`;
     return row;
   };
@@ -291,20 +297,33 @@ suite('матрица прав: админское API (реальный Postgre
   });
 
   it('снятое базовое право можно вернуть, даже если роли запрещено расширение', async () => {
-    // У monitor operations.*:edit — базовое (отметка проверки). Запрет
+    // У monitor operations.*:review — базовое (отметка проверки). Запрет
     // write-расширения касается только того, чего в дефолте не было, иначе
-    // снятый review-доступ оказался бы невозвратным.
+    // снятая отметка оказалась бы невозвратной.
     const off = await patch([
-      { role: 'monitor', page: 'operations.deliveries', action: 'edit', allowed: false },
+      { role: 'monitor', page: 'operations.deliveries', action: 'review', allowed: false },
     ]);
     expect(off.statusCode).toBe(200);
-    expect(await rowOf('monitor', 'operations.deliveries')).toMatchObject({ can_edit: false });
+    expect(await rowOf('monitor', 'operations.deliveries')).toMatchObject({ can_review: false });
 
     const back = await patch([
-      { role: 'monitor', page: 'operations.deliveries', action: 'edit', allowed: true },
+      { role: 'monitor', page: 'operations.deliveries', action: 'review', allowed: true },
     ]);
     expect(back.statusCode).toBe(200);
-    expect(await rowOf('monitor', 'operations.deliveries')).toMatchObject({ can_edit: true });
+    expect(await rowOf('monitor', 'operations.deliveries')).toMatchObject({ can_review: true });
+  });
+
+  it('edit монитору — отдельное от отметки право, и выдать его пока нельзя', async () => {
+    // Ради этого действие и разводилось: раньше edit у монитора совпадал с
+    // дефолтом, «включать» было нечего, и настоящая правка (flags, link-source,
+    // share-link — они manager-only) оставалась недостижимой. Теперь запрос
+    // корректно квалифицируется как расширение записи и отклоняется по общему
+    // правилу — до появления write-scope.
+    const res = await patch([
+      { role: 'monitor', page: 'operations.deliveries', action: 'edit', allowed: true },
+    ]);
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: 'write_not_expandable' });
   });
 
   it('роль admin в матрицу не принимается', async () => {

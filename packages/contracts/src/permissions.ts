@@ -17,18 +17,36 @@ import { UserRoleSchema, type UserRole } from './auth.js';
  * способен снять себе доступ к вкладке «Роли» и остаться без пути назад).
  */
 
-export const PageActionSchema = z.enum(['view', 'create', 'edit', 'delete']);
+export const PageActionSchema = z.enum(['view', 'create', 'edit', 'delete', 'review']);
 export type PageAction = z.infer<typeof PageActionSchema>;
 
-/** Порядок колонок в UI и в любых перечислениях. */
-export const PAGE_ACTIONS = ['view', 'create', 'edit', 'delete'] as const;
+/**
+ * Порядок колонок в UI и в любых перечислениях.
+ *
+ * `review` («Проверять») добавлен ПОСЛЕДНИМ намеренно: четыре привычные колонки
+ * не должны съезжать. Само действие применимо только к Операциям — на прочих
+ * страницах ячейка не рисуется (см. isActionApplicable).
+ */
+export const PAGE_ACTIONS = ['view', 'create', 'edit', 'delete', 'review'] as const;
 
 export const PAGE_ACTION_LABELS: Record<PageAction, string> = {
   view: 'Просмотр',
   create: 'Создавать',
   edit: 'Редактировать',
   delete: 'Удалять',
+  review: 'Проверять',
 };
+
+/**
+ * Действия, без которых мобильный клиент КПП перестаёт работать. Из НИХ, а не
+ * из всего PAGE_ACTIONS, строится LOCKED_CELLS.
+ *
+ * Разделение существенное: любое новое действие, добавленное в PAGE_ACTIONS,
+ * иначе автоматически становилось бы у инспектора включённым и неснимаемым —
+ * даже если планшет о нём не подозревает. Так и вышло бы с `review`: отметка
+ * проверки качества мобильному приложению не нужна вовсе.
+ */
+export const MOBILE_REQUIRED_ACTIONS: PageAction[] = ['view', 'create', 'edit', 'delete'];
 
 /**
  * Роли, участвующие в матрице. admin исключён намеренно (см. заголовок).
@@ -105,6 +123,7 @@ export const PagePermissionsSchema = z.object({
   create: z.boolean(),
   edit: z.boolean(),
   delete: z.boolean(),
+  review: z.boolean(),
 });
 
 export type PageCatalogEntry = {
@@ -125,6 +144,9 @@ export type PageCatalogEntry = {
 
 const CRUD: PageAction[] = ['view', 'create', 'edit', 'delete'];
 
+/** Операции — единственные страницы, где есть отметка проверки качества. */
+const CRUD_WITH_REVIEW: PageAction[] = [...CRUD, 'review'];
+
 /**
  * Справочники заказчика ведут себя одинаково: смотреть и править может
  * manager, удалять — только admin (canDelete = role === 'admin' на всех
@@ -142,15 +164,25 @@ const referenceBase: PageCatalogEntry['base'] = {
  * различаются query-параметром ?type=, поэтому в матрице это две отдельные
  * страницы, а не одна.
  *
- * monitor имеет edit — это его отметка проверки качества
- * (PATCH /deliveries|shipments/:id/review), единственная запись, которую
- * оставляет ему глобальный read-only-хук в server.ts.
+ * `review` — отметка проверки качества (PATCH /deliveries|shipments/:id/review),
+ * единственная запись, которую оставляет monitor'у глобальный read-only-хук в
+ * server.ts. Это ОТДЕЛЬНОЕ действие, а не часть edit, и вот почему.
+ *
+ * Одной ячейкой edit помечены четыре маршрута с разными allow-list: review
+ * открыт admin/manager/monitor, а flags, supplier-from-directory, link-source и
+ * share-link — только admin/manager. Пока отметка сидела внутри edit, право
+ * монитора было БАЗОВЫМ, то есть никогда не считалось расширением и не обходило
+ * authorize. Итог: галочка «Редактировать» у монитора включена, означает одну
+ * лишь отметку, а выдать ему настоящую правку невозможно — включать нечего.
+ * Разведя действия, мы возвращаем edit его прямой смысл: у монитора он снят по
+ * умолчанию и выдаётся администратором как обычное расширение.
  */
 const operationsBase: PageCatalogEntry['base'] = {
   view: ['manager', 'inspector_kpp', 'contractor', 'monitor'],
   create: ['manager', 'inspector_kpp'],
-  edit: ['manager', 'inspector_kpp', 'monitor'],
+  edit: ['manager', 'inspector_kpp'],
   delete: ['manager', 'inspector_kpp'],
+  review: ['manager', 'monitor'],
 };
 
 /** Вкладки «Администрирования» — целиком прерогатива admin. */
@@ -161,14 +193,14 @@ export const PAGE_CATALOG: PageCatalogEntry[] = [
     id: 'operations.deliveries',
     group: 'operations',
     label: 'Приёмки',
-    actions: CRUD,
+    actions: CRUD_WITH_REVIEW,
     base: operationsBase,
   },
   {
     id: 'operations.shipments',
     group: 'operations',
     label: 'Отгрузки',
-    actions: CRUD,
+    actions: CRUD_WITH_REVIEW,
     base: operationsBase,
   },
   {
@@ -356,12 +388,14 @@ function buildDefaultMatrix(): PermissionMatrix {
   for (const role of MANAGED_ROLES) {
     const byPage = {} as Record<PageId, PagePermissions>;
     for (const page of PAGE_CATALOG) {
-      byPage[page.id] = {
-        view: page.base.view?.includes(role) ?? false,
-        create: page.base.create?.includes(role) ?? false,
-        edit: page.base.edit?.includes(role) ?? false,
-        delete: page.base.delete?.includes(role) ?? false,
-      };
+      // Цикл по PAGE_ACTIONS, а не перечисление полей: добавленное действие
+      // иначе молча оставалось бы false у всех ролей, и дефолт разошёлся бы с
+      // каталогом.
+      const perms = {} as PagePermissions;
+      for (const action of PAGE_ACTIONS) {
+        perms[action] = page.base[action]?.includes(role) ?? false;
+      }
+      byPage[page.id] = perms;
     }
     out[role] = byPage;
   }
@@ -388,11 +422,16 @@ export function defaultFor(role: ManagedRole, page: PageId): PagePermissions {
  * закрыли любое из этих действий, просто перестанет работать, и инспектор не
  * поймёт почему.
  *
- * Заблокированы все 4 действия обеих страниц Операций:
+ * Заблокированы 4 действия обеих страниц Операций:
  *   view   — без него мертвы GET /sync и GET /events;
  *   create — не создать приёмку и не загрузить фото (presign/confirm);
  *   edit   — мобилка правит существующие записи тем же POST-upsert;
  *   delete — мобилка помечает на удаление (POST /:id/mark-deletion).
+ *
+ * Источник списка — MOBILE_REQUIRED_ACTIONS, а НЕ PAGE_ACTIONS: замок обязан
+ * покрывать ровно то, чем пользуется планшет. Иначе каждое новое действие
+ * (первым таким стал `review`) автоматически становилось бы у инспектора
+ * включённым и неснимаемым без единой строки обоснования.
  *
  * TODO: снять замок, когда мобильный клиент научится показывать 403
  * пользователю (тогда строку «Инспектор КПП × Операции» можно будет
@@ -400,7 +439,7 @@ export function defaultFor(role: ManagedRole, page: PageId): PagePermissions {
  */
 export const LOCKED_CELLS: ReadonlySet<string> = new Set(
   (['operations.deliveries', 'operations.shipments'] as const).flatMap((page) =>
-    PAGE_ACTIONS.map((action) => `inspector_kpp:${page}:${action}`),
+    MOBILE_REQUIRED_ACTIONS.map((action) => `inspector_kpp:${page}:${action}`),
   ),
 );
 
@@ -445,6 +484,11 @@ export function isNeverGrantable(page: PageId, action: PageAction): boolean {
  *
  * Снимается в фазе 2, когда появятся write-scope инварианты. «Просмотр»
  * расширяется всем: чтение везде уже ограничено скоупом роли.
+ *
+ * `review` идёт здесь же, вместе с записью, а не вместе с просмотром: хендлер
+ * PATCH /deliveries|shipments/:id/review выбирает запись по одному id, без
+ * сверки siteId. Инспектор или подрядчик с выданной отметкой проверял бы чужую
+ * операцию по известному UUID.
  */
 export const EXPANDABLE_WRITE_ROLES: ManagedRole[] = ['manager'];
 

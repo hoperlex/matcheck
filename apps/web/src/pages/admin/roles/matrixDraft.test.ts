@@ -73,10 +73,26 @@ describe('состояние ячейки', () => {
   });
 
   it('базовое право остаётся редактируемым даже там, где расширение запрещено', () => {
-    // У monitor operations.*:edit базовый (отметка проверки). Если бы правило
+    // У monitor operations.*:review базовый (отметка проверки). Если бы правило
     // про write-расширение делало ячейку disabled, снятый доступ нельзя было
     // бы вернуть.
-    expect(cellState(byId('operations.deliveries'), 'monitor', 'edit', locked)).toBe('editable');
+    expect(cellState(byId('operations.deliveries'), 'monitor', 'review', locked)).toBe('editable');
+  });
+
+  it('edit монитору показан как запрещённый к выдаче, а не как включённый', () => {
+    // До разделения действий эта ячейка была «editable» и стояла отмеченной,
+    // хотя означала лишь отметку проверки. Теперь интерфейс честно говорит:
+    // права записи у роли нет и выдать его пока нельзя.
+    expect(cellState(byId('operations.deliveries'), 'monitor', 'edit', locked)).toBe(
+      'write-locked',
+    );
+  });
+
+  it('колонка «Проверять» есть только у Операций', () => {
+    // Иначе она добавила бы пустой столбец во все разделы матрицы.
+    expect(byId('operations.deliveries').actions).toContain('review');
+    expect(byId('references.sites').actions).not.toContain('review');
+    expect(byId('admin.users').actions).not.toContain('review');
   });
 
   it('обычная ячейка', () => {

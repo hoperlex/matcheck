@@ -86,7 +86,7 @@ describe('homePath', () => {
     // первый доступный раздел, а доступных нет.
     const perms = defaultPermissions('manager');
     for (const page of Object.keys(perms.pages) as (keyof typeof perms.pages)[]) {
-      perms.pages[page] = { view: false, create: false, edit: false, delete: false };
+      perms.pages[page] = { view: false, create: false, edit: false, delete: false, review: false };
     }
     expect(homePath(perms, 'manager')).toBeNull();
   });
@@ -95,7 +95,7 @@ describe('homePath', () => {
     // Мутация возвращённого набора не должна утекать в DEFAULT_MATRIX: иначе
     // одна страница испортила бы права всему приложению.
     const perms = defaultPermissions('manager');
-    perms.pages['references.sites'] = { view: false, create: false, edit: false, delete: false };
+    perms.pages['references.sites'] = { view: false, create: false, edit: false, delete: false, review: false };
     expect(defaultPermissions('manager').pages['references.sites'].view).toBe(true);
   });
 });

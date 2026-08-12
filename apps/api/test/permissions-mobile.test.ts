@@ -15,6 +15,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   LOCKED_CELLS,
+  MOBILE_REQUIRED_ACTIONS,
   PAGE_ACTIONS,
   type PageAction,
   type PageId,
@@ -119,11 +120,29 @@ describe('мобильный периметр не зависит от матр�
     },
   );
 
-  it('заблокировано ровно 8 ячеек: обе страницы Операций × 4 действия', () => {
+  it('заблокировано ровно 8 ячеек: обе страницы Операций × 4 мобильных действия', () => {
     expect(LOCKED_CELLS.size).toBe(8);
     for (const page of ['operations.deliveries', 'operations.shipments'] as PageId[]) {
-      for (const action of PAGE_ACTIONS) {
+      for (const action of MOBILE_REQUIRED_ACTIONS) {
         expect(LOCKED_CELLS.has(`inspector_kpp:${page}:${action}`)).toBe(true);
+      }
+    }
+  });
+
+  it('замок покрывает ровно то, чем пользуется планшет, и ни действием больше', () => {
+    // Инвариант против тихого разрастания: LOCKED_CELLS строится из
+    // MOBILE_REQUIRED_ACTIONS, а не из всего PAGE_ACTIONS. Иначе каждое новое
+    // действие автоматически становилось бы у инспектора включённым и
+    // неснимаемым — первым таким был бы `review`, которого в мобильном клиенте
+    // нет вовсе.
+    const notMobile = PAGE_ACTIONS.filter((a) => !MOBILE_REQUIRED_ACTIONS.includes(a));
+    expect(notMobile).not.toHaveLength(0);
+    for (const page of ['operations.deliveries', 'operations.shipments'] as PageId[]) {
+      for (const action of notMobile) {
+        expect(
+          LOCKED_CELLS.has(`inspector_kpp:${page}:${action}`),
+          `${action} залочен у инспектора, хотя планшет им не пользуется`,
+        ).toBe(false);
       }
     }
   });

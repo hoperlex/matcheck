@@ -43,7 +43,7 @@ import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isShipmentDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
-import { canSeeReview } from '../lib/review.js';
+import { canSeeReviewInMatrix } from '../lib/review.js';
 import { assertPermission } from '../lib/permissions/assert.js';
 import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
 import {
@@ -325,7 +325,7 @@ function assembleShipmentDto(
 // не изменилось — та же форма через общий assembleShipmentDto.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function buildShipmentDto(app: any, id: string, viewerRole?: string | null) {
-  const showReview = canSeeReview(viewerRole);
+  const showReview = await canSeeReviewInMatrix(app, viewerRole, 'operations.shipments');
   const rows = await selectShipmentHeaders(app).where(eq(shipments.id, id)).limit(1);
   const r = rows[0] as ShipmentHeaderRow | undefined;
   if (!r) return null;
@@ -352,7 +352,7 @@ async function buildShipmentDto(app: any, id: string, viewerRole?: string | null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: string | null) {
   if (ids.length === 0) return [];
-  const showReview = canSeeReview(viewerRole);
+  const showReview = await canSeeReviewInMatrix(app, viewerRole, 'operations.shipments');
   const headerRows = (await selectShipmentHeaders(app).where(
     inArray(shipments.id, ids),
   )) as ShipmentHeaderRow[];

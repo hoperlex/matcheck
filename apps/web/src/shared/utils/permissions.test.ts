@@ -34,6 +34,7 @@ describe('права: фолбэк на дефолты', () => {
         create: true,
         edit: true,
         delete: true,
+        review: true,
       });
     }
   });
