@@ -323,6 +323,17 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
         }
         return reply.code(401).send({ error: 'invalid_refresh' });
       }
+      // Повтор потерянного ответа — не ошибка и не ротация: ни один токен не
+      // выпущен, клиент получает ту же замену. В логе видно отдельно от штатных
+      // refresh, чтобы всплеск повторов читался как «клиенты не получают ответы»
+      // (обычно — тормоза API), а не терялся в общем потоке.
+      if (result.replayed) {
+        req.log.info(
+          { sessionId: result.sessionId, mobile },
+          'refresh replay: повтор в grace-окне, сессия сохранена',
+        );
+      }
+
       const [user] = await app.db
         .select({ role: users.role })
         .from(users)

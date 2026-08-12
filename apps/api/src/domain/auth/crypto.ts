@@ -1,4 +1,10 @@
-import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  randomBytes,
+  createHash,
+  createHmac,
+} from 'node:crypto';
 import { loadEnv } from '../../lib/env.js';
 
 export type EncryptedEnvelope = {
@@ -72,4 +78,85 @@ export function sha256Hex(input: string): string {
 
 export function buildAad(table: string, rowId: string): string {
   return `kind:${table}:id:${rowId}`;
+}
+
+// ─── Refresh: детерминированный вывод токена-замены ───────────────────────
+//
+// Зачем. При ротации refresh сервер отзывает старый токен и выдаёт новый. Если
+// ответ до клиента не дошёл (оборванный по таймауту fetch, потерянный
+// Set-Cookie, второй параллельный запрос), клиент повторяет запрос со СТАРЫМ
+// токеном — и упирается в reuse-detection, которая трактует это как кражу и
+// убивает всю сессию. Чтобы ответить на такой повтор идемпотентно, сервер
+// должен уметь выдать ТОТ ЖЕ токен-замену повторно. Взять его из БД нельзя:
+// там лежит только sha256-хеш (refresh_tokens.token_hash). Значит замену надо
+// уметь вывести заново.
+//
+// Из чего выводим. Ключ вывода — ТОЛЬКО серверный: подключ из keyring
+// APP_FIELD_ENCRYPTION_KEYS. Материал сообщения — предъявленный родительский
+// токен и id будущей строки-замены.
+//
+// Почему ключ обязателен и почему replacementId в модель секретности НЕ входит:
+// это первичный ключ строки, он попадает в дампы, диагностику и логи. Если бы
+// стойкость держалась на нём, вор, укравший родительский токен и подсмотревший
+// UUID, вычислил бы действующего потомка и обошёл reuse-detection вовсе. С
+// серверным ключом кража родительского токена не даёт ничего: ни внутри
+// grace-окна, ни после него. Дамп БД без ключа — тоже.
+//
+// Стойкость наследуется от keyring: на production дефолтный (нулевой) keyring
+// недопустим — он публично известен, и вывод замены перестал бы быть секретом.
+// То же ограничение уже действует для field-encryption.
+const REPLACEMENT_KEY_INFO = 'matcheck:refresh-replacement-key:v1';
+const REPLACEMENT_TOKEN_DOMAIN = 'matcheck:refresh-replacement:v1';
+
+// Подключ выводится отдельно (domain separation), а не берётся из keyring
+// напрямую: один и тот же байтовый ключ не должен работать сразу и как
+// AES-256-GCM-ключ шифрования полей, и как HMAC-ключ выпуска токенов.
+const cachedReplacementKeys = new Map<string, Buffer>();
+
+function replacementKey(version: string): Buffer {
+  const memo = cachedReplacementKeys.get(version);
+  if (memo) return memo;
+  const { keys } = loadKeys();
+  const key = keys.get(version);
+  if (!key) throw new Error(`Unknown encryption key version ${version}`);
+  const derived = createHmac('sha256', key).update(REPLACEMENT_KEY_INFO).digest();
+  cachedReplacementKeys.set(version, derived);
+  return derived;
+}
+
+/**
+ * Версии keyring: активная первой. При replay кандидат-токен проверяется по
+ * каждой (их единицы, HMAC дешёв) — так ротация ключа не обрывает живые
+ * сессии, выпущенные на прежней версии, и не требует колонки в refresh_tokens.
+ *
+ * ВАЖНО при ротации ключа: старую версию нельзя удалять из
+ * APP_FIELD_ENCRYPTION_KEYS, пока живы цепочки, выпущенные на ней. Замену из
+ * такой цепочки станет нечем вывести, повтор перестанет обслуживаться, и
+ * потерянный ответ снова обернётся разлогином. Безопасный срок хранения старой
+ * версии — не меньше REFRESH_TOKEN_TTL_DAYS.
+ */
+export function replacementKeyVersions(): string[] {
+  const { keys, active } = loadKeys();
+  return [active, ...[...keys.keys()].filter((v) => v !== active)];
+}
+
+/**
+ * Токен-замена для ротации: HMAC(подключ; домен ‖ родительский токен ‖ id замены).
+ * Вызывается дважды за жизнь токена — при выпуске и при идемпотентном повторе,
+ * оба раза даёт один и тот же результат. Разделитель \0 между частями делает
+ * конкатенацию однозначной (ни base64url-токен, ни UUID нулевого байта не содержат).
+ */
+export function deriveReplacementToken(
+  parentToken: string,
+  replacementId: string,
+  keyVersion?: string,
+): string {
+  const version = keyVersion ?? loadKeys().active;
+  return createHmac('sha256', replacementKey(version))
+    .update(REPLACEMENT_TOKEN_DOMAIN)
+    .update('\0')
+    .update(parentToken)
+    .update('\0')
+    .update(replacementId)
+    .digest('base64url');
 }

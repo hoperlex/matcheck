@@ -62,6 +62,24 @@ const envSchema = z.object({
   ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(14),
   REFRESH_TOKEN_ABSOLUTE_MAX_DAYS: z.coerce.number().int().positive().default(90),
+
+  // Окно, внутри которого повторное предъявление уже отозванного refresh-токена
+  // считается потерянным ответом, а не кражей: сервер повторно выдаёт ту же
+  // замену вместо того, чтобы убить сессию (см. domain/auth/refresh.ts).
+  //
+  // 60с покрывает наблюдавшийся на проде разброс между успешной ротацией и
+  // повтором (от долей секунды у параллельных запросов до ~60с у клиента,
+  // оборвавшего fetch по 10-секундному таймауту). 0 — аварийное отключение
+  // replay без релиза; потолок 300 — чтобы окно нельзя было раздуть до суток.
+  //
+  // preprocess: пустая строка (REFRESH_REUSE_GRACE_SECONDS= при копировании
+  // env-примера) иначе прошла бы через z.coerce.number() как 0 и молча
+  // выключила бы защиту от ложных разлогинов — ровно наоборот к умолчанию.
+  REFRESH_REUSE_GRACE_SECONDS: z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    z.coerce.number().int().min(0).max(300).default(60),
+  ),
+
   COOKIE_DOMAIN: z.string().optional(),
   COOKIE_SECURE: z.coerce.boolean().default(false),
 

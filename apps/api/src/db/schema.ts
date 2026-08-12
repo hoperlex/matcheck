@@ -186,7 +186,16 @@ export const refreshTokens = pgTable(
     ip: varchar('ip', { length: 64 }),
     userAgent: text('user_agent'),
   },
-  (t) => [uniqueIndex('refresh_token_hash_unique').on(t.tokenHash)],
+  (t) => [
+    uniqueIndex('refresh_token_hash_unique').on(t.tokenHash),
+    // revokeBySessionId гасит все живые токены сессии по session_id, а таблица
+    // растёт на каждую ротацию (на проде — сотни тысяч строк / десятки МБ), и
+    // без индекса каждый logout и каждая инвалидация сканировали её целиком.
+    // Частичный: отозванные строки в этот запрос не попадают никогда.
+    index('refresh_tokens_session_active_idx')
+      .on(t.sessionId)
+      .where(sql`${t.revokedAt} is null`),
+  ],
 );
 
 // ─── Сброс пароля: заявка и ссылка — РАЗНЫЕ сущности ──────────────────────

@@ -645,6 +645,13 @@
       "when": 1781800018000,
       "tag": "0092_role_permissions",
       "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1781800019000,
+      "tag": "0093_refresh_session_idx",
+      "breakpoints": true
     }
   ]
 }

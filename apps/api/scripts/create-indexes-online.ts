@@ -26,7 +26,8 @@ interface IndexSpec {
   columns: string;
 }
 
-// Зеркало 0071_perf_indexes.sql. При правке — синхронизировать оба файла.
+// Зеркало 0071_perf_indexes.sql и 0093_refresh_session_idx.sql.
+// При правке — синхронизировать соответствующий файл миграции.
 const INDEXES: IndexSpec[] = [
   { name: 'delivery_items_delivery_line_idx', table: 'delivery_items', columns: '("delivery_id", "line_no")' },
   { name: 'shipment_items_shipment_line_idx', table: 'shipment_items', columns: '("shipment_id", "line_no")' },
@@ -49,6 +50,15 @@ const INDEXES: IndexSpec[] = [
     name: 'source_documents_site_direction_parsed_idx',
     table: 'source_documents',
     columns: '("site_id", "direction", "parsed_at" DESC, "id" DESC)',
+  },
+  // 0093: живые токены сессии. Частичный — отозванные строки (почти весь объём
+  // таблицы) в индекс не попадают. Строить CONCURRENTLY здесь особенно важно:
+  // refresh_tokens в горячем пути логина, обычный CREATE INDEX остановил бы
+  // выдачу токенов на время построения.
+  {
+    name: 'refresh_tokens_session_active_idx',
+    table: 'refresh_tokens',
+    columns: '("session_id") WHERE "revoked_at" IS NULL',
   },
 ];
 
