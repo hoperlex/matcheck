@@ -19,6 +19,18 @@ export type AuthUser = {
   sessionId: string;
 };
 
+/**
+ * Метка со списком ролей на функции-страже, которую возвращает app.authorize.
+ *
+ * Symbol, а не обычное поле: страж — обычный preHandler, и случайное совпадение
+ * имён с чужим свойством дало бы неверный инвентарь прав.
+ */
+export const ALLOWED_ROLES = Symbol.for('matcheck.authorize.roles');
+
+export type AuthorizeGuard = ((req: FastifyRequest, reply: FastifyReply) => Promise<void>) & {
+  [ALLOWED_ROLES]?: AuthUser['role'][];
+};
+
 declare module 'fastify' {
   interface FastifyRequest {
     user?: AuthUser;
@@ -159,7 +171,7 @@ export default fp(async (app) => {
   });
 
   app.decorate('authorize', (...roles: AuthUser['role'][]) => {
-    return async (req: FastifyRequest, reply: FastifyReply) => {
+    const guard = async (req: FastifyRequest, reply: FastifyReply) => {
       if (!req.user) {
         await logUnauthorized(req, 401, 'missing_user_after_auth');
         reply.code(401).send({ error: 'unauthorized' });
@@ -177,6 +189,12 @@ export default fp(async (app) => {
         return;
       }
     };
+    // Список ролей вешаем на саму функцию-страж: по нему onRoute-хук плагина
+    // прав строит рантайм-инвентарь «маршрут → allow-list». Альтернатива —
+    // продублировать роли в реестре прав — разъезжалась бы с роутами молча:
+    // достаточно поменять authorize у одного роута и забыть про вторую копию.
+    (guard as AuthorizeGuard)[ALLOWED_ROLES] = roles;
+    return guard;
   });
 
   app.addHook('onRequest', async (req, reply) => {

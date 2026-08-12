@@ -6,6 +6,7 @@ import {
 } from '@matcheck/contracts';
 import { asZod } from '../lib/fastify.js';
 import { effectiveFor } from '../lib/permissions/matrix.js';
+import { capabilitiesFor } from '../lib/permissions/capabilities.js';
 
 /**
  * Эффективные права текущего пользователя.
@@ -49,6 +50,10 @@ export async function meRoutes(rawApp: FastifyInstance): Promise<void> {
         role: user.role,
         enforced: app.permissions.enforced,
         pages: effectiveFor(overrides, user.role) as Record<PageId, PagePermissions>,
+        // Возможности считаются от тех же overrides, что и страницы: при
+        // выключенном enforcement — от дефолтов, то есть повторяют сегодняшний
+        // доступ. Разъехаться эти два поля не могут.
+        capabilities: capabilitiesFor(overrides, user.role, app.permissions.routeRoles),
       };
     },
   );

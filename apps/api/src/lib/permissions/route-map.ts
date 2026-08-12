@@ -19,7 +19,29 @@ import type { ManagedRole, PageAction, PageId } from '@matcheck/contracts';
  * (`/api/v1/public/../sites`), шаблон выдаёт роутер уже после матчинга.
  */
 
-export type RouteRule =
+/**
+ * Метаданные, общие для всех классов правил.
+ *
+ * `capability` — стабильное имя возможности, которое сервер отдаёт интерфейсу в
+ * /me/permissions. Нужно там, где ячейка матрицы шире одного маршрута: у
+ * `operations.*:edit` четыре маршрута с разными allow-list, и кнопка «Флаги»
+ * обязана исчезать не по ячейке, а по фактическому доступу — иначе она
+ * останется на экране и вернёт 403.
+ *
+ * `expandableBy` — КОМУ позволено обойти allow-list маршрута по праву, выданному
+ * матрицей сверх дефолта. Решение пер-ролевое, и общий флаг «нельзя расширять»
+ * здесь не работает: `flags` закрыт для inspector_kpp (у которого базовый edit
+ * есть), но открывать его монитору мы как раз хотим — ради этого затевалось
+ * разделение прав. Отсутствие поля = прежнее поведение, расширение допускается
+ * всем, кто прошёл проверки матрицы.
+ */
+export type RuleMeta = {
+  capability?: string;
+  expandableBy?: ManagedRole[];
+};
+
+export type RouteRule = RuleMeta &
+  (
   /** Право известно до чтения тела — проверяется глобальным onRequest-хуком. */
   | { kind: 'static'; page: PageId; action: PageAction }
   /** Страница зависит от тела запроса — проверяется глобальным preHandler. */
@@ -46,10 +68,15 @@ export type RouteRule =
    * monitor немедленно увидел бы пункт «История поступлений», а manager —
    * раздел «Администрирование». Интерфейс изменился бы в день выката.
    */
-  | { kind: 'legacy'; page: PageId; action: PageAction; roles: ManagedRole[]; note: string };
+  | { kind: 'legacy'; page: PageId; action: PageAction; roles: ManagedRole[]; note: string });
 
-const st = (page: PageId, action: PageAction): RouteRule => ({ kind: 'static', page, action });
-const always = (note: string): RouteRule => ({ kind: 'always', note });
+const st = (page: PageId, action: PageAction, meta?: RuleMeta): RouteRule => ({
+  kind: 'static',
+  page,
+  action,
+  ...meta,
+});
+const always = (note: string, meta?: RuleMeta): RouteRule => ({ kind: 'always', note, ...meta });
 const inHandler = (note: string): RouteRule => ({ kind: 'in-handler', note });
 const legacy = (
   page: PageId,
@@ -76,6 +103,8 @@ const MOBILE_CHANNEL =
   'привязка к одной странице некорректна. Скоуп по роли и siteId остаётся в хендлере.';
 const SHARE_LINKS =
   'Ссылка-шаринг общая для приёмок и отгрузок — правило «одна страница» неприменимо.';
+/** Переписка по share-ссылке: третья возможность share, открыта admin/manager. */
+const MSG: RuleMeta = { capability: 'operations.share.messages' };
 const GAP =
   'РАЗРЫВ «API щедрее UI»: роль имеет доступ по API, но страницы в вебе у неё нет. ' +
   'Перечисленные роли идут мимо матрицы — сужение отложено до отдельного согласования ' +
@@ -125,16 +154,73 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // allow-list (admin/manager), и совмещение делало право монитора базовым,
   // то есть неспособным быть расширенным до настоящей правки.
   ['PATCH /api/v1/deliveries/:id/review', st('operations.deliveries', 'review')],
-  ['PATCH /api/v1/deliveries/:id/flags', st('operations.deliveries', 'edit')],
-  ['PATCH /api/v1/deliveries/:id/supplier-from-directory', st('operations.deliveries', 'edit')],
-  ['POST /api/v1/deliveries/:id/link-source', st('operations.deliveries', 'edit')],
-  ['POST /api/v1/deliveries/:id/share-link', st('operations.deliveries', 'edit')],
+  // Три маршрута ниже открыты только admin/manager, хотя базовый edit есть и у
+  // inspector_kpp: для него это остаётся закрытым (его записи ограничены
+  // объектом, а сверки siteId на этих путях нет). Монитору же выданный edit
+  // обязан здесь работать — ровно ради этого разделяли права.
+  [
+    'PATCH /api/v1/deliveries/:id/flags',
+    st('operations.deliveries', 'edit', {
+      capability: 'operations.edit.flags',
+      expandableBy: ['monitor'],
+    }),
+  ],
+  [
+    'PATCH /api/v1/deliveries/:id/supplier-from-directory',
+    st('operations.deliveries', 'edit', {
+      capability: 'operations.edit.supplier_directory',
+      expandableBy: ['monitor'],
+    }),
+  ],
+  [
+    'POST /api/v1/deliveries/:id/link-source',
+    st('operations.deliveries', 'edit', {
+      capability: 'operations.edit.link_source',
+      expandableBy: ['monitor'],
+    }),
+  ],
+  // Ссылки-шаринги — не часть обычного редактирования: у создания, списка,
+  // отзыва и переписки РАЗНЫЕ allow-list (инспектор создаёт и видит, но не
+  // отзывает). Выдача edit их не открывает, интерфейс скрывает по capability.
+  [
+    'POST /api/v1/deliveries/:id/share-link',
+    st('operations.deliveries', 'edit', {
+      capability: 'operations.share.manage',
+      expandableBy: [],
+    }),
+  ],
   ['DELETE /api/v1/deliveries/:id', st('operations.deliveries', 'delete')],
   ['POST /api/v1/deliveries/:id/mark-deletion', st('operations.deliveries', 'delete')],
   ['POST /api/v1/deliveries/:id/unmark-deletion', st('operations.deliveries', 'delete')],
-  ['POST /api/v1/deliveries/bulk-mark-deletion', st('operations.deliveries', 'delete')],
-  ['POST /api/v1/deliveries/bulk-unmark-deletion', st('operations.deliveries', 'delete')],
-  ['POST /api/v1/deliveries/bulk-hard-delete', st('operations.deliveries', 'delete')],
+  // Массовая пометка — кнопка в истории приёмок, открыта admin/manager.
+  // Инспектору закрыта намеренно (с планшета он помечает записи по одной), а
+  // монитору с выданным «Удалять» открывается: у него нет ограничения по своим
+  // данным, он и так видит все объекты.
+  [
+    'POST /api/v1/deliveries/bulk-mark-deletion',
+    st('operations.deliveries', 'delete', {
+      capability: 'operations.delete.bulk_mark',
+      expandableBy: ['monitor'],
+    }),
+  ],
+  [
+    'POST /api/v1/deliveries/bulk-unmark-deletion',
+    st('operations.deliveries', 'delete', {
+      capability: 'operations.delete.bulk_mark',
+      expandableBy: ['monitor'],
+    }),
+  ],
+  // Удаление НАВСЕГДА — admin-only по существу операции. Ячейкой delete
+  // помечены и обычные пути (manager/inspector), поэтому выданное монитору
+  // «Удалять» не должно открывать ещё и это: иначе расширение дало бы ему
+  // больше, чем есть у менеджера.
+  [
+    'POST /api/v1/deliveries/bulk-hard-delete',
+    st('operations.deliveries', 'delete', {
+      capability: 'operations.delete.bulk_hard',
+      expandableBy: [],
+    }),
+  ],
 
   // ─────────────────────────── Операции: отгрузки ─────────────────────────
   ['GET /api/v1/shipments', st('operations.shipments', 'view')],
@@ -143,24 +229,73 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // /api/v1/source-documents/export.xlsx (см. OperationsPage.tsx).
   ['POST /api/v1/shipments', inHandler('Upsert — см. POST /api/v1/deliveries.')],
   ['PATCH /api/v1/shipments/:id/review', st('operations.shipments', 'review')],
-  ['PATCH /api/v1/shipments/:id/flags', st('operations.shipments', 'edit')],
-  ['PATCH /api/v1/shipments/:id/supplier-from-directory', st('operations.shipments', 'edit')],
-  ['POST /api/v1/shipments/:id/link-source', st('operations.shipments', 'edit')],
-  ['POST /api/v1/shipments/:id/share-link', st('operations.shipments', 'edit')],
+  // Зеркально приёмкам — см. комментарии там.
+  [
+    'PATCH /api/v1/shipments/:id/flags',
+    st('operations.shipments', 'edit', {
+      capability: 'operations.edit.flags',
+      expandableBy: ['monitor'],
+    }),
+  ],
+  [
+    'PATCH /api/v1/shipments/:id/supplier-from-directory',
+    st('operations.shipments', 'edit', {
+      capability: 'operations.edit.supplier_directory',
+      expandableBy: ['monitor'],
+    }),
+  ],
+  [
+    'POST /api/v1/shipments/:id/link-source',
+    st('operations.shipments', 'edit', {
+      capability: 'operations.edit.link_source',
+      expandableBy: ['monitor'],
+    }),
+  ],
+  [
+    'POST /api/v1/shipments/:id/share-link',
+    st('operations.shipments', 'edit', {
+      capability: 'operations.share.manage',
+      expandableBy: [],
+    }),
+  ],
   ['DELETE /api/v1/shipments/:id', st('operations.shipments', 'delete')],
   ['POST /api/v1/shipments/:id/mark-deletion', st('operations.shipments', 'delete')],
   ['POST /api/v1/shipments/:id/unmark-deletion', st('operations.shipments', 'delete')],
-  ['POST /api/v1/shipments/bulk-mark-deletion', st('operations.shipments', 'delete')],
-  ['POST /api/v1/shipments/bulk-unmark-deletion', st('operations.shipments', 'delete')],
-  ['POST /api/v1/shipments/bulk-hard-delete', st('operations.shipments', 'delete')],
+  [
+    'POST /api/v1/shipments/bulk-mark-deletion',
+    st('operations.shipments', 'delete', {
+      capability: 'operations.delete.bulk_mark',
+      expandableBy: ['monitor'],
+    }),
+  ],
+  [
+    'POST /api/v1/shipments/bulk-unmark-deletion',
+    st('operations.shipments', 'delete', {
+      capability: 'operations.delete.bulk_mark',
+      expandableBy: ['monitor'],
+    }),
+  ],
+  [
+    'POST /api/v1/shipments/bulk-hard-delete',
+    st('operations.shipments', 'delete', {
+      capability: 'operations.delete.bulk_hard',
+      expandableBy: [],
+    }),
+  ],
 
   // Счётчики и ссылки-шаринги — общие для обеих страниц Операций.
   [
     'GET /api/v1/reports/operations-counters',
     always('Счётчики для меню: один ответ по приёмкам и отгрузкам сразу.'),
   ],
-  ['GET /api/v1/share-links', always(SHARE_LINKS)],
-  ['POST /api/v1/share-links/:id/revoke', always(SHARE_LINKS)],
+  // Список и отзыв — разные возможности, а не одна «работа со ссылками»:
+  // список открыт ещё и инспектору, отзыв — нет. Одна capability на оба
+  // оставила бы инспектору кнопку «Отозвать», которая отвечает 403.
+  ['GET /api/v1/share-links', always(SHARE_LINKS, { capability: 'operations.share.manage' })],
+  [
+    'POST /api/v1/share-links/:id/revoke',
+    always(SHARE_LINKS, { capability: 'operations.share.revoke' }),
+  ],
 
   // Мобильный транспорт.
   ['GET /api/v1/sync', always(MOBILE_CHANNEL)],
@@ -207,7 +342,14 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     'GET /api/v1/source-documents/export.xlsx',
     legacy('documents.list', 'view', ['manager', 'inspector_kpp', 'contractor', 'monitor'], GAP),
   ],
-  ['GET /api/v1/source-documents/import-result/:bundleId', st('documents.list', 'view')],
+  // Результат импорта УПД: admin/manager. Подрядчику закрыт намеренно — его
+  // видимость документов ограничена своими записями, а этот маршрут скоуп не
+  // сверяет. Монитору выданный просмотр документов его открывает: у монитора
+  // ограничения по своим данным нет вовсе.
+  [
+    'GET /api/v1/source-documents/import-result/:bundleId',
+    st('documents.list', 'view', { expandableBy: ['monitor'] }),
+  ],
   ['POST /api/v1/source-documents/upload-upd', st('documents.list', 'create')],
   ['POST /api/v1/source-documents/upload-upd-pdf', st('documents.list', 'create')],
   ['POST /api/v1/source-documents/upload-waybill', st('documents.list', 'create')],
@@ -243,16 +385,24 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['POST /api/v1/mail/receipts/:id/replay', st('documents.mail', 'edit')],
 
   // Переписка по share-ссылке (колокольчик в шапке) — виджет без страницы.
+  // Переписка по ссылке — третья возможность share: открыта admin/manager,
+  // инспектору нет (хотя ссылку он создать может).
   [
     'GET /api/v1/share-messages/threads',
-    always('Виджет уведомлений в шапке layout, у него нет страницы в матрице.'),
+    always('Виджет уведомлений в шапке layout, у него нет страницы в матрице.', MSG),
   ],
-  ['GET /api/v1/share-messages/threads/:tokenId', always('Виджет уведомлений в шапке layout.')],
-  ['GET /api/v1/share-messages/unread-count', always('Виджет уведомлений в шапке layout.')],
-  ['POST /api/v1/share-messages/threads/:tokenId', always('Виджет уведомлений в шапке layout.')],
+  [
+    'GET /api/v1/share-messages/threads/:tokenId',
+    always('Виджет уведомлений в шапке layout.', MSG),
+  ],
+  ['GET /api/v1/share-messages/unread-count', always('Виджет уведомлений в шапке layout.', MSG)],
+  [
+    'POST /api/v1/share-messages/threads/:tokenId',
+    always('Виджет уведомлений в шапке layout.', MSG),
+  ],
   [
     'POST /api/v1/share-messages/threads/:tokenId/mark-read',
-    always('Виджет уведомлений в шапке layout.'),
+    always('Виджет уведомлений в шапке layout.', MSG),
   ],
 
   // ─────────────────────── История поступлений и отчёты ───────────────────

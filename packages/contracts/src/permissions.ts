@@ -529,6 +529,18 @@ export const MePermissionsResponseSchema = z.object({
   // прятать кнопки по overrides, которые сервер уже не применяет.
   enforced: z.boolean(),
   pages: PageMapSchema,
+  /**
+   * Что РЕАЛЬНО доступно, помимо «страница × действие».
+   *
+   * Ячейка матрицы шире одного маршрута: у `operations.*:edit` четыре маршрута
+   * с разными allow-list. Интерфейс, спрашивающий только права страницы,
+   * нарисует инспектору кнопку «Флаги» — и она ответит 403. Список считает
+   * сервер (там сходятся матрица и allow-list); фронт эту логику не повторяет.
+   *
+   * Необязательное: старый веб поле игнорирует, а новый при его отсутствии
+   * работает по дефолтам роли — инвариант «нет данных ≠ нет прав».
+   */
+  capabilities: z.array(z.string()).optional(),
 });
 export type MePermissionsResponse = z.infer<typeof MePermissionsResponseSchema>;
 

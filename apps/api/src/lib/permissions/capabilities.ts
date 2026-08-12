@@ -1,0 +1,94 @@
+import { isActionApplicable, type UserRole } from '@matcheck/contracts';
+import { isAllowed, isExpanded, type OverrideMap } from './matrix.js';
+import { ROUTE_PERMISSIONS, type RouteRule } from './route-map.js';
+import type { RouteRolesMap } from './route-roles.js';
+
+/**
+ * Возможности (capabilities) текущего пользователя.
+ *
+ * Зачем поверх матрицы. Ячейка «страница × действие» не равна одной
+ * возможности: у `operations.*:edit` четыре маршрута с разными allow-list —
+ * отметка проверки, флаги, привязка УПД, ссылка-шаринг. Интерфейс, спрашивающий
+ * только `can(page, action)`, нарисует кнопку «Флаги» инспектору (у которого
+ * базовый edit есть, а маршрут закрыт) — и она ответит 403.
+ *
+ * Поэтому сервер отдаёт вебу ещё и плоский список имён: «что реально можно».
+ * Считается здесь, в одном месте, где сходятся матрица (что разрешено роли) и
+ * рантайм-инвентарь allow-list (кого пускает сам маршрут). Дублировать эту
+ * логику на фронте нельзя — разъедется при первом же изменении allow-list.
+ */
+
+/**
+ * Доступен ли роли конкретный маршрут — та же цепочка проверок, что в рантайме,
+ * но без запроса.
+ *
+ * Порядок повторяет боевой путь: сначала матрица (хук прав), затем allow-list
+ * (app.authorize). Расширение снимает allow-list только если политика маршрута
+ * пускает эту роль — см. expandableBy в route-map.
+ */
+function routeAllowsRole(
+  rule: RouteRule,
+  routeRoles: RouteRolesMap,
+  key: string,
+  overrides: OverrideMap,
+  role: UserRole,
+): boolean {
+  // admin вне матрицы и вне allow-list'ов — ему доступно всё.
+  if (role === 'admin') return true;
+
+  // 1. Матрица. Правила без ячейки (always) проверять нечем — они и не
+  //    участвуют в матрице по определению.
+  let expanded = false;
+  if (rule.kind === 'static' || rule.kind === 'legacy') {
+    if (!isActionApplicable(rule.page, rule.action)) return false;
+    if (!isAllowed(overrides, role, rule.page, rule.action)) return false;
+    expanded =
+      isExpanded(overrides, role, rule.page, rule.action) &&
+      (rule.expandableBy?.includes(role as never) ?? true);
+    // legacy: роли из списка идут мимо матрицы целиком и мимо allow-list —
+    // их доступ исторический.
+    if (rule.kind === 'legacy' && rule.roles.includes(role as never)) return true;
+  }
+
+  // 2. Allow-list маршрута. Пустой список = authorize не вызывался.
+  const roles = routeRoles.get(key);
+  if (!roles || roles.length === 0) {
+    // Маршрут без authorize — либо открыт всем аутентифицированным, либо роли
+    // проверяются ВНУТРИ хендлера (DELETE /deliveries/:id). Отличить снаружи
+    // нельзя, поэтому такие маршруты не должны получать capability вовсе:
+    // иначе она молча означала бы «разрешено», что для inline-веток неверно.
+    // Инвариант в тестах это стережёт.
+    return true;
+  }
+  return expanded || roles.includes(role);
+}
+
+/**
+ * Имена возможностей, доступных роли.
+ *
+ * Возможность считается доступной, если доступен ХОТЬ ОДИН из её маршрутов:
+ * `operations.share.manage` держат создание ссылки и список, и наличие любого
+ * из них означает, что раздел share пользователю показывать имеет смысл.
+ */
+export function capabilitiesFor(
+  overrides: OverrideMap,
+  role: UserRole,
+  routeRoles: RouteRolesMap,
+): string[] {
+  const out = new Set<string>();
+  for (const [key, rule] of ROUTE_PERMISSIONS) {
+    if (!rule.capability) continue;
+    if (out.has(rule.capability)) continue;
+    if (routeAllowsRole(rule, routeRoles, key, overrides, role)) out.add(rule.capability);
+  }
+  return [...out].sort();
+}
+
+/** Все объявленные в реестре имена — для тестов и для отладки. */
+export function declaredCapabilities(): string[] {
+  const out = new Set<string>();
+  for (const rule of ROUTE_PERMISSIONS.values()) {
+    if (rule.capability) out.add(rule.capability);
+  }
+  return [...out].sort();
+}

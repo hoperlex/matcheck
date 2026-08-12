@@ -2,7 +2,7 @@ import { useCallback, useMemo } from 'react';
 import type { PageAction, PageGroup, PageId } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
 import { usePermissionsStore } from '../../stores/permissions';
-import { can, canView, canViewGroup } from '../utils/permissions';
+import { can, canView, canViewGroup, hasCapability } from '../utils/permissions';
 
 /**
  * Права текущего пользователя для компонентов.
@@ -21,6 +21,7 @@ export function usePermissions() {
     [perms, role],
   );
   const canSee = useCallback((page: PageId) => canView(perms, page, role), [perms, role]);
+  const hasCap = useCallback((capability: string) => hasCapability(perms, capability), [perms]);
   const canSeeGroup = useCallback(
     (group: PageGroup) => canViewGroup(perms, group, role),
     [perms, role],
@@ -31,6 +32,11 @@ export function usePermissions() {
       can: canDo,
       canView: canSee,
       canViewGroup: canSeeGroup,
+      /**
+       * Точный гейт для элементов, чья ячейка покрывает маршруты с разными
+       * allow-list («Флаги», «Отозвать ссылку», удаление навсегда).
+       */
+      hasCapability: hasCap,
       /** false — сервер матрицу не применяет (PERMISSIONS_ENFORCE=0). */
       enforced: perms?.enforced ?? false,
       /** Права ещё не приехали — UI работает по дефолтам роли. */

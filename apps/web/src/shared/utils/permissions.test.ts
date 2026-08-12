@@ -7,6 +7,7 @@ import {
   canView,
   canViewGroup,
   defaultPermissions,
+  hasCapability,
 } from './permissions';
 
 const payload = (over: Partial<MePermissionsResponse> = {}): MePermissionsResponse =>
@@ -114,5 +115,37 @@ describe('права: раздел виден, если видна хоть од
     expect(canViewGroup(perms, 'references')).toBe(false);
     // Соседний раздел не задет.
     expect(canViewGroup(perms, 'operations')).toBe(true);
+  });
+});
+
+describe('возможности: точный гейт там, где ячейка слишком груба', () => {
+  it('КРИТИЧНО: список не приехал — это НЕ отказ', () => {
+    // Тот же инвариант, что и для прав страниц. Иначе первый же таймаут или
+    // старый API спрятали бы у всех половину интерфейса.
+    expect(hasCapability(null, 'operations.edit.flags')).toBe(true);
+    const noField = buildPermissionSet(payload());
+    expect(noField.capabilities).toBeNull();
+    expect(hasCapability(noField, 'operations.edit.flags')).toBe(true);
+  });
+
+  it('пустой список — это отказ, а не «сервер промолчал»', () => {
+    // Различать обязательно: роль без единой возможности существует (монитор
+    // до выдачи прав), и показывать ей всё было бы неверно.
+    const perms = buildPermissionSet(
+      payload({ capabilities: [] } as Partial<MePermissionsResponse>),
+    );
+    expect(perms.capabilities).not.toBeNull();
+    expect(hasCapability(perms, 'operations.edit.flags')).toBe(false);
+  });
+
+  it('выданное имя разрешает, соседнее — нет', () => {
+    const perms = buildPermissionSet(
+      payload({
+        capabilities: ['operations.share.manage'],
+      } as Partial<MePermissionsResponse>),
+    );
+    expect(hasCapability(perms, 'operations.share.manage')).toBe(true);
+    // Инспектор создаёт ссылку, но не отзывает — ровно этот случай.
+    expect(hasCapability(perms, 'operations.share.revoke')).toBe(false);
   });
 });

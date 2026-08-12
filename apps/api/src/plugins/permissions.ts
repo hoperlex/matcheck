@@ -5,10 +5,11 @@ import { loadEnv } from '../lib/env.js';
 import { isAllowed, isExpanded } from '../lib/permissions/matrix.js';
 import { createMatrixStore, type MatrixStore } from '../lib/permissions/store.js';
 import { lookupRule, type RouteRule } from '../lib/permissions/route-map.js';
+import { collectRouteRoles, type RouteRolesMap } from '../lib/permissions/route-roles.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
-    permissions: MatrixStore & { enforced: boolean };
+    permissions: MatrixStore & { enforced: boolean; routeRoles: RouteRolesMap };
   }
   interface FastifyRequest {
     /**
@@ -54,7 +55,13 @@ export default fp(async (app) => {
   const store = createMatrixStore(app);
   const enforced = env.PERMISSIONS_ENFORCE;
 
-  app.decorate('permissions', Object.assign(store, { enforced }));
+  // Инвентарь allow-list собираем ДО раннего выхода: /me/permissions отдаёт
+  // возможности независимо от флага (при выключенном — по дефолтам, то есть
+  // повторяя сегодняшний доступ). Хук onRoute обязан быть повешен раньше
+  // регистрации маршрутов — плагин для этого и стоит в server.ts перед ними.
+  const routeRoles = collectRouteRoles(app);
+
+  app.decorate('permissions', Object.assign(store, { enforced, routeRoles }));
 
   if (!enforced) {
     app.log.info('permissions: enforcement выключен (PERMISSIONS_ENFORCE=0)');
@@ -71,6 +78,22 @@ export default fp(async (app) => {
   });
 
   const warned = new Set<string>();
+
+  /**
+   * Открывает ли выданное сверх дефолта право ИМЕННО ЭТОТ маршрут.
+   *
+   * Ячейка матрицы шире одного маршрута, и allow-list'ы у них разные. Без
+   * пер-ролевой политики выдача «Удалять» монитору открыла бы заодно admin-only
+   * bulk-hard-delete — то есть больше, чем есть у менеджера.
+   *
+   * Общий флаг «этот маршрут не расширяется» тут не годится: `flags` закрыт для
+   * inspector_kpp (у которого базовый edit есть), но монитору его открыть надо —
+   * ровно ради этого разделяли права. Поэтому решение принимается по роли, а
+   * отсутствие политики означает «как раньше»: расширение допускается.
+   */
+  function expansionOpensRoute(rule: RouteRule, role: ManagedRole): boolean {
+    return rule.expandableBy?.includes(role) ?? true;
+  }
 
   async function deny(
     req: FastifyRequest,
@@ -133,7 +156,10 @@ export default fp(async (app) => {
       // manager-only правку операций (его operations.*:edit существует ради
       // отметки проверки), а manager — admin-only bulk-hard-delete. То есть
       // права расширились бы у всех сразу, без единой строки в БД.
-      if (isExpanded(overrides, req.user!.role, rule.page, rule.action)) {
+      if (
+        isExpanded(overrides, req.user!.role, rule.page, rule.action) &&
+        expansionOpensRoute(rule, req.user!.role as ManagedRole)
+      ) {
         req.permissionExpanded = true;
       }
       return;

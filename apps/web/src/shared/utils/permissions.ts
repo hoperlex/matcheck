@@ -32,6 +32,12 @@ export type PermissionSet = {
   /** false — сервер матрицу не применяет (PERMISSIONS_ENFORCE=0). */
   enforced: boolean;
   pages: Record<PageId, PagePermissions>;
+  /**
+   * Что реально доступно поверх «страница × действие». null — сервер списка не
+   * прислал (старый API или права не приехали): тогда действует то же правило,
+   * что и для страниц — «не знаем» трактуем как «как раньше», см. hasCapability.
+   */
+  capabilities: ReadonlySet<string> | null;
 };
 
 const ALL_ALLOWED: PagePermissions = {
@@ -69,7 +75,7 @@ function permissionsForRole(role: UserRole): Record<PageId, PagePermissions> {
  * прятать кнопки, которые API разрешает.
  */
 export function defaultPermissions(role: UserRole): PermissionSet {
-  return { role, enforced: false, pages: permissionsForRole(role) };
+  return { role, enforced: false, pages: permissionsForRole(role), capabilities: null };
 }
 
 /**
@@ -86,7 +92,31 @@ export function buildPermissionSet(payload: MePermissionsResponse): PermissionSe
     const fromServer = payload.pages[page.id];
     pages[page.id] = fromServer ? { ...fromServer } : { ...base[page.id] };
   }
-  return { role: payload.role, enforced: payload.enforced, pages };
+  return {
+    role: payload.role,
+    enforced: payload.enforced,
+    pages,
+    // Поле необязательное: старый API его не отдаёт. Отличаем «не прислал»
+    // (null → работаем как раньше) от «прислал пустой» (ничего не доступно).
+    capabilities: payload.capabilities ? new Set(payload.capabilities) : null,
+  };
+}
+
+/**
+ * Доступна ли возможность — точная проверка там, где права страницы слишком
+ * грубые.
+ *
+ * `can(page, action)` отвечает «разрешено ли действие в принципе», а одна ячейка
+ * покрывает маршруты с разными allow-list: у инспектора `operations.*:edit`
+ * включён, но «Флаги» ему закрыты. Кнопку такого рода гейтим отсюда.
+ *
+ * Список не приехал — НЕ отказ, как и с правами страниц: показываем по-старому,
+ * сервер всё равно проверит сам. Иначе первый же таймаут спрятал бы у всех
+ * половину интерфейса.
+ */
+export function hasCapability(perms: PermissionSet | null, capability: string): boolean {
+  if (!perms?.capabilities) return true;
+  return perms.capabilities.has(capability);
 }
 
 /**
