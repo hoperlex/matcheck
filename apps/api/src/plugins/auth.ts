@@ -161,6 +161,17 @@ export default fp(async (app) => {
   app.decorate('logUnauthorized', logUnauthorized);
 
   app.decorate('authenticate', async (req: FastifyRequest, reply: FastifyReply) => {
+    // Глобальный onRequest-хук (ниже) уже прогнал attachUser и проставил
+    // req.user — onRequest всегда идёт до preHandler. Без этого выхода каждый
+    // маршрут с `preHandler: [app.authenticate]` (их 159) делал ВТОРУЮ пару
+    // SELECT'ов (sessions + users) и вторую verifyAccessToken на запрос: БД
+    // внешняя, так что это лишний сетевой round-trip на каждый вызов, включая
+    // каждую миниатюру фото.
+    //
+    // Ветку attachUser ниже сохраняем: на публичных путях (PUBLIC_ROUTE_PREFIX,
+    // PUBLIC_PATHS, /health) глобальный хук выходит рано и req.user не ставит,
+    // а маршрут под этим префиксом всё же может попросить аутентификацию.
+    if (req.user) return;
     const user = await attachUser(req);
     if (!user) {
       await logUnauthorized(req, 401, 'invalid_or_missing_token');

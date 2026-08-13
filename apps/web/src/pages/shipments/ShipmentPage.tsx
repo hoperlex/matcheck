@@ -303,7 +303,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   // Детали УПД для преднаполнения формы в режиме isNew. Сначала IndexedDB
   // (наполняется pullSync), при пустом кеше — серверный fallback.
   const newFromUpdQuery = useQuery({
-    queryKey: ['source-document-detail', updIdFromUrl],
+    // ОТДЕЛЬНЫЙ ключ от ['source-document', id]: там queryFn всегда ходит в
+    // сеть, а здесь сначала читается снимок из IndexedDB (наполняет pullSync).
+    queryKey: ['source-document-offline', updIdFromUrl],
     queryFn: async (): Promise<SourceDocumentDetail> => {
       if (!updIdFromUrl) throw new Error('no upd id');
       const dbi = await db();
@@ -498,7 +500,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   // (Cannot access 'loadedShipment' before initialization).
   const linkedSourceId = loadedShipment?.sourceDocumentIds[0] ?? null;
   const linkedSourceQuery = useQuery({
-    queryKey: ['source-document-detail', linkedSourceId],
+    // Тот же офлайн-first путь, что у newFromUpdQuery выше.
+    queryKey: ['source-document-offline', linkedSourceId],
     queryFn: async (): Promise<SourceDocumentDetail> => {
       if (!linkedSourceId) throw new Error('no source id');
       const dbi = await db();

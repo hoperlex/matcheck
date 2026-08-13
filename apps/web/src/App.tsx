@@ -10,7 +10,7 @@ import { QueryProvider } from './app/providers/QueryProvider';
 import { AuthProvider } from './app/providers/AuthProvider';
 import { useQueryClient } from '@tanstack/react-query';
 import { setupInvalidation } from './services/invalidation';
-import { startSyncLoop } from './services/sync';
+import { startSyncLoop, syncAvailableForRole } from './services/sync';
 import { useAuthStore } from './stores/auth';
 import { UpdateBanner } from './shared/ui/UpdateBanner';
 
@@ -38,10 +38,13 @@ function SideEffects() {
     Sentry.setUser(user ? { id: user.id } : null);
     if (!user) return;
     const teardownInv = setupInvalidation(qc);
-    const teardownSync = startSyncLoop();
+    // Офлайн-синхронизация есть не у всех ролей: contractor и monitor получают
+    // на /api/v1/sync 403. Раньше цикл стартовал для любого залогиненного и раз
+    // в минуту стучался в закрытую дверь.
+    const teardownSync = syncAvailableForRole(user.role) ? startSyncLoop() : undefined;
     return () => {
       teardownInv();
-      teardownSync();
+      teardownSync?.();
     };
   }, [qc, user]);
   return null;

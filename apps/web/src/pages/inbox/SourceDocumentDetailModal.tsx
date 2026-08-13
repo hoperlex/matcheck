@@ -235,11 +235,12 @@ export function SourceDocumentDetailModal({
     onSuccess: () => {
       message.success('Документ сохранён');
       void qc.invalidateQueries({ queryKey: ['source-documents'] });
+      // Один ключ на карточку, префетч списка и раскрытие «+» в списке.
       void qc.invalidateQueries({ queryKey: ['source-document', id] });
-      // Тот же endpoint обслуживает префетч-кэш ExpandedSourceDocumentItems
-      // (отдельный queryKey по историческим причинам) — инвалидируем оба,
-      // иначе раскрытие «+» в списке покажет старые позиции.
-      void qc.invalidateQueries({ queryKey: ['source-document-detail', id] });
+      // Второй кэш того же документа — офлайн-first (IndexedDB, наполняется
+      // pullSync): его читают КПП и отгрузка при преднаполнении формы из УПД.
+      // Сбрасываем и его, иначе форма подставит доредакционные данные.
+      void qc.invalidateQueries({ queryKey: ['source-document-offline', id] });
       // Закрываем модалку — пользователь явно подтвердил изменения и не
       // должен дополнительно жать ×. Крестик/Esc остаются как способ
       // выйти без сохранения.
@@ -254,11 +255,12 @@ export function SourceDocumentDetailModal({
     onSuccess: () => {
       message.success('Расхождение принято');
       void qc.invalidateQueries({ queryKey: ['source-documents'] });
+      // Один ключ на карточку, префетч списка и раскрытие «+» в списке.
       void qc.invalidateQueries({ queryKey: ['source-document', id] });
-      // Тот же endpoint обслуживает префетч-кэш ExpandedSourceDocumentItems
-      // (отдельный queryKey по историческим причинам) — инвалидируем оба,
-      // иначе раскрытие «+» в списке покажет старые позиции.
-      void qc.invalidateQueries({ queryKey: ['source-document-detail', id] });
+      // Второй кэш того же документа — офлайн-first (IndexedDB, наполняется
+      // pullSync): его читают КПП и отгрузка при преднаполнении формы из УПД.
+      // Сбрасываем и его, иначе форма подставит доредакционные данные.
+      void qc.invalidateQueries({ queryKey: ['source-document-offline', id] });
     },
     onError: (err: Error) => message.error(err.message),
   });

@@ -346,7 +346,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // (его наполняет pullSync), при пустом кеше — серверный fallback. Грузится один
   // раз на updIdFromUrl, после чего гидратация заполняет items/contractor/site.
   const newFromUpdQuery = useQuery({
-    queryKey: ['source-document-detail', updIdFromUrl],
+    // ОТДЕЛЬНЫЙ ключ от ['source-document', id]: там queryFn всегда ходит в
+    // сеть, а здесь сначала читается снимок из IndexedDB (его наполняет
+    // pullSync) — это работает офлайн на планшете КПП. Один ключ на два разных
+    // queryFn означал бы, что содержимое кэша зависит от того, какой компонент
+    // смонтировался первым.
+    queryKey: ['source-document-offline', updIdFromUrl],
     queryFn: async (): Promise<SourceDocumentDetail> => {
       if (!updIdFromUrl) throw new Error('no upd id');
       const dbi = await db();

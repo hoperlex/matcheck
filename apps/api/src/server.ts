@@ -1,6 +1,7 @@
 import * as Sentry from '@sentry/node';
 import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
+import compress from '@fastify/compress';
 import {
   serializerCompiler,
   validatorCompiler,
@@ -72,6 +73,25 @@ export async function buildServer() {
   // Волна 0A: метрики per-request. Регистрируем до authPlugin, чтобы ALS-контекст
   // (счётчик SQL) был активен уже на attachUser. No-op при выключенном флаге.
   await app.register(metricsPlugin);
+  // Сжатие JSON-ответов. Портал тянет крупные списки (/source-documents,
+  // /counterparties?limit=5000 и подобные), и до этого они уходили в браузер
+  // сырыми: у /api/v1/* не было ни content-encoding, ни Vary: Accept-Encoding,
+  // тогда как статику жмёт nginx web-контейнера. Делаем это в приложении, а не
+  // в nginx: vhost боевого домена лежит на сервере вне репозитория.
+  //
+  // threshold — не жать мелочь, на которой накладные расходы больше выигрыша.
+  // globalDecompression: false — нам нужна только компрессия ОТВЕТОВ; разбор
+  // сжатых тел запросов плагин по умолчанию включает, и это лишняя поверхность.
+  //
+  // Бинарники не затрагиваются: /photos/:id/content отдаёт image/*, а такие
+  // типы mime-db помечает как non-compressible. SSE отключён явно на маршруте
+  // (routes/events.ts). Регистрация ПОСЛЕ metricsPlugin осознанная: onSend
+  // метрик отработает раньше, поэтому respBytes продолжит показывать честный
+  // несжатый размер ответа.
+  await app.register(compress, {
+    threshold: 1024,
+    globalDecompression: false,
+  });
   await app.register(queuePlugin);
   await app.register(securityPlugin);
   await app.register(multipart, {

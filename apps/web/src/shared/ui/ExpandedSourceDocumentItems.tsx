@@ -22,7 +22,9 @@ export function ExpandedSourceDocumentItems({
   kind: SourceDocumentDetail['kind'];
 }) {
   const { data, isLoading, error } = useQuery({
-    queryKey: ['source-document-detail', id],
+    // Тот же ключ, что у префетча списка и карточки документа: один и тот же
+    // GET /source-documents/:id не должен грузиться трижды под разными именами.
+    queryKey: ['source-document', id],
     queryFn: () => api.get<SourceDocumentDetail>(`/source-documents/${id}`),
   });
 

@@ -1,4 +1,4 @@
-import type { SyncDeltaResponse } from '@matcheck/contracts';
+import type { SyncDeltaResponse, UserDto } from '@matcheck/contracts';
 import { api, ApiError, ConflictError } from './api';
 import { db } from '../lib/db';
 import { upsertServerSnapshot, buildUpsertPayload } from './deliveries';
@@ -12,6 +12,22 @@ import { retryPendingUploads } from './photoPipeline';
 
 const CURSOR_KEY = 'sync_cursor';
 const RUNNING = { value: false };
+
+/**
+ * Роли, которым сервер отдаёт GET /api/v1/sync. Зеркалит allow-list на роуте
+ * (`app.authorize('admin', 'manager', 'inspector_kpp')` в
+ * apps/api/src/routes/sync.ts) — contractor и monitor получают там 403.
+ *
+ * Гонять цикл для запрещённой роли бессмысленно вдвойне: каждый тик тратит
+ * аутентификацию и оставляет запись в unauthorized_access_log, а данных всё
+ * равно не приносит.
+ */
+const SYNC_ROLES: readonly UserDto['role'][] = ['admin', 'manager', 'inspector_kpp'];
+
+/** Есть ли у роли доступ к офлайн-синхронизации. */
+export function syncAvailableForRole(role: UserDto['role'] | undefined): boolean {
+  return role !== undefined && SYNC_ROLES.includes(role);
+}
 
 export async function pullSync(): Promise<void> {
   const cursor = await getSetting<string>(CURSOR_KEY);
@@ -126,7 +142,15 @@ let intervalHandle: number | null = null;
 export function startSyncLoop(intervalMs = 60_000): () => void {
   if (intervalHandle) clearInterval(intervalHandle);
   void runSync();
-  intervalHandle = window.setInterval(() => void runSync(), intervalMs);
+  intervalHandle = window.setInterval(() => {
+    // Периодический тик — только для видимой вкладки. GET /api/v1/sync стоит
+    // ~20 последовательных SELECT'ов, и забытая открытая вкладка гоняла их
+    // каждую минуту весь рабочий день, ничего не показывая пользователю.
+    // Возврат к вкладке закрывает onVisibility ниже: данные освежаются сразу,
+    // как на вкладку посмотрят, поэтому пропуск тиков не «отстаёт» видимо.
+    if (document.visibilityState !== 'visible') return;
+    void runSync();
+  }, intervalMs);
 
   const onOnline = () => void runSync();
   const onVisibility = () => {
