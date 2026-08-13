@@ -14,8 +14,8 @@ import type { ManagedRole, PageAction, PageId } from '@matcheck/contracts';
  * CI красный.
  *
  * Ключ — `${METHOD} ${routeOptions.url}`, то есть ШАБЛОН роута (с :params),
- * а не сырой req.url. Тот же принцип, что у MONITOR_WRITE_ROUTES в
- * server.ts и публичного префикса в plugins/auth.ts: сырой url подделывается
+ * а не сырой req.url. Тот же принцип, что у read-only-гарда в plugins/
+ * permissions.ts и публичного префикса в plugins/auth.ts: сырой url подделывается
  * (`/api/v1/public/../sites`), шаблон выдаёт роутер уже после матчинга.
  */
 
@@ -52,6 +52,16 @@ export type RuleMeta = {
    * реестром молча.
    */
   cells?: { page: PageId; action: PageAction }[];
+  /**
+   * Ячейки, которых касается маршрут класса `always` — то есть данные, которые
+   * он отдаёт или меняет, оставаясь ВНЕ матрицы.
+   *
+   * Нужно только для честной маркировки в интерфейсе (`cellCoverage`): по
+   * этому полю видно, что снятый «Просмотр» уберёт вкладку, но не закроет те
+   * же данные по API. На доступ поле не влияет — `always` как был вне матрицы,
+   * так и остаётся.
+   */
+  affects?: { page: PageId; action: PageAction }[];
 };
 
 export type RouteRule = RuleMeta &
@@ -129,6 +139,18 @@ const SHARE_LINKS =
   'Ссылка-шаринг общая для приёмок и отгрузок — правило «одна страница» неприменимо.';
 /** Переписка по share-ссылке: третья возможность share, открыта admin/manager. */
 const MSG: RuleMeta = { capability: 'operations.share.messages' };
+
+/**
+ * Фото делятся на две возможности, потому что у них РАЗНЫЕ allow-list.
+ *
+ * Загрузка кадра (presign/confirm/content) открыта ещё и инспектору — он снимает
+ * с планшета. Правка вида кадра и удаление — только admin/manager
+ * (routes/photos.ts). Одна общая возможность нарисовала бы инспектору кнопку
+ * удаления, которая отвечает 403: у него base-права operations.*:delete есть, а
+ * маршрут закрыт.
+ */
+const PHOTO_UPLOAD: RuleMeta = { capability: 'operations.photo.upload' };
+const PHOTO_MANAGE: RuleMeta = { capability: 'operations.photo.manage' };
 const GAP =
   'РАЗРЫВ «API щедрее UI»: роль имеет доступ по API, но страницы в вебе у неё нет. ' +
   'Перечисленные роли идут мимо матрицы — сужение отложено до отдельного согласования ' +
@@ -354,6 +376,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
       // Возможные исходы resolve — для хука расширения и для теста «матрица не
       // сужает». Сам resolve выбирает из них по телу запроса.
       cells: bothOps('create'),
+      ...PHOTO_UPLOAD,
       resolve: (req) => {
         const body = (req.body ?? {}) as { operationKind?: string; deliveryId?: string };
         // Фолбэк повторяет хендлер (photos.ts): operationKind ?? 'delivery',
@@ -369,21 +392,24 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // Остальные узнают вид операции только после findPhoto().
   [
     'POST /api/v1/photos/:id/confirm',
-    inHandler('found.kind + create, после findPhoto.', bothOps('create')),
+    inHandler('found.kind + create, после findPhoto.', bothOps('create'), PHOTO_UPLOAD),
   ],
   // Право то же, что у presign/confirm: загрузка файла — часть создания фото.
   [
     'POST /api/v1/photos/:id/content',
-    inHandler('found.kind + create, после findPhoto.', bothOps('create')),
+    inHandler('found.kind + create, после findPhoto.', bothOps('create'), PHOTO_UPLOAD),
   ],
-  ['PATCH /api/v1/photos/:id', inHandler('found.kind + edit, после findPhoto.', bothOps('edit'))],
+  [
+    'PATCH /api/v1/photos/:id',
+    inHandler('found.kind + edit, после findPhoto.', bothOps('edit'), PHOTO_MANAGE),
+  ],
   [
     'POST /api/v1/photos/:id/recognize',
-    inHandler('found.kind + edit, после findPhoto.', bothOps('edit')),
+    inHandler('found.kind + edit, после findPhoto.', bothOps('edit'), PHOTO_MANAGE),
   ],
   [
     'DELETE /api/v1/photos/:id',
-    inHandler('found.kind + delete, после findPhoto.', bothOps('delete')),
+    inHandler('found.kind + delete, после findPhoto.', bothOps('delete'), PHOTO_MANAGE),
   ],
   ['GET /api/v1/photos/:id/url', inHandler('found.kind + view, после findPhoto.', bothOps('view'))],
   [
@@ -396,12 +422,12 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ],
 
   // ─────────────────────────── Документы (УПД) ────────────────────────────
-  ['GET /api/v1/source-documents', always(SD_READ)],
-  ['GET /api/v1/source-documents/:id', always(SD_READ)],
-  ['GET /api/v1/source-documents/:id/file', always(SD_READ)],
-  ['GET /api/v1/source-documents/:id/file/raw', always(SD_READ)],
-  ['GET /api/v1/source-documents/:id/extra/:itemId/url', always(SD_READ)],
-  ['GET /api/v1/source-documents/:id/extra/:itemId/raw', always(SD_READ)],
+  ['GET /api/v1/source-documents', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
+  ['GET /api/v1/source-documents/:id', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
+  ['GET /api/v1/source-documents/:id/file', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
+  ['GET /api/v1/source-documents/:id/file/raw', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
+  ['GET /api/v1/source-documents/:id/extra/:itemId/url', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
+  ['GET /api/v1/source-documents/:id/extra/:itemId/raw', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
   [
     'GET /api/v1/source-documents/export.xlsx',
     legacy('documents.list', 'view', ['manager', 'inspector_kpp', 'contractor', 'monitor'], GAP),
@@ -482,16 +508,16 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
 
   // ─────────────────────────── Справочники ────────────────────────────────
   ['GET /api/v1/statuses', always(LOOKUP)],
-  ['GET /api/v1/sites', always(LOOKUP)],
-  ['GET /api/v1/sites/:id', always(LOOKUP)],
-  ['GET /api/v1/units', always(LOOKUP)],
-  ['GET /api/v1/counterparties', always(LOOKUP)],
-  ['GET /api/v1/customer-counterparties', always(LOOKUP)],
-  ['GET /api/v1/suppliers', always(LOOKUP)],
-  ['GET /api/v1/materials', always(LOOKUP)],
-  ['GET /api/v1/responsible-persons', always(LOOKUP)],
-  ['GET /api/v1/assets', always(LOOKUP)],
-  ['GET /api/v1/mol', always(LOOKUP)],
+  ['GET /api/v1/sites', always(LOOKUP, { affects: [{ page: 'references.sites', action: 'view' }] })],
+  ['GET /api/v1/sites/:id', always(LOOKUP, { affects: [{ page: 'references.sites', action: 'view' }] })],
+  ['GET /api/v1/units', always(LOOKUP, { affects: [{ page: 'references.units', action: 'view' }] })],
+  ['GET /api/v1/counterparties', always(LOOKUP, { affects: [{ page: 'references.counterparties_legacy', action: 'view' }] })],
+  ['GET /api/v1/customer-counterparties', always(LOOKUP, { affects: [{ page: 'references.customer_counterparties', action: 'view' }] })],
+  ['GET /api/v1/suppliers', always(LOOKUP, { affects: [{ page: 'references.suppliers', action: 'view' }] })],
+  ['GET /api/v1/materials', always(LOOKUP, { affects: [{ page: 'references.materials', action: 'view' }] })],
+  ['GET /api/v1/responsible-persons', always(LOOKUP, { affects: [{ page: 'references.responsible_persons', action: 'view' }] })],
+  ['GET /api/v1/assets', always(LOOKUP, { affects: [{ page: 'references.assets', action: 'view' }] })],
+  ['GET /api/v1/mol', always(LOOKUP, { affects: [{ page: 'references.mol', action: 'view' }] })],
 
   ['POST /api/v1/sites', st('references.sites', 'create')],
   ['PATCH /api/v1/sites/:id', st('references.sites', 'edit')],

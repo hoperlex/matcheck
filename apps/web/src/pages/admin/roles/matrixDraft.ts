@@ -20,7 +20,14 @@ import {
 
 export type CatalogEntry = RolePermissionsResponse['catalog'][number];
 export type Matrix = Record<ManagedRole, Record<PageId, PagePermissions>>;
-export type Change = { role: ManagedRole; page: PageId; action: PageAction; allowed: boolean };
+export type Change = {
+  role: ManagedRole;
+  page: PageId;
+  action: PageAction;
+  allowed: boolean;
+  /** Значение, которое видел клиент, — сервер сверит его с БД (409 при расхождении). */
+  expected?: boolean;
+};
 
 /**
  * Что можно сделать с ячейкой:
@@ -170,22 +177,67 @@ export function groupState(
  * Слать матрицу целиком нельзя: два администратора, правящих разные ячейки,
  * затирали бы правки друг друга. Дельта же конфликтует только на одной и той
  * же ячейке.
+ *
+ * `base` — снимок НА МОМЕНТ ПОДЪЁМА черновика, а не текущий ответ сервера.
+ * Разница принципиальная: список сервера обновляется фоновым рефетчем, и если
+ * считать дельту от него, чужая правка той же ячейки превратится в «моё»
+ * изменение — возврат к прежнему значению, — и сохранение молча откатит чужую
+ * работу. От неизменного снимка такая ячейка в дельту не попадает вовсе, а
+ * если я её всё же трогал, `expected` даст серверу поймать конфликт (409).
  */
-export function diffMatrix(server: Matrix, draft: Matrix): Change[] {
+export function diffMatrix(base: Matrix, draft: Matrix): Change[] {
   const out: Change[] = [];
   for (const role of Object.keys(draft) as ManagedRole[]) {
     const pages = draft[role];
     if (!pages) continue;
     for (const page of Object.keys(pages) as PageId[]) {
       for (const action of PAGE_ACTIONS) {
-        const before = server[role]?.[page]?.[action];
+        const before = base[role]?.[page]?.[action];
         const after = pages[page]?.[action];
         if (before === undefined || after === undefined) continue;
-        if (before !== after) out.push({ role, page, action, allowed: after });
+        if (before !== after) out.push({ role, page, action, allowed: after, expected: before });
       }
     }
   }
   return out;
+}
+
+/**
+ * Перебазировать черновик на свежий ответ сервера.
+ *
+ * Ячейки, которые я не трогал, берём с сервера — иначе чужие правки не были бы
+ * видны до перезагрузки страницы. Тронутые оставляем как есть: это моя
+ * несохранённая работа, и терять её при фоновом рефетче нельзя. `base`
+ * двигается вместе с нетронутыми ячейками, чтобы они не попали в дельту.
+ */
+export function rebaseDraft(
+  base: Matrix,
+  draft: Matrix,
+  server: Matrix,
+): { base: Matrix; draft: Matrix } {
+  const touched = new Set(diffMatrix(base, draft).map((c) => cellKey(c.role, c.page, c.action)));
+  const nextBase = cloneMatrix(server);
+  const nextDraft = cloneMatrix(server);
+
+  for (const role of Object.keys(draft) as ManagedRole[]) {
+    for (const page of Object.keys(draft[role] ?? {}) as PageId[]) {
+      for (const action of PAGE_ACTIONS) {
+        if (!touched.has(cellKey(role, page, action))) continue;
+        const mine = draft[role]?.[page]?.[action];
+        const wasBase = base[role]?.[page]?.[action];
+        if (mine === undefined || wasBase === undefined) continue;
+        const target = nextDraft[role]?.[page];
+        if (!target) continue;
+        target[action] = mine;
+        // База для тронутой ячейки остаётся прежней: именно это значение я
+        // видел, и именно его сервер сверит с БД.
+        const baseRow = nextBase[role]?.[page];
+        if (baseRow) baseRow[action] = wasBase;
+      }
+    }
+  }
+
+  return { base: nextBase, draft: nextDraft };
 }
 
 /** Есть ли несохранённые правки у конкретной роли (точка рядом с её именем). */

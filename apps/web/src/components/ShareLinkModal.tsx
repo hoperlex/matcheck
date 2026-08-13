@@ -16,6 +16,7 @@ import { CopyOutlined, LinkOutlined, StopOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ShareEntityType, ShareLink } from '@matcheck/contracts';
 import { api, ApiError } from '../services/api';
+import { usePermissions } from '../shared/hooks/usePermissions';
 import { formatDateRu } from '../shared/utils/formatRu';
 
 type ListResp = { items: ShareLink[] };
@@ -47,6 +48,10 @@ export function ShareLinkModal({
   title?: string;
 }) {
   const qc = useQueryClient();
+  // Отзыв ссылки — своя возможность со своим allow-list (см. route-map:
+  // operations.share.revoke). Создание и список открыты шире.
+  const { hasCapability } = usePermissions();
+  const canRevoke = hasCapability('operations.share.revoke');
 
   const list = useQuery({
     queryKey: ['share-links', entityType, entityId],
@@ -157,7 +162,10 @@ export function ShareLinkModal({
               <ActiveLinkRow
                 key={link.id}
                 link={link}
-                onRevoke={() => revoke.mutate(link.id)}
+                // Отзыв — отдельная возможность: инспектор ссылку создаёт и
+                // видит, но отозвать не может. Без этой проверки кнопка
+                // рисовалась бы ему и отвечала 403.
+                onRevoke={canRevoke ? () => revoke.mutate(link.id) : undefined}
                 revoking={revoke.isPending && revoke.variables === link.id}
               />
             ))}
@@ -186,7 +194,8 @@ function ActiveLinkRow({
   revoking,
 }: {
   link: ShareLink;
-  onRevoke: () => void;
+  /** undefined — права на отзыв нет: кнопку не рисуем вовсе. */
+  onRevoke?: () => void;
   revoking: boolean;
 }) {
   const [copied, setCopied] = useState(false);
@@ -232,18 +241,20 @@ function ActiveLinkRow({
             ? `${link.accessedCount} ${link.lastAccessedAt ? `· последний раз ${formatDateRu(link.lastAccessedAt)}` : ''}`
             : '0 раз'}
         </Typography.Text>
-        <Popconfirm
-          title="Отозвать ссылку?"
-          description="После отзыва получатель сразу потеряет доступ. Действие необратимо."
-          okText="Отозвать"
-          cancelText="Отмена"
-          okButtonProps={{ danger: true, loading: revoking }}
-          onConfirm={onRevoke}
-        >
-          <Button danger size="small" icon={<StopOutlined />}>
-            Отозвать
-          </Button>
-        </Popconfirm>
+        {onRevoke && (
+          <Popconfirm
+            title="Отозвать ссылку?"
+            description="После отзыва получатель сразу потеряет доступ. Действие необратимо."
+            okText="Отозвать"
+            cancelText="Отмена"
+            okButtonProps={{ danger: true, loading: revoking }}
+            onConfirm={onRevoke}
+          >
+            <Button danger size="small" icon={<StopOutlined />}>
+              Отозвать
+            </Button>
+          </Popconfirm>
+        )}
       </Space>
     </div>
   );

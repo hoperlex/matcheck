@@ -5,6 +5,7 @@ import {
   DEFAULT_MATRIX,
   ErrorResponseSchema,
   LOCKED_CELLS,
+  MANAGED_ROLES,
   ManagedRoleSchema,
   PAGE_ACTIONS,
   PAGE_CATALOG,
@@ -24,7 +25,8 @@ import { asZod } from '../../lib/fastify.js';
 import { authEvents, rolePagePermissions } from '../../db/schema.js';
 import { fullMatrix, type OverrideMap } from '../../lib/permissions/matrix.js';
 import { readOverrides, type DbLike } from '../../lib/permissions/store.js';
-import { badRequest } from '../../lib/http-error.js';
+import { computeCellCoverage } from '../../lib/permissions/cell-coverage.js';
+import { HttpError, badRequest } from '../../lib/http-error.js';
 
 /** Колонка таблицы по действию. */
 const COLUMN: Record<PageAction, 'canView' | 'canCreate' | 'canEdit' | 'canDelete' | 'canReview'> =
@@ -36,7 +38,14 @@ const COLUMN: Record<PageAction, 'canView' | 'canCreate' | 'canEdit' | 'canDelet
     review: 'canReview',
   };
 
-type Change = { role: ManagedRole; page: PageId; action: PageAction; allowed: boolean };
+type Change = {
+  role: ManagedRole;
+  page: PageId;
+  action: PageAction;
+  allowed: boolean;
+  /** Значение, которое видел клиент. Расхождение с БД = конфликт правок (409). */
+  expected?: boolean;
+};
 
 /**
  * Ошибка валидации матрицы с машиночитаемым кодом. Обычный badRequest отдал бы
@@ -45,6 +54,17 @@ type Change = { role: ManagedRole; page: PageId; action: PageAction; allowed: bo
  */
 function invalid(code: string, message: string) {
   const err = badRequest(message);
+  err.name = code;
+  return err;
+}
+
+/**
+ * Конфликт правок: ячейку изменил другой администратор. 409, а не 400 —
+ * запрос корректен, изменилось состояние, и клиенту нужно перечитать матрицу и
+ * повторить, а не исправлять данные.
+ */
+function conflict(code: string, message: string) {
+  const err = new HttpError(409, message);
   err.name = code;
   return err;
 }
@@ -83,6 +103,18 @@ function computeWrites(changes: Change[], overrides: OverrideMap): Write[] {
     const patch: Partial<Record<PageAction, boolean>> = {};
     const audit: Change[] = [];
     for (const c of row.cells) {
+      // Оптимистичная блокировка на уровне ЯЧЕЙКИ. Клиент присылает значение,
+      // которое видел, принимая решение; если в БД уже другое — между чтением
+      // и сохранением эту же ячейку правил кто-то ещё, и молча затирать его
+      // работу нельзя. Проверка здесь, внутри транзакции поверх SELECT ... FOR
+      // UPDATE: снаружи она была бы гонкой сама по себе.
+      if (c.expected !== undefined && current[c.action] !== c.expected) {
+        throw conflict(
+          'stale_cell',
+          `Ячейку ${row.role}:${row.page}:${c.action} успел изменить другой администратор — ` +
+            'обновите страницу и повторите',
+        );
+      }
       patch[c.action] = c.allowed;
       audit.push(c);
     }
@@ -135,6 +167,9 @@ function computeWrites(changes: Change[], overrides: OverrideMap): Write[] {
 export async function rolePermissionRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
 
+  // Покрытие ячеек зависит только от реестра маршрутов — считаем один раз.
+  const coverage = computeCellCoverage();
+
   const catalogDto = PAGE_CATALOG.map((p) => ({
     id: p.id,
     group: p.group,
@@ -162,11 +197,25 @@ export async function rolePermissionRoutes(rawApp: FastifyInstance): Promise<voi
    */
   async function buildResponse() {
     const overrides = await readOverrides(app.db);
+    // Сколько строк-отклонений у каждой роли. Из матрицы это не вывести:
+    // строка может совпадать с дефолтом (после каскада), и она всё равно
+    // существует. Клиенту число нужно, чтобы «Сбросить к дефолту» не стёр
+    // строки, добавленные соседом уже после того, как страница загрузилась.
+    const overrideRows = {} as Record<ManagedRole, number>;
+    for (const role of MANAGED_ROLES) overrideRows[role] = 0;
+    for (const key of overrides.keys()) {
+      const role = key.split(':')[0] as ManagedRole;
+      if (role in overrideRows) overrideRows[role] += 1;
+    }
+
     return {
       enforced: app.permissions.enforced,
       catalog: catalogDto,
       matrix: fullMatrix(overrides),
       lockedCells: [...LOCKED_CELLS],
+      overrideRows,
+      // Считается из реестра, а не из БД, — поэтому один раз на модуль.
+      cellCoverage: coverage,
     };
   }
 
@@ -185,7 +234,12 @@ export async function rolePermissionRoutes(rawApp: FastifyInstance): Promise<voi
       preHandler: [app.authenticate, app.authorize('admin')],
       schema: {
         body: RolePermissionsPatchSchema,
-        response: { 200: RolePermissionsResponseSchema, 400: ErrorResponseSchema },
+        response: {
+          200: RolePermissionsResponseSchema,
+          400: ErrorResponseSchema,
+          // Ячейку успел изменить другой администратор — см. conflict().
+          409: ErrorResponseSchema,
+        },
       },
     },
     async (req) => {
@@ -317,7 +371,14 @@ export async function rolePermissionRoutes(rawApp: FastifyInstance): Promise<voi
       preHandler: [app.authenticate, app.authorize('admin')],
       schema: {
         params: z.object({ role: ManagedRoleSchema }),
-        response: { 200: RolePermissionsResponseSchema, 400: ErrorResponseSchema },
+        // Клиент может прислать число строк, которое видел: если их стало
+        // больше или меньше — роль правил кто-то ещё, и сброс отменяется.
+        querystring: z.object({ expectedRows: z.coerce.number().int().min(0).optional() }),
+        response: {
+          200: RolePermissionsResponseSchema,
+          400: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
       },
     },
     async (req) => {
@@ -326,6 +387,7 @@ export async function rolePermissionRoutes(rawApp: FastifyInstance): Promise<voi
       // «как в коде», поэтому записывать сегодняшние значения нельзя: дефолт
       // застыл бы слепком и перестал следовать за кодом.
       const role = req.params.role;
+      const expectedRows = req.query.expectedRows;
 
       await app.db.transaction(async (tx) => {
         const removed = await tx
@@ -337,7 +399,20 @@ export async function rolePermissionRoutes(rawApp: FastifyInstance): Promise<voi
             canDelete: rolePagePermissions.canDelete,
           })
           .from(rolePagePermissions)
-          .where(eq(rolePagePermissions.role, role));
+          .where(eq(rolePagePermissions.role, role))
+          // FOR UPDATE: между SELECT и DELETE соседний админ не должен успеть
+          // добавить строку, которая уедет в сброс без следа в аудите.
+          .for('update');
+
+        // Оптимистичная блокировка на уровне РОЛИ. Точность ячейки здесь не
+        // нужна: сброс стирает строки целиком, и любое расхождение означает,
+        // что человек принимал решение по устаревшему состоянию.
+        if (expectedRows !== undefined && removed.length !== expectedRows) {
+          throw conflict(
+            'stale_role',
+            'Права этой роли успел изменить другой администратор — обновите страницу и повторите',
+          );
+        }
 
         if (removed.length === 0) return;
 

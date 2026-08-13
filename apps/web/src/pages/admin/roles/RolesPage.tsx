@@ -13,7 +13,7 @@ import {
   Typography,
   message,
 } from 'antd';
-import { PlusCircleFilled } from '@ant-design/icons';
+import { InfoCircleOutlined, PlusCircleFilled } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   MANAGED_ROLES,
@@ -28,7 +28,7 @@ import {
   type RolePermissionsResponse,
   type UserRole,
 } from '@matcheck/contracts';
-import { api } from '../../../services/api';
+import { api, ApiError } from '../../../services/api';
 import { StickyPageHeader } from '../../../shared/ui/StickyPageHeader';
 import { ResponsiveTable } from '../../../shared/ui/ResponsiveTable';
 import { roleLabel } from '../../../shared/constants/roleLabels';
@@ -40,12 +40,23 @@ import {
   diffMatrix,
   groupState,
   isExtension,
+  rebaseDraft,
   roleHasChanges,
   type CatalogEntry,
   type Matrix,
 } from './matrixDraft';
 
 const ROLE_TABS: UserRole[] = ['admin', ...MANAGED_ROLES];
+
+/**
+ * Отказ из-за чужой правки: ячейку или роль успел изменить другой
+ * администратор. Проверяем именно `code` — `name` у ApiError обычный «Error»,
+ * и сверка по нему молча не срабатывала бы, оставляя человека жать «Сохранить»
+ * по кругу.
+ */
+function isConflict(err: unknown): boolean {
+  return err instanceof ApiError && (err.code === 'stale_cell' || err.code === 'stale_role');
+}
 
 /**
  * Подсказка под состоянием ячейки — почему её нельзя тронуть.
@@ -90,14 +101,33 @@ export default function RolesPage() {
   // раздельном выкате веба и API списки страниц разъедутся, и админ будет
   // править строки, которых сервер не знает.
   const catalog = query.data?.catalog ?? [];
+  /** Сколько строк-отклонений у роли по последнему ответу сервера. */
+  const overrideRowsOf = (r: ManagedRole) => query.data?.overrideRows?.[r] ?? 0;
 
-  // Черновик поднимается один раз на загрузку. Пере-инициализация на каждый
-  // ответ (в т.ч. фоновый refetch) стирала бы несохранённые правки.
+  // Снимок на момент подъёма черновика — от НЕГО считается дельта. Брать
+  // текущий ответ сервера нельзя: он обновляется фоновым рефетчем, и правка
+  // соседа по той же ячейке попала бы в мою дельту как возврат к прежнему
+  // значению, молча откатив чужую работу.
+  const [baseSnapshot, setBaseSnapshot] = useState<Matrix | null>(null);
+
   useEffect(() => {
-    if (server && !draft) setDraft(cloneMatrix(server));
-  }, [server, draft]);
+    if (!server) return;
+    if (!draft || !baseSnapshot) {
+      setDraft(cloneMatrix(server));
+      setBaseSnapshot(cloneMatrix(server));
+      return;
+    }
+    // Фоновый рефетч: нетронутые ячейки подтягиваем с сервера (иначе чужие
+    // правки не видны до перезагрузки), тронутые — оставляем своими.
+    const next = rebaseDraft(baseSnapshot, draft, server);
+    setDraft(next.draft);
+    setBaseSnapshot(next.base);
+    // Зависимость намеренно одна — server. Добавить сюда draft/baseSnapshot
+    // нельзя: ре-база запускалась бы на каждую правку ячейки и затирала бы её
+    // сама собой. Значения читаются на момент прихода нового ответа сервера.
+  }, [server]);
 
-  const changes = server && draft ? diffMatrix(server, draft) : [];
+  const changes = baseSnapshot && draft ? diffMatrix(baseSnapshot, draft) : [];
   const dirty = changes.length > 0;
 
   // Уход со страницы с несохранёнными правками. useBlocker здесь не
@@ -122,20 +152,37 @@ export default function RolesPage() {
       // черновик, иначе следующий diff считался бы от устаревшего снимка.
       qc.setQueryData(['role-permissions'], res);
       setDraft(cloneMatrix(res.matrix as Matrix));
+      setBaseSnapshot(cloneMatrix(res.matrix as Matrix));
       message.success('Права сохранены');
     },
-    onError: (err: Error) => message.error(err.message),
+    onError: (err: Error) => {
+      message.error(err.message);
+      // Конфликт правок: у соседа своя версия ячейки. Перечитываем матрицу,
+      // чтобы человек увидел актуальное состояние и решил заново, — иначе он
+      // будет жать «Сохранить» по кругу с тем же результатом.
+      // Код отказа лежит в ApiError.code; err.name у него — обычное «Error».
+      if (isConflict(err)) void query.refetch();
+    },
   });
 
   const reset = useMutation({
     mutationFn: (target: ManagedRole) =>
-      api.delete<RolePermissionsResponse>(`/admin/role-permissions/${target}`),
+      // Сколько строк-отклонений у роли я видел. Сервер сверит и откажет
+      // (409), если сосед успел что-то добавить или убрать: сброс стирает
+      // строки целиком, и делать это по устаревшей картине нельзя.
+      api.delete<RolePermissionsResponse>(
+        `/admin/role-permissions/${target}?expectedRows=${overrideRowsOf(target)}`,
+      ),
     onSuccess: (res) => {
       qc.setQueryData(['role-permissions'], res);
       setDraft(cloneMatrix(res.matrix as Matrix));
+      setBaseSnapshot(cloneMatrix(res.matrix as Matrix));
       message.success('Права роли сброшены к значениям по умолчанию');
     },
-    onError: (err: Error) => message.error(err.message),
+    onError: (err: Error) => {
+      message.error(err.message);
+      if (isConflict(err)) void query.refetch();
+    },
   });
 
   if (query.isLoading || !draft || !server) {
@@ -173,19 +220,38 @@ export default function RolesPage() {
         onChange={(e) => toggleCell(entry, action, e.target.checked)}
       />
     );
+    // Честная маркировка: та же ручка может кормить и вкладку, и комбобоксы
+    // формы приёмки, и мобильный /sync. Тогда снятая галочка убирает раздел из
+    // меню, но данные по API остаются — и знать это администратор должен до
+    // того, как на неё понадеется.
+    const coverage = query.data?.cellCoverage?.[`${entry.id}:${action}`];
+    const coverageHint =
+      coverage === 'portal-only'
+        ? 'Действует только в портале: раздел исчезнет из меню, но те же данные останутся доступны по API — эти маршруты кормят и форму приёмки, и мобильное приложение'
+        : coverage === 'partial'
+          ? 'Действует не полностью: часть маршрутов этой ячейки вне матрицы, данные по ним останутся доступны по API'
+          : null;
+
     const hint = extension
       ? 'Право выдано сверх базового набора роли'
       : state === 'write-locked'
         ? expandBlockReason(role, entry.id, action)
-        : CELL_HINT[state];
-    const wrapped = extension ? (
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-        {box}
-        <PlusCircleFilled style={{ color: '#fa8c16', fontSize: 11 }} />
-      </span>
-    ) : (
-      box
+        : (CELL_HINT[state] ?? coverageHint);
+    // Значок неполного покрытия — только у включённой галочки: у снятой
+    // оговорка бессмысленна, там и скрывать нечего.
+    const partialMark = coverageHint && checked && !extension && (
+      <InfoCircleOutlined style={{ color: '#8c8c8c', fontSize: 11 }} />
     );
+    const wrapped =
+      extension || partialMark ? (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          {box}
+          {extension && <PlusCircleFilled style={{ color: '#fa8c16', fontSize: 11 }} />}
+          {partialMark}
+        </span>
+      ) : (
+        box
+      );
     return hint ? (
       <Tooltip title={hint}>
         <span>{wrapped}</span>
@@ -219,8 +285,12 @@ export default function RolesPage() {
               {ROLE_TABS.map((r) => {
                 const isAdminRole = r === 'admin';
                 const active = isAdminRole ? adminSelected : !adminSelected && r === role;
+                // От снимка, а не от текущего сервера: иначе чужая правка
+                // подсвечивалась бы как моя несохранённая.
                 const changed =
-                  !isAdminRole && roleHasChanges(server, draft, r as ManagedRole);
+                  !isAdminRole &&
+                  baseSnapshot != null &&
+                  roleHasChanges(baseSnapshot, draft, r as ManagedRole);
                 return (
                   <Button
                     key={r}
@@ -240,7 +310,12 @@ export default function RolesPage() {
             <Space wrap>
               {dirty && <Tag color="orange">Есть несохранённые изменения</Tag>}
               <Button
-                onClick={() => setDraft(cloneMatrix(server))}
+                // «Отменить» возвращает к актуальному серверу и переносит туда
+                // же снимок: после отказа от правок расхождению взяться неоткуда.
+                onClick={() => {
+                  setDraft(cloneMatrix(server));
+                  setBaseSnapshot(cloneMatrix(server));
+                }}
                 disabled={!dirty || save.isPending}
               >
                 Отменить

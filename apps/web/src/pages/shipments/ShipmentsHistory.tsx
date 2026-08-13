@@ -42,6 +42,7 @@ import {
   unmarkDeletion,
 } from '../../services/shipments';
 import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StatusIconsCell, StatusLegend, ReviewStatusIcon } from '../../shared/ui/operationStatusIcon';
 import { operationsRowClass } from '../../shared/utils/operationsRowHighlight';
@@ -134,10 +135,20 @@ export function ShipmentsHistory({
   // Подрядчик: read-only + справочники закрыты — имена берём из DTO, фильтры/
   // действия записи скрыты, справочные запросы не грузим.
   const isContractor = authUser?.role === 'contractor';
-  // Мониторинг: read-only на данные, видит все объекты, ставит отметку проверки.
+  // Мониторинг: видит все объекты, ставит отметку проверки.
   const isMonitor = authUser?.role === 'monitor';
   // Менеджмент видит отметку проверки: бейдж, фильтр «С замечаниями».
   const isManagement = isAdmin || authUser?.role === 'manager' || isMonitor;
+
+  // Действия — по матрице, а не по имени роли (см. DeliveriesHistory).
+  const { can, hasCapability } = usePermissions();
+  const canEdit = can('operations.shipments', 'edit');
+  const canDelete = can('operations.shipments', 'delete');
+  // Ячейка И возможность — ровно как в приёмках: создание ссылки помечено
+  // operations.*:edit, а список ссылок открыт всем (always). Спрашивая одну
+  // возможность, мы оставили бы кнопку менеджеру со снятым edit — и создание
+  // вернуло бы 403.
+  const canShare = canEdit && hasCapability('operations.share.manage');
 
   // См. комментарий в DeliveriesHistory: tracking внешнего slot для portal-
   // режима bulk-actions, чтобы не сдвигать таблицу при выборе строк.
@@ -544,18 +555,20 @@ export function ShipmentsHistory({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterKey]);
 
-  // Иконка «Поделиться» — показывается всегда, даже в корзине, чтобы
-  // можно было создать публичную ссылку и без перехода в edit-режим.
-  const shareIcon = (r: Row) => (
-    <Tooltip title="Поделиться ссылкой">
-      <Button
-        size="small"
-        shape="circle"
-        icon={<ShareAltOutlined />}
-        onClick={() => setShareId(r.id)}
-      />
-    </Tooltip>
-  );
+  // Иконка «Поделиться» — и в корзине тоже: ссылку создают без перехода в
+  // edit-режим. Но только при праве: без гейта она оставалась у роли, которой
+  // создание ссылки закрыто, и клик возвращал 403.
+  const shareIcon = (r: Row) =>
+    canShare ? (
+      <Tooltip title="Поделиться ссылкой">
+        <Button
+          size="small"
+          shape="circle"
+          icon={<ShareAltOutlined />}
+          onClick={() => setShareId(r.id)}
+        />
+      </Tooltip>
+    ) : null;
 
   // Снимок для read-only ShipmentViewModal: подставляем имена получателя
   // (counterparty/destSite в зависимости от kind), объекта и краткие
@@ -603,8 +616,9 @@ export function ShipmentsHistory({
           onClick={() => setViewData(buildViewData(r))}
         />
       </Tooltip>
-      {/* Подрядчик и мониторинг — read-only: правка недоступна. */}
-      {!isContractor && !isMonitor && (
+      {/* Правка — по матрице: выданное администратором право обязано показать
+          кнопку, а перечислять роли рядом с ним незачем. */}
+      {canEdit && (
         <Tooltip title="Редактировать">
           <Button
             size="small"
@@ -618,8 +632,9 @@ export function ShipmentsHistory({
   );
 
   const renderActions = (r: Row) => {
-    // Подрядчик и мониторинг — read-only: удаление/пометка/восстановление недоступны.
-    if (isContractor || isMonitor) return null;
+    // Право удаления — у матрицы. Ограничения ниже (добить помеченное — только
+    // админ, восстановить — автор пометки) остаются: это бизнес-правила.
+    if (!canDelete) return null;
     const errMsg = deleteErrors[r.id];
     const errIcon = errMsg ? (
       <Tooltip title={errMsg}>
@@ -929,12 +944,11 @@ export function ShipmentsHistory({
         // ИНН второй строкой. Без явной минимальной ширины остальные ужимались
         // бы на 1024-1366px в нечитаемую кашу.
         scrollX={1700}
-        rowSelection={
-          (isAdmin || !isTrash) && !isContractor && !isMonitor ? bulk.selection : undefined
-        }
-        // monitor — read-only: клик по строке открывает просмотр (там же —
-        // отметка проверки), а не редактор.
-        onRowClick={(r) => (isMonitor ? setViewData(buildViewData(r)) : onOpen(r.id))}
+        // Массовые действия — по праву удаления; в корзине только у админа.
+        rowSelection={(isAdmin || !isTrash) && canDelete ? bulk.selection : undefined}
+        // Без права правки клик по строке ведёт в просмотр (там же — отметка
+        // проверки), а не в редактор, который всё равно откажет.
+        onRowClick={(r) => (canEdit ? onOpen(r.id) : setViewData(buildViewData(r)))}
         emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет отгрузок'}
         rowClassName={(r) =>
           operationsRowClass({ statusCode: r.status.code, dateIso: r.shippedAt })

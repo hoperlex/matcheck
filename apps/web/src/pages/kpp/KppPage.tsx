@@ -44,6 +44,7 @@ import type {
 } from '@matcheck/contracts';
 import { api, apiDownload } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { SYSTEM_SITE_ID } from '../../lib/db';
 import { capturePhoto, onPhotoUploadSettled } from '../../services/photoPipeline';
 import {
@@ -206,6 +207,19 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // Подрядчик: read-only + справочники закрыты. Не грузим справочные запросы,
   // чипы disabled, кнопки записи/загрузки фото скрыты; имена берём из DTO.
   const isContractor = authUser?.role === 'contractor';
+
+  // Права редактора — по матрице. Отдельные возможности там, где у маршрута
+  // свой allow-list: флаги, привязка УПД и подстановка поставщика открыты уже
+  // admin/manager, а загрузка кадра — ещё и инспектору. Спрашивать одну ячейку
+  // мало: роль с выданным create, но без edit, увидела бы правку, а с одним
+  // edit — загрузку фото; часть кнопок отвечала бы 403.
+  const { can, hasCapability } = usePermissions();
+  const canEditDelivery = can('operations.deliveries', 'edit');
+  const canEditFlags = canEditDelivery && hasCapability('operations.edit.flags');
+  const canLinkUpd = canEditDelivery && hasCapability('operations.edit.link_source');
+  const canPickSupplier = canEditDelivery && hasCapability('operations.edit.supplier_directory');
+  const canUploadPhoto =
+    can('operations.deliveries', 'create') && hasCapability('operations.photo.upload');
 
   const [items, setItems] = useState<DraftItem[]>([]);
   // Inline-edit названия материала: clientKey строки в режиме редактирования.
@@ -1525,7 +1539,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   hasUpd={(loadedDelivery.sourceDocumentIds?.length ?? 0) > 0}
                   displayName={supplierDisplayName}
                   invalidateQueryKey={['deliveries', deliveryId]}
-                  disabled={isInspector || isContractor}
+                  disabled={!canPickSupplier}
                 />
               )}
 
@@ -1600,8 +1614,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     — без УПД —
                   </Typography.Text>
-                  {!isInspector &&
-                    !isContractor &&
+                  {canLinkUpd &&
                     loadedDelivery?.sourceDocumentIds.length === 0 &&
                     !isNew && (
                       <Button
@@ -1630,7 +1643,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   emoji="🚚"
                   color="orange"
                   value={loadedDelivery.inTransit}
-                  disabled={isInspector || isContractor || patchFlags.isPending}
+                  disabled={!canEditFlags || patchFlags.isPending}
                   loading={patchFlags.isPending}
                   onChange={(next) => patchFlags.mutate({ inTransit: next })}
                 />
@@ -1644,7 +1657,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   emoji="📦"
                   color="purple"
                   value={loadedDelivery.isAssets}
-                  disabled={isInspector || isContractor || patchFlags.isPending}
+                  disabled={!canEditFlags || patchFlags.isPending}
                   loading={patchFlags.isPending}
                   onChange={(next) => patchFlags.mutate({ isAssets: next })}
                 />
@@ -1699,8 +1712,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               label: `Фото${photosCount ? ` (${photosCount})` : ''}`,
               children: (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                  {/* Подрядчик — read-only: загрузка фото недоступна (только просмотр). */}
-                  {!isContractor && (
+                  {/* Загрузка кадра — право «Создавать» плюс возможность маршрута
+                      (у presign/confirm свой allow-list, шире правки). */}
+                  {canUploadPhoto && (
                   <Space wrap>
                     <Upload {...photoPropsStage1}>
                       <Button size="large" icon={<CameraOutlined />}>

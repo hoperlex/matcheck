@@ -42,6 +42,7 @@ import {
   unmarkDeletion,
 } from '../../services/deliveries';
 import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StatusIconsCell, StatusLegend, ReviewStatusIcon } from '../../shared/ui/operationStatusIcon';
 import { operationsRowClass } from '../../shared/utils/operationsRowHighlight';
@@ -156,11 +157,21 @@ export function DeliveriesHistory({
   // Подрядчик: read-only + справочники закрыты (403). Не грузим справочные
   // запросы и берём имена из DTO; фильтры/действия записи скрыты.
   const isContractor = authUser?.role === 'contractor';
-  // Мониторинг: read-only на данные (как contractor, но видит все объекты и
-  // справочники), из строки открывает просмотр, ставит отметку проверки.
+  // Мониторинг: видит все объекты и справочники, ставит отметку проверки.
   const isMonitor = authUser?.role === 'monitor';
   // Менеджмент видит отметку проверки: бейдж, фильтр «С замечаниями».
   const isManagement = isAdmin || authUser?.role === 'manager' || isMonitor;
+
+  // Действия — по матрице, а не по имени роли. Ссылка-шаринг спрашивается
+  // отдельной возможностью: у неё свой allow-list, и выданная правка её не
+  // открывает (см. route-map, operations.share.manage).
+  const { can, hasCapability } = usePermissions();
+  const canEdit = can('operations.deliveries', 'edit');
+  const canDelete = can('operations.deliveries', 'delete');
+  // Ячейка И возможность: создание ссылки помечено operations.*:edit, а список
+  // ссылок — always. Спрашивая одну возможность, мы оставили бы кнопку
+  // менеджеру со снятым edit — и создание вернуло бы 403.
+  const canShare = canEdit && hasCapability('operations.share.manage');
 
   // Slot для bulk-actions в внешнем header-row родителя. Отслеживаем
   // через state, потому что ref.current = null до commit phase — портал
@@ -642,8 +653,11 @@ export function DeliveriesHistory({
 
   // Возвращает блок кнопок действий в зависимости от вкладки, статуса и прав.
   const renderActions = (r: Row) => {
-    // Подрядчик и мониторинг — read-only: удаление/пометка/восстановление недоступны.
-    if (isContractor || isMonitor) return null;
+    // Право удаления спрашиваем у матрицы, а не у имени роли: администратор
+    // может выдать «Удалять» во вкладке «Роли», и кнопки обязаны появиться.
+    // Ограничения ниже (добить помеченное — только админ, восстановить — автор
+    // пометки) остаются: это бизнес-правила, а не авторизация.
+    if (!canDelete) return null;
     const errMsg = deleteErrors[r.id];
     const errIcon = errMsg ? (
       <Tooltip title={errMsg}>
@@ -754,8 +768,9 @@ export function DeliveriesHistory({
           onClick={() => setViewData(buildViewData(r))}
         />
       </Tooltip>
-      {/* Подрядчик и мониторинг — read-only: правка и share недоступны. */}
-      {!isContractor && !isMonitor && (
+      {/* Правка — по матрице; ссылка-шаринг — по своей возможности: у неё
+          отдельный allow-list, и выданный edit её не открывает. */}
+      {canEdit && (
         <Tooltip title="Редактировать">
           <Button
             size="small"
@@ -765,7 +780,7 @@ export function DeliveriesHistory({
           />
         </Tooltip>
       )}
-      {!isContractor && !isMonitor && (
+      {canShare && (
         <Tooltip title="Поделиться ссылкой">
           <Button
             size="small"
@@ -1060,12 +1075,12 @@ export function DeliveriesHistory({
         // ИНН второй строкой. Без явной минимальной ширины остальные ужимались
         // бы на 1024-1366px в нечитаемую кашу.
         scrollX={1700}
-        // monitor — read-only: клик по строке открывает просмотр (там же —
-        // отметка проверки), а не редактор.
-        rowSelection={
-          (isAdmin || !isTrash) && !isContractor && !isMonitor ? bulk.selection : undefined
-        }
-        onRowClick={(r) => (isMonitor ? setViewData(buildViewData(r)) : onOpen(r.id))}
+        // Массовые действия — по праву удаления; в корзине они только у админа
+        // (окончательное удаление помеченного — его прерогатива).
+        rowSelection={(isAdmin || !isTrash) && canDelete ? bulk.selection : undefined}
+        // Без права правки клик по строке ведёт в просмотр (там же — отметка
+        // проверки), а не в редактор, который всё равно откажет.
+        onRowClick={(r) => (canEdit ? onOpen(r.id) : setViewData(buildViewData(r)))}
         emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет приёмок'}
         rowClassName={(r) =>
           operationsRowClass({ statusCode: r.status.code, dateIso: r.arrivedAt })

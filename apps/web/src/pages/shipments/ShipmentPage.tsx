@@ -45,6 +45,7 @@ import type {
 } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { capturePhoto, onPhotoUploadSettled } from '../../services/photoPipeline';
 import {
   applyLocalEdit,
@@ -190,6 +191,14 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   // Подрядчик: read-only + справочники закрыты. Не грузим справочные запросы,
   // чипы disabled, кнопки записи/фото скрыты; имена берём из DTO.
   const isContractor = authUser?.role === 'contractor';
+
+  // Права редактора — по матрице, отдельные возможности там, где у маршрута
+  // свой allow-list (см. зеркальный комментарий в KppPage).
+  const { can, hasCapability } = usePermissions();
+  const canEditShipment = can('operations.shipments', 'edit');
+  const canPickSupplier = canEditShipment && hasCapability('operations.edit.supplier_directory');
+  const canUploadPhoto =
+    can('operations.shipments', 'create') && hasCapability('operations.photo.upload');
 
   const [items, setItems] = useState<DraftItem[]>([]);
   // Inline-edit названия материала: см. apps/web/src/pages/kpp/KppPage.tsx.
@@ -1442,7 +1451,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   hasUpd={(loadedShipment.sourceDocumentIds?.length ?? 0) > 0}
                   displayName={supplierDisplayName}
                   invalidateQueryKey={['shipments', shipmentId]}
-                  disabled={isInspector || isContractor}
+                  disabled={!canPickSupplier}
                 />
               )}
 
@@ -1642,8 +1651,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               label: `Фото${photosCount ? ` (${photosCount})` : ''}`,
               children: (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                  {/* Подрядчик — read-only: загрузка фото недоступна. */}
-                  {!isContractor && (
+                  {/* Загрузка кадра — «Создавать» плюс возможность маршрута. */}
+                  {canUploadPhoto && (
                   <Space wrap>
                     <Upload {...photoPropsStage1}>
                       <Button size="large" icon={<CameraOutlined />}>

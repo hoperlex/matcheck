@@ -54,6 +54,9 @@ export async function meRoutes(rawApp: FastifyInstance): Promise<void> {
         // выключенном enforcement — от дефолтов, то есть повторяют сегодняшний
         // доступ. Разъехаться эти два поля не могут.
         capabilities: capabilitiesFor(overrides, user.role, app.permissions.routeRoles),
+        // Отпечаток authz-состояния: роль и обе привязки скоупа. Значение
+        // непрозрачно для клиента — он только сравнивает его с прошлым.
+        authzRevision: [user.role, user.siteId ?? '-', user.contractorCustomerId ?? '-'].join(':'),
       };
     },
   );

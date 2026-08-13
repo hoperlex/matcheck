@@ -104,4 +104,66 @@ export async function syncPermissions(user?: Pick<UserDto, 'id'> | null): Promis
   const perms = permissionsToApply(result.payload, user ?? null, current ?? null);
   if (!perms) return;
   usePermissionsStore.getState().set(current!.id, perms);
+  await refreshUserIfAuthzChanged(result.payload, current ?? null);
+}
+
+/**
+ * Роль или скоуп пользователя изменились на сервере — перечитать /auth/me.
+ *
+ * Права приезжают опросом, а роль, siteId и привязка к подрядчику живут в
+ * auth-store и заполняются один раз при входе. Без этой сверки получалось
+ * смешанное состояние: меню уже от новой роли, а ролевые ветки и скоуп — от
+ * старой, до перезагрузки страницы.
+ *
+ * Сравнивать по одной роли недостаточно: смена объекта у инспектора роль не
+ * меняет, а видимость меняет, — поэтому сервер отдаёт отпечаток целиком.
+ * Старый API поля не присылает: тогда сверять нечего и поведение прежнее.
+ *
+ * Ошибку глотаем: не смогли перечитать — останемся на прежних данных до
+ * следующего опроса, это не повод ронять синхронизацию прав.
+ */
+async function refreshUserIfAuthzChanged(
+  payload: MePermissionsResponse,
+  current: UserDto | null,
+): Promise<void> {
+  const revision = payload.authzRevision;
+  if (!revision || !current) return;
+  const known = [current.role, current.siteId ?? '-', current.contractorCustomerId ?? '-'].join(
+    ':',
+  );
+  if (revision === known) return;
+
+  try {
+    const me = await fetchMe();
+    // Пользователь мог смениться, пока запрос был в полёте.
+    if (!me || useAuthStore.getState().user?.id !== me.id) return;
+    useAuthStore.getState().setUser(me);
+    // Скоуп изменился — данные на экране собраны под старую видимость.
+    onAuthzChangedHandlers.forEach((fn) => fn());
+  } catch {
+    /* см. комментарий выше */
+  }
+}
+
+/** Голый fetch по тем же причинам, что и у прав: api.ts замкнул бы цикл. */
+async function fetchMe(): Promise<UserDto | null> {
+  const token = useAuthStore.getState().accessToken;
+  const res = await fetch('/api/v1/auth/me', {
+    credentials: 'include',
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as UserDto;
+}
+
+const onAuthzChangedHandlers = new Set<() => void>();
+
+/**
+ * Подписка на смену роли или скоупа. Нужна, чтобы сбросить кеш запросов:
+ * списки, справочники и счётчики собраны под прежнюю видимость и после смены
+ * объекта показывали бы чужие данные до истечения их staleTime.
+ */
+export function onAuthzChanged(fn: () => void): () => void {
+  onAuthzChangedHandlers.add(fn);
+  return () => onAuthzChangedHandlers.delete(fn);
 }

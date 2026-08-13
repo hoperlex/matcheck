@@ -68,11 +68,10 @@ export default function OperationsPage() {
         : 'shipment';
   const page: PageId = type === 'delivery' ? 'operations.deliveries' : 'operations.shipments';
   const canCreate = can(page, 'create');
+  const canEditOps = can(page, 'edit');
   const tab: ListTab = params.get('tab') === 'accepted' ? 'accepted' : 'expected';
   const isInspector = authUser?.role === 'inspector_kpp';
   const isContractor = authUser?.role === 'contractor';
-  // Мониторинг: read-only, не создаёт приёмки/отгрузки (кнопка создания скрыта).
-  const isMonitor = authUser?.role === 'monitor';
   const inspectorWithoutSite = isInspector && !authUser?.siteId;
   // Подрядчик без привязки к контрагенту видит пустые списки — показываем баннер.
   const contractorWithoutLink = isContractor && !authUser?.contractorCustomerId;
@@ -199,14 +198,18 @@ export default function OperationsPage() {
   // Защита «слепка таблицы» (ради которой когда-то ввели closing) теперь
   // не нужна — `if (embedded) return null;` в KppPage / ShipmentPage
   // перехватывает любой рендер этих компонентов без params.
-  // monitor — read-only на данные: редактор ему недоступен даже по прямому URL
-  // (?delivery=/?shipment=). Он работает только через модалку просмотра (клик по
-  // строке / иконка «глаз»), где ставит отметку проверки. Бэкенд дублирует запрет
-  // (read-only guard, 403 на любую запись), это — чтобы не показывать сам редактор.
+  // Редактор открывается по ПРАВУ, а не по имени роли: администратор может
+  // выдать роли создание или правку во вкладке «Роли», и форма обязана
+  // открыться. Права разные: новая запись требует «Создавать», существующая —
+  // «Редактировать». Иначе роль с одним лишь create открывала бы чужую приёмку
+  // и получала 403 при сохранении. Без права остаётся модалка просмотра (клик
+  // по строке / «глаз») с отметкой проверки; сервер запрет дублирует.
   const deliveryModalOpen =
-    !MODAL_DISABLED && !isMonitor && (Boolean(editDeliveryId) || editDeliveryIsNew);
+    !MODAL_DISABLED &&
+    (editDeliveryIsNew ? canCreate : Boolean(editDeliveryId) && canEditOps);
   const shipmentModalOpen =
-    !MODAL_DISABLED && !isMonitor && (Boolean(editShipmentId) || editShipmentIsNew);
+    !MODAL_DISABLED &&
+    (editShipmentIsNew ? canCreate : Boolean(editShipmentId) && canEditOps);
 
   // Закрытие — один проход: чистим URL (или уходим на /materials, если
   // пришли оттуда). Modal видит open=false на следующем рендере и
@@ -313,9 +316,10 @@ export default function OperationsPage() {
   );
   const headerExtras = (
     <Space size={8}>
-      {/* Подрядчик и мониторинг — read-only: кнопку создания не показываем.
-          canCreate — та же проверка по матрице; сервер её дублирует отказом. */}
-      {!isContractor && !isMonitor && canCreate && createButton}
+      {/* Только по матрице: перечислять роли рядом с правом незачем — у
+          read-only ролей create в дефолте нет, а выданный админом обязан
+          показать кнопку. Сервер проверку дублирует отказом. */}
+      {canCreate && createButton}
       {exportButton}
     </Space>
   );

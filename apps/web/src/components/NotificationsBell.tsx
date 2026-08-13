@@ -8,7 +8,7 @@ import type {
   ShareMessageUnreadCountResponse,
 } from '@matcheck/contracts';
 import { api } from '../services/api';
-import { useAuthStore } from '../stores/auth';
+import { usePermissions } from '../shared/hooks/usePermissions';
 import { formatDateRu } from '../shared/utils/formatRu';
 import { ShareThreadDrawer } from './ShareThreadDrawer';
 
@@ -18,11 +18,18 @@ import { ShareThreadDrawer } from './ShareThreadDrawer';
  * = текущий юзер (или все — для admin). Клик → Popover со списком тредов;
  * клик по треду → Drawer чата.
  *
- * Доступна только admin/manager (inspector_kpp не пользуется share).
+ * Виден по возможности `operations.share.messages`, а не по имени роли: у
+ * переписки свой allow-list, отличный от создания ссылки (инспектор ссылку
+ * создаёт, но переписку не читает), и одна общая проверка рисовала бы
+ * колокольчик тому, кому список тредов ответит 403.
  */
 export function NotificationsBell({ collapsed = false }: { collapsed?: boolean }) {
-  const role = useAuthStore((s) => s.user?.role);
-  const enabled = role === 'admin' || role === 'manager';
+  const { hasCapability, loading } = usePermissions();
+  // Пока права не приехали, hasCapability отвечает «да» — таков инвариант «нет
+  // данных ≠ нет прав», и для видимых контролов он верен. Но здесь запрос
+  // уходит САМ, без клика: подрядчик получал бы гарантированный 403 на каждой
+  // загрузке портала. Поэтому ждём ответа, а не показываем колокольчик авансом.
+  const enabled = !loading && hasCapability('operations.share.messages');
   const [open, setOpen] = useState(false);
   const [drawerTokenId, setDrawerTokenId] = useState<string | null>(null);
 

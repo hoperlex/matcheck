@@ -1,5 +1,6 @@
-import { isActionApplicable, type UserRole } from '@matcheck/contracts';
-import { isAllowed, isExpanded, type OverrideMap } from './matrix.js';
+import type { ManagedRole, UserRole } from '@matcheck/contracts';
+import type { OverrideMap } from './matrix.js';
+import { judgeRuleCells } from './rule-cells.js';
 import { ROUTE_PERMISSIONS, type RouteRule } from './route-map.js';
 import type { RouteRolesMap } from './route-roles.js';
 
@@ -36,19 +37,17 @@ function routeAllowsRole(
   // admin вне матрицы и вне allow-list'ов — ему доступно всё.
   if (role === 'admin') return true;
 
-  // 1. Матрица. Правила без ячейки (always) проверять нечем — они и не
-  //    участвуют в матрице по определению.
-  let expanded = false;
-  if (rule.kind === 'static' || rule.kind === 'legacy') {
-    if (!isActionApplicable(rule.page, rule.action)) return false;
-    if (!isAllowed(overrides, role, rule.page, rule.action)) return false;
-    expanded =
-      isExpanded(overrides, role, rule.page, rule.action) &&
-      (rule.expandableBy?.includes(role as never) ?? true);
-    // legacy: роли из списка идут мимо матрицы целиком и мимо allow-list —
-    // их доступ исторический.
-    if (rule.kind === 'legacy' && rule.roles.includes(role as never)) return true;
-  }
+  // 1. Матрица — через общую с рантайм-хуком функцию, чтобы «что разрешено»
+  //    считалось одинаково. Она же покрывает dynamic/in-handler: у маршрутов
+  //    фото и upsert ячеек несколько, и раньше они здесь не рассматривались
+  //    вовсе — выданное монитору право не давало ему capability.
+  const verdict = judgeRuleCells(rule, overrides, role as ManagedRole);
+  if (!verdict.allowed) return false;
+  const expanded = verdict.expanded;
+
+  // legacy: роли из списка идут мимо матрицы целиком и мимо allow-list —
+  // их доступ исторический.
+  if (rule.kind === 'legacy' && rule.roles.includes(role as ManagedRole)) return true;
 
   // 2. Allow-list маршрута.
   const roles = routeRoles.get(key);

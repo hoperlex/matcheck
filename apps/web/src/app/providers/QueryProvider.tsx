@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
+import { onAuthzChanged } from '../../services/permissionsSync';
 
 export function QueryProvider({ children }: { children: ReactNode }) {
   const [client] = useState(
@@ -21,5 +22,13 @@ export function QueryProvider({ children }: { children: ReactNode }) {
         },
       }),
   );
+
+  // Смена роли или объекта на сервере меняет видимость данных, а кеш собран под
+  // прежнюю. Именно resetQueries, а не invalidateQueries: последний помечает
+  // данные устаревшими, но оставляет их на экране до ответа сервера — то есть
+  // выдачу чужого скоупа было бы видно ещё несколько секунд. Сбрасываем всё
+  // разом: событие редкое (правка администратором), экономить нечего.
+  useEffect(() => onAuthzChanged(() => void client.resetQueries()), [client]);
+
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }

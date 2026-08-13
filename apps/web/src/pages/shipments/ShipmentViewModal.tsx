@@ -8,7 +8,7 @@ import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
-import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 
 type Row = z.infer<typeof ShipmentListResponseSchema>['items'][number];
 type Item = Row['items'][number];
@@ -49,8 +49,9 @@ export function ShipmentViewModal({
   onClose: () => void;
   onEdit: () => void;
 }) {
-  // monitor — read-only: редактор недоступен, кнопку «Открыть в редакторе» не показываем.
-  const isMonitor = useAuthStore((st) => st.user?.role === 'monitor');
+  // Переход в редактор — по праву правки, а не по имени роли: выданный
+  // администратором edit обязан открывать форму и отсюда.
+  const canEdit = usePermissions().can('operations.shipments', 'edit');
   const s = data?.shipment;
   const items = s?.items ?? [];
 
@@ -186,7 +187,7 @@ export function ShipmentViewModal({
       footer={
         <Space>
           <Button onClick={onClose}>Закрыть</Button>
-          {!isMonitor && (
+          {canEdit && (
             <Button type="primary" icon={<EditOutlined />} onClick={onEdit}>
               Открыть в редакторе
             </Button>

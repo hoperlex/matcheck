@@ -15,15 +15,16 @@ import { DeleteOutlined, EditOutlined, ReloadOutlined, WarningOutlined } from '@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   DeliveryPhoto,
+  PageId,
   PhotoDeleteResponse,
   PhotoPatchResponse,
   ShipmentPhoto,
 } from '@matcheck/contracts';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { api, apiDownload, ApiError } from '../../services/api';
 import { uploadPhoto } from '../../services/photoPipeline';
 import { enqueueThumbLoad, enqueueFullLoad } from '../../lib/thumbQueue';
 import { db, type OperationKind } from '../../lib/db';
-import { useAuthStore } from '../../stores/auth';
 import { PhotoDocumentPreview } from './PhotoDocumentPreview';
 
 const THUMB_SIZE = 140;
@@ -79,13 +80,18 @@ export function PhotoGallery({
   // даже если пользователь admin. Семантически: «здесь смотрят, не правят».
   readOnly?: boolean;
 }): JSX.Element | null {
-  const role = useAuthStore((s) => s.user?.role);
-  // admin + manager: оба полностью редактируют приёмки/отгрузки, удаление
-  // отдельного фото — часть этих прав. Inspector_kpp на веб-портале фото
-  // не правит; на мобиле он удаляет через свой UI.
-  const canDelete = (role === 'admin' || role === 'manager') && !readOnly;
-  // Изменение типа фото (kind) — те же роли. Симметрично canDelete.
-  const canEditKind = (role === 'admin' || role === 'manager') && !readOnly;
+  // Право = ячейка И возможность маршрута. Одной ячейки мало: у инспектора
+  // operations.*:delete базово есть, но DELETE /photos/:id открыт только
+  // admin/manager — по ячейке мы нарисовали бы ему кнопку, отвечающую 403.
+  // Одной возможности тоже мало: снятое администратором право обязано убрать
+  // кнопку, даже если allow-list маршрута роль пропускает.
+  const { can, hasCapability } = usePermissions();
+  const page: PageId =
+    operationKind === 'shipment' ? 'operations.shipments' : 'operations.deliveries';
+  const managePhotos = hasCapability('operations.photo.manage');
+  const canDelete = can(page, 'delete') && managePhotos && !readOnly;
+  // Изменение типа кадра — правка операции, не удаление.
+  const canEditKind = can(page, 'edit') && managePhotos && !readOnly;
   const queryClient = useQueryClient();
   const invalidateKey = operationKind === 'shipment' ? 'shipments' : 'deliveries';
 
