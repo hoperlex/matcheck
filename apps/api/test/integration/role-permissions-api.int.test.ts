@@ -339,6 +339,92 @@ suite('матрица прав: админское API (реальный Postgre
     expect(row).toMatchObject({ can_review: true });
   });
 
+  it('конфликт правок: ячейку успел изменить другой администратор', async () => {
+    // Дельта решает конкурентность на РАЗНЫХ ячейках, но не на одной. Сосед
+    // сохранил своё значение, пока я держал страницу открытой; без сверки с
+    // expected моё сохранение молча откатило бы его работу.
+    const first = await patch([
+      { role: 'manager', page: 'references.units', action: 'edit', allowed: false },
+    ]);
+    expect(first.statusCode).toBe(200);
+
+    // Я всё ещё вижу старое значение (true) и на него ссылаюсь.
+    const second = await patch([
+      {
+        role: 'manager',
+        page: 'references.units',
+        action: 'edit',
+        allowed: true,
+        expected: true,
+      },
+    ]);
+    expect(second.statusCode).toBe(409);
+    expect(second.json()).toMatchObject({ error: 'stale_cell' });
+    // Чужое значение уцелело.
+    expect(await rowOf('manager', 'references.units')).toMatchObject({ can_edit: false });
+  });
+
+  it('совпавшее ожидание сохраняется штатно', async () => {
+    const res = await patch([
+      {
+        role: 'manager',
+        page: 'references.suppliers',
+        action: 'edit',
+        allowed: false,
+        expected: true,
+      },
+    ]);
+    expect(res.statusCode).toBe(200);
+    expect(await rowOf('manager', 'references.suppliers')).toMatchObject({ can_edit: false });
+  });
+
+  it('без expected поведение прежнее — старый клиент не ломается', async () => {
+    const res = await patch([
+      { role: 'manager', page: 'references.sites', action: 'edit', allowed: false },
+    ]);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('сброс к дефолту отменяется, если роль успел изменить другой админ', async () => {
+    // Сброс стирает строки целиком: делать это по устаревшей картине нельзя —
+    // вместе со своими исчезли бы и чужие правки, о которых человек не знал.
+    await patch([
+      { role: 'manager', page: 'references.units', action: 'edit', allowed: false },
+    ]);
+
+    // Я видел одну строку, а сосед добавил вторую.
+    await patch([
+      { role: 'manager', page: 'references.sites', action: 'edit', allowed: false },
+    ]);
+
+    const stale = await app.inject({
+      method: 'DELETE',
+      url: '/api/v1/admin/role-permissions/manager?expectedRows=1',
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json()).toMatchObject({ error: 'stale_role' });
+    // Ничего не стёрто.
+    expect(await rowOf('manager', 'references.sites')).toBeDefined();
+
+    // С актуальным числом строк сброс проходит.
+    const ok = await app.inject({
+      method: 'DELETE',
+      url: '/api/v1/admin/role-permissions/manager?expectedRows=2',
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(await rowOf('manager', 'references.sites')).toBeUndefined();
+  });
+
+  it('GET отдаёт число строк-отклонений по ролям', async () => {
+    await patch([
+      { role: 'manager', page: 'references.units', action: 'edit', allowed: false },
+    ]);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/admin/role-permissions' });
+    const body = res.json() as { overrideRows: Record<string, number> };
+    expect(body.overrideRows.manager).toBe(1);
+    expect(body.overrideRows.monitor).toBe(0);
+  });
+
   it('роль admin в матрицу не принимается', async () => {
     const res = await patch([
       { role: 'admin', page: 'references.sites', action: 'edit', allowed: false },

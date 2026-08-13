@@ -81,8 +81,9 @@ export const INLINE_ROLE_ACCESS: Record<string, ManagedRole[]> = {
   'GET /api/v1/deliveries/:id': ['manager', 'inspector_kpp', 'contractor', 'monitor'],
   'GET /api/v1/deliveries/export.xlsx': ['manager', 'inspector_kpp', 'contractor', 'monitor'],
   // deliveries.ts:943 — hard-delete: admin всегда; manager/inspector только для
-  // draft/not_filled (инспектор — в пределах своего объекта). contractor и
-  // monitor отсечены глобальным read-only-хуком (server.ts) как мутация.
+  // draft/not_filled (инспектор — в пределах своего объекта, и получает 403, а
+  // не 404). contractor и monitor отсечены read-only-гардом (plugins/
+  // permissions.ts) как мутация.
   'DELETE /api/v1/deliveries/:id': ['manager', 'inspector_kpp'],
   // deliveries.ts:1068,1135 — пометка на удаление и её снятие (снять может
   // автор пометки либо admin).
@@ -135,6 +136,9 @@ export const INLINE_ROLE_ACCESS: Record<string, ManagedRole[]> = {
     'contractor',
     'monitor',
   ],
+  // Свои же права: закрыв этот маршрут, мы лишили бы интерфейс возможности их
+  // узнать — он навсегда остался бы на дефолтах. Доступен всем ролям.
+  'GET /api/v1/me/permissions': ['manager', 'inspector_kpp', 'contractor', 'monitor'],
   // Самообслуживание — доступно всем ролям.
   'GET /api/v1/auth/me': ['manager', 'inspector_kpp', 'contractor', 'monitor'],
   'PATCH /api/v1/auth/me': ['manager', 'inspector_kpp', 'contractor', 'monitor'],

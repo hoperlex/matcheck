@@ -110,3 +110,80 @@ describe('fetchPermissions: сеть', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('смена роли и объекта без перезагрузки страницы', () => {
+  /** Стор + мок сети: /me/permissions отдаёт revision, /auth/me — нового юзера. */
+  async function setup(revision: string, me: Record<string, unknown>) {
+    const fetchMock = vi.fn(async (url: string) =>
+      url.includes('/me/permissions')
+        ? new Response(JSON.stringify(response({ authzRevision: revision })), { status: 200 })
+        : new Response(JSON.stringify(me), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const mod = await loadModule();
+    const { useAuthStore } = await import('../stores/auth');
+    return { mod, useAuthStore, fetchMock };
+  }
+
+  const user = (over: Record<string, unknown> = {}) => ({
+    id: 'u1',
+    email: 'u@x',
+    role: 'monitor',
+    siteId: null,
+    contractorCustomerId: null,
+    ...over,
+  });
+
+  it('роль изменилась на сервере — auth-store перечитывается', async () => {
+    // Без этого меню строилось бы по новым правам, а isMonitor/siteId и
+    // ролевые ветки оставались от старой роли до F5.
+    const { mod, useAuthStore, fetchMock } = await setup('manager:-:-', user({ role: 'manager' }));
+    useAuthStore.setState({ user: user() as never, accessToken: 't' });
+
+    await mod.syncPermissions({ id: 'u1' });
+
+    expect(useAuthStore.getState().user?.role).toBe('manager');
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/auth/me'))).toBe(true);
+  });
+
+  it('сменился только объект — тоже перечитываем', async () => {
+    // Роль прежняя, поэтому сверка по одной роли этот случай пропустила бы, а
+    // видимость инспектора уже другая.
+    const { mod, useAuthStore } = await setup(
+      'inspector_kpp:site-2:-',
+      user({ role: 'inspector_kpp', siteId: 'site-2' }),
+    );
+    useAuthStore.setState({
+      user: user({ role: 'inspector_kpp', siteId: 'site-1' }) as never,
+      accessToken: 't',
+    });
+
+    await mod.syncPermissions({ id: 'u1' });
+
+    expect(useAuthStore.getState().user?.siteId).toBe('site-2');
+  });
+
+  it('ничего не изменилось — лишнего запроса нет', async () => {
+    const { mod, useAuthStore, fetchMock } = await setup('monitor:-:-', user());
+    useAuthStore.setState({ user: user() as never, accessToken: 't' });
+
+    await mod.syncPermissions({ id: 'u1' });
+
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/auth/me'))).toBe(false);
+  });
+
+  it('старый API без поля revision ничего не ломает', async () => {
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify(response()), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const mod = await loadModule();
+    const { useAuthStore } = await import('../stores/auth');
+    useAuthStore.setState({ user: user() as never, accessToken: 't' });
+
+    await mod.syncPermissions({ id: 'u1' });
+
+    expect(useAuthStore.getState().user?.role).toBe('monitor');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});

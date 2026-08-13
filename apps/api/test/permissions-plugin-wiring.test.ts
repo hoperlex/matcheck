@@ -40,4 +40,13 @@ describe('проводка плагина прав', () => {
     const firstRoute = src.indexOf('await app.register(healthRoutes)');
     expect(firstRoute).toBeGreaterThan(perms);
   });
+
+  it('read-only-гард живёт в плагине, а не отдельным хуком в server.ts', async () => {
+    // Пока гард был здесь, он отбивал мутации монитора РАНЬШЕ матрицы, и
+    // выданное право не работало никогда. Возврат хардкода в server.ts вернул
+    // бы ту же дыру молча — поэтому проверяем, что его тут нет.
+    const src = await readFile(SERVER_TS, 'utf8');
+    expect(src).not.toMatch(/MONITOR_WRITE_ROUTES/);
+    expect(src).not.toMatch(/Read-only role/);
+  });
 });

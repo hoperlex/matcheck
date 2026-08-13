@@ -7,6 +7,14 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    // .tsx — render-тесты permission-aware контролов. Они поднимают jsdom
+    // сами, директивой `// @vitest-environment jsdom`: держать jsdom общим
+    // окружением ради нескольких файлов значило бы замедлить остальные ~160
+    // тестов, которые в DOM не нуждаются.
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    // Полифиллы того, чего в jsdom нет (ResizeObserver, matchMedia,
+    // createObjectURL), и подавление известного jsdom-шума. В node-окружении
+    // файл ничего не делает — см. guard внутри.
+    setupFiles: ['./src/test/setup.ts'],
   },
 });

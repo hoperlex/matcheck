@@ -20,6 +20,7 @@ import {
   diffMatrix,
   groupState,
   isExtension,
+  rebaseDraft,
   roleHasChanges,
   type CatalogEntry,
   type Matrix,
@@ -153,7 +154,15 @@ describe('каскад просмотра', () => {
     const after = applyCell(fresh(), byId('references.sites'), 'manager', 'delete', true, locked);
     expect(after.manager['references.sites']!.delete).toBe(true);
     expect(diffMatrix(fresh(), after)).toEqual([
-      { role: 'manager', page: 'references.sites', action: 'delete', allowed: true },
+      {
+        role: 'manager',
+        page: 'references.sites',
+        action: 'delete',
+        allowed: true,
+        // Старое значение едет вместе с правкой: по нему сервер отличит
+        // «включить впервые» от «затереть чужое изменение».
+        expected: false,
+      },
     ]);
     expect(isExtension(byId('references.sites'), 'manager', 'delete', true)).toBe(true);
     // Базовое право расширением не считается.
@@ -249,5 +258,76 @@ describe('дельта для сохранения', () => {
     let draft = applyCell(fresh(), byId('references.sites'), 'manager', 'edit', false, locked);
     draft = applyCell(draft, byId('references.sites'), 'manager', 'edit', true, locked);
     expect(diffMatrix(fresh(), draft)).toEqual([]);
+  });
+});
+
+describe('конкурентная правка: снимок и перебазирование', () => {
+  const matrix = () => cloneMatrix(DEFAULT_MATRIX as unknown as Matrix);
+
+  it('дельта несёт ожидаемое старое значение', () => {
+    // Без него сервер не отличит «вернуть как было» от «затереть чужое».
+    const base = matrix();
+    const draft = matrix();
+    draft.manager['references.sites'].create = false;
+
+    const [change] = diffMatrix(base, draft);
+    expect(change).toMatchObject({
+      role: 'manager',
+      page: 'references.sites',
+      action: 'create',
+      allowed: false,
+      expected: true,
+    });
+  });
+
+  it('ГЛАВНОЕ: чужая правка не превращается в мою дельту', () => {
+    // Сосед снял «Создавать» и сохранил, пока я держал страницу открытой.
+    // Считая дельту от свежего ответа сервера, мой черновик выглядел бы как
+    // «включить обратно» — и сохранение молча откатило бы чужую работу.
+    const base = matrix();
+    const draft = matrix();
+    // Я тронул другую ячейку.
+    draft.manager['references.units'].edit = false;
+
+    const server = matrix();
+    server.manager['references.sites'].create = false;
+
+    const next = rebaseDraft(base, draft, server);
+    const changes = diffMatrix(next.base, next.draft);
+
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ page: 'references.units', action: 'edit' });
+    // Чужая правка видна в черновике, а не затёрта моей копией.
+    expect(next.draft.manager['references.sites'].create).toBe(false);
+  });
+
+  it('моя несохранённая правка переживает фоновый рефетч', () => {
+    const base = matrix();
+    const draft = matrix();
+    draft.manager['references.sites'].create = false;
+
+    // Сервер прислал то же, что было, — рефетч не должен стирать черновик.
+    const next = rebaseDraft(base, draft, matrix());
+
+    expect(next.draft.manager['references.sites'].create).toBe(false);
+    expect(diffMatrix(next.base, next.draft)).toHaveLength(1);
+  });
+
+  it('правка той же ячейки обоими остаётся конфликтом для сервера', () => {
+    // Здесь фронт уступать не должен: он сохраняет моё значение и старое
+    // ожидание, а решение принимает сервер — 409 вместо тихого затирания.
+    const base = matrix();
+    const draft = matrix();
+    draft.manager['references.sites'].create = false;
+
+    const server = matrix();
+    server.manager['references.sites'].create = false;
+    server.manager['references.sites'].edit = false;
+
+    const next = rebaseDraft(base, draft, server);
+    const mine = diffMatrix(next.base, next.draft).find(
+      (c) => c.page === 'references.sites' && c.action === 'create',
+    );
+    expect(mine).toMatchObject({ allowed: false, expected: true });
   });
 });

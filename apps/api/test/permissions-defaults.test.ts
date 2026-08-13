@@ -24,6 +24,10 @@ import {
 } from '@matcheck/contracts';
 import { ROUTE_PERMISSIONS, routeKey } from '../src/lib/permissions/route-map.js';
 import { collectRoutes, isSyntheticMethod, type RouteRow } from './helpers/route-inventory.js';
+// Модель «как было бы без матрицы» — общая с permissions-noop: две копии
+// разошлись бы, и ошибку заметил бы не CI, а бой. Read-only-гард учтён внутри
+// неё (он живёт в плагине прав, а не в server.ts).
+import { apiAllows } from './helpers/access-model.js';
 import {
   INLINE_ROLE_ACCESS,
   MATRIX_CHECKED_INLINE,
@@ -33,40 +37,10 @@ import {
   UI_ONLY_CELLS,
 } from './fixtures/permissions-baseline.js';
 
-const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-/** server.ts: единственные мутации, оставленные роли monitor. */
-const MONITOR_WRITE_ROUTES = new Set([
-  '/api/v1/deliveries/:id/review',
-  '/api/v1/shipments/:id/review',
-]);
-
 let cache: RouteRow[] | undefined;
 async function routes(): Promise<RouteRow[]> {
   cache ??= await collectRoutes();
   return cache.filter((r) => !isSyntheticMethod(r.method));
-}
-
-/** Имеет ли роль доступ к маршруту СЕГОДНЯ — как если бы матрицы не было. */
-function apiAllows(role: ManagedRole, r: RouteRow): boolean {
-  const key = routeKey(r.method, r.url);
-
-  // Глобальный read-only-хук (server.ts) — поверх любых allow-list'ов.
-  if (role === 'contractor' || role === 'monitor') {
-    if (MUTATING.has(r.method.toUpperCase()) && !r.url.startsWith('/api/v1/auth/')) {
-      if (!(role === 'monitor' && MONITOR_WRITE_ROUTES.has(r.url))) return false;
-    }
-  }
-
-  if (r.roles.length > 0) return (r.roles as string[]).includes(role);
-
-  const inline = INLINE_ROLE_ACCESS[key];
-  if (inline) return inline.includes(role);
-
-  throw new Error(
-    `Маршрут «${key}» объявлен без app.authorize(...) и отсутствует в INLINE_ROLE_ACCESS. ` +
-      'Добавьте его в test/fixtures/permissions-baseline.ts с указанием фактических ролей — ' +
-      'иначе baseline перестаёт быть полным.',
-  );
 }
 
 function cell(role: ManagedRole, page: PageId, action: PageAction): string {

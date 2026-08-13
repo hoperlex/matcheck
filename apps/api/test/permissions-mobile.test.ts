@@ -22,7 +22,6 @@ import {
 } from '@matcheck/contracts';
 import { ROUTE_PERMISSIONS, routeKey } from '../src/lib/permissions/route-map.js';
 import { isAllowed, overrideKey, type OverrideMap } from '../src/lib/permissions/matrix.js';
-import { RUNTIME_RULE_COVERAGE } from './fixtures/permissions-baseline.js';
 
 /** Маршруты, которыми пользуется мобильное приложение (docs/MOBILE_API.md). */
 const MOBILE_ROUTES: [string, string][] = [

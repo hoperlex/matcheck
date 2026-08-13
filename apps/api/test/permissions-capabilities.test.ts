@@ -94,6 +94,28 @@ describe('политика расширения: выданное право о�
     expect(meta('POST /api/v1/deliveries/bulk-hard-delete')?.expandableBy).toEqual([]);
   });
 
+  it('выданное право доходит до возможностей фото (dynamic и in-handler)', async () => {
+    // Раньше матрица учитывалась только для static/legacy, а маршруты фото —
+    // dynamic и in-handler: возможность не появлялась ни при каких правах,
+    // потому что монитора нет в allow-list, а расширение не рассматривалось.
+    const caps = capabilitiesFor(
+      granted('monitor', 'operations.deliveries', 'create'),
+      'monitor',
+      await roleMap(),
+    );
+    expect(caps).toContain('operations.photo.upload');
+    // Правка и удаление кадра — другая возможность, её create не открывает.
+    expect(caps).not.toContain('operations.photo.manage');
+  });
+
+  it('инспектору фото грузить можно, а править и удалять — нет', async () => {
+    // Ровно тот регресс, который ловило ревью: base-права operations.*:delete
+    // у инспектора есть, а DELETE /photos/:id закрыт для него allow-list'ом.
+    const caps = capabilitiesFor(EMPTY, 'inspector_kpp', await roleMap());
+    expect(caps).toContain('operations.photo.upload');
+    expect(caps).not.toContain('operations.photo.manage');
+  });
+
   it('выданное монитору «Удалять» НЕ открывает удаление навсегда', async () => {
     // Иначе расширение дало бы монитору больше, чем есть у менеджера:
     // bulk-hard-delete admin-only. Проверка держится и сейчас, и после того,
@@ -146,16 +168,17 @@ describe('политика расширения: выданное право о�
 });
 
 describe('инварианты реестра', () => {
-  it('capability не вешается на маршрут, у которого роли проверяются в хендлере', async () => {
-    // У таких маршрутов (DELETE /deliveries/:id) снаружи allow-list не виден:
-    // capability молча означала бы «разрешено всем, у кого ячейка», что неверно.
-    // Снять запрет можно будет, когда inline-проверки переедут на
-    // assertPermission (шаг 6 плана).
+  it('capability не вешается туда, где allow-list не виден снаружи', async () => {
+    // Суть запрета — не класс правила, а видимость ролей. У DELETE
+    // /deliveries/:id их проверяет сам хендлер, и capability молча означала бы
+    // «разрешено всем, у кого ячейка». А маршруты фото — тоже in-handler, но
+    // authorize у них есть, и возможность вычисляется честно: именно поэтому
+    // проверяем инвентарь, а не rule.kind.
     const withRoles = await roleMap();
     const offenders: string[] = [];
     for (const [key, rule] of ROUTE_PERMISSIONS) {
       if (!rule.capability) continue;
-      if (rule.kind === 'in-handler' || !withRoles.has(key)) offenders.push(key);
+      if (!withRoles.has(key)) offenders.push(key);
     }
     expect(offenders).toEqual([]);
   });
