@@ -666,6 +666,13 @@
       "when": 1781800021000,
       "tag": "0095_source_documents_party_inn",
       "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1781800022000,
+      "tag": "0096_multi_upd_delivery",
+      "breakpoints": true
     }
   ]
 }

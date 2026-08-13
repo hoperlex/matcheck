@@ -898,6 +898,21 @@ export const sourceBundles = pgTable(
     // до router'а и имеют NULL. Основной дискриминатор маршрута в worker — это
     // job.data.mode, kind здесь резервный признак для отчётности/диагностики.
     kind: text('kind'),
+    // Как собран пакет (см. миграцию 0096):
+    //   legacy     — «файл = документ», группировать нельзя;
+    //   logical_v1 — «логический УПД = документ», группа = корневой пакет.
+    // Уже загруженные пакеты остаются legacy навсегда: внутри них страницы
+    // одной УПД лежат отдельными документами, и показ их одной поставкой
+    // задвоил бы материалы.
+    assemblyVersion: text('assembly_version').notNull().default('legacy'),
+    // Поколение, которое РАЗРЕШЕНО показывать. Выставляется той же транзакцией,
+    // что публикует собранный набор. NULL — публиковать нечего: legacy-пакет
+    // либо сборка не завершилась, и промежуточные документы наружу не идут.
+    publishedGeneration: integer('published_generation'),
+    // Версия состава группы: растёт и при изменении набора документов, и при
+    // изменении реквизитов/позиций любого из них. Планшет сверяет её при
+    // создании приёмки — «состав тот же, но суммы другие» тоже расхождение.
+    groupRevision: integer('group_revision').notNull().default(1),
     createdByUserId: uuid('created_by_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),
@@ -984,6 +999,11 @@ export const bundleImportItems = pgTable(
     // Поколение попытки загрузки: строки прошлых поколений относятся к
     // брошенным загрузкам и в разбор не идут.
     uploadGeneration: integer('upload_generation'),
+    // Порядок файла внутри пачки (0-based). Без него набор фотографий нельзя
+    // разложить в страницы: «вторая страница» определяется соседством с
+    // первой, а выборка из реестра порядка не гарантирует. NULL у строк,
+    // созданных до миграции 0096.
+    inputOrder: integer('input_order'),
     // Что собирались делать с файлом, известно уже при приёме:
     //   auto       — классифицировать и распознать, если тип подтверждён;
     //   store_only — файл из зоны «Дополнительные документы»: только сохранить.
@@ -1030,6 +1050,49 @@ export const bundleImportItems = pgTable(
     index('bundle_import_items_unresolved_idx')
       .on(t.effectiveStatus)
       .where(sql`${t.effectiveStatus} is not null and ${t.resolvedAt} is null`),
+  ],
+);
+
+// Манифест сегментов пакета: сегмент = один ЛОГИЧЕСКИЙ УПД, собранный из
+// страниц (страницы могут лежать в разных файлах — россыпь фотографий).
+//
+// Манифест сохраняется, а не живёт в памяти задания, ради идемпотентности:
+// повтор упавшего задания находит сегмент по (пакет, поколение, индекс) и не
+// создаёт второй комплект документов. Публикация проставляет
+// sourceDocumentId и publishedAt всем сегментам поколения одной транзакцией —
+// до этого документов сегмента наружу не видно.
+export const bundleSegments = pgTable(
+  'bundle_segments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bundleId: uuid('bundle_id')
+      .notNull()
+      .references(() => sourceBundles.id, { onDelete: 'cascade' }),
+    generation: integer('generation').notNull(),
+    segmentIndex: integer('segment_index').notNull(),
+    sourceDocumentId: uuid('source_document_id').references(() => sourceDocuments.id, {
+      onDelete: 'set null',
+    }),
+    // PageRef[]: { registryItemId, inputOrder, pageInFile } — адрес каждой
+    // страницы, переживающий пересборку и разделение документов.
+    pageRefs: jsonb('page_refs')
+      .$type<Array<{ registryItemId: string; inputOrder: number; pageInFile: number }>>()
+      .notNull()
+      .default([]),
+    // normal | fallback | uncertain (см. segmentUpdPages). Поколение с
+    // fallback/uncertain не публикуется автоматически — разбирает менеджер.
+    confidence: text('confidence'),
+    docNumber: text('doc_number'),
+    docDate: timestamp('doc_date', { mode: 'date' }),
+    publishedAt: timestamp('published_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('bundle_segments_slot_unique').on(t.bundleId, t.generation, t.segmentIndex),
+    index('bundle_segments_document_idx')
+      .on(t.sourceDocumentId)
+      .where(sql`${t.sourceDocumentId} is not null`),
   ],
 );
 
@@ -1240,6 +1303,35 @@ export const deliverySources = pgTable(
   ],
 );
 
+// Одна поставка принимается один раз.
+//
+// Проверкой в коде это не удержать: два планшета создают приёмку по одной и той
+// же группе одновременно, и оба видят её свободной. PRIMARY KEY по groupId
+// делает второй заезд ошибкой уникальности внутри транзакции создания.
+//
+// Группа занята ЛЮБОЙ неудалённой приёмкой, включая завершённую
+// (confirmed_mol): иначе ту же машину можно принять повторно на следующий день.
+// Сценарий «несколько рейсов по одному УПД» — осознанное действие менеджера,
+// которое снимает claim явно (строка удаляется, releasedByUserId остаётся в
+// журнале аудита операции).
+export const deliveryGroupClaims = pgTable(
+  'delivery_group_claims',
+  {
+    // Корневой пакет поставки.
+    groupId: uuid('group_id')
+      .primaryKey()
+      .references(() => sourceBundles.id, { onDelete: 'cascade' }),
+    deliveryId: uuid('delivery_id')
+      .notNull()
+      .references(() => deliveries.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    releasedByUserId: uuid('released_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+  },
+  (t) => [index('delivery_group_claims_delivery_idx').on(t.deliveryId)],
+);
+
 export const deliveryItems = pgTable(
   'delivery_items',
   {
@@ -1248,6 +1340,24 @@ export const deliveryItems = pgTable(
       .notNull()
       .references(() => deliveries.id, { onDelete: 'cascade' }),
     materialId: uuid('material_id').references(() => materials.id, { onDelete: 'set null' }),
+    // ПРОИСХОЖДЕНИЕ позиции, а не текущая связь: связь приёмки с документом
+    // живёт в delivery_sources и снимается отвязкой, а это поле остаётся —
+    // иначе после «Отвязать» неоткуда узнать, откуда взялась строка, и
+    // повторная привязка вынуждена угадывать по названию и количеству.
+    // NULL — действительно неизвестное происхождение (ручной ввод; для истории
+    // до миграции 0096 — то, что не удалось сопоставить однозначно).
+    // RESTRICT: документ, чьи позиции попали в приёмку, удалять нельзя, только
+    // архивировать.
+    sourceDocumentId: uuid('source_document_id').references(() => sourceDocuments.id, {
+      onDelete: 'restrict',
+    }),
+    // Точная исходная строка документа. SET NULL, а не RESTRICT: повторный
+    // разбор УПД удаляет и пересоздаёт source_document_items, и RESTRICT
+    // заблокировал бы переразбор. Документ при этом остаётся известен.
+    sourceDocumentItemId: uuid('source_document_item_id').references(
+      () => sourceDocumentItems.id,
+      { onDelete: 'set null' },
+    ),
     // Тип позиции: 'material' (по умолчанию) или 'asset' (ОС). См. миграцию 0029.
     itemKind: itemKindEnum('item_kind').notNull().default('material'),
     assetId: uuid('asset_id').references(() => assets.id, { onDelete: 'set null' }),
@@ -1269,6 +1379,11 @@ export const deliveryItems = pgTable(
   },
   (t) => [
     index('delivery_items_asset_idx').on(t.assetId).where(sql`${t.assetId} is not null`),
+    // Позиции одного документа: секции «УПД № … · Материалы (N)» в приёмке и
+    // проверка «эта строка действительно из этого УПД».
+    index('delivery_items_source_document_idx')
+      .on(t.sourceDocumentId)
+      .where(sql`${t.sourceDocumentId} is not null`),
     check(
       'delivery_items_kind_target_chk',
       sql`(${t.itemKind} = 'material' AND ${t.assetId} IS NULL)

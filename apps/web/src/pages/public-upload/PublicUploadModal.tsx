@@ -34,10 +34,20 @@ import {
   type DeliveryState,
   type QueuePatch,
 } from './submitQueue';
-import { MAX_FILES, filesProblem } from './uploadLimits';
+import { MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES, filesProblem } from './uploadLimits';
 import { rejectLabel } from './rejectLabel';
 
 const MAX_COMMENT = 500;
+
+// Те же лимиты, что проверяет filesProblem перед отправкой, но применённые уже
+// на выборе файлов: лишнее не попадает в список, а человек сразу видит, что
+// именно не взяли. Считаются по обеим зонам вместе — сервер меряет запрос
+// целиком.
+const PUBLIC_LIMITS = {
+  maxFiles: MAX_FILES,
+  maxFileBytes: MAX_FILE_BYTES,
+  maxTotalBytes: MAX_TOTAL_BYTES,
+};
 
 // HEIC в списке НЕТ намеренно: распознать его конвейер не умеет, и сервер
 // отказывает по содержимому. Полезный побочный эффект — Safari на iOS, не видя
@@ -498,7 +508,8 @@ function DeliveryFields({
               compact
               title="Перетащите файлы либо нажмите для выбора"
               hint={`До ${MAX_FILES} файлов, каждый до 10 МБ. Можно сфотографировать телефоном.`}
-              canAdd={(f) => guardOtherZone(draft.extraRows, f)}
+              otherZone={draft.extraRows}
+              limits={PUBLIC_LIMITS}
             />
           </Form.Item>
           <Form.Item
@@ -514,23 +525,13 @@ function DeliveryFields({
               compact
               title="Перетащите файлы либо нажмите для выбора"
               hint="Не распознаются — просто сохранятся вместе с документами машины."
-              canAdd={(f) => guardOtherZone(draft.rows, f)}
+              otherZone={draft.rows}
+              limits={PUBLIC_LIMITS}
             />
           </Form.Item>
         </Col>
       </Row>
     </Form>
   );
-}
-
-/**
- * Один и тот же файл в обеих зонах — противоречивое указание. Сервер сведёт его
- * к «только сохранить», но человеку честнее сказать сразу.
- */
-function guardOtherZone(other: FileRow[], f: File): boolean {
-  const key = `${f.name}:${f.size}`;
-  if (!other.some((r) => `${r.file.name}:${r.file.size}` === key)) return true;
-  message.warning(`Файл «${f.name}» уже добавлен в другую зону`);
-  return false;
 }
 

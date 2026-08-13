@@ -759,7 +759,16 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         .map((i) => {
           const computed = computeVatSum(i);
           return {
-            id: crypto.randomUUID(),
+            // Существующая строка уходит со СВОИМ id из БД, а не со свежим
+            // случайным. Upsert позиций устроен как DELETE + INSERT, и сервер
+            // по этому id переносит происхождение строки (source_document_id,
+            // см. domain/operations/item-origin.ts). Со случайным id сервер
+            // строку не узнаёт и вынужден сопоставлять её по названию, единице
+            // и номеру — а переименование или сдвиг номера после удаления
+            // соседней строки такое сопоставление рвут, и привязка к УПД
+            // теряется. В БД присланный id не пишется (его генерирует
+            // Postgres), так что для новой строки годится любой валидный uuid.
+            id: i.serverId ?? crypto.randomUUID(),
             itemKind: i.itemKind,
             materialId: i.itemKind === 'asset' ? null : i.materialId,
             assetId: i.itemKind === 'asset' ? i.assetId : null,

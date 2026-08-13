@@ -206,10 +206,11 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         : [];
       const sdCreatorById = new Map(sdCreators.map((u) => [u.id, u]));
 
-      // Имена поставщика / подрядчика для отображения на мобиле в списке
-      // УПД (см. IntakeUpdSelectScreen.kt: subtitle = "Поставщик: ${row.supplierName ?: "—"}").
-      // До этого фикса бэк отдавал только supplierId/contractorId, и инспектор
-      // видел «—».
+      // Имена сторон УПД для отображения на мобиле в списке выбора УПД:
+      // поставщик — заголовок группы, грузополучатель — строка под номером
+      // документа (см. IntakeUpdSelectScreen.kt / DispatchUpdSelectScreen.kt).
+      // Подрядчик мобиле больше не показывается, но имя отдаём: он один на
+      // объект, и убирать поле из ответа ради этого не стоит.
       //
       // Логика точно как в /source-documents list ([source-documents.ts:527]):
       //   supplierName = COALESCE(suppliers.name, counterparties.name)
@@ -231,6 +232,12 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       const sdContractorIds = Array.from(
         new Set(sdRows.map((r) => r.contractorId).filter((v): v is string => !!v)),
       );
+      // Грузополучатель (графа 4). В проде consignee_id не заполнен ни разу —
+      // графу 4 печатают без ИНН, связать её не с чем, — но резолвим по нему
+      // так же, как веб, чтобы поведение совпадало, когда связь всё-таки есть.
+      const sdConsigneeIds = Array.from(
+        new Set(sdRows.map((r) => r.consigneeId).filter((v): v is string => !!v)),
+      );
       // Справочник «Поставщики» (suppliers, не путать с counterparties).
       const supplierDirRows = sdSupplierDirIds.length
         ? await app.db
@@ -240,8 +247,11 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         : [];
       const supplierDirById = new Map(supplierDirRows.map((r) => [r.id, r.name]));
       // Один SELECT на counterparties по объединённому списку — supplier-id
-      // (legacy fallback COALESCE) и contractor-id (основной источник).
-      const cpLookupIds = Array.from(new Set([...sdSupplierIds, ...sdContractorIds]));
+      // (legacy fallback COALESCE), contractor-id (основной источник) и
+      // consignee-id (fallback для графы 4).
+      const cpLookupIds = Array.from(
+        new Set([...sdSupplierIds, ...sdContractorIds, ...sdConsigneeIds]),
+      );
       const cpLookupRows = cpLookupIds.length
         ? await app.db
             .select({ id: counterparties.id, name: counterparties.name })
@@ -511,6 +521,15 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             null;
           const contractorName =
             (sd.contractorId && cpNameById.get(sd.contractorId)) || null;
+          // Грузополучатель (графа 4) — тем же COALESCE, что в основном DTO
+          // (sdRow в routes/source-documents.ts) и в primarySourceDocument
+          // (deliveries.ts:456). Именно ??, а не || как у соседей выше:
+          // COALESCE отдаёт consignee_name_raw, даже если это пустая строка,
+          // а || провалился бы в FK-ветку. Расхождение намеренное — поведение
+          // supplierName/contractorName не трогаем.
+          const consigneeName =
+            sd.consigneeNameRaw ??
+            (sd.consigneeId ? cpNameById.get(sd.consigneeId) ?? null : null);
           return {
           id: sd.id,
           kind: sd.kind,
@@ -521,6 +540,8 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           recipientId: sd.recipientId,
           contractorId: sd.contractorId,
           contractorName,
+          consigneeId: sd.consigneeId,
+          consigneeName,
           recipientMolId: sd.recipientMolId,
           // Мобильному клиенту поле не нужно, но /sync собирает документы по той
           // же SourceDocumentDetailSchema, что и портал: пропущенное поле молча

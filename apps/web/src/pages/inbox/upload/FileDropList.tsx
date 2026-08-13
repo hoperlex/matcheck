@@ -1,8 +1,9 @@
-import { Button, List, Upload } from 'antd';
+import { Button, List, Upload, message } from 'antd';
 import { FileTextOutlined, InboxOutlined } from '@ant-design/icons';
 import type { UploadFile, UploadProps } from 'antd';
+import { addFileBatch, rejectionMessage, type FileLimits, type FileRow } from './fileBatch';
 
-export type FileRow = { uid: string; file: File };
+export type { FileRow, FileLimits } from './fileBatch';
 
 /**
  * Дропзона + список выбранных файлов.
@@ -18,7 +19,8 @@ export function FileDropList({
   accept,
   hint,
   title = 'Перетащите документы поставки либо нажмите для выбора',
-  canAdd,
+  otherZone = [],
+  limits,
   compact = false,
 }: {
   rows: FileRow[];
@@ -36,27 +38,39 @@ export function FileDropList({
    */
   compact?: boolean;
   /**
-   * Разрешено ли добавить файл. Нужно, чтобы один и тот же файл не попал в обе
-   * зоны сразу: сервер такой запрос переживёт (сведёт к «только сохранить»), но
+   * Файлы соседней зоны формы. Один и тот же файл не должен попасть в обе
+   * сразу: сервер такой запрос переживёт (сведёт к «только сохранить»), но
    * человеку честнее сказать сразу.
    */
-  canAdd?: (file: File) => boolean;
+  otherZone?: readonly FileRow[];
+  /** Клиентские лимиты; считаются по обеим зонам вместе (см. fileBatch). */
+  limits?: FileLimits;
 }) {
   const uploadProps: UploadProps = {
     accept,
     multiple: true,
     showUploadList: false,
-    beforeUpload: (file) => {
-      const fileLike = file as unknown as File;
-      if (canAdd && !canAdd(fileLike)) return false;
-      onChange([
-        ...rows,
-        {
-          uid: `${fileLike.name}-${fileLike.size}-${Date.now()}-${Math.random()}`,
-          file: fileLike,
-        },
-      ]);
-      // false — файл остаётся у нас, antd сам никуда его не отправляет.
+    // antd зовёт beforeUpload синхронно на КАЖДЫЙ файл пачки, а `rows` в этом
+    // замыкании — состояние на момент рендера, между вызовами оно не меняется.
+    // Поэтому пачку обрабатываем целиком на первом её файле, а остальные
+    // вызовы пропускаем: иначе в списке оставался бы только последний файл, а
+    // предупреждений было бы столько же, сколько файлов.
+    beforeUpload: (file, fileList) => {
+      const batch = fileList?.length ? fileList : [file];
+      if (batch[0] !== file) return false;
+
+      const { next, rejected } = addFileBatch({
+        prev: rows,
+        otherZone,
+        files: batch as unknown as File[],
+        limits,
+      });
+
+      const warning = rejectionMessage(rejected);
+      if (warning) message.warning(warning);
+      if (next.length !== rows.length) onChange(next);
+
+      // false — файлы остаются у нас, antd сам никуда их не отправляет.
       return false;
     },
     fileList: [] as UploadFile[],

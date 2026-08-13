@@ -43,6 +43,7 @@ import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/fo
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
+import { resolveItemOrigins } from '../domain/operations/item-origin.js';
 import { canSeeReviewInMatrix } from '../lib/review.js';
 import { assertPermission } from '../lib/permissions/assert.js';
 import {
@@ -258,6 +259,8 @@ function assembleDeliveryDto(
   const s = r.s;
   const mappedItems = items.map((i) => ({
     id: i.id,
+    sourceDocumentId: i.sourceDocumentId,
+    sourceDocumentItemId: i.sourceDocumentItemId,
     itemKind: i.itemKind,
     materialId: i.materialId,
     assetId: i.assetId,
@@ -2104,24 +2107,32 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               unit: string;
               qtyPlanned: string | null;
               lineNo: number;
+              sourceDocumentId: string | null;
+              sourceDocumentItemId: string | null;
             }[] = await tx
               .select({
                 nameRaw: deliveryItems.nameRaw,
                 unit: deliveryItems.unit,
                 qtyPlanned: deliveryItems.qtyPlanned,
                 lineNo: deliveryItems.lineNo,
+                sourceDocumentId: deliveryItems.sourceDocumentId,
+                sourceDocumentItemId: deliveryItems.sourceDocumentItemId,
               })
               .from(deliveryItems)
               .where(eq(deliveryItems.deliveryId, d.id));
 
-            // Ключ дедупликации: нормализованные nameRaw + unit + qty.
-            // Защищает от двух кейсов:
-            //   а) повторный нажим кнопки «Привязать УПД» — позиции из
-            //      УПД уже могут быть в приёмке, не задваиваем;
-            //   б) инспектор руками внёс точно ту же строку, что в УПД,
-            //      — не делаем визуальный дубль.
-            // При несовпадении единицы измерения / количества — строки
-            // считаются разными, и УПД-строка добавляется отдельно.
+            // Дедупликация идёт ВНУТРИ документа, а не по всей приёмке.
+            //
+            // Раньше ключ (nameRaw, unit, qty) сравнивался со всеми позициями
+            // сразу, и одинаковая строка из второй УПД молча пропадала —
+            // приёмка занижалась ровно на неё. Машина же привозит два разных
+            // документа, и в каждом эта позиция своя.
+            //
+            // Что защита сохраняет: повторный нажим «Привязать» и повторную
+            // привязку после отвязки. Основной признак — сохранённое
+            // происхождение строки: по нему позиция находится точно, без
+            // угадывания. Ключ (name, unit, qty) остаётся запасным — для
+            // строк, чей sourceDocumentItemId обнулился переразбором документа.
             const buildKey = (
               name: string,
               unit: string,
@@ -2130,8 +2141,16 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               `${name.trim().toLowerCase()}|${unit.trim().toLowerCase()}|${
                 qty == null ? '' : Number(qty).toString()
               }`;
+            const itemsFromThisDoc = existingItems.filter(
+              (i) => i.sourceDocumentId === src.id,
+            );
+            const existingSourceItemIds = new Set(
+              itemsFromThisDoc
+                .map((i) => i.sourceDocumentItemId)
+                .filter((v): v is string => v !== null),
+            );
             const existingKeys = new Set(
-              existingItems.map((i) =>
+              itemsFromThisDoc.map((i) =>
                 buildKey(i.nameRaw, i.unit, i.qtyPlanned),
               ),
             );
@@ -2150,11 +2169,14 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             const newRows: (typeof deliveryItems.$inferInsert)[] = [];
             let lineNo = startLineNo;
             for (const r of updRows) {
+              if (existingSourceItemIds.has(r.id)) continue;
               if (existingKeys.has(buildKey(r.nameRaw, r.unit, r.qty))) {
                 continue;
               }
               newRows.push({
                 deliveryId: d.id,
+                sourceDocumentId: src.id,
+                sourceDocumentItemId: r.id,
                 itemKind: 'material' as const,
                 materialId: r.materialId,
                 assetId: null,
@@ -2205,6 +2227,89 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       // УПД исчезла из ожидаемых у инспектора. Делаем после транзакции,
       // потому что touch не атомарен с insert (это уже отдельный bump).
       await touchSourceDocuments(app, [src.id]);
+      publishEvent(app, {
+        type: 'delivery_updated',
+        entityId: d.id,
+        ts: new Date().toISOString(),
+      });
+
+      const dto = await buildDeliveryDto(app, d.id, req.user?.role);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
+      return dto;
+    },
+  );
+
+  // Отвязка документа от приёмки — парное действие к link-source.
+  //
+  // Понадобилась вместе с правилом «upsert не меняет привязки»: без явной
+  // отвязки ошибочную привязку стало бы нечем откатить. Раньше её роль играл
+  // upsert с урезанным sourceDocumentIds, и он же был дырой — планшет стирал
+  // привязки менеджера.
+  //
+  // Позиции НЕ удаляются и происхождение НЕ обнуляется: строка могла быть уже
+  // проверена и исправлена инспектором, а знание «откуда она взялась» — данные,
+  // а не следствие связи. В интерфейсе такая группа показывается как
+  // «Отвязанный УПД № …», а повторная привязка находит свои строки по
+  // сохранённому sourceDocumentItemId и не задваивает их.
+  app.post(
+    '/api/v1/deliveries/:id/unlink-source',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: z.object({ sourceDocumentId: z.string().uuid() }),
+        response: {
+          200: DeliverySchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [d] = await app.db
+        .select({ id: deliveries.id, pendingDeletionAt: deliveries.pendingDeletionAt })
+        .from(deliveries)
+        .where(eq(deliveries.id, req.params.id))
+        .limit(1);
+      if (!d) return reply.code(404).send({ error: 'not_found' });
+      if (d.pendingDeletionAt !== null) {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — мутации запрещены',
+        });
+      }
+
+      const removed = await app.db.transaction(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async (tx: any) => {
+          const deleted = await tx
+            .delete(deliverySources)
+            .where(
+              and(
+                eq(deliverySources.deliveryId, d.id),
+                eq(deliverySources.sourceDocumentId, req.body.sourceDocumentId),
+              ),
+            )
+            .returning({ sourceDocumentId: deliverySources.sourceDocumentId });
+          if (deleted.length === 0) return false;
+
+          await tx
+            .update(deliveries)
+            .set({ version: drSql`${deliveries.version} + 1`, updatedAt: new Date() })
+            .where(eq(deliveries.id, d.id));
+          return true;
+        },
+      );
+
+      if (!removed) {
+        return reply.code(404).send({
+          error: 'not_linked',
+          message: 'Этот документ не привязан к приёмке',
+        });
+      }
+
+      // Документ снова свободен — мобильный Inbox должен его увидеть.
+      await touchSourceDocuments(app, [req.body.sourceDocumentId]);
       publishEvent(app, {
         type: 'delivery_updated',
         entityId: d.id,
@@ -2287,9 +2392,21 @@ async function createDelivery(
     .returning();
   if (!created) throw new Error('Failed to insert delivery');
   if (input.items.length) {
+    // При СОЗДАНИИ приёмки происхождение берётся из запроса: строк в БД ещё
+    // нет, переносить нечего. Ограничение то же, что и дальше по жизни
+    // приёмки, — документ должен быть в её наборе связей.
+    const linkedOnCreate = new Set(input.sourceDocumentIds);
     await tx.insert(deliveryItems).values(
       input.items.map((i) => ({
         deliveryId: created.id,
+        sourceDocumentId:
+          i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
+            ? i.sourceDocumentId
+            : null,
+        sourceDocumentItemId:
+          i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
+            ? (i.sourceDocumentItemId ?? null)
+            : null,
         itemKind: i.itemKind,
         materialId: i.itemKind === 'asset' ? null : (i.materialId ?? null),
         assetId: i.itemKind === 'asset' ? (i.assetId ?? null) : null,
@@ -2396,40 +2513,37 @@ async function updateDelivery(
   // умеет биндить объект Date внутри sql`` и падает на Bind.
   const confirmedAtIso = confirmedAtCandidate?.toISOString() ?? null;
 
-  // Ручная привязка УПД к приёмке без документа на портале: клиент шлёт
-  // непустой sourceDocumentIds и пустой items — сервер подтягивает позиции
-  // из УПД (qtyPlanned из qty, qtyActual=null). Дальше оператор/инспектор
-  // доводит приёмку до filled штатным путём.
-  const [existingSourcesCount] = await app.db
-    .select({ c: drSql<number>`count(*)::int` })
-    .from(deliverySources)
-    .where(eq(deliverySources.deliveryId, id));
-  const existingHadNoDocs = (existingSourcesCount?.c ?? 0) === 0;
-  const itemsForInsert =
-    existingHadNoDocs &&
-    input.sourceDocumentIds.length > 0 &&
-    input.items.length === 0
-      ? await buildDeliveryItemsFromSources(app, input.sourceDocumentIds)
-      : input.items.map((i) => ({
-          itemKind: i.itemKind,
-          materialId: i.itemKind === 'asset' ? null : (i.materialId ?? null),
-          assetId: i.itemKind === 'asset' ? (i.assetId ?? null) : null,
-          inventoryNumber: i.inventoryNumber ?? null,
-          serialNumber: i.serialNumber ?? null,
-          nameRaw: i.nameRaw,
-          qtyPlanned: i.qtyPlanned ?? null,
-          qtyActual: i.qtyActual ?? null,
-          unit: i.unit,
-          comment: i.comment ?? null,
-          lineNo: i.lineNo,
-          volumeM3: i.volumeM3 ?? null,
-          massKg: i.massKg ?? null,
-          price: i.price ?? null,
-          vatRate: i.vatRate ?? null,
-          vatSum: i.vatSum ?? null,
-          volumeConfidence: i.volumeConfidence ?? null,
-          groupName: i.groupName ?? null,
-        }));
+  // Позиции берутся из запроса как есть. Ветки «клиент прислал только
+  // sourceDocumentIds — сервер сам подтянет позиции из УПД» здесь больше нет:
+  // привязка документа к существующей приёмке стала явным действием
+  // (POST /:id/link-source), и позиции подтягивает оно же, в одной транзакции
+  // со связью. Оставить её тут значило бы создать позиции без связи.
+  //
+  // clientId держим отдельно от полей строки: он нужен только для переноса
+  // происхождения и в БД не пишется (id генерирует Postgres).
+  const itemsForInsert = input.items.map((i) => ({
+    clientId: i.id ?? null,
+    sourceDocumentId: i.sourceDocumentId ?? null,
+    sourceDocumentItemId: i.sourceDocumentItemId ?? null,
+    itemKind: i.itemKind,
+    materialId: i.itemKind === 'asset' ? null : (i.materialId ?? null),
+    assetId: i.itemKind === 'asset' ? (i.assetId ?? null) : null,
+    inventoryNumber: i.inventoryNumber ?? null,
+    serialNumber: i.serialNumber ?? null,
+    nameRaw: i.nameRaw,
+    qtyPlanned: i.qtyPlanned ?? null,
+    qtyActual: i.qtyActual ?? null,
+    unit: i.unit,
+    comment: i.comment ?? null,
+    lineNo: i.lineNo,
+    volumeM3: i.volumeM3 ?? null,
+    massKg: i.massKg ?? null,
+    price: i.price ?? null,
+    vatRate: i.vatRate ?? null,
+    vatSum: i.vatSum ?? null,
+    volumeConfidence: i.volumeConfidence ?? null,
+    groupName: i.groupName ?? null,
+  }));
 
   // Атомарность update: статус/шапка + позиции + источники + touch УПД —
   // одна транзакция (см. createDelivery). Раньше delete items проходил, а
@@ -2468,42 +2582,72 @@ async function updateDelivery(
   // Объект записи изменился после чтения existing — прерываем транзакцию,
   // маршрут отдаст 403 foreign_site (см. domain/operations/foreign-site.ts).
   if (updatedRows.length === 0) throw new ForeignSiteError();
-  await tx.delete(deliveryItems).where(eq(deliveryItems.deliveryId, id));
-  if (itemsForInsert.length) {
-    await tx.insert(deliveryItems).values(
-      itemsForInsert.map((i) => ({ ...i, deliveryId: id })),
-    );
-  }
-  if (input.sourceDocumentIds.length) {
-    await assertSourcesAvailableForDelivery({ db: tx }, input.sourceDocumentIds, id);
-  }
-  // Запоминаем какие УПД были привязаны раньше — нужно бампать
-  // их updated_at тоже (для УПД, которая отвязывается, видимость
-  // в Inbox должна вернуться).
-  const previousSources: { sourceDocumentId: string }[] = await tx
+
+  // Происхождение позиций переносится ЯВНО: строки удаляются и вставляются
+  // заново, а `source_document_id` — данные, которых в запросе может не быть
+  // (старый планшет о поле не знает) и которым в запросе нельзя доверять
+  // (клиент не должен переписывать происхождение существующей строки).
+  // Поэтому снимок делается ДО delete, а решение принимает resolveItemOrigins.
+  const previousItems = await tx
+    .select({
+      id: deliveryItems.id,
+      nameRaw: deliveryItems.nameRaw,
+      unit: deliveryItems.unit,
+      lineNo: deliveryItems.lineNo,
+      sourceDocumentId: deliveryItems.sourceDocumentId,
+      sourceDocumentItemId: deliveryItems.sourceDocumentItemId,
+    })
+    .from(deliveryItems)
+    .where(eq(deliveryItems.deliveryId, id));
+
+  // Связи существующей приёмки — авторитетны, и они же ограничивают, из каких
+  // документов позиция вообще может приехать.
+  const linkedSources: { sourceDocumentId: string }[] = await tx
     .select({ sourceDocumentId: deliverySources.sourceDocumentId })
     .from(deliverySources)
     .where(eq(deliverySources.deliveryId, id));
-  await tx.delete(deliverySources).where(eq(deliverySources.deliveryId, id));
-  if (input.sourceDocumentIds.length) {
-    try {
-      await tx
-        .insert(deliverySources)
-        .values(input.sourceDocumentIds.map((sid) => ({ deliveryId: id, sourceDocumentId: sid })));
-    } catch (err) {
-      if (isSourceDocumentUniqueViolation(err)) {
-        throw new SourceAlreadyLinkedError(input.sourceDocumentIds);
-      }
-      throw err;
-    }
+  const linkedDocumentIds = linkedSources.map((s) => s.sourceDocumentId);
+
+  const origins = resolveItemOrigins({
+    existing: previousItems,
+    incoming: itemsForInsert.map((i) => ({
+      id: i.clientId ?? null,
+      nameRaw: i.nameRaw,
+      unit: i.unit,
+      lineNo: i.lineNo,
+      sourceDocumentId: i.sourceDocumentId ?? null,
+      sourceDocumentItemId: i.sourceDocumentItemId ?? null,
+    })),
+    linkedDocumentIds,
+  });
+
+  await tx.delete(deliveryItems).where(eq(deliveryItems.deliveryId, id));
+  if (itemsForInsert.length) {
+    await tx.insert(deliveryItems).values(
+      itemsForInsert.map(({ clientId: _clientId, ...i }, idx) => ({
+        ...i,
+        deliveryId: id,
+        sourceDocumentId: origins[idx]?.sourceDocumentId ?? null,
+        sourceDocumentItemId: origins[idx]?.sourceDocumentItemId ?? null,
+      })),
+    );
   }
-  // Бамп updated_at для всех затронутых УПД: и для новопривязанных,
-  // и для тех, которые отвязались. См. domain/sourceDocuments/touch.ts.
-  const affected = new Set<string>([
-    ...previousSources.map((p) => p.sourceDocumentId),
-    ...input.sourceDocumentIds,
-  ]);
-  await touchSourceDocuments({ db: tx }, [...affected]);
+
+  // Привязки существующей приёмки upsert НЕ меняет.
+  //
+  // Раньше здесь стоял DELETE всех связей + INSERT присланного списка. Пока
+  // документ у приёмки был один, это работало; с несколькими — планшет,
+  // знающий про одну УПД, стирал остальные, привязанные менеджером, а
+  // устаревший клиент мог воскресить явно отвязанный документ. Опереться на
+  // baseVersion нельзя: в контракте он необязателен.
+  //
+  // Теперь набор связей меняют только явные действия: POST /:id/link-source и
+  // POST /:id/unlink-source. При СОЗДАНИИ приёмки связи по-прежнему берутся из
+  // запроса — см. createDelivery.
+  //
+  // Бамп updated_at всё равно нужен: реквизиты приёмки могли поменяться, а
+  // мобильный Inbox фильтрует документы по привязкам и ждёт дельту.
+  await touchSourceDocuments({ db: tx }, linkedDocumentIds);
   });
 }
 
@@ -2515,61 +2659,3 @@ function isSourceDocumentUniqueViolation(err: unknown): boolean {
   return name.endsWith('_source_document_id_unique');
 }
 
-// Подтягивает позиции из привязываемых УПД в формате delivery_items.
-// Используется при ручной привязке УПД к приёмке «Без документа» на портале:
-// диспетчер указывает только sourceDocumentId, а сервер копирует позиции
-// (qtyPlanned из source_document_items.qty, qtyActual=null). lineNo пересчитываем
-// сквозным образом, чтобы при нескольких УПД получился непрерывный список.
-async function buildDeliveryItemsFromSources(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  app: any,
-  sourceDocumentIds: string[],
-): Promise<
-  Array<{
-    itemKind: 'material';
-    materialId: string | null;
-    assetId: null;
-    inventoryNumber: null;
-    serialNumber: null;
-    nameRaw: string;
-    qtyPlanned: string | null;
-    qtyActual: null;
-    unit: string;
-    comment: null;
-    lineNo: number;
-    volumeM3: string | null;
-    massKg: string | null;
-    price: string | null;
-    vatRate: string | null;
-    vatSum: string | null;
-    volumeConfidence: 'low' | 'medium' | 'high' | null;
-    groupName: string | null;
-  }>
-> {
-  if (!sourceDocumentIds.length) return [];
-  const rows: (typeof sourceDocumentItems.$inferSelect)[] = await app.db
-    .select()
-    .from(sourceDocumentItems)
-    .where(inArray(sourceDocumentItems.sourceDocumentId, sourceDocumentIds))
-    .orderBy(sourceDocumentItems.lineNo);
-  return rows.map((r, idx) => ({
-    itemKind: 'material' as const,
-    materialId: r.materialId,
-    assetId: null,
-    inventoryNumber: null,
-    serialNumber: null,
-    nameRaw: r.nameRaw,
-    qtyPlanned: r.qty,
-    qtyActual: null,
-    unit: r.unit,
-    comment: null,
-    lineNo: idx + 1,
-    volumeM3: r.volumeM3,
-    massKg: r.massKg,
-    price: r.price,
-    vatRate: r.vatRate,
-    vatSum: r.vatSum,
-    volumeConfidence: r.volumeConfidence as 'low' | 'medium' | 'high' | null,
-    groupName: r.groupName,
-  }));
-}

@@ -120,16 +120,6 @@ export function UploadDocumentsModal({
   // Лимиты сервер считает по ВСЕМУ запросу, поэтому и здесь зоны складываются.
   const totalCount = rows.length + extraRows.length;
   const canUpload = !!siteId && totalCount > 0 && !uploading;
-  // Один файл в обеих зонах — противоречивое указание. Сервер сведёт его к
-  // «только сохранить», но человеку лучше сказать сразу.
-  function fileKey(f: File): string {
-    return `${f.name}:${f.size}`;
-  }
-  function guardDuplicate(other: FileRow[], f: File): boolean {
-    if (!other.some((r) => fileKey(r.file) === fileKey(f))) return true;
-    message.warning(`Файл «${f.name}» уже добавлен в другую зону`);
-    return false;
-  }
   const inResult = bundleId !== null;
   const result = resultQuery.data;
   const inProgress =
@@ -282,7 +272,7 @@ export function UploadDocumentsModal({
                 accept={UPLOAD_ACCEPT}
                 title="Перетащите УПД и накладные либо нажмите для выбора"
                 hint="УПД, накладные, Excel, фото — вперемешку. Можно сразу несколько. Лимит на файл — 10 МБ."
-                canAdd={(f) => guardDuplicate(extraRows, f)}
+                otherZone={extraRows}
               />
             </Form.Item>
             <Form.Item
@@ -296,7 +286,7 @@ export function UploadDocumentsModal({
                 accept={UPLOAD_ACCEPT}
                 title="Перетащите дополнительные документы либо нажмите для выбора"
                 hint="Эти файлы не распознаются — система просто сохранит их вместе с поставкой."
-                canAdd={(f) => guardDuplicate(rows, f)}
+                otherZone={rows}
               />
             </Form.Item>
           </Form>

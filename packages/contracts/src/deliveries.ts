@@ -8,6 +8,22 @@ export type ItemKind = z.infer<typeof ItemKindSchema>;
 
 export const DeliveryItemSchema = z.object({
   id: z.string().uuid(),
+  /**
+   * Происхождение позиции: документ, из которого она приехала. НЕ «текущая
+   * связь» — связь приёмки с документом живёт в sourceDocumentIds и снимается
+   * отвязкой, а происхождение остаётся. По нему строятся секции «УПД № … ·
+   * Материалы (N)» и проверка «эта строка действительно из этого документа».
+   *
+   * null — происхождение неизвестно: строка внесена руками либо это история до
+   * миграции 0096, которую не удалось сопоставить однозначно. «Без привязки к
+   * УПД», а не «добавлено вручную»: утверждать второе мы не можем.
+   *
+   * optional — схема общая с /sync и ответами upsert; продюсеры, которые поле
+   * не собирают, не должны падать на валидации ответа.
+   */
+  sourceDocumentId: z.string().uuid().nullable().optional(),
+  /** Конкретная строка документа-источника; null после его переразбора. */
+  sourceDocumentItemId: z.string().uuid().nullable().optional(),
   itemKind: ItemKindSchema,
   materialId: z.string().uuid().nullable(),
   assetId: z.string().uuid().nullable(),
@@ -133,6 +149,15 @@ export type DeliveryMarkDeletion = z.infer<typeof DeliveryMarkDeletionSchema>;
 
 export const DeliveryUpsertItemSchema = z.object({
   id: z.string().uuid().optional(),
+  /**
+   * Происхождение НОВОЙ позиции. Для строки, которая уже есть в приёмке,
+   * значение игнорируется: сервер берёт сохранённое из БД по id. Клиент не
+   * может переписать происхождение задним числом — иначе достаточно одного
+   * устаревшего планшета, чтобы приписать позиции чужому документу.
+   * Присланный документ, не привязанный к этой приёмке, отбрасывается в null.
+   */
+  sourceDocumentId: z.string().uuid().nullable().optional(),
+  sourceDocumentItemId: z.string().uuid().nullable().optional(),
   itemKind: ItemKindSchema.default('material'),
   materialId: z.string().uuid().nullable().optional(),
   assetId: z.string().uuid().nullable().optional(),

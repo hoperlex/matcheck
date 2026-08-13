@@ -179,6 +179,15 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
       expandableBy: ['monitor'],
     }),
   ],
+  // Отвязка — парное действие к привязке и та же ячейка, но своя возможность:
+  // кнопка «Отвязать» в шапке приёмки рисуется отдельно от «Добавить УПД».
+  [
+    'POST /api/v1/deliveries/:id/unlink-source',
+    st('operations.deliveries', 'edit', {
+      capability: 'operations.edit.unlink_source',
+      expandableBy: ['monitor'],
+    }),
+  ],
   // Ссылки-шаринги — не часть обычного редактирования: у создания, списка,
   // отзыва и переписки РАЗНЫЕ allow-list (инспектор создаёт и видит, но не
   // отзывает). Выдача edit их не открывает, интерфейс скрывает по capability.
