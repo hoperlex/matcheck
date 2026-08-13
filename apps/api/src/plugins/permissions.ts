@@ -6,6 +6,7 @@ import { isAllowed, isExpanded } from '../lib/permissions/matrix.js';
 import { createMatrixStore, type MatrixStore } from '../lib/permissions/store.js';
 import { lookupRule, type RouteRule } from '../lib/permissions/route-map.js';
 import { collectRouteRoles, type RouteRolesMap } from '../lib/permissions/route-roles.js';
+import { judgeRuleCells, matrixCellsOf } from '../lib/permissions/rule-cells.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -24,17 +25,20 @@ declare module 'fastify' {
 /**
  * Применение матрицы прав ролей.
  *
- * Регистрируется ПОСЛЕ authPlugin (нужен req.user) и после read-only-хука
- * для contractor/monitor. Порядок между ними семантически безразличен —
- * оба только запрещают, итог конъюнкция, — но так существующее сообщение
- * 'Read-only role' и его тесты не меняются ни в одном сценарии.
+ * Регистрируется ПОСЛЕ authPlugin: обоим хукам нужен req.user, который тот
+ * заполняет своим onRequest.
+ *
+ * Здесь же живёт read-only-гард для web-only ролей: он переехал из server.ts,
+ * когда стал выводиться из матрицы. Пока гард был отдельным хардкодом, он
+ * отбивал мутации монитора раньше матрицы, и выданное право не работало
+ * никогда.
  *
  * Хуков ДВА, и это не дублирование:
  *
  *   onRequest  — правила класса `static`. Отказ до чтения тела: маршруты
  *                загрузки УПД принимают multipart до 10 МБ, и качать их
  *                ради заведомого 403 незачем. Тот же приём использует
- *                read-only-хук в server.ts.
+ *                read-only-гард ниже.
  *
  *   preHandler — правила класса `dynamic`, где страница берётся из тела
  *                (POST /photos/presign: приёмка или отгрузка). На onRequest
@@ -62,6 +66,67 @@ export default fp(async (app) => {
   const routeRoles = collectRouteRoles(app);
 
   app.decorate('permissions', Object.assign(store, { enforced, routeRoles }));
+
+  /**
+   * Read-only-гард для web-only ролей: любая мутация contractor и monitor
+   * отбивается 403, кроме самообслуживания под /api/v1/auth/ (выход, смена
+   * пароля).
+   *
+   * Метод-ориентированный, а не пер-маршрутный: иммунен к добавлению новых
+   * write-эндпоинтов — закрывать каждый вручную не нужно.
+   *
+   * ПРИ ВЫКЛЮЧЕННОМ ФЛАГЕ поведение ровно прежнее: монитору разрешены только
+   * два маршрута отметки проверки, перечисленные ниже. Это условие полноты
+   * отката — «вернуть 0 и перезапустить» обязано возвращать систему в
+   * исходное состояние целиком, включая гард.
+   *
+   * ПРИ ВКЛЮЧЁННОМ решение принимает матрица: маршрут проходит, если она
+   * разрешает хотя бы одну его ячейку. Иначе выданное монитору «Создавать»
+   * упиралось бы сюда и никогда не работало. Список MONITOR_WRITE_ROUTES при
+   * этом не нужен: PATCH /:id/review помечен действием `review`, которое у
+   * монитора базовое, — матрица пропустит его сама.
+   *
+   * Защита по умолчанию сохраняется: маршрут вне реестра или помеченный
+   * `always` ячеек не имеет, и мутация read-only роли по-прежнему запрещена.
+   */
+  const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+  const WEB_ONLY_ROLES = new Set(['contractor', 'monitor']);
+  // Шаблоны роутов, а не префиксы сырого url: в сыром URL id стоит в середине
+  // пути, и startsWith мог бы случайно открыть лишний mutating-эндпоинт.
+  const MONITOR_WRITE_ROUTES = new Set([
+    '/api/v1/deliveries/:id/review',
+    '/api/v1/shipments/:id/review',
+  ]);
+
+  app.addHook('onRequest', async (req, reply) => {
+    const role = req.user?.role;
+    if (!role || !WEB_ONLY_ROLES.has(role)) return;
+    if (!MUTATING.has(req.method.toUpperCase())) return;
+    if (req.url.startsWith('/api/v1/auth/')) return;
+
+    let allowed = false;
+    if (!enforced) {
+      allowed = role === 'monitor' && MONITOR_WRITE_ROUTES.has(req.routeOptions?.url ?? '');
+    } else {
+      const tmpl = req.routeOptions?.url;
+      const rule = tmpl ? lookupRule(req.method, tmpl) : undefined;
+      // Критерий — «матрица разрешает», а не «право расширено»: базовые права
+      // (отметка проверки у монитора) обязаны работать без всякой выдачи.
+      //
+      // Fail-closed по построению: пропускаем, только если у маршрута ЕСТЬ
+      // ячейки под матрицей и она их разрешает. Маршрут вне реестра, `always`
+      // или ячейка с неприменимым действием (legacy sync ЭДО ссылается на
+      // `edit`, которого у страницы нет) — всё это «матрица здесь ничего не
+      // защищает», и мутацию web-only роли пускать нельзя.
+      const cells = rule ? matrixCellsOf(rule) : [];
+      allowed =
+        cells.length > 0 && judgeRuleCells(rule!, await store.get(), role as ManagedRole).allowed;
+    }
+
+    if (allowed) return;
+    req.log.warn({ path: req.url, method: req.method, role }, 'read-only role write blocked');
+    return reply.code(403).send({ error: 'forbidden', message: 'Read-only role' });
+  });
 
   if (!enforced) {
     app.log.info('permissions: enforcement выключен (PERMISSIONS_ENFORCE=0)');
@@ -106,9 +171,10 @@ export default fp(async (app) => {
    */
   async function anyCellExpanded(rule: RouteRule, role: ManagedRole): Promise<boolean> {
     if (!rule.cells?.length) return false;
-    if (!expansionOpensRoute(rule, role)) return false;
-    const overrides = await store.get();
-    return rule.cells.some((c) => isExpanded(overrides, role, c.page, c.action));
+    // Та же функция, что считает возможности для /me/permissions: разойдись
+    // они — интерфейс показывал бы кнопку, которую сервер не пускает, или
+    // наоборот. Политика expandableBy учтена внутри.
+    return judgeRuleCells(rule, await store.get(), role).expanded;
   }
 
   async function deny(
