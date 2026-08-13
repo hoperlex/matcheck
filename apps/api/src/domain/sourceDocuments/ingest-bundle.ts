@@ -617,13 +617,19 @@ export async function ingestDocumentsBundle(
           ),
         );
       await tx.insert(bundleImportItems).values(
-        succeeded.map((a) => ({
+        succeeded.map((a, idx) => ({
           bundleId: bundle.id,
           sourceFilename: a.filename,
           inputS3Key: a.s3Key,
           mimeType: a.mimeType,
           sizeBytes: a.sizeBytes,
           uploadGeneration: bundle.activeUploadGeneration,
+          // Порядок файлов в пачке — здесь единственное место, где он ещё
+          // известен. Дальше по реестру его не восстановить: у фотографий
+          // страниц одной УПД нет ни номеров, ни имён, по которым можно было бы
+          // понять, какая за какой, а порядок выборки из БД ничем не задан.
+          // Сборка логических документов опирается именно на него.
+          inputOrder: idx,
           processingMode: a.processingMode,
           status: 'accepted' as const,
         })),

@@ -178,11 +178,35 @@ class SourceAlreadyLinkedError extends Error {
 // упадёт на PK с понятным violation. Параметры сохранены для совместимости.
 async function assertSourcesAvailableForDelivery(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  _app: any,
-  _sourceDocumentIds: string[],
+  app: any,
+  sourceDocumentIds: string[],
   _excludeDeliveryId: string | null,
 ) {
-  return;
+  if (sourceDocumentIds.length === 0) return;
+  // Служебные записи пакетов к приёмке не привязываются. Это держатели
+  // вложений на время разбора и промежуточные документы сборки логических
+  // УПД: снаружи их не существует, а до публикации такой документ — половина
+  // поставки, позиции которой ещё меняются.
+  const technical = await app.db
+    .select({ id: sourceDocuments.id })
+    .from(sourceDocuments)
+    .where(
+      and(
+        inArray(sourceDocuments.id, sourceDocumentIds),
+        eq(sourceDocuments.isTechnical, true),
+      ),
+    )
+    .limit(1);
+  if (technical.length > 0) {
+    throw new TechnicalSourceDocumentError();
+  }
+}
+
+/** Попытка привязать служебную запись пакета — отвечаем 404, её «нет». */
+class TechnicalSourceDocumentError extends Error {
+  constructor() {
+    super('technical_source_document');
+  }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -954,6 +978,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             error: 'source_document_already_linked',
             message: 'УПД уже привязана к другой приёмке',
             details: { sourceDocumentIds: err.sourceDocumentIds },
+          });
+        }
+        if (err instanceof TechnicalSourceDocumentError) {
+          return reply.code(404).send({
+            error: 'source_document_not_found',
+            message: 'УПД не найдена',
           });
         }
         // Объект записи сменился между проверкой и UPDATE — транзакция откатана.
@@ -2072,7 +2102,15 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       const [src] = await app.db
         .select({ id: sourceDocuments.id })
         .from(sourceDocuments)
-        .where(eq(sourceDocuments.id, req.body.sourceDocumentId))
+        .where(
+          and(
+            eq(sourceDocuments.id, req.body.sourceDocumentId),
+            // Служебная запись пакета (держатель вложений, промежуточный
+            // документ сборки логических УПД) снаружи не существует и к
+            // приёмке не привязывается.
+            eq(sourceDocuments.isTechnical, false),
+          ),
+        )
         .limit(1);
       if (!src) {
         return reply.code(404).send({

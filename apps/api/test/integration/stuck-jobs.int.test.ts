@@ -18,7 +18,12 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Db } from '../../src/db/client.js';
-import { dispatchKeyOf, bundleDispatchKeyOf } from '../../src/domain/jobs/job-outbox.js';
+import {
+  assemblyDispatchKeyOf,
+  bundleDispatchKeyOf,
+  dispatchKeyOf,
+  segmentDispatchKeyOf,
+} from '../../src/domain/jobs/job-outbox.js';
 import { repairStuckJobs, STUCK_AFTER_MINUTES } from '../../src/domain/jobs/stuck-jobs.js';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -213,6 +218,86 @@ suite('подбор зависших заданий (реальный PostgreSQL
 
   it('пустой прогон ничего не делает', async () => {
     const res = await repair();
-    expect(res).toEqual({ documents: 0, bundles: 0, finalizedItems: 0 });
+    expect(res).toEqual({ documents: 0, bundles: 0, segments: 0, finalizedItems: 0 });
+  });
+
+  // ─── Сборка логических УПД ────────────────────────────────────────────────
+  //
+  // Документ сегмента до публикации технический, а общая выборка технические
+  // пропускает: без отдельной ветки зависший сегмент не восстановился бы
+  // никогда, и комплект остался бы неопубликованным — то есть поставка просто
+  // не появилась бы ни в «Документах», ни на планшете.
+
+  /** Пакет со сборкой: корень, дочерний исполнитель и один сегмент. */
+  async function assemblyWithSegment(age: number): Promise<{
+    rootId: string;
+    subId: string;
+    segmentId: string;
+    docId: string;
+  }> {
+    const rootId = randomUUID();
+    const subId = randomUUID();
+    const docId = randomUUID();
+    await sql`INSERT INTO source_bundles
+        (id, bundle_hash, kind, direction, site_id, status, updated_at)
+      VALUES (${rootId}, ${createHash('sha256').update(rootId).digest('hex')}, 'mixed',
+        'inbound', ${siteId}, 'processing', now() - ${ageMinutes(age)}::interval)`;
+    await sql`INSERT INTO source_bundles
+        (id, bundle_hash, kind, parent_bundle_id, direction, site_id, status, updated_at)
+      VALUES (${subId}, ${createHash('sha256').update(subId).digest('hex')}, 'upd', ${rootId},
+        'inbound', ${siteId}, 'processing', now() - ${ageMinutes(age)}::interval)`;
+    await sql`INSERT INTO source_documents
+        (id, kind, is_technical, direction, origin, status, site_id, bundle_id, queued_at)
+      VALUES (${docId}, 'upd', true, 'inbound', 'manual_pdf', 'queued', ${siteId}, ${subId},
+        now() - ${ageMinutes(age)}::interval)`;
+    const [seg] = await sql<{ id: string }[]>`
+      INSERT INTO bundle_segments (bundle_id, generation, segment_index, source_document_id, confidence)
+      VALUES (${rootId}, 0, 0, ${docId}, 'normal')
+      RETURNING id`;
+    ours.push(segmentDispatchKeyOf(seg!.id, 0), assemblyDispatchKeyOf(subId, 0));
+    return { rootId, subId, segmentId: seg!.id, docId };
+  }
+
+  it('зависший сегмент восстанавливается своим заданием, а не одиночным', async () => {
+    const { segmentId, docId } = await assemblyWithSegment(STUCK_AFTER_MINUTES + 10);
+
+    const res = await repair();
+
+    expect(res.segments).toBe(1);
+    const jobs = await outboxFor(segmentDispatchKeyOf(segmentId, 0));
+    expect(jobs).toHaveLength(1);
+    // Payload адресует манифест: одиночное задание по s3Key распознало бы одну
+    // страницу вместо всего логического УПД.
+    expect(jobs[0]!.payload).toEqual({ sourceDocumentId: docId, segmentId, generation: 0 });
+    expect(await outboxFor(dispatchKeyOf(docId))).toHaveLength(0);
+  });
+
+  it('опубликованный сегмент повторно не ставится', async () => {
+    const { segmentId } = await assemblyWithSegment(STUCK_AFTER_MINUTES + 10);
+    await sql`UPDATE bundle_segments SET published_at = now() WHERE id = ${segmentId}`;
+    await sql`UPDATE source_documents SET is_technical = false, status = 'parsed',
+        doc_number = 'УТ-9', doc_date = current_date, total_sum = 100
+      WHERE id = (SELECT source_document_id FROM bundle_segments WHERE id = ${segmentId})`;
+
+    const res = await repair();
+
+    expect(res.segments).toBe(0);
+    expect(await outboxFor(segmentDispatchKeyOf(segmentId, 0))).toHaveLength(0);
+  });
+
+  it('зависший дочерний пакет сборки восстанавливается своим режимом', async () => {
+    const { subId } = await assemblyWithSegment(STUCK_AFTER_MINUTES + 10);
+    // Сборка не дошла до манифеста: пакет ждёт своего задания.
+    await sql`DELETE FROM bundle_segments WHERE bundle_id IN
+        (SELECT id FROM source_bundles WHERE site_id = ${siteId})`;
+    await sql`UPDATE source_bundles SET status = 'queued' WHERE id = ${subId}`;
+
+    await repair();
+
+    const jobs = await outboxFor(assemblyDispatchKeyOf(subId, 0));
+    expect(jobs).toHaveLength(1);
+    // Без mode='upd_assembly' задание ушло бы в waybill-обработчик, который не
+    // нашёл бы накладных и пометил пакет parse_failed.
+    expect(jobs[0]!.payload).toEqual({ bundleId: subId, mode: 'upd_assembly', generation: 0 });
   });
 });

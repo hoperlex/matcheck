@@ -18,6 +18,15 @@ export type RegistryRow = {
   mimeType: string | null;
   sizeBytes: number | null;
   uploadGeneration: number | null;
+  /**
+   * Порядок файла внутри пачки (0-based), проставленный при приёме.
+   *
+   * Нужен сборке логических УПД: набор фотографий раскладывается в страницы
+   * только по соседству, а порядок выборки из реестра ничем не гарантирован.
+   * NULL у строк, созданных до миграции 0096, — для них порядок берётся по
+   * createdAt/id.
+   */
+  inputOrder: number | null;
   status: string;
   processingMode: string;
   detectedKind: string | null;
@@ -28,6 +37,12 @@ export type RegistryRow = {
   // Конечный исход файла, если он расходится с решением router'а: накладная
   // ушла в дочерний пакет (status='created'), а тот кончился ничем.
   effectiveStatus: string | null;
+  /**
+   * Дочерний пакет, в который уехал файл: накладная — в waybill-разбор, УПД —
+   * в сборку логических документов. По нему сборка отбирает свои файлы: в
+   * реестре корневого пакета лежат и чужие строки (сертификаты, накладные).
+   */
+  subBundleId: string | null;
   resolvedAt: Date | null;
   createdAt: Date;
 };
@@ -40,6 +55,7 @@ const columns = {
   mimeType: bundleImportItems.mimeType,
   sizeBytes: bundleImportItems.sizeBytes,
   uploadGeneration: bundleImportItems.uploadGeneration,
+  inputOrder: bundleImportItems.inputOrder,
   status: bundleImportItems.status,
   processingMode: bundleImportItems.processingMode,
   detectedKind: bundleImportItems.detectedKind,
@@ -48,6 +64,7 @@ const columns = {
   createdDocumentIds: bundleImportItems.createdDocumentIds,
   reason: bundleImportItems.reason,
   effectiveStatus: bundleImportItems.effectiveStatus,
+  subBundleId: bundleImportItems.subBundleId,
   resolvedAt: bundleImportItems.resolvedAt,
   createdAt: bundleImportItems.createdAt,
 };

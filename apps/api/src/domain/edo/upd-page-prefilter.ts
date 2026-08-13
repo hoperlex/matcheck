@@ -25,16 +25,13 @@
 // (upd-vision.parser импортирует этот модуль).
 
 import { spawn } from 'node:child_process';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Jimp } from 'jimp';
-import { computePdfRenderDpi } from './pdf-render-dpi.js';
-
-// DPI для миниатюр под классификацию страниц. Низкий — классификатору
-// (upd / сертификат / накладная) не нужно высокое разрешение, а токены и
-// payload-size экономятся существенно.
-const CLASSIFY_DPI = 72;
+// Рендер PDF живёт в общем модуле: тем же кодом, DPI и таймаутами страницы
+// готовит сборка логических УПД (worker: upd_assembly).
+import { CLASSIFY_DPI, renderPdf } from './page-render.js';
 
 // Сколько страниц максимум рендерим/классифицируем. Защита от аномального
 // PDF на сотню страниц: УПД-пакеты реально 1-8 страниц. Если УПД-страница
@@ -47,7 +44,7 @@ const OSD_MIN_CONFIDENCE = 1.0;
 
 const OSD_TIMEOUT_MS = 20_000;
 const CLASSIFY_TIMEOUT_MS = 60_000;
-const PDFTOPPM_TIMEOUT_MS = 75_000;
+// Таймаут pdftoppm переехал в page-render вместе с самим рендером.
 const PDFINFO_TIMEOUT_MS = 5_000;
 
 // Знак поворота на стыке Tesseract↔Jimp. Tesseract OSD "Rotate: N" — это
@@ -416,60 +413,7 @@ export async function rotatePng(png: Buffer, clockwiseDeg: number): Promise<Buff
   return (await img.getBuffer('image/png')) as Buffer;
 }
 
-// ─── Внутренние утилиты рендера/метаданных PDF ──────────────────────────────
-
-type RenderOpts = { dpi?: number; firstPage?: number; lastPage?: number };
-
-/**
- * PDF→PNG через системный pdftoppm. Гибче, чем pdfToPngsViaPoppler в
- * upd-vision.parser: умеет произвольный диапазон страниц и явный DPI
- * (для миниатюр классификации). Без явного dpi — адаптивный
- * computePdfRenderDpi (как основной рендер). Бросает Error при сбое.
- */
-async function renderPdf(pdfBuffer: Buffer, ropts: RenderOpts): Promise<Buffer[]> {
-  const dir = await mkdtemp(join(tmpdir(), 'upd-prefilter-'));
-  try {
-    const inPath = join(dir, 'in.pdf');
-    const outPrefix = join(dir, 'out');
-    await writeFile(inPath, pdfBuffer);
-
-    const dpi = ropts.dpi ?? (await computePdfRenderDpi(pdfBuffer));
-    const args = ['-r', String(dpi), '-png'];
-    if (ropts.firstPage) args.push('-f', String(ropts.firstPage));
-    if (ropts.lastPage) args.push('-l', String(ropts.lastPage));
-    args.push(inPath, outPrefix);
-
-    await new Promise<void>((resolve, reject) => {
-      const proc = spawn('pdftoppm', args, { stdio: ['ignore', 'ignore', 'pipe'] });
-      let stderr = '';
-      const timer = setTimeout(() => {
-        proc.kill('SIGKILL');
-        reject(new Error('pdftoppm timeout (prefilter)'));
-      }, PDFTOPPM_TIMEOUT_MS);
-      proc.stderr.on('data', (c: Buffer) => {
-        stderr += c.toString('utf8');
-      });
-      proc.on('error', (err) => {
-        clearTimeout(timer);
-        reject(new Error(`pdftoppm не запустился (prefilter): ${err.message}`));
-      });
-      proc.on('exit', (code) => {
-        clearTimeout(timer);
-        if (code !== 0) reject(new Error(`pdftoppm exit=${code} (prefilter): ${stderr.slice(0, 200)}`));
-        else resolve();
-      });
-    });
-
-    const files = (await readdir(dir))
-      .filter((f) => /^out-\d+\.png$/.test(f))
-      .sort((a, b) => Number(a.match(/(\d+)/)![1]) - Number(b.match(/(\d+)/)![1]));
-    const pages: Buffer[] = [];
-    for (const f of files) pages.push(await readFile(join(dir, f)));
-    return pages;
-  } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-  }
-}
+// ─── Внутренние утилиты метаданных PDF ──────────────────────────────────────
 
 /**
  * Per-page /Rotate из pdfinfo (`-l N`). Возвращает массив углов по индексу

@@ -489,6 +489,31 @@ suite('происхождение позиций приёмки (реальны�
     expect(byName('Ветошь', 5).source_document_id).toBeNull();
   });
 
+  it('служебную запись пакета к приёмке привязать нельзя', async () => {
+    // Промежуточный документ сборки логических УПД остаётся техническим до
+    // публикации: его позиции ещё меняются, а часть страниц может быть не
+    // распознана. Привязать такой документ — значит принять половину поставки.
+    const techId = randomUUID();
+    await sql`
+      INSERT INTO source_documents (id, kind, direction, status, origin, site_id, is_technical)
+      VALUES (${techId}, 'upd', 'inbound', 'queued', 'manual_pdf', ${siteId}, true)`;
+    const deliveryId = await makeDelivery();
+
+    const linked = await link(deliveryId, techId);
+    expect(linked.statusCode).toBe(404);
+
+    // И при создании приёмки — тоже: там набор связей берётся из запроса.
+    const created = await upsert({
+      id: randomUUID(),
+      statusCode: 'filled',
+      siteId,
+      items: [],
+      sourceDocumentIds: [techId],
+    });
+    expect(created.statusCode).toBe(404);
+    expect(await sourcesOf(deliveryId)).toEqual([]);
+  });
+
   it('документ, чьи позиции лежат в приёмке, удалить нельзя', async () => {
     const upd = await makeUpd('О-16', [{ name: 'Саморезы', qty: '1000' }]);
     const deliveryId = await makeDelivery();

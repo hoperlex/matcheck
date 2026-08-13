@@ -22,18 +22,21 @@
 // Порог намеренно большой: воркер разбирает пачки последовательно
 // (CONCURRENCY=1) и при длинной очереди запись законно ждёт десятки минут.
 
-import { and, eq, isNotNull, lt, sql as drSql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, lt, sql as drSql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
+  bundleSegments,
   sourceBundles,
   sourceDocumentAttachments,
   sourceDocuments,
 } from '../../db/schema.js';
 import {
+  assemblyDispatchKeyOf,
   bundleDispatchKeyOf,
   dispatchKeyOf,
   documentSecondPassKeyOf,
   enqueueJob,
+  segmentDispatchKeyOf,
 } from './job-outbox.js';
 import {
   finalizeStaleRegistryItems,
@@ -54,7 +57,13 @@ export type RepairDeps = {
   log?: { info?: (o: unknown, m?: string) => void; warn?: (o: unknown, m?: string) => void };
 };
 
-export type RepairResult = { documents: number; bundles: number; finalizedItems: number };
+export type RepairResult = {
+  documents: number;
+  bundles: number;
+  /** Сегменты сборки логических УПД, переставленные заново. */
+  segments: number;
+  finalizedItems: number;
+};
 
 /**
  * Переставляет задания для записей, зависших в `queued`.
@@ -116,6 +125,46 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
     documents += 1;
   }
 
+  // ─── Сегменты сборки: технические документы, ждущие своего распознавания ──
+  //
+  // Общая выборка выше берёт только is_technical = false, и это правильно:
+  // служебные записи пакетов ждут задания ПАКЕТА. Но документ сегмента —
+  // исключение: он технический ровно до публикации, а задание у него своё,
+  // адресующее строку манифеста. Без этой ветки зависший сегмент не
+  // восстановился бы никогда, и комплект не опубликовался бы вовсе.
+  const staleSegments = await db
+    .select({
+      docId: bundleSegments.sourceDocumentId,
+      segmentId: bundleSegments.id,
+      generation: bundleSegments.generation,
+    })
+    .from(bundleSegments)
+    .innerJoin(sourceDocuments, eq(sourceDocuments.id, bundleSegments.sourceDocumentId))
+    .where(
+      and(
+        eq(sourceDocuments.status, 'queued'),
+        eq(sourceDocuments.isTechnical, true),
+        isNull(bundleSegments.publishedAt),
+        isNotNull(sourceDocuments.queuedAt),
+        lt(sourceDocuments.queuedAt, cutoff),
+      ),
+    )
+    .limit(STUCK_BATCH);
+
+  let segments = 0;
+  for (const seg of staleSegments) {
+    if (!seg.docId) continue;
+    await enqueueJob(db, {
+      queue: deps.queue,
+      jobName: 'parse',
+      // Payload и ключ ровно те же, что при первой постановке: иначе BullMQ
+      // примет задание за новое и сегмент распознается дважды.
+      payload: { sourceDocumentId: seg.docId, segmentId: seg.segmentId, generation: seg.generation },
+      dedupeKey: segmentDispatchKeyOf(seg.segmentId, seg.generation),
+    });
+    segments += 1;
+  }
+
   // ─── Пакеты: ждут разбора router'ом или waybill-парсером ─────────────────
   //
   // Только те, где разбор заведомо не начинался: служебная запись на месте,
@@ -125,6 +174,7 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
     .select({
       id: sourceBundles.id,
       kind: sourceBundles.kind,
+      parentBundleId: sourceBundles.parentBundleId,
       generation: sourceBundles.dispatchGeneration,
     })
     .from(sourceBundles)
@@ -143,7 +193,26 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
   let repairedBundles = 0;
   for (const bundle of bundles) {
     // Router-пакеты (kind='mixed') приходят из единого входа и требуют
-    // mode:'router'; накладные разбираются waybill-веткой.
+    // mode:'router'; накладные разбираются waybill-веткой. Дочерний пакет
+    // сборки (kind='upd' с родителем) — третий случай: без своего режима он
+    // ушёл бы в waybill-обработчик, не нашёл там накладных и пометил бы пакет
+    // parse_failed, потеряв уже загруженные файлы.
+    if (bundle.kind === 'upd' && bundle.parentBundleId) {
+      const [root] = await db
+        .select({ gen: sourceBundles.activeUploadGeneration })
+        .from(sourceBundles)
+        .where(eq(sourceBundles.id, bundle.parentBundleId))
+        .limit(1);
+      if (!root) continue;
+      await enqueueJob(db, {
+        queue: deps.queue,
+        jobName: 'parse',
+        payload: { bundleId: bundle.id, mode: 'upd_assembly' as const, generation: root.gen },
+        dedupeKey: assemblyDispatchKeyOf(bundle.id, root.gen),
+      });
+      repairedBundles += 1;
+      continue;
+    }
     const payload =
       bundle.kind === 'mixed'
         ? { bundleId: bundle.id, mode: 'router' as const }
@@ -157,15 +226,15 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
     repairedBundles += 1;
   }
 
-  if (documents || repairedBundles) {
+  if (documents || repairedBundles || segments) {
     deps.log?.warn?.(
-      { documents, bundles: repairedBundles, thresholdMin: STUCK_AFTER_MINUTES },
+      { documents, bundles: repairedBundles, segments, thresholdMin: STUCK_AFTER_MINUTES },
       'repair: найдены записи без задания, поставлены заново',
     );
   }
 
   const finalizedItems = await finalizeIncompleteBundles(deps);
-  return { documents, bundles: repairedBundles, finalizedItems };
+  return { documents, bundles: repairedBundles, segments, finalizedItems };
 }
 
 /**

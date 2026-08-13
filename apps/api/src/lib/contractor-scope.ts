@@ -136,8 +136,18 @@ export function sourceDocumentVisibleToContractor(
 export async function sourceDocumentVisible(
   app: FastifyInstance,
   user: AuthUser | undefined,
-  sd: { siteId: string | null; contractorId: string | null; recipientSource: string | null },
+  sd: {
+    siteId: string | null;
+    contractorId: string | null;
+    recipientSource: string | null;
+    isTechnical?: boolean | null;
+  },
 ): Promise<boolean> {
+  // Служебная запись пакета: держатель вложений на время разбора и промежуточный
+  // документ сборки логических УПД. Списки и /sync её и так не отдают, но по
+  // прямому id она открывалась — а до публикации это половина поставки, которую
+  // никто не должен ни открыть, ни привязать к приёмке.
+  if (sd.isTechnical) return false;
   // inspector_kpp видит только документы своего объекта.
   if (user?.role === 'inspector_kpp') {
     return !!user.siteId && sd.siteId === user.siteId;

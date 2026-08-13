@@ -96,13 +96,30 @@ import {
 } from './domain/sourceDocuments/bundle-import-registry.js';
 import { classifyImageKind } from './domain/edo/vision-classifier.js';
 import {
+  assemblyDispatchKeyOf,
   bundleDispatchKeyOf,
   documentSecondPassKeyOf,
   dispatchKeyOf,
   enqueueJob,
   processJobOutbox,
+  segmentDispatchKeyOf,
   OUTBOX_INTERVAL_MS as JOB_OUTBOX_INTERVAL_MS,
 } from './domain/jobs/job-outbox.js';
+import { loadEnv } from './lib/env.js';
+import { bundleSegments, ingestEvents, jobOutbox } from './db/schema.js';
+import { classifyPages, type PageClassification } from './domain/edo/upd-page-prefilter.js';
+import { imageToPng, renderPdf, toClassifyThumb } from './domain/edo/page-render.js';
+import {
+  mergeClassificationChunks,
+  pageRefsOfSegment,
+  planUpdSegments,
+  type AssemblyPage,
+  type PageRef,
+} from './domain/edo/upd-assembly.js';
+import { extractUpdSegment } from './domain/edo/upd-segment-extract.js';
+import { resolveRootBundle } from './domain/sourceDocuments/bundle-import-registry.js';
+import { llmProviders, llmProviderCredentials } from './db/schema.js';
+import { buildAad, decryptField } from './domain/auth/crypto.js';
 import { repairStuckJobs, STUCK_INTERVAL_MS } from './domain/jobs/stuck-jobs.js';
 import type { UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
 
@@ -189,7 +206,9 @@ type ParseMode =
   | 'excel_structural'
   | 'excel_vision'
   | 'm15_vision'
-  | 'second_pass_vision';
+  | 'second_pass_vision'
+  // Логический УПД, собранный из страниц пакета (см. bundle_segments).
+  | 'segment_vision';
 
 /**
  * Режимы, для которых имеет смысл второй проход картинкой.
@@ -333,17 +352,57 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     await handleDocumentRouterJob(job.data.bundleId, log);
     return;
   }
+  // Сборка логических УПД. Проверка ОБЯЗАНА стоять раньше общей ветки по
+  // bundleId: у дочернего пакета сборки тот же ключ, и без дискриминатора он
+  // ушёл бы в waybill-обработчик — тот не нашёл бы накладных и пометил пакет
+  // parse_failed.
+  if ('mode' in job.data && job.data.mode === 'upd_assembly' && job.data.bundleId) {
+    const log = logger.child({
+      bundleId: job.data.bundleId,
+      jobId: job.id,
+      mode: 'upd_assembly',
+    });
+    await handleUpdAssemblyJob(job.data.bundleId, job.data.generation, log);
+    return;
+  }
   if ('bundleId' in job.data && job.data.bundleId) {
     const log = logger.child({ bundleId: job.data.bundleId, jobId: job.id });
     await handleWaybillBundleJob(job.data.bundleId, log);
     return;
   }
-  if (!job.data.sourceDocumentId || !job.data.s3Key) {
+  // Сегмент сборки: файла у задания нет вовсе — страницы адресует манифест,
+  // поэтому проверка payload ниже пропускает его отдельно.
+  const segmentJob =
+    'segmentId' in job.data && job.data.segmentId && job.data.sourceDocumentId
+      ? { segmentId: job.data.segmentId, generation: job.data.generation }
+      : null;
+
+  if (!job.data.sourceDocumentId || (!job.data.s3Key && !segmentJob)) {
     logger.warn({ jobId: job.id, data: job.data }, 'unknown job payload — skipping');
     return;
   }
-  const { sourceDocumentId, s3Key } = job.data;
-  const secondPassJob = job.data.pass === 'vision';
+  const sourceDocumentId = job.data.sourceDocumentId;
+
+  // Fencing сегментного задания. Одной проверки поколения мало: откат
+  // происходит ВНУТРИ того же поколения, и после него задание, дождавшееся
+  // своей очереди, снова прошло бы проверку и переписало бы документ, которого
+  // уже нет. Поэтому условий несколько, и достаточно любого несовпадения.
+  let segmentContext: SegmentJobContext | null = null;
+  if (segmentJob) {
+    segmentContext = await loadSegmentContext(sourceDocumentId, segmentJob);
+    if (!segmentContext) {
+      logger.info(
+        { jobId: job.id, segmentId: segmentJob.segmentId },
+        'сегмент сборки: задание неактуально — пропускаем',
+      );
+      return;
+    }
+  }
+
+  // Для сегмента ключ первого вложения нужен только для логов и сообщений:
+  // распознавание идёт по страницам манифеста, а не по файлу.
+  const s3Key = job.data.s3Key ?? segmentContext?.firstS3Key ?? '';
+  const secondPassJob = 'pass' in job.data && job.data.pass === 'vision';
   const log = logger.child({
     sourceDocumentId,
     jobId: job.id,
@@ -371,12 +430,18 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   }
 
   // ─── УПД-флоу (kind='upd'/'request') ─────────────────────────────────────
-  let buffer: Buffer;
-  try {
-    buffer = await getObject(s3Key);
-  } catch (err) {
-    log.error({ err, s3Key }, 's3 getObject failed');
-    throw err;
+  //
+  // У сегмента страниц несколько и лежат они в разных файлах, поэтому «скачать
+  // один буфер» здесь неприменимо: страницы готовит loadSegmentPages ниже, по
+  // адресам из манифеста.
+  let buffer: Buffer = Buffer.alloc(0);
+  if (!segmentContext) {
+    try {
+      buffer = await getObject(s3Key);
+    } catch (err) {
+      log.error({ err, s3Key }, 's3 getObject failed');
+      throw err;
+    }
   }
 
   // Routing по типу файла. s3Key содержит имя «source.{ext}», где ext —
@@ -412,7 +477,24 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   let parsedViaVision = false;
   let parseMode: ParseMode = 'text';
   try {
-    if (secondPassJob) {
+    if (segmentContext) {
+      // Логический УПД, собранный из страниц пакета. Страницы уже отобраны
+      // классификатором и лежат в манифесте — ни классифицировать заново, ни
+      // угадывать формат файла не нужно.
+      const pages = await loadSegmentPages(segmentContext);
+      const r = await extractUpdSegment(pages, {
+        sourceDocumentId,
+        bundleId: segmentContext.rootId,
+        segmentIndex: segmentContext.segmentIndex,
+      });
+      parsed = r.parsed;
+      llmProviderId = r.llmProviderId;
+      parsedViaVision = true;
+      // Отдельный режим, а не image_vision: по нему видно, что документ собран
+      // из страниц, и он намеренно НЕ входит в SECOND_PASS_MODES — повторять
+      // картинку картинкой нечем.
+      parseMode = 'segment_vision';
+    } else if (secondPassJob) {
       // Второй проход: сразу картинка, без текстового пути и bundle-попыток —
       // именно они и дали слабый результат на первом заходе.
       const mimeForVision = isImage ? imageMime! : 'application/pdf';
@@ -424,7 +506,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       llmProviderId = r.llmProviderId;
       parsedViaVision = true;
       parseMode = 'second_pass_vision';
-    } else if (job.data.docKind === 'm15') {
+    } else if ('docKind' in job.data && job.data.docKind === 'm15') {
       // М-15 (накладная на отпуск материалов) — всегда распознаём через vision
       // отдельным m15-промптом: у сканов/фото нет текстового слоя, а у PDF из
       // 1С он часто «битый» (нечитаемые глифы). Тип документа уже задан при
@@ -1106,7 +1188,15 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         ),
       )
       .limit(1);
-    if (existing) {
+    if (existing && segmentContext) {
+      // Сегмент сборки. Ветка ниже терминальна: она пишет шапку и выходит ДО
+      // сохранения позиций, оставляя пустую карточку. Для собранного документа
+      // это неприемлемо — распознавание уже состоялось, и терять его позиции
+      // из-за того, что такой же УПД когда-то загружали, нельзя. Дубликат
+      // здесь остаётся предупреждением: пометку проставим после сохранения.
+      duplicate = { id: existing.id };
+      log.warn({ existingId: existing.id }, 'сегмент: дубликат — сохраняем полностью');
+    } else if (existing) {
       duplicate = { id: existing.id };
       const duplicateValues = {
         status: 'needs_resolution' as const,
@@ -1162,13 +1252,15 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     );
   }
 
-  if (duplicate) return;
+  // Обычный путь на дубликате заканчивается: шапка записана веткой выше.
+  // Сегмент идёт дальше — его результат сохраняется целиком.
+  if (duplicate && !segmentContext) return;
 
   // Толлинг-М-15 без стоимостной части (итог прописью «Ноль»): доопределяем
   // totalSum/vatSum в 0, чтобы документ не падал в partial_parse из-за
   // недетерминизма vision (0 vs null). Для всех прочих документов — no-op.
   // См. m15-normalize.ts.
-  parsed = normalizeM15ZeroTotals(parsed, job.data.docKind);
+  parsed = normalizeM15ZeroTotals(parsed, 'docKind' in job.data ? job.data.docKind : undefined);
 
   // Валидация сумм.
   const validation = validateUpdTotals({
@@ -1339,11 +1431,37 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     await db.insert(sourceDocumentItems).values(rows);
   }
 
+  // Дубликат у собранного документа — предупреждение поверх сохранённого
+  // результата: позиции и реквизиты остаются, менеджер решает, что делать.
+  if (duplicate && segmentContext) {
+    await db
+      .update(sourceDocuments)
+      .set({
+        status: 'needs_resolution',
+        parseErrorCode: 'duplicate_upd',
+        parseErrorDetails: {
+          existingId: duplicate.id,
+          docNumber: parsed.docNumber,
+          docDate: parsed.docDate,
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(sourceDocuments.id, sourceDocumentId));
+  }
+
   log.info(
     { itemsCount: parsed.items.length, status, parseErrorCode },
     'upd parsed successfully',
   );
   await notifySourceDocumentUpdated(sourceDocumentId);
+
+  // Комплект мог стать готовым именно сейчас. Вызов здесь, а не в вызывающем
+  // коде: у handleJob несколько ранних выходов, и публикация не должна
+  // зависеть от того, каким из них закончился разбор — за остальные отвечает
+  // finally в обработчике очереди и ветка worker.on('failed').
+  if (segmentContext) {
+    await tryFinalizeUpdAssembly(segmentContext.rootId, segmentContext.generation, log);
+  }
 }
 
 // ─── Накладные (ТН-2116 + ОС-2): vision-LLM пайплайн ─────────────────────
@@ -1576,6 +1694,11 @@ type RouterInputFile = {
   registryItemId: string | null;
   uploadGeneration: number | null;
   /**
+   * Позиция файла в пачке. Адресует страницы при сборке логических УПД:
+   * PageRef хранит именно её, а не порядок выборки из БД.
+   */
+  inputOrder: number;
+  /**
    * Статус строки реестра на входе в прогон.
    *
    * Терминальных состояний два, и повторять нельзя ни одно: `created` дал бы
@@ -1606,15 +1729,29 @@ async function loadRouterInputs(
   const registry = await selectRegistryRows(db, bundleId, activeUploadGeneration);
 
   if (registry.length > 0) {
+    // Порядок файлов: input_order, проставленный при приёме. У строк старше
+    // миграции 0096 его нет — они идут после нумерованных, в порядке
+    // поступления. Сортировка здесь, а не в SQL: fallback-ветка ниже читает
+    // attachments, и порядок должен определяться одним правилом.
+    const ordered = [...registry].sort((a, b) => {
+      if (a.inputOrder !== null && b.inputOrder !== null) return a.inputOrder - b.inputOrder;
+      if (a.inputOrder !== null) return -1;
+      if (b.inputOrder !== null) return 1;
+      const byDate = a.createdAt.getTime() - b.createdAt.getTime();
+      return byDate !== 0 ? byDate : a.id.localeCompare(b.id);
+    });
     return {
       source: 'registry',
-      files: registry.map((r) => ({
+      files: ordered.map((r, idx) => ({
         s3Key: r.s3Key as string,
         filename: r.filename,
         mimeType: r.mimeType,
         sizeBytes: r.sizeBytes,
         registryItemId: r.id,
         uploadGeneration: r.uploadGeneration,
+        // Позиция в разложенном порядке: сборка адресует страницы именно ею, и
+        // для legacy-строк без input_order она тоже должна быть определена.
+        inputOrder: r.inputOrder ?? idx,
         status: r.status,
         processingMode: r.processingMode,
       })),
@@ -1629,13 +1766,14 @@ async function loadRouterInputs(
     .where(eq(sourceDocumentAttachments.sourceDocumentId, techId));
   return {
     source: 'attachments',
-    files: attachments.map((a) => ({
+    files: attachments.map((a, idx) => ({
       s3Key: a.s3Key,
       filename: a.filename,
       mimeType: a.mimeType,
       sizeBytes: a.sizeBytes,
       registryItemId: null,
       uploadGeneration: null,
+      inputOrder: idx,
       status: null,
       // Пакеты, принятые до появления зон, знали только один режим.
       processingMode: 'auto',
@@ -1653,8 +1791,9 @@ type ImportItemOutcome = {
   createdDocumentIds?: string[];
   subBundleId?: string | null;
   metadata?: Record<string, unknown> | null;
-  // Конечный исход файла, если он отличается от решения router'а. Не задан —
-  // выводится из status (см. recordImportItem).
+  // Конечный исход файла, если он отличается от решения router'а. Ключ не
+  // передан — выводится из status; передан явный null — исход ЕЩЁ НЕ ИЗВЕСТЕН
+  // (файл ушёл в асинхронную сборку, см. recordImportItem).
   effectiveStatus?: string | null;
 };
 
@@ -1694,8 +1833,18 @@ async function recordImportItem(
     // где исход выясняется позже (дочерний пакет накладной), переписывают его
     // отдельно. Держать колонку заполненной обязательно: проверка «ни один
     // принятый файл не потерян» опирается именно на неё.
+    //
+    // Различаем «ключ не передан» и «передан явный null»: у сборки логических
+    // УПД файл уезжает в дочерний пакет со status='created', но исход по нему
+    // выяснится только после публикации или отката, и объявлять его
+    // обработанным сразу нельзя. `??` такой разницы не видит, поэтому проверка
+    // именно по наличию ключа.
     effectiveStatus:
-      outcome.effectiveStatus ?? (TERMINAL_ITEM_STATUSES.has(outcome.status) ? outcome.status : null),
+      'effectiveStatus' in outcome
+        ? outcome.effectiveStatus
+        : TERMINAL_ITEM_STATUSES.has(outcome.status)
+          ? outcome.status
+          : null,
     updatedAt: new Date(),
   };
 
@@ -1849,6 +1998,12 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
   let createdCount = 0;
   let failedCount = 0;
 
+  // Сборка логических УПД включается только там, где она и нужна: публичная
+  // форма поставщика, входящее направление, включённый флаг. Проверка одна на
+  // весь пакет — до цикла, чтобы решение по файлам не разъехалось.
+  const assemblyEnabled = await isUpdAssemblyEligible(bundleId, bundle);
+  const assemblyCandidates: { file: RouterInputFile; cls: FileClassification }[] = [];
+
   for (const a of inputs) {
     // Файл уже в терминальном состоянии от прошлого прогона (крах в середине
     // пачки, BullMQ retry, ручной перезапуск). Повторять нельзя: created дал бы
@@ -1948,6 +2103,21 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
       // файл создаётся видимая строка (12 загрузил → 12 строк).
       const isWaybill =
         cls.detectedKind === 'transport_waybill' || cls.detectedKind === 'os2_transfer';
+
+      if (cls.detectedKind === 'unknown' && assemblyEnabled && isAssemblyCandidate(a, cls)) {
+        // Страница-продолжение УПД (таблица позиций без шапки счёта-фактуры)
+        // пофайлово опознаётся именно как unknown: ни текстовый классификатор,
+        // ни vision по одному кадру не могут сказать, частью чего она является.
+        // Отправить её в заглушку ДО пакетной классификации — значит гарантированно
+        // повторить исходную ошибку: страница станет пустым документом, а её
+        // позиции пропадут из своего УПД.
+        //
+        // Поэтому при включённой сборке такой файл идёт в общий разбор пакета,
+        // и заглушкой становится только если ни одна его страница не вошла в
+        // сегмент.
+        assemblyCandidates.push({ file: a, cls });
+        continue;
+      }
 
       if (cls.detectedKind === 'unknown') {
         // Тип не подтвердил ни текстовый классификатор, ни vision. В УПД-flow
@@ -2158,69 +2328,20 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
           });
         });
         createdCount++;
+      } else if (assemblyEnabled && isAssemblyCandidate(a, cls)) {
+        // Сборка логических УПД: файл не превращается в документ здесь.
+        // Страницы всех кандидатов классифицируются одним заходом в дочернем
+        // пакете, и уже там решается, сколько документов получится. Строка
+        // реестра заводится сразу (файл не должен пропасть из виду), но исход
+        // по ней ещё не известен — его проставит публикация или откат.
+        assemblyCandidates.push({ file: a, cls });
       } else {
         // УПД-flow (одиночный, тот же путь, что «Загрузить УПД»). Сюда попадают:
         //  - УПД (Excel / текстовый PDF) — детерминированно;
         //  - сканы и фото, которые vision подтвердил как УПД (needsVision) —
         //    handleJob распознает их через parseUpdVision.
         // Неопознанное сюда больше не доходит: оно обработано веткой выше.
-        const docId = randomUUID();
-        const dedupeKey = dispatchKeyOf(docId);
-        const reason =
-          cls.detectedKind === 'upd' && !cls.needsVision
-            ? cls.updInvoiceCount && cls.updInvoiceCount >= 2
-              ? `УПД-пачка (${cls.updInvoiceCount} счёт-фактур) → агрегат`
-              : 'УПД → одиночный парсер'
-            : cls.needsVision
-              ? 'скан/фото/неясный текст → распознавание через vision'
-              : 'тип неоднозначен → попытка распознавания';
-        await db.transaction(async (tx) => {
-          await tx.insert(sourceDocuments).values({
-            id: docId,
-            kind: 'upd',
-            direction: bundle.direction,
-            origin: bundleOrigin,
-            status: 'queued',
-            contractorId: bundle.contractorId,
-            recipientMolId: bundle.recipientMolId,
-            recipientSource: manualRecipientSource(bundle),
-            siteId: bundle.siteId,
-            expectedDate: bundleExpected,
-            originalFilename: a.filename,
-            queuedAt: new Date(),
-            parsedAt: new Date(),
-            jobId: dedupeKey,
-            bundleId,
-            createdByUserId: bundle.createdByUserId,
-          });
-          await tx.insert(sourceDocumentAttachments).values({
-            sourceDocumentId: docId,
-            s3Key: a.s3Key,
-            filename: a.filename,
-            mimeType: a.mimeType,
-            sizeBytes: a.sizeBytes,
-            role: 'original',
-          });
-          await enqueueJob(tx as unknown as typeof db, {
-            queue: UPD_PARSE_QUEUE,
-            jobName: 'parse',
-            payload: { sourceDocumentId: docId, s3Key: a.s3Key },
-            dedupeKey,
-          });
-          await recordImportItem(tx as unknown as typeof db, bundleId, a, {
-            detectedKind: cls.detectedKind,
-            confidence: cls.confidence.toString(),
-            parserUsed: cls.needsVision ? 'parseUpdVision' : cls.parserUsed,
-            status: 'created',
-            createdDocumentIds: [docId],
-            reason,
-            metadata: {
-              signals: cls.signals,
-              needsVision: cls.needsVision,
-              updInvoiceCount: cls.updInvoiceCount ?? null,
-            },
-          });
-        });
+        await createSingleUpdDocument({ bundleId, bundle, bundleOrigin, bundleExpected, file: a, cls });
         createdCount++;
       }
     } catch (err) {
@@ -2234,6 +2355,51 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
         reason: 'внутренняя ошибка обработки файла',
       }).catch(() => undefined);
       failedCount++;
+    }
+  }
+
+  // Кандидаты на сборку уезжают одним дочерним пакетом: их страницы нужно
+  // классифицировать вместе, иначе не понять, где кончается одна УПД и
+  // начинается следующая.
+  let assemblyStarted = false;
+  if (assemblyCandidates.length > 0) {
+    try {
+      await startUpdAssembly({
+        bundleId,
+        bundle,
+        bundleOrigin,
+        candidates: assemblyCandidates,
+        log,
+      });
+      assemblyStarted = true;
+      // createdCount не увеличиваем: документы появятся в дочернем пакете и
+      // будут посчитаны при публикации.
+    } catch (err) {
+      // Не удалось даже завести сборку (БД, outbox) — файлы не должны
+      // застрять. Разворачиваем их прежним путём прямо здесь.
+      log.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'router: не удалось запустить сборку УПД — откат на «файл = документ»',
+      );
+      for (const c of assemblyCandidates) {
+        try {
+          await createSingleUpdDocument({
+            bundleId,
+            bundle,
+            bundleOrigin,
+            bundleExpected,
+            file: c.file,
+            cls: c.cls,
+          });
+          createdCount++;
+        } catch (inner) {
+          log.error(
+            { err: inner instanceof Error ? inner.message : String(inner), file: c.file.filename },
+            'router: откат кандидата сборки тоже упал',
+          );
+          failedCount++;
+        }
+      }
     }
   }
 
@@ -2267,11 +2433,1103 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
   // нигде — ни документа, ни дополнительного файла.
   await closeStaleRegistryItems(bundleId, log);
 
+  // Пакет со сборкой ещё не разобран: документы появятся, когда дочерний пакет
+  // опубликует поколение. Ставить 'parsed' сейчас — значит объявить готовым
+  // пакет, у которого ни одного видимого документа нет.
   await db
     .update(sourceBundles)
-    .set({ status: 'parsed', kind: 'mixed', docCount: createdCount, updatedAt: new Date() })
+    .set({
+      status: assemblyStarted ? 'processing' : 'parsed',
+      kind: 'mixed',
+      docCount: createdCount,
+      updatedAt: new Date(),
+    })
     .where(eq(sourceBundles.id, bundleId));
-  log.info({ created: createdCount, failed: failedCount }, 'router bundle classified');
+  log.info(
+    { created: createdCount, failed: failedCount, assembly: assemblyCandidates.length },
+    'router bundle classified',
+  );
+}
+
+// ─── Сборка логических УПД (Э6) ─────────────────────────────────────────────
+//
+// Пофайловый разбор ломается на самом частом сценарии публичной формы:
+// поставщик фотографирует документы постранично. Шесть снимков одной машины —
+// это, например, три УПД, но router делает из них шесть документов, два из
+// которых обрубки без шапки, а суммы у оставшихся не сходятся.
+//
+// Сборка идёт тремя фазами, и тяжёлое намеренно вынесено из router-job:
+// однажды vision внутри него уже вешал воркер с CONCURRENCY=1 (revert ab25477).
+//   1. router  — отбирает кандидатов и заводит дочерний пакет;
+//   2. assembly — ОДИН дешёвый вызов классификации страниц, нарезка, манифест,
+//      технические документы и задания на них;
+//   3. handleJob по сегменту + финализатор, публикующий комплект целиком.
+
+/**
+ * Можно ли собирать этот пакет.
+ *
+ * Узко по умолчанию: флаг, входящее направление и публичная форма. Почта, ЭДО
+ * и внутренняя загрузка на портале идут прежним путём — там другие сценарии
+ * (готовые PDF из 1С), а зона риска должна оставаться маленькой.
+ */
+async function isUpdAssemblyEligible(
+  bundleId: string,
+  bundle: typeof sourceBundles.$inferSelect,
+): Promise<boolean> {
+  if (!loadEnv().UPD_ASSEMBLY_V1) return false;
+  if (bundle.direction !== 'inbound') return false;
+  const root = await resolveRootBundle(db, bundleId);
+  if (!root) return false;
+  const [publicEvent] = await db
+    .select({ id: ingestEvents.id })
+    .from(ingestEvents)
+    .where(and(eq(ingestEvents.bundleId, root.id), eq(ingestEvents.channel, 'public')))
+    .limit(1);
+  return !!publicEvent;
+}
+
+/**
+ * Годится ли файл в сборку: страницы из него можно получить растром.
+ *
+ * Excel остаётся на одиночном пути — у него свой структурный парсер, который
+ * читает ячейки, а не картинку, и разбирать его страницами значило бы терять
+ * точность ради ненужной здесь склейки.
+ */
+function isAssemblyCandidate(file: RouterInputFile, cls: FileClassification): boolean {
+  if (cls.detectedKind === 'supplementary' || cls.detectedKind === 'm15') return false;
+  const name = file.filename.toLowerCase();
+  const mime = (file.mimeType ?? '').toLowerCase();
+  if (/\.(xlsx?|xlsm)$/i.test(name) || mime.includes('spreadsheet') || mime.includes('excel')) {
+    return false;
+  }
+  return (
+    mime.startsWith('image/') ||
+    mime === 'application/pdf' ||
+    /\.(jpe?g|png|webp|pdf)$/i.test(name)
+  );
+}
+
+/** Одиночный путь «файл = документ»: документ, вложение, задание, реестр. */
+async function createSingleUpdDocument(args: {
+  bundleId: string;
+  bundle: typeof sourceBundles.$inferSelect;
+  bundleOrigin: NonNullable<typeof sourceBundles.$inferSelect.origin>;
+  bundleExpected: Date | null;
+  file: RouterInputFile;
+  cls: FileClassification;
+  /** Причина в реестре: у отката она своя. */
+  reasonOverride?: string;
+}): Promise<string> {
+  const { bundleId, bundle, bundleOrigin, bundleExpected, file: a, cls } = args;
+  const docId = randomUUID();
+  const dedupeKey = dispatchKeyOf(docId);
+  const reason =
+    args.reasonOverride ??
+    (cls.detectedKind === 'upd' && !cls.needsVision
+      ? cls.updInvoiceCount && cls.updInvoiceCount >= 2
+        ? `УПД-пачка (${cls.updInvoiceCount} счёт-фактур) → агрегат`
+        : 'УПД → одиночный парсер'
+      : cls.needsVision
+        ? 'скан/фото/неясный текст → распознавание через vision'
+        : 'тип неоднозначен → попытка распознавания');
+  await db.transaction(async (tx) => {
+    await tx.insert(sourceDocuments).values({
+      id: docId,
+      kind: 'upd',
+      direction: bundle.direction,
+      origin: bundleOrigin,
+      status: 'queued',
+      contractorId: bundle.contractorId,
+      recipientMolId: bundle.recipientMolId,
+      recipientSource: manualRecipientSource(bundle),
+      siteId: bundle.siteId,
+      expectedDate: bundleExpected,
+      originalFilename: a.filename,
+      queuedAt: new Date(),
+      parsedAt: new Date(),
+      jobId: dedupeKey,
+      bundleId,
+      createdByUserId: bundle.createdByUserId,
+    });
+    await tx.insert(sourceDocumentAttachments).values({
+      sourceDocumentId: docId,
+      s3Key: a.s3Key,
+      filename: a.filename,
+      mimeType: a.mimeType,
+      sizeBytes: a.sizeBytes,
+      role: 'original',
+    });
+    await enqueueJob(tx as unknown as typeof db, {
+      queue: UPD_PARSE_QUEUE,
+      jobName: 'parse',
+      payload: { sourceDocumentId: docId, s3Key: a.s3Key },
+      dedupeKey,
+    });
+    await recordImportItem(tx as unknown as typeof db, bundleId, a, {
+      detectedKind: cls.detectedKind,
+      confidence: cls.confidence.toString(),
+      parserUsed: cls.needsVision ? 'parseUpdVision' : cls.parserUsed,
+      status: 'created',
+      createdDocumentIds: [docId],
+      reason,
+      metadata: {
+        signals: cls.signals,
+        needsVision: cls.needsVision,
+        updInvoiceCount: cls.updInvoiceCount ?? null,
+      },
+    });
+  });
+  return docId;
+}
+
+/**
+ * Заводит дочерний пакет сборки и ставит задание.
+ *
+ * Идемпотентность — через bundle_hash, а не через id: id пакета всегда новый
+ * uuid, а хеш детерминирован по (корень, поколение). Повторный router-job
+ * упирается в уникальный индекс, подхватывает уже созданный пакет и второй
+ * комплект документов не создаёт.
+ */
+async function startUpdAssembly(args: {
+  bundleId: string;
+  bundle: typeof sourceBundles.$inferSelect;
+  bundleOrigin: NonNullable<typeof sourceBundles.$inferSelect.origin>;
+  candidates: { file: RouterInputFile; cls: FileClassification }[];
+  log: WorkerLog;
+}): Promise<void> {
+  const { bundleId, bundle, bundleOrigin, candidates, log } = args;
+  const root = await resolveRootBundle(db, bundleId);
+  if (!root) throw new Error('сборка УПД: не найден корневой пакет');
+  const generation = root.activeUploadGeneration;
+
+  const subHash = createHash('sha256')
+    .update(`assembly:${root.id}:${generation}`)
+    .digest('hex');
+
+  const subId = randomUUID();
+  const techId = randomUUID();
+
+  await db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(sourceBundles)
+      .values({
+        id: subId,
+        bundleHash: subHash,
+        kind: 'upd',
+        direction: bundle.direction,
+        origin: bundle.origin,
+        parentBundleId: bundleId,
+        siteId: bundle.siteId,
+        contractorId: bundle.contractorId,
+        recipientMolId: bundle.recipientMolId,
+        expectedDate: bundle.expectedDate,
+        status: 'queued',
+        createdByUserId: bundle.createdByUserId,
+      })
+      .onConflictDoNothing({ target: sourceBundles.bundleHash })
+      .returning({ id: sourceBundles.id });
+
+    // Пакет этого поколения уже существует — значит задание поставлено раньше,
+    // и повторять нечего: манифест и документы принадлежат ему.
+    if (inserted.length === 0) {
+      log.info({ subHash }, 'сборка УПД: дочерний пакет уже создан, пропускаем');
+      return;
+    }
+
+    await tx.insert(sourceDocuments).values({
+      id: techId,
+      kind: 'upd',
+      // Служебная запись пакета — вне выдачи, как у накладных.
+      isTechnical: true,
+      direction: bundle.direction,
+      origin: bundleOrigin,
+      status: 'queued',
+      contractorId: bundle.contractorId,
+      recipientMolId: bundle.recipientMolId,
+      recipientSource: manualRecipientSource(bundle),
+      siteId: bundle.siteId,
+      expectedDate:
+        bundle.expectedDate instanceof Date
+          ? bundle.expectedDate
+          : bundle.expectedDate
+            ? new Date(bundle.expectedDate)
+            : null,
+      originalFilename: candidates[0]?.file.filename ?? null,
+      queuedAt: new Date(),
+      bundleId: subId,
+      createdByUserId: bundle.createdByUserId,
+    });
+    await tx.insert(sourceDocumentAttachments).values(
+      candidates.map((c) => ({
+        sourceDocumentId: techId,
+        s3Key: c.file.s3Key,
+        filename: c.file.filename,
+        mimeType: c.file.mimeType,
+        sizeBytes: c.file.sizeBytes,
+        role: 'original' as const,
+      })),
+    );
+
+    for (const c of candidates) {
+      await recordImportItem(tx as unknown as typeof db, bundleId, c.file, {
+        detectedKind: c.cls.detectedKind,
+        confidence: c.cls.confidence.toString(),
+        parserUsed: 'updAssembly',
+        status: 'created',
+        subBundleId: subId,
+        // Явный null: файл принят и передан в сборку, но чем она кончится —
+        // публикацией или откатом — ещё неизвестно. Объявить его обработанным
+        // сейчас значило бы соврать инварианту завершённости пакета.
+        effectiveStatus: null,
+        createdDocumentIds: [],
+        reason: 'УПД → сборка страниц в логические документы',
+        metadata: { signals: c.cls.signals, subBundleId: subId, assemblyGeneration: generation },
+      });
+    }
+
+    await enqueueJob(tx as unknown as typeof db, {
+      queue: UPD_PARSE_QUEUE,
+      jobName: 'parse',
+      payload: { bundleId: subId, mode: 'upd_assembly', generation },
+      dedupeKey: assemblyDispatchKeyOf(subId, generation),
+    });
+  });
+
+  log.info({ subBundleId: subId, files: candidates.length, generation }, 'сборка УПД запущена');
+}
+
+/** Всё, что сегментному заданию нужно знать о своём месте в сборке. */
+type SegmentJobContext = {
+  segmentId: string;
+  segmentIndex: number;
+  rootId: string;
+  generation: number;
+  pageRefs: PageRef[];
+  /** Ключ первого файла сегмента — только для логов и сообщений об ошибке. */
+  firstS3Key: string;
+};
+
+/**
+ * Проверяет, что сегментное задание всё ещё имеет смысл, и собирает контекст.
+ *
+ * Проверок несколько, и это не перестраховка. Откат сборки происходит ВНУТРИ
+ * того же поколения: манифест удаляется, документы стираются, файлы
+ * разворачиваются по-старому. Задание, дождавшееся очереди после этого,
+ * сравнение поколений прошло бы — и записало бы результат в документ, которого
+ * уже нет, либо во второй раз распознало бы то, что уже разобрано иначе.
+ */
+async function loadSegmentContext(
+  sourceDocumentId: string,
+  job: { segmentId: string; generation: number },
+): Promise<SegmentJobContext | null> {
+  const [seg] = await db
+    .select()
+    .from(bundleSegments)
+    .where(eq(bundleSegments.id, job.segmentId))
+    .limit(1);
+  if (!seg) return null; // манифест снят откатом
+  if (seg.generation !== job.generation) return null;
+  if (seg.sourceDocumentId !== sourceDocumentId) return null;
+
+  const [root] = await db
+    .select({
+      id: sourceBundles.id,
+      gen: sourceBundles.activeUploadGeneration,
+      published: sourceBundles.publishedGeneration,
+      status: sourceBundles.status,
+    })
+    .from(sourceBundles)
+    .where(eq(sourceBundles.id, seg.bundleId))
+    .limit(1);
+  if (!root) return null;
+  if (root.gen !== job.generation) return null;
+  // Уже опубликовано — комплект закрыт, переписывать его нельзя.
+  if (root.published !== null) return null;
+  if (root.status !== 'processing') return null;
+
+  const [doc] = await db
+    .select({ id: sourceDocuments.id, isTechnical: sourceDocuments.isTechnical })
+    .from(sourceDocuments)
+    .where(eq(sourceDocuments.id, sourceDocumentId))
+    .limit(1);
+  // Документ уже опубликован (isTechnical снят) — значит комплект закрыт, а
+  // это задание опоздало.
+  if (!doc || !doc.isTechnical) return null;
+
+  const refs = (seg.pageRefs ?? []) as PageRef[];
+  if (refs.length === 0) return null;
+
+  const [firstAttachment] = await db
+    .select({ s3Key: sourceDocumentAttachments.s3Key })
+    .from(sourceDocumentAttachments)
+    .where(eq(sourceDocumentAttachments.sourceDocumentId, sourceDocumentId))
+    .limit(1);
+
+  return {
+    segmentId: seg.id,
+    segmentIndex: seg.segmentIndex,
+    rootId: seg.bundleId,
+    generation: seg.generation,
+    pageRefs: refs,
+    firstS3Key: firstAttachment?.s3Key ?? '',
+  };
+}
+
+/**
+ * Готовит страницы сегмента по адресам манифеста.
+ *
+ * Из PDF берётся ровно та страница, что записана в PageRef: сегмент может
+ * занимать середину многостраничного файла, и отдавать модели весь документ
+ * значило бы вернуть ту же путаницу, ради устранения которой всё затевалось.
+ */
+async function loadSegmentPages(ctx: SegmentJobContext): Promise<Buffer[]> {
+  const rows = await selectRegistryRows(db, ctx.rootId, ctx.generation);
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const byOrder = new Map(rows.map((r) => [r.inputOrder ?? -1, r]));
+
+  const pages: Buffer[] = [];
+  // Кэш файлов: у россыпи фотографий каждый файл читается один раз, а у PDF
+  // одна и та же выборка обслуживает несколько страниц сегмента.
+  const buffers = new Map<string, Buffer>();
+  for (const ref of ctx.pageRefs) {
+    const row = ref.registryItemId ? byId.get(ref.registryItemId) : byOrder.get(ref.inputOrder);
+    if (!row?.s3Key) continue;
+    let buf = buffers.get(row.s3Key);
+    if (!buf) {
+      buf = await getObject(row.s3Key);
+      buffers.set(row.s3Key, buf);
+    }
+    const isPdf =
+      (row.mimeType ?? '').toLowerCase() === 'application/pdf' || /\.pdf$/i.test(row.filename);
+    if (isPdf) {
+      const rendered = await renderPdf(buf, {
+        firstPage: ref.pageInFile,
+        lastPage: ref.pageInFile,
+      });
+      if (rendered[0]) pages.push(rendered[0]);
+    } else {
+      pages.push(await imageToPng(buf));
+    }
+  }
+  if (pages.length === 0) throw new Error('сегмент: не удалось собрать ни одной страницы');
+  return pages;
+}
+
+/** Ключи OpenRouter для классификации страниц. null — работать нечем. */
+async function resolveOpenRouterCreds(): Promise<{
+  apiBaseUrl: string;
+  apiKey: string;
+  model: string;
+} | null> {
+  const [provider] = await db
+    .select()
+    .from(llmProviders)
+    .where(eq(llmProviders.isDefault, true))
+    .limit(1);
+  if (!provider || provider.kind !== 'openrouter') return null;
+  const [cred] = await db
+    .select()
+    .from(llmProviderCredentials)
+    .where(eq(llmProviderCredentials.kind, provider.kind))
+    .limit(1);
+  if (!cred) return null;
+  try {
+    return {
+      apiBaseUrl: cred.apiBaseUrl,
+      apiKey: decryptField(cred.apiKeyEncrypted, buildAad('llm_provider_credentials', cred.kind)),
+      model: provider.model,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Раскладывает файлы пакета в сквозной список страниц.
+ *
+ * Фотография — одна страница; PDF — столько, сколько в нём листов. Порядок
+ * задаётся input_order: у россыпи снимков это единственное, что связывает
+ * продолжение таблицы с её началом.
+ */
+async function buildAssemblyPages(
+  files: RouterInputFile[],
+  maxTotalPages: number,
+): Promise<AssemblyPage[]> {
+  const pages: AssemblyPage[] = [];
+  for (const file of files) {
+    const buffer = await getObject(file.s3Key);
+    const isPdf =
+      (file.mimeType ?? '').toLowerCase() === 'application/pdf' || /\.pdf$/i.test(file.filename);
+    const rendered = isPdf
+      ? await renderPdf(buffer, {})
+      : [await imageToPng(buffer)];
+    for (const [idx, full] of rendered.entries()) {
+      if (pages.length >= maxTotalPages) {
+        throw new Error(
+          `пакет содержит больше ${maxTotalPages} страниц — сборка не запускается`,
+        );
+      }
+      pages.push({
+        ref: {
+          registryItemId: file.registryItemId,
+          inputOrder: file.inputOrder,
+          pageInFile: idx + 1,
+        },
+        globalPage: pages.length + 1,
+        full,
+        thumb: await toClassifyThumb(full),
+      });
+    }
+  }
+  return pages;
+}
+
+// Сколько страниц уходит в один вызов классификатора. Тот же предел, что у
+// prefilter: больше — и модель начинает путать номера.
+const ASSEMBLY_CLASSIFY_CHUNK = 15;
+
+/**
+ * Сборка логических УПД: классификация страниц, нарезка, манифест, документы.
+ *
+ * Тяжёлого здесь ровно один вызов — классификация. Извлечение каждого УПД
+ * уезжает отдельным заданием: при CONCURRENCY=1 это разница между «воркер
+ * занят минуту» и «воркер занят десять».
+ */
+export async function handleUpdAssemblyJob(
+  subBundleId: string,
+  generation: number,
+  log: WorkerLog,
+): Promise<void> {
+  const [sub] = await db
+    .select()
+    .from(sourceBundles)
+    .where(eq(sourceBundles.id, subBundleId))
+    .limit(1);
+  if (!sub || !sub.parentBundleId) {
+    log.warn('сборка УПД: дочерний пакет исчез — пропускаем');
+    return;
+  }
+  const rootId = sub.parentBundleId;
+
+  // Fencing на входе. Короткая транзакция: держать блокировку во время рендера
+  // и обращения к модели нельзя — это минуты, за которые встанут соседние
+  // операции по пакету.
+  const gate = await db.transaction(async (tx) => {
+    const [root] = await tx
+      .select()
+      .from(sourceBundles)
+      .where(eq(sourceBundles.id, rootId))
+      .for('update');
+    if (!root) return { ok: false as const, reason: 'корневой пакет исчез' };
+    if (root.activeUploadGeneration !== generation) {
+      return { ok: false as const, reason: 'поколение устарело' };
+    }
+    if (root.publishedGeneration !== null) {
+      return { ok: false as const, reason: 'поколение уже опубликовано' };
+    }
+    await tx
+      .update(sourceBundles)
+      .set({ status: 'processing', updatedAt: new Date() })
+      .where(eq(sourceBundles.id, subBundleId));
+    return { ok: true as const, root };
+  });
+  if (!gate.ok) {
+    log.info({ reason: gate.reason }, 'сборка УПД: задание неактуально');
+    return;
+  }
+
+  // Манифест поколения уже есть — продолжаем с него. Переклассифицировать
+  // нельзя: это LLM-вызов, второй раз он даст другую нарезку, и получится два
+  // разных комплекта документов на один пакет.
+  const existing = await db
+    .select()
+    .from(bundleSegments)
+    .where(and(eq(bundleSegments.bundleId, rootId), eq(bundleSegments.generation, generation)))
+    .orderBy(bundleSegments.segmentIndex);
+
+  let pages: AssemblyPage[] = [];
+  if (existing.length === 0) {
+    const registry = (await selectRegistryRows(db, rootId, generation)).filter(
+      (r) => r.subBundleId === subBundleId && r.s3Key !== null,
+    );
+    if (registry.length === 0) {
+      await rollbackUpdAssembly({
+        rootId,
+        subBundleId,
+        generation,
+        reason: 'в реестре нет файлов сборки',
+        log,
+      });
+      return;
+    }
+    const files: RouterInputFile[] = [...registry]
+      .sort((a, b) => (a.inputOrder ?? 0) - (b.inputOrder ?? 0))
+      .map((r, idx) => ({
+        s3Key: r.s3Key as string,
+        filename: r.filename,
+        mimeType: r.mimeType,
+        sizeBytes: r.sizeBytes,
+        registryItemId: r.id,
+        uploadGeneration: r.uploadGeneration,
+        inputOrder: r.inputOrder ?? idx,
+        status: r.status,
+        processingMode: r.processingMode,
+      }));
+
+    const creds = await resolveOpenRouterCreds();
+    if (!creds) {
+      await rollbackUpdAssembly({
+        rootId,
+        subBundleId,
+        generation,
+        reason: 'провайдер классификации недоступен',
+        log,
+      });
+      return;
+    }
+
+    try {
+      pages = await buildAssemblyPages(files, loadEnv().UPD_ASSEMBLY_MAX_TOTAL_PAGES);
+    } catch (err) {
+      await rollbackUpdAssembly({
+        rootId,
+        subBundleId,
+        generation,
+        reason: `не удалось подготовить страницы: ${err instanceof Error ? err.message : String(err)}`,
+        log,
+      });
+      return;
+    }
+
+    // Классификация порциями. Смещение номеров обязательно: classifyPages в
+    // каждом вызове нумерует страницы заново с единицы и про предыдущие порции
+    // ничего не знает.
+    const chunks: PageClassification[][] = [];
+    const chunkSizes: number[] = [];
+    try {
+      for (let i = 0; i < pages.length; i += ASSEMBLY_CLASSIFY_CHUNK) {
+        const slice = pages.slice(i, i + ASSEMBLY_CLASSIFY_CHUNK);
+        const res = await classifyPages({ ...creds, thumbs: slice.map((p) => p.thumb) });
+        chunks.push(res.classification);
+        chunkSizes.push(slice.length);
+      }
+    } catch (err) {
+      await rollbackUpdAssembly({
+        rootId,
+        subBundleId,
+        generation,
+        reason: `классификация страниц не удалась: ${err instanceof Error ? err.message : String(err)}`,
+        log,
+      });
+      return;
+    }
+
+    const classification = mergeClassificationChunks(chunks, chunkSizes);
+    const plan = planUpdSegments(classification, pages.length, MAX_PAGES_FOR_OPENROUTER_SEGMENT);
+    if (!plan.confident) {
+      await rollbackUpdAssembly({
+        rootId,
+        subBundleId,
+        generation,
+        reason: `нарезке нельзя доверять: ${plan.reasons.join('; ')}`,
+        log,
+      });
+      return;
+    }
+
+    // Манифест пишется целиком или не пишется вовсе. Посегментная вставка
+    // «кто успел» склеила бы результаты двух классификаций в один гибридный
+    // комплект — с чужими страницами внутри документа.
+    const written = await db.transaction(async (tx) => {
+      const [root] = await tx
+        .select({ gen: sourceBundles.activeUploadGeneration })
+        .from(sourceBundles)
+        .where(eq(sourceBundles.id, rootId))
+        .for('update');
+      if (!root || root.gen !== generation) return false;
+      const [any] = await tx
+        .select({ id: bundleSegments.id })
+        .from(bundleSegments)
+        .where(and(eq(bundleSegments.bundleId, rootId), eq(bundleSegments.generation, generation)))
+        .limit(1);
+      if (any) return false; // чужой манифест победил — используем его
+      await tx.insert(bundleSegments).values(
+        plan.segments.map((seg) => ({
+          bundleId: rootId,
+          generation,
+          segmentIndex: seg.segmentIndex,
+          pageRefs: pageRefsOfSegment(seg, pages),
+          confidence: seg.confidence,
+        })),
+      );
+      return true;
+    });
+    if (!written) {
+      log.info('сборка УПД: манифест этого поколения уже создан другим заданием');
+    }
+  }
+
+  // Документы сегментов создаются техническими: до публикации их не должно
+  // быть видно ни в списке, ни на планшете — иначе инспектор примет половину
+  // поставки, пока остальные страницы ещё распознаются.
+  const manifest = await db
+    .select()
+    .from(bundleSegments)
+    .where(and(eq(bundleSegments.bundleId, rootId), eq(bundleSegments.generation, generation)))
+    .orderBy(bundleSegments.segmentIndex);
+
+  const [rootBundle] = await db
+    .select()
+    .from(sourceBundles)
+    .where(eq(sourceBundles.id, rootId))
+    .limit(1);
+  if (!rootBundle) return;
+
+  const attachmentsByOrder = new Map<number, RouterInputFile>();
+  for (const r of await selectRegistryRows(db, rootId, generation)) {
+    if (r.subBundleId === subBundleId && r.s3Key) {
+      attachmentsByOrder.set(r.inputOrder ?? 0, {
+        s3Key: r.s3Key,
+        filename: r.filename,
+        mimeType: r.mimeType,
+        sizeBytes: r.sizeBytes,
+        registryItemId: r.id,
+        uploadGeneration: r.uploadGeneration,
+        inputOrder: r.inputOrder ?? 0,
+        status: r.status,
+        processingMode: r.processingMode,
+      });
+    }
+  }
+
+  for (const seg of manifest) {
+    if (seg.sourceDocumentId) continue; // документ этого сегмента уже создан
+    const refs = (seg.pageRefs ?? []) as PageRef[];
+    const orders = [...new Set(refs.map((r) => r.inputOrder))].sort((a, b) => a - b);
+    const docId = randomUUID();
+    const dedupeKey = segmentDispatchKeyOf(seg.id, generation);
+    await db.transaction(async (tx) => {
+      // Повторная проверка под блокировкой строки манифеста: параллельное
+      // задание могло создать документ между выборкой и вставкой.
+      const [fresh] = await tx
+        .select({ id: bundleSegments.id, docId: bundleSegments.sourceDocumentId })
+        .from(bundleSegments)
+        .where(eq(bundleSegments.id, seg.id))
+        .for('update');
+      if (!fresh || fresh.docId) return;
+
+      await tx.insert(sourceDocuments).values({
+        id: docId,
+        kind: 'upd',
+        isTechnical: true,
+        direction: rootBundle.direction,
+        origin: rootBundle.origin ?? 'manual_pdf',
+        status: 'queued',
+        contractorId: rootBundle.contractorId,
+        recipientMolId: rootBundle.recipientMolId,
+        recipientSource: manualRecipientSource(rootBundle),
+        siteId: rootBundle.siteId,
+        expectedDate:
+          rootBundle.expectedDate instanceof Date
+            ? rootBundle.expectedDate
+            : rootBundle.expectedDate
+              ? new Date(rootBundle.expectedDate)
+              : null,
+        originalFilename: attachmentsByOrder.get(orders[0] ?? 0)?.filename ?? null,
+        queuedAt: new Date(),
+        parsedAt: new Date(),
+        jobId: dedupeKey,
+        bundleId: subBundleId,
+        createdByUserId: rootBundle.createdByUserId,
+      });
+
+      const attachments = orders
+        .map((o) => attachmentsByOrder.get(o))
+        .filter((f): f is RouterInputFile => f != null);
+      if (attachments.length > 0) {
+        await tx.insert(sourceDocumentAttachments).values(
+          attachments.map((f) => ({
+            sourceDocumentId: docId,
+            s3Key: f.s3Key,
+            filename: f.filename,
+            mimeType: f.mimeType,
+            sizeBytes: f.sizeBytes,
+            role: 'original' as const,
+          })),
+        );
+      }
+
+      await tx
+        .update(bundleSegments)
+        .set({ sourceDocumentId: docId, updatedAt: new Date() })
+        .where(eq(bundleSegments.id, seg.id));
+
+      await enqueueJob(tx as unknown as typeof db, {
+        queue: UPD_PARSE_QUEUE,
+        jobName: 'parse',
+        payload: { sourceDocumentId: docId, segmentId: seg.id, generation },
+        dedupeKey,
+      });
+    });
+  }
+
+  log.info({ segments: manifest.length, subBundleId }, 'сборка УПД: сегменты поставлены в разбор');
+}
+
+// Предел страниц на один сегмент — столько картинок уходит в vision за раз.
+// Тот же MAX_PAGES_FOR_OPENROUTER, что у одиночного пути; вынесен константой,
+// чтобы planUpdSegments не зависел от модуля vision-парсера.
+const MAX_PAGES_FOR_OPENROUTER_SEGMENT = 5;
+
+/**
+ * Исход сегмента с точки зрения публикации.
+ *
+ * needs_resolution в этом коде значит две разные вещи. Дубликат и расхождение
+ * сумм — это ПРЕДУПРЕЖДЕНИЯ: документ распознан, менеджер разберётся, и
+ * заваливать из-за них всю сборку нельзя (на боевом пакете в needs_resolution
+ * были все шесть документов). А вот partial_parse — это «шапки или позиций
+ * нет», то есть склеили неправильно, и такому комплекту верить нельзя.
+ */
+function segmentOutcome(doc: {
+  status: string;
+  parseErrorCode: string | null;
+}): 'ready' | 'pending' | 'broken' {
+  if (doc.status === 'queued' || doc.status === 'processing') return 'pending';
+  if (doc.status === 'parsed') return 'ready';
+  if (doc.status === 'needs_resolution') {
+    return doc.parseErrorCode === 'partial_parse' ? 'broken' : 'ready';
+  }
+  return 'broken';
+}
+
+/**
+ * Публикует комплект, когда все сегменты дошли до терминального состояния.
+ *
+ * Вызывается после КАЖДОГО сегментного задания (в том числе провалившегося) —
+ * публикует та попытка, которая застала комплект готовым. Частичной публикации
+ * не бывает: пока хоть один сегмент в работе, наружу не виден ни один документ
+ * группы.
+ */
+export async function tryFinalizeUpdAssembly(
+  rootId: string,
+  generation: number,
+  log: WorkerLog,
+): Promise<void> {
+  const decision = await db.transaction(async (tx) => {
+    const [root] = await tx
+      .select()
+      .from(sourceBundles)
+      .where(eq(sourceBundles.id, rootId))
+      .for('update');
+    if (!root) return { action: 'none' as const, reason: 'корневой пакет исчез' };
+    if (root.activeUploadGeneration !== generation) {
+      return { action: 'none' as const, reason: 'поколение устарело' };
+    }
+    // Уже опубликовано — второй раз ни статусы не трогаем, ни group_revision
+    // не бампаем: ревизия означает «состав изменился», а он не менялся.
+    if (root.publishedGeneration === generation) {
+      return { action: 'none' as const, reason: 'уже опубликовано' };
+    }
+
+    const segments = await tx
+      .select({
+        id: bundleSegments.id,
+        confidence: bundleSegments.confidence,
+        docId: bundleSegments.sourceDocumentId,
+      })
+      .from(bundleSegments)
+      .where(and(eq(bundleSegments.bundleId, rootId), eq(bundleSegments.generation, generation)));
+    if (segments.length === 0) return { action: 'none' as const, reason: 'манифест пуст' };
+
+    if (segments.some((s) => s.confidence !== 'normal')) {
+      return { action: 'rollback' as const, reason: 'в манифесте есть неуверенные сегменты' };
+    }
+    if (segments.some((s) => !s.docId)) {
+      return { action: 'none' as const, reason: 'не у всех сегментов есть документ' };
+    }
+
+    const docIds = segments.map((s) => s.docId as string);
+    const docs = await tx
+      .select({
+        id: sourceDocuments.id,
+        status: sourceDocuments.status,
+        parseErrorCode: sourceDocuments.parseErrorCode,
+      })
+      .from(sourceDocuments)
+      .where(inArray(sourceDocuments.id, docIds));
+
+    if (docs.length !== docIds.length) {
+      return { action: 'rollback' as const, reason: 'документ сегмента исчез' };
+    }
+    const outcomes = docs.map(segmentOutcome);
+    if (outcomes.includes('pending')) {
+      return { action: 'none' as const, reason: 'часть сегментов ещё распознаётся' };
+    }
+    if (outcomes.includes('broken')) {
+      return { action: 'rollback' as const, reason: 'сегмент распознан неполно' };
+    }
+
+    // ── публикация ──────────────────────────────────────────────────────────
+    const now = new Date();
+    // updated_at и version обязательны: планшет забирает дельту по updated_at,
+    // и без бампа документы, созданные до его последней синхронизации, не
+    // приедут никогда.
+    await tx
+      .update(sourceDocuments)
+      .set({ isTechnical: false, updatedAt: now, version: drSql`${sourceDocuments.version} + 1` })
+      .where(inArray(sourceDocuments.id, docIds));
+    await tx
+      .update(bundleSegments)
+      .set({ publishedAt: now, updatedAt: now })
+      .where(and(eq(bundleSegments.bundleId, rootId), eq(bundleSegments.generation, generation)));
+    await tx
+      .update(sourceBundles)
+      .set({
+        assemblyVersion: 'logical_v1',
+        publishedGeneration: generation,
+        groupRevision: drSql`${sourceBundles.groupRevision} + 1`,
+        status: 'parsed',
+        updatedAt: now,
+      })
+      .where(eq(sourceBundles.id, rootId));
+
+    return { action: 'publish' as const, docIds, reason: 'комплект готов' };
+  });
+
+  if (decision.action === 'none') {
+    log.info({ reason: decision.reason }, 'сборка УПД: публикация отложена');
+    return;
+  }
+  if (decision.action === 'rollback') {
+    const [sub] = await db
+      .select({ id: sourceBundles.id })
+      .from(sourceBundles)
+      .where(and(eq(sourceBundles.parentBundleId, rootId), eq(sourceBundles.kind, 'upd')))
+      .limit(1);
+    await rollbackUpdAssembly({
+      rootId,
+      subBundleId: sub?.id ?? null,
+      generation,
+      reason: decision.reason,
+      log,
+    });
+    return;
+  }
+
+  // Дочерний пакет отработал: закрываем его и убираем служебную запись, чтобы
+  // у него не осталось ни одного technical-документа.
+  await finishAssemblySubBundle(rootId, 'parsed', log);
+  await closeAssemblyRegistryRows(rootId, generation, decision.docIds, 'created');
+  await recountGroupDocCount(rootId);
+
+  for (const id of decision.docIds) await notifySourceDocumentUpdated(id);
+  log.info({ documents: decision.docIds.length }, 'сборка УПД: поколение опубликовано');
+}
+
+/**
+ * Откат на «файл = документ».
+ *
+ * Единый выход для всех неуспехов: классификация упала, нарезке нельзя
+ * доверять, провайдер не тот, сегмент распознан неполно. Менеджер в худшем
+ * случае видит ровно то, что видел бы без сборки.
+ */
+async function rollbackUpdAssembly(args: {
+  rootId: string;
+  subBundleId: string | null;
+  generation: number;
+  reason: string;
+  log: WorkerLog;
+}): Promise<void> {
+  const { rootId, subBundleId, generation, reason, log } = args;
+  log.warn({ reason, subBundleId }, 'сборка УПД: откат на «файл = документ»');
+
+  // 1. Снимаем манифест и технические документы. Задания сегментов, ещё не
+  //    доставленные в очередь, забираем сразу: fencing их всё равно обезвредит,
+  //    но холостое задание занимает слот воркера с CONCURRENCY=1 и остаётся в
+  //    outbox мусором. Уже доставленные (строки в outbox нет) отсекутся
+  //    проверками loadSegmentContext.
+  const removedDocIds = await db.transaction(async (tx) => {
+    const segments = await tx
+      .select({ id: bundleSegments.id, docId: bundleSegments.sourceDocumentId })
+      .from(bundleSegments)
+      .where(and(eq(bundleSegments.bundleId, rootId), eq(bundleSegments.generation, generation)));
+    const docIds = segments.map((s) => s.docId).filter((v): v is string => v !== null);
+    if (segments.length > 0) {
+      await tx.delete(jobOutbox).where(
+        inArray(
+          jobOutbox.dedupeKey,
+          segments.map((s) => segmentDispatchKeyOf(s.id, generation)),
+        ),
+      );
+    }
+    await tx
+      .delete(bundleSegments)
+      .where(and(eq(bundleSegments.bundleId, rootId), eq(bundleSegments.generation, generation)));
+    if (docIds.length > 0) {
+      // Документы технические — наружу они не выходили, поэтому tombstone не
+      // нужен: клиенты их не видели и удалять у себя нечего.
+      await tx.delete(sourceDocuments).where(inArray(sourceDocuments.id, docIds));
+    }
+    await tx
+      .update(sourceBundles)
+      .set({
+        assemblyVersion: 'legacy',
+        publishedGeneration: null,
+        // Причина отката переживает уборку: llm_calls удаляются вместе с
+        // документами сегментов, и без этой записи разбираться было бы не по
+        // чему.
+        parseErrorMessage: `сборка УПД отменена: ${reason}`.slice(0, 500),
+        updatedAt: new Date(),
+      })
+      .where(eq(sourceBundles.id, rootId));
+    return docIds;
+  });
+
+  // 2. Разворачиваем файлы прежним путём. Повторно звать router нельзя: его
+  //    строки реестра уже в status='created', и он их пропустит.
+  const [rootBundle] = await db
+    .select()
+    .from(sourceBundles)
+    .where(eq(sourceBundles.id, rootId))
+    .limit(1);
+  if (!rootBundle) return;
+
+  const rows = (await selectRegistryRows(db, rootId, generation)).filter(
+    (r) => r.s3Key !== null && (subBundleId ? r.subBundleId === subBundleId : r.effectiveStatus === null),
+  );
+  const createdIds: string[] = [];
+  for (const r of rows) {
+    const file: RouterInputFile = {
+      s3Key: r.s3Key as string,
+      filename: r.filename,
+      mimeType: r.mimeType,
+      sizeBytes: r.sizeBytes,
+      registryItemId: r.id,
+      uploadGeneration: r.uploadGeneration,
+      inputOrder: r.inputOrder ?? 0,
+      status: r.status,
+      processingMode: r.processingMode,
+    };
+    try {
+      const docId = await createSingleUpdDocument({
+        bundleId: rootId,
+        bundle: rootBundle,
+        bundleOrigin: rootBundle.origin ?? 'manual_pdf',
+        bundleExpected:
+          rootBundle.expectedDate instanceof Date
+            ? rootBundle.expectedDate
+            : rootBundle.expectedDate
+              ? new Date(rootBundle.expectedDate)
+              : null,
+        file,
+        cls: {
+          detectedKind: 'upd',
+          confidence: 0,
+          needsVision: true,
+          parserUsed: 'none',
+          signals: ['assembly:rollback'],
+        },
+        reasonOverride: `сборка отменена (${reason}) → распознавание по файлу`,
+      });
+      createdIds.push(docId);
+    } catch (err) {
+      log.error(
+        { err: err instanceof Error ? err.message : String(err), file: r.filename },
+        'сборка УПД: откат файла не удался',
+      );
+    }
+  }
+
+  await finishAssemblySubBundle(rootId, 'parse_failed', log);
+  await recountGroupDocCount(rootId);
+  log.info(
+    { removed: removedDocIds.length, created: createdIds.length },
+    'сборка УПД: откат завершён',
+  );
+}
+
+/**
+ * Закрывает дочерний пакет сборки и убирает его служебную запись.
+ *
+ * Служебных документов у дочернего пакета после завершения оставаться не
+ * должно: они невидимы в интерфейсе, но живут в БД и мешают инварианту
+ * «technical — это всегда идущая обработка».
+ */
+async function finishAssemblySubBundle(
+  rootId: string,
+  status: 'parsed' | 'parse_failed',
+  log: WorkerLog,
+): Promise<void> {
+  const subs = await db
+    .select({ id: sourceBundles.id })
+    .from(sourceBundles)
+    .where(and(eq(sourceBundles.parentBundleId, rootId), eq(sourceBundles.kind, 'upd')));
+  for (const sub of subs) {
+    await db.transaction(async (tx) => {
+      await tx
+        .delete(sourceDocuments)
+        .where(and(eq(sourceDocuments.bundleId, sub.id), eq(sourceDocuments.isTechnical, true)));
+      await tx
+        .update(sourceBundles)
+        .set({ status, updatedAt: new Date() })
+        .where(eq(sourceBundles.id, sub.id));
+    });
+  }
+  if (subs.length > 0) log.info({ subs: subs.length, status }, 'сборка УПД: дочерний пакет закрыт');
+}
+
+/**
+ * Проставляет строкам реестра итоговый исход и созданные документы.
+ *
+ * Один документ попадает в несколько строк (страницы одной УПД сняты разными
+ * кадрами), и наоборот — многостраничный PDF даёт несколько документов одной
+ * строке. Поэтому список пишется целиком всем строкам сборки.
+ */
+async function closeAssemblyRegistryRows(
+  rootId: string,
+  generation: number,
+  docIds: string[],
+  effectiveStatus: 'created' | 'failed',
+): Promise<void> {
+  const rows = (await selectRegistryRows(db, rootId, generation)).filter(
+    (r) => r.effectiveStatus === null && r.subBundleId !== null,
+  );
+  if (rows.length === 0) return;
+  await db
+    .update(bundleImportItems)
+    .set({ effectiveStatus, createdDocumentIds: docIds, updatedAt: new Date() })
+    .where(
+      inArray(
+        bundleImportItems.id,
+        rows.map((r) => r.id),
+      ),
+    );
+}
+
+/**
+ * Пересчитывает число документов группы.
+ *
+ * Считается по всем нетехническим документам корневого и дочерних пакетов:
+ * накладная или М-15 может закончиться позже сборки (ретрай), и зафиксировать
+ * счётчик один раз значило бы показать заниженное число.
+ */
+async function recountGroupDocCount(rootId: string): Promise<void> {
+  const [row] = await db
+    .select({ n: drSql<number>`count(*)::int` })
+    .from(sourceDocuments)
+    .where(
+      and(
+        eq(sourceDocuments.isTechnical, false),
+        or(
+          eq(sourceDocuments.bundleId, rootId),
+          drSql`${sourceDocuments.bundleId} in (select id from source_bundles where parent_bundle_id = ${rootId})`,
+        ),
+      ),
+    );
+  await db
+    .update(sourceBundles)
+    .set({ docCount: row?.n ?? 0, updatedAt: new Date() })
+    .where(eq(sourceBundles.id, rootId));
 }
 
 // «Пустой» UpdPdfParsed для Excel-кейса, когда структурный парсер
@@ -2585,9 +3843,52 @@ export async function recoverStaleProcessing(): Promise<void> {
         stale.map((s) => s.id),
       ),
     );
+  // Сегменты сборки восстанавливаются СВОИМ заданием: файла у них нет, работу
+  // адресует строка манифеста. Обычное задание по s3Key вернуло бы документ на
+  // одиночный путь — он распознал бы одну страницу вместо всего логического
+  // УПД и потерял бы остальные позиции.
+  const segmentsById = new Map(
+    (
+      await db
+        .select({
+          docId: bundleSegments.sourceDocumentId,
+          segmentId: bundleSegments.id,
+          generation: bundleSegments.generation,
+        })
+        .from(bundleSegments)
+        .where(
+          inArray(
+            bundleSegments.sourceDocumentId,
+            stale.map((s) => s.id),
+          ),
+        )
+    ).map((r) => [r.docId as string, r]),
+  );
+
   // Точечная постановка джобов: для каждой записи берём S3-ключ из её
   // attachments (роль original) и кладём в очередь заново.
   for (const s of stale) {
+    const segment = segmentsById.get(s.id);
+    if (segment) {
+      const dedupeKey = segmentDispatchKeyOf(segment.segmentId, segment.generation);
+      await db.transaction(async (tx) => {
+        await tx
+          .update(sourceDocuments)
+          .set({ jobId: dedupeKey })
+          .where(eq(sourceDocuments.id, s.id));
+        await enqueueJob(tx as unknown as typeof db, {
+          queue: UPD_PARSE_QUEUE,
+          jobName: 'parse',
+          payload: {
+            sourceDocumentId: s.id,
+            segmentId: segment.segmentId,
+            generation: segment.generation,
+          },
+          dedupeKey,
+        });
+      });
+      continue;
+    }
     const [att] = await db.execute(
       drSql`select s3_key from source_document_attachments
             where source_document_id = ${s.id} and role = 'original'
@@ -2636,10 +3937,40 @@ const queue = new Queue<UpdParseJobData>(UPD_PARSE_QUEUE, {
   defaultJobOptions: UPD_PARSE_JOB_OPTIONS,
 });
 
-const worker = new Worker<UpdParseJobData>(UPD_PARSE_QUEUE, handleJob, {
-  connection,
-  concurrency: CONCURRENCY,
-});
+const worker = new Worker<UpdParseJobData>(
+  UPD_PARSE_QUEUE,
+  async (job) => {
+    try {
+      await handleJob(job);
+    } finally {
+      // Внешний finally для сегментов сборки. У handleJob несколько ранних
+      // выходов — дубликат, таймаут vision, «документ исчез», — и если
+      // публиковать только из «счастливого» конца, комплект, где один сегмент
+      // ушёл по такой ветке, остался бы неопубликованным навсегда: технические
+      // документы есть, а видимых нет.
+      if ('segmentId' in job.data && job.data.segmentId) {
+        try {
+          const [seg] = await db
+            .select({ rootId: bundleSegments.bundleId, generation: bundleSegments.generation })
+            .from(bundleSegments)
+            .where(eq(bundleSegments.id, job.data.segmentId))
+            .limit(1);
+          if (seg) await tryFinalizeUpdAssembly(seg.rootId, seg.generation, logger);
+        } catch (err) {
+          // Финализация — не повод потерять исходную ошибку задания.
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err) },
+            'сборка УПД: финализация после задания не удалась',
+          );
+        }
+      }
+    }
+  },
+  {
+    connection,
+    concurrency: CONCURRENCY,
+  },
+);
 
 // Второй воркер — асинхронная чистка S3-объектов при удалении документов.
 // Концурренси выше — операции лёгкие (один DELETE-запрос к S3 на ключ).
@@ -2660,6 +3991,53 @@ worker.on('failed', async (job, err) => {
     extra: { jobId: job.id, attempts: job.attemptsMade },
   });
   try {
+    // Сборка не смогла даже начаться — файлы не должны застрять в дочернем
+    // пакете. Откат разворачивает их прежним путём, поэтому общий обработчик
+    // ошибки пакета (ниже) сюда не годится: он просто пометил бы пакет
+    // parse_failed, и файлы исчезли бы из виду.
+    if ('mode' in job.data && job.data.mode === 'upd_assembly' && job.data.bundleId) {
+      const subId = job.data.bundleId;
+      const [sub] = await db
+        .select({ parentId: sourceBundles.parentBundleId })
+        .from(sourceBundles)
+        .where(eq(sourceBundles.id, subId))
+        .limit(1);
+      if (sub?.parentId) {
+        await rollbackUpdAssembly({
+          rootId: sub.parentId,
+          subBundleId: subId,
+          generation: job.data.generation,
+          reason: `задание сборки не выполнилось: ${err.message}`,
+          log: logger,
+        });
+      }
+      return;
+    }
+
+    // Сегмент исчерпал попытки: помечаем документ и передаём решение
+    // финализатору — он либо опубликует остальные (если этот единственный
+    // сломанный), либо откатит весь комплект.
+    if ('segmentId' in job.data && job.data.segmentId && job.data.sourceDocumentId) {
+      const docId = job.data.sourceDocumentId;
+      await db
+        .update(sourceDocuments)
+        .set({
+          status: 'parse_failed',
+          parseErrorCode: 'internal_error',
+          parseErrorDetails: { message: err.message },
+          processedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceDocuments.id, docId));
+      const [seg] = await db
+        .select({ rootId: bundleSegments.bundleId, generation: bundleSegments.generation })
+        .from(bundleSegments)
+        .where(eq(bundleSegments.id, job.data.segmentId))
+        .limit(1);
+      if (seg) await tryFinalizeUpdAssembly(seg.rootId, seg.generation, logger);
+      return;
+    }
+
     if ('bundleId' in job.data && job.data.bundleId) {
       const bundleId = job.data.bundleId;
       await db
@@ -2714,7 +4092,7 @@ worker.on('failed', async (job, err) => {
       // рабочим. Помечаем попытку завершённой и оставляем данные как есть;
       // parse_failed остаётся только для документов, у которых сохранять
       // нечего (первый проход не дал ни позиций, ни номера).
-      if (job.data.pass === 'vision') {
+      if ('pass' in job.data && job.data.pass === 'vision') {
         const [doc] = await db
           .select({ docNumber: sourceDocuments.docNumber, status: sourceDocuments.status })
           .from(sourceDocuments)

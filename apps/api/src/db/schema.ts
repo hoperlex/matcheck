@@ -1075,8 +1075,10 @@ export const bundleSegments = pgTable(
     }),
     // PageRef[]: { registryItemId, inputOrder, pageInFile } — адрес каждой
     // страницы, переживающий пересборку и разделение документов.
+    // registryItemId допускает null: у пакетов, принятых до появления реестра,
+    // строки нет вовсе, и адресом остаётся порядковый номер файла.
     pageRefs: jsonb('page_refs')
-      .$type<Array<{ registryItemId: string; inputOrder: number; pageInFile: number }>>()
+      .$type<Array<{ registryItemId: string | null; inputOrder: number; pageInFile: number }>>()
       .notNull()
       .default([]),
     // normal | fallback | uncertain (см. segmentUpdPages). Поколение с

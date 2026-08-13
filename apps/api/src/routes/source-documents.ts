@@ -1303,6 +1303,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           siteId: sourceDocuments.siteId,
           contractorId: sourceDocuments.contractorId,
           recipientSource: sourceDocuments.recipientSource,
+          isTechnical: sourceDocuments.isTechnical,
         })
         .from(sourceDocuments)
         .where(eq(sourceDocuments.id, req.params.id))
@@ -1337,6 +1338,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           siteId: sourceDocuments.siteId,
           contractorId: sourceDocuments.contractorId,
           recipientSource: sourceDocuments.recipientSource,
+          isTechnical: sourceDocuments.isTechnical,
         })
         .from(sourceDocuments)
         .where(eq(sourceDocuments.id, req.params.id))
@@ -1396,6 +1398,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           // Без recipient_source проверка пропустила бы автоподставленного
           // подрядчика и отдала оригинал файла — см. contractor-scope.ts.
           recipientSource: sourceDocuments.recipientSource,
+          isTechnical: sourceDocuments.isTechnical,
         })
         .from(sourceDocuments)
         .where(eq(sourceDocuments.id, req.params.id))
@@ -1443,6 +1446,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           // Без recipient_source проверка пропустила бы автоподставленного
           // подрядчика и отдала оригинал файла — см. contractor-scope.ts.
           recipientSource: sourceDocuments.recipientSource,
+          isTechnical: sourceDocuments.isTechnical,
         })
         .from(sourceDocuments)
         .where(eq(sourceDocuments.id, req.params.id))
@@ -2363,7 +2367,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       const [sd] = await app.db
         .select()
         .from(sourceDocuments)
-        .where(eq(sourceDocuments.id, req.params.id))
+        .where(
+          and(
+            eq(sourceDocuments.id, req.params.id),
+            // Служебная запись пакета — держатель вложений на время разбора и
+            // промежуточный документ сборки логических УПД. Снаружи её не
+            // существует, поэтому мутация по прямому id отвечает 404.
+            eq(sourceDocuments.isTechnical, false),
+          ),
+        )
         .limit(1);
       if (!sd) return reply.code(404).send({ error: 'not_found' });
       if (sd.parseErrorCode !== 'duplicate_upd') {
@@ -2468,7 +2480,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       const [sd] = await app.db
         .select()
         .from(sourceDocuments)
-        .where(eq(sourceDocuments.id, req.params.id))
+        .where(
+          and(
+            eq(sourceDocuments.id, req.params.id),
+            // Служебная запись пакета — держатель вложений на время разбора и
+            // промежуточный документ сборки логических УПД. Снаружи её не
+            // существует, поэтому мутация по прямому id отвечает 404.
+            eq(sourceDocuments.isTechnical, false),
+          ),
+        )
         .limit(1);
       if (!sd) return reply.code(404).send({ error: 'not_found' });
       if (sd.parseErrorCode !== 'validation_mismatch') {
@@ -2620,7 +2640,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       const [sd] = await app.db
         .select()
         .from(sourceDocuments)
-        .where(eq(sourceDocuments.id, req.params.id))
+        .where(
+          and(
+            eq(sourceDocuments.id, req.params.id),
+            // Служебная запись пакета — держатель вложений на время разбора и
+            // промежуточный документ сборки логических УПД. Снаружи её не
+            // существует, поэтому мутация по прямому id отвечает 404.
+            eq(sourceDocuments.isTechnical, false),
+          ),
+        )
         .limit(1);
       if (!sd) return reply.code(404).send({ error: 'not_found' });
 
@@ -2843,7 +2871,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       const [updated] = await app.db
         .update(sourceDocuments)
         .set({ direction: req.body.direction, updatedAt: new Date() })
-        .where(eq(sourceDocuments.id, req.params.id))
+        .where(
+          and(
+            eq(sourceDocuments.id, req.params.id),
+            // Служебная запись пакета — держатель вложений на время разбора и
+            // промежуточный документ сборки логических УПД. Снаружи её не
+            // существует, поэтому мутация по прямому id отвечает 404.
+            eq(sourceDocuments.isTechnical, false),
+          ),
+        )
         .returning();
       if (!updated) return reply.code(404).send({ error: 'not_found' });
       const items = await app.db
@@ -2889,7 +2925,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       const [existing] = await app.db
         .select()
         .from(sourceDocuments)
-        .where(eq(sourceDocuments.id, req.params.id))
+        .where(
+          and(
+            eq(sourceDocuments.id, req.params.id),
+            // Служебная запись пакета — держатель вложений на время разбора и
+            // промежуточный документ сборки логических УПД. Снаружи её не
+            // существует, поэтому мутация по прямому id отвечает 404.
+            eq(sourceDocuments.isTechnical, false),
+          ),
+        )
         .limit(1);
       if (!existing) return reply.code(404).send({ error: 'not_found' });
 
@@ -2933,7 +2977,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         const [existing] = await app.db
           .select({ id: sourceDocuments.id })
           .from(sourceDocuments)
-          .where(eq(sourceDocuments.id, id))
+          .where(
+            and(
+              eq(sourceDocuments.id, id),
+              // Служебная запись пакета — держатель вложений на время разбора и
+              // промежуточный документ сборки логических УПД. Снаружи её не
+              // существует, поэтому мутация по прямому id отвечает 404.
+              eq(sourceDocuments.isTechnical, false),
+            ),
+          )
           .limit(1);
         if (!existing) {
           skipped.push({ id, reason: 'not_found' });

@@ -159,11 +159,28 @@ class SourceAlreadyLinkedError extends Error {
 // гарантирует уникальность ПАРЫ (повторный INSERT той же пары упадёт на PK).
 async function assertSourcesAvailableForShipment(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  _app: any,
-  _sourceDocumentIds: string[],
+  app: any,
+  sourceDocumentIds: string[],
   _excludeShipmentId: string | null,
 ) {
-  return;
+  if (sourceDocumentIds.length === 0) return;
+  // Служебные записи пакетов к отгрузке не привязываются — симметрично
+  // приёмкам (см. assertSourcesAvailableForDelivery).
+  const technical = await app.db
+    .select({ id: sourceDocuments.id })
+    .from(sourceDocuments)
+    .where(
+      and(inArray(sourceDocuments.id, sourceDocumentIds), eq(sourceDocuments.isTechnical, true)),
+    )
+    .limit(1);
+  if (technical.length > 0) throw new TechnicalSourceDocumentError();
+}
+
+/** Попытка привязать служебную запись пакета — отвечаем 404, её «нет». */
+class TechnicalSourceDocumentError extends Error {
+  constructor() {
+    super('technical_source_document');
+  }
 }
 
 function isSourceDocumentUniqueViolation(err: unknown): boolean {
@@ -935,6 +952,12 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             details: { sourceDocumentIds: err.sourceDocumentIds },
           });
         }
+        if (err instanceof TechnicalSourceDocumentError) {
+          return reply.code(404).send({
+            error: 'source_document_not_found',
+            message: 'УПД не найдена',
+          });
+        }
         // Объект записи сменился между проверкой и UPDATE — транзакция откатана.
         if (err instanceof ForeignSiteError) {
           return reply.code(403).send(FOREIGN_SITE_RESPONSE);
@@ -1661,7 +1684,13 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       const [src] = await app.db
         .select({ id: sourceDocuments.id })
         .from(sourceDocuments)
-        .where(eq(sourceDocuments.id, req.body.sourceDocumentId))
+        .where(
+          and(
+            eq(sourceDocuments.id, req.body.sourceDocumentId),
+            // Служебная запись пакета снаружи не существует — см. deliveries.ts.
+            eq(sourceDocuments.isTechnical, false),
+          ),
+        )
         .limit(1);
       if (!src) {
         return reply.code(404).send({

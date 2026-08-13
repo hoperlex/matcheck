@@ -52,6 +52,28 @@ export function bundleDispatchKeyOf(bundleId: string, generation = 0): string {
 }
 
 /**
+ * Ключ сборки логических УПД для пакета.
+ *
+ * Отдельный от bundleDispatchKeyOf: у дочернего пакета сборки и обычного
+ * пакетного разбора разные обработчики, и общий ключ означал бы, что повторная
+ * постановка одного вытесняет другое.
+ */
+export function assemblyDispatchKeyOf(bundleId: string, generation = 0): string {
+  return assertValidKey(['bundle', bundleId, 'assembly', generation].join(KEY_SEP));
+}
+
+/**
+ * Ключ распознавания одного сегмента.
+ *
+ * Адресует сегмент манифеста, а не файл: страницы сегмента лежат в разных
+ * файлах, и восстановление зависшего задания обязано попасть в тот же ключ,
+ * иначе документ распознается дважды.
+ */
+export function segmentDispatchKeyOf(segmentId: string, generation = 0): string {
+  return assertValidKey(['segment', segmentId, 'parse', generation].join(KEY_SEP));
+}
+
+/**
  * Ключ ВТОРОГО прохода документа (повторное распознавание картинкой).
  *
  * Отдельный от ключей пакета: второй проход адресует конкретный документ, а не

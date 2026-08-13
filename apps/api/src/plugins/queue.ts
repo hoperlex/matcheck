@@ -24,9 +24,49 @@ export type UpdParseJobData =
       pass?: 'vision';
       bundleId?: undefined;
       mode?: undefined;
+      segmentId?: undefined;
+      generation?: undefined;
     }
-  | { bundleId: string; mode?: undefined; sourceDocumentId?: undefined; s3Key?: undefined }
-  | { bundleId: string; mode: 'router'; sourceDocumentId?: undefined; s3Key?: undefined };
+  // Распознавание ОДНОГО логического УПД, собранного из страниц пакета.
+  // s3Key нет намеренно: страницы сегмента лежат в разных файлах, их адреса
+  // хранит манифест bundle_segments — он же единственный источник истины при
+  // повторе задания.
+  | {
+      sourceDocumentId: string;
+      segmentId: string;
+      /** Поколение сборки корневого пакета — fencing против устаревших заданий. */
+      generation: number;
+      s3Key?: undefined;
+      bundleId?: undefined;
+      mode?: undefined;
+    }
+  | {
+      bundleId: string;
+      mode?: undefined;
+      sourceDocumentId?: undefined;
+      s3Key?: undefined;
+      segmentId?: undefined;
+      generation?: undefined;
+    }
+  | {
+      bundleId: string;
+      mode: 'router';
+      sourceDocumentId?: undefined;
+      s3Key?: undefined;
+      segmentId?: undefined;
+      generation?: undefined;
+    }
+  // Сборка логических УПД: классификация страниц пакета и нарезка на сегменты.
+  // bundleId здесь — ДОЧЕРНИЙ пакет-исполнитель; поколение и манифест живут на
+  // корневом (см. resolveRootBundle).
+  | {
+      bundleId: string;
+      mode: 'upd_assembly';
+      generation: number;
+      sourceDocumentId?: undefined;
+      s3Key?: undefined;
+      segmentId?: undefined;
+    };
 
 export type S3CleanupJobData = {
   s3Keys: string[];

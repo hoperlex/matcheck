@@ -138,4 +138,54 @@ suite('служебные записи пакета (реальный PostgreSQL
     });
     expect(res.json().total).toBe(1);
   });
+
+  // Списками дело не ограничивается: со сборкой логических УПД служебной
+  // записью стал ещё и промежуточный документ поставки. До публикации он
+  // содержит половину распознанного комплекта, и открыть его по прямому id
+  // (равно как отредактировать или удалить) нельзя — иначе менеджер увидит
+  // документ, состав которого ещё меняется.
+  it('карточка служебной записи отвечает 404 по прямому id', async () => {
+    currentUser = { id: managerId, role: 'manager', siteId: null } as AuthUser;
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/source-documents/${techDocId}`,
+    });
+    expect(res.statusCode).toBe(404);
+
+    const real = await app.inject({
+      method: 'GET',
+      url: `/api/v1/source-documents/${realDocId}`,
+    });
+    expect(real.statusCode).toBe(200);
+  });
+
+  it('редактирование и удаление служебной записи отвечают 404', async () => {
+    currentUser = { id: managerId, role: 'manager', siteId: null } as AuthUser;
+    const patch = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/source-documents/${techDocId}`,
+      payload: { docNumber: 'подмена' },
+    });
+    expect(patch.statusCode).toBe(404);
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/source-documents/${techDocId}`,
+    });
+    expect(del.statusCode).toBe(404);
+
+    // Запись на месте: 404 означает «снаружи её нет», а не «удалена».
+    const [row] = await sql<{ id: string }[]>`
+      SELECT id FROM source_documents WHERE id = ${techDocId}`;
+    expect(row?.id).toBe(techDocId);
+  });
+
+  it('файл служебной записи не отдаётся', async () => {
+    currentUser = { id: managerId, role: 'manager', siteId: null } as AuthUser;
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/source-documents/${techDocId}/file`,
+    });
+    expect(res.statusCode).toBe(404);
+  });
 });

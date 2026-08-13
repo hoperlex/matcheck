@@ -265,7 +265,10 @@ export class VisionBudgetExceededError extends Error {
 // Возвращает false для finally-ошибок (таймаут на 180 сек, валидация Zod
 // на корректном JSON, низкий confidence, ошибки маппинга/БД) — повтор не
 // поможет, только потратит бюджет и токены пользователя.
-function isTransientVisionError(err: Error): boolean {
+// Экспортируется для сегментного извлечения (upd-segment-extract.ts): у него
+// свой retry-цикл, но классификация ошибок обязана совпадать — иначе один и
+// тот же обрыв соединения в двух путях лечился бы по-разному.
+export function isTransientVisionError(err: Error): boolean {
   // Per-attempt timeout — fail-fast (VisionTimeoutError ловится в worker'е).
   if (err instanceof VisionTimeoutError) return false;
   // Битый/обрезанный JSON (truncated response) — основной симптом обрыва
