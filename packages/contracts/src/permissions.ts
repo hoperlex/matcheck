@@ -473,27 +473,54 @@ export function isNeverGrantable(page: PageId, action: PageAction): boolean {
 }
 
 /**
- * Кому можно расширять ПРАВА ЗАПИСИ (create/edit/delete).
+ * Роли, которым запись не выдаётся НИГДЕ.
  *
- * Только manager, и это про область видимости, а не про доверие. У него
- * row-scope нет вовсе — он и сегодня видит все объекты, поэтому выданная
- * запись не открывает ему чужих данных. У остальных ограничение по своим
- * данным на путях записи отсутствует: upsert операций сверяет объект только у
- * inspector_kpp, а маршруты документов не сверяют siteId вовсе — подрядчик или
- * инспектор с выданным create писали бы куда угодно.
- *
- * Снимается в фазе 2, когда появятся write-scope инварианты. «Просмотр»
- * расширяется всем: чтение везде уже ограничено скоупом роли.
- *
- * `review` идёт здесь же, вместе с записью, а не вместе с просмотром: хендлер
- * PATCH /deliveries|shipments/:id/review выбирает запись по одному id, без
- * сверки siteId. Инспектор или подрядчик с выданной отметкой проверял бы чужую
- * операцию по известному UUID.
+ * Подрядчик видит только свои записи, но пути записи принадлежность подрядчику
+ * не сверяют вовсе. Пока этой сверки нет, любое выданное ему create/edit/delete
+ * означало бы право писать в чужое — отдельная задача про write-scope.
  */
-export const EXPANDABLE_WRITE_ROLES: ManagedRole[] = ['manager'];
+export const WRITE_BLOCKED_ROLES: ManagedRole[] = ['contractor'];
+
+/**
+ * Роли с ограничением видимости по строкам: inspector_kpp — по siteId.
+ * Для них запись безопасна лишь там, где скоуп реально проверяется.
+ *
+ * monitor в этот список НЕ входит: он, как и manager, видит все объекты, и
+ * выданная запись не открывает ему ничего, чего он уже не видит. Раньше он
+ * был заперт заодно с подрядчиком — это и была причина серых галочек.
+ */
+export const ROW_SCOPED_ROLES: ManagedRole[] = ['inspector_kpp'];
+
+/** Страницы, где у записей есть владелец (объект или подрядчик). */
+export const ROW_SCOPED_PAGES: PageId[] = [
+  'operations.deliveries',
+  'operations.shipments',
+  'documents.list',
+];
+
+/**
+ * Где скоуп на путях ЗАПИСИ действительно проверяется: upsert операций сверяет
+ * siteId у inspector_kpp (routes/deliveries.ts, foreign-site). Маршруты
+ * документов не сверяют объект вовсе, поэтому их здесь нет.
+ */
+export const WRITE_SCOPE_ENFORCED: ReadonlySet<string> = new Set([
+  'inspector_kpp:operations.deliveries',
+  'inspector_kpp:operations.shipments',
+]);
 
 /**
  * Можно ли ВЫДАТЬ роли право, которого нет в её дефолте.
+ *
+ * Вопрос не «кому мы доверяем», а «у кого выданная запись откроет ЧУЖИЕ
+ * данные». Отсюда порядок проверок: сперва роли, которым запись закрыта
+ * совсем, затем страницы без владельца у записей (справочники, админка,
+ * почта — там «своей» строки не бывает), затем роли без ограничения видимости,
+ * и лишь в остатке — требование реально работающего скоупа.
+ *
+ * `review` идёт вместе с записью, а не с просмотром: хендлер
+ * PATCH /deliveries|shipments/:id/review выбирает запись по одному id, без
+ * сверки siteId, — иначе роль с ограниченной видимостью проверяла бы чужую
+ * операцию по известному UUID.
  *
  * Сужение этой функцией не ограничивается — снять можно почти всё (кроме
  * LOCKED_CELLS, они про работоспособность мобильного клиента).
@@ -502,7 +529,30 @@ export function canExpand(role: ManagedRole, page: PageId, action: PageAction): 
   if (!isActionApplicable(page, action)) return false;
   if (isNeverGrantable(page, action)) return false;
   if (action === 'view') return true;
-  return EXPANDABLE_WRITE_ROLES.includes(role);
+  if (WRITE_BLOCKED_ROLES.includes(role)) return false;
+  if (!ROW_SCOPED_PAGES.includes(page)) return true;
+  if (!ROW_SCOPED_ROLES.includes(role)) return true;
+  return WRITE_SCOPE_ENFORCED.has(`${role}:${page}`);
+}
+
+/**
+ * Почему право нельзя выдать — для тултипа в матрице. null = можно.
+ * Формулировки конкретные: «этой роли только просмотр» ничего не объясняет.
+ */
+export function expandBlockReason(
+  role: ManagedRole,
+  page: PageId,
+  action: PageAction,
+): string | null {
+  if (canExpand(role, page, action)) return null;
+  if (!isActionApplicable(page, action)) return null;
+  if (isNeverGrantable(page, action)) {
+    return 'Это право не выдаётся ни одной роли: через него можно получить полномочия администратора и отобрать доступ у остальных';
+  }
+  if (WRITE_BLOCKED_ROLES.includes(role)) {
+    return 'Подрядчик видит только свои записи, но пути записи принадлежность не сверяют — выданное право позволило бы менять чужое';
+  }
+  return `На этой странице у роли нет ограничения по своим данным на путях записи — выданное право открыло бы чужие записи`;
 }
 
 // ──────────────────────────── API-контракты ────────────────────────────

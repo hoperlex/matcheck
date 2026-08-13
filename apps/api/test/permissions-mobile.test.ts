@@ -93,8 +93,8 @@ function cellsOf(method: string, url: string): { page: PageId; action: PageActio
   if (!rule) throw new Error(`Мобильный маршрут «${key}» отсутствует в реестре прав`);
   if (rule.kind === 'always') return [];
   if (rule.kind === 'static') return [{ page: rule.page, action: rule.action }];
-  const runtime = RUNTIME_RULE_COVERAGE[key];
-  if (!runtime) throw new Error(`Нет описания исходов для «${key}»`);
+  const runtime = rule.cells;
+  if (!runtime?.length) throw new Error(`Нет описания исходов (cells) для «${key}»`);
   return runtime;
 }
 

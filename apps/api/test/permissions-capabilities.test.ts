@@ -7,7 +7,7 @@
  * открывает лишнего.
  */
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_MATRIX, MANAGED_ROLES, type ManagedRole } from '@matcheck/contracts';
+import { DEFAULT_MATRIX, MANAGED_ROLES, canExpand, type ManagedRole } from '@matcheck/contracts';
 import { capabilitiesFor, declaredCapabilities } from '../src/lib/permissions/capabilities.js';
 import { ROUTE_PERMISSIONS, routeKey } from '../src/lib/permissions/route-map.js';
 import type { OverrideMap } from '../src/lib/permissions/matrix.js';
@@ -83,11 +83,6 @@ describe('capabilities: фактический доступ, а не перес�
 
 describe('политика расширения: выданное право открывает ровно то, что задумано', () => {
   it('политика записана в реестре явно — это контракт, а не деталь', () => {
-    // Механику «выданное монитору право открывает флаги» целиком проверить
-    // сейчас нельзя: write-расширение пока разрешено только менеджеру
-    // (EXPANDABLE_WRITE_ROLES), а ему эти маршруты и так открыты. Снимется на
-    // шаге про row-scope — тогда сюда добавится сквозной сценарий. До тех пор
-    // фиксируем принятые решения, чтобы они не «уплыли» молча.
     const meta = (key: string) => ROUTE_PERMISSIONS.get(key);
 
     expect(meta('PATCH /api/v1/deliveries/:id/flags')?.expandableBy).toEqual(['monitor']);
@@ -111,13 +106,42 @@ describe('политика расширения: выданное право о�
     expect(caps).not.toContain('operations.delete.bulk_hard');
   });
 
-  it('write-расширение монитору пока закрыто целиком (снимется на шаге row-scope)', async () => {
+  it('ЦЕЛЬ ЗАДАЧИ: выданный монитору edit открывает флаги и привязку УПД', async () => {
+    // До разделения review и edit это было невыразимо: право монитора совпадало
+    // с дефолтом, расширением не считалось, и authorize отказывал всегда.
     const caps = capabilitiesFor(
       granted('monitor', 'operations.deliveries', 'edit'),
       'monitor',
       await roleMap(),
     );
-    expect(caps).not.toContain('operations.edit.flags');
+    expect(caps).toContain('operations.edit.flags');
+    expect(caps).toContain('operations.edit.link_source');
+  });
+
+  it('выданный монитору edit НЕ открывает ссылки-шаринги', async () => {
+    // expandableBy: [] — share живёт своей возможностью, а не частью правки.
+    const caps = capabilitiesFor(
+      granted('monitor', 'operations.deliveries', 'edit'),
+      'monitor',
+      await roleMap(),
+    );
+    expect(caps).not.toContain('operations.share.manage');
+    expect(caps).not.toContain('operations.share.revoke');
+  });
+
+  it('подрядчику запись не выдаётся ни на одной странице', async () => {
+    // WRITE_BLOCKED_ROLES: у него есть ограничение видимости, но пути записи
+    // принадлежность не сверяют — выданное право означало бы правку чужого.
+    for (const page of ['operations.deliveries', 'references.sites', 'documents.mail'] as const) {
+      for (const action of ['create', 'edit', 'delete'] as const) {
+        expect(
+          canExpand('contractor', page, action),
+          `${page}:${action} не должен выдаваться подрядчику`,
+        ).toBe(false);
+      }
+    }
+    // Просмотр — можно: чтение и так ограничено скоупом роли.
+    expect(canExpand('contractor', 'references.sites', 'view')).toBe(true);
   });
 });
 

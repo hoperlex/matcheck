@@ -26,6 +26,7 @@ import { ROUTE_PERMISSIONS, routeKey } from '../src/lib/permissions/route-map.js
 import { collectRoutes, isSyntheticMethod, type RouteRow } from './helpers/route-inventory.js';
 import {
   INLINE_ROLE_ACCESS,
+  MATRIX_CHECKED_INLINE,
   KNOWN_API_UI_GAPS,
   NAV_ACCESS,
   RUNTIME_RULE_COVERAGE,
@@ -92,11 +93,14 @@ function coveredCells(r: RouteRow, role: ManagedRole): { page: PageId; action: P
     return rule.roles.includes(role) ? [] : [{ page: rule.page, action: rule.action }];
   }
 
-  const runtime = RUNTIME_RULE_COVERAGE[key];
-  if (!runtime) {
+  // Исходы dynamic/in-handler берём ИЗ РЕЕСТРА: там же, где они нужны хуку,
+  // решающему, пускать ли запрос до обработчика. Пока список жил отдельной
+  // фикстурой, это был второй источник правды, способный молча разойтись.
+  const runtime = rule.cells;
+  if (!runtime?.length) {
     throw new Error(
-      `Маршрут «${key}» помечен ${rule.kind}, но его исходы не описаны в ` +
-        'RUNTIME_RULE_COVERAGE. Без этого право, которое он охраняет, не проверяется.',
+      `Маршрут «${key}» помечен ${rule.kind}, но его исходы не описаны полем cells ` +
+        'в реестре прав. Без этого право, которое он охраняет, не проверяется.',
     );
   }
   return runtime;
@@ -240,6 +244,8 @@ describe('дефолтная матрица == сегодняшние права
 
       // Маршрут защищён allow-list'ом — его расширение снимает штатно.
       if (r.roles.length > 0) continue;
+      // Ролевой гейт заменён на assertPermission: упираться больше не во что.
+      if (MATRIX_CHECKED_INLINE.has(key)) continue;
       const inline = INLINE_ROLE_ACCESS[key];
       if (!inline) continue;
 
@@ -255,6 +261,28 @@ describe('дефолтная матрица == сегодняшние права
       broken.sort(),
       'Право можно выдать, но маршрут всё равно откажет: внутри хендлера своя проверка роли.',
     ).toEqual([]);
+  });
+
+  it('перенос исходов в реестр ничего не потерял и не исказил', () => {
+    // RUNTIME_RULE_COVERAGE больше не питает проверки — исходы живут в реестре
+    // (поле cells), где ими пользуется и рантайм-хук. Фикстура остаётся
+    // историческим эталоном: этот тест сверяет её с реестром ячейка в ячейку и
+    // упадёт, если перенос что-то потерял. Тот же приём, что у filterByRole в
+    // navItems.ts.
+    const norm = (cells: { page: PageId; action: PageAction }[]) =>
+      cells.map((c) => `${c.page}:${c.action}`).sort();
+
+    const fromRegistry: Record<string, string[]> = {};
+    for (const [key, rule] of ROUTE_PERMISSIONS) {
+      if (rule.kind !== 'dynamic' && rule.kind !== 'in-handler') continue;
+      fromRegistry[key] = norm(rule.cells ?? []);
+    }
+
+    const fromFixture = Object.fromEntries(
+      Object.entries(RUNTIME_RULE_COVERAGE).map(([k, v]) => [k, norm(v)]),
+    );
+
+    expect(fromRegistry).toEqual(fromFixture);
   });
 
   it('каталог согласован: base не содержит неприменимых действий', () => {

@@ -260,24 +260,29 @@ describe('резолвер держит запреты сам, без помощ
     expect(body.pages['operations.shipments']).toMatchObject({ review: true, edit: false });
   });
 
-  it('edit монитору — уже расширение, но пока запрещённое, и review от этого не страдает', async () => {
-    // Разведя действия, мы вернули edit статус расширения: строка в БД теперь
-    // ОТЛИЧАЕТСЯ от дефолта, и резолвер обязан судить её по правилам выдачи
-    // записи. Сегодня они пускают только manager (EXPANDABLE_WRITE_ROLES) —
-    // отсюда edit: false. До разделения этот сценарий был невыразим вовсе:
-    // edit у монитора совпадал с дефолтом и расширением не считался никогда.
-    //
-    // Когда появится write-scope, ожидание здесь станет edit: true — и это
-    // будет ровно та строчка, ради которой затевалась вся работа.
+  it('ЦЕЛЬ: выданный монитору edit действует, и отметка проверки не страдает', async () => {
+    // Ради этой строчки затевалась работа. До разделения review и edit
+    // сценарий был невыразим: право монитора совпадало с дефолтом, расширением
+    // не считалось никогда, и authorize отказывал всегда.
     app = await buildApp({
       role: 'monitor',
       overrides: [row('monitor', 'operations.deliveries', { canView: true, canEdit: true })],
     });
     const body = await perms(app);
-    expect(body.pages['operations.deliveries']).toMatchObject({ view: true, edit: false });
-    // Отметка проверки остаётся при своём: запрет расширения касается только
-    // того, чего в дефолте не было.
+    expect(body.pages['operations.deliveries']).toMatchObject({ view: true, edit: true });
+    // Отметка проверки — базовое право, выдача соседнего его не трогает.
     expect(body.pages['operations.deliveries'].review).toBe(true);
+  });
+
+  it('подрядчику выданная запись игнорируется резолвером, а не только PATCH', async () => {
+    // Строку можно записать прямым UPDATE в psql — запрет обязан держаться на
+    // резолвере. У подрядчика нет сверки принадлежности на путях записи.
+    app = await buildApp({
+      role: 'contractor',
+      overrides: [row('contractor', 'references.sites', { canView: true, canCreate: true })],
+    });
+    const body = await perms(app);
+    expect(body.pages['references.sites']).toMatchObject({ view: true, create: false });
   });
 });
 

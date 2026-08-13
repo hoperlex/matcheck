@@ -57,6 +57,24 @@ export const NAV_ACCESS: Record<PageId, ManagedRole[]> = {
  * (с учётом их скоупа: инспектор видит свой объект, подрядчик — свои
  * записи; сам скоуп матрицей не выражается и остаётся в хендлере).
  */
+/**
+ * Маршруты, где ролевой гейт заменён на assertPermission: доступ решает
+ * матрица, а бизнес-правила (только admin добивает помеченное, снимает пометку
+ * автор или admin, инспектор ограничен своим объектом) остались рядом.
+ *
+ * Их специально исключают из проверки «расширение упрётся в inline-роль»:
+ * упереться там больше не во что, а перечислять роли в INLINE_ROLE_ACCESS
+ * значило бы фиксировать слепок матрицы во второй раз.
+ */
+export const MATRIX_CHECKED_INLINE: ReadonlySet<string> = new Set([
+  'DELETE /api/v1/deliveries/:id',
+  'POST /api/v1/deliveries/:id/mark-deletion',
+  'POST /api/v1/deliveries/:id/unmark-deletion',
+  'DELETE /api/v1/shipments/:id',
+  'POST /api/v1/shipments/:id/mark-deletion',
+  'POST /api/v1/shipments/:id/unmark-deletion',
+]);
+
 export const INLINE_ROLE_ACCESS: Record<string, ManagedRole[]> = {
   // deliveries.ts:493,718,1481 — список/карточка/выгрузка со скоупом по роли.
   'GET /api/v1/deliveries': ['manager', 'inspector_kpp', 'contractor', 'monitor'],

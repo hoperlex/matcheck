@@ -278,13 +278,14 @@ suite('матрица прав: админское API (реальный Postgre
     ])).statusCode).toBe(200);
   });
 
-  it('ролям без write-scope выдаётся только «Просмотр»', async () => {
-    // На путях записи у contractor и inspector_kpp нет ограничения по своим
-    // данным — выданное create писало бы в чужие объекты.
+  it('запись не выдаётся там, где роль писала бы в чужое', async () => {
+    // Подрядчику — нигде: у него есть ограничение видимости, но пути записи
+    // принадлежность не сверяют. Инспектору — в документах: siteId там тоже не
+    // сверяется (в отличие от upsert операций).
     for (const change of [
       { role: 'contractor', page: 'references.sites', action: 'create', allowed: true },
+      { role: 'contractor', page: 'operations.deliveries', action: 'edit', allowed: true },
       { role: 'inspector_kpp', page: 'documents.list', action: 'edit', allowed: true },
-      { role: 'monitor', page: 'references.units', action: 'delete', allowed: true },
     ]) {
       const res = await patch([change]);
       expect(res.statusCode, JSON.stringify(change)).toBe(400);
@@ -294,6 +295,17 @@ suite('матрица прав: админское API (реальный Postgre
     expect((await patch([
       { role: 'contractor', page: 'references.sites', action: 'view', allowed: true },
     ])).statusCode).toBe(200);
+  });
+
+  it('монитору запись выдаётся: у него нет ограничения по своим данным', async () => {
+    // Ради этого и переделывали: раньше монитор был заперт заодно с
+    // подрядчиком, хотя видит все объекты — как менеджер.
+    const res = await patch([
+      { role: 'monitor', page: 'references.units', action: 'view', allowed: true },
+      { role: 'monitor', page: 'references.units', action: 'delete', allowed: true },
+    ]);
+    expect(res.statusCode).toBe(200);
+    expect(await rowOf('monitor', 'references.units')).toMatchObject({ can_delete: true });
   });
 
   it('снятое базовое право можно вернуть, даже если роли запрещено расширение', async () => {
@@ -313,17 +325,18 @@ suite('матрица прав: админское API (реальный Postgre
     expect(await rowOf('monitor', 'operations.deliveries')).toMatchObject({ can_review: true });
   });
 
-  it('edit монитору — отдельное от отметки право, и выдать его пока нельзя', async () => {
-    // Ради этого действие и разводилось: раньше edit у монитора совпадал с
-    // дефолтом, «включать» было нечего, и настоящая правка (flags, link-source,
-    // share-link — они manager-only) оставалась недостижимой. Теперь запрос
-    // корректно квалифицируется как расширение записи и отклоняется по общему
-    // правилу — до появления write-scope.
+  it('ЦЕЛЬ: монитору выдаётся полноценная правка Приёмок, отдельно от отметки', async () => {
+    // Раньше edit у монитора совпадал с дефолтом и означал одну лишь отметку
+    // проверки: «включать» было нечего, а настоящая правка (flags, link-source)
+    // оставалась недостижимой. Теперь это обычное расширение.
     const res = await patch([
       { role: 'monitor', page: 'operations.deliveries', action: 'edit', allowed: true },
     ]);
-    expect(res.statusCode).toBe(400);
-    expect(res.json()).toMatchObject({ error: 'write_not_expandable' });
+    expect(res.statusCode).toBe(200);
+    const row = await rowOf('monitor', 'operations.deliveries');
+    expect(row).toMatchObject({ can_edit: true });
+    // Отметка проверки — базовое право, выдача соседнего его не трогает.
+    expect(row).toMatchObject({ can_review: true });
   });
 
   it('роль admin в матрицу не принимается', async () => {

@@ -95,6 +95,22 @@ export default fp(async (app) => {
     return rule.expandableBy?.includes(role) ?? true;
   }
 
+  /**
+   * Расширена ли администратором хотя бы одна из ячеек, которыми маршрут может
+   * обернуться в рантайме (upsert — create или edit, фото — приёмка или
+   * отгрузка).
+   *
+   * Ровно «хотя бы одна»: до SELECT неизвестно, какая ветка сработает, а
+   * требовать расширения обеих значило бы, что выданное «Создавать» не
+   * действует, пока не выдано ещё и «Редактировать».
+   */
+  async function anyCellExpanded(rule: RouteRule, role: ManagedRole): Promise<boolean> {
+    if (!rule.cells?.length) return false;
+    if (!expansionOpensRoute(rule, role)) return false;
+    const overrides = await store.get();
+    return rule.cells.some((c) => isExpanded(overrides, role, c.page, c.action));
+  }
+
   async function deny(
     req: FastifyRequest,
     reply: FastifyReply,
@@ -141,6 +157,23 @@ export default fp(async (app) => {
 
   app.addHook('onRequest', async (req, reply) => {
     const rule = ruleFor(req);
+
+    // in-handler: сама проверка — внутри обработчика, после SELECT. Здесь
+    // решается только одно: пускать ли запрос ДО обработчика. Пускаем, если
+    // администратор явно расширил хоть одну из возможных ячеек маршрута —
+    // иначе allow-list отсечёт монитора раньше, чем станет известно, создание
+    // это или правка, и выданное право осталось бы мёртвым.
+    //
+    // Точность от этого не страдает: assertPermission внутри хендлера сверит
+    // уже конкретную пару и откажет, если расширена была соседняя (выдан
+    // только create, а запись существует → 403 на ветке edit).
+    if (rule?.kind === 'in-handler') {
+      if (await anyCellExpanded(rule, req.user!.role as ManagedRole)) {
+        req.permissionExpanded = true;
+      }
+      return;
+    }
+
     if (rule?.kind !== 'static' && rule?.kind !== 'legacy') return;
 
     // legacy: роли, у которых доступ к маршруту есть исторически, идут мимо
@@ -173,7 +206,18 @@ export default fp(async (app) => {
 
     const { page, action } = rule.resolve(req);
     const overrides = await store.get();
-    if (isAllowed(overrides, req.user!.role, page, action)) return;
+    if (isAllowed(overrides, req.user!.role, page, action)) {
+      // Как и у static: снимаем allow-list только на явно выданном праве.
+      // Instance-preHandler выполняется раньше route-preHandler (там сидит
+      // app.authorize), поэтому отметка успевает — это закреплено тестом.
+      if (
+        isExpanded(overrides, req.user!.role, page, action) &&
+        expansionOpensRoute(rule, req.user!.role as ManagedRole)
+      ) {
+        req.permissionExpanded = true;
+      }
+      return;
+    }
     return deny(req, reply, page, action);
   });
 });

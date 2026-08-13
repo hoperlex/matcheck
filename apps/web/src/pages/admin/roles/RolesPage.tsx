@@ -19,6 +19,7 @@ import {
   MANAGED_ROLES,
   PAGE_ACTIONS,
   PAGE_ACTION_LABELS,
+  expandBlockReason,
   PAGE_GROUPS,
   PAGE_GROUP_LABELS,
   type ManagedRole,
@@ -46,14 +47,19 @@ import {
 
 const ROLE_TABS: UserRole[] = ['admin', ...MANAGED_ROLES];
 
-/** Подсказка под каждым состоянием ячейки — почему её нельзя тронуть. */
+/**
+ * Подсказка под состоянием ячейки — почему её нельзя тронуть.
+ *
+ * `write-locked` здесь нет: причина у него разная (подрядчику запись закрыта
+ * везде, инспектору — только там, где скоуп не проверяется), и одна общая
+ * фраза «этой роли можно выдать только Просмотр» вводила бы в заблуждение.
+ * Её даёт expandBlockReason из контрактов, рядом с самим правилом.
+ */
 const CELL_HINT: Record<string, string> = {
   locked:
     'Требуется мобильному приложению КПП: планшет не показывает ошибку доступа и просто перестанет работать',
   never:
     'Это право не выдаётся ни одной роли: через него можно получить полномочия администратора и отобрать доступ у остальных',
-  'write-locked':
-    'Этой роли можно выдать только «Просмотр»: на путях записи у неё нет ограничения по своим данным, и выданное право открыло бы чужие записи',
 };
 
 /** Разделы, выдача прав в которых даёт роли административные экраны. */
@@ -169,7 +175,9 @@ export default function RolesPage() {
     );
     const hint = extension
       ? 'Право выдано сверх базового набора роли'
-      : CELL_HINT[state];
+      : state === 'write-locked'
+        ? expandBlockReason(role, entry.id, action)
+        : CELL_HINT[state];
     const wrapped = extension ? (
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
         {box}

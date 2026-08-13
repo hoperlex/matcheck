@@ -79,13 +79,32 @@ describe('состояние ячейки', () => {
     expect(cellState(byId('operations.deliveries'), 'monitor', 'review', locked)).toBe('editable');
   });
 
-  it('edit монитору показан как запрещённый к выдаче, а не как включённый', () => {
-    // До разделения действий эта ячейка была «editable» и стояла отмеченной,
-    // хотя означала лишь отметку проверки. Теперь интерфейс честно говорит:
-    // права записи у роли нет и выдать его пока нельзя.
-    expect(cellState(byId('operations.deliveries'), 'monitor', 'edit', locked)).toBe(
+  it('edit монитору можно выдать: у него нет ограничения по своим данным', () => {
+    // Раньше ячейка стояла отмеченной, но означала лишь отметку проверки —
+    // выдать настоящую правку было нечем. Теперь она снята по умолчанию и
+    // доступна к выдаче: монитор, как и менеджер, видит все объекты.
+    expect(cellState(byId('operations.deliveries'), 'monitor', 'edit', locked)).toBe('editable');
+  });
+
+  it('подрядчику запись не выдаётся нигде, даже в справочниках', () => {
+    // У него есть ограничение видимости, но пути записи принадлежность не
+    // сверяют: выданное право означало бы правку чужого.
+    expect(cellState(byId('operations.deliveries'), 'contractor', 'edit', locked)).toBe(
       'write-locked',
     );
+    expect(cellState(byId('references.sites'), 'contractor', 'create', locked)).toBe(
+      'write-locked',
+    );
+    // Просмотр справочника выдать можно.
+    expect(cellState(byId('references.sites'), 'contractor', 'view', locked)).toBe('editable');
+  });
+
+  it('инспектору запись в документы закрыта: siteId там не сверяется', () => {
+    expect(cellState(byId('documents.list'), 'inspector_kpp', 'create', locked)).toBe(
+      'write-locked',
+    );
+    // А в справочниках — можно: там у записей нет владельца.
+    expect(cellState(byId('references.sites'), 'inspector_kpp', 'create', locked)).toBe('editable');
   });
 
   it('колонка «Проверять» есть только у Операций', () => {

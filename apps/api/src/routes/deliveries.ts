@@ -1005,14 +1005,16 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             message: 'Сначала пометьте документ на удаление',
           });
         }
-        // Для draft/not_filled — прежняя ролевая модель.
+        // Для draft/not_filled — по матрице. Имя роли здесь больше не решает:
+        // иначе выданное «Удалять» упиралось бы в этот if и оставалось мёртвым.
+        // Ограничение инспектора по объекту — бизнес-скоуп, а не авторизация,
+        // поэтому остаётся рядом и проверяется первым.
         if (role === 'inspector_kpp') {
           if (!req.user?.siteId || existing.siteId !== req.user.siteId) {
             return reply.code(403).send({ error: 'forbidden' });
           }
-        } else if (role !== 'admin' && role !== 'manager') {
-          return reply.code(403).send({ error: 'forbidden' });
         }
+        await assertPermission(req, 'operations.deliveries', 'delete');
       }
 
       // Аудит для трассировки: pending_deletion_* теряются вместе с записью.
@@ -1116,13 +1118,14 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
 
       const role = req.user?.role;
       // Видимость как при обычном чтении: inspector_kpp — только свой site.
+      // Проверяется ДО прав и отвечает 404, а не 403: иначе по коду ответа
+      // читалось бы существование чужой записи.
       if (role === 'inspector_kpp') {
         if (!req.user?.siteId || existing.siteId !== req.user.siteId) {
           return reply.code(404).send({ error: 'not_found' });
         }
-      } else if (role !== 'admin' && role !== 'manager') {
-        return reply.code(403).send({ error: 'forbidden' });
       }
+      await assertPermission(req, 'operations.deliveries', 'delete');
 
       if (existing.pendingDeletionAt !== null) {
         return reply.code(409).send({
@@ -1192,6 +1195,10 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           return reply.code(404).send({ error: 'not_found' });
         }
       }
+      // Бизнес-правило «автор или админ» выше — про то, ЧЬЮ пометку можно
+      // снять; матрица отвечает на другой вопрос — есть ли у роли право
+      // удаления вообще. Снятая галочка обязана останавливать и автора.
+      await assertPermission(req, 'operations.deliveries', 'delete');
 
       if (existing.pendingDeletionAt === null) {
         return reply.code(409).send({

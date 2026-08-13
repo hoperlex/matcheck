@@ -982,13 +982,14 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             message: 'Сначала пометьте документ на удаление',
           });
         }
+        // См. зеркальный комментарий в deliveries.ts: имя роли здесь больше не
+        // решает, ограничение инспектора по объекту — бизнес-скоуп.
         if (role === 'inspector_kpp') {
           if (!req.user?.siteId || existing.siteId !== req.user.siteId) {
             return reply.code(403).send({ error: 'forbidden' });
           }
-        } else if (role !== 'admin' && role !== 'manager') {
-          return reply.code(403).send({ error: 'forbidden' });
         }
+        await assertPermission(req, 'operations.shipments', 'delete');
       }
 
       if (isPending) {
@@ -1084,13 +1085,14 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!existing) return reply.code(404).send({ error: 'not_found' });
 
       const role = req.user?.role;
+      // Видимость — до прав и через 404: код ответа не должен выдавать
+      // существование чужой записи.
       if (role === 'inspector_kpp') {
         if (!req.user?.siteId || existing.siteId !== req.user.siteId) {
           return reply.code(404).send({ error: 'not_found' });
         }
-      } else if (role !== 'admin' && role !== 'manager') {
-        return reply.code(403).send({ error: 'forbidden' });
       }
+      await assertPermission(req, 'operations.shipments', 'delete');
 
       if (existing.pendingDeletionAt !== null) {
         return reply.code(409).send({
@@ -1159,6 +1161,9 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           return reply.code(404).send({ error: 'not_found' });
         }
       }
+      // «Автор или админ» выше — про то, чью пометку можно снять; матрица —
+      // про право удаления как таковое. Снятая галочка останавливает и автора.
+      await assertPermission(req, 'operations.shipments', 'delete');
 
       if (existing.pendingDeletionAt === null) {
         return reply.code(409).send({

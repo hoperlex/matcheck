@@ -38,6 +38,20 @@ import type { ManagedRole, PageAction, PageId } from '@matcheck/contracts';
 export type RuleMeta = {
   capability?: string;
   expandableBy?: ManagedRole[];
+  /**
+   * Все ячейки, которыми маршрут может обернуться в рантайме — для правил
+   * `dynamic` и `in-handler`, где страница или действие выясняются из тела
+   * запроса либо после SELECT.
+   *
+   * Зачем в реестре, а не только в тестах. Во-первых, по этому списку хук
+   * решает, пропускать ли запрос до обработчика: `authorize` снимается, если
+   * администратор явно расширил ХОТЬ ОДНУ из возможных ячеек, — точное
+   * действие всё равно проверит assertPermission после SELECT. Во-вторых,
+   * список нужен и тесту «матрица не сужает»: раньше он жил отдельной
+   * фикстурой, то есть вторым источником правды, который мог разойтись с
+   * реестром молча.
+   */
+  cells?: { page: PageId; action: PageAction }[];
 };
 
 export type RouteRule = RuleMeta &
@@ -77,7 +91,17 @@ const st = (page: PageId, action: PageAction, meta?: RuleMeta): RouteRule => ({
   ...meta,
 });
 const always = (note: string, meta?: RuleMeta): RouteRule => ({ kind: 'always', note, ...meta });
-const inHandler = (note: string): RouteRule => ({ kind: 'in-handler', note });
+const inHandler = (
+  note: string,
+  cells: { page: PageId; action: PageAction }[],
+  meta?: Omit<RuleMeta, 'cells'>,
+): RouteRule => ({ kind: 'in-handler', note, cells, ...meta });
+
+/** Обе страницы Операций разом — фото и upsert ведут себя одинаково. */
+const bothOps = (action: PageAction): { page: PageId; action: PageAction }[] => [
+  { page: 'operations.deliveries', action },
+  { page: 'operations.shipments', action },
+];
 const legacy = (
   page: PageId,
   action: PageAction,
@@ -148,6 +172,10 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     inHandler(
       'Upsert: create или edit решается наличием строки в БД, а не наличием input.id — ' +
         'офлайн-запись с планшета приходит с уже сгенерированным UUID.',
+      [
+        { page: 'operations.deliveries', action: 'create' },
+        { page: 'operations.deliveries', action: 'edit' },
+      ],
     ),
   ],
   // Отметка проверки качества — своё действие, не edit: у ячейки edit другой
@@ -236,7 +264,13 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/shipments/:id', st('operations.shipments', 'view')],
   // Своего export.xlsx у отгрузок нет: страница Операций выгружает их через
   // /api/v1/source-documents/export.xlsx (см. OperationsPage.tsx).
-  ['POST /api/v1/shipments', inHandler('Upsert — см. POST /api/v1/deliveries.')],
+  [
+    'POST /api/v1/shipments',
+    inHandler('Upsert — см. POST /api/v1/deliveries.', [
+      { page: 'operations.shipments', action: 'create' },
+      { page: 'operations.shipments', action: 'edit' },
+    ]),
+  ],
   ['PATCH /api/v1/shipments/:id/review', st('operations.shipments', 'review')],
   // Зеркально приёмкам — см. комментарии там.
   [
@@ -317,6 +351,9 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     'POST /api/v1/photos/presign',
     {
       kind: 'dynamic',
+      // Возможные исходы resolve — для хука расширения и для теста «матрица не
+      // сужает». Сам resolve выбирает из них по телу запроса.
+      cells: bothOps('create'),
       resolve: (req) => {
         const body = (req.body ?? {}) as { operationKind?: string; deliveryId?: string };
         // Фолбэк повторяет хендлер (photos.ts): operationKind ?? 'delivery',
@@ -330,15 +367,33 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     },
   ],
   // Остальные узнают вид операции только после findPhoto().
-  ['POST /api/v1/photos/:id/confirm', inHandler('found.kind + create, после findPhoto.')],
+  [
+    'POST /api/v1/photos/:id/confirm',
+    inHandler('found.kind + create, после findPhoto.', bothOps('create')),
+  ],
   // Право то же, что у presign/confirm: загрузка файла — часть создания фото.
-  ['POST /api/v1/photos/:id/content', inHandler('found.kind + create, после findPhoto.')],
-  ['PATCH /api/v1/photos/:id', inHandler('found.kind + edit, после findPhoto.')],
-  ['POST /api/v1/photos/:id/recognize', inHandler('found.kind + edit, после findPhoto.')],
-  ['DELETE /api/v1/photos/:id', inHandler('found.kind + delete, после findPhoto.')],
-  ['GET /api/v1/photos/:id/url', inHandler('found.kind + view, после findPhoto.')],
-  ['GET /api/v1/photos/:id/content', inHandler('found.kind + view, после findPhoto.')],
-  ['GET /api/v1/photos/:id/recognition', inHandler('found.kind + view, после findPhoto.')],
+  [
+    'POST /api/v1/photos/:id/content',
+    inHandler('found.kind + create, после findPhoto.', bothOps('create')),
+  ],
+  ['PATCH /api/v1/photos/:id', inHandler('found.kind + edit, после findPhoto.', bothOps('edit'))],
+  [
+    'POST /api/v1/photos/:id/recognize',
+    inHandler('found.kind + edit, после findPhoto.', bothOps('edit')),
+  ],
+  [
+    'DELETE /api/v1/photos/:id',
+    inHandler('found.kind + delete, после findPhoto.', bothOps('delete')),
+  ],
+  ['GET /api/v1/photos/:id/url', inHandler('found.kind + view, после findPhoto.', bothOps('view'))],
+  [
+    'GET /api/v1/photos/:id/content',
+    inHandler('found.kind + view, после findPhoto.', bothOps('view')),
+  ],
+  [
+    'GET /api/v1/photos/:id/recognition',
+    inHandler('found.kind + view, после findPhoto.', bothOps('view')),
+  ],
 
   // ─────────────────────────── Документы (УПД) ────────────────────────────
   ['GET /api/v1/source-documents', always(SD_READ)],
