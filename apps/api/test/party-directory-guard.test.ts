@@ -7,6 +7,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  consigneeOwnIdentity,
   normalizePartyForDirectory,
   normalizePartyName,
 } from '../src/domain/sourceDocuments/party-directory-guard.js';
@@ -65,6 +66,84 @@ describe('normalizePartyForDirectory — имя', () => {
     // Маркеры проверяются якорем ^ и целым словом — «Продавец-Сервис» это
     // название организации, а не подпись графы.
     expect(normalizePartyName('ООО "Продавец-Сервис"')).toBe('ООО "Продавец-Сервис"');
+  });
+});
+
+describe('consigneeOwnIdentity — реквизиты, скопированные у покупателя', () => {
+  const SU10 = { inn: '7736255508', kpp: '774550001', name: 'ООО "СУ-10"' };
+
+  it('боевой случай 1736: другое имя при ИНН покупателя → реквизиты отброшены', () => {
+    // Ровно то, что модель вернула на бою 14.08: имя грузополучателя своё,
+    // а ИНН и КПП — компании из графы 6.
+    const r = consigneeOwnIdentity(
+      { inn: '7736255508', kpp: '774550001', name: 'ООО "АЛЬЯНС"' },
+      SU10,
+    );
+    expect(r).toEqual({ inn: null, kpp: null });
+  });
+
+  it('«он же»: совпали и ИНН, и имя → реквизиты сохраняются', () => {
+    // Законный случай: графа 4 отсылает к графе 6, повтор реквизитов верен.
+    const r = consigneeOwnIdentity({ ...SU10 }, SU10);
+    expect(r).toEqual({ inn: '7736255508', kpp: '774550001' });
+  });
+
+  it('разное написание одного юрлица не считается разными сторонами', () => {
+    const r = consigneeOwnIdentity(
+      { inn: '7736255508', kpp: '774550001', name: 'ООО «СУ-10»' },
+      { inn: '7736255508', kpp: '774550001', name: 'ООО  "СУ-10"' },
+    );
+    expect(r.inn).toBe('7736255508');
+  });
+
+  it('разные ИНН — сторона своя, ничего не трогаем', () => {
+    const r = consigneeOwnIdentity(
+      { inn: '7725494913', kpp: null, name: 'ООО "АЛЬЯНС"' },
+      SU10,
+    );
+    expect(r).toEqual({ inn: '7725494913', kpp: null });
+  });
+
+  it('у грузополучателя нет ИНН — штатное состояние графы 4', () => {
+    const r = consigneeOwnIdentity({ inn: null, kpp: null, name: 'ООО "АЛЬЯНС"' }, SU10);
+    expect(r).toEqual({ inn: null, kpp: null });
+  });
+
+  it('ИНН совпал, но имя грузополучателя пусто → реквизиты отброшены', () => {
+    // Пустое имя не может служить доказательством «он же»: сравнивать не с чем.
+    const r = consigneeOwnIdentity({ inn: '7736255508', kpp: '774550001', name: null }, SU10);
+    expect(r).toEqual({ inn: null, kpp: null });
+  });
+
+  it('ИНН совпал, но имя покупателя пусто → реквизиты отброшены', () => {
+    const r = consigneeOwnIdentity(
+      { inn: '7736255508', kpp: '774550001', name: 'ООО "АЛЬЯНС"' },
+      { inn: '7736255508', kpp: '774550001', name: null },
+    );
+    expect(r).toEqual({ inn: null, kpp: null });
+  });
+
+  it('ИНН с пробелами считается тем же самым', () => {
+    const r = consigneeOwnIdentity(
+      { inn: '77 36 25 55 08', kpp: null, name: 'ООО "АЛЬЯНС"' },
+      SU10,
+    );
+    expect(r).toEqual({ inn: null, kpp: null });
+  });
+
+  it('возвращаются ИСХОДНЫЕ значения, а не нормализованные', () => {
+    // Нормализация нужна только для сравнения: в consignee_inn_raw должно
+    // лечь то, что стояло в документе.
+    const r = consigneeOwnIdentity(
+      { inn: '77 25 49 49 13', kpp: '77-25-01-001', name: 'ООО "АЛЬЯНС"' },
+      SU10,
+    );
+    expect(r).toEqual({ inn: '77 25 49 49 13', kpp: '77-25-01-001' });
+  });
+
+  it('покупателя нет вовсе — сравнивать не с чем, реквизиты остаются', () => {
+    const r = consigneeOwnIdentity({ inn: '7736255508', kpp: null, name: 'ООО "СУ-10"' }, null);
+    expect(r.inn).toBe('7736255508');
   });
 });
 

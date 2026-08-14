@@ -311,6 +311,26 @@ suite('стороны документа: что записывает ворке
       return Number(r!.n);
     }
 
+    /**
+     * Заводит запись справочника идемпотентно и возвращает её id.
+     *
+     * Простой INSERT здесь ломается: vitest гоняет интеграционные файлы
+     * параллельно, `counterparties.inn` уникален, и соседний набор может занять
+     * тот же ИНН между beforeEach и вставкой. Тест про поведение гарда, а не
+     * про то, кто успел первым.
+     */
+    async function ensureCounterparty(inn: string, name: string): Promise<string> {
+      // Уникальность у справочника частичная: `(inn) WHERE kpp IS NULL` и
+      // `(inn, kpp) WHERE kpp IS NOT NULL`. Записи заводим без КПП, поэтому и
+      // условие в ON CONFLICT — то же самое, иначе Postgres не находит индекс.
+      const [row] = await db<{ id: string }[]>`
+        INSERT INTO counterparties (id, inn, kpp, name, is_customer)
+        VALUES (${randomUUID()}, ${inn}, NULL, ${name}, true)
+        ON CONFLICT (inn) WHERE kpp IS NULL DO UPDATE SET name = counterparties.name
+        RETURNING id`;
+      return row!.id;
+    }
+
     beforeEach(async () => {
       for (const inn of createdInns) await db`DELETE FROM counterparties WHERE inn = ${inn}`;
       createdInns.length = 0;
@@ -324,10 +344,8 @@ suite('стороны документа: что записывает ворке
       // Ради этого гард стоит ПОСЛЕ поиска, а не до него: иначе документы
       // перестали бы привязываться к тому, к чему привязывались раньше, и
       // защита справочника сама стала бы регрессом.
-      const legacyId = randomUUID();
       createdInns.push(INVALID_LEGACY_INN);
-      await db`INSERT INTO counterparties (id, inn, kpp, name, is_customer)
-               VALUES (${legacyId}, ${INVALID_LEGACY_INN}, NULL, 'ООО «СУ-10» (старая запись)', true)`;
+      const legacyId = await ensureCounterparty(INVALID_LEGACY_INN, 'ООО «СУ-10» (старая запись)');
 
       const docId = await seedUpd();
       parseUpdPdf.mockResolvedValue(
@@ -373,10 +391,8 @@ suite('стороны документа: что записывает ворке
     }, 30_000);
 
     it('валидный ИНН с пробелами находит каноническую запись, а не создаёт вторую', async () => {
-      const canonicalId = randomUUID();
       createdInns.push(FREE_VALID_INN_2);
-      await db`INSERT INTO counterparties (id, inn, kpp, name, is_customer)
-               VALUES (${canonicalId}, ${FREE_VALID_INN_2}, NULL, 'ООО «Канонический»', true)`;
+      const canonicalId = await ensureCounterparty(FREE_VALID_INN_2, 'ООО «Канонический»');
 
       const docId = await seedUpd();
       const spaced = `${FREE_VALID_INN_2.slice(0, 4)} ${FREE_VALID_INN_2.slice(4)}`;
@@ -405,6 +421,55 @@ suite('стороны документа: что записывает ворке
       const r = await row(docId);
       expect(r.consignee_id).not.toBeNull();
       expect(await countByInn(freshInn)).toBe(1);
+    }, 30_000);
+  });
+
+  /**
+   * Реквизиты грузополучателя, скопированные моделью у покупателя.
+   *
+   * Воспроизводится боевой случай 14.08: промпт v9 вернул «ООО «АЛЬЯНС»» с ИНН
+   * и КПП компании «СУ-10». Проверяется, что до БД такие реквизиты не доходят —
+   * иначе документ показывает чужой ИНН и связывается с чужой организацией.
+   */
+  describe('реквизиты грузополучателя, скопированные у покупателя', () => {
+    it('другое имя при ИНН покупателя: ИНН и связь не сохраняются, имя остаётся', async () => {
+      const docId = await seedUpd();
+      parseUpdPdf.mockResolvedValue(
+        parsedUpd({
+          // parsedUpd по умолчанию кладёт покупателя ООО «СУ-10» с этим же ИНН.
+          consignee: { inn: '7736255508', kpp: '774550001', name: 'ООО «АЛЬЯНС»' },
+        }),
+      );
+
+      await handleJob(job(docId));
+
+      const r = await row(docId);
+      expect(r.consignee_name_raw).toBe('ООО «АЛЬЯНС»');
+      expect(r.consignee_id).toBeNull();
+      const [raw] = await db<{ consignee_inn_raw: string | null }[]>`
+        SELECT consignee_inn_raw FROM source_documents WHERE id = ${docId}`;
+      expect(raw!.consignee_inn_raw).toBeNull();
+      // Покупателя правило не касается — его реквизиты на месте.
+      expect(r.buyer_id).not.toBeNull();
+    }, 30_000);
+
+    it('«он же»: совпали имя и ИНН — связь по-прежнему создаётся', async () => {
+      // Анти-регресс: законный повтор графы 6 не должен пострадать от правила.
+      const docId = await seedUpd();
+      parseUpdPdf.mockResolvedValue(
+        parsedUpd({
+          consignee: { inn: '7736255508', kpp: '774550001', name: 'ООО «СУ-10»' },
+        }),
+      );
+
+      await handleJob(job(docId));
+
+      const r = await row(docId);
+      expect(r.consignee_name_raw).toBe('ООО «СУ-10»');
+      expect(r.consignee_id).not.toBeNull();
+      const [raw] = await db<{ consignee_inn_raw: string | null }[]>`
+        SELECT consignee_inn_raw FROM source_documents WHERE id = ${docId}`;
+      expect(raw!.consignee_inn_raw).toBe('7736255508');
     }, 30_000);
   });
 });

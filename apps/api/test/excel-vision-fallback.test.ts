@@ -5,6 +5,7 @@ import {
   needsExcelVisionFallback,
   mergeExcelStructuralWithVision,
 } from '../src/domain/edo/excel-vision-fallback.js';
+import { consigneeOwnIdentity } from '../src/domain/sourceDocuments/party-directory-guard.js';
 
 // Валидный структурный результат: суммы сходятся (items.sum=totalSum,
 // items.vatSum=vatSum), confidence высокий, шапка заполнена.
@@ -153,5 +154,64 @@ describe('mergeExcelStructuralWithVision', () => {
   it('confidence не завышается слепо (max structural / min(vision,0.9))', () => {
     const m = mergeExcelStructuralWithVision(good({ confidence: 0.8 }), good({ confidence: 1 }));
     expect(m.result.confidence).toBe(0.9); // min(1, 0.9)=0.9 > 0.8
+  });
+});
+
+/**
+ * Грузополучатель на гибридном Excel-пути.
+ *
+ * Структурный парсер графу 4 читает и жёстко ставит inn/kpp = null. Но у
+ * неполного Excel в дело вступает Vision — а он подчиняется промпту и на v9
+ * подставляет туда реквизиты покупателя. Проверяется, что слияние ведёт себя
+ * предсказуемо, а подстановку в итоге срезает общий гард сторон.
+ */
+describe('Excel-fallback: грузополучатель', () => {
+  it('структурный без графы 4 добирает её из Vision', () => {
+    const structural = good({ consignee: null });
+    const vision = good({ consignee: { inn: null, kpp: null, name: 'ООО «АЛЬЯНС»' } });
+    const m = mergeExcelStructuralWithVision(structural, vision);
+    expect(m.result.consignee?.name).toBe('ООО «АЛЬЯНС»');
+    expect(m.mergedFields).toContain('consignee');
+  });
+
+  it('структурная графа 4 не затирается Vision-версией', () => {
+    // Структурный парсер читает ячейку документа, Vision — картинку; при
+    // расхождении верить надо ячейке.
+    const structural = good({ consignee: { inn: null, kpp: null, name: 'ООО «СУ-10»' } });
+    const vision = good({ consignee: { inn: '7736255508', kpp: null, name: 'ООО «АЛЬЯНС»' } });
+    const m = mergeExcelStructuralWithVision(structural, vision);
+    expect(m.result.consignee?.name).toBe('ООО «СУ-10»');
+    expect(m.result.consignee?.inn ?? null).toBeNull();
+    expect(m.mergedFields).not.toContain('consignee');
+  });
+
+  it('реквизиты, принесённые Vision из графы покупателя, срезает гард сторон', () => {
+    // Сквозная проверка связки: merge сам по себе доверяет Vision, и это
+    // нормально — отличить подстановку от «он же» умеет consigneeOwnIdentity,
+    // через который воркер прогоняет результат перед записью.
+    // Покупателя структурный парсер прочитал сам (ячейка есть всегда), а графу
+    // 4 не нашёл — её добирает Vision и приносит с реквизитами покупателя.
+    const structural = good({
+      consignee: null,
+      recipient: { inn: '7736255508', kpp: '774550001', name: 'ООО «СУ-10»' },
+    });
+    const vision = good({
+      recipient: { inn: '7736255508', kpp: '774550001', name: 'ООО «СУ-10»' },
+      consignee: { inn: '7736255508', kpp: '774550001', name: 'ООО «АЛЬЯНС»' },
+    });
+    const m = mergeExcelStructuralWithVision(structural, vision);
+    // До гарда в результате лежат чужие реквизиты…
+    expect(m.result.consignee?.inn).toBe('7736255508');
+    // …а после — только имя.
+    const identity = consigneeOwnIdentity(m.result.consignee, m.result.recipient);
+    expect(identity).toEqual({ inn: null, kpp: null });
+    expect(m.result.consignee?.name).toBe('ООО «АЛЬЯНС»');
+  });
+
+  it('пустой структурный результат заменяется Vision целиком', () => {
+    const vision = good({ consignee: { inn: null, kpp: null, name: 'ООО «АЛЬЯНС»' } });
+    const m = mergeExcelStructuralWithVision(good({ items: [], confidence: 0.2 }), vision);
+    expect(m.tookVisionWhole).toBe(true);
+    expect(m.result.consignee?.name).toBe('ООО «АЛЬЯНС»');
   });
 });

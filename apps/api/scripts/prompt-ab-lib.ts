@@ -9,6 +9,9 @@
  * Здесь нет ни БД, ни сети, ни файловой системы.
  */
 import type { UpdPdfParsed } from '@matcheck/contracts';
+// Общий с боевым кодом (party-directory-guard): сравнение названий сторон
+// должно быть одним правилом, иначе гейт сверки разойдётся с воркером.
+import { normalizeOrgName } from '../src/domain/sourceDocuments/org-name.js';
 
 /** Нормализованный снимок разбора: то, что сравнивается между прогонами. */
 export type Snapshot = Record<string, string>;
@@ -150,22 +153,33 @@ export type ExpectationVerdict =
   | { status: 'mismatch'; detail: string }
   | { status: 'filled_from_text'; detail: string };
 
-/** Сравнение имени организации: регистр, кавычки и пробелы не считаются. */
-export function normalizeOrgName(v: string | null | undefined): string {
-  if (!v) return '';
-  return v
-    .replace(/[«»"'']/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
+/** Только цифры — ИНН/КПП в ответах приходят и с пробелами, и с дефисами. */
+function digits(v: string | null | undefined): string {
+  return (v ?? '').replace(/\D/g, '');
 }
 
 export function checkConsigneeAgainstExpectation(
   unit: ParsedUnit,
   expected: ExpectedDocument | undefined,
+  /**
+   * false — в документе графа 4 пуста (напечатана только подпись). Это тоже
+   * проверяемое утверждение: модель не должна выдумывать сторону там, где её
+   * нет, и не должна возвращать вместо значения саму подпись графы.
+   */
+  hasConsignee?: boolean | null,
 ): ExpectationVerdict {
+  const gotName = unit.parsed.consignee?.name ?? null;
+
+  if (hasConsignee === false) {
+    if (!gotName) return { status: 'ok' };
+    return {
+      status: 'mismatch',
+      detail: `графа 4 в документе пуста, но модель вернула «${gotName}»`,
+    };
+  }
+
   if (!expected) return { status: 'no_expectation' };
-  const got = unit.parsed.consignee?.name ?? null;
+  const got = gotName;
   const want = expected.consignee.name;
 
   if (normalizeOrgName(got) !== normalizeOrgName(want)) {
@@ -177,13 +191,30 @@ export function checkConsigneeAgainstExpectation(
       detail: `«${want}» дозаполнен регулярками, а не моделью — промпт этого не доказывает`,
     };
   }
-  const wantInn = expected.consignee.inn;
-  if (wantInn && (unit.parsed.consignee?.inn ?? null) !== wantInn) {
+
+  // Реквизиты сверяются В ОБЕ СТОРОНЫ, включая эталонный null.
+  //
+  // Прежняя версия проверяла ИНН только при непустом ожидании
+  // (`if (wantInn && …)`), а КПП не проверяла вовсе — и пропускала ровно тот
+  // дефект, ради которого всё это писалось: в графе 4 реквизитов нет (эталон
+  // null), а модель подставляет туда ИНН и КПП покупателя. Такой прогон
+  // отчитывался «грузополучатель распознан», хотя документ получал чужие
+  // реквизиты и связывался с чужой организацией.
+  for (const field of ['inn', 'kpp'] as const) {
+    const wantValue = expected.consignee[field];
+    const gotValue = unit.parsed.consignee?.[field] ?? null;
+    if (digits(wantValue) === digits(gotValue)) continue;
+    const label = field === 'inn' ? 'ИНН' : 'КПП';
     return {
       status: 'mismatch',
-      detail: `ИНН: ожидался ${wantInn}, получен ${unit.parsed.consignee?.inn ?? '∅'}`,
+      detail: wantValue
+        ? `${label}: ожидался ${wantValue}, получен ${gotValue ?? '∅'}`
+        : // Самый частый случай: в документе реквизита нет, а модель его
+          // выдумала — почти всегда скопировав у покупателя.
+          `${label} не напечатан в графе 4, но модель вернула ${gotValue ?? '∅'}`,
     };
   }
+
   return { status: 'ok' };
 }
 
@@ -222,6 +253,8 @@ export function compareUnit(args: {
   b: UpdPdfParsed;
   consigneeFromModel: boolean;
   expected: ExpectedDocument | undefined;
+  /** false — графа 4 в документе пуста (см. checkConsigneeAgainstExpectation). */
+  hasConsignee?: boolean | null;
 }): UnitComparison {
   const sa1 = snapshotOf(args.a1);
   const sa2 = snapshotOf(args.a2);
@@ -243,6 +276,7 @@ export function compareUnit(args: {
     expectation: checkConsigneeAgainstExpectation(
       { label: args.label, parsed: args.b, consigneeFromModel: args.consigneeFromModel },
       args.expected,
+      args.hasConsignee,
     ),
   };
 }

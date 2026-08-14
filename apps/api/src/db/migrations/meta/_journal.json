@@ -687,6 +687,13 @@
       "when": 1781800024000,
       "tag": "0098_m15_prompt_v2",
       "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1781800027000,
+      "tag": "0101_upd_prompt_v10",
+      "breakpoints": true
     }
   ]
 }

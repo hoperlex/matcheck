@@ -213,6 +213,91 @@ describe('грузополучатель против эталона', () => {
     );
     expect(v.status).toBe('mismatch');
   });
+
+  // Дефект, который прежний гейт пропускал: в графе 4 реквизитов нет (эталон
+  // null), а модель подставляет туда ИНН и КПП покупателя. Проверка вида
+  // `if (wantInn && …)` считала это успехом — именно так дефект и доехал до боя.
+  it('эталон inn: null, модель вернула ИНН → mismatch', () => {
+    const v = checkConsigneeAgainstExpectation(
+      {
+        label: 'f.pdf',
+        parsed: parsed({ consignee: { inn: '7736255508', kpp: null, name: 'ООО «СУ-10»' } }),
+        consigneeFromModel: true,
+      },
+      expected,
+    );
+    expect(v.status).toBe('mismatch');
+    expect('detail' in v && v.detail).toContain('не напечатан в графе 4');
+  });
+
+  it('эталон kpp: null, модель вернула КПП → mismatch', () => {
+    const v = checkConsigneeAgainstExpectation(
+      {
+        label: 'f.pdf',
+        parsed: parsed({ consignee: { inn: null, kpp: '774550001', name: 'ООО «СУ-10»' } }),
+        consigneeFromModel: true,
+      },
+      expected,
+    );
+    expect(v.status).toBe('mismatch');
+    expect('detail' in v && v.detail).toContain('КПП');
+  });
+
+  it('«он же»: эталон с реальными реквизитами покупателя → ok', () => {
+    // Законный повтор графы 6 не должен краснеть, поэтому в манифесте у таких
+    // документов стоят настоящие ИНН/КПП, а не null.
+    const v = checkConsigneeAgainstExpectation(
+      {
+        label: 'f.pdf',
+        parsed: parsed({
+          consignee: { inn: '7736255508', kpp: '774550001', name: 'ООО «СУ-10»' },
+        }),
+        consigneeFromModel: true,
+      },
+      {
+        docNumber: '1421',
+        consignee: { name: 'ООО «СУ-10»', inn: '7736255508', kpp: '774550001' },
+      },
+    );
+    expect(v.status).toBe('ok');
+  });
+
+  it('графа 4 пуста по манифесту, модель ничего не вернула → ok', () => {
+    const v = checkConsigneeAgainstExpectation(
+      { label: 'f.pdf', parsed: parsed({ consignee: null }), consigneeFromModel: true },
+      undefined,
+      false,
+    );
+    expect(v.status).toBe('ok');
+  });
+
+  it('графа 4 пуста, но модель выдумала сторону → mismatch', () => {
+    // В корпусе такие документы есть (УПД №100000, Х-3655): напечатана только
+    // подпись графы. Раньше именно сюда попадал мусор «(4)» и «и его адрес:».
+    const v = checkConsigneeAgainstExpectation(
+      {
+        label: 'f.pdf',
+        parsed: parsed({ consignee: { inn: null, kpp: null, name: 'ООО «СУ-10»' } }),
+        consigneeFromModel: true,
+      },
+      undefined,
+      false,
+    );
+    expect(v.status).toBe('mismatch');
+    expect('detail' in v && v.detail).toContain('пуста');
+  });
+
+  it('ИНН с пробелами против эталона без них — не расхождение', () => {
+    const v = checkConsigneeAgainstExpectation(
+      {
+        label: 'f.pdf',
+        parsed: parsed({ consignee: { inn: '77 36 25 55 08', kpp: null, name: 'ООО «СУ-10»' } }),
+        consigneeFromModel: true,
+      },
+      { docNumber: '1421', consignee: { name: 'ООО «СУ-10»', inn: '7736255508', kpp: null } },
+    );
+    expect(v.status).toBe('ok');
+  });
 });
 
 describe('сопоставление с эталоном по номеру документа', () => {

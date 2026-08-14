@@ -259,11 +259,21 @@ async function main(): Promise<void> {
   if (work.length < selected.length) {
     console.log(`[ab] --limit: из ${selected.length} подходящих взято ${work.length}`);
   }
-  const withoutExpectation = work.filter((e) => !e.expectedDocuments?.length);
+  // «Пустая графа 4» — тоже утверждение, и оно проверяется; без эталона
+  // остаются только записи, где не сказано вообще ничего.
+  const withoutExpectation = work.filter(
+    (e) => !e.expectedDocuments?.length && e.hasConsignee !== false,
+  );
   if (withoutExpectation.length > 0) {
     console.log(
       `[ab] БЕЗ ЭТАЛОНА (${withoutExpectation.length}): грузополучатель у них не проверяется,` +
         ' они работают только на анти-регресс. Заполните expectedDocuments в манифесте.',
+    );
+  }
+  const emptyGraph = work.filter((e) => e.hasConsignee === false);
+  if (emptyGraph.length > 0) {
+    console.log(
+      `[ab] графа 4 пуста по манифесту (${emptyGraph.length}): проверяем, что модель ничего не выдумала.`,
     );
   }
 
@@ -312,6 +322,9 @@ async function main(): Promise<void> {
         b: pair.b.parsed,
         consigneeFromModel: pair.b.consigneeFromModel,
         expected: matchExpectation(pair.b.parsed, index, entry.expectedDocuments),
+        // Документы с пустой графой 4 проверяются от обратного: модель не
+        // должна выдумать сторону там, где её нет.
+        hasConsignee: entry.hasConsignee,
       }),
     );
     comparisons.push(...fileComparisons);

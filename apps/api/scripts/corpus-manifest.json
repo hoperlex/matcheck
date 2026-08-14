@@ -21,11 +21,21 @@
     },
     {
       "filename": "1697.pdf",
-      "kind": "unknown",
+      "kind": "upd",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "text:ambiguous"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан УПД, продавец ООО \"СТК-Лидер\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "1697",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "201_2112636922_202606260947_117572_PRINTER2.TXT.pdf",
@@ -79,11 +89,21 @@
     },
     {
       "filename": "5303397567129394215.jpg",
-      "kind": "unknown",
+      "kind": "upd",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "image"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "фото УПД, продавец ООО \"ЛИФТОИТ\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "328",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "85072371.PDF",
@@ -95,27 +115,57 @@
     },
     {
       "filename": "IMG_0001 (1).pdf",
-      "kind": "unknown",
+      "kind": "m15",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "text:ambiguous"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан М-15, отправитель ООО \"АЛЮПРОМ\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "191",
+          "consignee": {
+            "name": "ООО \"АЛЮСПЭЙС\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "IMG_0002 (1).pdf",
-      "kind": "unknown",
+      "kind": "m15",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "text:ambiguous"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан М-15, отправитель ООО \"АЛЮПРОМ\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "196",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "scanlite3.pdf",
-      "kind": "unknown",
+      "kind": "upd",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "pdf:scan; textLen:12"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан УПД, продавец ООО \"ГЛОБАЛ ГЛАСС\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "582",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "Алия.pdf",
@@ -251,17 +301,37 @@
       "filename": "М-15 № 168 от 26.06.2026 г. на отпуск материалов Алюпром-Алюспэйс .pdf",
       "kind": "m15",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "pdf:scan; name:m15; textLen:12"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан М-15, отправитель ООО \"АЛЮПРОМ\"; тот же документ, что фото «Су-10 Алюспэйс фрнарь 001.jpg»",
+      "expectedDocuments": [
+        {
+          "docNumber": "168",
+          "consignee": {
+            "name": "ООО \"АЛЮСПЭЙС\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "М-15 № 170 от 26.06.2026 г. на отпуск материалов Алюпром-Алюспэйс .pdf",
       "kind": "m15",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "text:ambiguous; name:m15"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан М-15, отправитель ООО \"АЛЮПРОМ\", 11 позиций",
+      "expectedDocuments": [
+        {
+          "docNumber": "170",
+          "consignee": {
+            "name": "ООО \"АЛЮСПЭЙС\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "Реализация товаров и услуг № 22083 от 25 июня 2026 г .XLS",
@@ -281,35 +351,75 @@
     },
     {
       "filename": "Су-10 06.07..pdf",
-      "kind": "unknown",
+      "kind": "upd",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "pdf:scan; textLen:51"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "копия предыдущего файла",
+      "expectedDocuments": [
+        {
+          "docNumber": "234",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "Су-10 06.07.pdf",
-      "kind": "unknown",
+      "kind": "upd",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "pdf:scan; textLen:51"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан УПД, продавец ООО \"ПСТ Групп\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "234",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "Су-10 Алюспэйс фрнарь 001.jpg",
-      "kind": "unknown",
+      "kind": "m15",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "image"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "фото М-15, отправитель ООО \"АЛЮПРОМ\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "168",
+          "consignee": {
+            "name": "ООО \"АЛЮСПЭЙС\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "Су-10 Фридриха Энгельса 22.06..pdf",
-      "kind": "unknown",
+      "kind": "upd",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "pdf:scan; textLen:77"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан УПД, продавец ООО \"ПСТ Групп\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "219",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "Т56532_20260622112337_Подтверждение_отгрузки.XLSX",
@@ -765,11 +875,21 @@
     },
     {
       "filename": "УПД_214_СУ_10_Борисовские_пруды_сб_20_06_.pdf",
-      "kind": "unknown",
+      "kind": "upd",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "pdf:scan; textLen:64"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан УПД, продавец ООО \"ПСТ Групп\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "214",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "Универсальный передаточный документ (УПД) 51458 от 07.07.2026 (1).pdf",
@@ -869,35 +989,75 @@
     },
     {
       "filename": "сканирование.pdf",
-      "kind": "unknown",
+      "kind": "upd",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "pdf:scan; textLen:12"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан УПД, продавец ТД \"Альфа\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "АА0607-0002",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "сканирование0043.pdf",
-      "kind": "unknown",
+      "kind": "upd",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "pdf:scan; textLen:25"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан УПД, продавец ТД \"Альфа\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "АА0907-0004",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "сканирование0055.pdf",
-      "kind": "unknown",
+      "kind": "upd",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "pdf:scan; textLen:25"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан того же УПД АА0907-0004, другие позиции",
+      "expectedDocuments": [
+        {
+          "docNumber": "АА0907-0004",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "сканирование0202.pdf",
-      "kind": "unknown",
+      "kind": "upd",
       "parsePath": "vision",
-      "hasConsignee": null,
-      "source": "guess",
-      "note": "pdf:scan; textLen:51"
+      "hasConsignee": true,
+      "source": "manual",
+      "note": "скан УПД, продавец ООО \"СТК ГРУПП\"",
+      "expectedDocuments": [
+        {
+          "docNumber": "487",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "су-10 АсфБ.xlsx",
