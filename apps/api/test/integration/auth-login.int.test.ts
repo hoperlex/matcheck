@@ -63,6 +63,8 @@ suite('POST /auth/login — верный пароль пускает всегд�
   const email = `login-${userId}@example.com`;
   const inactiveEmail = `inactive-${inactiveId}@example.com`;
   const contractorEmail = `contractor-${contractorId}@example.com`;
+  const observerId = randomUUID();
+  const observerEmail = `observer-${observerId}@example.com`;
 
   const login = (body: Record<string, unknown>, headers: Record<string, string> = {}) =>
     app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: body, headers });
@@ -116,7 +118,8 @@ suite('POST /auth/login — верный пароль пускает всегд�
     await sql`INSERT INTO users (id, email, password_hash, role, is_active) VALUES
       (${userId}, ${email}, ${hash}, 'manager', true),
       (${inactiveId}, ${inactiveEmail}, ${hash}, 'manager', false),
-      (${contractorId}, ${contractorEmail}, ${hash}, 'contractor', true)`;
+      (${contractorId}, ${contractorEmail}, ${hash}, 'contractor', true),
+      (${observerId}, ${observerEmail}, ${hash}, 'observer', true)`;
   });
 
   beforeEach(async () => {
@@ -211,6 +214,23 @@ suite('POST /auth/login — верный пароль пускает всегд�
     );
     expect(res.statusCode).toBe(403);
     expect(res.json().error).toBe('web_only_role');
+  });
+
+  it('роль observer с мобильного клиента → 403 web_only_role', async () => {
+    // Наблюдатель — тоже web-only. Мобильный клиент не показывает 403 ни на
+    // одном экране, поэтому роль отсекается на входе, а не на первом закрытом
+    // маршруте: иначе планшет залипал бы молча.
+    const res = await login(
+      { email: observerEmail, password: PASSWORD },
+      { 'x-client-type': 'mobile' },
+    );
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe('web_only_role');
+  });
+
+  it('роль observer с веба входит штатно', async () => {
+    const res = await login({ email: observerEmail, password: PASSWORD });
+    expect(res.statusCode).toBe(200);
   });
 
   it('сессия, выданная ДО обновления, продолжает работать: refresh ротируется', async () => {

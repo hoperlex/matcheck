@@ -24,6 +24,7 @@ import type {
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { LlmProviderCredentialsModal } from './LlmProviderCredentialsModal';
 
 const KIND_DEFAULT_MODEL: Record<LlmKind, string> = {
@@ -163,6 +164,14 @@ export default function AdminLlmProvidersPage() {
     setOpen(true);
   };
 
+  // Все действия ниже — мутации на admin.llm_providers. «Тест», «Сделать
+  // default» и переключатель активности помечены действием edit (см. route-map),
+  // ключи провайдеров — отдельная модалка с тем же правом.
+  const { can } = usePermissions();
+  const canCreate = can('admin.llm_providers', 'create');
+  const canEdit = can('admin.llm_providers', 'edit');
+  const canDelete = can('admin.llm_providers', 'delete');
+
   return (
     <StickyPageHeader
       header={
@@ -171,10 +180,12 @@ export default function AdminLlmProvidersPage() {
             LLM провайдеры
           </Typography.Title>
           <Space>
-            <Button onClick={() => setCredsOpen(true)}>Ключи провайдеров</Button>
-            <Button type="primary" onClick={openCreate}>
-              Добавить
-            </Button>
+            {canEdit && <Button onClick={() => setCredsOpen(true)}>Ключи провайдеров</Button>}
+            {canCreate && (
+              <Button type="primary" onClick={openCreate}>
+                Добавить
+              </Button>
+            )}
           </Space>
         </Space>
       }
@@ -204,33 +215,40 @@ export default function AdminLlmProvidersPage() {
             key: 'a',
             render: (_: unknown, r: LlmProviderDto) => (
               <Space wrap>
-                <Button size="small" onClick={() => openEdit(r)}>
-                  Редактировать
-                </Button>
-                <Button size="small" onClick={() => test.mutate(r.id)} loading={test.isPending}>
-                  Тест
-                </Button>
-                <Button
-                  size="small"
-                  onClick={() => patch.mutate({ id: r.id, body: { isDefault: true } })}
-                >
-                  Сделать default
-                </Button>
-                <Switch
-                  checked={r.isActive}
-                  onChange={(v) => patch.mutate({ id: r.id, body: { isActive: v } })}
-                />
-                <Popconfirm
-                  title="Удалить провайдера?"
-                  okText="Удалить"
-                  cancelText="Отмена"
-                  okButtonProps={{ danger: true }}
-                  onConfirm={() => remove.mutate(r.id)}
-                >
-                  <Button size="small" danger>
-                    Удалить
-                  </Button>
-                </Popconfirm>
+                {canEdit && (
+                  <>
+                    <Button size="small" onClick={() => openEdit(r)}>
+                      Редактировать
+                    </Button>
+                    <Button size="small" onClick={() => test.mutate(r.id)} loading={test.isPending}>
+                      Тест
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() => patch.mutate({ id: r.id, body: { isDefault: true } })}
+                    >
+                      Сделать default
+                    </Button>
+                    <Switch
+                      checked={r.isActive}
+                      onChange={(v) => patch.mutate({ id: r.id, body: { isActive: v } })}
+                    />
+                  </>
+                )}
+                {canDelete && (
+                  <Popconfirm
+                    title="Удалить провайдера?"
+                    okText="Удалить"
+                    cancelText="Отмена"
+                    okButtonProps={{ danger: true }}
+                    onConfirm={() => remove.mutate(r.id)}
+                  >
+                    <Button size="small" danger>
+                      Удалить
+                    </Button>
+                  </Popconfirm>
+                )}
+                {!canEdit && !canDelete && <Typography.Text type="secondary">—</Typography.Text>}
               </Space>
             ),
           },
@@ -248,29 +266,35 @@ export default function AdminLlmProvidersPage() {
                 {r.kind} · {r.model}
               </Typography.Text>
               <Space wrap>
-                <Button size="small" onClick={() => openEdit(r)}>
-                  Редактировать
-                </Button>
-                <Button size="small" onClick={() => test.mutate(r.id)}>
-                  Тест
-                </Button>
-                <Button
-                  size="small"
-                  onClick={() => patch.mutate({ id: r.id, body: { isDefault: true } })}
-                >
-                  Default
-                </Button>
-                <Popconfirm
-                  title="Удалить провайдера?"
-                  okText="Удалить"
-                  cancelText="Отмена"
-                  okButtonProps={{ danger: true }}
-                  onConfirm={() => remove.mutate(r.id)}
-                >
-                  <Button size="small" danger>
-                    Удалить
-                  </Button>
-                </Popconfirm>
+                {canEdit && (
+                  <>
+                    <Button size="small" onClick={() => openEdit(r)}>
+                      Редактировать
+                    </Button>
+                    <Button size="small" onClick={() => test.mutate(r.id)}>
+                      Тест
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() => patch.mutate({ id: r.id, body: { isDefault: true } })}
+                    >
+                      Default
+                    </Button>
+                  </>
+                )}
+                {canDelete && (
+                  <Popconfirm
+                    title="Удалить провайдера?"
+                    okText="Удалить"
+                    cancelText="Отмена"
+                    okButtonProps={{ danger: true }}
+                    onConfirm={() => remove.mutate(r.id)}
+                  >
+                    <Button size="small" danger>
+                      Удалить
+                    </Button>
+                  </Popconfirm>
+                )}
               </Space>
             </Space>
           </Card>

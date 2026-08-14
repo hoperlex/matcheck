@@ -19,11 +19,16 @@ import type { PromptDocKind, PromptDto, PromptUpsert } from '@matcheck/contracts
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 
+// Подписи обязаны покрывать ВЕСЬ PromptDocKindSchema: без ключа m15 обе
+// версии промпта накладных показывались в таблице с пустым типом, и выбирать
+// версию для активации приходилось вслепую между похожими строками.
 const DOC_KIND_LABEL: Record<PromptDocKind, string> = {
   upd: 'УПД (PDF)',
   request: 'Заявка (письмо)',
   transport_waybill: 'Накладные (ТН/ОС-2, фото)',
+  m15: 'Накладная М-15 (отпуск материалов)',
 };
 
 type FormValues = PromptUpsert;
@@ -56,6 +61,14 @@ export default function AdminPromptsPage() {
   }, [open, editing, form]);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['admin', 'prompts'] });
+
+  // Промпты можно выдать на просмотр, не выдавая правку: активация — это тоже
+  // изменение (POST .../activate помечен действием edit), поэтому она идёт под
+  // тем же правом, а не под собственным.
+  const { can } = usePermissions();
+  const canCreate = can('admin.prompts', 'create');
+  const canEdit = can('admin.prompts', 'edit');
+  const canDelete = can('admin.prompts', 'delete');
 
   const create = useMutation({
     mutationFn: (body: FormValues) => api.post('/admin/prompts', body),
@@ -114,15 +127,17 @@ export default function AdminPromptsPage() {
             <Typography.Title level={3} style={{ margin: 0 }}>
               Промпты LLM
             </Typography.Title>
-            <Button
-              type="primary"
-              onClick={() => {
-                setEditing(null);
-                setOpen(true);
-              }}
-            >
-              Добавить
-            </Button>
+            {canCreate && (
+              <Button
+                type="primary"
+                onClick={() => {
+                  setEditing(null);
+                  setOpen(true);
+                }}
+              >
+                Добавить
+              </Button>
+            )}
           </Space>
           <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
             Системные промпты для распознавания документов через LLM. У каждого типа документа
@@ -165,16 +180,18 @@ export default function AdminPromptsPage() {
             key: 'a',
             render: (_: unknown, r: PromptDto) => (
               <Space wrap>
-                <Button
-                  size="small"
-                  onClick={() => {
-                    setEditing(r);
-                    setOpen(true);
-                  }}
-                >
-                  Редактировать
-                </Button>
-                {!r.isActive && (
+                {canEdit && (
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      setEditing(r);
+                      setOpen(true);
+                    }}
+                  >
+                    Редактировать
+                  </Button>
+                )}
+                {canEdit && !r.isActive && (
                   <Button
                     size="small"
                     onClick={() => activate.mutate(r.id)}
@@ -183,17 +200,20 @@ export default function AdminPromptsPage() {
                     Активировать
                   </Button>
                 )}
-                <Tooltip title={r.isActive ? 'Активный промпт нельзя удалить' : ''}>
-                  <Popconfirm
-                    title="Удалить промпт?"
-                    onConfirm={() => remove.mutate(r.id)}
-                    disabled={r.isActive}
-                  >
-                    <Button size="small" danger disabled={r.isActive}>
-                      Удалить
-                    </Button>
-                  </Popconfirm>
-                </Tooltip>
+                {canDelete && (
+                  <Tooltip title={r.isActive ? 'Активный промпт нельзя удалить' : ''}>
+                    <Popconfirm
+                      title="Удалить промпт?"
+                      onConfirm={() => remove.mutate(r.id)}
+                      disabled={r.isActive}
+                    >
+                      <Button size="small" danger disabled={r.isActive}>
+                        Удалить
+                      </Button>
+                    </Popconfirm>
+                  </Tooltip>
+                )}
+                {!canEdit && !canDelete && <Typography.Text type="secondary">—</Typography.Text>}
               </Space>
             ),
           },
@@ -209,22 +229,24 @@ export default function AdminPromptsPage() {
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 Обновлён {new Date(r.updatedAt).toLocaleString('ru-RU')}
               </Typography.Text>
-              <Space wrap>
-                <Button
-                  size="small"
-                  onClick={() => {
-                    setEditing(r);
-                    setOpen(true);
-                  }}
-                >
-                  Редактировать
-                </Button>
-                {!r.isActive && (
-                  <Button size="small" onClick={() => activate.mutate(r.id)}>
-                    Активировать
+              {canEdit && (
+                <Space wrap>
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      setEditing(r);
+                      setOpen(true);
+                    }}
+                  >
+                    Редактировать
                   </Button>
-                )}
-              </Space>
+                  {!r.isActive && (
+                    <Button size="small" onClick={() => activate.mutate(r.id)}>
+                      Активировать
+                    </Button>
+                  )}
+                </Space>
+              )}
             </Space>
           </Card>
         )}
@@ -246,11 +268,10 @@ export default function AdminPromptsPage() {
           <Form.Item name="docKind" label="Тип документа" rules={[{ required: true }]}>
             <Select
               disabled={!!editing}
-              options={[
-                { value: 'upd', label: 'УПД (PDF)' },
-                { value: 'request', label: 'Заявка (письмо)' },
-                { value: 'transport_waybill', label: 'Накладные (ТН/ОС-2, фото)' },
-              ]}
+              options={(Object.keys(DOC_KIND_LABEL) as PromptDocKind[]).map((value) => ({
+                value,
+                label: DOC_KIND_LABEL[value],
+              }))}
             />
           </Form.Item>
           <Form.Item name="name" label="Имя версии" rules={[{ required: true, max: 200 }]}>

@@ -62,7 +62,35 @@ export type RuleMeta = {
    * так и остаётся.
    */
   affects?: { page: PageId; action: PageAction }[];
+  /**
+   * Что делать с маршрутом для роли БЕЗ исторического доступа
+   * (MATRIX_ONLY_ROLES в plugins/permissions.ts — сегодня это `observer`).
+   *
+   * Такой роли не помогает ни allow-list (её там нет), ни класс `always`
+   * (матрица его не проверяет вовсе): без этого поля она либо читала бы весь
+   * authenticate-only API без единой галочки, либо не открывалась бы даже с
+   * выданной. Поэтому политика задаётся явно:
+   *
+   *   allow — маршрут остаётся открытым и ей: самообслуживание, /me/permissions;
+   *   deny  — закрыт: мобильный канал, диагностика, виджеты менеджмента;
+   *   cells — открыт, если матрица разрешает ЛЮБУЮ ячейку из `openedBy`.
+   *
+   * `openedBy` — не то же, что `affects`: то поле описывает, какие данные
+   * маршрут отдаёт мимо матрицы (значок cellCoverage), а это — какие галочки
+   * его открывают. Справочник объектов кормит и свою вкладку, и форму операции,
+   * и журнал, поэтому у него несколько «ключей», а покрывает он только себя.
+   *
+   * Обязательно у каждого авторизованного `always` и `legacy` (стережёт
+   * permissions-observer.test.ts). Отсутствие поля трактуется как deny —
+   * забытый маршрут закрывается, а не открывается.
+   */
+  matrixOnly?: MatrixOnlyPolicy;
 };
+
+export type MatrixOnlyPolicy =
+  | { mode: 'allow' }
+  | { mode: 'deny' }
+  | { mode: 'cells'; openedBy: { page: PageId; action: PageAction }[] };
 
 export type RouteRule = RuleMeta &
   (
@@ -112,6 +140,34 @@ const bothOps = (action: PageAction): { page: PageId; action: PageAction }[] => 
   { page: 'operations.deliveries', action },
   { page: 'operations.shipments', action },
 ];
+
+// ── Политики matrixOnly ────────────────────────────────────────────────────
+/** Открыт всем, включая роли без исторического доступа. */
+const SELF: MatrixOnlyPolicy = { mode: 'allow' };
+/** Закрыт роли без исторического доступа — выдать его галочкой нельзя. */
+const NO: MatrixOnlyPolicy = { mode: 'deny' };
+/** Открывается любой из перечисленных галочек. */
+const openedBy = (...openedByCells: { page: PageId; action: PageAction }[]): MatrixOnlyPolicy => ({
+  mode: 'cells',
+  openedBy: openedByCells,
+});
+/** Просмотр страницы — самый частый ключ в openedBy. */
+const v = (page: PageId): { page: PageId; action: PageAction } => ({ page, action: 'view' });
+/** Просмотр обеих страниц Операций. */
+const OPS_VIEW = bothOps('view');
+/**
+ * Роли без ограничения видимости по строкам: выданное им право не открывает
+ * чужих записей, потому что «своих» у них нет — они видят все объекты. Отсюда
+ * право обойти allow-list узких маршрутов правки и массовой пометки.
+ * inspector_kpp сюда не входит: его записи ограничены объектом, а сверки siteId
+ * на этих путях нет.
+ */
+const UNSCOPED: ManagedRole[] = ['monitor', 'observer'];
+/**
+ * Чтение УПД: раздел «Документы» ИЛИ любая из страниц Операций — вкладка
+ * «Ожидаемые» и карточка операции работают на тех же маршрутах.
+ */
+const SD_OPEN: MatrixOnlyPolicy = { mode: 'cells', openedBy: [{ page: 'documents.list', action: 'view' }, ...bothOps('view')] };
 const legacy = (
   page: PageId,
   action: PageAction,
@@ -159,31 +215,44 @@ const GAP =
 
 export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // ─────────────────────────── Служебное / auth ───────────────────────────
-  ['GET /health', always('Health-check, вне авторизации вовсе.')],
-  ['POST /api/v1/auth/login', always(SELF_SERVICE)],
-  ['POST /api/v1/auth/register', always(SELF_SERVICE)],
-  ['POST /api/v1/auth/refresh', always(SELF_SERVICE)],
-  ['POST /api/v1/auth/logout', always(SELF_SERVICE)],
-  ['GET /api/v1/auth/me', always(SELF_SERVICE)],
-  ['PATCH /api/v1/auth/me', always(SELF_SERVICE)],
-  ['POST /api/v1/auth/change-password', always(SELF_SERVICE)],
-  ['GET /api/v1/me/permissions', always('Свои же права: закрыв, лишим UI возможности их узнать.')],
+  // Самообслуживание — единственная группа с matrixOnly: 'allow'. Закрыв её,
+  // мы отрезали бы наблюдателю вход, выход, смену пароля и получение
+  // собственных прав, то есть сделали бы роль неработоспособной вовсе.
+  ['GET /health', always('Health-check, вне авторизации вовсе.', { matrixOnly: SELF })],
+  ['POST /api/v1/auth/login', always(SELF_SERVICE, { matrixOnly: SELF })],
+  ['POST /api/v1/auth/register', always(SELF_SERVICE, { matrixOnly: SELF })],
+  ['POST /api/v1/auth/refresh', always(SELF_SERVICE, { matrixOnly: SELF })],
+  ['POST /api/v1/auth/logout', always(SELF_SERVICE, { matrixOnly: SELF })],
+  ['GET /api/v1/auth/me', always(SELF_SERVICE, { matrixOnly: SELF })],
+  ['PATCH /api/v1/auth/me', always(SELF_SERVICE, { matrixOnly: SELF })],
+  ['POST /api/v1/auth/change-password', always(SELF_SERVICE, { matrixOnly: SELF })],
+  [
+    'GET /api/v1/me/permissions',
+    always('Свои же права: закрыв, лишим UI возможности их узнать.', { matrixOnly: SELF }),
+  ],
 
   // ─────────────────────────── Публичный периметр ─────────────────────────
-  ['GET /api/v1/public/sites', always('Публичная загрузка документов поставщиком.')],
-  ['POST /api/v1/public/upload-documents', always('Публичная загрузка документов поставщиком.')],
+  // matrixOnly здесь — констатация, а не решение: req.user на публичных путях
+  // не заполняется вовсе, и ветка matrix-only ролей до них не доходит. Поле
+  // проставлено, чтобы тест полноты остался простым «у каждого always она есть»
+  // и ловил забытую политику у по-настоящему закрытого маршрута.
+  ['GET /api/v1/public/sites', always('Публичная загрузка документов поставщиком.', { matrixOnly: SELF })],
+  [
+    'POST /api/v1/public/upload-documents',
+    always('Публичная загрузка документов поставщиком.', { matrixOnly: SELF }),
+  ],
   [
     'GET /api/v1/public/upload-documents/:ticket',
-    always('Публичная загрузка документов поставщиком.'),
+    always('Публичная загрузка документов поставщиком.', { matrixOnly: SELF }),
   ],
-  ['POST /api/v1/public/password-reset/request', always('Публичный сброс пароля.')],
-  ['POST /api/v1/public/password-reset/inspect', always('Публичный сброс пароля.')],
-  ['POST /api/v1/public/password-reset/consume', always('Публичный сброс пароля.')],
-  ['GET /api/v1/share/:token', always(SHARE_TOKEN)],
-  ['GET /api/v1/share/:token/messages', always(SHARE_TOKEN)],
-  ['POST /api/v1/share/:token/messages', always(SHARE_TOKEN)],
-  ['GET /api/v1/share/:token/photos/:photoId', always(SHARE_TOKEN)],
-  ['GET /api/v1/share/:token/photos/:photoId/thumb', always(SHARE_TOKEN)],
+  ['POST /api/v1/public/password-reset/request', always('Публичный сброс пароля.', { matrixOnly: SELF })],
+  ['POST /api/v1/public/password-reset/inspect', always('Публичный сброс пароля.', { matrixOnly: SELF })],
+  ['POST /api/v1/public/password-reset/consume', always('Публичный сброс пароля.', { matrixOnly: SELF })],
+  ['GET /api/v1/share/:token', always(SHARE_TOKEN, { matrixOnly: SELF })],
+  ['GET /api/v1/share/:token/messages', always(SHARE_TOKEN, { matrixOnly: SELF })],
+  ['POST /api/v1/share/:token/messages', always(SHARE_TOKEN, { matrixOnly: SELF })],
+  ['GET /api/v1/share/:token/photos/:photoId', always(SHARE_TOKEN, { matrixOnly: SELF })],
+  ['GET /api/v1/share/:token/photos/:photoId/thumb', always(SHARE_TOKEN, { matrixOnly: SELF })],
 
   // ─────────────────────────── Операции: приёмки ──────────────────────────
   ['GET /api/v1/deliveries', st('operations.deliveries', 'view')],
@@ -212,21 +281,21 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     'PATCH /api/v1/deliveries/:id/flags',
     st('operations.deliveries', 'edit', {
       capability: 'operations.edit.flags',
-      expandableBy: ['monitor'],
+      expandableBy: UNSCOPED,
     }),
   ],
   [
     'PATCH /api/v1/deliveries/:id/supplier-from-directory',
     st('operations.deliveries', 'edit', {
       capability: 'operations.edit.supplier_directory',
-      expandableBy: ['monitor'],
+      expandableBy: UNSCOPED,
     }),
   ],
   [
     'POST /api/v1/deliveries/:id/link-source',
     st('operations.deliveries', 'edit', {
       capability: 'operations.edit.link_source',
-      expandableBy: ['monitor'],
+      expandableBy: UNSCOPED,
     }),
   ],
   // Отвязка — парное действие к привязке и та же ячейка, но своя возможность:
@@ -235,7 +304,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     'POST /api/v1/deliveries/:id/unlink-source',
     st('operations.deliveries', 'edit', {
       capability: 'operations.edit.unlink_source',
-      expandableBy: ['monitor'],
+      expandableBy: UNSCOPED,
     }),
   ],
   // Ссылки-шаринги — не часть обычного редактирования: у создания, списка,
@@ -259,14 +328,14 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     'POST /api/v1/deliveries/bulk-mark-deletion',
     st('operations.deliveries', 'delete', {
       capability: 'operations.delete.bulk_mark',
-      expandableBy: ['monitor'],
+      expandableBy: UNSCOPED,
     }),
   ],
   [
     'POST /api/v1/deliveries/bulk-unmark-deletion',
     st('operations.deliveries', 'delete', {
       capability: 'operations.delete.bulk_mark',
-      expandableBy: ['monitor'],
+      expandableBy: UNSCOPED,
     }),
   ],
   // Удаление НАВСЕГДА — admin-only по существу операции. Ячейкой delete
@@ -299,21 +368,21 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     'PATCH /api/v1/shipments/:id/flags',
     st('operations.shipments', 'edit', {
       capability: 'operations.edit.flags',
-      expandableBy: ['monitor'],
+      expandableBy: UNSCOPED,
     }),
   ],
   [
     'PATCH /api/v1/shipments/:id/supplier-from-directory',
     st('operations.shipments', 'edit', {
       capability: 'operations.edit.supplier_directory',
-      expandableBy: ['monitor'],
+      expandableBy: UNSCOPED,
     }),
   ],
   [
     'POST /api/v1/shipments/:id/link-source',
     st('operations.shipments', 'edit', {
       capability: 'operations.edit.link_source',
-      expandableBy: ['monitor'],
+      expandableBy: UNSCOPED,
     }),
   ],
   [
@@ -330,14 +399,14 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     'POST /api/v1/shipments/bulk-mark-deletion',
     st('operations.shipments', 'delete', {
       capability: 'operations.delete.bulk_mark',
-      expandableBy: ['monitor'],
+      expandableBy: UNSCOPED,
     }),
   ],
   [
     'POST /api/v1/shipments/bulk-unmark-deletion',
     st('operations.shipments', 'delete', {
       capability: 'operations.delete.bulk_mark',
-      expandableBy: ['monitor'],
+      expandableBy: UNSCOPED,
     }),
   ],
   [
@@ -351,21 +420,31 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // Счётчики и ссылки-шаринги — общие для обеих страниц Операций.
   [
     'GET /api/v1/reports/operations-counters',
-    always('Счётчики для меню: один ответ по приёмкам и отгрузкам сразу.'),
+    always('Счётчики для меню: один ответ по приёмкам и отгрузкам сразу.', {
+      matrixOnly: openedBy(...OPS_VIEW),
+    }),
   ],
   // Список и отзыв — разные возможности, а не одна «работа со ссылками»:
   // список открыт ещё и инспектору, отзыв — нет. Одна capability на оба
   // оставила бы инспектору кнопку «Отозвать», которая отвечает 403.
-  ['GET /api/v1/share-links', always(SHARE_LINKS, { capability: 'operations.share.manage' })],
+  // Ссылки-шаринги запрашиваются не при открытии страницы, а только при
+  // открытой модалке (ShareLinkModal, enabled: open) — это отдельная функция со
+  // своей capability, а не часть просмотра операций. Роли без исторического
+  // доступа она не выдаётся: выданный «Просмотр» открывать её не должен.
+  [
+    'GET /api/v1/share-links',
+    always(SHARE_LINKS, { capability: 'operations.share.manage', matrixOnly: NO }),
+  ],
   [
     'POST /api/v1/share-links/:id/revoke',
-    always(SHARE_LINKS, { capability: 'operations.share.revoke' }),
+    always(SHARE_LINKS, { capability: 'operations.share.revoke', matrixOnly: NO }),
   ],
 
-  // Мобильный транспорт.
-  ['GET /api/v1/sync', always(MOBILE_CHANNEL)],
-  ['POST /api/v1/sync/reconcile', always(MOBILE_CHANNEL)],
-  ['GET /api/v1/events', always(MOBILE_CHANNEL)],
+  // Мобильный транспорт. Наблюдателю закрыт по построению: роль web-only, на
+  // планшет она не пускается вовсе (routes/auth.ts).
+  ['GET /api/v1/sync', always(MOBILE_CHANNEL, { matrixOnly: NO })],
+  ['POST /api/v1/sync/reconcile', always(MOBILE_CHANNEL, { matrixOnly: NO })],
+  ['GET /api/v1/events', always(MOBILE_CHANNEL, { matrixOnly: NO })],
 
   // ─────────────────────────── Фото операций ──────────────────────────────
   // Единственный маршрут, знающий вид операции из тела запроса.
@@ -422,15 +501,25 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ],
 
   // ─────────────────────────── Документы (УПД) ────────────────────────────
-  ['GET /api/v1/source-documents', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
-  ['GET /api/v1/source-documents/:id', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
-  ['GET /api/v1/source-documents/:id/file', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
-  ['GET /api/v1/source-documents/:id/file/raw', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
-  ['GET /api/v1/source-documents/:id/extra/:itemId/url', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
-  ['GET /api/v1/source-documents/:id/extra/:itemId/raw', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }] })],
+  // Открываются не только разделом «Документы»: вкладка «Ожидаемые» на странице
+  // Операций открыта по умолчанию и грузит именно этот список
+  // (ExpectedSourceDocsList), а карточка операции показывает связанный УПД.
+  // Выдать «Операции: просмотр» и оставить эти маршруты закрытыми значило бы
+  // отдать раздел с ошибкой загрузки.
+  ['GET /api/v1/source-documents', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
+  ['GET /api/v1/source-documents/:id', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
+  ['GET /api/v1/source-documents/:id/file', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
+  ['GET /api/v1/source-documents/:id/file/raw', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
+  ['GET /api/v1/source-documents/:id/extra/:itemId/url', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
+  ['GET /api/v1/source-documents/:id/extra/:itemId/raw', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
+  // Кнопка экспорта живёт и на Операциях, и в Документах — ключи те же, что у
+  // списков выше.
   [
     'GET /api/v1/source-documents/export.xlsx',
-    legacy('documents.list', 'view', ['manager', 'inspector_kpp', 'contractor', 'monitor'], GAP),
+    {
+      ...legacy('documents.list', 'view', ['manager', 'inspector_kpp', 'contractor', 'monitor'], GAP),
+      matrixOnly: SD_OPEN,
+    },
   ],
   // Результат импорта УПД: admin/manager. Подрядчику закрыт намеренно — его
   // видимость документов ограничена своими записями, а этот маршрут скоуп не
@@ -438,7 +527,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // ограничения по своим данным нет вовсе.
   [
     'GET /api/v1/source-documents/import-result/:bundleId',
-    st('documents.list', 'view', { expandableBy: ['monitor'] }),
+    st('documents.list', 'view', { expandableBy: UNSCOPED }),
   ],
   ['POST /api/v1/source-documents/upload-upd', st('documents.list', 'create')],
   ['POST /api/v1/source-documents/upload-upd-pdf', st('documents.list', 'create')],
@@ -452,7 +541,9 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['POST /api/v1/source-documents/bulk-delete', st('documents.list', 'delete')],
   [
     'GET /api/v1/source-documents/:id/llm-calls',
-    always('Логи распознавания — диагностический инструмент админа, не CRUD страницы.'),
+    always('Логи распознавания — диагностический инструмент админа, не CRUD страницы.', {
+      matrixOnly: NO,
+    }),
   ],
 
   // Комплекты без распознанных документов.
@@ -477,28 +568,39 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // Переписка по share-ссылке (колокольчик в шапке) — виджет без страницы.
   // Переписка по ссылке — третья возможность share: открыта admin/manager,
   // инспектору нет (хотя ссылку он создать может).
+  // Наблюдателю переписка не выдаётся: у неё нет страницы в матрице, а значит и
+  // галочки, которой её можно было бы открыть осознанно.
   [
     'GET /api/v1/share-messages/threads',
-    always('Виджет уведомлений в шапке layout, у него нет страницы в матрице.', MSG),
+    always('Виджет уведомлений в шапке layout, у него нет страницы в матрице.', {
+      ...MSG,
+      matrixOnly: NO,
+    }),
   ],
   [
     'GET /api/v1/share-messages/threads/:tokenId',
-    always('Виджет уведомлений в шапке layout.', MSG),
+    always('Виджет уведомлений в шапке layout.', { ...MSG, matrixOnly: NO }),
   ],
-  ['GET /api/v1/share-messages/unread-count', always('Виджет уведомлений в шапке layout.', MSG)],
+  [
+    'GET /api/v1/share-messages/unread-count',
+    always('Виджет уведомлений в шапке layout.', { ...MSG, matrixOnly: NO }),
+  ],
   [
     'POST /api/v1/share-messages/threads/:tokenId',
-    always('Виджет уведомлений в шапке layout.', MSG),
+    always('Виджет уведомлений в шапке layout.', { ...MSG, matrixOnly: NO }),
   ],
   [
     'POST /api/v1/share-messages/threads/:tokenId/mark-read',
-    always('Виджет уведомлений в шапке layout.', MSG),
+    always('Виджет уведомлений в шапке layout.', { ...MSG, matrixOnly: NO }),
   ],
 
   // ─────────────────────── История поступлений и отчёты ───────────────────
   [
     'GET /api/v1/materials/journal',
-    legacy('materials_journal', 'view', ['manager', 'inspector_kpp', 'monitor'], GAP),
+    {
+      ...legacy('materials_journal', 'view', ['manager', 'inspector_kpp', 'monitor'], GAP),
+      matrixOnly: openedBy(v('materials_journal')),
+    },
   ],
   ['GET /api/v1/reports/intake', st('materials_journal', 'view')],
   ['GET /api/v1/reports/shipment', st('materials_journal', 'view')],
@@ -507,17 +609,24 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/reports/stats-summary', st('stats', 'view')],
 
   // ─────────────────────────── Справочники ────────────────────────────────
-  ['GET /api/v1/statuses', always(LOOKUP)],
-  ['GET /api/v1/sites', always(LOOKUP, { affects: [{ page: 'references.sites', action: 'view' }] })],
-  ['GET /api/v1/sites/:id', always(LOOKUP, { affects: [{ page: 'references.sites', action: 'view' }] })],
-  ['GET /api/v1/units', always(LOOKUP, { affects: [{ page: 'references.units', action: 'view' }] })],
-  ['GET /api/v1/counterparties', always(LOOKUP, { affects: [{ page: 'references.counterparties_legacy', action: 'view' }] })],
-  ['GET /api/v1/customer-counterparties', always(LOOKUP, { affects: [{ page: 'references.customer_counterparties', action: 'view' }] })],
-  ['GET /api/v1/suppliers', always(LOOKUP, { affects: [{ page: 'references.suppliers', action: 'view' }] })],
-  ['GET /api/v1/materials', always(LOOKUP, { affects: [{ page: 'references.materials', action: 'view' }] })],
-  ['GET /api/v1/responsible-persons', always(LOOKUP, { affects: [{ page: 'references.responsible_persons', action: 'view' }] })],
-  ['GET /api/v1/assets', always(LOOKUP, { affects: [{ page: 'references.assets', action: 'view' }] })],
-  ['GET /api/v1/mol', always(LOOKUP, { affects: [{ page: 'references.mol', action: 'view' }] })],
+  // matrixOnly у каждого справочника СВОЙ, по фактическим потребителям в вебе.
+  // Общий набор ключей был бы дырой: одна галочка «Статистика» открыла бы
+  // заодно единицы измерения, поставщиков и МОЛ, которых та страница не
+  // запрашивает вовсе.
+  //
+  // Статусы веб не запрашивает ни на одной странице — маршрут кормит мобильный
+  // /sync, а он наблюдателю закрыт.
+  ['GET /api/v1/statuses', always(LOOKUP, { matrixOnly: NO })],
+  ['GET /api/v1/sites', always(LOOKUP, { affects: [v('references.sites')], matrixOnly: openedBy(v('references.sites'), ...OPS_VIEW, v('documents.list'), v('documents.mail'), v('materials_journal'), v('stats'), v('admin.users')) })],
+  ['GET /api/v1/sites/:id', always(LOOKUP, { affects: [v('references.sites')], matrixOnly: openedBy(v('references.sites'), ...OPS_VIEW, v('documents.list'), v('documents.mail'), v('materials_journal'), v('stats'), v('admin.users')) })],
+  ['GET /api/v1/units', always(LOOKUP, { affects: [v('references.units')], matrixOnly: openedBy(v('references.units'), ...OPS_VIEW, v('documents.list')) })],
+  ['GET /api/v1/counterparties', always(LOOKUP, { affects: [v('references.counterparties_legacy')], matrixOnly: openedBy(v('references.counterparties_legacy'), ...OPS_VIEW, v('documents.list'), v('documents.mail'), v('materials_journal')) })],
+  ['GET /api/v1/customer-counterparties', always(LOOKUP, { affects: [v('references.customer_counterparties')], matrixOnly: openedBy(v('references.customer_counterparties'), ...OPS_VIEW, v('admin.users')) })],
+  ['GET /api/v1/suppliers', always(LOOKUP, { affects: [v('references.suppliers')], matrixOnly: openedBy(v('references.suppliers'), ...OPS_VIEW) })],
+  ['GET /api/v1/materials', always(LOOKUP, { affects: [v('references.materials')], matrixOnly: openedBy(v('references.materials')) })],
+  ['GET /api/v1/responsible-persons', always(LOOKUP, { affects: [v('references.responsible_persons')], matrixOnly: openedBy(v('references.responsible_persons'), ...OPS_VIEW, v('documents.list')) })],
+  ['GET /api/v1/assets', always(LOOKUP, { affects: [v('references.assets')], matrixOnly: openedBy(v('references.assets')) })],
+  ['GET /api/v1/mol', always(LOOKUP, { affects: [v('references.mol')], matrixOnly: openedBy(v('references.mol')) })],
 
   ['POST /api/v1/sites', st('references.sites', 'create')],
   ['PATCH /api/v1/sites/:id', st('references.sites', 'edit')],
@@ -604,16 +713,35 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/admin/edo-accounts', st('admin.edo_accounts', 'view')],
   ['POST /api/v1/admin/edo-accounts', st('admin.edo_accounts', 'create')],
   ['DELETE /api/v1/admin/edo-accounts/:id', st('admin.edo_accounts', 'delete')],
-  ['POST /api/v1/admin/edo-accounts/:id/sync', legacy('admin.edo_accounts', 'edit', ['manager'], GAP)],
+  // Синхронизация ЭДО ссылается на admin.edo_accounts:edit, а такого действия у
+  // страницы нет вовсе (actions: view/create/delete — учётку пересоздают).
+  // Выдать эту ячейку невозможно, поэтому и открыть маршрут галочкой нельзя:
+  // deny — не выбор из осторожности, а единственное непротиворечивое значение.
+  [
+    'POST /api/v1/admin/edo-accounts/:id/sync',
+    { ...legacy('admin.edo_accounts', 'edit', ['manager'], GAP), matrixOnly: NO },
+  ],
 
   ['GET /api/v1/admin/mail-accounts', st('admin.mail_accounts', 'view')],
   ['POST /api/v1/admin/mail-accounts', st('admin.mail_accounts', 'create')],
   ['PATCH /api/v1/admin/mail-accounts/:id', st('admin.mail_accounts', 'edit')],
   ['DELETE /api/v1/admin/mail-accounts/:id', st('admin.mail_accounts', 'delete')],
-  ['POST /api/v1/admin/mail-accounts/:id/sync', legacy('admin.mail_accounts', 'edit', ['manager'], GAP)],
+  [
+    'POST /api/v1/admin/mail-accounts/:id/sync',
+    {
+      ...legacy('admin.mail_accounts', 'edit', ['manager'], GAP),
+      matrixOnly: openedBy({ page: 'admin.mail_accounts', action: 'edit' }),
+    },
+  ],
   ['POST /api/v1/admin/mail-accounts/:id/poll', st('admin.mail_accounts', 'edit')],
 
-  ['GET /api/v1/admin/settings', legacy('admin.settings', 'view', ['manager'], GAP)],
+  [
+    'GET /api/v1/admin/settings',
+    {
+      ...legacy('admin.settings', 'view', ['manager'], GAP),
+      matrixOnly: openedBy(v('admin.settings')),
+    },
+  ],
   ['PUT /api/v1/admin/settings', st('admin.settings', 'edit')],
 ]);
 

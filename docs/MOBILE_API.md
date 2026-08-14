@@ -83,7 +83,7 @@ User-Agent: matcheck-android/1.0 (Build 1; Android 14)
 - `400 weak_password` — слабый пароль (только для `/auth/register`)
 - `401 invalid_credentials` — неверный email/пароль
 - `401 account_inactive` — аккаунт деактивирован
-- `403 web_only_role` — роль `contractor`/`monitor`: только веб-портал
+- `403 web_only_role` — роль `contractor`/`monitor`/`observer`: только веб-портал
 
 Отказать в ответ на **верные** логин и пароль `/auth/login` не может: ни блокировки
 аккаунта, ни rate-limit на этом роуте нет. Раньше были и давали `423 account_locked`
@@ -173,6 +173,7 @@ Authorization: Bearer <refreshToken>
 | `inspector_kpp` | Видит deliveries и shipments своего объекта (`siteId`), включая записи других инспекторов на том же объекте. Создаёт от своего имени. GET по `counterparties` и `materials`. Mobile-клиент рассчитан на эту роль. |
 | `manager` | Видит все `deliveries`/`shipments`, может создавать справочники. |
 | `admin` | Полный доступ. Окончательное удаление помеченных документов (см. ниже) — только admin. |
+| `contractor`, `monitor`, `observer` | Только веб-портал. Логин с мобильного клиента отклоняется `403 web_only_role` — до API дело не доходит. |
 
 Сервер фильтрует данные на стороне БД — клиенту не нужно делать фильтрацию. При запросе `/deliveries` инспектор получит только данные своего объекта (по `siteId`), даже без явных query-параметров.
 

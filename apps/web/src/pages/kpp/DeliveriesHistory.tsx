@@ -157,10 +157,6 @@ export function DeliveriesHistory({
   // Подрядчик: read-only + справочники закрыты (403). Не грузим справочные
   // запросы и берём имена из DTO; фильтры/действия записи скрыты.
   const isContractor = authUser?.role === 'contractor';
-  // Мониторинг: видит все объекты и справочники, ставит отметку проверки.
-  const isMonitor = authUser?.role === 'monitor';
-  // Менеджмент видит отметку проверки: бейдж, фильтр «С замечаниями».
-  const isManagement = isAdmin || authUser?.role === 'manager' || isMonitor;
 
   // Действия — по матрице, а не по имени роли. Ссылка-шаринг спрашивается
   // отдельной возможностью: у неё свой allow-list, и выданная правка её не
@@ -168,6 +164,12 @@ export function DeliveriesHistory({
   const { can, hasCapability } = usePermissions();
   const canEdit = can('operations.deliveries', 'edit');
   const canDelete = can('operations.deliveries', 'delete');
+  // Отметка проверки: бейдж в таблице и легенда — по ячейке матрицы, а не по
+  // имени роли. Роль без базовых прав (наблюдатель) получает отметку только
+  // выданной галочкой, и перечислять её поимённо здесь было бы вторым списком
+  // прав, расходящимся с матрицей. Для admin/manager/monitor результат прежний:
+  // у первого права полные, у двух других review есть в дефолте.
+  const canReview = can('operations.deliveries', 'review');
   // Ячейка И возможность: создание ссылки помечено operations.*:edit, а список
   // ссылок — always. Спрашивая одну возможность, мы оставили бы кнопку
   // менеджеру со снятым edit — и создание вернуло бы 403.
@@ -934,7 +936,7 @@ export function DeliveriesHistory({
                   showPurpose={false}
                 />
                 {/* Фильтр по отметке проверки — только менеджменту. */}
-                {isManagement && (
+                {canReview && (
                   <Select
                     size="small"
                     style={{ minWidth: 150 }}
@@ -1044,7 +1046,7 @@ export function DeliveriesHistory({
               </div>
             ) : null;
           })()}
-          <StatusLegend statuses={legendStatuses} showReview={isManagement} />
+          <StatusLegend statuses={legendStatuses} showReview={canReview} />
         </Space>
       }
     >

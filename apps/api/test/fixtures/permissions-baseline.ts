@@ -75,6 +75,54 @@ export const MATRIX_CHECKED_INLINE: ReadonlySet<string> = new Set([
   'POST /api/v1/shipments/:id/unmark-deletion',
 ]);
 
+/**
+ * Роли, существовавшие ДО матрицы прав.
+ *
+ * Только для них осмысленно сравнение «с матрицей ≡ без матрицы»: у роли без
+ * исторического доступа (observer) никакого «до» нет, её baseline пуст с обеих
+ * сторон, и прогон через эти наборы сравнивал бы пустоту с пустотой, выдавая
+ * зелёный цвет за доказательство. Что новая роль закрыта по-настоящему,
+ * проверяет permissions-observer.test.ts настоящими HTTP-запросами.
+ *
+ * Список намеренно отдельный от MANAGED_ROLES: при добавлении следующей роли
+ * тест заставит решить явно, историческая она или нет.
+ */
+export const LEGACY_ROLES: ManagedRole[] = [
+  'manager',
+  'inspector_kpp',
+  'contractor',
+  'monitor',
+];
+
+/**
+ * Маршруты, где inline-проверка роли — это СУЖЕНИЕ по скоупу, а не гейт
+ * доступа: «если inspector_kpp — только свой объект, если contractor — только
+ * свои записи», и никакой else-ветки с отказом
+ * (deliveries.ts:586-604, 772-786, 1573-1587; shipments.ts:549-567, 728-740;
+ * source-documents.ts экспорт).
+ *
+ * Роль без скоупа проходит такую проверку насквозь и получает полный ответ —
+ * ровно как manager. Различие видно только у роли без базовых прав: для
+ * остальных проверка «расширение не упрётся в inline» до этих маршрутов не
+ * доходит, потому что право у них базовое. Без этого списка выданная
+ * наблюдателю галочка «Операции: просмотр» выглядела бы нерабочей, хотя
+ * фактически работает.
+ */
+export const SCOPE_NARROWING_INLINE: ReadonlySet<string> = new Set([
+  'GET /api/v1/deliveries',
+  'GET /api/v1/deliveries/:id',
+  'GET /api/v1/deliveries/export.xlsx',
+  'GET /api/v1/shipments',
+  'GET /api/v1/shipments/:id',
+  'GET /api/v1/source-documents/export.xlsx',
+]);
+
+/** Роли, у которых есть ограничение видимости по строкам. */
+export const SCOPED_ROLES: ReadonlySet<ManagedRole> = new Set<ManagedRole>([
+  'inspector_kpp',
+  'contractor',
+]);
+
 export const INLINE_ROLE_ACCESS: Record<string, ManagedRole[]> = {
   // deliveries.ts:493,718,1481 — список/карточка/выгрузка со скоупом по роли.
   'GET /api/v1/deliveries': ['manager', 'inspector_kpp', 'contractor', 'monitor'],

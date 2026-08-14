@@ -193,7 +193,7 @@
                                                 },
                                                 {
                                                     "id": "fd66365a-9cd1-4c2f-8214-b0f63fb617ba",
-                                                    "name": "Роль только для веб-портала (contractor/monitor)",
+                                                    "name": "Роль только для веб-портала (contractor/monitor/observer)",
                                                     "originalRequest": {
                                                         "url": {
                                                             "path": [

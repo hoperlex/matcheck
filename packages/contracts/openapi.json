@@ -66,7 +66,8 @@
           "manager",
           "inspector_kpp",
           "contractor",
-          "monitor"
+          "monitor",
+          "observer"
         ]
       },
       "UserDto": {
@@ -86,7 +87,8 @@
               "manager",
               "inspector_kpp",
               "contractor",
-              "monitor"
+              "monitor",
+              "observer"
             ]
           },
           "isActive": {
@@ -194,7 +196,8 @@
                   "manager",
                   "inspector_kpp",
                   "contractor",
-                  "monitor"
+                  "monitor",
+                  "observer"
                 ]
               },
               "isActive": {
@@ -380,6 +383,20 @@
         "properties": {
           "id": {
             "type": "string",
+            "format": "uuid"
+          },
+          "sourceDocumentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "sourceDocumentItemId": {
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uuid"
           },
           "itemKind": {
@@ -819,6 +836,20 @@
               "properties": {
                 "id": {
                   "type": "string",
+                  "format": "uuid"
+                },
+                "sourceDocumentId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "sourceDocumentItemId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
                   "format": "uuid"
                 },
                 "itemKind": {
@@ -1270,6 +1301,20 @@
                   "type": "string",
                   "format": "uuid"
                 },
+                "sourceDocumentId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "sourceDocumentItemId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
                 "itemKind": {
                   "type": "string",
                   "enum": [
@@ -1654,6 +1699,20 @@
                     "properties": {
                       "id": {
                         "type": "string",
+                        "format": "uuid"
+                      },
+                      "sourceDocumentId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "sourceDocumentItemId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "format": "uuid"
                       },
                       "itemKind": {
@@ -2288,6 +2347,20 @@
                   "properties": {
                     "id": {
                       "type": "string",
+                      "format": "uuid"
+                    },
+                    "sourceDocumentId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "sourceDocumentItemId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
                       "format": "uuid"
                     },
                     "itemKind": {
@@ -7648,6 +7721,20 @@
                     "properties": {
                       "id": {
                         "type": "string",
+                        "format": "uuid"
+                      },
+                      "sourceDocumentId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "sourceDocumentItemId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "format": "uuid"
                       },
                       "itemKind": {

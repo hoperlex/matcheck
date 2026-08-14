@@ -12,6 +12,7 @@ import { users, sessions } from '../../db/schema.js';
 import { hashPassword } from '../../domain/auth/password.js';
 import { applyPasswordHash } from '../../domain/auth/apply-password.js';
 import { publishEvent } from '../events.js';
+import { isMatrixOnlyRole, isWebOnlyRole } from '../../lib/roles.js';
 
 function dto(u: typeof users.$inferSelect) {
   return {
@@ -114,17 +115,27 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
         .returning();
       if (!updated) return reply.code(404).send({ error: 'not_found' });
 
-      // Deploy-safety: смена роли на web-only (contractor/monitor) инвалидирует все
-      // сессии юзера. Роль читается из БД на каждом запросе, а мобильный клиент
-      // обрабатывает только 401 (на 403 залипает молча). Без инвалидации ошибочно
-      // назначенная мобильному инспектору web-only-роль сломалась бы тихо (write→403,
-      // sync-scope пуст). Инвалидация → мобилка ловит 401 → штатный разлогин → при
-      // логине с мобилы получает понятный 403 «web-only». Механизм тот же, что при
-      // смене пароля (см. routes/auth.ts). Архив на планшете не вайпится: wipe
-      // завязан на смену siteId в /auth/me, а не на разлогин. Условие «был не-web-only
-      // → стал web-only», чтобы не дёргать при переходах между web-only ролями.
-      const isWebOnly = (r: string): boolean => r === 'contractor' || r === 'monitor';
-      if (isWebOnly(nextRole) && !isWebOnly(existing.role)) {
+      // Deploy-safety: смена роли на web-only (contractor/monitor/observer)
+      // инвалидирует все сессии юзера. Роль читается из БД на каждом запросе, а
+      // мобильный клиент обрабатывает только 401 (на 403 залипает молча). Без
+      // инвалидации ошибочно назначенная мобильному инспектору web-only-роль
+      // сломалась бы тихо (write→403, sync-scope пуст). Инвалидация → мобилка ловит
+      // 401 → штатный разлогин → при логине с мобилы получает понятный 403
+      // «web-only». Механизм тот же, что при смене пароля (см. routes/auth.ts).
+      // Архив на планшете не вайпится: wipe завязан на смену siteId в /auth/me, а не
+      // на разлогин. Базовое условие — «был не-web-only → стал web-only», чтобы не
+      // дёргать при переходах между web-only ролями.
+      //
+      // ОТДЕЛЬНО — переходы из/в matrix-only роль (observer) в ЛЮБУЮ сторону. У неё
+      // нет базовых прав вовсе: набор доступного меняется целиком, а не в деталях.
+      // Особенно важен обратный переход observer → manager: базовое условие его не
+      // покрывает (обе стороны... точнее, целевая роль не web-only), и без этой ветки
+      // откат роли оставил бы живые сессии — тот самый случай, ради которого перед
+      // возвратом старого кода приходится деактивировать людей вручную.
+      const roleClassChanged =
+        (isWebOnlyRole(nextRole) && !isWebOnlyRole(existing.role)) ||
+        isMatrixOnlyRole(nextRole) !== isMatrixOnlyRole(existing.role);
+      if (roleClassChanged) {
         const now = new Date();
         await app.db
           .update(users)

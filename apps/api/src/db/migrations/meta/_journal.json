@@ -673,6 +673,13 @@
       "when": 1781800022000,
       "tag": "0096_multi_upd_delivery",
       "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1781800023000,
+      "tag": "0097_user_role_observer",
+      "breakpoints": true
     }
   ]
 }

@@ -6,7 +6,8 @@ import { isAllowed, isExpanded } from '../lib/permissions/matrix.js';
 import { createMatrixStore, type MatrixStore } from '../lib/permissions/store.js';
 import { lookupRule, type RouteRule } from '../lib/permissions/route-map.js';
 import { collectRouteRoles, type RouteRolesMap } from '../lib/permissions/route-roles.js';
-import { judgeRuleCells, matrixCellsOf } from '../lib/permissions/rule-cells.js';
+import { judgeCells, judgeRuleCells, matrixCellsOf } from '../lib/permissions/rule-cells.js';
+import { isMatrixOnlyRole, isWebOnlyRole } from '../lib/roles.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -90,7 +91,6 @@ export default fp(async (app) => {
    * `always` ячеек не имеет, и мутация read-only роли по-прежнему запрещена.
    */
   const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-  const WEB_ONLY_ROLES = new Set(['contractor', 'monitor']);
   // Шаблоны роутов, а не префиксы сырого url: в сыром URL id стоит в середине
   // пути, и startsWith мог бы случайно открыть лишний mutating-эндпоинт.
   const MONITOR_WRITE_ROUTES = new Set([
@@ -100,7 +100,7 @@ export default fp(async (app) => {
 
   app.addHook('onRequest', async (req, reply) => {
     const role = req.user?.role;
-    if (!role || !WEB_ONLY_ROLES.has(role)) return;
+    if (!role || !isWebOnlyRole(role)) return;
     if (!MUTATING.has(req.method.toUpperCase())) return;
     if (req.url.startsWith('/api/v1/auth/')) return;
 
@@ -126,6 +126,89 @@ export default fp(async (app) => {
     if (allowed) return;
     req.log.warn({ path: req.url, method: req.method, role }, 'read-only role write blocked');
     return reply.code(403).send({ error: 'forbidden', message: 'Read-only role' });
+  });
+
+  async function deny(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    page: string,
+    action: string,
+  ): Promise<void> {
+    await app.logUnauthorized(req, 403, `permission_denied:${page}:${action}`, req.user?.id);
+    // Код ошибки — тот же, что у in-handler-пути (PermissionError в
+    // lib/permissions/error.ts). Один класс отказа обязан иметь один код:
+    // иначе фронтовый onForbidden и будущие интеграции вынуждены знать два.
+    // От authorize(...) отличается только этим полем; details добавочные
+    // (в ErrorResponseSchema поле необязательное).
+    return reply.code(403).send({
+      error: 'permission_denied',
+      message: 'Недостаточно прав для этого действия',
+      details: { page, action },
+    });
+  }
+
+  /**
+   * Роли БЕЗ исторического доступа (lib/roles.ts): их нет ни в одном allow-list
+   * и ни в одной строке baseline, поэтому «маршрут вне матрицы» означает для
+   * них не «пропустить», а «закрыть».
+   *
+   * Без этого хука роль с пустым дефолтом получила бы весь authenticate-only
+   * API (список УПД, справочники) без единой галочки — класс `always` матрицей
+   * не проверяется вовсе. И наоборот: маршрут с allow-list, но без ячейки
+   * (GET /sites) не открылся бы даже выданной галочкой, потому что расширять
+   * там нечего. Решение принимает политика `matrixOnly` из реестра.
+   *
+   * Хук стоит ДО раннего выхода по флагу сознательно.
+   *
+   * При PERMISSIONS_ENFORCE=0 матрицы нет: overrides не читаются, основной хук
+   * не вешается. Если бы ветка жила ниже, возврат флага в 0 — штатный способ
+   * отката — открыл бы наблюдателю тот самый authenticate-only API. Поэтому в
+   * выключенном режиме роль сохраняет только `allow`-маршруты (вход, выход,
+   * смена пароля, свои права), а всё остальное закрыто: выдавать права нечем.
+   */
+  app.addHook('onRequest', async (req, reply) => {
+    const role = req.user?.role;
+    if (!role || !isMatrixOnlyRole(role)) return;
+
+    // На 404 шаблона нет — поведение прежнее, как и у основного хука.
+    const tmpl = req.routeOptions?.url;
+    if (!tmpl) return;
+
+    const rule = lookupRule(req.method, tmpl);
+    const policy = rule?.matrixOnly;
+
+    if (policy?.mode === 'allow') return;
+
+    // Маршрут вне реестра — единственное место, где fail-open заменён на
+    // fail-closed: для роли без исторического доступа забытая строка реестра
+    // была бы не совместимостью, а дырой.
+    if (!rule) {
+      req.log.warn(
+        { route: tmpl, method: req.method, role },
+        'permissions: маршрут вне реестра закрыт для matrix-only роли',
+      );
+      return deny(req, reply, 'unknown', 'route');
+    }
+
+    if (policy?.mode === 'deny') return deny(req, reply, tmpl, req.method.toLowerCase());
+
+    if (policy?.mode === 'cells') {
+      if (!enforced) return deny(req, reply, policy.openedBy[0]?.page ?? tmpl, 'view');
+      const verdict = judgeCells(policy.openedBy, await store.get(), role as ManagedRole);
+      if (!verdict.allowed) {
+        const first = policy.openedBy[0];
+        return deny(req, reply, first?.page ?? tmpl, first?.action ?? 'view');
+      }
+      // Снимаем allow-list маршрута: роли в нём нет по определению, а право ей
+      // выдано явной строкой матрицы.
+      if (verdict.expanded) req.permissionExpanded = true;
+      return;
+    }
+
+    // Политики нет — это static/dynamic/in-handler, их решает основной хук по
+    // собственным ячейкам. При выключенном флаге основного хука не будет,
+    // поэтому закрываем сами.
+    if (!enforced) return deny(req, reply, tmpl, req.method.toLowerCase());
   });
 
   if (!enforced) {
@@ -177,25 +260,6 @@ export default fp(async (app) => {
     return judgeRuleCells(rule, await store.get(), role).expanded;
   }
 
-  async function deny(
-    req: FastifyRequest,
-    reply: FastifyReply,
-    page: string,
-    action: string,
-  ): Promise<void> {
-    await app.logUnauthorized(req, 403, `permission_denied:${page}:${action}`, req.user?.id);
-    // Код ошибки — тот же, что у in-handler-пути (PermissionError в
-    // lib/permissions/error.ts). Один класс отказа обязан иметь один код:
-    // иначе фронтовый onForbidden и будущие интеграции вынуждены знать два.
-    // От authorize(...) отличается только этим полем; details добавочные
-    // (в ErrorResponseSchema поле необязательное).
-    return reply.code(403).send({
-      error: 'permission_denied',
-      message: 'Недостаточно прав для этого действия',
-      details: { page, action },
-    });
-  }
-
   /** Общая часть обоих хуков: вернуть правило, если его вообще надо проверять. */
   function ruleFor(req: FastifyRequest): RouteRule | null {
     const user = req.user;
@@ -218,6 +282,12 @@ export default fp(async (app) => {
       }
       return null;
     }
+    // Правило с явной политикой для matrix-only роли уже рассудил хук выше, и
+    // второй раз его судить нельзя: у `legacy` собственная пара page:action
+    // (у export.xlsx — documents.list:view), а политика открывает маршрут ещё и
+    // операционными ячейками. Пройдя политику, запрос упёрся бы здесь в пару из
+    // правила и получил 403 — то есть выданная галочка не работала бы.
+    if (rule.matrixOnly && isMatrixOnlyRole(user.role)) return null;
     return rule;
   }
 

@@ -135,15 +135,13 @@ export function ShipmentsHistory({
   // Подрядчик: read-only + справочники закрыты — имена берём из DTO, фильтры/
   // действия записи скрыты, справочные запросы не грузим.
   const isContractor = authUser?.role === 'contractor';
-  // Мониторинг: видит все объекты, ставит отметку проверки.
-  const isMonitor = authUser?.role === 'monitor';
-  // Менеджмент видит отметку проверки: бейдж, фильтр «С замечаниями».
-  const isManagement = isAdmin || authUser?.role === 'manager' || isMonitor;
 
   // Действия — по матрице, а не по имени роли (см. DeliveriesHistory).
   const { can, hasCapability } = usePermissions();
   const canEdit = can('operations.shipments', 'edit');
   const canDelete = can('operations.shipments', 'delete');
+  // Отметка проверки — по ячейке матрицы, а не по имени роли (см. DeliveriesHistory).
+  const canReview = can('operations.shipments', 'review');
   // Ячейка И возможность — ровно как в приёмках: создание ссылки помечено
   // operations.*:edit, а список ссылок открыт всем (always). Спрашивая одну
   // возможность, мы оставили бы кнопку менеджеру со снятым edit — и создание
@@ -820,7 +818,7 @@ export function ShipmentsHistory({
                   onChange={updateFilters}
                 />
                 {/* Фильтр по отметке проверки — только менеджменту. */}
-                {isManagement && (
+                {canReview && (
                   <Select
                     size="small"
                     style={{ minWidth: 150 }}
@@ -916,7 +914,7 @@ export function ShipmentsHistory({
               </div>
             ) : null;
           })()}
-          <StatusLegend statuses={legendStatuses} showReview={isManagement} />
+          <StatusLegend statuses={legendStatuses} showReview={canReview} />
         </Space>
       }
     >

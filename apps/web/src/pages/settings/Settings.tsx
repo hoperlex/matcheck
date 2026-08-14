@@ -6,12 +6,18 @@ import { api } from '../../services/api';
 import { getSetting, setSetting } from '../../lib/db';
 import { runSync } from '../../services/sync';
 import { usePwaInstall } from '../../lib/usePwaInstall';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 
 type RetentionMode = 'all' | 'from_date' | 'none';
 
 export default function SettingsPage() {
   const qc = useQueryClient();
   const [retention, setRetention] = useState<RetentionMode>('all');
+  // Способ распознавания — серверная настройка (PUT /admin/settings). Просмотр
+  // страницы можно выдать отдельно от правки, поэтому переключатель спрашивает
+  // именно edit: иначе он выглядел бы рабочим и отвечал 403.
+  const { can } = usePermissions();
+  const canEditSettings = can('admin.settings', 'edit');
   const { canInstall, promptInstall } = usePwaInstall();
 
   useEffect(() => {
@@ -55,7 +61,7 @@ export default function SettingsPage() {
               <Radio.Group
                 value={appSettingsQ.data?.updParseMode ?? 'llm'}
                 onChange={(e) => saveParseMode.mutate(e.target.value as UpdParseMode)}
-                disabled={saveParseMode.isPending}
+                disabled={saveParseMode.isPending || !canEditSettings}
                 options={[
                   { value: 'llm', label: 'Через LLM (точнее, но медленно и расходует токены)' },
                   { value: 'local', label: 'Локально (быстро, без LLM)' },

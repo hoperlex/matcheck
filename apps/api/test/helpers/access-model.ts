@@ -15,8 +15,14 @@ import type { RouteRow } from './route-inventory.js';
 
 export const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-/** Роли, которым read-only-гард запрещает мутации (кроме самообслуживания). */
-export const WEB_ONLY_ROLES: ManagedRole[] = ['contractor', 'monitor'];
+/**
+ * Роли, которым read-only-гард запрещает мутации (кроме самообслуживания).
+ *
+ * Копия рантайм-списка из src/lib/roles.ts — намеренная: модель обязана
+ * описывать поведение независимо, и её расхождение с рантаймом должно быть
+ * видно как падение теста, а не «сойтись» через общий импорт.
+ */
+export const WEB_ONLY_ROLES: ManagedRole[] = ['contractor', 'monitor', 'observer'];
 
 /**
  * Единственные мутации, оставленные монитору ДО матрицы — отметка проверки.

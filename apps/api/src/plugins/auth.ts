@@ -7,7 +7,7 @@ import { ACCESS_COOKIE_NAME } from '../domain/auth/refresh.js';
 
 export type AuthUser = {
   id: string;
-  role: 'admin' | 'manager' | 'inspector_kpp' | 'contractor' | 'monitor';
+  role: 'admin' | 'manager' | 'inspector_kpp' | 'contractor' | 'monitor' | 'observer';
   // Привязка к объекту. У inspector_kpp определяет область видимости;
   // читаем из БД на каждом запросе, чтобы смена объекта применялась
   // моментально без перевыпуска токена.

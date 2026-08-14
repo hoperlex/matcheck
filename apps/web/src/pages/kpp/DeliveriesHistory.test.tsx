@@ -43,7 +43,7 @@ const row = {
   isAssets: false,
   pendingDeletionAt: null,
   pendingDeletionByUserId: null,
-  reviewState: null,
+  reviewState: 'approved',
   items: [],
   photos: [],
   sourceDocumentIds: [],
@@ -137,5 +137,31 @@ describe('DeliveriesHistory: действия в строке', () => {
     expect(hasIcon(c, 'share-alt')).toBe(false);
     expect(hasIcon(c, 'edit')).toBe(true);
     expect(hasCapability).toHaveBeenCalledWith('operations.share.manage');
+  });
+});
+
+describe('DeliveriesHistory: отметка проверки по матрице', () => {
+  it('право review выдано — значок и легенда на месте', async () => {
+    // До этой правки видимость отметки решал список ролей
+    // (isAdmin || manager || monitor). Роль без базовых прав в него не попадала,
+    // и выданная галочка «Проверять» не давала ничего: кнопка отметки была, а
+    // увидеть результат было негде.
+    can.mockReturnValue(true);
+    hasCapability.mockReturnValue(true);
+    const c = await renderHistory();
+    expect(can).toHaveBeenCalledWith('operations.deliveries', 'review');
+    expect(screen.getAllByText('Проверено').length).toBeGreaterThan(0);
+    expect(hasIcon(c, 'safety-certificate')).toBe(true);
+  });
+
+  it('право review снято — легенды нет', async () => {
+    // Значок в строке проверяется отдельно: он приходит из DTO, который сервер
+    // обнуляет при снятой галочке (canSeeReviewInMatrix). Здесь предмет —
+    // именно решение интерфейса: расшифровку значков рисовать или нет.
+    can.mockImplementation((_page: string, action: string) => action !== 'review');
+    hasCapability.mockReturnValue(true);
+    await renderHistory();
+    expect(screen.queryByText('Проверено')).toBeNull();
+    expect(screen.queryByText('Есть замечания')).toBeNull();
   });
 });

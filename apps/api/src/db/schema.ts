@@ -28,6 +28,7 @@ export const userRoleEnum = pgEnum('user_role', [
   'inspector_kpp',
   'contractor',
   'monitor',
+  'observer',
 ]);
 export const shipmentKindEnum = pgEnum('shipment_kind', [
   'contractor',

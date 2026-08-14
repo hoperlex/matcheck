@@ -26,7 +26,17 @@ import { api, ApiError } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
 import { roleLabel } from '../../shared/constants/roleLabels';
 
-const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp', 'contractor', 'monitor'];
+// Список ролей выбора. Дубль UserRoleSchema: компилятор его не сверяет, а
+// typecheck веба сейчас не проверяет файлы вовсе (корневой tsconfig с
+// files: []), поэтому полноту стережёт roleLabels.test.ts.
+const roles: UserRole[] = [
+  'admin',
+  'manager',
+  'inspector_kpp',
+  'contractor',
+  'monitor',
+  'observer',
+];
 
 function hasValidInn(inn: string | null | undefined): boolean {
   const digits = (inn ?? '').replace(/[^0-9]/g, '');

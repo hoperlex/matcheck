@@ -5,9 +5,20 @@ import type { EdoAccountDto, EdoAccountUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 
 export default function AdminEdoAccountsPage() {
   const qc = useQueryClient();
+  // Страницу можно выдать на просмотр отдельно от управления, поэтому контролы
+  // спрашивают действие, а не факт открытия страницы.
+  const { can } = usePermissions();
+  const canCreate = can('admin.edo_accounts', 'create');
+  // Действия `edit` у страницы нет вовсе (учётку пересоздают, PATCH-роута нет),
+  // поэтому синхронизацию гейтим по правам управления учётками: у кого есть
+  // заведение или удаление, у того есть и обслуживание. Роль с одним лишь
+  // просмотром кнопку не увидит — на сервере этот маршрут ей закрыт
+  // (matrixOnly: deny в route-map).
+  const canManage = canCreate || can('admin.edo_accounts', 'delete');
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
 
@@ -44,9 +55,11 @@ export default function AdminEdoAccountsPage() {
           <Typography.Title level={3} style={{ margin: 0 }}>
             ЭДО учётки (Диадок)
           </Typography.Title>
-          <Button type="primary" onClick={() => setOpen(true)}>
-            Добавить
-          </Button>
+          {canCreate && (
+            <Button type="primary" onClick={() => setOpen(true)}>
+              Добавить
+            </Button>
+          )}
         </Space>
       }
     >
@@ -62,11 +75,14 @@ export default function AdminEdoAccountsPage() {
           {
             title: 'Действия',
             key: 'a',
-            render: (_: unknown, r: EdoAccountDto) => (
-              <Button onClick={() => sync.mutate(r.id)} loading={sync.isPending}>
-                Sync now
-              </Button>
-            ),
+            render: (_: unknown, r: EdoAccountDto) =>
+              canManage ? (
+                <Button onClick={() => sync.mutate(r.id)} loading={sync.isPending}>
+                  Sync now
+                </Button>
+              ) : (
+                <Typography.Text type="secondary">—</Typography.Text>
+              ),
           },
         ]}
         cardRender={(r) => (
@@ -74,9 +90,11 @@ export default function AdminEdoAccountsPage() {
             <Space direction="vertical">
               <Typography.Text strong>{r.name}</Typography.Text>
               <Typography.Text type="secondary">{r.provider}</Typography.Text>
-              <Button size="small" onClick={() => sync.mutate(r.id)}>
-                Sync
-              </Button>
+              {canManage && (
+                <Button size="small" onClick={() => sync.mutate(r.id)}>
+                  Sync
+                </Button>
+              )}
             </Space>
           </Card>
         )}

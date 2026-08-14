@@ -58,6 +58,11 @@ export const MANAGED_ROLES: ManagedRole[] = [
   'inspector_kpp',
   'contractor',
   'monitor',
+  // observer в PAGE_CATALOG[].base не упоминается нигде — это и есть его пустой
+  // дефолт: buildDefaultMatrix развернёт роль во все false. Но в MANAGED_ROLES
+  // он обязан быть, иначе роль не попадёт ни в DEFAULT_MATRIX, ни в матрицу
+  // админки, и обращение DEFAULT_MATRIX[role][page] упадёт в рантайме.
+  'observer',
 ];
 
 export const ManagedRoleSchema = UserRoleSchema.exclude(['admin']);

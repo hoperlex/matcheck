@@ -34,6 +34,8 @@ import {
   KNOWN_API_UI_GAPS,
   NAV_ACCESS,
   RUNTIME_RULE_COVERAGE,
+  SCOPED_ROLES,
+  SCOPE_NARROWING_INLINE,
   UI_ONLY_CELLS,
 } from './fixtures/permissions-baseline.js';
 
@@ -227,6 +229,11 @@ describe('дефолтная матрица == сегодняшние права
         if (DEFAULT_MATRIX[role][rule.page][rule.action]) continue;
         if (!canExpand(role, rule.page, rule.action)) continue;
         if (inline.includes(role)) continue;
+        // Проверка сужает по скоупу, а не отказывает: роль без скоупа проходит
+        // её насквозь и получает полный ответ. INLINE_ROLE_ACCESS перечисляет
+        // тех, кто имел доступ ДО матрицы, поэтому роли без исторического
+        // доступа там нет — но это не значит, что хендлер её отсечёт.
+        if (SCOPE_NARROWING_INLINE.has(key) && !SCOPED_ROLES.has(role)) continue;
         broken.push(`${role}:${rule.page}:${rule.action} → ${key} проверяет роль внутри`);
       }
     }

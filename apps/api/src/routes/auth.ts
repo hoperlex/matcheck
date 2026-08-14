@@ -31,13 +31,14 @@ import {
 import { sha256Hex } from '../domain/auth/crypto.js';
 import { loadEnv } from '../lib/env.js';
 import { createBurstyRateLimit } from '../lib/auth-rate-limit.js';
+import { isWebOnlyRole } from '../lib/roles.js';
 
 const env = loadEnv();
 
 function userToDto(u: {
   id: string;
   email: string;
-  role: 'admin' | 'manager' | 'inspector_kpp' | 'contractor' | 'monitor';
+  role: 'admin' | 'manager' | 'inspector_kpp' | 'contractor' | 'monitor' | 'observer';
   isActive: boolean;
   siteId: string | null;
   contractorCustomerId: string | null;
@@ -235,10 +236,11 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
           .send({ error: 'account_inactive', message: 'Account is not active' });
       }
 
-      // contractor и monitor — роли только для веб-портала: мобильный клиент их не
-      // поддерживает, а мобильный sync для них закрыт. Отклоняем на входе, чтобы
-      // web-token такой роли вообще не появлялся у мобильного приложения.
-      if (isMobileClient(req) && (user.role === 'contractor' || user.role === 'monitor')) {
+      // contractor, monitor и observer — роли только для веб-портала: мобильный
+      // клиент их не поддерживает, а мобильный sync для них закрыт. Отклоняем на
+      // входе, чтобы web-token такой роли вообще не появлялся у мобильного
+      // приложения (список — lib/roles.ts).
+      if (isMobileClient(req) && isWebOnlyRole(user.role)) {
         return reply
           .code(403)
           .send({ error: 'web_only_role', message: 'This role is web-only' });

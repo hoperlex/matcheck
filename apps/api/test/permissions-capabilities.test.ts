@@ -85,9 +85,21 @@ describe('политика расширения: выданное право о�
   it('политика записана в реестре явно — это контракт, а не деталь', () => {
     const meta = (key: string) => ROUTE_PERMISSIONS.get(key);
 
-    expect(meta('PATCH /api/v1/deliveries/:id/flags')?.expandableBy).toEqual(['monitor']);
-    expect(meta('POST /api/v1/deliveries/:id/link-source')?.expandableBy).toEqual(['monitor']);
-    expect(meta('POST /api/v1/deliveries/bulk-mark-deletion')?.expandableBy).toEqual(['monitor']);
+    // Роли без ограничения видимости по строкам: выданное им право не откроет
+    // чужих записей, потому что «своих» у них нет. Список общий (UNSCOPED в
+    // route-map), но проверяем поимённо — политика расширения это контракт.
+    expect(meta('PATCH /api/v1/deliveries/:id/flags')?.expandableBy).toEqual([
+      'monitor',
+      'observer',
+    ]);
+    expect(meta('POST /api/v1/deliveries/:id/link-source')?.expandableBy).toEqual([
+      'monitor',
+      'observer',
+    ]);
+    expect(meta('POST /api/v1/deliveries/bulk-mark-deletion')?.expandableBy).toEqual([
+      'monitor',
+      'observer',
+    ]);
 
     // Ссылки-шаринги и удаление навсегда не открывает никакое расширение.
     expect(meta('POST /api/v1/deliveries/:id/share-link')?.expandableBy).toEqual([]);

@@ -77,7 +77,12 @@ describe('нулевой UI-diff: расширение не меняет инт�
 describe('homePath', () => {
   it('ведёт на первый доступный раздел роли', () => {
     for (const role of ALL_ROLES) {
-      expect(homePath(defaultPermissions(role), role)).toBe(filterByRole(role)[0]?.path);
+      // `?? null` — потому что у роли без единого раздела (observer до выдачи
+      // галочек) эталон даёт undefined, а homePath по контракту возвращает
+      // именно null: это значение читает редирект с корня.
+      expect(homePath(defaultPermissions(role), role), role).toBe(
+        filterByRole(role)[0]?.path ?? null,
+      );
     }
   });
 

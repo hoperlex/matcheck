@@ -27,6 +27,7 @@ import {
   routeAllows,
   WEB_ONLY_ROLES,
 } from './helpers/access-model.js';
+import { LEGACY_ROLES } from './fixtures/permissions-baseline.js';
 
 /** Пустая таблица — то состояние, в котором система уходит в прод. */
 const EMPTY: OverrideMap = new Map();
@@ -81,7 +82,7 @@ describe('пустая таблица overrides ≡ система без мат
       // Публичный периметр (login, refresh, share по токену) baseline не имеет:
       // req.user там не заполняется, и сравнивать нечего.
       if (!hasBaseline(r)) continue;
-      for (const role of MANAGED_ROLES) {
+      for (const role of LEGACY_ROLES) {
         const before = apiAllows(role, r);
         const after = modelAllows(role, r);
         if (before !== after) {
@@ -105,7 +106,12 @@ describe('пустая таблица overrides ≡ система без мат
     const all = await routes();
     expect(all.length).toBeGreaterThan(150);
     expect(all.filter(hasBaseline).length).toBeGreaterThan(140);
-    expect(MANAGED_ROLES.length).toBe(4);
+    expect(LEGACY_ROLES.length).toBe(4);
+    // Роли, появившиеся после матрицы, в сравнении не участвуют — у них нет
+    // «поведения до». Список ниже обязан оставаться исчерпывающим: добавили
+    // роль, не внеся её ни сюда, ни в LEGACY_ROLES — тест заставит решить, к
+    // какому классу она относится.
+    expect(MANAGED_ROLES.filter((r) => !LEGACY_ROLES.includes(r))).toEqual(['observer']);
   });
 
   it('вне сравнения остаётся только публичный периметр', async () => {

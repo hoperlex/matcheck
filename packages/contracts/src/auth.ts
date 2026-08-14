@@ -1,6 +1,17 @@
 import { z } from 'zod';
 
-export const UserRoleSchema = z.enum(['admin', 'manager', 'inspector_kpp', 'contractor', 'monitor']);
+export const UserRoleSchema = z.enum([
+  'admin',
+  'manager',
+  'inspector_kpp',
+  'contractor',
+  'monitor',
+  // Наблюдатель — роль без исторического доступа: в дефолте у неё нет НИ ОДНОГО
+  // права, всё выдаётся галочками в матрице. Отсюда особый режим на сервере
+  // (MATRIX_ONLY_ROLES в plugins/permissions.ts): для неё маршрут вне матрицы
+  // означает «закрыт», а не «пропустить».
+  'observer',
+]);
 export type UserRole = z.infer<typeof UserRoleSchema>;
 
 export const EmailSchema = z.string().email().max(254).toLowerCase().trim();

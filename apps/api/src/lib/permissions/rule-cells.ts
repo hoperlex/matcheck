@@ -62,15 +62,35 @@ export function judgeRuleCells(
   overrides: OverrideMap,
   role: ManagedRole,
 ): CellVerdict {
-  const cells = matrixCellsOf(rule);
-  // Ячеек нет — маршрут вне матрицы, и запрещать ей нечего. Для ГАРДА эта же
-  // ситуация читается наоборот, поэтому он спрашивает matrixCellsOf сам.
-  if (cells.length === 0) return { allowed: true, expanded: false };
+  return judgeCells(matrixCellsOf(rule), overrides, role, rule.expandableBy);
+}
 
-  const allowed = cells.some((c) => isAllowed(overrides, role, c.page, c.action));
+/**
+ * То же решение по ПРОИЗВОЛЬНОМУ списку ячеек.
+ *
+ * Нужно для политики `matrixOnly` (см. route-map): её ячейки лежат в отдельном
+ * поле `openedBy` и в `cellsOfRule` не попадают — там у `always` вернулся бы
+ * пустой список, то есть вердикт «разрешено», ровно наоборот задуманному.
+ * Расширять ради этого `cellsOfRule` нельзя: его выдачу читают read-only-гард
+ * и подсчёт возможностей, и смена смысла для `always` изменила бы поведение
+ * существующих ролей.
+ */
+export function judgeCells(
+  cells: { page: PageId; action: PageAction }[],
+  overrides: OverrideMap,
+  role: ManagedRole,
+  expandableBy?: ManagedRole[],
+): CellVerdict {
+  const applicable = cells.filter((c) => isActionApplicable(c.page, c.action));
+  // Ячеек нет — маршрут вне матрицы, и запрещать ей нечего. Для ГАРДА и для
+  // matrix-only ролей эта же ситуация читается наоборот, поэтому оба
+  // спрашивают список ячеек сами.
+  if (applicable.length === 0) return { allowed: true, expanded: false };
+
+  const allowed = applicable.some((c) => isAllowed(overrides, role, c.page, c.action));
   const expanded =
-    (rule.expandableBy?.includes(role) ?? true) &&
-    cells.some((c) => isExpanded(overrides, role, c.page, c.action));
+    (expandableBy?.includes(role) ?? true) &&
+    applicable.some((c) => isExpanded(overrides, role, c.page, c.action));
 
   return { allowed, expanded };
 }

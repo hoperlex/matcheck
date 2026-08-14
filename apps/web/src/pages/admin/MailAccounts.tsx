@@ -19,6 +19,7 @@ import type { MailAccountDto, MailAccountUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 
 /**
  * Ящики бывают двух назначений:
@@ -36,6 +37,11 @@ export default function AdminMailAccountsPage() {
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm<MailAccountUpsert>();
   const invalidate = () => void qc.invalidateQueries({ queryKey: ['admin', 'mail-accounts'] });
+  // Просмотр ящиков выдаётся отдельно от управления ими: всё, что шлёт запрос
+  // (опрос, синхронизация, автоопрос, заведение), спрашивает своё действие.
+  const { can } = usePermissions();
+  const canCreate = can('admin.mail_accounts', 'create');
+  const canEdit = can('admin.mail_accounts', 'edit');
 
   const list = useQuery({
     queryKey: ['admin', 'mail-accounts'],
@@ -81,8 +87,9 @@ export default function AdminMailAccountsPage() {
 
   const isDocs = (r: MailAccountDto) => r.purpose === 'document';
 
-  const actions = (r: MailAccountDto, size?: 'small') =>
-    isDocs(r) ? (
+  const actions = (r: MailAccountDto, size?: 'small') => {
+    if (!canEdit) return <Typography.Text type="secondary">—</Typography.Text>;
+    return isDocs(r) ? (
       <Space size={8} wrap>
         <Button size={size} onClick={() => poll.mutate(r.id)} loading={poll.isPending}>
           Проверить сейчас
@@ -107,6 +114,7 @@ export default function AdminMailAccountsPage() {
         Синхронизировать
       </Button>
     );
+  };
 
   return (
     <StickyPageHeader
@@ -115,9 +123,11 @@ export default function AdminMailAccountsPage() {
           <Typography.Title level={3} style={{ margin: 0 }}>
             Почтовые ящики
           </Typography.Title>
-          <Button type="primary" onClick={() => setOpen(true)}>
-            Добавить
-          </Button>
+          {canCreate && (
+            <Button type="primary" onClick={() => setOpen(true)}>
+              Добавить
+            </Button>
+          )}
         </Space>
       }
     >

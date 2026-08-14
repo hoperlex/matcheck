@@ -29,8 +29,19 @@ import { roleLabel } from '../../shared/constants/roleLabels';
 import { UserEditModal } from './UserEditModal';
 import { PasswordResetLinkModal } from './PasswordResetLinkModal';
 import { formatDateRu, formatDateTimeRu } from '../../shared/utils/formatRu';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 
-const roles: UserRole[] = ['admin', 'manager', 'inspector_kpp', 'contractor', 'monitor'];
+// Список ролей выбора. Дубль UserRoleSchema: компилятор его не сверяет, а
+// typecheck веба сейчас не проверяет файлы вовсе (корневой tsconfig с
+// files: []), поэтому полноту стережёт roleLabels.test.ts.
+const roles: UserRole[] = [
+  'admin',
+  'manager',
+  'inspector_kpp',
+  'contractor',
+  'monitor',
+  'observer',
+];
 
 // ИНН считаем валидным, если после удаления нецифр остаётся непустая
 // не-нулевая строка. Подрядчик без валидного ИНН → скоуп по ИНН вернёт пусто,
@@ -42,6 +53,13 @@ function hasValidInn(inn: string | null | undefined): boolean {
 
 export default function AdminUsersPage() {
   const qc = useQueryClient();
+  // Страницу можно выдать на просмотр (admin.users:view), а правку — нельзя:
+  // admin.users:edit|delete в NEVER_GRANTABLE, потому что через PATCH
+  // пользователя выдаётся роль admin. Значит режим «только смотрю» здесь не
+  // экзотика, а штатное состояние для всех, кроме администратора, и контролы
+  // обязаны его отражать — иначе каждый из них ответит 403.
+  const { can } = usePermissions();
+  const canEditUsers = can('admin.users', 'edit');
   const [editing, setEditing] = useState<UserDto | null>(null);
   const [resetFor, setResetFor] = useState<UserDto | null>(null);
   // Поиск — client-side: бэк /admin/users отдаёт плоский UserDto[] без
@@ -123,6 +141,7 @@ export default function AdminUsersPage() {
         onPressEnter={(e) => (e.target as HTMLInputElement).blur()}
         placeholder="+7 …"
         allowClear
+        disabled={!canEditUsers}
         // Ширину задаёт колонка: с фиксированной шириной контрол вылезал за
         // её границу и обрезался на стыке ячеек.
         style={{ width: '100%' }}
@@ -143,6 +162,7 @@ export default function AdminUsersPage() {
         showSearch
         optionFilterProp="label"
         loading={sitesQuery.isLoading}
+        disabled={!canEditUsers}
         onChange={(v) => patch.mutate({ id: row.id, body: { siteId: v ?? null } })}
         options={sites.map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` }))}
       />
@@ -164,6 +184,7 @@ export default function AdminUsersPage() {
         showSearch
         optionFilterProp="label"
         loading={customerCpQuery.isLoading}
+        disabled={!canEditUsers}
         onChange={(v) => patch.mutate({ id: row.id, body: { contractorCustomerId: v ?? null } })}
         options={customerCps.map((c) => ({
           value: c.id,
@@ -228,6 +249,7 @@ export default function AdminUsersPage() {
               <Select
                 value={r}
                 style={{ width: '100%' }}
+                disabled={!canEditUsers}
                 onChange={(v) => patch.mutate({ id: row.id, body: { role: v } })}
                 options={roles.map((rl) => ({ value: rl, label: roleLabel(rl) }))}
               />
@@ -250,6 +272,7 @@ export default function AdminUsersPage() {
             render: (a: boolean, row: UserDto) => (
               <Switch
                 checked={a}
+                disabled={!canEditUsers}
                 onChange={(v) => patch.mutate({ id: row.id, body: { isActive: v } })}
               />
             ),
@@ -281,6 +304,11 @@ export default function AdminUsersPage() {
             align: 'right' as const,
             render: (_: unknown, row: UserDto) => {
               const reset = resetByUser.get(row.id);
+              // Обе кнопки ведут к правке (ссылка на смену пароля — это
+              // POST .../password-reset-link). Без права их не рисуем вовсе:
+              // задизейбленная иконка без подписи выглядит как сбой, а не как
+              // «не положено».
+              if (!canEditUsers) return <Typography.Text type="secondary">—</Typography.Text>;
               return (
                 <Space size={0}>
                   <Tooltip
