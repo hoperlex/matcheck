@@ -181,8 +181,8 @@ suite('документ «не распознано» (реальный PostgreS
   });
 
   it('чужой код ошибки флагом не закрывается', async () => {
-    // Флаг создан ровно для одного случая. Дубликат закрывается своим
-    // диалогом (заменить/пропустить), а не кнопкой «разобрано».
+    // Флаг создан для заглушек. Дубликат закрывается своим диалогом
+    // (заменить/пропустить), а не кнопкой «разобрано».
     const id = await document('duplicate_upd');
 
     const res = await app.inject({
@@ -196,5 +196,111 @@ suite('документ «не распознано» (реальный PostgreS
       status: 'needs_resolution',
       parseErrorCode: 'duplicate_upd',
     });
+  });
+
+  it('прочие заглушки ведут себя так же: скрыты в «Ожидаемых», видны в списке', async () => {
+    // Кодов у заглушки теперь несколько: накладную не смог прочитать парсер,
+    // файл не дошёл до разбора, сертификат распознавать не требуется. Ведут
+    // себя они одинаково — иначе поведение зависело бы от того, на каком шаге
+    // сорвался разбор.
+    const waybill = await document('no_waybill_found');
+    const notProcessed = await document('not_processed');
+    const supplementary = await document('supplementary');
+    // Сопроводительный заводится сразу архивным: разбирать в нём нечего.
+    await sql`UPDATE source_documents SET status = 'archived' WHERE id = ${supplementary}`;
+
+    const expected = await app.inject({
+      method: 'GET',
+      url: '/api/v1/source-documents?kind=upd&unaccepted=true&limit=200',
+    });
+    const expectedIds = (expected.json() as { items: Array<{ id: string }> }).items.map((i) => i.id);
+    expect(expectedIds).not.toContain(waybill);
+    expect(expectedIds).not.toContain(notProcessed);
+    expect(expectedIds).not.toContain(supplementary);
+
+    const all = await app.inject({ method: 'GET', url: '/api/v1/source-documents?limit=200' });
+    const allIds = (all.json() as { items: Array<{ id: string }> }).items.map((i) => i.id);
+    expect(allIds).toEqual(expect.arrayContaining([waybill, notProcessed, supplementary]));
+  });
+
+  it('документ со сломавшимся разбором из «Ожидаемых» не пропадает', async () => {
+    // Граница отбора: заглушка — это пара (статус, код). У обычного документа,
+    // разбор которого сорвался, статус parse_failed, и прятать его нельзя —
+    // менеджер по нему работает.
+    const [broken] = await sql<{ id: string }[]>`
+      INSERT INTO source_documents
+        (kind, is_technical, direction, origin, status, site_id, queued_at, processed_at,
+         parse_error_code, original_filename)
+      VALUES ('upd', false, 'inbound', 'manual_pdf', 'parse_failed', ${siteId}, now(), now(),
+        'not_processed', 'broken.pdf')
+      RETURNING id`;
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/source-documents?kind=upd&unaccepted=true&limit=200',
+    });
+    const ids = (res.json() as { items: Array<{ id: string }> }).items.map((i) => i.id);
+    expect(ids).toContain(broken!.id);
+  });
+
+  it('накладная закрывается без суммы: её в документе может не быть вовсе', async () => {
+    // CHECK source_upd_required требует сумму только с УПД. Требовать её с
+    // накладной значило бы навсегда запереть такой документ в архиве.
+    const [row] = await sql<{ id: string }[]>`
+      INSERT INTO source_documents
+        (kind, is_technical, direction, origin, status, site_id, queued_at, processed_at,
+         parse_error_code, original_filename)
+      VALUES ('transport_waybill', false, 'inbound', 'manual_pdf', 'needs_resolution', ${siteId},
+        now(), now(), 'no_waybill_found', 'wb.jpg')
+      RETURNING id`;
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/source-documents/${row!.id}`,
+      payload: { resolveManually: true, docNumber: 'ТН-5', docDate: '2026-08-01' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: 'parsed', parseErrorCode: null });
+  });
+
+  it('исходник заглушки реально скачивается через /file/raw', async () => {
+    // Видимая строка без доступного файла ничего не стоит: ради файла всё и
+    // затевалось. Проверяем именно поток через бэкенд, а не выдачу ссылки:
+    // маршрут `/file` только подписывает URL и наличие объекта не проверяет.
+    const id = await document('no_waybill_found');
+    const s3Key = `upload/${id}/wb.jpg`;
+    await sql`INSERT INTO source_document_attachments
+        (source_document_id, s3_key, filename, mime_type, size_bytes, role)
+      VALUES (${id}, ${s3Key}, 'wb.jpg', 'image/jpeg', 12, 'original')`;
+
+    const body = Buffer.from('jpeg-bytes');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(body, { status: 200, headers: { 'content-type': 'image/jpeg' } }),
+      );
+
+    try {
+      const res = await app.inject({ method: 'GET', url: `/api/v1/source-documents/${id}/file/raw` });
+      expect(res.statusCode).toBe(200);
+      expect(res.rawPayload.equals(body)).toBe(true);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('поиск находит заглушку по имени файла — номера у неё нет', async () => {
+    // Поиск шёл только по doc_number, поэтому любой непустой запрос прятал
+    // ровно те документы, которые менеджер и ищет глазами по названию файла.
+    const id = await document('unrecognized_type');
+    await sql`UPDATE source_documents SET original_filename = 'скан-квитанции.pdf' WHERE id = ${id}`;
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/source-documents?q=квитанц&limit=200',
+    });
+    const ids = (res.json() as { items: Array<{ id: string }> }).items.map((i) => i.id);
+    expect(ids).toContain(id);
   });
 });

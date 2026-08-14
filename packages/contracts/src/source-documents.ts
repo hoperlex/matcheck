@@ -114,8 +114,64 @@ export const SourceParseErrorCodeSchema = z.enum([
   // ТОЛЬКО чтобы файл не исчез из виду: распознавать больше нечем, разбирает
   // человек и закрывает вопрос кнопкой «Разобрано вручную».
   'unrecognized_type',
+  // Сопроводительный документ: сертификат, паспорт качества, декларация,
+  // проформа — либо файл из зоны «Дополнительные документы». Реквизиты из него
+  // не нужны, разбирать нечего, поэтому документ заводится сразу archived. Он
+  // существует только затем, чтобы файл был виден и открывался.
+  'supplementary',
+  // Файл принят, но документа из него не вышло по технической причине: не
+  // скачался из S3, упал разбор, не дошёл до классификации. Отдельный код, а не
+  // internal_error: последний носят и обычные документы со сломавшимся
+  // разбором, а их прятать из «Ожидаемых» и /sync нельзя.
+  'not_processed',
 ]);
 export type SourceParseErrorCode = z.infer<typeof SourceParseErrorCodeSchema>;
+
+/**
+ * Документ-заглушка: запись, заведённая ради того, чтобы принятый файл был
+ * виден и открывался, а не ради его содержимого. Реквизитов у неё нет.
+ *
+ * Отбор ВСЕГДА по паре (статус, код), а не по одному коду: `not_processed`
+ * рядом с `parse_failed` — это обычный документ, у которого сорвался разбор, и
+ * из выдач он исчезать не должен.
+ */
+export const STUB_ERROR_CODES = [
+  'unrecognized_type',
+  'no_waybill_found',
+  'not_processed',
+  'supplementary',
+] as const satisfies readonly SourceParseErrorCode[];
+
+/**
+ * Заглушки, которые ЖДУТ человека: он открывает файл, вводит реквизиты или
+ * закрывает вопрос кнопкой «Разобрано вручную».
+ *
+ * `supplementary` сюда не входит: он заводится сразу archived, разбирать в нём
+ * нечего.
+ */
+export const ACTIONABLE_STUB_CODES = [
+  'unrecognized_type',
+  'no_waybill_found',
+  'not_processed',
+] as const satisfies readonly SourceParseErrorCode[];
+
+/** Заглушка ли это — см. STUB_ERROR_CODES про пару (статус, код). */
+export function isStubDocument(row: {
+  status: string | null;
+  parseErrorCode: string | null;
+}): boolean {
+  if (row.status !== 'needs_resolution' && row.status !== 'archived') return false;
+  return (STUB_ERROR_CODES as readonly string[]).includes(row.parseErrorCode ?? '');
+}
+
+/** Заглушка, ожидающая ручного разбора. Archived сюда не попадает по статусу. */
+export function isActionableStub(row: {
+  status: string | null;
+  parseErrorCode: string | null;
+}): boolean {
+  if (row.status !== 'needs_resolution') return false;
+  return (ACTIONABLE_STUB_CODES as readonly string[]).includes(row.parseErrorCode ?? '');
+}
 export const SourceDirectionSchema = z.enum(['inbound', 'outbound']);
 export type SourceDirection = z.infer<typeof SourceDirectionSchema>;
 

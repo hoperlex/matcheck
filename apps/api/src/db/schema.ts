@@ -1039,6 +1039,17 @@ export const bundleImportItems = pgTable(
     manualDocumentId: uuid('manual_document_id').references((): AnyPgColumn => sourceDocuments.id, {
       onDelete: 'set null',
     }),
+    // Документ, заведённый по этому файлу автоматически, — в том числе
+    // заглушка для файла, из которого распознавания не вышло.
+    //
+    // Дублирует created_document_ids намеренно: тот jsonb без FK, и после
+    // удаления документа продолжает указывать в пустоту. Проверять по нему
+    // «документ уже есть» нельзя, а здесь БД сама обнулит ссылку. Пара
+    // (stub_document_id, resolved_at) и отвечает на вопрос «нужно ли заводить
+    // документ по этому файлу»: NULL + NULL — нужно, см. stub-documents.ts.
+    stubDocumentId: uuid('stub_document_id').references((): AnyPgColumn => sourceDocuments.id, {
+      onDelete: 'set null',
+    }),
     metadata: jsonb('metadata'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -1051,6 +1062,11 @@ export const bundleImportItems = pgTable(
     index('bundle_import_items_unresolved_idx')
       .on(t.effectiveStatus)
       .where(sql`${t.effectiveStatus} is not null and ${t.resolvedAt} is null`),
+    // Нужен самой БД: без него ON DELETE SET NULL сканирует реестр целиком на
+    // каждое удаление документа.
+    index('bundle_import_items_stub_document_idx')
+      .on(t.stubDocumentId)
+      .where(sql`${t.stubDocumentId} is not null`),
   ],
 );
 

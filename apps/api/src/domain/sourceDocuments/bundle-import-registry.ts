@@ -43,6 +43,12 @@ export type RegistryRow = {
    * реестре корневого пакета лежат и чужие строки (сертификаты, накладные).
    */
   subBundleId: string | null;
+  /**
+   * Документ, заведённый по этому файлу, — с настоящим FK, в отличие от
+   * createdDocumentIds. Пара (stubDocumentId, resolvedAt) отвечает на вопрос
+   * «нужно ли заводить документ»: см. stub-documents.ts.
+   */
+  stubDocumentId: string | null;
   resolvedAt: Date | null;
   createdAt: Date;
 };
@@ -65,6 +71,7 @@ const columns = {
   reason: bundleImportItems.reason,
   effectiveStatus: bundleImportItems.effectiveStatus,
   subBundleId: bundleImportItems.subBundleId,
+  stubDocumentId: bundleImportItems.stubDocumentId,
   resolvedAt: bundleImportItems.resolvedAt,
   createdAt: bundleImportItems.createdAt,
 };
@@ -196,6 +203,41 @@ export async function markSubBundleItemsFailed(
       ),
     )
     .returning({ id: bundleImportItems.id, filename: bundleImportItems.sourceFilename });
+}
+
+/**
+ * Дочерний пакет накладной кончился ничем, но файл всё-таки стал видимым
+ * документом-заглушкой → родительская строка реестра.
+ *
+ * Противоположность markSubBundleItemsFailed: тот помечает файл потерянным,
+ * этот — дошедшим до результата. Разница важна для блока «дополнительные
+ * файлы»: строка с effective_status='failed' попала бы туда (isExtraFileRow), и
+ * файл висел бы приложением к собственному документу.
+ */
+export async function markSubBundleItemDocumented(
+  db: Db,
+  subBundleId: string,
+  documentId: string,
+  reason: string,
+): Promise<{ id: string }[]> {
+  return db
+    .update(bundleImportItems)
+    .set({
+      stubDocumentId: documentId,
+      createdDocumentIds: [documentId],
+      status: 'created',
+      effectiveStatus: 'created',
+      reason,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(bundleImportItems.subBundleId, subBundleId),
+        // Разобранное человеком не переоткрываем.
+        isNull(bundleImportItems.resolvedAt),
+      ),
+    )
+    .returning({ id: bundleImportItems.id });
 }
 
 /**

@@ -30,10 +30,7 @@ import {
   autoAssignContractorFromBuyer,
   manualRecipientSource,
 } from './domain/sourceDocuments/resolve-contractor.js';
-import {
-  consigneeOwnIdentity,
-  normalizePartyForDirectory,
-} from './domain/sourceDocuments/party-directory-guard.js';
+import { normalizePartyForDirectory } from './domain/sourceDocuments/party-directory-guard.js';
 import {
   buildQueueConnection,
   S3_CLEANUP_QUEUE,
@@ -96,8 +93,14 @@ import { classifyFile, type FileClassification } from './domain/edo/document-rou
 import {
   finalizeStaleRegistryItems,
   markSubBundleItemsFailed,
+  markSubBundleItemDocumented,
   selectRegistryRows,
 } from './domain/sourceDocuments/bundle-import-registry.js';
+import {
+  ensureDocumentForRegistryRow,
+  selectRowsWithoutDocument,
+  stubReasonForRow,
+} from './domain/sourceDocuments/stub-documents.js';
 import { classifyImageKind } from './domain/edo/vision-classifier.js';
 import {
   assemblyDispatchKeyOf,
@@ -1158,27 +1161,10 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // /counterparties?role=contractor, справочник на планшете) должен оставаться
   // тем, что выбирают люди, иначе туда натечёт каждый грузополучатель из УПД.
   const consignee = parsed.consignee;
-  // Реквизиты грузополучателя проходят проверку на подстановку: модель по
-  // промпту v9 копирует ИНН и КПП покупателя даже когда наименование другое
-  // (см. consigneeOwnIdentity). Скопированные — отбрасываем, иначе документ
-  // покажет чужой ИНН и свяжется с чужой организацией.
-  const consigneeIdentity = consigneeOwnIdentity(consignee, recipient);
-  if (consignee?.inn && !consigneeIdentity.inn) {
-    logger.warn(
-      {
-        docNumber: parsed.docNumber,
-        consigneeName: consignee.name,
-        consigneeInn: consignee.inn,
-        recipientName: recipient?.name,
-        recipientInn: recipient?.inn,
-      },
-      'consignee identity dropped: looks copied from buyer',
-    );
-  }
   const consigneeId =
-    consignee && consigneeIdentity.inn && consignee.name
+    consignee && consignee.inn && consignee.name
       ? await findOrCreateCounterparty(
-          { inn: consigneeIdentity.inn, kpp: consigneeIdentity.kpp, name: consignee.name },
+          { inn: consignee.inn, kpp: consignee.kpp ?? null, name: consignee.name },
           'customer',
         )
       : null;
@@ -1193,11 +1179,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // «что стояло в документе». Нормализацию оставляем читателю.
     supplierInnRaw: supplier?.inn ?? null,
     buyerInnRaw: recipient?.inn ?? null,
-    //
-    // Исключение — грузополучатель: если его реквизиты скопированы у
-    // покупателя, «сырое» значение перестаёт отвечать на этот вопрос (в графе 4
-    // ИНН не печатают вовсе), поэтому пишем то, что осталось после проверки.
-    consigneeInnRaw: consigneeIdentity.inn,
+    consigneeInnRaw: consignee?.inn ?? null,
   };
 
   // Проверка дубля. Считаем дублем УПД с тем же (supplier_directory_id,
@@ -1655,39 +1637,67 @@ async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise
     throw err;
   }
 
-  // Пакет не содержит распознаваемых документов → parse_failed,
-  // ни одной source_document не создаём (техническую удалит DELETE
-  // ниже только если есть documents; здесь оставляем её для аудита).
+  // Пакет не содержит распознаваемых документов. Реальных документов не
+  // создаём, но техническую запись ПОКАЗЫВАЕМ: под ней уже висит оригинал, и
+  // это единственное, что связывает файл с интерфейсом. Пока она оставалась
+  // технической, файл пропадал совсем — список отбирает по is_technical=false,
+  // а sourceDocumentVisible на техническую отвечает 404 даже на запрос
+  // исходника. Новую заглушку заводить нельзя: получился бы второй документ на
+  // тот же файл.
   if (parsed.documents.length === 0) {
-    await db
-      .update(sourceDocuments)
-      .set({
-        status: 'parse_failed',
-        parseErrorCode: 'no_waybill_found',
-        llmProviderId,
-        llmConfidence: '0',
-        processedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(sourceDocuments.id, techId));
-    await db
-      .update(sourceBundles)
-      .set({
-        status: 'parse_failed',
-        parseErrorCode: 'no_waybill_found',
-        parseErrorMessage: 'в пакете не найдено ни ТН, ни ОС-2',
-        updatedAt: new Date(),
-      })
-      .where(eq(sourceBundles.id, bundleId));
-    log.warn('no waybill found in bundle');
-    // Пакет мог быть развёрнут router'ом из файла родительской поставки —
-    // тогда без этой отметки файл исчезал из виду совсем (документа нет,
-    // родительская строка реестра осталась в created).
-    await markSubBundleItemFailed(
-      bundleId,
-      'накладная не распознана — ни ТН, ни ОС-2 не найдены',
-      log,
-    );
+    // Показывать нечего, если оригинал не прикреплён (сбой при приёме,
+    // legacy-пакет). Тогда оставляем запись технической и помечаем строку
+    // реестра — файл хотя бы виден во вкладке «Без документов».
+    const [original] = await db
+      .select({ id: sourceDocumentAttachments.id })
+      .from(sourceDocumentAttachments)
+      .where(
+        and(
+          eq(sourceDocumentAttachments.sourceDocumentId, techId),
+          eq(sourceDocumentAttachments.role, 'original'),
+        ),
+      )
+      .limit(1);
+    const reason = 'накладная не распознана — ни ТН, ни ОС-2 не найдены';
+
+    await db.transaction(async (tx) => {
+      await tx
+        .update(sourceDocuments)
+        .set({
+          isTechnical: !original,
+          // Разбор состоялся и кончился ничем: дальше файл ждёт человека, а не
+          // очередь. Отсюда needs_resolution, а не parse_failed — по этой паре
+          // (статус, код) документ и опознаётся как заглушка.
+          status: original ? 'needs_resolution' : 'parse_failed',
+          parseErrorCode: 'no_waybill_found',
+          parseErrorDetails: { message: reason },
+          llmProviderId,
+          llmConfidence: '0',
+          processedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceDocuments.id, techId));
+      await tx
+        .update(sourceBundles)
+        .set({
+          status: 'parse_failed',
+          parseErrorCode: 'no_waybill_found',
+          parseErrorMessage: 'в пакете не найдено ни ТН, ни ОС-2',
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceBundles.id, bundleId));
+      // Пакет мог быть развёрнут router'ом из файла родительской поставки —
+      // родительская строка реестра осталась в created и без отметки не знает
+      // об исходе. Документ теперь есть, поэтому строка «дошла до результата»,
+      // а не «провалилась»: иначе тот же файл повис бы ещё и в блоке
+      // «дополнительные файлы» собственной карточки.
+      if (original) {
+        await markSubBundleItemDocumented(tx as unknown as typeof db, bundleId, techId, reason);
+      } else {
+        await markSubBundleItemsFailed(tx as unknown as typeof db, bundleId, reason);
+      }
+    });
+    log.warn({ visible: Boolean(original) }, 'no waybill found in bundle');
     await notifySourceDocumentUpdated(techId);
     return;
   }
@@ -1955,6 +1965,51 @@ async function markSubBundleItemFailed(
   } catch (err) {
     log.error({ err, subBundleId }, 'не удалось пометить строку реестра failed');
   }
+}
+
+/**
+ * Инвариант видимости: по каждому принятому файлу заводим документ, если его
+ * так и не появилось.
+ *
+ * Ошибка по одному файлу не должна ронять разбор всей пачки и не должна
+ * прерывать проход по остальным: инвариант перепроверяется периодически
+ * (repairStuckJobs), поэтому здесь достаточно записать её в лог.
+ *
+ * Возвращает число заведённых документов — router считает их в docCount пакета.
+ */
+async function ensureDocumentsForBundleFiles(
+  bundleId: string,
+  bundle: typeof sourceBundles.$inferSelect,
+  log: WorkerLog,
+): Promise<number> {
+  let created = 0;
+  try {
+    const rows = await selectRowsWithoutDocument(db, { bundleId });
+    for (const row of rows) {
+      try {
+        const res = await ensureDocumentForRegistryRow({
+          db,
+          row,
+          bundle,
+          reason: stubReasonForRow(row),
+        });
+        if (res.action === 'created' || res.action === 'promoted') {
+          created++;
+          log.info(
+            { file: row.filename, documentId: res.documentId, how: res.action },
+            'файл без документа → показан',
+          );
+        } else if (res.action === 'missing_object') {
+          log.warn({ file: row.filename, s3Key: row.s3Key }, 'файл без документа: объекта нет в S3');
+        }
+      } catch (err) {
+        log.error({ err, file: row.filename }, 'не удалось завести документ по файлу');
+      }
+    }
+  } catch (err) {
+    log.error({ err, bundleId }, 'проверка «у каждого файла есть документ» не выполнена');
+  }
+  return created;
 }
 
 /**
@@ -2503,6 +2558,15 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
   // (legacy-строка без ключа S3, до входов вообще не дошедшая), невидима
   // нигде — ни документа, ни дополнительного файла.
   await closeStaleRegistryItems(bundleId, log);
+
+  // Инвариант видимости: у каждого принятого файла есть документ. Ветки выше
+  // его местами не создают — зона «Дополнительные документы», сертификат,
+  // сорвавшееся скачивание, исключение по файлу, строка, не дошедшая до
+  // разбора. Такой файл лежит в S3, а менеджер видит «ничего не пришло».
+  // Проверка одна на все ветки: латать каждую по отдельности ненадёжно, седьмая
+  // появится со следующей фичей.
+  const documented = await ensureDocumentsForBundleFiles(bundleId, bundle, log);
+  createdCount += documented;
 
   // Пакет со сборкой ещё не разобран: документы появятся, когда дочерний пакет
   // опубликует поколение. Ставить 'parsed' сейчас — значит объявить готовым
@@ -4124,11 +4188,6 @@ worker.on('failed', async (job, err) => {
       // родительская строка реестра осталась бы в created и файл исчез бы из
       // виду. Для не-дочернего пакета обновлять нечего — запрос ничего не
       // найдёт.
-      await markSubBundleItemFailed(
-        bundleId,
-        `разбор накладной не удался: ${err.message}`,
-        logger,
-      );
       // Строки самого пакета, не дошедшие до терминального решения (краш
       // router-job в середине пачки), тоже нельзя оставлять «в процессе».
       await closeStaleRegistryItems(bundleId, logger, {
@@ -4142,18 +4201,62 @@ worker.on('failed', async (job, err) => {
         .from(sourceDocuments)
         .where(and(eq(sourceDocuments.bundleId, bundleId), eq(sourceDocuments.isTechnical, true)))
         .limit(1);
+      // У дочернего пакета накладной техническая запись — единственное, что
+      // связывает файл с интерфейсом: оригинал висит именно на ней. Ретраи
+      // исчерпаны, распознавать больше нечем — показываем её человеку, иначе
+      // файл исчезнет совсем.
+      //
+      // Только для waybill-пакета: у корневого router-пакета техническая запись
+      // штатно удаляется в конце разбора, а у дочернего пакета СБОРКИ под
+      // техническими документами лежат сегменты — их снимает rollbackUpdAssembly,
+      // и показывать их поштучно нельзя (комплект публикуется целиком).
+      const [failedBundle] = await db
+        .select({ kind: sourceBundles.kind })
+        .from(sourceBundles)
+        .where(eq(sourceBundles.id, bundleId))
+        .limit(1);
+      const [original] = tech
+        ? await db
+            .select({ id: sourceDocumentAttachments.id })
+            .from(sourceDocumentAttachments)
+            .where(
+              and(
+                eq(sourceDocumentAttachments.sourceDocumentId, tech.id),
+                eq(sourceDocumentAttachments.role, 'original'),
+              ),
+            )
+            .limit(1)
+        : [];
+      const showTech = Boolean(tech && original && failedBundle?.kind === 'waybill');
+      const itemReason = `разбор накладной не удался: ${err.message}`;
+
       if (tech) {
         await db
           .update(sourceDocuments)
           .set({
-            status: 'parse_failed',
-            parseErrorCode: 'internal_error',
+            isTechnical: !showTech,
+            status: showTech ? 'needs_resolution' : 'parse_failed',
+            parseErrorCode: showTech ? 'not_processed' : 'internal_error',
             parseErrorDetails: { message: err.message },
             processedAt: new Date(),
             updatedAt: new Date(),
           })
           .where(eq(sourceDocuments.id, tech.id));
         await notifySourceDocumentUpdated(tech.id);
+      }
+      // Пакет мог быть дочерним (накладная из router'а): без отметки
+      // родительская строка реестра осталась бы в created и файл исчез бы из
+      // виду. Если техническая запись стала видимой — исход строки «документ
+      // есть», иначе «провалился». Для не-дочернего пакета обновлять нечего:
+      // запрос ничего не найдёт.
+      if (showTech && tech) {
+        try {
+          await markSubBundleItemDocumented(db, bundleId, tech.id, itemReason);
+        } catch (markErr) {
+          logger.error({ err: markErr, bundleId }, 'не удалось отметить строку реестра документом');
+        }
+      } else {
+        await markSubBundleItemFailed(bundleId, itemReason, logger);
       }
       return;
     }

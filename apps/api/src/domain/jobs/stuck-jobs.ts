@@ -42,6 +42,11 @@ import {
   finalizeStaleRegistryItems,
   selectBundlesWithStaleItems,
 } from '../sourceDocuments/bundle-import-registry.js';
+import {
+  ensureDocumentForRegistryRow,
+  selectRowsWithoutDocument,
+  stubReasonForRow,
+} from '../sourceDocuments/stub-documents.js';
 
 /** Сколько запись должна провисеть в `queued`, чтобы считаться потерянной. */
 export const STUCK_AFTER_MINUTES = 45;
@@ -63,6 +68,8 @@ export type RepairResult = {
   /** Сегменты сборки логических УПД, переставленные заново. */
   segments: number;
   finalizedItems: number;
+  /** Принятые файлы, оставшиеся без документа: заведены заглушки. */
+  stubbedFiles: number;
 };
 
 /**
@@ -234,7 +241,63 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
   }
 
   const finalizedItems = await finalizeIncompleteBundles(deps);
-  return { documents, bundles: repairedBundles, segments, finalizedItems };
+  const stubbedFiles = await ensureDocumentsForOrphanFiles(deps);
+  return { documents, bundles: repairedBundles, segments, finalizedItems, stubbedFiles };
+}
+
+/**
+ * Страховка инварианта видимости: принятый файл остался без документа.
+ *
+ * Штатно заглушку заводит сам router-job, но между разбором и записью есть
+ * окно, а дочерний пакет накладной мог умереть молча — тогда файл лежит в S3, а
+ * менеджер видит «ничего не пришло».
+ *
+ * Отбор внутри (selectRowsWithoutDocument) делится надвое: обычные строки и
+ * строки, чей дочерний пакет завершился без документов. Одним условием их не
+ * покрыть — у файлов, уехавших в дочерний пакет, документ висит не на строке
+ * реестра, и created_document_ids для этого пути не заполняется вовсе.
+ *
+ * Закрытые человеком (resolved_at) не трогаем: там же лежит и удаление
+ * документа — воскрешать его нельзя, S3-объекта за ним уже нет.
+ */
+export async function ensureDocumentsForOrphanFiles(deps: RepairDeps): Promise<number> {
+  const rows = await selectRowsWithoutDocument(deps.db, {
+    olderThanMinutes: STUCK_AFTER_MINUTES,
+    limit: STUCK_BATCH,
+  });
+  let stubbed = 0;
+  for (const row of rows) {
+    const [bundle] = await deps.db
+      .select()
+      .from(sourceBundles)
+      .where(eq(sourceBundles.id, row.bundleId))
+      .limit(1);
+    if (!bundle) continue;
+    try {
+      const res = await ensureDocumentForRegistryRow({
+        db: deps.db,
+        row,
+        bundle,
+        reason: stubReasonForRow(row),
+      });
+      if (res.action === 'created' || res.action === 'promoted') {
+        stubbed += 1;
+        deps.log?.warn?.(
+          { bundleId: row.bundleId, file: row.filename, documentId: res.documentId, how: res.action },
+          'repair: принятый файл остался без документа — теперь виден',
+        );
+      } else if (res.action === 'missing_object') {
+        deps.log?.warn?.(
+          { bundleId: row.bundleId, file: row.filename },
+          'repair: файла нет в хранилище — документ не заводим',
+        );
+      }
+    } catch (err) {
+      // Сетевая ошибка S3 или гонка: следующий прогон повторит.
+      deps.log?.warn?.({ err, file: row.filename }, 'repair: заглушку завести не удалось');
+    }
+  }
+  return stubbed;
 }
 
 /**

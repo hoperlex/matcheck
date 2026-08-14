@@ -26,6 +26,7 @@ import {
   ErrorResponseSchema,
   getDocumentDisplayStatus,
   getDocumentDisplayStatusLabel,
+  isActionableStub,
 } from '@matcheck/contracts';
 import {
   counterparties,
@@ -60,6 +61,10 @@ import {
   selectRegistryRows,
   type RegistryRow,
 } from '../domain/sourceDocuments/bundle-import-registry.js';
+import {
+  closeRegistryRowsForDeletedDocument,
+  notStubDocumentSql,
+} from '../domain/sourceDocuments/stub-documents.js';
 import {
   resolveContractorOpIds,
   sourceDocumentContractorPredicate,
@@ -632,6 +637,11 @@ async function deleteUpdWithRefsCheck(
       siteId: doc?.siteId ?? null,
       deletedByUserId,
     });
+    // Закрываем строку реестра ДО удаления документа, в той же транзакции.
+    // Иначе проверка «у каждого принятого файла есть документ» увидит файл без
+    // документа и заведёт заглушку заново — причём призраком: ключи этого
+    // документа уходят ниже в очередь на физическое удаление из S3.
+    await closeRegistryRowsForDeletedDocument(tx, id, deletedByUserId);
     await tx.delete(sourceDocuments).where(eq(sourceDocuments.id, id));
   });
 
@@ -691,7 +701,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         }
       }
       if (direction) conditions.push(eq(sourceDocuments.direction, direction));
-      if (q) conditions.push(ilike(sourceDocuments.docNumber, `%${q}%`));
+      // Поиск и по имени файла: у заглушки номера нет вовсе, и поиск только по
+      // doc_number прятал бы её при любом непустом запросе — то есть ровно те
+      // документы, которые менеджер и ищет глазами по названию файла.
+      if (q) {
+        conditions.push(
+          drSql`(${ilike(sourceDocuments.docNumber, `%${q}%`)}
+                 or ${ilike(sourceDocuments.originalFilename, `%${q}%`)})`,
+        );
+      }
       // inspector_kpp видит только документы своего объекта.
       // Без объекта — пустой результат.
       if (req.user?.role === 'inspector_kpp') {
@@ -727,14 +745,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             .from(shipmentSources);
           conditions.push(drSql`${sourceDocuments.id} not in ${linkedToShipment}`);
         }
-        // Нераспознанный файл — заглушка под ручной разбор, реквизитов в ней
-        // нет. В «Ожидаемых» на приёмке и КПП ей не место: инспектор не сможет
-        // по ней ничего принять, а при массовой загрузке фото такие строки
-        // забьют рабочий список. partial_parse остаётся ожидаемой — там шапка
-        // распознана, не хватает только позиций.
-        conditions.push(
-          drSql`${sourceDocuments.parseErrorCode} is distinct from 'unrecognized_type'`,
-        );
+        // Заглушка под ручной разбор (тип не определён, накладная не читается,
+        // сертификат, технический сбой) реквизитов не содержит. В «Ожидаемых»
+        // на приёмке и КПП ей не место: инспектор не сможет по ней ничего
+        // принять, а при массовой загрузке фото такие строки забьют рабочий
+        // список. partial_parse остаётся ожидаемой — там шапка распознана, не
+        // хватает только позиций.
+        conditions.push(notStubDocumentSql());
       }
       // Волна 1C — серверные фильтры (contractor/supplier/site/даты). Опциональны:
       // добавляются в conditions, только если параметр задан → при пустых
@@ -1272,7 +1289,16 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // пакета: накладные router разворачивает в дочерний, а сертификаты висят
       // на родителе — иначе в карточке накладной блок был бы пуст. У документа
       // без пакета (загружен поштучно) дополнительных файлов быть не может.
-      const extraFiles = sd.bundleId ? await selectExtraFiles(app.db, sd.bundleId) : [];
+      //
+      // Строку, из которой вырос САМ этот документ, из блока убираем: файл уже
+      // показан как оригинал документа, и висеть приложением к себе же он не
+      // должен. Актуально для заглушек — у них исход строки «документ есть», но
+      // у исторических строк исход мог остаться прежним.
+      const extraFiles = sd.bundleId
+        ? (await selectExtraFiles(app.db, sd.bundleId)).filter(
+            (r) => r.stubDocumentId !== sd.id && !r.createdDocumentIds.includes(sd.id),
+          )
+        : [];
 
       return {
         ...base,
@@ -2774,12 +2800,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         upd.parseErrorDetails = null;
       }
 
-      // Завершение ручного разбора нераспознанного файла. Только по явному
-      // флагу: правка полей сама по себе не значит, что человек закончил.
+      // Завершение ручного разбора заглушки. Только по явному флагу: правка
+      // полей сама по себе не значит, что человек закончил.
       const resolvingManually =
-        req.body.resolveManually === true &&
-        sd.status === 'needs_resolution' &&
-        sd.parseErrorCode === 'unrecognized_type';
+        req.body.resolveManually === true && isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
       if (resolvingManually) {
         // Куда переводить — решают сами данные, и выбора тут по сути нет:
         // ограничение source_upd_required запрещает УПД в статусе `parsed` без
@@ -2790,8 +2814,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         const nextDocNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
         const nextDocDate = upd.docDate !== undefined ? upd.docDate : sd.docDate;
         const nextTotalSum = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
+        // Комплект реквизитов зависит от вида: CHECK source_upd_required
+        // требует сумму только с УПД. В накладной суммы может не быть вовсе
+        // (перемещение ОС, отпуск материалов), и требовать её значило бы
+        // навсегда запереть такой документ в архиве.
+        const needsTotalSum = sd.kind === 'upd';
         const complete =
-          nextDocNumber != null && nextDocDate != null && nextTotalSum != null;
+          nextDocNumber != null &&
+          nextDocDate != null &&
+          (!needsTotalSum || nextTotalSum != null);
         upd.status = complete ? 'parsed' : 'archived';
         if (complete) {
           // Стал полноценным документом — прошлая ошибка распознавания больше

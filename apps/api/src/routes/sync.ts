@@ -30,6 +30,7 @@ import {
   units,
   users,
 } from '../db/schema.js';
+import { notStubDocumentSql } from '../domain/sourceDocuments/stub-documents.js';
 
 const QuerySchema = z.object({
   since: z.string().datetime().optional(),
@@ -158,14 +159,15 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       const sdWhereParts = [
         gte(sourceDocuments.updatedAt, effectiveSince),
         eq(sourceDocuments.isTechnical, false),
-        // Заглушка «не распознано» (файл принят, тип определить не удалось)
-        // существует только ради того, чтобы файл не исчез из виду у менеджера.
-        // Реквизитов в ней нет, принять по ней нечего, а мобильный список
+        // Документы-заглушки (файл принят, распознать не удалось: тип не
+        // определён, накладная не читается, сертификат, технический сбой)
+        // существуют только ради того, чтобы файл не исчез из виду у менеджера.
+        // Реквизитов в них нет, принять по ним нечего, а мобильный список
         // приёмки отбирает документы по объекту и дате поставки, без оглядки на
         // статус, — на планшете КПП такие строки просто засорили бы «Сегодня».
         // Разобранный вручную документ приедет обычной дельтой: код ошибки
         // очищается, updated_at бампается.
-        drSql`${sourceDocuments.parseErrorCode} is distinct from 'unrecognized_type'`,
+        notStubDocumentSql(),
       ];
       if (inspectorOnly && userSiteId) {
         sdWhereParts.push(eq(sourceDocuments.siteId, userSiteId));

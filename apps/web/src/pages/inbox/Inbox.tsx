@@ -30,7 +30,11 @@ import type {
   SourceDocumentBulkDeleteResponse,
   SourceDocumentListResponseSchema,
 } from '@matcheck/contracts';
-import { getDocumentDisplayStatus } from '@matcheck/contracts';
+import {
+  getDocumentDisplayStatus,
+  isActionableStub,
+  isStubDocument,
+} from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api, apiDownload, ApiError } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
@@ -68,12 +72,12 @@ const UNFINISHED_STATUSES: ReadonlyArray<Row['status']> = [
 /**
  * «Живой» ли документ — то есть ждём ли мы, что сервер сам изменит его статус.
  *
- * Пара (статус, код), а не один статус: нераспознанный файл висит в
- * needs_resolution до ручного разбора, и по одному статусу опрос на 4 секунды
- * не выключился бы никогда.
+ * Пара (статус, код), а не один статус: заглушка висит в needs_resolution до
+ * ручного разбора, и по одному статусу опрос на 4 секунды не выключился бы
+ * никогда. Автоматических попыток по ней больше не будет — распознавать нечем.
  */
 function isUnfinished(row: Pick<Row, 'status' | 'parseErrorCode'>): boolean {
-  if (row.status === 'needs_resolution' && row.parseErrorCode === 'unrecognized_type') return false;
+  if (isStubDocument(row)) return false;
   return UNFINISHED_STATUSES.includes(row.status);
 }
 
@@ -126,15 +130,33 @@ function KindTag({ kind }: { kind: Row['kind'] }) {
 }
 
 /**
- * Файл из обязательной зоны, тип которого распознать не удалось. Документ по
- * нему заводится пустым — только чтобы файл не исчез из виду; ни номера, ни
- * позиций в нём нет, и «УПД» в колонке «Тип» было бы враньём.
+ * Файл, по которому документ заведён пустым — только чтобы он не исчез из виду;
+ * ни номера, ни позиций в нём нет, а тип неизвестен, и «УПД» в колонке «Тип»
+ * было бы враньём.
+ *
+ * Накладной, которую не смог прочитать парсер, здесь нет: её тип известен из
+ * классификации, и тег «Накладная» для неё правдив.
  */
 function isUnrecognized(row: Pick<Row, 'parseErrorCode'>): boolean {
   // По коду, а не по статусу: закрытый вручную файл уходит в архив, но код при
   // нём остаётся (по нему запись не уезжает на планшет и не попадает в
   // «Ожидаемые») — тип у неё так и остался неизвестным.
-  return row.parseErrorCode === 'unrecognized_type';
+  return (
+    row.parseErrorCode === 'unrecognized_type' ||
+    row.parseErrorCode === 'supplementary' ||
+    row.parseErrorCode === 'not_processed'
+  );
+}
+
+/** Подсказка под тегом «не распознано»: у каждой заглушки своя причина. */
+function stubHint(code: Row['parseErrorCode']): string {
+  if (code === 'no_waybill_found') {
+    return 'Накладную прочитать не удалось — ни ТН, ни ОС-2 не распознаны. Откройте файл и разберите вручную';
+  }
+  if (code === 'not_processed') {
+    return 'Файл принят, но распознать его не удалось. Откройте файл и разберите вручную';
+  }
+  return 'Тип документа определить не удалось — откройте файл и разберите вручную';
 }
 
 function StatusTag({
@@ -207,19 +229,29 @@ function StatusTag({
       );
     }
     case 'archived':
+      // Сопроводительный документ (сертификат, паспорт качества, проформа, файл
+      // из зоны «Дополнительные») не «убран из работы», а изначально в ней не
+      // участвует: реквизитов в нём нет, разбирать нечего. Отдельный тег, чтобы
+      // менеджер не искал, кто и зачем отправил документ в архив.
+      if (row.parseErrorCode === 'supplementary') {
+        return (
+          <Tooltip title="Сопроводительный документ — распознавание не требуется, файл доступен в карточке">
+            <Tag color="default">доп. документ</Tag>
+          </Tooltip>
+        );
+      }
       return <Tag>архив</Tag>;
     case 'needs_resolution':
-      if (row.parseErrorCode === 'unrecognized_type') {
+      if (isActionableStub(row)) {
         // Автоматических попыток больше не будет: и классификатор, и vision уже
         // отказались. Строка живёт, пока человек не откроет файл и не закроет
         // вопрос. «Разобрано» без реквизитов уводит документ в архив (файл
-        // остаётся доступным), с введёнными номером, датой и суммой — в
-        // «обработано».
+        // остаётся доступным), с введёнными реквизитами — в «обработано».
         return (
           // wrap={false} во всех составных статусах: с переносом тег и
           // действие вставали в две строки и высота строки таблицы скакала.
           <Space size={4} wrap={false}>
-            <Tooltip title="Тип документа определить не удалось — откройте файл и разберите вручную">
+            <Tooltip title={stubHint(row.parseErrorCode)}>
               <Tag color="default" style={{ marginInlineEnd: 0 }}>
                 не распознано
               </Tag>
@@ -672,7 +704,13 @@ export default function InboxPage() {
 
   const renderDocNumber = (v: string | null, r: Row) => {
     if (v) return v;
-    if ((r.status === 'queued' || r.status === 'processing') && r.originalFilename) {
+    // Номера нет ни у документа в работе, ни у заглушки — и во втором случае
+    // его не появится вовсе. Без имени файла такие строки превращаются в пачку
+    // одинаковых прочерков, где не отличить сертификат от нечитаемой накладной,
+    // а именно по имени менеджер их и ищет.
+    const showFilename =
+      r.status === 'queued' || r.status === 'processing' || isStubDocument(r);
+    if (showFilename && r.originalFilename) {
       return (
         <Typography.Text type="secondary" italic>
           {r.originalFilename}

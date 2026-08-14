@@ -305,4 +305,21 @@ suite('upload-documents — фиксация текущего поведения
     });
     expect(mocks.queueAdd).not.toHaveBeenCalled();
   });
+
+  it('после сбоя S3 та же пачка грузится заново целиком', async () => {
+    // Приём атомарен: частично залитую пачку мы не сохраняем. Это и делает
+    // повтор рабочим — bundleAlreadyProcessed считает пакет отработанным при
+    // наличии ЛЮБОГО документа, поэтому «спасённый» одиночный файл запер бы
+    // остальные навсегда: повторная загрузка вернула бы «уже загружено».
+    mocks.putObject.mockRejectedValueOnce(new Error('S3 down'));
+    const failed = await upload(onePdf('retry'));
+    expect(failed.statusCode).toBe(503);
+
+    mocks.putObject.mockResolvedValue(undefined);
+    const again = await upload(onePdf('retry'));
+    expect(again.statusCode).toBe(201);
+    expect(again.json()).toMatchObject({ alreadyExists: false });
+    // Задание поставлено — то есть файл действительно пошёл в разбор.
+    expect(mocks.queueAdd).toHaveBeenCalledTimes(1);
+  });
 });

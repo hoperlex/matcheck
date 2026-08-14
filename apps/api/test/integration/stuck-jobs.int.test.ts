@@ -16,8 +16,18 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Db } from '../../src/db/client.js';
+
+// Проверка «у каждого принятого файла есть документ» ходит в S3 за наличием
+// объекта. Без мока набор зависел бы от сети и реального бакета.
+const s3 = vi.hoisted(() => ({ headObject: vi.fn().mockResolvedValue(true) }));
+vi.mock('../../src/domain/storage/s3.signer.js', () => ({
+  headObject: s3.headObject,
+  presign: vi.fn().mockResolvedValue('https://s3.example/signed'),
+  putObject: vi.fn().mockResolvedValue(undefined),
+  getObject: vi.fn(),
+}));
 import {
   assemblyDispatchKeyOf,
   bundleDispatchKeyOf,
@@ -218,7 +228,70 @@ suite('подбор зависших заданий (реальный PostgreSQL
 
   it('пустой прогон ничего не делает', async () => {
     const res = await repair();
-    expect(res).toEqual({ documents: 0, bundles: 0, segments: 0, finalizedItems: 0 });
+    expect(res).toEqual({
+      documents: 0,
+      bundles: 0,
+      segments: 0,
+      finalizedItems: 0,
+      stubbedFiles: 0,
+    });
+  });
+
+  it('принятый файл без документа получает заглушку', async () => {
+    // Router мог не довести файл до документа (сертификат, сбой скачивания,
+    // упавший дочерний пакет). Файл лежит в S3, а менеджер видит «ничего не
+    // пришло» — repair это и чинит.
+    const bundleId = randomUUID();
+    const hash = createHash('sha256').update(bundleId).digest('hex');
+    await sql`INSERT INTO source_bundles
+        (id, bundle_hash, kind, direction, site_id, status, active_upload_generation, updated_at)
+      VALUES (${bundleId}, ${hash}, 'mixed', 'inbound', ${siteId}, 'parsed', 0,
+              now() - ${ageMinutes(STUCK_AFTER_MINUTES + 10)}::interval)`;
+    await sql`INSERT INTO bundle_import_items
+        (bundle_id, source_filename, input_s3_key, mime_type, size_bytes, upload_generation,
+         processing_mode, status, updated_at)
+      VALUES (${bundleId}, 'cert.pdf', ${`upload/${bundleId}/cert.pdf`}, 'application/pdf', 10, 0,
+              'store_only', 'skipped', now() - ${ageMinutes(STUCK_AFTER_MINUTES + 10)}::interval)`;
+
+    const res = await repair();
+    expect(res.stubbedFiles).toBe(1);
+
+    const docs = await sql<{ status: string; parse_error_code: string; is_technical: boolean }[]>`
+      SELECT status, parse_error_code, is_technical FROM source_documents
+       WHERE bundle_id = ${bundleId}`;
+    expect(docs).toHaveLength(1);
+    expect(docs[0]).toMatchObject({
+      status: 'archived',
+      parse_error_code: 'supplementary',
+      is_technical: false,
+    });
+
+    // Второй прогон не должен плодить документы на тот же файл.
+    expect((await repair()).stubbedFiles).toBe(0);
+    expect(
+      await sql`SELECT id FROM source_documents WHERE bundle_id = ${bundleId}`,
+    ).toHaveLength(1);
+  });
+
+  it('файла нет в хранилище — документ не заводим', async () => {
+    // Документ без файла выглядит рабочим, но не открывается: это хуже, чем
+    // честная пометка «исходник недоступен».
+    s3.headObject.mockResolvedValueOnce(false);
+    const bundleId = randomUUID();
+    const hash = createHash('sha256').update(bundleId).digest('hex');
+    await sql`INSERT INTO source_bundles
+        (id, bundle_hash, kind, direction, site_id, status, active_upload_generation, updated_at)
+      VALUES (${bundleId}, ${hash}, 'mixed', 'inbound', ${siteId}, 'parsed', 0,
+              now() - ${ageMinutes(STUCK_AFTER_MINUTES + 10)}::interval)`;
+    await sql`INSERT INTO bundle_import_items
+        (bundle_id, source_filename, input_s3_key, mime_type, size_bytes, upload_generation,
+         processing_mode, status, updated_at)
+      VALUES (${bundleId}, 'gone.pdf', ${`upload/${bundleId}/gone.pdf`}, 'application/pdf', 10, 0,
+              'store_only', 'skipped', now() - ${ageMinutes(STUCK_AFTER_MINUTES + 10)}::interval)`;
+
+    const res = await repair();
+    expect(res.stubbedFiles).toBe(0);
+    expect(await sql`SELECT id FROM source_documents WHERE bundle_id = ${bundleId}`).toHaveLength(0);
   });
 
   // ─── Сборка логических УПД ────────────────────────────────────────────────
