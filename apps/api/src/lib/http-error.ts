@@ -11,11 +11,21 @@
  */
 export class HttpError extends Error {
   readonly statusCode: number;
+  /**
+   * Машиночитаемые подробности отказа — уходят в тело ответа рядом с
+   * `error`/`message`, но только у 4xx (см. lib/error-handler.ts).
+   *
+   * Нужны там, где клиенту недостаточно текста: конфликт правки матрицы прав
+   * возвращает список ячеек с фактическими значениями, и разбирать его из
+   * человеческой фразы было бы нельзя.
+   */
+  readonly details?: unknown;
 
-  constructor(statusCode: number, message: string) {
+  constructor(statusCode: number, message: string, details?: unknown) {
     super(message);
     this.name = 'HttpError';
     this.statusCode = statusCode;
+    this.details = details;
   }
 }
 

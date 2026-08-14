@@ -240,9 +240,84 @@ export function rebaseDraft(
   return { base: nextBase, draft: nextDraft };
 }
 
+/**
+ * Принять ответ сервера после сохранения ОДНОЙ роли.
+ *
+ * Сохранение больше не отправляет всю матрицу, поэтому и принимать её целиком
+ * нельзя: `setDraft(server)` стёр бы черновики соседних вкладок, над которыми
+ * человек ещё работает. Сохранённая роль берётся с сервера целиком (её правки
+ * уже применены), остальные проходят обычную ре-базу.
+ */
+export function commitRole(
+  base: Matrix,
+  draft: Matrix,
+  server: Matrix,
+  role: ManagedRole,
+): { base: Matrix; draft: Matrix } {
+  const next = rebaseDraft(base, draft, server);
+  return {
+    base: adoptRole(next.base, server, role),
+    draft: adoptRole(next.draft, server, role),
+  };
+}
+
+/**
+ * Откатить одну роль к серверу — «Отменить» на её вкладке.
+ *
+ * И черновик, и снимок: после отказа от правок расхождению взяться неоткуда.
+ * Соседние роли не трогаем.
+ */
+export function resetRole(
+  base: Matrix,
+  draft: Matrix,
+  server: Matrix,
+  role: ManagedRole,
+): { base: Matrix; draft: Matrix } {
+  return {
+    base: adoptRole(base, server, role),
+    draft: adoptRole(draft, server, role),
+  };
+}
+
+/**
+ * Сдвинуть снимок на фактические значения конфликтных ячеек.
+ *
+ * Черновик не трогаем: галочки — решение человека, и сервер отказал не потому,
+ * что оно неверное. Двигается только представление о том, «что было», — иначе
+ * следующее сохранение уйдёт с тем же устаревшим `expected` и получит тот же
+ * отказ, сколько ни повторяй.
+ */
+export function applyConflicts(
+  base: Matrix,
+  conflicts: readonly { role: ManagedRole; page: PageId; action: PageAction; actual: boolean }[],
+): Matrix {
+  const next = cloneMatrix(base);
+  for (const c of conflicts) {
+    const row = next[c.role]?.[c.page];
+    if (!row) continue;
+    row[c.action] = c.actual;
+  }
+  return next;
+}
+
 /** Есть ли несохранённые правки у конкретной роли (точка рядом с её именем). */
 export function roleHasChanges(server: Matrix, draft: Matrix, role: ManagedRole): boolean {
   return diffMatrix(server, draft).some((c) => c.role === role);
+}
+
+/** Копия матрицы, где одна роль заменена серверной. Остальные — как были. */
+function adoptRole(target: Matrix, server: Matrix, role: ManagedRole): Matrix {
+  const pages = server[role];
+  if (!pages) return target;
+  return { ...target, [role]: clonePages(pages) };
+}
+
+function clonePages(pages: Record<PageId, PagePermissions>): Record<PageId, PagePermissions> {
+  const copy = {} as Record<PageId, PagePermissions>;
+  for (const page of Object.keys(pages) as PageId[]) {
+    copy[page] = clonePage(pages[page]!);
+  }
+  return copy;
 }
 
 /** Глубокая копия матрицы: черновик правится независимо от ответа сервера. */
@@ -251,11 +326,7 @@ export function cloneMatrix(m: Matrix): Matrix {
   for (const role of Object.keys(m) as ManagedRole[]) {
     const pages = m[role];
     if (!pages) continue;
-    const copy = {} as Record<PageId, PagePermissions>;
-    for (const page of Object.keys(pages) as PageId[]) {
-      copy[page] = clonePage(pages[page]!);
-    }
-    out[role] = copy;
+    out[role] = clonePages(pages);
   }
   return out;
 }

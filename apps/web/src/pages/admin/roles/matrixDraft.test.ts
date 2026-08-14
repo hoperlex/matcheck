@@ -14,13 +14,16 @@ import {
 } from '@matcheck/contracts';
 import {
   applyCell,
+  applyConflicts,
   applyGroup,
   cellState,
   cloneMatrix,
+  commitRole,
   diffMatrix,
   groupState,
   isExtension,
   rebaseDraft,
+  resetRole,
   roleHasChanges,
   type CatalogEntry,
   type Matrix,
@@ -329,5 +332,90 @@ describe('конкурентная правка: снимок и перебаз�
       (c) => c.page === 'references.sites' && c.action === 'create',
     );
     expect(mine).toMatchObject({ allowed: false, expected: true });
+  });
+});
+
+describe('сохранение одной роли', () => {
+  const matrix = () => cloneMatrix(DEFAULT_MATRIX as unknown as Matrix);
+
+  it('дельта фильтруется по активной роли', () => {
+    // Регресс: «Сохранить» отправлял правки ВСЕХ вкладок, поэтому застрявшая
+    // ячейка одной роли отменяла транзакцию и правки другой не доезжали.
+    const base = matrix();
+    const draft = matrix();
+    draft.manager['references.sites'].delete = true;
+    draft.monitor['references.sites'].view = true;
+
+    const mine = diffMatrix(base, draft).filter((c) => c.role === 'manager');
+
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ role: 'manager', page: 'references.sites', action: 'delete' });
+  });
+
+  it('commitRole принимает сохранённую роль и бережёт черновик соседней', () => {
+    const base = matrix();
+    const draft = matrix();
+    draft.manager['references.sites'].delete = true;
+    draft.monitor['references.sites'].view = true;
+
+    // Сервер применил только менеджера — монитор мы не отправляли.
+    const server = matrix();
+    server.manager['references.sites'].delete = true;
+
+    const next = commitRole(base, draft, server, 'manager');
+
+    expect(diffMatrix(next.base, next.draft).some((c) => c.role === 'manager')).toBe(false);
+    expect(next.draft.manager['references.sites'].delete).toBe(true);
+    // Незавершённая работа на соседней вкладке обязана остаться.
+    expect(next.draft.monitor['references.sites'].view).toBe(true);
+    expect(roleHasChanges(next.base, next.draft, 'monitor')).toBe(true);
+  });
+
+  it('resetRole откатывает только свою роль', () => {
+    const base = matrix();
+    const draft = matrix();
+    draft.manager['references.sites'].delete = true;
+    draft.monitor['references.sites'].view = true;
+
+    const next = resetRole(base, draft, matrix(), 'manager');
+
+    expect(next.draft.manager['references.sites'].delete).toBe(false);
+    expect(next.draft.monitor['references.sites'].view).toBe(true);
+    expect(roleHasChanges(next.base, next.draft, 'manager')).toBe(false);
+  });
+});
+
+describe('разрешение конфликта', () => {
+  const matrix = () => cloneMatrix(DEFAULT_MATRIX as unknown as Matrix);
+
+  it('сдвиг снимка на фактическое значение убирает вечный отказ', () => {
+    // Снимок отстал: в БД право уже выдано, а вкладка думает, что его нет.
+    // Без сдвига базы повтор уходил бы с тем же expected и получал тот же 409.
+    const base = matrix();
+    const draft = matrix();
+    draft.monitor['references.sites'].view = true;
+
+    const before = diffMatrix(base, draft);
+    expect(before[0]).toMatchObject({ allowed: true, expected: false });
+
+    const shifted = applyConflicts(base, [
+      { role: 'monitor', page: 'references.sites', action: 'view', actual: true },
+    ]);
+
+    // Значение уже такое, какого добивался человек, — правка исчезает как
+    // применённая, повторное сохранение не нужно вовсе.
+    expect(diffMatrix(shifted, draft)).toHaveLength(0);
+  });
+
+  it('черновик при сдвиге снимка не трогается', () => {
+    const base = matrix();
+    const draft = matrix();
+    draft.monitor['references.sites'].view = true;
+
+    applyConflicts(base, [
+      { role: 'monitor', page: 'references.sites', action: 'view', actual: true },
+    ]);
+
+    expect(draft.monitor['references.sites'].view).toBe(true);
   });
 });

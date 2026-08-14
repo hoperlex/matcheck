@@ -34,9 +34,15 @@ export function errorHandler(err: FastifyError, req: FastifyRequest, reply: Fast
   // Сообщения HttpError — часть контракта («Некорректная дата в arrivedTo»),
   // их отдаём всегда.
   const hideDetails = status >= 500 && env.NODE_ENV === 'production';
+  // `details` отдаём только у НАШИХ 4xx. Два ограничения, и оба намеренные:
+  // произвольная ошибка с уже выставленным 4xx (например, из библиотеки) могла
+  // бы принести наружу внутренние данные, а у 5xx подробности закрыты всегда —
+  // там в тексте оказывается SQL с параметрами.
+  const details = err instanceof HttpError && status < 500 ? err.details : undefined;
   reply.send({
     error: error.name ?? 'internal_error',
     message: hideDetails ? 'Internal error' : error.message,
+    ...(details !== undefined ? { details } : {}),
   });
 }
 

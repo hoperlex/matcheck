@@ -22,6 +22,7 @@ import {
   expandBlockReason,
   PAGE_GROUPS,
   PAGE_GROUP_LABELS,
+  RolePermissionConflictDetailsSchema,
   type ManagedRole,
   type PageAction,
   type PageGroup,
@@ -34,15 +35,19 @@ import { ResponsiveTable } from '../../../shared/ui/ResponsiveTable';
 import { roleLabel } from '../../../shared/constants/roleLabels';
 import {
   applyCell,
+  applyConflicts,
   applyGroup,
   cellState,
   cloneMatrix,
+  commitRole,
   diffMatrix,
   groupState,
   isExtension,
   rebaseDraft,
+  resetRole,
   roleHasChanges,
   type CatalogEntry,
+  type Change,
   type Matrix,
 } from './matrixDraft';
 
@@ -56,6 +61,21 @@ const ROLE_TABS: UserRole[] = ['admin', ...MANAGED_ROLES];
  */
 function isConflict(err: unknown): boolean {
   return err instanceof ApiError && (err.code === 'stale_cell' || err.code === 'stale_role');
+}
+
+/**
+ * Ячейки, из-за которых сервер отказал, с их фактическими значениями.
+ *
+ * `null` означает «разобрать не удалось»: так отвечает сервер прошлой версии,
+ * который подробностей не присылал. Веб и API выкатываются раздельно, и без
+ * этой ветки новый интерфейс со старым сервером снова заперся бы в отказе,
+ * который нечем исправить.
+ */
+function conflictCells(err: unknown) {
+  if (!(err instanceof ApiError) || err.code !== 'stale_cell') return null;
+  const body = err.payload as { details?: unknown } | undefined;
+  const parsed = RolePermissionConflictDetailsSchema.safeParse(body?.details);
+  return parsed.success ? parsed.data.conflicts : null;
 }
 
 /**
@@ -87,6 +107,13 @@ export default function RolesPage() {
   const query = useQuery({
     queryKey: ['role-permissions'],
     queryFn: () => api.get<RolePermissionsResponse>('/admin/role-permissions'),
+    // Фоновое обновление по возврату фокуса здесь вредит: страница держит
+    // черновик, и ответ GET, вышедшего в полёт до сохранения, возвращал кеш к
+    // прежней матрице уже ПОСЛЕ ответа PATCH. Снимок при этом уезжал на
+    // значение, которого в БД давно нет, и следующее сохранение отбивалось
+    // «ячейку изменил другой администратор» без всякого другого администратора.
+    // Свежесть обеспечивает сверка expected на сервере, а не опрос.
+    refetchOnWindowFocus: false,
   });
 
   const server = useMemo(
@@ -127,8 +154,19 @@ export default function RolesPage() {
     // сама собой. Значения читаются на момент прихода нового ответа сервера.
   }, [server]);
 
+  // Роль, права которой сейчас редактируются. На вкладке «Администратор» её
+  // нет: `role` продолжает хранить последнюю managed-роль, и без этого различия
+  // кнопки сохранения работали бы там от имени скрытой вкладки.
+  const activeRole: ManagedRole | null = adminSelected ? null : role;
+
+  // Дельта по ВСЕМ ролям — для точек на вкладках и предупреждения об уходе.
   const changes = baseSnapshot && draft ? diffMatrix(baseSnapshot, draft) : [];
   const dirty = changes.length > 0;
+  // Дельта активной вкладки — именно она уходит в PATCH. Раньше сохранялись все
+  // роли разом: одна застрявшая ячейка отменяла транзакцию целиком, и правки
+  // соседней роли не доезжали никогда, хотя человек их и не редактировал.
+  const roleChanges = activeRole ? changes.filter((c) => c.role === activeRole) : [];
+  const roleDirty = roleChanges.length > 0;
 
   // Уход со страницы с несохранёнными правками. useBlocker здесь не
   // применяем — вкладка живёт внутри AdminLayout, и достаточно предупредить
@@ -144,24 +182,73 @@ export default function RolesPage() {
     return () => window.removeEventListener('beforeunload', handler);
   }, [dirty]);
 
+  /**
+   * Принять ответ мутации: кеш, черновик и снимок.
+   *
+   * `savedRole` приходит из variables мутации, а не из состояния: пока запрос в
+   * полёте, вкладку могли переключить, и `role` указывал бы уже на другую роль —
+   * подтверждённой оказалась бы не та.
+   *
+   * cancelQueries перед setQueryData обязателен: GET, ушедший в полёт до
+   * мутации, иначе вернётся позже ответа и перезапишет свежую матрицу старой.
+   */
+  const acceptResponse = async (res: RolePermissionsResponse, savedRole: ManagedRole) => {
+    await qc.cancelQueries({ queryKey: ['role-permissions'] });
+    qc.setQueryData(['role-permissions'], res);
+    const server = res.matrix as Matrix;
+    if (!draft || !baseSnapshot) {
+      setDraft(cloneMatrix(server));
+      setBaseSnapshot(cloneMatrix(server));
+      return;
+    }
+    // Черновики соседних ролей переживают сохранение: принимать всю матрицу
+    // целиком нельзя, человек мог наставить галочек и на других вкладках.
+    const next = commitRole(baseSnapshot, draft, server, savedRole);
+    setDraft(next.draft);
+    setBaseSnapshot(next.base);
+  };
+
+  /**
+   * Отказ по конфликту. Сообщение о нём — не «сосед вас опередил»: чаще всего
+   * расходится собственная вкладка, и прежняя формулировка вводила в
+   * заблуждение.
+   */
+  const handleConflict = (err: Error, savedRole: ManagedRole): boolean => {
+    const cells = conflictCells(err);
+    if (cells) {
+      // Двигаем снимок точечно на фактические значения — черновик остаётся
+      // выбором человека. После этого повтор уходит с верным expected.
+      setBaseSnapshot((b) => (b ? applyConflicts(b, cells) : b));
+      message.error('Часть ячеек на сервере уже изменилась — проверьте отмеченные и повторите');
+      void query.refetch();
+      return true;
+    }
+    if (isConflict(err)) {
+      // Подробностей нет — это сервер прошлой версии. Двигать снимок вслепую
+      // нечем, поэтому откатываем роль к серверу и говорим об этом прямо:
+      // иначе человек жал бы «Сохранить» по кругу с тем же результатом.
+      if (server && draft && baseSnapshot) {
+        const next = resetRole(baseSnapshot, draft, server, savedRole);
+        setDraft(next.draft);
+        setBaseSnapshot(next.base);
+      }
+      message.error('Состояние на сервере изменилось — правки этой роли отменены, повторите');
+      void query.refetch();
+      return true;
+    }
+    return false;
+  };
+
   const save = useMutation({
-    mutationFn: (payload: typeof changes) =>
-      api.patch<RolePermissionsResponse>('/admin/role-permissions', { changes: payload }),
-    onSuccess: (res) => {
-      // Ответ — уже пересчитанная матрица: берём её как новую основу и
-      // черновик, иначе следующий diff считался бы от устаревшего снимка.
-      qc.setQueryData(['role-permissions'], res);
-      setDraft(cloneMatrix(res.matrix as Matrix));
-      setBaseSnapshot(cloneMatrix(res.matrix as Matrix));
+    mutationFn: (vars: { role: ManagedRole; changes: Change[] }) =>
+      api.patch<RolePermissionsResponse>('/admin/role-permissions', { changes: vars.changes }),
+    onSuccess: async (res, vars) => {
+      await acceptResponse(res, vars.role);
       message.success('Права сохранены');
     },
-    onError: (err: Error) => {
+    onError: (err: Error, vars) => {
+      if (handleConflict(err, vars.role)) return;
       message.error(err.message);
-      // Конфликт правок: у соседа своя версия ячейки. Перечитываем матрицу,
-      // чтобы человек увидел актуальное состояние и решил заново, — иначе он
-      // будет жать «Сохранить» по кругу с тем же результатом.
-      // Код отказа лежит в ApiError.code; err.name у него — обычное «Error».
-      if (isConflict(err)) void query.refetch();
     },
   });
 
@@ -173,17 +260,22 @@ export default function RolesPage() {
       api.delete<RolePermissionsResponse>(
         `/admin/role-permissions/${target}?expectedRows=${overrideRowsOf(target)}`,
       ),
-    onSuccess: (res) => {
-      qc.setQueryData(['role-permissions'], res);
-      setDraft(cloneMatrix(res.matrix as Matrix));
-      setBaseSnapshot(cloneMatrix(res.matrix as Matrix));
+    onSuccess: async (res, target) => {
+      await acceptResponse(res, target);
       message.success('Права роли сброшены к значениям по умолчанию');
     },
-    onError: (err: Error) => {
+    onError: (err: Error, target) => {
+      if (handleConflict(err, target)) return;
       message.error(err.message);
-      if (isConflict(err)) void query.refetch();
     },
   });
+
+  /**
+   * Любая мутация в полёте. Общий флаг, а не два раздельных: иначе сохранение и
+   * сброс можно запустить одновременно, а клик по галочке после нажатия
+   * «Сохранить» пропал бы — ответ принимает роль с сервера целиком.
+   */
+  const busy = save.isPending || reset.isPending;
 
   if (query.isLoading || !draft || !server) {
     return (
@@ -216,7 +308,9 @@ export default function RolesPage() {
     const box = (
       <Checkbox
         checked={checked}
-        disabled={state !== 'editable'}
+        // busy: ответ мутации принимает роль с сервера целиком, и клик,
+        // сделанный после нажатия «Сохранить», был бы молча съеден.
+        disabled={state !== 'editable' || busy}
         onChange={(e) => toggleCell(entry, action, e.target.checked)}
       />
     );
@@ -270,7 +364,7 @@ export default function RolesPage() {
 
   // Среди несохранённых правок есть выдача прав на раздел «Администрирование».
   // Такое сохранение подтверждаем отдельно: это полномочия уровня админа.
-  const grantsAdminAccess = changes.some((c) => {
+  const grantsAdminAccess = roleChanges.some((c) => {
     if (!c.allowed) return false;
     const entry = catalog.find((e) => e.id === c.page);
     return entry?.group === ADMIN_GROUP && !entry.base[c.action]?.includes(c.role);
@@ -295,6 +389,9 @@ export default function RolesPage() {
                   <Button
                     key={r}
                     type={active ? 'primary' : 'default'}
+                    // Пока мутация в полёте, роль менять нельзя: ответ принимает
+                    // роль из variables, и уехавшая вкладка сбивала бы с толку.
+                    disabled={busy}
                     onClick={() => {
                       setAdminSelected(isAdminRole);
                       if (!isAdminRole) setRole(r as ManagedRole);
@@ -308,15 +405,20 @@ export default function RolesPage() {
               })}
             </Space>
             <Space wrap>
-              {dirty && <Tag color="orange">Есть несохранённые изменения</Tag>}
+              {/* Тег — про активную вкладку. Общий на все роли висел и тогда,
+                  когда правки лежали на соседней, и читался как «сохранение не
+                  прошло». */}
+              {roleDirty && <Tag color="orange">Есть несохранённые изменения</Tag>}
               <Button
-                // «Отменить» возвращает к актуальному серверу и переносит туда
-                // же снимок: после отказа от правок расхождению взяться неоткуда.
+                // Откат только активной роли: черновики соседних вкладок — это
+                // работа, которую человек не просил выбрасывать.
                 onClick={() => {
-                  setDraft(cloneMatrix(server));
-                  setBaseSnapshot(cloneMatrix(server));
+                  if (!activeRole || !baseSnapshot) return;
+                  const next = resetRole(baseSnapshot, draft, server, activeRole);
+                  setDraft(next.draft);
+                  setBaseSnapshot(next.base);
                 }}
-                disabled={!dirty || save.isPending}
+                disabled={!roleDirty || busy}
               >
                 Отменить
               </Button>
@@ -324,10 +426,10 @@ export default function RolesPage() {
                 title={`Сбросить права роли «${roleLabel(role)}» к значениям по умолчанию?`}
                 okText="Сбросить"
                 cancelText="Отмена"
-                onConfirm={() => reset.mutate(role)}
-                disabled={isAdminView}
+                onConfirm={() => activeRole && reset.mutate(activeRole)}
+                disabled={!activeRole || busy}
               >
-                <Button danger disabled={isAdminView} loading={reset.isPending}>
+                <Button danger disabled={!activeRole || busy} loading={reset.isPending}>
                   Сбросить к дефолту
                 </Button>
               </Popconfirm>
@@ -342,18 +444,22 @@ export default function RolesPage() {
                   }
                   okText="Выдать"
                   cancelText="Отмена"
-                  onConfirm={() => save.mutate(changes)}
+                  onConfirm={() =>
+                    activeRole && save.mutate({ role: activeRole, changes: roleChanges })
+                  }
                 >
-                  <Button type="primary" disabled={!dirty} loading={save.isPending}>
+                  <Button type="primary" disabled={!roleDirty || busy} loading={save.isPending}>
                     Сохранить
                   </Button>
                 </Popconfirm>
               ) : (
                 <Button
                   type="primary"
-                  disabled={!dirty}
+                  disabled={!roleDirty || busy}
                   loading={save.isPending}
-                  onClick={() => save.mutate(changes)}
+                  onClick={() =>
+                    activeRole && save.mutate({ role: activeRole, changes: roleChanges })
+                  }
                 >
                   Сохранить
                 </Button>
@@ -396,7 +502,7 @@ export default function RolesPage() {
                       key={action}
                       checked={st.checked}
                       indeterminate={st.indeterminate}
-                      disabled={st.disabled}
+                      disabled={st.disabled || busy}
                       onChange={(e) => toggleGroup(entries, action, e.target.checked)}
                     >
                       <Typography.Text type="secondary">

@@ -686,7 +686,13 @@ export const RolePermissionsPatchSchema = z.object({
          * же: интерфейс держит черновик, а список сервера обновляется фоновым
          * рефетчем, и правка соседа успевает попасть в «мою» дельту как
          * возврат к прежнему значению. Сверка с expected внутри транзакции
-         * превращает это в 409 вместо тихого отката чужой работы.
+         * ловит это вместо тихого отката чужой работы.
+         *
+         * Расхождение не равно отказу. Для булева права `allowed = !expected`,
+         * поэтому «на сервере не то, что я видел» почти всегда означает «там уже
+         * стоит то, чего я добиваюсь»: сервер применяет такую ячейку
+         * идемпотентно. 409 остаётся на случай, когда фактическое значение не
+         * совпадает и с желаемым.
          *
          * Необязательное: старый клиент поля не шлёт, для него поведение
          * прежнее — «последний победил».
@@ -698,3 +704,45 @@ export const RolePermissionsPatchSchema = z.object({
     .max(200),
 });
 export type RolePermissionsPatch = z.infer<typeof RolePermissionsPatchSchema>;
+
+/**
+ * Ячейка, на которой сверка `expected` не сошлась, и её ФАКТИЧЕСКОЕ значение.
+ *
+ * `actual` — эффективное право (то, что вернёт `matrix` в ответе), а не сырое
+ * содержимое строки: клиент сдвигает по нему свою базу, и значение, которого он
+ * не увидит в матрице, вернуло бы его в тот же конфликт на следующем сохранении.
+ */
+export const RolePermissionConflictSchema = z.object({
+  role: ManagedRoleSchema,
+  page: PageIdSchema,
+  action: PageActionSchema,
+  actual: z.boolean(),
+});
+export type RolePermissionConflict = z.infer<typeof RolePermissionConflictSchema>;
+
+export const RolePermissionConflictDetailsSchema = z.object({
+  conflicts: z.array(RolePermissionConflictSchema).min(1),
+});
+export type RolePermissionConflictDetails = z.infer<typeof RolePermissionConflictDetailsSchema>;
+
+/**
+ * Ответ 409 у PATCH — отдельной схемой, а не общей ErrorResponseSchema.
+ *
+ * В общей схеме `details` объявлено как `z.unknown()`, и клиенту пришлось бы
+ * разбирать его вслепую. Здесь форма конфликтов — часть контракта.
+ *
+ * Штатным путём этот ответ больше не возникает: расхождение `expected`, при
+ * котором фактическое значение уже совпадает с желаемым, сервер применяет
+ * идемпотентно (см. routes/admin/role-permissions.ts). Остаётся диагностика
+ * аномалий — прямых правок БД и клиентов, присылающих `expected` не от того
+ * значения, которое они меняли.
+ *
+ * `details` необязательное: тем же кодом отвечает `stale_role` на сбросе роли,
+ * у которого поячеечных подробностей нет.
+ */
+export const RolePermissionConflictResponseSchema = z.object({
+  error: z.string(),
+  message: z.string().optional(),
+  details: RolePermissionConflictDetailsSchema.optional(),
+});
+export type RolePermissionConflictResponse = z.infer<typeof RolePermissionConflictResponseSchema>;

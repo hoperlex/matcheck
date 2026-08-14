@@ -385,6 +385,123 @@ suite('матрица прав: админское API (реальный Postgre
     expect(res.statusCode).toBe(200);
   });
 
+  it('устаревший expected при уже применённом значении не отказ, а no-op', async () => {
+    // Ровно то, из-за чего вкладка «Роли» вставала намертво. Снимок в браузере
+    // отстал от БД, и сохранение отбивалось «ячейку изменил другой
+    // администратор» — хотя администратор был один, а значение в БД уже
+    // совпадало с желаемым.
+    //
+    // Для булева права дельта строится только из изменённых ячеек, то есть
+    // allowed = !expected. Значит «в БД не то, что я видел» почти всегда
+    // означает «там уже стоит то, чего я добиваюсь»: отказывать не от чего.
+    const first = await patch([
+      { role: 'manager', page: 'references.units', action: 'edit', allowed: false },
+    ]);
+    expect(first.statusCode).toBe(200);
+    await sql`DELETE FROM auth_events WHERE user_id = ${adminId}`;
+
+    const second = await patch([
+      {
+        role: 'manager',
+        page: 'references.units',
+        action: 'edit',
+        allowed: false,
+        expected: true,
+      },
+    ]);
+
+    expect(second.statusCode).toBe(200);
+    expect(await rowOf('manager', 'references.units')).toMatchObject({ can_edit: false });
+    // Ни повторной записи, ни дубля в журнале: менять было нечего.
+    const [{ count }] = await sql<{ count: string }[]>`
+      SELECT count(*)::text AS count FROM auth_events WHERE user_id = ${adminId}`;
+    expect(count).toBe('0');
+  });
+
+  it('соседние правки того же запроса применяются, а не отменяются', async () => {
+    // Раньше одна застрявшая ячейка роняла транзакцию целиком, и правки
+    // соседней страницы не доезжали никогда.
+    await patch([{ role: 'manager', page: 'references.units', action: 'edit', allowed: false }]);
+
+    const res = await patch([
+      {
+        role: 'manager',
+        page: 'references.units',
+        action: 'edit',
+        allowed: false,
+        expected: true,
+      },
+      {
+        role: 'manager',
+        page: 'references.sites',
+        action: 'edit',
+        allowed: false,
+        expected: true,
+      },
+    ]);
+
+    expect(res.statusCode).toBe(200);
+    expect(await rowOf('manager', 'references.sites')).toMatchObject({ can_edit: false });
+  });
+
+  it('замаскированное расширение дочищается: сверка идёт по эффективному праву', async () => {
+    // Строку можно записать и прямым UPDATE в psql. Подрядчику запись не
+    // выдаётся нигде, поэтому резолвер отдаёт такую ячейку как false — а сырое
+    // значение в строке остаётся true.
+    //
+    // Клиент видит false и присылает expected: false. Сверяй мы сырое значение,
+    // подтвердить ячейку было бы нельзя никаким expected — вечный 409 без
+    // единого способа его снять.
+    await sql`
+      INSERT INTO role_page_permissions (role, page_id, can_view, can_create)
+      VALUES ('contractor', 'references.sites', false, true)`;
+    app.permissions.invalidateLocal();
+
+    const res = await patch([
+      {
+        role: 'contractor',
+        page: 'references.sites',
+        action: 'create',
+        allowed: false,
+        expected: false,
+      },
+    ]);
+
+    expect(res.statusCode).toBe(200);
+    // Снятие расширения — не расширение, поэтому проходит; строка чистится, а
+    // не остаётся мусором, который резолвер прячет.
+    expect(await rowOf('contractor', 'references.sites')).toMatchObject({ can_create: false });
+  });
+
+  it('409 перечисляет ВСЕ конфликтные ячейки с их значениями', async () => {
+    // Остаётся для аномалий: expected прислан не от того значения, которое
+    // меняли. Собираем весь список — по одной ячейке за раз клиент чинил бы
+    // состояние столькими повторами, сколько ячеек разошлось.
+    await patch([
+      { role: 'manager', page: 'references.units', action: 'edit', allowed: false },
+      { role: 'manager', page: 'references.sites', action: 'edit', allowed: false },
+    ]);
+
+    const res = await patch([
+      { role: 'manager', page: 'references.units', action: 'edit', allowed: true, expected: true },
+      { role: 'manager', page: 'references.sites', action: 'edit', allowed: true, expected: true },
+    ]);
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json() as {
+      error: string;
+      details?: { conflicts: { page: string; actual: boolean }[] };
+    };
+    expect(body.error).toBe('stale_cell');
+    expect(body.details?.conflicts).toHaveLength(2);
+    expect(body.details?.conflicts.map((c) => c.page).sort()).toEqual([
+      'references.sites',
+      'references.units',
+    ]);
+    // Фактическое значение нужно клиенту, чтобы сдвинуть свой снимок.
+    expect(body.details?.conflicts.every((c) => c.actual === false)).toBe(true);
+  });
+
   it('сброс к дефолту отменяется, если роль успел изменить другой админ', async () => {
     // Сброс стирает строки целиком: делать это по устаревшей картине нельзя —
     // вместе со своими исчезли бы и чужие правки, о которых человек не знал.
@@ -491,12 +608,29 @@ suite('матрица прав: админское API (реальный Postgre
   it('сброс роли не трогает overrides другой роли', async () => {
     await patch([
       { role: 'manager', page: 'references.sites', action: 'edit', allowed: false },
-      { role: 'monitor', page: 'operations.deliveries', action: 'edit', allowed: false },
+      // Снятие базовой отметки проверки — реальное отклонение от дефолта.
+      // Ячейка, совпадающая с дефолтом, строки больше не создаёт (см. тест ниже).
+      { role: 'monitor', page: 'operations.deliveries', action: 'review', allowed: false },
     ]);
     await app.inject({ method: 'DELETE', url: '/api/v1/admin/role-permissions/manager' });
 
     expect(await rowOf('manager', 'references.sites')).toBeUndefined();
     expect(await rowOf('monitor', 'operations.deliveries')).toBeDefined();
+  });
+
+  it('правка, повторяющая дефолт, строки-отклонения не создаёт', async () => {
+    // Строка в таблице означает «здесь не как в коде». Записывать её, когда
+    // значение совпало с дефолтом, — плодить мусор: он попадал бы в счётчик
+    // overrideRows и мешал бы оптимистичной блокировке сброса.
+    const res = await patch([
+      { role: 'monitor', page: 'operations.deliveries', action: 'edit', allowed: false },
+    ]);
+
+    expect(res.statusCode).toBe(200);
+    expect(await rowOf('monitor', 'operations.deliveries')).toBeUndefined();
+    const [{ count }] = await sql<{ count: string }[]>`
+      SELECT count(*)::text AS count FROM auth_events WHERE user_id = ${adminId}`;
+    expect(count).toBe('0');
   });
 
   it('сохранённое сужение видно в ответе GET', async () => {

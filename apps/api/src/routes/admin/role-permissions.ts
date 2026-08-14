@@ -10,6 +10,7 @@ import {
   PAGE_ACTIONS,
   PAGE_CATALOG,
   PAGE_BY_ID,
+  RolePermissionConflictResponseSchema,
   RolePermissionsPatchSchema,
   RolePermissionsResponseSchema,
   canExpand,
@@ -20,10 +21,11 @@ import {
   type PageAction,
   type PageId,
   type PagePermissions,
+  type RolePermissionConflict,
 } from '@matcheck/contracts';
 import { asZod } from '../../lib/fastify.js';
 import { authEvents, rolePagePermissions } from '../../db/schema.js';
-import { fullMatrix, type OverrideMap } from '../../lib/permissions/matrix.js';
+import { fullMatrix, isAllowed, type OverrideMap } from '../../lib/permissions/matrix.js';
 import { readOverrides, type DbLike } from '../../lib/permissions/store.js';
 import { computeCellCoverage } from '../../lib/permissions/cell-coverage.js';
 import { HttpError, badRequest } from '../../lib/http-error.js';
@@ -46,7 +48,7 @@ type Change = {
   page: PageId;
   action: PageAction;
   allowed: boolean;
-  /** Значение, которое видел клиент. Расхождение с БД = конфликт правок (409). */
+  /** Значение, которое видел клиент. Разбор расхождения — в collectConflicts(). */
   expected?: boolean;
 };
 
@@ -62,14 +64,51 @@ function invalid(code: string, message: string) {
 }
 
 /**
- * Конфликт правок: ячейку изменил другой администратор. 409, а не 400 —
- * запрос корректен, изменилось состояние, и клиенту нужно перечитать матрицу и
- * повторить, а не исправлять данные.
+ * Конфликт правок. 409, а не 400 — запрос корректен, изменилось состояние, и
+ * клиенту нужно перечитать матрицу и повторить, а не исправлять данные.
+ *
+ * `details` несёт ячейки с фактическими значениями: из человеческой фразы
+ * клиент не может сдвинуть свою базу, а без этого он вернётся сюда же на
+ * следующем сохранении.
  */
-function conflict(code: string, message: string) {
-  const err = new HttpError(409, message);
+function conflict(code: string, message: string, details?: unknown) {
+  const err = new HttpError(409, message, details);
   err.name = code;
   return err;
+}
+
+/**
+ * Ячейки, где `expected` разошёлся с фактическим правом НЕПРИМИРИМО.
+ *
+ * Расхождение само по себе конфликтом не является. Дельту клиент строит только
+ * из реально изменённых ячеек, то есть `allowed = !expected`; для булева права
+ * из `actual !== expected` тогда следует `actual === allowed` — на сервере уже
+ * стоит ровно то, чего добивается человек. Отказывать здесь не от чего:
+ * применять нечего, а 409 заодно отменил бы все остальные правки того же
+ * запроса (транзакция одна). Такие ячейки просто пропускаем.
+ *
+ * Остаётся случай `actual !== allowed` — из нынешнего интерфейса недостижимый.
+ * Его дают прямые правки БД и клиенты, приславшие `expected` не от того
+ * значения, которое меняли; вот он и есть конфликт.
+ *
+ * Сверяем ЭФФЕКТИВНОЕ право, а не сырое `{...DEFAULT, ...override}`: клиент
+ * видел матрицу из ответа, а её считает тот же резолвер (locked форсирует в
+ * `true`, запрещённое расширение и неприменимое действие — в `false`). По
+ * сырому значению такие ячейки нельзя было бы подтвердить никаким `expected`.
+ *
+ * Отдельным проходом ДО computeWrites: иначе view_required успел бы выбросить
+ * 400 на первой строке раньше, чем соберётся полный список конфликтов.
+ */
+function collectConflicts(changes: Change[], overrides: OverrideMap): RolePermissionConflict[] {
+  const out: RolePermissionConflict[] = [];
+  for (const c of changes) {
+    if (c.expected === undefined) continue;
+    const actual = isAllowed(overrides, c.role, c.page, c.action);
+    if (actual === c.expected) continue;
+    if (actual === c.allowed) continue;
+    out.push({ role: c.role, page: c.page, action: c.action, actual });
+  }
+  return out;
 }
 
 type Write = {
@@ -103,26 +142,31 @@ function computeWrites(changes: Change[], overrides: OverrideMap): Write[] {
     const existing = overrides.get(`${row.role}:${row.page}`);
     const current: PagePermissions = { ...base, ...(existing ?? {}) };
 
+    // Что клиент ПРОСИЛ, и что мы реально ПИШЕМ, — разные вещи.
+    //
+    // `requested` — все присланные ячейки строки, включая те, что уже в нужном
+    // состоянии. По ним считается итог и работает каскад: «выключи просмотр и
+    // включи редактирование» обязано остаться противоречием (view_required)
+    // независимо от того, было ли редактирование включено заранее.
+    //
+    // `patch` — только реальные изменения. Ячейку, уже равную `allowed`, не
+    // пишем и не аудируем: повторное сохранение того же значения плодило бы
+    // дубли в журнале и двигало updated_at без причины.
+    //
+    // Сравниваем с СЫРЫМ `current`, а не с эффективным правом: у замаскированного
+    // расширения (`stored = true`, резолвер отдаёт `false`) они расходятся, и
+    // пропуск по эффективному оставил бы мусорную строку в БД навсегда.
+    const requested: Partial<Record<PageAction, boolean>> = {};
     const patch: Partial<Record<PageAction, boolean>> = {};
     const audit: Change[] = [];
     for (const c of row.cells) {
-      // Оптимистичная блокировка на уровне ЯЧЕЙКИ. Клиент присылает значение,
-      // которое видел, принимая решение; если в БД уже другое — между чтением
-      // и сохранением эту же ячейку правил кто-то ещё, и молча затирать его
-      // работу нельзя. Проверка здесь, внутри транзакции поверх SELECT ... FOR
-      // UPDATE: снаружи она была бы гонкой сама по себе.
-      if (c.expected !== undefined && current[c.action] !== c.expected) {
-        throw conflict(
-          'stale_cell',
-          `Ячейку ${row.role}:${row.page}:${c.action} успел изменить другой администратор — ` +
-            'обновите страницу и повторите',
-        );
-      }
+      requested[c.action] = c.allowed;
+      if (current[c.action] === c.allowed) continue;
       patch[c.action] = c.allowed;
       audit.push(c);
     }
 
-    const next: PagePermissions = { ...current, ...patch };
+    const next: PagePermissions = { ...current, ...requested };
 
     // Каскад: «Просмотр» — база. Сняли его — гасим остальные сами и
     // пишем производные изменения в аудит. Требовать их в дельте было бы
@@ -137,7 +181,7 @@ function computeWrites(changes: Change[], overrides: OverrideMap): Write[] {
       for (const action of PAGE_ACTIONS) {
         if (action === 'view') continue;
         if (!next[action]) continue;
-        if (patch[action] === true) continue;
+        if (requested[action] === true) continue;
         if (!isActionApplicable(row.page, action)) continue;
         // Заблокированную ячейку каскад не трогает — она всё равно
         // форсируется резолвером, и запись false вводила бы в заблуждение.
@@ -160,6 +204,12 @@ function computeWrites(changes: Change[], overrides: OverrideMap): Write[] {
         `Действия ${dangling.join(', ')} на странице ${row.page} требуют права «Просмотр»`,
       );
     }
+
+    // Писать нечего: все присланные ячейки строки уже в нужном состоянии.
+    // Пропускаем целиком, чтобы не делать UPSERT ради обновления updated_at.
+    // Проверка ПОСЛЕ каскада и dangling: противоречие в запросе обязано
+    // отвергаться, даже если менять по итогу нечего.
+    if (Object.keys(patch).length === 0) continue;
 
     writes.push({ role: row.role, page: row.page, patch, audit });
   }
@@ -240,8 +290,10 @@ export async function rolePermissionRoutes(rawApp: FastifyInstance): Promise<voi
         response: {
           200: RolePermissionsResponseSchema,
           400: ErrorResponseSchema,
-          // Ячейку успел изменить другой администратор — см. conflict().
-          409: ErrorResponseSchema,
+          // Ячейка на сервере имеет другое значение — см. collectConflicts().
+          // Схема своя, а не общая: клиент разбирает список ячеек, чтобы
+          // сдвинуть по нему базу, и `z.unknown()` заставил бы делать это вслепую.
+          409: RolePermissionConflictResponseSchema,
         },
       },
     },
@@ -313,6 +365,24 @@ export async function rolePermissionRoutes(rawApp: FastifyInstance): Promise<voi
       const roles = [...new Set(changes.map((c) => c.role))];
       await app.db.transaction(async (tx) => {
         const overrides = await readOverrides(tx as DbLike, { roles, lock: true });
+
+        // Сверка `expected` — поверх SELECT ... FOR UPDATE, внутри транзакции:
+        // снаружи она была бы гонкой сама по себе. Отдельным проходом до
+        // computeWrites, иначе view_required выбросил бы 400 на первой строке
+        // раньше, чем соберётся весь список.
+        const conflicts = collectConflicts(changes, overrides);
+        if (conflicts.length > 0) {
+          const first = conflicts[0]!;
+          const where = `${first.role}:${first.page}:${first.action}`;
+          const more = conflicts.length > 1 ? ` (и ещё ${conflicts.length - 1})` : '';
+          throw conflict(
+            'stale_cell',
+            `Ячейка ${where}${more} на сервере имеет другое значение — ` +
+              'обновите страницу и повторите',
+            { conflicts },
+          );
+        }
+
         const writes = computeWrites(changes, overrides);
 
         for (const w of writes) {

@@ -3,7 +3,7 @@ import Fastify from 'fastify';
 import { validatorCompiler, type ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 import { registerErrorHandler } from '../src/lib/error-handler.js';
-import { badRequest } from '../src/lib/http-error.js';
+import { badRequest, HttpError } from '../src/lib/http-error.js';
 
 /**
  * Lightweight-приложение: только компилятор валидации + наш обработчик.
@@ -38,6 +38,22 @@ function buildApp() {
   app.get('/reply-403', async (_req, reply) => {
     reply.code(403);
     throw new Error('forbidden');
+  });
+
+  app.get('/throws-409-details', async () => {
+    throw new HttpError(409, 'конфликт', { conflicts: [{ page: 'stats', action: 'view' }] });
+  });
+
+  app.get('/throws-500-details', async () => {
+    throw new HttpError(500, 'сломалось', { sql: 'select * from users where token = $1' });
+  });
+
+  /** Чужая ошибка с 4xx и полем details — деталей отдавать не должны. */
+  app.get('/foreign-with-details', async (_req, reply) => {
+    reply.code(400);
+    const err = new Error('foreign') as Error & { details: unknown };
+    err.details = { secret: 'не для клиента' };
+    throw err;
   });
 
   return app;
@@ -94,6 +110,32 @@ describe('errorHandler', () => {
     const app = buildApp();
     const res = await app.inject({ method: 'GET', url: '/reply-403' });
     expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('4xx HttpError отдаёт details — клиенту нужен разбор, а не фраза', async () => {
+    const app = buildApp();
+    const res = await app.inject({ method: 'GET', url: '/throws-409-details' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().details).toEqual({ conflicts: [{ page: 'stats', action: 'view' }] });
+    await app.close();
+  });
+
+  it('5xx не отдаёт details никогда — в них попадает SQL с параметрами', async () => {
+    const app = buildApp();
+    const res = await app.inject({ method: 'GET', url: '/throws-500-details' });
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).not.toHaveProperty('details');
+    await app.close();
+  });
+
+  it('чужая ошибка с 4xx деталей не получает', async () => {
+    // Поле `details` у произвольной ошибки нам не принадлежит: отдавая его
+    // наружу, мы бы публиковали внутренности библиотек.
+    const app = buildApp();
+    const res = await app.inject({ method: 'GET', url: '/foreign-with-details' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).not.toHaveProperty('details');
     await app.close();
   });
 });
