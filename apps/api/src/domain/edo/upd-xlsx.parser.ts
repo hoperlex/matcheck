@@ -6,7 +6,7 @@ import {
   type UpdPdfParsed,
   type UpdPdfItem,
 } from '@matcheck/contracts';
-import { matchParty } from './upd-party-text.js';
+import { matchParty, nameBeforeAddress } from './upd-party-text.js';
 
 // Локальный парсер УПД из xlsx (без LLM). Поддерживает обе формы:
 //   А — 1С/Элевел 2026 (новая редакция постановления 1137, графы 1–14 с
@@ -365,11 +365,11 @@ function parseParties(lines: string[]): {
       }
     }
     // Грузополучатель (графа 4). ИНН формой не предусмотрен, а название
-    // печатается вместе с адресом — режем по первой запятой (см.
-    // nameBeforeAddress в upd-pdf-local.parser.ts, правило то же).
+    // печатается вместе с адресом — отрезаем адрес общей nameBeforeAddress
+    // (upd-party-text.ts): одно правило на текстовые пути и на vision.
     if (!consigneeName) {
       const m = matchParty(line, /Грузополучатель(?:\s+и\s+его\s+адрес)?:?\s*/, /\(4\)|Покупатель:|ИНН|Валюта:/);
-      if (m) consigneeName = m.split(',')[0]?.trim() || null;
+      if (m) consigneeName = nameBeforeAddress(m);
     }
   }
 

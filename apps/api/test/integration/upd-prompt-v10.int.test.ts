@@ -26,12 +26,15 @@ const ANCHOR =
 /** Сигнал принудительного отката: транзакция обязана откатиться всегда. */
 class Rollback extends Error {}
 
+// Соединение одно на файл, поэтому и закрывается один раз: у каждого suite
+// свой afterAll закрыл бы его после первого набора, и второй падал бы с
+// CONNECTION_ENDED.
+afterAll(async () => {
+  await sql?.end({ timeout: 5 });
+});
+
 suite('миграция 0101: промпт upd v10 (реальный PostgreSQL)', () => {
   const db = sql!;
-
-  afterAll(async () => {
-    await db.end({ timeout: 5 });
-  });
 
   async function migrationSql(): Promise<string> {
     return readFile(
@@ -128,5 +131,107 @@ suite('миграция 0101: промпт upd v10 (реальный PostgreSQL)
         await tx.unsafe(migration);
       }),
     ).rejects.toThrow(/default v10|найдено 0/i);
+  });
+});
+
+/**
+ * Миграция 0102 на настоящем PostgreSQL: дополнение текста v10.
+ *
+ * Здесь проверяется то, чего не увидеть чтением SQL: что правка применяется к
+ * реальной записи и что защитные условия (неактивен, нет ссылок из llm_calls)
+ * действительно останавливают её, когда промпт уже использовали.
+ */
+suite('миграция 0102: правило об адресе в v10 (реальный PostgreSQL)', () => {
+  const db = sql!;
+
+  const ADDRESS_RULE = 'адрес, индекс, город, улицу и дом НЕ включай';
+  /** Полный текст правила — им же откатываем 0102 перед проверкой. */
+  const ADDRESS_RULE_FULL =
+    'В name пиши ТОЛЬКО наименование организации, как в ЕГРЮЛ: адрес, индекс, город, улицу и дом НЕ включай, даже если в графе они напечатаны следом через запятую в той же строке.';
+
+  async function migration102(): Promise<string> {
+    return readFile(
+      new URL('../../src/db/migrations/0102_upd_prompt_v10_address.sql', import.meta.url),
+      'utf8',
+    );
+  }
+
+  /** Транзакция с принудительным откатом; v10 приводится к редакции 0101. */
+  async function inTx<T>(fn: (tx: postgres.TransactionSql) => Promise<T>): Promise<T> {
+    let result!: T;
+    try {
+      await db.begin(async (tx) => {
+        // Тестовая БД поднимается прогоном миграций, поэтому 0102 уже применена
+        // — откатываем её эффект, чтобы проверять именно применение.
+        await tx`UPDATE prompts
+                    SET content = replace(content, ${' ' + ADDRESS_RULE_FULL}, '')
+                  WHERE doc_kind = 'upd' AND name = 'default v10'`;
+        result = await fn(tx);
+        throw new Rollback();
+      });
+    } catch (err) {
+      if (!(err instanceof Rollback)) throw err;
+    }
+    return result;
+  }
+
+  it('добавляет правило об адресе, сохраняя правило о реквизитах', async () => {
+    const migration = await migration102();
+
+    const content = await inTx(async (tx) => {
+      const [before] = await tx<{ content: string }[]>`
+        SELECT content FROM prompts WHERE doc_kind = 'upd' AND name = 'default v10'`;
+      expect(before!.content).not.toContain(ADDRESS_RULE);
+
+      await tx.unsafe(migration);
+
+      const [after] = await tx<{ content: string; is_active: boolean }[]>`
+        SELECT content, is_active FROM prompts WHERE doc_kind = 'upd' AND name = 'default v10'`;
+      return { before: before!.content, after: after!.content, active: after!.is_active };
+    });
+
+    expect(content.after).toContain(ADDRESS_RULE);
+    // Правило из 0101 на месте — миграция правит ту же строку.
+    expect(content.after).toContain('ТОЛЬКО если они напечатаны в самой графе 4');
+    // Промпт не активируется правкой текста.
+    expect(content.active).toBe(false);
+    // Изменилась ровно одна строка.
+    const beforeLines = content.before.split('\n');
+    const afterLines = content.after.split('\n');
+    expect(afterLines.length).toBe(beforeLines.length);
+    expect(afterLines.filter((l, i) => l !== beforeLines[i])).toHaveLength(1);
+  });
+
+  it('не трогает промпт, которым уже что-то разобрано', async () => {
+    const migration = await migration102();
+
+    // Ошибка Postgres обрывает транзакцию целиком, поэтому проверяем не
+    // «состояние после», а сам факт падения: при исключении внутри begin
+    // postgres.js откатывает всё, и текст промпта по определению остаётся
+    // прежним. Заодно это ближе к бою — там миграция тоже идёт транзакцией.
+    await expect(
+      db.begin(async (tx) => {
+        await tx`UPDATE prompts
+                    SET content = replace(content, ${' ' + ADDRESS_RULE_FULL}, '')
+                  WHERE doc_kind = 'upd' AND name = 'default v10'`;
+        const [v10] = await tx<{ id: string }[]>`
+          SELECT id FROM prompts WHERE doc_kind = 'upd' AND name = 'default v10'`;
+        // Имитируем «промптом уже разбирали»: одна запись в журнале вызовов.
+        // provider_id nullable, заводить провайдера ради этого не нужно —
+        // миграцию интересует сам факт ссылки на prompt_id.
+        await tx`INSERT INTO llm_calls (prompt_id, doc_kind, model, request_messages, latency_ms)
+                 VALUES (${v10!.id}, 'upd', 'test-model', '[]'::jsonb, 1)`;
+        await tx.unsafe(migration);
+      }),
+    ).rejects.toThrow(/уже разобрано/i);
+
+    // Контроль, что откат действительно произошёл: подсунутой записи в журнале
+    // нет, а правило об адресе на месте (0102 применена к тестовой БД).
+    const [{ content }] = await db<{ content: string }[]>`
+      SELECT content FROM prompts WHERE doc_kind = 'upd' AND name = 'default v10'`;
+    expect(content).toContain(ADDRESS_RULE);
+    const [{ n }] = await db<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM llm_calls WHERE model = 'test-model'`;
+    expect(Number(n)).toBe(0);
   });
 });

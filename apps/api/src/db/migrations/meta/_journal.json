@@ -708,6 +708,13 @@
       "when": 1781800027000,
       "tag": "0101_upd_prompt_v10",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1781800028000,
+      "tag": "0102_upd_prompt_v10_address",
+      "breakpoints": true
     }
   ]
 }

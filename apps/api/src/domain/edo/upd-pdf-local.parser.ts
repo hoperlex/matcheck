@@ -1,7 +1,7 @@
 import { PDFParse } from 'pdf-parse';
 import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { PdfNoTextError, type ParsePdfResult } from './upd-pdf.parser.js';
-import { matchParty } from './upd-party-text.js';
+import { matchParty, nameBeforeAddress } from './upd-party-text.js';
 
 const MIN_TEXT_LENGTH = 200;
 
@@ -61,21 +61,6 @@ function clean(s: string | null | undefined): string | null {
   if (!s) return null;
   const t = s.trim();
   return t.length ? t : null;
-}
-
-/**
- * Отрезает адрес от названия в графах вида «наименование и его адрес».
- *
- * Форма 1137 печатает грузоотправителя и грузополучателя одной строкой:
- * «ООО "СУ-10", Россия, 117335, Город Москва, ул. Вавилова, дом 69/75, …».
- * Название юрлица идёт первым и заканчивается на первой запятой — дальше
- * всегда адрес. В названиях запятая практически не встречается (кавычки,
- * дефисы — да), поэтому режем по первой.
- */
-function nameBeforeAddress(s: string | null): string | null {
-  if (!s) return null;
-  const head = s.split(',')[0];
-  return clean(head);
 }
 
 // Разбивает строку с N числами на ровно `count` частей. Учитывает русский

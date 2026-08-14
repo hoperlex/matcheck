@@ -86,3 +86,55 @@ describe('0101_upd_prompt_v10 — миграция промпта УПД', () =>
     expect(down).toMatch(/"is_active" = false/);
   });
 });
+
+/**
+ * Миграция 0102 — дополнение того же промпта правилом об адресе.
+ *
+ * Она правит СУЩЕСТВУЮЩУЮ строку, а не заводит новую версию, и это допустимо
+ * ровно при двух условиях: промпт неактивен и им ничего не разобрано. Оба
+ * условия обязаны проверяться в самой миграции, иначе текст промпта разойдётся
+ * с тем, чем реально распознавались документы.
+ */
+describe('0102_upd_prompt_v10_address — правило об адресе', () => {
+  const sql102 = readFileSync(join(migrationsDir, '0102_upd_prompt_v10_address.sql'), 'utf-8');
+
+  it('правит существующий v10, а не создаёт новую версию', () => {
+    expect(sql102).toMatch(/UPDATE "prompts"/i);
+    expect(sql102).not.toMatch(/INSERT INTO "prompts"/i);
+    expect(sql102).toContain("'default v10'");
+  });
+
+  it('условие безопасности: промпт неактивен и на него нет ссылок из llm_calls', () => {
+    // Без проверки llm_calls мы бы задним числом переписали текст промпта,
+    // которым уже что-то распознано, — записи журнала перестали бы
+    // соответствовать своему содержимому.
+    expect(sql102).toMatch(/"is_active" = false/);
+    expect(sql102).toMatch(/NOT EXISTS \(SELECT 1 FROM "llm_calls"/i);
+    expect(sql102).toMatch(/RAISE EXCEPTION/);
+  });
+
+  it('гейт требует ОБА правила: и про реквизиты, и про адрес', () => {
+    // Миграция переписывает ту же строку, что и 0101, — потерять первое правило
+    // при неаккуратной правке легко.
+    expect(sql102).toContain('ТОЛЬКО если они напечатаны в самой графе 4');
+    expect(sql102).toContain('адрес, индекс, город, улицу и дом НЕ включай');
+  });
+
+  it('есть откат, возвращающий текст к редакции 0101', () => {
+    const down = readFileSync(join(migrationsDir, '0102_down.sql'), 'utf-8');
+    expect(down).toMatch(/UPDATE "prompts"/i);
+    expect(down).toMatch(/replace\(/i);
+    // Откат тоже не трогает активный или уже использованный промпт.
+    expect(down).toMatch(/"is_active" = false/);
+    expect(down).toMatch(/NOT EXISTS \(SELECT 1 FROM "llm_calls"/i);
+  });
+
+  it('зарегистрирована в журнале миграций', () => {
+    const journal = JSON.parse(readFileSync(join(migrationsDir, 'meta/_journal.json'), 'utf-8')) as {
+      entries: { idx: number; tag: string }[];
+    };
+    const entry = journal.entries.find((e) => e.tag === '0102_upd_prompt_v10_address');
+    expect(entry).toBeTruthy();
+    expect(entry!.idx).toBe(102);
+  });
+});

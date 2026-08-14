@@ -34,6 +34,7 @@ import {
   consigneeOwnIdentity,
   normalizePartyForDirectory,
 } from './domain/sourceDocuments/party-directory-guard.js';
+import { nameBeforeAddress } from './domain/edo/upd-party-text.js';
 import {
   buildQueueConnection,
   S3_CLEANUP_QUEUE,
@@ -1363,10 +1364,20 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       'consignee identity dropped: looks copied from buyer',
     );
   }
+  // Адрес отрезаем ПОСЛЕ проверки реквизитов, и порядок здесь принципиален.
+  //
+  // Графу 4 печатают как «ООО "СУ-10", 127018, Город Москва, …», и vision
+  // возвращает строку целиком (текстовые парсеры адрес режут давно). Обрежь мы
+  // имя ДО consigneeOwnIdentity — сравнение сторон стало бы «ООО "СУ-10"» ==
+  // «ООО "СУ-10"», и ИНН покупателя сохранился бы как «свой», хотя в графе 4
+  // реквизитов нет вовсе. При нынешнем порядке имя с адресом честно считается
+  // другой стороной, выдуманный ИНН отбрасывается, а до пользователя доезжает
+  // уже чистое наименование.
+  const consigneeName = nameBeforeAddress(consignee?.name);
   const consigneeId =
-    consignee && consigneeIdentity.inn && consignee.name
+    consignee && consigneeIdentity.inn && consigneeName
       ? await findOrCreateCounterparty(
-          { inn: consigneeIdentity.inn, kpp: consigneeIdentity.kpp, name: consignee.name },
+          { inn: consigneeIdentity.inn, kpp: consigneeIdentity.kpp, name: consigneeName },
           'customer',
         )
       : null;
@@ -1374,7 +1385,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     buyerId: recipientId,
     buyerNameRaw: recipient?.name ?? null,
     consigneeId,
-    consigneeNameRaw: consignee?.name ?? null,
+    consigneeNameRaw: consigneeName,
     // ИНН пишем сырым, как распознали, — ровно по той же причине, что и имя:
     // сторона без FK (графа 4 без ИНН) иначе осталась бы совсем без реквизитов,
     // а справочную запись потом правят люди, и она перестаёт отвечать на вопрос

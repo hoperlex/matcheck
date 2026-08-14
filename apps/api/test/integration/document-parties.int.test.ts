@@ -453,6 +453,32 @@ suite('стороны документа: что записывает ворке
       expect(r.buyer_id).not.toBeNull();
     }, 30_000);
 
+    it('имя с адресом: в БД только наименование, реквизиты отброшены', async () => {
+      // Боевой случай AA1708-0018: графу 4 печатают как «ООО "СУ-10", 127018,
+      // Город Москва, …», и vision возвращает строку целиком. Адрес режется
+      // ПОСЛЕ проверки реквизитов — иначе имена совпали бы и выдуманный ИНН
+      // сохранился бы как «свой».
+      const docId = await seedUpd();
+      parseUpdPdf.mockResolvedValue(
+        parsedUpd({
+          consignee: {
+            inn: '7736255508',
+            kpp: '774550001',
+            name: 'ООО «СУ-10», 127018, Город Москва, ул Полковая, дом 3',
+          },
+        }),
+      );
+
+      await handleJob(job(docId));
+
+      const r = await row(docId);
+      expect(r.consignee_name_raw).toBe('ООО «СУ-10»');
+      expect(r.consignee_id).toBeNull();
+      const [raw] = await db<{ consignee_inn_raw: string | null }[]>`
+        SELECT consignee_inn_raw FROM source_documents WHERE id = ${docId}`;
+      expect(raw!.consignee_inn_raw).toBeNull();
+    }, 30_000);
+
     it('«он же»: совпали имя и ИНН — связь по-прежнему создаётся', async () => {
       // Анти-регресс: законный повтор графы 6 не должен пострадать от правила.
       const docId = await seedUpd();
