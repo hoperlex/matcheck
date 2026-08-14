@@ -110,7 +110,18 @@ main() {
   APPLIED_NOW=$(( APPLIED_AFTER - APPLIED_BEFORE ))
 
   # ─── 6/6 · up -d ───
+  #
+  # Воркер останавливаем ОТДЕЛЬНО и с большим таймаутом. `up -d --force-recreate`
+  # шлёт SIGTERM и ждёт stop_grace_period, но распознавание одного тяжёлого
+  # пакета идёт минутами: без явного ожидания Docker добивал процесс SIGKILL'ом
+  # посреди задания, и документ оставался висеть в processing до окна
+  # восстановления. Так воркер успевает доработать текущее задание и снять
+  # блокировку BullMQ сам.
   step "6/6 · пересоздание контейнеров"
+  if "${COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx 'matcheck-worker'; then
+    echo "  ожидание завершения активного задания воркера (до 10 минут)…"
+    "${COMPOSE[@]}" stop -t 600 matcheck-worker
+  fi
   "${COMPOSE[@]}" up -d --force-recreate "${SERVICES[@]}"
 
   # ─── Сводка ───

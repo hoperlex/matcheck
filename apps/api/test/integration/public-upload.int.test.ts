@@ -527,6 +527,36 @@ suite('публичная загрузка документов (реальны�
     await sql`DELETE FROM s3_cleanup_outbox WHERE entity_id = ${bundle!.id}`;
   });
 
+  it('повтор сразу после сбоя S3 заливает заново, а не отвечает «принято» на пустоту', async () => {
+    mocks.putObject.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('S3 down'));
+    const first = await upload([...onePdf('retry-a', 'a.pdf'), ...onePdf('retry-b', 'b.pdf')]);
+    expect(first.statusCode).toBe(503);
+
+    const [failed] = await sql<{ id: string; status: string }[]>`
+      SELECT id, status FROM source_bundles WHERE site_id = ${siteId}`;
+    expect(failed!.status).toBe('parse_failed');
+    await sql`DELETE FROM s3_cleanup_outbox WHERE entity_id = ${failed!.id}`;
+
+    // Поставщик видит ошибку и жмёт «отправить ещё раз» СРАЗУ — то есть внутри
+    // ORPHAN_GRACE_MS. Раньше CAS считал свежую запись признаком параллельной
+    // заливки, возвращал reused и отдавал 201: файлы объявлялись принятыми,
+    // хотя успевший объект уже уехал в очередь на удаление.
+    mocks.putObject.mockClear();
+    mocks.putObject.mockResolvedValue(undefined);
+    const second = await upload([...onePdf('retry-a', 'a.pdf'), ...onePdf('retry-b', 'b.pdf')]);
+    expect(second.statusCode).toBe(201);
+    expect(mocks.putObject).toHaveBeenCalledTimes(2);
+
+    // Тот же пакет (scope не менялся), но снова в работе и с полным реестром.
+    const [again] = await sql<{ id: string; status: string }[]>`
+      SELECT id, status FROM source_bundles WHERE site_id = ${siteId}`;
+    expect(again!.id).toBe(failed!.id);
+    expect(again!.status).toBe('queued');
+    const [{ count: items }] = await sql<{ count: string }[]>`
+      SELECT count(*) FROM bundle_import_items WHERE bundle_id = ${failed!.id}`;
+    expect(Number(items)).toBe(2);
+  });
+
   it('глобальный потолок исчерпан → 429 без единой записи и без S3', async () => {
     mocks.rateLimit.mockResolvedValueOnce({ ...RATE_LIMIT_OK, remaining: 0, isExceeded: true });
 

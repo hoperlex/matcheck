@@ -19,7 +19,7 @@
 //                резервирования против одновременных запросов: публичный вход
 //                открыт всем, две вкладки с одним комплектом реальны.
 
-import { and, asc, eq, isNull, ne, sql as drSql } from 'drizzle-orm';
+import { and, asc, eq, isNull, ne, or, sql as drSql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import type { Db } from '../../db/client.js';
 import { selectRegistryRows } from './bundle-import-registry.js';
@@ -402,6 +402,17 @@ export async function ingestDocumentsBundle(
   if (existing) {
     // Пакет есть, документов нет: либо его бросили (сбой воркера, ручная
     // чистка), либо параллельный запрос прямо сейчас льёт файлы в S3.
+    //
+    // Окно ORPHAN_GRACE_MS различает эти два случая по возрасту записи, но у
+    // него был провал: неудачная заливка помечает пакет `parse_failed` и при
+    // этом обновляет updated_at (см. шаг 4). Поставщик, нажавший «отправить ещё
+    // раз» сразу после ошибки, попадал в «свежий пакет — значит им занят
+    // кто-то другой» и получал reused, то есть 201 «принято» на пустоту:
+    // успевшие объекты к тому моменту уже уехали в очередь на удаление.
+    // `parse_failed` — это не «кто-то другой льёт прямо сейчас», а
+    // зафиксированный отказ, поэтому такой пакет перезапускаем немедленно.
+    // Сюда мы попадаем только с пакетом БЕЗ единого документа: иначе шаг 2
+    // вернул бы reused выше.
     const restart = reserve
       ? await db
           .update(sourceBundles)
@@ -416,7 +427,10 @@ export async function ingestDocumentsBundle(
           .where(
             and(
               eq(sourceBundles.id, existing.id),
-              drSql`${sourceBundles.updatedAt} < now() - make_interval(secs => ${ORPHAN_GRACE_MS / 1000})`,
+              or(
+                drSql`${sourceBundles.updatedAt} < now() - make_interval(secs => ${ORPHAN_GRACE_MS / 1000})`,
+                eq(sourceBundles.status, 'parse_failed'),
+              ),
             ),
           )
           .returning()
