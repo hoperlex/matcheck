@@ -287,4 +287,124 @@ suite('стороны документа: что записывает ворке
     // ТН писался именно туда и подменял бы колонку «Покупатель».
     expect(doc!.recipient_id).toBeNull();
   });
+
+  /**
+   * Гард справочника: что попадает в counterparties, а что нет.
+   *
+   * Порядок «поиск → нормализованный поиск → гард на создание» проверяется
+   * именно здесь, потому что первая его ступень существует ради данных,
+   * которых в свежей БД нет — исторических записей с невалидным ИНН.
+   */
+  describe('гард справочника контрагентов', () => {
+    const INVALID_LEGACY_INN = '7736255608'; // перестановка цифр, есть в проде
+    // Валидные ИНН, которых заведомо нет в справочнике: гард проверяется на
+    // ветке СОЗДАНИЯ, а она достижима только когда поиск ничего не нашёл.
+    // Если взять ИНН уже существующей записи (например «СУ-10»), первый же шаг
+    // вернёт её id — и это правильное поведение, но не то, что здесь проверяем.
+    const FREE_VALID_INN = '7712345671';
+    const FREE_VALID_INN_2 = '7801122331';
+    const createdInns: string[] = [];
+
+    async function countByInn(inn: string): Promise<number> {
+      const [r] = await db<{ n: string }[]>`
+        SELECT count(*)::text AS n FROM counterparties WHERE inn = ${inn}`;
+      return Number(r!.n);
+    }
+
+    beforeEach(async () => {
+      for (const inn of createdInns) await db`DELETE FROM counterparties WHERE inn = ${inn}`;
+      createdInns.length = 0;
+    });
+
+    afterAll(async () => {
+      for (const inn of createdInns) await db`DELETE FROM counterparties WHERE inn = ${inn}`;
+    });
+
+    it('существующая запись с НЕвалидным ИНН по-прежнему находится', async () => {
+      // Ради этого гард стоит ПОСЛЕ поиска, а не до него: иначе документы
+      // перестали бы привязываться к тому, к чему привязывались раньше, и
+      // защита справочника сама стала бы регрессом.
+      const legacyId = randomUUID();
+      createdInns.push(INVALID_LEGACY_INN);
+      await db`INSERT INTO counterparties (id, inn, kpp, name, is_customer)
+               VALUES (${legacyId}, ${INVALID_LEGACY_INN}, NULL, 'ООО «СУ-10» (старая запись)', true)`;
+
+      const docId = await seedUpd();
+      parseUpdPdf.mockResolvedValue(
+        parsedUpd({ consignee: { inn: INVALID_LEGACY_INN, kpp: null, name: 'ООО «СУ-10»' } }),
+      );
+      await handleJob(job(docId));
+
+      const r = await row(docId);
+      expect(r.consignee_id).toBe(legacyId);
+      expect(await countByInn(INVALID_LEGACY_INN)).toBe(1);
+    }, 30_000);
+
+    it('новый невалидный ИНН: контрагент не создаётся, распознанное сохранено', async () => {
+      const docId = await seedUpd();
+      parseUpdPdf.mockResolvedValue(
+        parsedUpd({ consignee: { inn: '127018', kpp: null, name: 'ООО «АЛЬЯНС»' } }),
+      );
+      await handleJob(job(docId));
+
+      const r = await row(docId);
+      expect(r.consignee_id).toBeNull();
+      // Данные не теряются: и имя, и сырой ИНН на месте — карточка покажет,
+      // что распозналось, просто без ссылки на справочник.
+      expect(r.consignee_name_raw).toBe('ООО «АЛЬЯНС»');
+      const [raw] = await db<{ consignee_inn_raw: string | null }[]>`
+        SELECT consignee_inn_raw FROM source_documents WHERE id = ${docId}`;
+      expect(raw!.consignee_inn_raw).toBe('127018');
+      expect(await countByInn('127018')).toBe(0);
+    }, 30_000);
+
+    it('имя-обрывок графы не заводит контрагента даже с валидным ИНН', async () => {
+      createdInns.push(FREE_VALID_INN);
+      const docId = await seedUpd();
+      parseUpdPdf.mockResolvedValue(
+        parsedUpd({ consignee: { inn: FREE_VALID_INN, kpp: null, name: 'и его адрес:' } }),
+      );
+      await handleJob(job(docId));
+
+      const r = await row(docId);
+      expect(r.consignee_id).toBeNull();
+      expect(r.consignee_name_raw).toBe('и его адрес:');
+      expect(await countByInn(FREE_VALID_INN)).toBe(0);
+    }, 30_000);
+
+    it('валидный ИНН с пробелами находит каноническую запись, а не создаёт вторую', async () => {
+      const canonicalId = randomUUID();
+      createdInns.push(FREE_VALID_INN_2);
+      await db`INSERT INTO counterparties (id, inn, kpp, name, is_customer)
+               VALUES (${canonicalId}, ${FREE_VALID_INN_2}, NULL, 'ООО «Канонический»', true)`;
+
+      const docId = await seedUpd();
+      const spaced = `${FREE_VALID_INN_2.slice(0, 4)} ${FREE_VALID_INN_2.slice(4)}`;
+      parseUpdPdf.mockResolvedValue(
+        parsedUpd({ consignee: { inn: spaced, kpp: null, name: 'ООО «Канонический»' } }),
+      );
+      await handleJob(job(docId));
+
+      const r = await row(docId);
+      expect(r.consignee_id).toBe(canonicalId);
+      expect(await countByInn(FREE_VALID_INN_2)).toBe(1);
+    }, 30_000);
+
+    it('валидный ИНН без записи в справочнике: поведение прежнее — контрагент создаётся', async () => {
+      // Анти-регресс основной ветки: гард не должен мешать нормальному случаю.
+      const freshInn = '5010123459';
+      createdInns.push(freshInn);
+      const docId = await seedUpd();
+      parseUpdPdf.mockResolvedValue(
+        parsedUpd({
+          consignee: { inn: freshInn, kpp: '772501001', name: 'ООО "ФСК Инжиниринг"' },
+        }),
+      );
+      await handleJob(job(docId));
+
+      const r = await row(docId);
+      expect(r.consignee_id).not.toBeNull();
+      expect(await countByInn(freshInn)).toBe(1);
+    }, 30_000);
+  });
 });

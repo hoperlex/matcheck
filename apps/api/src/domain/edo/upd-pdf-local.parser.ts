@@ -1,6 +1,7 @@
 import { PDFParse } from 'pdf-parse';
 import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { PdfNoTextError, type ParsePdfResult } from './upd-pdf.parser.js';
+import { matchParty } from './upd-party-text.js';
 
 const MIN_TEXT_LENGTH = 200;
 
@@ -199,8 +200,19 @@ export function parseUpdText(text: string): UpdPdfParsed {
       if (m?.[1]) recipientName = clean(m[1]);
     }
     if (!consigneeName) {
-      const m = /^Грузополучатель(?:\s+и\s+его\s+адрес)?\s+(.+?)(?:\s*\(4\))?$/.exec(line);
-      if (m?.[1]) consigneeName = nameBeforeAddress(clean(m[1]));
+      // Подпись графы 4 печатается и без двоеточия («Грузополучатель и его
+      // адрес ООО …»), и с ним («Грузополучатель и его адрес: ООО …»), и
+      // вообще без значения («Грузополучатель и его адрес:» — значение на
+      // следующей строке или графа пуста). Прежняя регулярка двоеточия не
+      // знала: опциональная группа не замыкалась, и (.+?) захватывала сам
+      // ярлык — в БД попадало «и его адрес:». matchParty (общий с XLSX)
+      // описывает двоеточие как :? и на пустом хвосте возвращает null.
+      const m = matchParty(
+        line,
+        /^\s*Грузополучатель(?:\s+и\s+его\s+адрес)?:?\s*/,
+        /\(4\)|Покупатель:|ИНН|Валюта:/,
+      );
+      if (m) consigneeName = nameBeforeAddress(clean(m));
     }
     if (supplierName && recipientName && consigneeName) break;
   }

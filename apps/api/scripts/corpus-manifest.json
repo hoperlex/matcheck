@@ -6,8 +6,18 @@
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "1697.pdf",
@@ -22,8 +32,50 @@
       "kind": "upd",
       "parsePath": "multi_upd",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:5"
+      "source": "manual",
+      "note": "text:upd; invoices:5",
+      "expectedDocuments": [
+        {
+          "docNumber": "201/2112636922",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126387-1",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126372",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126371",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126389",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "5303397567129394215.jpg",
@@ -70,8 +122,130 @@
       "kind": "upd",
       "parsePath": "multi_upd",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:15"
+      "source": "manual",
+      "note": "text:upd; invoices:15",
+      "expectedDocuments": [
+        {
+          "docNumber": "201/21126085-4",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126363-8",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126091",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/211153230-1",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126311-2",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126311-1",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126332",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126332-1",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126363-1",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126373-9",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126373-8",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126085-9",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126390-3",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126390-2",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126373",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "М-15 № 168 от 26.06.2026 г. на отпуск материалов Алюпром-Алюспэйс .pdf",
@@ -190,24 +364,54 @@
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД (статус 1) № 262 от 7 июля 2026 г.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД (статус 1) № 273 от 9 июля 2026 г.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД № ТК-02815 от 18 июня 2026 г..xls",
@@ -269,145 +473,295 @@
       "filename": "УПД №100000.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
-      "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "hasConsignee": false,
+      "source": "manual",
+      "note": "text:upd; invoices:1; графа 4 в документе пуста"
     },
     {
       "filename": "УПД №116 от 30.09.25.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "Общество с ограниченной ответственностью \"Строительное Управление - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №11618 от 24.10.25.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №1223-004_1 от 23.12.25.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №18266 от 19.12.25.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №24 от 13.01.26.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №UT-3843 от 30.12.25.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"АЛЬЯНС\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №КА-1518 от 07.11.25.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №М-1789 от 19.05.26.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"ИКС\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №МО1812-00014_4 от 18.12.25.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №ТРМ-МЛН131832 от 10.04.26.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №УТ-1160 от 26.12.25.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №УТ-2217 от 14.05.26.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №УТ-22170000.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №УТ-6564 от 14.10.25.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД №Х-3655 от 06.10.25 (1).pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
-      "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "hasConsignee": false,
+      "source": "manual",
+      "note": "text:upd; invoices:1; графа 4 в документе пуста"
     },
     {
       "filename": "УПД №Х-3655 от 06.10.25.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
-      "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "hasConsignee": false,
+      "source": "manual",
+      "note": "text:upd; invoices:1; графа 4 в документе пуста"
     },
     {
       "filename": "УПД №ЦБ-641 от 13.03.26.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"АЛЬЯНС\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "УПД_214_СУ_10_Борисовские_пруды_сб_20_06_.pdf",
@@ -422,32 +776,96 @@
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "Универсальный передаточный документ (УПД) 51458 от 07.07.2026 (2).pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "Универсальный передаточный документ (УПД) 51458 от 07.07.2026.pdf",
       "kind": "upd",
       "parsePath": "text_pdf",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:1"
+      "source": "manual",
+      "note": "text:upd; invoices:1",
+      "expectedDocuments": [
+        {
+          "docNumber": "",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "зиларт.pdf",
       "kind": "upd",
       "parsePath": "multi_upd",
       "hasConsignee": true,
-      "source": "guess",
-      "note": "text:upd; invoices:4"
+      "source": "manual",
+      "note": "text:upd; invoices:4",
+      "expectedDocuments": [
+        {
+          "docNumber": "201/21126389",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126387-1",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126372",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        },
+        {
+          "docNumber": "201/21126371",
+          "consignee": {
+            "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
+            "inn": null,
+            "kpp": null
+          }
+        }
+      ]
     },
     {
       "filename": "сканирование.pdf",

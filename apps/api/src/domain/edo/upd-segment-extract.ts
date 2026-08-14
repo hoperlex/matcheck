@@ -16,7 +16,7 @@ import type { UpdPdfParsed } from '@matcheck/contracts';
 import { db } from '../../db/client.js';
 import { llmCalls, llmProviders, llmProviderCredentials } from '../../db/schema.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
-import { resolvePrompt } from '../prompts/registry.js';
+import { resolvePrompt, type PromptOverride } from '../prompts/registry.js';
 import { extractUpdFromPages } from './upd-vision-extract.js';
 import {
   MAX_PAGES_FOR_OPENROUTER,
@@ -64,9 +64,15 @@ export type SegmentExtractResult = {
 export async function extractUpdSegment(
   pages: Buffer[],
   ctx: {
-    sourceDocumentId: string;
+    // null — прогон вне разбора документа (офлайн-сверка версий промпта):
+    // llm_calls.source_document_id nullable, ровно так же пишет parseUpdVision.
+    sourceDocumentId: string | null;
     bundleId: string;
     segmentIndex: number;
+    // Только для scripts/segment-prompt-ab.ts: подменяет активный промпт и
+    // температуру. В бою не передаётся — тогда берётся промпт из БД, как и
+    // раньше. Тот же механизм, что у parseUpdVision.
+    promptOverride?: PromptOverride;
   },
 ): Promise<SegmentExtractResult> {
   if (pages.length === 0) throw new Error('сегмент без страниц');
@@ -103,7 +109,7 @@ export async function extractUpdSegment(
     throw new SegmentProviderUnsupportedError('не удалось расшифровать ключ провайдера');
   }
 
-  const promptMeta = await resolvePrompt('upd');
+  const promptMeta = await resolvePrompt('upd', ctx.promptOverride);
   // Тот же хвост, что у bundle-пути: модель обязана вернуть ОДИН объект.
   // Сегмент — это один УПД, и массив на верхнем уровне ломает валидацию.
   const promptText =
@@ -122,7 +128,7 @@ export async function extractUpdSegment(
         apiBaseUrl: cred.apiBaseUrl,
         apiKey,
         model: provider.model,
-        temperature: Number(provider.temperature ?? 0.2),
+        temperature: ctx.promptOverride?.temperature ?? Number(provider.temperature ?? 0.2),
         maxTokens: provider.maxTokens ?? 8192,
         promptText,
       });

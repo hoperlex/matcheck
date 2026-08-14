@@ -30,6 +30,7 @@ import {
   autoAssignContractorFromBuyer,
   manualRecipientSource,
 } from './domain/sourceDocuments/resolve-contractor.js';
+import { normalizePartyForDirectory } from './domain/sourceDocuments/party-directory-guard.js';
 import {
   buildQueueConnection,
   S3_CLEANUP_QUEUE,
@@ -163,10 +164,28 @@ async function findOrCreateMaterial(name: string, unit?: string | null): Promise
   return created.id;
 }
 
+/**
+ * Контрагент под распознанную сторону документа: найти существующего, иначе
+ * завести нового — но только если сторона прошла валидацию.
+ *
+ * Порядок шагов принципиален, и менять его нельзя:
+ *
+ *   1. поиск по ключу «ИНН как пришёл + КПП» — ровно как было до гарда. Иначе
+ *      документы перестали бы привязываться к историческим записям с
+ *      невалидным ИНН (их в справочнике уже с десяток), то есть правка,
+ *      задуманная как защита, сама стала бы регрессом;
+ *   2. поиск по нормализованному ИНН — лечит дубли от пробелов и разделителей
+ *      в ответе модели («77 36 25 55 08» и «7736255508» — одна организация);
+ *   3. и только СОЗДАНИЕ закрыто гардом: невалидный ИНН или имя-обрывок →
+ *      возвращаем null, ничего не вставляя.
+ *
+ * null означает лишь «связи со справочником нет». Распознанное не теряется:
+ * *_name_raw и *_inn_raw пишутся из сырого ответа независимо от этой функции.
+ */
 async function findOrCreateCounterparty(
   party: { inn: string; kpp: string | null; name: string },
   role: 'supplier' | 'customer',
-): Promise<string> {
+): Promise<string | null> {
   const existing = await db
     .select({ id: counterparties.id })
     .from(counterparties)
@@ -178,12 +197,40 @@ async function findOrCreateCounterparty(
     )
     .limit(1);
   if (existing[0]) return existing[0].id;
+
+  const normalized = normalizePartyForDirectory(party);
+  if (!normalized) {
+    logger.warn(
+      { inn: party.inn, name: party.name, role },
+      'counterparty not created: party failed directory validation',
+    );
+    return null;
+  }
+
+  // Второй заход по нормализованному ключу: строка «77 36 25 55 08» не нашлась
+  // точным сравнением на шаге 1, но организация в справочнике уже есть.
+  if (normalized.inn !== party.inn || normalized.kpp !== party.kpp) {
+    const byNormalized = await db
+      .select({ id: counterparties.id })
+      .from(counterparties)
+      .where(
+        and(
+          eq(counterparties.inn, normalized.inn),
+          normalized.kpp
+            ? eq(counterparties.kpp, normalized.kpp)
+            : drSql`${counterparties.kpp} is null`,
+        ),
+      )
+      .limit(1);
+    if (byNormalized[0]) return byNormalized[0].id;
+  }
+
   const [created] = await db
     .insert(counterparties)
     .values({
-      inn: party.inn,
-      kpp: party.kpp,
-      name: party.name,
+      inn: normalized.inn,
+      kpp: normalized.kpp,
+      name: normalized.name,
       isSupplier: role === 'supplier',
       isCustomer: role === 'customer',
     })

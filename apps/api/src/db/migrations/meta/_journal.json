@@ -680,6 +680,13 @@
       "when": 1781800023000,
       "tag": "0097_user_role_observer",
       "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1781800024000,
+      "tag": "0098_m15_prompt_v2",
+      "breakpoints": true
     }
   ]
 }

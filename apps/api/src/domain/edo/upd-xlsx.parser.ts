@@ -6,6 +6,7 @@ import {
   type UpdPdfParsed,
   type UpdPdfItem,
 } from '@matcheck/contracts';
+import { matchParty } from './upd-party-text.js';
 
 // Локальный парсер УПД из xlsx (без LLM). Поддерживает обе формы:
 //   А — 1С/Элевел 2026 (новая редакция постановления 1137, графы 1–14 с
@@ -383,16 +384,6 @@ function parseParties(lines: string[]): {
     : null;
   const consignee = consigneeName ? { inn: null, kpp: null, name: consigneeName } : null;
   return { supplier, recipient, consignee };
-}
-
-function matchParty(line: string, prefixRe: RegExp, terminatorAlt: RegExp): string | null {
-  const startMatch = prefixRe.exec(line);
-  if (!startMatch) return null;
-  const tail = line.slice(startMatch.index + startMatch[0].length);
-  const endMatch = terminatorAlt.exec(tail);
-  const raw = (endMatch ? tail.slice(0, endMatch.index) : tail).trim();
-  if (!raw) return null;
-  return raw.replace(/\s*\(\d+[а-я]?\)\s*$/u, '').trim() || null;
 }
 
 // ─── Табличная часть ───────────────────────────────────────────────────────
