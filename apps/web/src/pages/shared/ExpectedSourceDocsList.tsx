@@ -421,10 +421,6 @@ export function ExpectedSourceDocsList({
                 {shortenCounterpartyName(r.buyerName)} ·{' '}
                 {shortenCounterpartyName(r.consigneeName)} · {r.siteName ?? '—'}
               </Typography.Text>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                Подрядчик: {shortenCounterpartyName(r.contractorName ?? r.recipientMolName)}
-                {r.recipientSource === 'auto_buyer' ? ' (автоматически)' : ''}
-              </Typography.Text>
             </Space>
           </Card>
         )}

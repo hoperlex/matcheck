@@ -95,6 +95,58 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
+/**
+ * Подрядчик убран из СПИСКА, но не из системы.
+ *
+ * В списке это поле почти всегда повторяло покупателя документа и занимало
+ * ширину, поэтому колонку убрали — и из десктопной таблицы, и из карточки на
+ * узком экране (там таблица не рендерится вовсе, и поле рисовалось отдельным
+ * JSX). А вот фильтр «Подрядчик» над таблицей остался: отбирать поступления по
+ * подрядчику по-прежнему нужно. Тест держит обе границы сразу.
+ */
+describe('DeliveriesHistory: подрядчик не показывается в списке', () => {
+  const CONTRACTOR = 'ООО «Подрядчик Тест»';
+
+  beforeEach(() => {
+    can.mockReturnValue(true);
+    hasCapability.mockReturnValue(true);
+    // contractorId обязателен, а не «для полноты»: прежний renderContractor
+    // начинался с resolveContractor и на пустом id возвращал прочерк — тест на
+    // одном лишь contractorName проходил бы и со старым кодом, ничего не
+    // проверяя.
+    row.contractorId = '44444444-4444-4444-4444-444444444444';
+    row.contractorName = CONTRACTOR;
+  });
+  afterEach(() => {
+    row.contractorId = null;
+    row.contractorName = null;
+  });
+
+  it('имени подрядчика нет ни в таблице, ни в карточке', async () => {
+    await renderHistory();
+    expect(screen.queryByText(CONTRACTOR)).toBeNull();
+    // Объект остался — проверяем, что исчез именно подрядчик, а не вся строка
+    // вторичных данных рядом с ним.
+    expect(screen.getByText('Объект 1')).toBeDefined();
+  });
+
+  it('заголовка колонки «Подрядчик» в таблице нет', async () => {
+    const container = await renderHistory();
+    const headers = [...container.querySelectorAll('th')].map((th) => th.textContent ?? '');
+    expect(headers).not.toContain('Подрядчик');
+    // Соседние колонки на месте — правка не задела остальной набор.
+    expect(headers.some((h) => h.includes('Объект'))).toBe(true);
+  });
+
+  it('фильтр «Подрядчик» над таблицей остаётся', async () => {
+    const container = await renderHistory();
+    const placeholders = [...container.querySelectorAll('.ant-select-selection-placeholder')].map(
+      (el) => el.textContent ?? '',
+    );
+    expect(placeholders).toContain('Подрядчик');
+  });
+});
+
 describe('DeliveriesHistory: действия в строке', () => {
   it('права выданы — правка, удаление и ссылка на месте', async () => {
     can.mockReturnValue(true);

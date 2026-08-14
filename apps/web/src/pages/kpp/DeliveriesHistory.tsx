@@ -834,19 +834,9 @@ export function DeliveriesHistory({
     return Array.from(seen.values());
   }, [items]);
 
-  const renderContractor = (r: Row) => {
-    const { id, inherited } = resolveContractor(r);
-    if (!id) return '—';
-    // DTO-имя (прямой подрядчик приёмки) → справочник → имя из привязанного УПД
-    // (унаследованный подрядчик). Первое и последнее не требуют справочников.
-    const sd = r.primarySourceDocument ?? null;
-    const name = r.contractorName ?? counterpartiesMap.get(id) ?? sd?.contractorName ?? '—';
-    return inherited ? (
-      <Typography.Text type="secondary">{name}</Typography.Text>
-    ) : (
-      name
-    );
-  };
+  // renderContractor убран вместе с колонкой «Подрядчик»: в списке это поле
+  // почти всегда повторяло покупателя документа. resolveContractor остаётся —
+  // он нужен не для показа, а для подбора подрядчика (см. вызовы ниже).
   const renderSite = (r: Row) => {
     const { id } = resolveSite(r);
     const name = r.siteName ?? (id ? sitesMap.get(id) : null) ?? '—';
@@ -1171,13 +1161,6 @@ export function DeliveriesHistory({
             ellipsis: false,
             render: (_: unknown, r: Row) => renderSupplierCell(r),
           },
-          // Подрядчик здесь — подрядчик ПРИЁМКИ, со своей логикой наследования
-          // из документа (см. renderContractor), а не колонка из общего набора.
-          {
-            title: 'Подрядчик',
-            key: 'contractor',
-            render: (_: unknown, r: Row) => renderContractor(r),
-          },
           {
             title: 'Объект',
             key: 'site',
@@ -1241,7 +1224,7 @@ export function DeliveriesHistory({
                 {renderSupplierName(r)} · {r.items?.length ?? 0} стр.
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {renderContractor(r)} · {renderSite(r)}
+                {renderSite(r)}
               </Typography.Text>
               <Typography.Text type="secondary">{r.arrivedAt ?? '—'}</Typography.Text>
               <div

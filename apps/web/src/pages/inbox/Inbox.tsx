@@ -947,8 +947,8 @@ export default function InboxPage() {
                   {/* Тип «—»: файл распознать не удалось, и «УПД» здесь ввело
                       бы в заблуждение — реквизитов в документе нет. */}
                   {isUnrecognized(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
-                  {/* Происхождение отмечаем только у почтовых: у них не
-                      заполнен подрядчик, и это объясняет пустую колонку. */}
+                  {/* Происхождение отмечаем только у почтовых: такой документ
+                      пришёл от подрядчика письмом, а не загружен вручную. */}
                   {r.origin === 'mail' && (
                     <Tooltip title="Пришёл по почте от подрядчика">
                       <MailOutlined style={{ color: '#8c8c8c' }} />
@@ -1021,7 +1021,7 @@ export default function InboxPage() {
             sorter: stringSorter<Row>((r) => r.siteName),
             render: (v: string | null | undefined) => v ?? '—',
           },
-          // Стороны документа + подрядчик — общий набор для всех таблиц с УПД,
+          // Стороны документа — общий набор для всех таблиц с УПД,
           // см. shared/ui/documentPartyColumns.
           ...documentPartyColumns<Row>((r) => r),
           {
@@ -1079,12 +1079,6 @@ export default function InboxPage() {
                 {r.siteName ?? '—'} · {shortenCounterpartyName(r.buyerName)} ·{' '}
                 {shortenCounterpartyName(r.consigneeName)} ·{' '}
                 {shortenCounterpartyName(r.supplierName)}
-              </Typography.Text>
-              {/* Подрядчик отдельной строкой: на узком экране колонок нет, а
-                  именно это поле объясняет ярлык «Черновик». */}
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                Подрядчик: {shortenCounterpartyName(r.contractorName ?? r.recipientMolName)}
-                {r.recipientSource === 'auto_buyer' ? ' (автоматически)' : ''}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {originLabel(r.origin, r.fromSupplierPortal)}
