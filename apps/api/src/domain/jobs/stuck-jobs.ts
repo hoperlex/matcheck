@@ -47,6 +47,10 @@ import {
   selectRowsWithoutDocument,
   stubReasonForRow,
 } from '../sourceDocuments/stub-documents.js';
+import {
+  finalizeBundleTerminalState,
+  selectStuckProcessingBundles,
+} from '../sourceDocuments/bundle-finalize.js';
 
 /** Сколько запись должна провисеть в `queued`, чтобы считаться потерянной. */
 export const STUCK_AFTER_MINUTES = 45;
@@ -70,7 +74,19 @@ export type RepairResult = {
   finalizedItems: number;
   /** Принятые файлы, оставшиеся без документа: заведены заглушки. */
   stubbedFiles: number;
+  /** Пакеты, зависшие в `processing`: работа закончилась, статус досинхронизирован. */
+  finalizedBundles: number;
+  /** Пакеты, у которых router-job умер посреди пачки: задание поставлено заново. */
+  restartedBundles: number;
 };
+
+/**
+ * Сколько раз пакету дают переставить router-job, прежде чем признать неудачу.
+ *
+ * Без потолка пакет, который валит обработчик детерминированно (битый файл,
+ * ошибка в разборе), гонял бы задание по кругу каждые десять минут вечно.
+ */
+export const MAX_BUNDLE_REDISPATCH = 3;
 
 /**
  * Переставляет задания для записей, зависших в `queued`.
@@ -266,7 +282,130 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
 
   const finalizedItems = await finalizeIncompleteBundles(deps);
   const stubbedFiles = await ensureDocumentsForOrphanFiles(deps);
-  return { documents, bundles: repairedBundles, segments, finalizedItems, stubbedFiles };
+  // Порядок важен: сначала перезапускаем то, где работа ещё возможна, и только
+  // потом объявляем исход у того, где она заведомо кончилась. Иначе пакет с
+  // умершим router-job получил бы терминальный статус вместо второй попытки.
+  const restartedBundles = await restartAbandonedRouterBundles(deps);
+  const finalizedBundles = await finalizeStuckProcessingBundles(deps);
+  return {
+    documents,
+    bundles: repairedBundles,
+    segments,
+    finalizedItems,
+    stubbedFiles,
+    finalizedBundles,
+    restartedBundles,
+  };
+}
+
+/**
+ * Пакет застрял в `processing`, а работать по нему уже некому.
+ *
+ * Router ставит `processing` при запуске сборки логических УПД, рассчитывая, что
+ * до терминала пакет доведёт публикация. Ветка ОТКАТА сборки этого не делала —
+ * пакет висел вечно, потому что основной repair ищет только `queued`. По бою так
+ * зависли 7 пакетов, ровно все откаты сборки; A1 закрыл сам источник, эта
+ * функция подбирает уже зависшие и всё, что зависнет иным путём (например крах
+ * между разбором и записью статуса).
+ *
+ * Заданий не ставит вовсе — только досинхронизирует статус, поэтому повторного
+ * распознавания вызвать не может. Условия отбора живут в
+ * selectStuckProcessingBundles и трактуют любое сомнение в пользу бездействия.
+ */
+export async function finalizeStuckProcessingBundles(deps: RepairDeps): Promise<number> {
+  const ids = await selectStuckProcessingBundles(deps.db, STUCK_AFTER_MINUTES, STUCK_BATCH);
+  let finalized = 0;
+  for (const id of ids) {
+    const res = await finalizeBundleTerminalState(deps.db, id, {
+      itemReason: 'файл не дошёл до разбора (пакет закрыт сторожем)',
+      parseErrorCode: 'not_finalized',
+      parseErrorMessage: 'пакет остался в processing без активной работы',
+    });
+    if (res.outcome === 'skipped') continue;
+    finalized += 1;
+    deps.log?.warn?.(
+      { bundleId: id, outcome: res.outcome, documents: res.documents },
+      'repair: пакет висел в processing без работы — статус досинхронизирован',
+    );
+  }
+  return finalized;
+}
+
+/**
+ * Router-job умер посреди пачки: пакет в `processing`, служебная запись жива.
+ *
+ * Этот случай finalizeStuckProcessingBundles намеренно пропускает — часть файлов
+ * не обработана, и подменять статус нельзя, надо доработать. Повторный запуск
+ * безопасен: router пропускает строки реестра в терминальном статусе, поэтому
+ * второй раз тот же файл документа не породит.
+ *
+ * Ключ задания берёт новое поколение: старое задание могло остаться в BullMQ
+ * завершённым (removeOnComplete держит сутки), и постановка под тем же id молча
+ * не создала бы ничего.
+ */
+export async function restartAbandonedRouterBundles(deps: RepairDeps): Promise<number> {
+  const { db } = deps;
+  const stuck = await db
+    .select({
+      id: sourceBundles.id,
+      kind: sourceBundles.kind,
+      generation: sourceBundles.dispatchGeneration,
+    })
+    .from(sourceBundles)
+    .where(
+      and(
+        eq(sourceBundles.status, 'processing'),
+        isNull(sourceBundles.parentBundleId),
+        drSql`${sourceBundles.updatedAt} < now() - make_interval(mins => ${STUCK_AFTER_MINUTES})`,
+        drSql`${sourceBundles.dispatchGeneration} < ${MAX_BUNDLE_REDISPATCH}`,
+        // Живая служебная запись — признак недоработавшего router-job.
+        drSql`exists (select 1 from source_documents d
+                where d.bundle_id = ${sourceBundles.id} and d.is_technical = true)`,
+        // Сборка в работе — её восстанавливают своей веткой, выше.
+        drSql`not exists (select 1 from bundle_segments s
+                where s.bundle_id = ${sourceBundles.id}
+                  and s.generation = ${sourceBundles.activeUploadGeneration}
+                  and s.published_at is null)`,
+        drSql`not exists (select 1 from source_bundles c
+                where c.parent_bundle_id = ${sourceBundles.id}
+                  and c.status in ('queued', 'processing'))`,
+        // Задание уже ждёт доставки — второе не нужно.
+        drSql`not exists (select 1 from job_outbox o
+                where o.payload->>'bundleId' = ${sourceBundles.id}::text)`,
+      ),
+    )
+    .limit(STUCK_BATCH);
+
+  let restarted = 0;
+  for (const bundle of stuck) {
+    const [bumped] = await db
+      .update(sourceBundles)
+      .set({
+        dispatchGeneration: drSql`${sourceBundles.dispatchGeneration} + 1`,
+        status: 'queued',
+        updatedAt: new Date(),
+      })
+      // CAS: пакет мог уйти в терминал, пока мы собирали выборку.
+      .where(and(eq(sourceBundles.id, bundle.id), eq(sourceBundles.status, 'processing')))
+      .returning({ generation: sourceBundles.dispatchGeneration });
+    if (!bumped) continue;
+
+    await enqueueJob(db, {
+      queue: deps.queue,
+      jobName: 'parse',
+      payload:
+        bundle.kind === 'mixed'
+          ? { bundleId: bundle.id, mode: 'router' as const }
+          : { bundleId: bundle.id },
+      dedupeKey: bundleDispatchKeyOf(bundle.id, bumped.generation),
+    });
+    restarted += 1;
+    deps.log?.warn?.(
+      { bundleId: bundle.id, generation: bumped.generation },
+      'repair: router-job не доработал — пакет переставлен новым поколением',
+    );
+  }
+  return restarted;
 }
 
 /**

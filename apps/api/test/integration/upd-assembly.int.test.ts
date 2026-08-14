@@ -418,11 +418,20 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
     // Манифест снят, поколение не опубликовано, сборка помечена legacy.
     expect(await segmentsOf(bundleId)).toHaveLength(0);
     const [root] = await db<
-      { assembly_version: string; published_generation: number | null; parse_error_message: string | null }[]
-    >`SELECT assembly_version, published_generation, parse_error_message
+      {
+        assembly_version: string;
+        published_generation: number | null;
+        parse_error_message: string | null;
+        status: string;
+      }[]
+    >`SELECT assembly_version, published_generation, parse_error_message, status
         FROM source_bundles WHERE id = ${bundleId}`;
     expect(root).toMatchObject({ assembly_version: 'legacy', published_generation: null });
     expect(root!.parse_error_message).toContain('сборка УПД отменена');
+    // Пакет обязан выйти из processing. Раньше откат его там и оставлял: до
+    // терминала пакет доводила только публикация, а repairStuckJobs смотрит
+    // лишь на `queued`. По бою так зависли 7 пакетов — ровно все откаты.
+    expect(root!.status).toBe('parsed');
     // Технических документов у дочернего пакета не осталось.
     const techInSub = docs.filter((d) => d.is_technical && d.bundle_id === sub!.id);
     expect(techInSub).toHaveLength(0);

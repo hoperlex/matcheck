@@ -34,7 +34,11 @@ import {
   dispatchKeyOf,
   segmentDispatchKeyOf,
 } from '../../src/domain/jobs/job-outbox.js';
-import { repairStuckJobs, STUCK_AFTER_MINUTES } from '../../src/domain/jobs/stuck-jobs.js';
+import {
+  MAX_BUNDLE_REDISPATCH,
+  repairStuckJobs,
+  STUCK_AFTER_MINUTES,
+} from '../../src/domain/jobs/stuck-jobs.js';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const suite = TEST_DATABASE_URL ? describe : describe.skip;
@@ -264,6 +268,8 @@ suite('подбор зависших заданий (реальный PostgreSQL
       segments: 0,
       finalizedItems: 0,
       stubbedFiles: 0,
+      finalizedBundles: 0,
+      restartedBundles: 0,
     });
   });
 
@@ -402,5 +408,108 @@ suite('подбор зависших заданий (реальный PostgreSQL
     // Без mode='upd_assembly' задание ушло бы в waybill-обработчик, который не
     // нашёл бы накладных и пометил пакет parse_failed.
     expect(jobs[0]!.payload).toEqual({ bundleId: subId, mode: 'upd_assembly', generation: 0 });
+  });
+
+  describe('пакет завис в processing', () => {
+    /**
+     * Пакет в `processing`. Router ставит этот статус на время сборки, и раньше
+     * ветка отката оставляла его навсегда: основной repair смотрит только
+     * `queued`. По бою так зависли 7 пакетов — ровно все откаты сборки.
+     */
+    async function processingBundle(
+      age: number,
+      opts: { withTech?: boolean; withReal?: boolean; generation?: number } = {},
+    ): Promise<string> {
+      const id = randomUUID();
+      ours.push(bundleDispatchKeyOf(id, (opts.generation ?? 0) + 1));
+      const hash = createHash('sha256').update(id).digest('hex');
+      await sql`INSERT INTO source_bundles
+          (id, bundle_hash, kind, direction, site_id, status, updated_at, dispatch_generation)
+        VALUES (${id}, ${hash}, 'mixed', 'inbound', ${siteId}, 'processing',
+          now() - ${ageMinutes(age)}::interval, ${opts.generation ?? 0})`;
+      if (opts.withTech) {
+        await sql`INSERT INTO source_documents
+            (kind, is_technical, direction, origin, status, site_id, bundle_id, queued_at)
+          VALUES ('transport_waybill', true, 'inbound', 'manual_pdf', 'queued', ${siteId},
+            ${id}, now() - ${ageMinutes(age)}::interval)`;
+      }
+      if (opts.withReal) {
+        await sql`INSERT INTO source_documents
+            (kind, is_technical, direction, origin, status, site_id, bundle_id,
+             doc_number, doc_date, total_sum)
+          VALUES ('upd', false, 'inbound', 'manual_pdf', 'parsed', ${siteId}, ${id},
+            'УТ-7', current_date, 500)`;
+      }
+      return id;
+    }
+
+    const bundleStatus = async (id: string): Promise<string> => {
+      const [row] = await sql<{ status: string }[]>`
+        SELECT status FROM source_bundles WHERE id = ${id}`;
+      return row!.status;
+    };
+
+    it('работа кончилась, документы есть → статус досинхронизирован', async () => {
+      const id = await processingBundle(STUCK_AFTER_MINUTES + 10, { withReal: true });
+
+      const res = await repair();
+
+      expect(res.finalizedBundles).toBe(1);
+      expect(await bundleStatus(id)).toBe('parsed');
+    });
+
+    it('документов не появилось → parse_failed, а не вечное «в обработке»', async () => {
+      const id = await processingBundle(STUCK_AFTER_MINUTES + 10);
+
+      await repair();
+
+      expect(await bundleStatus(id)).toBe('parse_failed');
+    });
+
+    it('финализация не ставит заданий — двойное распознавание невозможно', async () => {
+      const id = await processingBundle(STUCK_AFTER_MINUTES + 10, { withReal: true });
+      const [before] = await sql<{ n: string }[]>`SELECT count(*) AS n FROM job_outbox`;
+
+      await repair();
+
+      const [after] = await sql<{ n: string }[]>`SELECT count(*) AS n FROM job_outbox`;
+      expect(after!.n).toBe(before!.n);
+      expect(await bundleStatus(id)).toBe('parsed');
+    });
+
+    it('свежий пакет не трогаем — разбор мог ещё идти', async () => {
+      const id = await processingBundle(5, { withReal: true });
+
+      await repair();
+
+      expect(await bundleStatus(id)).toBe('processing');
+    });
+
+    it('жива техническая запись → router не доработал, пакет переставляем', async () => {
+      // Подменять статус здесь нельзя: часть файлов пачки не обработана.
+      const id = await processingBundle(STUCK_AFTER_MINUTES + 10, { withTech: true });
+
+      const res = await repair();
+
+      expect(res.restartedBundles).toBe(1);
+      expect(await bundleStatus(id)).toBe('queued');
+      // Ключ нового поколения: старое задание могло остаться в BullMQ
+      // завершённым, и постановка под тем же id молча не создала бы ничего.
+      const jobs = await outboxFor(bundleDispatchKeyOf(id, 1));
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]!.payload).toEqual({ bundleId: id, mode: 'router' });
+    });
+
+    it('исчерпав попытки, пакет больше не перезапускается', async () => {
+      const id = await processingBundle(STUCK_AFTER_MINUTES + 10, {
+        withTech: true,
+        generation: MAX_BUNDLE_REDISPATCH,
+      });
+
+      const res = await repair();
+
+      expect(res.restartedBundles).toBe(0);
+      expect(await bundleStatus(id)).toBe('processing');
+    });
   });
 });

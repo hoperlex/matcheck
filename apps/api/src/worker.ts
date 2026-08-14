@@ -36,6 +36,7 @@ import {
   S3_CLEANUP_QUEUE,
   UPD_PARSE_QUEUE,
   UPD_PARSE_JOB_OPTIONS,
+  UPD_PARSE_WORKER_OPTIONS,
   type S3CleanupJobData,
   type UpdParseJobData,
 } from './plugins/queue.js';
@@ -102,6 +103,7 @@ import {
   stubReasonForRow,
 } from './domain/sourceDocuments/stub-documents.js';
 import { isBlocked, resolveReparsePlan } from './domain/sourceDocuments/reparse-plan.js';
+import { finalizeBundleTerminalState } from './domain/sourceDocuments/bundle-finalize.js';
 import { classifyImageKind } from './domain/edo/vision-classifier.js';
 import {
   assemblyDispatchKeyOf,
@@ -3839,8 +3841,31 @@ async function rollbackUpdAssembly(args: {
 
   await finishAssemblySubBundle(rootId, 'parse_failed', log);
   await recountGroupDocCount(rootId);
+
+  // Корневой пакет обязан выйти из `processing` здесь и сейчас.
+  //
+  // Router ставит ему `processing`, когда запускает сборку (см. handleDocumentRouterJob),
+  // рассчитывая, что до терминала его доведёт публикация. Откат публикацией не
+  // заканчивается, а собственного закрытия у него не было — пакет оставался в
+  // `processing` навсегда: repairStuckJobs ищет только `queued` и такой пакет не
+  // подбирает никто. На боевой БД так зависли 7 пакетов, и это ровно все откаты
+  // сборки при 8 успешных публикациях.
+  //
+  // `requireUnpublished` — против гонки с параллельной публикацией: пока откат
+  // разворачивал файлы, та могла успеть объявить поколение опубликованным, и
+  // отбирать у неё статус нельзя.
+  const finalized = await finalizeBundleTerminalState(db, rootId, {
+    requireUnpublished: true,
+    itemReason: 'файл не дошёл до разбора (сборка отменена)',
+    parseErrorCode: 'assembly_rolled_back',
+  });
   log.info(
-    { removed: removedDocIds.length, created: createdIds.length },
+    {
+      removed: removedDocIds.length,
+      created: createdIds.length,
+      bundle: finalized.outcome,
+      ...(finalized.skipReason ? { skipped: finalized.skipReason } : {}),
+    },
     'сборка УПД: откат завершён',
   );
 }
@@ -4583,6 +4608,7 @@ const worker = new Worker<UpdParseJobData>(
   {
     connection,
     concurrency: CONCURRENCY,
+    ...UPD_PARSE_WORKER_OPTIONS,
   },
 );
 
