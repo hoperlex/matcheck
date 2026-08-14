@@ -30,7 +30,10 @@ import {
   autoAssignContractorFromBuyer,
   manualRecipientSource,
 } from './domain/sourceDocuments/resolve-contractor.js';
-import { normalizePartyForDirectory } from './domain/sourceDocuments/party-directory-guard.js';
+import {
+  consigneeOwnIdentity,
+  normalizePartyForDirectory,
+} from './domain/sourceDocuments/party-directory-guard.js';
 import {
   buildQueueConnection,
   S3_CLEANUP_QUEUE,
@@ -1343,10 +1346,27 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // /counterparties?role=contractor, справочник на планшете) должен оставаться
   // тем, что выбирают люди, иначе туда натечёт каждый грузополучатель из УПД.
   const consignee = parsed.consignee;
+  // Реквизиты грузополучателя проходят проверку на подстановку: модель по
+  // промпту v9 копирует ИНН и КПП покупателя даже когда наименование другое
+  // (см. consigneeOwnIdentity). Скопированные — отбрасываем, иначе документ
+  // покажет чужой ИНН и свяжется с чужой организацией.
+  const consigneeIdentity = consigneeOwnIdentity(consignee, recipient);
+  if (consignee?.inn && !consigneeIdentity.inn) {
+    logger.warn(
+      {
+        docNumber: parsed.docNumber,
+        consigneeName: consignee.name,
+        consigneeInn: consignee.inn,
+        recipientName: recipient?.name,
+        recipientInn: recipient?.inn,
+      },
+      'consignee identity dropped: looks copied from buyer',
+    );
+  }
   const consigneeId =
-    consignee && consignee.inn && consignee.name
+    consignee && consigneeIdentity.inn && consignee.name
       ? await findOrCreateCounterparty(
-          { inn: consignee.inn, kpp: consignee.kpp ?? null, name: consignee.name },
+          { inn: consigneeIdentity.inn, kpp: consigneeIdentity.kpp, name: consignee.name },
           'customer',
         )
       : null;
@@ -1359,9 +1379,13 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // сторона без FK (графа 4 без ИНН) иначе осталась бы совсем без реквизитов,
     // а справочную запись потом правят люди, и она перестаёт отвечать на вопрос
     // «что стояло в документе». Нормализацию оставляем читателю.
+    //
+    // Исключение — грузополучатель: если его реквизиты скопированы у
+    // покупателя, «сырое» значение перестаёт отвечать на этот вопрос (в графе 4
+    // ИНН не печатают вовсе), поэтому пишем то, что осталось после проверки.
     supplierInnRaw: supplier?.inn ?? null,
     buyerInnRaw: recipient?.inn ?? null,
-    consigneeInnRaw: consignee?.inn ?? null,
+    consigneeInnRaw: consigneeIdentity.inn,
   };
 
   // Проверка дубля. Считаем дублем УПД с тем же (supplier_directory_id,
