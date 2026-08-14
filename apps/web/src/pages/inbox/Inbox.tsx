@@ -20,6 +20,7 @@ import {
   CloudUploadOutlined,
   MinusSquareOutlined,
   PlusSquareOutlined,
+  ReloadOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -29,6 +30,7 @@ import type {
   SourceDirection,
   SourceDocumentBulkDeleteResponse,
   SourceDocumentListResponseSchema,
+  SourceReparseResponse,
 } from '@matcheck/contracts';
 import {
   getDocumentDisplayStatus,
@@ -377,6 +379,9 @@ export default function InboxPage() {
   const { can: canDo } = usePermissions();
   const canCreateDocs = canDo('documents.list', 'create');
   const canDeleteDocs = canDo('documents.list', 'delete');
+  // Повторное распознавание — отдельное действие матрицы: правка полей и
+  // повторный прогон через модель различаются и по цене, и по последствиям.
+  const canReparseDocs = canDo('documents.list', 'reparse');
   // direction/kind/q + контрагенты/объект — всё хранится в URL, чтобы фильтры
   // переживали F5 и поддерживали share-able ссылки.
   const direction: SourceDirection =
@@ -675,6 +680,44 @@ export default function InboxPage() {
       message.error(err.message);
     },
   });
+
+  // Повторное распознавание: документ уходит обратно в очередь и разбирается
+  // заново тем же путём, каким появился. Исходный файл не трогается — меняются
+  // только распознанные данные, и при неудаче документ возвращается в прежний
+  // вид (сервер держит снимок).
+  const reparse = useMutation({
+    mutationFn: (id: string) =>
+      api.post<SourceReparseResponse>(`/source-documents/${id}/reparse`, {}),
+    onSuccess: (_res, id) => {
+      message.success('Документ отправлен на повторное распознавание');
+      void qc.invalidateQueries({ queryKey: ['source-documents'] });
+      void qc.invalidateQueries({ queryKey: ['source-document', id] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  const renderReparseButton = (r: Row) => {
+    if (!canReparseDocs) return null;
+    // Документ уже в работе — второе задание ему не нужно (сервер ответит 409).
+    const busy = r.status === 'queued' || r.status === 'processing';
+    return (
+      <Popconfirm
+        title="Распознать документ заново?"
+        description="Файл сохранится, но текущие распознанные данные заменятся, а точные связи строк приёмки с позициями документа сбросятся."
+        okText="Распознать"
+        cancelText="Отмена"
+        onConfirm={() => reparse.mutate(r.id)}
+      >
+        <Button
+          size="small"
+          shape="circle"
+          icon={<ReloadOutlined />}
+          disabled={busy || reparse.isPending}
+          title="Распознать повторно"
+        />
+      </Popconfirm>
+    );
+  };
 
   const renderDeleteButton = (r: Row) => {
     // Право «Удалять» на странице «Документы»: у подрядчика его нет по
@@ -996,12 +1039,18 @@ export default function InboxPage() {
           {
             title: '',
             key: 'actions',
-            width: 56,
+            // Две круглые кнопки: повтор распознавания и удаление.
+            width: 96,
             align: 'right' as const,
             onCell: () => ({
               onClick: (e: MouseEvent) => e.stopPropagation(),
             }),
-            render: (_: unknown, r: Row) => renderDeleteButton(r),
+            render: (_: unknown, r: Row) => (
+              <Space size={4}>
+                {renderReparseButton(r)}
+                {renderDeleteButton(r)}
+              </Space>
+            ),
           },
         ]}
         cardRender={(r) => (
@@ -1044,6 +1093,7 @@ export default function InboxPage() {
                 style={{ position: 'absolute', top: 0, right: 0 }}
                 onClick={(e) => e.stopPropagation()}
               >
+                {renderReparseButton(r)}
                 {renderDeleteButton(r)}
               </div>
             </Space>

@@ -368,9 +368,31 @@ export const ExtraFileSchema = z.object({
 });
 export type ExtraFile = z.infer<typeof ExtraFileSchema>;
 
+/**
+ * Состояние ручного повторного распознавания (кнопка «Распознать повторно»).
+ *
+ * Отдаётся только в карточке документа: списку хватает статуса строки — повтор
+ * возвращает документ в `queued`, и таблица сама показывает «в очереди».
+ * А вот ОТКАЗ повтора статусом не виден вовсе: неудачная попытка восстанавливает
+ * прежнее состояние документа целиком, и без этого поля кнопка выглядела бы как
+ * «нажал — ничего не произошло».
+ */
+export const SourceReparseStateSchema = z.object({
+  state: z.enum(['queued', 'processing', 'succeeded', 'failed']),
+  /** Поколение диспетчеризации, к которому относится попытка. */
+  generation: z.number(),
+  at: z.string(),
+  /** Почему повтор не удался. Заполняется только у state='failed'. */
+  reason: z.string().nullable().optional(),
+});
+export type SourceReparseState = z.infer<typeof SourceReparseStateSchema>;
+
 export const SourceDocumentDetailSchema = SourceDocumentSchema.extend({
   items: z.array(SourceItemSchema),
   attachments: z.array(SourceAttachmentSchema),
+  // null — повтор ни разу не запускался. Optional по той же причине, что и
+  // submission: схема переиспользуется ответами PATCH/POST и /sync.
+  reparse: SourceReparseStateSchema.nullable().optional(),
   // Файлы поставки, которые не распознавались. Показываются у любого документа
   // комплекта: карточка одна на все типы, а сертификат относится к поставке
   // целиком. `.default([])` без внешнего `.optional()` — входное поле остаётся
@@ -819,6 +841,20 @@ export const UpdAcknowledgeMismatchRequestSchema = z.object({
   reason: z.string().max(1000).optional(),
 });
 export type UpdAcknowledgeMismatchRequest = z.infer<typeof UpdAcknowledgeMismatchRequestSchema>;
+
+/**
+ * Ответ POST /source-documents/:id/reparse.
+ *
+ * `plan` — каким путём документ будет распознан заново: тем же, каким он
+ * появился. Возвращается не ради UI (он ждёт смены статуса строки), а ради
+ * диагностики: по логу видно, что накладная ушла m15-путём, а УПД из комплекта
+ * фото — сегментным, а не «одним файлом целиком».
+ */
+export const SourceReparseResponseSchema = z.object({
+  ok: z.literal(true),
+  plan: z.enum(['single', 'm15', 'segment', 'waybill']),
+});
+export type SourceReparseResponse = z.infer<typeof SourceReparseResponseSchema>;
 
 // ──────────── Журнал LLM-вызовов (для админского drawer) ────────────
 

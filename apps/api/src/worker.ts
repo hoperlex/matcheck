@@ -92,8 +92,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { classifyFile, type FileClassification } from './domain/edo/document-router.js';
 import {
   finalizeStaleRegistryItems,
-  markSubBundleItemsFailed,
   markSubBundleItemDocumented,
+  markSubBundleItemsFailed,
   selectRegistryRows,
 } from './domain/sourceDocuments/bundle-import-registry.js';
 import {
@@ -101,6 +101,7 @@ import {
   selectRowsWithoutDocument,
   stubReasonForRow,
 } from './domain/sourceDocuments/stub-documents.js';
+import { isBlocked, resolveReparsePlan } from './domain/sourceDocuments/reparse-plan.js';
 import { classifyImageKind } from './domain/edo/vision-classifier.js';
 import {
   assemblyDispatchKeyOf,
@@ -261,7 +262,10 @@ type ParseMode =
   | 'm15_vision'
   | 'second_pass_vision'
   // Логический УПД, собранный из страниц пакета (см. bundle_segments).
-  | 'segment_vision';
+  | 'segment_vision'
+  // Накладная (ТН/ОС-2), разобранная пакетным parseWaybillBatch. Ставится не
+  // здесь, а в createSourceDocumentFromWaybill: у пакетного пути свой обработчик.
+  | 'waybill_batch';
 
 /**
  * Режимы, для которых имеет смысл второй проход картинкой.
@@ -288,6 +292,90 @@ function weakParseReasons(parsed: UpdPdfParsed, hasMismatch: boolean): string[] 
 }
 
 /**
+ * Результат задания устарел: документ переразобрали, пока оно работало.
+ *
+ * Отдельный класс, а не «тихий return»: бросается из транзакции сохранения,
+ * которую нужно откатить целиком. Ловится на выходе из handleJob и НЕ уходит в
+ * BullMQ-retry — повторять нечего, документ уже принадлежит новому поколению.
+ */
+class StaleGenerationError extends Error {
+  constructor() {
+    super('document superseded by a newer reparse generation');
+    this.name = 'StaleGenerationError';
+  }
+}
+
+/**
+ * Условие «этот документ и это поколение диспетчеризации».
+ *
+ * Ставится на КАЖДУЮ запись задания в документ. Поколение растёт только при
+ * ручном повторе, поэтому для обычного потока условие всегда истинно (0 = 0), а
+ * задание, застрявшее до повтора, после него не совпадёт и не перепишет свежий
+ * результат своим устаревшим.
+ */
+function generationScoped(sourceDocumentId: string, generation: number) {
+  return and(
+    eq(sourceDocuments.id, sourceDocumentId),
+    eq(sourceDocuments.dispatchGeneration, generation),
+  );
+}
+
+/**
+ * Возвращает документ в состояние до неудачного повтора.
+ *
+ * Инвариант кнопки «Распознать повторно»: нажатие не может ухудшить документ.
+ * Маршрут к этому моменту уже сменил статус на `queued` и обнулил `second_pass`,
+ * поэтому «просто ничего не писать» недостаточно — нужно вернуть снимок,
+ * сделанный при постановке задания.
+ *
+ * Ничего не делает, если снимка нет (обычный, не ручной разбор) или поколение
+ * разошлось — тогда документ уже принадлежит следующей попытке.
+ */
+async function rollbackReparse(
+  sourceDocumentId: string,
+  generation: number,
+  reason: string,
+  log: WorkerLog,
+): Promise<boolean> {
+  const [doc] = await db
+    .select({ reparse: sourceDocuments.reparse })
+    .from(sourceDocuments)
+    .where(generationScoped(sourceDocumentId, generation))
+    .limit(1);
+  const state = doc?.reparse as
+    | { generation?: number; snapshot?: Record<string, unknown> }
+    | null
+    | undefined;
+  if (!state?.snapshot || state.generation !== generation) return false;
+
+  const snap = state.snapshot as {
+    status?: string;
+    parseErrorCode?: string | null;
+    parseErrorDetails?: Record<string, unknown> | null;
+    validation?: unknown;
+    processedAt?: string | null;
+    secondPass?: unknown;
+  };
+
+  const [restored] = await db
+    .update(sourceDocuments)
+    .set({
+      status: (snap.status ?? 'parse_failed') as 'parsed',
+      parseErrorCode: snap.parseErrorCode ?? null,
+      parseErrorDetails: snap.parseErrorDetails ?? null,
+      validation: (snap.validation ?? null) as never,
+      processedAt: snap.processedAt ? new Date(snap.processedAt) : null,
+      secondPass: (snap.secondPass ?? null) as never,
+      reparse: { ...state, state: 'failed', reason, finishedAt: new Date().toISOString() },
+      updatedAt: new Date(),
+    })
+    .where(generationScoped(sourceDocumentId, generation))
+    .returning({ id: sourceDocuments.id });
+  if (restored) log.warn({ reason }, 'повторное распознавание откачено — документ не изменён');
+  return Boolean(restored);
+}
+
+/**
  * Заказывает второй проход: пишет состояние документа и задание в ОДНОЙ
  * транзакции через outbox.
  *
@@ -304,15 +392,27 @@ async function queueSecondPass(args: {
   s3Key: string;
   reasons: string[];
   values: Record<string, unknown>;
+  /** Поколение задания-родителя: и для fencing, и для ключа второго прохода. */
+  generation: number;
+  /**
+   * Транзакция вызывающего. Для ручного повтора обязательна: иначе шапка со
+   * слабым результатом успевает лечь в БД раньше, чем переписаны позиции, и в
+   * этом окне документ выглядит как «новая шапка со старыми позициями».
+   */
+  tx?: typeof db;
 }): Promise<boolean> {
-  const [current] = await db
+  // Читаем ТОЙ ЖЕ транзакцией, что и пишем. Отдельное соединение изнутри чужой
+  // транзакции — это запрос к строке, которую она уже держит: пул выдаёт другое
+  // соединение, и оно ждёт коммита, которого не будет, пока ждём мы.
+  const reader = args.tx ?? db;
+  const [current] = await reader
     .select({ secondPass: sourceDocuments.secondPass })
     .from(sourceDocuments)
-    .where(eq(sourceDocuments.id, args.sourceDocumentId))
+    .where(generationScoped(args.sourceDocumentId, args.generation))
     .limit(1);
   if (!current || current.secondPass != null) return false;
 
-  await db.transaction(async (tx) => {
+  const write = async (tx: typeof db) => {
     await tx
       .update(sourceDocuments)
       .set({
@@ -324,14 +424,25 @@ async function queueSecondPass(args: {
           reasons: args.reasons,
         },
       })
-      .where(eq(sourceDocuments.id, args.sourceDocumentId));
+      .where(generationScoped(args.sourceDocumentId, args.generation));
     await enqueueJob(tx as unknown as typeof db, {
       queue: UPD_PARSE_QUEUE,
       jobName: 'parse',
-      payload: { sourceDocumentId: args.sourceDocumentId, s3Key: args.s3Key, pass: 'vision' },
-      dedupeKey: documentSecondPassKeyOf(args.sourceDocumentId),
+      payload: {
+        sourceDocumentId: args.sourceDocumentId,
+        s3Key: args.s3Key,
+        pass: 'vision',
+        docGeneration: args.generation,
+      },
+      // Ключ версионный: после ручного повтора старый `doc~<id>~parse~vision`
+      // уже отработал, а BullMQ держит завершённые задания сутки — без
+      // поколения второй проход просто не запустился бы.
+      dedupeKey: documentSecondPassKeyOf(args.sourceDocumentId, args.generation),
     });
-  });
+  };
+
+  if (args.tx) await write(args.tx);
+  else await db.transaction(async (tx) => write(tx as unknown as typeof db));
   return true;
 }
 
@@ -423,11 +534,32 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     await handleWaybillBundleJob(job.data.bundleId, log);
     return;
   }
+  // Повторный разбор ОДНОЙ накладной пакетного пути. Отдельный обработчик:
+  // parseWaybillBatch читает вложения документа, а не один файл, и результат
+  // пишется в существующую строку, а не создаёт новые.
+  if ('mode' in job.data && job.data.mode === 'waybill_single' && job.data.sourceDocumentId) {
+    const log = logger.child({
+      sourceDocumentId: job.data.sourceDocumentId,
+      jobId: job.id,
+      mode: 'waybill_single',
+    });
+    await handleWaybillSingleReparseJob(
+      job.data.sourceDocumentId,
+      job.data.docGeneration ?? 0,
+      log,
+    );
+    return;
+  }
   // Сегмент сборки: файла у задания нет вовсе — страницы адресует манифест,
   // поэтому проверка payload ниже пропускает его отдельно.
   const segmentJob =
     'segmentId' in job.data && job.data.segmentId && job.data.sourceDocumentId
-      ? { segmentId: job.data.segmentId, generation: job.data.generation }
+      ? {
+          segmentId: job.data.segmentId,
+          generation: job.data.generation,
+          // Ручной повтор опубликованного комплекта — см. loadSegmentContext.
+          reparse: job.data.reparse === true,
+        }
       : null;
 
   if (!job.data.sourceDocumentId || (!job.data.s3Key && !segmentJob)) {
@@ -435,6 +567,19 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     return;
   }
   const sourceDocumentId = job.data.sourceDocumentId;
+  /**
+   * Поколение диспетчеризации, под которым поставлено ЭТО задание.
+   *
+   * Задание без поля считается поколением 0: у документа, которого ни разу не
+   * переразбирали, `dispatch_generation` равен нулю, поэтому все существующие
+   * задания продолжают работать как раньше. А после ручного повтора счётчик
+   * растёт, и застрявшее старое задание уже не совпадёт — то есть не перепишет
+   * свежий результат своим устаревшим.
+   */
+  const jobGeneration = job.data.docGeneration ?? 0;
+  // Ручной повтор. Признак — ненулевое поколение: счётчик растёт только в
+  // маршруте /reparse, никакой другой путь его не трогает.
+  const reparseJob = jobGeneration > 0;
 
   // Fencing сегментного задания. Одной проверки поколения мало: откат
   // происходит ВНУТРИ того же поколения, и после него задание, дождавшееся
@@ -466,19 +611,26 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // делается ДО того, как документ уйдёт в processing и начнётся разбор.
   const baseline = secondPassJob ? await loadParsedBaseline(sourceDocumentId) : null;
 
-  // Переводим в processing + считаем attempt. Если кто-то уже удалил
-  // документ через DELETE /:id, returning() вернёт пустой массив — выходим.
+  // Переводим в processing + считаем attempt. Пустой returning() значит одно из
+  // двух: документ удалён через DELETE /:id либо его успели переразобрать, и
+  // наше задание относится к прошлому поколению. Оба случая — «работать не над
+  // чем», выходим молча.
   const [proc] = await db
     .update(sourceDocuments)
     .set({
       status: 'processing',
       jobAttempts: drSql`${sourceDocuments.jobAttempts} + 1`,
+      ...(reparseJob
+        ? {
+            reparse: drSql`jsonb_set(${sourceDocuments.reparse}, '{state}', '"processing"')`,
+          }
+        : {}),
       updatedAt: new Date(),
     })
-    .where(eq(sourceDocuments.id, sourceDocumentId))
+    .where(generationScoped(sourceDocumentId, jobGeneration))
     .returning({ id: sourceDocuments.id, kind: sourceDocuments.kind });
   if (!proc) {
-    log.warn('source document is gone — skipping job');
+    log.warn({ jobGeneration }, 'source document is gone or superseded — skipping job');
     return;
   }
 
@@ -872,7 +1024,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
                   processedAt: new Date(),
                   updatedAt: new Date(),
                 })
-                .where(eq(sourceDocuments.id, sourceDocumentId));
+                .where(generationScoped(sourceDocumentId, jobGeneration));
               log.warn(
                 { visionErr },
                 'pdf-no-text + vision fallback failed — marked parse_failed',
@@ -898,6 +1050,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
                 parseErrorDetails: { textParseError: message },
                 updatedAt: new Date(),
               },
+              generation: jobGeneration,
             });
             if (queued) return;
             throw err;
@@ -908,6 +1061,33 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       }
     }
   } catch (err) {
+    // Документ переразобрали, пока мы работали. Результат этого задания
+    // относится к прошлому поколению — писать его некуда, ретраить нечего.
+    if (err instanceof StaleGenerationError) {
+      log.info({ jobGeneration }, 'результат задания устарел — документ уже переразобран');
+      return;
+    }
+
+    // Ручной повтор не удался — возвращаем документ ровно в то состояние, в
+    // котором он был до нажатия кнопки. Это главный инвариант фичи: повтор
+    // может не улучшить документ, но не имеет права его ухудшить.
+    //
+    // Второй проход ПОВТОРА сюда тоже попадает, и это не оплошность. Обычный
+    // второй проход просто оставляет документ как есть — терять ему нечего.
+    // Но повтор к этому моменту уже перевёл документ в `queued`, и «оставить
+    // как есть» означало бы вечное «в очереди»: первый проход упал, картинка
+    // тоже, а вернуть прежний статус некому. Откат снимает и заказ второго
+    // прохода — он часть той же неудавшейся попытки.
+    if (reparseJob) {
+      const message = err instanceof Error ? err.message : String(err);
+      const rolledBack = await rollbackReparse(sourceDocumentId, jobGeneration, message, log);
+      if (rolledBack) {
+        await notifySourceDocumentUpdated(sourceDocumentId);
+        return;
+      }
+      // Снимка нет (документ создан до 0100) — падаем в обычные ветки ниже.
+    }
+
     // Второй проход упал — сохранённый разбор важнее причины падения. Он уже
     // лежит в БД, и первый проход мог дать пользователю рабочий документ:
     // затирать его статусом parse_failed из-за неудачной попытки улучшить
@@ -941,7 +1121,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
               }
             : { secondPass: secondPassState, updatedAt: new Date() },
         )
-        .where(eq(sourceDocuments.id, sourceDocumentId));
+        .where(generationScoped(sourceDocumentId, jobGeneration));
       log.warn(
         { err: message, baselineEmpty },
         baselineEmpty
@@ -988,7 +1168,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           processedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(sourceDocuments.id, sourceDocumentId));
+        .where(generationScoped(sourceDocumentId, jobGeneration));
       log.warn(
         { elapsedMs: err.elapsedMs, reason: isBudget ? 'vision_budget' : 'vision_timeout' },
         'vision fail-fast — marked parse_failed without retry',
@@ -1030,7 +1210,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           processedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(sourceDocuments.id, sourceDocumentId));
+        .where(generationScoped(sourceDocumentId, jobGeneration));
       log.warn({ err }, 'xls convert failed — marked parse_failed without retry');
       await notifySourceDocumentUpdated(sourceDocumentId);
       return;
@@ -1058,7 +1238,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           processedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(sourceDocuments.id, sourceDocumentId));
+        .where(generationScoped(sourceDocumentId, jobGeneration));
       log.warn(
         { err, isTimeout },
         'excel→png conversion failed — marked parse_failed without retry',
@@ -1081,7 +1261,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           processedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(sourceDocuments.id, sourceDocumentId));
+        .where(generationScoped(sourceDocumentId, jobGeneration));
       log.warn(
         { reason: isTimeout ? 'pdf_render_timeout' : 'pdf_render_error', err },
         'pdf→png failed — marked parse_failed without retry',
@@ -1114,7 +1294,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           },
           updatedAt: new Date(),
         })
-        .where(eq(sourceDocuments.id, sourceDocumentId));
+        .where(generationScoped(sourceDocumentId, jobGeneration));
       log.info({ reasons: decision.reasons }, 'vision second pass worse than baseline — kept');
       await notifySourceDocumentUpdated(sourceDocumentId);
       return;
@@ -1249,6 +1429,25 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       // здесь остаётся предупреждением: пометку проставим после сохранения.
       duplicate = { id: existing.id };
       log.warn({ existingId: existing.id }, 'сегмент: дубликат — сохраняем полностью');
+    } else if (existing && reparseJob) {
+      // Ручной повтор упёрся в дубликат. Ветка ниже терминальна — она пишет
+      // шапку и выходит ДО сохранения позиций, то есть документ остался бы с
+      // новой шапкой и СТАРЫМИ позициями. Для повтора это ухудшение, поэтому
+      // откатываем: документ таким и был до нажатия кнопки, а для дубликатов
+      // есть свой сценарий «разрешить».
+      duplicate = { id: existing.id };
+      const rolledBack = await rollbackReparse(
+        sourceDocumentId,
+        jobGeneration,
+        'duplicate_detected',
+        log,
+      );
+      log.warn(
+        { existingId: existing.id, rolledBack },
+        'повтор: найден дубликат — результат не применяем',
+      );
+      await notifySourceDocumentUpdated(sourceDocumentId);
+      return;
     } else if (existing) {
       duplicate = { id: existing.id };
       const duplicateValues = {
@@ -1282,13 +1481,14 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             s3Key,
             reasons: weakReasons,
             values: duplicateValues,
+            generation: jobGeneration,
           })
         : false;
       if (!queued) {
         await db
           .update(sourceDocuments)
           .set(duplicateValues)
-          .where(eq(sourceDocuments.id, sourceDocumentId));
+          .where(generationScoped(sourceDocumentId, jobGeneration));
       }
       log.warn(
         { existingId: existing.id, confidence, parsedViaVision, secondPassQueued: queued },
@@ -1399,6 +1599,10 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     llmProviderId,
     llmConfidence: parsed.confidence.toString(),
     validation,
+    // Чем документ разобран. Читает это только повтор: он обязан пойти ТЕМ ЖЕ
+    // путём, а по типу документа его не вывести — kind='transport_waybill'
+    // одинаков и у М-15, и у ТН из пакетного разбора.
+    parseMode,
     processedAt: new Date(),
     updatedAt: new Date(),
     // Второй проход, дошедший сюда, победил сравнение — фиксируем исход, иначе
@@ -1414,15 +1618,105 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         }
       : {}),
   };
-  const secondPassQueued = wantSecondPass
-    ? await queueSecondPass({ sourceDocumentId, s3Key, reasons: weakReasons, values: headerValues })
-    : false;
-  if (!secondPassQueued) {
-    await db
-      .update(sourceDocuments)
-      .set(headerValues)
-      .where(eq(sourceDocuments.id, sourceDocumentId));
+  // Материалы заводим ДО транзакции: findOrCreateMaterial ходит в справочник на
+  // каждую позицию, и внутри транзакции это растянуло бы её на все вставки.
+  // Справочник идемпотентен, поэтому откат транзакции ему не вредит.
+  const itemRows =
+    parsed.items.length > 0
+      ? await Promise.all(
+          parsed.items.map(async (it, idx) => ({
+            sourceDocumentId,
+            materialId: await findOrCreateMaterial(it.nameRaw, it.unit),
+            nameRaw: it.nameRaw,
+            // qty может быть null для строк-услуг (доставка без количества) —
+            // в БД пишем '0' (колонка NOT NULL), как в waybill-пути.
+            qty: it.qty != null ? it.qty.toString() : '0',
+            unit: it.unit,
+            price: it.price != null ? it.price.toString() : null,
+            sum: it.sum != null ? it.sum.toString() : null,
+            // vatRate/vatSum извлекаются промптом v5+. Старые промпты их
+            // игнорируют → останутся NULL, веб-портал в этом случае рисует
+            // «—» в колонке «Сумма НДС». См. контракт UpdPdfItemSchema.
+            vatRate: it.vatRate != null ? it.vatRate.toString() : null,
+            vatSum: it.vatSum != null ? it.vatSum.toString() : null,
+            volumeM3: it.volumeM3 != null ? it.volumeM3.toString() : null,
+            massKg: it.massKg != null ? it.massKg.toString() : null,
+            volumeConfidence: it.volumeConfidence ?? null,
+            groupName: it.groupName ?? null,
+            lineNo: idx + 1,
+          })),
+        )
+      : [];
 
+  // Шапка и позиции — ОДНОЙ транзакцией.
+  //
+  // Раньше это были три отдельных запроса (шапка, delete позиций, insert), и
+  // падение между ними оставляло документ без позиций. Для первой загрузки это
+  // почти незаметно (терять было нечего), но для повтора — ровно тот исход,
+  // ради предотвращения которого кнопка и делается.
+  let secondPassQueued = false;
+  await db.transaction(async (tx) => {
+    const txDb = tx as unknown as typeof db;
+
+    if (wantSecondPass) {
+      secondPassQueued = await queueSecondPass({
+        sourceDocumentId,
+        s3Key,
+        reasons: weakReasons,
+        values: headerValues,
+        generation: jobGeneration,
+        tx: txDb,
+      });
+    }
+
+    if (!secondPassQueued) {
+      const [saved] = await txDb
+        .update(sourceDocuments)
+        .set(headerValues)
+        .where(generationScoped(sourceDocumentId, jobGeneration))
+        .returning({ id: sourceDocuments.id });
+      // Документ переразобрали, пока мы работали, — наш результат устарел.
+      if (!saved) throw new StaleGenerationError();
+    }
+
+    await txDb
+      .delete(sourceDocumentItems)
+      .where(eq(sourceDocumentItems.sourceDocumentId, sourceDocumentId));
+    if (itemRows.length > 0) await txDb.insert(sourceDocumentItems).values(itemRows);
+
+    // Дубликат у собранного документа — предупреждение поверх сохранённого
+    // результата: позиции и реквизиты остаются, менеджер решает, что делать.
+    if (duplicate && segmentContext) {
+      await txDb
+        .update(sourceDocuments)
+        .set({
+          status: 'needs_resolution',
+          parseErrorCode: 'duplicate_upd',
+          parseErrorDetails: {
+            existingId: duplicate.id,
+            docNumber: parsed.docNumber,
+            docDate: parsed.docDate,
+          },
+          updatedAt: new Date(),
+        })
+        .where(generationScoped(sourceDocumentId, jobGeneration));
+    }
+
+    // Ручной повтор дошёл до конца — гасим диагностику прошлого разбора и
+    // закрываем попытку. Именно здесь, а не в маршруте: до этого момента
+    // прежние parse_error*/validation обязаны оставаться на месте, иначе
+    // неудачный повтор стёр бы их без замены.
+    if (reparseJob) {
+      await txDb
+        .update(sourceDocuments)
+        .set({
+          reparse: drSql`jsonb_set(jsonb_set(${sourceDocuments.reparse}, '{state}', '"succeeded"'), '{finishedAt}', to_jsonb(now()::text))`,
+        })
+        .where(generationScoped(sourceDocumentId, jobGeneration));
+    }
+  });
+
+  if (!secondPassQueued) {
     // Автоподстановка подрядчика по покупателю — только для публичной загрузки.
     //
     // Отдельным UPDATE после записи шапки, а не полем в headerValues: условие
@@ -1438,6 +1732,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       confidence,
       minConfidence: MIN_DEDUP_CONFIDENCE,
       buyerInn: recipient?.inn ?? null,
+      generation: jobGeneration,
     });
     if (autoAssign.assigned) {
       log.info(
@@ -1450,56 +1745,6 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       { reasons: weakReasons, parseMode },
       'weak parse — vision second pass queued as separate job',
     );
-  }
-
-  // Удаляем возможные старые позиции (если это повторный прогон после
-  // resolve-duplicate/replace) и вставляем новые.
-  await db
-    .delete(sourceDocumentItems)
-    .where(eq(sourceDocumentItems.sourceDocumentId, sourceDocumentId));
-  if (parsed.items.length > 0) {
-    const rows = await Promise.all(
-      parsed.items.map(async (it, idx) => ({
-        sourceDocumentId,
-        materialId: await findOrCreateMaterial(it.nameRaw, it.unit),
-        nameRaw: it.nameRaw,
-        // qty может быть null для строк-услуг (доставка без количества) —
-        // в БД пишем '0' (колонка NOT NULL), как в waybill-пути.
-        qty: it.qty != null ? it.qty.toString() : '0',
-        unit: it.unit,
-        price: it.price != null ? it.price.toString() : null,
-        sum: it.sum != null ? it.sum.toString() : null,
-        // vatRate/vatSum извлекаются промптом v5+. Старые промпты их
-        // игнорируют → останутся NULL, веб-портал в этом случае рисует
-        // «—» в колонке «Сумма НДС». См. контракт UpdPdfItemSchema.
-        vatRate: it.vatRate != null ? it.vatRate.toString() : null,
-        vatSum: it.vatSum != null ? it.vatSum.toString() : null,
-        volumeM3: it.volumeM3 != null ? it.volumeM3.toString() : null,
-        massKg: it.massKg != null ? it.massKg.toString() : null,
-        volumeConfidence: it.volumeConfidence ?? null,
-        groupName: it.groupName ?? null,
-        lineNo: idx + 1,
-      })),
-    );
-    await db.insert(sourceDocumentItems).values(rows);
-  }
-
-  // Дубликат у собранного документа — предупреждение поверх сохранённого
-  // результата: позиции и реквизиты остаются, менеджер решает, что делать.
-  if (duplicate && segmentContext) {
-    await db
-      .update(sourceDocuments)
-      .set({
-        status: 'needs_resolution',
-        parseErrorCode: 'duplicate_upd',
-        parseErrorDetails: {
-          existingId: duplicate.id,
-          docNumber: parsed.docNumber,
-          docDate: parsed.docDate,
-        },
-        updatedAt: new Date(),
-      })
-      .where(eq(sourceDocuments.id, sourceDocumentId));
   }
 
   log.info(
@@ -1706,12 +1951,16 @@ async function handleWaybillBundleJob(bundleId: string, log: WorkerLog): Promise
   // Атачменты пакета прикрепляем к каждому из них (все ко всем) —
   // оператор в карточке любого документа видит весь пакет.
   const created: { id: string; docNumber: string | null; form: string }[] = [];
-  for (const doc of parsed.documents) {
+  for (const [index, doc] of parsed.documents.entries()) {
     const newId = await createSourceDocumentFromWaybill({
       doc,
       bundleId,
       bundle,
       llmProviderId,
+      // Позиция в ответе модели. Нужна повторному распознаванию: по ней он
+      // находит «свой» документ, когда в одном файле их несколько. Номер для
+      // этого не годится — неверно распознанный номер и есть повод для повтора.
+      batchIndex: index,
       attachments: attachments.map((a) => ({
         s3Key: a.s3Key,
         filename: a.filename,
@@ -2855,7 +3104,7 @@ type SegmentJobContext = {
  */
 async function loadSegmentContext(
   sourceDocumentId: string,
-  job: { segmentId: string; generation: number },
+  job: { segmentId: string; generation: number; reparse?: boolean },
 ): Promise<SegmentJobContext | null> {
   const [seg] = await db
     .select()
@@ -2878,18 +3127,31 @@ async function loadSegmentContext(
     .limit(1);
   if (!root) return null;
   if (root.gen !== job.generation) return null;
-  // Уже опубликовано — комплект закрыт, переписывать его нельзя.
-  if (root.published !== null) return null;
-  if (root.status !== 'processing') return null;
 
-  const [doc] = await db
-    .select({ id: sourceDocuments.id, isTechnical: sourceDocuments.isTechnical })
-    .from(sourceDocuments)
-    .where(eq(sourceDocuments.id, sourceDocumentId))
-    .limit(1);
-  // Документ уже опубликован (isTechnical снят) — значит комплект закрыт, а
-  // это задание опоздало.
-  if (!doc || !doc.isTechnical) return null;
+  // Ручной повтор опубликованного комплекта проверяется иначе.
+  //
+  // Проверки ниже стерегут ОДНО: «сборка ещё идёт, и задание не опоздало». Для
+  // повтора это условие ложно по определению — комплект давно опубликован, а
+  // документ перестал быть техническим. Но то, ради чего проверки существуют —
+  // что манифест принадлежит этому документу и относится к активному поколению
+  // пакета, — уже подтверждено выше и остаётся в силе. Единственное, что
+  // добавляется: не вмешиваться, пока комплект пересобирают.
+  if (job.reparse) {
+    if (root.status === 'processing') return null;
+  } else {
+    // Уже опубликовано — комплект закрыт, переписывать его нельзя.
+    if (root.published !== null) return null;
+    if (root.status !== 'processing') return null;
+
+    const [doc] = await db
+      .select({ id: sourceDocuments.id, isTechnical: sourceDocuments.isTechnical })
+      .from(sourceDocuments)
+      .where(eq(sourceDocuments.id, sourceDocumentId))
+      .limit(1);
+    // Документ уже опубликован (isTechnical снят) — значит комплект закрыт, а
+    // это задание опоздало.
+    if (!doc || !doc.isTechnical) return null;
+  }
 
   const refs = (seg.pageRefs ?? []) as PageRef[];
   if (refs.length === 0) return null;
@@ -3717,6 +3979,8 @@ async function createSourceDocumentFromWaybill(args: {
   bundleId: string;
   bundle: typeof sourceBundles.$inferSelect;
   llmProviderId: string | null;
+  /** Позиция документа в ответе модели — постоянная привязка для повтора. */
+  batchIndex?: number;
   attachments: { s3Key: string; filename: string; mimeType: string | null; sizeBytes: number | null }[];
 }): Promise<string> {
   const { doc, bundleId, bundle, llmProviderId, attachments } = args;
@@ -3807,6 +4071,10 @@ async function createSourceDocumentFromWaybill(args: {
       llmConfidence: doc.confidence.toString(),
       parsedAt: new Date(),
       processedAt: new Date(),
+      // Пакетный разбор накладных: и режим, и позиция в пачке нужны повтору,
+      // чтобы пойти тем же путём и записать результат в нужную строку.
+      parseMode: 'waybill_batch',
+      batchIndex: args.batchIndex ?? null,
       bundleId,
       createdByUserId: bundle.createdByUserId,
     })
@@ -3857,6 +4125,187 @@ async function createSourceDocumentFromWaybill(args: {
   }
 
   return id;
+}
+
+/**
+ * Повторное распознавание ОДНОЙ накладной пакетного пути (ТН/ОС-2).
+ *
+ * Пакетный разбор устроен «файл → N документов», и повторить его целиком нельзя:
+ * технической записи пакета давно нет, а новый прогон создал бы вторую пачку
+ * документов вместо обновления существующей. Поэтому здесь тот же парсер
+ * применяется к вложениям ОДНОГО документа, а результат сопоставляется с ним.
+ *
+ * Порядок сопоставления и почему он такой:
+ *   1. batch_index — позиция документа в ответе модели при создании. Единственный
+ *      способ, устойчивый к неверно распознанному номеру, — а это ровно тот
+ *      случай, ради которого повтор и запускают. Работает, когда модель вернула
+ *      столько же документов, сколько было в прошлый раз.
+ *   2. один документ в ответе — сопоставлять не с чем.
+ *   3. совпадение номера и даты — для записей, созданных до появления
+ *      batch_index (на бою таких три).
+ *   4. не сопоставили → полный откат: документ остаётся ровно таким, каким был.
+ */
+async function handleWaybillSingleReparseJob(
+  sourceDocumentId: string,
+  jobGeneration: number,
+  log: WorkerLog,
+): Promise<void> {
+  const [doc] = await db
+    .select()
+    .from(sourceDocuments)
+    .where(generationScoped(sourceDocumentId, jobGeneration))
+    .limit(1);
+  if (!doc) {
+    log.warn({ jobGeneration }, 'накладная исчезла или переразобрана — пропускаем задание');
+    return;
+  }
+
+  const [marked] = await db
+    .update(sourceDocuments)
+    .set({
+      status: 'processing',
+      jobAttempts: drSql`${sourceDocuments.jobAttempts} + 1`,
+      reparse: drSql`jsonb_set(${sourceDocuments.reparse}, '{state}', '"processing"')`,
+      updatedAt: new Date(),
+    })
+    .where(generationScoped(sourceDocumentId, jobGeneration))
+    .returning({ id: sourceDocuments.id });
+  if (!marked) return;
+
+  try {
+    const attachments = await db
+      .select()
+      .from(sourceDocumentAttachments)
+      .where(
+        and(
+          eq(sourceDocumentAttachments.sourceDocumentId, sourceDocumentId),
+          eq(sourceDocumentAttachments.role, 'original'),
+        ),
+      );
+    const files: WaybillInputImage[] = [];
+    for (const a of attachments) {
+      const buf = await getObject(a.s3Key);
+      files.push({ buffer: buf, mimeType: a.mimeType ?? 'image/jpeg', filename: a.filename });
+    }
+    if (files.length === 0) throw new Error('нет исходных файлов накладной');
+
+    // Тот же препроцессинг, что и в пакетном разборе: OpenRouter принимает
+    // только image/*, поэтому PDF разворачиваем в страницы-PNG.
+    if ((await getDefaultProviderKind()) === 'openrouter') {
+      const expanded = await expandPdfAttachmentsForOpenRouter(files);
+      files.length = 0;
+      files.push(...expanded);
+    }
+
+    const { parsed, llmProviderId } = await parseWaybillBatch(files, {
+      sourceDocumentId,
+      // Пакета здесь нет: разбирается один документ, а не загрузка целиком.
+      bundleId: null,
+    });
+    const picked = pickReparsedWaybill(parsed.documents, doc);
+    if (!picked) {
+      const rolledBack = await rollbackReparse(
+        sourceDocumentId,
+        jobGeneration,
+        'ambiguous_source',
+        log,
+      );
+      log.warn(
+        { found: parsed.documents.length, batchIndex: doc.batchIndex, rolledBack },
+        'повтор накладной: не удалось сопоставить результат с документом',
+      );
+      await notifySourceDocumentUpdated(sourceDocumentId);
+      return;
+    }
+
+    const kind = picked.form === 'os2' ? 'os2_transfer' : 'transport_waybill';
+    const itemRows = await Promise.all(
+      picked.items.map(async (it, idx) => ({
+        sourceDocumentId,
+        materialId:
+          kind === 'transport_waybill'
+            ? await findOrCreateMaterial(it.nameRaw, it.unit ?? null)
+            : null,
+        nameRaw: it.nameRaw,
+        qty: it.qty != null ? it.qty.toString() : '0',
+        unit: it.unit && it.unit.trim() ? it.unit.trim() : 'шт',
+        price: it.price != null ? it.price.toString() : null,
+        sum: it.sum != null ? it.sum.toString() : null,
+        vatRate: null,
+        vatSum: null,
+        volumeM3: null,
+        massKg: null,
+        volumeConfidence: null,
+        groupName: null,
+        lineNo: idx + 1,
+        inventoryNumber: it.invNumber ?? null,
+      })),
+    );
+
+    await db.transaction(async (tx) => {
+      const txDb = tx as unknown as typeof db;
+      const [saved] = await txDb
+        .update(sourceDocuments)
+        .set({
+          kind,
+          status: 'parsed',
+          parseError: null,
+          parseErrorCode: null,
+          parseErrorDetails: null,
+          docNumber: picked.docNumber ?? null,
+          docDate: parseLlmDocDate(picked.docDate),
+          totalSum: picked.totalSum != null ? picked.totalSum.toString() : null,
+          llmProviderId,
+          llmConfidence: picked.confidence.toString(),
+          parseMode: 'waybill_batch',
+          processedAt: new Date(),
+          reparse: drSql`jsonb_set(jsonb_set(${sourceDocuments.reparse}, '{state}', '"succeeded"'), '{finishedAt}', to_jsonb(now()::text))`,
+          updatedAt: new Date(),
+        })
+        .where(generationScoped(sourceDocumentId, jobGeneration))
+        .returning({ id: sourceDocuments.id });
+      if (!saved) throw new StaleGenerationError();
+
+      await txDb
+        .delete(sourceDocumentItems)
+        .where(eq(sourceDocumentItems.sourceDocumentId, sourceDocumentId));
+      if (itemRows.length > 0) await txDb.insert(sourceDocumentItems).values(itemRows);
+    });
+
+    log.info({ itemsCount: picked.items.length, form: picked.form }, 'накладная распознана заново');
+    await notifySourceDocumentUpdated(sourceDocumentId);
+  } catch (err) {
+    if (err instanceof StaleGenerationError) {
+      log.info({ jobGeneration }, 'результат задания устарел — документ уже переразобран');
+      return;
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    await rollbackReparse(sourceDocumentId, jobGeneration, message, log);
+    log.warn({ err: message }, 'повтор накладной не удался — документ возвращён в прежний вид');
+    await notifySourceDocumentUpdated(sourceDocumentId);
+  }
+}
+
+/** Какой из распознанных документов относится к этой строке. См. порядок выше. */
+function pickReparsedWaybill(
+  documents: WaybillDocument[],
+  doc: { batchIndex: number | null; docNumber: string | null; docDate: Date | null },
+): WaybillDocument | null {
+  if (documents.length === 0) return null;
+  if (doc.batchIndex != null && doc.batchIndex < documents.length) {
+    return documents[doc.batchIndex] ?? null;
+  }
+  if (documents.length === 1) return documents[0] ?? null;
+
+  const sameNumber = documents.filter(
+    (d) => (d.docNumber ?? null) === doc.docNumber && sameDay(parseLlmDocDate(d.docDate), doc.docDate),
+  );
+  return sameNumber.length === 1 ? sameNumber[0]! : null;
+}
+
+function sameDay(a: Date | null, b: Date | null): boolean {
+  if (a == null || b == null) return a === b;
+  return a.toISOString().slice(0, 10) === b.toISOString().slice(0, 10);
 }
 
 async function handleS3Cleanup(job: Job<S3CleanupJobData>): Promise<void> {
@@ -3965,7 +4414,13 @@ async function processS3CleanupOutbox(): Promise<void> {
 export async function recoverStaleProcessing(): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_PROCESSING_MS);
   const stale = await db
-    .select({ id: sourceDocuments.id, secondPass: sourceDocuments.secondPass })
+    .select({
+      id: sourceDocuments.id,
+      kind: sourceDocuments.kind,
+      parseMode: sourceDocuments.parseMode,
+      dispatchGeneration: sourceDocuments.dispatchGeneration,
+      secondPass: sourceDocuments.secondPass,
+    })
     .from(sourceDocuments)
     .where(and(eq(sourceDocuments.status, 'processing'), lt(sourceDocuments.updatedAt, cutoff)));
   if (stale.length === 0) return;
@@ -4024,21 +4479,19 @@ export async function recoverStaleProcessing(): Promise<void> {
       });
       continue;
     }
-    const [att] = await db.execute(
-      drSql`select s3_key from source_document_attachments
-            where source_document_id = ${s.id} and role = 'original'
-            order by created_at desc limit 1`,
-    );
-    const s3Key = (att as { s3_key?: string } | undefined)?.s3_key;
-    if (s3Key) {
-      // Через outbox и под ТЕМ ЖЕ ключом, что использует подбор зависших
-      // записей. Раньше здесь стоял прямой queue.add без jobId: задание
-      // получало случайный идентификатор, и если документ снова застревал в
-      // queued, repair добавлял второе — документ распознавался дважды.
-      // Второй проход восстанавливаем вторым проходом: обычное задание вернуло
-      // бы документ на текстовый путь, который уже дал слабый результат.
-      const pendingSecondPass = (s.secondPass as { state?: string } | null)?.state === 'queued';
-      const dedupeKey = pendingSecondPass ? documentSecondPassKeyOf(s.id) : dispatchKeyOf(s.id);
+    // Второй проход восстанавливаем вторым проходом: обычное задание вернуло бы
+    // документ на текстовый путь, который уже дал слабый результат. Ключ —
+    // версионный, иначе после ручного повтора он совпал бы с уже отработавшим.
+    const pendingSecondPass = (s.secondPass as { state?: string } | null)?.state === 'queued';
+    if (pendingSecondPass) {
+      const [att] = await db.execute(
+        drSql`select s3_key from source_document_attachments
+              where source_document_id = ${s.id} and role = 'original'
+              order by created_at desc limit 1`,
+      );
+      const s3Key = (att as { s3_key?: string } | undefined)?.s3_key;
+      if (!s3Key) continue;
+      const dedupeKey = documentSecondPassKeyOf(s.id, s.dispatchGeneration);
       await db.transaction(async (tx) => {
         await tx
           .update(sourceDocuments)
@@ -4047,13 +4500,39 @@ export async function recoverStaleProcessing(): Promise<void> {
         await enqueueJob(tx as unknown as typeof db, {
           queue: UPD_PARSE_QUEUE,
           jobName: 'parse',
-          payload: pendingSecondPass
-            ? { sourceDocumentId: s.id, s3Key, pass: 'vision' as const }
-            : { sourceDocumentId: s.id, s3Key },
+          payload: {
+            sourceDocumentId: s.id,
+            s3Key,
+            pass: 'vision' as const,
+            docGeneration: s.dispatchGeneration,
+          },
           dedupeKey,
         });
       });
+      continue;
     }
+
+    // Остальное строит общий планировщик: он же знает, что М-15 нужен свой
+    // промпт, а накладная пакетного пути — свой обработчик. Раньше здесь всегда
+    // ставилось «обычное» задание по s3Key, и зависшая М-15 восстанавливалась
+    // УПД-путём.
+    const plan = await resolveReparsePlan(db, s, s.dispatchGeneration);
+    if (isBlocked(plan)) {
+      logger.warn({ sourceDocumentId: s.id, reason: plan.blocked }, 'recovery: нечем распознавать');
+      continue;
+    }
+    await db.transaction(async (tx) => {
+      await tx
+        .update(sourceDocuments)
+        .set({ jobId: plan.dedupeKey })
+        .where(eq(sourceDocuments.id, s.id));
+      await enqueueJob(tx as unknown as typeof db, {
+        queue: UPD_PARSE_QUEUE,
+        jobName: 'parse',
+        payload: plan.payload,
+        dedupeKey: plan.dedupeKey,
+      });
+    });
   }
   logger.warn({ count: stale.length }, 'recovered stale processing documents');
 }
@@ -4149,6 +4628,29 @@ worker.on('failed', async (job, err) => {
       return;
     }
 
+    // Ручной повтор исчерпал попытки. Документ возвращается в состояние до
+    // нажатия кнопки — и это раньше веток ниже: и сегмент, и одиночный документ
+    // при повторе обязаны откатываться, а не получать parse_failed поверх
+    // ранее нормально распознанных данных. Откат сам сверяет поколение и
+    // ничего не делает, если документ уже переразобрали снова.
+    const failedDocGeneration =
+      'docGeneration' in job.data && typeof job.data.docGeneration === 'number'
+        ? job.data.docGeneration
+        : 0;
+    if (failedDocGeneration > 0 && job.data.sourceDocumentId) {
+      const docId = job.data.sourceDocumentId;
+      const rolledBack = await rollbackReparse(
+        docId,
+        failedDocGeneration,
+        `повтор не выполнился: ${err.message}`,
+        logger.child({ sourceDocumentId: docId }),
+      );
+      if (rolledBack) {
+        await notifySourceDocumentUpdated(docId);
+        return;
+      }
+    }
+
     // Сегмент исчерпал попытки: помечаем документ и передаём решение
     // финализатору — он либо опубликует остальные (если этот единственный
     // сломанный), либо откатит весь комплект.
@@ -4163,7 +4665,10 @@ worker.on('failed', async (job, err) => {
           processedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(sourceDocuments.id, docId));
+        // Поколение сверяем и здесь: пока задание доживало свои ретраи,
+        // документ могли переразобрать вручную, и свежий результат не должен
+        // получить parse_failed от старой попытки.
+        .where(generationScoped(docId, failedDocGeneration));
       const [seg] = await db
         .select({ rootId: bundleSegments.bundleId, generation: bundleSegments.generation })
         .from(bundleSegments)
@@ -4184,10 +4689,6 @@ worker.on('failed', async (job, err) => {
           updatedAt: new Date(),
         })
         .where(eq(sourceBundles.id, bundleId));
-      // Пакет мог быть дочерним (накладная из router'а): без этой отметки
-      // родительская строка реестра осталась бы в created и файл исчез бы из
-      // виду. Для не-дочернего пакета обновлять нечего — запрос ничего не
-      // найдёт.
       // Строки самого пакета, не дошедшие до терминального решения (краш
       // router-job в середине пачки), тоже нельзя оставлять «в процессе».
       await closeStaleRegistryItems(bundleId, logger, {

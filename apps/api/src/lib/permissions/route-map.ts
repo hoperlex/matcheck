@@ -537,6 +537,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['PATCH /api/v1/source-documents/:id/direction', st('documents.list', 'edit')],
   ['POST /api/v1/source-documents/:id/acknowledge-mismatch', st('documents.list', 'edit')],
   ['POST /api/v1/source-documents/:id/resolve-duplicate', st('documents.list', 'edit')],
+  ['POST /api/v1/source-documents/:id/reparse', st('documents.list', 'reparse')],
   ['DELETE /api/v1/source-documents/:id', st('documents.list', 'delete')],
   ['POST /api/v1/source-documents/bulk-delete', st('documents.list', 'delete')],
   [

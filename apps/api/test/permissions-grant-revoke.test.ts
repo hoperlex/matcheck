@@ -41,6 +41,7 @@ type Row = {
   canEdit: boolean;
   canDelete: boolean;
   canReview: boolean;
+  canReparse: boolean;
 };
 
 /** Строка overrides: дефолт роли с одной изменённой ячейкой. */
@@ -54,6 +55,7 @@ function overrideRow(role: ManagedRole, page: PageId, action: PageAction, allowe
     canEdit: base.edit,
     canDelete: base.delete,
     canReview: base.review,
+    canReparse: base.reparse,
   };
 }
 

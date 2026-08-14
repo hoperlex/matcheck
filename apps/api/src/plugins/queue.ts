@@ -22,6 +22,7 @@ export type UpdParseJobData =
       // Отдельное задание, а не повтор внутри текущего: воркер работает с
       // concurrency=1, и удлинять им первый разбор нельзя.
       pass?: 'vision';
+      docGeneration?: number;
       bundleId?: undefined;
       mode?: undefined;
       segmentId?: undefined;
@@ -36,9 +37,29 @@ export type UpdParseJobData =
       segmentId: string;
       /** Поколение сборки корневого пакета — fencing против устаревших заданий. */
       generation: number;
+      docGeneration?: number;
+      /**
+       * Ручной повтор УЖЕ опубликованного сегмента (кнопка «Распознать
+       * повторно»). Ослабляет fencing сборки: страницы манифеста на месте, но
+       * проверки «сборка ещё идёт» (не опубликовано, пакет в processing,
+       * документ технический) для повтора неприменимы.
+       */
+      reparse?: true;
       s3Key?: undefined;
       bundleId?: undefined;
       mode?: undefined;
+    }
+  // Повторный разбор ОДНОЙ накладной пакетного пути (ТН/ОС-2): parseWaybillBatch
+  // по вложениям самого документа, результат пишется в него же. s3Key нет:
+  // пакетный парсер берёт все вложения документа, а не один файл.
+  | {
+      sourceDocumentId: string;
+      mode: 'waybill_single';
+      docGeneration?: number;
+      s3Key?: undefined;
+      bundleId?: undefined;
+      segmentId?: undefined;
+      generation?: undefined;
     }
   | {
       bundleId: string;

@@ -17,17 +17,18 @@ import { UserRoleSchema, type UserRole } from './auth.js';
  * способен снять себе доступ к вкладке «Роли» и остаться без пути назад).
  */
 
-export const PageActionSchema = z.enum(['view', 'create', 'edit', 'delete', 'review']);
+export const PageActionSchema = z.enum(['view', 'create', 'edit', 'delete', 'review', 'reparse']);
 export type PageAction = z.infer<typeof PageActionSchema>;
 
 /**
  * Порядок колонок в UI и в любых перечислениях.
  *
- * `review` («Проверять») добавлен ПОСЛЕДНИМ намеренно: четыре привычные колонки
- * не должны съезжать. Само действие применимо только к Операциям — на прочих
- * страницах ячейка не рисуется (см. isActionApplicable).
+ * `review` («Проверять») и `reparse` («Распознавать повторно») добавлены В КОНЕЦ
+ * намеренно: четыре привычные колонки не должны съезжать. Оба действия узкие —
+ * `review` применим только к Операциям, `reparse` только к Документам, — и на
+ * прочих страницах ячейка не рисуется (см. isActionApplicable).
  */
-export const PAGE_ACTIONS = ['view', 'create', 'edit', 'delete', 'review'] as const;
+export const PAGE_ACTIONS = ['view', 'create', 'edit', 'delete', 'review', 'reparse'] as const;
 
 export const PAGE_ACTION_LABELS: Record<PageAction, string> = {
   view: 'Просмотр',
@@ -35,6 +36,7 @@ export const PAGE_ACTION_LABELS: Record<PageAction, string> = {
   edit: 'Редактировать',
   delete: 'Удалять',
   review: 'Проверять',
+  reparse: 'Распознавать повторно',
 };
 
 /**
@@ -129,6 +131,7 @@ export const PagePermissionsSchema = z.object({
   edit: z.boolean(),
   delete: z.boolean(),
   review: z.boolean(),
+  reparse: z.boolean(),
 });
 
 export type PageCatalogEntry = {
@@ -151,6 +154,9 @@ const CRUD: PageAction[] = ['view', 'create', 'edit', 'delete'];
 
 /** Операции — единственные страницы, где есть отметка проверки качества. */
 const CRUD_WITH_REVIEW: PageAction[] = [...CRUD, 'review'];
+
+/** Документы — единственная страница, где есть повторное распознавание. */
+const CRUD_WITH_REPARSE: PageAction[] = [...CRUD, 'reparse'];
 
 /**
  * Справочники заказчика ведут себя одинаково: смотреть и править может
@@ -212,7 +218,11 @@ export const PAGE_CATALOG: PageCatalogEntry[] = [
     id: 'documents.list',
     group: 'documents',
     label: 'Документы',
-    actions: CRUD,
+    // `reparse` — запуск повторного распознавания уже загруженного документа.
+    // Отдельное действие, а не часть edit: правка полей документа и повторный
+    // прогон через модель — разные по цене и по последствиям операции, и
+    // выдавать их одной галочкой нельзя.
+    actions: CRUD_WITH_REPARSE,
     // contractor видит /documents, но только свои строки (row-level scope в
     // lib/contractor-scope.ts). Писать не может — read-only роль.
     base: {
@@ -220,6 +230,10 @@ export const PAGE_CATALOG: PageCatalogEntry[] = [
       create: ['manager'],
       edit: ['manager'],
       delete: ['manager'],
+      // `reparse` не выдан в дефолте НИКОМУ, и это не осторожность, а следствие
+      // правила «дефолт повторяет сегодняшний доступ»: маршрут новый, значит
+      // сегодня его нет ни у одной роли. Право включает администратор — себе
+      // оно доступно всегда (admin вне матрицы), остальным галочкой в «Ролях».
     },
   },
   {
@@ -525,7 +539,8 @@ export const WRITE_SCOPE_ENFORCED: ReadonlySet<string> = new Set([
  * `review` идёт вместе с записью, а не с просмотром: хендлер
  * PATCH /deliveries|shipments/:id/review выбирает запись по одному id, без
  * сверки siteId, — иначе роль с ограниченной видимостью проверяла бы чужую
- * операцию по известному UUID.
+ * операцию по известному UUID. `reparse` — тем же правилом: повтор переписывает
+ * распознанные данные документа, выбранного по одному id.
  *
  * Сужение этой функцией не ограничивается — снять можно почти всё (кроме
  * LOCKED_CELLS, они про работоспособность мобильного клиента).

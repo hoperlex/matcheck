@@ -17,6 +17,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Popconfirm,
   Segmented,
   Select,
   Space,
@@ -39,6 +40,7 @@ import {
   FilePdfOutlined,
   FileTextOutlined,
   PlusOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
@@ -46,10 +48,12 @@ import type {
   SourceDirection,
   SourceDocumentDetail,
   SourceDocumentFileResponse,
+  SourceReparseResponse,
   UpdCheck,
 } from '@matcheck/contracts';
 import { getDocumentDisplayStatus } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
+import { usePermissions } from '../../shared/hooks/usePermissions';
 import { api, apiDownload, ApiError } from '../../services/api';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
@@ -177,6 +181,8 @@ export function SourceDocumentDetailModal({
 }) {
   const qc = useQueryClient();
   const role = useAuthStore((s) => s.user?.role ?? null);
+  const { can } = usePermissions();
+  const canReparse = can('documents.list', 'reparse');
   const [edit, setEdit] = useState<EditForm | null>(null);
   const [llmDrawerOpen, setLlmDrawerOpen] = useState(false);
   const isWide = useIsWideViewport();
@@ -260,6 +266,19 @@ export function SourceDocumentDetailModal({
       // Второй кэш того же документа — офлайн-first (IndexedDB, наполняется
       // pullSync): его читают КПП и отгрузка при преднаполнении формы из УПД.
       // Сбрасываем и его, иначе форма подставит доредакционные данные.
+      void qc.invalidateQueries({ queryKey: ['source-document-offline', id] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  // Повторное распознавание из карточки: именно здесь пользователь и видит,
+  // что распозналось плохо. Исходный файл остаётся, меняются только данные.
+  const reparse = useMutation({
+    mutationFn: () => api.post<SourceReparseResponse>(`/source-documents/${id}/reparse`, {}),
+    onSuccess: () => {
+      message.success('Документ отправлен на повторное распознавание');
+      void qc.invalidateQueries({ queryKey: ['source-documents'] });
+      void qc.invalidateQueries({ queryKey: ['source-document', id] });
       void qc.invalidateQueries({ queryKey: ['source-document-offline', id] });
     },
     onError: (err: Error) => message.error(err.message),
@@ -442,6 +461,19 @@ export function SourceDocumentDetailModal({
                   Принять как есть
                 </Button>
               )}
+              {canReparse && !isProcessing && (
+                <Popconfirm
+                  title="Распознать документ заново?"
+                  description="Файл сохранится, но текущие распознанные данные заменятся, а точные связи строк приёмки с позициями документа сбросятся."
+                  okText="Распознать"
+                  cancelText="Отмена"
+                  onConfirm={() => reparse.mutate()}
+                >
+                  <Button icon={<ReloadOutlined />} loading={reparse.isPending}>
+                    Распознать повторно
+                  </Button>
+                </Popconfirm>
+              )}
               {!isProcessing && !isDuplicate && (
                 <Button type="primary" onClick={onSave} loading={patch.isPending}>
                   Сохранить
@@ -475,6 +507,22 @@ export function SourceDocumentDetailModal({
                 showIcon
                 message="Документ ещё распознаётся"
                 description="Окно обновится автоматически, когда распознавание завершится."
+              />
+            )}
+            {/* Повтор не удался — документ вернулся к прежним данным. Без этого
+                сообщения откат выглядел бы как «кнопка ничего не сделала»:
+                статус и поля остались ровно теми же. */}
+            {sd.reparse?.state === 'failed' && (
+              <Alert
+                style={{ marginBottom: 12 }}
+                type="warning"
+                showIcon
+                message="Повторное распознавание не удалось"
+                description={
+                  sd.reparse.reason
+                    ? `Документ оставлен без изменений. Причина: ${sd.reparse.reason}`
+                    : 'Документ оставлен без изменений.'
+                }
               />
             )}
             {isDuplicate && (

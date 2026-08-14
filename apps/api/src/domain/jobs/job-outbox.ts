@@ -82,8 +82,18 @@ export function segmentDispatchKeyOf(segmentId: string, generation = 0): string 
  * outbox. Восстановление зависших заданий обязано использовать ЭТОТ же ключ,
  * иначе документ распознается дважды.
  */
-export function documentSecondPassKeyOf(sourceDocumentId: string): string {
-  return assertValidKey(['doc', sourceDocumentId, 'parse', 'vision'].join(KEY_SEP));
+export function documentSecondPassKeyOf(sourceDocumentId: string, generation = 0): string {
+  // Поколение в ключе — по той же причине, по которой оно есть у остальных:
+  // BullMQ держит завершённые задания сутки, и после РУЧНОГО повтора документа
+  // (кнопка «Распознать повторно», dispatch_generation растёт) ключ без
+  // поколения совпал бы с уже отработавшим — второй проход молча не запустился
+  // бы. Значение по умолчанию сохраняет прежний вид ключа для документов,
+  // которые ни разу не переразбирали.
+  return assertValidKey(
+    generation === 0
+      ? ['doc', sourceDocumentId, 'parse', 'vision'].join(KEY_SEP)
+      : ['doc', sourceDocumentId, 'parse', 'vision', generation].join(KEY_SEP),
+  );
 }
 
 export const OUTBOX_BATCH = 50;

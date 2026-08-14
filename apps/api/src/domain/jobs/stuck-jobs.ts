@@ -33,11 +33,11 @@ import {
 import {
   assemblyDispatchKeyOf,
   bundleDispatchKeyOf,
-  dispatchKeyOf,
   documentSecondPassKeyOf,
   enqueueJob,
   segmentDispatchKeyOf,
 } from './job-outbox.js';
+import { isBlocked, resolveReparsePlan } from '../sourceDocuments/reparse-plan.js';
 import {
   finalizeStaleRegistryItems,
   selectBundlesWithStaleItems,
@@ -91,6 +91,8 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
       id: sourceDocuments.id,
       s3Key: sourceDocumentAttachments.s3Key,
       kind: sourceDocuments.kind,
+      parseMode: sourceDocuments.parseMode,
+      dispatchGeneration: sourceDocuments.dispatchGeneration,
       secondPass: sourceDocuments.secondPass,
     })
     .from(sourceDocuments)
@@ -121,13 +123,35 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
     // который уже дал слабый результат и породил повтор.
     const pendingSecondPass =
       (doc.secondPass as { state?: string } | null)?.state === 'queued';
+    if (pendingSecondPass) {
+      await enqueueJob(db, {
+        queue: deps.queue,
+        jobName: 'parse',
+        payload: {
+          sourceDocumentId: doc.id,
+          s3Key: doc.s3Key,
+          pass: 'vision' as const,
+          docGeneration: doc.dispatchGeneration,
+        },
+        // Ключ версионный: после ручного повтора старый уже отработал, а BullMQ
+        // держит завершённые задания сутки — иначе задание молча не создалось бы.
+        dedupeKey: documentSecondPassKeyOf(doc.id, doc.dispatchGeneration),
+      });
+      documents += 1;
+      continue;
+    }
+
+    // Остальное строит общий планировщик — тот же, которым пользуется кнопка
+    // «Распознать повторно». Раньше здесь всегда ставилось задание по s3Key без
+    // docKind, и зависшая М-15 восстанавливалась УПД-путём: другой промпт,
+    // другой результат. Он же выбирает ключ: у ручного повтора своё поколение.
+    const plan = await resolveReparsePlan(db, doc, doc.dispatchGeneration);
+    if (isBlocked(plan)) continue;
     await enqueueJob(db, {
       queue: deps.queue,
       jobName: 'parse',
-      payload: pendingSecondPass
-        ? { sourceDocumentId: doc.id, s3Key: doc.s3Key, pass: 'vision' as const }
-        : { sourceDocumentId: doc.id, s3Key: doc.s3Key },
-      dedupeKey: pendingSecondPass ? documentSecondPassKeyOf(doc.id) : dispatchKeyOf(doc.id),
+      payload: plan.payload,
+      dedupeKey: plan.dedupeKey,
     });
     documents += 1;
   }

@@ -130,6 +130,15 @@ export type AutoAssignParams = {
   minConfidence: number;
   /** ИНН покупателя из графы 6 — как его выдал парсер, ненормализованным. */
   buyerInn: string | null | undefined;
+  /**
+   * Поколение диспетчеризации задания, от имени которого идёт подстановка.
+   *
+   * Запись выполняется ПОСЛЕ сохранения шапки, и за это время документ мог уйти
+   * на повторное распознавание. Без сверки подстановка легла бы поверх нового
+   * поколения — то есть по данным, которых в документе уже нет. Не передали —
+   * ведём себя как раньше (0 = у документа не было ни одного ручного повтора).
+   */
+  generation?: number;
 };
 
 export type AutoAssignResult =
@@ -184,6 +193,7 @@ export async function autoAssignContractorFromBuyer(
     .where(
       and(
         eq(sourceDocuments.id, params.sourceDocumentId),
+        eq(sourceDocuments.dispatchGeneration, params.generation ?? 0),
         eq(sourceDocuments.kind, 'upd'),
         eq(sourceDocuments.direction, 'inbound'),
         eq(sourceDocuments.status, 'parsed'),

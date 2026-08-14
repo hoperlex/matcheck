@@ -131,6 +131,36 @@ suite('подбор зависших заданий (реальный PostgreSQL
     expect(jobs[0]!.payload).toMatchObject({ sourceDocumentId: id });
   });
 
+  it('зависшая М-15 восстанавливается СВОИМ путём, а не как УПД', async () => {
+    // Раньше repair всегда ставил «обычное» задание по s3Key: накладная уходила
+    // на УПД-промпт — другой промпт, другой результат. Режим прошлого разбора
+    // теперь хранится в parse_mode, и задание строится по нему.
+    const id = await queuedDocument(STUCK_AFTER_MINUTES + 10);
+    await sql`UPDATE source_documents
+                 SET kind = 'transport_waybill', parse_mode = 'm15_vision' WHERE id = ${id}`;
+
+    await repair();
+
+    const jobs = await outboxFor(dispatchKeyOf(id));
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.payload).toMatchObject({ sourceDocumentId: id, docKind: 'm15' });
+  });
+
+  it('после ручного повтора задание восстанавливается ключом НОВОГО поколения', async () => {
+    // Ключ поколения 0 уже отработал, и BullMQ держит завершённые задания сутки:
+    // восстановление старым ключом молча не создало бы задания вовсе.
+    const id = await queuedDocument(STUCK_AFTER_MINUTES + 10);
+    await sql`UPDATE source_documents SET dispatch_generation = 2 WHERE id = ${id}`;
+    ours.push(dispatchKeyOf(id, 2));
+
+    await repair();
+
+    expect(await outboxFor(dispatchKeyOf(id))).toHaveLength(0);
+    const jobs = await outboxFor(dispatchKeyOf(id, 2));
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.payload).toMatchObject({ sourceDocumentId: id, docGeneration: 2 });
+  });
+
   it('свежий документ не трогаем — он просто ждёт очереди', async () => {
     // При CONCURRENCY=1 ожидание в десятки минут штатно, торопиться нельзя.
     const id = await queuedDocument(5);

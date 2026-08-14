@@ -29,14 +29,17 @@ import { computeCellCoverage } from '../../lib/permissions/cell-coverage.js';
 import { HttpError, badRequest } from '../../lib/http-error.js';
 
 /** Колонка таблицы по действию. */
-const COLUMN: Record<PageAction, 'canView' | 'canCreate' | 'canEdit' | 'canDelete' | 'canReview'> =
-  {
-    view: 'canView',
-    create: 'canCreate',
-    edit: 'canEdit',
-    delete: 'canDelete',
-    review: 'canReview',
-  };
+const COLUMN: Record<
+  PageAction,
+  'canView' | 'canCreate' | 'canEdit' | 'canDelete' | 'canReview' | 'canReparse'
+> = {
+  view: 'canView',
+  create: 'canCreate',
+  edit: 'canEdit',
+  delete: 'canDelete',
+  review: 'canReview',
+  reparse: 'canReparse',
+};
 
 type Change = {
   role: ManagedRole;

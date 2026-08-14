@@ -46,6 +46,7 @@ const ALL_ALLOWED: PagePermissions = {
   edit: true,
   delete: true,
   review: true,
+  reparse: true,
 };
 
 /**

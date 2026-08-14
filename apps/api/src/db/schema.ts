@@ -334,6 +334,9 @@ export const rolePagePermissions = pgTable(
     // отметка сидела внутри неё, у monitor'а право было базовым — то есть
     // никогда не считалось расширением и не открывало настоящую правку.
     canReview: boolean('can_review').notNull().default(false),
+    // Повторное распознавание документа. Тоже отдельное действие: правка полей
+    // и повторный прогон через модель различаются и по цене, и по последствиям.
+    canReparse: boolean('can_reparse').notNull().default(false),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     updatedByUserId: uuid('updated_by_user_id').references(() => users.id, {
       onDelete: 'set null',
@@ -748,6 +751,28 @@ export const sourceDocuments = pgTable(
     // { state: 'queued'|'done', requestedAt, mode: 'vision',
     //   outcome?: 'replaced'|'kept_baseline'|'vision_failed', error?: string }
     secondPass: jsonb('second_pass'),
+    // Состояние РУЧНОГО повторного распознавания (кнопка «Распознать повторно»)
+    // вместе со снимком того, что было до попытки.
+    //
+    // Снимок здесь не для истории, а для отката: неудачный повтор обязан вернуть
+    // документ в прежний вид целиком, а маршрут к этому моменту уже сменил
+    // статус и обнулил second_pass. Хранить снимок в parse_error_details нельзя
+    // по той же причине, по которой там не живёт second_pass, — они
+    // перезаписываются каждым разбором.
+    //
+    // { state: 'queued'|'processing'|'succeeded'|'failed', generation, at, by,
+    //   reason?, snapshot: { status, parseErrorCode, parseErrorDetails,
+    //   validation, processedAt, secondPass } }
+    reparse: jsonb('reparse').$type<Record<string, unknown> | null>(),
+    // Чем документ был разобран в последний раз (ParseMode из worker.ts).
+    // Нужен повтору: он обязан пойти ТЕМ ЖЕ путём, иначе М-15 уедет на
+    // УПД-промпт, а логический УПД из комплекта фото — на разбор всего файла.
+    parseMode: text('parse_mode'),
+    // Позиция документа в пакете накладных (индекс в parsed.documents у
+    // parseWaybillBatch). Постоянная привязка результата повтора к строке:
+    // сопоставление по номеру не годится там, где номер и распознан неверно —
+    // ровно в том случае, ради которого повтор и запускают.
+    batchIndex: integer('batch_index'),
     siteId: uuid('site_id').references(() => sites.id, { onDelete: 'set null' }),
     docNumber: text('doc_number'),
     docDate: timestamp('doc_date', { withTimezone: false, mode: 'date' }),

@@ -20,6 +20,7 @@ import {
   UpdPdfQueueRequestSchema,
   UpdPdfQueueResponseSchema,
   UpdResolveDuplicateRequestSchema,
+  SourceReparseResponseSchema,
   UploadDocumentsResponseSchema,
   ImportResultSchema,
   ExtraOnlyBundleListResponseSchema,
@@ -65,6 +66,15 @@ import {
   closeRegistryRowsForDeletedDocument,
   notStubDocumentSql,
 } from '../domain/sourceDocuments/stub-documents.js';
+import {
+  REPARSE_BLOCK_MESSAGES,
+  isBlocked,
+  resolveReparsePlan,
+  type ReparsePlanKind,
+} from '../domain/sourceDocuments/reparse-plan.js';
+import { enqueueJob } from '../domain/jobs/job-outbox.js';
+import { UPD_PARSE_QUEUE } from '../plugins/queue.js';
+import type { Db } from '../db/client.js';
 import {
   resolveContractorOpIds,
   sourceDocumentContractorPredicate,
@@ -2480,6 +2490,130 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           },
         ],
       });
+    },
+  );
+
+  // ──────────── Повторное распознавание ────────────
+  //
+  // Кнопка «Распознать повторно»: документ распознаётся заново ТЕМ ЖЕ путём,
+  // каким появился (см. resolveReparsePlan). Исходный файл не трогается вовсе —
+  // ни S3-объект, ни строка вложения; заменяются только распознанные данные.
+  //
+  // Позиции здесь НЕ удаляются: до конца разбора в списке видны прежние, а
+  // замена происходит одной транзакцией в воркере. Так неудачный повтор не
+  // оставляет документ без позиций.
+  app.post(
+    '/api/v1/source-documents/:id/reparse',
+    {
+      // Только admin в allow-list: в дефолте повтор не выдан никому, а роль,
+      // которой администратор поставил галочку, проходит сюда расширением —
+      // req.permissionExpanded снимает список ролей (см. plugins/auth.ts).
+      preHandler: [app.authenticate, app.authorize('admin')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: {
+          200: SourceReparseResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const userId = req.user?.id ?? null;
+      type Outcome =
+        | { ok: true; plan: ReparsePlanKind }
+        | { ok: false; error: string; code: 404 | 409; message?: string };
+      const result: Outcome = await app.db.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Db;
+        // FOR UPDATE: два клика подряд и гонка с воркером иначе поставили бы два
+        // задания на один документ. В соседнем resolve-duplicate этой защиты
+        // нет — повторять пробел не нужно.
+        const [sd] = await tx
+          .select()
+          .from(sourceDocuments)
+          .where(
+            and(
+              eq(sourceDocuments.id, req.params.id),
+              // Служебная запись пакета снаружи не существует.
+              eq(sourceDocuments.isTechnical, false),
+            ),
+          )
+          .for('update')
+          .limit(1);
+        if (!sd) return { ok: false, error: 'not_found', code: 404 };
+        if (sd.status === 'queued' || sd.status === 'processing') {
+          return {
+            ok: false,
+            error: 'already_running',
+            code: 409,
+            message: 'Документ уже в очереди на распознавание',
+          };
+        }
+
+        const generation = sd.dispatchGeneration + 1;
+        const plan = await resolveReparsePlan(tx, sd, generation);
+        if (isBlocked(plan)) {
+          return {
+            ok: false,
+            error: plan.blocked,
+            code: 409,
+            message: REPARSE_BLOCK_MESSAGES[plan.blocked],
+          };
+        }
+
+        // Снимок «что было до». Нужен не для истории, а для отката: ниже
+        // меняются статус и second_pass, и без снимка неудачный повтор оставил
+        // бы документ хуже, чем он был. Всё остальное (parse_error*, validation,
+        // processed_at) не трогаем вовсе — их погасит успешный разбор.
+        await tx
+          .update(sourceDocuments)
+          .set({
+            status: 'queued',
+            dispatchGeneration: generation,
+            queuedAt: new Date(),
+            jobId: plan.dedupeKey,
+            jobAttempts: 0,
+            // Иначе queueSecondPass сочтёт, что повтор картинкой уже был, и
+            // слабый результат второго шанса не получит.
+            secondPass: null,
+            reparse: {
+              state: 'queued',
+              generation,
+              at: new Date().toISOString(),
+              by: userId,
+              snapshot: {
+                status: sd.status,
+                parseErrorCode: sd.parseErrorCode,
+                parseErrorDetails: sd.parseErrorDetails,
+                validation: sd.validation,
+                processedAt: sd.processedAt ? sd.processedAt.toISOString() : null,
+                secondPass: sd.secondPass,
+              },
+            },
+            updatedAt: new Date(),
+          })
+          .where(eq(sourceDocuments.id, sd.id));
+
+        // Через outbox, а не queue.add: задание и новое состояние документа
+        // попадают в БД одной транзакцией, и недоступность Redis не оставит
+        // документ в queued без задания.
+        await enqueueJob(tx, {
+          queue: UPD_PARSE_QUEUE,
+          jobName: 'parse',
+          payload: plan.payload,
+          dedupeKey: plan.dedupeKey,
+        });
+
+        return { ok: true, plan: plan.kind };
+      });
+
+      if (!result.ok) {
+        return reply
+          .code(result.code)
+          .send({ error: result.error, ...(result.message ? { message: result.message } : {}) });
+      }
+      req.log.info({ sourceDocumentId: req.params.id, plan: result.plan }, 'reparse requested');
+      return { ok: true as const, plan: result.plan };
     },
   );
 
