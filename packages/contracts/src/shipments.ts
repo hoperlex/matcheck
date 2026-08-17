@@ -3,6 +3,7 @@ import { ShipmentStatusCodeSchema, StatusSchema } from './statuses.js';
 import { VolumeConfidenceSchema, PrimarySourceDocumentSchema } from './source-documents.js';
 import { ItemKindSchema } from './deliveries.js';
 import { ReviewFieldsShape } from './review.js';
+import { GroupOperationFields } from './group-operations.js';
 
 export const ShipmentKindSchema = z.enum(['contractor', 'return', 'transfer', 'writeoff']);
 export type ShipmentKind = z.infer<typeof ShipmentKindSchema>;
@@ -197,6 +198,7 @@ export const ShipmentUpsertSchema = z.object({
   sourceDocumentIds: z.array(z.string().uuid()).default([]),
   items: z.array(ShipmentUpsertItemSchema).default([]),
   baseVersion: z.number().int().nonnegative().optional(),
+  ...GroupOperationFields,
 });
 export type ShipmentUpsert = z.infer<typeof ShipmentUpsertSchema>;
 

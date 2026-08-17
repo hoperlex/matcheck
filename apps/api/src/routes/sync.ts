@@ -35,7 +35,7 @@ import {
   documentGroupRevisionSql,
 } from '../domain/sourceDocuments/document-group.js';
 import { notStubDocumentSql } from '../domain/sourceDocuments/stub-documents.js';
-import { mobileVisibleSourceDocumentSql } from '../domain/sourceDocuments/mobile-visibility.js';
+import { mobileVisibleWithinCanarySql } from '../domain/sourceDocuments/mobile-visibility.js';
 import { selectVisibilityTombstones } from '../domain/sourceDocuments/visibility-events.js';
 import { parseCapabilities, resolveGroupMode } from '../domain/groups/group-mode.js';
 import {
@@ -222,7 +222,10 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       // менять ей контракт нельзя (см. group-mode.ts).
       const groupMode = resolveGroupMode({ siteId: userSiteId, capabilities });
       if (groupMode.enabled) {
-        sdWhereParts.push(mobileVisibleSourceDocumentSql);
+        // Сужение по объектам canary обязательно: у менеджера siteId нет, и без
+        // него предикат применился бы к документам объектов, которые в режим не
+        // переводили. См. mobileVisibleWithinCanarySql.
+        sdWhereParts.push(mobileVisibleWithinCanarySql(userSiteId));
       }
 
       // Keyset-пагинация. Включается вместе с групповым режимом: старый клиент
@@ -1062,7 +1065,9 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
                   ...(inspectorOnly && userSiteId
                     ? [eq(sourceDocuments.siteId, userSiteId)]
                     : []),
-                  ...(reconcileGroupMode.enabled ? [mobileVisibleSourceDocumentSql] : []),
+                  ...(reconcileGroupMode.enabled
+                    ? [mobileVisibleWithinCanarySql(userSiteId)]
+                    : []),
                 ],
               ),
             );

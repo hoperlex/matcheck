@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { DeliveryStatusCodeSchema, StatusSchema } from './statuses.js';
 import { VolumeConfidenceSchema, PrimarySourceDocumentSchema } from './source-documents.js';
 import { ReviewFieldsShape } from './review.js';
+import { GroupOperationFields } from './group-operations.js';
 
 export const ItemKindSchema = z.enum(['material', 'asset']);
 export type ItemKind = z.infer<typeof ItemKindSchema>;
@@ -203,6 +204,7 @@ export const DeliveryUpsertSchema = z.object({
   sourceDocumentIds: z.array(z.string().uuid()).default([]),
   items: z.array(DeliveryUpsertItemSchema).default([]),
   baseVersion: z.number().int().nonnegative().optional(),
+  ...GroupOperationFields,
 });
 export type DeliveryUpsert = z.infer<typeof DeliveryUpsertSchema>;
 

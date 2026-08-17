@@ -16,9 +16,10 @@
  * Портала и админки это НЕ касается: они обязаны видеть скрытое, иначе кнопкой
  * «Принять как есть» некому будет воспользоваться.
  */
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { sourceBundles, sourceDocuments } from '../../db/schema.js';
 import { STUB_ERROR_CODES } from '@matcheck/contracts';
+import { groupModeSites } from '../groups/group-mode.js';
 
 /**
  * Реквизиты, без которых документ на планшете бесполезен.
@@ -130,3 +131,36 @@ export const mobileVisibleSourceDocumentSql = sql`(
 
 /** Отрицание — для поиска документов, которые надо снять с планшета. */
 export const mobileHiddenSourceDocumentSql = sql`(not ${mobileVisibleSourceDocumentSql})`;
+
+/**
+ * Тот же предикат, но ограниченный охватом canary.
+ *
+ * Зачем отдельная форма. Инспектор привязан к объекту, и его объект проверяет
+ * `resolveGroupMode` ещё до выборки. У менеджера и админа объекта нет вовсе —
+ * `siteId` равен null, проверка пропускается, и предикат применялся ко ВСЕЙ
+ * выдаче: документы объектов, которые в canary не входят, исчезали у менеджера,
+ * хотя инспектор соседнего объекта продолжал их видеть. Охват зависел от роли
+ * смотрящего, а не от объекта, — то есть canary протекал.
+ *
+ * Правило: документ вне списка объектов идёт по прежнему контракту, документ
+ * внутри — через предикат видимости.
+ *
+ * @param userSiteId объект пользователя; не null означает, что охват уже
+ *   проверен по нему и сужать выборку не нужно.
+ */
+export function mobileVisibleWithinCanarySql(userSiteId: string | null | undefined): SQL {
+  if (userSiteId) return mobileVisibleSourceDocumentSql;
+  const sites = groupModeSites();
+  // null — режим включён на всех объектах (`*`), сужать нечего.
+  if (sites === null) return mobileVisibleSourceDocumentSql;
+  // Пустой список сюда не доходит: resolveGroupMode вернул бы enabled=false.
+  if (sites.length === 0) return mobileVisibleSourceDocumentSql;
+  // `is null` в первой ветке обязателен: документ без объекта не проходит
+  // HAS_REQUIRED_FIELDS, и без явного пропуска NOT IN дал бы по нему NULL,
+  // выбросив строку из выдачи менеджера вместе с прежним контрактом.
+  return sql`(
+    ${sourceDocuments.siteId} is null
+    or ${sourceDocuments.siteId} not in ${sites}
+    or ${mobileVisibleSourceDocumentSql}
+  )`;
+}
