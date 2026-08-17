@@ -55,14 +55,20 @@ export function getDocumentDisplayStatus(sd: {
   siteId?: string | null;
 }): DocumentDisplayStatus {
   if (sd.status !== 'parsed') return sd.status;
-  // Признак «получатель указан» зависит от направления документа:
-  //   outbound: внешний контрагент (recipientId) ИЛИ наш МОЛ-получатель;
-  //   inbound:  наш подрядчик-приёмник (contractorId) ИЛИ наш МОЛ.
-  // Без direction (старые callsite'ы) — поведение как было: contractorId|MOL.
+  // Получатель обязателен только у ОТГРУЗКИ: там мы отдаём материалы наружу, и
+  // без внешнего контрагента либо нашего МОЛ непонятно кому.
+  //
+  // У приёмки подрядчик перестал быть обязательным. Инспектору он не нужен:
+  // на площадке важно, ОТ КОГО груз и КОМУ он адресован, а это поставщик и
+  // грузополучатель — оба распознаются из самого документа. Подрядчик — это
+  // внутренняя привязка затрат, её проставляет менеджер, и ждать её значило бы
+  // держать поставку на портале, пока машина стоит под разгрузкой.
+  //
+  // Приёмка без подрядчика допустима и в базе: CHECK deliveries_recipient_chk
+  // запрещает только оба поля сразу, а «оба NULL» — обычная приёмка от
+  // внешнего поставщика.
   const hasRecipient =
-    sd.direction === 'outbound'
-      ? !!(sd.recipientId || sd.recipientMolId)
-      : !!(sd.contractorId || sd.recipientMolId);
+    sd.direction === 'outbound' ? !!(sd.recipientId || sd.recipientMolId) : true;
   const hasExpectedDate = !!sd.expectedDate;
   const hasSite = !!sd.siteId;
   if (!hasRecipient || !hasExpectedDate || !hasSite) return 'draft';

@@ -38,7 +38,14 @@ const HAS_REQUIRED_FIELDS = sql`
     case
       when ${sourceDocuments.direction} = 'outbound'
         then ${sourceDocuments.recipientId} is not null or ${sourceDocuments.recipientMolId} is not null
-      else ${sourceDocuments.contractorId} is not null or ${sourceDocuments.recipientMolId} is not null
+      -- У ПРИЁМКИ получатель не требуется. Инспектору на площадке важно, от
+      -- кого груз и кому он адресован, — поставщик и грузополучатель приходят
+      -- из самого документа. Подрядчик же внутренняя привязка затрат: её
+      -- ставит менеджер, и ожидание этого держало поставку на портале, пока
+      -- машина стоит под разгрузкой. Зеркало getDocumentDisplayStatus —
+      -- разъехавшись, они дают худший из багов: на портале «Черновик», а
+      -- инспектор документ уже принимает.
+      else true
     end
   )
 `;
@@ -90,10 +97,14 @@ const GROUP_IS_COMPLETE = sql`
            and (
              sibling.site_id is null
              or sibling.expected_date is null
+             -- Тот же набор обязательных реквизитов, что и у HAS_REQUIRED_FIELDS
+             -- выше: у приёмки подрядчик не требуется. Условия обязаны
+             -- совпадать — иначе документ виден сам по себе, но держит свою же
+             -- машину скрытой, и поставка не приедет никогда.
              or case
                   when sibling.direction = 'outbound'
                     then sibling.recipient_id is null and sibling.recipient_mol_id is null
-                  else sibling.contractor_id is null and sibling.recipient_mol_id is null
+                  else false
                 end
            )
          )

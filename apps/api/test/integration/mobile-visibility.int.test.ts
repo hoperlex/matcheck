@@ -135,9 +135,25 @@ suite('видимость документа на планшете (реальн
     expect(await isVisible(id)).toBe(false);
   });
 
-  it('parsed без получателя не виден', async () => {
+  it('приёмка без подрядчика видна: инспектору важны поставщик и грузополучатель', async () => {
+    // Подрядчик — внутренняя привязка затрат, её проставляет менеджер. Ждать
+    // её значило бы держать поставку на портале, пока машина под разгрузкой.
+    // От кого груз и кому он адресован, инспектор видит из самого документа.
     const id = randomUUID();
     await doc({ id, bundleId: null, withRecipient: false });
+    expect(await isVisible(id)).toBe(true);
+  });
+
+  it('отгрузка без получателя по-прежнему не видна', async () => {
+    // У отгрузки получатель обязателен: материалы уходят наружу, и без
+    // контрагента либо нашего МОЛ непонятно кому.
+    const id = randomUUID();
+    await sql_`INSERT INTO source_documents
+        (id, kind, is_technical, direction, origin, status, site_id, parsed_at,
+         doc_number, doc_date, total_sum, expected_date, contractor_id, recipient_id,
+         recipient_mol_id)
+      VALUES (${id}, 'upd', false, 'outbound', 'manual_pdf', 'parsed', ${siteId}, now(),
+              'ВИД-OUT', now(), 100, now(), null, null, null)`;
     expect(await isVisible(id)).toBe(false);
   });
 
