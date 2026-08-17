@@ -94,11 +94,50 @@ describe('planUpdSegments', () => {
     expect(plan.reasons.join(' ')).toContain('больше предела 3');
   });
 
-  it('неуверенный сегмент делает весь план ненадёжным', () => {
-    // Страница «other» посреди пакета — segmentUpdPages пометит сегмент
-    // uncertain, и публиковать такую нарезку нельзя.
+  it('страница «other» при распознанной шапке нарезку не отменяет', () => {
+    // Оборот с подписями, приложение, спецификация — их классификатор относит
+    // к «other». Границы документа при этом определены достоверно: сегмент
+    // начат шапкой. Отменять из-за такой страницы весь комплект незачем — это
+    // была самая частая причина отката на бою (18 случаев из 52 за месяц).
     const plan = planUpdSegments([cls(1, 'upd_main'), cls(2, 'other')], 2, 5);
+
+    expect(plan.confident).toBe(true);
+    expect(plan.segments).toHaveLength(1);
+    // Страница остаётся в сегменте — материалы с неё не теряются.
+    expect(plan.segments[0]!.pages).toEqual([1, 2]);
+    // След в причинах всё равно нужен: сегмент уехал в распознавание с чужой
+    // страницей внутри.
+    expect(plan.reasons.join(' ')).toContain('принят с оговоркой');
+  });
+
+  it('две УПД с оборотами собираются в две машины', () => {
+    // Ровно боевой случай: два PDF по две-три страницы, у каждого оборот.
+    const plan = planUpdSegments(
+      [
+        cls(1, 'upd_main'),
+        cls(2, 'other'),
+        cls(3, 'upd_main'),
+        cls(4, 'upd_continuation'),
+        cls(5, 'other'),
+      ],
+      5,
+      5,
+    );
+
+    expect(plan.confident).toBe(true);
+    expect(plan.segments.map((s) => s.pages)).toEqual([
+      [1, 2],
+      [3, 4, 5],
+    ]);
+  });
+
+  it('сегмент, открытый НЕ шапкой, по-прежнему отменяет нарезку', () => {
+    // Продолжение без начала: неизвестно даже, сколько документов в пачке и
+    // где границы. Такой пакет должен идти прежним путём «файл = документ».
+    const plan = planUpdSegments([cls(1, 'upd_continuation'), cls(2, 'upd_continuation')], 2, 5);
+
     expect(plan.confident).toBe(false);
+    expect(plan.reasons.join(' ')).toContain('fallback');
   });
 
   it('пустая классификация — нет сегментов и нет уверенности', () => {

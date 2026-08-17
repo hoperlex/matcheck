@@ -3750,8 +3750,18 @@ export async function tryFinalizeUpdAssembly(
       .where(and(eq(bundleSegments.bundleId, rootId), eq(bundleSegments.generation, generation)));
     if (segments.length === 0) return { action: 'none' as const, reason: 'манифест пуст' };
 
-    if (segments.some((s) => s.confidence !== 'normal')) {
-      return { action: 'rollback' as const, reason: 'в манифесте есть неуверенные сегменты' };
+    // `fallback` — сегмент, открытый НЕ шапкой: продолжение без начала либо
+    // непонятная страница сама по себе. Публиковать такое нельзя, границы
+    // документов недостоверны.
+    //
+    // `uncertain` публикуем: в манифест он попадает только после того, как
+    // planUpdSegments признал нарезку надёжной, а это возможно единственным
+    // способом — сегмент начат распознанной шапкой, и «неуверенность» вызвана
+    // прикреплённой страницей (оборот, приложение). Существующие манифесты от
+    // этого не меняются: до правки uncertain до манифеста не доходил вовсе,
+    // пакет откатывался раньше.
+    if (segments.some((s) => s.confidence === 'fallback')) {
+      return { action: 'rollback' as const, reason: 'в манифесте есть сегменты без шапки' };
     }
     if (segments.some((s) => !s.docId)) {
       return { action: 'none' as const, reason: 'не у всех сегментов есть документ' };

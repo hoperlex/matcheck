@@ -400,10 +400,42 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
     expect(subs).toHaveLength(1);
   });
 
-  it('ненадёжная нарезка откатывает пакет на «файл = документ»', async () => {
+  it('оборот документа («other» при распознанной шапке) сборку не отменяет', async () => {
+    // Боевой случай: у каждой УПД есть оборот с подписями, классификатор
+    // относит его к «other». Границы документов определены по шапкам, поэтому
+    // машина должна собраться, а не развалиться на отдельные файлы. До правки
+    // это была самая частая причина отката: 18 из 52 за месяц.
+    const bundleId = await publicBundle(['1.jpg', '2.jpg', '3.jpg']);
+    pagesAre('upd_main', 'other', 'upd_main');
+
+    await handleDocumentRouterJob(bundleId, log);
+    const [subOk] = await db<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE parent_bundle_id = ${bundleId}`;
+    await handleUpdAssemblyJob(subOk!.id, 0, log);
+
+    // Два сегмента: страницы 1-2 (шапка + оборот) и страница 3. Манифест на
+    // месте — значит нарезке доверились и пакет пошёл путём машины.
+    // (`logical_v1` проставит публикация, когда сегменты будут разобраны.)
+    const segments = await segmentsOf(bundleId);
+    expect(segments).toHaveLength(2);
+    const [rootOk] = await db<{ parse_error_message: string | null }[]>`
+      SELECT parse_error_message FROM source_bundles WHERE id = ${bundleId}`;
+    expect(rootOk!.parse_error_message).toBeNull();
+    // У каждого сегмента появился свой документ, и оба технические — наружу
+    // до публикации они не видны. Считаем именно по манифесту: в дочернем
+    // пакете лежит ещё и служебная запись router'а.
+    expect(segments.every((seg) => seg.source_document_id != null)).toBe(true);
+    const segmentDocIds = segments.map((seg) => seg.source_document_id);
+    const created = (await docsOf()).filter((d) => segmentDocIds.includes(d.id));
+    expect(created).toHaveLength(2);
+    expect(created.every((d) => d.is_technical)).toBe(true);
+  });
+
+  it('сегмент без шапки по-прежнему откатывает пакет на «файл = документ»', async () => {
     const bundleId = await publicBundle(['1.jpg', '2.jpg']);
-    // Вторая страница — «other»: segmentUpdPages пометит сегмент uncertain.
-    pagesAre('upd_main', 'other');
+    // Ни одной страницы `upd_main`: продолжение без начала — границы
+    // документов неизвестны, доверять нарезке нельзя.
+    pagesAre('upd_continuation', 'upd_continuation');
 
     await handleDocumentRouterJob(bundleId, log);
     const [sub] = await db<{ id: string }[]>`
