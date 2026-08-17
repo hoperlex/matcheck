@@ -320,11 +320,12 @@ describe('collectUploadParts — режим strict (публичный вход)
     expect(res.rejected[0]).toMatchObject({ reason: 'unsupported_type' });
   });
 
-  it('HEIC отклоняется на входе со своей причиной', async () => {
-    // Айфон по умолчанию снимает в HEIC. Конвейер такой файл принимал, но
-    // распознать не мог никогда: vision работает с jpeg/png/webp/pdf, а по
-    // расширению файл уходил в PDF-ветку и падал на pdftoppm. Отказ сразу, с
-    // инструкцией, честнее тихого parse_failed через минуту.
+  it('HEIC принимается публичной формой', async () => {
+    // Айфон по умолчанию снимает в HEIC, и раньше здесь стоял отказ: vision
+    // работает с jpeg/png/webp/pdf, распознать такой файл было нечем. Теперь
+    // он декодируется системным heif-convert перед отправкой модели
+    // (page-render.ts), поэтому запрет снят — иначе мы отвергали бы самый
+    // частый способ сфотографировать документ.
     const heic = Buffer.concat([
       Buffer.from([0x00, 0x00, 0x00, 0x18]),
       Buffer.from('ftypheic'),
@@ -335,9 +336,10 @@ describe('collectUploadParts — режим strict (публичный вход)
     ]);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.accepted).toHaveLength(0);
-    expect(res.rejected[0]).toMatchObject({ reason: 'heic_unsupported' });
-    // Причина уходит наружу поставщику — она обязана быть в контракте.
+    expect(res.accepted).toHaveLength(1);
+    expect(res.rejected).toHaveLength(0);
+    // Код причины из контракта не удаляем: он остаётся у отказов, уже
+    // записанных в истории публичных отправок.
     expect(PublicRejectReasonSchema.safeParse('heic_unsupported').success).toBe(true);
   });
 

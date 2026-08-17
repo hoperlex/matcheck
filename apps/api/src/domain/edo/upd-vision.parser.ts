@@ -32,6 +32,7 @@ import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { resolvePrompt, type PromptOverride } from '../prompts/registry.js';
 import { computePdfRenderDpi } from './pdf-render-dpi.js';
 import { prefilterUpdPages, type PrefilterResult } from './upd-page-prefilter.js';
+import { imageToPng, isHeicBuffer } from './page-render.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
 import type { ParsePdfResult } from './upd-pdf.parser.js';
 
@@ -388,7 +389,16 @@ export async function parseUpdVision(
     sourceDocumentId: null,
   },
 ): Promise<ParsePdfResult> {
-  const mime = input.mimeType.toLowerCase();
+  // HEIC приводим к PNG до проверки формата: модель его не принимает, а
+  // отказывать пользователю нельзя — с айфона это формат по умолчанию.
+  // Определяем по сигнатуре, а не по mime: браузер и почта называют такой
+  // файл как угодно, вплоть до application/octet-stream.
+  let buffer = input.buffer;
+  let mime = input.mimeType.toLowerCase();
+  if (isHeicBuffer(buffer)) {
+    buffer = await imageToPng(buffer);
+    mime = 'image/png';
+  }
   if (!SUPPORTED_MIMES.has(mime)) {
     throw new Error(`parseUpdVision: неподдерживаемый MIME ${input.mimeType}`);
   }
@@ -523,7 +533,7 @@ export async function parseUpdVision(
           temperature,
           maxTokens: row.maxTokens ?? 8192,
           promptText: visionPromptText,
-          file: { buffer: input.buffer, mimeType: mime },
+          file: { buffer, mimeType: mime },
         });
         raw = result.raw;
         promptTokens = result.promptTokens;
@@ -534,7 +544,7 @@ export async function parseUpdVision(
         const filesForOpenRouter =
           convertedPngPages !== null
             ? convertedPngPages.map((png) => ({ buffer: png, mimeType: 'image/png' }))
-            : [{ buffer: input.buffer, mimeType: mime }];
+            : [{ buffer, mimeType: mime }];
         const result = await callOpenRouter({
           apiBaseUrl: cred.apiBaseUrl,
           apiKey,
@@ -568,7 +578,7 @@ export async function parseUpdVision(
       parsedZod = UpdPdfParsedSchema.parse(jsonParsed);
       return {
         parsed: parsedZod,
-        textLength: input.buffer.length,
+        textLength: buffer.length,
         llmProviderId: row.id,
       };
     } catch (err) {
@@ -590,7 +600,7 @@ export async function parseUpdVision(
           requestMessages: [
             {
               role: 'user',
-              content: `[vision upd attempt=${attemptNo}: ${input.filename ?? 'no-name'} (${mime}, ${input.buffer.length} bytes${
+              content: `[vision upd attempt=${attemptNo}: ${input.filename ?? 'no-name'} (${mime}, ${buffer.length} bytes${
                 convertedPngPages !== null
                   ? `, pdf→png pages=${convertedPngPages.length}`
                   : ''

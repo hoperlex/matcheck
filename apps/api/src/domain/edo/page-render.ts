@@ -148,8 +148,140 @@ function readOrientationFromTiff(buf: Buffer, tiffStart: number): number {
  * лежащий «боком» с Orientation=6, читается уже развёрнутым. Добавлять свой
  * поворот сверху нельзя: получится двойной, и страница ляжет набок.
  */
+/**
+ * Формат картинки по СИГНАТУРЕ файла, а не по имени и не по mime.
+ *
+ * И то, и другое приходит недостоверным: почта отдаёт вложения с
+ * `application/octet-stream`, публичная форма — с тем mime, который назвал
+ * браузер, а телефоны переименовывают файлы как угодно. Единственный надёжный
+ * источник — первые байты.
+ *
+ * Возвращает 'jimp' для всего, что Jimp читает сам (JPEG, PNG, BMP, TIFF, GIF).
+ */
+export function sniffImageKind(buf: Buffer): 'webp' | 'heic' | 'jimp' {
+  // RIFF....WEBP — контейнер RIFF с типом WEBP на 8-м байте.
+  if (
+    buf.length >= 12 &&
+    buf.toString('ascii', 0, 4) === 'RIFF' &&
+    buf.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return 'webp';
+  }
+  // ....ftyp<бренд> — ISO-BMFF. Тот же список брендов, что у почтового
+  // фильтра вложений (attachment-filter.ts): держать два разных набора значило
+  // бы принимать файл на входе и не понимать его при разборе.
+  if (buf.length >= 12 && buf.toString('ascii', 4, 8) === 'ftyp') {
+    const brand = buf.toString('ascii', 8, 12).toLowerCase();
+    if (['heic', 'heix', 'hevc', 'heim', 'heis', 'mif1', 'msf1', 'hevx'].includes(brand)) {
+      return 'heic';
+    }
+  }
+  return 'jimp';
+}
+
+/**
+ * HEIC ли это — по сигнатуре.
+ *
+ * Нужен одиночному vision-пути: модель HEIC не принимает, и файл приводится к
+ * PNG до проверки формата. Отдельная функция, а не сравнение с результатом
+ * sniffImageKind у вызывающего, — чтобы список брендов жил в одном месте.
+ */
+export function isHeicBuffer(buf: Buffer): boolean {
+  return sniffImageKind(buf) === 'heic';
+}
+
+/** Сколько ждём внешний декодер картинки. Секунды на файл — с запасом. */
+const IMAGE_DECODE_TIMEOUT_MS = 30_000;
+
+/**
+ * Потолок на выход декодера.
+ *
+ * Картинка на 20000×20000 пикселей весит в PNG сотни мегабайт и кладёт воркер
+ * на memcpy раньше, чем дойдёт до модели. Ограничение проверяется ПОСЛЕ
+ * декодирования, потому что до него размер в пикселях неизвестен: сжатый webp
+ * на пару мегабайт разворачивается во что угодно.
+ */
+const MAX_DECODED_PIXELS = 50_000_000;
+
+/**
+ * Декодирование системным конвертером — тем же способом, что renderPdf зовёт
+ * pdftoppm: spawn без shell, временный каталог с гарантированной уборкой,
+ * таймаут с SIGKILL и обрезанный stderr.
+ */
+async function decodeViaTool(
+  buf: Buffer,
+  tool: 'dwebp' | 'heif-convert',
+  inExt: string,
+): Promise<Buffer> {
+  const dir = await mkdtemp(join(tmpdir(), 'img-decode-'));
+  try {
+    const inPath = join(dir, `in.${inExt}`);
+    const outPath = join(dir, 'out.png');
+    await writeFile(inPath, buf);
+
+    // Порядок аргументов у конвертеров разный: dwebp принимает -o, heif-convert
+    // ждёт выходной файл позиционно.
+    const args = tool === 'dwebp' ? [inPath, '-o', outPath] : [inPath, outPath];
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(tool, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      const timer = setTimeout(() => {
+        proc.kill('SIGKILL');
+        reject(new Error(`${tool}: таймаут декодирования`));
+      }, IMAGE_DECODE_TIMEOUT_MS);
+      proc.stderr.on('data', (c: Buffer) => {
+        // Ограничиваем: у битого файла конвертер сыплет мегабайтами предупреждений.
+        if (stderr.length < 4096) stderr += c.toString('utf8');
+      });
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        // ENOENT здесь — не «файл плохой», а «в образе нет пакета». Разница
+        // важна: первое чинит пользователь, второе — Dockerfile.
+        const hint =
+          (err as NodeJS.ErrnoException).code === 'ENOENT'
+            ? `требуется ${tool} (пакет ${tool === 'dwebp' ? 'libwebp-tools' : 'libheif-tools'})`
+            : err.message;
+        reject(new Error(`${tool} не запустился: ${hint}`));
+      });
+      proc.on('exit', (code) => {
+        clearTimeout(timer);
+        if (code !== 0) reject(new Error(`${tool} exit=${code}: ${stderr.slice(0, 200)}`));
+        else resolve();
+      });
+    });
+
+    return await readFile(outPath);
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Картинка → PNG.
+ *
+ * WebP и HEIC декодируются внешним конвертером: Jimp их не читает вовсе и
+ * падает с «Mime type image/webp does not support decoding». В сборке машины
+ * это ронял весь комплект — одна фотография в webp разворачивала пакет обратно
+ * в «файл = документ» и разрушала группировку.
+ *
+ * Всё остальное по-прежнему идёт через Jimp, включая применение EXIF
+ * Orientation при декодировании JPEG.
+ */
 export async function imageToPng(buf: Buffer): Promise<Buffer> {
-  const img = await Jimp.read(buf);
+  const kind = sniffImageKind(buf);
+  // Внешний конвертер отдаёт готовый PNG, но прогон через Jimp обязателен:
+  // он нормализует результат так же, как для остальных форматов, и заодно
+  // даёт размеры для проверки лимита.
+  const decoded = kind === 'jimp' ? buf : await decodeViaTool(buf, kind === 'webp' ? 'dwebp' : 'heif-convert', kind);
+
+  const img = await Jimp.read(decoded);
+  const pixels = img.bitmap.width * img.bitmap.height;
+  if (pixels > MAX_DECODED_PIXELS) {
+    throw new Error(
+      `картинка ${img.bitmap.width}×${img.bitmap.height} превышает предел ${MAX_DECODED_PIXELS} пикселей`,
+    );
+  }
   return (await img.getBuffer('image/png')) as Buffer;
 }
 

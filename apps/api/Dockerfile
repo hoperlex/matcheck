@@ -39,7 +39,13 @@ ENV NODE_ENV=production
 # без неё `--psm 0` падает. На Alpine это два отдельных пакета из community.
 # ВАЖНО: имена пакетов alpine-специфичны (на Debian/Ubuntu — tesseract-ocr-osd);
 # подтвердить доступность при первом `docker build`.
-RUN apk add --no-cache tini poppler-utils libreoffice font-noto tesseract-ocr tesseract-ocr-data-osd && corepack enable && corepack prepare pnpm@9.12.0 --activate
+# libwebp-tools (`dwebp`) и libheif-tools (`heif-convert`) — декодеры картинок,
+# которых не умеет jimp. Он падает на них с «Mime type image/webp does not
+# support decoding», и в сборке машины это роняло ВЕСЬ комплект: одна
+# фотография в webp разворачивала пакет обратно в «файл = документ». Формат
+# приходит с телефонов и мессенджеров сам собой, поэтому это не экзотика.
+# Вызов — domain/edo/page-render.ts, imageToPng.
+RUN apk add --no-cache tini poppler-utils libreoffice font-noto tesseract-ocr tesseract-ocr-data-osd libwebp-tools libheif-tools && corepack enable && corepack prepare pnpm@9.12.0 --activate
 # Сохраняем pnpm-структуру монорепо, чтобы workspace-symlinks (@matcheck/contracts) и
 # .pnpm-symlinks (fastify, drizzle и пр.) корректно резолвились в runtime.
 COPY --from=build /repo/package.json /repo/pnpm-workspace.yaml /repo/tsconfig.base.json ./
