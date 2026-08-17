@@ -20,6 +20,8 @@ export function rejectLabel(reason: string): string {
       return 'формат HEIC не поддерживается — включите в камере «Наиболее совместимый» или пришлите JPEG';
     case 'archive_suspicious':
       return 'файл не удалось прочитать';
+    case 'storage_failed':
+      return 'файл не сохранился — отправьте его ещё раз, остальные уже приняты';
     default:
       return 'не принят';
   }

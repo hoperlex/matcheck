@@ -154,6 +154,16 @@ export function UploadDocumentsModal({
       if (res.alreadyExists) {
         message.info('Этот набор файлов уже загружали — показываю результат.');
       }
+      // Файл прошёл проверки, но не лёг в хранилище. Остальные при этом
+      // приняты и разбираются, поэтому это не ошибка загрузки, а список того,
+      // что нужно отправить ещё раз: повторная загрузка дозагрузит только
+      // недостающее и не пересоздаст уже разобранные документы.
+      if (res.notStored && res.notStored.length > 0) {
+        message.error({
+          content: `Не сохранились в хранилище: ${res.notStored.join(', ')}. Загрузите эти файлы ещё раз.`,
+          duration: 10,
+        });
+      }
     } catch (err) {
       const msg =
         err instanceof ApiError

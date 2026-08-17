@@ -736,6 +736,13 @@
       "when": 1781800031000,
       "tag": "0105_visibility_events",
       "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1781886431000,
+      "tag": "0106_registry_content_hash",
+      "breakpoints": true
     }
   ]
 }

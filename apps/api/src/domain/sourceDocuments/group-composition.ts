@@ -108,7 +108,7 @@ export async function resolveGroupComposition(
   // клиента нельзя.
   const scope = [
     sql`(${documentGroupIdSql}) = ${groupId}::uuid`,
-    mobileVisibleSourceDocumentSql,
+    mobileVisibleSourceDocumentSql(),
     sql`${sourceDocuments.direction} = ${direction}`,
     ...(siteId ? [sql`${sourceDocuments.siteId} = ${siteId}::uuid`] : []),
   ];

@@ -107,13 +107,37 @@ export async function getObject(key: string): Promise<Buffer> {
   return Buffer.from(ab);
 }
 
-export async function putObject(key: string, body: Buffer, contentType: string): Promise<void> {
+/**
+ * Кладёт объект в хранилище.
+ *
+ * @param metadata пользовательские метаданные объекта — уезжают заголовками
+ *   `x-amz-meta-<имя>`. Нужны, чтобы хеш содержимого хранился РЯДОМ С ФАЙЛОМ, а
+ *   не только в нашей БД: строка реестра говорит, что мы приняли, метаданные
+ *   объекта — что на самом деле лежит в бакете. Без этого сверка «в S3 именно
+ *   то, что прислали» упирается в скачивание файла целиком.
+ *
+ *   Имена ключей — только латиница, цифры и дефис: значение заголовка обязано
+ *   быть ASCII, а имя участвует в подписи запроса.
+ */
+export async function putObject(
+  key: string,
+  body: Buffer,
+  contentType: string,
+  metadata?: Record<string, string>,
+): Promise<void> {
   const url = new URL(`${endpoint()}/${env.S3_BUCKET}/${key}`);
+  const headers: Record<string, string> = {
+    'Content-Type': contentType,
+    'Content-Length': String(body.length),
+  };
+  for (const [name, value] of Object.entries(metadata ?? {})) {
+    headers[`x-amz-meta-${name}`] = value;
+  }
   const res = await s3FetchWithRetry(() =>
     getClient().fetch(url, {
       method: 'PUT',
       body,
-      headers: { 'Content-Type': contentType, 'Content-Length': String(body.length) },
+      headers,
     }),
   );
   if (!res.ok) {

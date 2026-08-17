@@ -11,6 +11,24 @@
  */
 
 /**
+ * Метка машины для строки списка.
+ *
+ * `portalGroupId` вперёд, потому что он шире: планшетный `groupId` пуст, пока
+ * пачка не собрана и не опубликована, и совсем пуст после отката сборки. Для
+ * менеджера машина существует с момента загрузки — иначе он видит россыпь
+ * строк и не понимает, что они приехали одним рейсом.
+ *
+ * Оба поля необязательные: у документов из почты и внутренних загрузок машины
+ * нет вовсе.
+ */
+export function documentGroupKey(row: {
+  groupId?: string | null;
+  portalGroupId?: string | null;
+}): string | null {
+  return row.portalGroupId ?? row.groupId ?? null;
+}
+
+/**
  * Строки одной машины — подряд, с сохранением исходного порядка.
  *
  * Стабильная кластеризация, а не сортировка: позицию кластера задаёт ПЕРВОЕ
@@ -21,12 +39,14 @@
  * Возвращает НОВЫЙ массив. Мутировать вход нельзя: сюда приходит массив из
  * кэша React Query, и `.sort()` по месту рассинхронизировал бы кэш с сервером.
  */
-export function clusterRowsByGroup<T extends { groupId?: string | null }>(rows: readonly T[]): T[] {
+export function clusterRowsByGroup<T extends { groupId?: string | null; portalGroupId?: string | null }>(
+  rows: readonly T[],
+): T[] {
   const clusters = new Map<string, T[]>();
   const order: Array<{ groupId: string | null; row: T }> = [];
 
   for (const row of rows) {
-    const groupId = row.groupId ?? null;
+    const groupId = documentGroupKey(row);
     if (!groupId) {
       order.push({ groupId: null, row });
       continue;

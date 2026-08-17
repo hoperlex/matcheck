@@ -64,7 +64,7 @@ export async function recordVisibilityTransitions(
     with current_state as (
       select source_documents.id,
              source_documents.site_id,
-             ${mobileVisibleSourceDocumentSql} as visible
+             ${mobileVisibleSourceDocumentSql()} as visible
         from source_documents
        where ${scope}
     ),

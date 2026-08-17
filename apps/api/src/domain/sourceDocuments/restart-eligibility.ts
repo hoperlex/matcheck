@@ -26,7 +26,11 @@ import {
   sourceBundles,
   sourceDocuments,
 } from '../../db/schema.js';
-import { selectRegistryRows } from './bundle-import-registry.js';
+import {
+  selectMissingObjectRows,
+  selectRegistryRows,
+  type RegistryRow,
+} from './bundle-import-registry.js';
 
 type BundleRow = typeof sourceBundles.$inferSelect;
 
@@ -37,6 +41,16 @@ export type RestartEligibility =
   | { action: 'reuse'; reason: 'locked_by_operation'; operationDocumentIds: string[] }
   /** По пакету прямо сейчас идёт разбор: документ в queued/processing. */
   | { action: 'reuse'; reason: 'busy' }
+  /**
+   * Часть файлов не долетела до S3 — дозагружаем их в ТО ЖЕ поколение.
+   *
+   * Отдельный исход, а не разновидность `restart`, потому что restart
+   * разрушителен: он поднимает поколение и зовёт `purgePreviousGeneration`,
+   * то есть сносит документы девяти успешно принятых файлов ради одного
+   * недостающего. Здесь же ничего удалять не нужно — в пакете просто дырка,
+   * и её надо заполнить.
+   */
+  | { action: 'complete_partial'; reason: 'missing_objects'; missingRows: RegistryRow[] }
   /** Комплект неполон и никем не занят — восстанавливаем новым поколением. */
   | { action: 'restart'; reason: 'incomplete'; missingFiles: number };
 
@@ -233,6 +247,26 @@ export async function resolveRestartEligibility(
   }
 
   const docIds = await liveDocumentIds(db, bundle.id);
+
+  // Дырка в хранилище проверяется ДО «комплект неполон»: оба условия истинны
+  // одновременно (файла нет — значит и документа по нему нет), но лечатся
+  // по-разному. Отдать такой пакет в restart значит снести уже разобранное
+  // ради одного недолетевшего файла.
+  const missingObjects = await selectMissingObjectRows(
+    db,
+    bundle.id,
+    bundle.activeUploadGeneration,
+  );
+  if (missingObjects.length > 0) {
+    // Занятость операцией сильнее: дозагрузка добавила бы документ в машину,
+    // которую инспектор уже принял, и состав приёмки разошёлся бы с тем, что
+    // он видел. Такой файл разбирает менеджер руками.
+    const busyDocs = await documentsUsedByOperations(db, docIds);
+    if (busyDocs.length > 0) {
+      return { action: 'reuse', reason: 'locked_by_operation', operationDocumentIds: busyDocs };
+    }
+    return { action: 'complete_partial', reason: 'missing_objects', missingRows: missingObjects };
+  }
 
   const missingFiles = await countMissingFiles(db, bundle);
 

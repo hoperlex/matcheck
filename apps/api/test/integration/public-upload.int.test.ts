@@ -508,53 +508,124 @@ suite('публичная загрузка документов (реальны�
     expect(Number(docs)).toBe(1);
   });
 
-  it('падение S3 → 503, успевшие ключи уходят в чистку', async () => {
+  it('часть файлов не легла в S3 — дошедшее принято, недошедшее видно как непринятое', async () => {
     mocks.putObject
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('S3 down'));
 
     const res = await upload([...onePdf('s3a', 'a.pdf'), ...onePdf('s3b', 'b.pdf')]);
+    // Раньше здесь был 503 и чистка успевшего объекта: поставщик терял уже
+    // залитое и грузил комплект заново целиком.
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.filesAccepted).toBe(1);
+    expect(body.filesRejected).toEqual([
+      expect.objectContaining({ reason: 'storage_failed' }),
+    ]);
+
+    const [bundle] = await sql<{ id: string; status: string }[]>`
+      SELECT id, status FROM source_bundles WHERE site_id = ${siteId}`;
+    // Пакет живёт: по дошедшему файлу разбор идёт.
+    expect(bundle?.status).toBe('queued');
+
+    // Успевший объект остаётся в бакете — чистить нечего.
+    const cleanupRows = await sql<{ s3_key: string }[]>`
+      SELECT s3_key FROM s3_cleanup_outbox WHERE entity_id = ${bundle!.id}`;
+    expect(cleanupRows.length).toBe(0);
+
+    // В реестре обе строки: у дошедшей есть ключ, у недошедшей — нет, но есть
+    // хеш, по которому её узнают при повторной отправке.
+    const items = await sql<
+      { status: string; input_s3_key: string | null; content_sha256: string | null }[]
+    >`SELECT status, input_s3_key, content_sha256
+        FROM bundle_import_items WHERE bundle_id = ${bundle!.id} ORDER BY input_order`;
+    expect(items.length).toBe(2);
+    expect(items[0]).toMatchObject({ status: 'accepted' });
+    expect(items[0]!.input_s3_key).toBeTruthy();
+    expect(items[1]).toMatchObject({ status: 'failed', input_s3_key: null });
+    expect(items[1]!.content_sha256).toBeTruthy();
+  });
+
+  it('по умолчанию запрос к хранилищу без пользовательских метаданных', async () => {
+    // Заголовок x-amz-meta-sha256 стандартный, но на нашем провайдере не
+    // проверен, а приём пачки — критичный путь. Выкат не должен менять запросы
+    // к S3 вообще: хеш уходит туда только при S3_OBJECT_CHECKSUM=1.
+    const res = await upload(onePdf('no-meta'));
+    expect(res.statusCode).toBe(201);
+
+    expect(mocks.putObject).toHaveBeenCalledTimes(1);
+    // Четвёртый аргумент — метаданные. undefined значит «шлём ровно то, что
+    // слали раньше».
+    expect(mocks.putObject.mock.calls[0]![3]).toBeUndefined();
+  });
+
+  it('полный отказ S3 → 503: принимать нечего', async () => {
+    mocks.putObject.mockRejectedValue(new Error('S3 down'));
+
+    const res = await upload(onePdf('s3-dead'));
     expect(res.statusCode).toBe(503);
 
     const [bundle] = await sql<{ id: string; status: string }[]>`
       SELECT id, status FROM source_bundles WHERE site_id = ${siteId}`;
     expect(bundle?.status).toBe('parse_failed');
-    // Раньше успевший объект оставался в бакете навсегда: записи о нём не
-    // создавалось, а удалять было некому.
-    const cleanupRows = await sql<{ s3_key: string }[]>`
-      SELECT s3_key FROM s3_cleanup_outbox WHERE entity_id = ${bundle!.id}`;
-    expect(cleanupRows.length).toBe(1);
-    await sql`DELETE FROM s3_cleanup_outbox WHERE entity_id = ${bundle!.id}`;
   });
 
-  it('повтор сразу после сбоя S3 заливает заново, а не отвечает «принято» на пустоту', async () => {
+  it('повтор после частичного сбоя дозагружает только пропавший файл', async () => {
     mocks.putObject.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('S3 down'));
     const first = await upload([...onePdf('retry-a', 'a.pdf'), ...onePdf('retry-b', 'b.pdf')]);
-    expect(first.statusCode).toBe(503);
+    expect(first.statusCode).toBe(201);
 
-    const [failed] = await sql<{ id: string; status: string }[]>`
-      SELECT id, status FROM source_bundles WHERE site_id = ${siteId}`;
-    expect(failed!.status).toBe('parse_failed');
-    await sql`DELETE FROM s3_cleanup_outbox WHERE entity_id = ${failed!.id}`;
+    const [partial] = await sql<{ id: string; status: string; gen: number }[]>`
+      SELECT id, status, active_upload_generation as gen
+        FROM source_bundles WHERE site_id = ${siteId}`;
+    expect(partial!.status).toBe('queued');
 
-    // Поставщик видит ошибку и жмёт «отправить ещё раз» СРАЗУ — то есть внутри
-    // ORPHAN_GRACE_MS. Раньше CAS считал свежую запись признаком параллельной
-    // заливки, возвращал reused и отдавал 201: файлы объявлялись принятыми,
-    // хотя успевший объект уже уехал в очередь на удаление.
+    // Разбор дошедшего файла завершился: служебная запись снята, по файлу есть
+    // документ. Пока разбор ИДЁТ, дозагрузка не начинается намеренно — router
+    // в этот момент читает реестр, и подкладывать ему ключ на ходу нельзя.
+    await sql`DELETE FROM source_documents WHERE bundle_id = ${partial!.id} AND is_technical = true`;
+    const [storedItem] = await sql<{ input_s3_key: string; source_filename: string }[]>`
+      SELECT input_s3_key, source_filename FROM bundle_import_items
+       WHERE bundle_id = ${partial!.id} AND input_s3_key IS NOT NULL`;
+    const docId = randomUUID();
+    // needs_resolution, а не parsed: CHECK source_upd_required требует у
+    // разобранной УПД номер, дату и сумму, а нам важен лишь сам факт «по файлу
+    // есть живой документ».
+    await sql`INSERT INTO source_documents (id, kind, direction, origin, status, site_id, bundle_id, parsed_at)
+              VALUES (${docId}, 'upd', 'inbound', 'manual_pdf', 'needs_resolution', ${siteId}, ${partial!.id}, now())`;
+    await sql`INSERT INTO source_document_attachments (source_document_id, s3_key, filename, role)
+              VALUES (${docId}, ${storedItem!.input_s3_key}, ${storedItem!.source_filename}, 'original')`;
+    await sql`UPDATE bundle_import_items SET status = 'created', effective_status = 'created'
+               WHERE bundle_id = ${partial!.id} AND input_s3_key IS NOT NULL`;
+
+    // Поставщик отправляет тот же комплект ещё раз. Заливается РОВНО один файл
+    // — тот, которого не хватает. Второй уже лежит в бакете, и перезаливать его
+    // значит платить трафиком за то, что и так есть.
     mocks.putObject.mockClear();
     mocks.putObject.mockResolvedValue(undefined);
     const second = await upload([...onePdf('retry-a', 'a.pdf'), ...onePdf('retry-b', 'b.pdf')]);
     expect(second.statusCode).toBe(201);
-    expect(mocks.putObject).toHaveBeenCalledTimes(2);
+    expect(mocks.putObject).toHaveBeenCalledTimes(1);
 
-    // Тот же пакет (scope не менялся), но снова в работе и с полным реестром.
-    const [again] = await sql<{ id: string; status: string }[]>`
-      SELECT id, status FROM source_bundles WHERE site_id = ${siteId}`;
-    expect(again!.id).toBe(failed!.id);
-    expect(again!.status).toBe('queued');
-    const [{ count: items }] = await sql<{ count: string }[]>`
-      SELECT count(*) FROM bundle_import_items WHERE bundle_id = ${failed!.id}`;
-    expect(Number(items)).toBe(2);
+    const [again] = await sql<{ id: string; status: string; gen: number }[]>`
+      SELECT id, status, active_upload_generation as gen
+        FROM source_bundles WHERE site_id = ${siteId}`;
+    // Тот же пакет и ТО ЖЕ поколение загрузки: это дозагрузка, а не пересбор.
+    // Поднятое поколение означало бы purgePreviousGeneration, то есть снос
+    // документов по уже принятым файлам.
+    expect(again!.id).toBe(partial!.id);
+    expect(again!.gen).toBe(partial!.gen);
+
+    // Строк по-прежнему две, и обе теперь с ключами.
+    const items = await sql<{ status: string; input_s3_key: string | null }[]>`
+      SELECT status, input_s3_key
+        FROM bundle_import_items WHERE bundle_id = ${partial!.id} ORDER BY input_order`;
+    expect(items.length).toBe(2);
+    expect(items.every((i) => i.input_s3_key !== null)).toBe(true);
+    // Уже разобранный файл остаётся `created` — второй раз его не разбирают.
+    // Дозагруженный встаёт в `accepted`, то есть «ждёт разбора»: именно этот
+    // статус router и берёт в работу.
+    expect(items.map((i) => i.status).sort()).toEqual(['accepted', 'created']);
   });
 
   it('глобальный потолок исчерпан → 429 без единой записи и без S3', async () => {

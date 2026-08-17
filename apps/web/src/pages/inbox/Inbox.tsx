@@ -26,9 +26,11 @@ import {
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   clusterRowsByGroup,
+  documentGroupKey,
   GROUP_COLORS,
   groupRowClass,
 } from '../../shared/ui/documentGroupRows';
+import { PendingFilesPanel } from './PendingFilesPanel';
 import type {
   Counterparty,
   Site,
@@ -910,6 +912,9 @@ export default function InboxPage() {
       <style>{GROUP_COLORS.map(
         (color, i) => `.matcheck-doc-group-${i} > td:first-child { box-shadow: inset 4px 0 0 ${color}; }`,
       ).join('\n')}</style>
+      {/* Принятые файлы, до которых разбор ещё не дошёл. Сервер отдаёт их
+          только на первой странице и только менеджеру с админом. */}
+      <PendingFilesPanel files={list.data?.pendingFiles ?? []} />
       <ResponsiveTable<Row>
         items={groupedItems}
         loading={list.isLoading}
@@ -931,7 +936,7 @@ export default function InboxPage() {
         rowSelection={isContractor ? undefined : bulk.selection}
         // Цветная полоса слева у документов одной машины. Приглушённая:
         // строку со статусом «не распознано» она перекрикивать не должна.
-        rowClassName={(r) => groupRowClass(r.groupId)}
+        rowClassName={(r) => groupRowClass(documentGroupKey(r))}
         expandable={{
           // Свою колонку с иконкой не рендерим — ± живёт в столбце «Тип».
           showExpandColumn: false,

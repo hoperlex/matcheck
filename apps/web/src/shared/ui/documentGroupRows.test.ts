@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   clusterRowsByGroup,
+  documentGroupKey,
   GROUP_COLOR_COUNT,
   groupColorIndex,
   groupRowClass,
@@ -71,5 +72,27 @@ describe('группировка строк документов', () => {
       // перерисовке таблицы.
       expect(groupColorIndex(id)).toBe(idx);
     }
+  });
+
+  it('машина портала сильнее планшетной: она видна до публикации', () => {
+    // groupId приходит с сервера пустым, пока пачка не собрана и не
+    // опубликована, а после отката сборки — пустым навсегда. Менеджер обязан
+    // видеть машину раньше инспектора, поэтому метку задаёт portalGroupId.
+    expect(documentGroupKey({ groupId: null, portalGroupId: 'p1' })).toBe('p1');
+    expect(documentGroupKey({ groupId: 'g1', portalGroupId: null })).toBe('g1');
+    // Опубликованная поставка: оба поля указывают на один корневой пакет.
+    expect(documentGroupKey({ groupId: 'same', portalGroupId: 'same' })).toBe('same');
+    // Почта и внутренние загрузки машиной не считаются.
+    expect(documentGroupKey({})).toBeNull();
+  });
+
+  it('строки одной машины собираются подряд и по портальной метке', () => {
+    const rows = [
+      { id: 'a', portalGroupId: 'p1' },
+      { id: 'b', portalGroupId: null },
+      { id: 'c', portalGroupId: 'p1' },
+    ];
+
+    expect(clusterRowsByGroup(rows).map((r) => r.id)).toEqual(['a', 'c', 'b']);
   });
 });

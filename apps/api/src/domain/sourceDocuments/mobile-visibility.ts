@@ -17,9 +17,10 @@
  * «Принять как есть» некому будет воспользоваться.
  */
 import { sql, type SQL } from 'drizzle-orm';
-import { sourceBundles, sourceDocuments } from '../../db/schema.js';
+import { ingestEvents, sourceBundles, sourceDocuments } from '../../db/schema.js';
 import { STUB_ERROR_CODES } from '@matcheck/contracts';
 import { groupModeSites } from '../groups/group-mode.js';
+import { loadEnv } from '../../lib/env.js';
 
 /**
  * Реквизиты, без которых документ на планшете бесполезен.
@@ -70,10 +71,13 @@ const GROUP_IS_COMPLETE = sql`
       left join ${sourceDocuments} sibling
              on sibling.bundle_id = member.id
             and sibling.is_technical = false
+      -- Условия «есть ключ S3» здесь НЕТ намеренно. Файл, не долетевший до
+      -- хранилища, оставляет строку без ключа (частичный сбой приёма), и
+      -- пробел в машине от этого не становится меньше: документа по такому
+      -- файлу нет и быть не может, пока его не дозагрузят.
       left join bundle_import_items bi
              on bi.bundle_id = member.id
             and bi.upload_generation = member.active_upload_generation
-            and bi.input_s3_key is not null
      where self.id = ${sourceDocuments.bundleId}
        and root.assembly_version = 'logical_v1'
        and (
@@ -110,27 +114,72 @@ const GROUP_IS_COMPLETE = sql`
 `;
 
 /**
+ * Поставка с публичного портала отдаётся только собранной и опубликованной.
+ *
+ * Пакет, пришедший через `/uploads`, — это машина: несколько документов одного
+ * рейса. Пока сборка не свела их в логическую поставку, `group_id` у них NULL,
+ * и планшет нарисует столько карточек, сколько документов. Инспектор оформит
+ * один рейс дважды, а остаток повиснет неоформленным — ровно та беда, ради
+ * которой группы и заводились.
+ *
+ * Одной проверки комплектности (GROUP_IS_COMPLETE) для этого мало: она следит,
+ * чтобы документы приехали ОДНОВРЕМЕННО, но не делает из них группу. Поэтому
+ * до публикации публичный пакет не выдаётся вовсе.
+ *
+ * Почта, внутренняя загрузка и ЭДО правилом не затронуты: там понятия «машина»
+ * нет, документ отвечает сам за себя.
+ */
+const PORTAL_PACKAGE_IS_PUBLISHED = sql`
+  not exists (
+    select 1
+      from ${sourceBundles} pb
+      join ${sourceBundles} proot on proot.id = coalesce(pb.parent_bundle_id, pb.id)
+     where pb.id = ${sourceDocuments.bundleId}
+       and exists (
+         select 1 from ${ingestEvents} ie
+          where ie.bundle_id = proot.id and ie.channel = 'public'
+       )
+       and not (
+         proot.assembly_version = 'logical_v1'
+         and proot.published_generation is not null
+         and proot.published_generation = proot.active_upload_generation
+       )
+  )
+`;
+
+/**
  * Полный предикат «документ виден инспектору».
  *
- * Собирается из четырёх частей, и каждая закрывает свой класс проблем:
+ * Собирается из пяти частей, и каждая закрывает свой класс проблем:
  *   1. терминальный успешный статус;
  *   2. не служебная запись и не заглушка «не распознано»;
  *   3. реквизиты заполнены — иначе это черновик;
- *   4. группа целиком готова.
+ *   4. группа целиком готова;
+ *   5. поставка с портала собрана и опубликована — за флагом PORTAL_GROUPS_STRICT.
+ *
+ * Функция, а не константа: пятая часть зависит от переменной окружения, и
+ * значение, зафиксированное при импорте модуля, нельзя было бы ни выключить на
+ * работающем сервере, ни проверить тестом.
  */
-export const mobileVisibleSourceDocumentSql = sql`(
-  ${sourceDocuments.status} = 'parsed'
-  and ${sourceDocuments.isTechnical} = false
-  and coalesce(${sourceDocuments.parseErrorCode}, '') not in (${sql.join(
-    STUB_ERROR_CODES.map((code) => sql`${code}`),
-    sql`, `,
-  )})
-  and ${HAS_REQUIRED_FIELDS}
-  and ${GROUP_IS_COMPLETE}
-)`;
+export function mobileVisibleSourceDocumentSql(): SQL {
+  const strictPortal = loadEnv().PORTAL_GROUPS_STRICT;
+  return sql`(
+    ${sourceDocuments.status} = 'parsed'
+    and ${sourceDocuments.isTechnical} = false
+    and coalesce(${sourceDocuments.parseErrorCode}, '') not in (${sql.join(
+      STUB_ERROR_CODES.map((code) => sql`${code}`),
+      sql`, `,
+    )})
+    and ${HAS_REQUIRED_FIELDS}
+    and ${GROUP_IS_COMPLETE}
+    ${strictPortal ? sql`and ${PORTAL_PACKAGE_IS_PUBLISHED}` : sql``}
+  )`;
+}
 
 /** Отрицание — для поиска документов, которые надо снять с планшета. */
-export const mobileHiddenSourceDocumentSql = sql`(not ${mobileVisibleSourceDocumentSql})`;
+export function mobileHiddenSourceDocumentSql(): SQL {
+  return sql`(not ${mobileVisibleSourceDocumentSql()})`;
+}
 
 /**
  * Тот же предикат, но ограниченный охватом canary.
@@ -149,12 +198,12 @@ export const mobileHiddenSourceDocumentSql = sql`(not ${mobileVisibleSourceDocum
  *   проверен по нему и сужать выборку не нужно.
  */
 export function mobileVisibleWithinCanarySql(userSiteId: string | null | undefined): SQL {
-  if (userSiteId) return mobileVisibleSourceDocumentSql;
+  if (userSiteId) return mobileVisibleSourceDocumentSql();
   const sites = groupModeSites();
   // null — режим включён на всех объектах (`*`), сужать нечего.
-  if (sites === null) return mobileVisibleSourceDocumentSql;
+  if (sites === null) return mobileVisibleSourceDocumentSql();
   // Пустой список сюда не доходит: resolveGroupMode вернул бы enabled=false.
-  if (sites.length === 0) return mobileVisibleSourceDocumentSql;
+  if (sites.length === 0) return mobileVisibleSourceDocumentSql();
   // `is null` в первой ветке обязателен: документ без объекта не проходит
   // HAS_REQUIRED_FIELDS, и без явного пропуска NOT IN дал бы по нему NULL,
   // выбросив строку из выдачи менеджера вместе с прежним контрактом.

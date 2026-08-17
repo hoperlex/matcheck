@@ -58,6 +58,7 @@ import { ingestDocumentsBundle } from '../domain/sourceDocuments/ingest-bundle.j
 import {
   documentGroupIdSql,
   documentGroupRevisionSql,
+  portalDocumentGroupIdSql,
 } from '../domain/sourceDocuments/document-group.js';
 import { fromSupplierPortalSql } from '../domain/sourceDocuments/public-origin.js';
 import { manualRecipientSource } from '../domain/sourceDocuments/resolve-contractor.js';
@@ -282,6 +283,9 @@ type SdNames = {
   // logical_v1-сборки. См. domain/sourceDocuments/document-group.ts.
   groupId?: string | null;
   groupRevision?: number | null;
+  // «Машина» глазами менеджера: та же поставка, но видимая до сборки и
+  // публикации. Только для загрузок с публичного портала.
+  portalGroupId?: string | null;
 };
 
 /**
@@ -364,6 +368,7 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     // дельта по updated_at новую колонку не привозит.
     groupId: names.groupId ?? null,
     groupRevision: names.groupRevision ?? null,
+    portalGroupId: names.portalGroupId ?? null,
   };
 }
 
@@ -839,51 +844,154 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       const orderByArgs = sort
         ? [drSql`${sortExprMap[sort]} ${dirNulls}`, desc(sourceDocuments.id)]
         : [desc(sourceDocuments.parsedAt), desc(sourceDocuments.id)];
-      const rows = await app.db
-        .select({
-          sd: sourceDocuments,
-          // Поставщик — приоритет справочника (новый путь), fallback на
-          // counterparties (исторические УПД до миграции 0064).
-          supplierName: drSql<string | null>`COALESCE(${supplierDir.name}, ${supplier.name})`,
-          contractorName: contractor.name,
-          recipientName: recipient.name,
-          // Показываем распознанный текст, имя контрагента — fallback для
-          // исторических строк (бэкфилл миграции 0083 заполнил только FK).
-          buyerName: drSql<string | null>`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
-          consigneeName: drSql<string | null>`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
-          // Только справочная часть ИНН: распознанный подставит sdRow, у него
-          // приоритет. NULLIF(BTRIM(…)) обязателен — suppliers.inn объявлен
-          // NOT NULL DEFAULT '', и без него пустая строка справочника выиграла
-          // бы у legacy-контрагента с настоящим ИНН.
-          supplierInn: drSql<string | null>`COALESCE(NULLIF(BTRIM(${supplierDir.inn}), ''), NULLIF(BTRIM(${supplier.inn}), ''))`,
-          buyerInn: drSql<string | null>`NULLIF(BTRIM(${buyer.inn}), '')`,
-          consigneeInn: drSql<string | null>`NULLIF(BTRIM(${consignee.inn}), '')`,
-          recipientMolName: responsiblePersons.fullName,
-          siteName: sites.name,
-          fromSupplierPortal: fromSupplierPortalSql,
-          groupId: documentGroupIdSql,
-          groupRevision: documentGroupRevisionSql,
-        })
-        .from(sourceDocuments)
-        .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
-        .leftJoin(supplierDir, eq(sourceDocuments.supplierDirectoryId, supplierDir.id))
-        .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
-        .leftJoin(recipient, eq(sourceDocuments.recipientId, recipient.id))
-        .leftJoin(buyer, eq(sourceDocuments.buyerId, buyer.id))
-        .leftJoin(consignee, eq(sourceDocuments.consigneeId, consignee.id))
-        .leftJoin(
-          responsiblePersons,
-          eq(sourceDocuments.recipientMolId, responsiblePersons.id),
-        )
-        .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
-        .where(where)
-        .orderBy(...orderByArgs)
-        .limit(limit)
-        .offset(offset);
-      const [{ count } = { count: 0 }] = await app.db
-        .select({ count: drSql<number>`count(*)::int` })
-        .from(sourceDocuments)
-        .where(where);
+      // Принятые файлы без документа — только на первой странице и только
+      // менеджеру с админом (тот же круг, что у вкладки «Без документов»: это
+      // инструмент разбора, а не витрина для объекта).
+      //
+      // «Документные» фильтры выдачу выключают: у файла нет ни типа, ни номера,
+      // ни поставщика, и показывать его в ответ на запрос «УПД такого-то
+      // поставщика» значит выдавать заведомо не то, что искали.
+      const pendingAllowed =
+        offset === 0 &&
+        (req.user?.role === 'admin' || req.user?.role === 'manager') &&
+        !kind?.length &&
+        !q &&
+        !unaccepted &&
+        !contractorIds?.length &&
+        !supplierIds?.length &&
+        !docDateFrom &&
+        !docDateTo &&
+        !expectedDateFrom &&
+        !expectedDateTo;
+
+      // items, total и pendingFiles — из ОДНОГО снимка базы.
+      //
+      // Без этого воркер, создавший документ между двумя запросами, показал бы
+      // файл дважды (строкой «ожидает» и строкой документа) или не показал бы
+      // вовсе — в зависимости от того, какой запрос успел раньше. REPEATABLE
+      // READ фиксирует состояние на первом чтении, и обе выборки говорят об
+      // одном моменте времени.
+      const snapshot = await app.db.transaction(
+        async (tx) => {
+          const rows = await tx
+            .select({
+              sd: sourceDocuments,
+              // Поставщик — приоритет справочника (новый путь), fallback на
+              // counterparties (исторические УПД до миграции 0064).
+              supplierName: drSql<string | null>`COALESCE(${supplierDir.name}, ${supplier.name})`,
+              contractorName: contractor.name,
+              recipientName: recipient.name,
+              // Показываем распознанный текст, имя контрагента — fallback для
+              // исторических строк (бэкфилл миграции 0083 заполнил только FK).
+              buyerName: drSql<string | null>`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
+              consigneeName: drSql<string | null>`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
+              // Только справочная часть ИНН: распознанный подставит sdRow, у него
+              // приоритет. NULLIF(BTRIM(…)) обязателен — suppliers.inn объявлен
+              // NOT NULL DEFAULT '', и без него пустая строка справочника выиграла
+              // бы у legacy-контрагента с настоящим ИНН.
+              supplierInn: drSql<string | null>`COALESCE(NULLIF(BTRIM(${supplierDir.inn}), ''), NULLIF(BTRIM(${supplier.inn}), ''))`,
+              buyerInn: drSql<string | null>`NULLIF(BTRIM(${buyer.inn}), '')`,
+              consigneeInn: drSql<string | null>`NULLIF(BTRIM(${consignee.inn}), '')`,
+              recipientMolName: responsiblePersons.fullName,
+              siteName: sites.name,
+              fromSupplierPortal: fromSupplierPortalSql,
+              groupId: documentGroupIdSql,
+              groupRevision: documentGroupRevisionSql,
+              portalGroupId: portalDocumentGroupIdSql,
+            })
+            .from(sourceDocuments)
+            .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
+            .leftJoin(supplierDir, eq(sourceDocuments.supplierDirectoryId, supplierDir.id))
+            .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
+            .leftJoin(recipient, eq(sourceDocuments.recipientId, recipient.id))
+            .leftJoin(buyer, eq(sourceDocuments.buyerId, buyer.id))
+            .leftJoin(consignee, eq(sourceDocuments.consigneeId, consignee.id))
+            .leftJoin(
+              responsiblePersons,
+              eq(sourceDocuments.recipientMolId, responsiblePersons.id),
+            )
+            .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
+            .where(where)
+            .orderBy(...orderByArgs)
+            .limit(limit)
+            .offset(offset);
+          const [{ count } = { count: 0 }] = await tx
+            .select({ count: drSql<number>`count(*)::int` })
+            .from(sourceDocuments)
+            .where(where);
+
+          // Принятые файлы, по которым документа ещё нет.
+          //
+          // Условие «нет документа» то же, что у инварианта видимости
+          // (stub-documents.ts): вложение с этим ключом у нетехнического
+          // документа. Строка без ключа проходит его сама собой — объекта нет,
+          // значит и документа быть не может.
+          //
+          // `content_sha256 is not null` у строк без ключа отделяет наши
+          // недогруженные файлы от legacy-строк, где ключа нет просто потому, что
+          // реестр тогда не заполняли.
+          const pendingRows = pendingAllowed
+            ? await tx.execute<{
+                item_id: string;
+                bundle_id: string;
+                portal_group_id: string | null;
+                filename: string;
+                mime_type: string | null;
+                size_bytes: number | null;
+                site_name: string | null;
+                expected_date: Date | null;
+                created_at: Date;
+                stored: boolean;
+              }>(drSql`
+                select bi.id as item_id,
+                       bi.bundle_id,
+                       case when exists (
+                              select 1 from ingest_events ie
+                               where ie.bundle_id = coalesce(b.parent_bundle_id, b.id)
+                                 and ie.channel = 'public'
+                            )
+                            then coalesce(b.parent_bundle_id, b.id)
+                       end as portal_group_id,
+                       bi.source_filename as filename,
+                       bi.mime_type,
+                       bi.size_bytes,
+                       s.name as site_name,
+                       b.expected_date,
+                       bi.created_at,
+                       (bi.input_s3_key is not null) as stored
+                  from bundle_import_items bi
+                  join source_bundles b on b.id = bi.bundle_id
+                  left join sites s on s.id = b.site_id
+                 where bi.resolved_at is null
+                   and bi.status <> 'skipped'
+                   and (bi.input_s3_key is not null or bi.content_sha256 is not null)
+                   and (bi.upload_generation = b.active_upload_generation
+                        or bi.upload_generation is null)
+                   and not exists (
+                     select 1
+                       from source_document_attachments a
+                       join source_documents d on d.id = a.source_document_id
+                      where a.s3_key = bi.input_s3_key
+                        and d.is_technical = false
+                   )
+                   ${
+                     fSite.length > 0
+                       ? drSql`and b.site_id in ${drSql`(${drSql.join(
+                           fSite.map((id) => drSql`${id}::uuid`),
+                           drSql`, `,
+                         )})`}`
+                       : drSql``
+                   }
+                 order by bi.created_at desc, bi.id
+                 limit 200
+              `)
+            : [];
+
+          return { rows, count, pendingRows: [...pendingRows] };
+        },
+        { isolationLevel: 'repeatable read' },
+      );
+      const { rows, count, pendingRows } = snapshot;
       return {
         items: rows.map((r) =>
           sdRow(r.sd, {
@@ -900,9 +1008,33 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             fromSupplierPortal: r.fromSupplierPortal,
             groupId: r.groupId,
             groupRevision: r.groupRevision,
+            portalGroupId: r.portalGroupId,
           }),
         ),
         total: count,
+        ...(pendingAllowed
+          ? {
+              pendingFiles: pendingRows.map((p) => ({
+                // Префикс отделяет строку файла от строки документа: список
+                // рисует их вместе, и одинаковый ключ заставил бы React
+                // переиспользовать DOM-узел с чужим состоянием.
+                key: `registry:${p.item_id}`,
+                itemId: p.item_id,
+                bundleId: p.bundle_id,
+                portalGroupId: p.portal_group_id,
+                filename: p.filename,
+                mimeType: p.mime_type,
+                sizeBytes: p.size_bytes,
+                siteName: p.site_name,
+                expectedDate: p.expected_date
+                  ? new Date(p.expected_date).toISOString().slice(0, 10)
+                  : null,
+                createdAt: new Date(p.created_at).toISOString(),
+                state: p.stored ? ('awaiting_processing' as const) : ('not_stored' as const),
+              })),
+              pendingTotal: pendingRows.length,
+            }
+          : {}),
       };
     },
   );
@@ -1223,6 +1355,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           fromSupplierPortal: fromSupplierPortalSql,
           groupId: documentGroupIdSql,
           groupRevision: documentGroupRevisionSql,
+          portalGroupId: portalDocumentGroupIdSql,
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
@@ -1285,6 +1418,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         fromSupplierPortal: row.fromSupplierPortal,
         groupId: row.groupId,
         groupRevision: row.groupRevision,
+        portalGroupId: row.portalGroupId,
       });
 
       // Комментарий поставщика к поставке. Персональных данных здесь нет
@@ -2238,11 +2372,23 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         });
       }
 
+      // Файлы, не долетевшие до хранилища. Пакет при этом живёт и разбирается:
+      // менеджеру сообщаем, какие именно отправить ещё раз — повторная
+      // загрузка дозаполнит пробел, не пересоздавая остальные документы.
+      const notStored = 'storageRejected' in result ? result.storageRejected : [];
+      if (notStored.length > 0) {
+        req.log.error(
+          { bundleId: result.bundleId, files: notStored.map((f) => f.filename) },
+          'загрузка документов: часть файлов не сохранилась в хранилище',
+        );
+      }
+
       reply.code(201);
       return UploadDocumentsResponseSchema.parse({
         bundleId: result.bundleId,
         status: 'queued',
         alreadyExists: false,
+        ...(notStored.length > 0 ? { notStored: notStored.map((f) => f.filename) } : {}),
       });
     },
   );

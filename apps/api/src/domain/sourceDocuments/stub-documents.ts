@@ -344,6 +344,7 @@ export async function selectRowsWithoutDocument(
     source_filename: string;
     mime_type: string | null;
     size_bytes: number | null;
+    content_sha256: string | null;
     upload_generation: number | null;
     input_order: number | null;
     status: string;
@@ -400,6 +401,7 @@ export async function selectRowsWithoutDocument(
     filename: r.source_filename,
     mimeType: r.mime_type,
     sizeBytes: r.size_bytes,
+    contentSha256: r.content_sha256,
     uploadGeneration: r.upload_generation,
     inputOrder: r.input_order,
     status: r.status,

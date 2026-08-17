@@ -32,8 +32,10 @@ import {
   sourceDocuments,
 } from '../../db/schema.js';
 import { bundleDispatchKeyOf, enqueueJob, type JobQueue } from '../jobs/job-outbox.js';
+import type { RegistryRow } from './bundle-import-registry.js';
 import { manualRecipientSource } from './resolve-contractor.js';
 import { purgePreviousGeneration, resolveRestartEligibility } from './restart-eligibility.js';
+import { loadEnv } from '../../lib/env.js';
 import { buildS3Key } from '../storage/s3.path.js';
 import { putObject } from '../storage/s3.signer.js';
 import { UPD_PARSE_QUEUE } from '../../plugins/queue.js';
@@ -109,8 +111,29 @@ export type IngestBundleParams = {
   publicSubmission?: PublicSubmission | null;
 };
 
+/** Файл, принятый формой, но не доехавший до хранилища. */
+export type StorageRejectedFile = { filename: string; reason: string };
+
 export type IngestBundleResult =
-  | { outcome: 'created'; bundleId: string; ticket: string | null }
+  | {
+      outcome: 'created';
+      bundleId: string;
+      ticket: string | null;
+      /**
+       * Файлы, которые форма приняла, а хранилище не взяло. Пустой массив —
+       * обычный случай. Непустой означает «принято N из M»: пакет живёт,
+       * разбор идёт по дошедшему, а пробел ждёт повторной отправки.
+       */
+      storageRejected: StorageRejectedFile[];
+    }
+  | {
+      /** Повторная отправка дозаполнила дырку в уже существующем пакете. */
+      outcome: 'completed_partial';
+      bundleId: string;
+      ticket: string | null;
+      completedFiles: number;
+      storageRejected: StorageRejectedFile[];
+    }
   | { outcome: 'reused'; bundleId: string; status: string; ticket: string | null }
   | { outcome: 's3_unavailable'; bundleId: string };
 
@@ -203,6 +226,97 @@ async function scheduleS3Cleanup(
 
 type HashedFile = IngestFile & { fileHash: string; processingMode: 'auto' | 'store_only' };
 
+/** Файл, доехавший до хранилища. `ordinal` — его место в пачке (0-based). */
+type UploadedFile = {
+  ordinal: number;
+  s3Key: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  processingMode: 'auto' | 'store_only';
+  sha256: string;
+};
+
+/** Файл, который принят формой, но в хранилище не лёг. Ключа у него нет. */
+type RejectedFile = {
+  ordinal: number;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  processingMode: 'auto' | 'store_only';
+  sha256: string;
+  error: unknown;
+};
+
+/**
+ * Кладёт файлы пачки в хранилище, не останавливаясь на первом отказе.
+ *
+ * Возвращает оба списка. Вызывающий решает, что делать с частичным исходом, —
+ * и решение это разное: при первичном приёме недоехавший файл превращается в
+ * строку реестра «не загружен», при дозагрузке остаётся ждать следующей попытки.
+ *
+ * Хеш уезжает в метаданные объекта — но только при `S3_OBJECT_CHECKSUM=1`.
+ * Строка реестра говорит, что мы приняли, а `x-amz-meta-sha256` — что в бакете
+ * действительно лежит. По умолчанию флаг выключен: заголовок стандартный, но на
+ * нашем провайдере не проверен, а приём пачки ронять нельзя. Дозагрузку
+ * недостающих файлов это не затрагивает — она сверяется с хешем из реестра.
+ */
+async function putBundleFiles(args: {
+  entries: Array<{ file: HashedFile; ordinal: number }>;
+  bundleId: string;
+  site: { code: string } | null;
+  counterparty: { inn: string; name: string } | null;
+}): Promise<{ uploaded: UploadedFile[]; rejected: RejectedFile[] }> {
+  const results = await Promise.allSettled(
+    args.entries.map(async ({ file, ordinal }) => {
+      const name = safeName(file.filename, ordinal);
+      const s3Key = buildS3Key({
+        site: args.site,
+        counterparty: args.counterparty,
+        entityType: 'source-documents',
+        entityId: args.bundleId,
+        filename: `doc-${ordinal + 1}-${name}`,
+      });
+      await putObject(
+        s3Key,
+        file.buffer,
+        file.mimeType || 'application/octet-stream',
+        loadEnv().S3_OBJECT_CHECKSUM ? { sha256: file.fileHash } : undefined,
+      );
+      return {
+        ordinal,
+        s3Key,
+        filename: name,
+        mimeType: file.mimeType || 'application/octet-stream',
+        sizeBytes: file.buffer.length,
+        processingMode: file.processingMode,
+        sha256: file.fileHash,
+      } satisfies UploadedFile;
+    }),
+  );
+
+  const uploaded: UploadedFile[] = [];
+  const rejected: RejectedFile[] = [];
+  results.forEach((r, i) => {
+    const entry = args.entries[i];
+    if (!entry) return;
+    if (r.status === 'fulfilled') {
+      uploaded.push(r.value);
+      return;
+    }
+    rejected.push({
+      ordinal: entry.ordinal,
+      filename: safeName(entry.file.filename, entry.ordinal),
+      mimeType: entry.file.mimeType || 'application/octet-stream',
+      sizeBytes: entry.file.buffer.length,
+      processingMode: entry.file.processingMode,
+      sha256: entry.file.fileHash,
+      error: r.reason,
+    });
+  });
+  return { uploaded, rejected };
+}
+
 /**
  * Один и тот же файл, попавший в ОБЕ зоны формы, сводится к `store_only`.
  *
@@ -237,6 +351,234 @@ function mergeSameFileAcrossZones(files: readonly IngestFile[]): HashedFile[] {
     kept.add(f.fileHash);
     return [{ ...f, processingMode: 'store_only' as const }];
   });
+}
+
+/** Объект и контрагент — то, из чего строится путь в бакете. */
+async function resolveKeyScope(
+  db: Db,
+  siteId: string | null,
+  contractorId: string | null,
+): Promise<{
+  site: { code: string } | null;
+  counterparty: { inn: string; name: string } | null;
+}> {
+  const [site] = siteId
+    ? await db.select({ code: sites.code }).from(sites).where(eq(sites.id, siteId)).limit(1)
+    : [];
+  const [cp] = contractorId
+    ? await db
+        .select({ inn: counterparties.inn, name: counterparties.name })
+        .from(counterparties)
+        .where(eq(counterparties.id, contractorId))
+        .limit(1)
+    : [];
+  return { site: site ?? null, counterparty: cp ?? null };
+}
+
+/**
+ * Сопоставляет файлы повторной отправки со строками, чей объект не долетел до S3.
+ *
+ * Сначала по хешу содержимого — единственный признак, который не врёт: имена у
+ * поставщиков повторяются пачками (IMG_0431.jpg), а порядок человек меняет,
+ * перекладывая файлы в форме. Одинаковых файлов может быть несколько, поэтому
+ * хеш ведёт к ОЧЕРЕДИ строк, и каждый файл забирает из неё первую свободную.
+ *
+ * Запасной путь — имя плюс позиция в пачке: он нужен строкам, принятым до
+ * появления хеша, и отправкам, где поставщик пересохранил файл (байты
+ * изменились, документ тот же).
+ */
+export function matchFilesToMissingRows(
+  files: HashedFile[],
+  rows: RegistryRow[],
+): Array<{ file: HashedFile; row: RegistryRow }> {
+  const byHash = new Map<string, RegistryRow[]>();
+  for (const r of rows) {
+    if (!r.contentSha256) continue;
+    const queue = byHash.get(r.contentSha256) ?? [];
+    queue.push(r);
+    byHash.set(r.contentSha256, queue);
+  }
+
+  const taken = new Set<string>();
+  const matched: Array<{ file: HashedFile; row: RegistryRow }> = [];
+  const unmatchedFiles: Array<{ file: HashedFile; ordinal: number }> = [];
+
+  files.forEach((file, ordinal) => {
+    const queue = byHash.get(file.fileHash);
+    const row = queue?.find((r) => !taken.has(r.id));
+    if (row) {
+      taken.add(row.id);
+      matched.push({ file, row });
+      return;
+    }
+    unmatchedFiles.push({ file, ordinal });
+  });
+
+  // Запасной путь для тех, кого хеш не нашёл.
+  for (const { file, ordinal } of unmatchedFiles) {
+    const row = rows.find(
+      (r) => !taken.has(r.id) && r.filename === safeName(file.filename, ordinal) && r.inputOrder === ordinal,
+    );
+    if (!row) continue;
+    taken.add(row.id);
+    matched.push({ file, row });
+  }
+
+  return matched;
+}
+
+/**
+ * Дозагружает файлы, которые в прошлый раз не легли в хранилище.
+ *
+ * Ничего не удаляет и не поднимает поколение загрузки: пакет тот же, документы
+ * уже принятых файлов на месте, в реестре просто дырка. Это и отличает
+ * дозагрузку от рестарта, который начинает поколение заново и сносит прошлые
+ * документы (purgePreviousGeneration).
+ *
+ * Поднимается только `dispatch_generation` — иначе задание разбора не
+ * поставится: его ключ дедупликации совпал бы с уже выполненным.
+ */
+async function completePartialUpload(
+  deps: IngestBundleDeps,
+  params: IngestBundleParams,
+  bundle: BundleRow,
+  missingRows: RegistryRow[],
+  hashed: HashedFile[],
+): Promise<IngestBundleResult> {
+  const { db, log } = deps;
+  const publicSubmission = params.publicSubmission ?? null;
+  const matched = matchFilesToMissingRows(hashed, missingRows);
+
+  if (matched.length === 0) {
+    // Прислали что-то другое: ни один файл не подошёл к дырке. Пакет не
+    // трогаем — иначе повторная отправка чужого комплекта затёрла бы реестр.
+    log.warn(
+      { bundleId: bundle.id, missing: missingRows.length },
+      'приём пачки: повторная отправка не содержит недостающих файлов',
+    );
+    if (publicSubmission) await recordPublicSubmission(db, bundle.id, publicSubmission);
+    return {
+      outcome: 'reused',
+      bundleId: bundle.id,
+      status: bundle.status,
+      ticket: publicSubmission?.ticket ?? null,
+    };
+  }
+
+  const scope = await resolveKeyScope(db, bundle.siteId, bundle.contractorId ?? null);
+  const { uploaded, rejected } = await putBundleFiles({
+    entries: matched.map(({ file, row }) => ({
+      file,
+      // Позиция из реестра, а не из текущей отправки: порядок страниц задан
+      // первой загрузкой, и менять его нельзя — по нему собираются УПД.
+      ordinal: row.inputOrder ?? 0,
+    })),
+    bundleId: bundle.id,
+    site: scope.site,
+    counterparty: scope.counterparty,
+  });
+
+  const rowByOrdinal = new Map(matched.map(({ row }) => [row.inputOrder ?? 0, row]));
+  let completed = 0;
+  for (const file of uploaded) {
+    const row = rowByOrdinal.get(file.ordinal);
+    if (!row) continue;
+    // Ключ и статус — ОДНИМ обновлением: состояния «ключ уже есть, а строка ещё
+    // failed» существовать не должно, иначе параллельный проход увидит файл
+    // одновременно и потерянным, и загруженным.
+    //
+    // Условие `input_s3_key is null` — CAS: если вторая вкладка успела
+    // дозагрузить тот же файл, наш UPDATE ничего не изменит, и мы не перепишем
+    // чужой ключ на свой, оставив объект-сироту.
+    const done = await db
+      .update(bundleImportItems)
+      .set({
+        inputS3Key: file.s3Key,
+        status: 'accepted',
+        effectiveStatus: null,
+        reason: null,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+        contentSha256: file.sha256,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(bundleImportItems.id, row.id), isNull(bundleImportItems.inputS3Key)))
+      .returning({ id: bundleImportItems.id });
+    if (done.length > 0) {
+      completed++;
+    } else {
+      // Гонку проиграли — объект наш, а ссылки на него нет. В бакете он не
+      // нужен: строку держит ключ победителя.
+      await scheduleS3Cleanup(db, bundle.id, [file.s3Key], log);
+    }
+  }
+
+  if (completed === 0) {
+    if (publicSubmission) await recordPublicSubmission(db, bundle.id, publicSubmission);
+    return {
+      outcome: 'reused',
+      bundleId: bundle.id,
+      status: bundle.status,
+      ticket: publicSubmission?.ticket ?? null,
+    };
+  }
+
+  // Разбор надо запустить заново: дозагруженные строки лежат в `accepted`, а
+  // router пропускает только терминальные. Поколение ЗАДАНИЯ растёт, поколение
+  // ЗАГРУЗКИ — нет: файлы те же самые, реестр тот же.
+  const [bumped] = await db
+    .update(sourceBundles)
+    .set({
+      status: 'queued',
+      parseErrorCode: null,
+      parseErrorMessage: null,
+      dispatchGeneration: drSql`${sourceBundles.dispatchGeneration} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(eq(sourceBundles.id, bundle.id))
+    .returning();
+
+  const dispatchGeneration = bumped?.dispatchGeneration ?? bundle.dispatchGeneration;
+  await db.transaction(async (tx) => {
+    if (publicSubmission) {
+      await tx.insert(ingestEvents).values({
+        bundleId: bundle.id,
+        channel: 'public',
+        publicTicket: publicSubmission.ticket,
+        submissionComment: publicSubmission.comment,
+        submitterIp: publicSubmission.ip,
+        submitterUserAgent: publicSubmission.userAgent,
+        submissionManifest: publicSubmission.manifest,
+      });
+    }
+    if (params.dispatch === 'outbox') {
+      await enqueueJob(tx as unknown as Db, {
+        queue: UPD_PARSE_QUEUE,
+        jobName: 'parse',
+        payload: { bundleId: bundle.id, mode: 'router' },
+        dedupeKey: bundleDispatchKeyOf(bundle.id, dispatchGeneration),
+      });
+    }
+  });
+  if (params.dispatch === 'direct') {
+    await deps.queue.add('parse', { bundleId: bundle.id, mode: 'router' } as never);
+  }
+
+  log.warn(
+    { bundleId: bundle.id, completed, stillMissing: rejected.length },
+    'приём пачки: дозагружены файлы, не дошедшие до хранилища в прошлый раз',
+  );
+
+  return {
+    outcome: 'completed_partial',
+    bundleId: bundle.id,
+    ticket: publicSubmission?.ticket ?? null,
+    completedFiles: completed,
+    storageRejected: rejected.map((r) => ({
+      filename: r.filename,
+      reason: 'файл снова не загрузился в хранилище',
+    })),
+  };
 }
 
 export async function ingestDocumentsBundle(
@@ -355,6 +697,13 @@ export async function ingestDocumentsBundle(
         status: existing.status,
         ticket: publicSubmission?.ticket ?? null,
       };
+    }
+    // Часть файлов прошлой отправки не легла в хранилище. Дозагружаем ровно их
+    // — ни поколение, ни уже разобранные документы не трогаем. Проверка стоит
+    // ДО рестарта намеренно: рестарт снёс бы девять принятых документов ради
+    // одного пропущенного файла.
+    if (eligibility.action === 'complete_partial') {
+      return completePartialUpload(deps, params, existing, eligibility.missingRows, hashed);
     }
     log?.warn(
       { bundleId: existing.id, missingFiles: eligibility.missingFiles },
@@ -543,34 +892,17 @@ export async function ingestDocumentsBundle(
         .limit(1)
     : [];
 
-  const uploads = await Promise.allSettled(
-    hashed.map(async (f, i) => {
-      const name = safeName(f.filename, i);
-      const s3Key = buildS3Key({
-        site: site ?? null,
-        counterparty: cp ?? null,
-        entityType: 'source-documents',
-        entityId: bundle.id,
-        filename: `doc-${i + 1}-${name}`,
-      });
-      await putObject(s3Key, f.buffer, f.mimeType || 'application/octet-stream');
-      return {
-        s3Key,
-        filename: name,
-        mimeType: f.mimeType || 'application/octet-stream',
-        sizeBytes: f.buffer.length,
-        processingMode: f.processingMode,
-      };
-    }),
-  );
+  const { uploaded: succeeded, rejected } = await putBundleFiles({
+    entries: hashed.map((file, ordinal) => ({ file, ordinal })),
+    bundleId: bundle.id,
+    site: site ?? null,
+    counterparty: cp ?? null,
+  });
 
-  const succeeded = uploads.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
-  const failed = uploads.filter((r) => r.status === 'rejected');
-  if (failed.length > 0) {
-    // Раньше здесь стоял Promise.all: успевшие объекты оставались в бакете
-    // навсегда, потому что запись о них не создавалась.
-    log.error({ err: (failed[0] as PromiseRejectedResult).reason }, 's3 putObject failed');
-    await scheduleS3Cleanup(db, bundle.id, succeeded.map((a) => a.s3Key), log);
+  // Не дошло НИЧЕГО — хранилище недоступно целиком. Прежнее поведение: убрать
+  // за собой и честно ответить отказом, чтобы поставщик повторил отправку.
+  if (succeeded.length === 0) {
+    if (rejected.length > 0) log.error({ err: rejected[0]?.error }, 's3 putObject failed');
     await db
       .update(sourceBundles)
       .set({
@@ -581,6 +913,25 @@ export async function ingestDocumentsBundle(
       })
       .where(eq(sourceBundles.id, bundle.id));
     return { outcome: 's3_unavailable', bundleId: bundle.id };
+  }
+
+  // Часть файлов не дошла. Раньше это бракова́ло приём целиком: успевшие девять
+  // объектов уезжали в очередь на удаление ради одного упавшего, и поставщик
+  // заливал всё заново. Теперь дошедшее остаётся, а по недошедшему заводится
+  // строка реестра БЕЗ ключа S3 — «принят формой, в хранилище не лёг».
+  //
+  // Ключ не выдумываем: объекта нет, и строка с ключом означала бы ссылку в
+  // пустоту — портал предложил бы открыть файл, а S3 вернул бы 404. По той же
+  // причине такая строка не проходит через selectRegistryRows: разбирать
+  // нечего.
+  //
+  // Машину это не выпускает наружу: строка без документа держит группу
+  // незавершённой (GROUP_IS_COMPLETE), пока файл не дозагрузят.
+  if (rejected.length > 0) {
+    log.error(
+      { err: rejected[0]?.error, bundleId: bundle.id, rejected: rejected.length },
+      's3 putObject failed — часть файлов пакета не принята',
+    );
   }
 
   // Та же пачка уже загружена в другом scope? Приём это не останавливает —
@@ -653,24 +1004,47 @@ export async function ingestDocumentsBundle(
             eq(bundleImportItems.uploadGeneration, bundle.activeUploadGeneration),
           ),
         );
-      await tx.insert(bundleImportItems).values(
-        succeeded.map((a, idx) => ({
+      await tx.insert(bundleImportItems).values([
+        ...succeeded.map((a) => ({
           bundleId: bundle.id,
           sourceFilename: a.filename,
           inputS3Key: a.s3Key,
           mimeType: a.mimeType,
           sizeBytes: a.sizeBytes,
+          contentSha256: a.sha256,
           uploadGeneration: bundle.activeUploadGeneration,
           // Порядок файлов в пачке — здесь единственное место, где он ещё
           // известен. Дальше по реестру его не восстановить: у фотографий
           // страниц одной УПД нет ни номеров, ни имён, по которым можно было бы
           // понять, какая за какой, а порядок выборки из БД ничем не задан.
           // Сборка логических документов опирается именно на него.
-          inputOrder: idx,
+          //
+          // Позиция В ИСХОДНОЙ ПАЧКЕ, а не в списке успешных: при частичном
+          // сбое второй файл мог не долететь, и нумерация «по порядку в
+          // succeeded» сдвинула бы третий на его место — страницы одной УПД
+          // разъехались бы после дозагрузки.
+          inputOrder: a.ordinal,
           processingMode: a.processingMode,
           status: 'accepted' as const,
         })),
-      );
+        // Файлы, не дошедшие до хранилища. Ключа нет — есть имя, порядок и
+        // хеш: этого хватит, чтобы показать пробел менеджеру и узнать файл при
+        // повторной отправке.
+        ...rejected.map((a) => ({
+          bundleId: bundle.id,
+          sourceFilename: a.filename,
+          inputS3Key: null,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+          contentSha256: a.sha256,
+          uploadGeneration: bundle.activeUploadGeneration,
+          inputOrder: a.ordinal,
+          processingMode: a.processingMode,
+          status: 'failed' as const,
+          effectiveStatus: 'failed' as const,
+          reason: 'файл не загрузился в хранилище — требуется повторная отправка',
+        })),
+      ]);
 
       if (publicSubmission) {
         await tx.insert(ingestEvents).values({
@@ -722,5 +1096,9 @@ export async function ingestDocumentsBundle(
     outcome: 'created',
     bundleId: bundle.id,
     ticket: publicSubmission?.ticket ?? null,
+    storageRejected: rejected.map((r) => ({
+      filename: r.filename,
+      reason: 'файл не загрузился в хранилище — отправьте его ещё раз',
+    })),
   };
 }

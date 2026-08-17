@@ -294,21 +294,30 @@ export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void>
       } catch {
         queueDepth = null;
       }
+      // Файлы, прошедшие входной фильтр, но не легшие в хранилище. Молчать о
+      // них нельзя: поставщик считал бы комплект принятым целиком, а в нём
+      // дырка. Повторная отправка дозагрузит ровно их — остальные документы
+      // при этом не пересоздаются.
+      const notStored = 'storageRejected' in result ? result.storageRejected : [];
       req.log.info(
         {
           bundleId: result.bundleId,
-          filesAccepted: collected.accepted.length,
+          filesAccepted: collected.accepted.length - notStored.length,
           filesRejected: collected.rejected.length,
+          filesNotStored: notStored.length,
           updParseWaiting: queueDepth,
         },
-        'public upload: принято',
+        notStored.length > 0 ? 'public upload: принято частично' : 'public upload: принято',
       );
 
       reply.code(201);
       return {
         ticket: result.ticket ?? ticket,
-        filesAccepted: collected.accepted.length,
-        filesRejected: collected.rejected,
+        filesAccepted: collected.accepted.length - notStored.length,
+        filesRejected: [
+          ...collected.rejected,
+          ...notStored.map((f) => ({ filename: f.filename, reason: 'storage_failed' as const })),
+        ],
       };
     },
   );

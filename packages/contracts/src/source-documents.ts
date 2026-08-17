@@ -362,6 +362,15 @@ export const SourceDocumentSchema = z.object({
   // финализацией — «состав тот же, но суммы другие» сравнением множества id
   // не ловится. Непустой при тех же условиях, что groupId.
   groupRevision: z.number().int().nullable().optional(),
+  // «Машина» глазами МЕНЕДЖЕРА: тот же корневой пакет, но без ожидания сборки
+  // и публикации. Нужен там, где groupId ещё (или уже) пуст: пока пачка
+  // разбирается и после отката сборки на «файл = документ». Менеджер обязан
+  // видеть, что строки приехали одним рейсом, раньше инспектора.
+  //
+  // Непустой только для загрузок с публичного портала: у почты и внутренних
+  // загрузок пачка файлов не означает один рейс. Планшет это поле не
+  // использует — на нём машина по-прежнему определяется groupId.
+  portalGroupId: z.string().uuid().nullable().optional(),
 });
 export type SourceDocument = z.infer<typeof SourceDocumentSchema>;
 
@@ -427,9 +436,56 @@ export const SourceDocumentDetailSchema = SourceDocumentSchema.extend({
 });
 export type SourceDocumentDetail = z.infer<typeof SourceDocumentDetailSchema>;
 
+/**
+ * Принятый файл, по которому документа ещё нет.
+ *
+ * Раньше такой файл не был виден в «Документах» вообще: он появлялся там
+ * только по итогам разбора — настоящим документом или заглушкой. Между приёмом
+ * и разбором (а при зависшей очереди это часы) менеджер видел пустоту и не мог
+ * отличить «поставщик ничего не присылал» от «прислал, но мы ещё не разобрали».
+ *
+ * Это НЕ документ: у него нет ни реквизитов, ни статуса разбора, и принять его
+ * нельзя. Поэтому отдельный тип и отдельное поле ответа, а не элемент items.
+ */
+export const PendingFileSchema = z.object({
+  /**
+   * Стабильный ключ строки для UI — `registry:<itemId>`.
+   *
+   * С префиксом намеренно: список рисует ожидающие файлы вместе с документами,
+   * и без него React мог бы переиспользовать DOM-строку файла для появившегося
+   * по нему документа — с чужим состоянием раскрытия и выделения.
+   */
+  key: z.string(),
+  itemId: z.string().uuid(),
+  bundleId: z.string().uuid(),
+  /** Машина, в которую входит файл (для той же цветовой метки, что у документов). */
+  portalGroupId: z.string().uuid().nullable(),
+  filename: z.string(),
+  mimeType: z.string().nullable(),
+  sizeBytes: z.number().int().nullable(),
+  siteName: z.string().nullable(),
+  expectedDate: z.string().nullable(),
+  /** Когда файл приняли. */
+  createdAt: z.string(),
+  /**
+   * `awaiting_processing` — файл в хранилище, ждёт разбора.
+   * `not_stored` — форма приняла, хранилище не взяло: нужна повторная отправка.
+   *   Ссылки на такой файл нет и быть не может — объекта не существует.
+   */
+  state: z.enum(['awaiting_processing', 'not_stored']),
+});
+export type PendingFile = z.infer<typeof PendingFileSchema>;
+
 export const SourceDocumentListResponseSchema = z.object({
   items: z.array(SourceDocumentSchema),
   total: z.number(),
+  /**
+   * Принятые файлы без документа. Отдаются только на ПЕРВОЙ странице (offset=0)
+   * со своим счётчиком: items листаются и сортируются по реквизитам документа,
+   * которых у файла нет, и подмешивание сломало бы и пагинацию, и total.
+   */
+  pendingFiles: z.array(PendingFileSchema).optional(),
+  pendingTotal: z.number().optional(),
 });
 
 // Компактный снимок «основного» документа-источника операции — первого
@@ -745,6 +801,10 @@ export const UploadDocumentsResponseSchema = z.object({
   status: z.string(),
   // true — этот же набор файлов уже загружали (вернули существующий bundle).
   alreadyExists: z.boolean(),
+  // Файлы, принятые формой, но не легшие в хранилище: остальные при этом
+  // сохранены и разбираются. Пусто в подавляющем большинстве загрузок.
+  // Необязательное — старые клиенты поля не ждут.
+  notStored: z.array(z.string()).optional(),
 });
 export type UploadDocumentsResponse = z.infer<typeof UploadDocumentsResponseSchema>;
 

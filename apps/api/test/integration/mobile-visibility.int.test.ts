@@ -78,7 +78,7 @@ suite('видимость документа на планшете (реальн
   /** Виден ли документ по предикату — спрашиваем саму БД. */
   async function isVisible(id: string): Promise<boolean> {
     const [row] = await db
-      .select({ visible: sql<boolean>`${mobileVisibleSourceDocumentSql}` })
+      .select({ visible: sql<boolean>`${mobileVisibleSourceDocumentSql()}` })
       .from(sourceDocuments)
       .where(eq(sourceDocuments.id, id));
     return row.visible;

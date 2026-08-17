@@ -17,6 +17,12 @@ export type RegistryRow = {
   filename: string;
   mimeType: string | null;
   sizeBytes: number | null;
+  /**
+   * SHA-256 содержимого (hex), посчитанный при приёме. NULL у строк до
+   * миграции 0106. По нему файл повторной отправки сопоставляется со строкой,
+   * чей объект так и не попал в S3, — см. selectMissingObjectRows.
+   */
+  contentSha256: string | null;
   uploadGeneration: number | null;
   /**
    * Порядок файла внутри пачки (0-based), проставленный при приёме.
@@ -60,6 +66,7 @@ const columns = {
   filename: bundleImportItems.sourceFilename,
   mimeType: bundleImportItems.mimeType,
   sizeBytes: bundleImportItems.sizeBytes,
+  contentSha256: bundleImportItems.contentSha256,
   uploadGeneration: bundleImportItems.uploadGeneration,
   inputOrder: bundleImportItems.inputOrder,
   status: bundleImportItems.status,
@@ -113,6 +120,47 @@ export async function selectRegistryRows(
         isNull(bundleImportItems.uploadGeneration),
       ),
     );
+}
+
+/**
+ * Файлы, которые пакет принял, но в хранилище так и не положил.
+ *
+ * Появляются при частичном сбое S3: девять объектов легли, десятый — нет.
+ * Строка о нём заводится всё равно (иначе файл исчезает бесследно и поставщик
+ * считает комплект принятым), но БЕЗ `input_s3_key` — ключа нет, потому что нет
+ * объекта. Выдавать по такой строке ссылку нельзя, а дозагрузить её — можно и
+ * нужно.
+ *
+ * Отбор по `content_sha256 IS NOT NULL` не косметика, а способ отличить их от
+ * legacy-строк: у пакетов, принятых до реестра, ключа тоже нет, но и хеша нет —
+ * колонка появилась миграцией 0106. Дозагружать legacy нечем: неизвестно, какой
+ * файл к какой строке относится.
+ *
+ * ВНЕ `selectRegistryRows` намеренно: та отбирает строки с ключом, потому что
+ * все её потребители (разбор, сборка, дополнительные файлы) работают с
+ * содержимым файла. Здесь ровно наоборот — нужны те, у кого содержимого нет.
+ */
+export async function selectMissingObjectRows(
+  db: Db,
+  bundleId: string,
+  activeUploadGeneration: number,
+): Promise<RegistryRow[]> {
+  return db
+    .select(columns)
+    .from(bundleImportItems)
+    .where(
+      and(
+        eq(bundleImportItems.bundleId, bundleId),
+        isNull(bundleImportItems.inputS3Key),
+        isNotNull(bundleImportItems.contentSha256),
+        eq(bundleImportItems.status, 'failed'),
+        eq(bundleImportItems.uploadGeneration, activeUploadGeneration),
+        // Разобранное человеком не переоткрываем: менеджер мог закрыть вопрос
+        // руками, и дозагрузка воскресила бы файл, от которого отказались.
+        isNull(bundleImportItems.resolvedAt),
+      ),
+    )
+    .orderBy(bundleImportItems.inputOrder);
 }
 
 /**
