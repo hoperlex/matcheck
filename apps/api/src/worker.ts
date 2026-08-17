@@ -3202,8 +3202,17 @@ async function loadSegmentContext(
   if (job.reparse) {
     if (root.status === 'processing') return null;
   } else {
-    // Уже опубликовано — комплект закрыт, переписывать его нельзя.
-    if (root.published !== null) return null;
+    // Сравнение с ЭТИМ поколением, а не с null — третье место с той же
+    // ошибкой, что уже исправлена в гейте сборки и в tryFinalizeUpdAssembly.
+    //
+    // `published !== null` означает «пакет когда-либо публиковался». Повторная
+    // отправка того же комплекта поднимает активное поколение, а published
+    // остаётся на прошлом номере, — и задания сегментов НОВОГО поколения
+    // отбрасывались здесь как «неактуальные». Пакет навсегда застревал в
+    // processing: сегменты не разбирались, публиковать было нечего, документы
+    // не появлялись ни на портале, ни на планшете. В логе это видно строкой
+    // «сегмент сборки: задание неактуально — пропускаем».
+    if (root.published === job.generation) return null;
     if (root.status !== 'processing') return null;
 
     const [doc] = await db
@@ -3962,6 +3971,10 @@ async function rollbackUpdAssembly(args: {
   // отбирать у неё статус нельзя.
   const finalized = await finalizeBundleTerminalState(db, rootId, {
     requireUnpublished: true,
+    // Именно откатываемое поколение: без него условие означало бы «пакет
+    // когда-либо публиковался», и повторная загрузка в уже публиковавшийся
+    // пакет не закрывалась бы откатом — он висел бы в processing.
+    generation,
     itemReason: 'файл не дошёл до разбора (сборка отменена)',
     parseErrorCode: 'assembly_rolled_back',
   });

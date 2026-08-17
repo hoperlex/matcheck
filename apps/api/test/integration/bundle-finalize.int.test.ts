@@ -169,13 +169,33 @@ suite('финализация зависшего пакета (реальный 
   it('опубликованное поколение не перебиваем', async () => {
     // Пока откат разворачивал файлы, параллельная публикация могла успеть
     // объявить поколение опубликованным — отбирать у неё статус нельзя.
+    // Фикстура публикует поколение 0, и откат идёт по нему же.
     const id = await stuckBundle(60, { published: true });
 
-    const res = await finalizeBundleTerminalState(db, id, { requireUnpublished: true });
+    const res = await finalizeBundleTerminalState(db, id, {
+      requireUnpublished: true,
+      generation: 0,
+    });
 
     expect(res.outcome).toBe('skipped');
     expect(res.skipReason).toBe('опубликован');
     expect(await statusOf(id)).toBe('processing');
+  });
+
+  it('публикация ПРОШЛОГО поколения откату не мешает', async () => {
+    // Ровно случай повторной загрузки: комплект публиковался поколением 0,
+    // документы удалили, файлы отправили заново — активное поколение стало 1.
+    // Сравнение с null объявляло бы такой пакет опубликованным, и откат не
+    // закрывал бы его: пакет висел в processing, а файлы оставались без разбора.
+    const id = await stuckBundle(60, { published: true });
+
+    const res = await finalizeBundleTerminalState(db, id, {
+      requireUnpublished: true,
+      generation: 1,
+    });
+
+    expect(res.outcome).not.toBe('skipped');
+    expect(await statusOf(id)).not.toBe('processing');
   });
 
   it('строка реестра «в процессе» закрывается — иначе файл не виден нигде', async () => {

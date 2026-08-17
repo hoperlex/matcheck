@@ -45,13 +45,25 @@ export type FinalizeBundleResult = {
 
 export type FinalizeBundleOptions = {
   /**
-   * Не трогать пакет, у которого уже проставлено published_generation.
+   * Не трогать пакет, поколение которого уже опубликовано.
    *
    * Нужно откату сборки: пока он разворачивает файлы, параллельная попытка
    * публикации могла успеть объявить поколение опубликованным, и отбирать у неё
    * статус нельзя.
+   *
+   * Работает только В ПАРЕ с `generation`: сравнение идёт с его номером.
+   * Раньше здесь стояло `!== null`, то есть «пакет когда-либо публиковался», —
+   * и пакет, у которого опубликовано ПРОШЛОЕ поколение, откатом уже не
+   * закрывался и оставался в processing навсегда. Та же ошибка была в гейте
+   * сборки и в loadSegmentContext.
    */
   requireUnpublished?: boolean;
+  /**
+   * Поколение, которое откатывается. Обязательно вместе с `requireUnpublished`:
+   * без него условие никогда не совпадёт и защита от гонки с публикацией
+   * перестанет работать.
+   */
+  generation?: number;
   /** Причина для строк реестра, не дошедших до разбора. */
   itemReason?: string;
   /**
@@ -107,7 +119,11 @@ export async function finalizeBundleTerminalState(
         finalizedItems: 0,
       };
     }
-    if (opts.requireUnpublished && bundle.publishedGeneration !== null) {
+    // Сравнение строго с номером поколения. Ветки «а если поколение не
+    // передали» здесь намеренно нет: она вырождалась бы в прежнее «пакет
+    // когда-либо публиковался» — ту самую ошибку, из-за которой повторно
+    // загруженный комплект оставался в processing.
+    if (opts.requireUnpublished && bundle.publishedGeneration === opts.generation) {
       return {
         outcome: 'skipped' as const,
         skipReason: 'опубликован' as const,
