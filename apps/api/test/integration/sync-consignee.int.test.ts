@@ -41,7 +41,8 @@ suite('грузополучатель в /sync (реальный PostgreSQL)', (
 
   const docRawWinsId = randomUUID(); // raw + FK одновременно
   const docFkOnlyId = randomUUID(); // только FK
-  const docEmptyId = randomUUID(); // ни того, ни другого
+  const docEmptyId = randomUUID();
+  const docBuyerOnlyId = randomUUID(); // ни того, ни другого
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, { max: 4 });
@@ -89,6 +90,13 @@ suite('грузополучатель в /sync (реальный PostgreSQL)', (
          doc_number, doc_date, total_sum)
       VALUES (${docEmptyId}, 'upd', false, 'inbound', 'manual_pdf', 'parsed', ${siteId}, now(),
               'Б-1', now(), 300)`;
+    // Графа 4 пуста, графа 6 распознана: планшет покажет покупателя, потому что
+    // подрядчика в списках УПД не показывают вовсе.
+    await sql`INSERT INTO source_documents
+        (id, kind, is_technical, direction, origin, status, site_id, parsed_at,
+         doc_number, doc_date, total_sum, buyer_name_raw)
+      VALUES (${docBuyerOnlyId}, 'upd', false, 'inbound', 'manual_pdf', 'parsed', ${siteId}, now(),
+              'ПК-9', now(), 400, 'ООО «Покупатель»')`;
 
     currentUser = {
       id: inspectorId,
@@ -131,5 +139,21 @@ suite('грузополучатель в /sync (реальный PostgreSQL)', (
     expect(doc).toHaveProperty('consigneeName');
     expect(doc.consigneeName).toBeNull();
     expect(doc.consigneeId).toBeNull();
+  });
+
+  // Покупатель приезжает той же проекцией. Поле объявлено .optional(), поэтому
+  // забытая строчка в ручной сборке ответа прошла бы валидацию молча — ровно
+  // так же, как до фикса терялся consigneeName.
+  it('покупатель (графа 6) доезжает до планшета', async () => {
+    const doc = (await syncDocs()).find((d) => d.id === docBuyerOnlyId)!;
+    expect(doc.buyerName).toBe('ООО «Покупатель»');
+    // Графа 4 пуста — именно тут планшет показывает покупателя.
+    expect(doc.consigneeName).toBeNull();
+  });
+
+  it('поле buyerName присутствует всегда, даже когда графа 6 не распозналась', async () => {
+    const doc = (await syncDocs()).find((d) => d.id === docEmptyId)!;
+    expect(doc).toHaveProperty('buyerName');
+    expect(doc.buyerName).toBeNull();
   });
 });

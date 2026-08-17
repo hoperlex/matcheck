@@ -43,6 +43,7 @@ import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isShipmentDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
+import { resolveItemOrigins } from '../domain/operations/item-origin.js';
 import { canSeeReviewInMatrix } from '../lib/review.js';
 import { assertPermission } from '../lib/permissions/assert.js';
 import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
@@ -253,6 +254,8 @@ function assembleShipmentDto(
   const st = r.st;
   const mappedItems = items.map((i) => ({
     id: i.id,
+    sourceDocumentId: i.sourceDocumentId,
+    sourceDocumentItemId: i.sourceDocumentItemId,
     itemKind: i.itemKind,
     materialId: i.materialId,
     assetId: i.assetId,
@@ -1946,9 +1949,22 @@ async function createShipment(
     .returning();
   if (!created) throw new Error('Failed to insert shipment');
   if (input.items.length) {
+    // При СОЗДАНИИ отгрузки происхождение берётся из запроса: строк в БД ещё
+    // нет, переносить нечего. Ограничение то же, что и дальше по жизни
+    // отгрузки, — документ должен быть в её наборе связей (симметрично
+    // createDelivery).
+    const linkedOnCreate = new Set(input.sourceDocumentIds);
     await tx.insert(shipmentItems).values(
       input.items.map((i) => ({
         shipmentId: created.id,
+        sourceDocumentId:
+          i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
+            ? i.sourceDocumentId
+            : null,
+        sourceDocumentItemId:
+          i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
+            ? (i.sourceDocumentItemId ?? null)
+            : null,
         itemKind: i.itemKind,
         materialId: i.itemKind === 'asset' ? null : (i.materialId ?? null),
         assetId: i.itemKind === 'asset' ? (i.assetId ?? null) : null,
@@ -2061,6 +2077,11 @@ async function updateShipment(
     input.items.length === 0
       ? await buildShipmentItemsFromSources(app, input.sourceDocumentIds)
       : input.items.map((i) => ({
+          // clientId переживает только сборку origins и отбрасывается перед
+          // вставкой — в shipment_items такой колонки нет.
+          clientId: i.id ?? null,
+          sourceDocumentId: i.sourceDocumentId ?? null,
+          sourceDocumentItemId: i.sourceDocumentItemId ?? null,
           itemKind: i.itemKind,
           materialId: i.itemKind === 'asset' ? null : (i.materialId ?? null),
           assetId: i.itemKind === 'asset' ? (i.assetId ?? null) : null,
@@ -2119,10 +2140,49 @@ async function updateShipment(
   // Объект отгрузки изменился после чтения existing — прерываем транзакцию,
   // маршрут отдаст 403 foreign_site (см. domain/operations/foreign-site.ts).
   if (updatedRows.length === 0) throw new ForeignSiteError();
+
+  // Происхождение позиций переносится ЯВНО — как в updateDelivery. Строки
+  // удаляются и вставляются заново, а source_document_id это данные, которых
+  // в запросе может не быть (старый планшет о поле не знает) и которым в
+  // запросе нельзя доверять (клиент не должен переписывать происхождение
+  // существующей строки). Поэтому снимок делается ДО delete.
+  const previousItems = await tx
+    .select({
+      id: shipmentItems.id,
+      nameRaw: shipmentItems.nameRaw,
+      unit: shipmentItems.unit,
+      lineNo: shipmentItems.lineNo,
+      sourceDocumentId: shipmentItems.sourceDocumentId,
+      sourceDocumentItemId: shipmentItems.sourceDocumentItemId,
+    })
+    .from(shipmentItems)
+    .where(eq(shipmentItems.shipmentId, id));
+
+  // В отличие от приёмки, набор связей отгрузки upsert ПЕРЕПИСЫВАЕТ (ниже
+  // delete + insert по input.sourceDocumentIds), поэтому авторитетным списком
+  // здесь служит присланный, а не сохранённый.
+  const origins = resolveItemOrigins({
+    existing: previousItems,
+    incoming: itemsForInsert.map((i) => ({
+      id: i.clientId ?? null,
+      nameRaw: i.nameRaw,
+      unit: i.unit,
+      lineNo: i.lineNo,
+      sourceDocumentId: i.sourceDocumentId ?? null,
+      sourceDocumentItemId: i.sourceDocumentItemId ?? null,
+    })),
+    linkedDocumentIds: input.sourceDocumentIds,
+  });
+
   await tx.delete(shipmentItems).where(eq(shipmentItems.shipmentId, id));
   if (itemsForInsert.length) {
     await tx.insert(shipmentItems).values(
-      itemsForInsert.map((i) => ({ ...i, shipmentId: id })),
+      itemsForInsert.map(({ clientId: _clientId, ...i }, idx) => ({
+        ...i,
+        shipmentId: id,
+        sourceDocumentId: origins[idx]?.sourceDocumentId ?? null,
+        sourceDocumentItemId: origins[idx]?.sourceDocumentItemId ?? null,
+      })),
     );
   }
   if (input.sourceDocumentIds.length) {
@@ -2166,6 +2226,9 @@ async function buildShipmentItemsFromSources(
   sourceDocumentIds: string[],
 ): Promise<
   Array<{
+    clientId: null;
+    sourceDocumentId: string;
+    sourceDocumentItemId: string;
     itemKind: 'material';
     materialId: string | null;
     assetId: null;
@@ -2193,6 +2256,11 @@ async function buildShipmentItemsFromSources(
     .where(inArray(sourceDocumentItems.sourceDocumentId, sourceDocumentIds))
     .orderBy(sourceDocumentItems.lineNo);
   return rows.map((r, idx) => ({
+    // Позиция построена ИЗ документа — происхождение известно точно, без
+    // сопоставления по названию. Ровно ради этого случая колонки и заводились.
+    clientId: null,
+    sourceDocumentId: r.sourceDocumentId,
+    sourceDocumentItemId: r.id,
     itemKind: 'material' as const,
     materialId: r.materialId,
     assetId: null,

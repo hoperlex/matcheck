@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { sql, desc } from 'drizzle-orm';
 import {
   pgTable,
   pgEnum,
@@ -1347,35 +1347,6 @@ export const deliverySources = pgTable(
   ],
 );
 
-// Одна поставка принимается один раз.
-//
-// Проверкой в коде это не удержать: два планшета создают приёмку по одной и той
-// же группе одновременно, и оба видят её свободной. PRIMARY KEY по groupId
-// делает второй заезд ошибкой уникальности внутри транзакции создания.
-//
-// Группа занята ЛЮБОЙ неудалённой приёмкой, включая завершённую
-// (confirmed_mol): иначе ту же машину можно принять повторно на следующий день.
-// Сценарий «несколько рейсов по одному УПД» — осознанное действие менеджера,
-// которое снимает claim явно (строка удаляется, releasedByUserId остаётся в
-// журнале аудита операции).
-export const deliveryGroupClaims = pgTable(
-  'delivery_group_claims',
-  {
-    // Корневой пакет поставки.
-    groupId: uuid('group_id')
-      .primaryKey()
-      .references(() => sourceBundles.id, { onDelete: 'cascade' }),
-    deliveryId: uuid('delivery_id')
-      .notNull()
-      .references(() => deliveries.id, { onDelete: 'cascade' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    releasedByUserId: uuid('released_by_user_id').references(() => users.id, {
-      onDelete: 'set null',
-    }),
-  },
-  (t) => [index('delivery_group_claims_delivery_idx').on(t.deliveryId)],
-);
-
 export const deliveryItems = pgTable(
   'delivery_items',
   {
@@ -1630,6 +1601,19 @@ export const shipmentItems = pgTable(
       .notNull()
       .references(() => shipments.id, { onDelete: 'cascade' }),
     materialId: uuid('material_id').references(() => materials.id, { onDelete: 'set null' }),
+    // ПРОИСХОЖДЕНИЕ позиции — зеркало delivery_items, см. миграцию 0103.
+    // Связь отгрузки с документом живёт в shipment_sources и снимается
+    // отвязкой, а это поле остаётся. NULL — действительно неизвестное
+    // происхождение: ручной ввод либо отгрузка, оформленная до 0103.
+    sourceDocumentId: uuid('source_document_id').references(() => sourceDocuments.id, {
+      onDelete: 'restrict',
+    }),
+    // SET NULL, а не RESTRICT: повторный разбор документа пересоздаёт
+    // source_document_items, и RESTRICT заблокировал бы переразбор.
+    sourceDocumentItemId: uuid('source_document_item_id').references(
+      () => sourceDocumentItems.id,
+      { onDelete: 'set null' },
+    ),
     // Тип позиции: 'material' (по умолчанию) или 'asset' (ОС). См. миграцию 0029.
     itemKind: itemKindEnum('item_kind').notNull().default('material'),
     assetId: uuid('asset_id').references(() => assets.id, { onDelete: 'set null' }),
@@ -1651,6 +1635,9 @@ export const shipmentItems = pgTable(
   },
   (t) => [
     index('shipment_items_material_idx').on(t.materialId),
+    index('shipment_items_source_document_idx')
+      .on(t.sourceDocumentId)
+      .where(sql`${t.sourceDocumentId} is not null`),
     index('shipment_items_asset_idx').on(t.assetId).where(sql`${t.assetId} is not null`),
     check(
       'shipment_items_kind_target_chk',
@@ -2101,6 +2088,138 @@ export const shareMessages = pgTable(
     index('share_messages_unread_partial_idx')
       .on(t.shareTokenId)
       .where(sql`${t.isRead} = false and ${t.senderType} = 'external'`),
+  ],
+);
+
+// ─── Claim группы: одна машина — одна операция ─────────────────────────────
+//
+// Объявлено в конце файла намеренно: таблица ссылается и на deliveries, и на
+// shipments, а shipments описан ниже deliveries.
+//
+// Проверкой в коде инвариант не удержать — два планшета создают операцию по
+// одной группе одновременно, и оба видят её свободной. PRIMARY KEY
+// (operationKind, groupId) превращает второй заезд в ошибку уникальности внутри
+// транзакции создания.
+//
+// Группа занята ЛЮБОЙ неудалённой операцией, включая завершённую
+// (confirmed_mol): иначе ту же машину можно принять повторно на следующий день.
+// Сценарий «несколько рейсов по одному УПД» — осознанное действие менеджера: оно
+// пишет событие release и удаляет активную строку.
+//
+// Приёмки и отгрузки в одной таблице, а не в двух зеркальных: групповой путь
+// отгрузки на планшете уже реализован, и отдельная таблица понадобилась бы сразу.
+export const operationGroupClaims = pgTable(
+  'operation_group_claims',
+  {
+    // 'delivery' | 'shipment'. text + CHECK вместо enum: новое значение enum
+    // нельзя использовать в той же транзакции (55P04, грабли миграции 0015).
+    operationKind: text('operation_kind').notNull(),
+    // Корневой пакет машины.
+    groupId: uuid('group_id')
+      .notNull()
+      .references(() => sourceBundles.id, { onDelete: 'cascade' }),
+    // Ровно одна из двух ссылок заполнена — какая, определяет operationKind.
+    // Полиморфный operationId без FK оставил бы claim жить после удаления
+    // операции, заблокировав группу навсегда.
+    deliveryId: uuid('delivery_id').references(() => deliveries.id, { onDelete: 'cascade' }),
+    shipmentId: uuid('shipment_id').references(() => shipments.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.operationKind, t.groupId] }),
+    check('operation_group_claims_kind_check', sql`${t.operationKind} in ('delivery', 'shipment')`),
+    check(
+      'operation_group_claims_one_operation_check',
+      sql`(${t.operationKind} = 'delivery' and ${t.deliveryId} is not null and ${t.shipmentId} is null)
+          or (${t.operationKind} = 'shipment' and ${t.shipmentId} is not null and ${t.deliveryId} is null)`,
+    ),
+    // Одна операция держит не больше одной группы: приёмка из двух машин заняла
+    // бы обе, и освободить их по отдельности стало бы нечем.
+    uniqueIndex('operation_group_claims_delivery_uniq')
+      .on(t.deliveryId)
+      .where(sql`${t.deliveryId} is not null`),
+    uniqueIndex('operation_group_claims_shipment_uniq')
+      .on(t.shipmentId)
+      .where(sql`${t.shipmentId} is not null`),
+  ],
+);
+
+// История claim'ов. Отдельной таблицей, потому что активная строка при
+// освобождении удаляется, и аудит ушёл бы вместе с ней.
+//
+// FK на группу и операцию НАМЕРЕННО НЕТ: история обязана пережить удаление и
+// пакета, и приёмки — именно тогда вопрос «кто снял claim» и задают.
+export const operationGroupClaimEvents = pgTable(
+  'operation_group_claim_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    operationKind: text('operation_kind').notNull(),
+    groupId: uuid('group_id').notNull(),
+    operationId: uuid('operation_id'),
+    // 'create' | 'release' | 'reclaim'
+    event: text('event').notNull(),
+    actorUserId: uuid('actor_user_id').references(() => users.id, { onDelete: 'set null' }),
+    reason: text('reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      'operation_group_claim_events_kind_check',
+      sql`${t.operationKind} in ('delivery', 'shipment')`,
+    ),
+    check(
+      'operation_group_claim_events_event_check',
+      sql`${t.event} in ('create', 'release', 'reclaim')`,
+    ),
+    index('operation_group_claim_events_group_idx').on(t.groupId, t.createdAt),
+  ],
+);
+
+// ─── Журнал видимости документов на планшете ───────────────────────────────
+//
+// Документ может перестать быть видимым, оставаясь в базе: ушёл из parsed при
+// переразборе, потерял объект или дату, попал в группу, где соседний документ
+// ещё обрабатывается. Дельта /sync отбирает по updated_at и такого не покажет —
+// у скрытого документа он не менялся. Планшет продолжал бы видеть машину,
+// которой больше нет.
+//
+// Журнал, а не вычисление на лету: «что пропало с прошлого since» выводится
+// только из сравнения двух снимков, а второго снимка нет ни у сервера, ни у
+// клиента. Планшет уходит в офлайн на дни — за это время документ мог скрыться
+// и снова появиться.
+export const sourceDocumentVisibilityEvents = pgTable(
+  'source_document_visibility_events',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    // Без FK: событие «скрыт» обязано пережить удаление документа, иначе
+    // вернувшийся из офлайна планшет не узнает об исчезновении.
+    sourceDocumentId: uuid('source_document_id').notNull(),
+    // 'hidden' | 'visible'
+    visibility: text('visibility').notNull(),
+    // Для фильтра инспектора КПП по своему объекту. NULL допустим — документ мог
+    // остаться без объекта, из-за чего и скрылся.
+    siteId: uuid('site_id'),
+    // Заполнена, когда документ скрыт вместе со всей машиной.
+    groupId: uuid('group_id'),
+    reason: text('reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      'source_document_visibility_events_visibility_check',
+      sql`${t.visibility} in ('hidden', 'visible')`,
+    ),
+    index('source_document_visibility_events_cursor_idx').on(t.createdAt, t.id),
+    index('source_document_visibility_events_document_idx').on(
+      t.sourceDocumentId,
+      desc(t.createdAt),
+    ),
+    index('source_document_visibility_events_site_idx')
+      .on(t.siteId, t.createdAt)
+      .where(sql`${t.siteId} is not null`),
   ],
 );
 

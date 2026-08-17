@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { desc, eq, gte, or, sql as drSql } from 'drizzle-orm';
+import { desc, eq, getTableColumns, gte, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
@@ -30,7 +30,19 @@ import {
   units,
   users,
 } from '../db/schema.js';
+import {
+  documentGroupIdSql,
+  documentGroupRevisionSql,
+} from '../domain/sourceDocuments/document-group.js';
 import { notStubDocumentSql } from '../domain/sourceDocuments/stub-documents.js';
+import { mobileVisibleSourceDocumentSql } from '../domain/sourceDocuments/mobile-visibility.js';
+import { selectVisibilityTombstones } from '../domain/sourceDocuments/visibility-events.js';
+import { parseCapabilities, resolveGroupMode } from '../domain/groups/group-mode.js';
+import {
+  decodePageToken,
+  encodePageToken,
+  trimPageToGroupBoundary,
+} from '../domain/sourceDocuments/sync-page-token.js';
 
 const QuerySchema = z.object({
   since: z.string().datetime().optional(),
@@ -38,6 +50,23 @@ const QuerySchema = z.object({
   // отдаются за последние N дней. Default 90. При since != null игнорируется
   // (старые записи могли поменяться, дельта-sync их захватывает).
   windowDays: z.coerce.number().int().min(1).max(365).optional(),
+  // Что умеет клиент, список через запятую. Сейчас распознаётся
+  // `source_groups_v1` — поддержка группового протокола: typed-конфликты и
+  // черновики, переживающие отказ сервера.
+  //
+  // Отсутствие параметра = старая сборка. Такой клиент получает прежний
+  // контракт при любых серверных флагах: 409, которого он не понимает, для него
+  // превращается в заблокированную сущность без объяснения инспектору.
+  capabilities: z.string().optional(),
+  // Позиция внутри снимка при листании документов. Непрозрачен для клиента.
+  //
+  // Без него листание было сломано: получив полную страницу, клиент двигал
+  // курсор на серверный `cursor`, и всё, что старше последней отданной строки,
+  // во вторую страницу уже не попадало — хвост дельты исчезал.
+  //
+  // Работает только вместе с capability: старый клиент токена не шлёт и получает
+  // прежнее поведение.
+  pageToken: z.string().optional(),
 });
 
 // Запас на clock skew между app-сервером и БД + на видимость только что
@@ -45,6 +74,14 @@ const QuerySchema = z.object({
 // пограничные записи гарантированно попали в следующую дельту. Повтор
 // безвреден — клиент применяет дельту идемпотентно (saveAggregate по id).
 const SYNC_CURSOR_SAFETY_MS = 3000;
+
+// Размер страницы документов в групповом режиме.
+//
+// Меньше прежней тысячи намеренно: страница теперь может быть расширена до
+// границы машины, а предикат видимости считает групповую полноту коррелированным
+// подзапросом. Пятьсот строк — компромисс между числом round-trip'ов и временем
+// одного запроса на активном объекте.
+const SD_PAGE_LIMIT = 500;
 
 export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
@@ -65,6 +102,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       // (initial-sync). Фиксация момента до выборок закрывает гонку.
       const syncStartedAt = new Date(Date.now() - SYNC_CURSOR_SAFETY_MS);
       const since = req.query.since ? new Date(req.query.since) : null;
+      const capabilities = parseCapabilities(req.query.capabilities);
       const windowDays = req.query.windowDays ?? 90;
       // effectiveSince — для deliveries/shipments/sourceDocuments:
       //  - при дельта-sync (since != null): since;
@@ -172,12 +210,77 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       if (inspectorOnly && userSiteId) {
         sdWhereParts.push(eq(sourceDocuments.siteId, userSiteId));
       }
-      const sdRows = await app.db
-        .select()
+      // Групповой режим: на планшет уезжает только ОБРАБОТАННОЕ.
+      //
+      // `notStubDocumentSql` фильтрует заглушки, но пропускает и documents в
+      // needs_resolution с расхождением сумм, и parsed без объекта или
+      // получателя — те самые, что портал рисует «Черновиком». Инспектор не
+      // должен принимать машину, у которой даже получатель не определён.
+      //
+      // Предикат применяется ТОЛЬКО клиенту с capability: старая сборка не
+      // понимает ни typed-конфликтов, ни исчезновения документа из выдачи, и
+      // менять ей контракт нельзя (см. group-mode.ts).
+      const groupMode = resolveGroupMode({ siteId: userSiteId, capabilities });
+      if (groupMode.enabled) {
+        sdWhereParts.push(mobileVisibleSourceDocumentSql);
+      }
+
+      // Keyset-пагинация. Включается вместе с групповым режимом: старый клиент
+      // токена не шлёт и получает прежнее поведение — одна страница на 1000.
+      const pageToken = groupMode.enabled ? decodePageToken(req.query.pageToken) : null;
+      // Снимок фиксируется первой страницей и дальше не меняется: иначе записи,
+      // изменившиеся во время листания, сдвигали бы границы страниц.
+      const snapshotAt = pageToken ? new Date(pageToken.snapshot) : syncStartedAt;
+      if (pageToken) {
+        // Позиция внутри снимка. Пара (updated_at, id), а не один updated_at: у
+        // пачки, разобранной одним заданием, время совпадает до миллисекунды, и
+        // по одному полю строки перескакивали бы.
+        sdWhereParts.push(
+          drSql`(${sourceDocuments.updatedAt}, ${sourceDocuments.id}) <
+                (${pageToken.updatedAt}::timestamptz, ${pageToken.id}::uuid)`,
+        );
+      }
+      if (groupMode.enabled) {
+        // Верхняя граница снимка: всё, что появилось после начала листания,
+        // приедет следующей дельтой, а не разорвёт текущую.
+        sdWhereParts.push(drSql`${sourceDocuments.updatedAt} <= ${snapshotAt.toISOString()}::timestamptz`);
+      }
+
+      // getTableColumns вместо голого .select(): нужны все колонки документа
+      // ПЛЮС два вычисляемых поля группы. Перечислять полсотни колонок руками
+      // ради этого — верный способ потерять одну при следующей миграции.
+      //
+      // Порядок с тай-брейком по id обязателен для keyset: без него две строки с
+      // одинаковым updated_at могли бы поменяться местами между страницами, и
+      // одна из них потерялась бы, а другая приехала дважды.
+      const sdFetched = await app.db
+        .select({
+          ...getTableColumns(sourceDocuments),
+          groupId: documentGroupIdSql,
+          groupRevision: documentGroupRevisionSql,
+        })
         .from(sourceDocuments)
         .where(drAnd(...sdWhereParts))
-        .orderBy(desc(sourceDocuments.updatedAt))
-        .limit(1000);
+        .orderBy(desc(sourceDocuments.updatedAt), desc(sourceDocuments.id))
+        // +1 строка, чтобы отличить «страница кончилась» от «есть продолжение»,
+        // не делая второй запрос.
+        .limit(groupMode.enabled ? SD_PAGE_LIMIT + 1 : 1000);
+
+      // Машина не режется границей страницы: половина документов на планшете —
+      // это неполный состав материалов и вечное «состав изменился» на форме.
+      const { page: sdRows, hasMore } = groupMode.enabled
+        ? trimPageToGroupBoundary(sdFetched, SD_PAGE_LIMIT)
+        : { page: sdFetched, hasMore: false };
+
+      const lastRow = sdRows[sdRows.length - 1];
+      const nextPageToken =
+        hasMore && lastRow
+          ? encodePageToken({
+              snapshot: snapshotAt.toISOString(),
+              updatedAt: lastRow.updatedAt.toISOString(),
+              id: lastRow.id,
+            })
+          : null;
 
       const sdIds = sdRows.map((r) => r.id);
       const sdItemRows = sdIds.length
@@ -240,6 +343,12 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       const sdConsigneeIds = Array.from(
         new Set(sdRows.map((r) => r.consigneeId).filter((v): v is string => !!v)),
       );
+      // Покупатель (графа 6). Планшет показывает его в списке выбора УПД, когда
+      // графа 4 не распозналась: подрядчика там не показывают вовсе — на
+      // портале он скрыт из таблиц документов.
+      const sdBuyerIds = Array.from(
+        new Set(sdRows.map((r) => r.buyerId).filter((v): v is string => !!v)),
+      );
       // Справочник «Поставщики» (suppliers, не путать с counterparties).
       const supplierDirRows = sdSupplierDirIds.length
         ? await app.db
@@ -252,7 +361,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       // (legacy fallback COALESCE), contractor-id (основной источник) и
       // consignee-id (fallback для графы 4).
       const cpLookupIds = Array.from(
-        new Set([...sdSupplierIds, ...sdContractorIds, ...sdConsigneeIds]),
+        new Set([...sdSupplierIds, ...sdContractorIds, ...sdConsigneeIds, ...sdBuyerIds]),
       );
       const cpLookupRows = cpLookupIds.length
         ? await app.db
@@ -416,7 +525,36 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             deletedResponsiblePersonIds.push(r.entityId);
           else if (r.entityType === 'asset') deletedAssetIds.push(r.entityId);
         }
+
+        // 3) Скрытые документы — отдельная семантика от hard-delete.
+        //
+        // Документ может ПЕРЕСТАТЬ БЫТЬ ВИДИМЫМ, оставаясь в базе: соседний
+        // документ машины ушёл на переразбор, в пачку добавился ещё не
+        // разобранный файл, у документа сняли объект. entity_deletions про такое
+        // не знает — там только физические удаления, — а дельта по updated_at не
+        // покажет, потому что сам документ не менялся.
+        //
+        // Только для клиента с capability: старая сборка не ждёт, что документ
+        // может исчезнуть без удаления, и внезапная пропажа машины выглядела бы
+        // для инспектора потерей данных.
+        if (groupMode.enabled) {
+          const hidden = await selectVisibilityTombstones(app.db, {
+            since,
+            siteId: inspectorOnly ? userSiteId : null,
+          });
+          deletedSourceDocumentIds.push(...hidden);
+        }
       }
+
+      // Один id не может приехать и в документах, и в удалениях: клиент
+      // применяет дельту в порядке «сначала записать, потом удалить», и такой
+      // документ был бы стёрт сразу после записи. Схлопывание по последнему
+      // событию делает selectVisibilityTombstones, здесь — страховка на случай
+      // гонки между двумя выборками.
+      const visibleIdSet = new Set(sdRows.map((r) => r.id));
+      const dedupedDeletedSourceDocumentIds = [...new Set(deletedSourceDocumentIds)].filter(
+        (id) => !visibleIdSet.has(id),
+      );
 
       // Справочники МОЛ/ОС — дельта по updatedAt; для initial-sync (since=null)
       // отдаём все записи.
@@ -435,11 +573,12 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
 
       return {
         cursor: syncStartedAt.toISOString(),
+        nextPageToken,
         serverNow: new Date().toISOString(),
         deletedIds: {
           deliveries: deletedDeliveryIds,
           shipments: deletedShipmentIds,
-          sourceDocuments: deletedSourceDocumentIds,
+          sourceDocuments: dedupedDeletedSourceDocumentIds,
           responsiblePersons: deletedResponsiblePersonIds,
           assets: deletedAssetIds,
         },
@@ -532,6 +671,9 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           const consigneeName =
             sd.consigneeNameRaw ??
             (sd.consigneeId ? cpNameById.get(sd.consigneeId) ?? null : null);
+          // Тем же COALESCE, что и грузополучатель.
+          const buyerName =
+            sd.buyerNameRaw ?? (sd.buyerId ? cpNameById.get(sd.buyerId) ?? null : null);
           return {
           id: sd.id,
           kind: sd.kind,
@@ -544,6 +686,8 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           contractorName,
           consigneeId: sd.consigneeId,
           consigneeName,
+          buyerId: sd.buyerId,
+          buyerName,
           recipientMolId: sd.recipientMolId,
           // Мобильному клиенту поле не нужно, но /sync собирает документы по той
           // же SourceDocumentDetailSchema, что и портал: пропущенное поле молча
@@ -580,6 +724,12 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           createdByUserId: sd.createdByUserId,
           createdByUserEmail: creator?.email ?? null,
           createdByUserPhone: creator?.phone ?? null,
+          // Идентификатор «машины»: документы одного корневого пакета планшет
+          // склеивает в одну карточку и одну приёмку. null для legacy-сборки и
+          // для документов без пакета — там каждый документ сам себе группа.
+          // См. domain/sourceDocuments/document-group.ts.
+          groupId: sd.groupId,
+          groupRevision: sd.groupRevision,
           items: sdItemRows
             .filter((i) => i.sourceDocumentId === sd.id)
             .map((i) => ({
@@ -659,6 +809,13 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             .filter((i) => i.deliveryId === d.id)
             .map((i) => ({
               id: i.id,
+              // Происхождение позиции обязано доезжать до планшета: по нему
+              // форма 1 Этапа понимает, чью строку убрать при изменении состава
+              // машины, и по нему же строятся секции по документам на портале.
+              // Схема помечает поле optional — молчаливый пропуск здесь не
+              // упал бы на валидации, а просто обнулил бы атрибуцию в Room.
+              sourceDocumentId: i.sourceDocumentId,
+              sourceDocumentItemId: i.sourceDocumentItemId,
               itemKind: i.itemKind,
               materialId: i.materialId,
               assetId: i.assetId,
@@ -733,6 +890,9 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             .filter((i) => i.shipmentId === s.id)
             .map((i) => ({
               id: i.id,
+              // Зеркало приёмки — см. комментарий выше.
+              sourceDocumentId: i.sourceDocumentId,
+              sourceDocumentItemId: i.sourceDocumentItemId,
               itemKind: i.itemKind,
               materialId: i.materialId,
               assetId: i.assetId,
@@ -786,6 +946,13 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req) => {
       const inspectorOnly = req.user?.role === 'inspector_kpp';
       const userSiteId = req.user?.siteId ?? null;
+      // Тот же режим, что в дельте: reconcile обязан отбирать документы по
+      // тому же правилу, иначе он вернёт скрытое обратно. Capability берём из
+      // тела запроса — reconcile POST, query-параметров у него нет.
+      const reconcileGroupMode = resolveGroupMode({
+        siteId: req.user?.siteId ?? null,
+        capabilities: parseCapabilities(req.body.capabilities),
+      });
       const noSite = inspectorOnly && !userSiteId;
       // Окно ограничивает ТОЛЬКО missingOnClient/staleOnClient разумным объёмом
       // (то, что клиент и так должен иметь после initial-sync 90 дней).
@@ -882,16 +1049,22 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
               // Технические записи из сверки исключаем: клиент их не получает
               // (см. фильтр дельты), и без этого reconcile объявлял бы их
               // «отсутствующими на клиенте» на каждом проходе.
-              inspectorOnly && userSiteId
-                ? drAnd(
-                    eq(sourceDocuments.siteId, userSiteId),
-                    gte(sourceDocuments.updatedAt, since),
-                    eq(sourceDocuments.isTechnical, false),
-                  )
-                : drAnd(
-                    gte(sourceDocuments.updatedAt, since),
-                    eq(sourceDocuments.isTechnical, false),
-                  ),
+              //
+              // Предикат видимости здесь ОБЯЗАТЕЛЕН и по той же причине. Дельта
+              // скрыла документ и прислала tombstone, а reconcile через минуту
+              // сверил бы version и вернул его обратно через detail-роут —
+              // скрытие не продержалось бы до конца синхронизации. Оба места
+              // обязаны отбирать по одному правилу.
+              drAnd(
+                ...[
+                  gte(sourceDocuments.updatedAt, since),
+                  eq(sourceDocuments.isTechnical, false),
+                  ...(inspectorOnly && userSiteId
+                    ? [eq(sourceDocuments.siteId, userSiteId)]
+                    : []),
+                  ...(reconcileGroupMode.enabled ? [mobileVisibleSourceDocumentSql] : []),
+                ],
+              ),
             );
 
       const delExisting = await existingIdsFor(

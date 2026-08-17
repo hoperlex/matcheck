@@ -55,6 +55,10 @@ import { publishEvent } from './events.js';
 import { matchOrCreateSupplier } from '../domain/sourceDocuments/supplierMatcher.js';
 import { collectUploadParts, uploadLimitMessage } from '../domain/sourceDocuments/collect-upload.js';
 import { ingestDocumentsBundle } from '../domain/sourceDocuments/ingest-bundle.js';
+import {
+  documentGroupIdSql,
+  documentGroupRevisionSql,
+} from '../domain/sourceDocuments/document-group.js';
 import { fromSupplierPortalSql } from '../domain/sourceDocuments/public-origin.js';
 import { manualRecipientSource } from '../domain/sourceDocuments/resolve-contractor.js';
 import {
@@ -274,6 +278,10 @@ type SdNames = {
   // Документ пришёл с публичной страницы (от поставщика). Считается по
   // наличию ingest_event с channel='public' у КОРНЕВОГО пакета.
   fromSupplierPortal?: boolean;
+  // «Машина»: id корневого пакета и версия состава группы. Непустые только для
+  // logical_v1-сборки. См. domain/sourceDocuments/document-group.ts.
+  groupId?: string | null;
+  groupRevision?: number | null;
 };
 
 /**
@@ -350,6 +358,12 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     updatedAt: sd.updatedAt.toISOString(),
     validation: sd.validation ?? null,
     fromSupplierPortal: names.fromSupplierPortal ?? false,
+    // Через detail-роут планшет дотягивает документы, которых не хватает после
+    // дельты (reconcile и backfill привязанных УПД). Пропустить здесь поля
+    // группы — значит оставить их NULL навсегда у всего, что уже закэшировано:
+    // дельта по updated_at новую колонку не привозит.
+    groupId: names.groupId ?? null,
+    groupRevision: names.groupRevision ?? null,
   };
 }
 
@@ -847,6 +861,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
           fromSupplierPortal: fromSupplierPortalSql,
+          groupId: documentGroupIdSql,
+          groupRevision: documentGroupRevisionSql,
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
@@ -882,6 +898,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             recipientMolName: r.recipientMolName,
             siteName: r.siteName,
             fromSupplierPortal: r.fromSupplierPortal,
+            groupId: r.groupId,
+            groupRevision: r.groupRevision,
           }),
         ),
         total: count,
@@ -1203,6 +1221,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
           fromSupplierPortal: fromSupplierPortalSql,
+          groupId: documentGroupIdSql,
+          groupRevision: documentGroupRevisionSql,
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
@@ -1263,6 +1283,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         recipientMolName: row.recipientMolName,
         siteName: row.siteName,
         fromSupplierPortal: row.fromSupplierPortal,
+        groupId: row.groupId,
+        groupRevision: row.groupRevision,
       });
 
       // Комментарий поставщика к поставке. Персональных данных здесь нет

@@ -9,6 +9,10 @@ export type ShipmentKind = z.infer<typeof ShipmentKindSchema>;
 
 export const ShipmentItemSchema = z.object({
   id: z.string().uuid(),
+  /** Происхождение позиции — зеркало DeliveryItemSchema, см. миграцию 0103. */
+  sourceDocumentId: z.string().uuid().nullable().optional(),
+  /** Конкретная строка документа-источника; null после его переразбора. */
+  sourceDocumentItemId: z.string().uuid().nullable().optional(),
   itemKind: ItemKindSchema,
   materialId: z.string().uuid().nullable(),
   assetId: z.string().uuid().nullable(),
@@ -134,6 +138,15 @@ export type ShipmentMarkDeletion = z.infer<typeof ShipmentMarkDeletionSchema>;
 
 export const ShipmentUpsertItemSchema = z.object({
   id: z.string().uuid().optional(),
+  /**
+   * Происхождение НОВОЙ позиции — те же правила, что у приёмки
+   * (DeliveryUpsertItemSchema). Для строки, которая уже есть в отгрузке,
+   * значение игнорируется: сервер берёт сохранённое из БД по id, иначе одного
+   * устаревшего планшета хватило бы, чтобы приписать позиции чужому документу.
+   * Присланный документ, не привязанный к этой отгрузке, отбрасывается в null.
+   */
+  sourceDocumentId: z.string().uuid().nullable().optional(),
+  sourceDocumentItemId: z.string().uuid().nullable().optional(),
   itemKind: ItemKindSchema.default('material'),
   materialId: z.string().uuid().nullable().optional(),
   assetId: z.string().uuid().nullable().optional(),

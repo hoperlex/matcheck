@@ -20,9 +20,7 @@
 //                открыт всем, две вкладки с одним комплектом реальны.
 
 import { and, asc, eq, isNull, ne, or, sql as drSql } from 'drizzle-orm';
-import { alias } from 'drizzle-orm/pg-core';
 import type { Db } from '../../db/client.js';
-import { selectRegistryRows } from './bundle-import-registry.js';
 import {
   bundleImportItems,
   counterparties,
@@ -35,6 +33,7 @@ import {
 } from '../../db/schema.js';
 import { bundleDispatchKeyOf, enqueueJob, type JobQueue } from '../jobs/job-outbox.js';
 import { manualRecipientSource } from './resolve-contractor.js';
+import { purgePreviousGeneration, resolveRestartEligibility } from './restart-eligibility.js';
 import { buildS3Key } from '../storage/s3.path.js';
 import { putObject } from '../storage/s3.signer.js';
 import { UPD_PARSE_QUEUE } from '../../plugins/queue.js';
@@ -135,46 +134,6 @@ function scopeMatches(bundle: BundleRow, params: IngestBundleParams): boolean {
     (bundle.recipientMolId ?? null) === (params.recipientMolId ?? null) &&
     expectedDateKeyOf(bundle.expectedDate) === (params.expectedDate ?? null)
   );
-}
-
-/**
- * Пакет уже отработан — новой работы по нему нет.
- *
- * Два основания, и второе появилось вместе с зоной «Дополнительные документы».
- *
- * 1. У пакета есть документ — на нём самом или в ДОЧЕРНЕМ пакете. Дочерний
- *    нужен потому, что накладные router разворачивает в отдельный пакет, и
- *    реальный документ ТН/ОС-2 висит уже на нём: без этой ветки повторная
- *    отправка тех же накладных заливала бы их заново.
- * 2. Документов нет вовсе, но пачка разобрана и КАЖДЫЙ её файл сохранён без
- *    распознавания. Так выглядит поставка из одних сертификатов: документов она
- *    не создаёт, а техническая запись после разбора удаляется — без этой ветки
- *    такая пачка при каждой отправке считалась бы брошенной и лилась заново.
- *
- * Чего здесь намеренно НЕТ: пофайлового восстановления. Если один документ
- * пачки жив, а второй менеджер удалил, повторная загрузка второй не воссоздаст —
- * ровно как и до появления этой функции.
- */
-async function bundleAlreadyProcessed(db: Db, bundle: BundleRow): Promise<boolean> {
-  const [own] = await db
-    .select({ id: sourceDocuments.id })
-    .from(sourceDocuments)
-    .where(eq(sourceDocuments.bundleId, bundle.id))
-    .limit(1);
-  if (own) return true;
-
-  const child = alias(sourceBundles, 'child_bundle');
-  const [inChild] = await db
-    .select({ id: sourceDocuments.id })
-    .from(sourceDocuments)
-    .innerJoin(child, eq(child.id, sourceDocuments.bundleId))
-    .where(eq(child.parentBundleId, bundle.id))
-    .limit(1);
-  if (inChild) return true;
-
-  if (bundle.status !== 'parsed') return false;
-  const rows = await selectRegistryRows(db, bundle.id, bundle.activeUploadGeneration);
-  return rows.length > 0 && rows.every((r) => r.status === 'skipped');
 }
 
 /**
@@ -370,15 +329,37 @@ export async function ingestDocumentsBundle(
     }
   }
 
-  // ─── 2. Пакет уже есть и разобран — новой работы нет ──────────────────────
-  if (existing && (await bundleAlreadyProcessed(db, existing))) {
-    if (publicSubmission) await recordPublicSubmission(db, existing.id, publicSubmission);
-    return {
-      outcome: 'reused',
-      bundleId: existing.id,
-      status: existing.status,
-      ticket: publicSubmission?.ticket ?? null,
-    };
+  // ─── 2. Пакет уже есть — решаем, есть ли по нему работа ───────────────────
+  //
+  // Раньше здесь стояло «есть хотя бы один документ → отработан». Этого мало:
+  // при частичном удалении (менеджер убрал одну УПД из пачки) живой документ у
+  // пакета оставался, и удалённая не восстанавливалась никогда, а поставщику
+  // отвечали 201 «принято». Теперь решение принимает resolveRestartEligibility,
+  // и «ничего не делаем» — это три разных причины, различимые в логе.
+  if (existing) {
+    const eligibility = await resolveRestartEligibility(db, existing);
+    if (eligibility.action === 'reuse') {
+      // Занятость операцией — единственная причина, которую стоит видеть в
+      // логе: поставщик прислал комплект повторно, а восстановить его нельзя,
+      // потому что документы уже в приёмке. Остальные два случая штатны.
+      if (eligibility.reason === 'locked_by_operation') {
+        log?.warn(
+          { bundleId: existing.id, documents: eligibility.operationDocumentIds },
+          'приём пачки: комплект неполон, но документы уже в операции — не восстанавливаем',
+        );
+      }
+      if (publicSubmission) await recordPublicSubmission(db, existing.id, publicSubmission);
+      return {
+        outcome: 'reused',
+        bundleId: existing.id,
+        status: existing.status,
+        ticket: publicSubmission?.ticket ?? null,
+      };
+    }
+    log?.warn(
+      { bundleId: existing.id, missingFiles: eligibility.missingFiles },
+      'приём пачки: комплект неполон — восстанавливаем новым поколением загрузки',
+    );
   }
 
   // ─── 3. Резервирование пакета ─────────────────────────────────────────────
@@ -411,8 +392,28 @@ export async function ingestDocumentsBundle(
     // успевшие объекты к тому моменту уже уехали в очередь на удаление.
     // `parse_failed` — это не «кто-то другой льёт прямо сейчас», а
     // зафиксированный отказ, поэтому такой пакет перезапускаем немедленно.
-    // Сюда мы попадаем только с пакетом БЕЗ единого документа: иначе шаг 2
+    // Сюда мы попадаем только с пакетом, по которому есть работа: иначе шаг 2
     // вернул бы reused выше.
+    //
+    // ПОКОЛЕНИЕ ЗАГРУЗКИ РАСТЁТ ЗДЕСЬ, и это не то же самое, что
+    // dispatch_generation.
+    //
+    // dispatch_generation — поколение ЗАДАНИЯ, оно защищает от повторной
+    // доставки старого job. active_upload_generation — поколение ЗАГРУЗКИ: по
+    // нему живут строки реестра, ключ дочернего пакета сборки
+    // (`assembly:<root>:<generation>`), ключи дочерних пакетов накладных и гейт
+    // публикации. До этой правки оно не инкрементировалось НИГДЕ — только
+    // читалось, и у всех пакетов оставалось нулём.
+    //
+    // Из-за этого повторная отправка того же комплекта попадала в мёртвую зону:
+    // хеш дочернего пакета совпадал с прошлым, вставка гасилась
+    // onConflictDoNothing, задание сборки не ставилось вовсе, и файлы получали
+    // заглушки «не распознано» при нуле попыток разбора.
+    //
+    // Инкремент здесь же переводит корень в staging без отдельного действия:
+    // published_generation остаётся на прошлом номере, а раз группа видна только
+    // при published_generation = active_upload_generation, документы прошлого
+    // поколения перестают быть видимыми в тот же момент.
     const restart = reserve
       ? await db
           .update(sourceBundles)
@@ -421,6 +422,7 @@ export async function ingestDocumentsBundle(
             idempotencyKey,
             contentHash,
             dispatchGeneration: drSql`${sourceBundles.dispatchGeneration} + 1`,
+            activeUploadGeneration: drSql`${sourceBundles.activeUploadGeneration} + 1`,
             createdByUserId: params.actorUserId ?? existing.createdByUserId,
             updatedAt: now,
           })
@@ -440,6 +442,10 @@ export async function ingestDocumentsBundle(
             ...bundleValues,
             idempotencyKey,
             contentHash,
+            // Тот же инкремент, что и в reserve-ветке: внутренняя загрузка
+            // «Загрузить документы» проходит здесь, и оставить её на прежнем
+            // поколении значило бы сохранить мёртвую зону для половины входов.
+            activeUploadGeneration: drSql`${sourceBundles.activeUploadGeneration} + 1`,
             createdByUserId: params.actorUserId ?? existing.createdByUserId,
             updatedAt: now,
           })
@@ -458,6 +464,23 @@ export async function ingestDocumentsBundle(
         ticket: publicSubmission?.ticket ?? null,
       };
     }
+    // Пакет пересобирается с нуля, поэтому остатки прошлого поколения уходят.
+    //
+    // Без этого рестарт задваивает документы: реестр нового поколения заводится
+    // на ВСЕ файлы пачки, router разберёт каждый, и уцелевшие документы прошлого
+    // прогона останутся рядом с новыми. Инвариант видимости такого не ловит — он
+    // спрашивает «есть ли документ по s3Key», а документ есть.
+    //
+    // Безопасно ровно потому, что сюда мы дошли с вердиктом `restart`: ни один
+    // документ не привязан к операции и разбор не идёт.
+    const purged = await db.transaction((tx) => purgePreviousGeneration(tx, existing.id));
+    if (purged.length > 0) {
+      log?.warn(
+        { bundleId: existing.id, documents: purged.length },
+        'приём пачки: документы прошлого поколения удалены перед пересбором',
+      );
+    }
+
     bundle = updated;
     generation = updated.dispatchGeneration;
   } else {

@@ -12,6 +12,8 @@ import './instrument.js'; // ПЕРВЫМ — Sentry.init до bullmq/postgres/u
 import * as Sentry from '@sentry/node';
 import { Queue, Worker, type Job } from 'bullmq';
 import { and, eq, inArray, isNull, lt, lte, or } from 'drizzle-orm';
+import { bumpGroupRevision, publishGroupDocuments } from './domain/sourceDocuments/document-group.js';
+import { recordVisibilityTransitions } from './domain/sourceDocuments/visibility-events.js';
 import { logger } from './lib/logger.js';
 import { db } from './db/client.js';
 import {
@@ -1751,6 +1753,22 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         })
         .where(generationScoped(sourceDocumentId, jobGeneration));
     }
+
+    // Позиции документа только что переписаны заново, с новыми id. Набор
+    // документов машины при этом прежний, поэтому форма на планшете не увидит
+    // расхождения по составу — единственный сигнал, что содержимое поменялось,
+    // это group_revision. В той же транзакции, что и сама правка: иначе
+    // планшет успел бы забрать документ до бампа.
+    await bumpGroupRevision(txDb, sourceDocumentId);
+
+    // Разбор изменил статус и реквизиты, а значит мог изменить и видимость —
+    // как самого документа, так и его соседей по машине: пока он был в
+    // processing, вся машина была скрыта, и теперь могла открыться целиком.
+    // Событие пишется только на фактический переход, повтор ничего не добавит.
+    await recordVisibilityTransitions(txDb, {
+      documentIds: [sourceDocumentId],
+      reason: 'разбор документа завершён',
+    });
   });
 
   if (!secondPassQueued) {
@@ -2674,7 +2692,15 @@ export async function handleDocumentRouterJob(bundleId: string, log: WorkerLog):
       } else if (isWaybill) {
         // Разворачиваем в waybill-flow: отдельный под-bundle на этот файл
         // (тот же путь, что «Загрузить накладные»).
-        const subHash = createHash('sha256').update(`router:${bundleId}:${a.s3Key}`).digest('hex');
+        //
+        // ПОКОЛЕНИЕ ЗАГРУЗКИ В КЛЮЧЕ ОБЯЗАТЕЛЬНО. Без него повторная отправка
+        // того же файла даёт тот же хеш, вставка гасится onConflictDoNothing —
+        // и дочерний пакет не создаётся, а накладная остаётся без разбора. Это
+        // ровно та мёртвая зона, что была у сборки УПД (`assembly:<root>:<gen>`),
+        // только для накладных: там поколение в ключе было, здесь его не было.
+        const subHash = createHash('sha256')
+          .update(`router:${bundleId}:${bundle.activeUploadGeneration}:${a.s3Key}`)
+          .digest('hex');
         const subId = randomUUID();
         const subTechId = randomUUID();
         await db.transaction(async (tx) => {
@@ -3358,7 +3384,18 @@ export async function handleUpdAssemblyJob(
     if (root.activeUploadGeneration !== generation) {
       return { ok: false as const, reason: 'поколение устарело' };
     }
-    if (root.publishedGeneration !== null) {
+    // Сравнение с ЭТИМ поколением, а не с null.
+    //
+    // `publishedGeneration !== null` означало «пакет когда-либо публиковался»,
+    // и после первой же публикации сборка отказывалась работать навсегда.
+    // Повторная отправка того же комплекта поднимает активное поколение, но
+    // published остаётся на прошлом номере — гейт видел «не null» и выходил
+    // ЗДЕСЬ, единственной веткой, которая не проходит через rollbackUpdAssembly.
+    // Файлы оставались без разбора и получали заглушки «не распознано».
+    //
+    // Та же форма сравнения уже используется в tryFinalizeUpdAssembly — там она
+    // изначально была написана верно, разъехались только эти два места.
+    if (root.publishedGeneration === generation) {
       return { ok: false as const, reason: 'поколение уже опубликовано' };
     }
     await tx
@@ -3705,13 +3742,10 @@ export async function tryFinalizeUpdAssembly(
 
     // ── публикация ──────────────────────────────────────────────────────────
     const now = new Date();
-    // updated_at и version обязательны: планшет забирает дельту по updated_at,
-    // и без бампа документы, созданные до его последней синхронизации, не
-    // приедут никогда.
-    await tx
-      .update(sourceDocuments)
-      .set({ isTechnical: false, updatedAt: now, version: drSql`${sourceDocuments.version} + 1` })
-      .where(inArray(sourceDocuments.id, docIds));
+    // Публикуем сегменты И бампаем сиблингов группы — иначе накладная, уже
+    // видимая до публикации, навсегда осталась бы на планшете отдельной
+    // карточкой. Подробнее — в KDoc publishGroupDocuments.
+    await publishGroupDocuments(tx, rootId, docIds, now);
     await tx
       .update(bundleSegments)
       .set({ publishedAt: now, updatedAt: now })
@@ -3726,6 +3760,15 @@ export async function tryFinalizeUpdAssembly(
         updatedAt: now,
       })
       .where(eq(sourceBundles.id, rootId));
+
+    // Публикация — момент, когда машина целиком становится видимой. Пишем
+    // переходы по ВСЕЙ группе, а не только по сегментам: накладная и М-15
+    // создаются на корневом пакете раньше публикации и до этой секунды были
+    // скрыты вместе с недособранной машиной.
+    await recordVisibilityTransitions(tx, {
+      groupId: rootId,
+      reason: 'комплект машины опубликован',
+    });
 
     return { action: 'publish' as const, docIds, reason: 'комплект готов' };
   });
@@ -3775,6 +3818,34 @@ async function rollbackUpdAssembly(args: {
   log: WorkerLog;
 }): Promise<void> {
   const { rootId, subBundleId, generation, reason, log } = args;
+
+  // Опубликованное поколение не откатываем НИКОГДА. Ниже идёт hard DELETE
+  // документов сегментов без записи в entity_deletions — это осознанно, но
+  // верно ровно до публикации: до неё документы технические и наружу не
+  // выходили. После публикации тот же DELETE оставил бы на планшетах фантомы
+  // (tombstone нет, значит удаление не доедет), а если по документу уже создана
+  // приёмка — упёрся бы в FK delivery_sources ... ON DELETE RESTRICT и порвал
+  // транзакцию, оставив пакет висеть в processing.
+  //
+  // Гвард именно здесь, а не только у вызывающих: путь worker.on('failed')
+  // зовёт откат вслепую, не заглядывая в published_generation.
+  //
+  // Сравнение с ЭТИМ поколением, а не с null: `!= null` запрещал откат любого
+  // поколения после первой публикации. Комплект, пересобираемый вторым заходом,
+  // при сбое не мог откатиться на «файл = документ» и оставался без документов
+  // вовсе — при том что публиковалось ПРЕДЫДУЩЕЕ поколение, а не это.
+  const [publishedCheck] = await db
+    .select({ publishedGeneration: sourceBundles.publishedGeneration })
+    .from(sourceBundles)
+    .where(eq(sourceBundles.id, rootId));
+  if (publishedCheck?.publishedGeneration === generation) {
+    log.warn(
+      { reason, subBundleId, publishedGeneration: publishedCheck.publishedGeneration },
+      'сборка УПД: откат отклонён — поколение уже опубликовано',
+    );
+    return;
+  }
+
   log.warn({ reason, subBundleId }, 'сборка УПД: откат на «файл = документ»');
 
   // 1. Снимаем манифест и технические документы. Задания сегментов, ещё не

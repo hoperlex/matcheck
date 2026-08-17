@@ -715,6 +715,27 @@
       "when": 1781800028000,
       "tag": "0102_upd_prompt_v10_address",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1781800029000,
+      "tag": "0103_shipment_item_origin",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1781800030000,
+      "tag": "0104_operation_group_claims",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1781800031000,
+      "tag": "0105_visibility_events",
+      "breakpoints": true
     }
   ]
 }

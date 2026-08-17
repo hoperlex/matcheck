@@ -24,6 +24,16 @@ export type SyncDeletedIds = z.infer<typeof SyncDeletedIdsSchema>;
 
 export const SyncDeltaResponseSchema = z.object({
   cursor: z.string(),
+  // Есть продолжение — передать это значение в следующий запрос параметром
+  // `pageToken`. null или отсутствие поля означает «страница последняя».
+  //
+  // ВАЖНО для клиента: основной курсор (`cursor`) записывается ТОЛЬКО после
+  // последней страницы. Сдвинув его раньше, клиент потеряет хвост — ровно та
+  // ошибка, из-за которой пагинация и переделывалась.
+  //
+  // Поле необязательное: старый клиент его не видит и продолжает работать по
+  // прежнему контракту, одной страницей.
+  nextPageToken: z.string().nullable().optional(),
   deliveries: z.array(DeliverySchema),
   shipments: z.array(ShipmentSchema),
   sourceDocuments: z.array(SourceDocumentDetailSchema),
@@ -60,6 +70,17 @@ export const ReconcileRequestSchema = z.object({
   deliveries: z.array(ReconcileItemSchema).max(5000).default([]),
   shipments: z.array(ReconcileItemSchema).max(5000).default([]),
   sourceDocuments: z.array(ReconcileItemSchema).max(5000).default([]),
+  // Что умеет клиент, список через запятую — то же, что query-параметр
+  // `capabilities` у GET /sync. Здесь оно в теле, потому что reconcile POST.
+  //
+  // Обязательно именно здесь, а не только в дельте: сверка отбирает документы
+  // тем же предикатом видимости. Разъедься эти два места — дельта прислала бы
+  // tombstone, а reconcile через минуту вернул бы документ обратно, и скрытие
+  // не пережило бы одну синхронизацию.
+  //
+  // Необязательное: старый клиент его не шлёт и продолжает получать прежний
+  // контракт.
+  capabilities: z.string().optional(),
 });
 export type ReconcileRequest = z.infer<typeof ReconcileRequestSchema>;
 
