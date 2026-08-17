@@ -236,7 +236,26 @@ export function PublicUploadModal({ open, onClose }: { open: boolean; onClose: (
   return (
     <Modal
       open={open}
-      title="Загрузка документов на приёмку"
+      title={
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'baseline',
+            gap: 16,
+            flexWrap: 'wrap',
+            // Крестик antd позиционирован абсолютно поверх шапки и места в ней
+            // не занимает — резервируем его вручную, иначе телефоны уедут под него.
+            paddingInlineEnd: 32,
+          }}
+        >
+          <span>Загрузка документов на приёмку</span>
+          <Typography.Text type="secondary" style={{ fontSize: 13, fontWeight: 'normal' }}>
+            Тел. мониторинга: <a href="tel:+79854360057">+79854360057</a>,{' '}
+            <a href="tel:+79859902540">+79859902540</a>
+          </Typography.Text>
+        </div>
+      }
       onCancel={close}
       maskClosable={false}
       keyboard={false}
