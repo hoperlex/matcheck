@@ -30,7 +30,7 @@ import {
   GROUP_COLORS,
   groupRowClass,
 } from '../../shared/ui/documentGroupRows';
-import { PendingFilesPanel } from './PendingFilesPanel';
+import { isPendingRow, pendingAsRow, pendingStateOf } from './pendingRow';
 import type {
   Counterparty,
   Site,
@@ -177,6 +177,17 @@ function StatusTag({
   onResolve?: (r: Row) => void;
   onManualResolve?: (r: Row) => void;
 }) {
+  // Принятый файл, по которому документа ещё нет. «не загружен» — отдельный
+  // случай: объекта в хранилище не существует, и ждать тут нечего, нужна
+  // повторная отправка. Обычный ожидающий файл идёт ниже общей веткой
+  // 'queued' — он и правда стоит в очереди на распознавание.
+  if (isPendingRow(row) && pendingStateOf(row) === 'not_stored') {
+    return (
+      <Tooltip title="Файл принят формой, но не сохранился в хранилище. Остальные файлы поставки приняты — попросите отправить этот ещё раз.">
+        <Tag color="red">не загружен</Tag>
+      </Tooltip>
+    );
+  }
   // onResolve не передан (роль contractor) → resolve-кнопки скрыты: дозаполнение
   // и разрешение дубликатов — write-операции, подрядчику недоступны.
   // Derived-статус: если parsed, но не заполнены получатель/объект/дата
@@ -650,12 +661,30 @@ export default function InboxPage() {
     });
   }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds]);
 
+  // Принятые файлы, до которых разбор ещё не дошёл, — обычные строки списка.
+  // Своей таблицы им заводить нельзя: вторая шапка колонок читается как
+  // чужеродный блок, а любой блок над списком выталкивает страницу за пределы
+  // экрана (таблица считает прокрутку от 100vh) и добавляет второй скроллбар.
+  //
+  // Сервер отдаёт их только на первой странице и только менеджеру с админом,
+  // поэтому здесь достаточно взять что дали.
+  const pendingRows = useMemo(
+    () => (list.data?.pendingFiles ?? []).map(pendingAsRow),
+    [list.data?.pendingFiles],
+  );
+
   // Документы одной машины — подряд и с общей цветовой меткой. Кластеризация
   // стабильная: место кластера задаёт первый его документ, поэтому порядок
   // списка (по дате) сохраняется. Явная сортировка по колонке сильнее — antd
   // применяет свой sorter после нас, и строки машины могут разойтись; метка
   // при этом остаётся, и машина по-прежнему узнаётся.
-  const groupedItems = useMemo(() => clusterRowsByGroup(filteredItems), [filteredItems]);
+  //
+  // Ожидающие файлы идут в тот же поток: файл встаёт рядом с уже разобранными
+  // документами своей поставки, а не отдельной кучей наверху.
+  const groupedItems = useMemo(
+    () => clusterRowsByGroup([...pendingRows, ...filteredItems]),
+    [pendingRows, filteredItems],
+  );
 
   // Префетч позиций — фоном после рендера списка. Клик «+» раскрывает
   // строку, дёргать сеть в этот момент не приходится: ExpandedSource-
@@ -912,9 +941,6 @@ export default function InboxPage() {
       <style>{GROUP_COLORS.map(
         (color, i) => `.matcheck-doc-group-${i} > td:first-child { box-shadow: inset 4px 0 0 ${color}; }`,
       ).join('\n')}</style>
-      {/* Принятые файлы, до которых разбор ещё не дошёл. Сервер отдаёт их
-          только на первой странице и только менеджеру с админом. */}
-      <PendingFilesPanel files={list.data?.pendingFiles ?? []} />
       <ResponsiveTable<Row>
         items={groupedItems}
         loading={list.isLoading}
@@ -933,7 +959,16 @@ export default function InboxPage() {
           showSizeChanger: true,
           pageSizeOptions: [50, 100, 200],
         }}
-        rowSelection={isContractor ? undefined : bulk.selection}
+        rowSelection={
+          isContractor
+            ? undefined
+            : {
+                ...bulk.selection,
+                // Массовое удаление относится к документам. У принятого файла
+                // документа ещё нет — удалять нечего, чекбокс неактивен.
+                getCheckboxProps: (r: Row) => ({ disabled: isPendingRow(r) }),
+              }
+        }
         // Цветная полоса слева у документов одной машины. Приглушённая:
         // строку со статусом «не распознано» она перекрикивать не должна.
         rowClassName={(r) => groupRowClass(documentGroupKey(r))}
@@ -945,7 +980,11 @@ export default function InboxPage() {
             <ExpandedSourceDocumentItems id={r.id} kind={r.kind} />
           ),
         }}
-        onRowClick={(r) => setSelectedId(r.id)}
+        // Карточки у принятого файла не существует — открывать нечего.
+        onRowClick={(r) => {
+          if (isPendingRow(r)) return;
+          setSelectedId(r.id);
+        }}
         columns={[
           {
             title: 'Тип',
@@ -960,6 +999,19 @@ export default function InboxPage() {
             // Кнопка ± рядом с тегом — раскрывает/сворачивает позиции
             // под строкой. stopPropagation чтобы не сработал onRowClick.
             render: (_: unknown, r: Row) => {
+              // Принятый файл: тип неизвестен, позиций нет — ни тега, ни
+              // раскрытия. Прочерк здесь честнее «УПД», которого может и не
+              // оказаться.
+              if (isPendingRow(r)) {
+                return (
+                  <Space size={4}>
+                    <Tag>—</Tag>
+                    <Tooltip title="Загружен поставщиком через публичную ссылку">
+                      <CloudUploadOutlined style={{ color: '#8c8c8c' }} />
+                    </Tooltip>
+                  </Space>
+                );
+              }
               const expanded = expandedIds.includes(r.id);
               return (
                 <Space size={4}>
@@ -1073,19 +1125,23 @@ export default function InboxPage() {
             onCell: () => ({
               onClick: (e: MouseEvent) => e.stopPropagation(),
             }),
-            render: (_: unknown, r: Row) => (
-              <Space size={4}>
-                {renderReparseButton(r)}
-                {renderDeleteButton(r)}
-              </Space>
-            ),
+            // Принятому файлу нечего повторять и нечего удалять: документа по
+            // нему ещё нет, а сам файл живёт в реестре пакета.
+            render: (_: unknown, r: Row) =>
+              isPendingRow(r) ? null : (
+                <Space size={4}>
+                  {renderReparseButton(r)}
+                  {renderDeleteButton(r)}
+                </Space>
+              ),
           },
         ]}
         cardRender={(r) => (
           <Card style={{ width: '100%' }} size="small">
             <Space direction="vertical" size={2} style={{ width: '100%', position: 'relative' }}>
               <Space size={4} wrap>
-                {isUnrecognized(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
+                {/* Принятый файл: тип ещё неизвестен — как и у нераспознанного. */}
+                {isUnrecognized(r) || isPendingRow(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
                 <StatusTag
                   row={r}
                   onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
@@ -1111,13 +1167,15 @@ export default function InboxPage() {
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {originLabel(r.origin, r.fromSupplierPortal)}
               </Typography.Text>
-              <div
-                style={{ position: 'absolute', top: 0, right: 0 }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                {renderReparseButton(r)}
-                {renderDeleteButton(r)}
-              </div>
+              {!isPendingRow(r) && (
+                <div
+                  style={{ position: 'absolute', top: 0, right: 0 }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {renderReparseButton(r)}
+                  {renderDeleteButton(r)}
+                </div>
+              )}
             </Space>
           </Card>
         )}
