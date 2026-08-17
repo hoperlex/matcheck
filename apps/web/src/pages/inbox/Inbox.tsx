@@ -24,6 +24,11 @@ import {
   WarningOutlined,
 } from '@ant-design/icons';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  clusterRowsByGroup,
+  GROUP_COLORS,
+  groupRowClass,
+} from '../../shared/ui/documentGroupRows';
 import type {
   Counterparty,
   Site,
@@ -643,6 +648,13 @@ export default function InboxPage() {
     });
   }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds]);
 
+  // Документы одной машины — подряд и с общей цветовой меткой. Кластеризация
+  // стабильная: место кластера задаёт первый его документ, поэтому порядок
+  // списка (по дате) сохраняется. Явная сортировка по колонке сильнее — antd
+  // применяет свой sorter после нас, и строки машины могут разойтись; метка
+  // при этом остаётся, и машина по-прежнему узнаётся.
+  const groupedItems = useMemo(() => clusterRowsByGroup(filteredItems), [filteredItems]);
+
   // Префетч позиций — фоном после рендера списка. Клик «+» раскрывает
   // строку, дёргать сеть в этот момент не приходится: ExpandedSource-
   // DocumentItems читает тот же queryKey из кэша react-query.
@@ -890,8 +902,16 @@ export default function InboxPage() {
           </>
         }
       >
+      {/* Метка машины: документы одной загрузки помечены общей полосой слева.
+          Правила строятся из GROUP_COLORS — списка, по которому считается и
+          индекс цвета, поэтому палитра и классы не могут разойтись.
+          box-shadow вместо border-left: border сдвигал бы содержимое ячейки и
+          ломал выравнивание колонки «№» между строками. */}
+      <style>{GROUP_COLORS.map(
+        (color, i) => `.matcheck-doc-group-${i} > td:first-child { box-shadow: inset 4px 0 0 ${color}; }`,
+      ).join('\n')}</style>
       <ResponsiveTable<Row>
-        items={filteredItems}
+        items={groupedItems}
         loading={list.isLoading}
         rowKey="id"
         numbered
@@ -909,6 +929,9 @@ export default function InboxPage() {
           pageSizeOptions: [50, 100, 200],
         }}
         rowSelection={isContractor ? undefined : bulk.selection}
+        // Цветная полоса слева у документов одной машины. Приглушённая:
+        // строку со статусом «не распознано» она перекрикивать не должна.
+        rowClassName={(r) => groupRowClass(r.groupId)}
         expandable={{
           // Свою колонку с иконкой не рендерим — ± живёт в столбце «Тип».
           showExpandColumn: false,
