@@ -1,4 +1,22 @@
 {
+  "1.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "11399.pdf": {
+    "confidence": 0.3,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "text:ambiguous",
+    ],
+  },
   "1221312.pdf": {
     "confidence": 0.95,
     "detectedKind": "upd",
@@ -19,6 +37,33 @@
       "text:ambiguous",
     ],
   },
+  "1_ТТН по заказу ОП-5469 (1).pdf": {
+    "confidence": 0.8,
+    "detectedKind": "transport_waybill",
+    "needsVision": false,
+    "parserUsed": "parseWaybillBatch",
+    "signals": [
+      "text:tn",
+    ],
+  },
+  "1_ТТН по заказу ОП-5469.pdf": {
+    "confidence": 0.8,
+    "detectedKind": "transport_waybill",
+    "needsVision": false,
+    "parserUsed": "parseWaybillBatch",
+    "signals": [
+      "text:tn",
+    ],
+  },
+  "2.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
   "201_2112636922_202606260947_117572_PRINTER2.TXT.pdf": {
     "confidence": 0.95,
     "detectedKind": "upd",
@@ -30,7 +75,43 @@
     ],
     "updInvoiceCount": 5,
   },
+  "20260817_151958.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "2e10213e-fbff-4750-9ff8-b0e5a8762eb6.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "3.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
   "5303397567129394215.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "605e8287-6a38-46b5-960b-0a6a159adaec.jpg": {
     "confidence": 0,
     "detectedKind": "unknown",
     "needsVision": true,
@@ -64,6 +145,105 @@
     "parserUsed": "none",
     "signals": [
       "text:ambiguous",
+    ],
+  },
+  "IMG_20260817_143503_018.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "IMG_20260817_162617_939.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "IMG_20260817_173128_112.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "IMG_5300.jpeg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "IMG_5302.jpeg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "IMG_5303.jpeg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "a9ead6d5-3c7f-4333-95a3-e590efd40aa3.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "ad40e580-65aa-4281-a940-2cf53548dc84.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "i (2).webp": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "i (3).webp": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "i.webp": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
     ],
   },
   "scanlite3.pdf": {
@@ -107,6 +287,27 @@
       "text:ambiguous",
       "name:m15",
     ],
+  },
+  "Накладная.pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:12",
+    ],
+  },
+  "Реализация товаров и услуг № 07-2784 от 17 августа 2026-2.PDF": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:1",
+    ],
+    "updInvoiceCount": 1,
   },
   "Реализация товаров и услуг № 22083 от 25 июня 2026 г .XLS": {
     "confidence": 0.99,
@@ -191,6 +392,36 @@
     "signals": [
       "ext:excel",
     ],
+  },
+  "ТН.pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:25",
+    ],
+  },
+  "Товарно-транспортная накладная № 1811 от 17 августа 2026 г (2).pdf": {
+    "confidence": 0.8,
+    "detectedKind": "transport_waybill",
+    "needsVision": false,
+    "parserUsed": "parseWaybillBatch",
+    "signals": [
+      "text:tn",
+    ],
+  },
+  "Транспортная накладная-1.PDF": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "parseUpdPdf",
+    "signals": [
+      "text:upd",
+      "invoices:0",
+    ],
+    "updInvoiceCount": 0,
   },
   "ТранспортнаяНакладнаяУПД Реализация товаров и услуг №ТН0006251866.pdf": {
     "confidence": 0.8,
@@ -556,6 +787,33 @@
     ],
     "updInvoiceCount": 1,
   },
+  "ЭКОДОМ СУ61 Дюков17.08.26 (1).xlsx": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": false,
+    "parserUsed": "none",
+    "signals": [
+      "excel:not-upd",
+    ],
+  },
+  "ЭКОДОМ СУ61 Шестаков17.08.26.xlsx": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": false,
+    "parserUsed": "none",
+    "signals": [
+      "excel:not-upd",
+    ],
+  },
+  "ЭКОДОМ СУ61Абрегов17.08.26ПГ.xlsx": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": false,
+    "parserUsed": "none",
+    "signals": [
+      "excel:not-upd",
+    ],
+  },
   "зиларт.pdf": {
     "confidence": 0.95,
     "detectedKind": "upd",
@@ -624,5 +882,27 @@
     "signals": [
       "ext:excel",
     ],
+  },
+  "упд 2 водитель.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "tryParseTextUpdBundle",
+    "signals": [
+      "text:upd",
+      "invoices:5",
+    ],
+    "updInvoiceCount": 5,
+  },
+  "упд тад_маршала шагала.pdf": {
+    "confidence": 0.95,
+    "detectedKind": "upd",
+    "needsVision": false,
+    "parserUsed": "tryParseTextUpdBundle",
+    "signals": [
+      "text:upd",
+      "invoices:2",
+    ],
+    "updInvoiceCount": 2,
   },
 }

@@ -743,6 +743,13 @@
       "when": 1781886431000,
       "tag": "0106_registry_content_hash",
       "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1781972831000,
+      "tag": "0107_upd_parsed_requires_number",
+      "breakpoints": true
     }
   ]
 }

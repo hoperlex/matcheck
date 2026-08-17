@@ -63,18 +63,38 @@ function itemsCountMatches(p: UpdPdfParsed): boolean {
 export function chooseBetterUpdResult(base: UpdPdfParsed, candidate: UpdPdfParsed): CompareResult {
   const reasons: string[] = [];
 
+  // ПОЛНОТА СПИСКА ИДЁТ ПЕРВОЙ, раньше полноты шапки.
+  //
+  // Раньше первым сравнивался комплект «номер + дата + итог», и результат с
+  // полной шапкой, но БЕЗ ЕДИНОЙ ПОЗИЦИИ, побеждал результат с номером и всеми
+  // материалами. Для приёмки это разворот наоборот: инспектор работает со
+  // списком материалов, а недостающую дату менеджер дописывает в карточке.
+  // С правилом «номер + полный список» (см. upd-outcome.ts) прежний порядок
+  // прямо противоречил цели — победитель оказывался непригоден к приёмке.
+
+  // Пустой набор позиций проигрывает непустому: документ без строк бесполезен
+  // приёмщику, какой бы полной ни была шапка.
+  if ((base.items.length === 0) !== (candidate.items.length === 0)) {
+    reasons.push(`items ${base.items.length} vs ${candidate.items.length}`);
+    return { winner: candidate.items.length > 0 ? 'candidate' : 'base', reasons };
+  }
+
+  // Список, сошедшийся с «Всего наименований», важнее лишнего поля шапки: он
+  // означает, что материалы распознаны целиком.
+  {
+    const countBase = itemsCountMatches(base);
+    const countCand = itemsCountMatches(candidate);
+    if (countBase !== countCand) {
+      reasons.push(`itemsCount match ${countBase} vs ${countCand}`);
+      return { winner: countCand ? 'candidate' : 'base', reasons };
+    }
+  }
+
   const headerBase = headerCompleteness(base);
   const headerCand = headerCompleteness(candidate);
   if (headerBase !== headerCand) {
     reasons.push(`header ${headerBase} vs ${headerCand}`);
     return { winner: headerCand > headerBase ? 'candidate' : 'base', reasons };
-  }
-
-  // Пустой набор позиций проигрывает непустому независимо от прочего: документ
-  // без строк бесполезен приёмщику.
-  if ((base.items.length === 0) !== (candidate.items.length === 0)) {
-    reasons.push(`items ${base.items.length} vs ${candidate.items.length}`);
-    return { winner: candidate.items.length > 0 ? 'candidate' : 'base', reasons };
   }
 
   const mismatchBase = hasMismatch(base);
@@ -84,12 +104,7 @@ export function chooseBetterUpdResult(base: UpdPdfParsed, candidate: UpdPdfParse
     return { winner: mismatchCand ? 'base' : 'candidate', reasons };
   }
 
-  const countBase = itemsCountMatches(base);
-  const countCand = itemsCountMatches(candidate);
-  if (countBase !== countCand) {
-    reasons.push(`itemsCount match ${countBase} vs ${countCand}`);
-    return { winner: countCand ? 'candidate' : 'base', reasons };
-  }
+  // Совпадение с «Всего наименований» уже проверено выше — до полноты шапки.
 
   if (base.items.length !== candidate.items.length) {
     reasons.push(`items ${base.items.length} vs ${candidate.items.length}`);

@@ -867,9 +867,15 @@ export const sourceDocuments = pgTable(
     index('source_documents_bundle_idx')
       .on(t.bundleId)
       .where(sql`${t.bundleId} is not null`),
+    // Готовность УПД к приёмке стережёт код (domain/edo/upd-outcome.ts), а не
+    // база: там же проверяется полнота списка позиций, которую CHECK выразить
+    // не может. Базе остаётся единственный реквизит, без которого документ не
+    // опознать, — номер. Дата и сумма необязательны с миграции 0107: на
+    // фотографии шапочная сумма часто не пропечатана, а подставлять вместо
+    // даты документа дату поставки нельзя.
     check(
       'source_upd_required',
-      sql`(${t.kind} <> 'upd') or (${t.status} <> 'parsed') or (${t.docNumber} is not null and ${t.docDate} is not null and ${t.totalSum} is not null)`,
+      sql`(${t.kind} <> 'upd') or (${t.status} <> 'parsed') or (${t.docNumber} is not null)`,
     ),
   ],
 );

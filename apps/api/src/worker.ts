@@ -64,7 +64,7 @@ import { tryParseTextUpdBundle } from './domain/edo/upd-text-bundle.parser.js';
 import { parseUpdXlsx } from './domain/edo/upd-xlsx.parser.js';
 import { convertXlsToXlsxBuffer, XlsConvertError } from './domain/edo/xls-to-xlsx.js';
 import {
-  convertExcelToPng,
+  convertExcelToPdf,
   ExcelConvertError,
   ExcelConvertTimeoutError,
   LibreOfficeNotAvailableError,
@@ -78,7 +78,7 @@ import {
 // триггерить ложный «Дубликат УПД». Порог 0.6 эмпирически — выше 0.7
 // будем терять часть нормально распознанных сканов, ниже 0.5 — будут
 // проскакивать галлюцинации (LLM на мусоре часто возвращает ровно 0.5).
-const MIN_DEDUP_CONFIDENCE = 0.6;
+// Значение живёт в domain/edo/upd-validation.ts — см. импорт ниже.
 import {
   parseWaybillBatch,
   type WaybillInputImage,
@@ -86,7 +86,8 @@ import {
 import { expandPdfAttachmentsForOpenRouter } from './domain/edo/waybill-pdf.js';
 import { getDefaultProviderKind } from './domain/llm/registry.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
-import { validateUpdTotals } from './domain/edo/upd-validation.js';
+import { MIN_DEDUP_CONFIDENCE, validateUpdTotals } from './domain/edo/upd-validation.js';
+import { deriveUpdParseOutcome } from './domain/edo/upd-outcome.js';
 import { chooseBetterUpdResult, mergeParties } from './domain/edo/upd-result-compare.js';
 import { normalizeM15ZeroTotals } from './domain/edo/m15-normalize.js';
 import {
@@ -785,13 +786,19 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           'excel structural parse incomplete/invalid — trying vision fallback',
         );
         try {
-          const pngPages = await convertExcelToPng(buffer, isXls ? 'xls' : 'xlsx');
-          // Берём первую страницу: первый лист Excel почти всегда —
-          // шапка + табличка УПД. Симметрия с PDF Vision-fallback
-          // (там тоже только первая страница, см. PDF_MAX_PAGES в
-          // upd-vision.parser.ts).
+          // В распознавание уходит PDF ЦЕЛИКОМ, а не картинка первой страницы.
+          //
+          // Раньше бралось `pngPages[0]`, и у Excel-УПД, чья таблица не
+          // помещается на лист, материалы со второй страницы терялись молча:
+          // документ выглядел распознанным, а половины строк в нём не было.
+          //
+          // Дальше страницами распоряжается сам vision-путь, и он у провайдеров
+          // разный: OpenRouter прогоняет PDF через prefilter (классификация
+          // страниц + предел MAX_PAGES_FOR_OPENROUTER), Google AI Studio
+          // принимает PDF как есть. Оба варианта лучше одной картинки.
+          const pdf = await convertExcelToPdf(buffer, isXls ? 'xls' : 'xlsx');
           const r = await parseUpdVision(
-            { buffer: pngPages[0]!, mimeType: 'image/png', filename: s3Key },
+            { buffer: pdf, mimeType: 'application/pdf', filename: s3Key },
             { sourceDocumentId },
           );
           // Merge: Vision ДОБИРАЕТ только пустые поля шапки, структурные items
@@ -1440,6 +1447,37 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   const wantSecondPass =
     !secondPassJob && weakReasons.length > 0 && SECOND_PASS_MODES.has(parseMode);
 
+  // Документ без даты: проверка на дубль по паре «поставщик + номер».
+  //
+  // Раньше такой документ до `parsed` не доходил вовсе, и вопрос не стоял.
+  // Теперь доходит — а дедуп ниже требует дату и молча пропустил бы его мимо
+  // проверки. Совпадение здесь НЕ блокирует: номера повторяются между годами,
+  // и жёсткий отказ остановил бы работу из-за однофамильца. Пишем пометку —
+  // менеджер видит риск в карточке, инспектор продолжает приёмку.
+  let possibleDuplicateOf: string | null = null;
+  if (canDedup && supplierDirectoryId && parsed.docNumber && !docDate) {
+    const [twin] = await db
+      .select({ id: sourceDocuments.id })
+      .from(sourceDocuments)
+      .where(
+        and(
+          eq(sourceDocuments.kind, 'upd'),
+          eq(sourceDocuments.supplierDirectoryId, supplierDirectoryId),
+          eq(sourceDocuments.docNumber, parsed.docNumber),
+          inArray(sourceDocuments.status, ['parsed', 'needs_resolution']),
+          drSql`${sourceDocuments.id} <> ${sourceDocumentId}`,
+        ),
+      )
+      .limit(1);
+    if (twin) {
+      possibleDuplicateOf = twin.id;
+      log.warn(
+        { existingId: twin.id, docNumber: parsed.docNumber },
+        'документ без даты: тот же номер у того же поставщика — помечаем как возможный дубль',
+      );
+    }
+  }
+
   let duplicate: { id: string } | null = null;
   if (canDedup && supplierDirectoryId && parsed.docNumber && docDate) {
     const [existing] = await db
@@ -1554,8 +1592,9 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // См. m15-normalize.ts.
   parsed = normalizeM15ZeroTotals(parsed, 'docKind' in job.data ? job.data.docKind : undefined);
 
-  // Валидация сумм.
-  const validation = validateUpdTotals({
+  // Валидация сумм. `let`: после синтеза итога по строкам сверку пересчитываем
+  // — предупреждение, посчитанное по пустой сумме, ввело бы в заблуждение.
+  let validation = validateUpdTotals({
     totalSum: parsed.totalSum ?? null,
     vatSum: parsed.vatSum ?? null,
     itemsCount: parsed.itemsCount ?? null,
@@ -1566,58 +1605,48 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     })),
   });
 
-  const hasMismatch = validation.hasMismatch;
-  // Шапка распознана НЕПОЛНО — это нормальный случай для excel-УПД на
-  // Шаге 2a (парсер пока не извлекает позиции и totalSum). Также защищает
-  // от падения UPDATE на CHECK-constraint source_upd_required, который
-  // требует docNumber/docDate/totalSum NOT NULL при status='parsed'.
-  // В таком виде документ записывается со статусом needs_resolution —
-  // пользователь добавит недостающие поля и позиции через UI.
-  const isIncomplete =
-    parsed.items.length === 0 ||
-    parsed.totalSum == null ||
-    parsed.docNumber == null ||
-    parsed.docDate == null;
-  const status: 'parsed' | 'needs_resolution' =
-    hasMismatch || isIncomplete ? 'needs_resolution' : 'parsed';
-  // Приоритет: partial_parse важнее validation_mismatch. Если документ
-  // распознан частично (нет позиций или итого) — сверка сумм бессмысленна,
-  // показывать «суммы не сходятся» вводит пользователя в заблуждение.
-  // Семантически правильно сначала добить шапку/позиции, потом проверять
-  // суммы — для xlsx Шага 2a это всегда так.
-  const parseErrorCode: 'validation_mismatch' | 'partial_parse' | null = isIncomplete
-    ? 'partial_parse'
-    : hasMismatch
-      ? 'validation_mismatch'
-      : null;
-  // confidence и parsedViaVision в parseErrorDetails — диагностика для
-  // UI / администратора (поля опциональные, контракт не меняем).
-  // reason='low_confidence' помечает кейс «модель не уверена в распознавании»
-  // — будущий UI может показать предупреждение «проверьте качество фото».
-  const parseErrorDetails: Record<string, unknown> | null = isIncomplete
-    ? {
-        missing: [
-          parsed.docNumber == null ? 'docNumber' : null,
-          parsed.docDate == null ? 'docDate' : null,
-          parsed.totalSum == null ? 'totalSum' : null,
-          parsed.items.length === 0 ? 'items' : null,
-        ].filter(Boolean) as string[],
-        confidence,
-        parsedViaVision,
-        reason: confidence < MIN_DEDUP_CONFIDENCE ? 'low_confidence' : null,
-      }
-    : hasMismatch
-      ? {
-          failedChecks: validation.checks
-            .filter((c) => !c.ok)
-            .map((c) => ({
-              name: c.name,
-              scope: c.scope,
-              expected: c.expected,
-              actual: c.actual,
-              diff: c.diff,
-            })),
-        }
+  // Готов ли документ к приёмке — единое правило, общее с ручной правкой на
+  // портале и с бэкфиллом (см. domain/edo/upd-outcome.ts). Решают две вещи:
+  // номер и ПОЛНЫЙ список материалов. Отсутствующая шапочная сумма считается
+  // по строкам, отсутствующая дата не мешает, денежные расхождения становятся
+  // предупреждением — но неполный список (12 позиций в документе против 3
+  // распознанных) по-прежнему отказ: такая поставка приехала бы инспектору
+  // как полная.
+  const outcome = deriveUpdParseOutcome(
+    { ...parsed, itemsCount: parsed.itemsCount ?? null },
+    validation,
+    { confidence, parsedViaVision },
+  );
+
+  // Итог посчитан по строкам — сверку сумм надо переснять, иначе в списке
+  // останется предупреждение, посчитанное по пустой сумме.
+  if (outcome.totalSumSynthesized && outcome.totalSum != null) {
+    parsed = { ...parsed, totalSum: outcome.totalSum };
+    validation = validateUpdTotals({
+      totalSum: outcome.totalSum,
+      vatSum: parsed.vatSum ?? null,
+      itemsCount: parsed.itemsCount ?? null,
+      items: parsed.items.map((i) => ({
+        qty: i.qty,
+        price: i.price ?? null,
+        sum: i.sum ?? null,
+      })),
+    });
+  }
+
+  const status = outcome.status;
+  const parseErrorCode = outcome.parseErrorCode;
+  const detailExtras = {
+    // reason='low_confidence' помечает кейс «модель не уверена в
+    // распознавании» — UI может предупредить «проверьте качество фото».
+    ...(confidence < MIN_DEDUP_CONFIDENCE ? { reason: 'low_confidence' } : {}),
+    // Тот же номер у того же поставщика, но дат нет ни у одного — сверить
+    // автоматически нечем, решение за менеджером.
+    ...(possibleDuplicateOf ? { possibleDuplicateOf } : {}),
+  };
+  const parseErrorDetails: Record<string, unknown> | null =
+    outcome.parseErrorDetails || Object.keys(detailExtras).length > 0
+      ? { ...(outcome.parseErrorDetails ?? {}), ...detailExtras }
       : null;
 
   // Запись шапки. Для новых распознанных УПД поставщик живёт в

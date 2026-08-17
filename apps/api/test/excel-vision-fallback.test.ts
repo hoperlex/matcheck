@@ -99,6 +99,66 @@ describe('getExcelVisionFallbackReasons', () => {
   });
 });
 
+describe('mergeExcelStructuralWithVision — чей список материалов', () => {
+  const item = (name: string) => ({
+    nameRaw: name,
+    qty: 1,
+    unit: 'шт',
+    price: 100,
+    sum: 122,
+    vatRate: 20,
+    vatSum: 22,
+    volumeM3: null,
+    massKg: null,
+    volumeConfidence: null,
+    groupName: null,
+  });
+
+  it('список, сошедшийся со «Всего наименований», побеждает', () => {
+    // Ровно кейс сложного Excel: структурный парсер вытащил первые строки и
+    // споткнулся на разметке, Vision увидел лист целиком. Раньше побеждал
+    // структурный — и половина материалов пропадала молча.
+    const structural = good({ items: [item('A')], itemsCount: 3, confidence: 0.9 });
+    const vision = good({ items: [item('A'), item('B'), item('C')], itemsCount: 3 });
+
+    const m = mergeExcelStructuralWithVision(structural, vision);
+
+    expect(m.result.items).toHaveLength(3);
+    expect(m.mergedFields).toContain('items');
+  });
+
+  it('структурный сошёлся со счётчиком — список Vision не берём', () => {
+    // Защита от галлюцинаций: модель дописала строку, счётчик её не
+    // подтверждает.
+    const structural = good({ items: [item('A'), item('B')], itemsCount: 2, confidence: 0.9 });
+    const vision = good({ items: [item('A'), item('B'), item('Выдумка')], itemsCount: 2 });
+
+    const m = mergeExcelStructuralWithVision(structural, vision);
+
+    expect(m.result.items).toHaveLength(2);
+    expect(m.mergedFields).not.toContain('items');
+  });
+
+  it('счётчика нет — берём более длинный список', () => {
+    // Пропущенная строка материала дороже лишней: лишнюю менеджер увидит в
+    // карточке, недостающую — только на площадке.
+    const structural = good({ items: [item('A')], itemsCount: null, confidence: 0.9 });
+    const vision = good({ items: [item('A'), item('B')], itemsCount: null });
+
+    expect(mergeExcelStructuralWithVision(structural, vision).result.items).toHaveLength(2);
+  });
+
+  it('списки равной длины — остаётся структурный', () => {
+    const structural = good({ items: [item('A')], itemsCount: null, confidence: 0.9 });
+    const vision = good({ items: [item('Другое имя')], itemsCount: null });
+
+    const m = mergeExcelStructuralWithVision(structural, vision);
+
+    expect(m.result.items[0]!.nameRaw).toBe('A');
+    expect(m.mergedFields).not.toContain('items');
+  });
+});
+
 describe('mergeExcelStructuralWithVision', () => {
   it('structural пустой по items → берём Vision целиком', () => {
     const vision = good({ docNumber: 'V' });

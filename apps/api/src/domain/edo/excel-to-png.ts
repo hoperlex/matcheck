@@ -77,6 +77,8 @@ const SOFFICE_BIN = 'soffice';
 export async function convertExcelToPng(
   buffer: Buffer,
   ext: 'xls' | 'xlsx',
+  /** Сколько страниц рендерить. По умолчанию — только первая (прежнее поведение). */
+  maxPages = 1,
 ): Promise<Buffer[]> {
   const dir = await mkdtemp(join(tmpdir(), 'upd-excel-'));
   try {
@@ -96,9 +98,39 @@ export async function convertExcelToPng(
       );
     }
 
-    return await pdfToPngs(dir, pdfPath);
+    return await pdfToPngs(dir, pdfPath, maxPages);
   } finally {
     // best-effort cleanup. Если что-то не удалилось — это temp, ОС подметёт.
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Excel → PDF, без рендера в картинки.
+ *
+ * Нужен распознаванию: PDF целиком отдаётся vision-парсеру, а тот сам решает,
+ * что делать со страницами — у OpenRouter это классификация страниц через
+ * prefilter, у Google AI Studio документ уходит как есть. Отдавать одну
+ * картинку первой страницы, как делалось раньше, значило терять материалы
+ * длинных таблиц: у Excel-УПД строки регулярно уходят на второй лист.
+ *
+ * Исключения те же, что у convertExcelToPng.
+ */
+export async function convertExcelToPdf(
+  buffer: Buffer,
+  ext: 'xls' | 'xlsx',
+): Promise<Buffer> {
+  const dir = await mkdtemp(join(tmpdir(), 'upd-excel-pdf-'));
+  try {
+    const inPath = join(dir, `in.${ext}`);
+    await writeFile(inPath, buffer);
+    await runLibreOfficeConvert(dir, inPath);
+    try {
+      return await readFile(join(dir, 'in.pdf'));
+    } catch {
+      throw new ExcelConvertError('LibreOffice завершился успешно, но не создал PDF-файл');
+    }
+  } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
@@ -152,18 +184,28 @@ async function runLibreOfficeConvert(outDir: string, inPath: string): Promise<vo
   });
 }
 
-async function pdfToPngs(dir: string, pdfPath: string): Promise<Buffer[]> {
-  // Рендерим только первую страницу (-l 1): первый лист Excel почти всегда
-  // содержит шапку + табличную часть УПД целиком (или хотя бы первые позиции,
-  // которых достаточно для распознавания). Если позиций больше — Vision
-  // не увидит их, но это симметрично PDF-fallback'у (там тоже лимит).
+async function pdfToPngs(dir: string, pdfPath: string, maxPages: number): Promise<Buffer[]> {
+  // Сколько страниц рендерить — решает вызывающий. Долгое время здесь стояла
+  // жёсткая единица («первый лист почти всегда содержит всю табличку»), и это
+  // молча резало список материалов: у Excel-УПД строки регулярно уходят на
+  // второй лист, а документ выглядел распознанным.
   //
   // DPI адаптивный: для типового A4-PDF после LibreOffice конвертации даёт
   // 150 (как hardcoded раньше), для аномально больших страниц снижает так,
   // чтобы PNG не превышал 2400 px по длинной стороне.
   const dpi = await computePdfRenderDpi(await readFile(pdfPath));
   const outPrefix = join(dir, 'out');
-  const args = ['-r', String(dpi), '-png', '-f', '1', '-l', '1', pdfPath, outPrefix];
+  const args = [
+    '-r',
+    String(dpi),
+    '-png',
+    '-f',
+    '1',
+    '-l',
+    String(Math.max(1, maxPages)),
+    pdfPath,
+    outPrefix,
+  ];
 
   const startMs = Date.now();
   await new Promise<void>((resolve, reject) => {

@@ -107,7 +107,30 @@ describe('chooseBetterUpdResult — что принимаем со второг�
     expect(chooseBetterUpdResult(good, empty).winner).toBe('base');
   });
 
-  it('полная шапка важнее числа позиций', () => {
+  it('полная шапка без единой позиции проигрывает списку материалов', () => {
+    // Приёмка идёт по списку материалов: документ без строк инспектору
+    // бесполезен, какой бы полной ни была шапка. Раньше сравнение начиналось
+    // с шапки, и такой кандидат побеждал — против цели «номер + материалы».
+    const headerOnly = parsedWith({
+      docNumber: 'УТ-9',
+      docDate: '2026-08-17',
+      totalSum: 999,
+      items: [],
+      itemsCount: null,
+    });
+    const itemsNoDate = parsedWith({
+      docNumber: 'УТ-9',
+      docDate: null,
+      totalSum: null,
+      items: [{ nameRaw: 'Труба', qty: 2, unit: 'шт', price: 100, sum: 200 }],
+      itemsCount: null,
+    });
+
+    expect(chooseBetterUpdResult(headerOnly, itemsNoDate).winner).toBe('candidate');
+    expect(chooseBetterUpdResult(itemsNoDate, headerOnly).winner).toBe('base');
+  });
+
+  it('полная шапка важнее при равной полноте списка', () => {
     const noTotal = parsedWith({
       totalSum: null,
       items: [

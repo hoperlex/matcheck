@@ -74,13 +74,43 @@ export type ExcelMergeResult = {
  *
  * - Структурного нет / нет позиций / низкая уверенность → берём Vision целиком
  *   (поведение как до гибрида).
- * - Структурный валиден по позициям → Vision ДОБИРАЕТ только ПУСТЫЕ поля шапки
- *   (docNumber/docDate/vatSum/totalSum/supplier/recipient/itemsCount), а
- *   structural.items НЕ затираются. confidence не завышаем слепо.
- *
- * Полную замену items на Vision (когда структурные не проходят validation, а
- * Vision проходит) этот шаг НЕ делает — это подшаг 2 (validation-арбитраж).
+ * - Иначе Vision ДОБИРАЕТ пустые поля шапки, а список материалов выбирается
+ *   арбитражем (см. chooseItems ниже). confidence не завышаем слепо.
  */
+/**
+ * Чей список материалов брать: структурного парсера или Vision.
+ *
+ * Прежнее правило — «структурные позиции не затираем никогда» — защищало от
+ * галлюцинаций модели, но ценой потери материалов: структурный парсер часто
+ * вытаскивает первые строки таблицы и спотыкается на плавающей разметке, а
+ * Vision видит лист целиком. Документ при этом выглядел распознанным.
+ *
+ * Арбитраж по единственному объективному признаку — «Всего наименований» из
+ * самой шапки:
+ *   1. список, сошедшийся со счётчиком, побеждает — он доказуемо полный;
+ *   2. счётчика нет ни у кого → берём более длинный: пропущенная строка
+ *      материала дороже лишней, которую менеджер увидит в карточке;
+ *   3. поровну → остаётся структурный, он ближе к исходным данным файла.
+ */
+function chooseItems(
+  structural: UpdPdfParsed,
+  vision: UpdPdfParsed,
+): { items: UpdPdfParsed['items']; source: 'structural' | 'vision' } {
+  const expected = structural.itemsCount ?? vision.itemsCount ?? null;
+  if (expected != null) {
+    const structuralMatches = structural.items.length === expected;
+    const visionMatches = vision.items.length === expected;
+    if (visionMatches && !structuralMatches) return { items: vision.items, source: 'vision' };
+    if (structuralMatches && !visionMatches) {
+      return { items: structural.items, source: 'structural' };
+    }
+  }
+  if (vision.items.length > structural.items.length) {
+    return { items: vision.items, source: 'vision' };
+  }
+  return { items: structural.items, source: 'structural' };
+}
+
 export function mergeExcelStructuralWithVision(
   structural: UpdPdfParsed | null,
   vision: UpdPdfParsed,
@@ -93,7 +123,9 @@ export function mergeExcelStructuralWithVision(
     return { result: vision, mergedFields: [], tookVisionWhole: true };
   }
 
+  const chosen = chooseItems(structural, vision);
   const mergedFields: string[] = [];
+  if (chosen.source === 'vision') mergedFields.push('items');
   function fill<T>(s: T | null | undefined, v: T | null | undefined, name: string): T | null {
     if (s != null) return s;
     if (v != null) {
@@ -113,8 +145,8 @@ export function mergeExcelStructuralWithVision(
     supplier: fill(structural.supplier, vision.supplier, 'supplier'),
     recipient: fill(structural.recipient, vision.recipient, 'recipient'),
     consignee: fill(structural.consignee, vision.consignee, 'consignee'),
-    // КЛЮЧЕВОЕ: структурные позиции не затираем.
-    items: structural.items,
+    // Список материалов — арбитраж, а не безусловный структурный.
+    items: chosen.items,
     // Не завышаем уверенность слепо: max(structural, min(vision, 0.9)).
     confidence: Math.max(structural.confidence, Math.min(vision.confidence, 0.9)),
   };

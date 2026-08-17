@@ -49,6 +49,7 @@ import {
 } from '../db/schema.js';
 import { parseUpdXml } from '../domain/edo/upd.parser.js';
 import { validateUpdTotals } from '../domain/edo/upd-validation.js';
+import { deriveUpdParseOutcome } from '../domain/edo/upd-outcome.js';
 import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { publishEvent } from './events.js';
@@ -3091,15 +3092,49 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       });
       upd.validation = validation;
 
-      // Авто-перевод needs_resolution → parsed, если расхождения исчезли.
-      if (
-        sd.status === 'needs_resolution' &&
-        sd.parseErrorCode === 'validation_mismatch' &&
-        !validation.hasMismatch
-      ) {
-        upd.status = 'parsed';
-        upd.parseErrorCode = null;
-        upd.parseErrorDetails = null;
+      // Исход после правки считает то же правило, что и разбор
+      // (domain/edo/upd-outcome.ts). Раньше здесь жила своя проверка, и она
+      // умела только одно: снять `validation_mismatch`, когда суммы сошлись.
+      // Менеджер, дописавший недостающие позиции или номер, оставался с
+      // `partial_parse` — то есть его работа не доезжала до инспектора.
+      //
+      // Трогаем статус только у документов в работе: `archived` закрыт
+      // человеком осознанно, а заглушки разбираются ниже по явному флагу.
+      // Дубликат сюда не попадает: его снимает отдельное действие «разрешить»
+      // (resolve-duplicate), где человек решает, какой из двух документов
+      // настоящий. Пересчитав ему исход здесь, мы бы стёрли эту пометку при
+      // любой правке поля — и второй экземпляр УПД тихо уехал бы инспектору.
+      const touchable =
+        sd.kind === 'upd' &&
+        (sd.status === 'needs_resolution' || sd.status === 'parsed') &&
+        sd.parseErrorCode !== 'duplicate_upd' &&
+        !isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
+      if (touchable) {
+        const nextNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
+        const outcome = deriveUpdParseOutcome(
+          {
+            items: updatedItems.map((i) => ({
+              nameRaw: i.nameRaw,
+              qty: Number(i.qty),
+              price: i.price != null ? Number(i.price) : null,
+              sum: i.sum != null ? Number(i.sum) : null,
+              vatRate: i.vatRate != null ? Number(i.vatRate) : null,
+            })),
+            docNumber: nextNumber ?? null,
+            totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
+            confidence: sd.llmConfidence != null ? Number(sd.llmConfidence) : 0,
+            itemsCount: null,
+          },
+          validation,
+        );
+        upd.status = outcome.status;
+        upd.parseErrorCode = outcome.parseErrorCode;
+        upd.parseErrorDetails = outcome.parseErrorDetails as never;
+        // Итог, посчитанный по строкам, записываем только если менеджер не
+        // задал его сам в этом же запросе.
+        if (upd.totalSum === undefined && outcome.totalSumSynthesized && outcome.totalSum != null) {
+          upd.totalSum = outcome.totalSum.toString();
+        }
       }
 
       // Завершение ручного разбора заглушки. Только по явному флагу: правка
