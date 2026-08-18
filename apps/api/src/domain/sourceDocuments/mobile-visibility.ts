@@ -20,6 +20,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { ingestEvents, sourceBundles, sourceDocuments } from '../../db/schema.js';
 import { STUB_ERROR_CODES } from '@matcheck/contracts';
 import { groupModeSites } from '../groups/group-mode.js';
+import { machineRootSql } from './document-group.js';
 import { loadEnv } from '../../lib/env.js';
 
 /**
@@ -51,25 +52,81 @@ const HAS_REQUIRED_FIELDS = sql`
 `;
 
 /**
- * Группа не в промежуточном состоянии.
+ * Машина не в промежуточном состоянии.
  *
- * Машина едет на планшет целиком или не едет вовсе. Блокирует её что угодно из
- * перечисленного:
+ * Машина едет на планшет целиком или не едет вовсе — иначе инспектор оформит
+ * рейс по половине бумаг. Но «целиком» не значит «пока менеджер не разберёт всё
+ * до последнего файла»: держать грузовик под разгрузкой из-за нераспознанного
+ * фото нельзя. Поэтому блокирует только то, что ЕЩЁ В РАБОТЕ и приедет само:
  *
- *   * документ группы не дошёл до parsed — он ещё в разборе или требует
- *     решения менеджера;
- *   * документ группы дошёл, но без реквизитов — то есть «Черновик»;
- *   * строка реестра активного поколения не имеет исхода — файл принят, а
- *     документа по нему ещё нет ВООБЩЕ. Это ключевой случай: проверка по
- *     source_documents его не видит, потому что проверять нечего.
+ *   * документ в разборе (queued/processing) — но не дольше STALE_PARSE_MINUTES;
+ *   * документ дошёл до parsed, но без реквизитов — на портале это «Черновик»,
+ *     менеджер вот-вот заполнит;
+ *   * файл принят, а документа по нему нет ВООБЩЕ — проверка по source_documents
+ *     такого не видит, потому что проверять нечего;
+ *   * поколение загрузки в переходе: комплект прошлой отправки вот-вот снесут.
  *
- * `archived` намеренно не блокирует: осознанно исключённый дубль или
- * сертификат не должен держать машину вечно.
+ * НЕ блокируют и намеренно: archived, дубликаты, заглушки «не распознано»,
+ * parse_failed, partial_parse, validation_mismatch. Все они ждут ЧЕЛОВЕКА, а не
+ * машины, и до его решения могут стоять сутками. Проверено на боевых данных
+ * перед сменой правила: за всё время журнала ни один документ не стал видимым
+ * ПОСЛЕ того, как по его машине создали приёмку (0 из 49), а переходы
+ * «скрыт → виден» укладываются в среднем в 0,1 минуты — то есть «опоздавших»
+ * документов, ради которых стоило бы держать машину, на практике не бывает.
+ * Прежнее правило (блокирует всё, что не parsed и не archived) держало 17 машин
+ * из-за их собственных дубликатов.
  *
- * Для документа без группы (legacy-сборка, ЭДО, почта) подзапрос не
+ * Для документа без машины (почта, ЭДО, внутренняя загрузка) подзапрос не
  * применяется — там понятия «машина» нет, документ отвечает сам за себя.
  */
-const GROUP_IS_COMPLETE = sql`
+
+/**
+ * Сколько документ может висеть в разборе, прежде чем перестанет держать машину.
+ *
+ * Разбор укладывается в доли минуты, получас — заведомый запас. Предел нужен не
+ * для скорости, а против зависших заданий: на бою один документ простоял в
+ * очереди 21 час и без предела погасил бы свою машину навсегда.
+ */
+const STALE_PARSE_MINUTES = 30;
+
+function groupIsCompleteSql(): SQL {
+  // Пока рубильник выключен — ровно прежнее правило, до последнего условия.
+  // Это обещание «выкат ничего не меняет для инспекторов»: набор блокирующих
+  // расширяется только вместе с новым определением машины.
+  const rollout = loadEnv().GROUPS_ROLLOUT;
+  const blockingSibling = rollout
+    ? sql`(
+           sibling.id is not null
+           and sibling.status in ('queued', 'processing')
+           and coalesce(sibling.queued_at, sibling.created_at)
+               > now() - make_interval(mins => ${STALE_PARSE_MINUTES})
+         )`
+    : sql`(sibling.id is not null and sibling.status not in ('parsed', 'archived'))`;
+  // Строка реестра, закрытая человеком, и строка без ключа в хранилище держат
+  // машину только по старому правилу — см. пояснения выше.
+  const registryGuard = rollout
+    ? sql`and bi.input_s3_key is not null and bi.resolved_at is null`
+    : sql``;
+  const generationInTransit = rollout
+    ? sql`
+         -- поколение загрузки в переходе: реестр прошлой отправки ещё есть, а
+         -- реестра новой ещё нет. Ровно в этом окне комплект выглядит целой
+         -- машиной, хотя его вот-вот удалят (см. purgePreviousGeneration).
+         or (
+           member.active_upload_generation > 0
+           and not exists (
+             select 1 from bundle_import_items x
+              where x.bundle_id = member.id
+                and x.upload_generation = member.active_upload_generation
+           )
+           and exists (
+             select 1 from bundle_import_items x
+              where x.bundle_id = member.id
+                and x.upload_generation < member.active_upload_generation
+           )
+         )`
+    : sql``;
+  return sql`
   not exists (
     select 1
       from ${sourceBundles} self
@@ -78,19 +135,23 @@ const GROUP_IS_COMPLETE = sql`
       left join ${sourceDocuments} sibling
              on sibling.bundle_id = member.id
             and sibling.is_technical = false
-      -- Условия «есть ключ S3» здесь НЕТ намеренно. Файл, не долетевший до
-      -- хранилища, оставляет строку без ключа (частичный сбой приёма), и
-      -- пробел в машине от этого не становится меньше: документа по такому
-      -- файлу нет и быть не может, пока его не дозагрузят.
       left join bundle_import_items bi
              on bi.bundle_id = member.id
             and bi.upload_generation = member.active_upload_generation
+            -- Под новым правилом машину НЕ держат две категории строк.
+            -- Без ключа в хранилище (частичный сбой приёма): заглушку по такой
+            -- строке не заводит никто — selectRowsWithoutDocument требует
+            -- input_s3_key is not null, — то есть снять блокировку было нечем и
+            -- машина гасла навсегда. Закрытая человеком (ручной разбор,
+            -- удаление документа менеджером): вопрос по файлу уже решён, а без
+            -- этого удаление лишней бумаги гасило бы всю машину.
+            ${registryGuard}
      where self.id = ${sourceDocuments.bundleId}
-       and root.assembly_version = 'logical_v1'
+       and ${machineRootSql('root')}
        and (
-         -- документ группы не готов. Статус archived сюда НЕ входит: осознанно
-         -- исключённый дубль или сертификат не должен держать машину вечно.
-         (sibling.id is not null and sibling.status not in ('parsed', 'archived'))
+         -- документ ещё в работе: под новым правилом это только разбор, который
+         -- не завис; под старым — всё, что не parsed и не archived.
+         ${blockingSibling}
          or (
            sibling.id is not null
            and sibling.status = 'parsed'
@@ -120,9 +181,11 @@ const GROUP_IS_COMPLETE = sql`
                 and d.is_technical = false
            )
          )
+         ${generationInTransit}
        )
   )
 `;
+}
 
 /**
  * Поставка с публичного портала отдаётся только собранной и опубликованной.
@@ -182,8 +245,37 @@ export function mobileVisibleSourceDocumentSql(): SQL {
       sql`, `,
     )})
     and ${HAS_REQUIRED_FIELDS}
-    and ${GROUP_IS_COMPLETE}
+    and ${groupIsCompleteSql()}
     ${strictPortal ? sql`and ${PORTAL_PACKAGE_IS_PUBLISHED}` : sql``}
+  )`;
+}
+
+/**
+ * Предикат выдачи с учётом отсечки «только будущие загрузки».
+ *
+ * Документ из пачки, принятой ДО выката, идёт по ПРЕЖНЕМУ контракту: он уже
+ * лежит на планшетах, инспектор с ним работал, часть таких документов оформлена.
+ * Отфильтровав их задним числом, мы бы забрали у инспектора то, что он вчера
+ * видел, — включая документы, по которым начаты приёмки.
+ *
+ * Документ вне машины (почта, ЭДО, ручной внос) при заданной отсечке тоже идёт
+ * по прежнему контракту: у него нет пакета, а значит и даты приёма, по которой
+ * можно решить «новый или старый».
+ *
+ * Без отсечки (GROUPS_ROLLOUT_SINCE пуст) — обычный предикат для всего.
+ */
+export function mobileVisibleWithinRolloutSql(): SQL {
+  const since = loadEnv().GROUPS_ROLLOUT_SINCE;
+  if (!since) return mobileVisibleSourceDocumentSql();
+  return sql`(
+    coalesce(
+      (select root.created_at
+         from ${sourceBundles} b
+         join ${sourceBundles} root on root.id = coalesce(b.parent_bundle_id, b.id)
+        where b.id = ${sourceDocuments.bundleId}),
+      ${sourceDocuments.createdAt}
+    ) < ${since.toISOString()}::timestamptz
+    or ${mobileVisibleSourceDocumentSql()}
   )`;
 }
 
@@ -218,9 +310,15 @@ export function mobileVisibleWithinCanarySql(userSiteId: string | null | undefin
   // `is null` в первой ветке обязателен: документ без объекта не проходит
   // HAS_REQUIRED_FIELDS, и без явного пропуска NOT IN дал бы по нему NULL,
   // выбросив строку из выдачи менеджера вместе с прежним контрактом.
+  //
+  // Скобки у вызова в третьей ветке ОБЯЗАТЕЛЬНЫ. Без них в шаблон попадает сама
+  // функция, а drizzle не видит в ней SQLWrapper (нет getSQL) и биндит её как
+  // обычный параметр: в запрос уходит `or $N` со значением-функцией вместо
+  // предиката. Ветка достижима только для менеджера и админа (siteId = null)
+  // при непустом списке объектов, поэтому на бою не проявлялась.
   return sql`(
     ${sourceDocuments.siteId} is null
     or ${sourceDocuments.siteId} not in ${sites}
-    or ${mobileVisibleSourceDocumentSql}
+    or ${mobileVisibleSourceDocumentSql()}
   )`;
 }

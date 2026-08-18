@@ -84,8 +84,8 @@ export async function resolveGroupComposition(
   );
   const sent = await db.execute<DocRow>(sql`
     select ${sourceDocuments.id} as id,
-           ${documentGroupIdSql} as "groupId",
-           ${documentGroupRevisionSql} as "groupRevision"
+           ${documentGroupIdSql()} as "groupId",
+           ${documentGroupRevisionSql()} as "groupRevision"
       from ${sourceDocuments}
      where ${sourceDocuments.id} in (${idList})
   `);
@@ -107,7 +107,7 @@ export async function resolveGroupComposition(
   // соседнего объекта в ту же операцию попасть не может, и требовать его от
   // клиента нельзя.
   const scope = [
-    sql`(${documentGroupIdSql}) = ${groupId}::uuid`,
+    sql`(${documentGroupIdSql()}) = ${groupId}::uuid`,
     mobileVisibleSourceDocumentSql(),
     sql`${sourceDocuments.direction} = ${direction}`,
     ...(siteId ? [sql`${sourceDocuments.siteId} = ${siteId}::uuid`] : []),

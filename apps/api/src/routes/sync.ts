@@ -35,7 +35,11 @@ import {
   documentGroupRevisionSql,
 } from '../domain/sourceDocuments/document-group.js';
 import { notStubDocumentSql } from '../domain/sourceDocuments/stub-documents.js';
-import { mobileVisibleWithinCanarySql } from '../domain/sourceDocuments/mobile-visibility.js';
+import {
+  mobileVisibleWithinCanarySql,
+  mobileVisibleWithinRolloutSql,
+} from '../domain/sourceDocuments/mobile-visibility.js';
+import { loadEnv } from '../lib/env.js';
 import { selectVisibilityTombstones } from '../domain/sourceDocuments/visibility-events.js';
 import { parseCapabilities, resolveGroupMode } from '../domain/groups/group-mode.js';
 import {
@@ -73,7 +77,19 @@ const QuerySchema = z.object({
 // закоммиченных записей. Курсор дельты сдвигаем на него назад, чтобы
 // пограничные записи гарантированно попали в следующую дельту. Повтор
 // безвреден — клиент применяет дельту идемпотентно (saveAggregate по id).
+//
+// Тридцать секунд ВМЕСТО трёх — но только вместе с новой моделью машины. Окно
+// обязано превышать предельную длительность транзакции, которая пишет события
+// видимости: событие помечается statement_timestamp(), а становится ВИДИМЫМ
+// только после коммита. Транзакция, начавшая писать событие до выдачи курсора и
+// закоммитившая после, иначе потеряла бы его навсегда — для метки удаления это
+// документ, застрявший на планшете до переустановки.
+//
+// Под рубильником, а не всегда: пока метки не выдаются, расширять окно незачем,
+// а лишний хвост дельты — это трафик на всех планшетах. Повтор строк сам по себе
+// безвреден, клиент применяет дельту идемпотентно.
 const SYNC_CURSOR_SAFETY_MS = 3000;
+const SYNC_CURSOR_SAFETY_ROLLOUT_MS = 30_000;
 
 // Размер страницы документов в групповом режиме.
 //
@@ -100,7 +116,10 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       // ни в текущий ответ, ни в будущие дельты (since уезжал за её
       // updated_at) — и становилась видна только после logout/login
       // (initial-sync). Фиксация момента до выборок закрывает гонку.
-      const syncStartedAt = new Date(Date.now() - SYNC_CURSOR_SAFETY_MS);
+      const syncStartedAt = new Date(
+        Date.now() -
+          (loadEnv().GROUPS_ROLLOUT ? SYNC_CURSOR_SAFETY_ROLLOUT_MS : SYNC_CURSOR_SAFETY_MS),
+      );
       const since = req.query.since ? new Date(req.query.since) : null;
       const capabilities = parseCapabilities(req.query.capabilities);
       const windowDays = req.query.windowDays ?? 90;
@@ -217,14 +236,23 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       // получателя — те самые, что портал рисует «Черновиком». Инспектор не
       // должен принимать машину, у которой даже получатель не определён.
       //
-      // Предикат применяется ТОЛЬКО клиенту с capability: старая сборка не
-      // понимает ни typed-конфликтов, ни исчезновения документа из выдачи, и
-      // менять ей контракт нельзя (см. group-mode.ts).
+      // Предикат НЕ зависит от capability клиента: «на планшет едет только
+      // обработанное» — базовое правило выдачи, а не часть групповой механики.
+      // Пока оно висело на том же рубильнике, что и группы, инспекторы получали
+      // дубликаты и неразобранные документы: за две недели 87 штук, из них 40
+      // дубликатов. Старому клиенту фильтр безразличен — он просто получает
+      // меньше строк, а не другой контракт.
+      //
+      // Только инспектору. `/sync` тянет и веб-портал под ролями admin/manager
+      // (apps/web/src/services/sync.ts), а им по контракту этого модуля положено
+      // видеть скрытое — иначе кнопкой «Принять как есть» некому пользоваться.
       const groupMode = resolveGroupMode({ siteId: userSiteId, capabilities });
-      if (groupMode.enabled) {
-        // Сужение по объектам canary обязательно: у менеджера siteId нет, и без
-        // него предикат применился бы к документам объектов, которые в режим не
-        // переводили. См. mobileVisibleWithinCanarySql.
+      const enforceVisibility = loadEnv().GROUPS_ROLLOUT && inspectorOnly;
+      if (enforceVisibility) {
+        sdWhereParts.push(mobileVisibleWithinRolloutSql());
+      } else if (groupMode.enabled) {
+        // Прежний путь под старым рубильником: сужение по объектам canary
+        // обязательно, у менеджера siteId нет. См. mobileVisibleWithinCanarySql.
         sdWhereParts.push(mobileVisibleWithinCanarySql(userSiteId));
       }
 
@@ -259,8 +287,8 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       const sdFetched = await app.db
         .select({
           ...getTableColumns(sourceDocuments),
-          groupId: documentGroupIdSql,
-          groupRevision: documentGroupRevisionSql,
+          groupId: documentGroupIdSql(),
+          groupRevision: documentGroupRevisionSql(),
         })
         .from(sourceDocuments)
         .where(drAnd(...sdWhereParts))
@@ -537,10 +565,12 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         // не знает — там только физические удаления, — а дельта по updated_at не
         // покажет, потому что сам документ не менялся.
         //
-        // Только для клиента с capability: старая сборка не ждёт, что документ
-        // может исчезнуть без удаления, и внезапная пропажа машины выглядела бы
-        // для инспектора потерей данных.
-        if (groupMode.enabled) {
+        // Отдаём ровно тем, к кому применён фильтр видимости: иначе документ
+        // исчезнет из выдачи, но останется лежать в памяти планшета навсегда —
+        // дельта его больше не привезёт, а сверка удалять документы не умеет
+        // (клиент игнорирует missingOnServer для source_documents). Capability
+        // здесь ни при чём: поле deletedIds старая сборка понимает.
+        if (enforceVisibility || groupMode.enabled) {
           const hidden = await selectVisibilityTombstones(app.db, {
             since,
             siteId: inspectorOnly ? userSiteId : null,
@@ -1065,9 +1095,16 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
                   ...(inspectorOnly && userSiteId
                     ? [eq(sourceDocuments.siteId, userSiteId)]
                     : []),
-                  ...(reconcileGroupMode.enabled
-                    ? [mobileVisibleWithinCanarySql(userSiteId)]
-                    : []),
+                  // Точно то же условие, что в дельте, и включается тем же
+                  // рубильником. Разъедься они — сверка вернула бы скрытый
+                  // документ в missingOnClient, клиент скачал бы его
+                  // detail-маршрутом (там проверяется только доступ), и скрытие
+                  // не пережило бы одну синхронизацию.
+                  ...(loadEnv().GROUPS_ROLLOUT && inspectorOnly
+                    ? [mobileVisibleWithinRolloutSql()]
+                    : reconcileGroupMode.enabled
+                      ? [mobileVisibleWithinCanarySql(userSiteId)]
+                      : []),
                 ],
               ),
             );

@@ -12,39 +12,72 @@
 // /sync, и detail-роуту, а держать его в двух местах — гарантированный
 // рассинхрон, когда одно из них поправят.
 
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { sourceBundles, sourceDocuments } from '../../db/schema.js';
+import { loadEnv } from '../../lib/env.js';
 
 /**
  * Сборка, при которой группу вообще можно склеивать.
+ *
+ * Прежнее правило, действует пока GROUPS_ROLLOUT выключен.
  *
  * legacy — «файл = документ»: многостраничную УПД, снятую по кадру на
  * страницу, разбор превратит в N документов с частичными позициями, и склейка
  * дала бы задвоенный список материалов. Там группа = сам документ.
  * logical_v1 — границы документов уже логические, группа = корневой пакет.
  * См. миграцию 0096_multi_upd_delivery.sql.
+ *
+ * Опасение про задвоенный список проверено на боевых данных перед сменой
+ * правила: среди публичных машин нет ни одной, где два ВИДИМЫХ документа несли
+ * бы одинаковый номер, а пересечений позиций у несобранных машин ноль.
  */
 const GROUPABLE_ASSEMBLY = 'logical_v1';
 
+/** Алиасы, под которыми корневой пакет доступен в местах вызова. */
+type RootAlias = 'root' | 'sb' | 'member_root';
+
 /**
- * Группа существует, только пока опубликованное поколение совпадает с активным.
+ * «Этот корневой пакет — машина», единственное правило на все точки.
  *
- * `assembly_version` одного мало. Оно означает «этот пакет когда-то собрали
- * логически» и после публикации не пересматривается. А `active_upload_generation`
- * растёт при каждой повторной отправке того же комплекта (см. ingest-bundle,
- * ветка CAS-рестарта): в этот момент старые документы ещё висят в базе, новые
- * только начинают создаваться, и группа находится в промежуточном состоянии.
+ * Новое (GROUPS_ROLLOUT=1): машина — это одна отправка с публичной страницы
+ * /uploads. Признак известен в момент приёма и не зависит от того, удалась ли
+ * постраничная сборка УПД: она откатывается (см. rollbackUpdAssembly), и
+ * поставка разваливалась на отдельные карточки у инспектора. За месяц так
+ * рассыпались 27 машин из 66.
  *
- * Без этого условия планшет успел бы забрать полусобранную машину: часть
- * документов нового поколения уже готова, часть ещё в разборе, а `groupId` у
- * них общий — инспектор принял бы неполный состав, считая его полным.
+ * Старое (GROUPS_ROLLOUT=0): машиной считается только успешно собранный и
+ * опубликованный пакет. Оставлено для мгновенного отката без выката.
  *
- * Сравнение с `published_generation` заодно даёт бесплатный staging: инкремента
- * активного поколения достаточно, чтобы группа исчезла из выдачи, и отдельного
- * «перевести корень в staging» писать не нужно.
+ * ОДНО И ТО ЖЕ правило обязано применяться в четырёх местах: group_id,
+ * group_revision, проверка комплектности машины (mobile-visibility) и бамп
+ * ревизии. Разъедься они — group_id без комплектности пропустит готовый
+ * документ вперёд разбирающегося соседа, а без бампа планшет не узнает о смене
+ * состава.
+ *
+ * @param alias как назван корневой пакет в вызывающем запросе. Значения
+ *   перечислены типом: строка приходит только из нашего кода, не из запроса.
  */
-const PUBLISHED_GENERATION_IS_CURRENT = sql`root.published_generation is not null
-   and root.published_generation = root.active_upload_generation`;
+export function machineRootSql(alias: RootAlias = 'root'): SQL {
+  const root = sql.raw(alias);
+  const env = loadEnv();
+  if (env.GROUPS_ROLLOUT) {
+    // Отсечка по дате приёма: новая модель распространяется только на пачки,
+    // загруженные ПОСЛЕ выката. Пакет, который инспекторы уже видели, менять
+    // задним числом нельзя — у него сложился состав машины и часть документов
+    // оформлена.
+    const since = env.GROUPS_ROLLOUT_SINCE;
+    const notOlder = since
+      ? sql` and ${root}.created_at >= ${since.toISOString()}::timestamptz`
+      : sql``;
+    return sql`(exists (
+      select 1 from ingest_events ie
+       where ie.bundle_id = ${root}.id and ie.channel = 'public'
+    )${notOlder})`;
+  }
+  return sql`${root}.assembly_version = ${GROUPABLE_ASSEMBLY}
+   and ${root}.published_generation is not null
+   and ${root}.published_generation = ${root}.active_upload_generation`;
+}
 
 /**
  * Идентификатор «машины» для документа: id КОРНЕВОГО пакета.
@@ -59,17 +92,19 @@ const PUBLISHED_GENERATION_IS_CURRENT = sql`root.published_generation is not nul
  *
  * Как и fromSupplierPortalSql, работает ТОЛЬКО внутри выборки по таблице
  * source_documents: ссылается на её колонку bundle_id.
+ *
+ * Функция, а не константа: правило машины зависит от GROUPS_ROLLOUT, и
+ * значение, зафиксированное при импорте модуля, нельзя было бы ни переключить
+ * на работающем сервере, ни проверить тестом.
  */
-export const documentGroupIdSql = sql<string | null>`(
-  select case
-           when root.assembly_version = ${GROUPABLE_ASSEMBLY}
-            and ${PUBLISHED_GENERATION_IS_CURRENT}
-           then root.id
-         end
+export function documentGroupIdSql(): SQL<string | null> {
+  return sql<string | null>`(
+  select case when ${machineRootSql('root')} then root.id end
     from ${sourceBundles} b
     join ${sourceBundles} root on root.id = coalesce(b.parent_bundle_id, b.id)
    where b.id = ${sourceDocuments.bundleId}
 )`;
+}
 
 /**
  * Машина ДЛЯ ПОРТАЛА: та же группа, но видимая менеджеру с первой секунды.
@@ -110,17 +145,17 @@ export const portalDocumentGroupIdSql = sql<string | null>`(
  * финализацией: «состав тот же, но суммы другие» сравнением множества id не
  * ловится, а привязать к приёмке документ, позиций которого инспектор не
  * видел, нельзя.
+ *
+ * Функция по той же причине, что и documentGroupIdSql: правило под рубильником.
  */
-export const documentGroupRevisionSql = sql<number | null>`(
-  select case
-           when root.assembly_version = ${GROUPABLE_ASSEMBLY}
-            and ${PUBLISHED_GENERATION_IS_CURRENT}
-           then root.group_revision
-         end
+export function documentGroupRevisionSql(): SQL<number | null> {
+  return sql<number | null>`(
+  select case when ${machineRootSql('root')} then root.group_revision end
     from ${sourceBundles} b
     join ${sourceBundles} root on root.id = coalesce(b.parent_bundle_id, b.id)
    where b.id = ${sourceDocuments.bundleId}
 )`;
+}
 
 /**
  * Публикация собранного комплекта: снять «технический» флаг с сегментов и
@@ -186,7 +221,17 @@ export async function publishGroupDocuments(
  * документ, его сиблинги остались бы в Room со старой ревизией, и сверка
  * состава на форме разошлась бы сама с собой.
  *
- * Для legacy-пакетов no-op: там группы нет, ревизия ничего не значит.
+ * Для пакета, который машиной не является (почта, ЭДО, внутренняя загрузка),
+ * no-op: там группы нет, ревизия ничего не значит. ВАЖНО: no-op здесь касается
+ * не только ревизии, но и побочного эффекта «поднять updated_at документов», —
+ * через него планшет узнаёт об изменении вообще. Поэтому правило машины должно
+ * быть тем же, что у group_id: разъехавшись, они дают документ, который сменил
+ * состав молча.
+ *
+ * `statement_timestamp()`, а не `now()`: последний возвращает время НАЧАЛА
+ * транзакции. Курсор /sync берётся с запасом от текущего времени, и отметка,
+ * проставленная началом длинной транзакции, оказывается ниже уже отданного
+ * курсора — документ не приедет НИКОГДА. См. тот же приём в visibility-events.
  *
  * Вызывать ВНУТРИ той же транзакции, что и само изменение, — иначе планшет
  * может успеть забрать документ до бампа и не узнать о правке.
@@ -206,14 +251,14 @@ export async function bumpGroupRevision(
     bumped as (
       update ${sourceBundles} sb
          set group_revision = sb.group_revision + 1,
-             updated_at = now()
+             updated_at = statement_timestamp()
         from root
        where sb.id = root.id
-         and sb.assembly_version = ${GROUPABLE_ASSEMBLY}
+         and ${machineRootSql('sb')}
       returning sb.id
     )
     update ${sourceDocuments} sd
-       set updated_at = now(),
+       set updated_at = statement_timestamp(),
            version = sd.version + 1
       from ${sourceBundles} b, bumped
      where b.id = sd.bundle_id

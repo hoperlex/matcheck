@@ -63,7 +63,18 @@ export async function recordVisibilityTransitions(
   await tx.execute(sql`
     with current_state as (
       select source_documents.id,
-             source_documents.site_id,
+             -- Объект берём с КОРНЕВОГО пакета, а документ — только запасным
+             -- вариантом. Выборка tombstone'ов фильтрует по site_id события, и
+             -- если объект документа сменили или очистили, планшет прежнего
+             -- объекта метку не получит: документ у него останется навсегда.
+             -- Объект машины при этом не меняется — он задан на форме загрузки.
+             coalesce(
+               (select rb.site_id
+                  from source_bundles sb
+                  join source_bundles rb on rb.id = coalesce(sb.parent_bundle_id, sb.id)
+                 where sb.id = source_documents.bundle_id),
+               source_documents.site_id
+             ) as site_id,
              ${mobileVisibleSourceDocumentSql()} as visible
         from source_documents
        where ${scope}
@@ -76,12 +87,20 @@ export async function recordVisibilityTransitions(
        order by e.source_document_id, e.created_at desc, e.id desc
     )
     insert into source_document_visibility_events
-      (source_document_id, visibility, site_id, group_id, reason)
+      (source_document_id, visibility, site_id, group_id, reason, created_at)
     select c.id,
            case when c.visible then 'visible' else 'hidden' end,
            c.site_id,
            ${groupId ?? null}::uuid,
-           ${reason}
+           ${reason},
+           -- НЕ полагаемся на DEFAULT now(): он даёт время НАЧАЛА транзакции.
+           -- Курсор /sync отходит назад на фиксированное окно от текущего
+           -- времени, поэтому событие, помеченное началом длинной транзакции,
+           -- оказывается ниже уже отданного курсора и не приезжает НИКОГДА.
+           -- statement_timestamp() плюс правило «запись события — последняя
+           -- операция транзакции» плюс окно курсора больше предельной
+           -- длительности транзакции дают вместе формальную гарантию доставки.
+           statement_timestamp()
       from current_state c
       left join last_event l on l.source_document_id = c.id
      where
@@ -111,7 +130,13 @@ export async function selectVisibilityTombstones(
   db: any,
   opts: { since: Date; siteId?: string | null; limit?: number },
 ): Promise<string[]> {
-  const { since, siteId, limit = 1000 } = opts;
+  // Предел поднят с 1000 намеренно. Отсечка здесь необратима: список удалений
+  // не пагинируется, а курсор после ответа уходит вперёд — всё, что не влезло,
+  // теряется навсегда, и документ остаётся на планшете до переустановки. Тысяча
+  // достигалась разово при массовом скрытии (выкатной прогон, чистка объекта).
+  // Строка ответа — это один uuid, поэтому даже десятки тысяч дешевле, чем один
+  // потерянный tombstone.
+  const { since, siteId, limit = 50_000 } = opts;
   const siteFilter = siteId ? sql`and e.site_id = ${siteId}::uuid` : sql``;
 
   const rows = await db.execute(sql`
