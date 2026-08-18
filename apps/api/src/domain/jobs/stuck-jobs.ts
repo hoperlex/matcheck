@@ -1,28 +1,15 @@
-// Восстановление записей, застрявших в `queued` без задания.
+// Периодическое восстановление незавершённой работы распознавания.
 //
-// Зачем. Даже с transactional outbox остаётся окно, где запись есть, а задания
-// нет: строка outbox доставлена и удалена, но воркер упал до перевода записи в
-// `processing`; или задание выполнилось, а обновление статуса не дошло. Такая
-// запись висит `queued` вечно — повторная загрузка того же комплекта вернёт
-// «уже загружено» и нового задания не поставит.
-//
-// Почему это безопасно и не приводит к двойному распознаванию:
-//
-//   * ключ задания тот же, что при первой постановке (`dispatchKeyOf`), а
-//     BullMQ не создаёт второй job с существующим jobId — пока задание висит в
-//     очереди или выполняется, repair его не продублирует;
-//   * `enqueueJob` дедуплицирует по тому же ключу, поэтому повтор repair'а не
-//     плодит строк outbox;
-//   * повторный разбор документа идемпотентен по позициям: обработчик удаляет
-//     старые строки перед вставкой новых;
-//   * пакет берётся только если разбор ещё не начинался — есть служебная
-//     запись и НЕТ ни одного реального документа. Иначе повтор создал бы
-//     вторые экземпляры уже разобранных документов.
+// Решение о восстановлении принимается не только по возрасту строки: сторож
+// сверяет transactional outbox и BullMQ. Живая работа не трогается, недоступный
+// Redis даёт unknown, а потерянная/просроченная попытка получает новое поколение
+// и новый jobId. Предыдущее поколение после этого не может записать результат:
+// обработчики проверяют generation под блокировкой перед видимыми изменениями.
 //
 // Порог намеренно большой: воркер разбирает пачки последовательно
 // (CONCURRENCY=1) и при длинной очереди запись законно ждёт десятки минут.
 
-import { and, eq, isNotNull, isNull, lt, sql as drSql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, lt, sql as drSql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
   bundleSegments,
@@ -33,11 +20,12 @@ import {
 import {
   assemblyDispatchKeyOf,
   bundleDispatchKeyOf,
+  dispatchKeyOf,
   documentSecondPassKeyOf,
-  enqueueJob,
-  segmentDispatchKeyOf,
 } from './job-outbox.js';
-import { isBlocked, resolveReparsePlan } from '../sourceDocuments/reparse-plan.js';
+import { inspectWorkHealth, type WorkHealthQueue } from './job-health.js';
+import { recoverDocumentAttempt } from './recognition-recovery.js';
+import { recoverBundleAttempt, recoverSegmentAttempt } from './recognition-attempt-recovery.js';
 import {
   finalizeStaleRegistryItems,
   selectBundlesWithStaleItems,
@@ -60,14 +48,35 @@ export const STUCK_BATCH = 20;
 
 export const STUCK_INTERVAL_MS = 10 * 60 * 1000;
 
+/**
+ * Режим восстановления — см. RECOGNITION_RECOVERY_MODE в env.ts.
+ *
+ * `dry_run` существует не ради осторожности вообще, а ради одного конкретного
+ * вопроса: сторож принимает решения по неполным данным (Redis, outbox, БД), и
+ * ошибка в классификации живого как мёртвого означала бы второй разбор поверх
+ * идущего. Список «что я сделал бы» в логе — единственный способ проверить это
+ * до того, как он начнёт переставлять работу на боевом сервере.
+ */
+export type RecoveryMode = 'off' | 'dry_run' | 'on';
+
 export type RepairDeps = {
   db: Db;
   queue: string;
   log?: { info?: (o: unknown, m?: string) => void; warn?: (o: unknown, m?: string) => void };
+  queueClient: WorkHealthQueue;
+  /**
+   * По умолчанию `off`: выкат кода и включение механизма — разные события.
+   * Между ними обязан пройти деплой ВСЕХ воркеров, иначе старый воркер, не
+   * знающий про поколения, запишет результат поверх восстановленного.
+   */
+  mode?: RecoveryMode;
 };
 
 export type RepairResult = {
   documents: number;
+  terminalizedDocuments: number;
+  /** Записи, которые сторож переставил бы при mode='on'. Только для dry_run. */
+  wouldRecover: number;
   bundles: number;
   /** Сегменты сборки логических УПД, переставленные заново. */
   segments: number;
@@ -81,14 +90,6 @@ export type RepairResult = {
 };
 
 /**
- * Сколько раз пакету дают переставить router-job, прежде чем признать неудачу.
- *
- * Без потолка пакет, который валит обработчик детерминированно (битый файл,
- * ошибка в разборе), гонял бы задание по кругу каждые десять минут вечно.
- */
-export const MAX_BUNDLE_REDISPATCH = 3;
-
-/**
  * Переставляет задания для записей, зависших в `queued`.
  *
  * Возвращает, сколько заданий поставлено заново. Ничего не найдено — тихо
@@ -96,80 +97,92 @@ export const MAX_BUNDLE_REDISPATCH = 3;
  */
 export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
   const { db } = deps;
+  const mode = deps.mode ?? 'off';
   const cutoff = drSql`now() - make_interval(mins => ${STUCK_AFTER_MINUTES})`;
+  // Счётчик dry-run общий на три контура: он отвечает на один вопрос — сколько
+  // записей сторож тронул бы, если его включить.
+  let wouldRecover = 0;
 
   // ─── Документы: ждут одиночного разбора ──────────────────────────────────
   //
   // Берём только те, у которых есть оригинальный файл: без него распознавать
   // нечего, и повторная постановка задания ничего не изменит.
-  const docs = await db
-    .select({
-      id: sourceDocuments.id,
-      s3Key: sourceDocumentAttachments.s3Key,
-      kind: sourceDocuments.kind,
-      parseMode: sourceDocuments.parseMode,
-      dispatchGeneration: sourceDocuments.dispatchGeneration,
-      secondPass: sourceDocuments.secondPass,
-    })
-    .from(sourceDocuments)
-    .innerJoin(
-      sourceDocumentAttachments,
-      eq(sourceDocumentAttachments.sourceDocumentId, sourceDocuments.id),
-    )
-    .where(
-      and(
-        eq(sourceDocuments.status, 'queued'),
-        // Служебные записи ждут задания ПАКЕТА — их обрабатывает вторая часть.
-        eq(sourceDocuments.isTechnical, false),
-        eq(sourceDocumentAttachments.role, 'original'),
-        isNotNull(sourceDocuments.queuedAt),
-        lt(sourceDocuments.queuedAt, cutoff),
-      ),
-    )
-    .limit(STUCK_BATCH);
+  const docs =
+    mode === 'off'
+      ? []
+      : await db
+          .select({
+            id: sourceDocuments.id,
+            s3Key: sourceDocumentAttachments.s3Key,
+            kind: sourceDocuments.kind,
+            parseMode: sourceDocuments.parseMode,
+            dispatchGeneration: sourceDocuments.dispatchGeneration,
+            secondPass: sourceDocuments.secondPass,
+            jobId: sourceDocuments.jobId,
+          })
+          .from(sourceDocuments)
+          .innerJoin(
+            sourceDocumentAttachments,
+            eq(sourceDocumentAttachments.sourceDocumentId, sourceDocuments.id),
+          )
+          .where(
+            and(
+              inArray(sourceDocuments.status, ['queued', 'processing']),
+              // Служебные записи ждут задания ПАКЕТА — их обрабатывает вторая часть.
+              eq(sourceDocuments.isTechnical, false),
+              eq(sourceDocumentAttachments.role, 'original'),
+              isNotNull(sourceDocuments.queuedAt),
+              lt(sourceDocuments.queuedAt, cutoff),
+            ),
+          )
+          .limit(STUCK_BATCH);
 
   let documents = 0;
   const seenDocs = new Set<string>();
+  let terminalizedDocuments = 0;
   for (const doc of docs) {
     // У документа может быть несколько вложений — задание нужно одно.
     if (seenDocs.has(doc.id)) continue;
     seenDocs.add(doc.id);
-    // Незавершённый второй проход восстанавливаем именно как второй проход.
-    // Обычное задание здесь вернуло бы документ на текстовый путь — тот самый,
-    // который уже дал слабый результат и породил повтор.
-    const pendingSecondPass =
-      (doc.secondPass as { state?: string } | null)?.state === 'queued';
-    if (pendingSecondPass) {
-      await enqueueJob(db, {
-        queue: deps.queue,
-        jobName: 'parse',
-        payload: {
-          sourceDocumentId: doc.id,
-          s3Key: doc.s3Key,
-          pass: 'vision' as const,
-          docGeneration: doc.dispatchGeneration,
-        },
-        // Ключ версионный: после ручного повтора старый уже отработал, а BullMQ
-        // держит завершённые задания сутки — иначе задание молча не создалось бы.
-        dedupeKey: documentSecondPassKeyOf(doc.id, doc.dispatchGeneration),
-      });
-      documents += 1;
+    const pendingSecondPass = (doc.secondPass as { state?: string } | null)?.state === 'queued';
+    const currentJobId =
+      doc.jobId ??
+      (pendingSecondPass
+        ? documentSecondPassKeyOf(doc.id, doc.dispatchGeneration)
+        : dispatchKeyOf(doc.id, doc.dispatchGeneration));
+    const health = await inspectWorkHealth({
+      db,
+      queue: deps.queueClient,
+      jobId: currentJobId,
+    });
+    if (health.state === 'alive' || health.state === 'alive_transport') {
       continue;
     }
-
-    // Остальное строит общий планировщик — тот же, которым пользуется кнопка
-    // «Распознать повторно». Раньше здесь всегда ставилось задание по s3Key без
-    // docKind, и зависшая М-15 восстанавливалась УПД-путём: другой промпт,
-    // другой результат. Он же выбирает ключ: у ручного повтора своё поколение.
-    const plan = await resolveReparsePlan(db, doc, doc.dispatchGeneration);
-    if (isBlocked(plan)) continue;
-    await enqueueJob(db, {
-      queue: deps.queue,
-      jobName: 'parse',
-      payload: plan.payload,
-      dedupeKey: plan.dedupeKey,
+    if (health.state === 'unknown') {
+      deps.log?.warn?.(
+        { sourceDocumentId: doc.id, err: health.reason },
+        'repair: состояние задания неизвестно — recovery пропущен',
+      );
+      continue;
+    }
+    if (mode === 'dry_run') {
+      wouldRecover += 1;
+      deps.log?.warn?.(
+        { sourceDocumentId: doc.id, health: health.state, jobId: currentJobId },
+        'repair(dry-run): документ был бы переставлен',
+      );
+      continue;
+    }
+    const outcome = await recoverDocumentAttempt({
+      db,
+      queueName: deps.queue,
+      sourceDocumentId: doc.id,
+      expectedGeneration: doc.dispatchGeneration,
+      health,
+      actor: 'watchdog',
     });
-    documents += 1;
+    if (outcome.outcome === 'recovered') documents += 1;
+    if (outcome.outcome === 'terminalized') terminalizedDocuments += 1;
   }
 
   // ─── Сегменты сборки: технические документы, ждущие своего распознавания ──
@@ -179,37 +192,67 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
   // исключение: он технический ровно до публикации, а задание у него своё,
   // адресующее строку манифеста. Без этой ветки зависший сегмент не
   // восстановился бы никогда, и комплект не опубликовался бы вовсе.
-  const staleSegments = await db
-    .select({
-      docId: bundleSegments.sourceDocumentId,
-      segmentId: bundleSegments.id,
-      generation: bundleSegments.generation,
-    })
-    .from(bundleSegments)
-    .innerJoin(sourceDocuments, eq(sourceDocuments.id, bundleSegments.sourceDocumentId))
-    .where(
-      and(
-        eq(sourceDocuments.status, 'queued'),
-        eq(sourceDocuments.isTechnical, true),
-        isNull(bundleSegments.publishedAt),
-        isNotNull(sourceDocuments.queuedAt),
-        lt(sourceDocuments.queuedAt, cutoff),
-      ),
-    )
-    .limit(STUCK_BATCH);
+  const staleSegments =
+    mode === 'off'
+      ? []
+      : await db
+          .select({
+            docId: bundleSegments.sourceDocumentId,
+            segmentId: bundleSegments.id,
+            generation: bundleSegments.generation,
+            dispatchGeneration: bundleSegments.dispatchGeneration,
+            docGeneration: sourceDocuments.dispatchGeneration,
+            jobId: sourceDocuments.jobId,
+          })
+          .from(bundleSegments)
+          .innerJoin(sourceDocuments, eq(sourceDocuments.id, bundleSegments.sourceDocumentId))
+          .where(
+            and(
+              inArray(sourceDocuments.status, ['queued', 'processing']),
+              eq(sourceDocuments.isTechnical, true),
+              isNull(bundleSegments.publishedAt),
+              isNotNull(sourceDocuments.queuedAt),
+              lt(sourceDocuments.queuedAt, cutoff),
+            ),
+          )
+          .limit(STUCK_BATCH);
 
   let segments = 0;
   for (const seg of staleSegments) {
     if (!seg.docId) continue;
-    await enqueueJob(db, {
-      queue: deps.queue,
-      jobName: 'parse',
-      // Payload и ключ ровно те же, что при первой постановке: иначе BullMQ
-      // примет задание за новое и сегмент распознается дважды.
-      payload: { sourceDocumentId: seg.docId, segmentId: seg.segmentId, generation: seg.generation },
-      dedupeKey: segmentDispatchKeyOf(seg.segmentId, seg.generation),
+    const health = await inspectWorkHealth({
+      db,
+      queue: deps.queueClient,
+      jobId: seg.jobId,
     });
-    segments += 1;
+    if (health.state === 'alive' || health.state === 'alive_transport') continue;
+    if (health.state === 'unknown') {
+      deps.log?.warn?.(
+        { segmentId: seg.segmentId, err: health.reason },
+        'repair: состояние задания сегмента неизвестно — recovery пропущен',
+      );
+      continue;
+    }
+    if (mode === 'dry_run') {
+      wouldRecover += 1;
+      deps.log?.warn?.(
+        { segmentId: seg.segmentId, health: health.state, jobId: seg.jobId },
+        'repair(dry-run): сегмент был бы переставлен',
+      );
+      continue;
+    }
+    const outcome = await recoverSegmentAttempt({
+      db,
+      queueName: deps.queue,
+      segmentId: seg.segmentId,
+      sourceDocumentId: seg.docId,
+      expectedGeneration: seg.dispatchGeneration,
+      expectedDocGeneration: seg.docGeneration,
+      health,
+      actor: 'watchdog',
+    });
+    if (outcome.outcome === 'recovered') segments += 1;
+    if (outcome.outcome === 'terminalized') terminalizedDocuments += 1;
   }
 
   // ─── Пакеты: ждут разбора router'ом или waybill-парсером ─────────────────
@@ -217,60 +260,68 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
   // Только те, где разбор заведомо не начинался: служебная запись на месте,
   // реальных документов нет. Пакет с уже созданными документами повторять
   // нельзя — получим их вторые экземпляры.
-  const bundles = await db
-    .select({
-      id: sourceBundles.id,
-      kind: sourceBundles.kind,
-      parentBundleId: sourceBundles.parentBundleId,
-      generation: sourceBundles.dispatchGeneration,
-    })
-    .from(sourceBundles)
-    .where(
-      and(
-        eq(sourceBundles.status, 'queued'),
-        lt(sourceBundles.updatedAt, cutoff),
-        drSql`exists (select 1 from source_documents d
+  const bundles =
+    mode === 'off'
+      ? []
+      : await db
+          .select({
+            id: sourceBundles.id,
+            kind: sourceBundles.kind,
+            parentBundleId: sourceBundles.parentBundleId,
+            generation: sourceBundles.dispatchGeneration,
+            activeUploadGeneration: sourceBundles.activeUploadGeneration,
+            jobId: sourceBundles.jobId,
+          })
+          .from(sourceBundles)
+          .where(
+            and(
+              inArray(sourceBundles.status, ['queued', 'processing']),
+              lt(sourceBundles.updatedAt, cutoff),
+              drSql`exists (select 1 from source_documents d
                 where d.bundle_id = ${sourceBundles.id} and d.is_technical = true)`,
-        drSql`not exists (select 1 from source_documents d
-                where d.bundle_id = ${sourceBundles.id} and d.is_technical = false)`,
-      ),
-    )
-    .limit(STUCK_BATCH);
+            ),
+          )
+          .limit(STUCK_BATCH);
 
   let repairedBundles = 0;
   for (const bundle of bundles) {
-    // Router-пакеты (kind='mixed') приходят из единого входа и требуют
-    // mode:'router'; накладные разбираются waybill-веткой. Дочерний пакет
-    // сборки (kind='upd' с родителем) — третий случай: без своего режима он
-    // ушёл бы в waybill-обработчик, не нашёл там накладных и пометил бы пакет
-    // parse_failed, потеряв уже загруженные файлы.
-    if (bundle.kind === 'upd' && bundle.parentBundleId) {
-      const [root] = await db
-        .select({ gen: sourceBundles.activeUploadGeneration })
-        .from(sourceBundles)
-        .where(eq(sourceBundles.id, bundle.parentBundleId))
-        .limit(1);
-      if (!root) continue;
-      await enqueueJob(db, {
-        queue: deps.queue,
-        jobName: 'parse',
-        payload: { bundleId: bundle.id, mode: 'upd_assembly' as const, generation: root.gen },
-        dedupeKey: assemblyDispatchKeyOf(bundle.id, root.gen),
-      });
-      repairedBundles += 1;
+    let currentJobId = bundle.jobId;
+    if (!currentJobId && bundle.kind === 'upd' && bundle.parentBundleId) {
+      currentJobId = assemblyDispatchKeyOf(bundle.id, bundle.generation);
+    } else if (!currentJobId) {
+      currentJobId = bundleDispatchKeyOf(bundle.id, bundle.generation);
+    }
+    const health = await inspectWorkHealth({
+      db,
+      queue: deps.queueClient,
+      jobId: currentJobId,
+    });
+    if (health.state === 'alive' || health.state === 'alive_transport') continue;
+    if (health.state === 'unknown') {
+      deps.log?.warn?.(
+        { bundleId: bundle.id, err: health.reason },
+        'repair: состояние пакетного задания неизвестно — recovery пропущен',
+      );
       continue;
     }
-    const payload =
-      bundle.kind === 'mixed'
-        ? { bundleId: bundle.id, mode: 'router' as const }
-        : { bundleId: bundle.id };
-    await enqueueJob(db, {
-      queue: deps.queue,
-      jobName: 'parse',
-      payload,
-      dedupeKey: bundleDispatchKeyOf(bundle.id, bundle.generation),
+    if (mode === 'dry_run') {
+      wouldRecover += 1;
+      deps.log?.warn?.(
+        { bundleId: bundle.id, health: health.state, jobId: currentJobId },
+        'repair(dry-run): пакет был бы переставлен',
+      );
+      continue;
+    }
+    const outcome = await recoverBundleAttempt({
+      db,
+      queueName: deps.queue,
+      bundleId: bundle.id,
+      expectedGeneration: bundle.generation,
+      health,
+      actor: 'watchdog',
     });
-    repairedBundles += 1;
+    if (outcome.outcome === 'recovered') repairedBundles += 1;
+    if (outcome.outcome === 'terminalized') terminalizedDocuments += 1;
   }
 
   if (documents || repairedBundles || segments) {
@@ -282,14 +333,21 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
 
   const finalizedItems = await finalizeIncompleteBundles(deps);
   const stubbedFiles = await ensureDocumentsForOrphanFiles(deps);
-  // Порядок важен: сначала перезапускаем то, где работа ещё возможна, и только
-  // потом объявляем исход у того, где она заведомо кончилась. Иначе пакет с
-  // умершим router-job получил бы терминальный статус вместо второй попытки.
-  const restartedBundles = await restartAbandonedRouterBundles(deps);
+  // Processing-пакеты уже проходят через health-aware контур выше.
+  const restartedBundles = 0;
   const finalizedBundles = await finalizeStuckProcessingBundles(deps);
+  if (wouldRecover) {
+    deps.log?.warn?.(
+      { wouldRecover, thresholdMin: STUCK_AFTER_MINUTES },
+      'repair(dry-run): записи без актуального задания найдены, ничего не изменено',
+    );
+  }
+
   return {
     documents,
     bundles: repairedBundles,
+    terminalizedDocuments,
+    wouldRecover,
     segments,
     finalizedItems,
     stubbedFiles,
@@ -316,7 +374,32 @@ export async function finalizeStuckProcessingBundles(deps: RepairDeps): Promise<
   const ids = await selectStuckProcessingBundles(deps.db, STUCK_AFTER_MINUTES, STUCK_BATCH);
   let finalized = 0;
   for (const id of ids) {
+    const [bundle] = await deps.db
+      .select({
+        dispatchGeneration: sourceBundles.dispatchGeneration,
+        jobId: sourceBundles.jobId,
+      })
+      .from(sourceBundles)
+      .where(eq(sourceBundles.id, id))
+      .limit(1);
+    if (!bundle) continue;
+
+    const health = await inspectWorkHealth({
+      db: deps.db,
+      queue: deps.queueClient,
+      jobId: bundle.jobId ?? bundleDispatchKeyOf(id, bundle.dispatchGeneration),
+    });
+    if (health.state === 'alive' || health.state === 'alive_transport') continue;
+    if (health.state === 'unknown') {
+      deps.log?.warn?.(
+        { bundleId: id, err: health.reason },
+        'repair: состояние processing-пакета неизвестно — финализация пропущена',
+      );
+      continue;
+    }
+
     const res = await finalizeBundleTerminalState(deps.db, id, {
+      expectedDispatchGeneration: bundle.dispatchGeneration,
       itemReason: 'файл не дошёл до разбора (пакет закрыт сторожем)',
       parseErrorCode: 'not_finalized',
       parseErrorMessage: 'пакет остался в processing без активной работы',
@@ -329,83 +412,6 @@ export async function finalizeStuckProcessingBundles(deps: RepairDeps): Promise<
     );
   }
   return finalized;
-}
-
-/**
- * Router-job умер посреди пачки: пакет в `processing`, служебная запись жива.
- *
- * Этот случай finalizeStuckProcessingBundles намеренно пропускает — часть файлов
- * не обработана, и подменять статус нельзя, надо доработать. Повторный запуск
- * безопасен: router пропускает строки реестра в терминальном статусе, поэтому
- * второй раз тот же файл документа не породит.
- *
- * Ключ задания берёт новое поколение: старое задание могло остаться в BullMQ
- * завершённым (removeOnComplete держит сутки), и постановка под тем же id молча
- * не создала бы ничего.
- */
-export async function restartAbandonedRouterBundles(deps: RepairDeps): Promise<number> {
-  const { db } = deps;
-  const stuck = await db
-    .select({
-      id: sourceBundles.id,
-      kind: sourceBundles.kind,
-      generation: sourceBundles.dispatchGeneration,
-    })
-    .from(sourceBundles)
-    .where(
-      and(
-        eq(sourceBundles.status, 'processing'),
-        isNull(sourceBundles.parentBundleId),
-        drSql`${sourceBundles.updatedAt} < now() - make_interval(mins => ${STUCK_AFTER_MINUTES})`,
-        drSql`${sourceBundles.dispatchGeneration} < ${MAX_BUNDLE_REDISPATCH}`,
-        // Живая служебная запись — признак недоработавшего router-job.
-        drSql`exists (select 1 from source_documents d
-                where d.bundle_id = ${sourceBundles.id} and d.is_technical = true)`,
-        // Сборка в работе — её восстанавливают своей веткой, выше.
-        drSql`not exists (select 1 from bundle_segments s
-                where s.bundle_id = ${sourceBundles.id}
-                  and s.generation = ${sourceBundles.activeUploadGeneration}
-                  and s.published_at is null)`,
-        drSql`not exists (select 1 from source_bundles c
-                where c.parent_bundle_id = ${sourceBundles.id}
-                  and c.status in ('queued', 'processing'))`,
-        // Задание уже ждёт доставки — второе не нужно.
-        drSql`not exists (select 1 from job_outbox o
-                where o.payload->>'bundleId' = ${sourceBundles.id}::text)`,
-      ),
-    )
-    .limit(STUCK_BATCH);
-
-  let restarted = 0;
-  for (const bundle of stuck) {
-    const [bumped] = await db
-      .update(sourceBundles)
-      .set({
-        dispatchGeneration: drSql`${sourceBundles.dispatchGeneration} + 1`,
-        status: 'queued',
-        updatedAt: new Date(),
-      })
-      // CAS: пакет мог уйти в терминал, пока мы собирали выборку.
-      .where(and(eq(sourceBundles.id, bundle.id), eq(sourceBundles.status, 'processing')))
-      .returning({ generation: sourceBundles.dispatchGeneration });
-    if (!bumped) continue;
-
-    await enqueueJob(db, {
-      queue: deps.queue,
-      jobName: 'parse',
-      payload:
-        bundle.kind === 'mixed'
-          ? { bundleId: bundle.id, mode: 'router' as const }
-          : { bundleId: bundle.id },
-      dedupeKey: bundleDispatchKeyOf(bundle.id, bumped.generation),
-    });
-    restarted += 1;
-    deps.log?.warn?.(
-      { bundleId: bundle.id, generation: bumped.generation },
-      'repair: router-job не доработал — пакет переставлен новым поколением',
-    );
-  }
-  return restarted;
 }
 
 /**
@@ -446,7 +452,12 @@ export async function ensureDocumentsForOrphanFiles(deps: RepairDeps): Promise<n
       if (res.action === 'created' || res.action === 'promoted') {
         stubbed += 1;
         deps.log?.warn?.(
-          { bundleId: row.bundleId, file: row.filename, documentId: res.documentId, how: res.action },
+          {
+            bundleId: row.bundleId,
+            file: row.filename,
+            documentId: res.documentId,
+            how: res.action,
+          },
           'repair: принятый файл остался без документа — теперь виден',
         );
       } else if (res.action === 'missing_object') {

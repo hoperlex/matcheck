@@ -309,36 +309,48 @@ export const NON_TERMINAL_ITEM_STATUSES = ['accepted', 'uploading', 'needs_revie
 export async function finalizeStaleRegistryItems(
   db: Db,
   bundleId: string,
-  opts?: { reason?: string },
+  opts?: { reason?: string; expectedDispatchGeneration?: number },
 ): Promise<{ id: string; filename: string }[]> {
-  const [bundle] = await db
-    .select({ activeUploadGeneration: sourceBundles.activeUploadGeneration })
-    .from(sourceBundles)
-    .where(eq(sourceBundles.id, bundleId))
-    .limit(1);
-  if (!bundle) return [];
+  return db.transaction(async (rawTx) => {
+    const [bundle] = await rawTx
+      .select({
+        activeUploadGeneration: sourceBundles.activeUploadGeneration,
+        dispatchGeneration: sourceBundles.dispatchGeneration,
+      })
+      .from(sourceBundles)
+      .where(eq(sourceBundles.id, bundleId))
+      .limit(1)
+      .for('update');
+    if (!bundle) return [];
+    if (
+      opts?.expectedDispatchGeneration !== undefined &&
+      bundle.dispatchGeneration !== opts.expectedDispatchGeneration
+    ) {
+      return [];
+    }
 
-  return db
-    .update(bundleImportItems)
-    .set({
-      status: 'failed',
-      effectiveStatus: 'failed',
-      reason: opts?.reason ?? 'файл не дошёл до разбора',
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(bundleImportItems.bundleId, bundleId),
-        inArray(bundleImportItems.status, [...NON_TERMINAL_ITEM_STATUSES]),
-        or(
-          eq(bundleImportItems.uploadGeneration, bundle.activeUploadGeneration),
-          isNull(bundleImportItems.uploadGeneration),
+    return rawTx
+      .update(bundleImportItems)
+      .set({
+        status: 'failed',
+        effectiveStatus: 'failed',
+        reason: opts?.reason ?? 'файл не дошёл до разбора',
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(bundleImportItems.bundleId, bundleId),
+          inArray(bundleImportItems.status, [...NON_TERMINAL_ITEM_STATUSES]),
+          or(
+            eq(bundleImportItems.uploadGeneration, bundle.activeUploadGeneration),
+            isNull(bundleImportItems.uploadGeneration),
+          ),
+          // Разобранное человеком не переоткрываем.
+          isNull(bundleImportItems.resolvedAt),
         ),
-        // Разобранное человеком не переоткрываем.
-        isNull(bundleImportItems.resolvedAt),
-      ),
-    )
-    .returning({ id: bundleImportItems.id, filename: bundleImportItems.sourceFilename });
+      )
+      .returning({ id: bundleImportItems.id, filename: bundleImportItems.sourceFilename });
+  });
 }
 
 /**

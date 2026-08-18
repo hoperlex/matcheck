@@ -539,7 +539,15 @@ async function completePartialUpload(
     .returning();
 
   const dispatchGeneration = bumped?.dispatchGeneration ?? bundle.dispatchGeneration;
+  const jobId = bundleDispatchKeyOf(bundle.id, dispatchGeneration);
   await db.transaction(async (tx) => {
+    await tx
+      .update(sourceBundles)
+      .set({ jobId })
+      .where(
+        and(eq(sourceBundles.id, bundle.id), eq(sourceBundles.dispatchGeneration, dispatchGeneration)),
+      );
+
     if (publicSubmission) {
       await tx.insert(ingestEvents).values({
         bundleId: bundle.id,
@@ -555,13 +563,17 @@ async function completePartialUpload(
       await enqueueJob(tx as unknown as Db, {
         queue: UPD_PARSE_QUEUE,
         jobName: 'parse',
-        payload: { bundleId: bundle.id, mode: 'router' },
-        dedupeKey: bundleDispatchKeyOf(bundle.id, dispatchGeneration),
+        payload: { bundleId: bundle.id, mode: 'router', bundleGeneration: dispatchGeneration },
+        dedupeKey: jobId,
       });
     }
   });
   if (params.dispatch === 'direct') {
-    await deps.queue.add('parse', { bundleId: bundle.id, mode: 'router' } as never);
+    await deps.queue.add(
+      'parse',
+      { bundleId: bundle.id, mode: 'router', bundleGeneration: dispatchGeneration } as never,
+      { jobId },
+    );
   }
 
   log.warn(
@@ -1069,14 +1081,22 @@ export async function ingestDocumentsBundle(
         });
       }
 
+      const jobId = bundleDispatchKeyOf(bundle.id, generation);
+      await tx
+        .update(sourceBundles)
+        .set({ jobId })
+        .where(
+          and(eq(sourceBundles.id, bundle.id), eq(sourceBundles.dispatchGeneration, generation)),
+        );
+
       if (params.dispatch === 'outbox') {
         // Приведение как в domain/mail/resolve-message.ts: тип транзакции
         // drizzle структурно не совпадает с Db, хотя API идентичен.
         await enqueueJob(tx as unknown as Db, {
           queue: UPD_PARSE_QUEUE,
           jobName: 'parse',
-          payload: { bundleId: bundle.id, mode: 'router' },
-          dedupeKey: bundleDispatchKeyOf(bundle.id, generation),
+          payload: { bundleId: bundle.id, mode: 'router', bundleGeneration: generation },
+          dedupeKey: jobId,
         });
       }
     });
@@ -1089,7 +1109,12 @@ export async function ingestDocumentsBundle(
   if (params.dispatch === 'direct') {
     // Прежнее поведение внутреннего входа: недоступность Redis поднимается
     // наверх как ошибка запроса.
-    await deps.queue.add('parse', { bundleId: bundle.id, mode: 'router' } as never);
+    const jobId = bundleDispatchKeyOf(bundle.id, generation);
+    await deps.queue.add(
+      'parse',
+      { bundleId: bundle.id, mode: 'router', bundleGeneration: generation } as never,
+      { jobId },
+    );
   }
 
   return {

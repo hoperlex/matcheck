@@ -21,6 +21,8 @@ import {
   UpdPdfQueueResponseSchema,
   UpdResolveDuplicateRequestSchema,
   SourceReparseResponseSchema,
+  SourceRecoverResponseSchema,
+  type SourceWorkHealth,
   UploadDocumentsResponseSchema,
   ImportResultSchema,
   ExtraOnlyBundleListResponseSchema,
@@ -54,13 +56,19 @@ import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { publishEvent } from './events.js';
 import { matchOrCreateSupplier } from '../domain/sourceDocuments/supplierMatcher.js';
-import { collectUploadParts, uploadLimitMessage } from '../domain/sourceDocuments/collect-upload.js';
+import {
+  collectUploadParts,
+  uploadLimitMessage,
+} from '../domain/sourceDocuments/collect-upload.js';
 import { ingestDocumentsBundle } from '../domain/sourceDocuments/ingest-bundle.js';
 import {
+  bumpGroupRevision,
   documentGroupIdSql,
   documentGroupRevisionSql,
   portalDocumentGroupIdSql,
 } from '../domain/sourceDocuments/document-group.js';
+import { recordVisibilityTransitions } from '../domain/sourceDocuments/visibility-events.js';
+import { loadEnv } from '../lib/env.js';
 import { fromSupplierPortalSql } from '../domain/sourceDocuments/public-origin.js';
 import { manualRecipientSource } from '../domain/sourceDocuments/resolve-contractor.js';
 import {
@@ -78,7 +86,14 @@ import {
   resolveReparsePlan,
   type ReparsePlanKind,
 } from '../domain/sourceDocuments/reparse-plan.js';
-import { enqueueJob } from '../domain/jobs/job-outbox.js';
+import {
+  bundleDispatchKeyOf,
+  dispatchKeyOf,
+  documentSecondPassKeyOf,
+  enqueueJob,
+} from '../domain/jobs/job-outbox.js';
+import { inspectWorkHealth } from '../domain/jobs/job-health.js';
+import { recoverDocumentAttempt } from '../domain/jobs/recognition-recovery.js';
 import { UPD_PARSE_QUEUE } from '../plugins/queue.js';
 import type { Db } from '../db/client.js';
 import {
@@ -287,6 +302,7 @@ type SdNames = {
   // «Машина» глазами менеджера: та же поставка, но видимая до сборки и
   // публикации. Только для загрузок с публичного портала.
   portalGroupId?: string | null;
+  workHealth?: SourceWorkHealth;
 };
 
 /**
@@ -345,16 +361,19 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     parsedAt: sd.parsedAt.toISOString(),
     queuedAt: sd.queuedAt?.toISOString() ?? null,
     processedAt: sd.processedAt?.toISOString() ?? null,
-    parseErrorCode: (sd.parseErrorCode as
-      | 'duplicate_upd'
-      | 'validation_mismatch'
-      | 'pdf_no_text'
-      | 'parse_failed'
-      | 'internal_error'
-      | 'partial_parse'
-      | 'unrecognized_type'
-      | null) ?? null,
+    parseErrorCode:
+      (sd.parseErrorCode as
+        | 'duplicate_upd'
+        | 'validation_mismatch'
+        | 'pdf_no_text'
+        | 'parse_failed'
+        | 'internal_error'
+        | 'partial_parse'
+        | 'unrecognized_type'
+        | 'recovery_exhausted'
+        | null) ?? null,
     parseErrorDetails: sd.parseErrorDetails ?? null,
+    workHealth: names.workHealth,
     originalFilename: sd.originalFilename,
     contentHash: sd.contentHash,
     jobAttempts: sd.jobAttempts,
@@ -371,6 +390,47 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     groupRevision: names.groupRevision ?? null,
     portalGroupId: names.portalGroupId ?? null,
   };
+}
+
+/**
+ * Состояние работы по документу — основание для кнопки «Восстановить».
+ *
+ * При выключенном рубильнике поле не отдаётся вовсе (оно optional): кнопка
+ * рисуется по его наличию, и одного места достаточно, чтобы фронт и сервер не
+ * разошлись во мнении, доступно ли ручное восстановление.
+ */
+async function sourceDocumentWorkHealth(
+  app: FastifyInstance,
+  sd: typeof sourceDocuments.$inferSelect,
+): Promise<SourceWorkHealth | undefined> {
+  if (!loadEnv().RECOGNITION_RECOVERY_MANUAL) return undefined;
+  if (sd.status !== 'queued' && sd.status !== 'processing') return 'terminal';
+
+  const pendingSecondPass = (sd.secondPass as { state?: string } | null)?.state === 'queued';
+  const jobId =
+    sd.jobId ??
+    (pendingSecondPass
+      ? documentSecondPassKeyOf(sd.id, sd.dispatchGeneration)
+      : dispatchKeyOf(sd.id, sd.dispatchGeneration));
+  const health = await inspectWorkHealth({
+    db: app.db,
+    queue: app.queues.updParse,
+    jobId,
+  });
+  switch (health.state) {
+    case 'alive_transport':
+    case 'alive':
+      return 'alive';
+    case 'stranded':
+    case 'missing':
+      return 'missing';
+    case 'terminal':
+      return 'terminal';
+    case 'overdue':
+      return 'overdue';
+    case 'unknown':
+      return 'unknown';
+  }
 }
 
 function itemDto(i: typeof sourceDocumentItems.$inferSelect) {
@@ -459,76 +519,72 @@ async function loadSdNames(
 ): Promise<SdNames> {
   const [supplier, contractor, recipient, buyer, consignee, mol, site, createdBy] =
     await Promise.all([
-    // Поставщик: приоритет — справочник `suppliers` (для распознанных УПД
-    // после миграции 0064). Fallback — counterparties (исторические УПД и
-    // manual XML). Один из ID должен быть заполнен; если оба null — supplier
-    // в шапке покажется как «не указан».
-    sd.supplierDirectoryId
-      ? app.db
-          .select({ name: suppliers.name, inn: suppliers.inn })
-          .from(suppliers)
-          .where(eq(suppliers.id, sd.supplierDirectoryId))
-          .limit(1)
-      : sd.supplierId
+      // Поставщик: приоритет — справочник `suppliers` (для распознанных УПД
+      // после миграции 0064). Fallback — counterparties (исторические УПД и
+      // manual XML). Один из ID должен быть заполнен; если оба null — supplier
+      // в шапке покажется как «не указан».
+      sd.supplierDirectoryId
+        ? app.db
+            .select({ name: suppliers.name, inn: suppliers.inn })
+            .from(suppliers)
+            .where(eq(suppliers.id, sd.supplierDirectoryId))
+            .limit(1)
+        : sd.supplierId
+          ? app.db
+              .select({ name: counterparties.name, inn: counterparties.inn })
+              .from(counterparties)
+              .where(eq(counterparties.id, sd.supplierId))
+              .limit(1)
+          : Promise.resolve([] as { name: string; inn: string | null }[]),
+      sd.contractorId
+        ? app.db
+            .select({ name: counterparties.name })
+            .from(counterparties)
+            .where(eq(counterparties.id, sd.contractorId))
+            .limit(1)
+        : Promise.resolve([] as { name: string }[]),
+      sd.recipientId
+        ? app.db
+            .select({ name: counterparties.name })
+            .from(counterparties)
+            .where(eq(counterparties.id, sd.recipientId))
+            .limit(1)
+        : Promise.resolve([] as { name: string }[]),
+      // Стороны документа: запрашиваем имя только когда сторона нормализована.
+      // Если ИНН в документе не было, FK пустой — имя возьмётся из *_name_raw
+      // ниже, в sdRow.
+      sd.buyerId
         ? app.db
             .select({ name: counterparties.name, inn: counterparties.inn })
             .from(counterparties)
-            .where(eq(counterparties.id, sd.supplierId))
+            .where(eq(counterparties.id, sd.buyerId))
             .limit(1)
         : Promise.resolve([] as { name: string; inn: string | null }[]),
-    sd.contractorId
-      ? app.db
-          .select({ name: counterparties.name })
-          .from(counterparties)
-          .where(eq(counterparties.id, sd.contractorId))
-          .limit(1)
-      : Promise.resolve([] as { name: string }[]),
-    sd.recipientId
-      ? app.db
-          .select({ name: counterparties.name })
-          .from(counterparties)
-          .where(eq(counterparties.id, sd.recipientId))
-          .limit(1)
-      : Promise.resolve([] as { name: string }[]),
-    // Стороны документа: запрашиваем имя только когда сторона нормализована.
-    // Если ИНН в документе не было, FK пустой — имя возьмётся из *_name_raw
-    // ниже, в sdRow.
-    sd.buyerId
-      ? app.db
-          .select({ name: counterparties.name, inn: counterparties.inn })
-          .from(counterparties)
-          .where(eq(counterparties.id, sd.buyerId))
-          .limit(1)
-      : Promise.resolve([] as { name: string; inn: string | null }[]),
-    sd.consigneeId
-      ? app.db
-          .select({ name: counterparties.name, inn: counterparties.inn })
-          .from(counterparties)
-          .where(eq(counterparties.id, sd.consigneeId))
-          .limit(1)
-      : Promise.resolve([] as { name: string; inn: string | null }[]),
-    sd.recipientMolId
-      ? app.db
-          .select({ name: responsiblePersons.fullName })
-          .from(responsiblePersons)
-          .where(eq(responsiblePersons.id, sd.recipientMolId))
-          .limit(1)
-      : Promise.resolve([] as { name: string }[]),
-    sd.siteId
-      ? app.db
-          .select({ name: sites.name })
-          .from(sites)
-          .where(eq(sites.id, sd.siteId))
-          .limit(1)
-      : Promise.resolve([] as { name: string }[]),
-    sd.createdByUserId
-      ? app.db
-          .select({ email: users.email, phone: users.phone })
-          .from(users)
-          .where(eq(users.id, sd.createdByUserId))
-          .limit(1)
-      : Promise.resolve([] as { email: string; phone: string | null }[]),
-  ]);
+      sd.consigneeId
+        ? app.db
+            .select({ name: counterparties.name, inn: counterparties.inn })
+            .from(counterparties)
+            .where(eq(counterparties.id, sd.consigneeId))
+            .limit(1)
+        : Promise.resolve([] as { name: string; inn: string | null }[]),
+      sd.recipientMolId
+        ? app.db
+            .select({ name: responsiblePersons.fullName })
+            .from(responsiblePersons)
+            .where(eq(responsiblePersons.id, sd.recipientMolId))
+            .limit(1)
+        : Promise.resolve([] as { name: string }[]),
+      sd.siteId
+        ? app.db.select({ name: sites.name }).from(sites).where(eq(sites.id, sd.siteId)).limit(1)
+        : Promise.resolve([] as { name: string }[]),
+      sd.createdByUserId
+        ? app.db
+            .select({ email: users.email, phone: users.phone })
+            .from(users)
+            .where(eq(users.id, sd.createdByUserId))
+            .limit(1)
+        : Promise.resolve([] as { email: string; phone: string | null }[]),
+    ]);
   return {
     supplierName: supplier[0]?.name ?? null,
     contractorName: contractor[0]?.name ?? null,
@@ -657,7 +713,18 @@ async function deleteUpdWithRefsCheck(
     .from(sourceDocuments)
     .where(eq(sourceDocuments.id, id))
     .limit(1);
+  // Корень машины забираем ДО удаления: после него связь документа с пакетом
+  // пропадает, и оповестить соседей будет не по чему.
+  const [machine] = await app.db
+    .select({
+      rootId: drSql<string>`coalesce(${sourceBundles.parentBundleId}, ${sourceBundles.id})`,
+    })
+    .from(sourceDocuments)
+    .innerJoin(sourceBundles, eq(sourceBundles.id, sourceDocuments.bundleId))
+    .where(eq(sourceDocuments.id, id))
+    .limit(1);
 
+  const rollout = loadEnv().GROUPS_ROLLOUT;
   // Журнал hard-delete + физическое удаление одной транзакцией:
   // офлайн-клиент узнаёт об удалении через /sync.deletedIds.
   await app.db.transaction(async (tx: typeof app.db) => {
@@ -667,12 +734,35 @@ async function deleteUpdWithRefsCheck(
       siteId: doc?.siteId ?? null,
       deletedByUserId,
     });
+    // Ревизию машины поднимаем ДО удаления, пока документ ещё связан с пакетом.
+    // Удаление меняет СОСТАВ машины, и планшет обязан узнать об этом: без бампа
+    // у соседей не меняется ни updated_at, ни version, дельта их не привозит, и
+    // на форме приёмки остаётся документ, которого больше нет.
+    //
+    // Под рубильником: это ИСПРАВЛЕНИЕ, но заметное инспектору. Соседи приедут
+    // заново, и если у него открыта форма по этой машине, он получит диалог
+    // «состав машины изменился». До выката новой модели интерфейс инспектора не
+    // должен меняться вообще.
+    if (rollout) await bumpGroupRevision(tx, id);
     // Закрываем строку реестра ДО удаления документа, в той же транзакции.
     // Иначе проверка «у каждого принятого файла есть документ» увидит файл без
     // документа и заведёт заглушку заново — причём призраком: ключи этого
     // документа уходят ниже в очередь на физическое удаление из S3.
     await closeRegistryRowsForDeletedDocument(tx, id, deletedByUserId);
     await tx.delete(sourceDocuments).where(eq(sourceDocuments.id, id));
+    // Переход видимости — ПОСЛЕДНЕЙ операцией транзакции: событие помечается
+    // временем записи, а становится видимым только после коммита. Чем ближе
+    // запись к коммиту, тем меньше окно, в котором курсор /sync успеет уйти
+    // вперёд метки (см. visibility-events).
+    //
+    // Скоуп по машине, а не по удалённому документу: гаснет или, наоборот,
+    // открывается именно СОСЕД — удалённого в выборке уже нет.
+    if (rollout && machine?.rootId) {
+      await recordVisibilityTransitions(tx, {
+        groupId: machine.rootId,
+        reason: 'документ удалён менеджером',
+      });
+    }
   });
 
   const s3Keys = attachments
@@ -680,11 +770,7 @@ async function deleteUpdWithRefsCheck(
     .filter((k: string): k is string => Boolean(k));
   if (s3Keys.length > 0) {
     try {
-      await app.queues.s3Cleanup.add(
-        'cleanup',
-        { s3Keys },
-        { jobId: `sd-${id}` },
-      );
+      await app.queues.s3Cleanup.add('cleanup', { s3Keys }, { jobId: `sd-${id}` });
     } catch (err) {
       // Падение enqueue не должно ронять удаление — БД уже консистентна,
       // S3-объекты при необходимости можно будет почистить вручную.
@@ -806,7 +892,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // Включительно по дню: >= from и < to+1день.
       if (docDateFrom) conditions.push(drSql`${sourceDocuments.docDate} >= ${docDateFrom}::date`);
       if (docDateTo)
-        conditions.push(drSql`${sourceDocuments.docDate} < (${docDateTo}::date + interval '1 day')`);
+        conditions.push(
+          drSql`${sourceDocuments.docDate} < (${docDateTo}::date + interval '1 day')`,
+        );
       if (expectedDateFrom)
         conditions.push(drSql`${sourceDocuments.expectedDate} >= ${expectedDateFrom}::date`);
       if (expectedDateTo)
@@ -884,20 +972,26 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
               recipientName: recipient.name,
               // Показываем распознанный текст, имя контрагента — fallback для
               // исторических строк (бэкфилл миграции 0083 заполнил только FK).
-              buyerName: drSql<string | null>`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
-              consigneeName: drSql<string | null>`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
+              buyerName: drSql<
+                string | null
+              >`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
+              consigneeName: drSql<
+                string | null
+              >`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
               // Только справочная часть ИНН: распознанный подставит sdRow, у него
               // приоритет. NULLIF(BTRIM(…)) обязателен — suppliers.inn объявлен
               // NOT NULL DEFAULT '', и без него пустая строка справочника выиграла
               // бы у legacy-контрагента с настоящим ИНН.
-              supplierInn: drSql<string | null>`COALESCE(NULLIF(BTRIM(${supplierDir.inn}), ''), NULLIF(BTRIM(${supplier.inn}), ''))`,
+              supplierInn: drSql<
+                string | null
+              >`COALESCE(NULLIF(BTRIM(${supplierDir.inn}), ''), NULLIF(BTRIM(${supplier.inn}), ''))`,
               buyerInn: drSql<string | null>`NULLIF(BTRIM(${buyer.inn}), '')`,
               consigneeInn: drSql<string | null>`NULLIF(BTRIM(${consignee.inn}), '')`,
               recipientMolName: responsiblePersons.fullName,
               siteName: sites.name,
               fromSupplierPortal: fromSupplierPortalSql,
-              groupId: documentGroupIdSql,
-              groupRevision: documentGroupRevisionSql,
+              groupId: documentGroupIdSql(),
+              groupRevision: documentGroupRevisionSql(),
               portalGroupId: portalDocumentGroupIdSql,
             })
             .from(sourceDocuments)
@@ -907,10 +1001,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             .leftJoin(recipient, eq(sourceDocuments.recipientId, recipient.id))
             .leftJoin(buyer, eq(sourceDocuments.buyerId, buyer.id))
             .leftJoin(consignee, eq(sourceDocuments.consigneeId, consignee.id))
-            .leftJoin(
-              responsiblePersons,
-              eq(sourceDocuments.recipientMolId, responsiblePersons.id),
-            )
+            .leftJoin(responsiblePersons, eq(sourceDocuments.recipientMolId, responsiblePersons.id))
             .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
             .where(where)
             .orderBy(...orderByArgs)
@@ -994,22 +1085,26 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       );
       const { rows, count, pendingRows } = snapshot;
       return {
-        items: rows.map((r) =>
-          sdRow(r.sd, {
-            supplierName: r.supplierName,
-            contractorName: r.contractorName,
-            recipientName: r.recipientName,
-            buyerName: r.buyerName,
-            consigneeName: r.consigneeName,
-            supplierInn: r.supplierInn,
-            buyerInn: r.buyerInn,
-            consigneeInn: r.consigneeInn,
-            recipientMolName: r.recipientMolName,
-            siteName: r.siteName,
-            fromSupplierPortal: r.fromSupplierPortal,
-            groupId: r.groupId,
-            groupRevision: r.groupRevision,
-            portalGroupId: r.portalGroupId,
+        items: await Promise.all(
+          rows.map(async (r) => {
+            const workHealth = await sourceDocumentWorkHealth(app, r.sd);
+            return sdRow(r.sd, {
+              supplierName: r.supplierName,
+              contractorName: r.contractorName,
+              recipientName: r.recipientName,
+              buyerName: r.buyerName,
+              consigneeName: r.consigneeName,
+              supplierInn: r.supplierInn,
+              buyerInn: r.buyerInn,
+              consigneeInn: r.consigneeInn,
+              recipientMolName: r.recipientMolName,
+              siteName: r.siteName,
+              fromSupplierPortal: r.fromSupplierPortal,
+              groupId: r.groupId,
+              groupRevision: r.groupRevision,
+              portalGroupId: r.portalGroupId,
+              workHealth,
+            });
           }),
         ),
         total: count,
@@ -1161,8 +1256,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             sd: sourceDocuments,
             supplierName: drSql<string | null>`COALESCE(${supplierDir.name}, ${supplier.name})`,
             contractorName: contractor.name,
-            buyerName: drSql<string | null>`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
-            consigneeName: drSql<string | null>`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
+            buyerName: drSql<
+              string | null
+            >`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
+            consigneeName: drSql<
+              string | null
+            >`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
             siteName: sites.name,
           })
           .from(sourceDocuments)
@@ -1287,9 +1386,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             });
             itemRow.outlineLevel = 1; // строка позиции — внутри +/- группы
             const qtyNum = Number(it.qty);
-            itemRow.getCell('qty').numFmt = Number.isInteger(qtyNum)
-              ? QTY_FMT_INT
-              : QTY_FMT_DEC;
+            itemRow.getCell('qty').numFmt = Number.isInteger(qtyNum) ? QTY_FMT_INT : QTY_FMT_DEC;
             itemRow.getCell('price').numFmt = MONEY_FMT;
             itemRow.getCell('vatSum').numFmt = MONEY_FMT;
             itemRow.getCell('sum').numFmt = MONEY_FMT;
@@ -1308,10 +1405,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             'Content-Type',
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
           )
-          .header(
-            'Content-Disposition',
-            `attachment; filename="${filename}"`,
-          )
+          .header('Content-Disposition', `attachment; filename="${filename}"`)
           .send(Buffer.from(buf));
       },
     );
@@ -1343,19 +1437,23 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           // Показываем распознанный текст, имя контрагента — fallback для
           // исторических строк (бэкфилл миграции 0083 заполнил только FK).
           buyerName: drSql<string | null>`COALESCE(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
-          consigneeName: drSql<string | null>`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
+          consigneeName: drSql<
+            string | null
+          >`COALESCE(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
           // Только справочная часть ИНН: распознанный подставит sdRow, у него
           // приоритет. NULLIF(BTRIM(…)) обязателен — suppliers.inn объявлен
           // NOT NULL DEFAULT '', и без него пустая строка справочника выиграла
           // бы у legacy-контрагента с настоящим ИНН.
-          supplierInn: drSql<string | null>`COALESCE(NULLIF(BTRIM(${supplierDir.inn}), ''), NULLIF(BTRIM(${supplier.inn}), ''))`,
+          supplierInn: drSql<
+            string | null
+          >`COALESCE(NULLIF(BTRIM(${supplierDir.inn}), ''), NULLIF(BTRIM(${supplier.inn}), ''))`,
           buyerInn: drSql<string | null>`NULLIF(BTRIM(${buyer.inn}), '')`,
           consigneeInn: drSql<string | null>`NULLIF(BTRIM(${consignee.inn}), '')`,
           recipientMolName: responsiblePersons.fullName,
           siteName: sites.name,
           fromSupplierPortal: fromSupplierPortalSql,
-          groupId: documentGroupIdSql,
-          groupRevision: documentGroupRevisionSql,
+          groupId: documentGroupIdSql(),
+          groupRevision: documentGroupRevisionSql(),
           portalGroupId: portalDocumentGroupIdSql,
         })
         .from(sourceDocuments)
@@ -1365,10 +1463,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .leftJoin(recipient, eq(sourceDocuments.recipientId, recipient.id))
         .leftJoin(buyer, eq(sourceDocuments.buyerId, buyer.id))
         .leftJoin(consignee, eq(sourceDocuments.consigneeId, consignee.id))
-        .leftJoin(
-          responsiblePersons,
-          eq(sourceDocuments.recipientMolId, responsiblePersons.id),
-        )
+        .leftJoin(responsiblePersons, eq(sourceDocuments.recipientMolId, responsiblePersons.id))
         .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
         .where(eq(sourceDocuments.id, req.params.id))
         .limit(1);
@@ -1405,6 +1500,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           vatSum: it.vatSum != null ? Number(it.vatSum) : null,
         })),
       });
+      const workHealth = await sourceDocumentWorkHealth(app, sd);
       const base = sdRow(sd, {
         supplierName: row.supplierName,
         contractorName: row.contractorName,
@@ -1420,6 +1516,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         groupId: row.groupId,
         groupRevision: row.groupRevision,
         portalGroupId: row.portalGroupId,
+        workHealth,
       });
 
       // Комментарий поставщика к поставке. Персональных данных здесь нет
@@ -1702,7 +1799,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       }
 
       reply.code(upstream.status);
-      for (const h of ['content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified']) {
+      for (const h of [
+        'content-length',
+        'content-range',
+        'accept-ranges',
+        'etag',
+        'last-modified',
+      ]) {
         const v = upstream.headers.get(h);
         if (v) reply.header(h, v);
       }
@@ -1915,12 +2018,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // чтобы один и тот же шаблон у разных подрядчиков не сливался.
       const existingWhere = [
         eq(sourceDocuments.contentHash, contentHash),
-        inArray(sourceDocuments.status, [
-          'queued',
-          'processing',
-          'parsed',
-          'needs_resolution',
-        ]),
+        inArray(sourceDocuments.status, ['queued', 'processing', 'parsed', 'needs_resolution']),
       ];
       if (contractorId) {
         existingWhere.push(eq(sourceDocuments.contractorId, contractorId));
@@ -2072,8 +2170,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         if (buf.length === 0) continue;
         const mime = (part.mimetype ?? '').toLowerCase();
         const isImage =
-          mime.startsWith('image/') ||
-          /\.(jpg|jpeg|png|webp|heic|heif)$/i.test(part.filename);
+          mime.startsWith('image/') || /\.(jpg|jpeg|png|webp|heic|heif)$/i.test(part.filename);
         const isPdf = mime.includes('pdf') || /\.pdf$/i.test(part.filename);
         if (!isImage && !isPdf) {
           // Молча пропускаем неподдерживаемые типы — это могут быть поля
@@ -2089,9 +2186,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       }
 
       if (collected.length === 0) {
-        return reply
-          .code(400)
-          .send({ error: 'no_files', message: 'Не приложен ни один файл' });
+        return reply.code(400).send({ error: 'no_files', message: 'Не приложен ни один файл' });
       }
 
       const meta = UpdPdfQueueRequestSchema.safeParse(rawFields);
@@ -2172,6 +2267,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             parseErrorCode: null,
             parseErrorMessage: null,
             docCount: 0,
+            dispatchGeneration: drSql`${sourceBundles.dispatchGeneration} + 1`,
             createdByUserId: req.user?.id ?? existingBundle.createdByUserId,
             updatedAt: new Date(),
           })
@@ -2282,7 +2378,25 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       );
 
       // 4) В очередь. Worker определит формат job по наличию bundleId.
-      await app.queues.updParse.add('parse', { bundleId: bundle.id });
+      const jobId = bundleDispatchKeyOf(bundle.id, bundle.dispatchGeneration);
+      await app.db.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Db;
+        await tx
+          .update(sourceBundles)
+          .set({ jobId })
+          .where(
+            and(
+              eq(sourceBundles.id, bundle.id),
+              eq(sourceBundles.dispatchGeneration, bundle.dispatchGeneration),
+            ),
+          );
+        await enqueueJob(tx, {
+          queue: UPD_PARSE_QUEUE,
+          jobName: 'parse',
+          payload: { bundleId: bundle.id, bundleGeneration: bundle.dispatchGeneration },
+          dedupeKey: jobId,
+        });
+      });
 
       const names = await loadSdNames(app, tech);
       reply.code(201);
@@ -2584,11 +2698,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .limit(1);
       if (!sd) return reply.code(404).send({ error: 'not_found' });
       if (sd.parseErrorCode !== 'duplicate_upd') {
-        return reply.code(400).send({ error: 'not_duplicate', message: 'Документ не в статусе дубликата' });
+        return reply
+          .code(400)
+          .send({ error: 'not_duplicate', message: 'Документ не в статусе дубликата' });
       }
       const existingId =
         sd.parseErrorDetails && typeof sd.parseErrorDetails === 'object'
-          ? (sd.parseErrorDetails as { existingId?: string }).existingId ?? null
+          ? ((sd.parseErrorDetails as { existingId?: string }).existingId ?? null)
           : null;
       if (req.body.action === 'skip') {
         // Удаляем загруженный дубль (не существующий оригинал).
@@ -2662,6 +2778,102 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     },
   );
 
+  // ──────────── Восстановление зависшего распознавания ────────────
+  app.post(
+    '/api/v1/source-documents/:id/recover',
+    {
+      preHandler: [app.authenticate, app.authorize('admin')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: {
+          200: SourceRecoverResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          503: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      // Рубильник проверяется ДО чтения документа: по плану выката ручное
+      // восстановление включается последним, уже после того как сторож отработал
+      // сутки без расхождений.
+      if (!loadEnv().RECOGNITION_RECOVERY_MANUAL) {
+        return reply.code(409).send({
+          error: 'recovery_disabled',
+          message: 'Ручное восстановление выключено',
+        });
+      }
+      const [sd] = await app.db
+        .select()
+        .from(sourceDocuments)
+        .where(and(eq(sourceDocuments.id, req.params.id), eq(sourceDocuments.isTechnical, false)))
+        .limit(1);
+      if (!sd || !(await sourceDocumentVisible(app, req.user, sd))) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      if (sd.status !== 'queued' && sd.status !== 'processing') {
+        return reply.code(409).send({
+          error: 'not_recoverable',
+          message: 'Документ уже находится в конечном состоянии',
+        });
+      }
+
+      const pendingSecondPass = (sd.secondPass as { state?: string } | null)?.state === 'queued';
+      const jobId =
+        sd.jobId ??
+        (pendingSecondPass
+          ? documentSecondPassKeyOf(sd.id, sd.dispatchGeneration)
+          : dispatchKeyOf(sd.id, sd.dispatchGeneration));
+      const health = await inspectWorkHealth({
+        db: app.db,
+        queue: app.queues.updParse,
+        jobId,
+      });
+      if (health.state === 'alive' || health.state === 'alive_transport') {
+        return reply.code(409).send({
+          error: 'already_running',
+          message: 'Актуальное задание ещё выполняется или ожидает доставки',
+        });
+      }
+      if (health.state === 'unknown') {
+        return reply.code(503).send({
+          error: 'work_state_unknown',
+          message: 'Не удалось надёжно определить состояние очереди',
+        });
+      }
+
+      const recovered = await recoverDocumentAttempt({
+        db: app.db,
+        queueName: UPD_PARSE_QUEUE,
+        sourceDocumentId: sd.id,
+        expectedGeneration: sd.dispatchGeneration,
+        health,
+        actor: 'manual',
+      });
+      if (recovered.outcome === 'skipped') {
+        return reply.code(409).send({
+          error: 'concurrent_change',
+          message: 'Состояние документа уже изменилось; обновите страницу',
+        });
+      }
+      if (recovered.outcome === 'terminalized') {
+        return {
+          ok: true as const,
+          outcome: recovered.outcome,
+          generation: recovered.generation,
+          jobId: null,
+          reason: recovered.reason,
+        };
+      }
+      return {
+        ok: true as const,
+        outcome: recovered.outcome,
+        generation: recovered.generation,
+        jobId: recovered.jobId,
+      };
+    },
+  );
+
   // ──────────── Повторное распознавание ────────────
   //
   // Кнопка «Распознать повторно»: документ распознаётся заново ТЕМ ЖЕ путём,
@@ -2720,7 +2932,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         }
 
         const generation = sd.dispatchGeneration + 1;
-        const plan = await resolveReparsePlan(tx, sd, generation);
+        const plan = await resolveReparsePlan(tx, sd, generation, { reparse: true });
         if (isBlocked(plan)) {
           return {
             ok: false,
@@ -3005,8 +3217,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       if (sd.direction === 'inbound') {
         const nextContractorId =
           upd.contractorId !== undefined ? upd.contractorId : sd.contractorId;
-        const nextMolId =
-          upd.recipientMolId !== undefined ? upd.recipientMolId : sd.recipientMolId;
+        const nextMolId = upd.recipientMolId !== undefined ? upd.recipientMolId : sd.recipientMolId;
         const recipientChanged =
           (nextContractorId ?? null) !== (sd.contractorId ?? null) ||
           (nextMolId ?? null) !== (sd.recipientMolId ?? null);
@@ -3039,166 +3250,210 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         upd.supplierInnRaw = null;
       }
 
-      if (req.body.items) {
-        // Полная замена позиций. Старые удаляются каскадом по delete + insert.
-        await app.db
-          .delete(sourceDocumentItems)
-          .where(eq(sourceDocumentItems.sourceDocumentId, sd.id));
-        if (req.body.items.length > 0) {
-          const rows = await Promise.all(
-            req.body.items.map(async (it, idx) => ({
-              sourceDocumentId: sd.id,
-              materialId: await findOrCreateMaterial(app, { name: it.nameRaw, unit: it.unit }),
-              nameRaw: it.nameRaw,
-              qty: typeof it.qty === 'number' ? it.qty.toString() : it.qty,
-              unit: it.unit,
-              price:
-                it.price === null || it.price === undefined
-                  ? null
-                  : typeof it.price === 'number'
-                    ? it.price.toString()
-                    : it.price,
-              sum:
-                it.sum === null || it.sum === undefined
-                  ? null
-                  : typeof it.sum === 'number'
-                    ? it.sum.toString()
-                    : it.sum,
-              lineNo: idx + 1,
-            })),
-          );
-          await app.db.insert(sourceDocumentItems).values(rows);
-        }
-      }
+      // Позиции считаем ДО транзакции: findOrCreateMaterial ходит в базу
+      // своим соединением, и держать ради него открытую транзакцию незачем.
+      const itemRows =
+        req.body.items && req.body.items.length > 0
+          ? await Promise.all(
+              req.body.items.map(async (it, idx) => ({
+                sourceDocumentId: sd.id,
+                materialId: await findOrCreateMaterial(app, { name: it.nameRaw, unit: it.unit }),
+                nameRaw: it.nameRaw,
+                qty: typeof it.qty === 'number' ? it.qty.toString() : it.qty,
+                unit: it.unit,
+                price:
+                  it.price === null || it.price === undefined
+                    ? null
+                    : typeof it.price === 'number'
+                      ? it.price.toString()
+                      : it.price,
+                sum:
+                  it.sum === null || it.sum === undefined
+                    ? null
+                    : typeof it.sum === 'number'
+                      ? it.sum.toString()
+                      : it.sum,
+                lineNo: idx + 1,
+              })),
+            )
+          : null;
 
-      // Пересчёт validation. Берём актуальные значения шапки и позиций.
-      const updatedItems = await app.db
-        .select()
-        .from(sourceDocumentItems)
-        .where(eq(sourceDocumentItems.sourceDocumentId, sd.id))
-        .orderBy(sourceDocumentItems.lineNo);
-      const totalSumForCheck =
-        upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
-      const validation = validateUpdTotals({
-        totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
-        vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
-        items: updatedItems.map((i) => ({
-          qty: Number(i.qty),
-          price: i.price != null ? Number(i.price) : null,
-          sum: i.sum != null ? Number(i.sum) : null,
-          vatRate: i.vatRate != null ? Number(i.vatRate) : null,
-          vatSum: i.vatSum != null ? Number(i.vatSum) : null,
-        })),
+      // Вся ЗАПИСЬ — одной транзакцией: позиции, шапка, отметка в реестре,
+      // ревизия машины и переход видимости. Раньше это были четыре
+      // независимых запроса, и между ними планшет успевал забрать документ с
+      // новыми позициями, но со старой ревизией — то есть форма приёмки
+      // считала состав неизменившимся.
+      const { updated, updatedItems } = await app.db.transaction(async (tx) => {
+        if (req.body.items) {
+          // Полная замена позиций. Старые удаляются каскадом по delete + insert.
+          await tx
+            .delete(sourceDocumentItems)
+            .where(eq(sourceDocumentItems.sourceDocumentId, sd.id));
+          if (itemRows && itemRows.length > 0) {
+            await tx.insert(sourceDocumentItems).values(itemRows);
+          }
+        }
+
+        // Пересчёт validation. Берём актуальные значения шапки и позиций.
+        const updatedItems = await tx
+          .select()
+          .from(sourceDocumentItems)
+          .where(eq(sourceDocumentItems.sourceDocumentId, sd.id))
+          .orderBy(sourceDocumentItems.lineNo);
+        const totalSumForCheck = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
+        const validation = validateUpdTotals({
+          totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
+          vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
+          items: updatedItems.map((i) => ({
+            qty: Number(i.qty),
+            price: i.price != null ? Number(i.price) : null,
+            sum: i.sum != null ? Number(i.sum) : null,
+            vatRate: i.vatRate != null ? Number(i.vatRate) : null,
+            vatSum: i.vatSum != null ? Number(i.vatSum) : null,
+          })),
+        });
+        upd.validation = validation;
+
+        // Исход после правки считает то же правило, что и разбор
+        // (domain/edo/upd-outcome.ts). Раньше здесь жила своя проверка, и она
+        // умела только одно: снять `validation_mismatch`, когда суммы сошлись.
+        // Менеджер, дописавший недостающие позиции или номер, оставался с
+        // `partial_parse` — то есть его работа не доезжала до инспектора.
+        //
+        // Трогаем статус только у документов в работе: `archived` закрыт
+        // человеком осознанно, а заглушки разбираются ниже по явному флагу.
+        // Дубликат сюда не попадает: его снимает отдельное действие «разрешить»
+        // (resolve-duplicate), где человек решает, какой из двух документов
+        // настоящий. Пересчитав ему исход здесь, мы бы стёрли эту пометку при
+        // любой правке поля — и второй экземпляр УПД тихо уехал бы инспектору.
+        const touchable =
+          sd.kind === 'upd' &&
+          (sd.status === 'needs_resolution' || sd.status === 'parsed') &&
+          sd.parseErrorCode !== 'duplicate_upd' &&
+          !isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
+        if (touchable) {
+          const nextNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
+          const outcome = deriveUpdParseOutcome(
+            {
+              items: updatedItems.map((i) => ({
+                nameRaw: i.nameRaw,
+                qty: Number(i.qty),
+                price: i.price != null ? Number(i.price) : null,
+                sum: i.sum != null ? Number(i.sum) : null,
+                vatRate: i.vatRate != null ? Number(i.vatRate) : null,
+              })),
+              docNumber: nextNumber ?? null,
+              totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
+              confidence: sd.llmConfidence != null ? Number(sd.llmConfidence) : 0,
+              itemsCount: null,
+            },
+            validation,
+          );
+          upd.status = outcome.status;
+          upd.parseErrorCode = outcome.parseErrorCode;
+          upd.parseErrorDetails = outcome.parseErrorDetails as never;
+          // Итог, посчитанный по строкам, записываем только если менеджер не
+          // задал его сам в этом же запросе.
+          if (
+            upd.totalSum === undefined &&
+            outcome.totalSumSynthesized &&
+            outcome.totalSum != null
+          ) {
+            upd.totalSum = outcome.totalSum.toString();
+          }
+        }
+
+        // Завершение ручного разбора заглушки. Только по явному флагу: правка
+        // полей сама по себе не значит, что человек закончил.
+        const resolvingManually =
+          req.body.resolveManually === true &&
+          isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
+        if (resolvingManually) {
+          // Куда переводить — решают сами данные, и выбора тут по сути нет:
+          // ограничение source_upd_required запрещает УПД в статусе `parsed` без
+          // номера, даты и суммы. Менеджер ввёл реквизиты (файл действительно был
+          // документом) — `parsed`; закрыл как есть (сертификат, дубль, мусор) —
+          // `archived`: документ уходит из работы, но остаётся видимым вместе с
+          // файлом, а это и есть вся суть правки.
+          const nextDocNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
+          const nextDocDate = upd.docDate !== undefined ? upd.docDate : sd.docDate;
+          const nextTotalSum = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
+          // Комплект реквизитов зависит от вида: CHECK source_upd_required
+          // требует сумму только с УПД. В накладной суммы может не быть вовсе
+          // (перемещение ОС, отпуск материалов), и требовать её значило бы
+          // навсегда запереть такой документ в архиве.
+          const needsTotalSum = sd.kind === 'upd';
+          const complete =
+            nextDocNumber != null &&
+            nextDocDate != null &&
+            (!needsTotalSum || nextTotalSum != null);
+          upd.status = complete ? 'parsed' : 'archived';
+          if (complete) {
+            // Стал полноценным документом — прошлая ошибка распознавания больше
+            // ни на что не влияет.
+            upd.parseErrorCode = null;
+            upd.parseErrorDetails = null;
+          }
+          // В архиве код СОХРАНЯЕТСЯ намеренно, и это не «забыли почистить»: по
+          // нему такие записи не уезжают в /sync на планшет КПП (там документы
+          // отбираются по объекту и дате, без оглядки на статус) и не попадают в
+          // «Ожидаемые». Плюс он объясняет менеджеру, почему документ в архиве.
+        }
+
+        const [updated] = await tx
+          .update(sourceDocuments)
+          .set(upd)
+          .where(eq(sourceDocuments.id, sd.id))
+          .returning();
+        if (!updated) throw new Error('Failed to update source_document');
+
+        // Отметка в реестре входных файлов: кто и когда закрыл вопрос по файлу.
+        // Без неё повторная проверка инварианта считала бы файл незакрытым, а в
+        // сверке (скрипт по бою) не было бы видно ручных разборов.
+        if (resolvingManually && sd.bundleId) {
+          await tx
+            .update(bundleImportItems)
+            .set({
+              resolvedAt: new Date(),
+              resolvedByUserId: req.user?.id ?? null,
+              manualDocumentId: sd.id,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(bundleImportItems.bundleId, sd.bundleId),
+                drSql`${bundleImportItems.createdDocumentIds} @> ${JSON.stringify([sd.id])}::jsonb`,
+              ),
+            );
+        }
+
+        // Ревизию поднимаем только на то, что ВИДИТ инспектор. Правка
+        // комментария или поставщика не должна выдавать ему «состав машины
+        // изменился» на открытой форме.
+        const inspectorSees =
+          req.body.items !== undefined ||
+          upd.siteId !== undefined ||
+          upd.expectedDate !== undefined ||
+          upd.docNumber !== undefined ||
+          upd.status !== undefined ||
+          upd.contractorId !== undefined ||
+          upd.recipientId !== undefined ||
+          upd.recipientMolId !== undefined;
+        // Под рубильником по той же причине, что и при удалении: до выката
+        // новой модели инспектор не должен видеть ни новых диалогов, ни
+        // перезагрузки состава машины.
+        if (inspectorSees && loadEnv().GROUPS_ROLLOUT) {
+          await bumpGroupRevision(tx, sd.id);
+          // Последней операцией транзакции: событие видно только после
+          // коммита, и чем ближе запись к нему, тем меньше окно, в котором
+          // курсор /sync уйдёт вперёд метки (см. visibility-events).
+          await recordVisibilityTransitions(tx, {
+            documentIds: [sd.id],
+            reason: 'документ изменён менеджером',
+          });
+        }
+        return { updated, updatedItems };
       });
-      upd.validation = validation;
-
-      // Исход после правки считает то же правило, что и разбор
-      // (domain/edo/upd-outcome.ts). Раньше здесь жила своя проверка, и она
-      // умела только одно: снять `validation_mismatch`, когда суммы сошлись.
-      // Менеджер, дописавший недостающие позиции или номер, оставался с
-      // `partial_parse` — то есть его работа не доезжала до инспектора.
-      //
-      // Трогаем статус только у документов в работе: `archived` закрыт
-      // человеком осознанно, а заглушки разбираются ниже по явному флагу.
-      // Дубликат сюда не попадает: его снимает отдельное действие «разрешить»
-      // (resolve-duplicate), где человек решает, какой из двух документов
-      // настоящий. Пересчитав ему исход здесь, мы бы стёрли эту пометку при
-      // любой правке поля — и второй экземпляр УПД тихо уехал бы инспектору.
-      const touchable =
-        sd.kind === 'upd' &&
-        (sd.status === 'needs_resolution' || sd.status === 'parsed') &&
-        sd.parseErrorCode !== 'duplicate_upd' &&
-        !isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
-      if (touchable) {
-        const nextNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
-        const outcome = deriveUpdParseOutcome(
-          {
-            items: updatedItems.map((i) => ({
-              nameRaw: i.nameRaw,
-              qty: Number(i.qty),
-              price: i.price != null ? Number(i.price) : null,
-              sum: i.sum != null ? Number(i.sum) : null,
-              vatRate: i.vatRate != null ? Number(i.vatRate) : null,
-            })),
-            docNumber: nextNumber ?? null,
-            totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
-            confidence: sd.llmConfidence != null ? Number(sd.llmConfidence) : 0,
-            itemsCount: null,
-          },
-          validation,
-        );
-        upd.status = outcome.status;
-        upd.parseErrorCode = outcome.parseErrorCode;
-        upd.parseErrorDetails = outcome.parseErrorDetails as never;
-        // Итог, посчитанный по строкам, записываем только если менеджер не
-        // задал его сам в этом же запросе.
-        if (upd.totalSum === undefined && outcome.totalSumSynthesized && outcome.totalSum != null) {
-          upd.totalSum = outcome.totalSum.toString();
-        }
-      }
-
-      // Завершение ручного разбора заглушки. Только по явному флагу: правка
-      // полей сама по себе не значит, что человек закончил.
-      const resolvingManually =
-        req.body.resolveManually === true && isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
-      if (resolvingManually) {
-        // Куда переводить — решают сами данные, и выбора тут по сути нет:
-        // ограничение source_upd_required запрещает УПД в статусе `parsed` без
-        // номера, даты и суммы. Менеджер ввёл реквизиты (файл действительно был
-        // документом) — `parsed`; закрыл как есть (сертификат, дубль, мусор) —
-        // `archived`: документ уходит из работы, но остаётся видимым вместе с
-        // файлом, а это и есть вся суть правки.
-        const nextDocNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
-        const nextDocDate = upd.docDate !== undefined ? upd.docDate : sd.docDate;
-        const nextTotalSum = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
-        // Комплект реквизитов зависит от вида: CHECK source_upd_required
-        // требует сумму только с УПД. В накладной суммы может не быть вовсе
-        // (перемещение ОС, отпуск материалов), и требовать её значило бы
-        // навсегда запереть такой документ в архиве.
-        const needsTotalSum = sd.kind === 'upd';
-        const complete =
-          nextDocNumber != null &&
-          nextDocDate != null &&
-          (!needsTotalSum || nextTotalSum != null);
-        upd.status = complete ? 'parsed' : 'archived';
-        if (complete) {
-          // Стал полноценным документом — прошлая ошибка распознавания больше
-          // ни на что не влияет.
-          upd.parseErrorCode = null;
-          upd.parseErrorDetails = null;
-        }
-        // В архиве код СОХРАНЯЕТСЯ намеренно, и это не «забыли почистить»: по
-        // нему такие записи не уезжают в /sync на планшет КПП (там документы
-        // отбираются по объекту и дате, без оглядки на статус) и не попадают в
-        // «Ожидаемые». Плюс он объясняет менеджеру, почему документ в архиве.
-      }
-
-      const [updated] = await app.db
-        .update(sourceDocuments)
-        .set(upd)
-        .where(eq(sourceDocuments.id, sd.id))
-        .returning();
-      if (!updated) throw new Error('Failed to update source_document');
-
-      // Отметка в реестре входных файлов: кто и когда закрыл вопрос по файлу.
-      // Без неё повторная проверка инварианта считала бы файл незакрытым, а в
-      // сверке (скрипт по бою) не было бы видно ручных разборов.
-      if (resolvingManually && sd.bundleId) {
-        await app.db
-          .update(bundleImportItems)
-          .set({
-            resolvedAt: new Date(),
-            resolvedByUserId: req.user?.id ?? null,
-            manualDocumentId: sd.id,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(bundleImportItems.bundleId, sd.bundleId),
-              drSql`${bundleImportItems.createdDocumentIds} @> ${JSON.stringify([sd.id])}::jsonb`,
-            ),
-          );
-      }
 
       const attachments = await app.db
         .select()
@@ -3286,7 +3541,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
-        response: { 200: z.object({ ok: z.literal(true) }), 404: ErrorResponseSchema, 409: ErrorResponseSchema },
+        response: {
+          200: z.object({ ok: z.literal(true) }),
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
       },
     },
     async (req, reply) => {
@@ -3339,7 +3598,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     },
     async (req) => {
       const deleted: string[] = [];
-      const skipped: Array<{ id: string; reason: 'has_references' | 'not_found' | 'internal_error' }> = [];
+      const skipped: Array<{
+        id: string;
+        reason: 'has_references' | 'not_found' | 'internal_error';
+      }> = [];
 
       for (const id of req.body.ids) {
         const [existing] = await app.db

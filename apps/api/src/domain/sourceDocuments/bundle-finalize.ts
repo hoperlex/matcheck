@@ -36,7 +36,12 @@ export type FinalizeBundleResult = {
   /** Что произошло: пакет доведён до терминала или оставлен как был. */
   outcome: 'parsed' | 'parse_failed' | 'skipped';
   /** Почему пропустили (для лога). Пусто, если пакет финализирован. */
-  skipReason?: 'исчез' | 'уже терминальный' | 'опубликован' | 'статус изменился';
+  skipReason?:
+    | 'исчез'
+    | 'уже терминальный'
+    | 'поколение устарело'
+    | 'опубликован'
+    | 'статус изменился';
   /** Сколько живых нетехнических документов нашлось у пакета и его детей. */
   documents: number;
   /** Строки реестра, закрытые как несостоявшиеся. */
@@ -44,6 +49,8 @@ export type FinalizeBundleResult = {
 };
 
 export type FinalizeBundleOptions = {
+  /** Dispatch-поколение пакетного задания, если финализация относится к конкретной попытке. */
+  expectedDispatchGeneration?: number;
   /**
    * Не трогать пакет, поколение которого уже опубликовано.
    *
@@ -102,6 +109,7 @@ export async function finalizeBundleTerminalState(
         status: sourceBundles.status,
         publishedGeneration: sourceBundles.publishedGeneration,
         parseErrorCode: sourceBundles.parseErrorCode,
+        dispatchGeneration: sourceBundles.dispatchGeneration,
         parseErrorMessage: sourceBundles.parseErrorMessage,
       })
       .from(sourceBundles)
@@ -109,7 +117,23 @@ export async function finalizeBundleTerminalState(
       .for('update');
 
     if (!bundle) {
-      return { outcome: 'skipped' as const, skipReason: 'исчез' as const, documents: 0, finalizedItems: 0 };
+      return {
+        outcome: 'skipped' as const,
+        skipReason: 'исчез' as const,
+        documents: 0,
+        finalizedItems: 0,
+      };
+    }
+    if (
+      opts.expectedDispatchGeneration !== undefined &&
+      bundle.dispatchGeneration !== opts.expectedDispatchGeneration
+    ) {
+      return {
+        outcome: 'skipped' as const,
+        skipReason: 'поколение устарело' as const,
+        documents: 0,
+        finalizedItems: 0,
+      };
     }
     if ((TERMINAL_BUNDLE_STATUSES as readonly string[]).includes(bundle.status)) {
       return {

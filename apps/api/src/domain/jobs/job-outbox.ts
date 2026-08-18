@@ -21,11 +21,12 @@ import { jobOutbox } from '../../db/schema.js';
  */
 
 /**
- * Ключи диспетчеризации. Формат общий для writers и для repair: пересоздание
- * задания зависшей записи обязано попасть в тот же ключ, иначе BullMQ примет
- * его как второй запуск и документ распознается дважды.
+ * Ключи диспетчеризации. Повтор доставки ОДНОЙ outbox-строки сохраняет ключ,
+ * поэтому BullMQ не создаёт дубль. Recovery, напротив, атомарно увеличивает
+ * `generation`, supersede'ит старую строку и получает новый jobId; старый
+ * worker после этого отсекается generation-fencing.
  *
- * `generation` — счётчик НАМЕРЕННЫХ перезапусков. Repair его не трогает.
+ * `generation` — счётчик ручных и watchdog-recovery попыток.
  *
  * Разделитель — `~`, а НЕ двоеточие: BullMQ строит из jobId ключи Redis и
  * отвергает идентификаторы с `:` ошибкой «Custom Id cannot contain :». С
@@ -66,8 +67,8 @@ export function assemblyDispatchKeyOf(bundleId: string, generation = 0): string 
  * Ключ распознавания одного сегмента.
  *
  * Адресует сегмент манифеста, а не файл: страницы сегмента лежат в разных
- * файлах, и восстановление зависшего задания обязано попасть в тот же ключ,
- * иначе документ распознается дважды.
+ * файлах. Recovery сохраняет segmentId, но увеличивает generation, чтобы
+ * терминальный BullMQ job прежней попытки не заблокировал новую.
  */
 export function segmentDispatchKeyOf(segmentId: string, generation = 0): string {
   return assertValidKey(['segment', segmentId, 'parse', generation].join(KEY_SEP));
@@ -143,6 +144,20 @@ export async function enqueueJob(tx: Db, input: EnqueueJobInput): Promise<void> 
     .onConflictDoNothing({ target: jobOutbox.dedupeKey });
 }
 
+/**
+ * Выводит старую попытку из доставки, не уничтожая улику об инциденте.
+ *
+ * Вызывать в той же транзакции, где сущность получает новое поколение и
+ * записывается новый outbox job.
+ */
+export async function supersedeJobAttempt(tx: Db, dedupeKey: string | null): Promise<void> {
+  if (!dedupeKey) return;
+  await tx
+    .update(jobOutbox)
+    .set({ supersededAt: drSql`now()`, processingAt: null })
+    .where(and(eq(jobOutbox.dedupeKey, dedupeKey), isNull(jobOutbox.supersededAt)));
+}
+
 export type ProcessJobOutboxDeps = {
   db: Db;
   /** Очереди по имени: consumer сам выбирает нужную по строке outbox. */
@@ -187,6 +202,8 @@ export async function processJobOutbox(
       .where(
         and(
           lte(jobOutbox.nextAttemptAt, dbNow),
+          isNull(jobOutbox.parkedAt),
+          isNull(jobOutbox.supersededAt),
           or(isNull(jobOutbox.processingAt), lt(jobOutbox.processingAt, leaseCutoff)),
         ),
       )
@@ -221,16 +238,15 @@ export async function processJobOutbox(
     } catch (err) {
       failed += 1;
       const attempts = row.attempts + 1;
-      // Исчерпав попытки, строка не теряется: откладывается на сутки и ждёт
-      // вмешательства — job терять нельзя, это и есть смысл outbox.
+      // Исчерпав транспортный бюджет, строка остаётся как улика, но больше не
+      // ездит по суточному циклу. Recovery создаст НОВОЕ поколение.
       const parked = attempts >= OUTBOX_MAX_ATTEMPTS;
-      const backoffSec = parked
-        ? 24 * 60 * 60
-        : Math.min(2 ** attempts, 60 * 60);
+      const backoffSec = parked ? 24 * 60 * 60 : Math.min(2 ** attempts, 60 * 60);
       await db
         .update(jobOutbox)
         .set({
           attempts,
+          parkedAt: parked ? dbNow : null,
           // Тоже от времени БД — иначе отставшие часы воркера отодвинут
           // повтор на лишние минуты (или, наоборот, вернут строку раньше).
           nextAttemptAt: drSql`now() + make_interval(secs => ${backoffSec})`,

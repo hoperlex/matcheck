@@ -223,10 +223,14 @@ suite('upload-documents — фиксация текущего поведения
     expect(attachments).toHaveLength(1);
 
     expect(mocks.queueAdd).toHaveBeenCalledTimes(1);
-    expect(mocks.queueAdd).toHaveBeenCalledWith('parse', {
-      bundleId: body.bundleId,
-      mode: 'router',
-    });
+    // Поколение и явный jobId — часть контракта задания, а не деталь: сторож
+    // ищет работу по этому ключу, а обработчик по поколению отличает свою
+    // попытку от устаревшей. Задание без них выглядело бы потерянным.
+    expect(mocks.queueAdd).toHaveBeenCalledWith(
+      'parse',
+      { bundleId: body.bundleId, mode: 'router', bundleGeneration: 0 },
+      { jobId: `bundle~${body.bundleId}~parse~0` },
+    );
   });
 
   it('повтор того же набора → alreadyExists, новый job НЕ ставится', async () => {

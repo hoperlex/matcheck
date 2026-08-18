@@ -220,13 +220,18 @@ suite('повторное распознавание (реальный PostgreSQ
     return generation;
   }
 
+  // reparse:true — признак РУЧНОГО повтора. Раньше воркер выводил его из
+  // ненулевого поколения, но поколение растёт и при автоматическом
+  // восстановлении: сторож, подняв зависший документ, выглядел бы как человек,
+  // нажавший кнопку, и получил бы его послабления в fencing. Признак стал
+  // явным, и тест обязан ставить его так же, как маршрут /reparse.
   const job = (docId: string, docGeneration?: number) =>
     ({
       id: 'j-reparse',
       data: {
         sourceDocumentId: docId,
         s3Key: `test/${docId}/source.pdf`,
-        ...(docGeneration === undefined ? {} : { docGeneration }),
+        ...(docGeneration === undefined ? {} : { docGeneration, reparse: true }),
       },
     }) as never;
 
@@ -239,6 +244,10 @@ suite('повторное распознавание (реальный PostgreSQ
         s3Key: `test/${docId}/source.pdf`,
         pass: 'vision',
         docGeneration,
+        // Второй проход внутри ручного повтора — часть того же повтора: именно
+        // по этому флагу неудача возвращает документ к снимку, а не оставляет
+        // его в `processing` навсегда. queueSecondPass ставит его так же.
+        reparse: true,
       },
     }) as never;
 
@@ -486,13 +495,38 @@ suite('повторное распознавание (реальный PostgreSQ
                VALUES (${segmentId}, ${doc!.bundle_id}, 0, 0, ${docId},
                        ${JSON.stringify([{ itemId: randomUUID(), page: 1 }])}::jsonb, 'normal')`;
 
-      const plan = await resolveReparsePlan(drizzleDb, await planInput(docId), 1);
+      const plan = await resolveReparsePlan(drizzleDb, await planInput(docId), 1, {
+        reparse: true,
+      });
       expect(plan).toMatchObject({
         kind: 'segment',
         // reparse:true ослабляет fencing сборки: комплект давно опубликован, но
         // страницы этого документа манифест по-прежнему описывает.
         payload: { segmentId, reparse: true, docGeneration: 1 },
       });
+    });
+
+    it('recovery сегмента идёт БЕЗ ослабления fencing', async () => {
+      // Флаг ставит только человек кнопкой «Распознать повторно»: он видит
+      // опубликованный комплект и осознанно просит перечитать его страницы.
+      // Сторож же поднимает НЕопубликованный сегмент, и для него проверки
+      // «сборка ещё идёт» — не помеха, а единственная защита от того, чтобы
+      // переставить работу поверх идущей сборки.
+      const docId = await seedParsedDoc();
+      const [doc] = await db<{ bundle_id: string }[]>`
+        SELECT bundle_id FROM source_documents WHERE id = ${docId}`;
+      const segmentId = randomUUID();
+      await db`UPDATE source_bundles SET active_upload_generation = 0, status = 'parsed'
+                WHERE id = ${doc!.bundle_id}`;
+      await db`INSERT INTO bundle_segments
+                 (id, bundle_id, generation, segment_index, source_document_id, page_refs, confidence)
+               VALUES (${segmentId}, ${doc!.bundle_id}, 0, 0, ${docId},
+                       ${JSON.stringify([{ itemId: randomUUID(), page: 1 }])}::jsonb, 'normal')`;
+
+      const plan = await resolveReparsePlan(drizzleDb, await planInput(docId), 1);
+
+      expect(plan).toMatchObject({ kind: 'segment', payload: { segmentId } });
+      expect((plan as { payload: Record<string, unknown> }).payload).not.toHaveProperty('reparse');
     });
 
     it('идущая пересборка комплекта блокирует повтор', async () => {

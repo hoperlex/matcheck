@@ -22,6 +22,8 @@ export type UpdParseJobData =
       // Отдельное задание, а не повтор внутри текущего: воркер работает с
       // concurrency=1, и удлинять им первый разбор нельзя.
       pass?: 'vision';
+      /** Явный признак ручного reparse; поколение само по себе им не является. */
+      reparse?: true;
       docGeneration?: number;
       bundleId?: undefined;
       mode?: undefined;
@@ -37,6 +39,10 @@ export type UpdParseJobData =
       segmentId: string;
       /** Поколение сборки корневого пакета — fencing против устаревших заданий. */
       generation: number;
+      /** Поколение именно попытки распознавания сегмента. */
+      segmentGeneration?: number;
+      /** Поколение дочернего assembly-пакета, породившего сегмент. */
+      bundleGeneration?: number;
       docGeneration?: number;
       /**
        * Ручной повтор УЖЕ опубликованного сегмента (кнопка «Распознать
@@ -55,6 +61,7 @@ export type UpdParseJobData =
   | {
       sourceDocumentId: string;
       mode: 'waybill_single';
+      reparse?: true;
       docGeneration?: number;
       s3Key?: undefined;
       bundleId?: undefined;
@@ -63,6 +70,8 @@ export type UpdParseJobData =
     }
   | {
       bundleId: string;
+      /** Поколение попытки пакетного обработчика. */
+      bundleGeneration?: number;
       mode?: undefined;
       sourceDocumentId?: undefined;
       s3Key?: undefined;
@@ -73,6 +82,7 @@ export type UpdParseJobData =
       bundleId: string;
       mode: 'router';
       sourceDocumentId?: undefined;
+      bundleGeneration?: number;
       s3Key?: undefined;
       segmentId?: undefined;
       generation?: undefined;
@@ -85,6 +95,8 @@ export type UpdParseJobData =
       mode: 'upd_assembly';
       generation: number;
       sourceDocumentId?: undefined;
+      /** Не смешивать с generation: это поколение попытки, не загрузки. */
+      bundleGeneration?: number;
       s3Key?: undefined;
       segmentId?: undefined;
     };

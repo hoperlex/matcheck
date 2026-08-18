@@ -1439,6 +1439,17 @@
           "baseVersion": {
             "type": "integer",
             "minimum": 0
+          },
+          "capabilities": {
+            "type": "string"
+          },
+          "groupId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "groupRevision": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [
@@ -2736,6 +2747,20 @@
             "type": "string",
             "format": "uuid"
           },
+          "sourceDocumentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "sourceDocumentItemId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "itemKind": {
             "type": "string",
             "enum": [
@@ -3169,6 +3194,20 @@
               "properties": {
                 "id": {
                   "type": "string",
+                  "format": "uuid"
+                },
+                "sourceDocumentId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "sourceDocumentItemId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
                   "format": "uuid"
                 },
                 "itemKind": {
@@ -3642,6 +3681,20 @@
                   "type": "string",
                   "format": "uuid"
                 },
+                "sourceDocumentId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "sourceDocumentItemId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
                 "itemKind": {
                   "type": "string",
                   "enum": [
@@ -3764,6 +3817,17 @@
             "default": []
           },
           "baseVersion": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "capabilities": {
+            "type": "string"
+          },
+          "groupId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "groupRevision": {
             "type": "integer",
             "minimum": 0
           }
@@ -4023,6 +4087,20 @@
                     "properties": {
                       "id": {
                         "type": "string",
+                        "format": "uuid"
+                      },
+                      "sourceDocumentId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "sourceDocumentItemId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "format": "uuid"
                       },
                       "itemKind": {
@@ -4652,6 +4730,20 @@
                   "properties": {
                     "id": {
                       "type": "string",
+                      "format": "uuid"
+                    },
+                    "sourceDocumentId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "sourceDocumentItemId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
                       "format": "uuid"
                     },
                     "itemKind": {
@@ -5445,7 +5537,10 @@
               "partial_parse",
               "no_transport_waybill_found",
               "no_waybill_found",
-              "unrecognized_type"
+              "unrecognized_type",
+              "supplementary",
+              "not_processed",
+              "recovery_exhausted"
             ]
           },
           "parseErrorDetails": {
@@ -5454,6 +5549,16 @@
               "null"
             ],
             "additionalProperties": {}
+          },
+          "workHealth": {
+            "type": "string",
+            "enum": [
+              "alive",
+              "missing",
+              "terminal",
+              "overdue",
+              "unknown"
+            ]
           },
           "originalFilename": {
             "type": [
@@ -5580,6 +5685,26 @@
           },
           "fromSupplierPortal": {
             "type": "boolean"
+          },
+          "groupId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "groupRevision": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "portalGroupId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         },
         "required": [
@@ -5867,7 +5992,10 @@
               "partial_parse",
               "no_transport_waybill_found",
               "no_waybill_found",
-              "unrecognized_type"
+              "unrecognized_type",
+              "supplementary",
+              "not_processed",
+              "recovery_exhausted"
             ]
           },
           "parseErrorDetails": {
@@ -5876,6 +6004,16 @@
               "null"
             ],
             "additionalProperties": {}
+          },
+          "workHealth": {
+            "type": "string",
+            "enum": [
+              "alive",
+              "missing",
+              "terminal",
+              "overdue",
+              "unknown"
+            ]
           },
           "originalFilename": {
             "type": [
@@ -6002,6 +6140,26 @@
           },
           "fromSupplierPortal": {
             "type": "boolean"
+          },
+          "groupId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "groupRevision": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "portalGroupId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
           "items": {
             "type": "array",
@@ -6161,6 +6319,40 @@
                 "role"
               ]
             }
+          },
+          "reparse": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "queued",
+                  "processing",
+                  "succeeded",
+                  "failed"
+                ]
+              },
+              "generation": {
+                "type": "number"
+              },
+              "at": {
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state",
+              "generation",
+              "at"
+            ]
           },
           "extraFiles": {
             "type": "array",
@@ -6529,7 +6721,10 @@
                     "partial_parse",
                     "no_transport_waybill_found",
                     "no_waybill_found",
-                    "unrecognized_type"
+                    "unrecognized_type",
+                    "supplementary",
+                    "not_processed",
+                    "recovery_exhausted"
                   ]
                 },
                 "parseErrorDetails": {
@@ -6538,6 +6733,16 @@
                     "null"
                   ],
                   "additionalProperties": {}
+                },
+                "workHealth": {
+                  "type": "string",
+                  "enum": [
+                    "alive",
+                    "missing",
+                    "terminal",
+                    "overdue",
+                    "unknown"
+                  ]
                 },
                 "originalFilename": {
                   "type": [
@@ -6664,6 +6869,26 @@
                 },
                 "fromSupplierPortal": {
                   "type": "boolean"
+                },
+                "groupId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "groupRevision": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "portalGroupId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
                 }
               },
               "required": [
@@ -6700,6 +6925,85 @@
             }
           },
           "total": {
+            "type": "number"
+          },
+          "pendingFiles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "itemId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "bundleId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "portalGroupId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "filename": {
+                  "type": "string"
+                },
+                "mimeType": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "sizeBytes": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "siteName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "expectedDate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "awaiting_processing",
+                    "not_stored"
+                  ]
+                }
+              },
+              "required": [
+                "key",
+                "itemId",
+                "bundleId",
+                "portalGroupId",
+                "filename",
+                "mimeType",
+                "sizeBytes",
+                "siteName",
+                "expectedDate",
+                "createdAt",
+                "state"
+              ]
+            }
+          },
+          "pendingTotal": {
             "type": "number"
           }
         },
@@ -7470,6 +7774,12 @@
         "properties": {
           "cursor": {
             "type": "string"
+          },
+          "nextPageToken": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "deliveries": {
             "type": "array",
@@ -8336,6 +8646,20 @@
                         "type": "string",
                         "format": "uuid"
                       },
+                      "sourceDocumentId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "sourceDocumentItemId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
                       "itemKind": {
                         "type": "string",
                         "enum": [
@@ -8941,7 +9265,10 @@
                     "partial_parse",
                     "no_transport_waybill_found",
                     "no_waybill_found",
-                    "unrecognized_type"
+                    "unrecognized_type",
+                    "supplementary",
+                    "not_processed",
+                    "recovery_exhausted"
                   ]
                 },
                 "parseErrorDetails": {
@@ -8950,6 +9277,16 @@
                     "null"
                   ],
                   "additionalProperties": {}
+                },
+                "workHealth": {
+                  "type": "string",
+                  "enum": [
+                    "alive",
+                    "missing",
+                    "terminal",
+                    "overdue",
+                    "unknown"
+                  ]
                 },
                 "originalFilename": {
                   "type": [
@@ -9076,6 +9413,26 @@
                 },
                 "fromSupplierPortal": {
                   "type": "boolean"
+                },
+                "groupId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "groupRevision": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "portalGroupId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
                 },
                 "items": {
                   "type": "array",
@@ -9235,6 +9592,40 @@
                       "role"
                     ]
                   }
+                },
+                "reparse": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "processing",
+                        "succeeded",
+                        "failed"
+                      ]
+                    },
+                    "generation": {
+                      "type": "number"
+                    },
+                    "at": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "generation",
+                    "at"
+                  ]
                 },
                 "extraFiles": {
                   "type": "array",

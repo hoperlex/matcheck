@@ -152,7 +152,9 @@ export const users = pgTable(
   },
   (t) => [
     uniqueIndex('users_email_unique').on(sql`lower(${t.email})`),
-    index('users_site_idx').on(t.siteId).where(sql`${t.siteId} is not null`),
+    index('users_site_idx')
+      .on(t.siteId)
+      .where(sql`${t.siteId} is not null`),
     index('users_contractor_customer_idx')
       .on(t.contractorCustomerId)
       .where(sql`${t.contractorCustomerId} is not null`),
@@ -797,6 +799,9 @@ export const sourceDocuments = pgTable(
     parseErrorDetails: jsonb('parse_error_details').$type<Record<string, unknown> | null>(),
     jobId: text('job_id'),
     jobAttempts: integer('job_attempts').notNull().default(0),
+    // Новые поколения recovery; BullMQ retries внутри поколения учитываются
+    // отдельно в job_attempts.
+    recoveryAttempts: integer('recovery_attempts').notNull().default(0),
     contentHash: varchar('content_hash', { length: 64 }),
     originalFilename: text('original_filename'),
     queuedAt: timestamp('queued_at', { withTimezone: true }),
@@ -854,7 +859,9 @@ export const sourceDocuments = pgTable(
     index('source_contractor_idx')
       .on(t.contractorId)
       .where(sql`${t.contractorId} is not null`),
-    index('source_site_idx').on(t.siteId).where(sql`${t.siteId} is not null`),
+    index('source_site_idx')
+      .on(t.siteId)
+      .where(sql`${t.siteId} is not null`),
     index('source_documents_created_by_idx')
       .on(t.createdByUserId)
       .where(sql`${t.createdByUserId} is not null`),
@@ -905,6 +912,10 @@ export const sourceBundles = pgTable(
     // Счётчик НАМЕРЕННЫХ запусков разбора: входит в dispatch ID, поэтому
     // повторный разбор получает новый jobId и реально выполняется.
     dispatchGeneration: integer('dispatch_generation').notNull().default(0),
+    // Текущая пакетная попытка. NULL допустим у legacy-строк: сторож умеет
+    // восстановить канонический ключ из типа пакета и поколения.
+    jobId: text('job_id'),
+    recoveryAttempts: integer('recovery_attempts').notNull().default(0),
     // Счётчик попыток ЗАГРУЗКИ (не разбора). Инкрементируется при приёме и при
     // takeover брошенной попытки; блокировка строки пакета сериализует
     // конкурентов, поэтому отдельный счётчик не нужен. Текущее значение — то,
@@ -1140,6 +1151,10 @@ export const bundleSegments = pgTable(
     confidence: text('confidence'),
     docNumber: text('doc_number'),
     docDate: timestamp('doc_date', { mode: 'date' }),
+    // Не смешивать с generation: тот адресует манифест сборки, этот —
+    // поколение попытки распознавания сегмента.
+    dispatchGeneration: integer('dispatch_generation').notNull().default(0),
+    recoveryAttempts: integer('recovery_attempts').notNull().default(0),
     publishedAt: timestamp('published_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -1381,10 +1396,9 @@ export const deliveryItems = pgTable(
     // Точная исходная строка документа. SET NULL, а не RESTRICT: повторный
     // разбор УПД удаляет и пересоздаёт source_document_items, и RESTRICT
     // заблокировал бы переразбор. Документ при этом остаётся известен.
-    sourceDocumentItemId: uuid('source_document_item_id').references(
-      () => sourceDocumentItems.id,
-      { onDelete: 'set null' },
-    ),
+    sourceDocumentItemId: uuid('source_document_item_id').references(() => sourceDocumentItems.id, {
+      onDelete: 'set null',
+    }),
     // Тип позиции: 'material' (по умолчанию) или 'asset' (ОС). См. миграцию 0029.
     itemKind: itemKindEnum('item_kind').notNull().default('material'),
     assetId: uuid('asset_id').references(() => assets.id, { onDelete: 'set null' }),
@@ -1405,7 +1419,9 @@ export const deliveryItems = pgTable(
     groupName: text('group_name'),
   },
   (t) => [
-    index('delivery_items_asset_idx').on(t.assetId).where(sql`${t.assetId} is not null`),
+    index('delivery_items_asset_idx')
+      .on(t.assetId)
+      .where(sql`${t.assetId} is not null`),
     // Позиции одного документа: секции «УПД № … · Материалы (N)» в приёмке и
     // проверка «эта строка действительно из этого УПД».
     index('delivery_items_source_document_idx')
@@ -1622,10 +1638,9 @@ export const shipmentItems = pgTable(
     }),
     // SET NULL, а не RESTRICT: повторный разбор документа пересоздаёт
     // source_document_items, и RESTRICT заблокировал бы переразбор.
-    sourceDocumentItemId: uuid('source_document_item_id').references(
-      () => sourceDocumentItems.id,
-      { onDelete: 'set null' },
-    ),
+    sourceDocumentItemId: uuid('source_document_item_id').references(() => sourceDocumentItems.id, {
+      onDelete: 'set null',
+    }),
     // Тип позиции: 'material' (по умолчанию) или 'asset' (ОС). См. миграцию 0029.
     itemKind: itemKindEnum('item_kind').notNull().default('material'),
     assetId: uuid('asset_id').references(() => assets.id, { onDelete: 'set null' }),
@@ -1650,7 +1665,9 @@ export const shipmentItems = pgTable(
     index('shipment_items_source_document_idx')
       .on(t.sourceDocumentId)
       .where(sql`${t.sourceDocumentId} is not null`),
-    index('shipment_items_asset_idx').on(t.assetId).where(sql`${t.assetId} is not null`),
+    index('shipment_items_asset_idx')
+      .on(t.assetId)
+      .where(sql`${t.assetId} is not null`),
     check(
       'shipment_items_kind_target_chk',
       sql`(${t.itemKind} = 'material' AND ${t.assetId} IS NULL)
@@ -1712,7 +1729,9 @@ export const photoRecognizedItems = pgTable(
     shipmentPhotoId: uuid('shipment_photo_id').references(() => shipmentPhotos.id, {
       onDelete: 'cascade',
     }),
-    items: jsonb('items').notNull().default(sql`'[]'::jsonb`),
+    items: jsonb('items')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     docForm: varchar('doc_form', { length: 32 }),
     docNumber: text('doc_number'),
     docDate: timestamp('doc_date', { withTimezone: false, mode: 'string' }),
@@ -1819,21 +1838,63 @@ export const jobOutbox = pgTable(
     nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
     lastError: text('last_error'),
     processingAt: timestamp('processing_at', { withTimezone: true }),
-    // Ставит ТОЛЬКО сторож/recovery: разрешает снять завершённый job с тем же
-    // jobId и поставить его заново. Обычная доставка так делать не вправе —
-    // существующий job для неё означает «уже доставлено», иначе падение между
-    // queue.add и удалением строки привело бы к повторному выполнению уже
-    // отработавшего задания.
+    // Legacy-флаг миграции 0086. Новый recovery никогда не переиспользует
+    // терминальный jobId: он повышает dispatch_generation и создаёт новый ключ.
+    // Колонку сохраняем ради rolling deploy со старыми экземплярами.
     replaceTerminal: boolean('replace_terminal').notNull().default(false),
+    parkedAt: timestamp('parked_at', { withTimezone: true }),
+    supersededAt: timestamp('superseded_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     // Одна попытка диспетчеризации — одна строка.
     uniqueIndex('job_outbox_dedupe_key_unique').on(t.dedupeKey),
-    // Выборка готовых к отправке среди «свободных» (как у s3_cleanup_outbox).
+    // Parked и superseded остаются для диагностики, но не доставляются.
     index('job_outbox_ready_idx')
       .on(t.nextAttemptAt)
-      .where(sql`${t.processingAt} is null`),
+      .where(
+        sql`${t.processingAt} is null
+          and ${t.parkedAt} is null
+          and ${t.supersededAt} is null`,
+      ),
+  ],
+);
+
+// Append-only история диспетчеризации. FK намеренно нет: событие переживает
+// удаление документа/пакета при откате.
+export const recognitionDispatchEvents = pgTable(
+  'recognition_dispatch_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workType: text('work_type').notNull(),
+    entityId: uuid('entity_id').notNull(),
+    generation: integer('generation').notNull(),
+    jobId: text('job_id').notNull(),
+    event: text('event').notNull(),
+    observedState: text('observed_state'),
+    reason: text('reason'),
+    actor: text('actor').notNull(),
+    metadata: jsonb('metadata').$type<Record<string, unknown> | null>(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('recognition_dispatch_events_entity_idx').on(t.workType, t.entityId, t.createdAt)],
+);
+
+// Append-only доказательства классификации и сборки. Они не имеют FK, чтобы
+// откат технических документов не уничтожал исходный вердикт и page mapping.
+export const recognitionEvidenceEvents = pgTable(
+  'recognition_evidence_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bundleId: uuid('bundle_id').notNull(),
+    sourceDocumentId: uuid('source_document_id'),
+    generation: integer('generation').notNull(),
+    evidenceType: text('evidence_type').notNull(),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('recognition_evidence_events_bundle_idx').on(t.bundleId, t.generation, t.createdAt),
   ],
 );
 
@@ -2085,7 +2146,7 @@ export const shareMessages = pgTable(
     shareTokenId: uuid('share_token_id')
       .notNull()
       .references(() => shareTokens.id, { onDelete: 'cascade' }),
-    senderType: text('sender_type').notNull(),       // 'external' | 'manager'
+    senderType: text('sender_type').notNull(), // 'external' | 'manager'
     senderUserId: uuid('sender_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),

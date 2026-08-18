@@ -53,7 +53,7 @@ vi.mock('../../src/domain/edo/document-router.js', () => ({
   classifyFile: (...args: unknown[]) => classifyFile(...args),
 }));
 
-const { handleDocumentRouterJob, recoverStaleProcessing } = await import('../../src/worker.js');
+const { handleDocumentRouterJob } = await import('../../src/worker.js');
 
 const log = {
   info: vi.fn(),
@@ -198,29 +198,6 @@ suite('провенанс документов из единого входа (�
     const [row] = await db<{ job_id: string }[]>`
       SELECT job_id FROM source_documents WHERE id = ${doc!.id}`;
     expect(row!.job_id).toBe(job!.dedupe_key);
-  });
-
-  it('документ, зависший в processing, возвращается под тем же ключом задания', async () => {
-    // Иначе он получил бы задание со случайным идентификатором, и подбор
-    // зависших записей добавил бы второе — документ распознался бы дважды.
-    const id = randomUUID();
-    await db`INSERT INTO source_documents
-        (id, kind, is_technical, direction, origin, status, site_id, updated_at)
-      VALUES (${id}, 'upd', false, 'inbound', 'manual_pdf', 'processing', ${siteId},
-        now() - interval '30 minutes')`;
-    await db`INSERT INTO source_document_attachments
-        (source_document_id, s3_key, filename, mime_type, size_bytes, role)
-      VALUES (${id}, ${`upload/${id}.pdf`}, 'doc.pdf', 'application/pdf', 100, 'original')`;
-
-    await recoverStaleProcessing();
-
-    const [doc] = await db<{ status: string; job_id: string }[]>`
-      SELECT status, job_id FROM source_documents WHERE id = ${id}`;
-    expect(doc!.status).toBe('queued');
-    expect(doc!.job_id).toBe(`doc~${id}~parse~0`);
-    const jobs = await db`
-      SELECT id FROM job_outbox WHERE dedupe_key = ${`doc~${id}~parse~0`}`;
-    expect(jobs).toHaveLength(1);
   });
 
   it('накладная из письма наследует происхождение через дочерний пакет', async () => {

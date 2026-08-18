@@ -1,16 +1,7 @@
 import type { MouseEvent } from 'react';
 import { useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import {
-  Button,
-  Card,
-  Popconfirm,
-  Space,
-  Tag,
-  Tooltip,
-  Typography,
-  message,
-} from 'antd';
+import { Button, Card, Popconfirm, Space, Tag, Tooltip, Typography, message } from 'antd';
 import {
   DeleteOutlined,
   DownloadOutlined,
@@ -37,13 +28,10 @@ import type {
   SourceDirection,
   SourceDocumentBulkDeleteResponse,
   SourceDocumentListResponseSchema,
+  SourceRecoverResponse,
   SourceReparseResponse,
 } from '@matcheck/contracts';
-import {
-  getDocumentDisplayStatus,
-  isActionableStub,
-  isStubDocument,
-} from '@matcheck/contracts';
+import { getDocumentDisplayStatus, isActionableStub, isStubDocument } from '@matcheck/contracts';
 import type { z } from 'zod';
 import { api, apiDownload, ApiError } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
@@ -52,7 +40,12 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
-import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
+import {
+  dateSorter,
+  numberSorter,
+  prioritySorter,
+  stringSorter,
+} from '../../shared/ui/tableSorters';
 import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
@@ -165,6 +158,9 @@ function stubHint(code: Row['parseErrorCode']): string {
   if (code === 'not_processed') {
     return 'Файл принят, но распознать его не удалось. Откройте файл и разберите вручную';
   }
+  if (code === 'recovery_exhausted') {
+    return 'Распознавание не завершилось за отведённые попытки. Файл на месте — откройте его и разберите вручную';
+  }
   return 'Тип документа определить не удалось — откройте файл и разберите вручную';
 }
 
@@ -239,7 +235,9 @@ function StatusTag({
     }
     case 'parse_failed': {
       const msg =
-        (row.parseErrorDetails as { message?: string } | null)?.message ?? row.parseErrorCode ?? 'ошибка';
+        (row.parseErrorDetails as { message?: string } | null)?.message ??
+        row.parseErrorCode ??
+        'ошибка';
       return (
         <Tooltip title={msg}>
           <Tag color="red" icon={<ExclamationCircleOutlined />}>
@@ -466,17 +464,14 @@ export default function InboxPage() {
       const qs = new URLSearchParams({ direction });
       if (filters.contractorIds.length > 0)
         qs.set('contractorIds', filters.contractorIds.join(','));
-      if (filters.supplierIds.length > 0)
-        qs.set('supplierIds', filters.supplierIds.join(','));
+      if (filters.supplierIds.length > 0) qs.set('supplierIds', filters.supplierIds.join(','));
       if (filters.siteIds.length > 0) qs.set('siteIds', filters.siteIds.join(','));
       const qTrim = filters.q.trim();
       if (qTrim) qs.set('q', qTrim);
       const { blob, filename } = await apiDownload(
         `/source-documents/export.xlsx?${qs.toString()}`,
       );
-      const fallback = `documents-${direction}-${new Date()
-        .toISOString()
-        .slice(0, 10)}.xlsx`;
+      const fallback = `documents-${direction}-${new Date().toISOString().slice(0, 10)}.xlsx`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -530,14 +525,12 @@ export default function InboxPage() {
 
   const counterpartiesQuery = useQuery({
     queryKey: ['counterparties', 'all'],
-    queryFn: () =>
-      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+    queryFn: () => api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
     enabled: !isContractor,
   });
   const sitesQuery = useQuery({
     queryKey: ['sites', 'all'],
-    queryFn: () =>
-      api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
+    queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
     enabled: !isContractor,
   });
 
@@ -546,13 +539,11 @@ export default function InboxPage() {
   // чтобы счётчики были стабильны при переключении.
   const inboundCountQuery = useQuery({
     queryKey: ['source-documents', 'count', 'inbound'],
-    queryFn: () =>
-      api.get<{ total: number }>('/source-documents?direction=inbound&limit=1'),
+    queryFn: () => api.get<{ total: number }>('/source-documents?direction=inbound&limit=1'),
   });
   const outboundCountQuery = useQuery({
     queryKey: ['source-documents', 'count', 'outbound'],
-    queryFn: () =>
-      api.get<{ total: number }>('/source-documents?direction=outbound&limit=1'),
+    queryFn: () => api.get<{ total: number }>('/source-documents?direction=outbound&limit=1'),
   });
   // Счётчик вкладки «Без документов»: сама вкладка есть давно, но пока в ней не
   // видно числа, туда никто не заглядывает — а именно там оседают файлы, из
@@ -569,8 +560,7 @@ export default function InboxPage() {
   // Подрядчику её нет никогда: чужие письма ему видеть нельзя.
   const mailSummaryQuery = useQuery({
     queryKey: ['mail-review-summary'],
-    queryFn: () =>
-      api.get<{ pending: number; configured: boolean }>('/mail/review/summary'),
+    queryFn: () => api.get<{ pending: number; configured: boolean }>('/mail/review/summary'),
     enabled: !isContractor,
     staleTime: 5 * 60_000,
   });
@@ -617,8 +607,9 @@ export default function InboxPage() {
     },
     onError: (err: Error, id, ctx) => {
       // Откат оптимистического изменения.
-      const snapshots = (ctx as { snapshots?: Array<[readonly unknown[], List | undefined]> } | undefined)
-        ?.snapshots;
+      const snapshots = (
+        ctx as { snapshots?: Array<[readonly unknown[], List | undefined]> } | undefined
+      )?.snapshots;
       if (snapshots) {
         for (const [key, value] of snapshots) {
           qc.setQueryData(key, value);
@@ -654,9 +645,18 @@ export default function InboxPage() {
   const allItems = list.data?.items ?? [];
   const filteredItems = useMemo(() => {
     return allItems.filter((r) => {
-      if (filters.contractorIds.length > 0 && (!r.contractorId || !filters.contractorIds.includes(r.contractorId))) return false;
-      if (filters.supplierIds.length > 0 && (!r.supplierId || !filters.supplierIds.includes(r.supplierId))) return false;
-      if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId))) return false;
+      if (
+        filters.contractorIds.length > 0 &&
+        (!r.contractorId || !filters.contractorIds.includes(r.contractorId))
+      )
+        return false;
+      if (
+        filters.supplierIds.length > 0 &&
+        (!r.supplierId || !filters.supplierIds.includes(r.supplierId))
+      )
+        return false;
+      if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId)))
+        return false;
       return true;
     });
   }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds]);
@@ -698,9 +698,7 @@ export default function InboxPage() {
   // через ExpandedSourceDocumentItems → useQuery, кеш react-query.
   const [expandedIds, setExpandedIds] = useState<string[]>([]);
   const toggleExpand = (id: string) =>
-    setExpandedIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-    );
+    setExpandedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   const bulk = useBulkSelection<Row>((r) => r.id);
   const bulkDel = useMutation({
@@ -739,10 +737,55 @@ export default function InboxPage() {
     onError: (err: Error) => message.error(err.message),
   });
 
+  const recover = useMutation({
+    mutationFn: (id: string) =>
+      api.post<SourceRecoverResponse>(`/source-documents/${id}/recover`, {}),
+    onSuccess: (res, id) => {
+      if (res.outcome === 'terminalized') {
+        message.warning('Автоматические попытки исчерпаны — документ требует решения');
+      } else {
+        message.success('Распознавание восстановлено');
+      }
+      void qc.invalidateQueries({ queryKey: ['source-documents'] });
+      void qc.invalidateQueries({ queryKey: ['source-document', id] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
   const renderReparseButton = (r: Row) => {
     if (!canReparseDocs) return null;
-    // Документ уже в работе — второе задание ему не нужно (сервер ответит 409).
     const busy = r.status === 'queued' || r.status === 'processing';
+    if (busy) {
+      const recoverable =
+        r.workHealth === 'missing' || r.workHealth === 'terminal' || r.workHealth === 'overdue';
+      if (!recoverable) {
+        const title =
+          r.workHealth === 'unknown'
+            ? 'Не удалось проверить состояние очереди'
+            : 'Распознавание выполняется';
+        return (
+          <Button size="small" shape="circle" icon={<ReloadOutlined />} disabled title={title} />
+        );
+      }
+      return (
+        <Popconfirm
+          title="Восстановить распознавание?"
+          description="Сервер создаст новую защищённую попытку или зафиксирует видимый итог, если лимит исчерпан."
+          okText="Восстановить"
+          cancelText="Отмена"
+          onConfirm={() => recover.mutate(r.id)}
+        >
+          <Button
+            size="small"
+            shape="circle"
+            danger
+            icon={<ReloadOutlined />}
+            loading={recover.isPending}
+            title="Восстановить распознавание"
+          />
+        </Popconfirm>
+      );
+    }
     return (
       <Popconfirm
         title="Распознать документ заново?"
@@ -755,7 +798,7 @@ export default function InboxPage() {
           size="small"
           shape="circle"
           icon={<ReloadOutlined />}
-          disabled={busy || reparse.isPending}
+          disabled={reparse.isPending}
           title="Распознать повторно"
         />
       </Popconfirm>
@@ -794,8 +837,7 @@ export default function InboxPage() {
     // его не появится вовсе. Без имени файла такие строки превращаются в пачку
     // одинаковых прочерков, где не отличить сертификат от нечитаемой накладной,
     // а именно по имени менеджер их и ищет.
-    const showFilename =
-      r.status === 'queued' || r.status === 'processing' || isStubDocument(r);
+    const showFilename = r.status === 'queued' || r.status === 'processing' || isStubDocument(r);
     if (showFilename && r.originalFilename) {
       return (
         <Typography.Text type="secondary" italic>
@@ -880,16 +922,10 @@ export default function InboxPage() {
                     okText="Удалить"
                     cancelText="Отмена"
                     okButtonProps={{ danger: true, loading: bulkDel.isPending }}
-                    onConfirm={() =>
-                      bulkDel.mutate(Array.from(bulk.selectedIds))
-                    }
+                    onConfirm={() => bulkDel.mutate(Array.from(bulk.selectedIds))}
                     placement="bottomRight"
                   >
-                    <Button
-                      danger
-                      icon={<DeleteOutlined />}
-                      loading={bulkDel.isPending}
-                    >
+                    <Button danger icon={<DeleteOutlined />} loading={bulkDel.isPending}>
                       Удалить выбранные
                     </Button>
                   </Popconfirm>
@@ -933,215 +969,136 @@ export default function InboxPage() {
           </>
         }
       >
-      {/* Метка машины: документы одной загрузки помечены общей полосой слева.
+        {/* Метка машины: документы одной загрузки помечены общей полосой слева.
           Правила строятся из GROUP_COLORS — списка, по которому считается и
           индекс цвета, поэтому палитра и классы не могут разойтись.
           box-shadow вместо border-left: border сдвигал бы содержимое ячейки и
           ломал выравнивание колонки «№» между строками. */}
-      <style>{GROUP_COLORS.map(
-        (color, i) => `.matcheck-doc-group-${i} > td:first-child { box-shadow: inset 4px 0 0 ${color}; }`,
-      ).join('\n')}</style>
-      <ResponsiveTable<Row>
-        items={groupedItems}
-        loading={list.isLoading}
-        rowKey="id"
-        numbered
-        // Колонок 14 (плюс чекбоксы при массовом выборе): четыре фиксированные,
-        // десяти свободным нужно от ~110px. На 1024-1366px скроллим таблицу,
-        // а не жмём колонки; на 1920px вид прежний. Три стороны документа с
-        // появлением ИНН получили фиксированные 170px вместо ~110 свободных —
-        // отсюда +150 к минимальной ширине.
-        scrollX={1750}
-        // Постраничная навигация (как в «Операциях»): по 50 на страницу, с
-        // переключателем размера. Клиентская — по всему загруженному набору.
-        pagination={{
-          pageSize: 50,
-          showSizeChanger: true,
-          pageSizeOptions: [50, 100, 200],
-        }}
-        rowSelection={
-          isContractor
-            ? undefined
-            : {
-                ...bulk.selection,
-                // Массовое удаление относится к документам. У принятого файла
-                // документа ещё нет — удалять нечего, чекбокс неактивен.
-                getCheckboxProps: (r: Row) => ({ disabled: isPendingRow(r) }),
-              }
-        }
-        // Цветная полоса слева у документов одной машины. Приглушённая:
-        // строку со статусом «не распознано» она перекрикивать не должна.
-        rowClassName={(r) => groupRowClass(documentGroupKey(r))}
-        expandable={{
-          // Свою колонку с иконкой не рендерим — ± живёт в столбце «Тип».
-          showExpandColumn: false,
-          expandedRowKeys: expandedIds,
-          expandedRowRender: (r) => (
-            <ExpandedSourceDocumentItems id={r.id} kind={r.kind} />
-          ),
-        }}
-        // Карточки у принятого файла не существует — открывать нечего.
-        onRowClick={(r) => {
-          if (isPendingRow(r)) return;
-          setSelectedId(r.id);
-        }}
-        columns={[
-          {
-            title: 'Тип',
-            dataIndex: 'kind',
-            width: 150,
-            // По частоте использования: УПД сверху, заявки в середине,
-            // накладные (ТН + ОС-2) вместе внизу.
-            sorter: prioritySorter<Row, Row['kind']>(
-              (r) => r.kind,
-              ['upd', 'request', 'transport_waybill', 'os2_transfer'],
-            ),
-            // Кнопка ± рядом с тегом — раскрывает/сворачивает позиции
-            // под строкой. stopPropagation чтобы не сработал onRowClick.
-            render: (_: unknown, r: Row) => {
-              // Принятый файл: тип неизвестен, позиций нет — ни тега, ни
-              // раскрытия. Прочерк здесь честнее «УПД», которого может и не
-              // оказаться.
-              if (isPendingRow(r)) {
+        <style>
+          {GROUP_COLORS.map(
+            (color, i) =>
+              `.matcheck-doc-group-${i} > td:first-child { box-shadow: inset 4px 0 0 ${color}; }`,
+          ).join('\n')}
+        </style>
+        <ResponsiveTable<Row>
+          items={groupedItems}
+          loading={list.isLoading}
+          rowKey="id"
+          numbered
+          // Колонок 14 (плюс чекбоксы при массовом выборе): четыре фиксированные,
+          // десяти свободным нужно от ~110px. На 1024-1366px скроллим таблицу,
+          // а не жмём колонки; на 1920px вид прежний. Три стороны документа с
+          // появлением ИНН получили фиксированные 170px вместо ~110 свободных —
+          // отсюда +150 к минимальной ширине.
+          scrollX={1750}
+          // Постраничная навигация (как в «Операциях»): по 50 на страницу, с
+          // переключателем размера. Клиентская — по всему загруженному набору.
+          pagination={{
+            pageSize: 50,
+            showSizeChanger: true,
+            pageSizeOptions: [50, 100, 200],
+          }}
+          rowSelection={
+            isContractor
+              ? undefined
+              : {
+                  ...bulk.selection,
+                  // Массовое удаление относится к документам. У принятого файла
+                  // документа ещё нет — удалять нечего, чекбокс неактивен.
+                  getCheckboxProps: (r: Row) => ({ disabled: isPendingRow(r) }),
+                }
+          }
+          // Цветная полоса слева у документов одной машины. Приглушённая:
+          // строку со статусом «не распознано» она перекрикивать не должна.
+          rowClassName={(r) => groupRowClass(documentGroupKey(r))}
+          expandable={{
+            // Свою колонку с иконкой не рендерим — ± живёт в столбце «Тип».
+            showExpandColumn: false,
+            expandedRowKeys: expandedIds,
+            expandedRowRender: (r) => <ExpandedSourceDocumentItems id={r.id} kind={r.kind} />,
+          }}
+          // Карточки у принятого файла не существует — открывать нечего.
+          onRowClick={(r) => {
+            if (isPendingRow(r)) return;
+            setSelectedId(r.id);
+          }}
+          columns={[
+            {
+              title: 'Тип',
+              dataIndex: 'kind',
+              width: 150,
+              // По частоте использования: УПД сверху, заявки в середине,
+              // накладные (ТН + ОС-2) вместе внизу.
+              sorter: prioritySorter<Row, Row['kind']>(
+                (r) => r.kind,
+                ['upd', 'request', 'transport_waybill', 'os2_transfer'],
+              ),
+              // Кнопка ± рядом с тегом — раскрывает/сворачивает позиции
+              // под строкой. stopPropagation чтобы не сработал onRowClick.
+              render: (_: unknown, r: Row) => {
+                // Принятый файл: тип неизвестен, позиций нет — ни тега, ни
+                // раскрытия. Прочерк здесь честнее «УПД», которого может и не
+                // оказаться.
+                if (isPendingRow(r)) {
+                  return (
+                    <Space size={4}>
+                      <Tag>—</Tag>
+                      <Tooltip title="Загружен поставщиком через публичную ссылку">
+                        <CloudUploadOutlined style={{ color: '#8c8c8c' }} />
+                      </Tooltip>
+                    </Space>
+                  );
+                }
+                const expanded = expandedIds.includes(r.id);
                 return (
                   <Space size={4}>
-                    <Tag>—</Tag>
-                    <Tooltip title="Загружен поставщиком через публичную ссылку">
-                      <CloudUploadOutlined style={{ color: '#8c8c8c' }} />
-                    </Tooltip>
-                  </Space>
-                );
-              }
-              const expanded = expandedIds.includes(r.id);
-              return (
-                <Space size={4}>
-                  <Button
-                    type="text"
-                    size="small"
-                    icon={expanded ? <MinusSquareOutlined /> : <PlusSquareOutlined />}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleExpand(r.id);
-                    }}
-                  />
-                  {/* Тип «—»: файл распознать не удалось, и «УПД» здесь ввело
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={expanded ? <MinusSquareOutlined /> : <PlusSquareOutlined />}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleExpand(r.id);
+                      }}
+                    />
+                    {/* Тип «—»: файл распознать не удалось, и «УПД» здесь ввело
                       бы в заблуждение — реквизитов в документе нет. */}
-                  {isUnrecognized(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
-                  {/* Происхождение отмечаем только у почтовых: такой документ
+                    {isUnrecognized(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
+                    {/* Происхождение отмечаем только у почтовых: такой документ
                       пришёл от подрядчика письмом, а не загружен вручную. */}
-                  {r.origin === 'mail' && (
-                    <Tooltip title="Пришёл по почте от подрядчика">
-                      <MailOutlined style={{ color: '#8c8c8c' }} />
-                    </Tooltip>
-                  )}
-                  {/* Загружен самим поставщиком через публичную ссылку: у таких
+                    {r.origin === 'mail' && (
+                      <Tooltip title="Пришёл по почте от подрядчика">
+                        <MailOutlined style={{ color: '#8c8c8c' }} />
+                      </Tooltip>
+                    )}
+                    {/* Загружен самим поставщиком через публичную ссылку: у таких
                       документов подрядчик тоже не заполнен, а отправителя видно
                       в карточке. */}
-                  {r.fromSupplierPortal && (
-                    <Tooltip title="Загружен поставщиком через публичную ссылку">
-                      <CloudUploadOutlined style={{ color: '#8c8c8c' }} />
-                    </Tooltip>
-                  )}
-                </Space>
-              );
+                    {r.fromSupplierPortal && (
+                      <Tooltip title="Загружен поставщиком через публичную ссылку">
+                        <CloudUploadOutlined style={{ color: '#8c8c8c' }} />
+                      </Tooltip>
+                    )}
+                  </Space>
+                );
+              },
             },
-          },
-          {
-            // Раньше шапка была двухстрочной «Статус / Уверенность» —
-            // теперь процент в ячейке не рисуется, заголовок упростили
-            // до одного «Статус».
-            title: 'Статус',
-            dataIndex: 'status',
-            // Ширина под самую длинную пару «распознано частично» + «дополнить»
-            // (~227px вместе с отступами ячейки). Уже — и общий ellipsis
-            // обрезал бы действие, которое нужно нажимать.
-            width: 260,
-            // По «требует внимания»: активные вверху, архив внизу.
-            sorter: prioritySorter<Row, Row['status']>(
-              (r) => r.status,
-              ['processing', 'queued', 'needs_resolution', 'parse_failed', 'parsed', 'archived'],
-            ),
-            render: (_: unknown, r: Row) => (
-              <StatusTag
-                row={r}
-                onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
-                onManualResolve={
-                  isContractor ? undefined : (row) => resolveManually.mutate(row.id)
-                }
-              />
-            ),
-          },
-          {
-            title: '№',
-            dataIndex: 'docNumber',
-            sorter: stringSorter<Row>((r) => r.docNumber),
-            render: renderDocNumber,
-          },
-          {
-            title: 'Дата',
-            dataIndex: 'docDate',
-            // defaultSortOrder убран: иначе при каждой перемонтировке
-            // (refresh / переход на другой раздел и обратно) сортировка
-            // возвращалась принудительно. Сервер уже отдаёт документы по
-            // parsed_at desc — свежие сверху без явной сортировки.
-            sorter: dateSorter<Row>((r) => r.docDate),
-            ...dateRangeColumnFilter<Row>((r) => r.docDate),
-            render: (v: string | null) => formatDateRu(v),
-          },
-          {
-            title: 'Дата поставки',
-            dataIndex: 'expectedDate',
-            sorter: dateSorter<Row>((r) => r.expectedDate),
-            ...dateRangeColumnFilter<Row>((r) => r.expectedDate),
-            render: (v: string | null) => formatDateRu(v),
-          },
-          {
-            title: 'Объект',
-            dataIndex: 'siteName',
-            sorter: stringSorter<Row>((r) => r.siteName),
-            render: (v: string | null | undefined) => v ?? '—',
-          },
-          // Стороны документа — общий набор для всех таблиц с УПД,
-          // см. shared/ui/documentPartyColumns.
-          ...documentPartyColumns<Row>((r) => r),
-          {
-            title: 'Сумма НДС',
-            dataIndex: 'vatSum',
-            sorter: numberSorter<Row>((r) => r.vatSum),
-            render: (v: string | null) => formatMoneyRu(v),
-          },
-          {
-            title: 'Сумма',
-            dataIndex: 'totalSum',
-            sorter: numberSorter<Row>((r) => r.totalSum),
-            render: (v: string | null) => formatMoneyRu(v),
-          },
-          {
-            title: '',
-            key: 'actions',
-            // Две круглые кнопки: повтор распознавания и удаление.
-            width: 96,
-            align: 'right' as const,
-            onCell: () => ({
-              onClick: (e: MouseEvent) => e.stopPropagation(),
-            }),
-            // Принятому файлу нечего повторять и нечего удалять: документа по
-            // нему ещё нет, а сам файл живёт в реестре пакета.
-            render: (_: unknown, r: Row) =>
-              isPendingRow(r) ? null : (
-                <Space size={4}>
-                  {renderReparseButton(r)}
-                  {renderDeleteButton(r)}
-                </Space>
+            {
+              // Раньше шапка была двухстрочной «Статус / Уверенность» —
+              // теперь процент в ячейке не рисуется, заголовок упростили
+              // до одного «Статус».
+              title: 'Статус',
+              dataIndex: 'status',
+              // Ширина под самую длинную пару «распознано частично» + «дополнить»
+              // (~227px вместе с отступами ячейки). Уже — и общий ellipsis
+              // обрезал бы действие, которое нужно нажимать.
+              width: 260,
+              // По «требует внимания»: активные вверху, архив внизу.
+              sorter: prioritySorter<Row, Row['status']>(
+                (r) => r.status,
+                ['processing', 'queued', 'needs_resolution', 'parse_failed', 'parsed', 'archived'],
               ),
-          },
-        ]}
-        cardRender={(r) => (
-          <Card style={{ width: '100%' }} size="small">
-            <Space direction="vertical" size={2} style={{ width: '100%', position: 'relative' }}>
-              <Space size={4} wrap>
-                {/* Принятый файл: тип ещё неизвестен — как и у нераспознанного. */}
-                {isUnrecognized(r) || isPendingRow(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
+              render: (_: unknown, r: Row) => (
                 <StatusTag
                   row={r}
                   onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
@@ -1149,37 +1106,117 @@ export default function InboxPage() {
                     isContractor ? undefined : (row) => resolveManually.mutate(row.id)
                   }
                 />
+              ),
+            },
+            {
+              title: '№',
+              dataIndex: 'docNumber',
+              sorter: stringSorter<Row>((r) => r.docNumber),
+              render: renderDocNumber,
+            },
+            {
+              title: 'Дата',
+              dataIndex: 'docDate',
+              // defaultSortOrder убран: иначе при каждой перемонтировке
+              // (refresh / переход на другой раздел и обратно) сортировка
+              // возвращалась принудительно. Сервер уже отдаёт документы по
+              // parsed_at desc — свежие сверху без явной сортировки.
+              sorter: dateSorter<Row>((r) => r.docDate),
+              ...dateRangeColumnFilter<Row>((r) => r.docDate),
+              render: (v: string | null) => formatDateRu(v),
+            },
+            {
+              title: 'Дата поставки',
+              dataIndex: 'expectedDate',
+              sorter: dateSorter<Row>((r) => r.expectedDate),
+              ...dateRangeColumnFilter<Row>((r) => r.expectedDate),
+              render: (v: string | null) => formatDateRu(v),
+            },
+            {
+              title: 'Объект',
+              dataIndex: 'siteName',
+              sorter: stringSorter<Row>((r) => r.siteName),
+              render: (v: string | null | undefined) => v ?? '—',
+            },
+            // Стороны документа — общий набор для всех таблиц с УПД,
+            // см. shared/ui/documentPartyColumns.
+            ...documentPartyColumns<Row>((r) => r),
+            {
+              title: 'Сумма НДС',
+              dataIndex: 'vatSum',
+              sorter: numberSorter<Row>((r) => r.vatSum),
+              render: (v: string | null) => formatMoneyRu(v),
+            },
+            {
+              title: 'Сумма',
+              dataIndex: 'totalSum',
+              sorter: numberSorter<Row>((r) => r.totalSum),
+              render: (v: string | null) => formatMoneyRu(v),
+            },
+            {
+              title: '',
+              key: 'actions',
+              // Две круглые кнопки: повтор распознавания и удаление.
+              width: 96,
+              align: 'right' as const,
+              onCell: () => ({
+                onClick: (e: MouseEvent) => e.stopPropagation(),
+              }),
+              // Принятому файлу нечего повторять и нечего удалять: документа по
+              // нему ещё нет, а сам файл живёт в реестре пакета.
+              render: (_: unknown, r: Row) =>
+                isPendingRow(r) ? null : (
+                  <Space size={4}>
+                    {renderReparseButton(r)}
+                    {renderDeleteButton(r)}
+                  </Space>
+                ),
+            },
+          ]}
+          cardRender={(r) => (
+            <Card style={{ width: '100%' }} size="small">
+              <Space direction="vertical" size={2} style={{ width: '100%', position: 'relative' }}>
+                <Space size={4} wrap>
+                  {/* Принятый файл: тип ещё неизвестен — как и у нераспознанного. */}
+                  {isUnrecognized(r) || isPendingRow(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
+                  <StatusTag
+                    row={r}
+                    onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
+                    onManualResolve={
+                      isContractor ? undefined : (row) => resolveManually.mutate(row.id)
+                    }
+                  />
+                </Space>
+                <Typography.Text strong>
+                  {r.docNumber ?? (r.originalFilename ? r.originalFilename : '— без номера —')}
+                </Typography.Text>
+                <Typography.Text type="secondary">
+                  {r.docDate ?? '—'} · {formatDecimal(r.totalSum) || '—'} ₽
+                  {r.llmConfidence != null
+                    ? ` · уверенность ${Math.round(Number(r.llmConfidence) * 100)}%`
+                    : ''}
+                </Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {r.siteName ?? '—'} · {shortenCounterpartyName(r.buyerName)} ·{' '}
+                  {shortenCounterpartyName(r.consigneeName)} ·{' '}
+                  {shortenCounterpartyName(r.supplierName)}
+                </Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {originLabel(r.origin, r.fromSupplierPortal)}
+                </Typography.Text>
+                {!isPendingRow(r) && (
+                  <div
+                    style={{ position: 'absolute', top: 0, right: 0 }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {renderReparseButton(r)}
+                    {renderDeleteButton(r)}
+                  </div>
+                )}
               </Space>
-              <Typography.Text strong>
-                {r.docNumber ?? (r.originalFilename ? r.originalFilename : '— без номера —')}
-              </Typography.Text>
-              <Typography.Text type="secondary">
-                {r.docDate ?? '—'} · {formatDecimal(r.totalSum) || '—'} ₽
-                {r.llmConfidence != null
-                  ? ` · уверенность ${Math.round(Number(r.llmConfidence) * 100)}%`
-                  : ''}
-              </Typography.Text>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {r.siteName ?? '—'} · {shortenCounterpartyName(r.buyerName)} ·{' '}
-                {shortenCounterpartyName(r.consigneeName)} ·{' '}
-                {shortenCounterpartyName(r.supplierName)}
-              </Typography.Text>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {originLabel(r.origin, r.fromSupplierPortal)}
-              </Typography.Text>
-              {!isPendingRow(r) && (
-                <div
-                  style={{ position: 'absolute', top: 0, right: 0 }}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  {renderReparseButton(r)}
-                  {renderDeleteButton(r)}
-                </div>
-              )}
-            </Space>
-          </Card>
-        )}
-      />
+            </Card>
+          )}
+        />
       </StickyPageHeader>
       <UpdPdfUploadModal
         open={pdfModalOpen}

@@ -97,9 +97,8 @@ vi.mock('../../src/domain/edo/upd-segment-extract.js', async (importOriginal) =>
   return { ...actual, extractUpdSegment: (...args: unknown[]) => extractUpdSegment(...args) };
 });
 
-const { handleDocumentRouterJob, handleUpdAssemblyJob, handleJob } = await import(
-  '../../src/worker.js'
-);
+const { handleDocumentRouterJob, handleUpdAssemblyJob, handleJob } =
+  await import('../../src/worker.js');
 const { encryptField, buildAad } = await import('../../src/domain/auth/crypto.js');
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never;
@@ -138,11 +137,20 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
       SELECT id FROM source_documents WHERE site_id = ${siteId}`;
     const bundles = await db<{ id: string }[]>`
       SELECT id FROM source_bundles WHERE site_id = ${siteId}`;
+    const segments = await db<{ id: string }[]>`
+      SELECT s.id FROM bundle_segments s
+      JOIN source_bundles b ON b.id = s.bundle_id
+      WHERE b.site_id = ${siteId}`;
     const ids = [...docs.map((d) => d.id), ...bundles.map((b) => b.id)];
+    const auditIds = [...ids, ...segments.map((s) => s.id)];
     if (ids.length > 0) {
       await db`DELETE FROM job_outbox
          WHERE payload->>'sourceDocumentId' = ANY(${ids})
             OR payload->>'bundleId' = ANY(${ids})`;
+      await db`DELETE FROM recognition_evidence_events WHERE bundle_id = ANY(${bundles.map((b) => b.id)})`;
+    }
+    if (auditIds.length > 0) {
+      await db`DELETE FROM recognition_dispatch_events WHERE entity_id = ANY(${auditIds})`;
     }
     await db`DELETE FROM source_documents WHERE site_id = ${siteId}`;
     await db`DELETE FROM source_bundles WHERE site_id = ${siteId}`;
@@ -248,7 +256,12 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
       WHERE site_id = ${siteId} ORDER BY created_at`;
 
   const segmentsOf = (bundleId: string) => db<
-    { id: string; segment_index: number; source_document_id: string | null; published_at: Date | null }[]
+    {
+      id: string;
+      segment_index: number;
+      source_document_id: string | null;
+      published_at: Date | null;
+    }[]
   >`SELECT id, segment_index, source_document_id, published_at FROM bundle_segments
       WHERE bundle_id = ${bundleId} ORDER BY segment_index`;
 
@@ -467,6 +480,28 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
     // Технических документов у дочернего пакета не осталось.
     const techInSub = docs.filter((d) => d.is_technical && d.bundle_id === sub!.id);
     expect(techInSub).toHaveLength(0);
+    const evidence = await db<
+      {
+        evidence_type: string;
+        payload: { pageMap?: unknown[]; reason?: string };
+      }[]
+    >`
+      SELECT evidence_type, payload
+        FROM recognition_evidence_events
+       WHERE bundle_id = ${bundleId}
+       ORDER BY created_at`;
+    expect(evidence.map((e) => e.evidence_type)).toEqual([
+      'file_classification',
+      'file_classification',
+      'page_classification',
+      'assembly_rollback',
+    ]);
+    expect(
+      evidence.find((e) => e.evidence_type === 'page_classification')!.payload.pageMap,
+    ).toHaveLength(2);
+    expect(evidence.find((e) => e.evidence_type === 'assembly_rollback')!.payload.reason).toContain(
+      'нарезке нельзя доверять',
+    );
   });
 
   it('страница, пропущенная классификатором, не теряется — пакет откатывается', async () => {

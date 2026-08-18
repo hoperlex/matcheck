@@ -1,14 +1,15 @@
 /**
- * Подбор записей, застрявших в `queued` без задания.
+ * Health-aware recovery незавершённого распознавания.
  *
- * Outbox закрывает разрыв «БД записала — Redis не принял», но не случай, когда
- * задание доставлено и потеряно вместе с воркером. Такая запись висит вечно:
- * повторная загрузка того же комплекта вернёт «уже загружено» и нового задания
- * не поставит.
+ * Outbox закрывает разрыв «БД записала — Redis не принял», watchdog дополнительно
+ * сверяет BullMQ и восстанавливает потерянную/просроченную работу. Живое задание
+ * не трогается, unknown не угадывается, а recovery создаёт новое поколение и
+ * новый jobId.
  *
- * Главное, что здесь проверяется, — repair не создаёт двойного распознавания:
- * ключ задания совпадает с исходным, а пакет с уже разобранными документами не
- * берётся вовсе.
+ * Главное, что здесь проверяется, — повторный watchdog не плодит задания,
+ * поколения растут атомарно, а исчерпание бюджета даёт видимый терминальный
+ * исход вместо вечного queued/processing.
+ *
  *
  * Запуск: см. заголовок test/integration/mail-requests.int.test.ts.
  * Без TEST_DATABASE_URL набор пропускается.
@@ -35,9 +36,9 @@ import {
   segmentDispatchKeyOf,
 } from '../../src/domain/jobs/job-outbox.js';
 import {
-  MAX_BUNDLE_REDISPATCH,
   repairStuckJobs,
   STUCK_AFTER_MINUTES,
+  type RecoveryMode,
 } from '../../src/domain/jobs/stuck-jobs.js';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -78,7 +79,7 @@ suite('подбор зависших заданий (реальный PostgreSQL
   /** Документ в очереди с оригинальным файлом; age — сколько минут он ждёт. */
   async function queuedDocument(age: number, opts: { technical?: boolean } = {}): Promise<string> {
     const id = randomUUID();
-    ours.push(dispatchKeyOf(id));
+    ours.push(...[0, 1, 2, 3].map((generation) => dispatchKeyOf(id, generation)));
     await sql`INSERT INTO source_documents
         (id, kind, is_technical, direction, origin, status, site_id, queued_at, job_id)
       VALUES (${id}, 'upd', ${opts.technical ?? false}, 'inbound', 'manual_pdf', 'queued',
@@ -95,7 +96,7 @@ suite('подбор зависших заданий (реальный PostgreSQL
     opts: { withTech?: boolean; withReal?: boolean; kind?: string } = {},
   ): Promise<string> {
     const id = randomUUID();
-    ours.push(bundleDispatchKeyOf(id, 0));
+    ours.push(bundleDispatchKeyOf(id, 0), bundleDispatchKeyOf(id, 1));
     const hash = createHash('sha256').update(id).digest('hex');
     await sql`INSERT INTO source_bundles
         (id, bundle_hash, kind, direction, site_id, status, updated_at)
@@ -122,7 +123,15 @@ suite('подбор зависших заданий (реальный PostgreSQL
     sql<{ payload: Record<string, unknown> }[]>`
       SELECT payload FROM job_outbox WHERE dedupe_key = ${key}`;
 
-  const repair = () => repairStuckJobs({ db, queue: QUEUE });
+  // mode: 'on' — эти тесты проверяют сам механизм восстановления. Рубильник
+  // (по умолчанию 'off') проверяется отдельными тестами ниже.
+  const repair = (mode: RecoveryMode = 'on') =>
+    repairStuckJobs({
+      db,
+      queue: QUEUE,
+      queueClient: { getJob: async () => null },
+      mode,
+    });
 
   it('документ, зависший без задания, ставится в очередь заново', async () => {
     const id = await queuedDocument(STUCK_AFTER_MINUTES + 10);
@@ -130,9 +139,39 @@ suite('подбор зависших заданий (реальный PostgreSQL
     const res = await repair();
 
     expect(res.documents).toBeGreaterThanOrEqual(1);
-    const jobs = await outboxFor(dispatchKeyOf(id));
+    const jobs = await outboxFor(dispatchKeyOf(id, 1));
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.payload).toMatchObject({ sourceDocumentId: id });
+  });
+
+  it("mode='off' не трогает ничего — рубильник выключен по умолчанию", async () => {
+    // Выкат кода и включение механизма — разные события: между ними обязан
+    // пройти деплой всех воркеров, иначе старый воркер, не знающий про
+    // поколения, запишет результат поверх восстановленного.
+    const id = await queuedDocument(STUCK_AFTER_MINUTES + 10);
+
+    const res = await repair('off');
+
+    expect(res.documents).toBe(0);
+    expect(res.wouldRecover).toBe(0);
+    expect(await outboxFor(dispatchKeyOf(id, 1))).toHaveLength(0);
+    const [doc] = await sql<{ status: string; dispatch_generation: number }[]>`
+      SELECT status, dispatch_generation FROM source_documents WHERE id = ${id}`;
+    expect(doc).toMatchObject({ status: 'queued', dispatch_generation: 0 });
+  });
+
+  it("mode='dry_run' считает и показывает, но не переставляет", async () => {
+    const id = await queuedDocument(STUCK_AFTER_MINUTES + 10);
+
+    const res = await repair('dry_run');
+
+    expect(res.wouldRecover).toBeGreaterThanOrEqual(1);
+    expect(res.documents).toBe(0);
+    // Ни задания, ни нового поколения: список в логе — единственный результат.
+    expect(await outboxFor(dispatchKeyOf(id, 1))).toHaveLength(0);
+    const [doc] = await sql<{ status: string; dispatch_generation: number }[]>`
+      SELECT status, dispatch_generation FROM source_documents WHERE id = ${id}`;
+    expect(doc).toMatchObject({ status: 'queued', dispatch_generation: 0 });
   });
 
   it('зависшая М-15 восстанавливается СВОИМ путём, а не как УПД', async () => {
@@ -145,7 +184,7 @@ suite('подбор зависших заданий (реальный PostgreSQL
 
     await repair();
 
-    const jobs = await outboxFor(dispatchKeyOf(id));
+    const jobs = await outboxFor(dispatchKeyOf(id, 1));
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.payload).toMatchObject({ sourceDocumentId: id, docKind: 'm15' });
   });
@@ -160,9 +199,9 @@ suite('подбор зависших заданий (реальный PostgreSQL
     await repair();
 
     expect(await outboxFor(dispatchKeyOf(id))).toHaveLength(0);
-    const jobs = await outboxFor(dispatchKeyOf(id, 2));
+    const jobs = await outboxFor(dispatchKeyOf(id, 3));
     expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.payload).toMatchObject({ sourceDocumentId: id, docGeneration: 2 });
+    expect(jobs[0]!.payload).toMatchObject({ sourceDocumentId: id, docGeneration: 3 });
   });
 
   it('свежий документ не трогаем — он просто ждёт очереди', async () => {
@@ -181,10 +220,26 @@ suite('подбор зависших заданий (реальный PostgreSQL
     await repair();
 
     // Ключ тот же, поэтому и строка outbox одна, и BullMQ второго job не создаст.
-    expect(await outboxFor(dispatchKeyOf(id))).toHaveLength(1);
+    expect(await outboxFor(dispatchKeyOf(id, 1))).toHaveLength(1);
+  });
+  it('parked outbox проходит controlled rearm новым поколением', async () => {
+    const id = await queuedDocument(STUCK_AFTER_MINUTES + 10);
+    const oldJobId = dispatchKeyOf(id, 0);
+    await sql`INSERT INTO job_outbox
+        (queue, job_name, payload, dedupe_key, attempts, parked_at, last_error)
+      VALUES (${QUEUE}, 'parse', ${JSON.stringify({ sourceDocumentId: id })}::jsonb, ${oldJobId},
+        12, now(), 'redis unavailable')`;
+
+    await repair();
+
+    const [oldAttempt] = await sql<{ parked_at: Date; superseded_at: Date | null }[]>`
+      SELECT parked_at, superseded_at FROM job_outbox WHERE dedupe_key = ${oldJobId}`;
+    expect(oldAttempt!.parked_at).toBeTruthy();
+    expect(oldAttempt!.superseded_at).toBeTruthy();
+    expect(await outboxFor(dispatchKeyOf(id, 1))).toHaveLength(1);
   });
 
-  it('ключ совпадает с исходным — двойного распознавания не будет', async () => {
+  it('jobId документа совпадает с ключом нового outbox-поколения', async () => {
     const id = await queuedDocument(STUCK_AFTER_MINUTES + 10);
 
     await repair();
@@ -192,7 +247,7 @@ suite('подбор зависших заданий (реальный PostgreSQL
     const [row] = await sql<{ job_id: string }[]>`
       SELECT job_id FROM source_documents WHERE id = ${id}`;
     const [job] = await sql<{ dedupe_key: string }[]>`
-      SELECT dedupe_key FROM job_outbox WHERE dedupe_key = ${dispatchKeyOf(id)}`;
+      SELECT dedupe_key FROM job_outbox WHERE dedupe_key = ${dispatchKeyOf(id, 1)}`;
     expect(job!.dedupe_key).toBe(row!.job_id);
   });
 
@@ -202,7 +257,7 @@ suite('подбор зависших заданий (реальный PostgreSQL
     const res = await repair();
 
     expect(res.bundles).toBeGreaterThanOrEqual(1);
-    const jobs = await outboxFor(bundleDispatchKeyOf(id, 0));
+    const jobs = await outboxFor(bundleDispatchKeyOf(id, 1));
     expect(jobs).toHaveLength(1);
     // mixed — это единый вход, ему нужен режим router.
     expect(jobs[0]!.payload).toMatchObject({ bundleId: id, mode: 'router' });
@@ -231,9 +286,9 @@ suite('подбор зависших заданий (реальный PostgreSQL
 
     await repair();
 
-    const jobs = await outboxFor(bundleDispatchKeyOf(id, 0));
+    const jobs = await outboxFor(bundleDispatchKeyOf(id, 1));
     expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.payload).toEqual({ bundleId: id });
+    expect(jobs[0]!.payload).toEqual({ bundleId: id, bundleGeneration: 1 });
   });
 
   it('служебная запись пакета отдельного задания не получает', async () => {
@@ -263,6 +318,8 @@ suite('подбор зависших заданий (реальный PostgreSQL
   it('пустой прогон ничего не делает', async () => {
     const res = await repair();
     expect(res).toEqual({
+      terminalizedDocuments: 0,
+      wouldRecover: 0,
       documents: 0,
       bundles: 0,
       segments: 0,
@@ -304,9 +361,9 @@ suite('подбор зависших заданий (реальный PostgreSQL
 
     // Второй прогон не должен плодить документы на тот же файл.
     expect((await repair()).stubbedFiles).toBe(0);
-    expect(
-      await sql`SELECT id FROM source_documents WHERE bundle_id = ${bundleId}`,
-    ).toHaveLength(1);
+    expect(await sql`SELECT id FROM source_documents WHERE bundle_id = ${bundleId}`).toHaveLength(
+      1,
+    );
   });
 
   it('файла нет в хранилище — документ не заводим', async () => {
@@ -327,7 +384,9 @@ suite('подбор зависших заданий (реальный PostgreSQL
 
     const res = await repair();
     expect(res.stubbedFiles).toBe(0);
-    expect(await sql`SELECT id FROM source_documents WHERE bundle_id = ${bundleId}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM source_documents WHERE bundle_id = ${bundleId}`).toHaveLength(
+      0,
+    );
   });
 
   // ─── Сборка логических УПД ────────────────────────────────────────────────
@@ -359,11 +418,19 @@ suite('подбор зависших заданий (реальный PostgreSQL
         (id, kind, is_technical, direction, origin, status, site_id, bundle_id, queued_at)
       VALUES (${docId}, 'upd', true, 'inbound', 'manual_pdf', 'queued', ${siteId}, ${subId},
         now() - ${ageMinutes(age)}::interval)`;
+    await sql`INSERT INTO source_document_attachments
+        (source_document_id, s3_key, filename, mime_type, size_bytes, role)
+      VALUES (${docId}, ${`upload/${docId}.pdf`}, 'segment.pdf', 'application/pdf', 100, 'original')`;
     const [seg] = await sql<{ id: string }[]>`
       INSERT INTO bundle_segments (bundle_id, generation, segment_index, source_document_id, confidence)
       VALUES (${rootId}, 0, 0, ${docId}, 'normal')
       RETURNING id`;
-    ours.push(segmentDispatchKeyOf(seg!.id, 0), assemblyDispatchKeyOf(subId, 0));
+    ours.push(
+      segmentDispatchKeyOf(seg!.id, 0),
+      segmentDispatchKeyOf(seg!.id, 1),
+      assemblyDispatchKeyOf(subId, 0),
+      assemblyDispatchKeyOf(subId, 1),
+    );
     return { rootId, subId, segmentId: seg!.id, docId };
   }
 
@@ -373,11 +440,18 @@ suite('подбор зависших заданий (реальный PostgreSQL
     const res = await repair();
 
     expect(res.segments).toBe(1);
-    const jobs = await outboxFor(segmentDispatchKeyOf(segmentId, 0));
+    const jobs = await outboxFor(segmentDispatchKeyOf(segmentId, 1));
     expect(jobs).toHaveLength(1);
     // Payload адресует манифест: одиночное задание по s3Key распознало бы одну
     // страницу вместо всего логического УПД.
-    expect(jobs[0]!.payload).toEqual({ sourceDocumentId: docId, segmentId, generation: 0 });
+    expect(jobs[0]!.payload).toEqual({
+      sourceDocumentId: docId,
+      segmentId,
+      generation: 0,
+      segmentGeneration: 1,
+      docGeneration: 1,
+      bundleGeneration: 0,
+    });
     expect(await outboxFor(dispatchKeyOf(docId))).toHaveLength(0);
   });
 
@@ -394,6 +468,37 @@ suite('подбор зависших заданий (реальный PostgreSQL
     expect(await outboxFor(segmentDispatchKeyOf(segmentId, 0))).toHaveLength(0);
   });
 
+  it('частично видимый пакет блокирует recovery сегмента, но файл получает терминал', async () => {
+    const { rootId, segmentId, docId } = await assemblyWithSegment(STUCK_AFTER_MINUTES + 10);
+    await sql`INSERT INTO source_documents
+        (kind, is_technical, direction, origin, status, site_id, bundle_id,
+         doc_number, doc_date, total_sum)
+      VALUES ('upd', false, 'inbound', 'manual_pdf', 'parsed', ${siteId}, ${rootId},
+        'VISIBLE-1', current_date, 100)`;
+
+    const res = await repair();
+
+    expect(res.segments).toBe(0);
+    expect(res.terminalizedDocuments).toBe(1);
+    const [terminal] = await sql<
+      {
+        status: string;
+        is_technical: boolean;
+        bundle_id: string | null;
+        dispatch_generation: number;
+      }[]
+    >`
+      SELECT status, is_technical, bundle_id, dispatch_generation
+        FROM source_documents WHERE id = ${docId}`;
+    expect(terminal).toMatchObject({
+      status: 'needs_resolution',
+      is_technical: false,
+      bundle_id: null,
+      dispatch_generation: 1,
+    });
+    expect(await outboxFor(segmentDispatchKeyOf(segmentId, 1))).toHaveLength(0);
+  });
+
   it('зависший дочерний пакет сборки восстанавливается своим режимом', async () => {
     const { subId } = await assemblyWithSegment(STUCK_AFTER_MINUTES + 10);
     // Сборка не дошла до манифеста: пакет ждёт своего задания.
@@ -403,11 +508,11 @@ suite('подбор зависших заданий (реальный PostgreSQL
 
     await repair();
 
-    const jobs = await outboxFor(assemblyDispatchKeyOf(subId, 0));
+    const jobs = await outboxFor(assemblyDispatchKeyOf(subId, 1));
     expect(jobs).toHaveLength(1);
     // Без mode='upd_assembly' задание ушло бы в waybill-обработчик, который не
     // нашёл бы накладных и пометил пакет parse_failed.
-    expect(jobs[0]!.payload).toEqual({ bundleId: subId, mode: 'upd_assembly', generation: 0 });
+    expect(jobs[0]!.payload).toMatchObject({ bundleId: subId, mode: 'upd_assembly' });
   });
 
   describe('пакет завис в processing', () => {
@@ -491,25 +596,23 @@ suite('подбор зависших заданий (реальный PostgreSQL
 
       const res = await repair();
 
-      expect(res.restartedBundles).toBe(1);
+      expect(res.bundles).toBe(1);
       expect(await bundleStatus(id)).toBe('queued');
       // Ключ нового поколения: старое задание могло остаться в BullMQ
       // завершённым, и постановка под тем же id молча не создала бы ничего.
       const jobs = await outboxFor(bundleDispatchKeyOf(id, 1));
       expect(jobs).toHaveLength(1);
-      expect(jobs[0]!.payload).toEqual({ bundleId: id, mode: 'router' });
+      expect(jobs[0]!.payload).toEqual({ bundleId: id, mode: 'router', bundleGeneration: 1 });
     });
 
-    it('исчерпав попытки, пакет больше не перезапускается', async () => {
-      const id = await processingBundle(STUCK_AFTER_MINUTES + 10, {
-        withTech: true,
-        generation: MAX_BUNDLE_REDISPATCH,
-      });
+    it('исчерпав recovery-бюджет, пакет получает видимый терминальный исход', async () => {
+      const id = await processingBundle(STUCK_AFTER_MINUTES + 10, { withTech: true });
+      await sql`UPDATE source_bundles SET recovery_attempts = 2 WHERE id = ${id}`;
 
       const res = await repair();
 
-      expect(res.restartedBundles).toBe(0);
-      expect(await bundleStatus(id)).toBe('processing');
+      expect(res.terminalizedDocuments).toBe(1);
+      expect(await bundleStatus(id)).toBe('parse_failed');
     });
   });
 });

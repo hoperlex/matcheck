@@ -116,6 +116,8 @@ export type EnsureStubResult =
   | { action: 'exists'; documentId: string | null }
   /** Вопрос по файлу закрыт человеком (в том числе удалением документа). */
   | { action: 'resolved' }
+  /** Попытка устарела: recovery уже выдал пакету новое поколение. */
+  | { action: 'stale' }
   /** Объекта нет в S3: документ без файла заводить нельзя. */
   | { action: 'missing_object' };
 
@@ -171,6 +173,21 @@ async function findTechnicalDocumentByKey(db: Db, s3Key: string): Promise<string
   return row?.id ?? null;
 }
 
+async function fenceRegistryAttempt(
+  tx: Db,
+  bundleId: string,
+  expectedDispatchGeneration: number | undefined,
+): Promise<boolean> {
+  if (expectedDispatchGeneration === undefined) return true;
+  const [locked] = await tx
+    .select({ dispatchGeneration: sourceBundles.dispatchGeneration })
+    .from(sourceBundles)
+    .where(eq(sourceBundles.id, bundleId))
+    .limit(1)
+    .for('update');
+  return locked?.dispatchGeneration === expectedDispatchGeneration;
+}
+
 /**
  * Заводит заглушку по строке реестра, если её ещё нет.
  *
@@ -192,6 +209,8 @@ export async function ensureDocumentForRegistryRow(args: {
   reason: StubReason;
   /** Текст для реестра, если у вызывающего он точнее общего. */
   reasonText?: string;
+  /** Поколение worker-attempt; repair без конкретной попытки не передаёт его. */
+  expectedDispatchGeneration?: number;
 }): Promise<EnsureStubResult> {
   const { db, row, bundle, reason } = args;
   const shape = STUB_SHAPES[reason];
@@ -201,19 +220,35 @@ export async function ensureDocumentForRegistryRow(args: {
   // «исходник недоступен» из-за моргнувшей сети значило бы соврать. Вызывающий
   // повторит на следующем проходе.
   if (!(await headObject(row.s3Key))) {
-    await db
-      .update(bundleImportItems)
-      .set({
-        status: 'failed',
-        effectiveStatus: 'failed',
-        reason: 'исходник недоступен: объекта нет в хранилище',
-        updatedAt: new Date(),
-      })
-      .where(eq(bundleImportItems.id, row.id));
-    return { action: 'missing_object' };
+    return db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      if (!(await fenceRegistryAttempt(tx, row.bundleId, args.expectedDispatchGeneration))) {
+        return { action: 'stale' as const };
+      }
+      await rawTx
+        .update(bundleImportItems)
+        .set({
+          status: 'failed',
+          effectiveStatus: 'failed',
+          reason: 'исходник недоступен: объекта нет в хранилище',
+          updatedAt: new Date(),
+        })
+        .where(eq(bundleImportItems.id, row.id));
+      return { action: 'missing_object' as const };
+    });
   }
 
   return db.transaction(async (tx) => {
+    if (
+      !(await fenceRegistryAttempt(
+        tx as unknown as Db,
+        row.bundleId,
+        args.expectedDispatchGeneration,
+      ))
+    ) {
+      return { action: 'stale' as const };
+    }
+
     const [locked] = await tx
       .select({
         id: bundleImportItems.id,
@@ -426,7 +461,9 @@ export async function selectRowsWithoutDocument(
  * технический сбой. Классификация только по строке реестра: она переживает и
  * разбор, и удаление служебной записи пакета.
  */
-export function stubReasonForRow(row: Pick<RegistryRow, 'processingMode' | 'detectedKind'>): StubReason {
+export function stubReasonForRow(
+  row: Pick<RegistryRow, 'processingMode' | 'detectedKind'>,
+): StubReason {
   if (row.processingMode === 'store_only') return 'supplementary';
   if (row.detectedKind === 'supplementary') return 'supplementary';
   if (row.detectedKind === 'transport_waybill' || row.detectedKind === 'os2_transfer') {

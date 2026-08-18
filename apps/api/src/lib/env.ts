@@ -270,12 +270,24 @@ const envSchema = z.object({
   //
   // Письмо крупнее предела не теряется: оно не скачивается и попадает в список
   // незабранных, где оператор может поднять лимит и затребовать повтор.
-  MAIL_LETTER_MAX_BYTES: z.coerce.number().int().positive().default(20 * 1024 * 1024),
+  MAIL_LETTER_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(20 * 1024 * 1024),
   // Вложение по определению меньше письма — держим предел согласованным.
-  MAIL_ATTACHMENT_MAX_BYTES: z.coerce.number().int().positive().default(15 * 1024 * 1024),
+  MAIL_ATTACHMENT_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(15 * 1024 * 1024),
   // Защита от zip-бомбы в xlsx: три независимых предела.
   MAIL_XLSX_MAX_ENTRIES: z.coerce.number().int().positive().default(512),
-  MAIL_XLSX_MAX_INFLATED_BYTES: z.coerce.number().int().positive().default(100 * 1024 * 1024),
+  MAIL_XLSX_MAX_INFLATED_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(100 * 1024 * 1024),
   MAIL_XLSX_MAX_RATIO: z.coerce.number().int().positive().default(200),
   // Срок хранения разобранной почты, дни. По умолчанию 0 — НЕ УДАЛЯТЬ.
   //
@@ -301,6 +313,33 @@ const envSchema = z.object({
   // Per-IP за 10 минут: один визит — до 10 поставок отдельными запросами плюс
   // запас на повторы. За одним внешним IP может сидеть весь офис подрядчика.
   PUBLIC_UPLOAD_IP_MAX: z.coerce.number().int().positive().default(20),
+
+  // Восстановление зависшего распознавания. Три состояния, а не рубильник:
+  // сторож принимает решения по неполным данным (Redis, outbox, БД), и увидеть
+  // их СПИСКОМ до того, как он начнёт переставлять работу на боевом сервере, —
+  // единственный способ убедиться, что он не тронет живое.
+  //
+  //   off     — сторож не смотрит на health вовсе, поведение как до выката;
+  //   dry_run — смотрит, пишет в лог «что сделал бы», не меняет ничего;
+  //   on      — переставляет работу и терминализует по исчерпании попыток.
+  //
+  // Значение по умолчанию `off`: выкат кода и включение механизма — два разных
+  // события, между ними обязан пройти деплой всех воркеров (иначе старый воркер
+  // запишет результат поверх нового поколения).
+  RECOGNITION_RECOVERY_MODE: z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    z.enum(['off', 'dry_run', 'on']).default('off'),
+  ),
+
+  // Кнопка ручного восстановления в карточке документа. Отдельно от сторожа и
+  // по плану выката включается ПОСЛЕДНЕЙ: у человека нет ограничения по
+  // частоте, и ошибка в fencing проявится через него быстрее всего.
+  //
+  // enum('0','1'), а не coerce.boolean(): последний превращает '0' в true, и
+  // рубильник нельзя было бы выключить.
+  RECOGNITION_RECOVERY_MANUAL: z
+    .preprocess((v) => (v === '' ? undefined : v), z.enum(['0', '1']).default('0'))
+    .transform((v) => v === '1'),
 
   // S3 (cloud.ru)
   S3_ENDPOINT: z.string().url().optional(),

@@ -285,17 +285,18 @@ export async function resolveMailMessage(
     });
 
     // Задание пишется в ТОЙ ЖЕ транзакции: падение Redis не оставит пакет
+    const jobId = bundleDispatchKeyOf(bundleId, 0);
     // навсегда в queued без разбора.
     await enqueueJob(tx as unknown as Db, {
       queue: UPD_PARSE_QUEUE,
       jobName: 'parse',
-      payload: { bundleId, mode: 'router' },
-      dedupeKey: bundleDispatchKeyOf(bundleId),
+      payload: { bundleId, mode: 'router', bundleGeneration: 0 },
+      dedupeKey: jobId,
     });
 
     await tx
       .update(sourceBundles)
-      .set({ status: 'queued', updatedAt: now })
+      .set({ status: 'queued', jobId, updatedAt: now })
       .where(eq(sourceBundles.id, bundleId));
 
     // Закрываем сагу только своим токеном — чужой повтор её не «докатит».

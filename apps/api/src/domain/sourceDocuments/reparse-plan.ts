@@ -13,9 +13,9 @@
 // Живёт в domain, а не в worker.ts, по той же причине, что и соседние модули:
 // worker.ts на верхнем уровне поднимает очередь и двух BullMQ-воркеров, и его
 // импорт из API-кода или из stuck-jobs поднял бы второго воркера в чужом
-// процессе. Плана касаются трое: маршрут повтора, repairStuckJobs и
-// recoverStaleProcessing — и все обязаны строить payload одинаково, иначе
-// восстановленное задание уедет не тем путём (сегодня так и происходит с М-15).
+// процессе. План используют маршрут ручного повтора и generation-aware
+// recovery; оба обязаны строить payload одинаково, иначе восстановленное
+// задание уедет не тем путём.
 
 import { and, eq, sql as drSql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
@@ -53,10 +53,7 @@ export type ReparsePlan = {
   dedupeKey: string;
 };
 
-export type ReparseBlockReason =
-  | 'no_attachment'
-  | 'segment_manifest_stale'
-  | 'assembly_busy';
+export type ReparseBlockReason = 'no_attachment' | 'segment_manifest_stale' | 'assembly_busy';
 
 export type ReparsePlanResult = ReparsePlan | { blocked: ReparseBlockReason };
 
@@ -91,8 +88,10 @@ export async function resolveReparsePlan(
   db: Db,
   doc: DocRow,
   docGeneration: number,
+  opts: { reparse?: boolean } = {},
 ): Promise<ReparsePlanResult> {
   const dedupeKey = dispatchKeyOf(doc.id, docGeneration);
+  const reparse = opts.reparse ? ({ reparse: true as const } as const) : {};
 
   // 1. Сегмент комплекта. Проверяется первым: у такого документа есть и
   //    вложение (весь PDF), и kind='upd', так что все прочие правила подошли бы
@@ -133,9 +132,9 @@ export async function resolveReparsePlan(
         segmentId: segment.id,
         generation: segment.generation,
         docGeneration,
-        // Флаг ослабляет fencing сборки: страницы манифеста на месте, но
-        // комплект уже опубликован, и проверки «сборка ещё идёт» неприменимы.
-        reparse: true,
+        // Только ручной повтор ослабляет fencing сборки.
+        // Recovery неопубликованного сегмента приходит без этого флага.
+        ...reparse,
       },
       dedupeKey,
     };
@@ -167,6 +166,7 @@ export async function resolveReparsePlan(
           s3Key: attachment.s3Key,
           docKind: 'm15',
           docGeneration,
+          ...reparse,
         },
         dedupeKey,
       };
@@ -175,7 +175,7 @@ export async function resolveReparsePlan(
     // документа, а не один файл, — их и читает воркер.
     return {
       kind: 'waybill',
-      payload: { sourceDocumentId: doc.id, mode: 'waybill_single', docGeneration },
+      payload: { sourceDocumentId: doc.id, mode: 'waybill_single', docGeneration, ...reparse },
       dedupeKey,
     };
   }
@@ -184,7 +184,7 @@ export async function resolveReparsePlan(
   //    как при первой загрузке.
   return {
     kind: 'single',
-    payload: { sourceDocumentId: doc.id, s3Key: attachment.s3Key, docGeneration },
+    payload: { sourceDocumentId: doc.id, s3Key: attachment.s3Key, docGeneration, ...reparse },
     dedupeKey,
   };
 }

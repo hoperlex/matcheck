@@ -35,6 +35,7 @@ function endpoint(): string {
 // не повторяем — это валидный ответ, который обрабатывает вызывающий.
 const S3_MAX_ATTEMPTS = 3;
 const S3_RETRY_BASE_MS = 200;
+const S3_ATTEMPT_TIMEOUT_MS = 60_000;
 
 function isTransientS3Status(status: number): boolean {
   return status === 502 || status === 503 || status === 504;
@@ -98,7 +99,9 @@ export async function presign({
 
 export async function getObject(key: string): Promise<Buffer> {
   const url = new URL(`${endpoint()}/${env.S3_BUCKET}/${key}`);
-  const res = await s3FetchWithRetry(() => getClient().fetch(url, { method: 'GET' }));
+  const res = await s3FetchWithRetry(() =>
+    getClient().fetch(url, { method: 'GET', signal: AbortSignal.timeout(S3_ATTEMPT_TIMEOUT_MS) }),
+  );
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`S3 GET ${key} failed: HTTP ${res.status} ${text.slice(0, 200)}`);
@@ -138,6 +141,7 @@ export async function putObject(
       method: 'PUT',
       body,
       headers,
+      signal: AbortSignal.timeout(S3_ATTEMPT_TIMEOUT_MS),
     }),
   );
   if (!res.ok) {
@@ -152,6 +156,7 @@ export async function copyObject(srcKey: string, dstKey: string): Promise<void> 
     getClient().fetch(url, {
       method: 'PUT',
       headers: { 'x-amz-copy-source': `/${env.S3_BUCKET}/${encodeURI(srcKey)}` },
+      signal: AbortSignal.timeout(S3_ATTEMPT_TIMEOUT_MS),
     }),
   );
   if (!res.ok) {
@@ -164,7 +169,12 @@ export async function copyObject(srcKey: string, dstKey: string): Promise<void> 
 
 export async function deleteObject(key: string): Promise<void> {
   const url = new URL(`${endpoint()}/${env.S3_BUCKET}/${key}`);
-  const res = await s3FetchWithRetry(() => getClient().fetch(url, { method: 'DELETE' }));
+  const res = await s3FetchWithRetry(() =>
+    getClient().fetch(url, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(S3_ATTEMPT_TIMEOUT_MS),
+    }),
+  );
   if (!res.ok && res.status !== 404) {
     const text = await res.text().catch(() => '');
     throw new Error(`S3 DELETE ${key} failed: HTTP ${res.status} ${text.slice(0, 200)}`);
@@ -176,7 +186,9 @@ export async function deleteObject(key: string): Promise<void> {
 // 404; throw — сетевая/permission-ошибка (caller решает что делать).
 export async function headObject(key: string): Promise<boolean> {
   const url = new URL(`${endpoint()}/${env.S3_BUCKET}/${key}`);
-  const res = await s3FetchWithRetry(() => getClient().fetch(url, { method: 'HEAD' }));
+  const res = await s3FetchWithRetry(() =>
+    getClient().fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(S3_ATTEMPT_TIMEOUT_MS) }),
+  );
   if (res.status === 404) return false;
   if (!res.ok) {
     const text = await res.text().catch(() => '');

@@ -10,12 +10,7 @@ import { z } from 'zod';
 // (см. waybill-batch.parser.ts): пакет фото загружается одним POST,
 // LLM классифицирует каждый файл и возвращает массив документов разных форм.
 // Один пакет может породить N source_documents (см. source_bundles).
-export const SourceKindSchema = z.enum([
-  'upd',
-  'request',
-  'transport_waybill',
-  'os2_transfer',
-]);
+export const SourceKindSchema = z.enum(['upd', 'request', 'transport_waybill', 'os2_transfer']);
 export const SourceOriginSchema = z.enum(['edo_diadoc', 'manual_xml', 'manual_pdf', 'mail']);
 export const SourceStatusSchema = z.enum([
   'parsed',
@@ -67,8 +62,7 @@ export function getDocumentDisplayStatus(sd: {
   // Приёмка без подрядчика допустима и в базе: CHECK deliveries_recipient_chk
   // запрещает только оба поля сразу, а «оба NULL» — обычная приёмка от
   // внешнего поставщика.
-  const hasRecipient =
-    sd.direction === 'outbound' ? !!(sd.recipientId || sd.recipientMolId) : true;
+  const hasRecipient = sd.direction === 'outbound' ? !!(sd.recipientId || sd.recipientMolId) : true;
   const hasExpectedDate = !!sd.expectedDate;
   const hasSite = !!sd.siteId;
   if (!hasRecipient || !hasExpectedDate || !hasSite) return 'draft';
@@ -130,6 +124,10 @@ export const SourceParseErrorCodeSchema = z.enum([
   // internal_error: последний носят и обычные документы со сломавшимся
   // разбором, а их прятать из «Ожидаемых» и /sync нельзя.
   'not_processed',
+  // Распознавание зависало и исчерпало отведённые поколения. Отдельный код, а
+  // не not_processed: там разбор упал и сказал почему, здесь работа просто не
+  // доехала — диагноз и для менеджера, и для метрик разный.
+  'recovery_exhausted',
 ]);
 export type SourceParseErrorCode = z.infer<typeof SourceParseErrorCodeSchema>;
 
@@ -146,6 +144,11 @@ export const STUB_ERROR_CODES = [
   'no_waybill_found',
   'not_processed',
   'supplementary',
+  // Документ, у которого распознавание так и не доехало. Реквизитов у него нет
+  // по той же причине, что у not_processed. Без этой строки он не считался бы
+  // заглушкой: портал опрашивал бы его как «ещё в работе» бесконечно, кнопки
+  // «разобрано» у него не было бы, а /sync отдал бы его инспектору пустым.
+  'recovery_exhausted',
 ] as const satisfies readonly SourceParseErrorCode[];
 
 /**
@@ -159,6 +162,7 @@ export const ACTIONABLE_STUB_CODES = [
   'unrecognized_type',
   'no_waybill_found',
   'not_processed',
+  'recovery_exhausted',
 ] as const satisfies readonly SourceParseErrorCode[];
 
 /** Заглушка ли это — см. STUB_ERROR_CODES про пару (статус, код). */
@@ -270,6 +274,15 @@ export type UpdValidation = z.infer<typeof UpdValidationSchema>;
 export const RecipientSourceSchema = z.enum(['manual', 'auto_buyer']);
 export type RecipientSource = z.infer<typeof RecipientSourceSchema>;
 
+export const SourceWorkHealthSchema = z.enum([
+  'alive',
+  'missing',
+  'terminal',
+  'overdue',
+  'unknown',
+]);
+export type SourceWorkHealth = z.infer<typeof SourceWorkHealthSchema>;
+
 export const SourceDocumentSchema = z.object({
   id: z.string().uuid(),
   kind: SourceKindSchema,
@@ -334,6 +347,7 @@ export const SourceDocumentSchema = z.object({
   processedAt: z.string().nullable(),
   parseErrorCode: SourceParseErrorCodeSchema.nullable(),
   parseErrorDetails: z.record(z.unknown()).nullable(),
+  workHealth: SourceWorkHealthSchema.optional(),
   originalFilename: z.string().nullable(),
   contentHash: z.string().nullable(),
   jobAttempts: z.number(),
@@ -890,9 +904,7 @@ export type ExtraOnlyBundleListResponse = z.infer<typeof ExtraOnlyBundleListResp
 export const SourceDocumentBulkDeleteRequestSchema = z.object({
   ids: z.array(z.string().uuid()).min(1).max(500),
 });
-export type SourceDocumentBulkDeleteRequest = z.infer<
-  typeof SourceDocumentBulkDeleteRequestSchema
->;
+export type SourceDocumentBulkDeleteRequest = z.infer<typeof SourceDocumentBulkDeleteRequestSchema>;
 
 export const SourceDocumentBulkDeleteSkipReasonSchema = z.enum([
   'has_references',
@@ -941,6 +953,14 @@ export const SourceReparseResponseSchema = z.object({
   plan: z.enum(['single', 'm15', 'segment', 'waybill']),
 });
 export type SourceReparseResponse = z.infer<typeof SourceReparseResponseSchema>;
+export const SourceRecoverResponseSchema = z.object({
+  ok: z.literal(true),
+  outcome: z.enum(['recovered', 'terminalized']),
+  generation: z.number().int().nonnegative(),
+  jobId: z.string().nullable(),
+  reason: z.string().optional(),
+});
+export type SourceRecoverResponse = z.infer<typeof SourceRecoverResponseSchema>;
 
 // ──────────── Журнал LLM-вызовов (для админского drawer) ────────────
 

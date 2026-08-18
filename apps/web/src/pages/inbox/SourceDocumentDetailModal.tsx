@@ -1,11 +1,4 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ComponentProps,
-  type ReactNode,
-} from 'react';
+import { useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import {
   Alert,
   Button,
@@ -48,6 +41,7 @@ import type {
   SourceDirection,
   SourceDocumentDetail,
   SourceDocumentFileResponse,
+  SourceRecoverResponse,
   SourceReparseResponse,
   UpdCheck,
 } from '@matcheck/contracts';
@@ -221,6 +215,10 @@ export function SourceDocumentDetailModal({
   const sd = detail.data;
   const items = sd?.items ?? [];
   const isProcessing = sd?.status === 'queued' || sd?.status === 'processing';
+  const canRecoverWork =
+    isProcessing &&
+    (sd?.workHealth === 'missing' || sd?.workHealth === 'terminal' || sd?.workHealth === 'overdue');
+
   const failedChecks = useMemo<UpdCheck[]>(() => {
     if (!sd?.validation?.checks) return [];
     return sd.validation.checks.filter((c) => !c.ok && !c.skipReason);
@@ -284,6 +282,21 @@ export function SourceDocumentDetailModal({
     onError: (err: Error) => message.error(err.message),
   });
 
+  const recover = useMutation({
+    mutationFn: () => api.post<SourceRecoverResponse>(`/source-documents/${id}/recover`, {}),
+    onSuccess: (res) => {
+      if (res.outcome === 'terminalized') {
+        message.warning('Автоматические попытки исчерпаны — документ требует решения');
+      } else {
+        message.success('Распознавание восстановлено');
+      }
+      void qc.invalidateQueries({ queryKey: ['source-documents'] });
+      void qc.invalidateQueries({ queryKey: ['source-document', id] });
+      void qc.invalidateQueries({ queryKey: ['source-document-offline', id] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
   function onSave() {
     if (!edit) return;
     // Получатель — взаимоисключающий выбор. Маппинг полей зависит от
@@ -322,8 +335,7 @@ export function SourceDocumentDetailModal({
 
   const isMismatchPending =
     sd?.status === 'needs_resolution' && sd.parseErrorCode === 'validation_mismatch';
-  const isDuplicate =
-    sd?.status === 'needs_resolution' && sd.parseErrorCode === 'duplicate_upd';
+  const isDuplicate = sd?.status === 'needs_resolution' && sd.parseErrorCode === 'duplicate_upd';
 
   return (
     <>
@@ -377,9 +389,7 @@ export function SourceDocumentDetailModal({
                     ? 'Накладная'
                     : 'Заявка'}
               </Tag>
-              {sd.siteName ? (
-                <Tag style={{ marginInlineEnd: 0 }}>Объект: {sd.siteName}</Tag>
-              ) : null}
+              {sd.siteName ? <Tag style={{ marginInlineEnd: 0 }}>Объект: {sd.siteName}</Tag> : null}
               {/* Стороны документа — покупатель, грузополучатель, поставщик:
                   то, что распознано в шапке УПД. Подрядчик (выбор менеджера)
                   живёт ниже, в поле «Получатель» формы редактирования. */}
@@ -408,7 +418,12 @@ export function SourceDocumentDetailModal({
                 <Tooltip title={sd.submission.comment}>
                   <Tag
                     color="cyan"
-                    style={{ marginInlineEnd: 0, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis' }}
+                    style={{
+                      marginInlineEnd: 0,
+                      maxWidth: 320,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
                   >
                     Комментарий поставщика: {sd.submission.comment}
                   </Tag>
@@ -474,6 +489,19 @@ export function SourceDocumentDetailModal({
                   </Button>
                 </Popconfirm>
               )}
+              {canReparse && canRecoverWork && (
+                <Popconfirm
+                  title="Восстановить распознавание?"
+                  description="Сервер создаст новую защищённую попытку или зафиксирует видимый итог, если лимит исчерпан."
+                  okText="Восстановить"
+                  cancelText="Отмена"
+                  onConfirm={() => recover.mutate()}
+                >
+                  <Button danger icon={<ReloadOutlined />} loading={recover.isPending}>
+                    Восстановить распознавание
+                  </Button>
+                </Popconfirm>
+              )}
               {!isProcessing && !isDuplicate && (
                 <Button type="primary" onClick={onSave} loading={patch.isPending}>
                   Сохранить
@@ -503,10 +531,20 @@ export function SourceDocumentDetailModal({
             {isProcessing && (
               <Alert
                 style={{ marginBottom: 12 }}
-                type="info"
+                type={canRecoverWork ? 'warning' : 'info'}
                 showIcon
-                message="Документ ещё распознаётся"
-                description="Окно обновится автоматически, когда распознавание завершится."
+                message={
+                  canRecoverWork
+                    ? 'Распознавание требует восстановления'
+                    : 'Документ ещё распознаётся'
+                }
+                description={
+                  canRecoverWork
+                    ? 'Задание отсутствует, завершилось без результата или превысило лимит времени.'
+                    : sd.workHealth === 'unknown'
+                      ? 'Состояние очереди временно не удалось проверить. Проверка повторится автоматически.'
+                      : 'Окно обновится автоматически, когда распознавание завершится.'
+                }
               />
             )}
             {/* Повтор не удался — документ вернулся к прежним данным. Без этого
@@ -540,9 +578,7 @@ export function SourceDocumentDetailModal({
                 type="error"
                 showIcon
                 message={`Ошибка распознавания: ${sd.parseErrorCode ?? 'unknown'}`}
-                description={
-                  (sd.parseErrorDetails as { message?: string } | null)?.message ?? null
-                }
+                description={(sd.parseErrorDetails as { message?: string } | null)?.message ?? null}
               />
             )}
             {failedChecks.length > 0 && (
@@ -587,9 +623,7 @@ export function SourceDocumentDetailModal({
                     <Form.Item label="№ документа">
                       <Input
                         value={edit.docNumber ?? ''}
-                        onChange={(e) =>
-                          setEdit({ ...edit, docNumber: e.target.value || null })
-                        }
+                        onChange={(e) => setEdit({ ...edit, docNumber: e.target.value || null })}
                       />
                     </Form.Item>
                     <Form.Item label="Дата">
@@ -661,7 +695,10 @@ export function SourceDocumentDetailModal({
                           });
                         }}
                         options={[
-                          { label: sd.direction === 'outbound' ? 'Контрагент' : 'Подрядчик', value: 'counterparty' },
+                          {
+                            label: sd.direction === 'outbound' ? 'Контрагент' : 'Подрядчик',
+                            value: 'counterparty',
+                          },
                           { label: 'МОЛ', value: 'mol' },
                         ]}
                       />
@@ -694,6 +731,7 @@ export function SourceDocumentDetailModal({
                       <SiteSelect
                         value={edit.siteId}
                         onChange={(v) => setEdit({ ...edit, siteId: v })}
+                        currentLabel={sd.siteName}
                       />
                     </Form.Item>
                   </Form>
@@ -703,11 +741,7 @@ export function SourceDocumentDetailModal({
               }
               originalNode={
                 sd.attachments.length > 0 ? (
-                  <OriginalAttachments
-                    attachments={sd.attachments}
-                    id={id!}
-                    compact={isWide}
-                  />
+                  <OriginalAttachments attachments={sd.attachments} id={id!} compact={isWide} />
                 ) : file.isLoading ? (
                   <Spin />
                 ) : (
@@ -827,8 +861,7 @@ function DetailBody({
           },
           {
             key: 'original',
-            label:
-              attachmentsCount > 1 ? `Оригинал (${attachmentsCount})` : 'Оригинал',
+            label: attachmentsCount > 1 ? `Оригинал (${attachmentsCount})` : 'Оригинал',
             children: originalNode,
           },
         ]}
@@ -1095,12 +1128,7 @@ function OriginalAttachments({
         )}
       </div>
       {attachments.length > 1 && (
-        <ThumbBar
-          attachments={attachments}
-          activeId={activeId}
-          onSelect={setActiveId}
-          id={id}
-        />
+        <ThumbBar attachments={attachments} activeId={activeId} onSelect={setActiveId} id={id} />
       )}
     </div>
   );
@@ -1113,10 +1141,7 @@ function isImageExt(name: string): boolean {
 function isExcelExt(name: string, mimeType?: string | null): boolean {
   if (/\.xlsx?$/i.test(name)) return true;
   if (!mimeType) return false;
-  return (
-    mimeType.includes('spreadsheetml') ||
-    mimeType === 'application/vnd.ms-excel'
-  );
+  return mimeType.includes('spreadsheetml') || mimeType === 'application/vnd.ms-excel';
 }
 
 function isPdfExt(name: string): boolean {
@@ -1130,10 +1155,7 @@ function formatFileSize(bytes: number | null): string | null {
   return `${(bytes / 1024 / 1024).toFixed(2)} МБ`;
 }
 
-async function downloadAttachment(
-  id: string,
-  attachment: AttachmentLike,
-): Promise<void> {
+async function downloadAttachment(id: string, attachment: AttachmentLike): Promise<void> {
   // download=1 заставляет сервер выставить Content-Disposition: attachment
   // даже для PDF/изображений; для xlsx attachment ставится автоматически
   // по mime-типу (см. routes/source-documents.ts). apiDownload сам
@@ -1153,13 +1175,7 @@ async function downloadAttachment(
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function ExcelPreviewCard({
-  id,
-  attachment,
-}: {
-  id: string;
-  attachment: AttachmentLike;
-}) {
+function ExcelPreviewCard({ id, attachment }: { id: string; attachment: AttachmentLike }) {
   const [downloading, setDownloading] = useState(false);
   const size = formatFileSize(attachment.sizeBytes);
   const handleDownload = async () => {
@@ -1167,9 +1183,7 @@ function ExcelPreviewCard({
       setDownloading(true);
       await downloadAttachment(id, attachment);
     } catch (err) {
-      message.error(
-        err instanceof Error ? err.message : 'Не удалось скачать файл',
-      );
+      message.error(err instanceof Error ? err.message : 'Не удалось скачать файл');
     } finally {
       setDownloading(false);
     }
@@ -1191,10 +1205,7 @@ function ExcelPreviewCard({
       }}
     >
       <FileExcelOutlined style={{ fontSize: 64, color: '#22863a' }} />
-      <Typography.Text
-        strong
-        style={{ textAlign: 'center', wordBreak: 'break-word' }}
-      >
+      <Typography.Text strong style={{ textAlign: 'center', wordBreak: 'break-word' }}>
         {attachment.filename}
       </Typography.Text>
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -1212,8 +1223,8 @@ function ExcelPreviewCard({
         type="secondary"
         style={{ fontSize: 11, textAlign: 'center', maxWidth: 380 }}
       >
-        Браузер не отображает Excel внутри страницы. Реквизиты и позиции
-        документа уже распознаны и доступны в панели «Позиции».
+        Браузер не отображает Excel внутри страницы. Реквизиты и позиции документа уже распознаны и
+        доступны в панели «Позиции».
       </Typography.Text>
     </div>
   );
