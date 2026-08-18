@@ -17,9 +17,10 @@ import { sites, deliveries, SYSTEM_SITE_ID } from '../db/schema.js';
 import type { Db } from '../db/client.js';
 
 // Объект «из ФОТ» — это запись с fot_site_id IS NOT NULL (см. миграцию
-// 0054). Через UI такие нельзя править/удалять: name/address приходят
-// из централизованного источника заказчика, локальные правки затёрло бы
-// следующим обновлением. Аналог isFotResponsiblePerson для МОЛ.
+// 0054). Через UI у него нельзя править справочные поля или удалять запись:
+// name/address приходят из централизованного источника заказчика, локальные
+// правки затёрло бы следующим обновлением. Признак активности при этом
+// остаётся под локальным контролем менеджера.
 async function isFotSite(db: Db, id: string): Promise<boolean> {
   const [row] = await db
     .select({ id: sites.id })
@@ -165,18 +166,44 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
           .code(409)
           .send({ error: 'system_site_readonly', message: 'Системный объект нельзя редактировать' });
       }
-      if (await isFotSite(app.db, req.params.id)) {
+      const [current] = await app.db
+        .select({
+          code: sites.code,
+          name: sites.name,
+          fullName: sites.fullName,
+          address: sites.address,
+          fotSiteId: sites.fotSiteId,
+        })
+        .from(sites)
+        .where(eq(sites.id, req.params.id))
+        .limit(1);
+      if (!current) return reply.code(404).send({ error: 'not_found' });
+
+      const isFot = current.fotSiteId != null;
+      if (
+        isFot &&
+        ((req.body.code !== undefined && req.body.code !== current.code) ||
+          (req.body.name !== undefined && req.body.name !== current.name) ||
+          (req.body.fullName !== undefined && req.body.fullName !== current.fullName) ||
+          (req.body.address !== undefined && req.body.address !== current.address))
+      ) {
         return reply.code(409).send({
           error: 'fot_readonly',
-          message: 'Объект из централизованного справочника нельзя редактировать в MATCHECK',
+          message:
+            'У объекта из централизованного справочника можно изменить только признак активности',
         });
       }
       try {
         const patch: Record<string, unknown> = { updatedAt: new Date() };
-        if (req.body.code !== undefined) patch.code = req.body.code;
-        if (req.body.name !== undefined) patch.name = req.body.name;
-        if (req.body.fullName !== undefined) patch.fullName = req.body.fullName;
-        if (req.body.address !== undefined) patch.address = req.body.address;
+        // Полная форма присылает и неизменённые справочные поля. Для ФОТ-записи
+        // мы проверили их выше, но намеренно не записываем: единственное
+        // локально управляемое поле такого объекта — isActive.
+        if (!isFot) {
+          if (req.body.code !== undefined) patch.code = req.body.code;
+          if (req.body.name !== undefined) patch.name = req.body.name;
+          if (req.body.fullName !== undefined) patch.fullName = req.body.fullName;
+          if (req.body.address !== undefined) patch.address = req.body.address;
+        }
         if (req.body.isActive !== undefined) patch.isActive = req.body.isActive;
         const [updated] = await app.db
           .update(sites)

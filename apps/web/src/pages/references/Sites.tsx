@@ -13,7 +13,12 @@ import {
   message,
 } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { BulkDeleteResponse, Site, SiteUpsert } from '@matcheck/contracts';
+import {
+  SiteCodeSchema,
+  type BulkDeleteResponse,
+  type Site,
+  type SiteUpsert,
+} from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
@@ -254,17 +259,22 @@ export default function SitesPage() {
         >
           <Form.Item
             name="code"
-            label="Код (до 5 символов)"
+            label="Код (до 16 символов)"
             rules={[
               { required: true, message: 'Обязательно' },
-              { max: 5, message: 'Не более 5 символов' },
               {
-                pattern: /^[A-Za-zА-Яа-я0-9_-]+$/,
-                message: 'Только буквы, цифры, тире и подчёркивание',
+                validator: (_, value: string | undefined) => {
+                  if (!value || SiteCodeSchema.safeParse(value).success) {
+                    return Promise.resolve();
+                  }
+                  return Promise.reject(
+                    new Error('До 16 символов: буквы, цифры, точка, тире, подчёркивание'),
+                  );
+                },
               },
             ]}
           >
-            <Input placeholder="например, A1" maxLength={5} />
+            <Input placeholder="например, A1" maxLength={16} />
           </Form.Item>
           <Form.Item name="name" label="Название" rules={[{ required: true, max: 500 }]}>
             <Input placeholder="ЖК «Северный»" />

@@ -521,10 +521,10 @@ export const sites = pgTable(
     isActive: boolean('is_active').notNull().default(true),
     // Если NOT NULL — запись пришла из внешнего источника (JSON-сид от
     // заказчика). По нему мы UPSERT-аем при будущих обновлениях файла;
-    // через UI такие объекты read-only (PATCH/DELETE возвращают 409
-    // fot_readonly — см. routes/sites.ts). Локально созданные объекты
-    // имеют NULL и редактируются как раньше. Уникальность — partial
-    // unique index из миграции 0054.
+    // через UI у таких объектов доступны только смена активности и просмотр
+    // (справочные поля и DELETE защищены fot_readonly — см. routes/sites.ts).
+    // Локально созданные объекты имеют NULL и редактируются как раньше.
+    // Уникальность — partial unique index из миграции 0054.
     fotSiteId: bigint('fot_site_id', { mode: 'number' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
