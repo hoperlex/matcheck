@@ -14,8 +14,8 @@
 ALTER TABLE sites ALTER COLUMN code TYPE VARCHAR(16);
 
 -- 2. Колонка для внешнего стабильного id (analog employee_id у МОЛ).
---    Локально созданные объекты имеют NULL. Через UI у ФОТ-записей можно
---    менять только активность; справочные поля read-only — см. routes/sites.ts.
+--    Локально созданные объекты имеют NULL. Через UI ФОТ-записи
+--    read-only — см. routes/sites.ts (409 fot_readonly).
 ALTER TABLE sites ADD COLUMN fot_site_id BIGINT;
 
 CREATE UNIQUE INDEX sites_fot_site_id_uidx
