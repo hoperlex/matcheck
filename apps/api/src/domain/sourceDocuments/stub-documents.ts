@@ -480,6 +480,28 @@ export function stubReasonForRow(
  * удаление документа ставит его S3-ключи в очередь на физическое удаление.
  * resolved_at — существующий механизм «вопрос закрыт, не переоткрывать», им же
  * пользуется ручной разбор.
+ *
+ * Три признака связи, и третий — не дубль первых двух. Прямые ссылки
+ * (stub_document_id, created_document_ids) молчат, когда документ родился не в
+ * том пакете, где принят файл: накладная разворачивается в ДОЧЕРНИЙ пакет, и с
+ * родительской строкой её связывает только sub_bundle_id. Строка оставалась
+ * открытой, а список ожидающих файлов показывал удалённый документ снова —
+ * «в очереди», без единой кнопки.
+ *
+ * Признак по sub_bundle_id тут не годится: сборка УПД кладёт в один под-пакет
+ * ВСЕ файлы разом, и удаление одного документа закрыло бы весь реестр сборки,
+ * записав «документ по файлу удалён» там, где документы живы. Поэтому третья
+ * ветка — ровно тот предикат, которым список ожидающих файлов и решает, что
+ * документа нет (routes/source-documents.ts): по input_s3_key строки не
+ * осталось вложений нетехнических документов. Вычисляем его так, как будто
+ * документ уже удалён (d2.id <> documentId): функция работает ДО delete, в той
+ * же транзакции, поэтому вложения удаляемого ещё на месте. «Строка закрыта» и
+ * «файл перестал считаться ожидающим» становятся одним условием и разъехаться
+ * не могут.
+ *
+ * Одного файла на нескольких документах это тоже касается: пачка накладных из
+ * одного PDF даёт несколько документов с общим ключом, и строка закроется лишь
+ * при удалении последнего из них.
  */
 export async function closeRegistryRowsForDeletedDocument(
   tx: Db,
@@ -498,7 +520,18 @@ export async function closeRegistryRowsForDeletedDocument(
       and(
         isNull(bundleImportItems.resolvedAt),
         drSql`(${bundleImportItems.stubDocumentId} = ${documentId}
-               or ${bundleImportItems.createdDocumentIds} @> ${JSON.stringify([documentId])}::jsonb)`,
+               or ${bundleImportItems.createdDocumentIds} @> ${JSON.stringify([documentId])}::jsonb
+               or (${bundleImportItems.inputS3Key} is not null
+                   and exists (select 1
+                                 from source_document_attachments a
+                                where a.source_document_id = ${documentId}::uuid
+                                  and a.s3_key = ${bundleImportItems.inputS3Key})
+                   and not exists (select 1
+                                     from source_document_attachments a2
+                                     join source_documents d2 on d2.id = a2.source_document_id
+                                    where a2.s3_key = ${bundleImportItems.inputS3Key}
+                                      and d2.is_technical = false
+                                      and d2.id <> ${documentId}::uuid)))`,
       ),
     );
 }

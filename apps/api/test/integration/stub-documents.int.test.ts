@@ -283,6 +283,36 @@ suite('инвариант «принятый файл виден докумен�
     expect(item!.stub_document_id).toBeNull();
   });
 
+  it('строка сборки закрывается прямой ссылкой, даже если второй документ жив', async () => {
+    // Фиксация СУЩЕСТВУЮЩЕГО поведения, а не желаемого. Сборка УПД пишет всем
+    // своим строкам полный список созданных документов (closeAssemblyRegistryRows),
+    // поэтому прямая ветка created_document_ids закрывает строку по первому же
+    // удалённому из списка. Трогать это правило мы намеренно не стали: оно
+    // работает годами, а инцидент был в другом — в отсутствии связи вообще.
+    const { bundleId, itemId } = await makeBundleWithFile({
+      filename: 'assembly.pdf',
+      status: 'created',
+    });
+    const alive = randomUUID();
+    const removed = randomUUID();
+    for (const id of [alive, removed]) {
+      await sql`INSERT INTO source_documents
+          (id, kind, is_technical, direction, origin, status, site_id, bundle_id,
+           doc_number, parsed_at)
+        VALUES (${id}, 'upd', false, 'inbound', 'manual_pdf', 'parsed', ${siteId}, ${bundleId},
+                ${`ASM-${id.slice(0, 8)}`}, now())`;
+    }
+    await sql`UPDATE bundle_import_items
+                 SET created_document_ids = ${JSON.stringify([alive, removed])}::jsonb
+               WHERE id = ${itemId}`;
+
+    await closeRegistryRowsForDeletedDocument(db as never, removed, userId);
+
+    const [item] = await sql<{ resolved_at: Date | null }[]>`
+      SELECT resolved_at FROM bundle_import_items WHERE id = ${itemId}`;
+    expect(item!.resolved_at).not.toBeNull();
+  });
+
   it('файл в живом дочернем пакете не трогаем — там работа ещё идёт', async () => {
     const { bundleId } = await makeBundleWithFile({
       filename: 'in-progress.pdf',

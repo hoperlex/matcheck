@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
   putObject: vi.fn(),
   presign: vi.fn(),
   queueAdd: vi.fn(),
+  s3CleanupAdd: vi.fn(),
 }));
 
 vi.mock('../../src/domain/storage/s3.signer.js', () => ({
@@ -133,7 +134,10 @@ suite('принятые файлы в списке документов (реа�
     app.setValidatorCompiler(validatorCompiler);
     app.setSerializerCompiler(serializerCompiler);
     app.decorate('db', drizzle(sql) as never);
-    app.decorate('queues', { updParse: { add: mocks.queueAdd } } as never);
+    app.decorate('queues', {
+      updParse: { add: mocks.queueAdd },
+      s3Cleanup: { add: mocks.s3CleanupAdd },
+    } as never);
     app.decorate('authenticate', async (req: { user?: AuthUser }) => {
       req.user = currentUser;
     });
@@ -176,6 +180,7 @@ suite('принятые файлы в списке документов (реа�
 
   beforeEach(async () => {
     currentUser = manager;
+    mocks.s3CleanupAdd.mockReset();
     await sql`DELETE FROM source_document_attachments WHERE source_document_id IN
                 (SELECT id FROM source_documents WHERE site_id = ${siteId})`;
     await sql`DELETE FROM source_documents WHERE site_id = ${siteId}`;
@@ -277,5 +282,88 @@ suite('принятые файлы в списке документов (реа�
     const body = await list();
     // Разбор принятых файлов — работа менеджера; инспектор видит документы.
     expect(body.pendingFiles).toBeUndefined();
+  });
+  /** Дочерний пакет: сюда уезжает накладная, и документ рождается уже в нём. */
+  async function subBundle(parentId: string) {
+    const id = randomUUID();
+    await sql`INSERT INTO source_bundles
+        (id, bundle_hash, direction, site_id, status, kind, parent_bundle_id,
+         active_upload_generation)
+      VALUES (${id}, ${hash('sub')}, 'inbound', ${siteId}, 'parsed', 'waybill', ${parentId}, 0)`;
+    return id;
+  }
+
+  const registryStateOf = (bundleId: string) =>
+    sql<{ resolved_at: Date | null; reason: string | null }[]>`
+      SELECT resolved_at, reason FROM bundle_import_items WHERE bundle_id = ${bundleId}`;
+
+  const removeDoc = async (id: string) => {
+    const res = await app.inject({ method: 'DELETE', url: `/api/v1/source-documents/${id}` });
+    expect(res.statusCode).toBe(200);
+  };
+
+  it('удалённый документ не возвращает файл строкой «в очереди»', async () => {
+    // Инцидент с ТТН 16531: накладную развернули в ДОЧЕРНИЙ пакет, документ
+    // создался там, и с родительской строкой реестра его не связывает ни
+    // stub_document_id, ни created_document_ids — только общий файл.
+    const b = randomUUID();
+    await bundle(b);
+    await registryRow(b, { filename: 'ТТН 16531.pdf', order: 0, s3Key: 's3/ttn-16531.pdf' });
+    const sub = await subBundle(b);
+    const docId = await documentFor(sub, 's3/ttn-16531.pdf');
+
+    // Пока документ жив, файл ожидающим не считается.
+    expect((await list()).pendingFiles ?? []).toHaveLength(0);
+
+    await removeDoc(docId);
+
+    const body = await list();
+    expect(body.items).toHaveLength(0);
+    expect(body.pendingFiles ?? []).toHaveLength(0);
+    const [row] = await registryStateOf(b);
+    expect(row!.resolved_at).not.toBeNull();
+    expect(row!.reason).toBe('документ по файлу удалён');
+  });
+
+  it('строка закрывается только когда по файлу не осталось ни одного документа', async () => {
+    // Один PDF даёт несколько документов (пачка накладных, страницы одной УПД),
+    // и S3-объект у них общий. Удаление первого не должно закрывать строку:
+    // файл по-прежнему представлен документом.
+    const b = randomUUID();
+    await bundle(b);
+    await registryRow(b, { filename: 'batch.pdf', order: 0, s3Key: 's3/batch.pdf' });
+    const first = await documentFor(b, 's3/batch.pdf');
+    const second = await documentFor(b, 's3/batch.pdf');
+
+    await removeDoc(first);
+    expect((await registryStateOf(b))[0]!.resolved_at).toBeNull();
+    expect((await list()).pendingFiles ?? []).toHaveLength(0);
+
+    await removeDoc(second);
+    expect((await registryStateOf(b))[0]!.resolved_at).not.toBeNull();
+    // И файл всё равно не всплыл: закрытая строка ожидающей не считается.
+    expect((await list()).pendingFiles ?? []).toHaveLength(0);
+  });
+
+  it('соседние файлы того же пакета остаются ожидающими', async () => {
+    // Проверка на то, что закрытие идёт по файлу, а не по пакету: иначе один
+    // удалённый документ погасил бы весь реестр загрузки.
+    const b = randomUUID();
+    await bundle(b);
+    await registryRow(b, { filename: 'first.pdf', order: 0, s3Key: 's3/first.pdf' });
+    await registryRow(b, { filename: 'second.pdf', order: 1, s3Key: 's3/second.pdf' });
+    const docId = await documentFor(b, 's3/first.pdf');
+
+    await removeDoc(docId);
+
+    const body = await list();
+    expect(body.pendingFiles?.map((f) => f.filename)).toEqual(['second.pdf']);
+    const rows = await sql<{ source_filename: string; resolved_at: Date | null }[]>`
+      SELECT source_filename, resolved_at FROM bundle_import_items
+       WHERE bundle_id = ${b} ORDER BY source_filename`;
+    expect(rows.map((r) => [r.source_filename, r.resolved_at === null])).toEqual([
+      ['first.pdf', false],
+      ['second.pdf', true],
+    ]);
   });
 });

@@ -110,6 +110,7 @@ import {
   stubReasonForRow,
 } from './domain/sourceDocuments/stub-documents.js';
 import { finalizeBundleTerminalState } from './domain/sourceDocuments/bundle-finalize.js';
+import { selectUnreferencedS3Keys } from './domain/sourceDocuments/s3-key-usage.js';
 import { classifyImageKind } from './domain/edo/vision-classifier.js';
 import {
   assemblyDispatchKeyOf,
@@ -5196,21 +5197,38 @@ async function handleS3Cleanup(job: Job<S3CleanupJobData>): Promise<void> {
   const log = logger.child({ jobId: job.id, queue: S3_CLEANUP_QUEUE });
   if (!s3Keys || s3Keys.length === 0) return;
 
-  const results = await Promise.allSettled(s3Keys.map((k) => deleteObject(k)));
+  // Удаляем только то, что больше никому не принадлежит. Один объект в бакете
+  // штатно делят несколько документов (пачка накладных, страницы одного PDF в
+  // сборке УПД, слияние дубликатов), а в очередь уходят ВСЕ ключи удалённого
+  // документа — без этой проверки удаление одной накладной из пачки стирало бы
+  // файл у живых соседей: строка вложения осталась бы, а объекта в S3 уже нет.
+  //
+  // Проверка здесь, а не в момент постановки: этот обработчик — единственный
+  // потребитель очереди, и он срабатывает позже, поэтому закрывает и случай
+  // «ссылка на тот же ключ появилась уже после enqueue».
+  const deletable = await selectUnreferencedS3Keys(db, s3Keys);
+  const skipped = new Set(s3Keys).size - deletable.length;
+  if (deletable.length === 0) {
+    log.info({ total: s3Keys.length, skipped }, 's3 cleanup skipped — ключи ещё используются');
+    return;
+  }
+
+  const results = await Promise.allSettled(deletable.map((k) => deleteObject(k)));
   let failed = 0;
   results.forEach((r, idx) => {
     if (r.status === 'rejected') {
       failed += 1;
-      log.warn({ err: r.reason, s3Key: s3Keys[idx] }, 's3 delete failed');
+      log.warn({ err: r.reason, s3Key: deletable[idx] }, 's3 delete failed');
     }
   });
   // Если все ключи зафейлились — это похоже на проблему с S3-доступом
   // в целом, имеет смысл повторить задачу. Если часть успешна — БД и
-  // так уже консистентна, считаем успехом.
-  if (failed === s3Keys.length) {
+  // так уже консистентна, считаем успехом. Счёт идёт от списка к удалению:
+  // пропущенные по ссылкам — не ошибка, и ретраить из-за них нечего.
+  if (failed === deletable.length) {
     throw new Error(`all ${failed} s3 deletions failed`);
   }
-  log.info({ total: s3Keys.length, failed }, 's3 cleanup done');
+  log.info({ total: s3Keys.length, deleted: deletable.length - failed, skipped, failed }, 's3 cleanup done');
 }
 
 // ─── S3 cleanup outbox consumer (Волна 1D) ──────────────────────────────────
