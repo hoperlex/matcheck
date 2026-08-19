@@ -440,7 +440,9 @@ describe('validateUpdTotals — целостность списка позици
     expect(r.hasMismatch).toBe(true);
   });
 
-  it('номер есть не у всех строк — расхождение, а не тихий пропуск', () => {
+  it('номер есть не у всех строк — проверка пропускается, а не краснеет', () => {
+    // Подпозиции «1а»/«2а» номером-числом не выражаются и приходят null.
+    // Красить из-за них документ нельзя: ошибки тут нет.
     const r = validateUpdTotals({
       totalSum: null,
       vatSum: null,
@@ -449,6 +451,9 @@ describe('validateUpdTotals — целостность списка позици
         { rowNo: null, qty: 1, price: 100, sum: 100 },
       ],
     });
-    expect(r.checks.find((c) => c.name === 'items_sequence')?.ok).toBe(false);
+    const seq = r.checks.find((c) => c.name === 'items_sequence');
+    expect(seq?.ok).toBe(true);
+    expect(seq?.skipReason).toBe('no_expected');
+    expect(r.hasMismatch).toBe(false);
   });
 });

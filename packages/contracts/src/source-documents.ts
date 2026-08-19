@@ -682,6 +682,43 @@ const SNAKE_TO_CAMEL_ITEM: Record<string, string> = {
   vat_rate: 'vatRate',
   vat_sum: 'vatSum',
 };
+/**
+ * Числовое поле ответа модели, которое НЕ ИМЕЕТ ПРАВА уронить разбор.
+ *
+ * 19.08 промпт v13 попросил номер позиции, модель вернула `"rowNo": "1"`
+ * строкой, и `z.number()` отверг ВЕСЬ ответ: корректно распознанная ТТН
+ * (номер, дата, стороны, позиция с суммами) превратилась в «не распознано».
+ * Отсюда правило: необязательное поле, добавленное ради диагностики, при любом
+ * непонятном значении становится null, а документ живёт дальше.
+ *
+ * `positiveInt` — для номеров строк: дробное, ноль и отрицательное значат, что
+ * прочитано не то, и тоже дают null.
+ */
+function lenientNumber(opts: { positiveInt?: boolean } = {}) {
+  return z.preprocess((raw) => {
+    let n: number | null = null;
+    if (typeof raw === 'number') {
+      n = Number.isFinite(raw) ? raw : null;
+    } else if (typeof raw === 'string') {
+      const trimmed = raw.trim().replace(',', '.');
+      if (trimmed === '') return null;
+      // Только строка, которая ЦЕЛИКОМ число. «1а» — законный номер подпозиции
+      // в бланке, но не число: parseFloat дал бы 1 и создал дубль с настоящей
+      // первой строкой, то есть ложное расхождение на ровном месте.
+      if (!/^-?\d+(\.\d*)?$/.test(trimmed)) return null;
+      const parsed = Number.parseFloat(trimmed);
+      n = Number.isFinite(parsed) ? parsed : null;
+    } else {
+      return null;
+    }
+    if (n == null) return null;
+    if (!opts.positiveInt) return n;
+    // «3.» и «3» — номер строки; «2.7» — прочитано не то поле.
+    if (!Number.isInteger(n) || n <= 0) return null;
+    return n;
+  }, z.number().nullable().optional());
+}
+
 export const UpdPdfItemSchema = z.preprocess(
   (raw) => {
     if (!raw || typeof raw !== 'object') return raw;
@@ -702,7 +739,7 @@ export const UpdPdfItemSchema = z.preprocess(
     // не зависящий от бланка и от того, напечатано ли «Всего наименований».
     // Опционально: старые версии промпта поле не возвращают, и проверка тогда
     // просто пропускается.
-    rowNo: z.number().int().positive().nullable().optional(),
+    rowNo: lenientNumber({ positiveInt: true }),
     // qty допускает null: строки-услуги УПД (доставка, погрузка) идут без
     // количества (в графе 3 формы прочерк «--»), и модель честно возвращает
     // null. ВАЖНО оставить именно null (не коерсить в 0): построчная сверка
@@ -733,8 +770,10 @@ export const UpdPdfItemSchema = z.preprocess(
     // Сумма налога по строке в рублях (отдельная колонка «Сумма налога»
     // формы УПД, не путать с `sum`).
     vatSum: z.number().nullable().optional(),
-    volumeM3: z.number().nullable().optional(),
-    massKg: z.number().nullable().optional(),
+    // Те же необязательные поля-довески: их формат тоже не должен решать
+    // судьбу документа.
+    volumeM3: lenientNumber(),
+    massKg: lenientNumber(),
     volumeConfidence: VolumeConfidenceSchema.nullable().optional(),
     groupName: z.string().nullable().optional(),
   }),

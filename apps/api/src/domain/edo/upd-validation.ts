@@ -225,7 +225,11 @@ export function validateUpdTotals(
     const printed = items
       .map((i) => i.rowNo ?? null)
       .filter((n): n is number => n != null && Number.isInteger(n));
-    if (printed.length === 0) {
+    // Номера есть не у всех строк — сверять нечего. Так бывает законно: в
+    // бланке встречаются подпозиции «1а», «2а», их номер числом не выражается и
+    // приходит null. Считать это расхождением значило бы красить документ там,
+    // где ошибки нет.
+    if (printed.length < rowCount) {
       checks.push({
         name: 'items_sequence',
         scope: 'document',
@@ -239,8 +243,7 @@ export function validateUpdTotals(
     } else {
       const unique = new Set(printed);
       const maxNo = Math.max(...printed);
-      const sequential =
-        printed.length === rowCount && unique.size === rowCount && maxNo === rowCount;
+      const sequential = unique.size === rowCount && maxNo === rowCount;
       checks.push({
         name: 'items_sequence',
         scope: 'document',

@@ -152,8 +152,13 @@ describe('document-router — сопроводительные документ�
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'spec.xlsx',
     );
+    // Тип по-прежнему не подтверждён — пустой УПД из спецификации не заводим.
+    // needsVision поднят: приговор такой книге выносит модель по картинке, а не
+    // регулярка под шаблоны 1С (см. EXCEL_VISION_ROUTING). Без флага ветка
+    // unknown в worker отработает как раньше — заглушка «не распознано».
     expect(c.detectedKind).toBe('unknown');
-    expect(c.needsVision).toBe(false);
+    expect(c.needsVision).toBe(true);
+    expect(c.signals).toContain('excel:not-upd');
   });
 
   it('нечитаемая книга → unknown: сохраняем файл, а не заводим пустой УПД', async () => {

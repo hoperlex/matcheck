@@ -790,7 +790,7 @@
   "ЭКОДОМ СУ61 Дюков17.08.26 (1).xlsx": {
     "confidence": 0,
     "detectedKind": "unknown",
-    "needsVision": false,
+    "needsVision": true,
     "parserUsed": "none",
     "signals": [
       "excel:not-upd",
@@ -799,7 +799,7 @@
   "ЭКОДОМ СУ61 Шестаков17.08.26.xlsx": {
     "confidence": 0,
     "detectedKind": "unknown",
-    "needsVision": false,
+    "needsVision": true,
     "parserUsed": "none",
     "signals": [
       "excel:not-upd",
@@ -808,7 +808,7 @@
   "ЭКОДОМ СУ61Абрегов17.08.26ПГ.xlsx": {
     "confidence": 0,
     "detectedKind": "unknown",
-    "needsVision": false,
+    "needsVision": true,
     "parserUsed": "none",
     "signals": [
       "excel:not-upd",

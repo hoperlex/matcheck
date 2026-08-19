@@ -142,10 +142,14 @@ export async function classifyFile(
       signal = 'excel:probe-failed';
     }
     if (!looksLikeUpd) {
+      // needsVision: true — приговор выносит не регулярка по чужому шаблону, а
+      // модель по картинке. Сама доклассификация живёт в worker и включается
+      // флагом EXCEL_VISION_ROUTING; без него ветка unknown ниже отработает
+      // ровно как раньше — заглушка «не распознано».
       return {
         detectedKind: 'unknown',
         confidence: 0,
-        needsVision: false,
+        needsVision: true,
         parserUsed: 'none',
         signals: [signal],
       };

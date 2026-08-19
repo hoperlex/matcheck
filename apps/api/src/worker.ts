@@ -2069,6 +2069,17 @@ async function secondPassWaybill1t(
   }
 }
 
+/** Расширение Excel-книги для конвертера, либо null — если файл не Excel. */
+function excelExtOf(mime: string, filename: string): 'xls' | 'xlsx' | null {
+  const m = (mime || '').toLowerCase();
+  const name = (filename || '').toLowerCase();
+  if (name.endsWith('.xlsx')) return 'xlsx';
+  if (name.endsWith('.xls')) return 'xls';
+  if (m.includes('spreadsheetml')) return 'xlsx';
+  if (m.includes('ms-excel')) return 'xls';
+  return null;
+}
+
 async function handleWaybillBundleJob(
   bundleId: string,
   bundleGeneration: number,
@@ -2857,15 +2868,45 @@ export async function handleDocumentRouterJob(
       // распознано» под ручной разбор). Уже работающие сканы УПД не
       // затрагиваются: их vision подтверждает как upd.
       if (cls.detectedKind === 'unknown' && cls.needsVision) {
-        const vc = await classifyImageKind(buffer, a.mimeType ?? '', { sourceDocumentId: null });
+        // Excel классификатору изображения не показать — сначала рендерим книгу
+        // в PDF тем же конвертером, что и разбор. Только под флагом: без него
+        // книга с сигналом 'excel:not-upd' идёт в заглушку, как раньше.
+        const excelExt = excelExtOf(a.mimeType ?? '', a.filename);
+        const excelRouting = excelExt != null && loadEnv().EXCEL_VISION_ROUTING;
+        let visionBuffer: Buffer | null = buffer;
+        let visionMime = a.mimeType ?? '';
+        if (excelExt != null) {
+          visionBuffer = null;
+          if (excelRouting) {
+            try {
+              visionBuffer = await convertExcelToPdf(buffer, excelExt);
+              visionMime = 'application/pdf';
+            } catch (err) {
+              log.warn({ err, file: a.filename }, 'excel→pdf для доклассификации не удался');
+            }
+          }
+        }
+
+        const vc = visionBuffer
+          ? await classifyImageKind(visionBuffer, visionMime, { sourceDocumentId: null })
+          : null;
         if (vc && vc.confidence >= 0.6 && vc.kind !== 'unknown') {
+          // Excel умеет только УПД-путь: parseWaybillBatch принимает изображения
+          // и PDF, а книгу не примет. Поэтому для Excel любой товарный вердикт
+          // модели означает «отдать в общий разбор», где уже отработает связка
+          // «структурный парсер → Excel→PDF→Vision».
+          const routedKind = excelRouting && vc.kind !== 'supplementary' ? 'upd' : vc.kind;
           cls = {
             ...cls,
-            detectedKind: vc.kind,
+            detectedKind: routedKind,
             // Уверенность тоже от модели: раньше в журнал уезжало исходное 0
             // или 0.3 — число, к принятому решению отношения не имеющее.
             confidence: vc.confidence,
-            signals: [...cls.signals, `vision-kind:${vc.kind}:${vc.confidence.toFixed(2)}`],
+            signals: [
+              ...cls.signals,
+              `vision-kind:${vc.kind}:${vc.confidence.toFixed(2)}`,
+              ...(routedKind !== vc.kind ? [`excel-routed:${routedKind}`] : []),
+            ],
           };
         }
       }
