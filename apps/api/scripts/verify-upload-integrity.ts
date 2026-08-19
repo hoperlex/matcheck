@@ -23,6 +23,11 @@
  *      живого объекта показывать нечего.
  *   4. Число принятых записей манифеста публичной отправки (с поправкой на
  *      дубли по sha256) сходится с числом строк реестра.
+ *   5. У живого нетехнического документа (пакета И его дочерних) объект-оригинал
+ *      каждого вложения доступен в S3. Проверки 1–4 смотрят со стороны реестра,
+ *      а файл может пропасть и у давно разобранного документа: один объект
+ *      штатно делят несколько документов, и до 8c5f821 удаление одного из них
+ *      уносило файл у остальных — junction-строка остаётся, объекта нет.
  *
  * Каждое нарушение печатается строкой: пакет, файл, что не так.
  */
@@ -72,6 +77,14 @@ async function main(): Promise<void> {
 
   const violations: Violation[] = [];
   let itemsChecked = 0;
+  let attachmentsChecked = 0;
+  // Объект в бакете может принадлежать нескольким документам, поэтому HEAD
+  // делаем один раз на ключ: 11 документов на одном PDF не должны дать 11
+  // запросов к flaky-хранилищу. Кеш живёт на весь прогон — один и тот же ключ
+  // встречается и в соседних пакетах (слияние дубликатов).
+  const headCache = new Map<string, boolean>();
+  let sharedKeys = 0;
+  let maxOwners = 0;
 
   for (const bundle of bundles) {
     // Правило выборки то же, что в приложении: есть строки активного
@@ -200,9 +213,83 @@ async function main(): Promise<void> {
         });
       }
     }
+
+    // 5. Вложения живых документов: объект-оригинал на месте.
+    //
+    // Документы берём и из ДОЧЕРНИХ пакетов: накладная разворачивается в
+    // под-пакет, сборка УПД тоже, и без этого проверка прошла бы мимо всей
+    // зоны риска — именно там несколько документов делят один файл.
+    //
+    // Только role='original': extracted_text — производная, её восстанавливает
+    // переразбор, и удваивать HEAD-запросы ради неё незачем.
+    const attachments = await sql<
+      { doc_id: string; doc_number: string | null; s3_key: string }[]
+    >`
+      SELECT d.id AS doc_id, d.doc_number, a.s3_key
+        FROM source_document_attachments a
+        JOIN source_documents d ON d.id = a.source_document_id
+       WHERE d.is_technical = false
+         AND a.role = 'original'
+         AND (d.bundle_id = ${bundle.id}
+              OR d.bundle_id IN (SELECT id FROM source_bundles
+                                  WHERE parent_bundle_id = ${bundle.id}))`;
+
+    const ownersByKey = new Map<string, { doc_id: string; doc_number: string | null }[]>();
+    for (const att of attachments) {
+      const owners = ownersByKey.get(att.s3_key);
+      if (owners) owners.push(att);
+      else ownersByKey.set(att.s3_key, [att]);
+    }
+
+    for (const [key, owners] of ownersByKey) {
+      attachmentsChecked += owners.length;
+      if (owners.length > 1) {
+        sharedKeys += 1;
+        maxOwners = Math.max(maxOwners, owners.length);
+      }
+      if (!headObject) continue;
+
+      let exists = headCache.get(key);
+      if (exists === undefined) {
+        exists = await headObject(key).catch((err: unknown) => {
+          violations.push({
+            bundleId: bundle.id,
+            filename: key,
+            kind: 's3_error',
+            detail: err instanceof Error ? err.message : String(err),
+          });
+          // Как и в проверке 3: сетевой сбой не выдаём за потерю данных.
+          return true;
+        });
+        headCache.set(key, exists);
+      }
+      if (exists) continue;
+
+      // Одно нарушение на объект, но со списком всех осиротевших документов —
+      // иначе один пропавший PDF дал бы одиннадцать одинаковых строк.
+      const named = owners.map((o) => o.doc_number ?? `id:${o.doc_id.slice(0, 8)}`).join(', ');
+      violations.push({
+        bundleId: bundle.id,
+        filename: named,
+        kind: 'attachment_object_missing',
+        detail: `объект ${key} отсутствует; документов без файла: ${owners.length}`,
+      });
+    }
   }
 
-  console.log(`Проверено пакетов: ${bundles.length}, строк реестра: ${itemsChecked}`);
+  const summary = [
+    `Проверено пакетов: ${bundles.length}`,
+    `строк реестра: ${itemsChecked}`,
+    `вложений-оригиналов: ${attachmentsChecked}`,
+  ];
+  // Зона риска видна, даже когда все файлы на месте: это те группы, где до
+  // 8c5f821 удаление одного документа уносило файл у остальных.
+  if (sharedKeys > 0) {
+    summary.push(
+      `объектов с несколькими владельцами: ${sharedKeys} (максимум на объект: ${maxOwners})`,
+    );
+  }
+  console.log(summary.join(', '));
   if (skipS3) console.log('S3 не проверялся (--skip-s3): наличие объектов не подтверждено');
   if (violations.length === 0) {
     console.log('Нарушений инварианта нет.');
