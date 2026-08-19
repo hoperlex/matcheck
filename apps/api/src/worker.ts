@@ -138,7 +138,7 @@ import { resolveRootBundle } from './domain/sourceDocuments/bundle-import-regist
 import { llmProviders, llmProviderCredentials } from './db/schema.js';
 import { buildAad, decryptField } from './domain/auth/crypto.js';
 import { repairStuckJobs, STUCK_INTERVAL_MS } from './domain/jobs/stuck-jobs.js';
-import type { UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
+import type { SourceStatus, UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
 
 // Хелпер: уведомляем подключённых SSE-клиентов о смене статуса УПД через
 // Redis Pub/Sub (worker в отдельном процессе, in-process bus API ему
@@ -1316,25 +1316,71 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   //
   // Vision вызывали ради улучшения, но он умеет и ухудшать: выдумать строки,
   // потерять итог, вернуть пустую шапку. Сравниваем с сохранённым разбором по
-  // явным критериям (upd-result-compare.ts) и при проигрыше просто закрываем
-  // попытку, не трогая документ.
+  // явным критериям (upd-result-compare.ts) и при проигрыше возвращаем документ
+  // к результату первого прохода.
   if (secondPassJob && baseline) {
     const decision = chooseBetterUpdResult(baseline, parsed);
     if (decision.winner === 'base') {
+      // Статус возвращаем СНИМКОМ, а не «оставляем как есть».
+      //
+      // Перед вторым проходом документ уже переведён в `processing`, поэтому
+      // закрыть попытку, не трогая статус, значит оставить его в «распознаётся»
+      // навсегда: задания больше нет, а сам себя документ оттуда не выведет. На
+      // бою так зависли УПД 2851 (минуту) и 2770/07 (больше суток) — оба с этим
+      // же исходом, тогда как все 11 документов с исходом `replaced` проходили
+      // дальше общим путём и статус получали.
+      //
+      // Снимок кладёт queueSecondPass в second_pass.restore. Берём статус
+      // оттуда, а не считаем заново: первый проход уже вынес свой вердикт
+      // (например, «суммы не сходятся»), и документ обязан вернуться именно к
+      // нему.
+      const [current] = await db
+        .select({ secondPass: sourceDocuments.secondPass })
+        .from(sourceDocuments)
+        .where(generationScoped(sourceDocumentId, jobGeneration))
+        .limit(1);
+      const restore = (
+        current?.secondPass as {
+          restore?: {
+            status?: SourceStatus | null;
+            parseErrorCode?: string | null;
+            parseErrorDetails?: Record<string, unknown> | null;
+          } | null;
+        } | null
+      )?.restore;
+      // Снимка нет только у документов, поставленных на второй проход версией
+      // кода без него. Для них поведение прежнее: статус не трогаем, документ
+      // подберёт восстановление — иначе мы бы гадали, чем он был до попытки.
+      const restoreValues = restore?.status
+        ? {
+            status: restore.status,
+            parseErrorCode: restore.parseErrorCode ?? null,
+            parseErrorDetails: restore.parseErrorDetails ?? null,
+          }
+        : {};
       await db
         .update(sourceDocuments)
         .set({
+          ...restoreValues,
           secondPass: {
             state: 'done',
             mode: 'vision',
             outcome: 'kept_baseline',
             reasons: decision.reasons,
             finishedAt: new Date().toISOString(),
+            // Снимок переживает закрытие попытки: если документ позже всё-таки
+            // зависнет, восстановлению будет к чему возвращать. Раньше объект
+            // перезаписывался целиком, restore терялся, и recovery отдавал
+            // документу `recovery_exhausted` вместо его настоящего исхода.
+            ...(restore ? { restore } : {}),
           },
           updatedAt: new Date(),
         })
         .where(generationScoped(sourceDocumentId, jobGeneration));
-      log.info({ reasons: decision.reasons }, 'vision second pass worse than baseline — kept');
+      log.info(
+        { reasons: decision.reasons, restored: Boolean(restore?.status) },
+        'vision second pass worse than baseline — kept',
+      );
       await notifySourceDocumentUpdated(sourceDocumentId);
       return;
     }

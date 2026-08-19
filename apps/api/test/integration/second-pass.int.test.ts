@@ -177,9 +177,15 @@ suite('второй проход распознавания (реальный Po
         total_sum: string | null;
         consignee_name_raw: string | null;
         consignee_inn_raw: string | null;
-        second_pass: { state?: string; outcome?: string } | null;
+        parse_error_code: string | null;
+        second_pass: {
+          state?: string;
+          outcome?: string;
+          restore?: { status?: string; parseErrorCode?: string | null };
+        } | null;
       }[]
-    >`SELECT status, doc_number, total_sum, consignee_name_raw, consignee_inn_raw, second_pass
+    >`SELECT status, doc_number, total_sum, consignee_name_raw, consignee_inn_raw,
+             parse_error_code, second_pass
         FROM source_documents WHERE id = ${docId}`;
     return r!;
   }
@@ -313,6 +319,18 @@ suite('второй проход распознавания (реальный Po
     expect(r.second_pass?.outcome).toBe('kept_baseline');
     expect(r.doc_number).toBe('UT-100');
     expect(await itemCount(docId)).toBe(1);
+
+    // Главное: документ ВЫШЕЛ из «распознаётся». Перед вторым проходом его
+    // перевели в processing, и закрытие попытки обязано вернуть статус — иначе
+    // он висит «распознаётся» навсегда: задания больше нет, а сам себя документ
+    // оттуда не выведет. На бою так зависли УПД 2851 и 2770/07.
+    expect(r.status).not.toBe('processing');
+    expect(r.status).toBe(before.second_pass?.restore?.status);
+    expect(r.parse_error_code ?? null).toBe(before.second_pass?.restore?.parseErrorCode ?? null);
+
+    // Снимок переживает закрытие попытки: если документ позже всё-таки
+    // зависнет, восстановлению будет к чему возвращать.
+    expect(r.second_pass?.restore?.status).toBe(before.second_pass?.restore?.status);
   });
 
   it('второй проход упал → baseline сохранён, документ не parse_failed', async () => {
