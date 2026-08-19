@@ -203,6 +203,10 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
             dispatchGeneration: bundleSegments.dispatchGeneration,
             docGeneration: sourceDocuments.dispatchGeneration,
             jobId: sourceDocuments.jobId,
+            // Пакет, ИСПОЛНЯЮЩИЙ сегмент, — это дочерний пакет сборки, а не
+            // корневой из bundle_segments.bundle_id. Именно его поколение
+            // попадает в задание сегмента и проверяется fencing'ом.
+            executionBundleId: sourceDocuments.bundleId,
           })
           .from(bundleSegments)
           .innerJoin(sourceDocuments, eq(sourceDocuments.id, bundleSegments.sourceDocumentId))
@@ -218,6 +222,20 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
           .limit(STUCK_BATCH);
 
   let segments = 0;
+  /**
+   * Пакеты, чей сегмент этот прогон уже тронул.
+   *
+   * Сегмент — это и есть работа своего пакета, и переставлять их одним
+   * прогоном нельзя: recoverSegmentAttempt кладёт в задание ТЕКУЩЕЕ поколение
+   * пакета, а recoverBundleAttempt следом его повышает. Воркер отвергнет
+   * задание сегмента по несовпадению поколений, а assembly-job нового
+   * поколения его не подберёт — у сегмента уже есть source_document_id, и он
+   * пропускается. Работа тихо исчезает, потратив попытку сегмента.
+   *
+   * Пакет от этого не теряется: следующий прогон через десять минут возьмёт
+   * его, если сегмент к тому времени не сдвинулся.
+   */
+  const bundlesAwaitingSegment = new Set<string>();
   for (const seg of staleSegments) {
     if (!seg.docId) continue;
     const health = await inspectWorkHealth({
@@ -233,6 +251,9 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
       );
       continue;
     }
+    // Пакет резервируется ДО самой попытки — и в dry_run тоже, иначе прогноз
+    // разошёлся бы с тем, что сделает mode='on'.
+    if (seg.executionBundleId) bundlesAwaitingSegment.add(seg.executionBundleId);
     if (mode === 'dry_run') {
       wouldRecover += 1;
       deps.log?.warn?.(
@@ -285,6 +306,14 @@ export async function repairStuckJobs(deps: RepairDeps): Promise<RepairResult> {
 
   let repairedBundles = 0;
   for (const bundle of bundles) {
+    if (bundlesAwaitingSegment.has(bundle.id)) {
+      // Не завис, а ждёт свой сегмент — его этот прогон уже переставил.
+      deps.log?.info?.(
+        { bundleId: bundle.id },
+        'repair: пакет ждёт восстановленный сегмент — поколение не трогаем',
+      );
+      continue;
+    }
     let currentJobId = bundle.jobId;
     if (!currentJobId && bundle.kind === 'upd' && bundle.parentBundleId) {
       currentJobId = assemblyDispatchKeyOf(bundle.id, bundle.generation);

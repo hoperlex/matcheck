@@ -455,6 +455,65 @@ suite('подбор зависших заданий (реальный PostgreSQL
     expect(await outboxFor(dispatchKeyOf(docId))).toHaveLength(0);
   });
 
+  it('пакет сегмента не переставляется тем же прогоном — иначе работа гаснет', async () => {
+    // Сегмент и его дочерний пакет зависают ВМЕСТЕ: сборка встала целиком.
+    // Восстановив оба сразу, сторож убивал бы собственную работу — задание
+    // сегмента несёт поколение пакета на момент постановки, а recovery пакета
+    // тут же делает его прошлым. Воркер такое задание отвергает
+    // (worker.ts, loadSegmentContext), а assembly-job нового поколения сегмент
+    // не подбирает: у него уже есть source_document_id.
+    const { subId, segmentId, docId } = await assemblyWithSegment(STUCK_AFTER_MINUTES + 10);
+
+    const res = await repair();
+
+    expect(res.segments).toBe(1);
+    // Главное: поколение пакета не двинулось, и задание сегмента переживёт fencing.
+    const [sub] = await sql<{ dispatch_generation: number; recovery_attempts: number }[]>`
+      SELECT dispatch_generation, recovery_attempts FROM source_bundles WHERE id = ${subId}`;
+    expect(sub).toMatchObject({ dispatch_generation: 0, recovery_attempts: 0 });
+
+    const jobs = await outboxFor(segmentDispatchKeyOf(segmentId, 1));
+    expect(jobs[0]!.payload).toMatchObject({
+      sourceDocumentId: docId,
+      bundleGeneration: sub!.dispatch_generation,
+    });
+    // Второго задания — на пересборку того же пакета — быть не должно.
+    expect(await outboxFor(assemblyDispatchKeyOf(subId, 1))).toHaveLength(0);
+  });
+
+  it('разобравшийся сегмент освобождает свой пакет — следующий прогон его берёт', async () => {
+    // Отсрочка не отменяет восстановление пакета, а откладывает: как только
+    // сегмент перестал ждать, пакет снова обычный кандидат.
+    const { subId, segmentId } = await assemblyWithSegment(STUCK_AFTER_MINUTES + 10);
+    await repair();
+
+    // Сегмент отработал и больше не ждёт: его документ вышел из очереди.
+    // Служебная запись при этом остаётся — сборка не опубликована, и пакет
+    // по-прежнему обычный кандидат на восстановление.
+    await sql`UPDATE source_documents SET status = 'parse_failed'
+       WHERE id = (SELECT source_document_id FROM bundle_segments WHERE id = ${segmentId})`;
+
+    const res = await repair();
+
+    expect(res.segments).toBe(0);
+    expect(res.bundles).toBe(1);
+    const [sub] = await sql<{ dispatch_generation: number }[]>`
+      SELECT dispatch_generation FROM source_bundles WHERE id = ${subId}`;
+    expect(sub!.dispatch_generation).toBe(1);
+  });
+
+  it('dry_run обещает ровно то, что сделает on: один сегмент, не пару', async () => {
+    // Иначе список в логе показывал бы пакет, которого включённый сторож не
+    // тронет, — и решение о выкате принималось бы по выдуманным данным.
+    await assemblyWithSegment(STUCK_AFTER_MINUTES + 10);
+
+    const res = await repair('dry_run');
+
+    expect(res.wouldRecover).toBe(1);
+    expect(res.segments).toBe(0);
+    expect(res.bundles).toBe(0);
+  });
+
   it('опубликованный сегмент повторно не ставится', async () => {
     const { segmentId } = await assemblyWithSegment(STUCK_AFTER_MINUTES + 10);
     await sql`UPDATE bundle_segments SET published_at = now() WHERE id = ${segmentId}`;
