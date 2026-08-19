@@ -88,8 +88,7 @@ export function checkPdfTextQuality(cleanText: string): string | null {
   // Средняя длина «слова» (буква-последовательность).
   const words = cleanText.match(/[a-zA-Zа-яА-ЯёЁ]+/g) ?? [];
   if (words.length > 0) {
-    const avgWordLen =
-      words.reduce((s, w) => s + w.length, 0) / words.length;
+    const avgWordLen = words.reduce((s, w) => s + w.length, 0) / words.length;
     if (avgWordLen < 2.5) {
       return `avg_word_length ${avgWordLen.toFixed(2)} < 2.5`;
     }
@@ -108,6 +107,10 @@ const RESPONSE_JSON_SCHEMA = {
     docDate: { type: ['string', 'null'], description: 'YYYY-MM-DD' },
     totalSum: { type: ['number', 'null'] },
     vatSum: { type: ['number', 'null'] },
+    pricing: {
+      type: ['string', 'null'],
+      enum: ['printed', 'absent', 'unclear', null],
+    },
     itemsCount: {
       type: ['integer', 'null'],
       description:

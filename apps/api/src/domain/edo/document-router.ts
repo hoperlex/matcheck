@@ -33,7 +33,12 @@ export type FileClassification = {
   // vision-слой (Этап 4). false — решение принято по тексту/расширению.
   needsVision: boolean;
   // предполагаемый парсер (для журнала parserUsed); 'none' — не парсим
-  parserUsed: 'parseUpdXlsx' | 'parseUpdPdf' | 'tryParseTextUpdBundle' | 'parseWaybillBatch' | 'none';
+  parserUsed:
+    | 'parseUpdXlsx'
+    | 'parseUpdPdf'
+    | 'tryParseTextUpdBundle'
+    | 'parseWaybillBatch'
+    | 'none';
   signals: string[];
   // для текстовых УПД — сколько уникальных счёт-фактур (≥2 → multi-UPD bundle)
   updInvoiceCount?: number;
@@ -54,6 +59,34 @@ const M15_NAME_RE = /м-?15|m-?15|накладная на отпуск|отпу�
 // данные.
 const SUPPLEMENTARY_RE =
   /сертификат\s+(соответстви|качеств)|паспорт\s+качеств|декларац\w*\s+о\s+соответстви|протокол\s+испытани/i;
+
+// «Грузоотправитель» встречается не только в транспортной накладной: это
+// штатная графа ТОРГ-12 и УПД. Поэтому одного этого слова для маршрута в
+// parseWaybillBatch недостаточно. ТН подтверждаем заголовком И признаком
+// формы: постановлением № 2116, формой 1-Т/ТТН либо нумерованными разделами.
+//
+// Важно: без флага `u` JS-класс `\w` не включает кириллицу. Во всех новых
+// выражениях ниже используются явные `[а-яё]`, иначе окончания слов снова
+// окажутся мёртвыми альтернативами.
+const TORG12_RE = /форма\s+(?:по\s+окуд\s+)?№?\s*торг\s*-?\s*12|товарн[а-яё]*\s+накладн[а-яё]*/i;
+const TRANSPORT_WAYBILL_TITLE_RE = /транспортн[а-яё]*\s+накладн[а-яё]*/i;
+const TRANSPORT_WAYBILL_FORM_RE =
+  /постановлен[а-яё]*[^.]{0,160}№?\s*2116|товарно\s*-?\s*транспортн[а-яё]*\s+накладн[а-яё]*|(?:^|\s)ттн(?:\s|№|$)|типов[а-яё]*\s+(?:межотраслев[а-яё]*\s+)?форм[а-яё]*\s+№?\s*1\s*-\s*т/i;
+
+/** Есть ли в тексте хотя бы два разных нумерованных раздела формы ТН. */
+function hasNumberedWaybillSections(text: string): boolean {
+  const sections = new Set<string>();
+  // Требуем пробел после точки и буквенный/кавычечный заголовок. Это не даёт
+  // датам и десятичным числам вроде 28.06 или 1.75 подтвердить форму.
+  const re = /(?:^|\s)([1-9]|1\d)(?:[а-яё])?\.\s+(?=[«"'(а-яёa-z])/gi;
+  for (const match of text.matchAll(re)) sections.add(match[1]!);
+  return sections.size >= 2;
+}
+
+function isTransportWaybillText(text: string): boolean {
+  if (!TRANSPORT_WAYBILL_TITLE_RE.test(text)) return false;
+  return TRANSPORT_WAYBILL_FORM_RE.test(text) || hasNumberedWaybillSections(text);
+}
 function m15ByName(signals: string[]): FileClassification {
   // needsVision=true: М-15 всегда распознаём через vision (своим m15-промптом).
   return { detectedKind: 'm15', confidence: 0, needsVision: true, parserUsed: 'none', signals };
@@ -164,7 +197,8 @@ export async function classifyFile(
 
     if (full.length < MIN_TEXT) {
       // скан без текста — vision
-      if (M15_NAME_RE.test(lower)) return m15ByName(['pdf:scan', 'name:m15', `textLen:${full.length}`]);
+      if (M15_NAME_RE.test(lower))
+        return m15ByName(['pdf:scan', 'name:m15', `textLen:${full.length}`]);
       // У сертификата текстовый слой часто короткий: пара строк заголовка и
       // номера. Без этой ветки он ушёл бы в vision — то есть в лишний вызов
       // модели ради файла, который распознавать не нужно.
@@ -202,7 +236,9 @@ export async function classifyFile(
     // М-15 (накладная на отпуск материалов) — роутер направит в отдельную
     // ветку и распознает своим vision-промптом m15 (надёжнее текстового парса:
     // у М-15-PDF из 1С текстовый слой часто «битый»).
-    if (/типовая\s+межотраслевая\s+форма\s+№?\s*м-?15|на отпуск материалов на сторону/i.test(full)) {
+    if (
+      /типовая\s+межотраслевая\s+форма\s+№?\s*м-?15|на отпуск материалов на сторону/i.test(full)
+    ) {
       return {
         detectedKind: 'm15',
         confidence: 0.7,
@@ -211,7 +247,11 @@ export async function classifyFile(
         signals: ['text:m15'],
       };
     }
-    if (/внутреннее перемещение объектов основных средств|унифицированн\w*\s+форм\w*\s+№?\s*ос-?2/i.test(full)) {
+    if (
+      /внутреннее перемещение объектов основных средств|унифицированн\w*\s+форм\w*\s+№?\s*ос-?2/i.test(
+        full,
+      )
+    ) {
       return {
         detectedKind: 'os2_transfer',
         confidence: 0.8,
@@ -220,7 +260,20 @@ export async function classifyFile(
         signals: ['text:os2'],
       };
     }
-    if (/транспортная\s+накладная|грузоотправитель/i.test(full)) {
+    // ТОРГ-12 — товарный документ с позициями. Направляем его в общий
+    // УПД-путь, а не в waybill-промпт, который по контракту понимает только
+    // ТН-2116 и ОС-2. Проверка стоит перед ТН: у товарной накладной тоже есть
+    // графа «Грузоотправитель».
+    if (TORG12_RE.test(full) && !isTransportWaybillText(full)) {
+      return {
+        detectedKind: 'upd',
+        confidence: 0.9,
+        needsVision: false,
+        parserUsed: 'parseUpdPdf',
+        signals: ['text:torg12'],
+      };
+    }
+    if (isTransportWaybillText(full)) {
       return {
         detectedKind: 'transport_waybill',
         confidence: 0.8,

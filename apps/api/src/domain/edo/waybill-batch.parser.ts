@@ -24,7 +24,8 @@ import {
   WaybillBatchParsedSchema,
   type WaybillBatchParsed,
 } from '@matcheck/contracts';
-import { loadActivePromptWithMeta } from '../prompts/registry.js';
+import { resolvePrompt, type PromptOverride } from '../prompts/registry.js';
+import type { PromptDocKind } from '@matcheck/contracts';
 import { buildAad, decryptField } from '../auth/crypto.js';
 
 // JSON-схема ответа для Gemini responseSchema. Дублируем структуру
@@ -39,7 +40,7 @@ const RESPONSE_JSON_SCHEMA = {
         type: 'object',
         required: ['form', 'items', 'confidence'],
         properties: {
-          form: { type: 'string', enum: ['tn_2116', 'os2'] },
+          form: { type: 'string', enum: ['tn_2116', 'tn_1t', 'os2'] },
           docNumber: { type: ['string', 'null'] },
           docDate: { type: ['string', 'null'], description: 'YYYY-MM-DD' },
           shipper: {
@@ -123,7 +124,20 @@ const SUPPORTED_MIMES = new Set([
  */
 export async function parseWaybillBatch(
   files: WaybillInputImage[],
-  ctx: { sourceDocumentId: string | null; bundleId: string | null },
+  // promptOverride — только для офлайн-сверки версий промпта
+  // (scripts/waybill-prompt-ab.ts). Прод его не передаёт и работает на
+  // активной версии из таблицы prompts, как раньше.
+  ctx: {
+    sourceDocumentId: string | null;
+    bundleId: string | null;
+    promptOverride?: PromptOverride;
+    /**
+     * Вид промпта. По умолчанию 'transport_waybill' — формы 2116 и ОС-2,
+     * то есть ровно сегодняшнее поведение. 'transport_waybill_1t' передаёт
+     * ВТОРОЙ проход: он запускается, только когда первый не нашёл ничего.
+     */
+    promptDocKind?: PromptDocKind;
+  },
 ): Promise<ParseWaybillBatchResult> {
   if (files.length === 0) {
     throw new Error('parseWaybillBatch: пустой пакет файлов');
@@ -164,7 +178,10 @@ export async function parseWaybillBatch(
   );
   // Промпт лежит в БД под doc_kind='transport_waybill' для совместимости
   // с существующей админкой; контент промпта (default v2+) уже мульти-формный.
-  const promptMeta = await loadActivePromptWithMeta('transport_waybill');
+  const promptMeta = await resolvePrompt(
+    ctx.promptDocKind ?? 'transport_waybill',
+    ctx.promptOverride,
+  );
 
   // OpenRouter vision не принимает application/pdf — только image_url.
   if (row.kind === 'openrouter') {
@@ -253,7 +270,7 @@ export async function parseWaybillBatch(
         sourceDocumentId: ctx.sourceDocumentId,
         providerId: row.id,
         promptId: promptMeta.id,
-        docKind: 'transport_waybill',
+        docKind: ctx.promptDocKind ?? 'transport_waybill',
         model: row.model,
         requestMessages: [
           {

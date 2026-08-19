@@ -670,11 +670,24 @@ export const UpdPdfItemSchema = z.preprocess(
 );
 export type UpdPdfItem = z.infer<typeof UpdPdfItemSchema>;
 
+export const UpdPricingSchema = z.preprocess(
+  (value) => {
+    if (value == null) return value;
+    return value === 'printed' || value === 'absent' || value === 'unclear' ? value : null;
+  },
+  z.enum(['printed', 'absent', 'unclear']).nullable().optional(),
+);
+export type UpdPricing = z.infer<typeof UpdPricingSchema>;
+
 export const UpdPdfParsedSchema = z.object({
   docNumber: z.string().nullable().optional(),
   docDate: z.string().nullable().optional(),
   totalSum: z.number().nullable().optional(),
   vatSum: z.number().nullable().optional(),
+  // Явный ответ модели: стоимость напечатана, структурно отсутствует либо
+  // качество изображения не позволяет решить. optional сохраняет ответы всех
+  // старых промптов; мусор приводится к null и не влияет на готовность.
+  pricing: UpdPricingSchema,
   // Значение из строки УПД «Всего наименований N»; null/undefined, если парсер
   // не смог его извлечь — тогда сверка по кол-ву позиций пропускается.
   itemsCount: z.number().int().nonnegative().nullable().optional(),
@@ -731,7 +744,13 @@ export const WaybillItemSchema = z.object({
 });
 export type WaybillItem = z.infer<typeof WaybillItemSchema>;
 
-export const WaybillFormSchema = z.enum(['tn_2116', 'os2']);
+// tn_1t — товарно-транспортная накладная формы № 1-Т (Госкомстат №78, ОКУД
+// 0345009). Отдельное значение, а не 'tn_2116': формы разные, и по ним
+// по-разному читаются стороны — в 1-Т грузоотправитель и грузополучатель
+// печатаются в шапке товарного раздела, а не в нумерованных разделах 2116.
+// В kind документа обе дают 'transport_waybill', то есть тег «Накладная» на
+// портале и планшете одинаков.
+export const WaybillFormSchema = z.enum(['tn_2116', 'tn_1t', 'os2']);
 export type WaybillForm = z.infer<typeof WaybillFormSchema>;
 
 export const WaybillDocumentSchema = z.object({

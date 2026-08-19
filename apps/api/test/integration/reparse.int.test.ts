@@ -163,6 +163,7 @@ suite('повторное распознавание (реальный PostgreSQ
       parseMode?: string | null;
       generation?: number;
       batchIndex?: number | null;
+      parseErrorCode?: string | null;
     } = {},
   ): Promise<string> {
     const bundleId = randomUUID();
@@ -177,7 +178,7 @@ suite('повторное распознавание (реальный PostgreSQ
                      ${bundleId}, 'OLD-1', '2026-06-01', '200.00', ${over.parseMode ?? 'text'},
                      ${over.generation ?? 0}, ${over.batchIndex ?? null},
                      ${JSON.stringify({ hasMismatch: true, checks: [], checkedAt: '2026-06-01' })}::jsonb,
-                     'validation_mismatch', now())`;
+                     ${over.parseErrorCode === undefined ? 'validation_mismatch' : over.parseErrorCode}, now())`;
     await db`INSERT INTO source_document_attachments (source_document_id, s3_key, filename, mime_type, role)
              VALUES (${docId}, ${`test/${docId}/source.pdf`}, 'source.pdf', 'application/pdf', 'original')`;
     await db`INSERT INTO source_document_items (source_document_id, name_raw, qty, unit, line_no)
@@ -391,6 +392,67 @@ suite('повторное распознавание (реальный PostgreSQ
     });
   });
 
+  describe('fallback пустого ответа накладной', () => {
+    it('ставит обычный разбор и сохраняет kind «Накладная»', async () => {
+      const bundleId = randomUUID();
+      const docId = randomUUID();
+      await db`INSERT INTO source_bundles
+          (id, site_id, direction, status, bundle_hash, dispatch_generation)
+        VALUES (${bundleId}, ${siteId}, 'inbound', 'queued', ${bundleId}, 0)`;
+      await db`INSERT INTO source_documents
+          (id, kind, is_technical, direction, status, origin, site_id, bundle_id, queued_at)
+        VALUES (${docId}, 'transport_waybill', true, 'inbound', 'queued', 'manual_pdf',
+                ${siteId}, ${bundleId}, now())`;
+      const s3Key = `test/${docId}/source.pdf`;
+      await db`INSERT INTO source_document_attachments
+          (source_document_id, s3_key, filename, mime_type, role)
+        VALUES (${docId}, ${s3Key}, 'source.pdf', 'application/pdf', 'original')`;
+      parseWaybillBatch.mockResolvedValue({
+        parsed: { documents: [] },
+        llmProviderId: null,
+      });
+
+      await handleJob({ id: 'bundle-empty', data: { bundleId, bundleGeneration: 0 } } as never);
+
+      const [queued] = await db<
+        {
+          kind: string;
+          is_technical: boolean;
+          status: string;
+          parse_error_code: string | null;
+        }[]
+      >`SELECT kind, is_technical, status, parse_error_code
+          FROM source_documents WHERE id = ${docId}`;
+      expect(queued).toMatchObject({
+        kind: 'transport_waybill',
+        is_technical: false,
+        status: 'queued',
+        parse_error_code: null,
+      });
+      const [fallbackJob] = await db<{ payload: { sourceDocumentId: string; s3Key: string } }[]>`
+        SELECT payload FROM job_outbox WHERE dedupe_key = ${`doc~${docId}~parse~0`}`;
+      expect(fallbackJob?.payload).toMatchObject({ sourceDocumentId: docId, s3Key });
+
+      // Обрабатываем ровно payload fallback-задания: общий parser сохраняет
+      // результат в ту же строку, но kind не переписывает в upd.
+      parseUpdPdf.mockResolvedValue(parsedResult({ docNumber: 'ТОРГ-7144' }));
+      await handleJob({
+        id: 'fallback-single',
+        data: { sourceDocumentId: docId, s3Key, docGeneration: 0 },
+      } as never);
+      const [parsed] = await db<
+        { kind: string; status: string; doc_number: string; parse_mode: string }[]
+      >`SELECT kind, status, doc_number, parse_mode
+          FROM source_documents WHERE id = ${docId}`;
+      expect(parsed).toMatchObject({
+        kind: 'transport_waybill',
+        status: 'parsed',
+        doc_number: 'ТОРГ-7144',
+        parse_mode: 'text',
+      });
+    });
+  });
+
   describe('повтор накладной пакетного пути', () => {
     /** Ответ parseWaybillBatch: N накладных из одного файла. */
     const waybills = (numbers: string[]) => ({
@@ -483,6 +545,20 @@ suite('повторное распознавание (реальный PostgreSQ
       });
     });
 
+    it('no_waybill_found → общий УПД-путь вместо повторения пустого waybill-вызова', async () => {
+      const docId = await seedParsedDoc({
+        kind: 'transport_waybill',
+        parseMode: 'waybill_batch',
+        parseErrorCode: 'no_waybill_found',
+      });
+      const plan = await resolveReparsePlan(drizzleDb, await planInput(docId), 1);
+      expect(plan).toMatchObject({
+        kind: 'single',
+        payload: { sourceDocumentId: docId, docGeneration: 1 },
+      });
+      expect(plan).not.toMatchObject({ payload: { mode: 'waybill_single' } });
+    });
+
     it('логический УПД из комплекта → сегментное задание по страницам манифеста', async () => {
       const docId = await seedParsedDoc();
       const [doc] = await db<{ bundle_id: string }[]>`
@@ -549,21 +625,29 @@ suite('повторное распознавание (реальный PostgreSQ
       const docId = await seedParsedDoc();
       const first = await resolveReparsePlan(drizzleDb, await planInput(docId), 1);
       const second = await resolveReparsePlan(drizzleDb, await planInput(docId), 2);
-      expect('dedupeKey' in first && 'dedupeKey' in second && first.dedupeKey !== second.dedupeKey).toBe(
-        true,
-      );
+      expect(
+        'dedupeKey' in first && 'dedupeKey' in second && first.dedupeKey !== second.dedupeKey,
+      ).toBe(true);
     });
   });
 
   /** Колонки документа, которых достаточно планировщику. */
   async function planInput(docId: string) {
     const [r] = await db<
-      { id: string; kind: string; parse_mode: string | null; dispatch_generation: number }[]
-    >`SELECT id, kind, parse_mode, dispatch_generation FROM source_documents WHERE id = ${docId}`;
+      {
+        id: string;
+        kind: string;
+        parse_mode: string | null;
+        parse_error_code: string | null;
+        dispatch_generation: number;
+      }[]
+    >`SELECT id, kind, parse_mode, parse_error_code, dispatch_generation
+        FROM source_documents WHERE id = ${docId}`;
     return {
       id: r!.id,
       kind: r!.kind,
       parseMode: r!.parse_mode,
+      parseErrorCode: r!.parse_error_code,
       dispatchGeneration: r!.dispatch_generation,
     };
   }

@@ -1,6 +1,19 @@
 import { z } from 'zod';
 
-export const PromptDocKindSchema = z.enum(['upd', 'request', 'transport_waybill', 'm15']);
+// transport_waybill_1t — ОТДЕЛЬНЫЙ вид промпта, а не версия транспортного.
+// Промпт transport_waybill распознаёт только формы 2116 и ОС-2 и по своей же
+// инструкции обязан игнорировать всё прочее; товарно-транспортная накладная
+// формы 1-Т (Госкомстат №78, ОКУД 0345009) под него не подходит и получает
+// пустой ответ. Заводить её в тот же промпт значило бы переписать текст,
+// которым сегодня успешно разбираются ТН-2116, — поэтому 1-Т живёт своим
+// видом и запускается ВТОРЫМ проходом, только когда первый ничего не нашёл.
+export const PromptDocKindSchema = z.enum([
+  'upd',
+  'request',
+  'transport_waybill',
+  'transport_waybill_1t',
+  'm15',
+]);
 export type PromptDocKind = z.infer<typeof PromptDocKindSchema>;
 
 export const PromptDtoSchema = z.object({

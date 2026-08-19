@@ -320,10 +320,96 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
     expect(published.map((d) => d.doc_number).sort()).toEqual(['1381', '1691', '1736']);
   });
 
+  it('повторные страницы одной УПД публикуются одним документом', async () => {
+    const bundleId = await publicBundle(['1.jpg', '2.jpg']);
+    pagesAre('upd_main', 'upd_main');
+    extractUpdSegment.mockResolvedValue(updResult('COPY-1', 'Плита ПК 60'));
+
+    await handleDocumentRouterJob(bundleId, log);
+    const [sub] = await db<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE parent_bundle_id = ${bundleId}`;
+    await handleUpdAssemblyJob(sub!.id, 0, log);
+    await runSegmentJobs(bundleId);
+
+    const published = (await docsOf()).filter((doc) => !doc.is_technical);
+    expect(published).toHaveLength(1);
+    const rows = await db<{ name_raw: string }[]>`
+      SELECT name_raw FROM source_document_items
+       WHERE source_document_id = ${published[0]!.id}
+       ORDER BY line_no`;
+    expect(rows.map((row) => row.name_raw)).toEqual(['Плита ПК 60']);
+
+    // Исходный второй сегмент не удалён: он скрыт, архивирован и указывает на
+    // канонический документ — склейку можно расследовать и откатить вручную.
+    const [archived] = await db<
+      { is_technical: boolean; status: string; parse_error_details: { mergedInto: string } }[]
+    >`SELECT is_technical, status, parse_error_details
+        FROM source_documents
+       WHERE site_id = ${siteId} AND status = 'archived'`;
+    expect(archived).toMatchObject({
+      is_technical: true,
+      status: 'archived',
+      parse_error_details: { mergedInto: published[0]!.id },
+    });
+  });
+
+  it('разные части одной УПД объединяют уникальные позиции', async () => {
+    const bundleId = await publicBundle(['1.jpg', '2.jpg']);
+    pagesAre('upd_main', 'upd_main');
+    extractUpdSegment
+      .mockResolvedValueOnce(updResult('PARTS-1', 'Арматура 12'))
+      .mockResolvedValueOnce(updResult('PARTS-1', 'Цемент М500'));
+
+    await handleDocumentRouterJob(bundleId, log);
+    const [sub] = await db<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE parent_bundle_id = ${bundleId}`;
+    await handleUpdAssemblyJob(sub!.id, 0, log);
+    await runSegmentJobs(bundleId);
+
+    const published = (await docsOf()).filter((doc) => !doc.is_technical);
+    expect(published).toHaveLength(1);
+    const rows = await db<{ name_raw: string; line_no: number }[]>`
+      SELECT name_raw, line_no FROM source_document_items
+       WHERE source_document_id = ${published[0]!.id}
+       ORDER BY line_no`;
+    expect(rows.map((row) => row.name_raw)).toEqual(['Арматура 12', 'Цемент М500']);
+    const [header] = await db<{ total_sum: string }[]>`
+      SELECT total_sum FROM source_documents WHERE id = ${published[0]!.id}`;
+    expect(header!.total_sum).toBe('2000.00');
+  });
+
+  it('тот же документ из другой загрузки по-прежнему считается дубликатом', async () => {
+    pagesAre('upd_main');
+    extractUpdSegment.mockResolvedValue(updResult('EXTERNAL-DUP', 'Балка'));
+
+    const firstBundle = await publicBundle(['first.jpg']);
+    await handleDocumentRouterJob(firstBundle, log);
+    const [firstSub] = await db<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE parent_bundle_id = ${firstBundle}`;
+    await handleUpdAssemblyJob(firstSub!.id, 0, log);
+    await runSegmentJobs(firstBundle);
+
+    const secondBundle = await publicBundle(['second.jpg']);
+    await handleDocumentRouterJob(secondBundle, log);
+    const [secondSub] = await db<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE parent_bundle_id = ${secondBundle}`;
+    await handleUpdAssemblyJob(secondSub!.id, 0, log);
+    await runSegmentJobs(secondBundle);
+
+    const visible = await db<{ status: string; parse_error_code: string | null }[]>`
+      SELECT status, parse_error_code FROM source_documents
+       WHERE site_id = ${siteId} AND is_technical = false
+       ORDER BY created_at`;
+    expect(visible).toHaveLength(2);
+    expect(visible.some((doc) => doc.parse_error_code === 'duplicate_upd')).toBe(true);
+  });
+
   it('до последнего сегмента наружу не виден ни один документ', async () => {
     const bundleId = await publicBundle(['1.jpg', '2.jpg']);
     pagesAre('upd_main', 'upd_main');
-    extractUpdSegment.mockResolvedValue(updResult('500', 'Труба'));
+    extractUpdSegment
+      .mockResolvedValueOnce(updResult('500', 'Труба'))
+      .mockResolvedValueOnce(updResult('501', 'Швеллер'));
 
     await handleDocumentRouterJob(bundleId, log);
     const [sub] = await db<{ id: string }[]>`

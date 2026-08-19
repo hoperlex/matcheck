@@ -34,7 +34,11 @@ describe('document-router classifyFile — детерминированная м
   });
 
   it('одиночный текстовый УПД (1221312) → parseUpdPdf, 1 счёт-фактура', async () => {
-    const c = await classifyFile(load('single-1221312.pdf'), 'application/pdf', 'single-1221312.pdf');
+    const c = await classifyFile(
+      load('single-1221312.pdf'),
+      'application/pdf',
+      'single-1221312.pdf',
+    );
     expect(c.detectedKind).toBe('upd');
     expect(c.parserUsed).toBe('parseUpdPdf');
     expect(c.updInvoiceCount).toBe(1);
@@ -45,6 +49,44 @@ describe('document-router classifyFile — детерминированная м
     expect(c.detectedKind).toBe('transport_waybill');
     expect(c.needsVision).toBe(false);
     expect(c.parserUsed).toBe('parseWaybillBatch');
+  });
+
+  it('ТОРГ-12 со словом «Грузоотправитель» → УПД-путь', async () => {
+    const pdf = makeTextPdf([
+      'ТОВАРНАЯ НАКЛАДНАЯ № 7144 от 17 августа 2026 г. Унифицированная форма ТОРГ-12.',
+      'Грузоотправитель: ООО «Поставщик», ИНН 7700000000.',
+      'Грузополучатель: ООО «Стройка», ИНН 7711111111.',
+      'Плательщик: ООО «Стройка». Основание: договор поставки № 15.',
+      'Наименование товара, единица измерения, количество, цена, сумма.',
+      'Цемент М500, мешок, 100, 500 руб., 50 000 руб.',
+      'Всего по накладной: 50 000 руб., в том числе НДС 8 333,33 руб.',
+    ]);
+    const c = await classifyFile(pdf, 'application/pdf', 'torg-12.pdf');
+    expect(c.detectedKind).toBe('upd');
+    expect(c.parserUsed).toBe('parseUpdPdf');
+  });
+
+  it('ТН без ссылки на 2116, но с нумерованными разделами остаётся накладной', async () => {
+    const pdf = makeTextPdf([
+      'Транспортная накладная № 123 от 17 августа 2026 г.',
+      '1. Грузоотправитель ООО «Поставщик», адрес и телефон организации.',
+      '2. Грузополучатель ООО «Стройка», адрес места доставки груза.',
+      '3. Груз: цемент М500, сто мешков, масса груза пять тонн.',
+      '4. Сопроводительные документы на груз: паспорт качества № 77.',
+    ]);
+    const c = await classifyFile(pdf, 'application/pdf', 'tn-sections.pdf');
+    expect(c.detectedKind).toBe('transport_waybill');
+  });
+
+  it('одно упоминание ТН и слово «Грузоотправитель» не перехватывают документ', async () => {
+    const pdf = makeTextPdf([
+      'Договор поставки строительных материалов и приложение к договору.',
+      'По заявке может быть оформлена транспортная накладная перевозчиком.',
+      'Грузоотправитель обязан передать покупателю паспорта качества продукции.',
+      'Стороны согласовали сроки, адрес доставки, порядок оплаты и ответственность.',
+    ]);
+    const c = await classifyFile(pdf, 'application/pdf', 'contract.pdf');
+    expect(c.detectedKind).not.toBe('transport_waybill');
   });
 
   it('скан без текста (scanlite3) → needsVision (доклассификация Этап 4)', async () => {

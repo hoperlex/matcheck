@@ -11,7 +11,7 @@
 import './instrument.js'; // ПЕРВЫМ — Sentry.init до bullmq/postgres/undici
 import * as Sentry from '@sentry/node';
 import { Queue, Worker, type Job } from 'bullmq';
-import { and, eq, inArray, isNull, lt, lte, or } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, lte, notInArray, or } from 'drizzle-orm';
 import {
   bumpGroupRevision,
   publishGroupDocuments,
@@ -79,13 +79,17 @@ import {
 // проскакивать галлюцинации (LLM на мусоре часто возвращает ровно 0.5).
 // Значение живёт в domain/edo/upd-validation.ts — см. импорт ниже.
 import { parseWaybillBatch, type WaybillInputImage } from './domain/edo/waybill-batch.parser.js';
-import { expandPdfAttachmentsForOpenRouter } from './domain/edo/waybill-pdf.js';
+import {
+  expandPdfAttachmentsForOpenRouter,
+  WAYBILL_1T_MAX_PAGES_FOR_OPENROUTER,
+} from './domain/edo/waybill-pdf.js';
 import { getDefaultProviderKind } from './domain/llm/registry.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
 import { MIN_DEDUP_CONFIDENCE, validateUpdTotals } from './domain/edo/upd-validation.js';
 import { deriveUpdParseOutcome } from './domain/edo/upd-outcome.js';
 import { chooseBetterUpdResult, mergeParties } from './domain/edo/upd-result-compare.js';
 import { normalizeM15ZeroTotals } from './domain/edo/m15-normalize.js';
+import { normalizeUpdNoPricingTotals } from './domain/edo/upd-no-pricing-normalize.js';
 import {
   getExcelVisionFallbackReasons,
   mergeExcelStructuralWithVision,
@@ -129,6 +133,7 @@ import {
   type PageRef,
 } from './domain/edo/upd-assembly.js';
 import { extractUpdSegment } from './domain/edo/upd-segment-extract.js';
+import { planAssemblyDocumentMerges } from './domain/edo/upd-assembly-merge.js';
 import { resolveRootBundle } from './domain/sourceDocuments/bundle-import-registry.js';
 import { llmProviders, llmProviderCredentials } from './db/schema.js';
 import { buildAad, decryptField } from './domain/auth/crypto.js';
@@ -1443,6 +1448,33 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   const confidence = parsed.confidence ?? 0;
   const canDedup = confidence >= MIN_DEDUP_CONFIDENCE;
 
+  // Сегменты ЭТОГО поколения не являются повторными загрузками друг для
+  // друга. После разбора их строгие совпадения склеит tryFinalizeUpdAssembly;
+  // здесь исключаем весь набор из поиска дубля, оставляя видимыми кандидаты из
+  // любых других пакетов/поколений.
+  const assemblyPeerIds = segmentContext
+    ? (
+        await db
+          .select({ docId: bundleSegments.sourceDocumentId })
+          .from(bundleSegments)
+          .where(
+            and(
+              eq(bundleSegments.bundleId, segmentContext.rootId),
+              eq(bundleSegments.generation, segmentContext.generation),
+            ),
+          )
+      )
+        .map((row) => row.docId)
+        .filter((id): id is string => id != null)
+    : [];
+  const outsideCurrentAssembly =
+    assemblyPeerIds.length > 0 ? notInArray(sourceDocuments.id, assemblyPeerIds) : undefined;
+
+  // pricing='absent' — уже полноценный результат новой версии промпта, а не
+  // причина для лишнего vision-прохода. При выключенном флаге это строгий
+  // no-op, поэтому старые активные промпты сохраняют прежнее поведение.
+  parsed = normalizeUpdNoPricingTotals(parsed, loadEnv().UPD_NO_PRICING_V1);
+
   // ─── Решение о втором проходе — ДО дедупликации ───────────────────────────
   //
   // Ветка дубля ниже завершается своим UPDATE и возвращается, до конца функции
@@ -1480,10 +1512,11 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       .from(sourceDocuments)
       .where(
         and(
-          eq(sourceDocuments.kind, 'upd'),
+          eq(sourceDocuments.kind, proc.kind),
           eq(sourceDocuments.supplierDirectoryId, supplierDirectoryId),
           eq(sourceDocuments.docNumber, parsed.docNumber),
           inArray(sourceDocuments.status, ['parsed', 'needs_resolution']),
+          outsideCurrentAssembly,
           drSql`${sourceDocuments.id} <> ${sourceDocumentId}`,
         ),
       )
@@ -1508,11 +1541,12 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       .leftJoin(suppliers, eq(sourceDocuments.supplierDirectoryId, suppliers.id))
       .where(
         and(
-          eq(sourceDocuments.kind, 'upd'),
+          eq(sourceDocuments.kind, proc.kind),
           eq(sourceDocuments.supplierDirectoryId, supplierDirectoryId),
           eq(sourceDocuments.docNumber, parsed.docNumber),
           eq(sourceDocuments.docDate, docDate),
           inArray(sourceDocuments.status, ['parsed', 'needs_resolution']),
+          outsideCurrentAssembly,
           drSql`${sourceDocuments.id} <> ${sourceDocumentId}`,
         ),
       )
@@ -1997,11 +2031,17 @@ async function handleWaybillBundleJob(
     throw new Error('bundle: не удалось скачать ни одного attachment');
   }
 
+  // Копия исходных вложений: `files` ниже перезаписывается отрендеренными
+  // страницами под предел первого прохода, а второму проходу (форма 1-Т)
+  // нужен свой, больший предел — значит рендерить он будет от оригиналов.
+  const originalFiles: WaybillInputImage[] = [...files];
+  const providerKind = await getDefaultProviderKind();
+
   // Накладные через OpenRouter: vision принимает только image/* (не PDF) —
   // конвертируем PDF-вложения в PNG-страницы ПЕРЕД parseWaybillBatch. Gemini
   // читает PDF нативно, для него не трогаем. Ошибка рендера пробрасывается во
   // внешний catch → bundle помечается parse_failed без BullMQ-retry.
-  if ((await getDefaultProviderKind()) === 'openrouter') {
+  if (providerKind === 'openrouter') {
     const expanded = await expandPdfAttachmentsForOpenRouter(files);
     files.length = 0;
     files.push(...expanded);
@@ -2018,19 +2058,57 @@ async function handleWaybillBundleJob(
     throw err;
   }
 
-  // Пакет не содержит распознаваемых документов. Реальных документов не
-  // создаём, но техническую запись ПОКАЗЫВАЕМ: под ней уже висит оригинал, и
-  // это единственное, что связывает файл с интерфейсом. Пока она оставалась
-  // технической, файл пропадал совсем — список отбирает по is_technical=false,
-  // а sourceDocumentVisible на техническую отвечает 404 даже на запрос
-  // исходника. Новую заглушку заводить нельзя: получился бы второй документ на
-  // тот же файл.
+  // Второй проход: товарно-транспортная накладная формы № 1-Т.
+  //
+  // Активный промпт накладных знает ровно две формы — 2116 и ОС-2 — и по
+  // собственной инструкции обязан игнорировать всё прочее. Форма 1-Т
+  // (Госкомстат №78, ОКУД 0345009) в его перечне отсутствует, поэтому боевые
+  // ТТН получают пустой список: у «Товарно-транспортная накладная № БП-1414»
+  // шесть вызовов подряд вернули ноль документов. Здесь мы даём такому файлу
+  // прицельный разбор СВОИМ промптом, в структуре накладной, — а не через
+  // общий УПД-промпт, который накладные тоже велено игнорировать.
+  //
+  // Первый проход при этом не меняется ни на символ: сюда мы попадаем, только
+  // когда он уже вернул ноль документов, и на его предел страниц не влияем.
+  if (parsed.documents.length === 0 && loadEnv().WAYBILL_1T_FALLBACK) {
+    try {
+      const files1t =
+        providerKind === 'openrouter'
+          ? await expandPdfAttachmentsForOpenRouter(
+              originalFiles,
+              WAYBILL_1T_MAX_PAGES_FOR_OPENROUTER,
+            )
+          : originalFiles;
+      const second = await parseWaybillBatch(files1t, {
+        sourceDocumentId: techId,
+        bundleId,
+        promptDocKind: 'transport_waybill_1t',
+      });
+      if (second.parsed.documents.length > 0) {
+        parsed = second.parsed;
+        llmProviderId = second.llmProviderId ?? llmProviderId;
+        log.info(
+          { documents: parsed.documents.length, pages: files1t.length },
+          'форма 1-Т распознана вторым проходом',
+        );
+      } else {
+        log.info('второй проход 1-Т тоже не нашёл документа');
+      }
+    } catch (err) {
+      // Второй проход — доп. попытка, а не обязательный этап: его сбой не
+      // должен отнимать у файла тот исход, который он получил бы и без нас.
+      log.warn({ err }, 'второй проход 1-Т не удался — идём прежним путём');
+    }
+  }
+
+  // Waybill-промпт строго понимает только ТН-2116 и ОС-2. Пустой ответ не
+  // доказывает, что файл не документ: старый роутер отправлял сюда ТОРГ-12 и
+  // реализации товаров по одному слову «Грузоотправитель». Даём такому файлу
+  // один шанс в общем УПД-пути, сохраняя kind='transport_waybill' — в UI он
+  // по-прежнему остаётся «Накладной».
   if (parsed.documents.length === 0) {
-    // Показывать нечего, если оригинал не прикреплён (сбой при приёме,
-    // legacy-пакет). Тогда оставляем запись технической и помечаем строку
-    // реестра — файл хотя бы виден во вкладке «Без документов».
     const [original] = await db
-      .select({ id: sourceDocumentAttachments.id })
+      .select({ s3Key: sourceDocumentAttachments.s3Key })
       .from(sourceDocumentAttachments)
       .where(
         and(
@@ -2039,47 +2117,82 @@ async function handleWaybillBundleJob(
         ),
       )
       .limit(1);
-    const reason = 'накладная не распознана — ни ТН, ни ОС-2 не найдены';
+    const reason = 'ТН и ОС-2 не найдены — пробуем общий разбор товарного документа';
 
+    // Без оригинала общий путь запустить невозможно. Это единственная ветка,
+    // где остаётся no_waybill_found: реального файла нет, повторять нечего.
+    if (!original) {
+      await db.transaction(async (tx) => {
+        await fenceBundleAttempt(tx as unknown as typeof db, bundleId, bundleGeneration);
+        await tx
+          .update(sourceDocuments)
+          .set({
+            status: 'parse_failed',
+            parseErrorCode: 'no_waybill_found',
+            parseErrorDetails: { message: reason },
+            llmProviderId,
+            llmConfidence: '0',
+            processedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(sourceDocuments.id, techId));
+        await tx
+          .update(sourceBundles)
+          .set({
+            status: 'parse_failed',
+            parseErrorCode: 'no_waybill_found',
+            parseErrorMessage: 'в пакете не найден оригинальный файл для fallback',
+            updatedAt: new Date(),
+          })
+          .where(eq(sourceBundles.id, bundleId));
+        await markSubBundleItemsFailed(tx as unknown as typeof db, bundleId, reason);
+      });
+      log.warn('no waybill found and no original available for UPD fallback');
+      return;
+    }
+
+    const docGeneration = 0;
+    const dedupeKey = dispatchKeyOf(techId, docGeneration);
     await db.transaction(async (tx) => {
       await fenceBundleAttempt(tx as unknown as typeof db, bundleId, bundleGeneration);
       await tx
         .update(sourceDocuments)
         .set({
-          isTechnical: !original,
-          // Разбор состоялся и кончился ничем: дальше файл ждёт человека, а не
-          // очередь. Отсюда needs_resolution, а не parse_failed — по этой паре
-          // (статус, код) документ и опознаётся как заглушка.
-          status: original ? 'needs_resolution' : 'parse_failed',
-          parseErrorCode: 'no_waybill_found',
-          parseErrorDetails: { message: reason },
-          llmProviderId,
-          llmConfidence: '0',
-          processedAt: new Date(),
+          isTechnical: false,
+          status: 'queued',
+          parseErrorCode: null,
+          parseErrorDetails: null,
+          queuedAt: new Date(),
+          processedAt: null,
+          jobId: dedupeKey,
           updatedAt: new Date(),
         })
         .where(eq(sourceDocuments.id, techId));
+      await enqueueJob(tx as unknown as typeof db, {
+        queue: UPD_PARSE_QUEUE,
+        jobName: 'parse',
+        payload: {
+          sourceDocumentId: techId,
+          s3Key: original.s3Key,
+          docGeneration,
+        },
+        dedupeKey,
+      });
+      // Как и у обычного одиночного УПД, пакет отражает факт маршрутизации, а
+      // финальный статус распознавания живёт в source_documents.
       await tx
         .update(sourceBundles)
         .set({
-          status: 'parse_failed',
-          parseErrorCode: 'no_waybill_found',
-          parseErrorMessage: 'в пакете не найдено ни ТН, ни ОС-2',
+          status: 'parsed',
+          docCount: 1,
+          parseErrorCode: null,
+          parseErrorMessage: null,
           updatedAt: new Date(),
         })
         .where(eq(sourceBundles.id, bundleId));
-      // Пакет мог быть развёрнут router'ом из файла родительской поставки —
-      // родительская строка реестра осталась в created и без отметки не знает
-      // об исходе. Документ теперь есть, поэтому строка «дошла до результата»,
-      // а не «провалилась»: иначе тот же файл повис бы ещё и в блоке
-      // «дополнительные файлы» собственной карточки.
-      if (original) {
-        await markSubBundleItemDocumented(tx as unknown as typeof db, bundleId, techId, reason);
-      } else {
-        await markSubBundleItemsFailed(tx as unknown as typeof db, bundleId, reason);
-      }
+      await markSubBundleItemDocumented(tx as unknown as typeof db, bundleId, techId, reason);
     });
-    log.warn({ visible: Boolean(original) }, 'no waybill found in bundle');
+    log.warn('no waybill found — queued common document fallback');
     await notifySourceDocumentUpdated(techId);
     return;
   }
@@ -3907,6 +4020,214 @@ export async function handleUpdAssemblyJob(
 const MAX_PAGES_FOR_OPENROUTER_SEGMENT = 5;
 
 /**
+ * Склеивает сегменты, которые после распознавания оказались одной УПД.
+ * Исходные строки не удаляются: лишние документы остаются техническими и
+ * архивируются с mergedInto, поэтому результат обратим и полностью аудируем.
+ */
+async function consolidateAssemblyDocuments(
+  tx: typeof db,
+  segments: Array<{
+    id: string;
+    segmentIndex: number;
+    docId: string | null;
+    pageRefs: unknown;
+  }>,
+  docs: Array<{
+    id: string;
+    status: string;
+    parseErrorCode: string | null;
+    parseErrorDetails: Record<string, unknown> | null;
+    supplierDirectoryId: string | null;
+    docNumber: string | null;
+    docDate: Date | null;
+    totalSum: string | null;
+    vatSum: string | null;
+  }>,
+): Promise<string[]> {
+  const orderedSegments = [...segments].sort((a, b) => a.segmentIndex - b.segmentIndex);
+  const initialDocIds = orderedSegments
+    .map((segment) => segment.docId)
+    .filter((id): id is string => id != null);
+  if (initialDocIds.length < 2) return initialDocIds;
+
+  const [items, attachments] = await Promise.all([
+    tx
+      .select()
+      .from(sourceDocumentItems)
+      .where(inArray(sourceDocumentItems.sourceDocumentId, initialDocIds))
+      .orderBy(sourceDocumentItems.lineNo),
+    tx
+      .select()
+      .from(sourceDocumentAttachments)
+      .where(inArray(sourceDocumentAttachments.sourceDocumentId, initialDocIds)),
+  ]);
+  const docById = new Map(docs.map((doc) => [doc.id, doc]));
+  const actions = planAssemblyDocumentMerges(
+    initialDocIds.flatMap((id) => {
+      const doc = docById.get(id);
+      return doc
+        ? [
+            {
+              id,
+              supplierDirectoryId: doc.supplierDirectoryId,
+              docNumber: doc.docNumber,
+              docDate: doc.docDate,
+              items: items
+                .filter((item) => item.sourceDocumentId === id)
+                .map((item) => ({
+                  id: item.id,
+                  nameRaw: item.nameRaw,
+                  qty: item.qty,
+                  sum: item.sum,
+                })),
+            },
+          ]
+        : [];
+    }),
+  );
+  if (actions.length === 0) return initialDocIds;
+
+  const publishedIds = new Set(initialDocIds);
+  for (const action of actions) {
+    const groupIds = new Set(action.documentIds);
+    const keeper = docById.get(action.keeperId)!;
+    const selectedItemIds = new Set(action.itemIds);
+    const keptItems = items.filter((item) => selectedItemIds.has(item.id));
+    const keeperItems = keptItems.filter((item) => item.sourceDocumentId === action.keeperId);
+    const missingItems = keptItems.filter((item) => item.sourceDocumentId !== action.keeperId);
+
+    // Planner оставляет по одной строке на (имя, количество, сумма). Строки
+    // первого сегмента уже у keeper; дописываем только уникальные продолжения.
+    if (missingItems.length > 0) {
+      await tx.insert(sourceDocumentItems).values(
+        missingItems.map((item, index) => {
+          const { id: _id, sourceDocumentId: _docId, lineNo: _lineNo, ...values } = item;
+          return {
+            ...values,
+            sourceDocumentId: action.keeperId,
+            lineNo: keeperItems.length + index + 1,
+          };
+        }),
+      );
+    }
+
+    // Все уникальные оригиналы остаются доступны из канонической карточки;
+    // исходные junction-строки скрытых документов сохраняются для аудита.
+    const keeperAttachmentKeys = new Set(
+      attachments
+        .filter((row) => row.sourceDocumentId === action.keeperId)
+        .map((row) => JSON.stringify([row.s3Key, row.role])),
+    );
+    const attachmentsToCopy = new Map<string, (typeof attachments)[number]>();
+    for (const attachment of attachments.filter((row) => groupIds.has(row.sourceDocumentId))) {
+      const key = JSON.stringify([attachment.s3Key, attachment.role]);
+      if (!keeperAttachmentKeys.has(key) && !attachmentsToCopy.has(key)) {
+        attachmentsToCopy.set(key, attachment);
+      }
+    }
+    if (attachmentsToCopy.size > 0) {
+      await tx.insert(sourceDocumentAttachments).values(
+        [...attachmentsToCopy.values()].map((attachment) => {
+          const {
+            id: _id,
+            sourceDocumentId: _docId,
+            createdAt: _createdAt,
+            ...values
+          } = attachment;
+          return { ...values, sourceDocumentId: action.keeperId };
+        }),
+      );
+    }
+
+    // У частей с разными строками keeper должен помнить страницы всех частей,
+    // иначе ручной reparse позднее увидел бы только первый кусок документа.
+    if (!action.identicalItems) {
+      const refs = new Map<
+        string,
+        { registryItemId: string | null; inputOrder: number; pageInFile: number }
+      >();
+      for (const segment of orderedSegments.filter((row) => row.docId && groupIds.has(row.docId))) {
+        for (const ref of segment.pageRefs as Array<{
+          registryItemId: string | null;
+          inputOrder: number;
+          pageInFile: number;
+        }>) {
+          const key = JSON.stringify([ref.registryItemId, ref.inputOrder, ref.pageInFile]);
+          if (!refs.has(key)) refs.set(key, ref);
+        }
+      }
+      const keeperSegment = orderedSegments.find((row) => row.docId === action.keeperId)!;
+      await tx
+        .update(bundleSegments)
+        .set({ pageRefs: [...refs.values()], updatedAt: new Date() })
+        .where(eq(bundleSegments.id, keeperSegment.id));
+    }
+
+    const allLineSumsKnown = keptItems.length > 0 && keptItems.every((item) => item.sum != null);
+    const totalSum =
+      !action.identicalItems && allLineSumsKnown
+        ? keptItems.reduce((sum, item) => sum + Number(item.sum), 0)
+        : keeper.totalSum == null
+          ? null
+          : Number(keeper.totalSum);
+    const allVatSumsKnown = keptItems.length > 0 && keptItems.every((item) => item.vatSum != null);
+    const vatSum =
+      !action.identicalItems && allVatSumsKnown
+        ? keptItems.reduce((sum, item) => sum + Number(item.vatSum), 0)
+        : keeper.vatSum == null
+          ? null
+          : Number(keeper.vatSum);
+    const validation = validateUpdTotals({
+      totalSum,
+      vatSum,
+      itemsCount: keptItems.length,
+      items: keptItems.map((item) => ({
+        qty: Number(item.qty),
+        price: item.price == null ? null : Number(item.price),
+        sum: item.sum == null ? null : Number(item.sum),
+        vatRate: item.vatRate == null ? null : Number(item.vatRate),
+        vatSum: item.vatSum == null ? null : Number(item.vatSum),
+      })),
+    });
+    const siblingDuplicate =
+      keeper.parseErrorCode === 'duplicate_upd' &&
+      typeof keeper.parseErrorDetails?.existingId === 'string' &&
+      groupIds.has(keeper.parseErrorDetails.existingId);
+    const resolvedValidation =
+      keeper.parseErrorCode === 'validation_mismatch' && !validation.hasMismatch;
+    await tx
+      .update(sourceDocuments)
+      .set({
+        totalSum: totalSum == null ? null : totalSum.toFixed(2),
+        vatSum: vatSum == null ? null : vatSum.toFixed(2),
+        validation,
+        ...(siblingDuplicate || resolvedValidation
+          ? { status: 'parsed' as const, parseErrorCode: null, parseErrorDetails: null }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(sourceDocuments.id, action.keeperId));
+
+    // Никакого физического удаления: технические строки остаются уликой,
+    // наружу не публикуются и явно указывают своего канонического победителя.
+    if (action.droppedDocumentIds.length > 0) {
+      await tx
+        .update(sourceDocuments)
+        .set({
+          isTechnical: true,
+          status: 'archived',
+          parseErrorCode: null,
+          parseErrorDetails: { mergedInto: action.keeperId },
+          updatedAt: new Date(),
+        })
+        .where(inArray(sourceDocuments.id, action.droppedDocumentIds));
+      for (const id of action.droppedDocumentIds) publishedIds.delete(id);
+    }
+  }
+  return initialDocIds.filter((id) => publishedIds.has(id));
+}
+
+/**
  * Исход сегмента с точки зрения публикации.
  *
  * needs_resolution в этом коде значит две разные вещи. Дубликат и расхождение
@@ -3980,11 +4301,14 @@ export async function tryFinalizeUpdAssembly(
     const segments = await tx
       .select({
         id: bundleSegments.id,
+        segmentIndex: bundleSegments.segmentIndex,
         confidence: bundleSegments.confidence,
         docId: bundleSegments.sourceDocumentId,
+        pageRefs: bundleSegments.pageRefs,
       })
       .from(bundleSegments)
-      .where(and(eq(bundleSegments.bundleId, rootId), eq(bundleSegments.generation, generation)));
+      .where(and(eq(bundleSegments.bundleId, rootId), eq(bundleSegments.generation, generation)))
+      .orderBy(bundleSegments.segmentIndex);
     if (segments.length === 0) return { action: 'none' as const, reason: 'манифест пуст' };
 
     // `fallback` — сегмент, открытый НЕ шапкой: продолжение без начала либо
@@ -4010,6 +4334,12 @@ export async function tryFinalizeUpdAssembly(
         id: sourceDocuments.id,
         status: sourceDocuments.status,
         parseErrorCode: sourceDocuments.parseErrorCode,
+        parseErrorDetails: sourceDocuments.parseErrorDetails,
+        supplierDirectoryId: sourceDocuments.supplierDirectoryId,
+        docNumber: sourceDocuments.docNumber,
+        docDate: sourceDocuments.docDate,
+        totalSum: sourceDocuments.totalSum,
+        vatSum: sourceDocuments.vatSum,
       })
       .from(sourceDocuments)
       .where(inArray(sourceDocuments.id, docIds));
@@ -4025,12 +4355,21 @@ export async function tryFinalizeUpdAssembly(
       return { action: 'rollback' as const, reason: 'сегмент распознан неполно' };
     }
 
+    // Совпавшие реквизиты внутри поколения означают части/копии одной УПД,
+    // а не повторную загрузку. До этой точки все сегменты терминальны, но ещё
+    // технические, поэтому состав можно изменить атомарно.
+    const publishedDocIds = await consolidateAssemblyDocuments(
+      tx as unknown as typeof db,
+      segments,
+      docs,
+    );
+
     // ── публикация ──────────────────────────────────────────────────────────
     const now = new Date();
     // Публикуем сегменты И бампаем сиблингов группы — иначе накладная, уже
     // видимая до публикации, навсегда осталась бы на планшете отдельной
     // карточкой. Подробнее — в KDoc publishGroupDocuments.
-    await publishGroupDocuments(tx, rootId, docIds, now);
+    await publishGroupDocuments(tx, rootId, publishedDocIds, now);
     await tx
       .update(bundleSegments)
       .set({ publishedAt: now, updatedAt: now })
@@ -4055,7 +4394,11 @@ export async function tryFinalizeUpdAssembly(
       reason: 'комплект машины опубликован',
     });
 
-    return { action: 'publish' as const, docIds, reason: 'комплект готов' };
+    return {
+      action: 'publish' as const,
+      docIds: publishedDocIds,
+      reason: 'комплект готов',
+    };
   });
 
   if (decision.action === 'none') {
@@ -4336,9 +4679,18 @@ async function finishAssemblySubBundle(
           attempt.bundleGeneration,
         );
       }
-      await tx
-        .delete(sourceDocuments)
-        .where(and(eq(sourceDocuments.bundleId, sub.id), eq(sourceDocuments.isTechnical, true)));
+      await tx.delete(sourceDocuments).where(
+        and(
+          eq(sourceDocuments.bundleId, sub.id),
+          eq(sourceDocuments.isTechnical, true),
+          // Удаляется только служебная запись самого sub-bundle. Архивные
+          // sibling-сегменты после склейки остаются техническими, но связаны
+          // с манифестом и хранят полный аудит исходного распознавания.
+          drSql`not exists (
+              select 1 from bundle_segments bs where bs.source_document_id = ${sourceDocuments.id}
+            )`,
+        ),
+      );
       await tx
         .update(sourceBundles)
         .set({ status, updatedAt: new Date() })
@@ -4482,10 +4834,15 @@ async function createSourceDocumentFromWaybill(args: {
   let consigneeNameRaw: string | null = null;
   // ИНН сторон накладной. У ОС-2 обе стороны внутренние и ИНН у них нет вовсе
   // (WaybillInternalPartySchema — только name/department), поэтому поля
-  // остаются null и заполняются лишь в ветке ТН-2116.
+  // остаются null и заполняются лишь в ветках внешних форм.
   let supplierInnRaw: string | null = null;
   let consigneeInnRaw: string | null = null;
-  if (doc.form === 'tn_2116') {
+  // 1-Т идёт здесь же, а не отдельной веткой: у неё те же внешние стороны —
+  // грузоотправитель и грузополучатель с ИНН, только напечатаны они в шапке
+  // товарного раздела, а не в нумерованных разделах формы 2116. Разделять
+  // ветки значило бы продублировать поиск поставщика в справочнике; забыть
+  // же добавить сюда новую форму — оставить документ без поставщика вовсе.
+  if (doc.form === 'tn_2116' || doc.form === 'tn_1t') {
     if (doc.shipper?.inn || doc.shipper?.name) {
       const match = await matchOrCreateSupplier(
         { db },

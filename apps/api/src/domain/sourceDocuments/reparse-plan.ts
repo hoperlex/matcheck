@@ -73,6 +73,7 @@ type DocRow = {
   id: string;
   kind: string;
   parseMode: string | null;
+  parseErrorCode: string | null;
   dispatchGeneration: number;
 };
 
@@ -157,6 +158,21 @@ export async function resolveReparsePlan(
   //    (М-15 против ТН/ОС-2) знает только реестр импорта или parse_mode.
   if (!attachment) return { blocked: 'no_attachment' };
 
+  // Пустой ответ waybill-промпта означает не «этот файл точно накладная», а
+  // лишь «в нём не нашли ТН-2116/ОС-2». Частый случай — ТОРГ-12, ошибочно
+  // направленная сюда старым роутером. Повторять тот же waybill-вызов
+  // бесполезно: накопившийся документ должен получить шанс в общем УПД-пути.
+  //
+  // Условие строго по коду исхода. Все реально разобранные ТН/ОС-2, включая
+  // legacy без parse_mode, продолжают повторяться пакетным парсером.
+  if (doc.parseErrorCode === 'no_waybill_found') {
+    return {
+      kind: 'single',
+      payload: { sourceDocumentId: doc.id, s3Key: attachment.s3Key, docGeneration, ...reparse },
+      dedupeKey,
+    };
+  }
+
   if (doc.kind === 'transport_waybill' || doc.kind === 'os2_transfer') {
     if (await parsedAsM15(db, doc)) {
       return {
@@ -220,5 +236,6 @@ export const REPARSE_DOC_COLUMNS = {
   id: sourceDocuments.id,
   kind: sourceDocuments.kind,
   parseMode: sourceDocuments.parseMode,
+  parseErrorCode: sourceDocuments.parseErrorCode,
   dispatchGeneration: sourceDocuments.dispatchGeneration,
 } as const;

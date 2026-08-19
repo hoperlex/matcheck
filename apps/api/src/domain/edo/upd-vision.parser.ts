@@ -130,10 +130,7 @@ export class PdfRenderError extends Error {
  */
 export { pdfToPngsViaPoppler };
 
-async function pdfToPngsViaPoppler(
-  pdfBuffer: Buffer,
-  maxPages: number,
-): Promise<Buffer[]> {
+async function pdfToPngsViaPoppler(pdfBuffer: Buffer, maxPages: number): Promise<Buffer[]> {
   const dir = await mkdtemp(join(tmpdir(), 'upd-pdf-'));
   try {
     const inPath = join(dir, 'in.pdf');
@@ -144,17 +141,7 @@ async function pdfToPngsViaPoppler(
     // для аномально больших страниц снижает так, чтобы итоговый PNG
     // не превышал 2400 px по длинной стороне.
     const dpi = await computePdfRenderDpi(pdfBuffer);
-    const args = [
-      '-r',
-      String(dpi),
-      '-png',
-      '-f',
-      '1',
-      '-l',
-      String(maxPages),
-      inPath,
-      outPrefix,
-    ];
+    const args = ['-r', String(dpi), '-png', '-f', '1', '-l', String(maxPages), inPath, outPrefix];
 
     const startMs = Date.now();
     await new Promise<void>((resolve, reject) => {
@@ -171,10 +158,9 @@ async function pdfToPngsViaPoppler(
       proc.on('error', (err) => {
         clearTimeout(timer);
         // ENOENT — самый частый случай: poppler-utils не установлен.
-        const hint =
-          err.message.includes('ENOENT')
-            ? ' (не найден pdftoppm; на сервере: sudo apt-get install -y poppler-utils)'
-            : '';
+        const hint = err.message.includes('ENOENT')
+          ? ' (не найден pdftoppm; на сервере: sudo apt-get install -y poppler-utils)'
+          : '';
         reject(new PdfRenderError(`pdftoppm не запустился: ${err.message}${hint}`));
       });
       proc.on('exit', (code) => {
@@ -298,6 +284,10 @@ const RESPONSE_JSON_SCHEMA = {
     docDate: { type: ['string', 'null'], description: 'YYYY-MM-DD' },
     totalSum: { type: ['number', 'null'] },
     vatSum: { type: ['number', 'null'] },
+    pricing: {
+      type: ['string', 'null'],
+      enum: ['printed', 'absent', 'unclear', null],
+    },
     itemsCount: { type: ['integer', 'null'] },
     supplier: {
       type: ['object', 'null'],
@@ -354,12 +344,7 @@ const RESPONSE_JSON_SCHEMA = {
   },
 } as const;
 
-const SUPPORTED_MIMES = new Set([
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'application/pdf',
-]);
+const SUPPORTED_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
 
 export type UpdVisionInput = {
   buffer: Buffer;
@@ -601,9 +586,7 @@ export async function parseUpdVision(
             {
               role: 'user',
               content: `[vision upd attempt=${attemptNo}: ${input.filename ?? 'no-name'} (${mime}, ${buffer.length} bytes${
-                convertedPngPages !== null
-                  ? `, pdf→png pages=${convertedPngPages.length}`
-                  : ''
+                convertedPngPages !== null ? `, pdf→png pages=${convertedPngPages.length}` : ''
               })]\n${promptMeta.content.slice(0, 4000)}`,
             },
           ],
@@ -646,10 +629,7 @@ export async function parseUpdVision(
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       lastErr = e;
-      if (
-        attempt < 1 + VISION_TRANSIENT_RETRIES &&
-        isTransientVisionError(e)
-      ) {
+      if (attempt < 1 + VISION_TRANSIENT_RETRIES && isTransientVisionError(e)) {
         // Логирование этой попытки уже произошло в runOneAttempt.finally —
         // просто продолжаем к следующей итерации без задержки.
         continue;
