@@ -78,7 +78,11 @@ import {
 // будем терять часть нормально распознанных сканов, ниже 0.5 — будут
 // проскакивать галлюцинации (LLM на мусоре часто возвращает ровно 0.5).
 // Значение живёт в domain/edo/upd-validation.ts — см. импорт ниже.
-import { parseWaybillBatch, type WaybillInputImage } from './domain/edo/waybill-batch.parser.js';
+import {
+  parseWaybillBatch,
+  type ParseWaybillBatchResult,
+  type WaybillInputImage,
+} from './domain/edo/waybill-batch.parser.js';
 import {
   expandPdfAttachmentsForOpenRouter,
   WAYBILL_1T_MAX_PAGES_FOR_OPENROUTER,
@@ -1998,6 +2002,53 @@ async function fenceBundleAttempt(
   if (!current) throw new StaleBundleAttemptError(bundleId, generation);
 }
 
+/**
+ * Второй проход накладных промптом формы 1-Т. Возвращает результат, если он
+ * что-то нашёл, и null во всех остальных случаях — тогда вызывающий остаётся
+ * ровно с тем исходом, который получил бы и без нас.
+ *
+ * Общая для пакетного разбора и для повтора одной накладной: оба зовут
+ * parseWaybillBatch активным промптом (формы 2116 и ОС-2) и оба получают на
+ * форме 1-Т пустой список — значит и лечение у них одно.
+ *
+ * `originalFiles` — вложения ДО рендера под предел первого прохода: у второго
+ * прохода свой, больший предел страниц, и рендерит он от оригиналов.
+ */
+async function secondPassWaybill1t(
+  originalFiles: WaybillInputImage[],
+  ctx: { sourceDocumentId: string | null; bundleId: string | null },
+  log: WorkerLog,
+): Promise<ParseWaybillBatchResult | null> {
+  if (!loadEnv().WAYBILL_1T_FALLBACK) return null;
+  try {
+    const files1t =
+      (await getDefaultProviderKind()) === 'openrouter'
+        ? await expandPdfAttachmentsForOpenRouter(
+            originalFiles,
+            WAYBILL_1T_MAX_PAGES_FOR_OPENROUTER,
+          )
+        : originalFiles;
+    const second = await parseWaybillBatch(files1t, {
+      ...ctx,
+      promptDocKind: 'transport_waybill_1t',
+    });
+    if (second.parsed.documents.length === 0) {
+      log.info('второй проход 1-Т тоже не нашёл документа');
+      return null;
+    }
+    log.info(
+      { documents: second.parsed.documents.length, pages: files1t.length },
+      'форма 1-Т распознана вторым проходом',
+    );
+    return second;
+  } catch (err) {
+    // Второй проход — доп. попытка, а не обязательный этап: его сбой не
+    // должен отнимать у файла тот исход, который он получил бы и без нас.
+    log.warn({ err }, 'второй проход 1-Т не удался — идём прежним путём');
+    return null;
+  }
+}
+
 async function handleWaybillBundleJob(
   bundleId: string,
   bundleGeneration: number,
@@ -2117,34 +2168,15 @@ async function handleWaybillBundleJob(
   //
   // Первый проход при этом не меняется ни на символ: сюда мы попадаем, только
   // когда он уже вернул ноль документов, и на его предел страниц не влияем.
-  if (parsed.documents.length === 0 && loadEnv().WAYBILL_1T_FALLBACK) {
-    try {
-      const files1t =
-        providerKind === 'openrouter'
-          ? await expandPdfAttachmentsForOpenRouter(
-              originalFiles,
-              WAYBILL_1T_MAX_PAGES_FOR_OPENROUTER,
-            )
-          : originalFiles;
-      const second = await parseWaybillBatch(files1t, {
-        sourceDocumentId: techId,
-        bundleId,
-        promptDocKind: 'transport_waybill_1t',
-      });
-      if (second.parsed.documents.length > 0) {
-        parsed = second.parsed;
-        llmProviderId = second.llmProviderId ?? llmProviderId;
-        log.info(
-          { documents: parsed.documents.length, pages: files1t.length },
-          'форма 1-Т распознана вторым проходом',
-        );
-      } else {
-        log.info('второй проход 1-Т тоже не нашёл документа');
-      }
-    } catch (err) {
-      // Второй проход — доп. попытка, а не обязательный этап: его сбой не
-      // должен отнимать у файла тот исход, который он получил бы и без нас.
-      log.warn({ err }, 'второй проход 1-Т не удался — идём прежним путём');
+  if (parsed.documents.length === 0) {
+    const second = await secondPassWaybill1t(
+      originalFiles,
+      { sourceDocumentId: techId, bundleId },
+      log,
+    );
+    if (second) {
+      parsed = second.parsed;
+      llmProviderId = second.llmProviderId ?? llmProviderId;
     }
   }
 
@@ -5072,6 +5104,10 @@ async function handleWaybillSingleReparseJob(
     }
     if (files.length === 0) throw new Error('нет исходных файлов накладной');
 
+    // Копия до рендера: второму проходу нужен свой предел страниц, а `files`
+    // ниже перезаписывается страницами под предел первого — см. пакетный путь.
+    const originalFiles: WaybillInputImage[] = [...files];
+
     // Тот же препроцессинг, что и в пакетном разборе: OpenRouter принимает
     // только image/*, поэтому PDF разворачиваем в страницы-PNG.
     if ((await getDefaultProviderKind()) === 'openrouter') {
@@ -5080,11 +5116,30 @@ async function handleWaybillSingleReparseJob(
       files.push(...expanded);
     }
 
-    const { parsed, llmProviderId } = await parseWaybillBatch(files, {
+    const first = await parseWaybillBatch(files, {
       sourceDocumentId,
       // Пакета здесь нет: разбирается один документ, а не загрузка целиком.
       bundleId: null,
     });
+    let parsed = first.parsed;
+    let llmProviderId = first.llmProviderId;
+
+    // Повтор идёт тем же активным промптом, что и первичный разбор, — значит на
+    // форме 1-Т получает тот же пустой список. Без второго прохода «распознать
+    // заново» для 1-Т всегда упирается в откат ниже, и документ, созданный с
+    // чужим номером (у боевой ТТН в номер попал код по ОКПО), починить нечем.
+    if (parsed.documents.length === 0) {
+      const second = await secondPassWaybill1t(
+        originalFiles,
+        { sourceDocumentId, bundleId: null },
+        log,
+      );
+      if (second) {
+        parsed = second.parsed;
+        llmProviderId = second.llmProviderId ?? llmProviderId;
+      }
+    }
+
     const picked = pickReparsedWaybill(parsed.documents, doc);
     if (!picked) {
       const rolledBack = await rollbackReparse(

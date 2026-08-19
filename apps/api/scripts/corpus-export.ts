@@ -30,7 +30,10 @@ import { sql as drSql } from 'drizzle-orm';
 import { db } from '../src/db/client.js';
 import { getObject } from '../src/domain/storage/s3.signer.js';
 
-type DocKind = 'm15' | 'upd';
+// transport_waybill — корпус накладных для scripts/waybill-prompt-ab.ts:
+// отбор тот же (документы, которые прод разбирал этим промптом), а сверяет их
+// свой скрипт, потому что накладные приходят пакетом «файл → N документов».
+type DocKind = 'm15' | 'upd' | 'transport_waybill';
 
 function argValue(flag: string, fallback: string | null = null): string | null {
   const i = process.argv.indexOf(flag);
@@ -153,8 +156,11 @@ async function main(): Promise<void> {
   console.log('\nЗаполните эталон по этим документам (номер / дата / позиций / текущее значение):');
   for (const line of table) console.log(line);
   console.log(
-    `\nДальше: pnpm --filter @matcheck/api exec tsx scripts/upd-prompt-ab.ts` +
-      ` --doc-kind ${docKind} --dir ${outDir} --manifest ${manifestPath}`,
+    docKind === 'transport_waybill'
+      ? `\nДальше: pnpm --filter @matcheck/api exec tsx scripts/waybill-prompt-ab.ts` +
+          ` --base "default v3" --new "default v4" --dir ${outDir}`
+      : `\nДальше: pnpm --filter @matcheck/api exec tsx scripts/upd-prompt-ab.ts` +
+          ` --doc-kind ${docKind} --dir ${outDir} --manifest ${manifestPath}`,
   );
 }
 

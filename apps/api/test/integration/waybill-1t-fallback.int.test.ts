@@ -221,6 +221,62 @@ suite('второй проход накладных: форма 1-Т', () => {
     expect(row).toMatchObject({ status: 'queued', is_technical: false });
   });
 
+  /**
+   * Уже созданная накладная под кнопкой «Распознать повторно»: строка с
+   * dispatch_generation и снимком в reparse — ровно то, что оставляет маршрут
+   * перед постановкой задания.
+   */
+  async function makeReparsedDoc(docNumber: string): Promise<string> {
+    const docId = randomUUID();
+    await db`INSERT INTO source_documents
+        (id, kind, is_technical, direction, status, origin, site_id, doc_number, doc_date,
+         parse_mode, batch_index, dispatch_generation, queued_at, reparse)
+      VALUES (${docId}, 'transport_waybill', false, 'inbound', 'queued', 'manual_pdf',
+              ${siteId}, ${docNumber}, '2026-08-18', 'waybill_batch', 0, 0, now(),
+              ${JSON.stringify({ generation: 0, state: 'queued', snapshot: { status: 'parsed' } })}::jsonb)`;
+    await db`INSERT INTO source_document_attachments
+        (source_document_id, s3_key, filename, mime_type, role)
+      VALUES (${docId}, ${`test/${docId}/ttn.pdf`}, 'ttn.pdf', 'application/pdf', 'original')`;
+    return docId;
+  }
+
+  const reparseJob = (id: string, sourceDocumentId: string) =>
+    ({ id, data: { mode: 'waybill_single', sourceDocumentId, docGeneration: 0 } }) as never;
+
+  it('повтор накладной: флаг выключен — пустой ответ откатывает документ как раньше', async () => {
+    const docId = await makeReparsedDoc('51160834');
+    parseWaybillBatch.mockResolvedValue(empty);
+
+    await handleJob(reparseJob('r1', docId));
+
+    expect(parseWaybillBatch).toHaveBeenCalledTimes(1);
+    const [row] = await db<{ status: string; doc_number: string | null; reparse: { state: string } }[]>`
+      SELECT status, doc_number, reparse FROM source_documents WHERE id = ${docId}`;
+    // Прежнее поведение: сопоставлять не с чем — документ возвращён как был.
+    expect(row).toMatchObject({ status: 'parsed', doc_number: '51160834' });
+    expect(row?.reparse?.state).toBe('failed');
+  });
+
+  it('повтор накладной: флаг включён — 1-Т разбирается вторым проходом', async () => {
+    const docId = await makeReparsedDoc('51160834');
+    fallbackEnabled = true;
+    parseWaybillBatch.mockResolvedValueOnce(empty).mockResolvedValueOnce(waybill('tn_1t', '8462'));
+
+    await handleJob(reparseJob('r2', docId));
+
+    expect(parseWaybillBatch).toHaveBeenCalledTimes(2);
+    expect(parseWaybillBatch.mock.calls[1]?.[1]).toMatchObject({
+      promptDocKind: 'transport_waybill_1t',
+    });
+    const [row] = await db<{ status: string; kind: string; doc_number: string | null }[]>`
+      SELECT status, kind, doc_number FROM source_documents WHERE id = ${docId}`;
+    // Номер из графы «№» заменил код по ОКПО, тип документа не изменился.
+    expect(row).toMatchObject({ status: 'parsed', kind: 'transport_waybill', doc_number: '8462' });
+    const items = await db<{ name_raw: string }[]>`
+      SELECT name_raw FROM source_document_items WHERE source_document_id = ${docId}`;
+    expect(items).toHaveLength(1);
+  });
+
   it('сбой второго прохода не отнимает у файла прежний исход', async () => {
     const { bundleId, docId } = await makeBundle();
     fallbackEnabled = true;
