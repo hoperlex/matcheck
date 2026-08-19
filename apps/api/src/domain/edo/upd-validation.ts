@@ -1,4 +1,5 @@
-import type { UpdCheck, UpdValidation } from '@matcheck/contracts';
+import { suspectQtyPriceSwap } from '@matcheck/contracts';
+import type { UpdCheck, UpdValidation, UpdWarning } from '@matcheck/contracts';
 
 // Duck-typed вход: подходит и для UpdPdfParsed (LLM/локальный PDF-парсер),
 // и для UpdParsed (XML). Поля с одинаковыми именами — qty, price, sum,
@@ -9,6 +10,10 @@ export type UpdLikeForValidation = {
   vatSum?: number | null;
   itemsCount?: number | null;
   items: ReadonlyArray<{
+    // Номер позиции, НАПЕЧАТАННЫЙ в графе 1 бланка (не наш порядковый индекс).
+    // Есть только у свежераспознанных документов: в БД он не хранится, поэтому
+    // на live-пересчёте и ручной правке проверка последовательности спит.
+    rowNo?: number | null;
     qty?: number | null;
     price?: number | null;
     sum?: number | null;
@@ -65,8 +70,25 @@ function effectiveDocVatRate(
   return (vatSum / base) * 100;
 }
 
-export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
+/**
+ * Опции сверки.
+ *
+ * `detectRecognitionWarnings` включает эвристику подозрения на перестановку
+ * количества и цены. По умолчанию ВЫКЛЮЧЕНА: этот же валидатор обслуживает
+ * XML-путь и сравнение вариантов разбора, где точная дробная цена — норма
+ * поставщика, а не признак ошибки модели. Включать только там, где числа
+ * пришли от LLM.
+ */
+export type ValidateUpdOptions = {
+  detectRecognitionWarnings?: boolean;
+};
+
+export function validateUpdTotals(
+  parsed: UpdLikeForValidation,
+  opts: ValidateUpdOptions = {},
+): UpdValidation {
   const checks: UpdCheck[] = [];
+  const warnings: UpdWarning[] = [];
   const items = parsed.items;
   const rowCount = items.length;
   const totalsTolerance = Math.max(ROW_TOLERANCE, rowCount * ROW_TOLERANCE);
@@ -149,14 +171,17 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
     } else {
       const actual = sumNullable(items.map((i) => i.vatSum ?? null));
       const diff = round2(Math.abs(expected - actual));
+      // Тот же рублёвый допуск, что и построчно: слагаемые здесь — те самые
+      // построчные суммы налога, и их копеечные округления складываются.
+      const vatTolerance = round2(Math.max(1, Math.abs(expected) * 0.001));
       checks.push({
         name: 'vat_total',
         scope: 'document',
         expected: round2(expected),
         actual,
         diff,
-        tolerance: totalsTolerance,
-        ok: diff <= totalsTolerance,
+        tolerance: vatTolerance,
+        ok: diff <= vatTolerance,
       });
     }
   }
@@ -185,6 +210,45 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
         diff,
         tolerance: 0,
         ok: diff === 0,
+      });
+    }
+  }
+
+  // 3a) Непрерывность напечатанных номеров позиций.
+  //
+  // Зачем отдельно от items_count: тот сверяется с надписью «Всего
+  // наименований», а её нет в большинстве бланков — на бою проверка
+  // пропускалась в 343 случаях из 360. Номера же напечатаны всегда, и по ним
+  // видно ровно то, чего не видит арифметика: пропала строка при переносе
+  // длинного наименования или задвоилась позиция.
+  {
+    const printed = items
+      .map((i) => i.rowNo ?? null)
+      .filter((n): n is number => n != null && Number.isInteger(n));
+    if (printed.length === 0) {
+      checks.push({
+        name: 'items_sequence',
+        scope: 'document',
+        expected: null,
+        actual: rowCount,
+        diff: null,
+        tolerance: 0,
+        ok: true,
+        skipReason: 'no_expected',
+      });
+    } else {
+      const unique = new Set(printed);
+      const maxNo = Math.max(...printed);
+      const sequential =
+        printed.length === rowCount && unique.size === rowCount && maxNo === rowCount;
+      checks.push({
+        name: 'items_sequence',
+        scope: 'document',
+        expected: rowCount,
+        actual: unique.size,
+        diff: Math.abs(maxNo - rowCount),
+        tolerance: 0,
+        ok: sequential,
       });
     }
   }
@@ -241,6 +305,7 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
     const actual = round2(qty * price);
     const diff = round2(Math.abs(baseFromSum - actual));
     const tolerance = round2(Math.max(1, Math.abs(baseFromSum) * 0.001));
+    const ok = diff <= tolerance;
     checks.push({
       name: 'row_qty_price',
       scope: { row },
@@ -248,8 +313,14 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
       actual,
       diff,
       tolerance,
-      ok: diff <= tolerance,
+      ok,
     });
+    // Подозрение на перестановку предъявляем только там, где арифметика
+    // сошлась: если строка уже не сходится, у оператора есть сигнал получше, а
+    // второй ярлык на той же строке только запутает.
+    if (opts.detectRecognitionWarnings && ok && suspectQtyPriceSwap({ qty, price })) {
+      warnings.push({ name: 'qty_price_swap', scope: { row } });
+    }
   });
 
   // 5) Построчно: vatSum ≈ sum × vatRate / (100 + vatRate).
@@ -281,21 +352,30 @@ export function validateUpdTotals(parsed: UpdLikeForValidation): UpdValidation {
     }
     const actual = computeActual(sum, vatRate);
     const diff = round2(Math.abs(vatSum - actual));
+    // Тот же допуск, что у row_qty_price: max(1₽, 0.1%). Копейка не годится —
+    // поставщики считают НДС от неокруглённой базы, и на копеечных остатках
+    // проверка краснела бы на здоровых документах. На боевых данных за трое
+    // суток из 1107 проверяемых строк с копеечным допуском не сходились 27, с
+    // рублёвым — 19: именно они и есть реальные дефекты распознавания.
+    const tolerance = round2(Math.max(1, Math.abs(actual) * 0.001));
     checks.push({
       name: 'row_vat_rate',
       scope: { row },
       expected: round2(vatSum),
       actual,
       diff,
-      tolerance: ROW_TOLERANCE,
-      ok: diff <= ROW_TOLERANCE,
+      tolerance,
+      ok: diff <= tolerance,
     });
   });
 
+  // warnings в hasMismatch не входят намеренно: подозрение не должно менять
+  // parseErrorCode, попадать в failedChecks и запускать второй проход.
   const hasMismatch = checks.some((c) => !c.ok);
   return {
     hasMismatch,
     checkedAt: new Date().toISOString(),
     checks,
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }

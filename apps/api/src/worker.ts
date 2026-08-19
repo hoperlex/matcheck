@@ -1538,6 +1538,9 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     vatSum: parsed.vatSum ?? null,
     itemsCount: parsed.itemsCount ?? null,
     items: parsed.items.map((i) => ({
+      // Разъехавшиеся номера позиций — такой же повод для второго прохода, как
+      // несходящиеся суммы: строку либо потеряли, либо задвоили.
+      rowNo: i.rowNo ?? null,
       qty: i.qty ?? null,
       price: i.price ?? null,
       sum: i.sum ?? null,
@@ -1699,16 +1702,27 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
 
   // Валидация сумм. `let`: после синтеза итога по строкам сверку пересчитываем
   // — предупреждение, посчитанное по пустой сумме, ввело бы в заблуждение.
-  let validation = validateUpdTotals({
-    totalSum: parsed.totalSum ?? null,
-    vatSum: parsed.vatSum ?? null,
-    itemsCount: parsed.itemsCount ?? null,
-    items: parsed.items.map((i) => ({
-      qty: i.qty,
-      price: i.price ?? null,
-      sum: i.sum ?? null,
-    })),
-  });
+  let validation = validateUpdTotals(
+    {
+      totalSum: parsed.totalSum ?? null,
+      vatSum: parsed.vatSum ?? null,
+      itemsCount: parsed.itemsCount ?? null,
+      // vatRate/vatSum обязательны: без них построчная сверка НДС и сверка
+      // итога налога молча пропускаются. На бою они пропускались всегда —
+      // из 1326 позиций за трое суток ставка распозналась у 1108, а до
+      // валидатора не доезжала ни одна, и две проверки из пяти были мертвы.
+      items: parsed.items.map((i) => ({
+        rowNo: i.rowNo ?? null,
+        qty: i.qty,
+        price: i.price ?? null,
+        sum: i.sum ?? null,
+        vatRate: i.vatRate ?? null,
+        vatSum: i.vatSum ?? null,
+      })),
+    },
+    // Числа пришли от модели — здесь эвристика подозрения уместна.
+    { detectRecognitionWarnings: true },
+  );
 
   // Готов ли документ к приёмке — единое правило, общее с ручной правкой на
   // портале и с бэкфиллом (см. domain/edo/upd-outcome.ts). Решают две вещи:
@@ -1727,16 +1741,22 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // останется предупреждение, посчитанное по пустой сумме.
   if (outcome.totalSumSynthesized && outcome.totalSum != null) {
     parsed = { ...parsed, totalSum: outcome.totalSum };
-    validation = validateUpdTotals({
-      totalSum: outcome.totalSum,
-      vatSum: parsed.vatSum ?? null,
-      itemsCount: parsed.itemsCount ?? null,
-      items: parsed.items.map((i) => ({
-        qty: i.qty,
-        price: i.price ?? null,
-        sum: i.sum ?? null,
-      })),
-    });
+    validation = validateUpdTotals(
+      {
+        totalSum: outcome.totalSum,
+        vatSum: parsed.vatSum ?? null,
+        itemsCount: parsed.itemsCount ?? null,
+        items: parsed.items.map((i) => ({
+          rowNo: i.rowNo ?? null,
+          qty: i.qty,
+          price: i.price ?? null,
+          sum: i.sum ?? null,
+          vatRate: i.vatRate ?? null,
+          vatSum: i.vatSum ?? null,
+        })),
+      },
+      { detectRecognitionWarnings: true },
+    );
   }
 
   const status = outcome.status;
@@ -4256,18 +4276,22 @@ async function consolidateAssemblyDocuments(
         : keeper.vatSum == null
           ? null
           : Number(keeper.vatSum);
-    const validation = validateUpdTotals({
-      totalSum,
-      vatSum,
-      itemsCount: keptItems.length,
-      items: keptItems.map((item) => ({
-        qty: Number(item.qty),
-        price: item.price == null ? null : Number(item.price),
-        sum: item.sum == null ? null : Number(item.sum),
-        vatRate: item.vatRate == null ? null : Number(item.vatRate),
-        vatSum: item.vatSum == null ? null : Number(item.vatSum),
-      })),
-    });
+    const validation = validateUpdTotals(
+      {
+        totalSum,
+        vatSum,
+        itemsCount: keptItems.length,
+        items: keptItems.map((item) => ({
+          qty: Number(item.qty),
+          price: item.price == null ? null : Number(item.price),
+          sum: item.sum == null ? null : Number(item.sum),
+          vatRate: item.vatRate == null ? null : Number(item.vatRate),
+          vatSum: item.vatSum == null ? null : Number(item.vatSum),
+        })),
+      },
+      // Позиции собраны из распознанных сегментов — эвристика применима.
+      { detectRecognitionWarnings: true },
+    );
     const siblingDuplicate =
       keeper.parseErrorCode === 'duplicate_upd' &&
       typeof keeper.parseErrorDetails?.existingId === 'string' &&

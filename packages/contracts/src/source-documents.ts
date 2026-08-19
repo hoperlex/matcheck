@@ -228,6 +228,10 @@ export const UpdCheckNameSchema = z.enum([
   'sum_total',
   'vat_total',
   'items_count',
+  // Непрерывность напечатанных номеров позиций (графа 1). Ловит то, чего не
+  // видит арифметика: строку, потерянную при переносе многострочного
+  // наименования, и позицию, задвоенную моделью.
+  'items_sequence',
   'row_qty_price',
   'row_vat_rate',
 ]);
@@ -251,12 +255,70 @@ export const UpdCheckSchema = z.object({
 });
 export type UpdCheck = z.infer<typeof UpdCheckSchema>;
 
+/**
+ * Подозрения, которые арифметика доказать не может.
+ *
+ * Отдельно от `checks`, потому что это не проверка, а догадка по виду чисел:
+ * она не входит в `hasMismatch`, не попадает в `failedChecks` и не запускает
+ * второй проход — только подсвечивает строку оператору.
+ */
+export const UpdWarningNameSchema = z.enum(['qty_price_swap']);
+export type UpdWarningName = z.infer<typeof UpdWarningNameSchema>;
+
+export const UpdWarningSchema = z.object({
+  name: UpdWarningNameSchema,
+  scope: UpdCheckScopeSchema,
+});
+export type UpdWarning = z.infer<typeof UpdWarningSchema>;
+
 export const UpdValidationSchema = z.object({
   hasMismatch: z.boolean(),
   checkedAt: z.string(),
   checks: z.array(UpdCheckSchema),
+  // Опционально: у записей, сделанных до появления поля, его просто нет.
+  warnings: z.array(UpdWarningSchema).optional(),
 });
 export type UpdValidation = z.infer<typeof UpdValidationSchema>;
+
+/**
+ * Похоже ли, что количество и цена в строке поменялись местами.
+ *
+ * Зачем эвристика вообще. Перестановку нельзя поймать арифметикой: проверка
+ * `qty × price ≈ sum` от перемены множителей не меняется, и строка проходит как
+ * корректная. На бою так прошёл УПД № 848 — «66,294 м² × 8 114,75 ₽» приехало
+ * как `qty 8114.75 / price 66.294`.
+ *
+ * Почему именно эти три условия. Цена хранится как numeric(18,4), и 65.4918 —
+ * законное значение, поэтому сама по себе дробная цена поводом не считается.
+ * Сигналом становится только совпадение всего сразу: у цены необычная для денег
+ * точность, у количества — ровно денежная (два знака), и количество крупнее
+ * цены. На корректных строках того же дня (200 × 451.68, 84 × 148.32,
+ * 66.294 × 8114.75) не срабатывает.
+ *
+ * Правило про штучные единицы намеренно не добавлено: `unit` схлопывается в
+ * «шт» когда единицу не распознали, и «шт + дробное qty» давало бы ложные
+ * предупреждения на ровном месте.
+ */
+export function suspectQtyPriceSwap(item: {
+  qty?: number | null;
+  price?: number | null;
+}): boolean {
+  const { qty, price } = item;
+  if (qty == null || price == null) return false;
+  if (!Number.isFinite(qty) || !Number.isFinite(price)) return false;
+  if (qty <= price) return false;
+  return decimalsOf(price) >= 3 && decimalsOf(qty) === 2;
+}
+
+/** Сколько знаков после запятой у числа (без хвостовых нулей). */
+function decimalsOf(n: number): number {
+  // toFixed(6) вместо String(n): у 0.1 + 0.2 строковое представление даёт 17
+  // знаков, и любое число после арифметики выглядело бы «необычно точным».
+  const fixed = n.toFixed(6).replace(/0+$/, '');
+  const dot = fixed.indexOf('.');
+  if (dot < 0) return 0;
+  return fixed.length - dot - 1;
+}
 
 /**
  * Происхождение получателя inbound-документа (contractor_id либо МОЛ).
@@ -632,6 +694,15 @@ export const UpdPdfItemSchema = z.preprocess(
   },
   z.object({
     nameRaw: z.string().min(1),
+    // rowNo — порядковый номер позиции из графы 1 бланка, как он НАПЕЧАТАН.
+    // Нужен не для отображения, а для проверки целостности списка: числа и
+    // наименования съезжают на соседнюю строку, когда наименование занимает
+    // две-три печатных строки, и суммы при этом иногда продолжают сходиться.
+    // Последовательность 1..N без пропусков и дублей — единственный признак,
+    // не зависящий от бланка и от того, напечатано ли «Всего наименований».
+    // Опционально: старые версии промпта поле не возвращают, и проверка тогда
+    // просто пропускается.
+    rowNo: z.number().int().positive().nullable().optional(),
     // qty допускает null: строки-услуги УПД (доставка, погрузка) идут без
     // количества (в графе 3 формы прочерк «--»), и модель честно возвращает
     // null. ВАЖНО оставить именно null (не коерсить в 0): построчная сверка

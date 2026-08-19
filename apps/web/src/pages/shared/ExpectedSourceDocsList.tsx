@@ -45,6 +45,8 @@ function checkLabel(c: UpdCheck): string {
       return 'Σ НДС по строкам vs итог';
     case 'items_count':
       return 'Кол-во позиций';
+    case 'items_sequence':
+      return 'Нумерация позиций';
     case 'row_qty_price':
       return `Строка ${row ?? '?'}: qty×price`;
     case 'row_vat_rate':

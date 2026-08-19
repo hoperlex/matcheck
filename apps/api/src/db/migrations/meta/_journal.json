@@ -785,6 +785,20 @@
       "when": 1787090000000,
       "tag": "0112_waybill_prompt_v4_codes",
       "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1787100000000,
+      "tag": "0113_upd_prompt_v12_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1787110000000,
+      "tag": "0114_upd_prompt_v13_row_numbers",
+      "breakpoints": true
     }
   ]
 }

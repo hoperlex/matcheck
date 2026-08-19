@@ -44,6 +44,7 @@ import type {
   SourceRecoverResponse,
   SourceReparseResponse,
   UpdCheck,
+  UpdWarning,
 } from '@matcheck/contracts';
 import { getDocumentDisplayStatus } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
@@ -102,12 +103,26 @@ function describeCheck(c: UpdCheck): string {
       sum_total: 'сумма позиций vs итог документа',
       vat_total: 'НДС позиций vs НДС документа',
       items_count: 'количество позиций vs «Всего наименований»',
+      items_sequence: 'номера позиций идут не подряд — строка потеряна или задвоена',
       row_qty_price: 'qty × price ≠ sum',
       row_vat_rate: 'sum × ставка ≠ НДС',
     }[c.name] || c.name;
   const exp = c.expected != null ? c.expected.toFixed(2) : '—';
   const act = c.actual != null ? c.actual.toFixed(2) : '—';
   return `${name} (${where}): ожидается ${exp}, по факту ${act}`;
+}
+
+/**
+ * Подозрения читаются иначе, чем расхождения: арифметика сошлась, доказательства
+ * нет — есть только повод перепроверить строку глазами по бумаге.
+ */
+function describeWarning(w: UpdWarning): string {
+  const where = w.scope === 'document' ? 'по документу' : `строка ${w.scope.row}`;
+  const name =
+    {
+      qty_price_swap: 'похоже, количество и цена стоят не в своих колонках',
+    }[w.name] || w.name;
+  return `${name} (${where})`;
 }
 
 function itemToEdit(i: Item): EditItem {
@@ -223,6 +238,8 @@ export function SourceDocumentDetailModal({
     if (!sd?.validation?.checks) return [];
     return sd.validation.checks.filter((c) => !c.ok && !c.skipReason);
   }, [sd]);
+
+  const warnings = useMemo<UpdWarning[]>(() => sd?.validation?.warnings ?? [], [sd]);
 
   // При смене документа сбрасываем форму. При первом открытии — инициализируем.
   useEffect(() => {
@@ -591,6 +608,21 @@ export function SourceDocumentDetailModal({
                   <ul style={{ margin: 0, paddingLeft: 16 }}>
                     {failedChecks.map((c, i) => (
                       <li key={i}>{describeCheck(c)}</li>
+                    ))}
+                  </ul>
+                }
+              />
+            )}
+            {warnings.length > 0 && (
+              <Alert
+                style={{ marginBottom: 12 }}
+                type="info"
+                showIcon
+                message="Проверьте строки по документу"
+                description={
+                  <ul style={{ margin: 0, paddingLeft: 16 }}>
+                    {warnings.map((w, i) => (
+                      <li key={i}>{describeWarning(w)}</li>
                     ))}
                   </ul>
                 }

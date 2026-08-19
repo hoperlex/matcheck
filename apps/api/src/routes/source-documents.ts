@@ -1488,18 +1488,23 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // в суммах» отражал актуальную логику, а не устарел вместе с
       // конкретным документом, пересчитываем validation по текущим
       // данным items + шапке. Стоимость операции — O(n) по строкам.
-      const liveValidation = validateUpdTotals({
-        totalSum: sd.totalSum != null ? Number(sd.totalSum) : null,
-        vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
-        itemsCount: null,
-        items: items.map((it) => ({
-          qty: it.qty != null ? Number(it.qty) : null,
-          price: it.price != null ? Number(it.price) : null,
-          sum: it.sum != null ? Number(it.sum) : null,
-          vatRate: it.vatRate != null ? Number(it.vatRate) : null,
-          vatSum: it.vatSum != null ? Number(it.vatSum) : null,
-        })),
-      });
+      const liveValidation = validateUpdTotals(
+        {
+          totalSum: sd.totalSum != null ? Number(sd.totalSum) : null,
+          vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
+          itemsCount: null,
+          items: items.map((it) => ({
+            qty: it.qty != null ? Number(it.qty) : null,
+            price: it.price != null ? Number(it.price) : null,
+            sum: it.sum != null ? Number(it.sum) : null,
+            vatRate: it.vatRate != null ? Number(it.vatRate) : null,
+            vatSum: it.vatSum != null ? Number(it.vatSum) : null,
+          })),
+        },
+        // Эвристика подозрения — только для распознанных документов: у XML и
+        // ручного ввода точная дробная цена ошибкой не является.
+        { detectRecognitionWarnings: sd.llmProviderId != null },
+      );
       const workHealth = await sourceDocumentWorkHealth(app, sd);
       const base = sdRow(sd, {
         supplierName: row.supplierName,
@@ -3301,17 +3306,22 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           .where(eq(sourceDocumentItems.sourceDocumentId, sd.id))
           .orderBy(sourceDocumentItems.lineNo);
         const totalSumForCheck = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
-        const validation = validateUpdTotals({
-          totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
-          vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
-          items: updatedItems.map((i) => ({
-            qty: Number(i.qty),
-            price: i.price != null ? Number(i.price) : null,
-            sum: i.sum != null ? Number(i.sum) : null,
-            vatRate: i.vatRate != null ? Number(i.vatRate) : null,
-            vatSum: i.vatSum != null ? Number(i.vatSum) : null,
-          })),
-        });
+        const validation = validateUpdTotals(
+          {
+            totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
+            vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
+            items: updatedItems.map((i) => ({
+              qty: Number(i.qty),
+              price: i.price != null ? Number(i.price) : null,
+              sum: i.sum != null ? Number(i.sum) : null,
+              vatRate: i.vatRate != null ? Number(i.vatRate) : null,
+              vatSum: i.vatSum != null ? Number(i.vatSum) : null,
+            })),
+          },
+          // Тот же признак, что и в live-пересчёте: распознанный документ —
+          // эвристика уместна, XML и ручной ввод — нет.
+          { detectRecognitionWarnings: sd.llmProviderId != null },
+        );
         upd.validation = validation;
 
         // Исход после правки считает то же правило, что и разбор

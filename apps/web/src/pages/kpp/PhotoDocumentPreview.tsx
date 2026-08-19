@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Alert, Button, Modal, Spin, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Modal, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PhotoRecognition, PhotoRecognitionItem } from '@matcheck/contracts';
+import { suspectQtyPriceSwap } from '@matcheck/contracts';
 import { api, apiDownload, ApiError } from '../../services/api';
 import { enqueueFullLoad } from '../../lib/thumbQueue';
 
@@ -376,6 +377,11 @@ function RecognitionPanel({
           dataSource={data.items}
           pagination={false}
           showSorterTooltip={false}
+          // Данные фото через серверную сверку не проходят — подозрение на
+          // перестановку количества и цены считаем здесь же, на клиенте.
+          onRow={(record) =>
+            suspectQtyPriceSwap(record) ? { style: { background: '#fffbe6' } } : {}
+          }
           columns={[
             {
               title: '№',
@@ -406,7 +412,20 @@ function RecognitionPanel({
               dataIndex: 'price',
               width: 90,
               align: 'right' as const,
-              render: (v: number | null | undefined) => (v == null ? '—' : formatMoney(v)),
+              // В подозрительной строке показываем цену как она распозналась, со
+              // всеми знаками: именно необычная точность и есть повод для
+              // предупреждения, а округление до копеек его прячет.
+              render: (v: number | null | undefined, record: PhotoRecognitionItem) => {
+                if (v == null) return '—';
+                if (!suspectQtyPriceSwap(record)) return formatMoney(v);
+                return (
+                  <Tooltip title="Похоже, количество и цена стоят не в своих колонках — сверьте с документом">
+                    <span style={{ borderBottom: '1px dashed #d48806' }}>
+                      {formatMoneyPrecise(v)}
+                    </span>
+                  </Tooltip>
+                );
+              },
             },
             {
               title: 'Сумма',
@@ -424,6 +443,15 @@ function RecognitionPanel({
 
 function formatNumber(n: number): string {
   return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 3 }).format(n);
+}
+
+/** Цена как распозналась: до четырёх знаков, как её хранит база. */
+function formatMoneyPrecise(n: number): string {
+  return new Intl.NumberFormat('ru-RU', {
+    style: 'currency',
+    currency: 'RUB',
+    maximumFractionDigits: 4,
+  }).format(n);
 }
 
 function formatMoney(n: number): string {
