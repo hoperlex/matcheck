@@ -56,6 +56,7 @@ import {
   PdfRenderError,
   PdfRenderTimeoutError,
   VisionBudgetExceededError,
+  VisionPayloadTooLargeError,
   VisionTimeoutError,
 } from './domain/edo/upd-vision.parser.js';
 import { tryParseUpdBundle } from './domain/edo/upd-bundle.parser.js';
@@ -130,7 +131,7 @@ import {
 import { loadEnv } from './lib/env.js';
 import { bundleSegments, ingestEvents, jobOutbox, recognitionEvidenceEvents } from './db/schema.js';
 import { classifyPages, type PageClassification } from './domain/edo/upd-page-prefilter.js';
-import { imageToPng, renderPdf, toClassifyThumb } from './domain/edo/page-render.js';
+import { imageToVisionPage, renderPdf, toClassifyThumb } from './domain/edo/page-render.js';
 import {
   mergeClassificationChunks,
   pageRefsOfSegment,
@@ -907,7 +908,8 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       } catch (bundleErr) {
         if (
           bundleErr instanceof VisionTimeoutError ||
-          bundleErr instanceof VisionBudgetExceededError
+          bundleErr instanceof VisionBudgetExceededError ||
+          bundleErr instanceof VisionPayloadTooLargeError
         ) {
           throw bundleErr;
         }
@@ -977,7 +979,8 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
               // без BullMQ retry. Оба класса означают, что повтор бесполезен.
               if (
                 visionErr instanceof VisionTimeoutError ||
-                visionErr instanceof VisionBudgetExceededError
+                visionErr instanceof VisionBudgetExceededError ||
+                visionErr instanceof VisionPayloadTooLargeError
               ) {
                 throw visionErr;
               }
@@ -1017,7 +1020,8 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
               } catch (bundleErr) {
                 if (
                   bundleErr instanceof VisionTimeoutError ||
-                  bundleErr instanceof VisionBudgetExceededError
+                  bundleErr instanceof VisionBudgetExceededError ||
+                  bundleErr instanceof VisionPayloadTooLargeError
                 ) {
                   throw bundleErr;
                 }
@@ -1058,7 +1062,8 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
               // понятная причина reason='vision_timeout' или 'vision_budget').
               if (
                 visionErr instanceof VisionTimeoutError ||
-                visionErr instanceof VisionBudgetExceededError
+                visionErr instanceof VisionBudgetExceededError ||
+                visionErr instanceof VisionPayloadTooLargeError
               ) {
                 throw visionErr;
               }
@@ -1194,6 +1199,36 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // из контрактного enum (vision_timeout не добавляем, чтобы не
     // менять @matcheck/contracts). UI уже умеет показывать pdf_no_text,
     // подробности — в parseErrorDetails.reason='vision_timeout'.
+    // VisionPayloadTooLargeError — fail-fast и своя ветка, а не соседняя:
+    // у ошибки размера нет elapsedMs, и причина «vision_timeout» увела бы
+    // разбор инцидента не туда. Повторять нечего — ни BullMQ-ретрай, ни новое
+    // поколение watchdog'а не уменьшают тело запроса, а каждое поколение стоит
+    // пользователю ~45 минут ожидания «в очереди».
+    if (err instanceof VisionPayloadTooLargeError) {
+      await db
+        .update(sourceDocuments)
+        .set({
+          status: 'parse_failed',
+          // Тот же контрактный код, что у соседних fail-fast веток: enum в
+          // @matcheck/contracts не расширяем, конкретика — в details.
+          parseErrorCode: 'pdf_no_text',
+          parseErrorDetails: {
+            reason: 'vision_payload_too_large',
+            actualBytes: err.actualBytes,
+            limitBytes: err.limitBytes,
+            message: err.message,
+          },
+          processedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(generationScoped(sourceDocumentId, jobGeneration));
+      log.warn(
+        { actualBytes: err.actualBytes, limitBytes: err.limitBytes },
+        'vision payload too large — marked parse_failed without retry',
+      );
+      await notifySourceDocumentUpdated(sourceDocumentId);
+      return;
+    }
     if (err instanceof VisionTimeoutError || err instanceof VisionBudgetExceededError) {
       // Оба класса означают, что повторный запуск Vision на тот же payload
       // бесполезен (per-attempt timeout 180с уже исчерпан, или total budget
@@ -3848,7 +3883,7 @@ async function loadSegmentPages(ctx: SegmentJobContext): Promise<Buffer[]> {
       });
       if (rendered[0]) pages.push(rendered[0]);
     } else {
-      pages.push(await imageToPng(buf));
+      pages.push(await imageToVisionPage(buf));
     }
   }
   if (pages.length === 0) throw new Error('сегмент: не удалось собрать ни одной страницы');
@@ -3900,7 +3935,7 @@ async function buildAssemblyPages(
     const buffer = await getObject(file.s3Key);
     const isPdf =
       (file.mimeType ?? '').toLowerCase() === 'application/pdf' || /\.pdf$/i.test(file.filename);
-    const rendered = isPdf ? await renderPdf(buffer, {}) : [await imageToPng(buffer)];
+    const rendered = isPdf ? await renderPdf(buffer, {}) : [await imageToVisionPage(buffer)];
     for (const [idx, full] of rendered.entries()) {
       if (pages.length >= maxTotalPages) {
         throw new Error(`пакет содержит больше ${maxTotalPages} страниц — сборка не запускается`);

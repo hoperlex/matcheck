@@ -26,6 +26,7 @@ import { prefilterUpdPages } from './upd-page-prefilter.js';
 import {
   MAX_PAGES_FOR_OPENROUTER,
   VisionBudgetExceededError,
+  VisionPayloadTooLargeError,
   VisionTimeoutError,
 } from './upd-vision.parser.js';
 import { extractUpdFromPages } from './upd-vision-extract.js';
@@ -177,7 +178,7 @@ export async function tryParseUpdBundle(
       .filter((b): b is Buffer => b != null);
     if (segPages.length === 0) continue;
     try {
-      const parsed = await extractUpdFromPages(segPages, {
+      const { parsed } = await extractUpdFromPages(segPages, {
         apiBaseUrl: cred.apiBaseUrl,
         apiKey,
         model: provider.model,
@@ -187,8 +188,14 @@ export async function tryParseUpdBundle(
       });
       subdocs.push({ ...parsed, pages: seg.pages, segmentIndex: seg.segmentIndex });
     } catch (err) {
-      // Таймаут/бюджет — fail-fast (как в одиночном vision).
-      if (err instanceof VisionTimeoutError || err instanceof VisionBudgetExceededError) {
+      // Таймаут/бюджет/размер — fail-fast (как в одиночном vision). Размер тут
+      // особенно важен: пропустить его как «ошибку одной группы» значит молча
+      // отдать агрегат без части документов.
+      if (
+        err instanceof VisionTimeoutError ||
+        err instanceof VisionBudgetExceededError ||
+        err instanceof VisionPayloadTooLargeError
+      ) {
         throw err;
       }
       // Прочая ошибка одной группы — пропускаем её, агрегируем остальные.

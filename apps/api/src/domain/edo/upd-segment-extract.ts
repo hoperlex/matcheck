@@ -121,10 +121,11 @@ export async function extractUpdSegment(
   const runOneAttempt = async (attempt: number): Promise<SegmentExtractResult> => {
     const startedAt = Date.now();
     let parsed: UpdPdfParsed | null = null;
+    let payloadFit: { quality: number; scale: number; bytes: number } | undefined;
     let errorCode: string | null = null;
     let errorMessage: string | null = null;
     try {
-      parsed = await extractUpdFromPages(pages, {
+      const extracted = await extractUpdFromPages(pages, {
         apiBaseUrl: cred.apiBaseUrl,
         apiKey,
         model: provider.model,
@@ -132,6 +133,8 @@ export async function extractUpdSegment(
         maxTokens: provider.maxTokens ?? 8192,
         promptText,
       });
+      parsed = extracted.parsed;
+      payloadFit = extracted.payloadFit;
       return { parsed, llmProviderId: provider.id };
     } catch (err) {
       errorCode = 'segment_extract_failed';
@@ -153,7 +156,14 @@ export async function extractUpdSegment(
               role: 'user',
               content:
                 `[segment bundle=${ctx.bundleId} index=${ctx.segmentIndex} ` +
-                `pages=${pages.length} attempt=${attempt}]\n${promptText.slice(0, 4000)}`,
+                `pages=${pages.length} attempt=${attempt}` +
+                // Подгонка под потолок размера — просадка качества, и она
+                // должна быть видна в админке: иначе «модель вдруг стала хуже
+                // читать цифры» не с чем связать.
+                (payloadFit
+                  ? ` fit=jpeg:q${payloadFit.quality}:x${payloadFit.scale}:${payloadFit.bytes}b`
+                  : '') +
+                `]\n${promptText.slice(0, 4000)}`,
             },
           ],
           responseParsed: parsed as unknown as object | null,

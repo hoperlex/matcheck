@@ -143,7 +143,7 @@ async function main(): Promise<void> {
       continue;
     }
     try {
-      const parsed = await extractUpdFromPages(segPages, {
+      const { parsed } = await extractUpdFromPages(segPages, {
         apiBaseUrl: cred.apiBaseUrl,
         apiKey,
         model: provider.model,

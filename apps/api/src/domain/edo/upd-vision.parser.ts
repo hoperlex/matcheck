@@ -32,7 +32,7 @@ import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { resolvePrompt, type PromptOverride } from '../prompts/registry.js';
 import { computePdfRenderDpi } from './pdf-render-dpi.js';
 import { prefilterUpdPages, type PrefilterResult } from './upd-page-prefilter.js';
-import { imageToPng, isHeicBuffer } from './page-render.js';
+import { imageToPng, isHeicBuffer, recodePageToJpeg } from './page-render.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
 import type { ParsePdfResult } from './upd-pdf.parser.js';
 
@@ -44,6 +44,52 @@ import type { ParsePdfResult } from './upd-pdf.parser.js';
 // Экспорт для регрессионных тестов; в коде parseUpdVision используется
 // напрямую — поведение не меняется.
 export const MAX_PAGES_FOR_OPENROUTER = 5;
+
+// Потолок на ИТОГОВОЕ тело запроса к OpenRouter — не на исходные байты
+// картинок: base64 раздувает их на треть, а сверху ложатся промпт, JSON-схема
+// и служебные поля. Ограничивать что-либо кроме сериализованного тела
+// бессмысленно — 413 приходит именно на него.
+//
+// Числа провайдер не публикует, поэтому потолок эмпирический и выбран между
+// двумя наблюдениями на бою: запросы до ~5 МБ проходят (одиночное фото 3.35 МБ
+// → base64 4.5 МБ; пять страниц PDF при 150 DPI ≈ 2 МБ), а страница-фотография
+// в PNG полного разрешения (~15 МБ base64) получает 413. Всё, что распознаётся
+// сегодня, остаётся ниже потолка и не трогается подгонкой.
+export const VISION_REQUEST_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Тело запроса не влезает в потолок даже после подгонки — либо провайдер
+ * ответил 413 на то, что мы считали допустимым.
+ *
+ * Отдельный класс, потому что worker обязан пометить документ parse_failed
+ * СРАЗУ: ни BullMQ-ретрай, ни поколения watchdog'а размер не уменьшают, а
+ * каждое поколение стоит ~45 минут ожидания для пользователя.
+ */
+export class VisionPayloadTooLargeError extends Error {
+  constructor(
+    public readonly actualBytes: number,
+    public readonly limitBytes: number,
+  ) {
+    super(
+      `Файл слишком большой для распознавания: запрос к модели весит ` +
+        `${Math.round(actualBytes / 1024 / 1024)} МБ при пределе ` +
+        `${Math.round(limitBytes / 1024 / 1024)} МБ. ` +
+        'Загрузите страницы отдельными снимками меньшего размера.',
+    );
+    this.name = 'VisionPayloadTooLargeError';
+  }
+}
+
+// Ступени подгонки: сначала жертвуем сжатием, потом разрешением. Каждая ступень
+// применяется к ИСХОДНЫМ страницам, а не к результату предыдущей — иначе
+// артефакты JPEG накладывались бы друг на друга и цифры в таблице позиций
+// «поплыли» бы раньше, чем тело влезет в потолок.
+const PAYLOAD_FIT_STEPS: ReadonlyArray<{ quality: number; scale: number }> = [
+  { quality: 90, scale: 1 },
+  { quality: 85, scale: 1 },
+  { quality: 85, scale: 0.75 },
+  { quality: 85, scale: 0.5 },
+];
 
 // DPI рендера PDF в PNG через pdftoppm — теперь адаптивный.
 // Для типовой A4 (8.27×11.69 inch) computePdfRenderDpi даёт 150 — то же
@@ -673,6 +719,12 @@ export type VisionCallResult = {
   raw: string;
   promptTokens: number | null;
   completionTokens: number | null;
+  /**
+   * Заполнено, только если тело пришлось ужимать под потолок размера. Нужно
+   * вызывающему для журнала llm_calls: иначе просадка качества распознавания
+   * выглядела бы беспричинной.
+   */
+  payloadFit?: { quality: number; scale: number; bytes: number };
 };
 
 export async function callGemini(args: GeminiCallArgs): Promise<VisionCallResult> {
@@ -724,14 +776,23 @@ export async function callGemini(args: GeminiCallArgs): Promise<VisionCallResult
   };
 }
 
-export async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCallResult> {
+/**
+ * Сериализованное тело запроса под заданный набор картинок.
+ *
+ * Строка возвращается наружу и уходит в fetch как есть: мерить одно, а
+ * отправлять другое — верный способ получить 413 на «проверенном» запросе.
+ */
+function serializeOpenRouterBody(
+  args: OpenRouterCallArgs,
+  files: ReadonlyArray<{ buffer: Buffer; mimeType: string }>,
+): { raw: string; bytes: number } {
   const content: Array<
     { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
   > = [];
   // Все картинки одним массивом — для многостраничного PDF (после
   // конвертации) это все страницы сразу, OpenRouter Vision API
   // поддерживает несколько image_url в одном messages[i].content.
-  for (const f of args.files) {
+  for (const f of files) {
     const dataUrl = `data:${f.mimeType};base64,${f.buffer.toString('base64')}`;
     content.push({ type: 'image_url', image_url: { url: dataUrl } });
   }
@@ -744,6 +805,50 @@ export async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCa
     max_tokens: args.maxTokens,
     response_format: { type: 'json_object' as const },
   };
+  const raw = JSON.stringify(body);
+  return { raw, bytes: Buffer.byteLength(raw, 'utf8') };
+}
+
+/**
+ * Тело запроса, гарантированно укладывающееся в VISION_REQUEST_MAX_BYTES.
+ *
+ * Инвариант на выходе: `bytes <= VISION_REQUEST_MAX_BYTES`. Если ни одна
+ * ступень подгонки его не обеспечила — бросаем VisionPayloadTooLargeError и НЕ
+ * отправляем заведомо отказной запрос: сеть, время и деньги на нём тратить
+ * незачем, а пользователю нужна причина, а не «повторите позже».
+ */
+async function fitOpenRouterBody(
+  args: OpenRouterCallArgs,
+): Promise<{ raw: string; bytes: number; fit: { quality: number; scale: number } | null }> {
+  let attempt = serializeOpenRouterBody(args, args.files);
+  if (attempt.bytes <= VISION_REQUEST_MAX_BYTES) return { ...attempt, fit: null };
+
+  for (const step of PAYLOAD_FIT_STEPS) {
+    const recoded: { buffer: Buffer; mimeType: string }[] = [];
+    // Последовательно, а не Promise.all: воркер живёт под mem_limit 700m, и
+    // держать в памяти пять распакованных страниц разом незачем.
+    for (const f of args.files) {
+      // PDF и прочее не-изображение перекодировать нечем — оставляем как есть.
+      if (!f.mimeType.startsWith('image/')) {
+        recoded.push(f);
+        continue;
+      }
+      recoded.push({
+        buffer: await recodePageToJpeg(f.buffer, step),
+        // MIME обязан ехать вместе с байтами: ниже из него строится data URL,
+        // и JPEG, объявленный как image/png, модель просто не прочитает.
+        mimeType: 'image/jpeg',
+      });
+    }
+    attempt = serializeOpenRouterBody(args, recoded);
+    if (attempt.bytes <= VISION_REQUEST_MAX_BYTES) return { ...attempt, fit: step };
+  }
+
+  throw new VisionPayloadTooLargeError(attempt.bytes, VISION_REQUEST_MAX_BYTES);
+}
+
+export async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCallResult> {
+  const { raw: requestBody, bytes: requestBytes, fit } = await fitOpenRouterBody(args);
 
   const url = `${args.apiBaseUrl.replace(/\/$/, '')}/chat/completions`;
   const startMs = Date.now();
@@ -757,11 +862,18 @@ export async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCa
         'HTTP-Referer': 'https://matcheck.local',
         'X-Title': 'matcheck',
       },
-      body: JSON.stringify(body),
+      body: requestBody,
       signal: AbortSignal.timeout(VISION_ATTEMPT_TIMEOUT_MS),
     });
   } catch (err) {
     rethrowVisionTimeout(err, startMs);
+  }
+  if (res.status === 413) {
+    // Наш потолок оказался выше реального лимита провайдера. Ретраить нечего:
+    // тот же payload получит тот же ответ, — отдаём fail-fast с фактическим
+    // размером, по нему и правится VISION_REQUEST_MAX_BYTES.
+    await res.text().catch(() => '');
+    throw new VisionPayloadTooLargeError(requestBytes, VISION_REQUEST_MAX_BYTES);
   }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -775,6 +887,7 @@ export async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCa
     raw: json.choices?.[0]?.message?.content ?? '',
     promptTokens: json.usage?.prompt_tokens ?? null,
     completionTokens: json.usage?.completion_tokens ?? null,
+    ...(fit ? { payloadFit: { ...fit, bytes: requestBytes } } : {}),
   };
 }
 

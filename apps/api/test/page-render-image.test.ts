@@ -6,7 +6,14 @@
 // разваливается.
 import { describe, expect, it } from 'vitest';
 import { Jimp } from 'jimp';
-import { imageToPng, readJpegOrientation, toClassifyThumb } from '../src/domain/edo/page-render.js';
+import {
+  imageToPng,
+  imageToVisionPage,
+  readJpegOrientation,
+  recodePageToJpeg,
+  toClassifyThumb,
+} from '../src/domain/edo/page-render.js';
+import { PDF_RENDER_CONSTANTS } from '../src/domain/edo/pdf-render-dpi.js';
 
 /** JPEG заданного размера. Без EXIF — jimp его не пишет. */
 async function makeJpeg(width: number, height: number): Promise<Buffer> {
@@ -89,6 +96,68 @@ describe('imageToPng', () => {
   it('снимок без EXIF проходит без изменения размеров', async () => {
     const img = await Jimp.read(await imageToPng(await makeJpeg(20, 10)));
     expect([img.bitmap.width, img.bitmap.height]).toEqual([20, 10]);
+  });
+});
+
+describe('imageToVisionPage', () => {
+  const CAP = PDF_RENDER_CONSTANTS.TARGET_LONG_EDGE_PX;
+
+  it('кадр меньше потолка не трогается вовсе', async () => {
+    // Гарантия отсутствия регрессии: всё, что распознаётся сегодня, доезжает
+    // до модели тем же кадром, что и раньше. Сравниваем не только размеры, но
+    // и байты с imageToPng — путь подготовки страницы обязан совпасть.
+    const jpeg = await makeJpeg(1200, 800);
+    const capped = await imageToVisionPage(jpeg);
+    expect(capped.equals(await imageToPng(jpeg))).toBe(true);
+
+    const img = await Jimp.read(capped);
+    expect([img.bitmap.width, img.bitmap.height]).toEqual([1200, 800]);
+  });
+
+  it('портретный кадр выше потолка ужимается по высоте с сохранением пропорций', async () => {
+    const tall = (await new Jimp({ width: 1500, height: 3000, color: 0xff0000ff }).getBuffer(
+      'image/png',
+    )) as Buffer;
+    const img = await Jimp.read(await imageToVisionPage(tall));
+    expect(img.bitmap.height).toBe(CAP);
+    expect(img.bitmap.width).toBe(CAP / 2);
+  });
+
+  it('альбомный кадр выше потолка ужимается по ширине с сохранением пропорций', async () => {
+    const wide = (await new Jimp({ width: 4000, height: 2000, color: 0xff0000ff }).getBuffer(
+      'image/png',
+    )) as Buffer;
+    const img = await Jimp.read(await imageToVisionPage(wide));
+    expect(img.bitmap.width).toBe(CAP);
+    expect(img.bitmap.height).toBe(CAP / 2);
+  });
+
+  it('отдаёт PNG и выпрямляет снимок «боком»', async () => {
+    const jpeg = withOrientation(await makeJpeg(20, 10), 6);
+    const out = await imageToVisionPage(jpeg);
+    expect(out.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+    const img = await Jimp.read(out);
+    expect([img.bitmap.width, img.bitmap.height]).toEqual([10, 20]);
+  });
+});
+
+describe('recodePageToJpeg', () => {
+  it('отдаёт JPEG и уменьшает кадр по scale', async () => {
+    const png = (await new Jimp({ width: 800, height: 400, color: 0x00ff00ff }).getBuffer(
+      'image/png',
+    )) as Buffer;
+    const out = await recodePageToJpeg(png, { quality: 85, scale: 0.5 });
+    expect(out.subarray(0, 3).toString('hex')).toBe('ffd8ff');
+    const img = await Jimp.read(out);
+    expect([img.bitmap.width, img.bitmap.height]).toEqual([400, 200]);
+  });
+
+  it('без scale размер кадра не меняется', async () => {
+    const png = (await new Jimp({ width: 300, height: 200, color: 0x00ff00ff }).getBuffer(
+      'image/png',
+    )) as Buffer;
+    const img = await Jimp.read(await recodePageToJpeg(png, { quality: 90 }));
+    expect([img.bitmap.width, img.bitmap.height]).toEqual([300, 200]);
   });
 });
 

@@ -22,6 +22,7 @@ import { describe, it, expect } from 'vitest';
  *   --------------------------+--------------+-----------------------+--------
  *   VisionTimeoutError        | outer catch  | vision_timeout        | НЕТ
  *   VisionBudgetExceededError | outer catch  | vision_budget         | НЕТ
+ *   VisionPayloadTooLargeError| outer catch  | vision_payload_too_large | НЕТ
  *   PdfRenderTimeoutError     | outer catch  | pdf_render_timeout    | НЕТ
  *   PdfRenderError            | outer catch  | pdf_render_error      | НЕТ
  *   XlsConvertError           | outer catch  | xls_convert_failed    | НЕТ
@@ -52,6 +53,23 @@ describe('worker.ts fail-fast обработка известных ошибок
   it('VisionBudgetExceededError → vision_budget, без retry', () => {
     expect(workerSource).toMatch(/err instanceof VisionBudgetExceededError/);
     expect(workerSource).toMatch(/reason:.*'vision_budget'/);
+  });
+
+  it('VisionPayloadTooLargeError → vision_payload_too_large, СВОЕЙ веткой', () => {
+    expect(workerSource).toMatch(/err instanceof VisionPayloadTooLargeError/);
+    expect(workerSource).toMatch(/reason:.*'vision_payload_too_large'/);
+    // Ветка обязана быть отдельной, а не приклеенной к таймауту через `||`:
+    // у ошибки размера нет elapsedMs, и общая ветка записала бы документу
+    // чужую причину «vision_timeout» плюс undefined вместо длительности.
+    expect(workerSource).not.toMatch(
+      /err instanceof Vision(Timeout|BudgetExceeded)Error\s*\|\|\s*err instanceof VisionPayloadTooLargeError/,
+    );
+    expect(workerSource).not.toMatch(
+      /err instanceof VisionPayloadTooLargeError\s*\|\|\s*err instanceof Vision(Timeout|BudgetExceeded)Error/,
+    );
+    // Размеры — в подробностях: по ним правится потолок VISION_REQUEST_MAX_BYTES.
+    expect(workerSource).toMatch(/actualBytes: err\.actualBytes/);
+    expect(workerSource).toMatch(/limitBytes: err\.limitBytes/);
   });
 
   it('PdfRenderTimeoutError / PdfRenderError → pdf_render_*', () => {

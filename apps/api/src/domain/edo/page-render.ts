@@ -18,7 +18,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Jimp } from 'jimp';
-import { computePdfRenderDpi } from './pdf-render-dpi.js';
+import { computePdfRenderDpi, PDF_RENDER_CONSTANTS } from './pdf-render-dpi.js';
 
 // DPI для миниатюр под классификацию страниц. Низкий — классификатору
 // (upd / сертификат / накладная) не нужно высокое разрешение, а токены и
@@ -269,6 +269,63 @@ async function decodeViaTool(
  * Orientation при декодировании JPEG.
  */
 export async function imageToPng(buf: Buffer): Promise<Buffer> {
+  const img = await decodeImage(buf);
+  return (await img.getBuffer('image/png')) as Buffer;
+}
+
+/**
+ * Страница для vision — то же, что imageToPng, но с потолком разрешения.
+ *
+ * Фотография с телефона это 12 Мп, и в PNG она разворачивается в 10-25 МБ:
+ * base64 такой страницы не влезает в тело запроса, OpenRouter отвечает
+ * 413 Request Entity Too Large, а документ навсегда остаётся «в очереди».
+ * Ровно от этого уже защищён PDF-путь — computePdfRenderDpi подбирает DPI под
+ * TARGET_LONG_EDGE_PX; здесь тот же потолок и то же число, чтобы два пути не
+ * разъезжались.
+ *
+ * Кадры мельче потолка не трогаются вовсе: всё, что распознаётся сегодня,
+ * доходит до модели в прежнем виде.
+ */
+export async function imageToVisionPage(buf: Buffer): Promise<Buffer> {
+  const img = await decodeImage(buf);
+  const longEdge = Math.max(img.bitmap.width, img.bitmap.height);
+  if (longEdge > PDF_RENDER_CONSTANTS.TARGET_LONG_EDGE_PX) {
+    // Пропорции считает сам Jimp: задаём только ту сторону, что длиннее.
+    img.resize(
+      img.bitmap.width >= img.bitmap.height
+        ? { w: PDF_RENDER_CONSTANTS.TARGET_LONG_EDGE_PX }
+        : { h: PDF_RENDER_CONSTANTS.TARGET_LONG_EDGE_PX },
+    );
+  }
+  return (await img.getBuffer('image/png')) as Buffer;
+}
+
+/**
+ * Перекодирование готовой страницы в JPEG — последняя ступень подгонки тела
+ * запроса к vision-провайдеру.
+ *
+ * Применяется только когда кадр уже ужат до потолка разрешения, а тело всё
+ * равно не влезает: PNG у фотографии сжимается плохо, и JPEG той же страницы
+ * меньше в разы. Качество и масштаб задаёт вызывающий — он же знает, сколько
+ * ещё надо срезать.
+ */
+export async function recodePageToJpeg(
+  page: Buffer,
+  opts: { quality: number; scale?: number },
+): Promise<Buffer> {
+  const img = await Jimp.read(page);
+  const scale = opts.scale ?? 1;
+  if (scale < 1) {
+    img.resize({ w: Math.max(1, Math.round(img.bitmap.width * scale)) });
+  }
+  return (await img.getBuffer('image/jpeg', { quality: opts.quality })) as Buffer;
+}
+
+/**
+ * Общий декод для обеих функций выше: внешний конвертер для webp/heic,
+ * Jimp для остального, проверка предела пикселей.
+ */
+async function decodeImage(buf: Buffer) {
   const kind = sniffImageKind(buf);
   // Внешний конвертер отдаёт готовый PNG, но прогон через Jimp обязателен:
   // он нормализует результат так же, как для остальных форматов, и заодно
@@ -282,7 +339,7 @@ export async function imageToPng(buf: Buffer): Promise<Buffer> {
       `картинка ${img.bitmap.width}×${img.bitmap.height} превышает предел ${MAX_DECODED_PIXELS} пикселей`,
     );
   }
-  return (await img.getBuffer('image/png')) as Buffer;
+  return img;
 }
 
 /**

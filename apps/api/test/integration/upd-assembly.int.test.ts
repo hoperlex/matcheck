@@ -96,6 +96,10 @@ vi.mock('../../src/domain/edo/page-render.js', async (importOriginal) => {
     ...actual,
     renderPdf: vi.fn().mockResolvedValue([Buffer.from('page-1')]),
     imageToPng: vi.fn().mockResolvedValue(Buffer.from('png')),
+    // Сборка готовит страницы через imageToVisionPage (тот же PNG, но с
+    // потолком разрешения). Без подмены сюда приехал бы настоящий Jimp и
+    // споткнулся о Buffer.from('png').
+    imageToVisionPage: vi.fn().mockResolvedValue(Buffer.from('png')),
     toClassifyThumb: vi.fn().mockResolvedValue(Buffer.from('thumb')),
   };
 });
@@ -106,8 +110,9 @@ vi.mock('../../src/domain/edo/upd-segment-extract.js', async (importOriginal) =>
   return { ...actual, extractUpdSegment: (...args: unknown[]) => extractUpdSegment(...args) };
 });
 
-const { handleDocumentRouterJob, handleUpdAssemblyJob, handleJob } =
+const { handleDocumentRouterJob, handleUpdAssemblyJob, handleJob, tryFinalizeUpdAssembly } =
   await import('../../src/worker.js');
+const { VisionPayloadTooLargeError } = await import('../../src/domain/edo/upd-vision.parser.js');
 const { encryptField, buildAad } = await import('../../src/domain/auth/crypto.js');
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never;
@@ -688,6 +693,58 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
     const [root] = await db<{ published_generation: number | null }[]>`
       SELECT published_generation FROM source_bundles WHERE id = ${bundleId}`;
     expect(root!.published_generation).toBeNull();
+  });
+
+  it('слишком большой запрос к модели валит сегмент сразу, а комплект откатывается', async () => {
+    // Инцидент 20.08: фото 3.3 МБ в сегментном пути раздувалось в PNG, тело
+    // запроса не влезало, OpenRouter отвечал 413. Ошибка не транзиентная,
+    // поэтому ни BullMQ-ретраи, ни поколения watchdog'а её не лечат — документ
+    // висел «в очереди» часами. Проверяем обратное: разбор заканчивается
+    // терминально с первой попытки, а комплект не остаётся недособранным.
+    const bundleId = await publicBundle(['1.jpg', '2.jpg']);
+    pagesAre('upd_main', 'upd_main');
+    extractUpdSegment
+      .mockResolvedValueOnce(updResult('444', 'Уголок'))
+      .mockRejectedValueOnce(new VisionPayloadTooLargeError(20 * 1024 * 1024, 8 * 1024 * 1024));
+
+    await handleDocumentRouterJob(bundleId, log);
+    const [sub] = await db<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE parent_bundle_id = ${bundleId}`;
+    await handleUpdAssemblyJob(sub!.id, 0, log);
+    const segs = await segmentsOf(bundleId);
+    const brokenDocId = segs[1]!.source_document_id!;
+
+    // Ошибка размера обрабатывается внутри handleJob: наружу она не выходит и
+    // задание не уезжает на второй круг очереди.
+    await expect(runSegmentJobs(bundleId)).resolves.toBeUndefined();
+
+    const [broken] = await db<
+      {
+        status: string;
+        parse_error_code: string | null;
+        parse_error_details: { reason?: string; actualBytes?: number; limitBytes?: number } | null;
+      }[]
+    >`SELECT status, parse_error_code, parse_error_details
+        FROM source_documents WHERE id = ${brokenDocId}`;
+    expect(broken!.status).toBe('parse_failed');
+    expect(broken!.parse_error_details).toMatchObject({
+      reason: 'vision_payload_too_large',
+      actualBytes: 20 * 1024 * 1024,
+      limitBytes: 8 * 1024 * 1024,
+    });
+
+    // В бою финализатор после каждого задания зовёт внешний finally воркера
+    // (см. worker.ts, обработчик очереди) — здесь повторяем этот вызов.
+    await tryFinalizeUpdAssembly(bundleId, 0, log);
+
+    // Комплект откатился на «файл = документ»: оба снимка снова видимы и ждут
+    // разбора поодиночке, а не растворились вместе со сборкой.
+    const real = (await docsOf()).filter((d) => !d.is_technical);
+    expect(real).toHaveLength(2);
+    expect(await segmentsOf(bundleId)).toHaveLength(0);
+    const [root] = await db<{ assembly_version: string; published_generation: number | null }[]>`
+      SELECT assembly_version, published_generation FROM source_bundles WHERE id = ${bundleId}`;
+    expect(root).toMatchObject({ assembly_version: 'legacy', published_generation: null });
   });
 
   it('реестр закрывается только после публикации', async () => {

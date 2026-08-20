@@ -77,7 +77,7 @@ describe('extractUpdSegment — источник промпта', () => {
     extractUpdFromPages.mockReset();
     insertValues.mockReset();
     insertValues.mockResolvedValue(undefined);
-    extractUpdFromPages.mockResolvedValue(PARSED);
+    extractUpdFromPages.mockResolvedValue({ parsed: PARSED });
   });
 
   it('без override: промпт берётся из БД, температура — провайдера', async () => {

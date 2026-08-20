@@ -29,10 +29,16 @@ export type ExtractUpdOpts = {
  * Извлекает один УПД из PNG-страниц через OpenRouter Vision (image-путь).
  * Бросает при пустом ответе / невалидном JSON / провале Zod-валидации.
  */
+export type ExtractUpdResult = {
+  parsed: UpdPdfParsed;
+  /** Заполнено, если тело запроса пришлось ужимать под потолок размера. */
+  payloadFit?: { quality: number; scale: number; bytes: number };
+};
+
 export async function extractUpdFromPages(
   pages: Buffer[],
   opts: ExtractUpdOpts,
-): Promise<UpdPdfParsed> {
+): Promise<ExtractUpdResult> {
   if (pages.length === 0) throw new Error('extractUpdFromPages: нет страниц для извлечения');
 
   const result = await callOpenRouter({
@@ -42,6 +48,9 @@ export async function extractUpdFromPages(
     temperature: opts.temperature ?? 0.2,
     maxTokens: opts.maxTokens ?? 8192,
     promptText: opts.promptText,
+    // На входе здесь всегда PNG. Если тело не влезет в потолок размера,
+    // callOpenRouter сам перекодирует страницы в JPEG и сменит MIME — здесь
+    // угадывать нечего.
     files: pages.map((png) => ({ buffer: png, mimeType: 'image/png' })),
   });
 
@@ -58,5 +67,8 @@ export async function extractUpdFromPages(
   // Та же страховка от array-обёртки, что в parseUpdVision.
   if (Array.isArray(jsonParsed) && jsonParsed.length === 1) jsonParsed = jsonParsed[0];
 
-  return UpdPdfParsedSchema.parse(jsonParsed);
+  return {
+    parsed: UpdPdfParsedSchema.parse(jsonParsed),
+    ...(result.payloadFit ? { payloadFit: result.payloadFit } : {}),
+  };
 }
