@@ -27,15 +27,10 @@
  *   pnpm --filter @matcheck/api exec tsx scripts/repair-merged-upd.ts --limit 5
  *   pnpm --filter @matcheck/api exec tsx scripts/repair-merged-upd.ts --apply
  */
-import { and, eq, inArray, sql as drSql } from 'drizzle-orm';
+import { eq, inArray, sql as drSql } from 'drizzle-orm';
 import { db, sql } from '../src/db/client.js';
-import {
-  bundleSegments,
-  deliverySources,
-  shipmentSources,
-  sourceDocumentItems,
-  sourceDocuments,
-} from '../src/db/schema.js';
+import { bundleSegments, sourceDocumentItems, sourceDocuments } from '../src/db/schema.js';
+import { operationTrace } from '../src/domain/sourceDocuments/operation-trace.js';
 import { dedupeAssemblyItems } from '../src/domain/edo/upd-assembly-merge.js';
 import { validateUpdTotals } from '../src/domain/edo/upd-validation.js';
 import { deriveUpdParseOutcome } from '../src/domain/edo/upd-outcome.js';
@@ -129,15 +124,11 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const linked = await db
-      .select({ n: drSql<number>`count(*)::int` })
-      .from(deliverySources)
-      .where(eq(deliverySources.sourceDocumentId, keeperId));
-    const linkedShipments = await db
-      .select({ n: drSql<number>`count(*)::int` })
-      .from(shipmentSources)
-      .where(eq(shipmentSources.sourceDocumentId, keeperId));
-    const isLinked = (linked[0]?.n ?? 0) > 0 || (linkedShipments[0]?.n ?? 0) > 0;
+    const trace = await operationTrace(
+      db,
+      keeperId,
+      items.map((i) => i.id),
+    );
 
     console.log(`  ${keeper.docNumber ?? '(без номера)'} · ${keeperId}`);
     console.log(
@@ -145,8 +136,8 @@ async function main(): Promise<void> {
         (drop.length ? ` (убираем ${drop.map((d) => d.nameRaw).join(', ')})` : ''),
     );
     console.log(`    итог: ${keeper.totalSum ?? '—'} → ${declaredTotal ?? keeper.totalSum ?? '—'}`);
-    if (isLinked) {
-      console.log('    ПРОПУСК: документ уже привязан к приёмке или отгрузке — правит человек');
+    if (trace) {
+      console.log(`    ПРОПУСК: ${trace} — правит человек`);
       skipped++;
       console.log();
       continue;
@@ -167,12 +158,15 @@ async function main(): Promise<void> {
         .where(eq(sourceDocuments.id, keeperId))
         .for('update');
       if (!locked) return;
-      const [stillFree] = await tx
-        .select({ n: drSql<number>`count(*)::int` })
-        .from(deliverySources)
-        .where(eq(deliverySources.sourceDocumentId, keeperId));
-      if ((stillFree?.n ?? 0) > 0) {
-        console.log('    ПРОПУСК: приёмка появилась между отчётом и записью');
+      // Между отчётом и записью приёмку могли создать или отвязать — тот же
+      // код проверки, но уже под блокировкой документа.
+      const traceNow = await operationTrace(
+        tx,
+        keeperId,
+        items.map((i) => i.id),
+      );
+      if (traceNow) {
+        console.log(`    ПРОПУСК: ${traceNow} (появилось между отчётом и записью)`);
         return;
       }
 
