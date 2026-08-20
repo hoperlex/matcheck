@@ -770,6 +770,10 @@ export const sourceDocuments = pgTable(
     // Нужен повтору: он обязан пойти ТЕМ ЖЕ путём, иначе М-15 уедет на
     // УПД-промпт, а логический УПД из комплекта фото — на разбор всего файла.
     parseMode: text('parse_mode'),
+    // Каким промптом разобрана накладная: 'transport_waybill_1t' либо NULL —
+    // активным промптом ТН-2116/ОС-2. Повторный разбор обязан идти тем же
+    // промптом, иначе выберет «свой» документ по batch_index из чужого набора.
+    waybillPromptKind: text('waybill_prompt_kind'),
     // Позиция документа в пакете накладных (индекс в parsed.documents у
     // parseWaybillBatch). Постоянная привязка результата повтора к строке:
     // сопоставление по номеру не годится там, где номер и распознан неверно —
@@ -1182,6 +1186,12 @@ export const sourceDocumentItems = pgTable('source_document_items', {
   vatSum: numeric('vat_sum', { precision: 18, scale: 2 }),
   expectedDate: timestamp('expected_date', { mode: 'date' }),
   lineNo: integer('line_no').notNull(),
+  // Номер позиции, НАПЕЧАТАННЫЙ в бланке (графа 1), в отличие от line_no —
+  // порядка строки у нас. По нему склейка отличает два экземпляра одной УПД
+  // (номера повторяются) от двух её частей (номера продолжаются), а валидатор
+  // видит задвоенную или потерянную строку. NULL — у строк до миграции 0115 и
+  // у подпозиций «1а», которые числом не выражаются.
+  rowNo: integer('row_no'),
   volumeM3: numeric('volume_m3', { precision: 10, scale: 4 }),
   massKg: numeric('mass_kg', { precision: 10, scale: 3 }),
   volumeConfidence: text('volume_confidence'),

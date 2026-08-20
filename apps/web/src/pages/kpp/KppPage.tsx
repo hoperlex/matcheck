@@ -81,6 +81,7 @@ import {
 } from '../../shared/utils/formatRu';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
+import { operationsListQuery, readOperationsFilters } from '../operations/operationsQuery';
 
 type DraftItem = {
   clientKey: string;
@@ -133,8 +134,7 @@ function computeVatSum(it: {
 
 type ListTab = 'expected' | 'accepted';
 
-const trimQty = (s: string) =>
-  s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
+const trimQty = (s: string) => (s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
 
 function formatMolDate(iso: string | null): string {
   if (!iso) return '—';
@@ -158,17 +158,9 @@ function newKey(): string {
  * Компактный inline-label для полей шапки. Мелкий шрифт, серый цвет —
  * заметен, но не съедает место как antd Form.Item label или Card title.
  */
-function FieldLabel({
-  children,
-  required,
-}: {
-  children: React.ReactNode;
-  required?: boolean;
-}) {
+function FieldLabel({ children, required }: { children: React.ReactNode; required?: boolean }) {
   return (
-    <Typography.Text
-      style={{ fontSize: 11, color: '#8c8c8c', display: 'block', marginBottom: 2 }}
-    >
+    <Typography.Text style={{ fontSize: 11, color: '#8c8c8c', display: 'block', marginBottom: 2 }}>
       {children}
       {required && <span style={{ color: '#ff4d4f' }}> *</span>}
     </Typography.Text>
@@ -444,10 +436,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     queryFn: async (): Promise<GalleryPhoto[]> => {
       if (!deliveryId) return [];
       const dbi = await db();
-      const all = await dbi
-        .transaction('photos')
-        .store.index('byDelivery')
-        .getAll(deliveryId);
+      const all = await dbi.transaction('photos').store.index('byDelivery').getAll(deliveryId);
       return all
         .filter((p) => p.operationKind === 'delivery')
         .map((p) => ({
@@ -683,9 +672,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           if (outcome.ok) {
             message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
           } else {
-            message.error(
-              'Фото сохранено в браузере, но не отправлено — повторим автоматически',
-            );
+            message.error('Фото сохранено в браузере, но не отправлено — повторим автоматически');
           }
         });
         void runSync();
@@ -704,8 +691,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // (например, «машина уже уехала»), не дожидаясь подписи МОЛ. В not_filled
   // (1 Этап ещё не сдан) кнопка остаётся заблокированной.
   const stage2Enabled =
-    loadedDelivery?.status.code === 'filled' ||
-    loadedDelivery?.status.code === 'confirmed_mol';
+    loadedDelivery?.status.code === 'filled' || loadedDelivery?.status.code === 'confirmed_mol';
 
   const updateField = (key: string, patch: Partial<DraftItem>) => {
     setItems((prev) => prev.map((it) => (it.clientKey === key ? { ...it, ...patch } : it)));
@@ -758,9 +744,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     // state, save отправил бы устаревший текст.
     const serverComment = loadedDelivery.comment ?? '';
     const serverParsed = parseDeliveryComment(serverComment);
-    const effectiveComment = serverParsed.hasStructure
-      ? serverComment || null
-      : (comment || null);
+    const effectiveComment = serverParsed.hasStructure ? serverComment || null : comment || null;
     return {
       status: nextStatus,
       siteId: siteId ?? loadedDelivery.siteId,
@@ -770,9 +754,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       vehiclePlate: plate || null,
       arrivedAt: loadedDelivery.arrivedAt ?? new Date().toISOString(),
       comment: effectiveComment,
-      sourceDocumentIds: selectedUpd
-        ? [selectedUpd.id]
-        : loadedDelivery.sourceDocumentIds,
+      sourceDocumentIds: selectedUpd ? [selectedUpd.id] : loadedDelivery.sourceDocumentIds,
       items: items
         .filter((i) => i.nameRaw.trim().length > 0)
         .map((i) => {
@@ -836,11 +818,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       // но локальный optimistic-state должен совпадать.
       const currentCode = loadedDelivery.status.code as DeliveryStatusCode;
       const nextCode: DeliveryStatusCode =
-        currentCode === 'confirmed_mol'
-          ? 'confirmed_mol'
-          : selectedUpd
-            ? 'filled'
-            : 'not_filled';
+        currentCode === 'confirmed_mol' ? 'confirmed_mol' : selectedUpd ? 'filled' : 'not_filled';
       await persistStatus(nextCode);
     },
     onSuccess: () => {
@@ -878,10 +856,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const linkUpd = useMutation({
     mutationFn: async (upd: SourceDocument): Promise<Delivery> => {
       if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
-      return await api.post<Delivery>(
-        `/deliveries/${loadedDelivery.id}/link-source`,
-        { sourceDocumentId: upd.id },
-      );
+      return await api.post<Delivery>(`/deliveries/${loadedDelivery.id}/link-source`, {
+        sourceDocumentId: upd.id,
+      });
     },
     onSuccess: async (dto) => {
       await upsertServerSnapshot([dto]);
@@ -1322,10 +1299,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     const pendingAt = loadedDelivery?.pendingDeletionAt ?? null;
     const isPending = pendingAt !== null;
     const isAdmin = authUser?.role === 'admin';
-    const canUnmark =
-      isAdmin || authUser?.id === (loadedDelivery?.pendingDeletionByUserId ?? null);
+    const canUnmark = isAdmin || authUser?.id === (loadedDelivery?.pendingDeletionByUserId ?? null);
     return (
-      <Space direction="vertical" size="middle" style={{ width: '100%', paddingBottom: isDesktop ? 0 : 96 }}>
+      <Space
+        direction="vertical"
+        size="middle"
+        style={{ width: '100%', paddingBottom: isDesktop ? 0 : 96 }}
+      >
         {!embedded && (
           <Space style={{ width: '100%' }} align="center">
             {fromAccepted && (
@@ -1594,9 +1574,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     </Typography.Text>
                   </Tag>
                   {selectedUpd.docDate && (
-                    <Tag style={{ marginInlineEnd: 0 }}>
-                      Дата документа: {selectedUpd.docDate}
-                    </Tag>
+                    <Tag style={{ marginInlineEnd: 0 }}>Дата документа: {selectedUpd.docDate}</Tag>
                   )}
                   {selectedUpd.expectedDate && (
                     <Tag style={{ marginInlineEnd: 0 }}>
@@ -1604,9 +1582,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     </Tag>
                   )}
                   {selectedUpd.totalSum && (
-                    <Tag style={{ marginInlineEnd: 0 }}>
-                      Сумма: {selectedUpd.totalSum} ₽
-                    </Tag>
+                    <Tag style={{ marginInlineEnd: 0 }}>Сумма: {selectedUpd.totalSum} ₽</Tag>
                   )}
                 </>
               ) : (
@@ -1614,22 +1590,20 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     — без УПД —
                   </Typography.Text>
-                  {canLinkUpd &&
-                    loadedDelivery?.sourceDocumentIds.length === 0 &&
-                    !isNew && (
-                      <Button
-                        type="link"
-                        size="small"
-                        icon={<LinkOutlined />}
-                        style={{ padding: '0 4px', fontSize: 12 }}
-                        onClick={() => {
-                          setLinkUpdError(null);
-                          setLinkUpdOpen(true);
-                        }}
-                      >
-                        Привязать
-                      </Button>
-                    )}
+                  {canLinkUpd && loadedDelivery?.sourceDocumentIds.length === 0 && !isNew && (
+                    <Button
+                      type="link"
+                      size="small"
+                      icon={<LinkOutlined />}
+                      style={{ padding: '0 4px', fontSize: 12 }}
+                      onClick={() => {
+                        setLinkUpdError(null);
+                        setLinkUpdOpen(true);
+                      }}
+                    >
+                      Привязать
+                    </Button>
+                  )}
                 </Tag>
               )}
               {/* Транзит — admin/manager могут поставить/снять прямо
@@ -1691,7 +1665,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           }}
           onPick={(upd) => linkUpd.mutate(upd)}
           direction="inbound"
-          siteId={loadedDelivery?.siteId === SYSTEM_SITE_ID ? null : loadedDelivery?.siteId ?? null}
+          siteId={
+            loadedDelivery?.siteId === SYSTEM_SITE_ID ? null : (loadedDelivery?.siteId ?? null)
+          }
           busy={linkUpd.isPending}
           error={linkUpdError}
         />
@@ -1715,40 +1691,32 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   {/* Загрузка кадра — право «Создавать» плюс возможность маршрута
                       (у presign/confirm свой allow-list, шире правки). */}
                   {canUploadPhoto && (
-                  <Space wrap>
-                    <Upload {...photoPropsStage1}>
-                      <Button size="large" icon={<CameraOutlined />}>
-                        Добавить фото: 1 этап
-                      </Button>
-                    </Upload>
-                    {/* 2 этап — доступен с момента, как 1 Этап оформлен
+                    <Space wrap>
+                      <Upload {...photoPropsStage1}>
+                        <Button size="large" icon={<CameraOutlined />}>
+                          Добавить фото: 1 этап
+                        </Button>
+                      </Upload>
+                      {/* 2 этап — доступен с момента, как 1 Этап оформлен
                         (status filled), и далее в confirmed_mol. Заблокирован
                         только пока приёмка не оформлена (not_filled). Подсказку
                         в tooltip оставляем видимой, чтобы было понятно, почему
                         кнопка disabled. */}
-                    <Tooltip
-                      title={
-                        stage2Enabled
-                          ? null
-                          : '2 Этап доступен после оформления 1 этапа'
-                      }
-                    >
-                      <Upload {...photoPropsStage2} disabled={!stage2Enabled}>
-                        <Button
-                          size="large"
-                          icon={<CameraOutlined />}
-                          disabled={!stage2Enabled}
-                        >
-                          Добавить фото: 2 этап
-                        </Button>
-                      </Upload>
-                    </Tooltip>
-                    {photosCount === 0 && (
-                      <Typography.Text type="secondary">
-                        Хотя бы одно фото нужно для сохранения.
-                      </Typography.Text>
-                    )}
-                  </Space>
+                      <Tooltip
+                        title={stage2Enabled ? null : '2 Этап доступен после оформления 1 этапа'}
+                      >
+                        <Upload {...photoPropsStage2} disabled={!stage2Enabled}>
+                          <Button size="large" icon={<CameraOutlined />} disabled={!stage2Enabled}>
+                            Добавить фото: 2 этап
+                          </Button>
+                        </Upload>
+                      </Tooltip>
+                      {photosCount === 0 && (
+                        <Typography.Text type="secondary">
+                          Хотя бы одно фото нужно для сохранения.
+                        </Typography.Text>
+                      )}
+                    </Space>
                   )}
                   {deliveryId && loadedDelivery && (
                     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -1833,8 +1801,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           {items.length === 0 ? (
             <div style={{ padding: 16 }}>
               <Typography.Text type="secondary">
-                Материалы можно не добавлять — приёмка сохранится со статусом «Не оформлена».
-                Чтобы оформить, добавьте строки вручную или выберите УПД.
+                Материалы можно не добавлять — приёмка сохранится со статусом «Не оформлена». Чтобы
+                оформить, добавьте строки вручную или выберите УПД.
               </Typography.Text>
             </div>
           ) : (
@@ -1864,9 +1832,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               : comment;
           const parsed = parseDeliveryComment(sourceComment);
           if (parsed.hasStructure) {
-            const empty = (
-              <Typography.Text type="secondary">— нет —</Typography.Text>
-            );
+            const empty = <Typography.Text type="secondary">— нет —</Typography.Text>;
             return (
               <Collapse
                 size="small"
@@ -1993,14 +1959,19 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   (Tooltip), что плохо обнаружимо. Теперь оранжевый тег
                   светится рядом, если есть незакрытые требования. */}
               {verifyReason && (
-                <Typography.Text
-                  type="warning"
-                  style={{ marginRight: 'auto', fontSize: 12 }}
-                >
+                <Typography.Text type="warning" style={{ marginRight: 'auto', fontSize: 12 }}>
                   ⚠ {verifyReason}
                 </Typography.Text>
               )}
-              <Button onClick={() => navigate(fromAccepted ? '/operations?type=delivery&tab=accepted' : '/operations?type=delivery')}>
+              <Button
+                onClick={() =>
+                  navigate(
+                    fromAccepted
+                      ? '/operations?type=delivery&tab=accepted'
+                      : '/operations?type=delivery',
+                  )
+                }
+              >
                 Отмена
               </Button>
               {markBlock}
@@ -2050,7 +2021,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               <Button
                 size="large"
                 style={{ flex: 1 }}
-                onClick={() => navigate(fromAccepted ? '/operations?type=delivery&tab=accepted' : '/operations?type=delivery')}
+                onClick={() =>
+                  navigate(
+                    fromAccepted
+                      ? '/operations?type=delivery&tab=accepted'
+                      : '/operations?type=delivery',
+                  )
+                }
               >
                 Отмена
               </Button>
@@ -2134,30 +2111,33 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   async function handleExportExcel() {
     try {
       setExporting(true);
-      const contractor = params.get('contractor');
-      const supplier = params.get('supplier');
-      const site = params.get('site');
-      const qVal = params.get('q')?.trim();
-      const qs = new URLSearchParams();
-      if (contractor) qs.set('contractorIds', contractor);
-      if (supplier) qs.set('supplierIds', supplier);
-      if (site) qs.set('siteIds', site);
-      if (qVal) qs.set('q', qVal);
-
       let path: string;
       let fallback: string;
       const today = new Date().toISOString().slice(0, 10);
       if (tab === 'expected') {
+        // «Ожидаемые» — это документы, а не приёмки: у них свой набор
+        // фильтров и своего периода на вкладке пока нет.
+        const qs = new URLSearchParams();
+        const contractor = params.get('contractor');
+        const supplier = params.get('supplier');
+        const site = params.get('site');
+        const qVal = params.get('q')?.trim();
+        if (contractor) qs.set('contractorIds', contractor);
+        if (supplier) qs.set('supplierIds', supplier);
+        if (site) qs.set('siteIds', site);
+        if (qVal) qs.set('q', qVal);
         qs.set('direction', 'inbound');
         qs.set('unaccepted', 'true');
         path = `/source-documents/export.xlsx?${qs.toString()}`;
         fallback = `documents-expected-inbound-${today}.xlsx`;
       } else {
-        const statusVal = params.get('status');
-        if (statusVal) qs.set('status', statusVal);
-        const plateVal = params.get('plate')?.trim();
-        if (plateVal) qs.set('plate', plateVal);
-        if (params.get('trash') === '1') qs.set('trash', 'true');
+        // Ровно те же параметры, что уходят в таблицу «Принятые», — включая
+        // выбранный период. Раньше даты в выгрузку не попадали вовсе, и файл
+        // приходил за всё время вместо запрошенного месяца.
+        const qs = operationsListQuery(readOperationsFilters(params), {
+          kind: 'delivery',
+          trash: params.get('trash') === '1',
+        });
         path = `/deliveries/export.xlsx?${qs.toString()}`;
         fallback = `deliveries-${today}.xlsx`;
       }
@@ -2179,11 +2159,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   }
 
   const exportButton = (
-    <Button
-      icon={<DownloadOutlined />}
-      onClick={handleExportExcel}
-      loading={exporting}
-    >
+    <Button icon={<DownloadOutlined />} onClick={handleExportExcel} loading={exporting}>
       Экспорт Excel
     </Button>
   );
@@ -2249,11 +2225,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             {/* Табы «Ожидаемые/Принятые» — в одной строке с заголовком,
                 чтобы освободить вертикальное пространство и поднять таблицу.
                 Дочерние компоненты больше не рендерят свой <PageTabs>. */}
-            <PageTabs
-              items={listTabs}
-              activeKey={tab}
-              onChange={handleTabChange}
-            />
+            <PageTabs items={listTabs} activeKey={tab} onChange={handleTabChange} />
           </div>
           <div
             style={{
@@ -2263,13 +2235,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               visibility: trashSwitchVisible ? 'visible' : 'hidden',
             }}
           >
-            <Switch
-              checked={trashOn}
-              onChange={(checked) => setTrash(checked)}
-            />
-            <Typography.Text type={trashOn ? undefined : 'secondary'}>
-              Удалённые
-            </Typography.Text>
+            <Switch checked={trashOn} onChange={(checked) => setTrash(checked)} />
+            <Typography.Text type={trashOn ? undefined : 'secondary'}>Удалённые</Typography.Text>
           </div>
         </div>
       }

@@ -114,6 +114,7 @@ export const SCOPE_NARROWING_INLINE: ReadonlySet<string> = new Set([
   'GET /api/v1/deliveries/export.xlsx',
   'GET /api/v1/shipments',
   'GET /api/v1/shipments/:id',
+  'GET /api/v1/shipments/export.xlsx',
   'GET /api/v1/source-documents/export.xlsx',
 ]);
 
@@ -140,6 +141,7 @@ export const INLINE_ROLE_ACCESS: Record<string, ManagedRole[]> = {
   // shipments.ts — зеркально приёмкам.
   'GET /api/v1/shipments': ['manager', 'inspector_kpp', 'contractor', 'monitor'],
   'GET /api/v1/shipments/:id': ['manager', 'inspector_kpp', 'contractor', 'monitor'],
+  'GET /api/v1/shipments/export.xlsx': ['manager', 'inspector_kpp', 'contractor', 'monitor'],
   'DELETE /api/v1/shipments/:id': ['manager', 'inspector_kpp'],
   'POST /api/v1/shipments/:id/mark-deletion': ['manager', 'inspector_kpp'],
   'POST /api/v1/shipments/:id/unmark-deletion': ['manager', 'inspector_kpp'],
@@ -152,6 +154,12 @@ export const INLINE_ROLE_ACCESS: Record<string, ManagedRole[]> = {
   'GET /api/v1/source-documents/:id': ['manager', 'inspector_kpp', 'contractor', 'monitor'],
   'GET /api/v1/source-documents/:id/file': ['manager', 'inspector_kpp', 'contractor', 'monitor'],
   'GET /api/v1/source-documents/:id/file/raw': [
+    'manager',
+    'inspector_kpp',
+    'contractor',
+    'monitor',
+  ],
+  'GET /api/v1/source-documents/:id/pages': [
     'manager',
     'inspector_kpp',
     'contractor',

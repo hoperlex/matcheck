@@ -41,6 +41,7 @@ import type {
   SourceDirection,
   SourceDocumentDetail,
   SourceDocumentFileResponse,
+  SourceDocumentPagesResponse,
   SourceRecoverResponse,
   SourceReparseResponse,
   UpdCheck,
@@ -1065,6 +1066,17 @@ function OriginalAttachments({
 }) {
   const [activeId, setActiveId] = useState<string | null>(attachments[0]?.id ?? null);
 
+  // Страницы этого документа внутри файла. Пакет из одного PDF режут на
+  // несколько УПД, а вложением к карточке остаётся файл целиком — без этой
+  // подсказки вьюер открывал двадцатистраничный скан с первой страницы, и
+  // менеджер видел на экране чужой лист вместо позиций своего документа.
+  // Отдельный маршрут: то же поле в DTO документа уехало бы и на планшет.
+  const pagesQuery = useQuery({
+    queryKey: ['source-document-pages', id],
+    queryFn: () => api.get<SourceDocumentPagesResponse>(`/source-documents/${id}/pages`),
+    staleTime: 5 * 60_000,
+  });
+
   // Если открыли другой документ — attachments сменились, нужно сбросить
   // активный на первый. Сравниваем по списку id, потому что массив
   // attachments — readonly прокси с новой ссылкой на каждом ререндере.
@@ -1083,6 +1095,12 @@ function OriginalAttachments({
   if (!active) return null;
   const activeIndex = attachments.findIndex((a) => a.id === active.id);
   const activeUrl = `/api/v1/source-documents/${id}/file/raw?attachmentId=${active.id}`;
+  const activePages =
+    pagesQuery.data?.attachments.find((a) => a.attachmentId === active.id)?.pages ?? [];
+  const pagesLabel = formatPagesLabel(activePages);
+  // Chrome PDF Viewer понимает page= внутри того же fragment. Отдельный «#»
+  // ломает якорь целиком, поэтому дописываем параметр к существующему.
+  const pdfFragment = `#toolbar=1&navpanes=0${activePages.length > 0 ? `&page=${activePages[0]}` : ''}`;
 
   return (
     <div
@@ -1102,8 +1120,9 @@ function OriginalAttachments({
           {attachments.length > 1
             ? `Фото ${activeIndex + 1} из ${attachments.length} · ${active.filename}`
             : active.filename}
+          {pagesLabel ? ` · ${pagesLabel}` : ''}
         </Typography.Text>
-        {isImageExt(active.filename) ? (
+        {isImageExt(active.filename, active.mimeType) ? (
           // antd Image даёт встроенный lightbox (zoom/rotate/fullscreen) —
           // для скана накладной это удобнее, чем image в <iframe>, где у
           // Chrome нет ни зума, ни поворота. Меняем active.id ⇒ Image
@@ -1148,7 +1167,7 @@ function OriginalAttachments({
             key={active.id}
             // #toolbar=1&navpanes=0 — Chrome PDF Viewer прячет левую панель
             // с миниатюрами страниц, освобождая место для самого документа.
-            src={`${activeUrl}#toolbar=1&navpanes=0`}
+            src={`${activeUrl}${pdfFragment}`}
             title={active.filename}
             style={{
               flex: 1,
@@ -1166,14 +1185,37 @@ function OriginalAttachments({
   );
 }
 
-function isImageExt(name: string): boolean {
-  return /\.(jpe?g|png|webp|gif|bmp|heic|heif)$/i.test(name);
+// Картинка ли это. Главный источник правды — mime-тип из БД: расширений у
+// изображений больше, чем стоит перечислять. Боевой случай — .jfif (так
+// Outlook и Windows сохраняют обычный JPEG): mime у файла image/jpeg, но по
+// расширению он не опознавался, уходил в <iframe> вместо antd Image (без зума
+// и лайтбокса), а в полосе миниатюр рисовался серой иконкой файла — инспектор
+// не понимал, как открыть второе фото. Расширение остаётся запасным путём для
+// вложений без mime.
+function isImageExt(name: string, mimeType?: string | null): boolean {
+  if (mimeType && mimeType.toLowerCase().startsWith('image/')) return true;
+  return /\.(jpe?g|jfif|jfi|pjpeg|png|webp|gif|bmp|heic|heif|avif)$/i.test(name);
 }
 
 function isExcelExt(name: string, mimeType?: string | null): boolean {
   if (/\.xlsx?$/i.test(name)) return true;
   if (!mimeType) return false;
   return mimeType.includes('spreadsheetml') || mimeType === 'application/vnd.ms-excel';
+}
+
+/**
+ * «Стр. 17–20» для смежных страниц, «Стр. 15, 17» для разрывов.
+ *
+ * Диапазон не додумываем: сегмент собирается из адресов конкретных страниц, и
+ * при пропуске посередине «17–20» соврало бы про два листа.
+ */
+function formatPagesLabel(pages: number[]): string {
+  if (pages.length === 0) return '';
+  if (pages.length === 1) return `Стр. ${pages[0]}`;
+  const first = pages[0]!;
+  const last = pages[pages.length - 1]!;
+  const contiguous = pages.every((p, i) => p === first + i);
+  return contiguous ? `Стр. ${first}–${last}` : `Стр. ${pages.join(', ')}`;
 }
 
 function isPdfExt(name: string): boolean {
@@ -1284,7 +1326,7 @@ function ThumbBar({
       }}
     >
       {attachments.map((a, i) => {
-        const isImg = isImageExt(a.filename);
+        const isImg = isImageExt(a.filename, a.mimeType);
         const isActive = a.id === activeId;
         const thumbUrl = `/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}`;
         const isPdf = isPdfExt(a.filename);

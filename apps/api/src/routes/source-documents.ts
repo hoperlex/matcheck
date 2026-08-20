@@ -15,6 +15,7 @@ import {
   SourceDocumentListResponseSchema,
   SourceDocumentDetailSchema,
   SourceDocumentFileResponseSchema,
+  SourceDocumentPagesResponseSchema,
   UpdAcknowledgeMismatchRequestSchema,
   UpdDuplicateConflictSchema,
   UpdPdfQueueRequestSchema,
@@ -46,6 +47,7 @@ import {
   sourceDocumentItems,
   sourceDocumentAttachments,
   bundleImportItems,
+  bundleSegments,
   suppliers,
   users,
 } from '../db/schema.js';
@@ -1836,6 +1838,90 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         return reply.send();
       }
       return reply.send(Readable.fromWeb(upstream.body as never));
+    },
+  );
+
+  // Какие страницы исходного файла принадлежат этому документу.
+  //
+  // Пакет из одного PDF режется на несколько УПД, но вложением к каждой
+  // карточке остаётся ФАЙЛ ЦЕЛИКОМ: страницы физически не вырезаются. Поэтому
+  // вьюер открывал двадцатистраничный скан с первой страницы, а в позициях был
+  // документ со страниц 17–20 — со стороны это выглядело как «распознало чужое».
+  //
+  // Отдельным маршрутом, а не полем SourceDocumentDetailSchema: ту же схему
+  // отдаёт /sync, и новое поле уехало бы на планшет, которому оно не нужно.
+  app.get(
+    '/api/v1/source-documents/:id/pages',
+    {
+      preHandler: [app.authenticate],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: { 200: SourceDocumentPagesResponseSchema, 404: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      // Права те же, что у карточки и у оригинала файла.
+      const [sd] = await app.db
+        .select({
+          siteId: sourceDocuments.siteId,
+          contractorId: sourceDocuments.contractorId,
+          recipientSource: sourceDocuments.recipientSource,
+          isTechnical: sourceDocuments.isTechnical,
+        })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, req.params.id))
+        .limit(1);
+      if (!sd || !(await sourceDocumentVisible(app, req.user, sd))) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+
+      const segments = await app.db
+        .select({ pageRefs: bundleSegments.pageRefs })
+        .from(bundleSegments)
+        .where(eq(bundleSegments.sourceDocumentId, req.params.id));
+      const refs = segments.flatMap((seg) => seg.pageRefs ?? []);
+      if (refs.length === 0) return { attachments: [] };
+
+      const attachments = await app.db
+        .select({ id: sourceDocumentAttachments.id, s3Key: sourceDocumentAttachments.s3Key })
+        .from(sourceDocumentAttachments)
+        .where(eq(sourceDocumentAttachments.sourceDocumentId, req.params.id));
+      if (attachments.length === 0) return { attachments: [] };
+
+      // Страница адресуется строкой реестра, а не вложением: registry_item_id →
+      // input_s3_key → тот же ключ у вложения документа. Ключ переживает
+      // пересборку, чего не даёт порядковый номер файла.
+      const registryIds = [...new Set(refs.map((r) => r.registryItemId).filter((v): v is string => v != null))];
+      const registryRows = registryIds.length
+        ? await app.db
+            .select({ id: bundleImportItems.id, inputS3Key: bundleImportItems.inputS3Key })
+            .from(bundleImportItems)
+            .where(inArray(bundleImportItems.id, registryIds))
+        : [];
+      const keyByRegistry = new Map(registryRows.map((r) => [r.id, r.inputS3Key]));
+      const attachmentByKey = new Map(attachments.map((a) => [a.s3Key, a.id]));
+
+      const pagesByAttachment = new Map<string, Set<number>>();
+      for (const ref of refs) {
+        const key = ref.registryItemId != null ? keyByRegistry.get(ref.registryItemId) : null;
+        // Пакеты старше реестра строки не имеют вовсе. Привязать страницу к
+        // файлу там можно только когда файл один — иначе молчим, чтобы не
+        // отправить вьюер на страницу чужого вложения.
+        const attachmentId =
+          (key != null ? attachmentByKey.get(key) : undefined) ??
+          (attachments.length === 1 ? attachments[0]!.id : undefined);
+        if (attachmentId == null) continue;
+        const pages = pagesByAttachment.get(attachmentId) ?? new Set<number>();
+        pages.add(ref.pageInFile);
+        pagesByAttachment.set(attachmentId, pages);
+      }
+
+      return {
+        attachments: [...pagesByAttachment.entries()].map(([attachmentId, pages]) => ({
+          attachmentId,
+          pages: [...pages].sort((a, b) => a - b),
+        })),
+      };
     },
   );
 

@@ -36,15 +36,15 @@ import { DELIVERY_SOFT_DELETE_STATUSES } from '@matcheck/contracts';
 import type { z } from 'zod';
 import dayjs from 'dayjs';
 import { ApiError, api } from '../../services/api';
-import {
-  hardDeleteDelivery,
-  markDeletion,
-  unmarkDeletion,
-} from '../../services/deliveries';
+import { hardDeleteDelivery, markDeletion, unmarkDeletion } from '../../services/deliveries';
 import { useAuthStore } from '../../stores/auth';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
-import { StatusIconsCell, StatusLegend, ReviewStatusIcon } from '../../shared/ui/operationStatusIcon';
+import {
+  StatusIconsCell,
+  StatusLegend,
+  ReviewStatusIcon,
+} from '../../shared/ui/operationStatusIcon';
 import { operationsRowClass } from '../../shared/utils/operationsRowHighlight';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
@@ -52,7 +52,12 @@ import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
-import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
+import {
+  dateSorter,
+  numberSorter,
+  prioritySorter,
+  stringSorter,
+} from '../../shared/ui/tableSorters';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
@@ -70,6 +75,7 @@ import { DeliveryViewModal, type DeliveryViewData } from './DeliveryViewModal';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
+import { operationsListQuery } from '../operations/operationsQuery';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
@@ -195,9 +201,9 @@ export function DeliveriesHistory({
   // URLSearchParams.getAll/append, CSV не использую (имена короткие, но
   // оставляем единообразие). Невалидные значения из URL отбрасываются.
   const FEATURE_SET = new Set<string>(FEATURE_VALUES);
-  const urlFeatures = params.getAll('feature').filter((v): v is OperationFeature =>
-    FEATURE_SET.has(v),
-  );
+  const urlFeatures = params
+    .getAll('feature')
+    .filter((v): v is OperationFeature => FEATURE_SET.has(v));
 
   type ExtraFilters = {
     status: string | null;
@@ -235,9 +241,7 @@ export function DeliveriesHistory({
     dateTo: params.get('dto') ?? '',
   };
 
-  const updateFilters = (
-    patch: Partial<ListFiltersValue & ExtraFilters>,
-  ) => {
+  const updateFilters = (patch: Partial<ListFiltersValue & ExtraFilters>) => {
     const next = new URLSearchParams(params);
     const apply = (key: string, val: string | null | undefined) => {
       if (val) next.set(key, val);
@@ -323,31 +327,11 @@ export function DeliveriesHistory({
   const list = useQuery({
     queryKey: listQueryKey,
     queryFn: () => {
-      const qs = new URLSearchParams();
+      // Тот же сборщик, что у «Экспорт Excel»: выгрузка обязана повторять
+      // таблицу, а не собирать свой урезанный набор фильтров.
+      const qs = operationsListQuery(filters, { kind: 'delivery', trash: view === 'trash' });
       qs.set('limit', String(PAGE_SIZE));
       qs.set('offset', String(offset));
-      if (view === 'trash') qs.set('trash', '1');
-      if (filters.contractorIds.length) qs.set('contractorIds', filters.contractorIds.join(','));
-      if (filters.supplierIds.length) qs.set('supplierIds', filters.supplierIds.join(','));
-      if (filters.siteIds.length) qs.set('siteIds', filters.siteIds.join(','));
-      if (filters.q.trim()) qs.set('q', filters.q.trim());
-      if (filters.displayId.trim()) qs.set('displayId', filters.displayId.trim());
-      if (filters.plate.trim()) qs.set('plate', filters.plate.trim());
-      if (filters.features.length) qs.set('features', filters.features.join(','));
-      if (filters.nophoto) qs.set('nophoto', '1');
-      // status=no_document — псевдо-значение, мапится на server-side noDocument=true.
-      if (filters.status === 'no_document') qs.set('noDocument', 'true');
-      else if (filters.status) qs.set('status', filters.status);
-      if (filters.reviewState) qs.set('reviewState', filters.reviewState);
-      // Дни → ISO-границы. Сервер сравнивает arrived_at >= arrivedFrom AND
-      // arrived_at < arrivedTo, поэтому верхняя граница — начало СЛЕДУЮЩЕГО
-      // дня: иначе записи выбранного конечного дня выпали бы из выдачи.
-      if (filters.dateFrom) {
-        qs.set('arrivedFrom', dayjs(filters.dateFrom).startOf('day').toISOString());
-      }
-      if (filters.dateTo) {
-        qs.set('arrivedTo', dayjs(filters.dateTo).add(1, 'day').startOf('day').toISOString());
-      }
       return api.get<List>(`/deliveries?${qs.toString()}`);
     },
     placeholderData: keepPreviousData,
@@ -363,8 +347,7 @@ export function DeliveriesHistory({
   // на вкладках Справочников.
   const counterpartiesQuery = useQuery({
     queryKey: ['counterparties', 'all'],
-    queryFn: () =>
-      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=5000'),
+    queryFn: () => api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=5000'),
     enabled: !isContractor,
   });
   const customerCounterpartiesQuery = useQuery({
@@ -377,14 +360,12 @@ export function DeliveriesHistory({
   });
   const suppliersQuery = useQuery({
     queryKey: ['suppliers', 'all'],
-    queryFn: () =>
-      api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
+    queryFn: () => api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
     enabled: !isContractor,
   });
   const sitesQuery = useQuery({
     queryKey: ['sites', 'all'],
-    queryFn: () =>
-      api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
+    queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
     enabled: !isContractor,
   });
   const clearErr = (id: string) => {
@@ -416,8 +397,9 @@ export function DeliveriesHistory({
       return { snapshots };
     },
     onError: (err: Error, id, ctx) => {
-      const snapshots = (ctx as { snapshots?: Array<[readonly unknown[], List | undefined]> } | undefined)
-        ?.snapshots;
+      const snapshots = (
+        ctx as { snapshots?: Array<[readonly unknown[], List | undefined]> } | undefined
+      )?.snapshots;
       if (snapshots) {
         for (const [key, value] of snapshots) {
           queryClient.setQueryData(key, value);
@@ -436,8 +418,7 @@ export function DeliveriesHistory({
   // Пометить на удаление: на активной вкладке убираем строку (она «уехала» в корзину),
   // полную инвалидизацию делаем в onSettled.
   const markDel = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string | null }) =>
-      markDeletion(id, reason),
+    mutationFn: ({ id, reason }: { id: string; reason: string | null }) => markDeletion(id, reason),
     onMutate: async ({ id }) => {
       clearErr(id);
       await queryClient.cancelQueries({ queryKey: ['deliveries', 'active'] });
@@ -608,11 +589,11 @@ export function DeliveriesHistory({
       delivery: r,
       contractorName:
         r.contractorName ??
-        (contractorId ? counterpartiesMap.get(contractorId) ?? null : null) ??
+        (contractorId ? (counterpartiesMap.get(contractorId) ?? null) : null) ??
         sd?.contractorName ??
         null,
       supplierName: resolveSupplierName(r),
-      siteName: r.siteName ?? (siteId ? sitesMap.get(siteId) ?? null : null),
+      siteName: r.siteName ?? (siteId ? (sitesMap.get(siteId) ?? null) : null),
       docNumber: sd?.docNumber ?? null,
       docKindLabel: kindLabel,
       docTotalSum: totalSum,
@@ -713,9 +694,7 @@ export function DeliveriesHistory({
                 rows={2}
                 maxLength={500}
                 value={reasonDraft[r.id] ?? ''}
-                onChange={(e) =>
-                  setReasonDraft((prev) => ({ ...prev, [r.id]: e.target.value }))
-                }
+                onChange={(e) => setReasonDraft((prev) => ({ ...prev, [r.id]: e.target.value }))}
               />
             }
             okText="Пометить"
@@ -860,7 +839,8 @@ export function DeliveriesHistory({
   // у поставщика самой приёмки реквизитов в DTO нет, и дописать к нему ИНН из
   // УПД значило бы показать чужие — приёмку и документ связывает человек.
   const renderSupplierCell = (r: Row) => {
-    const own = r.supplierName ?? (r.supplierId ? counterpartiesMap.get(r.supplierId) ?? null : null);
+    const own =
+      r.supplierName ?? (r.supplierId ? (counterpartiesMap.get(r.supplierId) ?? null) : null);
     if (own) return partyCell(own, null);
     const sd = r.primarySourceDocument ?? null;
     return partyCell(sd?.supplierName ?? null, sd?.supplierInn ?? null);
@@ -868,398 +848,388 @@ export function DeliveriesHistory({
 
   return (
     <>
-    <StickyPageHeader
-      header={
-        <Space direction="vertical" size="small" style={{ width: '100%' }}>
-          {/* Переключатель «Удалённые» теперь живёт в шапке KppPage рядом
+      <StickyPageHeader
+        header={
+          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            {/* Переключатель «Удалённые» теперь живёт в шапке KppPage рядом
               с Title (читается через URL ?trash=1) — это даёт постоянное
               место наверху и убирает «прыжок» контента при переключении
               вкладок Ожидаемые/Принятые. */}
-          <ListFilters
-            value={filters}
-            onChange={updateFilters}
-            // Подрядчик видит один свой срез — справочные фильтры ему не нужны
-            // (и справочники для них закрыты). Поиск, авто и даты — оставляем:
-            // они работают внутри его среза.
-            fields={
-              isContractor
-                ? ['displayId', 'q', 'plate', 'dates']
-                : ['displayId', 'contractor', 'supplier', 'site', 'q', 'plate', 'dates']
-            }
-            contractorOptions={contractorOptions}
-            supplierOptions={supplierOptions}
-            sites={sitesQuery.data?.items ?? []}
-            loading={
-              customerCounterpartiesQuery.isLoading ||
-              suppliersQuery.isLoading ||
-              sitesQuery.isLoading
-            }
-            searchPlaceholder="Номер документа"
-            displayId={filters.displayId}
-            onDisplayIdChange={(v) => updateFilters({ displayId: v })}
-            plate={filters.plate}
-            onPlateChange={(v) => updateFilters({ plate: v })}
-            dateRange={[
-              filters.dateFrom ? dayjs(filters.dateFrom) : null,
-              filters.dateTo ? dayjs(filters.dateTo) : null,
-            ]}
-            onDateRangeChange={(r) =>
-              updateFilters({
-                dateFrom: r?.[0]?.format('YYYY-MM-DD') ?? '',
-                dateTo: r?.[1]?.format('YYYY-MM-DD') ?? '',
-              })
-            }
-            datesPlaceholder={['Прибытие с', 'по']}
-            tail={
-              // showPurpose=false → purpose-селект не рендерится, поэтому
-              // purposes в onChange-patch'е никогда не приходят. Адаптер
-              // прокидывает только features, чтобы не тащить shipment-
-              // специфичные поля в delivery-фильтр.
-              <>
-                <ShipmentFeatureFilters
-                  value={{ purposes: [], features: filters.features }}
-                  onChange={(patch) => {
-                    if ('features' in patch) {
-                      updateFilters({ features: patch.features });
-                    }
-                  }}
-                  showPurpose={false}
-                />
-                {/* Фильтр по отметке проверки — только менеджменту. */}
-                {canReview && (
-                  <Select
-                    size="small"
-                    style={{ minWidth: 150 }}
-                    value={filters.reviewState ?? 'all'}
-                    onChange={(v) => updateFilters({ reviewState: v === 'all' ? null : v })}
-                    options={[
-                      { value: 'all', label: 'Проверка: все' },
-                      { value: 'issues', label: 'С замечаниями' },
-                      { value: 'approved', label: 'Проверено' },
-                      { value: 'none', label: 'Не проверено' },
-                    ]}
-                  />
-                )}
-              </>
-            }
-            // Инпут «Статус» убран по UX-запросу: если ?status= остался в URL
-            // от старой ссылки — query продолжает фильтровать, а UI просто не
-            // подсвечивает его применённым.
-            extra={filtersExtra}
-          />
-          {(() => {
-            // Bulk-actions: набор зависит от вкладки (Активные / Удалённые)
-            // и роли (hard-delete только admin). Раньше блок рендерился
-            // ТОЛЬКО внутри PageTabs.extra, поэтому при отсутствии tabs
-            // (как в OperationsPage, где собственные табы Ожидаемые/
-            // Принятые) кнопки «Удалить выбранные» / «Снять выбор» не
-            // появлялись при массовом выборе. Теперь блок отдельный:
-            // если есть tabs — переезжает в PageTabs.extra (как было);
-            // иначе рисуется самостоятельной строкой справа от шапки.
-            const actions = bulk.hasSelection ? (
-              isTrash ? (
-                <Space size={8}>
-                  <Typography.Text type="secondary">
-                    Выбрано: <b>{bulk.selectedCount}</b>
-                  </Typography.Text>
-                  <Popconfirm
-                    title={`Восстановить ${bulk.selectedCount} ${pluralizeDelivery(bulk.selectedCount)}?`}
-                    okText="Восстановить"
-                    cancelText="Отмена"
-                    onConfirm={() =>
-                      bulkUnmark.mutate(Array.from(bulk.selectedIds))
-                    }
-                    placement="bottomRight"
-                  >
-                    <Button
-                      icon={<UndoOutlined />}
-                      loading={bulkUnmark.isPending}
-                    >
-                      Восстановить выбранные
-                    </Button>
-                  </Popconfirm>
-                  {isAdmin && (
-                    <Popconfirm
-                      title={`Удалить ${bulk.selectedCount} ${pluralizeDelivery(bulk.selectedCount)} навсегда?`}
-                      description="Восстановить будет невозможно."
-                      okText="Удалить"
-                      cancelText="Отмена"
-                      okButtonProps={{ danger: true, loading: bulkHard.isPending }}
-                      onConfirm={() =>
-                        bulkHard.mutate(Array.from(bulk.selectedIds))
+            <ListFilters
+              value={filters}
+              onChange={updateFilters}
+              // Подрядчик видит один свой срез — справочные фильтры ему не нужны
+              // (и справочники для них закрыты). Поиск, авто и даты — оставляем:
+              // они работают внутри его среза.
+              fields={
+                isContractor
+                  ? ['displayId', 'q', 'plate', 'dates']
+                  : ['displayId', 'contractor', 'supplier', 'site', 'q', 'plate', 'dates']
+              }
+              contractorOptions={contractorOptions}
+              supplierOptions={supplierOptions}
+              sites={sitesQuery.data?.items ?? []}
+              loading={
+                customerCounterpartiesQuery.isLoading ||
+                suppliersQuery.isLoading ||
+                sitesQuery.isLoading
+              }
+              searchPlaceholder="Номер документа"
+              displayId={filters.displayId}
+              onDisplayIdChange={(v) => updateFilters({ displayId: v })}
+              plate={filters.plate}
+              onPlateChange={(v) => updateFilters({ plate: v })}
+              dateRange={[
+                filters.dateFrom ? dayjs(filters.dateFrom) : null,
+                filters.dateTo ? dayjs(filters.dateTo) : null,
+              ]}
+              onDateRangeChange={(r) =>
+                updateFilters({
+                  dateFrom: r?.[0]?.format('YYYY-MM-DD') ?? '',
+                  dateTo: r?.[1]?.format('YYYY-MM-DD') ?? '',
+                })
+              }
+              datesPlaceholder={['Прибытие с', 'по']}
+              tail={
+                // showPurpose=false → purpose-селект не рендерится, поэтому
+                // purposes в onChange-patch'е никогда не приходят. Адаптер
+                // прокидывает только features, чтобы не тащить shipment-
+                // специфичные поля в delivery-фильтр.
+                <>
+                  <ShipmentFeatureFilters
+                    value={{ purposes: [], features: filters.features }}
+                    onChange={(patch) => {
+                      if ('features' in patch) {
+                        updateFilters({ features: patch.features });
                       }
+                    }}
+                    showPurpose={false}
+                  />
+                  {/* Фильтр по отметке проверки — только менеджменту. */}
+                  {canReview && (
+                    <Select
+                      size="small"
+                      style={{ minWidth: 150 }}
+                      value={filters.reviewState ?? 'all'}
+                      onChange={(v) => updateFilters({ reviewState: v === 'all' ? null : v })}
+                      options={[
+                        { value: 'all', label: 'Проверка: все' },
+                        { value: 'issues', label: 'С замечаниями' },
+                        { value: 'approved', label: 'Проверено' },
+                        { value: 'none', label: 'Не проверено' },
+                      ]}
+                    />
+                  )}
+                </>
+              }
+              // Инпут «Статус» убран по UX-запросу: если ?status= остался в URL
+              // от старой ссылки — query продолжает фильтровать, а UI просто не
+              // подсвечивает его применённым.
+              extra={filtersExtra}
+            />
+            {(() => {
+              // Bulk-actions: набор зависит от вкладки (Активные / Удалённые)
+              // и роли (hard-delete только admin). Раньше блок рендерился
+              // ТОЛЬКО внутри PageTabs.extra, поэтому при отсутствии tabs
+              // (как в OperationsPage, где собственные табы Ожидаемые/
+              // Принятые) кнопки «Удалить выбранные» / «Снять выбор» не
+              // появлялись при массовом выборе. Теперь блок отдельный:
+              // если есть tabs — переезжает в PageTabs.extra (как было);
+              // иначе рисуется самостоятельной строкой справа от шапки.
+              const actions = bulk.hasSelection ? (
+                isTrash ? (
+                  <Space size={8}>
+                    <Typography.Text type="secondary">
+                      Выбрано: <b>{bulk.selectedCount}</b>
+                    </Typography.Text>
+                    <Popconfirm
+                      title={`Восстановить ${bulk.selectedCount} ${pluralizeDelivery(bulk.selectedCount)}?`}
+                      okText="Восстановить"
+                      cancelText="Отмена"
+                      onConfirm={() => bulkUnmark.mutate(Array.from(bulk.selectedIds))}
                       placement="bottomRight"
                     >
-                      <Button
-                        danger
-                        icon={<DeleteOutlined />}
-                        loading={bulkHard.isPending}
-                      >
-                        Удалить навсегда
+                      <Button icon={<UndoOutlined />} loading={bulkUnmark.isPending}>
+                        Восстановить выбранные
                       </Button>
                     </Popconfirm>
-                  )}
-                  <Button onClick={bulk.clear} disabled={bulkUnmark.isPending || bulkHard.isPending}>
-                    Снять выбор
-                  </Button>
-                </Space>
-              ) : (
-                <BulkActionInline
-                  selectedCount={bulk.selectedCount}
-                  onClear={bulk.clear}
-                  onDelete={() => bulkMark.mutate(Array.from(bulk.selectedIds))}
-                  deleting={bulkMark.isPending}
-                  confirmTitle={`Пометить ${bulk.selectedCount} ${pluralizeDelivery(bulk.selectedCount)} на удаление?`}
-                />
-              )
-            ) : null;
+                    {isAdmin && (
+                      <Popconfirm
+                        title={`Удалить ${bulk.selectedCount} ${pluralizeDelivery(bulk.selectedCount)} навсегда?`}
+                        description="Восстановить будет невозможно."
+                        okText="Удалить"
+                        cancelText="Отмена"
+                        okButtonProps={{ danger: true, loading: bulkHard.isPending }}
+                        onConfirm={() => bulkHard.mutate(Array.from(bulk.selectedIds))}
+                        placement="bottomRight"
+                      >
+                        <Button danger icon={<DeleteOutlined />} loading={bulkHard.isPending}>
+                          Удалить навсегда
+                        </Button>
+                      </Popconfirm>
+                    )}
+                    <Button
+                      onClick={bulk.clear}
+                      disabled={bulkUnmark.isPending || bulkHard.isPending}
+                    >
+                      Снять выбор
+                    </Button>
+                  </Space>
+                ) : (
+                  <BulkActionInline
+                    selectedCount={bulk.selectedCount}
+                    onClear={bulk.clear}
+                    onDelete={() => bulkMark.mutate(Array.from(bulk.selectedIds))}
+                    deleting={bulkMark.isPending}
+                    confirmTitle={`Пометить ${bulk.selectedCount} ${pluralizeDelivery(bulk.selectedCount)} на удаление?`}
+                  />
+                )
+              ) : null;
 
-            if (tabs && activeTab && onTabChange) {
-              return (
-                <PageTabs
-                  items={tabs}
-                  activeKey={activeTab}
-                  onChange={onTabChange}
-                  extra={actions}
-                />
-              );
-            }
-            // Portal-режим: actions улетают в slot шапки OperationsPage,
-            // под фильтрами ничего не рисуется → таблица не сдвигается.
-            if (bulkActionsPortalRef) {
-              return bulkSlotEl && actions ? createPortal(actions, bulkSlotEl) : null;
-            }
-            // Legacy inline для других страниц.
-            return actions ? (
-              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                {actions}
-              </div>
-            ) : null;
-          })()}
-          <StatusLegend statuses={legendStatuses} showReview={canReview} />
-        </Space>
-      }
-    >
-      {/* Ошибка запроса ЗАМЕНЯЕТ таблицу, а не дополняет её: items внизу —
+              if (tabs && activeTab && onTabChange) {
+                return (
+                  <PageTabs
+                    items={tabs}
+                    activeKey={activeTab}
+                    onChange={onTabChange}
+                    extra={actions}
+                  />
+                );
+              }
+              // Portal-режим: actions улетают в slot шапки OperationsPage,
+              // под фильтрами ничего не рисуется → таблица не сдвигается.
+              if (bulkActionsPortalRef) {
+                return bulkSlotEl && actions ? createPortal(actions, bulkSlotEl) : null;
+              }
+              // Legacy inline для других страниц.
+              return actions ? (
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>{actions}</div>
+              ) : null;
+            })()}
+            <StatusLegend statuses={legendStatuses} showReview={canReview} />
+          </Space>
+        }
+      >
+        {/* Ошибка запроса ЗАМЕНЯЕТ таблицу, а не дополняет её: items внизу —
           это `list.data?.items ?? []`, и при упавшем запросе таблица молча
           рисует «Нет приёмок» (а с keepPreviousData — устаревшие строки).
           Так 500 от фильтра дат месяц выглядел как «данных нет».
           Ветка живёт в JSX, а не ранним return — иначе поедет порядок
           хуков (React #310, уже чинили в cfd6941). */}
-      {list.isError ? (
-        <Alert
-          type="error"
-          showIcon
-          message="Не удалось загрузить приёмки"
-          description={list.error instanceof Error ? list.error.message : String(list.error)}
-          action={
-            <Button size="small" danger onClick={() => void list.refetch()}>
-              Повторить
-            </Button>
-          }
-        />
-      ) : (
-      <ResponsiveTable<Row>
-        items={items}
-        loading={list.isLoading}
-        rowKey="id"
-        // 14 колонок, из них три стороны документа — фиксированные 170px под
-        // ИНН второй строкой. Без явной минимальной ширины остальные ужимались
-        // бы на 1024-1366px в нечитаемую кашу.
-        scrollX={1700}
-        // Массовые действия — по праву удаления; в корзине они только у админа
-        // (окончательное удаление помеченного — его прерогатива).
-        rowSelection={(isAdmin || !isTrash) && canDelete ? bulk.selection : undefined}
-        // Без права правки клик по строке ведёт в просмотр (там же — отметка
-        // проверки), а не в редактор, который всё равно откажет.
-        onRowClick={(r) => (canEdit ? onOpen(r.id) : setViewData(buildViewData(r)))}
-        emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет приёмок'}
-        rowClassName={(r) =>
-          operationsRowClass({ statusCode: r.status.code, dateIso: r.arrivedAt })
-        }
-        numberedOffset={offset}
-        pagination={{
-          // Server-side controlled: current/pageSize/total — антд сам
-          // рендерит 1, 2, ... N. При смене страницы вызываем setPage,
-          // queryFn делает новый запрос с offset=(page-1)*PAGE_SIZE.
-          // Bulk-selection чистим при смене страницы — пользователь не
-          // должен случайно удалить «невидимые» выбранные строки.
-          current: page,
-          pageSize: PAGE_SIZE,
-          total: list.data?.total ?? 0,
-          showSizeChanger: false,
-          onChange: (next) => {
-            bulk.clear();
-            setPage(next);
-          },
-          showTotal: () => <OperationsRowLegend />,
-        }}
-        columns={[
-          // ─── sorter/dateRangeColumnFilter из колонок удалены ───
-          // Server-side pagination несовместима с клиентской сортировкой
-          // в рамках одной страницы (UX-ловушка «отсортировал только то
-          // что вижу»). Бэк всегда возвращает ORDER BY displayId DESC
-          // — свежие сверху. Фильтр по диапазону даты прибытия будет
-          // добавлен отдельным UI-элементом (params: arrivedFrom/arrivedTo
-          // уже принимаются сервером).
-          {
-            // Короткий человекочитаемый id — серверный авто-возрастающий
-            // displayId (см. миграцию 0059). Помогает быстро находить
-            // приёмку в разговоре «по id». В Ожидаемых не показывается
-            // — там УПД (другая сущность с другой нумерацией).
-            title: 'id',
-            key: 'displayId',
-            width: 80,
-            dataIndex: 'displayId',
-          },
-          {
-            title: 'Статус',
-            key: 'status',
-            render: (_: unknown, r: Row) => renderStatusCell(r),
-          },
-          {
-            title: 'Авто',
-            dataIndex: 'vehiclePlate',
-          },
-          {
-            title: 'Прибытие',
-            dataIndex: 'arrivedAt',
-            render: (v: string | null) => formatArrival(v),
-          },
-          // Стороны из шапки привязанного УПД — тот же набор, что в «Документах»
-          // и «Ожидаемых»: покупатель (графа 6), грузополучатель (графа 4),
-          // продавец (графа 2). Берутся от primarySourceDocument, то есть от
-          // ПЕРВОГО привязанного документа, без агрегации по всем.
-          // Ячейки двухстрочные (название + ИНН), поэтому ellipsis выключен —
-          // обрезкой и тултипами занимается partyCell.
-          {
-            title: 'Покупатель',
-            key: 'buyer',
-            width: 170,
-            ellipsis: false,
-            render: (_: unknown, r: Row) =>
-              partyCell(
-                r.primarySourceDocument?.buyerName ?? null,
-                r.primarySourceDocument?.buyerInn ?? null,
-              ),
-          },
-          {
-            title: 'Грузополучатель',
-            key: 'consignee',
-            width: 170,
-            ellipsis: false,
-            render: (_: unknown, r: Row) =>
-              partyCell(
-                r.primarySourceDocument?.consigneeName ?? null,
-                r.primarySourceDocument?.consigneeInn ?? null,
-              ),
-          },
-          {
-            title: 'Поставщик',
-            key: 'supplier',
-            width: 170,
-            ellipsis: false,
-            render: (_: unknown, r: Row) => renderSupplierCell(r),
-          },
-          {
-            title: 'Объект',
-            key: 'site',
-            // Длинные имена обрезаются многоточием в одну строку (высота
-            // строки таблицы не растёт), полный текст видно в Tooltip при
-            // наведении — см. renderSite. Единое поведение во всех 4
-            // таблицах раздела «Операции».
-            ellipsis: { showTitle: false },
-            render: (_: unknown, r: Row) => renderSite(r),
-          },
-          {
-            title: 'Фото',
-            key: 'photos',
-            width: 80,
-            // Суммарное количество фото обоих этапов (stage='before' + 'after').
-            // r.photos уже агрегирован сервером — отдельно по stage не считаем.
-            render: (_: unknown, r: Row) => r.photos?.length ?? 0,
-          },
-          {
-            title: 'Сумма НДС',
-            key: 'vatSum',
-            width: 120,
-            render: (_: unknown, r: Row) =>
-              formatMoneyRu(r.itemsVatSum ?? deliveryItemsVatSum(r.items)),
-          },
-          {
-            title: 'Сумма',
-            key: 'totalSum',
-            width: 130,
-            render: (_: unknown, r: Row) =>
-              formatMoneyRu(r.itemsTotal ?? deliveryItemsTotal(r.items)),
-          },
-          {
-            title: 'Действия',
-            key: 'actions',
-            width: 200,
-            align: 'right' as const,
-            onCell: () => ({
-              onClick: (e: MouseEvent) => e.stopPropagation(),
-            }),
-            render: (_: unknown, r: Row) => (
-              <Space size={4}>
-                {renderViewEdit(r)}
-                {renderActions(r)}
-              </Space>
-            ),
-          },
-        ]}
-        cardRender={(r) => (
-          <Card key={r.id} style={{ width: '100%' }} size="small">
-            <Space
-              direction="vertical"
-              size={4}
-              style={{ width: '100%', position: 'relative' }}
-            >
-              <Space wrap>
-                {renderStatusCell(r)}
-                <Typography.Text strong>{r.vehiclePlate ?? 'Без номера'}</Typography.Text>
-              </Space>
-              <Typography.Text type="secondary">
-                {renderSupplierName(r)} · {r.items?.length ?? 0} стр.
-              </Typography.Text>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {renderSite(r)}
-              </Typography.Text>
-              <Typography.Text type="secondary">{r.arrivedAt ?? '—'}</Typography.Text>
-              <div
-                style={{ position: 'absolute', top: 0, right: 0 }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <Space size={4}>
-                  {renderViewEdit(r)}
-                  {renderActions(r)}
+        {list.isError ? (
+          <Alert
+            type="error"
+            showIcon
+            message="Не удалось загрузить приёмки"
+            description={list.error instanceof Error ? list.error.message : String(list.error)}
+            action={
+              <Button size="small" danger onClick={() => void list.refetch()}>
+                Повторить
+              </Button>
+            }
+          />
+        ) : (
+          <ResponsiveTable<Row>
+            items={items}
+            loading={list.isLoading}
+            rowKey="id"
+            // 14 колонок, из них три стороны документа — фиксированные 170px под
+            // ИНН второй строкой. Без явной минимальной ширины остальные ужимались
+            // бы на 1024-1366px в нечитаемую кашу.
+            scrollX={1700}
+            // Массовые действия — по праву удаления; в корзине они только у админа
+            // (окончательное удаление помеченного — его прерогатива).
+            rowSelection={(isAdmin || !isTrash) && canDelete ? bulk.selection : undefined}
+            // Без права правки клик по строке ведёт в просмотр (там же — отметка
+            // проверки), а не в редактор, который всё равно откажет.
+            onRowClick={(r) => (canEdit ? onOpen(r.id) : setViewData(buildViewData(r)))}
+            emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет приёмок'}
+            rowClassName={(r) =>
+              operationsRowClass({ statusCode: r.status.code, dateIso: r.arrivedAt })
+            }
+            numberedOffset={offset}
+            pagination={{
+              // Server-side controlled: current/pageSize/total — антд сам
+              // рендерит 1, 2, ... N. При смене страницы вызываем setPage,
+              // queryFn делает новый запрос с offset=(page-1)*PAGE_SIZE.
+              // Bulk-selection чистим при смене страницы — пользователь не
+              // должен случайно удалить «невидимые» выбранные строки.
+              current: page,
+              pageSize: PAGE_SIZE,
+              total: list.data?.total ?? 0,
+              showSizeChanger: false,
+              onChange: (next) => {
+                bulk.clear();
+                setPage(next);
+              },
+              showTotal: () => <OperationsRowLegend />,
+            }}
+            columns={[
+              // ─── sorter/dateRangeColumnFilter из колонок удалены ───
+              // Server-side pagination несовместима с клиентской сортировкой
+              // в рамках одной страницы (UX-ловушка «отсортировал только то
+              // что вижу»). Бэк всегда возвращает ORDER BY displayId DESC
+              // — свежие сверху. Фильтр по диапазону даты прибытия будет
+              // добавлен отдельным UI-элементом (params: arrivedFrom/arrivedTo
+              // уже принимаются сервером).
+              {
+                // Короткий человекочитаемый id — серверный авто-возрастающий
+                // displayId (см. миграцию 0059). Помогает быстро находить
+                // приёмку в разговоре «по id». В Ожидаемых не показывается
+                // — там УПД (другая сущность с другой нумерацией).
+                title: 'id',
+                key: 'displayId',
+                width: 80,
+                dataIndex: 'displayId',
+              },
+              {
+                title: 'Статус',
+                key: 'status',
+                render: (_: unknown, r: Row) => renderStatusCell(r),
+              },
+              {
+                title: 'Авто',
+                dataIndex: 'vehiclePlate',
+              },
+              {
+                title: 'Прибытие',
+                dataIndex: 'arrivedAt',
+                render: (v: string | null) => formatArrival(v),
+              },
+              // Стороны из шапки привязанного УПД — тот же набор, что в «Документах»
+              // и «Ожидаемых»: покупатель (графа 6), грузополучатель (графа 4),
+              // продавец (графа 2). Берутся от primarySourceDocument, то есть от
+              // ПЕРВОГО привязанного документа, без агрегации по всем.
+              // Ячейки двухстрочные (название + ИНН), поэтому ellipsis выключен —
+              // обрезкой и тултипами занимается partyCell.
+              {
+                title: 'Покупатель',
+                key: 'buyer',
+                width: 170,
+                ellipsis: false,
+                render: (_: unknown, r: Row) =>
+                  partyCell(
+                    r.primarySourceDocument?.buyerName ?? null,
+                    r.primarySourceDocument?.buyerInn ?? null,
+                  ),
+              },
+              {
+                title: 'Грузополучатель',
+                key: 'consignee',
+                width: 170,
+                ellipsis: false,
+                render: (_: unknown, r: Row) =>
+                  partyCell(
+                    r.primarySourceDocument?.consigneeName ?? null,
+                    r.primarySourceDocument?.consigneeInn ?? null,
+                  ),
+              },
+              {
+                title: 'Поставщик',
+                key: 'supplier',
+                width: 170,
+                ellipsis: false,
+                render: (_: unknown, r: Row) => renderSupplierCell(r),
+              },
+              {
+                title: 'Объект',
+                key: 'site',
+                // Длинные имена обрезаются многоточием в одну строку (высота
+                // строки таблицы не растёт), полный текст видно в Tooltip при
+                // наведении — см. renderSite. Единое поведение во всех 4
+                // таблицах раздела «Операции».
+                ellipsis: { showTitle: false },
+                render: (_: unknown, r: Row) => renderSite(r),
+              },
+              {
+                title: 'Фото',
+                key: 'photos',
+                width: 80,
+                // Суммарное количество фото обоих этапов (stage='before' + 'after').
+                // r.photos уже агрегирован сервером — отдельно по stage не считаем.
+                render: (_: unknown, r: Row) => r.photos?.length ?? 0,
+              },
+              {
+                title: 'Сумма НДС',
+                key: 'vatSum',
+                width: 120,
+                render: (_: unknown, r: Row) =>
+                  formatMoneyRu(r.itemsVatSum ?? deliveryItemsVatSum(r.items)),
+              },
+              {
+                title: 'Сумма',
+                key: 'totalSum',
+                width: 130,
+                render: (_: unknown, r: Row) =>
+                  formatMoneyRu(r.itemsTotal ?? deliveryItemsTotal(r.items)),
+              },
+              {
+                title: 'Действия',
+                key: 'actions',
+                width: 200,
+                align: 'right' as const,
+                onCell: () => ({
+                  onClick: (e: MouseEvent) => e.stopPropagation(),
+                }),
+                render: (_: unknown, r: Row) => (
+                  <Space size={4}>
+                    {renderViewEdit(r)}
+                    {renderActions(r)}
+                  </Space>
+                ),
+              },
+            ]}
+            cardRender={(r) => (
+              <Card key={r.id} style={{ width: '100%' }} size="small">
+                <Space
+                  direction="vertical"
+                  size={4}
+                  style={{ width: '100%', position: 'relative' }}
+                >
+                  <Space wrap>
+                    {renderStatusCell(r)}
+                    <Typography.Text strong>{r.vehiclePlate ?? 'Без номера'}</Typography.Text>
+                  </Space>
+                  <Typography.Text type="secondary">
+                    {renderSupplierName(r)} · {r.items?.length ?? 0} стр.
+                  </Typography.Text>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {renderSite(r)}
+                  </Typography.Text>
+                  <Typography.Text type="secondary">{r.arrivedAt ?? '—'}</Typography.Text>
+                  <div
+                    style={{ position: 'absolute', top: 0, right: 0 }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Space size={4}>
+                      {renderViewEdit(r)}
+                      {renderActions(r)}
+                    </Space>
+                  </div>
                 </Space>
-              </div>
-            </Space>
-          </Card>
+              </Card>
+            )}
+          />
         )}
+      </StickyPageHeader>
+      <DeliveryViewModal
+        data={viewData}
+        open={viewData !== null}
+        onClose={() => setViewData(null)}
+        onEdit={() => {
+          if (!viewData) return;
+          const id = viewData.delivery.id;
+          setViewData(null);
+          onOpen(id);
+        }}
       />
-      )}
-    </StickyPageHeader>
-    <DeliveryViewModal
-      data={viewData}
-      open={viewData !== null}
-      onClose={() => setViewData(null)}
-      onEdit={() => {
-        if (!viewData) return;
-        const id = viewData.delivery.id;
-        setViewData(null);
-        onOpen(id);
-      }}
-    />
-    <ShareLinkModal
-      entityType="delivery"
-      entityId={shareId}
-      open={shareId !== null}
-      onClose={() => setShareId(null)}
-      title="Поделиться приёмкой"
-    />
+      <ShareLinkModal
+        entityType="delivery"
+        entityId={shareId}
+        open={shareId !== null}
+        onClose={() => setShareId(null)}
+        title="Поделиться приёмкой"
+      />
     </>
   );
 }

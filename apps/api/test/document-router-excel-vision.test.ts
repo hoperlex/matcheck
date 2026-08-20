@@ -12,10 +12,18 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
-const probe = vi.hoisted(() => ({ result: { confidence: 0, items: [] as unknown[] } }));
+const probe = vi.hoisted(() => ({
+  result: { confidence: 0, items: [] as unknown[] },
+  // Плоский текст книги: тот же сборщик строк, что и у разбора УПД.
+  rows: [] as { rowNumber: number; cells: Map<number, unknown>; text: string }[],
+}));
 vi.mock('../src/domain/edo/upd-xlsx.parser.js', () => ({
   parseUpdXlsx: () => probe.result,
+  collectRowsViaSheetJS: () => probe.rows,
 }));
+
+const sheet = (...lines: string[]) =>
+  lines.map((text, i) => ({ rowNumber: i + 1, cells: new Map<number, unknown>(), text }));
 
 const { classifyFile } = await import('../src/domain/edo/document-router.js');
 
@@ -24,6 +32,7 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
 describe('document-router: Excel вне шаблонов УПД', () => {
   it('книга без полей шапки — unknown, но с запросом на vision', async () => {
     probe.result = { confidence: 0, items: [] };
+    probe.rows = [];
     const c = await classifyFile(
       Buffer.from('xlsx'),
       XLSX_MIME,
@@ -47,5 +56,57 @@ describe('document-router: Excel вне шаблонов УПД', () => {
     const c = await classifyFile(Buffer.from('xlsx'), XLSX_MIME, 'реализация.xlsx');
     expect(c.detectedKind).toBe('upd');
     expect(c.needsVision).toBe(false);
+  });
+});
+
+describe('document-router: транспортная накладная, присланная книгой', () => {
+  const waybillSheet = sheet(
+    'Транспортная накладная № 199 от 21.08.2026',
+    'Постановление Правительства РФ № 2116',
+    'Грузоотправитель ООО «ЭлВаст»',
+    'Грузополучатель ООО «АЛЬЯНС»',
+  );
+
+  it('уходит к промпту накладных, а не к УПД', async () => {
+    // Боевой случай: структурный парсер находил в книге номер и дату, файл
+    // признавался УПД, и промпт УПД отвечал «это транспортная накладная, графы
+    // 1-11 отсутствуют» — ноль позиций и «распознано частично».
+    probe.result = { confidence: 0.9, items: [{ nameRaw: 'Кирпич' }] };
+    probe.rows = waybillSheet;
+    const c = await classifyFile(
+      Buffer.from('xlsx'),
+      XLSX_MIME,
+      'Транспортная накладная № 199 от 21.08.2026.xlsx',
+      { excelRouting: true },
+    );
+    expect(c.detectedKind).toBe('transport_waybill');
+    expect(c.parserUsed).toBe('parseWaybillBatch');
+  });
+
+  it('без рубильника маршрут прежний — книга остаётся УПД', async () => {
+    probe.result = { confidence: 0.9, items: [{ nameRaw: 'Кирпич' }] };
+    probe.rows = waybillSheet;
+    const c = await classifyFile(
+      Buffer.from('xlsx'),
+      XLSX_MIME,
+      'Транспортная накладная № 199 от 21.08.2026.xlsx',
+    );
+    expect(c.detectedKind).toBe('upd');
+  });
+
+  it('УПД, упомянувшая транспортную накладную, накладной не становится', async () => {
+    // В шапке УПД есть строка «Данные о транспортировке и грузе» со ссылкой на
+    // транспортную накладную. Приоритет остаётся за счётом-фактурой.
+    probe.result = { confidence: 0.9, items: [{ nameRaw: 'Кабель' }] };
+    probe.rows = sheet(
+      'Универсальный передаточный документ',
+      'Счёт-фактура № 42 от 21.08.2026',
+      'Данные о транспортировке и грузе: транспортная накладная № 199',
+      'Постановление Правительства РФ № 2116',
+    );
+    const c = await classifyFile(Buffer.from('xlsx'), XLSX_MIME, 'УПД 42.xlsx', {
+      excelRouting: true,
+    });
+    expect(c.detectedKind).toBe('upd');
   });
 });

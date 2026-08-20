@@ -64,8 +64,11 @@ type Row = {
 
 async function main(): Promise<void> {
   const docKind = (argValue('--doc-kind', 'm15') ?? 'm15') as DocKind;
-  const outDir = resolve(argValue('--out') ?? '');
-  if (!outDir) throw new Error('укажите каталог выгрузки: --out /path/to/corpus');
+  // resolve('') возвращает текущий каталог, поэтому проверять надо СЫРОЙ
+  // аргумент: иначе забытый --out молча вываливал корпус в рабочую папку.
+  const outArg = argValue('--out');
+  if (!outArg) throw new Error('укажите каталог выгрузки: --out /path/to/corpus');
+  const outDir = resolve(outArg);
   const limitRaw = argValue('--limit');
   const limit = limitRaw ? Number(limitRaw) : 500;
 

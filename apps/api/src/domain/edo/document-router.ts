@@ -11,7 +11,7 @@
 
 import { PDFParse } from 'pdf-parse';
 import { countUniqueUpdInvoices } from './upd-text-bundle.parser.js';
-import { parseUpdXlsx } from './upd-xlsx.parser.js';
+import { parseUpdXlsx, collectRowsViaSheetJS } from './upd-xlsx.parser.js';
 
 // 'supplementary' — сопроводительный документ качества: сертификат, паспорт
 // качества, декларация о соответствии, протокол испытаний. Реквизиты из него не
@@ -92,6 +92,26 @@ function m15ByName(signals: string[]): FileClassification {
   return { detectedKind: 'm15', confidence: 0, needsVision: true, parserUsed: 'none', signals };
 }
 
+/**
+ * Плоский текст книги Excel — для тех же текстовых признаков формы, что и у PDF.
+ *
+ * Читаем уже имеющимся сборщиком строк (он же разбирает УПД-книги), а не новым
+ * кодом: расхождение в том, что считать текстом ячейки, дало бы разные вердикты
+ * у классификатора и у парсера. Любая ошибка чтения — пустая строка: книга
+ * пойдёт прежним путём, как будто проверки не было.
+ */
+function excelPlainText(buffer: Buffer): string {
+  try {
+    return collectRowsViaSheetJS(buffer)
+      .map((row) => row.text)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  } catch {
+    return '';
+  }
+}
+
 async function extractPdfText(
   buffer: Buffer,
 ): Promise<{ pages: { num: number; text: string }[]; full: string }> {
@@ -118,6 +138,14 @@ export async function classifyFile(
   buffer: Buffer,
   mime: string,
   filename: string,
+  opts: {
+    /**
+     * Разрешено ли уводить книгу Excel в waybill-путь. Ровно тот же рубильник,
+     * что и у доклассификации Excel по картинке (EXCEL_VISION_ROUTING):
+     * маршрут книги меняется только вместе с ним.
+     */
+    excelRouting?: boolean;
+  } = {},
 ): Promise<FileClassification> {
   const lower = filename.toLowerCase();
   const m = (mime || '').toLowerCase();
@@ -132,6 +160,24 @@ export async function classifyFile(
   // как и раньше. Сбой парсера тоже оставляет прежнее поведение: потерять
   // распознаваемое хуже, чем принять лишний файл.
   if (/spreadsheetml|ms-excel/.test(m) || EXCEL_RE.test(lower)) {
+    // Транспортная накладная, присланная книгой. Раньше её забирал УПД-путь:
+    // структурный парсер находил номер и дату, книга признавалась УПД, а
+    // дальше промпт УПД честно отвечал «это транспортная накладная, графы 1-11
+    // отсутствуют» и не извлекал НИ ОДНОЙ позиции. Тот же текстовый признак,
+    // что и у PDF, отправляет её к своему промпту.
+    if (opts.excelRouting) {
+      const sheetText = excelPlainText(buffer);
+      const hasUpdMarker = /сч[её]т-фактур|универсальный передаточн/i.test(sheetText);
+      if (!hasUpdMarker && isTransportWaybillText(sheetText)) {
+        return {
+          detectedKind: 'transport_waybill',
+          confidence: 0.8,
+          needsVision: false,
+          parserUsed: 'parseWaybillBatch',
+          signals: ['ext:excel', 'text:tn'],
+        };
+      }
+    }
     let looksLikeUpd = true;
     let signal = 'ext:excel';
     try {

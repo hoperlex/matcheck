@@ -35,7 +35,16 @@ const sql = TEST_DATABASE_URL ? postgres(TEST_DATABASE_URL, { max: 4 }) : null;
 // документ на файл).
 vi.mock('../../src/lib/env.js', async (importOriginal) => {
   const actual = await importOriginal<typeof EnvModule>();
-  return { ...actual, loadEnv: () => ({ ...actual.loadEnv(), UPD_ASSEMBLY_V1: true }) };
+  return {
+    ...actual,
+    loadEnv: () => ({
+      ...actual.loadEnv(),
+      UPD_ASSEMBLY_V1: true,
+      // Сопоставление строк вместо дедупа по тексту наименования: набор
+      // описывает поведение, ради которого рубильник и заводился.
+      UPD_ASSEMBLY_COPY_DEDUP_V1: true,
+    }),
+  };
 });
 
 // SSE идёт через Redis, которого в тестовом окружении нет: ioredis честно
@@ -351,6 +360,39 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
       status: 'archived',
       parse_error_details: { mergedInto: published[0]!.id },
     });
+  });
+
+  it('экземпляры с расхождениями OCR не задваивают позиции и не удваивают итог', async () => {
+    // Боевой случай УПД 201/21127213-2: поставщик отсканировал оба экземпляра,
+    // модель прочла тире по-разному («МК-103» и «МК --103»). Прежний дедуп по
+    // тексту оставлял обе строки — 4 позиции вместо 2 — а итог документа
+    // подменялся их суммой: 18 800 ₽ вместо заявленных 9 400 ₽.
+    const bundleId = await publicBundle(['1.jpg', '2.jpg']);
+    pagesAre('upd_main', 'upd_main');
+    extractUpdSegment
+      .mockResolvedValueOnce(updResult('OCR-1', 'Контактор модульный 2НО 20А 230В МК --103'))
+      .mockResolvedValueOnce(updResult('OCR-1', 'Контактор модульный 2НО 20А 230В МК-103'));
+
+    await handleDocumentRouterJob(bundleId, log);
+    const [sub] = await db<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE parent_bundle_id = ${bundleId}`;
+    await handleUpdAssemblyJob(sub!.id, 0, log);
+    await runSegmentJobs(bundleId);
+
+    const published = (await docsOf()).filter((doc) => !doc.is_technical);
+    expect(published).toHaveLength(1);
+    const rows = await db<{ name_raw: string }[]>`
+      SELECT name_raw FROM source_document_items
+       WHERE source_document_id = ${published[0]!.id}
+       ORDER BY line_no`;
+    expect(rows).toHaveLength(1);
+    const [header] = await db<{ total_sum: string; status: string }[]>`
+      SELECT total_sum, status FROM source_documents WHERE id = ${published[0]!.id}`;
+    // Итог остаётся заявленным в шапке, а не суммой задвоенных строк.
+    expect(header!.total_sum).toBe('1000.00');
+    // Документ по-прежнему доезжает до планшета: расхождение сумм — жёлтая
+    // плашка, а не «требует решения».
+    expect(header!.status).toBe('parsed');
   });
 
   it('разные части одной УПД объединяют уникальные позиции', async () => {

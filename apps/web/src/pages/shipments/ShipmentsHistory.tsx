@@ -36,15 +36,15 @@ import { SHIPMENT_SOFT_DELETE_STATUSES } from '@matcheck/contracts';
 import type { z } from 'zod';
 import dayjs from 'dayjs';
 import { ApiError, api } from '../../services/api';
-import {
-  hardDeleteShipment,
-  markDeletion,
-  unmarkDeletion,
-} from '../../services/shipments';
+import { hardDeleteShipment, markDeletion, unmarkDeletion } from '../../services/shipments';
 import { useAuthStore } from '../../stores/auth';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
-import { StatusIconsCell, StatusLegend, ReviewStatusIcon } from '../../shared/ui/operationStatusIcon';
+import {
+  StatusIconsCell,
+  StatusLegend,
+  ReviewStatusIcon,
+} from '../../shared/ui/operationStatusIcon';
 import { operationsRowClass } from '../../shared/utils/operationsRowHighlight';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
@@ -66,6 +66,7 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { partyCell } from '../../shared/ui/documentPartyColumns';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
+import { operationsListQuery } from '../operations/operationsQuery';
 // directoryFilterMap (ИНН-маппинг customer_counterparties → operational
 // counterparties) больше не нужен — фильтрация переехала на сервер.
 
@@ -169,12 +170,12 @@ export function ShipmentsHistory({
   // (например, ?purpose=Foo от старой закладки) игнорируются.
   const PURPOSE_SET = new Set<string>(PURPOSE_VALUES);
   const FEATURE_SET = new Set<string>(FEATURE_VALUES);
-  const urlPurposes = params.getAll('purpose').filter((v): v is ShipmentPurpose =>
-    PURPOSE_SET.has(v),
-  );
-  const urlFeatures = params.getAll('feature').filter((v): v is ShipmentFeature =>
-    FEATURE_SET.has(v),
-  );
+  const urlPurposes = params
+    .getAll('purpose')
+    .filter((v): v is ShipmentPurpose => PURPOSE_SET.has(v));
+  const urlFeatures = params
+    .getAll('feature')
+    .filter((v): v is ShipmentFeature => FEATURE_SET.has(v));
 
   type ExtraFilters = {
     status: string | null;
@@ -211,9 +212,7 @@ export function ShipmentsHistory({
     dateTo: params.get('dto') ?? '',
   };
 
-  const updateFilters = (
-    patch: Partial<ListFiltersValue & ExtraFilters>,
-  ) => {
+  const updateFilters = (patch: Partial<ListFiltersValue & ExtraFilters>) => {
     const next = new URLSearchParams(params);
     const apply = (key: string, val: string | null | undefined) => {
       if (val) next.set(key, val);
@@ -297,31 +296,10 @@ export function ShipmentsHistory({
   const list = useQuery({
     queryKey: listQueryKey,
     queryFn: () => {
-      const qs = new URLSearchParams();
+      // Тот же сборщик, что у «Экспорт Excel» (см. operationsQuery.ts).
+      const qs = operationsListQuery(filters, { kind: 'shipment', trash: view === 'trash' });
       qs.set('limit', String(PAGE_SIZE));
       qs.set('offset', String(offset));
-      if (view === 'trash') qs.set('trash', '1');
-      if (filters.contractorIds.length) qs.set('contractorIds', filters.contractorIds.join(','));
-      if (filters.supplierIds.length) qs.set('supplierIds', filters.supplierIds.join(','));
-      if (filters.siteIds.length) qs.set('siteIds', filters.siteIds.join(','));
-      if (filters.q.trim()) qs.set('q', filters.q.trim());
-      if (filters.displayId.trim()) qs.set('displayId', filters.displayId.trim());
-      if (filters.plate.trim()) qs.set('plate', filters.plate.trim());
-      if (filters.purposes.length) qs.set('purposes', filters.purposes.join(','));
-      if (filters.features.length) qs.set('features', filters.features.join(','));
-      if (filters.nophoto) qs.set('nophoto', '1');
-      if (filters.status === 'no_document') qs.set('noDocument', 'true');
-      else if (filters.status) qs.set('status', filters.status);
-      if (filters.reviewState) qs.set('reviewState', filters.reviewState);
-      // Дни → ISO-границы. Сервер сравнивает shipped_at >= shippedFrom AND
-      // shipped_at < shippedTo, поэтому верхняя граница — начало СЛЕДУЮЩЕГО
-      // дня: иначе записи выбранного конечного дня выпали бы из выдачи.
-      if (filters.dateFrom) {
-        qs.set('shippedFrom', dayjs(filters.dateFrom).startOf('day').toISOString());
-      }
-      if (filters.dateTo) {
-        qs.set('shippedTo', dayjs(filters.dateTo).add(1, 'day').startOf('day').toISOString());
-      }
       return api.get<List>(`/shipments?${qs.toString()}`);
     },
     placeholderData: keepPreviousData,
@@ -345,8 +323,7 @@ export function ShipmentsHistory({
   });
   const suppliersQuery = useQuery({
     queryKey: ['suppliers', 'all'],
-    queryFn: () =>
-      api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
+    queryFn: () => api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
     enabled: !isContractor,
   });
   const sitesQuery = useQuery({
@@ -381,8 +358,9 @@ export function ShipmentsHistory({
       return { snapshots };
     },
     onError: (err: Error, id, ctx) => {
-      const snapshots = (ctx as { snapshots?: Array<[readonly unknown[], List | undefined]> } | undefined)
-        ?.snapshots;
+      const snapshots = (
+        ctx as { snapshots?: Array<[readonly unknown[], List | undefined]> } | undefined
+      )?.snapshots;
       if (snapshots) {
         for (const [key, value] of snapshots) {
           queryClient.setQueryData(key, value);
@@ -399,8 +377,7 @@ export function ShipmentsHistory({
   });
 
   const markDel = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string | null }) =>
-      markDeletion(id, reason),
+    mutationFn: ({ id, reason }: { id: string; reason: string | null }) => markDeletion(id, reason),
     onMutate: async ({ id }) => {
       clearErr(id);
       await queryClient.cancelQueries({ queryKey: ['shipments', 'active'] });
@@ -489,11 +466,11 @@ export function ShipmentsHistory({
       // справочника /counterparties, закрытого для роли contractor.
       if (r.receiverName) return r.receiverName;
       return r.receiverCounterpartyId
-        ? counterpartiesMap.get(r.receiverCounterpartyId) ?? '—'
+        ? (counterpartiesMap.get(r.receiverCounterpartyId) ?? '—')
         : '—';
     }
     if (r.kind === 'transfer') {
-      return r.destSiteId ? sitesMap.get(r.destSiteId) ?? '—' : '—';
+      return r.destSiteId ? (sitesMap.get(r.destSiteId) ?? '—') : '—';
     }
     return 'Списание';
   };
@@ -505,7 +482,7 @@ export function ShipmentsHistory({
     if (r.kind === 'contractor' || r.kind === 'return') {
       if (r.receiverName) return r.receiverName;
       return r.receiverCounterpartyId
-        ? counterpartiesMap.get(r.receiverCounterpartyId) ?? '—'
+        ? (counterpartiesMap.get(r.receiverCounterpartyId) ?? '—')
         : '—';
     }
     return destinationLabel(r);
@@ -574,8 +551,8 @@ export function ShipmentsHistory({
   const buildViewData = (r: Row): ShipmentViewData => {
     const receiverName =
       r.receiverName ??
-      (r.receiverCounterpartyId ? counterpartiesMap.get(r.receiverCounterpartyId) ?? null : null);
-    const destSiteName = r.destSiteId ? sitesMap.get(r.destSiteId) ?? null : null;
+      (r.receiverCounterpartyId ? (counterpartiesMap.get(r.receiverCounterpartyId) ?? null) : null);
+    const destSiteName = r.destSiteId ? (sitesMap.get(r.destSiteId) ?? null) : null;
     const sd = r.primarySourceDocument ?? null;
     const kindLabel = sd
       ? sd.kind === 'upd'
@@ -687,9 +664,7 @@ export function ShipmentsHistory({
                 rows={2}
                 maxLength={500}
                 value={reasonDraft[r.id] ?? ''}
-                onChange={(e) =>
-                  setReasonDraft((prev) => ({ ...prev, [r.id]: e.target.value }))
-                }
+                onChange={(e) => setReasonDraft((prev) => ({ ...prev, [r.id]: e.target.value }))}
               />
             }
             okText="Пометить"
@@ -768,380 +743,381 @@ export function ShipmentsHistory({
 
   return (
     <>
-    <StickyPageHeader
-      header={
-        <Space direction="vertical" size="small" style={{ width: '100%' }}>
-          {/* Переключатель «Удалённые» теперь живёт в шапке ShipmentPage
+      <StickyPageHeader
+        header={
+          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            {/* Переключатель «Удалённые» теперь живёт в шапке ShipmentPage
               рядом с Title (читается через URL ?trash=1) — это даёт
               постоянное место наверху и убирает «прыжок» контента при
               переключении вкладок Ожидаемые/Принятые. */}
-          <ListFilters
-            value={filters}
-            onChange={updateFilters}
-            // Подрядчик видит один свой срез — справочные фильтры скрыты.
-            // Поиск, авто и даты работают внутри его среза.
-            fields={
-              isContractor
-                ? ['displayId', 'q', 'plate', 'dates']
-                : ['displayId', 'contractor', 'supplier', 'site', 'q', 'plate', 'dates']
-            }
-            contractorOptions={contractorOptions}
-            supplierOptions={supplierOptions}
-            sites={sitesQuery.data?.items ?? []}
-            loading={
-              customerCounterpartiesQuery.isLoading ||
-              suppliersQuery.isLoading ||
-              sitesQuery.isLoading
-            }
-            searchPlaceholder="Номер документа"
-            displayId={filters.displayId}
-            onDisplayIdChange={(v) => updateFilters({ displayId: v })}
-            plate={filters.plate}
-            onPlateChange={(v) => updateFilters({ plate: v })}
-            dateRange={[
-              filters.dateFrom ? dayjs(filters.dateFrom) : null,
-              filters.dateTo ? dayjs(filters.dateTo) : null,
-            ]}
-            onDateRangeChange={(r) =>
-              updateFilters({
-                dateFrom: r?.[0]?.format('YYYY-MM-DD') ?? '',
-                dateTo: r?.[1]?.format('YYYY-MM-DD') ?? '',
-              })
-            }
-            datesPlaceholder={['Отгружено с', 'по']}
-            // Инпут «Статус» убран по UX-запросу: старый ?status= в URL
-            // продолжает фильтровать, но UI его не выставляет.
-            tail={
-              <>
-                <ShipmentFeatureFilters
-                  value={{ purposes: filters.purposes, features: filters.features }}
-                  onChange={updateFilters}
-                />
-                {/* Фильтр по отметке проверки — только менеджменту. */}
-                {canReview && (
-                  <Select
-                    size="small"
-                    style={{ minWidth: 150 }}
-                    value={filters.reviewState ?? 'all'}
-                    onChange={(v) => updateFilters({ reviewState: v === 'all' ? null : v })}
-                    options={[
-                      { value: 'all', label: 'Проверка: все' },
-                      { value: 'issues', label: 'С замечаниями' },
-                      { value: 'approved', label: 'Проверено' },
-                      { value: 'none', label: 'Не проверено' },
-                    ]}
+            <ListFilters
+              value={filters}
+              onChange={updateFilters}
+              // Подрядчик видит один свой срез — справочные фильтры скрыты.
+              // Поиск, авто и даты работают внутри его среза.
+              fields={
+                isContractor
+                  ? ['displayId', 'q', 'plate', 'dates']
+                  : ['displayId', 'contractor', 'supplier', 'site', 'q', 'plate', 'dates']
+              }
+              contractorOptions={contractorOptions}
+              supplierOptions={supplierOptions}
+              sites={sitesQuery.data?.items ?? []}
+              loading={
+                customerCounterpartiesQuery.isLoading ||
+                suppliersQuery.isLoading ||
+                sitesQuery.isLoading
+              }
+              searchPlaceholder="Номер документа"
+              displayId={filters.displayId}
+              onDisplayIdChange={(v) => updateFilters({ displayId: v })}
+              plate={filters.plate}
+              onPlateChange={(v) => updateFilters({ plate: v })}
+              dateRange={[
+                filters.dateFrom ? dayjs(filters.dateFrom) : null,
+                filters.dateTo ? dayjs(filters.dateTo) : null,
+              ]}
+              onDateRangeChange={(r) =>
+                updateFilters({
+                  dateFrom: r?.[0]?.format('YYYY-MM-DD') ?? '',
+                  dateTo: r?.[1]?.format('YYYY-MM-DD') ?? '',
+                })
+              }
+              datesPlaceholder={['Отгружено с', 'по']}
+              // Инпут «Статус» убран по UX-запросу: старый ?status= в URL
+              // продолжает фильтровать, но UI его не выставляет.
+              tail={
+                <>
+                  <ShipmentFeatureFilters
+                    value={{ purposes: filters.purposes, features: filters.features }}
+                    onChange={updateFilters}
                   />
-                )}
-              </>
-            }
-            extra={filtersExtra}
-          />
-          {(() => {
-            // См. комментарий-двойник в DeliveriesHistory: если есть tabs —
-            // bulk-actions переезжают в PageTabs.extra; иначе рисуются
-            // независимой строкой справа от шапки (OperationsPage не
-            // передаёт tabs).
-            const actions = bulk.hasSelection ? (
-              isTrash ? (
-                <Space size={8}>
-                  <Typography.Text type="secondary">
-                    Выбрано: <b>{bulk.selectedCount}</b>
-                  </Typography.Text>
-                  <Popconfirm
-                    title={`Восстановить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)}?`}
-                    okText="Восстановить"
-                    cancelText="Отмена"
-                    onConfirm={() =>
-                      bulkUnmark.mutate(Array.from(bulk.selectedIds))
-                    }
-                    placement="bottomRight"
-                  >
-                    <Button icon={<UndoOutlined />} loading={bulkUnmark.isPending}>
-                      Восстановить выбранные
-                    </Button>
-                  </Popconfirm>
-                  {isAdmin && (
+                  {/* Фильтр по отметке проверки — только менеджменту. */}
+                  {canReview && (
+                    <Select
+                      size="small"
+                      style={{ minWidth: 150 }}
+                      value={filters.reviewState ?? 'all'}
+                      onChange={(v) => updateFilters({ reviewState: v === 'all' ? null : v })}
+                      options={[
+                        { value: 'all', label: 'Проверка: все' },
+                        { value: 'issues', label: 'С замечаниями' },
+                        { value: 'approved', label: 'Проверено' },
+                        { value: 'none', label: 'Не проверено' },
+                      ]}
+                    />
+                  )}
+                </>
+              }
+              extra={filtersExtra}
+            />
+            {(() => {
+              // См. комментарий-двойник в DeliveriesHistory: если есть tabs —
+              // bulk-actions переезжают в PageTabs.extra; иначе рисуются
+              // независимой строкой справа от шапки (OperationsPage не
+              // передаёт tabs).
+              const actions = bulk.hasSelection ? (
+                isTrash ? (
+                  <Space size={8}>
+                    <Typography.Text type="secondary">
+                      Выбрано: <b>{bulk.selectedCount}</b>
+                    </Typography.Text>
                     <Popconfirm
-                      title={`Удалить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)} навсегда?`}
-                      description="Восстановить будет невозможно."
-                      okText="Удалить"
+                      title={`Восстановить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)}?`}
+                      okText="Восстановить"
                       cancelText="Отмена"
-                      okButtonProps={{ danger: true, loading: bulkHard.isPending }}
-                      onConfirm={() =>
-                        bulkHard.mutate(Array.from(bulk.selectedIds))
-                      }
+                      onConfirm={() => bulkUnmark.mutate(Array.from(bulk.selectedIds))}
                       placement="bottomRight"
                     >
-                      <Button danger icon={<DeleteOutlined />} loading={bulkHard.isPending}>
-                        Удалить навсегда
+                      <Button icon={<UndoOutlined />} loading={bulkUnmark.isPending}>
+                        Восстановить выбранные
                       </Button>
                     </Popconfirm>
-                  )}
-                  <Button onClick={bulk.clear} disabled={bulkUnmark.isPending || bulkHard.isPending}>
-                    Снять выбор
-                  </Button>
-                </Space>
-              ) : (
-                <BulkActionInline
-                  selectedCount={bulk.selectedCount}
-                  onClear={bulk.clear}
-                  onDelete={() => bulkMark.mutate(Array.from(bulk.selectedIds))}
-                  deleting={bulkMark.isPending}
-                  confirmTitle={`Пометить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)} на удаление?`}
-                />
-              )
-            ) : null;
+                    {isAdmin && (
+                      <Popconfirm
+                        title={`Удалить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)} навсегда?`}
+                        description="Восстановить будет невозможно."
+                        okText="Удалить"
+                        cancelText="Отмена"
+                        okButtonProps={{ danger: true, loading: bulkHard.isPending }}
+                        onConfirm={() => bulkHard.mutate(Array.from(bulk.selectedIds))}
+                        placement="bottomRight"
+                      >
+                        <Button danger icon={<DeleteOutlined />} loading={bulkHard.isPending}>
+                          Удалить навсегда
+                        </Button>
+                      </Popconfirm>
+                    )}
+                    <Button
+                      onClick={bulk.clear}
+                      disabled={bulkUnmark.isPending || bulkHard.isPending}
+                    >
+                      Снять выбор
+                    </Button>
+                  </Space>
+                ) : (
+                  <BulkActionInline
+                    selectedCount={bulk.selectedCount}
+                    onClear={bulk.clear}
+                    onDelete={() => bulkMark.mutate(Array.from(bulk.selectedIds))}
+                    deleting={bulkMark.isPending}
+                    confirmTitle={`Пометить ${bulk.selectedCount} ${pluralizeShipment(bulk.selectedCount)} на удаление?`}
+                  />
+                )
+              ) : null;
 
-            if (tabs && activeTab && onTabChange) {
-              return (
-                <PageTabs
-                  items={tabs}
-                  activeKey={activeTab}
-                  onChange={onTabChange}
-                  extra={actions}
-                />
-              );
-            }
-            // См. DeliveriesHistory: portal-режим — actions улетают в
-            // шапку OperationsPage, таблица не сдвигается. Без ref —
-            // legacy inline-рендер (для других страниц).
-            if (bulkActionsPortalRef) {
-              return bulkSlotEl && actions ? createPortal(actions, bulkSlotEl) : null;
-            }
-            return actions ? (
-              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                {actions}
-              </div>
-            ) : null;
-          })()}
-          <StatusLegend statuses={legendStatuses} showReview={canReview} />
-        </Space>
-      }
-    >
-      {/* Ошибка ЗАМЕНЯЕТ таблицу — см. тот же комментарий в
+              if (tabs && activeTab && onTabChange) {
+                return (
+                  <PageTabs
+                    items={tabs}
+                    activeKey={activeTab}
+                    onChange={onTabChange}
+                    extra={actions}
+                  />
+                );
+              }
+              // См. DeliveriesHistory: portal-режим — actions улетают в
+              // шапку OperationsPage, таблица не сдвигается. Без ref —
+              // legacy inline-рендер (для других страниц).
+              if (bulkActionsPortalRef) {
+                return bulkSlotEl && actions ? createPortal(actions, bulkSlotEl) : null;
+              }
+              return actions ? (
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>{actions}</div>
+              ) : null;
+            })()}
+            <StatusLegend statuses={legendStatuses} showReview={canReview} />
+          </Space>
+        }
+      >
+        {/* Ошибка ЗАМЕНЯЕТ таблицу — см. тот же комментарий в
           DeliveriesHistory: `list.data?.items ?? []` иначе рисует
           «Нет отгрузок» поверх упавшего запроса. */}
-      {list.isError ? (
-        <Alert
-          type="error"
-          showIcon
-          message="Не удалось загрузить отгрузки"
-          description={list.error instanceof Error ? list.error.message : String(list.error)}
-          action={
-            <Button size="small" danger onClick={() => void list.refetch()}>
-              Повторить
-            </Button>
-          }
-        />
-      ) : (
-      <ResponsiveTable<Row>
-        items={items}
-        loading={list.isLoading}
-        rowKey="id"
-        // 14 колонок, из них три стороны документа — фиксированные 170px под
-        // ИНН второй строкой. Без явной минимальной ширины остальные ужимались
-        // бы на 1024-1366px в нечитаемую кашу.
-        scrollX={1700}
-        // Массовые действия — по праву удаления; в корзине только у админа.
-        rowSelection={(isAdmin || !isTrash) && canDelete ? bulk.selection : undefined}
-        // Без права правки клик по строке ведёт в просмотр (там же — отметка
-        // проверки), а не в редактор, который всё равно откажет.
-        onRowClick={(r) => (canEdit ? onOpen(r.id) : setViewData(buildViewData(r)))}
-        emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет отгрузок'}
-        rowClassName={(r) =>
-          operationsRowClass({ statusCode: r.status.code, dateIso: r.shippedAt })
-        }
-        numberedOffset={offset}
-        pagination={{
-          // Server-side controlled pagination, симметрично DeliveriesHistory.
-          current: page,
-          pageSize: PAGE_SIZE,
-          total: list.data?.total ?? 0,
-          showSizeChanger: false,
-          onChange: (next) => {
-            bulk.clear();
-            setPage(next);
-          },
-          showTotal: () => <OperationsRowLegend />,
-        }}
-        columns={[
-          // sorter/dateRangeColumnFilter удалены — серверная пагинация
-          // с фиксированной сортировкой ORDER BY displayId DESC.
-          // Симметрия с DeliveriesHistory: тот же порядок — id, Статус,
-          // Авто, дата, Получатель (зеркало Поставщика приёмки), Объект,
-          // Фото, Сумма НДС, Сумма, Действия.
-          {
-            // Короткий displayId — отдельная нумерация для отгрузок (см.
-            // миграцию 0059). В Ожидаемых не показывается — там УПД.
-            title: 'id',
-            key: 'displayId',
-            width: 80,
-            dataIndex: 'displayId',
-          },
-          {
-            title: 'Статус',
-            key: 'status',
-            render: (_: unknown, r: Row) => renderStatusCell(r),
-          },
-          {
-            title: 'Авто',
-            dataIndex: 'vehiclePlate',
-          },
-          {
-            title: 'Отгружено',
-            dataIndex: 'shippedAt',
-            render: (v: string | null) => formatDateTimeRu(v),
-          },
-          {
-            // Зеркало «Поставщик» в Приёмке: внешний контрагент в начале
-            // цепочки. Для shipment внешний — это получатель. Для transfer
-            // показываем объект-приёмник через destinationLabel.
-            title: 'Получатель',
-            key: 'receiver',
-            render: (_: unknown, r: Row) => renderCounterpartyCol(r),
-          },
-          // Стороны из шапки привязанного УПД — тот же набор, что в «Документах»
-          // и «Ожидаемых». Берутся от primarySourceDocument, то есть от ПЕРВОГО
-          // привязанного документа, без агрегации по всем.
-          // Ячейки двухстрочные (название + ИНН), поэтому ellipsis выключен —
-          // обрезкой и тултипами занимается partyCell.
-          {
-            title: 'Покупатель',
-            key: 'buyer',
-            width: 170,
-            ellipsis: false,
-            render: (_: unknown, r: Row) =>
-              partyCell(
-                r.primarySourceDocument?.buyerName ?? null,
-                r.primarySourceDocument?.buyerInn ?? null,
-              ),
-          },
-          {
-            title: 'Грузополучатель',
-            key: 'consignee',
-            width: 170,
-            ellipsis: false,
-            render: (_: unknown, r: Row) =>
-              partyCell(
-                r.primarySourceDocument?.consigneeName ?? null,
-                r.primarySourceDocument?.consigneeInn ?? null,
-              ),
-          },
-          {
-            title: 'Поставщик',
-            key: 'supplier',
-            width: 170,
-            ellipsis: false,
-            render: (_: unknown, r: Row) =>
-              partyCell(
-                r.primarySourceDocument?.supplierName ?? null,
-                r.primarySourceDocument?.supplierInn ?? null,
-              ),
-          },
-          {
-            title: 'Объект',
-            key: 'site',
-            // Длинные имена («АЛ13 · ЖК АЛИЯ, БЛОКИ 13А, 13В») обрезаются
-            // многоточием в одну строку (высота строки таблицы не растёт),
-            // полный текст видно в Tooltip при наведении. Единое поведение
-            // во всех 4 таблицах раздела «Операции» — best practice antd.
-            ellipsis: { showTitle: false },
-            render: (_: unknown, r: Row) => {
-              const name = r.siteName ?? sitesMap.get(r.siteId) ?? '—';
-              return (
-                <Tooltip title={name} placement="topLeft">
-                  <span>{name}</span>
-                </Tooltip>
-              );
-            },
-          },
-          {
-            title: 'Фото',
-            key: 'photos',
-            width: 80,
-            // Суммарное количество фото обоих этапов (stage='before' + 'after')
-            // — поле stage у shipment_photos добавлено миграцией 0048.
-            render: (_: unknown, r: Row) => r.photos?.length ?? 0,
-          },
-          {
-            title: 'Сумма НДС',
-            key: 'vatSum',
-            width: 120,
-            render: (_: unknown, r: Row) =>
-              formatMoneyRu(r.itemsVatSum ?? shipmentItemsVatSum(r.items)),
-          },
-          {
-            title: 'Сумма',
-            key: 'totalSum',
-            width: 130,
-            render: (_: unknown, r: Row) =>
-              formatMoneyRu(r.itemsTotal ?? shipmentItemsTotal(r.items)),
-          },
-          {
-            title: 'Действия',
-            key: 'actions',
-            width: 200,
-            align: 'right' as const,
-            onCell: () => ({
-              onClick: (e: MouseEvent) => e.stopPropagation(),
-            }),
-            render: (_: unknown, r: Row) => (
-              <Space size={4}>
-                {renderViewEdit(r)}
-                {renderActions(r)}
-              </Space>
-            ),
-          },
-        ]}
-        cardRender={(r) => (
-          <Card style={{ width: '100%' }} size="small">
-            <Space direction="vertical" size={4} style={{ width: '100%', position: 'relative' }}>
-              <Space wrap>
-                {renderStatusCell(r)}
-                <Typography.Text strong>{r.vehiclePlate ?? 'Без номера'}</Typography.Text>
-              </Space>
-              <Typography.Text type="secondary">
-                {r.siteName ?? sitesMap.get(r.siteId) ?? '—'} → {destinationLabel(r)}
-              </Typography.Text>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {renderCounterpartyCol(r)}
-              </Typography.Text>
-              <Typography.Text type="secondary">
-                {r.shippedAt ?? '—'} · {r.items?.length ?? 0} стр.
-              </Typography.Text>
-              <div
-                style={{ position: 'absolute', top: 0, right: 0 }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <Space size={4}>
-                  {renderViewEdit(r)}
-                  {renderActions(r)}
+        {list.isError ? (
+          <Alert
+            type="error"
+            showIcon
+            message="Не удалось загрузить отгрузки"
+            description={list.error instanceof Error ? list.error.message : String(list.error)}
+            action={
+              <Button size="small" danger onClick={() => void list.refetch()}>
+                Повторить
+              </Button>
+            }
+          />
+        ) : (
+          <ResponsiveTable<Row>
+            items={items}
+            loading={list.isLoading}
+            rowKey="id"
+            // 14 колонок, из них три стороны документа — фиксированные 170px под
+            // ИНН второй строкой. Без явной минимальной ширины остальные ужимались
+            // бы на 1024-1366px в нечитаемую кашу.
+            scrollX={1700}
+            // Массовые действия — по праву удаления; в корзине только у админа.
+            rowSelection={(isAdmin || !isTrash) && canDelete ? bulk.selection : undefined}
+            // Без права правки клик по строке ведёт в просмотр (там же — отметка
+            // проверки), а не в редактор, который всё равно откажет.
+            onRowClick={(r) => (canEdit ? onOpen(r.id) : setViewData(buildViewData(r)))}
+            emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет отгрузок'}
+            rowClassName={(r) =>
+              operationsRowClass({ statusCode: r.status.code, dateIso: r.shippedAt })
+            }
+            numberedOffset={offset}
+            pagination={{
+              // Server-side controlled pagination, симметрично DeliveriesHistory.
+              current: page,
+              pageSize: PAGE_SIZE,
+              total: list.data?.total ?? 0,
+              showSizeChanger: false,
+              onChange: (next) => {
+                bulk.clear();
+                setPage(next);
+              },
+              showTotal: () => <OperationsRowLegend />,
+            }}
+            columns={[
+              // sorter/dateRangeColumnFilter удалены — серверная пагинация
+              // с фиксированной сортировкой ORDER BY displayId DESC.
+              // Симметрия с DeliveriesHistory: тот же порядок — id, Статус,
+              // Авто, дата, Получатель (зеркало Поставщика приёмки), Объект,
+              // Фото, Сумма НДС, Сумма, Действия.
+              {
+                // Короткий displayId — отдельная нумерация для отгрузок (см.
+                // миграцию 0059). В Ожидаемых не показывается — там УПД.
+                title: 'id',
+                key: 'displayId',
+                width: 80,
+                dataIndex: 'displayId',
+              },
+              {
+                title: 'Статус',
+                key: 'status',
+                render: (_: unknown, r: Row) => renderStatusCell(r),
+              },
+              {
+                title: 'Авто',
+                dataIndex: 'vehiclePlate',
+              },
+              {
+                title: 'Отгружено',
+                dataIndex: 'shippedAt',
+                render: (v: string | null) => formatDateTimeRu(v),
+              },
+              {
+                // Зеркало «Поставщик» в Приёмке: внешний контрагент в начале
+                // цепочки. Для shipment внешний — это получатель. Для transfer
+                // показываем объект-приёмник через destinationLabel.
+                title: 'Получатель',
+                key: 'receiver',
+                render: (_: unknown, r: Row) => renderCounterpartyCol(r),
+              },
+              // Стороны из шапки привязанного УПД — тот же набор, что в «Документах»
+              // и «Ожидаемых». Берутся от primarySourceDocument, то есть от ПЕРВОГО
+              // привязанного документа, без агрегации по всем.
+              // Ячейки двухстрочные (название + ИНН), поэтому ellipsis выключен —
+              // обрезкой и тултипами занимается partyCell.
+              {
+                title: 'Покупатель',
+                key: 'buyer',
+                width: 170,
+                ellipsis: false,
+                render: (_: unknown, r: Row) =>
+                  partyCell(
+                    r.primarySourceDocument?.buyerName ?? null,
+                    r.primarySourceDocument?.buyerInn ?? null,
+                  ),
+              },
+              {
+                title: 'Грузополучатель',
+                key: 'consignee',
+                width: 170,
+                ellipsis: false,
+                render: (_: unknown, r: Row) =>
+                  partyCell(
+                    r.primarySourceDocument?.consigneeName ?? null,
+                    r.primarySourceDocument?.consigneeInn ?? null,
+                  ),
+              },
+              {
+                title: 'Поставщик',
+                key: 'supplier',
+                width: 170,
+                ellipsis: false,
+                render: (_: unknown, r: Row) =>
+                  partyCell(
+                    r.primarySourceDocument?.supplierName ?? null,
+                    r.primarySourceDocument?.supplierInn ?? null,
+                  ),
+              },
+              {
+                title: 'Объект',
+                key: 'site',
+                // Длинные имена («АЛ13 · ЖК АЛИЯ, БЛОКИ 13А, 13В») обрезаются
+                // многоточием в одну строку (высота строки таблицы не растёт),
+                // полный текст видно в Tooltip при наведении. Единое поведение
+                // во всех 4 таблицах раздела «Операции» — best practice antd.
+                ellipsis: { showTitle: false },
+                render: (_: unknown, r: Row) => {
+                  const name = r.siteName ?? sitesMap.get(r.siteId) ?? '—';
+                  return (
+                    <Tooltip title={name} placement="topLeft">
+                      <span>{name}</span>
+                    </Tooltip>
+                  );
+                },
+              },
+              {
+                title: 'Фото',
+                key: 'photos',
+                width: 80,
+                // Суммарное количество фото обоих этапов (stage='before' + 'after')
+                // — поле stage у shipment_photos добавлено миграцией 0048.
+                render: (_: unknown, r: Row) => r.photos?.length ?? 0,
+              },
+              {
+                title: 'Сумма НДС',
+                key: 'vatSum',
+                width: 120,
+                render: (_: unknown, r: Row) =>
+                  formatMoneyRu(r.itemsVatSum ?? shipmentItemsVatSum(r.items)),
+              },
+              {
+                title: 'Сумма',
+                key: 'totalSum',
+                width: 130,
+                render: (_: unknown, r: Row) =>
+                  formatMoneyRu(r.itemsTotal ?? shipmentItemsTotal(r.items)),
+              },
+              {
+                title: 'Действия',
+                key: 'actions',
+                width: 200,
+                align: 'right' as const,
+                onCell: () => ({
+                  onClick: (e: MouseEvent) => e.stopPropagation(),
+                }),
+                render: (_: unknown, r: Row) => (
+                  <Space size={4}>
+                    {renderViewEdit(r)}
+                    {renderActions(r)}
+                  </Space>
+                ),
+              },
+            ]}
+            cardRender={(r) => (
+              <Card style={{ width: '100%' }} size="small">
+                <Space
+                  direction="vertical"
+                  size={4}
+                  style={{ width: '100%', position: 'relative' }}
+                >
+                  <Space wrap>
+                    {renderStatusCell(r)}
+                    <Typography.Text strong>{r.vehiclePlate ?? 'Без номера'}</Typography.Text>
+                  </Space>
+                  <Typography.Text type="secondary">
+                    {r.siteName ?? sitesMap.get(r.siteId) ?? '—'} → {destinationLabel(r)}
+                  </Typography.Text>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {renderCounterpartyCol(r)}
+                  </Typography.Text>
+                  <Typography.Text type="secondary">
+                    {r.shippedAt ?? '—'} · {r.items?.length ?? 0} стр.
+                  </Typography.Text>
+                  <div
+                    style={{ position: 'absolute', top: 0, right: 0 }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Space size={4}>
+                      {renderViewEdit(r)}
+                      {renderActions(r)}
+                    </Space>
+                  </div>
                 </Space>
-              </div>
-            </Space>
-          </Card>
+              </Card>
+            )}
+          />
         )}
+      </StickyPageHeader>
+      <ShareLinkModal
+        entityType="shipment"
+        entityId={shareId}
+        open={shareId !== null}
+        onClose={() => setShareId(null)}
+        title="Поделиться отгрузкой"
       />
-      )}
-    </StickyPageHeader>
-    <ShareLinkModal
-      entityType="shipment"
-      entityId={shareId}
-      open={shareId !== null}
-      onClose={() => setShareId(null)}
-      title="Поделиться отгрузкой"
-    />
-    <ShipmentViewModal
-      data={viewData}
-      open={viewData !== null}
-      onClose={() => setViewData(null)}
-      onEdit={() => {
-        if (!viewData) return;
-        const id = viewData.shipment.id;
-        setViewData(null);
-        onOpen(id);
-      }}
-    />
+      <ShipmentViewModal
+        data={viewData}
+        open={viewData !== null}
+        onClose={() => setViewData(null)}
+        onEdit={() => {
+          if (!viewData) return;
+          const id = viewData.shipment.id;
+          setViewData(null);
+          onOpen(id);
+        }}
+      />
     </>
   );
 }

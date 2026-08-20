@@ -27,7 +27,15 @@ import type { ApiError } from '../../services/api';
 import { pickActiveAttachment, splitAttachments } from './attachmentGroups';
 import { SiteSelect } from './SiteSelect';
 
-const IMAGE_RE = /\.(jpe?g|png|webp|gif|bmp|heic|tiff?)$/i;
+// Расширение — запасной путь: главный признак картинки это mime-тип, который
+// сервер определяет по сигнатуре файла, а не по имени. Иначе .jfif (обычный
+// JPEG из Outlook) открывался бы не просмотрщиком, а ссылкой на скачивание.
+const IMAGE_RE = /\.(jpe?g|jfif|jfi|pjpeg|png|webp|gif|bmp|heic|heif|avif|tiff?)$/i;
+
+function isImageAttachment(a: { filename: string | null; mimeType: string | null }): boolean {
+  if (a.mimeType && a.mimeType.toLowerCase().startsWith('image/')) return true;
+  return IMAGE_RE.test(a.filename ?? '');
+}
 const PDF_RE = /\.pdf$/i;
 
 function stateTag(state: MailMessageDetail['attachments'][number]['state']) {
@@ -445,7 +453,7 @@ export function MailReviewModal({
               }}
             >
               {activeUrl && active ? (
-                IMAGE_RE.test(active.filename ?? '') ? (
+                isImageAttachment(active) ? (
                   <Image
                     src={activeUrl}
                     wrapperStyle={{

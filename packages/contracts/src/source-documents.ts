@@ -897,6 +897,27 @@ export const SourceDocumentFileResponseSchema = z.object({
 });
 export type SourceDocumentFileResponse = z.infer<typeof SourceDocumentFileResponseSchema>;
 
+/**
+ * Какие страницы исходного файла принадлежат документу.
+ *
+ * Один PDF-пакет режется на несколько УПД, но вложением к каждой карточке
+ * остаётся файл целиком — страницы не вырезаются. Портальный вьюер по этим
+ * данным открывает нужную страницу и подписывает диапазон; планшету они не
+ * нужны, поэтому в SourceDocumentDetailSchema (её отдаёт и /sync) не входят.
+ *
+ * Страницы 1-based и относятся к КОНКРЕТНОМУ вложению: документ может быть
+ * собран из нескольких файлов, и сквозной нумерации у него нет.
+ */
+export const SourceDocumentPagesResponseSchema = z.object({
+  attachments: z.array(
+    z.object({
+      attachmentId: z.string().uuid(),
+      pages: z.array(z.number().int().positive()),
+    }),
+  ),
+});
+export type SourceDocumentPagesResponse = z.infer<typeof SourceDocumentPagesResponseSchema>;
+
 // ──────────── Асинхронная загрузка PDF УПД в очередь ────────────
 // Запрос — multipart/form-data, поэтому Zod-схема описывает только
 // нефайловые поля. Ответ — созданный документ в статусе 'queued'.

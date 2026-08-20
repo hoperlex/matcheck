@@ -22,6 +22,16 @@
  * Запуск:
  *   pnpm --filter @matcheck/api exec tsx scripts/waybill-prompt-ab.ts \
  *     --base "default v3" --new "default v4" --dir docs/debug-waybill
+ *   pnpm --filter @matcheck/api exec tsx scripts/waybill-prompt-ab.ts \
+ *     --doc-kind transport_waybill_1t --base "default v1" --new "default v2" \
+ *     --dir /path/to/1t-corpus
+ *
+ * ВНИМАНИЕ про исправления. Скрипт объявляет блокером ЛЮБОЕ стабильное
+ * изменение поля: он писался под правку, которая ничего не должна менять.
+ * Когда новая версия чинит распознавание намеренно (у формы 1-Т — количество
+ * и цену, которые старая брала из чужих граф), такие расхождения появятся в
+ * списке блокеров ОЖИДАЕМО. Их нужно сверить с бланком глазами: изменение в
+ * сторону напечатанного в документе — приобретение, а не регрессия.
  *
  * Стоит денег: три прогона по корпусу — примерно 3 LLM-вызова на файл.
  * Для черновых проверок есть --limit.
@@ -54,14 +64,19 @@ function argValue(flag: string, fallback: string | null = null): string | null {
   return i >= 0 ? (process.argv[i + 1] ?? fallback) : fallback;
 }
 
+// Вид промпта: у накладных их два — активный (ТН-2116 и ОС-2) и отдельный для
+// формы 1-Т. Сверять версии надо в пределах одного вида, иначе «база» и «новая»
+// окажутся разными промптами про разные бланки.
+const docKind = argValue('--doc-kind', 'transport_waybill') ?? 'transport_waybill';
+
 async function loadPrompt(name: string): Promise<{ id: string; content: string }> {
   const [row] = await db
     .select({ id: prompts.id, content: prompts.content })
     .from(prompts)
-    .where(and(eq(prompts.docKind, 'transport_waybill'), eq(prompts.name, name)))
+    .where(and(eq(prompts.docKind, docKind), eq(prompts.name, name)))
     .limit(1);
   if (!row) {
-    throw new Error(`Промпт «${name}» (doc_kind=transport_waybill) не найден в таблице prompts`);
+    throw new Error(`Промпт «${name}» (doc_kind=${docKind}) не найден в таблице prompts`);
   }
   return row;
 }
@@ -123,6 +138,9 @@ async function runOne(
   const res = await parseWaybillBatch(files, {
     sourceDocumentId: null,
     bundleId: null,
+    // Вид промпта уходит и в парсер: у формы 1-Т свой предел страниц и своя
+    // запись в журнале вызовов.
+    promptDocKind: docKind as 'transport_waybill' | 'transport_waybill_1t',
     // temperature 0 — сверка должна ловить изменения промпта, а не разброс
     // сэмплирования; остаточный шум всё равно отсекается прогоном A/A.
     promptOverride: { prompt, temperature: 0 },

@@ -1,6 +1,18 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Alert, Button, Modal, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography, message } from 'antd';
+import {
+  Alert,
+  Button,
+  Modal,
+  Space,
+  Spin,
+  Switch,
+  Tabs,
+  Tag,
+  Tooltip,
+  Typography,
+  message,
+} from 'antd';
 import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import type { Delivery, PageId, Shipment, SourceDocument } from '@matcheck/contracts';
@@ -14,6 +26,7 @@ import { ExpectedUpds } from '../kpp/ExpectedUpds';
 import { ExpectedOutbound } from '../shipments/ExpectedOutbound';
 import { DeliveriesHistory } from '../kpp/DeliveriesHistory';
 import { ShipmentsHistory } from '../shipments/ShipmentsHistory';
+import { operationsListQuery, readOperationsFilters } from './operationsQuery';
 
 // KppPage и ShipmentPage — крупные модули с собственными зависимостями
 // (IndexedDB, photoPipeline). Грузим лениво — модалка не появится без
@@ -27,8 +40,7 @@ const ShipmentPage = lazy(() => import('../shipments/ShipmentPage'));
  * случай регрессий в Modal-обвязке: можно мгновенно вернуть прежнее
  * поведение без revert'а коммита.
  */
-const MODAL_DISABLED =
-  import.meta.env.VITE_OPERATIONS_MODAL_DISABLED === '1';
+const MODAL_DISABLED = import.meta.env.VITE_OPERATIONS_MODAL_DISABLED === '1';
 
 type OpType = 'delivery' | 'shipment';
 type ListTab = 'expected' | 'accepted';
@@ -181,11 +193,9 @@ export default function OperationsPage() {
   // внутри KppPage/ShipmentPage navigate сам очищает ?delivery=/
   // ?shipment= — Modal закрывается через open=false.
   const editDeliveryId = type === 'delivery' ? params.get('delivery') : null;
-  const editDeliveryIsNew =
-    type === 'delivery' && params.get('new') === '1';
+  const editDeliveryIsNew = type === 'delivery' && params.get('new') === '1';
   const editShipmentId = type === 'shipment' ? params.get('shipment') : null;
-  const editShipmentIsNew =
-    type === 'shipment' && params.get('new') === '1';
+  const editShipmentIsNew = type === 'shipment' && params.get('new') === '1';
 
   // URL — единственный источник правды для open. Раньше параллельно
   // существовал локальный флаг closing (и afterClose как точка очистки
@@ -205,11 +215,9 @@ export default function OperationsPage() {
   // и получала 403 при сохранении. Без права остаётся модалка просмотра (клик
   // по строке / «глаз») с отметкой проверки; сервер запрет дублирует.
   const deliveryModalOpen =
-    !MODAL_DISABLED &&
-    (editDeliveryIsNew ? canCreate : Boolean(editDeliveryId) && canEditOps);
+    !MODAL_DISABLED && (editDeliveryIsNew ? canCreate : Boolean(editDeliveryId) && canEditOps);
   const shipmentModalOpen =
-    !MODAL_DISABLED &&
-    (editShipmentIsNew ? canCreate : Boolean(editShipmentId) && canEditOps);
+    !MODAL_DISABLED && (editShipmentIsNew ? canCreate : Boolean(editShipmentId) && canEditOps);
 
   // Закрытие — один проход: чистим URL (или уходим на /materials, если
   // пришли оттуда). Modal видит open=false на следующем рендере и
@@ -253,33 +261,38 @@ export default function OperationsPage() {
   async function handleExportExcel() {
     try {
       setExporting(true);
-      const contractor = params.get('contractor');
-      const supplier = params.get('supplier');
-      const site = params.get('site');
-      const qVal = params.get('q')?.trim();
-      const qs = new URLSearchParams();
-      if (contractor) qs.set('contractorIds', contractor);
-      if (supplier) qs.set('supplierIds', supplier);
-      if (site) qs.set('siteIds', site);
-      if (qVal) qs.set('q', qVal);
       const today = new Date().toISOString().slice(0, 10);
       let path: string;
       let fallback: string;
       if (tab === 'expected') {
+        // «Ожидаемые» — документы, у них свой набор фильтров без периода.
+        const qs = new URLSearchParams();
+        const contractor = params.get('contractor');
+        const supplier = params.get('supplier');
+        const site = params.get('site');
+        const qVal = params.get('q')?.trim();
+        if (contractor) qs.set('contractorIds', contractor);
+        if (supplier) qs.set('supplierIds', supplier);
+        if (site) qs.set('siteIds', site);
+        if (qVal) qs.set('q', qVal);
         qs.set('direction', type === 'delivery' ? 'inbound' : 'outbound');
         qs.set('unaccepted', 'true');
         path = `/source-documents/export.xlsx?${qs.toString()}`;
         fallback = `documents-expected-${type}-${today}.xlsx`;
-      } else if (type === 'delivery') {
-        if (params.get('trash') === '1') qs.set('trash', 'true');
-        path = `/deliveries/export.xlsx?${qs.toString()}`;
-        fallback = `deliveries-${today}.xlsx`;
       } else {
-        // Для отгрузок аналогичного endpoint'а нет — фоллбек на
-        // source-documents direction=outbound без unaccepted-фильтра.
-        qs.set('direction', 'outbound');
-        path = `/source-documents/export.xlsx?${qs.toString()}`;
-        fallback = `documents-shipments-${today}.xlsx`;
+        // Приёмки и отгрузки выгружаются своими маршрутами и тем же набором
+        // фильтров, что уходит в таблицу. Раньше у отгрузок собственного
+        // экспорта не было: страница отдавала ИСХОДЯЩИЕ документы, которых в
+        // базе один за всё время, — пользователь получал пустой лист.
+        const qs = operationsListQuery(readOperationsFilters(params), {
+          kind: type === 'delivery' ? 'delivery' : 'shipment',
+          trash: params.get('trash') === '1',
+        });
+        path =
+          type === 'delivery'
+            ? `/deliveries/export.xlsx?${qs.toString()}`
+            : `/shipments/export.xlsx?${qs.toString()}`;
+        fallback = type === 'delivery' ? `deliveries-${today}.xlsx` : `shipments-${today}.xlsx`;
       }
       const { blob, filename } = await apiDownload(path);
       const url = URL.createObjectURL(blob);
@@ -342,129 +355,130 @@ export default function OperationsPage() {
         .${'matcheck-row-overdue'} > td { background-color: #fff1f0 !important; }
         .${'matcheck-row-overdue'}:hover > td { background-color: #ffccc7 !important; }
       `}</style>
-    <StickyPageHeader
-      header={
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            width: '100%',
-            gap: 12,
-            flexWrap: 'wrap',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 40, flexWrap: 'wrap' }}>
-            {/* Верхний переключатель — между Приёмкой и Отгрузкой. Крупный
+      <StickyPageHeader
+        header={
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              width: '100%',
+              gap: 12,
+              flexWrap: 'wrap',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 40, flexWrap: 'wrap' }}>
+              {/* Верхний переключатель — между Приёмкой и Отгрузкой. Крупный
                 жирный шрифт делает табы похожими на заголовок раздела
                 (заменяет Typography.Title). gap:40 на родителе создаёт
                 визуальный разрыв с подчинёнными табами «Ожидаемые/Принятые». */}
-            <Tabs
-              size="large"
-              activeKey={type}
-              onChange={(k) => updateUrlResetPage({ type: k })}
-              items={[
-                ...(canSeeDeliveries
-                  ? [
-                      {
-                        key: 'delivery',
-                        label: <span style={{ fontSize: 22, fontWeight: 600 }}>Приёмка</span>,
-                      },
-                    ]
-                  : []),
-                ...(canSeeShipments
-                  ? [
-                      {
-                        key: 'shipment',
-                        label: <span style={{ fontSize: 22, fontWeight: 600 }}>Отгрузка</span>,
-                      },
-                    ]
-                  : []),
-              ]}
-              style={{ marginBottom: -12 }}
-            />
-            {/* Под ним — обычные табы Ожидаемые/Принятые. Справа —
+              <Tabs
+                size="large"
+                activeKey={type}
+                onChange={(k) => updateUrlResetPage({ type: k })}
+                items={[
+                  ...(canSeeDeliveries
+                    ? [
+                        {
+                          key: 'delivery',
+                          label: <span style={{ fontSize: 22, fontWeight: 600 }}>Приёмка</span>,
+                        },
+                      ]
+                    : []),
+                  ...(canSeeShipments
+                    ? [
+                        {
+                          key: 'shipment',
+                          label: <span style={{ fontSize: 22, fontWeight: 600 }}>Отгрузка</span>,
+                        },
+                      ]
+                    : []),
+                ]}
+                style={{ marginBottom: -12 }}
+              />
+              {/* Под ним — обычные табы Ожидаемые/Принятые. Справа —
                 «Сегодня в процессе: N» (жёлтый) и «Незавершенные: N»
                 (красный) — оба показываются только если есть строки.
                 «Сегодня в процессе» = filled/shipped без МОЛ за сегодня;
                 «Незавершенные» = filled/shipped без МОЛ со вчера и раньше. */}
-            <PageTabs
-              items={listTabs}
-              activeKey={tab}
-              onChange={(k) => updateUrlResetPage({ tab: k })}
-              extra={
-                counters.data && (counters.data.inProgressToday > 0 || counters.data.overdue > 0) ? (
-                  <Space size={8} style={{ marginLeft: 40 }}>
-                    {counters.data.inProgressToday > 0 && (
-                      <Tag color="gold" style={{ marginInlineEnd: 0 }}>
-                        Сегодня в процессе: {counters.data.inProgressToday}
-                      </Tag>
-                    )}
-                    {counters.data.overdue > 0 && (
-                      <Tooltip title="Незавершенные за другие дни">
-                        <Tag color="red" style={{ marginInlineEnd: 0, cursor: 'help' }}>
-                          Незавершенные: {counters.data.overdue}
+              <PageTabs
+                items={listTabs}
+                activeKey={tab}
+                onChange={(k) => updateUrlResetPage({ tab: k })}
+                extra={
+                  counters.data &&
+                  (counters.data.inProgressToday > 0 || counters.data.overdue > 0) ? (
+                    <Space size={8} style={{ marginLeft: 40 }}>
+                      {counters.data.inProgressToday > 0 && (
+                        <Tag color="gold" style={{ marginInlineEnd: 0 }}>
+                          Сегодня в процессе: {counters.data.inProgressToday}
                         </Tag>
-                      </Tooltip>
-                    )}
-                  </Space>
-                ) : null
-              }
-            />
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            {/* Slot для bulk-actions из DeliveriesHistory/ShipmentsHistory
+                      )}
+                      {counters.data.overdue > 0 && (
+                        <Tooltip title="Незавершенные за другие дни">
+                          <Tag color="red" style={{ marginInlineEnd: 0, cursor: 'help' }}>
+                            Незавершенные: {counters.data.overdue}
+                          </Tag>
+                        </Tooltip>
+                      )}
+                    </Space>
+                  ) : null
+                }
+              />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+              {/* Slot для bulk-actions из DeliveriesHistory/ShipmentsHistory
                 через React Portal. При отсутствии выбора — пустой div
                 нулевой ширины, layout не двигается. При выборе строк —
                 actions появляются здесь, рядом со Switch'ом, не толкая
                 таблицу вниз. */}
-            <div ref={bulkActionsSlotRef} style={{ display: 'flex', alignItems: 'center' }} />
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                visibility: trashSwitchVisible ? 'visible' : 'hidden',
-              }}
-            >
-              <Switch checked={trashOn} onChange={setTrash} />
-              <Typography.Text type={trashOn ? undefined : 'secondary'}>
-                Удалённые
-              </Typography.Text>
+              <div ref={bulkActionsSlotRef} style={{ display: 'flex', alignItems: 'center' }} />
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  visibility: trashSwitchVisible ? 'visible' : 'hidden',
+                }}
+              >
+                <Switch checked={trashOn} onChange={setTrash} />
+                <Typography.Text type={trashOn ? undefined : 'secondary'}>
+                  Удалённые
+                </Typography.Text>
+              </div>
             </div>
           </div>
-        </div>
-      }
-    >
-      {contractorWithoutLink && (
-        <Alert
-          type="warning"
-          showIcon
-          message="Подрядчик не назначен — обратитесь к администратору."
-          style={{ marginBottom: 12 }}
-        />
-      )}
-      {tab === 'expected' ? (
-        type === 'delivery' ? (
-          <ExpectedUpds onOpen={createFromUpd} filtersExtra={headerExtras} />
+        }
+      >
+        {contractorWithoutLink && (
+          <Alert
+            type="warning"
+            showIcon
+            message="Подрядчик не назначен — обратитесь к администратору."
+            style={{ marginBottom: 12 }}
+          />
+        )}
+        {tab === 'expected' ? (
+          type === 'delivery' ? (
+            <ExpectedUpds onOpen={createFromUpd} filtersExtra={headerExtras} />
+          ) : (
+            <ExpectedOutbound onOpen={createFromUpd} filtersExtra={headerExtras} />
+          )
+        ) : type === 'delivery' ? (
+          <DeliveriesHistory
+            onOpen={onOpenExisting}
+            filtersExtra={headerExtras}
+            bulkActionsPortalRef={bulkActionsSlotRef}
+          />
         ) : (
-          <ExpectedOutbound onOpen={createFromUpd} filtersExtra={headerExtras} />
-        )
-      ) : type === 'delivery' ? (
-        <DeliveriesHistory
-          onOpen={onOpenExisting}
-          filtersExtra={headerExtras}
-          bulkActionsPortalRef={bulkActionsSlotRef}
-        />
-      ) : (
-        <ShipmentsHistory
-          onOpen={onOpenExisting}
-          filtersExtra={headerExtras}
-          bulkActionsPortalRef={bulkActionsSlotRef}
-        />
-      )}
+          <ShipmentsHistory
+            onOpen={onOpenExisting}
+            filtersExtra={headerExtras}
+            bulkActionsPortalRef={bulkActionsSlotRef}
+          />
+        )}
 
-      {/* Модалка edit-режима Приёмки (этап А). KppPage внутри получает
+        {/* Модалка edit-режима Приёмки (этап А). KppPage внутри получает
           deliveryId/new=1 из тех же URL-параметров, что и раньше — никаких
           изменений в его внутренней логике. key={editDeliveryId ?? 'new'}
           + destroyOnClose дают полный unmount/remount при смене записи —
@@ -473,105 +487,105 @@ export default function OperationsPage() {
           /kpp?tab=accepted; KppGuard перенаправит обратно на /operations,
           и Modal закроется через open=false (промежуточный мерцающий
           /kpp устранит этап Б). */}
-      <Modal
-        open={deliveryModalOpen}
-        onCancel={closeDeliveryModal}
-        title={
-          editDeliveryIsNew
-            ? 'Новая приёмка'
-            : deliveryHeader.data
-              ? `Приёмка ${deliveryHeader.data.displayId}`
-              : 'Приёмка'
-        }
-        width="95vw"
-        style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
-        styles={{
-          // Body высоты 95vh минус заголовок (~50) и небольшие отступы.
-          // Скролл идёт внутри body — фиксированный header и footer (если
-          // были бы) остаются на местах.
-          body: {
-            padding: '12px 16px',
-            maxHeight: 'calc(95vh - 56px)',
-            overflowY: 'auto',
-          },
-        }}
-        footer={null}
-        destroyOnClose
-        maskClosable={false}
-        // ESC закрывает модалку через тот же onCancel, что и крестик.
-        keyboard
-        // Отключаем zoom-leave + mask-fade-leave анимации. Причина:
-        // высота body 95vh, и в середине zoom-out (~100мс) центр уже
-        // схлопнулся, а верх ещё виден — пользователь видит белую
-        // горизонтальную полосу с title+крестиком. С transitionName=""
-        // и maskTransitionName="" модалка пропадает мгновенно: нет
-        // промежуточных кадров — нет артефакта. afterClose продолжает
-        // вызываться (он не привязан к длительности анимации). Enter
-        // тоже становится мгновенным — для full-screen modal это
-        // воспринимается как ожидаемое поведение «открылась/закрылась».
-        transitionName=""
-        maskTransitionName=""
-      >
-        <Suspense
-          fallback={
-            <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
-              <Spin size="large" />
-            </div>
+        <Modal
+          open={deliveryModalOpen}
+          onCancel={closeDeliveryModal}
+          title={
+            editDeliveryIsNew
+              ? 'Новая приёмка'
+              : deliveryHeader.data
+                ? `Приёмка ${deliveryHeader.data.displayId}`
+                : 'Приёмка'
           }
+          width="95vw"
+          style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
+          styles={{
+            // Body высоты 95vh минус заголовок (~50) и небольшие отступы.
+            // Скролл идёт внутри body — фиксированный header и footer (если
+            // были бы) остаются на местах.
+            body: {
+              padding: '12px 16px',
+              maxHeight: 'calc(95vh - 56px)',
+              overflowY: 'auto',
+            },
+          }}
+          footer={null}
+          destroyOnClose
+          maskClosable={false}
+          // ESC закрывает модалку через тот же onCancel, что и крестик.
+          keyboard
+          // Отключаем zoom-leave + mask-fade-leave анимации. Причина:
+          // высота body 95vh, и в середине zoom-out (~100мс) центр уже
+          // схлопнулся, а верх ещё виден — пользователь видит белую
+          // горизонтальную полосу с title+крестиком. С transitionName=""
+          // и maskTransitionName="" модалка пропадает мгновенно: нет
+          // промежуточных кадров — нет артефакта. afterClose продолжает
+          // вызываться (он не привязан к длительности анимации). Enter
+          // тоже становится мгновенным — для full-screen modal это
+          // воспринимается как ожидаемое поведение «открылась/закрылась».
+          transitionName=""
+          maskTransitionName=""
         >
-          <KppPage key={editDeliveryId ?? 'new'} embedded />
-        </Suspense>
-      </Modal>
+          <Suspense
+            fallback={
+              <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
+                <Spin size="large" />
+              </div>
+            }
+          >
+            <KppPage key={editDeliveryId ?? 'new'} embedded />
+          </Suspense>
+        </Modal>
 
-      {/* Модалка edit-режима Отгрузки (этап В). По смыслу симметрична
+        {/* Модалка edit-режима Отгрузки (этап В). По смыслу симметрична
           Приёмке: открывается при ?shipment=… или (?new=1 && type=shipment),
           ShipmentPage внутри сам читает useSearchParams. key + destroyOnClose
           гарантируют полный unmount/remount при смене записи — IndexedDB
           photo-pipeline `['photos-local','shipment',shipmentId]` пересоздаётся. */}
-      <Modal
-        open={shipmentModalOpen}
-        onCancel={closeShipmentModal}
-        title={
-          editShipmentIsNew
-            ? 'Новая отгрузка'
-            : shipmentHeader.data
-              ? `Отгрузка ${shipmentHeader.data.displayId}`
-              : 'Отгрузка'
-        }
-        width="95vw"
-        style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
-        styles={{
-          // Body высоты 95vh минус заголовок (~50) и небольшие отступы.
-          // Скролл идёт внутри body — фиксированный header и footer (если
-          // были бы) остаются на местах.
-          body: {
-            padding: '12px 16px',
-            maxHeight: 'calc(95vh - 56px)',
-            overflowY: 'auto',
-          },
-        }}
-        footer={null}
-        destroyOnClose
-        maskClosable={false}
-        // ESC закрывает модалку через тот же onCancel, что и крестик.
-        keyboard
-        // См. комментарий у Modal приёмки выше — отключаем zoom-leave
-        // и mask-fade-leave, чтобы убрать промежуточный кадр с белой
-        // полосой title+крестика при закрытии full-screen модалки.
-        transitionName=""
-        maskTransitionName=""
-      >
-        <Suspense
-          fallback={
-            <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
-              <Spin size="large" />
-            </div>
+        <Modal
+          open={shipmentModalOpen}
+          onCancel={closeShipmentModal}
+          title={
+            editShipmentIsNew
+              ? 'Новая отгрузка'
+              : shipmentHeader.data
+                ? `Отгрузка ${shipmentHeader.data.displayId}`
+                : 'Отгрузка'
           }
+          width="95vw"
+          style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
+          styles={{
+            // Body высоты 95vh минус заголовок (~50) и небольшие отступы.
+            // Скролл идёт внутри body — фиксированный header и footer (если
+            // были бы) остаются на местах.
+            body: {
+              padding: '12px 16px',
+              maxHeight: 'calc(95vh - 56px)',
+              overflowY: 'auto',
+            },
+          }}
+          footer={null}
+          destroyOnClose
+          maskClosable={false}
+          // ESC закрывает модалку через тот же onCancel, что и крестик.
+          keyboard
+          // См. комментарий у Modal приёмки выше — отключаем zoom-leave
+          // и mask-fade-leave, чтобы убрать промежуточный кадр с белой
+          // полосой title+крестика при закрытии full-screen модалки.
+          transitionName=""
+          maskTransitionName=""
         >
-          <ShipmentPage key={editShipmentId ?? 'new'} embedded />
-        </Suspense>
-      </Modal>
-    </StickyPageHeader>
+          <Suspense
+            fallback={
+              <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
+                <Spin size="large" />
+              </div>
+            }
+          >
+            <ShipmentPage key={editShipmentId ?? 'new'} embedded />
+          </Suspense>
+        </Modal>
+      </StickyPageHeader>
     </>
   );
 }

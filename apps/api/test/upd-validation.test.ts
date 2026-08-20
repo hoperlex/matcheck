@@ -440,6 +440,18 @@ describe('validateUpdTotals — целостность списка позици
     expect(r.hasMismatch).toBe(true);
   });
 
+  it('пустой список позиций — проверка пропускается, а не краснеет', () => {
+    // Боевой случай: Excel-накладную разобрал промпт УПД и вернул items: [].
+    // Math.max() от пустого массива даёт -Infinity, и проверка падала всегда —
+    // документ без единой позиции показывал «строка потеряна или задвоена:
+    // ожидается 0.00, по факту 0.00».
+    const r = validateUpdTotals({ totalSum: null, vatSum: null, items: [] });
+    const seq = r.checks.find((c) => c.name === 'items_sequence');
+    expect(seq?.ok).toBe(true);
+    expect(seq?.skipReason).toBe('no_expected');
+    expect(r.hasMismatch).toBe(false);
+  });
+
   it('номер есть не у всех строк — проверка пропускается, а не краснеет', () => {
     // Подпозиции «1а»/«2а» номером-числом не выражаются и приходят null.
     // Красить из-за них документ нельзя: ошибки тут нет.

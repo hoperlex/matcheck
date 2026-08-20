@@ -1,5 +1,17 @@
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, ne, or, sql as drSql } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  gte,
+  ilike,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  or,
+  sql as drSql,
+} from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
@@ -53,6 +65,7 @@ import {
 } from '../lib/contractor-scope.js';
 import { publishEvent } from './events.js';
 import { dateRangeConditions } from '../lib/date-range.js';
+import { MONEY_FMT, QTY_FMT, fmtDateTimeRu, numOrNull } from '../lib/xlsx-format.js';
 
 const ListQuerySchema = z.object({
   status: ShipmentStatusCodeSchema.optional(),
@@ -94,18 +107,27 @@ const ListQuerySchema = z.object({
   offset: z.coerce.number().int().nonnegative().default(0),
 });
 
+// Параметры фильтрации без пагинации: их принимают и список, и экспорт.
+type ShipmentFilterQuery = Omit<z.infer<typeof ListQuerySchema>, 'limit' | 'offset'>;
+
 // ─── Helpers для server-side фильтров (симметрично deliveries.ts) ──────
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseUuidCsv(s: string | undefined): string[] {
   if (!s) return [];
-  return s.split(',').map((v) => v.trim()).filter((v) => UUID_RE.test(v));
+  return s
+    .split(',')
+    .map((v) => v.trim())
+    .filter((v) => UUID_RE.test(v));
 }
 
 function parseCsv(s: string | undefined): string[] {
   if (!s) return [];
-  return s.split(',').map((v) => v.trim()).filter(Boolean);
+  return s
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
 }
 
 const KNOWN_FEATURES = new Set(['transit', 'assets', 'upd', 'waybill']);
@@ -193,8 +215,7 @@ function isSourceDocumentUniqueViolation(err: unknown): boolean {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const resolveStatusId = (app: any, code: string) =>
-  resolveStatusIdShared(app, 'shipment', code);
+const resolveStatusId = (app: any, code: string) => resolveStatusIdShared(app, 'shipment', code);
 
 // Заголовочный select отгрузки (шапка + плоские join-поля). Один и тот же набор
 // колонок/join'ов для одиночного (buildShipmentDto) и батч-пути
@@ -495,6 +516,208 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
 
 export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
+  /**
+   * Условия выборки отгрузок — общий источник правды для списка и экспорта.
+   * Зеркало buildDeliveryFilters в deliveries.ts: у отгрузок появился свой
+   * export.xlsx, и второй копии правил здесь заводить нельзя.
+   */
+  async function buildShipmentFilters(
+    user: Parameters<typeof resolveContractorOpIds>[1],
+    query: ShipmentFilterQuery,
+  ): Promise<Array<ReturnType<typeof eq>>> {
+    const {
+      status,
+      kind,
+      siteId,
+      inspectorId,
+      changedSince,
+      trash,
+      noDocument,
+      contractorIds: contractorIdsCsv,
+      supplierIds: supplierIdsCsv,
+      siteIds: siteIdsCsv,
+      q,
+      displayId,
+      plate,
+      features: featuresCsv,
+      purposes: purposesCsv,
+      shippedFrom,
+      shippedTo,
+      nophoto,
+      reviewState,
+    } = query;
+
+    const contractorDirIds = parseUuidCsv(contractorIdsCsv);
+    const supplierDirIds = parseUuidCsv(supplierIdsCsv);
+    const siteIdsArr = parseUuidCsv(siteIdsCsv);
+    const featureCodes = parseCsv(featuresCsv).filter((f) => KNOWN_FEATURES.has(f));
+    const purposesArr = parseCsv(purposesCsv).filter((p) => KNOWN_PURPOSES.has(p));
+
+    const filters = [];
+    filters.push(
+      trash ? isNotNull(shipments.pendingDeletionAt) : isNull(shipments.pendingDeletionAt),
+    );
+    if (status) {
+      const statusId = await resolveStatusId(app, status);
+      filters.push(eq(shipments.statusId, statusId));
+    }
+    if (noDocument !== undefined) {
+      filters.push(
+        noDocument
+          ? drSql`not exists (select 1 from shipment_sources ss where ss.shipment_id = ${shipments.id})`
+          : drSql`exists (select 1 from shipment_sources ss where ss.shipment_id = ${shipments.id})`,
+      );
+    }
+    if (kind) filters.push(eq(shipments.kind, kind));
+    // Фильтр по отметке проверки. none — не проверено (NULL).
+    if (reviewState) {
+      filters.push(
+        reviewState === 'none'
+          ? isNull(shipments.reviewState)
+          : eq(shipments.reviewState, reviewState),
+      );
+    }
+    // inspector_kpp видит отгрузки своего объекта-источника (включая чужие).
+    // Без назначенного объекта — пустой результат. Для admin/manager
+    // siteId из query — обычный опциональный фильтр.
+    if (user?.role === 'inspector_kpp') {
+      if (!user.siteId) {
+        filters.push(drSql`false`);
+      } else {
+        filters.push(eq(shipments.siteId, user.siteId));
+      }
+    } else if (user?.role === 'contractor') {
+      // contractor видит отгрузки, где он — получатель (receiver_counterparty_id),
+      // по всем объектам, независимо от kind. Наследования от УПД нет (как и у
+      // UI-фильтра). Без назначенного подрядчика / без совпадений — пусто.
+      const opIds = await resolveContractorOpIds(app, user);
+      if (!opIds || opIds.length === 0) {
+        filters.push(drSql`false`);
+      } else {
+        filters.push(inArray(shipments.receiverCounterpartyId, opIds));
+      }
+    } else {
+      if (siteId) filters.push(eq(shipments.siteId, siteId));
+      if (inspectorId) filters.push(eq(shipments.inspectorId, inspectorId));
+    }
+    if (!status && user?.role !== 'inspector_kpp' && user) {
+      const draftId = await resolveStatusId(app, 'draft');
+      filters.push(or(ne(shipments.statusId, draftId), eq(shipments.inspectorId, user.id))!);
+    }
+    if (changedSince) filters.push(gte(shipments.updatedAt, new Date(changedSince)));
+
+    // ─── server-side фильтры из /operations?type=shipment&tab=accepted ─
+    // Логика 1-в-1 с клиентом ShipmentsHistory.tsx → filteredItems. См.
+    // там же комментарии. ВАЖНО: в shipments FK подрядчика — это
+    // receiver_counterparty_id (а не contractor_id как в deliveries),
+    // здесь inheritance из source_document НЕ применяется (на клиенте
+    // тоже без inheritance).
+
+    // siteIds (multi-select)
+    if (siteIdsArr.length > 0) {
+      filters.push(inArray(shipments.siteId, siteIdsArr));
+    }
+
+    // contractorIds: directory ID → operational ID через ИНН-маппинг.
+    // Подрядчик в shipments — это получатель (receiver_counterparty_id).
+    if (contractorDirIds.length > 0) {
+      const opIds = await expandCustomerCounterpartyToOpIds(app, contractorDirIds);
+      if (opIds.length === 0) {
+        filters.push(drSql`false`);
+      } else {
+        filters.push(inArray(shipments.receiverCounterpartyId, opIds));
+      }
+    }
+
+    // supplierIds: directory ID → operational ID через справочник suppliers.
+    if (supplierDirIds.length > 0) {
+      const opIds = await expandSupplierToOpIds(app, supplierDirIds);
+      if (opIds.length === 0) {
+        filters.push(drSql`false`);
+      } else {
+        filters.push(inArray(shipments.supplierId, opIds));
+      }
+    }
+
+    // q: поиск по номеру привязанного source_document.
+    if (q?.trim()) {
+      const needle = `%${q.trim()}%`;
+      filters.push(drSql`EXISTS (
+      SELECT 1 FROM shipment_sources ss_q
+      JOIN source_documents sd_q ON sd_q.id = ss_q.source_document_id
+      WHERE ss_q.shipment_id = ${shipments.id}
+        AND sd_q.doc_number ILIKE ${needle}
+    )`);
+    }
+
+    // displayId: точное совпадение по короткому id (уникальный индекс
+    // shipments_display_id_uidx) — симметрично deliveries.ts.
+    if (displayId !== undefined) {
+      filters.push(eq(shipments.displayId, displayId));
+    }
+
+    // plate: ILIKE на госномер.
+    if (plate?.trim()) {
+      filters.push(ilike(shipments.vehiclePlate, `%${plate.trim()}%`));
+    }
+
+    // purposes: OR между выбранными (легаси отгрузки без purpose не
+    // попадают ни в один выбранный тип — это совпадает с клиентским
+    // поведением «purpose=null → не отображается под фильтром»).
+    if (purposesArr.length > 0) {
+      filters.push(inArray(shipments.purpose, purposesArr));
+    }
+
+    // features (AND):
+    //   transit → in_transit = true
+    //   assets  → is_assets = true OR EXISTS shipment_items.item_kind='asset'
+    //   upd     → EXISTS source_document.kind='upd'
+    //   waybill → EXISTS source_document.kind IN ('transport_waybill','os2_transfer')
+    for (const f of featureCodes) {
+      if (f === 'transit') {
+        filters.push(eq(shipments.inTransit, true));
+      } else if (f === 'assets') {
+        filters.push(drSql`(
+        ${shipments.isAssets} = true
+        OR EXISTS (
+          SELECT 1 FROM shipment_items si_a
+          WHERE si_a.shipment_id = ${shipments.id} AND si_a.item_kind = 'asset'
+        )
+      )`);
+      } else if (f === 'upd') {
+        filters.push(drSql`EXISTS (
+        SELECT 1 FROM shipment_sources ss_u
+        JOIN source_documents sd_u ON sd_u.id = ss_u.source_document_id
+        WHERE ss_u.shipment_id = ${shipments.id} AND sd_u.kind = 'upd'
+      )`);
+      } else if (f === 'waybill') {
+        filters.push(drSql`EXISTS (
+        SELECT 1 FROM shipment_sources ss_w
+        JOIN source_documents sd_w ON sd_w.id = ss_w.source_document_id
+        WHERE ss_w.shipment_id = ${shipments.id}
+          AND sd_w.kind IN ('transport_waybill', 'os2_transfer')
+      )`);
+      }
+    }
+
+    // shippedFrom / shippedTo — диапазон даты отправки.
+    // Верхняя граница строгая: клиент шлёт начало следующего дня.
+    filters.push(
+      ...dateRangeConditions(shipments.shippedAt, shippedFrom, shippedTo, {
+        fromField: 'shippedFrom',
+        toField: 'shippedTo',
+      }),
+    );
+
+    // nophoto: нет связанных фото.
+    if (nophoto) {
+      filters.push(drSql`NOT EXISTS (
+      SELECT 1 FROM shipment_photos sp WHERE sp.shipment_id = ${shipments.id}
+    )`);
+    }
+
+    return filters;
+  }
 
   app.get(
     '/api/v1/shipments',
@@ -503,190 +726,8 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: { querystring: ListQuerySchema, response: { 200: ShipmentListResponseSchema } },
     },
     async (req) => {
-      const {
-        status, kind, siteId, inspectorId, changedSince, trash, noDocument,
-        contractorIds: contractorIdsCsv,
-        supplierIds: supplierIdsCsv,
-        siteIds: siteIdsCsv,
-        q, displayId, plate,
-        features: featuresCsv,
-        purposes: purposesCsv,
-        shippedFrom, shippedTo, nophoto,
-        reviewState,
-        limit, offset,
-      } = req.query;
-
-      const contractorDirIds = parseUuidCsv(contractorIdsCsv);
-      const supplierDirIds = parseUuidCsv(supplierIdsCsv);
-      const siteIdsArr = parseUuidCsv(siteIdsCsv);
-      const featureCodes = parseCsv(featuresCsv).filter((f) => KNOWN_FEATURES.has(f));
-      const purposesArr = parseCsv(purposesCsv).filter((p) => KNOWN_PURPOSES.has(p));
-
-      const filters = [];
-      filters.push(
-        trash ? isNotNull(shipments.pendingDeletionAt) : isNull(shipments.pendingDeletionAt),
-      );
-      if (status) {
-        const statusId = await resolveStatusId(app, status);
-        filters.push(eq(shipments.statusId, statusId));
-      }
-      if (noDocument !== undefined) {
-        filters.push(
-          noDocument
-            ? drSql`not exists (select 1 from shipment_sources ss where ss.shipment_id = ${shipments.id})`
-            : drSql`exists (select 1 from shipment_sources ss where ss.shipment_id = ${shipments.id})`,
-        );
-      }
-      if (kind) filters.push(eq(shipments.kind, kind));
-      // Фильтр по отметке проверки. none — не проверено (NULL).
-      if (reviewState) {
-        filters.push(
-          reviewState === 'none'
-            ? isNull(shipments.reviewState)
-            : eq(shipments.reviewState, reviewState),
-        );
-      }
-      // inspector_kpp видит отгрузки своего объекта-источника (включая чужие).
-      // Без назначенного объекта — пустой результат. Для admin/manager
-      // siteId из query — обычный опциональный фильтр.
-      if (req.user?.role === 'inspector_kpp') {
-        if (!req.user.siteId) {
-          filters.push(drSql`false`);
-        } else {
-          filters.push(eq(shipments.siteId, req.user.siteId));
-        }
-      } else if (req.user?.role === 'contractor') {
-        // contractor видит отгрузки, где он — получатель (receiver_counterparty_id),
-        // по всем объектам, независимо от kind. Наследования от УПД нет (как и у
-        // UI-фильтра). Без назначенного подрядчика / без совпадений — пусто.
-        const opIds = await resolveContractorOpIds(app, req.user);
-        if (!opIds || opIds.length === 0) {
-          filters.push(drSql`false`);
-        } else {
-          filters.push(inArray(shipments.receiverCounterpartyId, opIds));
-        }
-      } else {
-        if (siteId) filters.push(eq(shipments.siteId, siteId));
-        if (inspectorId) filters.push(eq(shipments.inspectorId, inspectorId));
-      }
-      if (!status && req.user?.role !== 'inspector_kpp' && req.user) {
-        const draftId = await resolveStatusId(app, 'draft');
-        filters.push(
-          or(ne(shipments.statusId, draftId), eq(shipments.inspectorId, req.user.id))!,
-        );
-      }
-      if (changedSince) filters.push(gte(shipments.updatedAt, new Date(changedSince)));
-
-      // ─── server-side фильтры из /operations?type=shipment&tab=accepted ─
-      // Логика 1-в-1 с клиентом ShipmentsHistory.tsx → filteredItems. См.
-      // там же комментарии. ВАЖНО: в shipments FK подрядчика — это
-      // receiver_counterparty_id (а не contractor_id как в deliveries),
-      // здесь inheritance из source_document НЕ применяется (на клиенте
-      // тоже без inheritance).
-
-      // siteIds (multi-select)
-      if (siteIdsArr.length > 0) {
-        filters.push(inArray(shipments.siteId, siteIdsArr));
-      }
-
-      // contractorIds: directory ID → operational ID через ИНН-маппинг.
-      // Подрядчик в shipments — это получатель (receiver_counterparty_id).
-      if (contractorDirIds.length > 0) {
-        const opIds = await expandCustomerCounterpartyToOpIds(app, contractorDirIds);
-        if (opIds.length === 0) {
-          filters.push(drSql`false`);
-        } else {
-          filters.push(inArray(shipments.receiverCounterpartyId, opIds));
-        }
-      }
-
-      // supplierIds: directory ID → operational ID через справочник suppliers.
-      if (supplierDirIds.length > 0) {
-        const opIds = await expandSupplierToOpIds(app, supplierDirIds);
-        if (opIds.length === 0) {
-          filters.push(drSql`false`);
-        } else {
-          filters.push(inArray(shipments.supplierId, opIds));
-        }
-      }
-
-      // q: поиск по номеру привязанного source_document.
-      if (q?.trim()) {
-        const needle = `%${q.trim()}%`;
-        filters.push(drSql`EXISTS (
-          SELECT 1 FROM shipment_sources ss_q
-          JOIN source_documents sd_q ON sd_q.id = ss_q.source_document_id
-          WHERE ss_q.shipment_id = ${shipments.id}
-            AND sd_q.doc_number ILIKE ${needle}
-        )`);
-      }
-
-      // displayId: точное совпадение по короткому id (уникальный индекс
-      // shipments_display_id_uidx) — симметрично deliveries.ts.
-      if (displayId !== undefined) {
-        filters.push(eq(shipments.displayId, displayId));
-      }
-
-      // plate: ILIKE на госномер.
-      if (plate?.trim()) {
-        filters.push(ilike(shipments.vehiclePlate, `%${plate.trim()}%`));
-      }
-
-      // purposes: OR между выбранными (легаси отгрузки без purpose не
-      // попадают ни в один выбранный тип — это совпадает с клиентским
-      // поведением «purpose=null → не отображается под фильтром»).
-      if (purposesArr.length > 0) {
-        filters.push(inArray(shipments.purpose, purposesArr));
-      }
-
-      // features (AND):
-      //   transit → in_transit = true
-      //   assets  → is_assets = true OR EXISTS shipment_items.item_kind='asset'
-      //   upd     → EXISTS source_document.kind='upd'
-      //   waybill → EXISTS source_document.kind IN ('transport_waybill','os2_transfer')
-      for (const f of featureCodes) {
-        if (f === 'transit') {
-          filters.push(eq(shipments.inTransit, true));
-        } else if (f === 'assets') {
-          filters.push(drSql`(
-            ${shipments.isAssets} = true
-            OR EXISTS (
-              SELECT 1 FROM shipment_items si_a
-              WHERE si_a.shipment_id = ${shipments.id} AND si_a.item_kind = 'asset'
-            )
-          )`);
-        } else if (f === 'upd') {
-          filters.push(drSql`EXISTS (
-            SELECT 1 FROM shipment_sources ss_u
-            JOIN source_documents sd_u ON sd_u.id = ss_u.source_document_id
-            WHERE ss_u.shipment_id = ${shipments.id} AND sd_u.kind = 'upd'
-          )`);
-        } else if (f === 'waybill') {
-          filters.push(drSql`EXISTS (
-            SELECT 1 FROM shipment_sources ss_w
-            JOIN source_documents sd_w ON sd_w.id = ss_w.source_document_id
-            WHERE ss_w.shipment_id = ${shipments.id}
-              AND sd_w.kind IN ('transport_waybill', 'os2_transfer')
-          )`);
-        }
-      }
-
-      // shippedFrom / shippedTo — диапазон даты отправки.
-      // Верхняя граница строгая: клиент шлёт начало следующего дня.
-      filters.push(
-        ...dateRangeConditions(shipments.shippedAt, shippedFrom, shippedTo, {
-          fromField: 'shippedFrom',
-          toField: 'shippedTo',
-        }),
-      );
-
-      // nophoto: нет связанных фото.
-      if (nophoto) {
-        filters.push(drSql`NOT EXISTS (
-          SELECT 1 FROM shipment_photos sp WHERE sp.shipment_id = ${shipments.id}
-        )`);
-      }
-
+      const { limit, offset } = req.query;
+      const filters = await buildShipmentFilters(req.user, req.query);
       const where = filters.length ? and(...filters) : undefined;
 
       const rows = await app.db
@@ -714,6 +755,157 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
     },
   );
 
+  // Подписи видов отгрузки — те же слова, что на портале (KIND_LABELS в
+  // ShipmentViewModal.tsx). В выгрузке коды 'contractor'/'writeoff' читались бы
+  // хуже, чем «Подрядчику» и «Списание».
+  const SHIPMENT_KIND_LABELS: Record<string, string> = {
+    contractor: 'Подрядчику',
+    return: 'Возврат',
+    transfer: 'Перемещение',
+    writeoff: 'Списание',
+  };
+
+  // Экспорт отгрузок в xlsx — тем же набором фильтров, что и список.
+  //
+  // Своего экспорта у отгрузок не было вовсе: страница Операций выгружала
+  // вместо них ИСХОДЯЩИЕ документы (/source-documents/export.xlsx с
+  // direction=outbound), а таких в базе один за всё время — пользователь
+  // получал пустой лист с одной шапкой.
+  //
+  // Строки собираются тем же buildShipmentDtosBatch, что и список: получатель,
+  // суммы и позиции резолвятся одним кодом, поэтому Excel не может разойтись
+  // с экраном. Пагинации нет — выгружается вся выборка по фильтрам.
+  {
+    const ExportShipmentsQuerySchema = ListQuerySchema.omit({ limit: true, offset: true });
+
+    app.get(
+      '/api/v1/shipments/export.xlsx',
+      {
+        preHandler: [app.authenticate],
+        schema: { querystring: ExportShipmentsQuerySchema },
+      },
+      async (req, reply) => {
+        const filters = await buildShipmentFilters(req.user, req.query);
+        const where = filters.length ? and(...filters) : undefined;
+        const rows = await app.db
+          .select({ id: shipments.id })
+          .from(shipments)
+          .where(where)
+          .orderBy(desc(shipments.displayId));
+        const dtos = await buildShipmentDtosBatch(
+          app,
+          rows.map((r: { id: string }) => r.id),
+          req.user?.role,
+        );
+
+        const ExcelJS = (await import('exceljs')).default;
+        const wb = new ExcelJS.Workbook();
+        const ws = wb.addWorksheet('Отгрузки', {
+          views: [{ state: 'frozen', ySplit: 1 }],
+          properties: { defaultRowHeight: 16 },
+        });
+        ws.columns = [
+          { header: '№', key: 'idx', width: 6 },
+          { header: 'id', key: 'displayId', width: 9 },
+          { header: 'Статус', key: 'status', width: 16 },
+          { header: 'Тип', key: 'kind', width: 14 },
+          { header: 'Назначение', key: 'purpose', width: 18 },
+          { header: 'Авто', key: 'vehiclePlate', width: 12 },
+          { header: 'Отгрузка', key: 'shippedAt', width: 18 },
+          { header: 'Получатель', key: 'receiverName', width: 28 },
+          { header: 'Объект', key: 'siteName', width: 24 },
+          { header: 'Фото', key: 'photos', width: 8 },
+          { header: 'Наименование', key: 'nameRaw', width: 40 },
+          { header: 'План', key: 'qtyPlanned', width: 9 },
+          { header: 'Факт', key: 'qtyActual', width: 9 },
+          { header: 'Ед.', key: 'unit', width: 7 },
+          { header: 'Цена', key: 'price', width: 12 },
+          { header: 'Сумма НДС', key: 'vatSum', width: 14 },
+          { header: 'Сумма', key: 'sum', width: 16 },
+        ];
+        const headerRow = ws.getRow(1);
+        headerRow.font = { bold: true };
+        headerRow.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+        headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEDEDED' } };
+
+        let idx = 0;
+        for (const dto of dtos) {
+          idx++;
+          const docRow = ws.addRow({
+            idx,
+            displayId: dto.displayId,
+            status: dto.status?.label ?? '',
+            kind: SHIPMENT_KIND_LABELS[dto.kind] ?? dto.kind,
+            purpose: dto.purpose ?? '',
+            vehiclePlate: dto.vehiclePlate ?? '',
+            shippedAt: fmtDateTimeRu(dto.shippedAt),
+            receiverName: dto.receiverName ?? '',
+            siteName: dto.siteName ?? '',
+            photos: dto.photos.length,
+            nameRaw: '',
+            qtyPlanned: null,
+            qtyActual: null,
+            unit: '',
+            price: null,
+            // Итоги считает тот же код, что отдаёт их списку, — расхождения
+            // между строкой Excel и карточкой на портале быть не может.
+            vatSum: dto.itemsVatSum ?? null,
+            sum: dto.itemsTotal ?? null,
+          });
+          docRow.font = { bold: true };
+          docRow.getCell('vatSum').numFmt = MONEY_FMT;
+          docRow.getCell('sum').numFmt = MONEY_FMT;
+          docRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF7F7F7' } };
+
+          for (const it of dto.items) {
+            const qtyP = numOrNull(it.qtyPlanned);
+            const qtyA = numOrNull(it.qtyActual);
+            const price = numOrNull(it.price);
+            const qtyForRowTotal = qtyA ?? qtyP;
+            const rowSum = qtyForRowTotal != null && price != null ? qtyForRowTotal * price : null;
+            const itemRow = ws.addRow({
+              idx: it.lineNo,
+              displayId: null,
+              status: '',
+              kind: '',
+              purpose: '',
+              vehiclePlate: '',
+              shippedAt: '',
+              receiverName: '',
+              siteName: '',
+              photos: null,
+              nameRaw: it.nameRaw,
+              qtyPlanned: qtyP,
+              qtyActual: qtyA,
+              unit: it.unit,
+              price,
+              vatSum: numOrNull(it.vatSum),
+              sum: rowSum,
+            });
+            itemRow.outlineLevel = 1;
+            itemRow.getCell('qtyPlanned').numFmt = QTY_FMT;
+            itemRow.getCell('qtyActual').numFmt = QTY_FMT;
+            itemRow.getCell('price').numFmt = MONEY_FMT;
+            itemRow.getCell('vatSum').numFmt = MONEY_FMT;
+            itemRow.getCell('sum').numFmt = MONEY_FMT;
+          }
+        }
+        ws.properties.outlineLevelRow = 1;
+
+        const buf = await wb.xlsx.writeBuffer();
+        const today = new Date().toISOString().slice(0, 10);
+        const filename = `shipments-${today}.xlsx`;
+        return reply
+          .header(
+            'Content-Type',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          )
+          .header('Content-Disposition', `attachment; filename="${filename}"`)
+          .send(Buffer.from(buf));
+      },
+    );
+  }
+
   app.get(
     '/api/v1/shipments/:id',
     {
@@ -737,11 +929,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       // receiverCounterpartyId, поэтому проверяем без доп. запроса.
       if (req.user?.role === 'contractor') {
         const opIds = await resolveContractorOpIds(app, req.user);
-        if (
-          !opIds ||
-          !dto.receiverCounterpartyId ||
-          !opIds.includes(dto.receiverCounterpartyId)
-        ) {
+        if (!opIds || !dto.receiverCounterpartyId || !opIds.includes(dto.receiverCounterpartyId)) {
           return reply.code(404).send({ error: 'not_found' });
         }
       }
@@ -873,9 +1061,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       const linksError = validateKindLinks(input);
       if (linksError) {
         const statusCode = linksError.code === 'receiver_required' ? 422 : 400;
-        return reply
-          .code(statusCode)
-          .send({ error: linksError.code, message: linksError.message });
+        return reply.code(statusCode).send({ error: linksError.code, message: linksError.message });
       }
 
       try {
@@ -934,18 +1120,32 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           }
           const dto = await buildShipmentDto(app, input.id, req.user?.role);
           if (!dto) return reply.code(404).send({ error: 'not_found' });
-          publishEvent(app, { type: 'shipment_updated', entityId: dto.id, ts: new Date().toISOString() });
+          publishEvent(app, {
+            type: 'shipment_updated',
+            entityId: dto.id,
+            ts: new Date().toISOString(),
+          });
           return dto;
         }
 
         await assertPermission(req, 'operations.shipments', 'create');
-        const created = await createShipment(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
+        const created = await createShipment(
+          app,
+          input,
+          statusId,
+          inspectorId,
+          req.user?.sessionId ?? null,
+        );
         if (input.kind === 'transfer') {
           await syncPairedTransferDelivery(app, created.id);
         }
         const dto = await buildShipmentDto(app, created.id, req.user?.role);
         if (!dto) throw new Error('Shipment missing after create');
-        publishEvent(app, { type: 'shipment_updated', entityId: dto.id, ts: new Date().toISOString() });
+        publishEvent(app, {
+          type: 'shipment_updated',
+          entityId: dto.id,
+          ts: new Date().toISOString(),
+        });
         return dto;
       } catch (err) {
         if (err instanceof SourceAlreadyLinkedError) {
@@ -1070,7 +1270,11 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         });
         if (keySet.size > 0) {
           await tx.insert(s3CleanupOutbox).values(
-            Array.from(keySet, (s3Key) => ({ s3Key, entityType: 'shipment', entityId: existing.id })),
+            Array.from(keySet, (s3Key) => ({
+              s3Key,
+              entityType: 'shipment',
+              entityId: existing.id,
+            })),
           );
         }
         await touchSourceDocuments({ db: tx }, attachedSdIds);
@@ -1131,7 +1335,8 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!SHIPMENT_SOFT_DELETE_STATUSES.has(code)) {
         return reply.code(400).send({
           error: 'cannot_mark_status',
-          message: 'Пометка на удаление возможна только для статусов «Оформлена» и «Подтверждено МОЛ»',
+          message:
+            'Пометка на удаление возможна только для статусов «Оформлена» и «Подтверждено МОЛ»',
         });
       }
 
@@ -1147,7 +1352,11 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(shipments.id, existing.id));
       const dto = await buildShipmentDto(app, existing.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
-      publishEvent(app, { type: 'shipment_updated', entityId: dto.id, ts: new Date().toISOString() });
+      publishEvent(app, {
+        type: 'shipment_updated',
+        entityId: dto.id,
+        ts: new Date().toISOString(),
+      });
       return dto;
     },
   );
@@ -1210,7 +1419,11 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(shipments.id, existing.id));
       const dto = await buildShipmentDto(app, existing.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
-      publishEvent(app, { type: 'shipment_updated', entityId: dto.id, ts: new Date().toISOString() });
+      publishEvent(app, {
+        type: 'shipment_updated',
+        entityId: dto.id,
+        ts: new Date().toISOString(),
+      });
       return dto;
     },
   );
@@ -1232,12 +1445,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       const deleted: string[] = [];
       const skipped: Array<{
         id: string;
-        reason:
-          | 'not_found'
-          | 'already_pending'
-          | 'wrong_status'
-          | 'forbidden'
-          | 'internal_error';
+        reason: 'not_found' | 'already_pending' | 'wrong_status' | 'forbidden' | 'internal_error';
       }> = [];
 
       for (const id of ids) {
@@ -1435,9 +1643,11 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
               deletedByUserId: req.user?.id ?? null,
             });
             if (keySet.size > 0) {
-              await tx.insert(s3CleanupOutbox).values(
-                Array.from(keySet, (s3Key) => ({ s3Key, entityType: 'shipment', entityId: id })),
-              );
+              await tx
+                .insert(s3CleanupOutbox)
+                .values(
+                  Array.from(keySet, (s3Key) => ({ s3Key, entityType: 'shipment', entityId: id })),
+                );
             }
             await touchSourceDocuments({ db: tx }, attachedSdIds);
             await tx.delete(shipments).where(eq(shipments.id, id));
@@ -1601,10 +1811,9 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             inTransit: z.boolean().optional(),
             isAssets: z.boolean().optional(),
           })
-          .refine(
-            (b) => b.inTransit !== undefined || b.isAssets !== undefined,
-            { message: 'Минимум одно из полей (inTransit, isAssets) должно быть задано' },
-          ),
+          .refine((b) => b.inTransit !== undefined || b.isAssets !== undefined, {
+            message: 'Минимум одно из полей (inTransit, isAssets) должно быть задано',
+          }),
         response: {
           200: ShipmentSchema,
           404: ErrorResponseSchema,
@@ -1721,9 +1930,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
               )
               .limit(1);
             if (already) throw new AlreadyLinkedError();
-            await tx
-              .insert(shipmentSources)
-              .values({ shipmentId: s.id, sourceDocumentId: src.id });
+            await tx.insert(shipmentSources).values({ shipmentId: s.id, sourceDocumentId: src.id });
 
             const existingItems: {
               nameRaw: string;
@@ -1740,30 +1947,21 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
               .from(shipmentItems)
               .where(eq(shipmentItems.shipmentId, s.id));
 
-            const buildKey = (
-              name: string,
-              unit: string,
-              qty: string | null,
-            ): string =>
+            const buildKey = (name: string, unit: string, qty: string | null): string =>
               `${name.trim().toLowerCase()}|${unit.trim().toLowerCase()}|${
                 qty == null ? '' : Number(qty).toString()
               }`;
             const existingKeys = new Set(
-              existingItems.map((i) =>
-                buildKey(i.nameRaw, i.unit, i.qtyPlanned),
-              ),
+              existingItems.map((i) => buildKey(i.nameRaw, i.unit, i.qtyPlanned)),
             );
             const startLineNo =
-              existingItems.length === 0
-                ? 1
-                : Math.max(...existingItems.map((i) => i.lineNo)) + 1;
+              existingItems.length === 0 ? 1 : Math.max(...existingItems.map((i) => i.lineNo)) + 1;
 
-            const updRows: (typeof sourceDocumentItems.$inferSelect)[] =
-              await tx
-                .select()
-                .from(sourceDocumentItems)
-                .where(eq(sourceDocumentItems.sourceDocumentId, src.id))
-                .orderBy(sourceDocumentItems.lineNo);
+            const updRows: (typeof sourceDocumentItems.$inferSelect)[] = await tx
+              .select()
+              .from(sourceDocumentItems)
+              .where(eq(sourceDocumentItems.sourceDocumentId, src.id))
+              .orderBy(sourceDocumentItems.lineNo);
 
             const newRows: (typeof shipmentItems.$inferInsert)[] = [];
             let lineNo = startLineNo;
@@ -1841,7 +2039,8 @@ type KindLinksError = {
   message: string;
 };
 function validateKindLinks(input: z.infer<typeof ShipmentUpsertSchema>): KindLinksError | null {
-  const { kind, receiverCounterpartyId, receiverMolId, destSiteId, siteId, sourceDocumentIds } = input;
+  const { kind, receiverCounterpartyId, receiverMolId, destSiteId, siteId, sourceDocumentIds } =
+    input;
   // Получатель указан XOR через counterparty или МОЛ (двух одновременно — нельзя).
   const hasContractorReceiver = Boolean(receiverCounterpartyId);
   const hasMolReceiver = Boolean(receiverMolId);
@@ -1920,91 +2119,92 @@ async function createShipment(
   // Атомарность: шапка + позиции + источники + touch УПД — одна транзакция
   // (симметрично createDelivery). Либо всё, либо ничего; контракт не меняется.
   return await app.db.transaction(async (tx: typeof app.db) => {
-  const [created] = await tx
-    .insert(shipments)
-    .values({
-      id: input.id,
-      statusId,
-      kind: input.kind,
-      purpose: input.purpose ?? null,
-      inTransit: input.inTransit ?? false,
-      siteId: input.siteId,
-      receiverCounterpartyId: input.receiverCounterpartyId ?? null,
-      receiverMolId: input.receiverMolId ?? null,
-      destSiteId: input.destSiteId ?? null,
-      supplierId: input.supplierId ?? null,
-      vehiclePlate: input.vehiclePlate ?? null,
-      driverName: input.driverName ?? null,
-      shippedAt: input.shippedAt ? new Date(input.shippedAt) : null,
-      inspectorId,
-      comment: input.comment ?? null,
-      isAssets: input.isAssets ?? false,
-      ...(isDirectConfirm && {
-        confirmedByMolUserId: inspectorId,
-        confirmedByMolAt: confirmedAtCandidate,
-      }),
-      createdBySessionId,
-      version: 1,
-    })
-    .returning();
-  if (!created) throw new Error('Failed to insert shipment');
-  if (input.items.length) {
-    // При СОЗДАНИИ отгрузки происхождение берётся из запроса: строк в БД ещё
-    // нет, переносить нечего. Ограничение то же, что и дальше по жизни
-    // отгрузки, — документ должен быть в её наборе связей (симметрично
-    // createDelivery).
-    const linkedOnCreate = new Set(input.sourceDocumentIds);
-    await tx.insert(shipmentItems).values(
-      input.items.map((i) => ({
-        shipmentId: created.id,
-        sourceDocumentId:
-          i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
-            ? i.sourceDocumentId
-            : null,
-        sourceDocumentItemId:
-          i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
-            ? (i.sourceDocumentItemId ?? null)
-            : null,
-        itemKind: i.itemKind,
-        materialId: i.itemKind === 'asset' ? null : (i.materialId ?? null),
-        assetId: i.itemKind === 'asset' ? (i.assetId ?? null) : null,
-        inventoryNumber: i.inventoryNumber ?? null,
-        serialNumber: i.serialNumber ?? null,
-        nameRaw: i.nameRaw,
-        qtyPlanned: i.qtyPlanned ?? null,
-        qtyActual: i.qtyActual ?? null,
-        unit: i.unit,
-        comment: i.comment ?? null,
-        lineNo: i.lineNo,
-        volumeM3: i.volumeM3 ?? null,
-        massKg: i.massKg ?? null,
-        price: i.price ?? null,
-        vatRate: i.vatRate ?? null,
-        vatSum: i.vatSum ?? null,
-        volumeConfidence: i.volumeConfidence ?? null,
-        groupName: i.groupName ?? null,
-      })),
-    );
-  }
-  if (input.sourceDocumentIds.length) {
-    await assertSourcesAvailableForShipment({ db: tx }, input.sourceDocumentIds, created.id);
-    try {
-      await tx
-        .insert(shipmentSources)
-        .values(
-          input.sourceDocumentIds.map((sid) => ({ shipmentId: created.id, sourceDocumentId: sid })),
-        );
-    } catch (err) {
-      if (isSourceDocumentUniqueViolation(err)) {
-        throw new SourceAlreadyLinkedError(input.sourceDocumentIds);
-      }
-      throw err;
+    const [created] = await tx
+      .insert(shipments)
+      .values({
+        id: input.id,
+        statusId,
+        kind: input.kind,
+        purpose: input.purpose ?? null,
+        inTransit: input.inTransit ?? false,
+        siteId: input.siteId,
+        receiverCounterpartyId: input.receiverCounterpartyId ?? null,
+        receiverMolId: input.receiverMolId ?? null,
+        destSiteId: input.destSiteId ?? null,
+        supplierId: input.supplierId ?? null,
+        vehiclePlate: input.vehiclePlate ?? null,
+        driverName: input.driverName ?? null,
+        shippedAt: input.shippedAt ? new Date(input.shippedAt) : null,
+        inspectorId,
+        comment: input.comment ?? null,
+        isAssets: input.isAssets ?? false,
+        ...(isDirectConfirm && {
+          confirmedByMolUserId: inspectorId,
+          confirmedByMolAt: confirmedAtCandidate,
+        }),
+        createdBySessionId,
+        version: 1,
+      })
+      .returning();
+    if (!created) throw new Error('Failed to insert shipment');
+    if (input.items.length) {
+      // При СОЗДАНИИ отгрузки происхождение берётся из запроса: строк в БД ещё
+      // нет, переносить нечего. Ограничение то же, что и дальше по жизни
+      // отгрузки, — документ должен быть в её наборе связей (симметрично
+      // createDelivery).
+      const linkedOnCreate = new Set(input.sourceDocumentIds);
+      await tx.insert(shipmentItems).values(
+        input.items.map((i) => ({
+          shipmentId: created.id,
+          sourceDocumentId:
+            i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
+              ? i.sourceDocumentId
+              : null,
+          sourceDocumentItemId:
+            i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
+              ? (i.sourceDocumentItemId ?? null)
+              : null,
+          itemKind: i.itemKind,
+          materialId: i.itemKind === 'asset' ? null : (i.materialId ?? null),
+          assetId: i.itemKind === 'asset' ? (i.assetId ?? null) : null,
+          inventoryNumber: i.inventoryNumber ?? null,
+          serialNumber: i.serialNumber ?? null,
+          nameRaw: i.nameRaw,
+          qtyPlanned: i.qtyPlanned ?? null,
+          qtyActual: i.qtyActual ?? null,
+          unit: i.unit,
+          comment: i.comment ?? null,
+          lineNo: i.lineNo,
+          volumeM3: i.volumeM3 ?? null,
+          massKg: i.massKg ?? null,
+          price: i.price ?? null,
+          vatRate: i.vatRate ?? null,
+          vatSum: i.vatSum ?? null,
+          volumeConfidence: i.volumeConfidence ?? null,
+          groupName: i.groupName ?? null,
+        })),
+      );
     }
-    // Бамп updated_at для привязанных УПД, чтобы они попали в дельту
-    // /sync. См. domain/sourceDocuments/touch.ts.
-    await touchSourceDocuments({ db: tx }, input.sourceDocumentIds);
-  }
-  return created;
+    if (input.sourceDocumentIds.length) {
+      await assertSourcesAvailableForShipment({ db: tx }, input.sourceDocumentIds, created.id);
+      try {
+        await tx.insert(shipmentSources).values(
+          input.sourceDocumentIds.map((sid) => ({
+            shipmentId: created.id,
+            sourceDocumentId: sid,
+          })),
+        );
+      } catch (err) {
+        if (isSourceDocumentUniqueViolation(err)) {
+          throw new SourceAlreadyLinkedError(input.sourceDocumentIds);
+        }
+        throw err;
+      }
+      // Бамп updated_at для привязанных УПД, чтобы они попали в дельту
+      // /sync. См. domain/sourceDocuments/touch.ts.
+      await touchSourceDocuments({ db: tx }, input.sourceDocumentIds);
+    }
+    return created;
   });
 }
 
@@ -2072,9 +2272,7 @@ async function updateShipment(
     .where(eq(shipmentSources.shipmentId, id));
   const existingHadNoDocs = (existingSourcesCount?.c ?? 0) === 0;
   const itemsForInsert =
-    existingHadNoDocs &&
-    input.sourceDocumentIds.length > 0 &&
-    input.items.length === 0
+    existingHadNoDocs && input.sourceDocumentIds.length > 0 && input.items.length === 0
       ? await buildShipmentItemsFromSources(app, input.sourceDocumentIds)
       : input.items.map((i) => ({
           // clientId переживает только сборку origins и отбрасывается перед
@@ -2105,116 +2303,118 @@ async function updateShipment(
   // Атомарность update: статус/шапка + позиции + источники + touch УПД —
   // одна транзакция (симметрично updateDelivery).
   return await app.db.transaction(async (tx: typeof app.db) => {
-  const updatedRows = await tx
-    .update(shipments)
-    .set({
-      statusId: effectiveStatusId,
-      kind: input.kind,
-      purpose: input.purpose ?? null,
-      inTransit: input.inTransit ?? false,
-      isAssets: input.isAssets ?? false,
-      siteId: input.siteId,
-      receiverCounterpartyId: input.receiverCounterpartyId ?? null,
-      receiverMolId: input.receiverMolId ?? null,
-      destSiteId: input.destSiteId ?? null,
-      supplierId: input.supplierId ?? null,
-      vehiclePlate: input.vehiclePlate ?? null,
-      driverName: input.driverName ?? null,
-      shippedAt: input.shippedAt ? new Date(input.shippedAt) : null,
-      comment: input.comment ?? null,
-      // COALESCE, а не условная запись: первое подтверждение побеждает даже при
-      // повторной или параллельной мутации.
-      ...(wantsConfirm && {
-        confirmedByMolUserId: drSql`COALESCE(${shipments.confirmedByMolUserId}, ${userId}::uuid)`,
-        confirmedByMolAt: drSql`COALESCE(${shipments.confirmedByMolAt}, ${confirmedAtIso}::timestamptz)`,
-      }),
-      version: drSql`${shipments.version} + 1`,
-      updatedAt: new Date(),
-    })
-    .where(
-      expectedSiteId
-        ? and(eq(shipments.id, id), eq(shipments.siteId, expectedSiteId))
-        : eq(shipments.id, id),
-    )
-    .returning({ id: shipments.id });
-  // Объект отгрузки изменился после чтения existing — прерываем транзакцию,
-  // маршрут отдаст 403 foreign_site (см. domain/operations/foreign-site.ts).
-  if (updatedRows.length === 0) throw new ForeignSiteError();
+    const updatedRows = await tx
+      .update(shipments)
+      .set({
+        statusId: effectiveStatusId,
+        kind: input.kind,
+        purpose: input.purpose ?? null,
+        inTransit: input.inTransit ?? false,
+        isAssets: input.isAssets ?? false,
+        siteId: input.siteId,
+        receiverCounterpartyId: input.receiverCounterpartyId ?? null,
+        receiverMolId: input.receiverMolId ?? null,
+        destSiteId: input.destSiteId ?? null,
+        supplierId: input.supplierId ?? null,
+        vehiclePlate: input.vehiclePlate ?? null,
+        driverName: input.driverName ?? null,
+        shippedAt: input.shippedAt ? new Date(input.shippedAt) : null,
+        comment: input.comment ?? null,
+        // COALESCE, а не условная запись: первое подтверждение побеждает даже при
+        // повторной или параллельной мутации.
+        ...(wantsConfirm && {
+          confirmedByMolUserId: drSql`COALESCE(${shipments.confirmedByMolUserId}, ${userId}::uuid)`,
+          confirmedByMolAt: drSql`COALESCE(${shipments.confirmedByMolAt}, ${confirmedAtIso}::timestamptz)`,
+        }),
+        version: drSql`${shipments.version} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(
+        expectedSiteId
+          ? and(eq(shipments.id, id), eq(shipments.siteId, expectedSiteId))
+          : eq(shipments.id, id),
+      )
+      .returning({ id: shipments.id });
+    // Объект отгрузки изменился после чтения existing — прерываем транзакцию,
+    // маршрут отдаст 403 foreign_site (см. domain/operations/foreign-site.ts).
+    if (updatedRows.length === 0) throw new ForeignSiteError();
 
-  // Происхождение позиций переносится ЯВНО — как в updateDelivery. Строки
-  // удаляются и вставляются заново, а source_document_id это данные, которых
-  // в запросе может не быть (старый планшет о поле не знает) и которым в
-  // запросе нельзя доверять (клиент не должен переписывать происхождение
-  // существующей строки). Поэтому снимок делается ДО delete.
-  const previousItems = await tx
-    .select({
-      id: shipmentItems.id,
-      nameRaw: shipmentItems.nameRaw,
-      unit: shipmentItems.unit,
-      lineNo: shipmentItems.lineNo,
-      sourceDocumentId: shipmentItems.sourceDocumentId,
-      sourceDocumentItemId: shipmentItems.sourceDocumentItemId,
-    })
-    .from(shipmentItems)
-    .where(eq(shipmentItems.shipmentId, id));
+    // Происхождение позиций переносится ЯВНО — как в updateDelivery. Строки
+    // удаляются и вставляются заново, а source_document_id это данные, которых
+    // в запросе может не быть (старый планшет о поле не знает) и которым в
+    // запросе нельзя доверять (клиент не должен переписывать происхождение
+    // существующей строки). Поэтому снимок делается ДО delete.
+    const previousItems = await tx
+      .select({
+        id: shipmentItems.id,
+        nameRaw: shipmentItems.nameRaw,
+        unit: shipmentItems.unit,
+        lineNo: shipmentItems.lineNo,
+        sourceDocumentId: shipmentItems.sourceDocumentId,
+        sourceDocumentItemId: shipmentItems.sourceDocumentItemId,
+      })
+      .from(shipmentItems)
+      .where(eq(shipmentItems.shipmentId, id));
 
-  // В отличие от приёмки, набор связей отгрузки upsert ПЕРЕПИСЫВАЕТ (ниже
-  // delete + insert по input.sourceDocumentIds), поэтому авторитетным списком
-  // здесь служит присланный, а не сохранённый.
-  const origins = resolveItemOrigins({
-    existing: previousItems,
-    incoming: itemsForInsert.map((i) => ({
-      id: i.clientId ?? null,
-      nameRaw: i.nameRaw,
-      unit: i.unit,
-      lineNo: i.lineNo,
-      sourceDocumentId: i.sourceDocumentId ?? null,
-      sourceDocumentItemId: i.sourceDocumentItemId ?? null,
-    })),
-    linkedDocumentIds: input.sourceDocumentIds,
-  });
-
-  await tx.delete(shipmentItems).where(eq(shipmentItems.shipmentId, id));
-  if (itemsForInsert.length) {
-    await tx.insert(shipmentItems).values(
-      itemsForInsert.map(({ clientId: _clientId, ...i }, idx) => ({
-        ...i,
-        shipmentId: id,
-        sourceDocumentId: origins[idx]?.sourceDocumentId ?? null,
-        sourceDocumentItemId: origins[idx]?.sourceDocumentItemId ?? null,
+    // В отличие от приёмки, набор связей отгрузки upsert ПЕРЕПИСЫВАЕТ (ниже
+    // delete + insert по input.sourceDocumentIds), поэтому авторитетным списком
+    // здесь служит присланный, а не сохранённый.
+    const origins = resolveItemOrigins({
+      existing: previousItems,
+      incoming: itemsForInsert.map((i) => ({
+        id: i.clientId ?? null,
+        nameRaw: i.nameRaw,
+        unit: i.unit,
+        lineNo: i.lineNo,
+        sourceDocumentId: i.sourceDocumentId ?? null,
+        sourceDocumentItemId: i.sourceDocumentItemId ?? null,
       })),
-    );
-  }
-  if (input.sourceDocumentIds.length) {
-    await assertSourcesAvailableForShipment({ db: tx }, input.sourceDocumentIds, id);
-  }
-  // Запоминаем какие УПД были привязаны раньше — нужно бампать
-  // их updated_at тоже (для УПД, которая отвязывается, видимость
-  // в Inbox должна вернуться).
-  const previousSources: { sourceDocumentId: string }[] = await tx
-    .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
-    .from(shipmentSources)
-    .where(eq(shipmentSources.shipmentId, id));
-  await tx.delete(shipmentSources).where(eq(shipmentSources.shipmentId, id));
-  if (input.sourceDocumentIds.length) {
-    try {
-      await tx
-        .insert(shipmentSources)
-        .values(input.sourceDocumentIds.map((sid) => ({ shipmentId: id, sourceDocumentId: sid })));
-    } catch (err) {
-      if (isSourceDocumentUniqueViolation(err)) {
-        throw new SourceAlreadyLinkedError(input.sourceDocumentIds);
-      }
-      throw err;
+      linkedDocumentIds: input.sourceDocumentIds,
+    });
+
+    await tx.delete(shipmentItems).where(eq(shipmentItems.shipmentId, id));
+    if (itemsForInsert.length) {
+      await tx.insert(shipmentItems).values(
+        itemsForInsert.map(({ clientId: _clientId, ...i }, idx) => ({
+          ...i,
+          shipmentId: id,
+          sourceDocumentId: origins[idx]?.sourceDocumentId ?? null,
+          sourceDocumentItemId: origins[idx]?.sourceDocumentItemId ?? null,
+        })),
+      );
     }
-  }
-  // Бамп updated_at для всех затронутых УПД: и для новопривязанных,
-  // и для тех, которые отвязались.
-  const affected = new Set<string>([
-    ...previousSources.map((p) => p.sourceDocumentId),
-    ...input.sourceDocumentIds,
-  ]);
-  await touchSourceDocuments({ db: tx }, [...affected]);
+    if (input.sourceDocumentIds.length) {
+      await assertSourcesAvailableForShipment({ db: tx }, input.sourceDocumentIds, id);
+    }
+    // Запоминаем какие УПД были привязаны раньше — нужно бампать
+    // их updated_at тоже (для УПД, которая отвязывается, видимость
+    // в Inbox должна вернуться).
+    const previousSources: { sourceDocumentId: string }[] = await tx
+      .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
+      .from(shipmentSources)
+      .where(eq(shipmentSources.shipmentId, id));
+    await tx.delete(shipmentSources).where(eq(shipmentSources.shipmentId, id));
+    if (input.sourceDocumentIds.length) {
+      try {
+        await tx
+          .insert(shipmentSources)
+          .values(
+            input.sourceDocumentIds.map((sid) => ({ shipmentId: id, sourceDocumentId: sid })),
+          );
+      } catch (err) {
+        if (isSourceDocumentUniqueViolation(err)) {
+          throw new SourceAlreadyLinkedError(input.sourceDocumentIds);
+        }
+        throw err;
+      }
+    }
+    // Бамп updated_at для всех затронутых УПД: и для новопривязанных,
+    // и для тех, которые отвязались.
+    const affected = new Set<string>([
+      ...previousSources.map((p) => p.sourceDocumentId),
+      ...input.sourceDocumentIds,
+    ]);
+    await touchSourceDocuments({ db: tx }, [...affected]);
   });
 }
 

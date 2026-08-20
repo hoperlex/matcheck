@@ -1,5 +1,17 @@
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, ne, or, sql as drSql } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  gte,
+  ilike,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  or,
+  sql as drSql,
+} from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
@@ -54,6 +66,7 @@ import {
 } from '../lib/contractor-scope.js';
 import { publishEvent } from './events.js';
 import { dateRangeConditions } from '../lib/date-range.js';
+import { MONEY_FMT, QTY_FMT, fmtDateTimeRu } from '../lib/xlsx-format.js';
 
 const ListQuerySchema = z.object({
   status: DeliveryStatusCodeSchema.optional(),
@@ -100,6 +113,11 @@ const ListQuerySchema = z.object({
   offset: z.coerce.number().int().nonnegative().default(0),
 });
 
+// Те же параметры, что у списка, минус пагинация: экспорт обязан выгружать
+// ровно то, что пользователь видит на экране, поэтому фильтры у них общие.
+// См. buildDeliveryFilters — один источник правды для обоих маршрутов.
+type DeliveryFilterQuery = Omit<z.infer<typeof ListQuerySchema>, 'limit' | 'offset'>;
+
 // UUID-regex для безопасного парсинга csv-параметров из URL. Невалидные
 // значения отбрасываем — иначе Postgres падает на `id IN ('not-uuid')`.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -107,14 +125,20 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // Парсит "a,b,c" в массив UUID, отбрасывая пустые и невалидные значения.
 function parseUuidCsv(s: string | undefined): string[] {
   if (!s) return [];
-  return s.split(',').map((v) => v.trim()).filter((v) => UUID_RE.test(v));
+  return s
+    .split(',')
+    .map((v) => v.trim())
+    .filter((v) => UUID_RE.test(v));
 }
 
 // Парсит "a,b,c" в массив строк, отбрасывая пустые. Без UUID-валидации —
 // используется для feature-кодов ('transit', 'assets', ...).
 function parseCsv(s: string | undefined): string[] {
   if (!s) return [];
-  return s.split(',').map((v) => v.trim()).filter(Boolean);
+  return s
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
 }
 
 const KNOWN_FEATURES = new Set(['transit', 'assets', 'upd', 'waybill']);
@@ -191,10 +215,7 @@ async function assertSourcesAvailableForDelivery(
     .select({ id: sourceDocuments.id })
     .from(sourceDocuments)
     .where(
-      and(
-        inArray(sourceDocuments.id, sourceDocumentIds),
-        eq(sourceDocuments.isTechnical, true),
-      ),
+      and(inArray(sourceDocuments.id, sourceDocumentIds), eq(sourceDocuments.isTechnical, true)),
     )
     .limit(1);
   if (technical.length > 0) {
@@ -210,8 +231,7 @@ class TechnicalSourceDocumentError extends Error {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const resolveStatusId = (app: any, code: string) =>
-  resolveStatusIdShared(app, 'delivery', code);
+const resolveStatusId = (app: any, code: string) => resolveStatusIdShared(app, 'delivery', code);
 
 // Заголовочный select приёмки (шапка + плоские join-поля). Один и тот же набор
 // колонок/join'ов для одиночного (buildDeliveryDto) и батч-пути
@@ -531,6 +551,216 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
 
 export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
+  /**
+   * Условия выборки приёмок — ОДИН источник правды для списка и для экспорта.
+   *
+   * Раньше экспорт строил свой WHERE, и он разошёлся со списком: поставщик
+   * фильтровался по directory-id без ИНН-маппинга (то есть не находил ничего),
+   * а displayId, features, reviewState, nophoto и диапазон дат экспорт не знал
+   * вовсе — выгрузка «за период» отдавала все приёмки от начала времён.
+   * Держать вторую копию правил нельзя: следующая правка фильтра снова
+   * разъедется, и заметит это не разработчик, а бухгалтер в Excel.
+   */
+  async function buildDeliveryFilters(
+    user: Parameters<typeof resolveContractorOpIds>[1],
+    query: DeliveryFilterQuery,
+  ): Promise<Array<ReturnType<typeof eq>>> {
+    const {
+      status,
+      inspectorId,
+      changedSince,
+      trash,
+      noDocument,
+      contractorIds: contractorIdsCsv,
+      supplierIds: supplierIdsCsv,
+      siteIds: siteIdsCsv,
+      q,
+      displayId,
+      plate,
+      features: featuresCsv,
+      arrivedFrom,
+      arrivedTo,
+      nophoto,
+      reviewState,
+    } = query;
+
+    // CSV → массивы. Для UUID-полей фильтруем регексом — невалидное
+    // отбрасываем, иначе Postgres падает на 'not-uuid' в `= ANY(...)`.
+    const contractorDirIds = parseUuidCsv(contractorIdsCsv);
+    const supplierDirIds = parseUuidCsv(supplierIdsCsv);
+    const siteIdsArr = parseUuidCsv(siteIdsCsv);
+    const featureCodes = parseCsv(featuresCsv).filter((f) => KNOWN_FEATURES.has(f));
+
+    const filters = [];
+    // По умолчанию показываем только активные документы; trash=true даёт корзину.
+    filters.push(
+      trash ? isNotNull(deliveries.pendingDeletionAt) : isNull(deliveries.pendingDeletionAt),
+    );
+    if (status) {
+      const statusId = await resolveStatusId(app, status);
+      filters.push(eq(deliveries.statusId, statusId));
+    }
+    if (noDocument !== undefined) {
+      filters.push(
+        noDocument
+          ? drSql`not exists (select 1 from delivery_sources ds where ds.delivery_id = ${deliveries.id})`
+          : drSql`exists (select 1 from delivery_sources ds where ds.delivery_id = ${deliveries.id})`,
+      );
+    }
+    // Фильтр по отметке проверки. none — не проверено (NULL).
+    if (reviewState) {
+      filters.push(
+        reviewState === 'none'
+          ? isNull(deliveries.reviewState)
+          : eq(deliveries.reviewState, reviewState),
+      );
+    }
+    // inspector_kpp видит приёмки своего объекта (включая созданные другими).
+    // Без назначенного объекта — пустой результат.
+    if (user?.role === 'inspector_kpp') {
+      if (!user.siteId) {
+        filters.push(drSql`false`);
+      } else {
+        filters.push(eq(deliveries.siteId, user.siteId));
+      }
+    } else if (user?.role === 'contractor') {
+      // contractor видит только свои приёмки по всем объектам: contractor_id
+      // приёмки ∈ его operational id ИЛИ унаследован от привязанного УПД.
+      // Без назначенного подрядчика / без совпадений по ИНН — пусто.
+      const opIds = await resolveContractorOpIds(app, user);
+      if (!opIds || opIds.length === 0) {
+        filters.push(drSql`false`);
+      } else {
+        filters.push(deliveryContractorPredicate(opIds));
+      }
+    } else if (inspectorId) {
+      filters.push(eq(deliveries.inspectorId, inspectorId));
+    }
+    // Чужие черновики (draft) скрыты, если status не указан явно
+    if (!status && user?.role !== 'inspector_kpp' && user) {
+      const draftId = await resolveStatusId(app, 'draft');
+      filters.push(or(ne(deliveries.statusId, draftId), eq(deliveries.inspectorId, user.id))!);
+    }
+    if (changedSince) filters.push(gte(deliveries.updatedAt, new Date(changedSince)));
+
+    // ─── server-side фильтры из /operations?tab=accepted ─────────
+    // Раньше эти фильтры применялись клиентом поверх первых 50 записей,
+    // и пользователь видел «фильтр работает только в видимом окне».
+    // Теперь фильтрация — на сервере, total и pagination считаются по
+    // отфильтрованным данным. Логика 1-в-1 повторяет клиентскую
+    // (см. apps/web/src/pages/kpp/DeliveriesHistory.tsx → filteredItems).
+
+    // siteIds — простой multi-select.
+    if (siteIdsArr.length > 0) {
+      filters.push(inArray(deliveries.siteId, siteIdsArr));
+    }
+
+    // contractorIds: directory ID → operational ID через ИНН-маппинг.
+    // + inheritance: если у приёмки contractor_id NULL, fallback на
+    // contractor_id первого привязанного source_document. Это
+    // воспроизводит resolveContractor() с клиента DeliveriesHistory.tsx.
+    if (contractorDirIds.length > 0) {
+      const opIds = await expandCustomerCounterpartyToOpIds(app, contractorDirIds);
+      if (opIds.length === 0) {
+        // Ни один directory-id не имеет соответствия в counterparties по
+        // ИНН — фильтр должен вернуть пустой результат (как клиент).
+        filters.push(drSql`false`);
+      } else {
+        // Тот же предикат, что у RBAC, но в режиме фильтра: менеджер ищет
+        // ВСЕ приёмки подрядчика, включая автоподставленные. Раньше здесь
+        // лежала копия SQL, и она разошлась бы с боевым правилом при первой
+        // же правке (а заодно повторяла бы ошибку с ANY(${'$'}{array})).
+        filters.push(deliveryContractorPredicate(opIds, { purpose: 'ui-filter' }));
+      }
+    }
+
+    // supplierIds: directory ID → operational ID через ИНН-маппинг по
+    // справочнику suppliers. Без inheritance (на клиенте тоже без него).
+    if (supplierDirIds.length > 0) {
+      const opIds = await expandSupplierToOpIds(app, supplierDirIds);
+      if (opIds.length === 0) {
+        filters.push(drSql`false`);
+      } else {
+        filters.push(inArray(deliveries.supplierId, opIds));
+      }
+    }
+
+    // q: поиск по номеру привязанного source_document (УПД/ТН).
+    if (q?.trim()) {
+      const needle = `%${q.trim()}%`;
+      filters.push(drSql`EXISTS (
+      SELECT 1 FROM delivery_sources ds_q
+      JOIN source_documents sd_q ON sd_q.id = ds_q.source_document_id
+      WHERE ds_q.delivery_id = ${deliveries.id}
+        AND sd_q.doc_number ILIKE ${needle}
+    )`);
+    }
+
+    // displayId: точное совпадение по короткому id (уникальный индекс
+    // deliveries_display_id_uidx). Отдельный AND-фильтр, НЕ часть q —
+    // см. комментарий в схеме. Проверка на undefined, а не truthy:
+    // .positive() сейчас делает их равнозначными, но при смене схемы
+    // truthy-проверка молча потеряла бы фильтр.
+    if (displayId !== undefined) {
+      filters.push(eq(deliveries.displayId, displayId));
+    }
+
+    // plate: ILIKE на госномер.
+    if (plate?.trim()) {
+      filters.push(ilike(deliveries.vehiclePlate, `%${plate.trim()}%`));
+    }
+
+    // features (AND между выбранными):
+    //   transit → in_transit = true
+    //   assets  → is_assets = true OR EXISTS item_kind='asset'
+    //   upd     → EXISTS source_document.kind='upd'
+    //   waybill → EXISTS source_document.kind IN ('transport_waybill','os2_transfer')
+    for (const f of featureCodes) {
+      if (f === 'transit') {
+        filters.push(eq(deliveries.inTransit, true));
+      } else if (f === 'assets') {
+        filters.push(drSql`(
+        ${deliveries.isAssets} = true
+        OR EXISTS (
+          SELECT 1 FROM delivery_items di_a
+          WHERE di_a.delivery_id = ${deliveries.id} AND di_a.item_kind = 'asset'
+        )
+      )`);
+      } else if (f === 'upd') {
+        filters.push(drSql`EXISTS (
+        SELECT 1 FROM delivery_sources ds_u
+        JOIN source_documents sd_u ON sd_u.id = ds_u.source_document_id
+        WHERE ds_u.delivery_id = ${deliveries.id} AND sd_u.kind = 'upd'
+      )`);
+      } else if (f === 'waybill') {
+        filters.push(drSql`EXISTS (
+        SELECT 1 FROM delivery_sources ds_w
+        JOIN source_documents sd_w ON sd_w.id = ds_w.source_document_id
+        WHERE ds_w.delivery_id = ${deliveries.id}
+          AND sd_w.kind IN ('transport_waybill', 'os2_transfer')
+      )`);
+      }
+    }
+
+    // arrivedFrom / arrivedTo — диапазон даты прибытия (archive lookup).
+    // Верхняя граница строгая: клиент шлёт начало следующего дня.
+    filters.push(
+      ...dateRangeConditions(deliveries.arrivedAt, arrivedFrom, arrivedTo, {
+        fromField: 'arrivedFrom',
+        toField: 'arrivedTo',
+      }),
+    );
+
+    // nophoto: нет связанных фото (deep-link из дашборда «Статистика»).
+    if (nophoto) {
+      filters.push(drSql`NOT EXISTS (
+      SELECT 1 FROM delivery_photos dp WHERE dp.delivery_id = ${deliveries.id}
+    )`);
+    }
+
+    return filters;
+  }
+
   app.get(
     '/api/v1/deliveries',
     {
@@ -538,194 +768,8 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: { querystring: ListQuerySchema, response: { 200: DeliveryListResponseSchema } },
     },
     async (req) => {
-      const {
-        status, inspectorId, changedSince, trash, noDocument,
-        contractorIds: contractorIdsCsv,
-        supplierIds: supplierIdsCsv,
-        siteIds: siteIdsCsv,
-        q, displayId, plate,
-        features: featuresCsv,
-        arrivedFrom, arrivedTo, nophoto,
-        reviewState,
-        limit, offset,
-      } = req.query;
-
-      // CSV → массивы. Для UUID-полей фильтруем регексом — невалидное
-      // отбрасываем, иначе Postgres падает на 'not-uuid' в `= ANY(...)`.
-      const contractorDirIds = parseUuidCsv(contractorIdsCsv);
-      const supplierDirIds = parseUuidCsv(supplierIdsCsv);
-      const siteIdsArr = parseUuidCsv(siteIdsCsv);
-      const featureCodes = parseCsv(featuresCsv).filter((f) => KNOWN_FEATURES.has(f));
-
-      const filters = [];
-      // По умолчанию показываем только активные документы; trash=true даёт корзину.
-      filters.push(
-        trash ? isNotNull(deliveries.pendingDeletionAt) : isNull(deliveries.pendingDeletionAt),
-      );
-      if (status) {
-        const statusId = await resolveStatusId(app, status);
-        filters.push(eq(deliveries.statusId, statusId));
-      }
-      if (noDocument !== undefined) {
-        filters.push(
-          noDocument
-            ? drSql`not exists (select 1 from delivery_sources ds where ds.delivery_id = ${deliveries.id})`
-            : drSql`exists (select 1 from delivery_sources ds where ds.delivery_id = ${deliveries.id})`,
-        );
-      }
-      // Фильтр по отметке проверки. none — не проверено (NULL).
-      if (reviewState) {
-        filters.push(
-          reviewState === 'none'
-            ? isNull(deliveries.reviewState)
-            : eq(deliveries.reviewState, reviewState),
-        );
-      }
-      // inspector_kpp видит приёмки своего объекта (включая созданные другими).
-      // Без назначенного объекта — пустой результат.
-      if (req.user?.role === 'inspector_kpp') {
-        if (!req.user.siteId) {
-          filters.push(drSql`false`);
-        } else {
-          filters.push(eq(deliveries.siteId, req.user.siteId));
-        }
-      } else if (req.user?.role === 'contractor') {
-        // contractor видит только свои приёмки по всем объектам: contractor_id
-        // приёмки ∈ его operational id ИЛИ унаследован от привязанного УПД.
-        // Без назначенного подрядчика / без совпадений по ИНН — пусто.
-        const opIds = await resolveContractorOpIds(app, req.user);
-        if (!opIds || opIds.length === 0) {
-          filters.push(drSql`false`);
-        } else {
-          filters.push(deliveryContractorPredicate(opIds));
-        }
-      } else if (inspectorId) {
-        filters.push(eq(deliveries.inspectorId, inspectorId));
-      }
-      // Чужие черновики (draft) скрыты, если status не указан явно
-      if (!status && req.user?.role !== 'inspector_kpp' && req.user) {
-        const draftId = await resolveStatusId(app, 'draft');
-        filters.push(
-          or(ne(deliveries.statusId, draftId), eq(deliveries.inspectorId, req.user.id))!,
-        );
-      }
-      if (changedSince) filters.push(gte(deliveries.updatedAt, new Date(changedSince)));
-
-      // ─── server-side фильтры из /operations?tab=accepted ─────────
-      // Раньше эти фильтры применялись клиентом поверх первых 50 записей,
-      // и пользователь видел «фильтр работает только в видимом окне».
-      // Теперь фильтрация — на сервере, total и pagination считаются по
-      // отфильтрованным данным. Логика 1-в-1 повторяет клиентскую
-      // (см. apps/web/src/pages/kpp/DeliveriesHistory.tsx → filteredItems).
-
-      // siteIds — простой multi-select.
-      if (siteIdsArr.length > 0) {
-        filters.push(inArray(deliveries.siteId, siteIdsArr));
-      }
-
-      // contractorIds: directory ID → operational ID через ИНН-маппинг.
-      // + inheritance: если у приёмки contractor_id NULL, fallback на
-      // contractor_id первого привязанного source_document. Это
-      // воспроизводит resolveContractor() с клиента DeliveriesHistory.tsx.
-      if (contractorDirIds.length > 0) {
-        const opIds = await expandCustomerCounterpartyToOpIds(app, contractorDirIds);
-        if (opIds.length === 0) {
-          // Ни один directory-id не имеет соответствия в counterparties по
-          // ИНН — фильтр должен вернуть пустой результат (как клиент).
-          filters.push(drSql`false`);
-        } else {
-          // Тот же предикат, что у RBAC, но в режиме фильтра: менеджер ищет
-          // ВСЕ приёмки подрядчика, включая автоподставленные. Раньше здесь
-          // лежала копия SQL, и она разошлась бы с боевым правилом при первой
-          // же правке (а заодно повторяла бы ошибку с ANY(${'$'}{array})).
-          filters.push(deliveryContractorPredicate(opIds, { purpose: 'ui-filter' }));
-        }
-      }
-
-      // supplierIds: directory ID → operational ID через ИНН-маппинг по
-      // справочнику suppliers. Без inheritance (на клиенте тоже без него).
-      if (supplierDirIds.length > 0) {
-        const opIds = await expandSupplierToOpIds(app, supplierDirIds);
-        if (opIds.length === 0) {
-          filters.push(drSql`false`);
-        } else {
-          filters.push(inArray(deliveries.supplierId, opIds));
-        }
-      }
-
-      // q: поиск по номеру привязанного source_document (УПД/ТН).
-      if (q?.trim()) {
-        const needle = `%${q.trim()}%`;
-        filters.push(drSql`EXISTS (
-          SELECT 1 FROM delivery_sources ds_q
-          JOIN source_documents sd_q ON sd_q.id = ds_q.source_document_id
-          WHERE ds_q.delivery_id = ${deliveries.id}
-            AND sd_q.doc_number ILIKE ${needle}
-        )`);
-      }
-
-      // displayId: точное совпадение по короткому id (уникальный индекс
-      // deliveries_display_id_uidx). Отдельный AND-фильтр, НЕ часть q —
-      // см. комментарий в схеме. Проверка на undefined, а не truthy:
-      // .positive() сейчас делает их равнозначными, но при смене схемы
-      // truthy-проверка молча потеряла бы фильтр.
-      if (displayId !== undefined) {
-        filters.push(eq(deliveries.displayId, displayId));
-      }
-
-      // plate: ILIKE на госномер.
-      if (plate?.trim()) {
-        filters.push(ilike(deliveries.vehiclePlate, `%${plate.trim()}%`));
-      }
-
-      // features (AND между выбранными):
-      //   transit → in_transit = true
-      //   assets  → is_assets = true OR EXISTS item_kind='asset'
-      //   upd     → EXISTS source_document.kind='upd'
-      //   waybill → EXISTS source_document.kind IN ('transport_waybill','os2_transfer')
-      for (const f of featureCodes) {
-        if (f === 'transit') {
-          filters.push(eq(deliveries.inTransit, true));
-        } else if (f === 'assets') {
-          filters.push(drSql`(
-            ${deliveries.isAssets} = true
-            OR EXISTS (
-              SELECT 1 FROM delivery_items di_a
-              WHERE di_a.delivery_id = ${deliveries.id} AND di_a.item_kind = 'asset'
-            )
-          )`);
-        } else if (f === 'upd') {
-          filters.push(drSql`EXISTS (
-            SELECT 1 FROM delivery_sources ds_u
-            JOIN source_documents sd_u ON sd_u.id = ds_u.source_document_id
-            WHERE ds_u.delivery_id = ${deliveries.id} AND sd_u.kind = 'upd'
-          )`);
-        } else if (f === 'waybill') {
-          filters.push(drSql`EXISTS (
-            SELECT 1 FROM delivery_sources ds_w
-            JOIN source_documents sd_w ON sd_w.id = ds_w.source_document_id
-            WHERE ds_w.delivery_id = ${deliveries.id}
-              AND sd_w.kind IN ('transport_waybill', 'os2_transfer')
-          )`);
-        }
-      }
-
-      // arrivedFrom / arrivedTo — диапазон даты прибытия (archive lookup).
-      // Верхняя граница строгая: клиент шлёт начало следующего дня.
-      filters.push(
-        ...dateRangeConditions(deliveries.arrivedAt, arrivedFrom, arrivedTo, {
-          fromField: 'arrivedFrom',
-          toField: 'arrivedTo',
-        }),
-      );
-
-      // nophoto: нет связанных фото (deep-link из дашборда «Статистика»).
-      if (nophoto) {
-        filters.push(drSql`NOT EXISTS (
-          SELECT 1 FROM delivery_photos dp WHERE dp.delivery_id = ${deliveries.id}
-        )`);
-      }
-
+      const { limit, offset } = req.query;
+      const filters = await buildDeliveryFilters(req.user, req.query);
       const where = filters.length ? and(...filters) : undefined;
 
       const rows = await app.db
@@ -962,15 +1006,29 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           }
           const dto = await buildDeliveryDto(app, input.id, req.user?.role);
           if (!dto) return reply.code(404).send({ error: 'not_found' });
-          publishEvent(app, { type: 'delivery_updated', entityId: dto.id, ts: new Date().toISOString() });
+          publishEvent(app, {
+            type: 'delivery_updated',
+            entityId: dto.id,
+            ts: new Date().toISOString(),
+          });
           return dto;
         }
 
         await assertPermission(req, 'operations.deliveries', 'create');
-        const created = await createDelivery(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
+        const created = await createDelivery(
+          app,
+          input,
+          statusId,
+          inspectorId,
+          req.user?.sessionId ?? null,
+        );
         const dto = await buildDeliveryDto(app, created.id, req.user?.role);
         if (!dto) throw new Error('Delivery missing after create');
-        publishEvent(app, { type: 'delivery_updated', entityId: dto.id, ts: new Date().toISOString() });
+        publishEvent(app, {
+          type: 'delivery_updated',
+          entityId: dto.id,
+          ts: new Date().toISOString(),
+        });
         return dto;
       } catch (err) {
         if (err instanceof SourceAlreadyLinkedError) {
@@ -1105,9 +1163,15 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           deletedByUserId: req.user?.id ?? null,
         });
         if (keySet.size > 0) {
-          await tx.insert(s3CleanupOutbox).values(
-            Array.from(keySet, (s3Key) => ({ s3Key, entityType: 'delivery', entityId: existing.id })),
-          );
+          await tx
+            .insert(s3CleanupOutbox)
+            .values(
+              Array.from(keySet, (s3Key) => ({
+                s3Key,
+                entityType: 'delivery',
+                entityId: existing.id,
+              })),
+            );
         }
         await touchSourceDocuments({ db: tx }, attachedSdIds);
         await tx.delete(deliveries).where(eq(deliveries.id, req.params.id));
@@ -1168,7 +1232,8 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!DELIVERY_SOFT_DELETE_STATUSES.has(code)) {
         return reply.code(400).send({
           error: 'cannot_mark_status',
-          message: 'Пометка на удаление возможна только для статусов «Оформлена» и «Подтверждено МОЛ»',
+          message:
+            'Пометка на удаление возможна только для статусов «Оформлена» и «Подтверждено МОЛ»',
         });
       }
 
@@ -1184,7 +1249,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(deliveries.id, existing.id));
       const dto = await buildDeliveryDto(app, existing.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
-      publishEvent(app, { type: 'delivery_updated', entityId: dto.id, ts: new Date().toISOString() });
+      publishEvent(app, {
+        type: 'delivery_updated',
+        entityId: dto.id,
+        ts: new Date().toISOString(),
+      });
       return dto;
     },
   );
@@ -1249,7 +1318,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(deliveries.id, existing.id));
       const dto = await buildDeliveryDto(app, existing.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
-      publishEvent(app, { type: 'delivery_updated', entityId: dto.id, ts: new Date().toISOString() });
+      publishEvent(app, {
+        type: 'delivery_updated',
+        entityId: dto.id,
+        ts: new Date().toISOString(),
+      });
       return dto;
     },
   );
@@ -1272,12 +1345,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       const deleted: string[] = [];
       const skipped: Array<{
         id: string;
-        reason:
-          | 'not_found'
-          | 'already_pending'
-          | 'wrong_status'
-          | 'forbidden'
-          | 'internal_error';
+        reason: 'not_found' | 'already_pending' | 'wrong_status' | 'forbidden' | 'internal_error';
       }> = [];
 
       for (const id of ids) {
@@ -1477,9 +1545,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               deletedByUserId: req.user?.id ?? null,
             });
             if (keySet.size > 0) {
-              await tx.insert(s3CleanupOutbox).values(
-                Array.from(keySet, (s3Key) => ({ s3Key, entityType: 'delivery', entityId: id })),
-              );
+              await tx
+                .insert(s3CleanupOutbox)
+                .values(
+                  Array.from(keySet, (s3Key) => ({ s3Key, entityType: 'delivery', entityId: id })),
+                );
             }
             await touchSourceDocuments({ db: tx }, attachedSdIds);
             await tx.delete(deliveries).where(eq(deliveries.id, id));
@@ -1510,35 +1580,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
   // через «+»). Контрагент резолвится как в UI: delivery.contractorId ||
   // sourceDocument.contractorId первого привязанного УПД.
   {
-    const csvUuids = (raw: string | undefined): string[] => {
-      if (!raw) return [];
-      return raw
-        .split(',')
-        .map((s) => s.trim())
-        .filter((s) => /^[0-9a-fA-F-]{36}$/.test(s));
-    };
-    const fmtDateTimeRu = (d: Date | string | null): string => {
-      if (!d) return '';
-      const date = d instanceof Date ? d : new Date(d);
-      if (Number.isNaN(date.getTime())) return '';
-      const dd = String(date.getUTCDate()).padStart(2, '0');
-      const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
-      const yyyy = date.getUTCFullYear();
-      const hh = String(date.getUTCHours()).padStart(2, '0');
-      const mi = String(date.getUTCMinutes()).padStart(2, '0');
-      return `${dd}.${mm}.${yyyy} ${hh}:${mi}`;
-    };
 
-    const ExportDeliveriesQuerySchema = z.object({
-      contractorIds: z.string().optional(),
-      supplierIds: z.string().optional(),
-      siteIds: z.string().optional(),
-      q: z.string().trim().min(1).max(200).optional(),
-      status: z.string().trim().min(1).max(50).optional(),
-      plate: z.string().trim().min(1).max(50).optional(),
-      trash: z.coerce.boolean().optional(),
-      noDocument: z.coerce.boolean().optional(),
-    });
+    // Параметры — те же, что у списка, минус пагинация: выгрузка обязана
+    // повторять экран. Раньше здесь жила своя схема из восьми полей, и период,
+    // displayId, features, reviewState и nophoto в выгрузку не доезжали вовсе.
+    const ExportDeliveriesQuerySchema = ListQuerySchema.omit({ limit: true, offset: true });
 
     app.get(
       '/api/v1/deliveries/export.xlsx',
@@ -1547,44 +1593,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         schema: { querystring: ExportDeliveriesQuerySchema },
       },
       async (req, reply) => {
-        const { contractorIds, supplierIds, siteIds, q, status, plate, trash, noDocument } =
-          req.query;
-        const cIds = csvUuids(contractorIds);
-        const sIds = csvUuids(supplierIds);
-        const stIds = csvUuids(siteIds);
-
-        const conds = [
-          trash
-            ? isNotNull(deliveries.pendingDeletionAt)
-            : isNull(deliveries.pendingDeletionAt),
-        ];
-        if (sIds.length) conds.push(inArray(deliveries.supplierId, sIds));
-        if (stIds.length) conds.push(inArray(deliveries.siteId, stIds));
-        if (plate) conds.push(ilike(deliveries.vehiclePlate, `%${plate}%`));
-        if (status && status !== 'no_document') {
-          const statusId = await resolveStatusId(app, status);
-          conds.push(eq(deliveries.statusId, statusId));
-        }
-        if (noDocument || status === 'no_document') {
-          conds.push(
-            drSql`not exists (select 1 from delivery_sources ds where ds.delivery_id = ${deliveries.id})`,
-          );
-        }
-        if (req.user?.role === 'inspector_kpp') {
-          if (!req.user.siteId) {
-            conds.push(drSql`false`);
-          } else {
-            conds.push(eq(deliveries.siteId, req.user.siteId));
-          }
-        } else if (req.user?.role === 'contractor') {
-          // Экспорт строит свой WHERE отдельно от списка — дублируем скоуп.
-          const opIds = await resolveContractorOpIds(app, req.user);
-          if (!opIds || opIds.length === 0) {
-            conds.push(drSql`false`);
-          } else {
-            conds.push(deliveryContractorPredicate(opIds));
-          }
-        }
+        // Тот же WHERE, что у списка: и RBAC-скоуп, и пользовательские фильтры
+        // приходят из buildDeliveryFilters, а не из второй копии правил.
+        const conds = await buildDeliveryFilters(req.user, req.query);
 
         const supplier = alias(counterparties, 'supplier');
         const contractor = alias(counterparties, 'contractor');
@@ -1663,17 +1674,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           };
         });
 
-        // Клиентоподобные фильтры по контрагенту и q (поиск по номеру УПД).
-        const filtered = resolved.filter((r) => {
-          if (cIds.length) {
-            if (!r.contractorIdResolved || !cIds.includes(r.contractorIdResolved)) return false;
-          }
-          if (q) {
-            const num = r.docNumber ?? '';
-            if (!num.toLowerCase().includes(q.toLowerCase())) return false;
-          }
-          return true;
-        });
+        // Фильтров в памяти больше нет: подрядчик и поиск по номеру документа
+        // применены в SQL тем же предикатом, что и в списке. Прежняя версия
+        // сравнивала q только с номером ПЕРВОГО привязанного документа — у
+        // машины из нескольких УПД выгрузка теряла строки, которые список
+        // показывал.
+        const filtered = resolved;
 
         const finalIds = filtered.map((r) => r.d.id);
         const itemsByDelivery = new Map<string, (typeof deliveryItems.$inferSelect)[]>();
@@ -1710,6 +1716,10 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         });
         ws.columns = [
           { header: '№', key: 'idx', width: 6 },
+          // Короткий id приёмки — по нему строку из Excel находят на портале
+          // (фильтр «id» в Принятых). Без него в файле не было ничего, чем
+          // строку можно опознать, кроме номера документа.
+          { header: 'id', key: 'displayId', width: 9 },
           { header: 'Статус', key: 'status', width: 16 },
           { header: 'Авто', key: 'vehiclePlate', width: 12 },
           { header: 'Прибытие', key: 'arrivedAt', width: 18 },
@@ -1735,9 +1745,6 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           fgColor: { argb: 'FFEDEDED' },
         };
 
-        const MONEY_FMT = '# ##0.00 "₽"';
-        const QTY_FMT = '# ##0.####';
-
         let idx = 0;
         for (const r of filtered) {
           idx++;
@@ -1757,9 +1764,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               docVatSum = (docVatSum ?? 0) + Number(it.vatSum);
             }
           }
-          const siteFull = r.siteCode && r.siteName ? `${r.siteCode} · ${r.siteName}` : r.siteName ?? '';
+          const siteFull =
+            r.siteCode && r.siteName ? `${r.siteCode} · ${r.siteName}` : (r.siteName ?? '');
           const docRow = ws.addRow({
             idx,
+            displayId: d.displayId,
             status: r.statusLabel,
             vehiclePlate: d.vehiclePlate ?? '',
             arrivedAt: fmtDateTimeRu(d.arrivedAt),
@@ -1786,16 +1795,21 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           };
 
           for (const it of items) {
-            const qtyP = it.qtyPlanned != null && it.qtyPlanned !== '' ? Number(it.qtyPlanned) : null;
+            const qtyP =
+              it.qtyPlanned != null && it.qtyPlanned !== '' ? Number(it.qtyPlanned) : null;
             const qtyA = it.qtyActual != null && it.qtyActual !== '' ? Number(it.qtyActual) : null;
             const price = it.price != null && it.price !== '' ? Number(it.price) : null;
             const qtyForRowTotal = qtyA ?? qtyP;
             const rowSum =
-              qtyForRowTotal != null && price != null && Number.isFinite(qtyForRowTotal) && Number.isFinite(price)
+              qtyForRowTotal != null &&
+              price != null &&
+              Number.isFinite(qtyForRowTotal) &&
+              Number.isFinite(price)
                 ? qtyForRowTotal * price
                 : null;
             const itemRow = ws.addRow({
               idx: it.lineNo,
+              displayId: null,
               status: '',
               vehiclePlate: '',
               arrivedAt: '',
@@ -2001,10 +2015,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             inTransit: z.boolean().optional(),
             isAssets: z.boolean().optional(),
           })
-          .refine(
-            (b) => b.inTransit !== undefined || b.isAssets !== undefined,
-            { message: 'Минимум одно из полей (inTransit, isAssets) должно быть задано' },
-          ),
+          .refine((b) => b.inTransit !== undefined || b.isAssets !== undefined, {
+            message: 'Минимум одно из полей (inTransit, isAssets) должно быть задано',
+          }),
         response: {
           200: DeliverySchema,
           404: ErrorResponseSchema,
@@ -2141,9 +2154,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               )
               .limit(1);
             if (already) throw new AlreadyLinkedError();
-            await tx
-              .insert(deliverySources)
-              .values({ deliveryId: d.id, sourceDocumentId: src.id });
+            await tx.insert(deliverySources).values({ deliveryId: d.id, sourceDocumentId: src.id });
 
             // Существующие items приёмки (ручные + предыдущие из УПД).
             // lineNo нужен, чтобы поставить новые позиции В КОНЕЦ списка.
@@ -2178,38 +2189,27 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             // происхождение строки: по нему позиция находится точно, без
             // угадывания. Ключ (name, unit, qty) остаётся запасным — для
             // строк, чей sourceDocumentItemId обнулился переразбором документа.
-            const buildKey = (
-              name: string,
-              unit: string,
-              qty: string | null,
-            ): string =>
+            const buildKey = (name: string, unit: string, qty: string | null): string =>
               `${name.trim().toLowerCase()}|${unit.trim().toLowerCase()}|${
                 qty == null ? '' : Number(qty).toString()
               }`;
-            const itemsFromThisDoc = existingItems.filter(
-              (i) => i.sourceDocumentId === src.id,
-            );
+            const itemsFromThisDoc = existingItems.filter((i) => i.sourceDocumentId === src.id);
             const existingSourceItemIds = new Set(
               itemsFromThisDoc
                 .map((i) => i.sourceDocumentItemId)
                 .filter((v): v is string => v !== null),
             );
             const existingKeys = new Set(
-              itemsFromThisDoc.map((i) =>
-                buildKey(i.nameRaw, i.unit, i.qtyPlanned),
-              ),
+              itemsFromThisDoc.map((i) => buildKey(i.nameRaw, i.unit, i.qtyPlanned)),
             );
             const startLineNo =
-              existingItems.length === 0
-                ? 1
-                : Math.max(...existingItems.map((i) => i.lineNo)) + 1;
+              existingItems.length === 0 ? 1 : Math.max(...existingItems.map((i) => i.lineNo)) + 1;
 
-            const updRows: (typeof sourceDocumentItems.$inferSelect)[] =
-              await tx
-                .select()
-                .from(sourceDocumentItems)
-                .where(eq(sourceDocumentItems.sourceDocumentId, src.id))
-                .orderBy(sourceDocumentItems.lineNo);
+            const updRows: (typeof sourceDocumentItems.$inferSelect)[] = await tx
+              .select()
+              .from(sourceDocumentItems)
+              .where(eq(sourceDocumentItems.sourceDocumentId, src.id))
+              .orderBy(sourceDocumentItems.lineNo);
 
             const newRows: (typeof deliveryItems.$inferInsert)[] = [];
             let lineNo = startLineNo;
@@ -2411,88 +2411,91 @@ async function createDelivery(
   // мобильном выливалось в исчерпание retry и потерю мутации. Теперь —
   // либо всё, либо ничего. Контракт ответа не меняется.
   return await app.db.transaction(async (tx: typeof app.db) => {
-  const [created] = await tx
-    .insert(deliveries)
-    .values({
-      id: input.id,
-      statusId,
-      siteId: input.siteId,
-      supplierId: input.supplierId ?? null,
-      contractorId: input.contractorId ?? null,
-      recipientMolId: input.recipientMolId ?? null,
-      vehiclePlate: input.vehiclePlate ?? null,
-      driverName: input.driverName ?? null,
-      arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,
-      inspectorId,
-      comment: input.comment ?? null,
-      inTransit: input.inTransit ?? false,
-      isAssets: input.isAssets ?? false,
-      ...(isDirectConfirm && {
-        confirmedByMolUserId: inspectorId,
-        confirmedByMolAt: confirmedAtCandidate,
-      }),
-      createdBySessionId,
-      version: 1,
-    })
-    .returning();
-  if (!created) throw new Error('Failed to insert delivery');
-  if (input.items.length) {
-    // При СОЗДАНИИ приёмки происхождение берётся из запроса: строк в БД ещё
-    // нет, переносить нечего. Ограничение то же, что и дальше по жизни
-    // приёмки, — документ должен быть в её наборе связей.
-    const linkedOnCreate = new Set(input.sourceDocumentIds);
-    await tx.insert(deliveryItems).values(
-      input.items.map((i) => ({
-        deliveryId: created.id,
-        sourceDocumentId:
-          i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
-            ? i.sourceDocumentId
-            : null,
-        sourceDocumentItemId:
-          i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
-            ? (i.sourceDocumentItemId ?? null)
-            : null,
-        itemKind: i.itemKind,
-        materialId: i.itemKind === 'asset' ? null : (i.materialId ?? null),
-        assetId: i.itemKind === 'asset' ? (i.assetId ?? null) : null,
-        inventoryNumber: i.inventoryNumber ?? null,
-        serialNumber: i.serialNumber ?? null,
-        nameRaw: i.nameRaw,
-        qtyPlanned: i.qtyPlanned ?? null,
-        qtyActual: i.qtyActual ?? null,
-        unit: i.unit,
-        comment: i.comment ?? null,
-        lineNo: i.lineNo,
-        volumeM3: i.volumeM3 ?? null,
-        massKg: i.massKg ?? null,
-        price: i.price ?? null,
-        vatRate: i.vatRate ?? null,
-        vatSum: i.vatSum ?? null,
-        volumeConfidence: i.volumeConfidence ?? null,
-        groupName: i.groupName ?? null,
-      })),
-    );
-  }
-  if (input.sourceDocumentIds.length) {
-    await assertSourcesAvailableForDelivery({ db: tx }, input.sourceDocumentIds, created.id);
-    try {
-      await tx
-        .insert(deliverySources)
-        .values(
-          input.sourceDocumentIds.map((sid) => ({ deliveryId: created.id, sourceDocumentId: sid })),
-        );
-    } catch (err) {
-      if (isSourceDocumentUniqueViolation(err)) {
-        throw new SourceAlreadyLinkedError(input.sourceDocumentIds);
-      }
-      throw err;
+    const [created] = await tx
+      .insert(deliveries)
+      .values({
+        id: input.id,
+        statusId,
+        siteId: input.siteId,
+        supplierId: input.supplierId ?? null,
+        contractorId: input.contractorId ?? null,
+        recipientMolId: input.recipientMolId ?? null,
+        vehiclePlate: input.vehiclePlate ?? null,
+        driverName: input.driverName ?? null,
+        arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,
+        inspectorId,
+        comment: input.comment ?? null,
+        inTransit: input.inTransit ?? false,
+        isAssets: input.isAssets ?? false,
+        ...(isDirectConfirm && {
+          confirmedByMolUserId: inspectorId,
+          confirmedByMolAt: confirmedAtCandidate,
+        }),
+        createdBySessionId,
+        version: 1,
+      })
+      .returning();
+    if (!created) throw new Error('Failed to insert delivery');
+    if (input.items.length) {
+      // При СОЗДАНИИ приёмки происхождение берётся из запроса: строк в БД ещё
+      // нет, переносить нечего. Ограничение то же, что и дальше по жизни
+      // приёмки, — документ должен быть в её наборе связей.
+      const linkedOnCreate = new Set(input.sourceDocumentIds);
+      await tx.insert(deliveryItems).values(
+        input.items.map((i) => ({
+          deliveryId: created.id,
+          sourceDocumentId:
+            i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
+              ? i.sourceDocumentId
+              : null,
+          sourceDocumentItemId:
+            i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
+              ? (i.sourceDocumentItemId ?? null)
+              : null,
+          itemKind: i.itemKind,
+          materialId: i.itemKind === 'asset' ? null : (i.materialId ?? null),
+          assetId: i.itemKind === 'asset' ? (i.assetId ?? null) : null,
+          inventoryNumber: i.inventoryNumber ?? null,
+          serialNumber: i.serialNumber ?? null,
+          nameRaw: i.nameRaw,
+          qtyPlanned: i.qtyPlanned ?? null,
+          qtyActual: i.qtyActual ?? null,
+          unit: i.unit,
+          comment: i.comment ?? null,
+          lineNo: i.lineNo,
+          volumeM3: i.volumeM3 ?? null,
+          massKg: i.massKg ?? null,
+          price: i.price ?? null,
+          vatRate: i.vatRate ?? null,
+          vatSum: i.vatSum ?? null,
+          volumeConfidence: i.volumeConfidence ?? null,
+          groupName: i.groupName ?? null,
+        })),
+      );
     }
-    // Бамп updated_at для привязанных УПД, чтобы они попали в дельту
-    // /sync и инспектор увидел изменение видимости без logout/login.
-    // См. domain/sourceDocuments/touch.ts.
-    await touchSourceDocuments({ db: tx }, input.sourceDocumentIds);
-  }
-  return created;
+    if (input.sourceDocumentIds.length) {
+      await assertSourcesAvailableForDelivery({ db: tx }, input.sourceDocumentIds, created.id);
+      try {
+        await tx
+          .insert(deliverySources)
+          .values(
+            input.sourceDocumentIds.map((sid) => ({
+              deliveryId: created.id,
+              sourceDocumentId: sid,
+            })),
+          );
+      } catch (err) {
+        if (isSourceDocumentUniqueViolation(err)) {
+          throw new SourceAlreadyLinkedError(input.sourceDocumentIds);
+        }
+        throw err;
+      }
+      // Бамп updated_at для привязанных УПД, чтобы они попали в дельту
+      // /sync и инспектор увидел изменение видимости без logout/login.
+      // См. domain/sourceDocuments/touch.ts.
+      await touchSourceDocuments({ db: tx }, input.sourceDocumentIds);
+    }
+    return created;
   });
 }
 
@@ -2594,105 +2597,105 @@ async function updateDelivery(
   // одна транзакция (см. createDelivery). Раньше delete items проходил, а
   // insert падал → приёмка теряла все позиции.
   return await app.db.transaction(async (tx: typeof app.db) => {
-  const updatedRows = await tx
-    .update(deliveries)
-    .set({
-      statusId: effectiveStatusId,
-      siteId: input.siteId,
-      supplierId: input.supplierId ?? null,
-      contractorId: input.contractorId ?? null,
-      recipientMolId: input.recipientMolId ?? null,
-      vehiclePlate: input.vehiclePlate ?? null,
-      driverName: input.driverName ?? null,
-      arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,
-      comment: input.comment ?? null,
-      inTransit: input.inTransit ?? false,
-      isAssets: input.isAssets ?? false,
-      // COALESCE, а не условная запись: первое подтверждение побеждает даже при
-      // повторной или параллельной мутации — SQL смотрит на актуальную строку,
-      // а не на прочитанный до транзакции снимок.
-      ...(wantsConfirm && {
-        confirmedByMolUserId: drSql`COALESCE(${deliveries.confirmedByMolUserId}, ${userId}::uuid)`,
-        confirmedByMolAt: drSql`COALESCE(${deliveries.confirmedByMolAt}, ${confirmedAtIso}::timestamptz)`,
-      }),
-      version: drSql`${deliveries.version} + 1`,
-      updatedAt: new Date(),
-    })
-    .where(
-      expectedSiteId
-        ? and(eq(deliveries.id, id), eq(deliveries.siteId, expectedSiteId))
-        : eq(deliveries.id, id),
-    )
-    .returning({ id: deliveries.id });
-  // Объект записи изменился после чтения existing — прерываем транзакцию,
-  // маршрут отдаст 403 foreign_site (см. domain/operations/foreign-site.ts).
-  if (updatedRows.length === 0) throw new ForeignSiteError();
+    const updatedRows = await tx
+      .update(deliveries)
+      .set({
+        statusId: effectiveStatusId,
+        siteId: input.siteId,
+        supplierId: input.supplierId ?? null,
+        contractorId: input.contractorId ?? null,
+        recipientMolId: input.recipientMolId ?? null,
+        vehiclePlate: input.vehiclePlate ?? null,
+        driverName: input.driverName ?? null,
+        arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,
+        comment: input.comment ?? null,
+        inTransit: input.inTransit ?? false,
+        isAssets: input.isAssets ?? false,
+        // COALESCE, а не условная запись: первое подтверждение побеждает даже при
+        // повторной или параллельной мутации — SQL смотрит на актуальную строку,
+        // а не на прочитанный до транзакции снимок.
+        ...(wantsConfirm && {
+          confirmedByMolUserId: drSql`COALESCE(${deliveries.confirmedByMolUserId}, ${userId}::uuid)`,
+          confirmedByMolAt: drSql`COALESCE(${deliveries.confirmedByMolAt}, ${confirmedAtIso}::timestamptz)`,
+        }),
+        version: drSql`${deliveries.version} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(
+        expectedSiteId
+          ? and(eq(deliveries.id, id), eq(deliveries.siteId, expectedSiteId))
+          : eq(deliveries.id, id),
+      )
+      .returning({ id: deliveries.id });
+    // Объект записи изменился после чтения existing — прерываем транзакцию,
+    // маршрут отдаст 403 foreign_site (см. domain/operations/foreign-site.ts).
+    if (updatedRows.length === 0) throw new ForeignSiteError();
 
-  // Происхождение позиций переносится ЯВНО: строки удаляются и вставляются
-  // заново, а `source_document_id` — данные, которых в запросе может не быть
-  // (старый планшет о поле не знает) и которым в запросе нельзя доверять
-  // (клиент не должен переписывать происхождение существующей строки).
-  // Поэтому снимок делается ДО delete, а решение принимает resolveItemOrigins.
-  const previousItems = await tx
-    .select({
-      id: deliveryItems.id,
-      nameRaw: deliveryItems.nameRaw,
-      unit: deliveryItems.unit,
-      lineNo: deliveryItems.lineNo,
-      sourceDocumentId: deliveryItems.sourceDocumentId,
-      sourceDocumentItemId: deliveryItems.sourceDocumentItemId,
-    })
-    .from(deliveryItems)
-    .where(eq(deliveryItems.deliveryId, id));
+    // Происхождение позиций переносится ЯВНО: строки удаляются и вставляются
+    // заново, а `source_document_id` — данные, которых в запросе может не быть
+    // (старый планшет о поле не знает) и которым в запросе нельзя доверять
+    // (клиент не должен переписывать происхождение существующей строки).
+    // Поэтому снимок делается ДО delete, а решение принимает resolveItemOrigins.
+    const previousItems = await tx
+      .select({
+        id: deliveryItems.id,
+        nameRaw: deliveryItems.nameRaw,
+        unit: deliveryItems.unit,
+        lineNo: deliveryItems.lineNo,
+        sourceDocumentId: deliveryItems.sourceDocumentId,
+        sourceDocumentItemId: deliveryItems.sourceDocumentItemId,
+      })
+      .from(deliveryItems)
+      .where(eq(deliveryItems.deliveryId, id));
 
-  // Связи существующей приёмки — авторитетны, и они же ограничивают, из каких
-  // документов позиция вообще может приехать.
-  const linkedSources: { sourceDocumentId: string }[] = await tx
-    .select({ sourceDocumentId: deliverySources.sourceDocumentId })
-    .from(deliverySources)
-    .where(eq(deliverySources.deliveryId, id));
-  const linkedDocumentIds = linkedSources.map((s) => s.sourceDocumentId);
+    // Связи существующей приёмки — авторитетны, и они же ограничивают, из каких
+    // документов позиция вообще может приехать.
+    const linkedSources: { sourceDocumentId: string }[] = await tx
+      .select({ sourceDocumentId: deliverySources.sourceDocumentId })
+      .from(deliverySources)
+      .where(eq(deliverySources.deliveryId, id));
+    const linkedDocumentIds = linkedSources.map((s) => s.sourceDocumentId);
 
-  const origins = resolveItemOrigins({
-    existing: previousItems,
-    incoming: itemsForInsert.map((i) => ({
-      id: i.clientId ?? null,
-      nameRaw: i.nameRaw,
-      unit: i.unit,
-      lineNo: i.lineNo,
-      sourceDocumentId: i.sourceDocumentId ?? null,
-      sourceDocumentItemId: i.sourceDocumentItemId ?? null,
-    })),
-    linkedDocumentIds,
-  });
-
-  await tx.delete(deliveryItems).where(eq(deliveryItems.deliveryId, id));
-  if (itemsForInsert.length) {
-    await tx.insert(deliveryItems).values(
-      itemsForInsert.map(({ clientId: _clientId, ...i }, idx) => ({
-        ...i,
-        deliveryId: id,
-        sourceDocumentId: origins[idx]?.sourceDocumentId ?? null,
-        sourceDocumentItemId: origins[idx]?.sourceDocumentItemId ?? null,
+    const origins = resolveItemOrigins({
+      existing: previousItems,
+      incoming: itemsForInsert.map((i) => ({
+        id: i.clientId ?? null,
+        nameRaw: i.nameRaw,
+        unit: i.unit,
+        lineNo: i.lineNo,
+        sourceDocumentId: i.sourceDocumentId ?? null,
+        sourceDocumentItemId: i.sourceDocumentItemId ?? null,
       })),
-    );
-  }
+      linkedDocumentIds,
+    });
 
-  // Привязки существующей приёмки upsert НЕ меняет.
-  //
-  // Раньше здесь стоял DELETE всех связей + INSERT присланного списка. Пока
-  // документ у приёмки был один, это работало; с несколькими — планшет,
-  // знающий про одну УПД, стирал остальные, привязанные менеджером, а
-  // устаревший клиент мог воскресить явно отвязанный документ. Опереться на
-  // baseVersion нельзя: в контракте он необязателен.
-  //
-  // Теперь набор связей меняют только явные действия: POST /:id/link-source и
-  // POST /:id/unlink-source. При СОЗДАНИИ приёмки связи по-прежнему берутся из
-  // запроса — см. createDelivery.
-  //
-  // Бамп updated_at всё равно нужен: реквизиты приёмки могли поменяться, а
-  // мобильный Inbox фильтрует документы по привязкам и ждёт дельту.
-  await touchSourceDocuments({ db: tx }, linkedDocumentIds);
+    await tx.delete(deliveryItems).where(eq(deliveryItems.deliveryId, id));
+    if (itemsForInsert.length) {
+      await tx.insert(deliveryItems).values(
+        itemsForInsert.map(({ clientId: _clientId, ...i }, idx) => ({
+          ...i,
+          deliveryId: id,
+          sourceDocumentId: origins[idx]?.sourceDocumentId ?? null,
+          sourceDocumentItemId: origins[idx]?.sourceDocumentItemId ?? null,
+        })),
+      );
+    }
+
+    // Привязки существующей приёмки upsert НЕ меняет.
+    //
+    // Раньше здесь стоял DELETE всех связей + INSERT присланного списка. Пока
+    // документ у приёмки был один, это работало; с несколькими — планшет,
+    // знающий про одну УПД, стирал остальные, привязанные менеджером, а
+    // устаревший клиент мог воскресить явно отвязанный документ. Опереться на
+    // baseVersion нельзя: в контракте он необязателен.
+    //
+    // Теперь набор связей меняют только явные действия: POST /:id/link-source и
+    // POST /:id/unlink-source. При СОЗДАНИИ приёмки связи по-прежнему берутся из
+    // запроса — см. createDelivery.
+    //
+    // Бамп updated_at всё равно нужен: реквизиты приёмки могли поменяться, а
+    // мобильный Inbox фильтрует документы по привязкам и ждёт дельту.
+    await touchSourceDocuments({ db: tx }, linkedDocumentIds);
   });
 }
 
@@ -2703,4 +2706,3 @@ function isSourceDocumentUniqueViolation(err: unknown): boolean {
   const name = e.constraint ?? e.constraint_name ?? '';
   return name.endsWith('_source_document_id_unique');
 }
-

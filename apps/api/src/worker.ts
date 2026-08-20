@@ -87,6 +87,7 @@ import {
   expandPdfAttachmentsForOpenRouter,
   WAYBILL_1T_MAX_PAGES_FOR_OPENROUTER,
 } from './domain/edo/waybill-pdf.js';
+import { detectWaybill1t } from './domain/edo/waybill-1t-detect.js';
 import { getDefaultProviderKind } from './domain/llm/registry.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
 import { MIN_DEDUP_CONFIDENCE, validateUpdTotals } from './domain/edo/upd-validation.js';
@@ -138,7 +139,10 @@ import {
   type PageRef,
 } from './domain/edo/upd-assembly.js';
 import { extractUpdSegment } from './domain/edo/upd-segment-extract.js';
-import { planAssemblyDocumentMerges } from './domain/edo/upd-assembly-merge.js';
+import {
+  planAssemblyDocumentMerges,
+  planAssemblyDocumentMergesLegacy,
+} from './domain/edo/upd-assembly-merge.js';
 import { resolveRootBundle } from './domain/sourceDocuments/bundle-import-registry.js';
 import { llmProviders, llmProviderCredentials } from './db/schema.js';
 import { buildAad, decryptField } from './domain/auth/crypto.js';
@@ -1837,6 +1841,10 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             volumeConfidence: it.volumeConfidence ?? null,
             groupName: it.groupName ?? null,
             lineNo: idx + 1,
+            // Номер из бланка сохраняем рядом с нашим порядковым: по нему
+            // склейка отличает второй экземпляр УПД от её продолжения, а
+            // валидатор после склейки видит задвоенную строку.
+            rowNo: it.rowNo ?? null,
           })),
         )
       : [];
@@ -2040,6 +2048,19 @@ async function secondPassWaybill1t(
   log: WorkerLog,
 ): Promise<ParseWaybillBatchResult | null> {
   if (!loadEnv().WAYBILL_1T_FALLBACK) return null;
+  return runWaybill1tPass(originalFiles, ctx, log);
+}
+
+/**
+ * Разбор промптом формы 1-Т. Без проверки флагов: КОГДА его звать, решают
+ * вызывающие — прицельный маршрут (WAYBILL_1T_ROUTE) или второй проход после
+ * пустого результата (WAYBILL_1T_FALLBACK).
+ */
+async function runWaybill1tPass(
+  originalFiles: WaybillInputImage[],
+  ctx: { sourceDocumentId: string | null; bundleId: string | null },
+  log: WorkerLog,
+): Promise<ParseWaybillBatchResult | null> {
   try {
     const files1t =
       (await getDefaultProviderKind()) === 'openrouter'
@@ -2160,6 +2181,28 @@ async function handleWaybillBundleJob(
     throw new Error('bundle: не удалось скачать ни одного attachment');
   }
 
+  // Накладная, присланная книгой Excel. Промпт накладных принимает картинки и
+  // PDF, книгу — нет, поэтому конвертируем той же связкой, что и УПД-путь.
+  // Раньше такие файлы сюда не доезжали вовсе: роутер отдавал их УПД-промпту,
+  // и тот честно возвращал ноль позиций («это транспортная накладная, а не
+  // счёт-фактура»). Сбой конвертации не роняет пакет: файл идёт как есть,
+  // модель его не опознает, и документ станет обычным «не распознано».
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]!;
+    const excelExt = excelExtOf(file.mimeType, file.filename);
+    if (!excelExt) continue;
+    try {
+      const pdf = await convertExcelToPdf(file.buffer, excelExt);
+      files[i] = {
+        buffer: pdf,
+        mimeType: 'application/pdf',
+        filename: `${file.filename}.pdf`,
+      };
+    } catch (err) {
+      log.warn({ err, file: file.filename }, 'накладная: excel→pdf не удался, файл идёт как есть');
+    }
+  }
+
   // Копия исходных вложений: `files` ниже перезаписывается отрендеренными
   // страницами под предел первого прохода, а второму проходу (форма 1-Т)
   // нужен свой, больший предел — значит рендерить он будет от оригиналов.
@@ -2178,13 +2221,79 @@ async function handleWaybillBundleJob(
 
   let parsed;
   let llmProviderId: string | null = null;
-  try {
-    const r = await parseWaybillBatch(files, { sourceDocumentId: techId, bundleId });
-    parsed = r.parsed;
-    llmProviderId = r.llmProviderId;
-  } catch (err) {
-    log.error({ err }, 'waybill batch parse failed, will retry');
-    throw err;
+  // Каким промптом разобран пакет — запоминаем в документах: повторный разбор
+  // обязан идти тем же путём, иначе он выберет «свой» документ по batchIndex
+  // из ЧУЖОГО набора и перепишет не ту строку.
+  let promptKind: string | null = null;
+
+  // Прицельный маршрут формы 1-Т.
+  //
+  // Активный промпт накладных знает ТН-2116 и ОС-2, а 1-Т по инструкции обязан
+  // игнорировать. На практике он её всё-таки читает — по колонкам чужой формы:
+  // в количество попадает графа «Кол-во мест» (боевая ТТН 16 674: 14 вместо
+  // 1260 шт), в цену — количество, а денежным итогом документа становится
+  // число из графы «Количество». Файл с признаками бланка 1-Т отдаём его
+  // собственному промпту сразу, не тратя вызов на чужой.
+  //
+  // Только ОДНОРОДНЫЙ пакет: вложения пакета прикрепляются ко всем созданным
+  // документам, и увести смешанную пачку целиком к промпту 1-Т значило бы
+  // потерять лежащие рядом ТН-2116 и ОС-2. На бою у всех разобранных 1-Т в
+  // пакете ровно один файл.
+  if (loadEnv().WAYBILL_1T_ROUTE) {
+    const flags = await Promise.all(
+      originalFiles.map((f) => detectWaybill1t(f.buffer, f.mimeType)),
+    );
+    if (flags.length > 0 && flags.every(Boolean)) {
+      const routed = await runWaybill1tPass(
+        originalFiles,
+        { sourceDocumentId: techId, bundleId },
+        log,
+      );
+      if (routed) {
+        parsed = routed.parsed;
+        llmProviderId = routed.llmProviderId;
+        promptKind = 'transport_waybill_1t';
+        log.info({ documents: parsed.documents.length }, 'форма 1-Т распознана своим промптом');
+      }
+    }
+  }
+
+  if (!parsed) {
+    try {
+      const r = await parseWaybillBatch(files, { sourceDocumentId: techId, bundleId });
+      parsed = r.parsed;
+      llmProviderId = r.llmProviderId;
+    } catch (err) {
+      log.error({ err }, 'waybill batch parse failed, will retry');
+      throw err;
+    }
+  }
+
+  // Фотография формы 1-Т: текстового слоя нет, детектор молчит — но модель
+  // сама пометила форму в ответе. Тогда пере-разбираем пакет её собственным
+  // промптом. Боевой случай: ТТН № 16, снятая на телефон, получила qty
+  // 1 260 000 вместо 1260 шт.
+  //
+  // Только пакет из ОДНОГО файла: у пачки перезапуск целиком отнял бы разбор у
+  // лежащих рядом ТН-2116 и ОС-2.
+  if (
+    loadEnv().WAYBILL_1T_ROUTE &&
+    promptKind == null &&
+    originalFiles.length === 1 &&
+    parsed.documents.length > 0 &&
+    parsed.documents.every((d) => d.form === 'tn_1t')
+  ) {
+    const routed = await runWaybill1tPass(
+      originalFiles,
+      { sourceDocumentId: techId, bundleId },
+      log,
+    );
+    if (routed && routed.parsed.documents.length > 0) {
+      parsed = routed.parsed;
+      llmProviderId = routed.llmProviderId;
+      promptKind = 'transport_waybill_1t';
+      log.info('форма 1-Т опознана моделью — пере-разобрали своим промптом');
+    }
   }
 
   // Второй проход: товарно-транспортная накладная формы № 1-Т.
@@ -2322,6 +2431,7 @@ async function handleWaybillBundleJob(
       // находит «свой» документ, когда в одном файле их несколько. Номер для
       // этого не годится — неверно распознанный номер и есть повод для повтора.
       batchIndex: index,
+      waybillPromptKind: promptKind,
       attachments: attachments.map((a) => ({
         s3Key: a.s3Key,
         filename: a.filename,
@@ -2846,7 +2956,9 @@ export async function handleDocumentRouterJob(
       // (S3, БД) по-прежнему failed.
       let cls: FileClassification;
       try {
-        cls = await classifyFile(buffer, a.mimeType ?? '', a.filename);
+        cls = await classifyFile(buffer, a.mimeType ?? '', a.filename, {
+          excelRouting: loadEnv().EXCEL_VISION_ROUTING,
+        });
       } catch (err) {
         log.warn({ err, file: a.filename }, 'router: classifyFile failed — сохраняем как прочий');
         cls = {
@@ -4164,6 +4276,28 @@ const MAX_PAGES_FOR_OPENROUTER_SEGMENT = 5;
  * Исходные строки не удаляются: лишние документы остаются техническими и
  * архивируются с mergedInto, поэтому результат обратим и полностью аудируем.
  */
+/**
+ * «Всего наименований», прочитанное из бланка, — из сохранённого снимка
+ * валидации сегмента.
+ *
+ * Колонки под это число нет: оно живёт только внутри результата распознавания
+ * и попадает в validation.checks как ожидание проверки items_count. После
+ * склейки взять его больше неоткуда, а без него проверка полноты списка
+ * сравнивает число строк само с собой.
+ */
+function declaredItemsCountOf(validation: unknown): number | null {
+  if (validation == null || typeof validation !== 'object') return null;
+  const checks = (validation as { checks?: unknown }).checks;
+  if (!Array.isArray(checks)) return null;
+  for (const check of checks) {
+    if (check == null || typeof check !== 'object') continue;
+    const row = check as { name?: unknown; expected?: unknown };
+    if (row.name !== 'items_count') continue;
+    return typeof row.expected === 'number' ? row.expected : null;
+  }
+  return null;
+}
+
 async function consolidateAssemblyDocuments(
   tx: typeof db,
   segments: Array<{
@@ -4182,6 +4316,8 @@ async function consolidateAssemblyDocuments(
     docDate: Date | null;
     totalSum: string | null;
     vatSum: string | null;
+    validation: unknown;
+    llmConfidence: string | null;
   }>,
 ): Promise<string[]> {
   const orderedSegments = [...segments].sort((a, b) => a.segmentIndex - b.segmentIndex);
@@ -4202,7 +4338,12 @@ async function consolidateAssemblyDocuments(
       .where(inArray(sourceDocumentAttachments.sourceDocumentId, initialDocIds)),
   ]);
   const docById = new Map(docs.map((doc) => [doc.id, doc]));
-  const actions = planAssemblyDocumentMerges(
+  // Рубильник фазы: при выключенном работает прежнее правило склейки — то, что
+  // сейчас на бою. UPD_ASSEMBLY_V1 для этого не годится, он включает сборку
+  // страниц целиком.
+  const copyDedup = loadEnv().UPD_ASSEMBLY_COPY_DEDUP_V1;
+  const plan = copyDedup ? planAssemblyDocumentMerges : planAssemblyDocumentMergesLegacy;
+  const actions = plan(
     initialDocIds.flatMap((id) => {
       const doc = docById.get(id);
       return doc
@@ -4212,6 +4353,7 @@ async function consolidateAssemblyDocuments(
               supplierDirectoryId: doc.supplierDirectoryId,
               docNumber: doc.docNumber,
               docDate: doc.docDate,
+              declaredTotal: doc.totalSum,
               items: items
                 .filter((item) => item.sourceDocumentId === id)
                 .map((item) => ({
@@ -4219,6 +4361,9 @@ async function consolidateAssemblyDocuments(
                   nameRaw: item.nameRaw,
                   qty: item.qty,
                   sum: item.sum,
+                  unit: item.unit,
+                  price: item.price,
+                  rowNo: item.rowNo,
                 })),
             },
           ]
@@ -4303,51 +4448,95 @@ async function consolidateAssemblyDocuments(
         .where(eq(bundleSegments.id, keeperSegment.id));
     }
 
-    const allLineSumsKnown = keptItems.length > 0 && keptItems.every((item) => item.sum != null);
-    const totalSum =
-      !action.identicalItems && allLineSumsKnown
-        ? keptItems.reduce((sum, item) => sum + Number(item.sum), 0)
-        : keeper.totalSum == null
-          ? null
-          : Number(keeper.totalSum);
-    const allVatSumsKnown = keptItems.length > 0 && keptItems.every((item) => item.vatSum != null);
-    const vatSum =
-      !action.identicalItems && allVatSumsKnown
-        ? keptItems.reduce((sum, item) => sum + Number(item.vatSum), 0)
-        : keeper.vatSum == null
-          ? null
-          : Number(keeper.vatSum);
+    // Итог документа. У КОПИЙ он уже прочитан из шапки («Всего к оплате») и
+    // одинаков в обоих экземплярах — подменять его суммой строк нельзя: именно
+    // это и уничтожало проверку, потому что после подмены она сравнивала число
+    // само с собой и сходилась даже на задвоенном составе. Сумма строк
+    // остаётся источником только там, где строки РАЗНЫЕ (части документа).
+    const sumsOf = (pick: (item: (typeof keptItems)[number]) => string | null): number | null => {
+      if (keptItems.length === 0) return null;
+      if (!keptItems.every((item) => pick(item) != null)) return null;
+      return keptItems.reduce((acc, item) => acc + Number(pick(item)), 0);
+    };
+    const keeperTotal = keeper.totalSum == null ? null : Number(keeper.totalSum);
+    const keeperVat = keeper.vatSum == null ? null : Number(keeper.vatSum);
+    const sumFromLines = action.relation === 'copies' ? null : sumsOf((item) => item.sum);
+    const vatFromLines = action.relation === 'copies' ? null : sumsOf((item) => item.vatSum);
+    const totalSum = !action.identicalItems && sumFromLines != null ? sumFromLines : keeperTotal;
+    const vatSum = !action.identicalItems && vatFromLines != null ? vatFromLines : keeperVat;
+
+    // «Всего наименований» из бланка. Отдельной колонки под него нет, поэтому
+    // поднимаем из снимков валидации сегментов: у копий число одно и то же, у
+    // частей берём максимум — меньшее заведомо описывает лишь часть списка.
+    const declaredItemsCount = (() => {
+      const values = action.documentIds
+        .map((id) => docById.get(id)?.validation)
+        .map((v) => declaredItemsCountOf(v))
+        .filter((n): n is number => n != null);
+      return values.length > 0 ? Math.max(...values) : null;
+    })();
+
+    const validationItems = keptItems.map((item) => ({
+      // Номер из бланка возвращает проверку целостности списка: без него
+      // items_sequence уходит в skip ровно там, где строку задвоили.
+      rowNo: item.rowNo ?? null,
+      qty: Number(item.qty),
+      price: item.price == null ? null : Number(item.price),
+      sum: item.sum == null ? null : Number(item.sum),
+      vatRate: item.vatRate == null ? null : Number(item.vatRate),
+      vatSum: item.vatSum == null ? null : Number(item.vatSum),
+    }));
     const validation = validateUpdTotals(
-      {
-        totalSum,
-        vatSum,
-        itemsCount: keptItems.length,
-        items: keptItems.map((item) => ({
-          qty: Number(item.qty),
-          price: item.price == null ? null : Number(item.price),
-          sum: item.sum == null ? null : Number(item.sum),
-          vatRate: item.vatRate == null ? null : Number(item.vatRate),
-          vatSum: item.vatSum == null ? null : Number(item.vatSum),
-        })),
-      },
+      { totalSum, vatSum, itemsCount: declaredItemsCount, items: validationItems },
       // Позиции собраны из распознанных сегментов — эвристика применима.
       { detectRecognitionWarnings: true },
+    );
+    // Исход считает общее правило системы, а не отдельная ветка склейки:
+    // денежное расхождение оставляет документ обработанным и вешает жёлтую
+    // плашку, а в «требует решения» уводит только неполнота (нет номера, нет
+    // позиций, список короче заявленного). Раньше здесь этой проверки не было
+    // вовсе — собранный документ всегда выглядел готовым.
+    const outcome = deriveUpdParseOutcome(
+      {
+        items: validationItems,
+        docNumber: keeper.docNumber,
+        totalSum,
+        itemsCount: declaredItemsCount,
+        confidence: keeper.llmConfidence == null ? null : Number(keeper.llmConfidence),
+      },
+      validation,
+      { parsedViaVision: true },
     );
     const siblingDuplicate =
       keeper.parseErrorCode === 'duplicate_upd' &&
       typeof keeper.parseErrorDetails?.existingId === 'string' &&
       groupIds.has(keeper.parseErrorDetails.existingId);
+    const CLEARED = { status: 'parsed' as const, parseErrorCode: null, parseErrorDetails: null };
+    // Дубликат-сосед и разошедшиеся суммы — не ошибки склейки: первый и есть
+    // второй экземпляр, который мы только что свели, вторые после сведения
+    // могли сойтись. Дальше исход считает общее правило системы — но только
+    // при включённом рубильнике: с выключенным поведение обязано остаться
+    // прежним, а раньше статус здесь не пересчитывался вовсе.
     const resolvedValidation =
       keeper.parseErrorCode === 'validation_mismatch' && !validation.hasMismatch;
+    const statusPatch = !copyDedup
+      ? siblingDuplicate || resolvedValidation
+        ? CLEARED
+        : {}
+      : siblingDuplicate
+        ? CLEARED
+        : {
+            status: outcome.status,
+            parseErrorCode: outcome.parseErrorCode,
+            parseErrorDetails: outcome.parseErrorDetails,
+          };
     await tx
       .update(sourceDocuments)
       .set({
         totalSum: totalSum == null ? null : totalSum.toFixed(2),
         vatSum: vatSum == null ? null : vatSum.toFixed(2),
         validation,
-        ...(siblingDuplicate || resolvedValidation
-          ? { status: 'parsed' as const, parseErrorCode: null, parseErrorDetails: null }
-          : {}),
+        ...statusPatch,
         updatedAt: new Date(),
       })
       .where(eq(sourceDocuments.id, action.keeperId));
@@ -4484,6 +4673,12 @@ export async function tryFinalizeUpdAssembly(
         docDate: sourceDocuments.docDate,
         totalSum: sourceDocuments.totalSum,
         vatSum: sourceDocuments.vatSum,
+        // Снимок валидации сегмента — единственное место, где сохранилось
+        // «Всего наименований» из бланка: отдельной колонки под него нет.
+        // После склейки без него проверка полноты списка сравнивает число
+        // строк само с собой и сходится всегда.
+        validation: sourceDocuments.validation,
+        llmConfidence: sourceDocuments.llmConfidence,
       })
       .from(sourceDocuments)
       .where(inArray(sourceDocuments.id, docIds));
@@ -4951,6 +5146,8 @@ async function createSourceDocumentFromWaybill(args: {
   llmProviderId: string | null;
   /** Позиция документа в ответе модели — постоянная привязка для повтора. */
   batchIndex?: number;
+  /** Каким промптом разобран пакет: повтор обязан идти тем же. */
+  waybillPromptKind?: string | null;
   attachments: {
     s3Key: string;
     filename: string;
@@ -5058,6 +5255,7 @@ async function createSourceDocumentFromWaybill(args: {
       // чтобы пойти тем же путём и записать результат в нужную строку.
       parseMode: 'waybill_batch',
       batchIndex: args.batchIndex ?? null,
+      waybillPromptKind: args.waybillPromptKind ?? null,
       bundleId,
       createdByUserId: bundle.createdByUserId,
     });
@@ -5181,11 +5379,20 @@ async function handleWaybillSingleReparseJob(
       files.push(...expanded);
     }
 
-    const first = await parseWaybillBatch(files, {
-      sourceDocumentId,
-      // Пакета здесь нет: разбирается один документ, а не загрузка целиком.
-      bundleId: null,
-    });
+    // Документ, созданный промптом формы 1-Т, повторяем ТЕМ ЖЕ промптом.
+    // Активный промпт вернул бы другой набор документов, и выбор «своего» по
+    // batch_index попал бы в чужую накладную из того же файла.
+    const routed1t =
+      doc.waybillPromptKind === 'transport_waybill_1t'
+        ? await runWaybill1tPass(originalFiles, { sourceDocumentId, bundleId: null }, log)
+        : null;
+    const first =
+      routed1t ??
+      (await parseWaybillBatch(files, {
+        sourceDocumentId,
+        // Пакета здесь нет: разбирается один документ, а не загрузка целиком.
+        bundleId: null,
+      }));
     let parsed = first.parsed;
     let llmProviderId = first.llmProviderId;
 
@@ -5348,7 +5555,10 @@ async function handleS3Cleanup(job: Job<S3CleanupJobData>): Promise<void> {
   if (failed === deletable.length) {
     throw new Error(`all ${failed} s3 deletions failed`);
   }
-  log.info({ total: s3Keys.length, deleted: deletable.length - failed, skipped, failed }, 's3 cleanup done');
+  log.info(
+    { total: s3Keys.length, deleted: deletable.length - failed, skipped, failed },
+    's3 cleanup done',
+  );
 }
 
 // ─── S3 cleanup outbox consumer (Волна 1D) ──────────────────────────────────

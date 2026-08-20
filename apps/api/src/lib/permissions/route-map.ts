@@ -353,8 +353,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // ─────────────────────────── Операции: отгрузки ─────────────────────────
   ['GET /api/v1/shipments', st('operations.shipments', 'view')],
   ['GET /api/v1/shipments/:id', st('operations.shipments', 'view')],
-  // Своего export.xlsx у отгрузок нет: страница Операций выгружает их через
-  // /api/v1/source-documents/export.xlsx (см. OperationsPage.tsx).
+  ['GET /api/v1/shipments/export.xlsx', st('operations.shipments', 'view')],
   [
     'POST /api/v1/shipments',
     inHandler('Upsert — см. POST /api/v1/deliveries.', [
@@ -510,6 +509,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/source-documents/:id', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
   ['GET /api/v1/source-documents/:id/file', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
   ['GET /api/v1/source-documents/:id/file/raw', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
+  ['GET /api/v1/source-documents/:id/pages', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
   ['GET /api/v1/source-documents/:id/extra/:itemId/url', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
   ['GET /api/v1/source-documents/:id/extra/:itemId/raw', always(SD_READ, { affects: [{ page: 'documents.list', action: 'view' }], matrixOnly: SD_OPEN })],
   // Кнопка экспорта живёт и на Операциях, и в Документах — ключи те же, что у
