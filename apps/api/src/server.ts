@@ -17,6 +17,7 @@ import securityPlugin from './plugins/security.js';
 import authPlugin from './plugins/auth.js';
 import permissionsPlugin from './plugins/permissions.js';
 import metricsPlugin from './plugins/metrics.js';
+import errorVisibilityPlugin from './plugins/error-visibility.js';
 import { healthRoutes } from './routes/health.js';
 import { authRoutes } from './routes/auth.js';
 import { meRoutes } from './routes/me.js';
@@ -70,6 +71,12 @@ export async function buildServer() {
 
   await app.register(redisPlugin);
   await app.register(dbPlugin);
+  // Видимость 5xx: единое событие http_5xx в логе + санитизация тела
+  // необработанных ошибок. Регистрируется ПЕРВЫМ из хуковых плагинов: onSend
+  // выполняются в порядке добавления, и подменённое тело должно попасть и в
+  // замер respBytes (metricsPlugin), и в компрессор — иначе метрика посчитает
+  // исходный размер, а сожмётся уже не то тело.
+  await app.register(errorVisibilityPlugin);
   // Волна 0A: метрики per-request. Регистрируем до authPlugin, чтобы ALS-контекст
   // (счётчик SQL) был активен уже на attachUser. No-op при выключенном флаге.
   await app.register(metricsPlugin);

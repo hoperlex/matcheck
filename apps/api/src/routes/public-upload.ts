@@ -29,6 +29,7 @@ import { collectUploadParts, uploadLimitMessage } from '../domain/sourceDocument
 import { ingestDocumentsBundle } from '../domain/sourceDocuments/ingest-bundle.js';
 import { loadEnv } from '../lib/env.js';
 import { fileHashOf } from '../domain/sourceDocuments/bundle-key.js';
+import { clientIpOf } from '../lib/client-ip.js';
 
 /** Лимиты публичной загрузки. Строже внутренних: вход открыт всем. */
 const PUBLIC_LIMITS = {
@@ -53,30 +54,6 @@ function newTicket(): string {
   // 16 байт = 128 бит: перебор нереален, а base64url даёт 22 символа —
   // человек может продиктовать такой номер менеджеру по телефону.
   return randomBytes(16).toString('base64url');
-}
-
-/**
- * IP клиента для лимитера.
- *
- * req.ip брать нельзя: Fastify поднят с trustProxy: true и берёт САМЫЙ ЛЕВЫЙ
- * адрес из X-Forwarded-For, а nginx этот заголовок не заменяет, а дополняет
- * ($proxy_add_x_forwarded_for) — клиент подделал бы себе новый лимит каждым
- * запросом. X-Real-IP nginx перезаписывает своим $remote_addr, подделать его
- * нельзя; следом идёт последний элемент XFF (его добавил наш же nginx).
- */
-function clientIpOf(req: { headers: Record<string, unknown>; ip: string }): string {
-  const real = req.headers['x-real-ip'];
-  if (typeof real === 'string' && real.trim()) return real.trim();
-  const xff = req.headers['x-forwarded-for'];
-  if (typeof xff === 'string') {
-    const parts = xff
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const last = parts[parts.length - 1];
-    if (last) return last;
-  }
-  return req.ip;
 }
 
 export async function publicUploadRoutes(rawApp: FastifyInstance): Promise<void> {
