@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { decimalString } from './decimal-string.js';
 import { ShipmentStatusCodeSchema, StatusSchema } from './statuses.js';
 import { VolumeConfidenceSchema, PrimarySourceDocumentSchema } from './source-documents.js';
 import { ItemKindSchema } from './deliveries.js';
@@ -154,16 +155,16 @@ export const ShipmentUpsertItemSchema = z.object({
   inventoryNumber: z.string().max(200).nullable().optional(),
   serialNumber: z.string().max(200).nullable().optional(),
   nameRaw: z.string().min(1),
-  qtyPlanned: z.string().nullable().optional(),
-  qtyActual: z.string().nullable().optional(),
+  qtyPlanned: decimalString({ precision: 18, scale: 4 }),
+  qtyActual: decimalString({ precision: 18, scale: 4 }),
   unit: z.string().min(1).default('шт'),
   comment: z.string().nullable().optional(),
   lineNo: z.number(),
-  volumeM3: z.string().nullable().optional(),
-  massKg: z.string().nullable().optional(),
-  price: z.string().nullable().optional(),
-  vatRate: z.string().nullable().optional(),
-  vatSum: z.string().nullable().optional(),
+  volumeM3: decimalString({ precision: 10, scale: 4 }),
+  massKg: decimalString({ precision: 10, scale: 3 }),
+  price: decimalString({ precision: 18, scale: 4 }),
+  vatRate: decimalString({ precision: 5, scale: 2 }),
+  vatSum: decimalString({ precision: 18, scale: 2 }),
   volumeConfidence: VolumeConfidenceSchema.nullable().optional(),
   groupName: z.string().nullable().optional(),
 });
