@@ -49,6 +49,13 @@ export default fp(async (app) => {
   });
 
   app.addHook('onSend', async (req, reply, payload) => {
+    // Заголовки уже ушли — значит маршрут пишет в сокет сам (SSE, ручной
+    // стрим). Такой ответ не наш: подмена тела здесь ничего не исправит, а
+    // попытка выставить заголовок роняет процесс с ERR_HTTP_HEADERS_SENT.
+    // Проверка стоит первой и не зависит от статуса: hijack() у потока может
+    // появиться в любом маршруте, а падение процесса — слишком дорогая плата
+    // за санитизацию тела, которого клиент всё равно не увидит.
+    if (reply.raw.headersSent) return payload;
     if (reply.statusCode < 500) return payload;
     if (!unhandledErrors.has(req)) return payload;
     if (!hideDetails) return payload;

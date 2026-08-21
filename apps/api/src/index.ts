@@ -3,6 +3,10 @@ import * as Sentry from '@sentry/node';
 import { buildServer } from './server.js';
 import { loadEnv } from './lib/env.js';
 import { logger } from './lib/logger.js';
+import { installFatalHandlers } from './lib/fatal-visibility.js';
+
+// До buildServer: падение при инициализации плагинов тоже должно быть видно.
+installFatalHandlers('api');
 
 async function main() {
   const env = loadEnv();

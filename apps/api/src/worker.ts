@@ -18,6 +18,7 @@ import {
 } from './domain/sourceDocuments/document-group.js';
 import { recordVisibilityTransitions } from './domain/sourceDocuments/visibility-events.js';
 import { logger } from './lib/logger.js';
+import { installFatalHandlers } from './lib/fatal-visibility.js';
 import { db } from './db/client.js';
 import {
   counterparties,
@@ -149,6 +150,10 @@ import { llmProviders, llmProviderCredentials } from './db/schema.js';
 import { buildAad, decryptField } from './domain/auth/crypto.js';
 import { repairStuckJobs, STUCK_INTERVAL_MS } from './domain/jobs/stuck-jobs.js';
 import type { SourceStatus, UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
+
+// Падение процесса обязано оставлять след в логе и в Sentry — см.
+// lib/fatal-visibility.ts (инцидент 21.08: 854 немых рестарта API).
+installFatalHandlers('worker');
 
 // Хелпер: уведомляем подключённых SSE-клиентов о смене статуса УПД через
 // Redis Pub/Sub (worker в отдельном процессе, in-process bus API ему

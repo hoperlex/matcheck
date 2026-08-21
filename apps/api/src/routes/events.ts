@@ -54,6 +54,21 @@ export async function eventsRoutes(app: FastifyInstance): Promise<void> {
       preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
     },
     async (req, reply: FastifyReply) => {
+      // hijack() ДО первой записи в сокет: дальше ответом распоряжаемся мы, и
+      // Fastify не выполняет для него ни onSend-хуки, ни финальную запись
+      // заголовков.
+      //
+      // Без этого поток жил на честном слове. Заголовки пишутся вручную
+      // (reply.raw.writeHead ниже), а обработчик завершался через `return
+      // reply` — Fastify считал ответ своим и в конце цепочки вызывал
+      // safeWriteHead. Пока в приложении не было ни одного onSend-хука, до
+      // этой строки дело не доходило. 20.08 плагин error-visibility добавил
+      // глобальный onSend — и каждое подключение к SSE стало ронять процесс:
+      // ERR_HTTP_HEADERS_SENT, никем не пойманный (обработчиков процесса в
+      // index.ts нет). Портал открывает SSE сразу после входа, поэтому каждый
+      // вход убивал API: 854 рестарта за ночь и «Ошибка входа» у всех, кто
+      // попал в окно рестарта.
+      reply.hijack();
       reply.raw.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
@@ -74,7 +89,8 @@ export async function eventsRoutes(app: FastifyInstance): Promise<void> {
         clearInterval(ping);
         bus.off('sse', listener);
       });
-      return reply;
+      // Ничего не возвращаем: после hijack() ответ Fastify уже не принадлежит,
+      // и `return reply` снова втянул бы его в цепочку onSend.
     },
   );
 }

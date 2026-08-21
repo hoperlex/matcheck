@@ -30,11 +30,16 @@ import {
 } from './domain/jobs/mail-poll-runner.js';
 import { DEFAULT_FETCH_LIMITS } from './domain/mail/imap.fetch.js';
 import { openMailbox } from './domain/mail/imap.connect.js';
+import { installFatalHandlers } from './lib/fatal-visibility.js';
 import { purgeOldMail, purgeOldReceipts } from './domain/mail/retention.js';
 import { copyObject, putObject } from './domain/storage/s3.signer.js';
 import { loadEnv } from './lib/env.js';
 import { logger } from './lib/logger.js';
 import { buildQueueConnection, MAIL_POLL_QUEUE, type MailPollJobData } from './plugins/queue.js';
+
+// Падение процесса обязано оставлять след в логе и в Sentry — см.
+// lib/fatal-visibility.ts (инцидент 21.08: 854 немых рестарта API).
+installFatalHandlers('mail-worker');
 
 const env = loadEnv();
 const log = logger.child({ service: 'mail-worker' });

@@ -17,6 +17,16 @@ export default fp(async (app) => {
     enableReadyCheck: true,
   });
 
+  // Слушатель ставится ДО connect(): 'error' у EventEmitter без единого
+  // подписчика роняет процесс, а ioredis эмитит его при каждом обрыве связи —
+  // не только на старте. Обработчик Redis не чинит: он лишь переводит сбой
+  // соединения из «падение API» в «строка в логе». Деградация уже описана —
+  // rate-limit работает со skipOnError, постановка задач в очередь честно
+  // вернёт ошибку запроса.
+  redis.on('error', (err) => {
+    app.log.error({ err, event: 'redis_error' }, 'redis connection error');
+  });
+
   try {
     await redis.connect();
     app.log.info({ url: url.replace(/:[^:@]*@/, ':***@') }, 'redis connected');

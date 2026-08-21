@@ -172,6 +172,24 @@ export function buildQueueConnection(): ConnectionOptions {
 }
 
 export default fp(async (app) => {
+  /**
+   * Подписка на 'error' у очереди.
+   *
+   * BullMQ держит своё соединение с Redis и эмитит на очереди 'error' при его
+   * обрыве. Без единого слушателя такое событие роняет процесс — тот же
+   * механизм EventEmitter, что и у самого клиента Redis. Хелпер общий, чтобы
+   * следующая заведённая очередь не появилась без подписки.
+   */
+  const watch = <T extends { on: (e: 'error', cb: (err: Error) => void) => unknown }>(
+    queue: T,
+    name: string,
+  ): T => {
+    queue.on('error', (err) => {
+      app.log.error({ err, event: 'queue_error', queue: name }, 'bullmq queue error');
+    });
+    return queue;
+  };
+
   const updParse = new Queue<UpdParseJobData>(UPD_PARSE_QUEUE, {
     connection: buildQueueConnection(),
     defaultJobOptions: UPD_PARSE_JOB_OPTIONS,
@@ -202,6 +220,10 @@ export default fp(async (app) => {
       removeOnFail: { age: 7 * 24 * 60 * 60 },
     },
   });
+
+  watch(updParse, UPD_PARSE_QUEUE);
+  watch(s3Cleanup, S3_CLEANUP_QUEUE);
+  watch(mailPoll, MAIL_POLL_QUEUE);
 
   app.decorate('queues', { updParse, s3Cleanup, mailPoll });
   app.addHook('onClose', async () => {
