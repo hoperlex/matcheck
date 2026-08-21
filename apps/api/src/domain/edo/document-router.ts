@@ -87,6 +87,33 @@ function isTransportWaybillText(text: string): boolean {
   if (!TRANSPORT_WAYBILL_TITLE_RE.test(text)) return false;
   return TRANSPORT_WAYBILL_FORM_RE.test(text) || hasNumberedWaybillSections(text);
 }
+
+/**
+ * Бланк ТН, а не просто упоминание накладной: заголовок формы И минимум два
+ * РАЗНЫХ именованных раздела («1. Грузоотправитель», «6. Перевозчик» и далее).
+ *
+ * Отдельная функция, а не isTransportWaybillText: у той вторая половина
+ * (hasNumberedWaybillSections) засчитывает любые «1. », «2. », и спецификация,
+ * где транспортная накладная упомянута в тексте, а нумерованный список свой,
+ * добрала бы порог. Там это допустимо, здесь — нет: цена ошибки не заглушка, а
+ * 2-3 вызова модели (parseWaybillBatch → второй проход → общий товарный
+ * fallback) и риск пустого черновика вместо честного «не распознано».
+ *
+ * Название раздела читается НЕПОСРЕДСТВЕННО после номера — свободного поиска
+ * ключевых слов по строке нет. Номера считаются УНИКАЛЬНЫМИ: «1. Грузоотправитель»
+ * и «1. Грузоотправитель (продолжение)» — один раздел, а не два.
+ */
+function isTransportWaybillForm(text: string): boolean {
+  if (!TRANSPORT_WAYBILL_TITLE_RE.test(text)) return false;
+  // `груз` — целое слово: без границы он совпал бы с «грузоотправитель», и один
+  // раздел прошёл бы порог в одиночку.
+  const re =
+    /(?:^|\s)([1-9]|1\d)[а-яё]?\.\s*(?:грузоотправ|грузополуч|перевозчик|груз(?![а-яё])|при[её]м\s+груза|сдача\s+груза|транспортн[а-яё]*\s+средств|сопроводительн)/gi;
+  const sections = new Set<string>();
+  for (const match of text.matchAll(re)) sections.add(match[1]!);
+  return sections.size >= 2;
+}
+
 function m15ByName(signals: string[]): FileClassification {
   // needsVision=true: М-15 всегда распознаём через vision (своим m15-промптом).
   return { detectedKind: 'm15', confidence: 0, needsVision: true, parserUsed: 'none', signals };
@@ -140,11 +167,21 @@ export async function classifyFile(
   filename: string,
   opts: {
     /**
-     * Разрешено ли уводить книгу Excel в waybill-путь. Ровно тот же рубильник,
-     * что и у доклассификации Excel по картинке (EXCEL_VISION_ROUTING):
-     * маршрут книги меняется только вместе с ним.
+     * Разрешено ли уводить книгу Excel в waybill-путь ДО структурной пробы.
+     * Ровно тот же рубильник, что и у доклассификации Excel по картинке
+     * (EXCEL_VISION_ROUTING): маршрут книги меняется только вместе с ним.
+     *
+     * Ветка способна перехватить книгу, в которой parseUpdXlsx что-то нашёл,
+     * поэтому и живёт под флагом vision-доклассификации — риск у них общий.
      */
     excelRouting?: boolean;
+    /**
+     * Разрешён ли текстовый маршрут «книга без признаков УПД → бланк ТН»
+     * (EXCEL_WAYBILL_TEXT_ROUTE). Работает ПОСЛЕ структурной пробы и потому
+     * трогает только книги с сигналом 'excel:not-upd' — те, что иначе
+     * гарантированно становятся заглушкой «не распознано».
+     */
+    excelWaybillTextRoute?: boolean;
   } = {},
 ): Promise<FileClassification> {
   const lower = filename.toLowerCase();
@@ -160,15 +197,21 @@ export async function classifyFile(
   // как и раньше. Сбой парсера тоже оставляет прежнее поведение: потерять
   // распознаваемое хуже, чем принять лишний файл.
   if (/spreadsheetml|ms-excel/.test(m) || EXCEL_RE.test(lower)) {
+    // Текст книги собирается ЛЕНИВО и не больше одного раза за вызов: при
+    // выключенных флагах он не нужен вовсе, а распознаваемому УПД — тем более.
+    // Иначе каждая книга платила бы лишним разбором SheetJS за ветку, которая
+    // её не касается.
+    let sheetText: string | undefined;
+    const getSheetText = (): string => (sheetText ??= excelPlainText(buffer));
+
     // Транспортная накладная, присланная книгой. Раньше её забирал УПД-путь:
     // структурный парсер находил номер и дату, книга признавалась УПД, а
     // дальше промпт УПД честно отвечал «это транспортная накладная, графы 1-11
     // отсутствуют» и не извлекал НИ ОДНОЙ позиции. Тот же текстовый признак,
     // что и у PDF, отправляет её к своему промпту.
     if (opts.excelRouting) {
-      const sheetText = excelPlainText(buffer);
-      const hasUpdMarker = /сч[её]т-фактур|универсальный передаточн/i.test(sheetText);
-      if (!hasUpdMarker && isTransportWaybillText(sheetText)) {
+      const hasUpdMarker = /сч[её]т-фактур|универсальный передаточн/i.test(getSheetText());
+      if (!hasUpdMarker && isTransportWaybillText(getSheetText())) {
         return {
           detectedKind: 'transport_waybill',
           confidence: 0.8,
@@ -188,6 +231,25 @@ export async function classifyFile(
       signal = 'excel:probe-failed';
     }
     if (!looksLikeUpd) {
+      // Бланк транспортной накладной, присланный книгой. Проверка стоит ЗДЕСЬ,
+      // после пробы, и в этом весь смысл: сюда попадают только книги, где
+      // parseUpdXlsx не нашёл ни одного поля шапки и ни одной позиции. Книга,
+      // которая распознаётся как УПД, до этой строки не доходит — значит
+      // маршрут работающих файлов правка не меняет по построению, а не по
+      // договорённости. Проверять hasUpdMarker тут не нужно: структурный
+      // вердикт «это не УПД» уже вынесен, а ссылка на УПД в графе 4 —
+      // штатное содержимое накладной, и именно на ней спотыкалась ветка выше.
+      if (opts.excelWaybillTextRoute && isTransportWaybillForm(getSheetText())) {
+        return {
+          detectedKind: 'transport_waybill',
+          confidence: 0.8,
+          needsVision: false,
+          parserUsed: 'parseWaybillBatch',
+          // Оба факта в журнал: «парсер УПД ничего не нашёл» и «текст читается
+          // как бланк ТН». По form:tn выбираются все срабатывания новой ветки.
+          signals: [signal, 'form:tn'],
+        };
+      }
       // needsVision: true — приговор выносит не регулярка по чужому шаблону, а
       // модель по картинке. Сама доклассификация живёт в worker и включается
       // флагом EXCEL_VISION_ROUTING; без него ветка unknown ниже отработает

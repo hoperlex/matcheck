@@ -2997,6 +2997,10 @@ export async function handleDocumentRouterJob(
       try {
         cls = await classifyFile(buffer, a.mimeType ?? '', a.filename, {
           excelRouting: loadEnv().EXCEL_VISION_ROUTING,
+          // Отдельный рубильник: этот маршрут работает по тексту, после
+          // структурной пробы, и трогает только книги, которые иначе стали бы
+          // заглушкой «не распознано» (см. lib/env.ts).
+          excelWaybillTextRoute: loadEnv().EXCEL_WAYBILL_TEXT_ROUTE,
         });
       } catch (err) {
         log.warn({ err, file: a.filename }, 'router: classifyFile failed — сохраняем как прочий');
