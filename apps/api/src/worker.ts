@@ -4134,7 +4134,12 @@ export async function handleUpdAssemblyJob(
     }
 
     const classification = mergeClassificationChunks(chunks, chunkSizes);
-    const plan = planUpdSegments(classification, pages.length, MAX_PAGES_FOR_OPENROUTER_SEGMENT);
+    // Карта «страница → файл» нужна перестановке: переставлять можно только
+    // файлы целиком, порядок листов внутри PDF задан самим документом.
+    const plan = planUpdSegments(classification, pages.length, MAX_PAGES_FOR_OPENROUTER_SEGMENT, {
+      pageOwners: new Map(pages.map((page) => [page.globalPage, page.ref.inputOrder])),
+      reorder: loadEnv().UPD_ASSEMBLY_REORDER_V1,
+    });
     await recordRecognitionEvidence({
       bundleId: rootId,
       generation,

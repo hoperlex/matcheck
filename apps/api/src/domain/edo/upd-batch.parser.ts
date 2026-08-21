@@ -29,7 +29,14 @@ export type SegmentConfidence =
 
 export type UpdPageSegment = {
   segmentIndex: number;
-  // 1-based номера страниц этого УПД, в порядке возрастания
+  /**
+   * 1-based номера страниц этого УПД — в том порядке, в каком их надо читать.
+   *
+   * Обычно это возрастание, но не всегда: при `preserveOrder` порядок задаёт
+   * вызывающий, и шапка может стоять перед страницей с меньшим номером. Именно
+   * этот порядок уезжает в манифест (pageRefsOfSegment), а продолжение таблицы
+   * читается только после своей шапки.
+   */
   pages: number[];
   confidence: SegmentConfidence;
   reasons: string[];
@@ -58,6 +65,7 @@ export type UpdPageSegment = {
 export function segmentUpdPages(
   classification: PageClassification[],
   selectedPages?: number[],
+  opts?: { preserveOrder?: boolean },
 ): UpdPageSegment[] {
   const typeByPage = new Map<number, PageType>();
   for (const c of classification) typeByPage.set(c.page, c.type);
@@ -66,8 +74,12 @@ export function segmentUpdPages(
   const rawPages =
     selectedPages ??
     classification.filter((c) => c.use).map((c) => c.page);
-  // Уникальные, по возрастанию — сегментация идёт строго в порядке страниц.
-  const pages = Array.from(new Set(rawPages)).sort((a, b) => a - b);
+  // Уникальные. По возрастанию — если порядок не задан явно вызывающим:
+  // сегментация идёт строго в порядке страниц, а он обычно и есть порядок
+  // чтения. preserveOrder нужен там, где порядок файлов в пакете произволен и
+  // шапку приходится ставить вперёд (см. planUpdSegments).
+  const unique = Array.from(new Set(rawPages));
+  const pages = opts?.preserveOrder ? unique : unique.sort((a, b) => a - b);
 
   const segments: UpdPageSegment[] = [];
   let current: UpdPageSegment | null = null;

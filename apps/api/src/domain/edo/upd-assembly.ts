@@ -83,6 +83,78 @@ const DROPPED_TYPES: ReadonlySet<PageType> = new Set<PageType>([
   'certificate',
 ]);
 
+export type PlanUpdSegmentsOptions = {
+  /**
+   * `globalPage → inputOrder` файла, из которого страница получена.
+   *
+   * Нужна, чтобы переставлять ФАЙЛЫ, а не отдельные страницы: внутри
+   * многостраничного PDF порядок физический и осмысленный, ломать его нельзя.
+   */
+  pageOwners?: ReadonlyMap<number, number>;
+  /** Рубильник UPD_ASSEMBLY_REORDER_V1. Выключен — поведение прежнее целиком. */
+  reorder?: boolean;
+};
+
+/**
+ * Порядок «шапка первой» — или null, если случай неоднозначный.
+ *
+ * Условия намеренно узкие. Одной страницы `upd_main` в пакете НЕ достаточно:
+ * у второй УПД шапку могли прочитать как продолжение, и тогда перестановка
+ * приклеила бы её к чужому документу. Требование «ровно два одностраничных
+ * файла, один main и один continuation» такую возможность резко сужает —
+ * приклеивать больше не к чему.
+ *
+ * Полностью её не исключает даже это: две одностраничные УПД, у одной из
+ * которых шапка прочитана неверно, выглядят точно так же. Различить их без
+ * номера документа на странице нельзя, а его классификатор не возвращает.
+ *
+ * Цена такой ошибки — два документа СОЛЬЮТСЯ В ОДИН: одной карточки не
+ * досчитаются, а её позиции окажутся в чужой. Риск принят сознательно против
+ * гарантированно разваленного комплекта сегодня, но недооценивать его нельзя:
+ * расширять условия применимости без номера документа на странице — нельзя.
+ */
+function headerFirstOrder(
+  classification: PageClassification[],
+  selectedPages: number[],
+  totalPages: number,
+  plan: SegmentPlan,
+  pageOwners?: ReadonlyMap<number, number>,
+): number[] | null {
+  if (!pageOwners) return null;
+
+  // Лечим ровно один вид отказа. Прочие причины (страница сверх предела,
+  // неупомянутые страницы, чужой тип внутри) перестановкой не исправляются.
+  const orphanContinuation = plan.segments.some(
+    (seg) => seg.confidence === 'fallback' && seg.reasons[0] === 'continuation_without_main',
+  );
+  if (!orphanContinuation) return null;
+
+  // Ровно две страницы во всём пакете, и обе идут в сегментацию: ни одна не
+  // отброшена как чужая и ни одна не осталась неупомянутой.
+  if (totalPages !== 2 || selectedPages.length !== 2) return null;
+
+  // Каждая страница — из своего файла. Два листа одного PDF переставлять
+  // нельзя: там порядок задан самим документом.
+  const owners = selectedPages.map((page) => pageOwners.get(page));
+  if (owners.some((owner) => owner === undefined)) return null;
+  if (new Set(owners).size !== 2) return null;
+
+  // Типы известны и ровно те, что нужны. Проверка заодно отсекает `unknown`,
+  // `other` и всё, что классификатор не отнёс ни к шапке, ни к продолжению:
+  // при любом третьем типе счётчики не сойдутся.
+  const typeByPage = new Map(classification.map((c) => [c.page, c.type]));
+  const mains = selectedPages.filter((page) => typeByPage.get(page) === 'upd_main');
+  const continuations = selectedPages.filter(
+    (page) => typeByPage.get(page) === 'upd_continuation',
+  );
+  if (mains.length !== 1 || continuations.length !== 1) return null;
+
+  // Шапка и так первая — переставлять нечего, отказ был по другой причине.
+  if (selectedPages[0] === mains[0]) return null;
+
+  return [mains[0]!, continuations[0]!];
+}
+
 /**
  * Планирует сегменты по классификации всех страниц пакета.
  *
@@ -97,6 +169,7 @@ export function planUpdSegments(
   classification: PageClassification[],
   totalPages: number,
   maxPagesPerSegment: number,
+  opts?: PlanUpdSegmentsOptions,
 ): SegmentPlan {
   const reasons: string[] = [];
   const byPage = new Map(classification.map((c) => [c.page, c]));
@@ -122,12 +195,61 @@ export function planUpdSegments(
     return { segments: [], confident: false, reasons: [...reasons, 'нет ни одной УПД-страницы'] };
   }
 
-  const segments = segmentUpdPages(classification, selectedPages);
+  const plan = evaluatePageOrder(
+    classification,
+    selectedPages,
+    maxPagesPerSegment,
+    reasons,
+    unclassified.length === 0,
+    false,
+  );
+  if (plan.confident) return plan;
+
+  // Нарезке не поверили. Единственный отказ, который лечится перестановкой, —
+  // «продолжение без начала»: страница с шапкой в пакете есть, но загружена
+  // второй. Пробуем поставить её вперёд и пересчитать.
+  if (!opts?.reorder) return plan;
+  const headerFirst = headerFirstOrder(classification, selectedPages, totalPages, plan, opts.pageOwners);
+  if (!headerFirst) return plan;
+  const reordered = evaluatePageOrder(
+    classification,
+    headerFirst,
+    maxPagesPerSegment,
+    reasons,
+    unclassified.length === 0,
+    true,
+  );
+  // Перестановка не помогла — отдаём ИСХОДНЫЙ план: он честно описывает, что
+  // увидел классификатор, и по нему разбирают инциденты.
+  if (!reordered.confident) return plan;
+  return { ...reordered, reasons: [...reordered.reasons, REORDERED_REASON] };
+}
+
+/** Отметка в reasons: по ней на бою видно, что план получен перестановкой. */
+export const REORDERED_REASON =
+  'порядок файлов скорректирован: страница с шапкой поставлена первой';
+
+/**
+ * Оценивает ОДИН порядок страниц: режет на сегменты и решает, можно ли верить.
+ *
+ * Вынесено из planUpdSegments, потому что порядков может быть два — исходный и
+ * с шапкой вперёд, — и оба обязаны оцениваться одним и тем же правилом.
+ */
+function evaluatePageOrder(
+  classification: PageClassification[],
+  selectedPages: number[],
+  maxPagesPerSegment: number,
+  baseReasons: string[],
+  classifiedFully: boolean,
+  preserveOrder: boolean,
+): SegmentPlan {
+  const reasons = [...baseReasons];
+  const segments = segmentUpdPages(classification, selectedPages, { preserveOrder });
   if (segments.length === 0) {
     return { segments, confident: false, reasons: [...reasons, 'сегментация не дала документов'] };
   }
 
-  let confident = unclassified.length === 0;
+  let confident = classifiedFully;
   for (const seg of segments) {
     // `uncertain` НЕ отменяет сборку, если сегмент начат шапкой.
     //
