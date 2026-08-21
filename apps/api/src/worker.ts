@@ -19,6 +19,7 @@ import {
 import { recordVisibilityTransitions } from './domain/sourceDocuments/visibility-events.js';
 import { logger } from './lib/logger.js';
 import { installFatalHandlers } from './lib/fatal-visibility.js';
+import { imageMimeOfKey } from './lib/image-kind.js';
 import { db } from './db/client.js';
 import {
   counterparties,
@@ -722,14 +723,12 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // SourceDocumentSchema не трогается.
   const isXlsx = /\.xlsx$/i.test(s3Key);
   const isXls = /\.xls$/i.test(s3Key);
-  const isImage = /\.(jpe?g|png|webp)$/i.test(s3Key);
-  const imageMime = isImage
-    ? /\.png$/i.test(s3Key)
-      ? 'image/png'
-      : /\.webp$/i.test(s3Key)
-        ? 'image/webp'
-        : 'image/jpeg'
-    : null;
+  // Картинка ли это — по расширению ключа. Список живёт в lib/image-kind.ts:
+  // пока он состоял из jpg/png/webp, файл .jfif (тот же JPEG из Outlook)
+  // считался PDF и уходил в pdftoppm — «May not be a PDF file», parse_failed,
+  // документ потерян.
+  const imageMime = imageMimeOfKey(s3Key);
+  const isImage = imageMime != null;
 
   let parsed: UpdPdfParsed;
   let llmProviderId: string | null = null;
