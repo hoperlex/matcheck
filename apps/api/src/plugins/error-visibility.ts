@@ -48,28 +48,33 @@ export default fp(async (app) => {
     unhandledErrors.set(req, err);
   });
 
-  app.addHook('onSend', async (req, reply, payload) => {
-    // Заголовки уже ушли — значит маршрут пишет в сокет сам (SSE, ручной
-    // стрим). Такой ответ не наш: подмена тела здесь ничего не исправит, а
-    // попытка выставить заголовок роняет процесс с ERR_HTTP_HEADERS_SENT.
-    // Проверка стоит первой и не зависит от статуса: hijack() у потока может
-    // появиться в любом маршруте, а падение процесса — слишком дорогая плата
-    // за санитизацию тела, которого клиент всё равно не увидит.
-    if (reply.raw.headersSent) return payload;
-    if (reply.statusCode < 500) return payload;
-    if (!unhandledErrors.has(req)) return payload;
-    if (!hideDetails) return payload;
-    // Тело формировал Fastify из текста исключения — там оказывается SQL с
-    // параметрами. Явные reply.code(5xx).send({...}) сюда не попадают: по ним
-    // onError не срабатывает, и их коды остаются контрактом для клиентов.
-    //
-    // content-type проставляем сами: ошибка могла случиться на маршруте,
-    // который уже объявил image/* или другой тип. onSend обязан вернуть
-    // строку или Buffer — объект Fastify отвергает (FST_ERR_REP_INVALID_PAYLOAD_TYPE).
-    reply.header('content-type', 'application/json; charset=utf-8');
-    reply.removeHeader('content-length');
-    return sanitizedErrorBody(String(req.id));
-  });
+  // Хук ставится только при включённом рубильнике: это единственный
+  // глобальный onSend в приложении, и в аварии он снимается переменной
+  // окружения, а не пересборкой образа.
+  if (env.ERROR_VISIBILITY_SANITIZE) {
+    app.addHook('onSend', async (req, reply, payload) => {
+      // Заголовки уже ушли — значит маршрут пишет в сокет сам (SSE, ручной
+      // стрим). Такой ответ не наш: подмена тела здесь ничего не исправит, а
+      // попытка выставить заголовок роняет процесс с ERR_HTTP_HEADERS_SENT.
+      // Проверка стоит первой и не зависит от статуса: hijack() у потока может
+      // появиться в любом маршруте, а падение процесса — слишком дорогая плата
+      // за санитизацию тела, которого клиент всё равно не увидит.
+      if (reply.raw.headersSent) return payload;
+      if (reply.statusCode < 500) return payload;
+      if (!unhandledErrors.has(req)) return payload;
+      if (!hideDetails) return payload;
+      // Тело формировал Fastify из текста исключения — там оказывается SQL с
+      // параметрами. Явные reply.code(5xx).send({...}) сюда не попадают: по ним
+      // onError не срабатывает, и их коды остаются контрактом для клиентов.
+      //
+      // content-type проставляем сами: ошибка могла случиться на маршруте,
+      // который уже объявил image/* или другой тип. onSend обязан вернуть
+      // строку или Buffer — объект Fastify отвергает (FST_ERR_REP_INVALID_PAYLOAD_TYPE).
+      reply.header('content-type', 'application/json; charset=utf-8');
+      reply.removeHeader('content-length');
+      return sanitizedErrorBody(String(req.id));
+    });
+  }
 
   // Единственная строка на каждый 5xx-ответ — и на брошенный, и на явный.
   // Собственные warn/error внутри роутов остаются, поэтому считать 5xx нужно

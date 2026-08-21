@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import type { SseEvent } from '@matcheck/contracts';
 import { startSseSubscriber } from '../domain/sse/redis-bridge.js';
 import { loadEnv } from '../lib/env.js';
@@ -28,11 +29,7 @@ function ensureSseSubscriber(log?: FastifyInstance['log']): void {
   subscriberStarted = true;
   const env = loadEnv();
   const url = env.REDIS_URL ?? 'redis://localhost:6379';
-  startSseSubscriber(
-    url,
-    (evt) => bus.emit('sse', evt),
-    log ?? console,
-  );
+  startSseSubscriber(url, (evt) => bus.emit('sse', evt), log ?? console);
 }
 
 export async function eventsRoutes(app: FastifyInstance): Promise<void> {
@@ -43,10 +40,8 @@ export async function eventsRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/api/v1/events',
     {
-      // Поток пишется через reply.raw (ниже), то есть мимо onSend-хуков, — но
-      // полагаться на эту деталь реализации нельзя: стоит кому-то перевести
-      // ответ на reply.send, и сжатие начнёт буферизовать поток, а живые
-      // события перестанут доходить до вкладок. Отключаем явно.
+      // Сжатие обязано быть выключено: компрессор буферизует поток, и живые
+      // события копились бы вместо доставки во вкладку.
       compress: false,
       // SSE-события шлются всем подключённым без скоупа (id/типы чужих сущностей)
       // → metadata-leak. contractor не должен подписываться (live-обновления ему
@@ -54,43 +49,47 @@ export async function eventsRoutes(app: FastifyInstance): Promise<void> {
       preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
     },
     async (req, reply: FastifyReply) => {
-      // hijack() ДО первой записи в сокет: дальше ответом распоряжаемся мы, и
-      // Fastify не выполняет для него ни onSend-хуки, ни финальную запись
-      // заголовков.
+      // Поток отдаём ШТАТНЫМ путём Fastify: заголовки ставит он, тело —
+      // PassThrough. Раньше маршрут писал в сокет сам (reply.raw.writeHead) и
+      // завершался через `return reply`. Пока в приложении не было ни одного
+      // onSend-хука, это работало; 20.08 плагин error-visibility такой хук
+      // добавил — и Fastify в конце цепочки попытался записать заголовки
+      // второй раз: ERR_HTTP_HEADERS_SENT, никем не пойманный. Каждое
+      // подключение к SSE роняло процесс, а портал открывает поток сразу
+      // после входа — 854 рестарта за ночь и «Ошибка входа» у всех.
       //
-      // Без этого поток жил на честном слове. Заголовки пишутся вручную
-      // (reply.raw.writeHead ниже), а обработчик завершался через `return
-      // reply` — Fastify считал ответ своим и в конце цепочки вызывал
-      // safeWriteHead. Пока в приложении не было ни одного onSend-хука, до
-      // этой строки дело не доходило. 20.08 плагин error-visibility добавил
-      // глобальный onSend — и каждое подключение к SSE стало ронять процесс:
-      // ERR_HTTP_HEADERS_SENT, никем не пойманный (обработчиков процесса в
-      // index.ts нет). Портал открывает SSE сразу после входа, поэтому каждый
-      // вход убивал API: 854 рестарта за ночь и «Ошибка входа» у всех, кто
-      // попал в окно рестарта.
-      reply.hijack();
-      reply.raw.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      });
-      reply.raw.write(`:ok\n\n`);
+      // reply.hijack() тут не помог (проверено на бою): ответ всё равно
+      // доходил до onSendEnd. Поэтому убираем сам конфликт — ручной записи
+      // заголовков больше нет, а значит нечему конфликтовать ни с этим
+      // хуком, ни с любым будущим.
+      const stream = new PassThrough();
+      reply
+        .header('Content-Type', 'text/event-stream')
+        .header('Cache-Control', 'no-cache, no-transform')
+        .header('Connection', 'keep-alive')
+        // Отключает буферизацию nginx: без этого события копятся в прокси и
+        // доходят до вкладки пачками.
+        .header('X-Accel-Buffering', 'no');
+
+      stream.write(':ok\n\n');
       const listener = (evt: SseEvent) => {
-        reply.raw.write(`event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`);
+        stream.write(`event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`);
       };
       bus.on('sse', listener);
       const ping = setInterval(() => {
-        reply.raw.write(
-          `event: ping\ndata: {"type":"ping","ts":"${new Date().toISOString()}"}\n\n`,
-        );
+        stream.write(`event: ping\ndata: {"type":"ping","ts":"${new Date().toISOString()}"}\n\n`);
       }, 25_000);
-      req.raw.on('close', () => {
+      // Клиент ушёл — снимаем подписку и таймер, иначе они копятся на каждой
+      // перезагрузке вкладки (EventSource переподключается сам).
+      const stop = (): void => {
         clearInterval(ping);
         bus.off('sse', listener);
-      });
-      // Ничего не возвращаем: после hijack() ответ Fastify уже не принадлежит,
-      // и `return reply` снова втянул бы его в цепочку onSend.
+        stream.end();
+      };
+      req.raw.on('close', stop);
+      stream.on('error', stop);
+
+      return reply.send(stream);
     },
   );
 }
