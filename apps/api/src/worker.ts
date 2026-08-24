@@ -1762,6 +1762,11 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         vatRate: i.vatRate ?? null,
         vatSum: i.vatSum ?? null,
       })),
+      // Стороны и сырая графа 4 — для проверки «грузополучатель повторяет
+      // покупателя, а бланк этого не подтверждает».
+      recipient: parsed.recipient ?? null,
+      consignee: parsed.consignee ?? null,
+      consigneeRaw: parsed.consigneeRaw ?? null,
     },
     // Числа пришли от модели — здесь эвристика подозрения уместна.
     { detectRecognitionWarnings: true },
@@ -1797,6 +1802,9 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           vatRate: i.vatRate ?? null,
           vatSum: i.vatSum ?? null,
         })),
+        recipient: parsed.recipient ?? null,
+        consignee: parsed.consignee ?? null,
+        consigneeRaw: parsed.consigneeRaw ?? null,
       },
       { detectRecognitionWarnings: true },
     );

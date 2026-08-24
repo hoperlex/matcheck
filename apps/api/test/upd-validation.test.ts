@@ -469,3 +469,150 @@ describe('validateUpdTotals — целостность списка позици
     expect(r.hasMismatch).toBe(false);
   });
 });
+
+describe('validateUpdTotals — подозрения на подставленные деньги', () => {
+  it('сумма строки равна количеству при пустой цене — предупреждение', () => {
+    // Керамзит с бою: в бланке заполнено только количество 72 м³, графы цены и
+    // стоимости пусты. Модель вернула sum = 72, и это стало итогом документа.
+    const r = validateUpdTotals(
+      {
+        totalSum: 72,
+        vatSum: null,
+        items: [{ qty: 72, price: null, sum: 72, vatRate: null, vatSum: null }],
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.map((w) => w.name)).toEqual(['sum_equals_qty']);
+    // Подозрение не меняет исход документа — только подсвечивает строку.
+    expect(r.hasMismatch).toBe(false);
+  });
+
+  it('цена 1 при равной количеству сумме даёт один ярлык, а не два', () => {
+    // Второй прогон того же керамзита: price = 1, и арифметика сходится сама с
+    // собой (72 × 1 = 72). Оператору хватает одного сигнала.
+    const r = validateUpdTotals(
+      {
+        totalSum: 72,
+        vatSum: null,
+        items: [{ qty: 72, price: 1, sum: 72, vatRate: null, vatSum: null }],
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.map((w) => w.name)).toEqual(['sum_equals_qty']);
+  });
+
+  it('цена 1 без совпадения с количеством — отдельное предупреждение', () => {
+    const r = validateUpdTotals(
+      {
+        totalSum: 1260000,
+        vatSum: null,
+        items: [{ qty: 1260000, price: 1, sum: 1260000, vatRate: null, vatSum: null }],
+      },
+      { detectRecognitionWarnings: true },
+    );
+    // qty === sum, поэтому это всё-таки перенос графы, а не «просто цена 1».
+    expect(r.warnings?.map((w) => w.name)).toEqual(['sum_equals_qty']);
+
+    const other = validateUpdTotals(
+      {
+        totalSum: 500,
+        vatSum: null,
+        items: [{ qty: 5, price: 1, sum: 500, vatRate: null, vatSum: null }],
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(other.warnings?.map((w) => w.name)).toEqual(['unit_price_one']);
+  });
+
+  it('настоящая цена: сумма, случайно равная количеству, подозрений не вызывает', () => {
+    // 2 шт по 1 ₽ — сумма 2 совпала с количеством, но цена напечатана.
+    const r = validateUpdTotals(
+      {
+        totalSum: 2,
+        vatSum: null,
+        items: [{ qty: 2, price: 1.5, sum: 2, vatRate: null, vatSum: null }],
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.some((w) => w.name === 'sum_equals_qty') ?? false).toBe(false);
+  });
+
+  it('без detectRecognitionWarnings подозрений нет вовсе (XML-путь, ручная правка)', () => {
+    const r = validateUpdTotals({
+      totalSum: 72,
+      vatSum: null,
+      items: [{ qty: 72, price: null, sum: 72, vatRate: null, vatSum: null }],
+    });
+    expect(r.warnings).toBeUndefined();
+  });
+});
+
+describe('validateUpdTotals — грузополучатель повторяет покупателя', () => {
+  const su10 = { inn: '7736255508', kpp: '774550001', name: 'ООО "СУ-10"' };
+  const base = {
+    totalSum: 184800,
+    vatSum: 33324.59,
+    items: [{ qty: 28, price: 5409.84, sum: 184800, vatRate: 22, vatSum: 33324.59 }],
+  };
+
+  it('реквизиты совпали, а в графе напечатан другой получатель — предупреждение', () => {
+    // УПД № 9792 с бою: в бланке ООО «СУ-90», в ответе — СУ-10 с реквизитами
+    // покупателя. Сравнение сторон между собой такое не ловит: они одинаковы.
+    const r = validateUpdTotals(
+      {
+        ...base,
+        recipient: su10,
+        consignee: su10,
+        consigneeRaw: 'ООО «СУ-90», 123290, г. Москва, тупик 1-й Магистральный, д. 5 «А»',
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.map((w) => w.name)).toContain('consignee_copy_unverified');
+    expect(r.warnings?.find((w) => w.name === 'consignee_copy_unverified')?.scope).toBe('document');
+    expect(r.hasMismatch).toBe(false);
+  });
+
+  it('буквальное «он же» в графе — законно, предупреждения нет', () => {
+    const r = validateUpdTotals(
+      { ...base, recipient: su10, consignee: su10, consigneeRaw: 'он же' },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.some((w) => w.name === 'consignee_copy_unverified') ?? false).toBe(false);
+  });
+
+  it('наименование покупателя напечатано в графе целиком — законно', () => {
+    const r = validateUpdTotals(
+      {
+        ...base,
+        recipient: su10,
+        consignee: su10,
+        consigneeRaw: 'ООО "СУ-10", 127018, г. Москва, ул. Полковая, д. 3, стр. 5',
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.some((w) => w.name === 'consignee_copy_unverified') ?? false).toBe(false);
+  });
+
+  it('сырой графы нет (промпт v13 и старше) — проверка спит', () => {
+    // Иначе очередь ручной проверки заполнилась бы всеми старыми документами:
+    // «он же» у СУ-10 — частый случай, а доказательства у нас нет.
+    const r = validateUpdTotals(
+      { ...base, recipient: su10, consignee: su10, consigneeRaw: null },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.some((w) => w.name === 'consignee_copy_unverified') ?? false).toBe(false);
+  });
+
+  it('стороны разные — предупреждения нет даже без подтверждения', () => {
+    const r = validateUpdTotals(
+      {
+        ...base,
+        recipient: su10,
+        consignee: { inn: '7714468005', kpp: null, name: 'ООО "СУ-90"' },
+        consigneeRaw: 'ООО «СУ-90»',
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.some((w) => w.name === 'consignee_copy_unverified') ?? false).toBe(false);
+  });
+});

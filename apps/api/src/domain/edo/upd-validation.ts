@@ -1,5 +1,10 @@
-import { suspectQtyPriceSwap } from '@matcheck/contracts';
+import {
+  suspectQtyPriceSwap,
+  suspectSumEqualsQty,
+  suspectUnitPriceOne,
+} from '@matcheck/contracts';
 import type { UpdCheck, UpdValidation, UpdWarning } from '@matcheck/contracts';
+import { consigneeCopyUnverified } from '../sourceDocuments/party-directory-guard.js';
 
 // Duck-typed вход: подходит и для UpdPdfParsed (LLM/локальный PDF-парсер),
 // и для UpdParsed (XML). Поля с одинаковыми именами — qty, price, sum,
@@ -20,6 +25,14 @@ export type UpdLikeForValidation = {
     vatRate?: number | null;
     vatSum?: number | null;
   }>;
+  /**
+   * Стороны и сырая графа 4 — только для предупреждения о скопированном
+   * грузополучателе. Необязательные: XML-путь и live-пересчёт по строкам из БД
+   * их не передают, и проверка там просто спит.
+   */
+  recipient?: { inn?: string | null; kpp?: string | null; name?: string | null } | null;
+  consignee?: { inn?: string | null; kpp?: string | null; name?: string | null } | null;
+  consigneeRaw?: string | null;
 };
 
 /**
@@ -330,6 +343,41 @@ export function validateUpdTotals(
       warnings.push({ name: 'qty_price_swap', scope: { row } });
     }
   });
+
+  // Подозрения на подставленные деньги там, где в бланке их нет.
+  //
+  // Отдельным проходом, а не внутри цикла выше: тот считает арифметику и
+  // пропускает строки без цены (`skipReason: no_actual`) — то есть ровно те,
+  // где перенос количества в сумму и случается. Эти два признака не про
+  // сходимость, а про происхождение чисел.
+  if (opts.detectRecognitionWarnings) {
+    items.forEach((it, idx) => {
+      const row = idx + 1;
+      const item = { qty: it.qty ?? null, price: it.price ?? null, sum: it.sum ?? null };
+      if (suspectSumEqualsQty(item)) {
+        warnings.push({ name: 'sum_equals_qty', scope: { row } });
+        // Один ярлык на строку: при цене 1 второй признак сработал бы тоже, но
+        // говорил бы оператору о том же самом.
+        return;
+      }
+      if (suspectUnitPriceOne(item)) {
+        warnings.push({ name: 'unit_price_one', scope: { row } });
+      }
+    });
+  }
+
+  // Грузополучатель повторяет покупателя, а сырая графа 4 этого не
+  // подтверждает. Проверка документа целиком, поэтому scope: 'document'.
+  if (
+    opts.detectRecognitionWarnings &&
+    consigneeCopyUnverified({
+      consignee: parsed.consignee ?? null,
+      recipient: parsed.recipient ?? null,
+      raw: parsed.consigneeRaw ?? null,
+    })
+  ) {
+    warnings.push({ name: 'consignee_copy_unverified', scope: 'document' });
+  }
 
   // 5) Построчно: vatSum ≈ sum × vatRate / (100 + vatRate).
   //

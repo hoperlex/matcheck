@@ -165,6 +165,10 @@ const ListQuerySchema = z.object({
   expectedDateTo: z.string().optional(),
   sort: z.enum(SORT_FIELDS).optional(),
   order: z.enum(['asc', 'desc']).optional(),
+  // Очередь ручной проверки: документы, где арифметика сошлась, но числа
+  // выглядят подставленными (validation.warnings). Фильтр серверный, иначе
+  // страница показывала бы «5 из 50», а не пятерых из всего потока.
+  needsAttention: z.coerce.boolean().optional(),
   limit: z.coerce.number().int().positive().max(2000).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
@@ -807,10 +811,20 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         expectedDateTo,
         sort,
         order,
+        needsAttention,
       } = req.query;
       // Техническая запись пакета — служебная: она живёт от загрузки до
       // разбора и не является документом. В списке ей делать нечего.
       const conditions = [eq(sourceDocuments.isTechnical, false)];
+      if (needsAttention) {
+        // Непустой массив warnings. jsonb_array_length по отсутствующему ключу
+        // падает, поэтому сначала проверяем сам ключ и его тип.
+        conditions.push(
+          drSql`${sourceDocuments.validation} -> 'warnings' is not null
+                and jsonb_typeof(${sourceDocuments.validation} -> 'warnings') = 'array'
+                and jsonb_array_length(${sourceDocuments.validation} -> 'warnings') > 0`,
+        );
+      }
       if (kind && kind.length > 0) {
         const first = kind[0];
         if (kind.length === 1 && first) {

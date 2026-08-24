@@ -129,3 +129,61 @@ export function consigneeOwnIdentity(
   // сравнивать не с чем, поэтому реквизиты тоже отбрасываем.
   return { inn: null, kpp: null };
 }
+
+/**
+ * Реквизиты грузополучателя повторяют покупателя, и сырая графа 4 этого не
+ * подтверждает.
+ *
+ * Зачем отдельно от `consigneeOwnIdentity`. Тот ловит случай «имя своё, ИНН
+ * чужой» — сравнением двух сторон между собой. Но когда модель копирует
+ * покупателя ЦЕЛИКОМ (и имя, и ИНН), сравнение сторон бессильно: результат
+ * неотличим от законного «он же». На бою так прошёл УПД № 9792 — в бланке
+ * ООО «СУ-90» с собственным адресом, в ответе СУ-10 с реквизитами покупателя,
+ * confidence 1,0, промпт v13 (где копировать прямо запрещено).
+ *
+ * Отличить можно только по тому, что напечатано в самой графе. Три случая:
+ *   * буквальное «он же» — законно, реквизиты покупателя там и подразумеваются;
+ *   * напечатанное наименование, совпадающее с покупателем, — тоже законно;
+ *   * реквизиты совпали, а в графе ни того, ни другого — подозрение.
+ *
+ * Сырой текст приходит от той же модели и доказательством не является: она
+ * способна выдумать и его. Поэтому результат — только предупреждение оператору,
+ * никакой автоматической правки данных.
+ *
+ * `raw == null` (промпты до v14, текстовый путь) — молчим: проверять нечем, а
+ * ложные предупреждения обесценят очередь ручной проверки.
+ */
+export function consigneeCopyUnverified(args: {
+  consignee: RawParty | null | undefined;
+  recipient: RawParty | null | undefined;
+  raw: string | null | undefined;
+}): boolean {
+  const { consignee, recipient, raw } = args;
+  if (raw == null || raw.trim() === '') return false;
+
+  const consigneeInn = innDigits(consignee?.inn);
+  const recipientInn = innDigits(recipient?.inn);
+  const consigneeName = normalizeOrgName(consignee?.name);
+  const recipientName = normalizeOrgName(recipient?.name);
+
+  const sameInn = consigneeInn !== '' && consigneeInn === recipientInn;
+  const sameName = consigneeName !== '' && consigneeName === recipientName;
+  if (!sameInn && !sameName) return false;
+
+  const normalizedRaw = normalizeOrgName(raw);
+  // «он же» в графе 4 — прямое указание на покупателя. Пишут по-разному
+  // («он же», «Он же.», «тот же»), поэтому ищем вхождением, а не равенством.
+  //
+  // Без \b: в JS граница слова определяется по латинице, и на кириллице
+  // условие не срабатывает вовсе. Пробелы к этому моменту уже схлопнуты
+  // normalizeOrgName, а внутри названия организации «он же» не встречается.
+  if (normalizedRaw.includes('он же') || normalizedRaw.includes('тот же')) return false;
+  // Наименование покупателя напечатано в графе целиком — тоже законно.
+  if (recipientName !== '' && normalizedRaw.includes(recipientName)) return false;
+  // Совпадение по короткому ядру названия: в графе печатают с адресом и
+  // организационной формой, а в recipient.name может лежать краткая форма.
+  const core = recipientName.replace(/^(ооо|оао|зао|ао|пао|ип)\s+/u, '').trim();
+  if (core.length >= 4 && normalizedRaw.includes(core)) return false;
+
+  return true;
+}

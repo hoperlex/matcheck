@@ -11,6 +11,7 @@ import {
   CloudUploadOutlined,
   MinusSquareOutlined,
   PlusSquareOutlined,
+  QuestionCircleOutlined,
   ReloadOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
@@ -220,6 +221,12 @@ function StatusTag({
       // его можно вернуть в столбец. Warning-иконку для несовпадения сумм
       // оставляем — это сигнал к действию.
       const hasMismatch = row.validation?.hasMismatch === true;
+      // Подозрения — отдельный сигнал от расхождения сумм: арифметика сошлась,
+      // но числа выглядят подставленными (сумма равна количеству, цена ровно 1,
+      // грузополучатель повторяет покупателя без подтверждения в бланке). Без
+      // значка в списке их видно только внутри карточки, то есть очереди
+      // ручной проверки не возникает вовсе.
+      const warnings = row.validation?.warnings ?? [];
       return (
         <Space size={4} align="center">
           <Tag color="green" style={{ marginInlineEnd: 0 }}>
@@ -228,6 +235,11 @@ function StatusTag({
           {hasMismatch && (
             <Tooltip title="Сумма по позициям не сходится с шапкой">
               <WarningOutlined style={{ color: '#fa8c16', fontSize: 12 }} />
+            </Tooltip>
+          )}
+          {!hasMismatch && warnings.length > 0 && (
+            <Tooltip title="Требует внимания: числа сходятся, но выглядят подставленными">
+              <QuestionCircleOutlined style={{ color: '#8c8c8c', fontSize: 12 }} />
             </Tooltip>
           )}
         </Space>
@@ -414,6 +426,10 @@ export default function InboxPage() {
     siteIds: parseCsvIds(params.get('site')),
     q: params.get('q') ?? '',
   };
+  // Очередь ручной проверки: документы с подозрениями (validation.warnings).
+  // В URL — чтобы ссылкой на очередь можно было поделиться и чтобы фильтр
+  // пережил F5, как остальные.
+  const needsAttention = params.get('attention') === '1';
 
   const updateParams = (patch: Record<string, string | null | undefined>) => {
     const next = new URLSearchParams(params);
@@ -657,9 +673,33 @@ export default function InboxPage() {
         return false;
       if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId)))
         return false;
+      if (needsAttention && (r.validation?.warnings ?? []).length === 0) return false;
       return true;
     });
-  }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds]);
+  }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds, needsAttention]);
+
+  // Сколько документов ждут ручной проверки — по тем же фильтрам, что и
+  // список, но без учёта самой кнопки: иначе после нажатия счётчик схлопнулся
+  // бы до числа показанных строк и перестал бы что-либо значить.
+  const attentionCount = useMemo(
+    () =>
+      allItems.filter((r) => {
+        if (
+          filters.contractorIds.length > 0 &&
+          (!r.contractorId || !filters.contractorIds.includes(r.contractorId))
+        )
+          return false;
+        if (
+          filters.supplierIds.length > 0 &&
+          (!r.supplierId || !filters.supplierIds.includes(r.supplierId))
+        )
+          return false;
+        if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId)))
+          return false;
+        return (r.validation?.warnings ?? []).length > 0;
+      }).length,
+    [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds],
+  );
 
   // Принятые файлы, до которых разбор ещё не дошёл, — обычные строки списка.
   // Своей таблицы им заводить нельзя: вторая шапка колонок читается как
@@ -946,6 +986,17 @@ export default function InboxPage() {
               searchPlaceholder="Номер документа"
               extra={
                 <Space size={8}>
+                  {/* Очередь ручной проверки. Счётчик рядом с названием — иначе
+                      непонятно, есть ли смысл нажимать: у большинства смен
+                      подозрений нет вовсе. */}
+                  <Button
+                    type={needsAttention ? 'primary' : 'default'}
+                    icon={<QuestionCircleOutlined />}
+                    onClick={() => updateParams({ attention: needsAttention ? null : '1' })}
+                  >
+                    Требуют внимания
+                    {attentionCount > 0 ? ` (${attentionCount})` : ''}
+                  </Button>
                   {/* Загрузка документов — право «Создавать» на этой странице. */}
                   {canCreateDocs && (
                     <>

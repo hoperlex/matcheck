@@ -122,6 +122,10 @@ function describeWarning(w: UpdWarning): string {
   const name =
     {
       qty_price_swap: 'похоже, количество и цена стоят не в своих колонках',
+      sum_equals_qty: 'сумма совпадает с количеством — похоже, в бумаге цены нет',
+      unit_price_one: 'цена ровно 1 — проверьте, напечатана ли она в документе',
+      consignee_copy_unverified:
+        'грузополучатель совпал с покупателем, но в графе 4 напечатано другое',
     }[w.name] || w.name;
   return `${name} (${where})`;
 }

@@ -145,6 +145,9 @@ export function mergeExcelStructuralWithVision(
     supplier: fill(structural.supplier, vision.supplier, 'supplier'),
     recipient: fill(structural.recipient, vision.recipient, 'recipient'),
     consignee: fill(structural.consignee, vision.consignee, 'consignee'),
+    // Сырую графу 4 может дать только vision: структурный разбор книги видит
+    // ячейки, а не напечатанный бланк.
+    consigneeRaw: structural.consigneeRaw ?? vision.consigneeRaw ?? null,
     // Список материалов — арбитраж, а не безусловный структурный.
     items: chosen.items,
     // Не завышаем уверенность слепо: max(structural, min(vision, 0.9)).

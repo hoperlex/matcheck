@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest';
 import type { UpdPdfParsed } from '@matcheck/contracts';
 import {
   checkConsigneeAgainstExpectation,
+  checkMoneyAgainstExpectation,
   compareUnit,
   confidenceBucket,
   diffKeys,
@@ -390,5 +391,153 @@ describe('evaluateGate', () => {
     expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [c] })).toContain(
       'ни у одного документа нет эталона в манифесте (сверять не с чем)',
     );
+  });
+});
+
+describe('checkMoneyAgainstExpectation — сверка денег с бумагой', () => {
+  const item = (over: Record<string, unknown>) => ({ ...parsed().items[0]!, ...over });
+
+  it('позиция ищется по номеру из графы 1, а не по индексу массива', () => {
+    // Модель вернула строки в обратном порядке: по индексу сверка сравнила бы
+    // вторую позицию с эталоном первой и нашла бы несуществующее расхождение.
+    const p = parsed({
+      items: [
+        item({ rowNo: 2, nameRaw: 'Вторая', qty: 5, price: 100, sum: 500 }),
+        item({ rowNo: 1, nameRaw: 'Первая', qty: 2, price: 10, sum: 20 }),
+      ],
+    });
+    const problems = checkMoneyAgainstExpectation(p, {
+      docNumber: '1421',
+      consignee: { name: '', inn: null, kpp: null },
+      items: [{ rowNo: 1, qty: 2, price: 10, sum: 20 }],
+    });
+    expect(problems).toEqual([]);
+  });
+
+  it('потерянная строка видна как отсутствие номера', () => {
+    const p = parsed({ items: [item({ rowNo: 1 })] });
+    const problems = checkMoneyAgainstExpectation(p, {
+      docNumber: '1421',
+      consignee: { name: '', inn: null, kpp: null },
+      items: [{ rowNo: 2, qty: 1 }],
+    });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.detail).toContain('в разборе нет');
+  });
+
+  it('задвоенный номер позиции — тоже расхождение', () => {
+    const p = parsed({ items: [item({ rowNo: 1 }), item({ rowNo: 1, nameRaw: 'Дубль' })] });
+    const problems = checkMoneyAgainstExpectation(p, {
+      docNumber: '1421',
+      consignee: { name: '', inn: null, kpp: null },
+      items: [{ rowNo: 1, qty: 1 }],
+    });
+    expect(problems[0]?.detail).toContain('задвоен');
+  });
+
+  it('эталонный null означает «в бумаге нет»: подставленная цена — расхождение', () => {
+    // Керамзит: цен в бланке нет вовсе, а модель вернула 29.51.
+    const p = parsed({ items: [item({ rowNo: 1, qty: 72, price: 29.51, sum: 72 })] });
+    const problems = checkMoneyAgainstExpectation(p, {
+      docNumber: '1421',
+      consignee: { name: '', inn: null, kpp: null },
+      items: [{ rowNo: 1, qty: 72, price: null, sum: null }],
+    });
+    expect(problems.map((m) => m.detail)).toEqual([
+      expect.stringContaining('цена в бумаге не напечатана'),
+      expect.stringContaining('сумма в бумаге не напечатана'),
+    ]);
+  });
+
+  it('неразмеченное поле не сверяется — это не то же самое, что null', () => {
+    // В эталоне только количество: цену никто не проверял, и придираться к ней
+    // нельзя, иначе вся неразмеченная часть корпуса станет «регрессией».
+    const p = parsed({ items: [item({ rowNo: 1, qty: 72, price: 29.51, sum: 72 })] });
+    const problems = checkMoneyAgainstExpectation(p, {
+      docNumber: '1421',
+      consignee: { name: '', inn: null, kpp: null },
+      items: [{ rowNo: 1, qty: 72 }],
+    });
+    expect(problems).toEqual([]);
+  });
+
+  it('итоги документа сверяются, когда размечены', () => {
+    const p = parsed({ totalSum: 72, vatSum: null });
+    const problems = checkMoneyAgainstExpectation(p, {
+      docNumber: '1421',
+      consignee: { name: '', inn: null, kpp: null },
+      totalSum: 47600,
+    });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.where).toBe('итог документа');
+  });
+
+  it('без эталона молчит', () => {
+    expect(checkMoneyAgainstExpectation(parsed(), undefined)).toEqual([]);
+  });
+});
+
+describe('evaluateGate — деньги блокируют активацию', () => {
+  it('расхождение сумм с эталоном — блокер, даже когда версии совпали между собой', () => {
+    const blockers = evaluateGate({
+      checkedUnits: 1,
+      failures: [],
+      comparisons: [
+        {
+          label: 'a.pdf',
+          unstable: [],
+          unstableCritical: [],
+          changed: [],
+          confidenceShift: null,
+          expectation: { status: 'ok' },
+          moneyMismatches: [{ where: 'строка 1', detail: 'сумма: ожидалось 20.00, получено 72.00' }],
+        },
+      ],
+    });
+    expect(blockers.some((b) => b.includes('расхождение сумм с эталоном'))).toBe(true);
+  });
+});
+
+describe('snapshotOf — ключ позиции', () => {
+  const item = (over: Record<string, unknown>) => ({ ...parsed().items[0]!, ...over });
+
+  it('перестановка строк с номерами не даёт ложного расхождения', () => {
+    // Один и тот же разбор, порядок строк в ответе модели разный. По индексу
+    // массива это выглядело бы как расхождение обеих позиций сразу.
+    const a = snapshotOf(
+      parsed({
+        items: [
+          item({ rowNo: 1, nameRaw: 'Первая', qty: 1 }),
+          item({ rowNo: 2, nameRaw: 'Вторая', qty: 2 }),
+        ],
+      }),
+    );
+    const b = snapshotOf(
+      parsed({
+        items: [
+          item({ rowNo: 2, nameRaw: 'Вторая', qty: 2 }),
+          item({ rowNo: 1, nameRaw: 'Первая', qty: 1 }),
+        ],
+      }),
+    );
+    expect(diffKeys(a, b)).toEqual([]);
+  });
+
+  it('без номеров ключ остаётся индексом — сравнение не пропадает', () => {
+    const a = snapshotOf(parsed({ items: [item({ rowNo: null, qty: 1 })] }));
+    const b = snapshotOf(parsed({ items: [item({ rowNo: null, qty: 2 })] }));
+    expect(diffKeys(a, b)).toContain('items[0].qty');
+  });
+
+  it('номера дублируются — тоже индекс: доверять такому ключу нельзя', () => {
+    const a = snapshotOf(parsed({ items: [item({ rowNo: 1, qty: 1 }), item({ rowNo: 1, qty: 2 })] }));
+    expect(Object.keys(a)).toContain('items[0].qty');
+    expect(Object.keys(a)).toContain('items[1].qty');
+  });
+
+  it('критическим считается и ключ по номеру строки', () => {
+    expect(isCriticalKey('items[row1].qty')).toBe(true);
+    expect(isCriticalKey('items[0].qty')).toBe(true);
+    expect(isCriticalKey('items[row1].groupName')).toBe(false);
   });
 });

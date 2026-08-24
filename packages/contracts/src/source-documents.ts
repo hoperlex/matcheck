@@ -262,7 +262,26 @@ export type UpdCheck = z.infer<typeof UpdCheckSchema>;
  * она не входит в `hasMismatch`, не попадает в `failedChecks` и не запускает
  * второй проход — только подсвечивает строку оператору.
  */
-export const UpdWarningNameSchema = z.enum(['qty_price_swap']);
+export const UpdWarningNameSchema = z.enum([
+  'qty_price_swap',
+  // Сумма строки в точности равна её количеству при пустой или единичной цене.
+  // Так выглядит перенос графы «Количество» в графу стоимости: 72 м³ приезжают
+  // суммой 72 ₽, а итог документа собирается из этой же подложной суммы.
+  // Арифметика при цене 1 сходится сама с собой, поэтому checks молчат.
+  'sum_equals_qty',
+  // Цена ровно 1 при ненулевой сумме. Отдельно от предыдущего: единичная цена
+  // встречается и там, где сумма количеству не равна, и почти всегда означает,
+  // что графа 4 пуста, а модель подставила единицу, чтобы «сошлось».
+  'unit_price_one',
+  // Реквизиты грузополучателя совпали с покупателем, а сырой текст графы 4
+  // этого не подтверждает: там нет ни «он же», ни совпадающего наименования.
+  // Именно так выглядит молчаливое копирование покупателя (УПД 9792: в бланке
+  // СУ-90, в ответе — СУ-10 с реквизитами покупателя).
+  //
+  // ВАЖНО: отсутствие consigneeRaw (ответы промптов до v14) предупреждения НЕ
+  // порождает — нечем проверять, а заполнять очередь всем подряд нельзя.
+  'consignee_copy_unverified',
+]);
 export type UpdWarningName = z.infer<typeof UpdWarningNameSchema>;
 
 export const UpdWarningSchema = z.object({
@@ -308,6 +327,48 @@ export function suspectQtyPriceSwap(item: {
   if (!Number.isFinite(qty) || !Number.isFinite(price)) return false;
   if (qty <= price) return false;
   return decimalsOf(price) >= 3 && decimalsOf(qty) === 2;
+}
+
+/**
+ * Сумма строки подозрительно повторяет её количество.
+ *
+ * Так выглядит перенос графы «Количество» в графу стоимости, когда цен в
+ * бланке нет вовсе: керамзит «72 м³» приехал суммой 72 ₽ и стал итогом
+ * документа. Арифметическая проверка это пропускает: при пустой цене строка
+ * не сверяется, а при подставленной единице `qty × 1 = sum` сходится сама с
+ * собой.
+ *
+ * Цена участвует в условии намеренно: при настоящей цене равенство суммы и
+ * количества — совпадение (2 шт по 1 ₽), а не перенос графы.
+ */
+export function suspectSumEqualsQty(item: {
+  qty?: number | null;
+  price?: number | null;
+  sum?: number | null;
+}): boolean {
+  const { qty, price, sum } = item;
+  if (qty == null || sum == null) return false;
+  if (!Number.isFinite(qty) || !Number.isFinite(sum)) return false;
+  if (qty === 0 || sum === 0) return false;
+  if (Math.abs(qty - sum) > 1e-9) return false;
+  return price == null || price === 1;
+}
+
+/**
+ * Цена ровно 1 при ненулевой сумме.
+ *
+ * Отдельно от предыдущей эвристики: единица встречается и там, где сумма
+ * количеству не равна. Почти всегда означает, что графа 4 пуста, а модель
+ * подставила единицу, чтобы арифметика сошлась.
+ */
+export function suspectUnitPriceOne(item: {
+  price?: number | null;
+  sum?: number | null;
+}): boolean {
+  const { price, sum } = item;
+  if (price !== 1) return false;
+  if (sum == null || !Number.isFinite(sum) || sum === 0) return false;
+  return true;
 }
 
 /** Сколько знаков после запятой у числа (без хвостовых нулей). */
@@ -719,6 +780,23 @@ function lenientNumber(opts: { positiveInt?: boolean } = {}) {
   }, z.number().nullable().optional());
 }
 
+/**
+ * Текстовое поле ответа модели, которое НЕ ИМЕЕТ ПРАВА уронить разбор.
+ *
+ * Тот же принцип, что у `lenientNumber`: поле добавлено ради диагностики, и
+ * любое непонятное значение (число, объект, пустая строка) становится `null`,
+ * а документ живёт дальше. Обрезка по длине — от ответов, где модель вместо
+ * одной графы вываливает половину документа.
+ */
+function lenientString(maxLength = 500) {
+  return z.preprocess((raw) => {
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.replace(/\s+/g, ' ').trim();
+    if (trimmed === '') return null;
+    return trimmed.slice(0, maxLength);
+  }, z.string().nullable().optional());
+}
+
 export const UpdPdfItemSchema = z.preprocess(
   (raw) => {
     if (!raw || typeof raw !== 'object') return raw;
@@ -808,6 +886,20 @@ export const UpdPdfParsedSchema = z.object({
   // что разобрано прежним промптом. ИНН в графе 4 печатают редко: сторона
   // сохраняется как текст (consignee_name_raw), а FK — только когда ИНН есть.
   consignee: UpdPdfPartySchema.nullable().optional(),
+  // Сырой текст графы 4 — «Грузополучатель и его адрес», как он НАПЕЧАТАН.
+  //
+  // Нужен потому, что структурированный `consignee` — это суждение модели, а
+  // не свидетельство: промпт v13 прямо запрещает переносить реквизиты
+  // покупателя, и модель всё равно их подставляет (УПД 9792 — СУ-90 в бланке,
+  // СУ-10 в ответе, confidence 1,0). По сырой строке уже НАША сторона
+  // различает буквальное «он же», напечатанное полностью наименование и
+  // ничем не подтверждённое копирование.
+  //
+  // Доказательством сам по себе тоже не является — модель способна выдумать и
+  // его. Поэтому используется только для предупреждения оператору, но НЕ для
+  // автоматической замены стороны. Появляется с промпта v14; на v13 и старше
+  // приходит undefined, и предупреждение не выставляется.
+  consigneeRaw: lenientString(),
   items: z.array(UpdPdfItemSchema),
   // confidence — обязательное. Без default: если LLM не вернёт поле,
   // Zod бросит ошибку парсинга, воркер пометит документ parse_failed.

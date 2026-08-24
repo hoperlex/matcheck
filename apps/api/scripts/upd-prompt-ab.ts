@@ -367,6 +367,16 @@ async function main(): Promise<void> {
     for (const c of shifted) console.log(`  ${c.label}: ${c.confidenceShift}`);
   }
 
+  const moneyProblems = comparisons.filter((c) => c.moneyMismatches.length > 0);
+  if (moneyProblems.length > 0) {
+    console.log(`\nСУММЫ — РАСХОЖДЕНИЯ С ЭТАЛОНОМ (${moneyProblems.length}):`);
+    for (const c of moneyProblems) {
+      for (const m of c.moneyMismatches) {
+        console.log(`  ${c.label} — ${m.where}: ${m.detail}`);
+      }
+    }
+  }
+
   const expectationProblems = comparisons.filter(
     (c) => c.expectation.status === 'mismatch' || c.expectation.status === 'filled_from_text',
   );

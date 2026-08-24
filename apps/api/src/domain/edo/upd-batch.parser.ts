@@ -165,6 +165,15 @@ export type AggregatedUpdDocument = {
   supplier: UpdPdfParsed['supplier'];
   recipient: UpdPdfParsed['recipient'];
   consignee: UpdPdfParsed['consignee'];
+  /**
+   * Сырой текст графы 4 первого субдокумента, у которого он есть.
+   *
+   * Берём именно первый непустой, а не склейку: строка нужна как свидетельство
+   * «что напечатано в графе», и склеенный текст двух разных бланков ничего не
+   * доказывает. Расхождение сторон между субдокументами уже ловит
+   * `multiple_consignees` в reasons.
+   */
+  consigneeRaw: UpdPdfParsed['consigneeRaw'];
   items: UpdPdfItem[];
   confidence: number;
   subdocs: AggregatedSubdocMeta[];
@@ -270,6 +279,7 @@ export function aggregateUpdDocuments(
   const supplier = resolveParty((d) => d.supplier, 'suppliers');
   const recipient = resolveParty((d) => d.recipient, 'recipients');
   const consignee = resolveParty((d) => d.consignee, 'consignees');
+  const consigneeRaw = ordered.map((d) => d.consigneeRaw).find((v) => v != null && v !== '') ?? null;
 
   // confidence — консервативно минимум по субдокументам.
   const confidence = Math.min(...ordered.map((d) => d.confidence));
@@ -283,6 +293,7 @@ export function aggregateUpdDocuments(
     supplier,
     recipient,
     consignee,
+    consigneeRaw,
     items,
     confidence,
     subdocs,

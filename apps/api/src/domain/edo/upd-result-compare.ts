@@ -203,5 +203,13 @@ export function mergeParties(winner: UpdPdfParsed, loser: UpdPdfParsed): UpdPdfP
       changed = true;
     }
   }
+  // Сырая графа 4 переносится по тому же правилу, что и сами стороны: у
+  // победителя её может не быть (старый промпт, текстовый путь), а
+  // свидетельство терять нельзя — по нему проверяется, не скопирован ли
+  // грузополучатель у покупателя.
+  if (next.consigneeRaw == null && loser.consigneeRaw != null) {
+    next.consigneeRaw = loser.consigneeRaw;
+    changed = true;
+  }
   return changed ? next : winner;
 }

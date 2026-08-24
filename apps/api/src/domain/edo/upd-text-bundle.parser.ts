@@ -164,6 +164,7 @@ export async function tryParseTextUpdBundle(
     supplier: agg.supplier,
     recipient: agg.recipient,
     consignee: agg.consignee,
+    consigneeRaw: agg.consigneeRaw,
     items: agg.items,
     confidence: agg.confidence,
   };

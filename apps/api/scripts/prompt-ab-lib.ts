@@ -71,7 +71,11 @@ export function confidenceBucket(v: number | null | undefined): string {
 export function isCriticalKey(key: string): boolean {
   if (['docNumber', 'docDate', 'items.length', 'totalSum', 'vatSum'].includes(key)) return true;
   if (key.startsWith('recipient.') || key.startsWith('supplier.')) return true;
-  return /^items\[\d+]\.(nameRaw|qty|price|sum)$/.test(key);
+  // Ключ позиции — либо индекс (`items[0]`), либо номер из графы 1
+  // (`items[row1]`), см. snapshotOf. Без второй формы критические поля
+  // перестали бы считаться критическими ровно на тех документах, где номера
+  // распознались, то есть на самых проверяемых.
+  return /^items\[(?:\d+|row\d+)]\.(nameRaw|qty|price|sum)$/.test(key);
 }
 
 /** Ключи снимка, относящиеся к добавляемому полю (им меняться разрешено). */
@@ -101,7 +105,18 @@ export function snapshotOf(p: UpdPdfParsed): Snapshot {
   };
   // Позиции целиком, а не только их количество: перепутанные цена и сумма или
   // съехавшее наименование при равной длине массива иначе прошли бы незаметно.
-  p.items.forEach((it, i) => {
+  //
+  // Ключ строки — НОМЕР ИЗ ГРАФЫ 1, когда он есть и уникален. По индексу
+  // массива сравнение ломается от перестановки строк: модель вернула те же
+  // позиции в другом порядке — и весь снимок «разошёлся», хотя разбор верный.
+  // Когда номеров нет (старые промпты, текстовый путь) или они повторяются,
+  // остаётся индекс: сравнивать всё равно надо, просто без этой страховки.
+  const rowNos = p.items.map((it) => it.rowNo ?? null);
+  const uniqueRowNos =
+    rowNos.every((n) => n != null) && new Set(rowNos).size === rowNos.length;
+  const keyOf = (i: number) => (uniqueRowNos ? `row${rowNos[i]}` : `${i}`);
+  p.items.forEach((it, index) => {
+    const i = keyOf(index);
     s[`items[${i}].nameRaw`] = str(it.nameRaw);
     s[`items[${i}].qty`] = num(it.qty, SCALE.qty);
     s[`items[${i}].unit`] = str(it.unit);
@@ -128,10 +143,34 @@ export function diffKeys(a: Snapshot, b: Snapshot): string[] {
   return out.sort();
 }
 
+/**
+ * Эталон одной позиции: только то, что действительно проверено по бумаге.
+ *
+ * Разница между `null` и отсутствующим полем принципиальна:
+ *   * `null`  — «в бланке этой графы нет» (документ без цен). Это проверяемое
+ *               утверждение: модель не должна ничего туда подставлять;
+ *   * поля нет — «мы не размечали». Сверка молчит.
+ * Без такого различения неразмеченный документ засчитывался бы как эталонный
+ * ноль, и любая подставленная цена выглядела бы регрессией.
+ */
+export type ExpectedItem = {
+  /** Номер позиции из графы 1 — по нему позиция и находится в разборе. */
+  rowNo: number;
+  qty?: number | null;
+  price?: number | null;
+  sum?: number | null;
+  vatSum?: number | null;
+};
+
 /** Эталон одного логического документа из манифеста. */
 export type ExpectedDocument = {
   docNumber: string;
   consignee: { name: string; inn: string | null; kpp: string | null };
+  /** Итоги документа. Отсутствуют — не размечены, сверка пропускается. */
+  totalSum?: number | null;
+  vatSum?: number | null;
+  /** Позиции. Размечать можно частично: сверяются только перечисленные. */
+  items?: ExpectedItem[];
 };
 
 /** Разбор одного логического документа (для multi_upd — одного субдокумента). */
@@ -218,6 +257,81 @@ export function checkConsigneeAgainstExpectation(
   return { status: 'ok' };
 }
 
+/** Расхождение разбора с эталоном по деньгам. */
+export type MoneyMismatch = { where: string; detail: string };
+
+/** Сравнение с точностью хранения: 12.10 и 12.1 — одно и то же значение. */
+function sameMoney(want: number | null, got: number | null | undefined, scale: number): boolean {
+  return num(want, scale) === num(got ?? null, scale);
+}
+
+/**
+ * Сверка денег с ЭТАЛОНОМ, а не между прогонами.
+ *
+ * Сравнение двух версий промпта между собой ловит изменения, но не ошибки:
+ * если обе версии одинаково перенесли количество в графу суммы, диффа нет и
+ * прогон выглядит успешным. Поэтому цены, суммы и итоги сверяются с тем, что
+ * напечатано в бумаге.
+ *
+ * Позиции ищутся ПО НОМЕРУ ИЗ ГРАФЫ 1, а не по индексу массива: индекс едет от
+ * любой потерянной или задвоенной строки — ровно от того, что и надо ловить.
+ * Номер, которого в разборе нет, — тоже расхождение: позиция потеряна.
+ */
+export function checkMoneyAgainstExpectation(
+  parsed: UpdPdfParsed,
+  expected: ExpectedDocument | undefined,
+): MoneyMismatch[] {
+  if (!expected) return [];
+  const out: MoneyMismatch[] = [];
+
+  if ('totalSum' in expected && !sameMoney(expected.totalSum ?? null, parsed.totalSum, SCALE.money)) {
+    out.push({
+      where: 'итог документа',
+      detail: `ожидалось ${num(expected.totalSum ?? null, SCALE.money)}, получено ${num(parsed.totalSum, SCALE.money)}`,
+    });
+  }
+  if ('vatSum' in expected && !sameMoney(expected.vatSum ?? null, parsed.vatSum, SCALE.money)) {
+    out.push({
+      where: 'НДС документа',
+      detail: `ожидалось ${num(expected.vatSum ?? null, SCALE.money)}, получено ${num(parsed.vatSum, SCALE.money)}`,
+    });
+  }
+
+  for (const want of expected.items ?? []) {
+    const matches = parsed.items.filter((it) => it.rowNo === want.rowNo);
+    if (matches.length === 0) {
+      out.push({ where: `строка ${want.rowNo}`, detail: 'позиции с таким номером в разборе нет' });
+      continue;
+    }
+    if (matches.length > 1) {
+      out.push({ where: `строка ${want.rowNo}`, detail: `номер задвоен: ${matches.length} позиций` });
+      continue;
+    }
+    const got = matches[0]!;
+    const fields = [
+      ['qty', SCALE.qty, 'количество'],
+      ['price', SCALE.price, 'цена'],
+      ['sum', SCALE.money, 'сумма'],
+      ['vatSum', SCALE.money, 'НДС'],
+    ] as const;
+    for (const [field, scale, label] of fields) {
+      if (!(field in want)) continue;
+      const wantValue = want[field] ?? null;
+      const gotValue = got[field] ?? null;
+      if (sameMoney(wantValue, gotValue, scale)) continue;
+      out.push({
+        where: `строка ${want.rowNo}`,
+        detail:
+          wantValue == null
+            ? `${label} в бумаге не напечатана, а модель вернула ${num(gotValue, scale)}`
+            : `${label}: ожидалось ${num(wantValue, scale)}, получено ${num(gotValue, scale)}`,
+      });
+    }
+  }
+
+  return out;
+}
+
 /** Сопоставление разбора с эталоном: по номеру документа, индекс — запасной. */
 export function matchExpectation(
   parsed: UpdPdfParsed,
@@ -244,6 +358,8 @@ export type UnitComparison = {
   /** Перешёл ли confidence через порог 0.5 / 0.6. */
   confidenceShift: string | null;
   expectation: ExpectationVerdict;
+  /** Расхождения по деньгам с эталоном (пусто — либо всё сошлось, либо не размечено). */
+  moneyMismatches: MoneyMismatch[];
 };
 
 export function compareUnit(args: {
@@ -278,6 +394,7 @@ export function compareUnit(args: {
       args.expected,
       args.hasConsignee,
     ),
+    moneyMismatches: checkMoneyAgainstExpectation(args.b, args.expected),
   };
 }
 
@@ -316,6 +433,14 @@ export function evaluateGate(input: GateInput): string[] {
 
   const mismatch = input.comparisons.filter((c) => c.expectation.status === 'mismatch');
   if (mismatch.length > 0) blockers.push(`расхождение с эталоном: ${mismatch.length}`);
+
+  // Деньги считаются отдельным блокером: «обе версии ошиблись одинаково» не
+  // даёт диффа между прогонами и без этой проверки прошло бы как успех.
+  const money = input.comparisons.filter((c) => c.moneyMismatches.length > 0);
+  if (money.length > 0) {
+    const rows = money.reduce((acc, c) => acc + c.moneyMismatches.length, 0);
+    blockers.push(`расхождение сумм с эталоном: ${money.length} док. / ${rows} полей`);
+  }
 
   const fromText = input.comparisons.filter((c) => c.expectation.status === 'filled_from_text');
   if (fromText.length > 0) {
