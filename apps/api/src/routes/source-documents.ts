@@ -74,6 +74,7 @@ import { loadEnv } from '../lib/env.js';
 import { fromSupplierPortalSql } from '../domain/sourceDocuments/public-origin.js';
 import { manualRecipientSource } from '../domain/sourceDocuments/resolve-contractor.js';
 import {
+  assemblyServedRowSql,
   selectExtraFiles,
   selectRegistryRows,
   type RegistryRow,
@@ -1068,6 +1069,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
                       where a.s3_key = bi.input_s3_key
                         and d.is_technical = false
                    )
+                   -- Сопоставления по ключу мало: сборка склеивает несколько
+                   -- входных файлов в один документ, и вложение остаётся лишь у
+                   -- одного из них. Остальные строки комплекта иначе висят
+                   -- «в очереди» вечно, хотя работа по ним закончена.
+                   and not ${assemblyServedRowSql()}
                    ${
                      fSite.length > 0
                        ? drSql`and b.site_id in ${drSql`(${drSql.join(

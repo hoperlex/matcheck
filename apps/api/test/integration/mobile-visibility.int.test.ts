@@ -97,6 +97,8 @@ suite('видимость документа на планшете (реальн
     if (!sql_) return;
     await sql_`DELETE FROM bundle_import_items WHERE bundle_id IN
                  (SELECT id FROM source_bundles WHERE site_id = ${siteId})`;
+    await sql_`DELETE FROM source_document_attachments WHERE source_document_id IN
+                 (SELECT id FROM source_documents WHERE site_id = ${siteId})`;
     await sql_`DELETE FROM source_documents WHERE site_id = ${siteId}`;
     await sql_`DELETE FROM source_bundles WHERE site_id = ${siteId} AND parent_bundle_id IS NOT NULL`;
     await sql_`DELETE FROM source_bundles WHERE site_id = ${siteId}`;
@@ -241,5 +243,116 @@ suite('видимость документа на планшете (реальн
 
     // Сосед в разборе, но группы нет — готовый документ виден.
     expect(await isVisible(a)).toBe(true);
+  });
+
+  // ─── Комплект, собранный в один логический УПД ────────────────────────────
+  //
+  // Сборка склеивает несколько файлов в ОДИН документ, и вложение остаётся
+  // только у одного из них. Строка второго файла по ключу не сопоставляется, и
+  // без исключения ниже собранная машина не доезжала до планшета вовсе.
+
+  /** Строка реестра файла, ушедшего в сборку. */
+  async function assemblyItem(
+    rootId: string,
+    opts: {
+      filename: string;
+      s3Key: string;
+      subBundleId: string | null;
+      effectiveStatus?: string | null;
+      createdDocumentIds?: string[];
+      parserUsed?: string | null;
+    },
+  ) {
+    await sql_`INSERT INTO bundle_import_items
+        (bundle_id, source_filename, status, input_s3_key, upload_generation,
+         processing_mode, parser_used, sub_bundle_id, effective_status, created_document_ids)
+      VALUES (${rootId}, ${opts.filename}, 'created', ${opts.s3Key}, 0, 'auto',
+              ${opts.parserUsed ?? 'updAssembly'}, ${opts.subBundleId},
+              ${opts.effectiveStatus ?? 'created'},
+              ${JSON.stringify(opts.createdDocumentIds ?? [])}::jsonb)`;
+  }
+
+  it('собранная машина едет на планшет: второй файл комплекта её не держит', async () => {
+    const root = randomUUID();
+    const child = randomUUID();
+    const assembled = randomUUID();
+    await bundle(root);
+    await bundle(child, { assembly: 'legacy', parent: root });
+    await doc({ id: assembled, bundleId: child });
+    // Вложение есть только у первого файла — у документа сборки оно одно.
+    await sql_`INSERT INTO source_document_attachments (source_document_id, s3_key, filename, role)
+               VALUES (${assembled}, ${`vis/${root}/page-1.jpg`}, 'page-1.jpg', 'original')`;
+    await assemblyItem(root, {
+      filename: 'page-1.jpg',
+      s3Key: `vis/${root}/page-1.jpg`,
+      subBundleId: child,
+      createdDocumentIds: [assembled],
+    });
+    await assemblyItem(root, {
+      filename: 'page-2.jpg',
+      s3Key: `vis/${root}/page-2.jpg`,
+      subBundleId: child,
+      createdDocumentIds: [assembled],
+    });
+
+    expect(await isVisible(assembled)).toBe(true);
+  });
+
+  it('пока сборка идёт, машина остаётся скрытой', async () => {
+    const root = randomUUID();
+    const child = randomUUID();
+    const ready = randomUUID();
+    await bundle(root);
+    await bundle(child, { assembly: 'legacy', parent: root });
+    await doc({ id: ready, bundleId: root });
+    // Работа по строке не закончена: исхода нет, документов нет.
+    await assemblyItem(root, {
+      filename: 'page-1.jpg',
+      s3Key: `vis/${root}/in-progress.jpg`,
+      subBundleId: child,
+      effectiveStatus: null,
+      createdDocumentIds: [],
+    });
+
+    expect(await isVisible(ready)).toBe(false);
+  });
+
+  it('документ сборки удалён — машина снова скрыта', async () => {
+    const root = randomUUID();
+    const child = randomUUID();
+    const ready = randomUUID();
+    await bundle(root);
+    await bundle(child, { assembly: 'legacy', parent: root });
+    await doc({ id: ready, bundleId: root });
+    await assemblyItem(root, {
+      filename: 'page-1.jpg',
+      s3Key: `vis/${root}/orphan.jpg`,
+      subBundleId: child,
+      // Идентификатор остался, документа уже нет: файл снова ничем не представлен.
+      createdDocumentIds: [randomUUID()],
+    });
+
+    expect(await isVisible(ready)).toBe(false);
+  });
+
+  it('накладная с дочерним пакетом машину по-прежнему держит', async () => {
+    const root = randomUUID();
+    const child = randomUUID();
+    const ready = randomUUID();
+    const other = randomUUID();
+    await bundle(root);
+    await bundle(child, { assembly: 'legacy', parent: root });
+    await doc({ id: ready, bundleId: root });
+    await doc({ id: other, bundleId: child });
+    // sub_bundle_id заполняется и у накладных — одного его мало.
+    await assemblyItem(root, {
+      filename: 'waybill.pdf',
+      s3Key: `vis/${root}/waybill.pdf`,
+      subBundleId: child,
+      parserUsed: 'parseWaybillBatch',
+      createdDocumentIds: [other],
+    });
+
+    expect(await isVisible(ready)).toBe(false);
   });
 });

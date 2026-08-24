@@ -80,17 +80,27 @@ suite('принятые файлы в списке документов (реа�
       generation?: number;
       resolved?: boolean;
       sha?: string | null;
+      /** Кем разобран файл: 'updAssembly' — признак сборки логических УПД. */
+      parserUsed?: string | null;
+      subBundleId?: string | null;
+      effectiveStatus?: string | null;
+      createdDocumentIds?: string[];
     },
   ) {
     await sql`INSERT INTO bundle_import_items
         (bundle_id, source_filename, input_s3_key, content_sha256, upload_generation,
-         input_order, status, resolved_at)
+         input_order, status, resolved_at, parser_used, sub_bundle_id, effective_status,
+         created_document_ids)
       VALUES (${bundleId}, ${opts.filename},
               ${opts.s3Key === undefined ? `s3/${opts.filename}` : opts.s3Key},
               ${opts.sha ?? 'f'.repeat(64)},
               ${opts.generation ?? 0}, ${opts.order},
               ${opts.status ?? 'accepted'},
-              ${opts.resolved ? sql`now()` : null})`;
+              ${opts.resolved ? sql`now()` : null},
+              ${opts.parserUsed ?? null},
+              ${opts.subBundleId ?? null},
+              ${opts.effectiveStatus ?? null},
+              ${JSON.stringify(opts.createdDocumentIds ?? [])}::jsonb)`;
   }
 
   /** Живой документ по файлу — то, что закрывает строку реестра. */
@@ -283,13 +293,20 @@ suite('принятые файлы в списке документов (реа�
     // Разбор принятых файлов — работа менеджера; инспектор видит документы.
     expect(body.pendingFiles).toBeUndefined();
   });
-  /** Дочерний пакет: сюда уезжает накладная, и документ рождается уже в нём. */
-  async function subBundle(parentId: string) {
+  /**
+   * Дочерний пакет: сюда уезжает накладная или сборка логических УПД, и
+   * документ рождается уже в нём.
+   */
+  async function subBundle(
+    parentId: string,
+    opts: { status?: string; kind?: string } = {},
+  ) {
     const id = randomUUID();
     await sql`INSERT INTO source_bundles
         (id, bundle_hash, direction, site_id, status, kind, parent_bundle_id,
          active_upload_generation)
-      VALUES (${id}, ${hash('sub')}, 'inbound', ${siteId}, 'parsed', 'waybill', ${parentId}, 0)`;
+      VALUES (${id}, ${hash('sub')}, 'inbound', ${siteId}, ${opts.status ?? 'parsed'},
+              ${opts.kind ?? 'waybill'}, ${parentId}, 0)`;
     return id;
   }
 
@@ -365,5 +382,123 @@ suite('принятые файлы в списке документов (реа�
       ['first.pdf', false],
       ['second.pdf', true],
     ]);
+  });
+
+  // ─── Комплект, собранный в один логический УПД ────────────────────────────
+  //
+  // Сборка склеивает НЕСКОЛЬКО входных файлов в ОДИН документ, а вложение
+  // остаётся только у одного из них. Сопоставление строки реестра с документом
+  // по ключу S3 для остальных файлов не срабатывает, и они висели «в очереди»
+  // вечно, хотя работа по ним закончена. Здесь закреплено, где проходит
+  // граница: закончилась сборка или ещё идёт.
+
+  it('комплект сборки уходит из ожидающих целиком, а не только первый файл', async () => {
+    const b = randomUUID();
+    await bundle(b);
+    const sub = await subBundle(b, { status: 'parsed', kind: 'upd' });
+    // Документ сборки несёт вложение ТОЛЬКО первого файла комплекта.
+    const docId = await documentFor(sub, 's3/page-1.jpg');
+    for (const [order, filename] of ['page-1.jpg', 'page-2.jpg'].entries()) {
+      await registryRow(b, {
+        filename,
+        order,
+        s3Key: `s3/${filename}`,
+        status: 'created',
+        parserUsed: 'updAssembly',
+        subBundleId: sub,
+        effectiveStatus: 'created',
+        createdDocumentIds: [docId],
+      });
+    }
+
+    const body = await list();
+    expect(body.items.length).toBe(1);
+    // Второй файл комплекта не должен изображать «в очереди»: он разобран.
+    expect(body.pendingFiles ?? []).toHaveLength(0);
+    expect(body.pendingTotal).toBe(0);
+  });
+
+  it('пока сборка идёт, файлы комплекта остаются ожидающими', async () => {
+    const b = randomUUID();
+    await bundle(b);
+    const sub = await subBundle(b, { status: 'processing', kind: 'upd' });
+    for (const [order, filename] of ['page-1.jpg', 'page-2.jpg'].entries()) {
+      await registryRow(b, {
+        filename,
+        order,
+        s3Key: `s3/${filename}`,
+        status: 'created',
+        parserUsed: 'updAssembly',
+        subBundleId: sub,
+        // Работа не закончена: исход строки ещё не проставлен, документа нет.
+        effectiveStatus: null,
+        createdDocumentIds: [],
+      });
+    }
+
+    const body = await list();
+    // Иначе менеджер не увидит ни файла, ни документа — файл пропадёт из виду.
+    expect(body.pendingFiles?.map((f) => f.filename)).toEqual(['page-2.jpg', 'page-1.jpg']);
+  });
+
+  it('документ сборки удалён — файл снова виден', async () => {
+    const b = randomUUID();
+    await bundle(b);
+    const sub = await subBundle(b, { status: 'parsed', kind: 'upd' });
+    await registryRow(b, {
+      filename: 'page-1.jpg',
+      order: 0,
+      s3Key: 's3/page-1.jpg',
+      status: 'created',
+      parserUsed: 'updAssembly',
+      subBundleId: sub,
+      effectiveStatus: 'created',
+      // Идентификатор остался в массиве, а документа уже нет.
+      createdDocumentIds: [randomUUID()],
+    });
+
+    const body = await list();
+    expect(body.pendingFiles?.map((f) => f.filename)).toEqual(['page-1.jpg']);
+  });
+
+  it('мусор в created_document_ids не роняет список документов', async () => {
+    // Приведение к uuid стоит в выборке списка и в предикате мобильной
+    // видимости: одно нечисловое значение, попавшее в массив мимо router,
+    // уронило бы не строку, а весь список и синхронизацию целиком.
+    const b = randomUUID();
+    await bundle(b);
+    const sub = await subBundle(b, { status: 'parsed', kind: 'upd' });
+    await sql`INSERT INTO bundle_import_items
+        (bundle_id, source_filename, input_s3_key, content_sha256, upload_generation,
+         input_order, status, parser_used, sub_bundle_id, effective_status,
+         created_document_ids)
+      VALUES (${b}, 'broken.jpg', ${'s3/broken.jpg'}, ${'f'.repeat(64)}, 0, 0, 'created',
+              'updAssembly', ${sub}, 'created', ${'["не-uuid", "1"]'}::jsonb)`;
+
+    const body = await list();
+    // Запрос отработал, а сам файл остался видимым: доказательства обслуженности нет.
+    expect(body.pendingFiles?.map((f) => f.filename)).toEqual(['broken.jpg']);
+  });
+
+  it('накладная с дочерним пакетом обслуженной сборкой не считается', async () => {
+    // sub_bundle_id заполняется и у накладных — одного его мало, иначе
+    // потерянная накладная тихо исчезнет из списка.
+    const b = randomUUID();
+    await bundle(b);
+    const sub = await subBundle(b, { status: 'parsed', kind: 'upd' });
+    const otherDoc = await documentFor(sub, 's3/other-key.pdf');
+    await registryRow(b, {
+      filename: 'waybill.pdf',
+      order: 0,
+      s3Key: 's3/waybill.pdf',
+      status: 'created',
+      parserUsed: 'parseWaybillBatch',
+      subBundleId: sub,
+      effectiveStatus: 'created',
+      createdDocumentIds: [otherDoc],
+    });
+
+    const body = await list();
+    expect(body.pendingFiles?.map((f) => f.filename)).toEqual(['waybill.pdf']);
   });
 });

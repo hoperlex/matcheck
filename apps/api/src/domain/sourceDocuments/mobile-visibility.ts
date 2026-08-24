@@ -20,6 +20,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { ingestEvents, sourceBundles, sourceDocuments } from '../../db/schema.js';
 import { STUB_ERROR_CODES } from '@matcheck/contracts';
 import { groupModeSites } from '../groups/group-mode.js';
+import { assemblyServedRowSql } from './bundle-import-registry.js';
 import { machineRootSql } from './document-group.js';
 import { loadEnv } from '../../lib/env.js';
 
@@ -180,6 +181,11 @@ function groupIsCompleteSql(): SQL {
               where a.s3_key = bi.input_s3_key
                 and d.is_technical = false
            )
+           -- Кроме файлов, которые обслужила сборка: она склеивает несколько
+           -- входных файлов в ОДИН документ, и вложение остаётся только у
+           -- одного из них. Без этого исключения собранная машина не доезжает
+           -- до планшета вовсе — её держит строка второго файла комплекта.
+           and not ${assemblyServedRowSql()}
          )
          ${generationInTransit}
        )

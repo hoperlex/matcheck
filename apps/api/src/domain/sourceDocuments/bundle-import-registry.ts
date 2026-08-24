@@ -6,9 +6,9 @@
 // BullMQ-воркеров, вешает обработчики сигналов и периодические задачи. Импорт
 // его из роута поднял бы второго воркера прямо в API-процессе.
 
-import { and, eq, inArray, isNotNull, isNull, or, sql as drSql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, or, sql as drSql, type SQL } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { bundleImportItems, sourceBundles } from '../../db/schema.js';
+import { bundleImportItems, sourceBundles, sourceDocuments } from '../../db/schema.js';
 
 export type RegistryRow = {
   id: string;
@@ -381,4 +381,52 @@ export async function selectBundlesWithStaleItems(
     )
     .limit(limit);
   return rows.map((r) => r.id);
+}
+
+/**
+ * Файл уже обслужен сборкой логических УПД.
+ *
+ * Нужен там, где «обслуженность» файла проверяется по вложению с его ключом:
+ * сборка склеивает несколько входных файлов в ОДИН документ, и вложение
+ * остаётся только у одного из них. Остальные строки комплекта по ключу не
+ * находятся и выглядят вечно необслуженными — висят «в очереди» в списке
+ * менеджера и держат машину скрытой от планшета.
+ *
+ * Условия намеренно узкие:
+ *   * `parser_used = 'updAssembly'` — в дочерний пакет разворачиваются и
+ *     накладные (см. комментарий к `sub_bundle_id` в схеме), поэтому одного
+ *     `sub_bundle_id is not null` мало;
+ *   * `effective_status = 'created'` + непустой `created_document_ids` — работа
+ *     по строке ЗАКОНЧЕНА. Пока дочерний пакет в разборе, строка обязана
+ *     оставаться видимой: файл действительно ещё в очереди;
+ *   * EXISTS живого нетехнического документа — устаревший идентификатор в
+ *     массиве (документ удалили) не должен прятать файл: тогда он снова
+ *     ничем не представлен, и это как раз повод показать строку.
+ *
+ * Значения `created_document_ids` — uuid по построению (их пишет router,
+ * читая id вставленных документов). Форма всё равно проверяется регулярным
+ * выражением ПЕРЕД приведением: этот предикат стоит в выборке списка документов
+ * и в предикате мобильной видимости, и одно нечисловое значение, попавшее в
+ * массив мимо router (ручная правка, скрипт восстановления), уронило бы не
+ * строку, а весь список и синхронизацию целиком. Сравнение через `::uuid`, а не
+ * `sd.id::text`, оставлено ради индекса по первичному ключу.
+ */
+export function assemblyServedRowSql(alias = 'bi'): SQL {
+  const bi = drSql.raw(alias);
+  return drSql`(
+    ${bi}.parser_used = 'updAssembly'
+    and ${bi}.sub_bundle_id is not null
+    and ${bi}.effective_status = 'created'
+    and jsonb_array_length(${bi}.created_document_ids) > 0
+    and exists (
+      select 1
+        from jsonb_array_elements_text(${bi}.created_document_ids) as did(doc_id)
+        join ${sourceDocuments} sd
+          on sd.id = case
+                       when did.doc_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                         then did.doc_id::uuid
+                     end
+       where sd.is_technical = false
+    )
+  )`;
 }
