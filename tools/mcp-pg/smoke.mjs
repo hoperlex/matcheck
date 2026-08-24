@@ -1,12 +1,19 @@
 // Проверка конвейера БЕЗ MCP-транспорта: guardrails (offline) + реальное подключение
-// (TLS/CA + read-only) к БД из MATCHECK_DB_RO_URL. Для ранней валидации гоняем на
-// FOT_DATABASE_URL (тот же Yandex-TLS), пока нет creds к основной БД matcheck.
+// (TLS/CA + read-only) к БД из MATCHECK_DB_RO_URL.
+//
+// URL живёт ТОЛЬКО в infra/secrets/mcp-db.env (chmod 600, вне git). Две готчи, из-за
+// которых команда запуска выглядит именно так:
+//   * `--env-file` НЕ перебивает уже существующую переменную окружения → нужен `env -u`,
+//     иначе прогон незаметно уйдёт на унаследованный URL вместо файла;
+//   * NODE_EXTRA_CA_CERTS через `--env-file` не применяется (Node читает его при
+//     инициализации TLS, до наполнения process.env) → CA передаём в стартовом окружении,
+//     иначе молчаливый отказ TLS.
 //
 // Запуск (URL и CA не печатаются):
-//   set -a; . apps/api/.env; set +a
-//   MATCHECK_DB_RO_URL="$FOT_DATABASE_URL" \
-//   NODE_EXTRA_CA_CERTS=infra/secrets/yandex-ca/root.crt \
-//   node tools/mcp-pg/smoke.mjs
+//   NODE_EXTRA_CA_CERTS=/root/projects/matcheck/infra/secrets/yandex-ca/root.crt \
+//     /usr/bin/env -u MATCHECK_DB_RO_URL \
+//     /usr/local/bin/node --env-file=/root/projects/matcheck/infra/secrets/mcp-db.env \
+//     /root/projects/matcheck/tools/mcp-pg/smoke.mjs
 
 import { openDb, guardQuery, runReadOnlyQuery } from './db.mjs';
 
