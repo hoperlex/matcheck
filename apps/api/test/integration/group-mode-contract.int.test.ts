@@ -27,6 +27,7 @@ import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AuthUser } from '../../src/plugins/auth.js';
+import { encodePageToken } from '../../src/domain/sourceDocuments/sync-page-token.js';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const suite = TEST_DATABASE_URL ? describe : describe.skip;
@@ -282,6 +283,56 @@ suite('групповой режим: стык capability ↔ сервер (ре
       const { body } = await delta(app, `&capabilities=${CAPABILITY}`);
       expect(body).toHaveProperty('nextPageToken');
       expect(body.nextPageToken).toBeNull();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('курсор страницы продолжения равен снимку токена, а не текущему моменту', async () => {
+    // Снимок фиксируется ПЕРВОЙ страницей, а курсор раньше считался заново на
+    // каждой как now − буфер. Клиент коммитит курсор ПОСЛЕДНЕЙ страницы
+    // (SyncPageWalk.decidePageStep), поэтому объявлял применённым интервал
+    // (snapshot, lastCursor], которого не получал: верхняя граница снимка эти
+    // строки отсекла, а следующая дельта уходит уже от lastCursor. Запись,
+    // изменившаяся во время обхода, не приезжала никогда — так теряется
+    // массовый bump updated_at (backfill, переразбор), идущий параллельно
+    // листанию.
+    const snapshot = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const token = encodePageToken({
+      snapshot,
+      updatedAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      id: randomUUID(),
+    });
+    const app = await buildApp({
+      groupModeV1: '1',
+      groupModeSites: canarySiteId,
+      user: userOf(inspectorId, 'inspector_kpp', canarySiteId),
+    });
+    try {
+      const { body } = await delta(app, `&capabilities=${CAPABILITY}&pageToken=${token}`);
+      expect(body.cursor).toBe(snapshot);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('на первой странице курсор по-прежнему момент начала выборки', async () => {
+    // Обратная сторона предыдущего кейса: одностраничный проход не должен
+    // получить курсор из прошлого, иначе каждая дельта тянула бы всё заново.
+    // Без токена snapshotAt === syncStartedAt, то есть поведение прежнее.
+    const app = await buildApp({
+      groupModeV1: '1',
+      groupModeSites: canarySiteId,
+      user: userOf(inspectorId, 'inspector_kpp', canarySiteId),
+    });
+    try {
+      const before = Date.now();
+      const { body } = await delta(app, `&capabilities=${CAPABILITY}`);
+      const cursorMs = Date.parse(body.cursor as string);
+      // Буфер безопасности вычитается из now, поэтому курсор чуть в прошлом,
+      // но не дальше минуты — конкретную величину буфера тест не фиксирует.
+      expect(cursorMs).toBeLessThanOrEqual(before);
+      expect(cursorMs).toBeGreaterThan(before - 60_000);
     } finally {
       await app.close();
     }

@@ -605,7 +605,23 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         .limit(500);
 
       return {
-        cursor: syncStartedAt.toISOString(),
+        // Курсор прохода — момент СНИМКА, а не now каждой страницы.
+        //
+        // snapshotAt заморожен первой страницей (см. выше), а syncStartedAt
+        // пересчитывается на каждом запросе. Клиент коммитит курсор ПОСЛЕДНЕЙ
+        // страницы (SyncPageWalk.decidePageStep на мобиле), и при
+        // многостраничном обходе он объявлял применённым интервал
+        // (snapshotAt, lastCursor], которого не получал: верхняя граница
+        // снимка эти строки отсекла, а следующая дельта уйдёт уже от
+        // lastCursor. Запись, изменившаяся во время обхода, не приезжала
+        // НИКОГДА — ровно так теряется массовый bump updated_at (backfill,
+        // переразбор), идущий параллельно листанию.
+        //
+        // На первой странице и вне группового режима snapshotAt ===
+        // syncStartedAt, поэтому для одностраничного прохода не меняется
+        // ничего. Повтор строк, изменившихся во время обхода, безвреден:
+        // клиент применяет дельту идемпотентно.
+        cursor: snapshotAt.toISOString(),
         nextPageToken,
         serverNow: new Date().toISOString(),
         deletedIds: {
