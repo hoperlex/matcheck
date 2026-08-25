@@ -1757,6 +1757,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       items: parsed.items.map((i) => ({
         rowNo: i.rowNo ?? null,
         qty: i.qty,
+        unit: i.unit ?? null,
         price: i.price ?? null,
         sum: i.sum ?? null,
         vatRate: i.vatRate ?? null,
@@ -1797,6 +1798,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         items: parsed.items.map((i) => ({
           rowNo: i.rowNo ?? null,
           qty: i.qty,
+          unit: i.unit ?? null,
           price: i.price ?? null,
           sum: i.sum ?? null,
           vatRate: i.vatRate ?? null,
@@ -4537,6 +4539,7 @@ async function consolidateAssemblyDocuments(
       // items_sequence уходит в skip ровно там, где строку задвоили.
       rowNo: item.rowNo ?? null,
       qty: Number(item.qty),
+      unit: item.unit ?? null,
       price: item.price == null ? null : Number(item.price),
       sum: item.sum == null ? null : Number(item.sum),
       vatRate: item.vatRate == null ? null : Number(item.vatRate),

@@ -1,6 +1,7 @@
 import {
   suspectQtyPriceSwap,
   suspectSumEqualsQty,
+  suspectUnitCodeAsQty,
   suspectUnitPriceOne,
 } from '@matcheck/contracts';
 import type { UpdCheck, UpdValidation, UpdWarning } from '@matcheck/contracts';
@@ -20,6 +21,8 @@ export type UpdLikeForValidation = {
     // на live-пересчёте и ручной правке проверка последовательности спит.
     rowNo?: number | null;
     qty?: number | null;
+    /** Условное обозначение единицы (графа 2а) — для проверки на код из графы 2. */
+    unit?: string | null;
     price?: number | null;
     sum?: number | null;
     vatRate?: number | null;
@@ -354,6 +357,13 @@ export function validateUpdTotals(
     items.forEach((it, idx) => {
       const row = idx + 1;
       const item = { qty: it.qty ?? null, price: it.price ?? null, sum: it.sum ?? null };
+      // Код единицы вместо количества — проверяется первым: он объясняет и
+      // задранное количество, и заниженную цену одной причиной, тогда как
+      // остальные признаки увидели бы только следствие.
+      if (suspectUnitCodeAsQty({ qty: it.qty ?? null, unit: it.unit ?? null })) {
+        warnings.push({ name: 'unit_code_as_qty', scope: { row } });
+        return;
+      }
       if (suspectSumEqualsQty(item)) {
         warnings.push({ name: 'sum_equals_qty', scope: { row } });
         // Один ярлык на строку: при цене 1 второй признак сработал бы тоже, но

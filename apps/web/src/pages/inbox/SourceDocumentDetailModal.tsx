@@ -122,6 +122,7 @@ function describeWarning(w: UpdWarning): string {
   const name =
     {
       qty_price_swap: 'похоже, количество и цена стоят не в своих колонках',
+      unit_code_as_qty: 'в количестве стоит код единицы измерения из бланка, а не количество',
       sum_equals_qty: 'сумма совпадает с количеством — похоже, в бумаге цены нет',
       unit_price_one: 'цена ровно 1 — проверьте, напечатана ли она в документе',
       consignee_copy_unverified:

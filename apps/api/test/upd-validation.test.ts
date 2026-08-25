@@ -616,3 +616,93 @@ describe('validateUpdTotals — грузополучатель повторяе�
     expect(r.warnings?.some((w) => w.name === 'consignee_copy_unverified') ?? false).toBe(false);
   });
 });
+
+describe('validateUpdTotals — код единицы измерения вместо количества', () => {
+  it('«шт» с количеством 796 — предупреждение', () => {
+    // УПД-5 (ГРИФФ) с бою: в графу количества попал код ОКЕИ «штука», а
+    // настоящие 200 штук уехали в цену. Арифметика при этом согласована, и
+    // денежные проверки молчат.
+    const r = validateUpdTotals(
+      {
+        totalSum: 700000,
+        vatSum: null,
+        items: [{ qty: 796, unit: 'шт', price: 200, sum: 700000, vatRate: null, vatSum: null }],
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.map((w) => w.name)).toEqual(['unit_code_as_qty']);
+  });
+
+  it.each([
+    ['упак', 778],
+    ['м2', 55],
+    ['м²', 55],
+    ['шт.', 796],
+    ['м3', 113],
+    ['кг', 166],
+  ])('единица %s с количеством %i — предупреждение', (unit, qty) => {
+    // Написание единицы приходит как попало, поэтому сравнение по
+    // нормализованной форме: «шт.» и «м²» обязаны срабатывать наравне.
+    const r = validateUpdTotals(
+      {
+        totalSum: 1000,
+        vatSum: null,
+        items: [{ qty, unit, price: 20, sum: 1000, vatRate: null, vatSum: null }],
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.map((w) => w.name)).toEqual(['unit_code_as_qty']);
+  });
+
+  it('код чужой единицы количеством не считается', () => {
+    // 796 при «м2» — просто число: код обязан совпасть со СВОЕЙ единицей,
+    // иначе правило начнёт придираться к обычным количествам.
+    const r = validateUpdTotals(
+      {
+        totalSum: 1000,
+        vatSum: null,
+        items: [{ qty: 796, unit: 'м2', price: 20, sum: 1000, vatRate: null, vatSum: null }],
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.some((w) => w.name === 'unit_code_as_qty') ?? false).toBe(false);
+  });
+
+  it('обычное количество той же единицы не трогается', () => {
+    const r = validateUpdTotals(
+      {
+        totalSum: 1000,
+        vatSum: null,
+        items: [{ qty: 200, unit: 'шт', price: 5, sum: 1000, vatRate: null, vatSum: null }],
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.some((w) => w.name === 'unit_code_as_qty') ?? false).toBe(false);
+  });
+
+  it('дробное количество кодом быть не может', () => {
+    const r = validateUpdTotals(
+      {
+        totalSum: 1000,
+        vatSum: null,
+        items: [{ qty: 796.5, unit: 'шт', price: 20, sum: 1000, vatRate: null, vatSum: null }],
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.some((w) => w.name === 'unit_code_as_qty') ?? false).toBe(false);
+  });
+
+  it('на строку выдаётся один ярлык: код единицы объясняет причину, а не следствие', () => {
+    // При подмене и сумма может совпасть с количеством. Оператору нужен
+    // сигнал про причину, а не два ярлыка об одном и том же.
+    const r = validateUpdTotals(
+      {
+        totalSum: 796,
+        vatSum: null,
+        items: [{ qty: 796, unit: 'шт', price: null, sum: 796, vatRate: null, vatSum: null }],
+      },
+      { detectRecognitionWarnings: true },
+    );
+    expect(r.warnings?.map((w) => w.name)).toEqual(['unit_code_as_qty']);
+  });
+});
