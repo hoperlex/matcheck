@@ -34,14 +34,12 @@
  *   pnpm --filter @matcheck/api tsx scripts/repromote-parsed-documents.ts --apply
  *   pnpm --filter @matcheck/api tsx scripts/repromote-parsed-documents.ts --limit 10 --apply
  */
-import { and, eq, inArray, sql as drSql } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { db, sql } from '../src/db/client.js';
 import { sourceDocumentItems, sourceDocuments } from '../src/db/schema.js';
 import { deriveUpdParseOutcome } from '../src/domain/edo/upd-outcome.js';
 import { validateUpdTotals } from '../src/domain/edo/upd-validation.js';
 import { bumpGroupRevision } from '../src/domain/sourceDocuments/document-group.js';
-import { autoAssignContractorFromBuyer } from '../src/domain/sourceDocuments/resolve-contractor.js';
-import { MIN_DEDUP_CONFIDENCE } from '../src/domain/edo/upd-validation.js';
 import { recordVisibilityTransitions } from '../src/domain/sourceDocuments/visibility-events.js';
 
 function argValue(flag: string): string | null {
@@ -63,11 +61,6 @@ async function main(): Promise<void> {
       parseErrorCode: sourceDocuments.parseErrorCode,
       parseErrorDetails: sourceDocuments.parseErrorDetails,
       confidence: sourceDocuments.llmConfidence,
-      buyerInn: sourceDocuments.buyerInnRaw,
-      // Получатель — подрядчик либо МОЛ. Без него документ на планшете
-      // считается черновиком и не показывается, каким бы ни был статус.
-      hasRecipient: drSql<boolean>`(${sourceDocuments.contractorId} is not null
-                                    or ${sourceDocuments.recipientMolId} is not null)`,
     })
     .from(sourceDocuments)
     .where(
@@ -80,11 +73,12 @@ async function main(): Promise<void> {
     )
     .limit(limit);
 
-  console.info(`[repromote] кандидатов на проверку: ${candidates.length}${apply ? '' : ' (dry-run)'}`);
+  console.info(
+    `[repromote] кандидатов на проверку: ${candidates.length}${apply ? '' : ' (dry-run)'}`,
+  );
 
   let promoted = 0;
   let skipped = 0;
-  let assignedRecipients = 0;
 
   for (const doc of candidates) {
     const items = await db
@@ -178,33 +172,11 @@ async function main(): Promise<void> {
       });
     });
 
-    // Статуса мало: без получателя (подрядчик либо МОЛ) документ на планшете
-    // не появится — предикат видимости считает его черновиком. Подставляем
-    // тем же способом, что и разбор: по ИНН покупателя из графы 6. Работает
-    // только для уже `parsed`, поэтому вызывается ПОСЛЕ перевода.
-    if (!doc.hasRecipient) {
-      const assigned = await autoAssignContractorFromBuyer(db, {
-        sourceDocumentId: doc.id,
-        status: 'parsed',
-        confidence: doc.confidence != null ? Number(doc.confidence) : 0,
-        minConfidence: MIN_DEDUP_CONFIDENCE,
-        buyerInn: doc.buyerInn,
-      });
-      if (assigned.assigned) {
-        assignedRecipients++;
-        console.info(`[repromote] ${doc.id} — подрядчик подставлен по ИНН покупателя`);
-      }
-    }
     promoted++;
   }
 
   console.info(
-    `[repromote] итог: ${apply ? 'переведено' : 'перевели бы'} ${promoted}, ` +
-      `пропущено ${skipped}, подрядчик подставлен у ${assignedRecipients}`,
-  );
-  console.info(
-    '[repromote] документы без получателя на планшет не поедут: менеджер выбирает ' +
-      'подрядчика или МОЛ в карточке',
+    `[repromote] итог: ${apply ? 'переведено' : 'перевели бы'} ${promoted}, пропущено ${skipped}`,
   );
   if (!apply) console.info('[repromote] это был dry-run; для записи добавьте --apply');
 }

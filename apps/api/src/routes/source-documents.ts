@@ -68,8 +68,18 @@ import {
   documentGroupIdSql,
   documentGroupRevisionSql,
   portalDocumentGroupIdSql,
+  portalDocumentGroupSizeSql,
 } from '../domain/sourceDocuments/document-group.js';
-import { recordVisibilityTransitions } from '../domain/sourceDocuments/visibility-events.js';
+import {
+  recordSiteTransfer,
+  recordVisibilityTransitions,
+} from '../domain/sourceDocuments/visibility-events.js';
+import {
+  isBundleScopeUniqueViolation,
+  transferSite,
+  type SiteTransfer,
+  type SiteTransferConflict,
+} from '../domain/sourceDocuments/site-transfer.js';
 import { loadEnv } from '../lib/env.js';
 import { fromSupplierPortalSql } from '../domain/sourceDocuments/public-origin.js';
 import { manualRecipientSource } from '../domain/sourceDocuments/resolve-contractor.js';
@@ -309,6 +319,9 @@ type SdNames = {
   // «Машина» глазами менеджера: та же поставка, но видимая до сборки и
   // публикации. Только для загрузок с публичного портала.
   portalGroupId?: string | null;
+  // Размер машины — сколько строк переедет вместе с документом при смене
+  // объекта (см. transferSite).
+  portalGroupSize?: number | null;
   workHealth?: SourceWorkHealth;
 };
 
@@ -396,6 +409,7 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     groupId: names.groupId ?? null,
     groupRevision: names.groupRevision ?? null,
     portalGroupId: names.portalGroupId ?? null,
+    portalGroupSize: names.portalGroupSize ?? null,
   };
 }
 
@@ -592,6 +606,36 @@ async function loadSdNames(
             .limit(1)
         : Promise.resolve([] as { email: string; phone: string | null }[]),
     ]);
+  // Машина глазами менеджера. Detail-роут берёт эти поля своим select'ом, а
+  // сюда они не попадали — и ответ PATCH возвращал карточке пустую машину, из-за
+  // чего после сохранения исчезала подсказка «объект сменится у всей поставки».
+  const portalRows = sd.bundleId
+    ? await app.db.execute(drSql`
+        select case when portal.yes then root.id end as portal_group_id,
+               case
+                 when portal.yes then (
+                   select count(*)::int
+                     from source_documents member
+                     join source_bundles mb on mb.id = member.bundle_id
+                    where coalesce(mb.parent_bundle_id, mb.id) = root.id
+                      and member.is_technical = false
+                 )
+               end as portal_group_size
+          from source_bundles b
+          join source_bundles root on root.id = coalesce(b.parent_bundle_id, b.id)
+          cross join lateral (
+            select exists (
+              select 1 from ingest_events ie
+               where ie.bundle_id = root.id and ie.channel = 'public'
+            ) as yes
+          ) portal
+         where b.id = ${sd.bundleId}::uuid
+      `)
+    : [];
+  const portal = [...portalRows][0] as
+    | { portal_group_id: string | null; portal_group_size: number | null }
+    | undefined;
+
   return {
     supplierName: supplier[0]?.name ?? null,
     contractorName: contractor[0]?.name ?? null,
@@ -610,6 +654,8 @@ async function loadSdNames(
     siteName: site[0]?.name ?? null,
     createdByUserEmail: createdBy[0]?.email ?? null,
     createdByUserPhone: createdBy[0]?.phone ?? null,
+    portalGroupId: portal?.portal_group_id ?? null,
+    portalGroupSize: portal?.portal_group_size ?? null,
   };
 }
 
@@ -1477,6 +1523,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           groupId: documentGroupIdSql(),
           groupRevision: documentGroupRevisionSql(),
           portalGroupId: portalDocumentGroupIdSql,
+          portalGroupSize: portalDocumentGroupSizeSql,
         })
         .from(sourceDocuments)
         .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
@@ -1543,6 +1590,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         groupId: row.groupId,
         groupRevision: row.groupRevision,
         portalGroupId: row.portalGroupId,
+        portalGroupSize: row.portalGroupSize,
         workHealth,
       });
 
@@ -1911,7 +1959,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // Страница адресуется строкой реестра, а не вложением: registry_item_id →
       // input_s3_key → тот же ключ у вложения документа. Ключ переживает
       // пересборку, чего не даёт порядковый номер файла.
-      const registryIds = [...new Set(refs.map((r) => r.registryItemId).filter((v): v is string => v != null))];
+      const registryIds = [
+        ...new Set(refs.map((r) => r.registryItemId).filter((v): v is string => v != null)),
+      ];
       const registryRows = registryIds.length
         ? await app.db
             .select({ id: bundleImportItems.id, inputS3Key: bundleImportItems.inputS3Key })
@@ -3285,7 +3335,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       schema: {
         params: z.object({ id: z.string().uuid() }),
         body: UpdPatchSchema,
-        response: { 200: SourceDocumentDetailSchema, 404: ErrorResponseSchema },
+        response: {
+          200: SourceDocumentDetailSchema,
+          404: ErrorResponseSchema,
+          // Смена объекта у поставки, по которой уже оформлена операция, и
+          // столкновение с таким же комплектом на целевом объекте.
+          409: ErrorResponseSchema,
+        },
       },
     },
     async (req, reply) => {
@@ -3315,7 +3371,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       if (req.body.contractorId !== undefined) upd.contractorId = req.body.contractorId;
       if (req.body.recipientId !== undefined) upd.recipientId = req.body.recipientId;
       if (req.body.recipientMolId !== undefined) upd.recipientMolId = req.body.recipientMolId;
-      if (req.body.siteId !== undefined) upd.siteId = req.body.siteId;
+      // siteId здесь НЕ пишется: смена объекта — отдельная операция со своим
+      // порядком блокировок и переносом всей машины (см. transferSite ниже).
+      // Оставь мы поле здесь, документ уехал бы на новый объект в одиночку, а
+      // пакет и соседи остались бы на прежнем.
 
       // Пометка «получателя задал человек» — только когда пара получателя
       // ДЕЙСТВИТЕЛЬНО изменилась. Форма карточки кладёт contractorId в тело при
@@ -3326,13 +3385,18 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // Только inbound: у outbound получатель — recipient_id, а contractor_id
       // там наш отправитель, и на «Черновик» он не влияет.
       if (sd.direction === 'inbound') {
+        // Провенанс описывает происхождение ПОДРЯДЧИКА, и только его. МОЛ здесь
+        // не при чём, хотя раньше учитывался: карточка больше не даёт выбирать
+        // подрядчика, менеджер правит один МОЛ — и автоподставленный когда-то
+        // contractor_id молча получал бы метку 'manual'. А RBAC исключает
+        // подрядчика ровно по значению 'auto_buyer' (lib/contractor-scope.ts),
+        // то есть недоверенная подстановка из содержимого чужого файла стала бы
+        // основанием доступа к документу.
         const nextContractorId =
           upd.contractorId !== undefined ? upd.contractorId : sd.contractorId;
-        const nextMolId = upd.recipientMolId !== undefined ? upd.recipientMolId : sd.recipientMolId;
-        const recipientChanged =
-          (nextContractorId ?? null) !== (sd.contractorId ?? null) ||
-          (nextMolId ?? null) !== (sd.recipientMolId ?? null);
-        if (recipientChanged) upd.recipientSource = 'manual';
+        if ((nextContractorId ?? null) !== (sd.contractorId ?? null)) {
+          upd.recipientSource = 'manual';
+        }
       }
       if (req.body.totalSum !== undefined) {
         upd.totalSum =
@@ -3394,182 +3458,247 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // независимых запроса, и между ними планшет успевал забрать документ с
       // новыми позициями, но со старой ревизией — то есть форма приёмки
       // считала состав неизменившимся.
-      const { updated, updatedItems } = await app.db.transaction(async (tx) => {
-        if (req.body.items) {
-          // Полная замена позиций. Старые удаляются каскадом по delete + insert.
-          await tx
-            .delete(sourceDocumentItems)
-            .where(eq(sourceDocumentItems.sourceDocumentId, sd.id));
-          if (itemRows && itemRows.length > 0) {
-            await tx.insert(sourceDocumentItems).values(itemRows);
+      let transfer: SiteTransfer = { changed: false };
+      type PatchOutcome =
+        | { conflict: SiteTransferConflict }
+        | {
+            updated: typeof sourceDocuments.$inferSelect;
+            updatedItems: (typeof sourceDocumentItems.$inferSelect)[];
+          };
+      let result: PatchOutcome;
+      try {
+        result = await app.db.transaction(async (tx): Promise<PatchOutcome> => {
+          // ПЕРВЫМ действием: перенос берёт блокировки в порядке «пакет →
+          // документ», и любая правка документа до него дала бы обратный порядок,
+          // то есть взаимную блокировку с воркером (fenceBundleAttempt).
+          if (req.body.siteId !== undefined) {
+            const outcome = await transferSite(tx as unknown as Db, {
+              documentId: sd.id,
+              toSiteId: req.body.siteId,
+            });
+            if ('conflict' in outcome) return { conflict: outcome.conflict };
+            transfer = outcome.transfer;
           }
-        }
+          if (req.body.items) {
+            // Полная замена позиций. Старые удаляются каскадом по delete + insert.
+            await tx
+              .delete(sourceDocumentItems)
+              .where(eq(sourceDocumentItems.sourceDocumentId, sd.id));
+            if (itemRows && itemRows.length > 0) {
+              await tx.insert(sourceDocumentItems).values(itemRows);
+            }
+          }
 
-        // Пересчёт validation. Берём актуальные значения шапки и позиций.
-        const updatedItems = await tx
-          .select()
-          .from(sourceDocumentItems)
-          .where(eq(sourceDocumentItems.sourceDocumentId, sd.id))
-          .orderBy(sourceDocumentItems.lineNo);
-        const totalSumForCheck = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
-        const validation = validateUpdTotals(
-          {
-            totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
-            vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
-            items: updatedItems.map((i) => ({
-              qty: Number(i.qty),
-              price: i.price != null ? Number(i.price) : null,
-              sum: i.sum != null ? Number(i.sum) : null,
-              vatRate: i.vatRate != null ? Number(i.vatRate) : null,
-              vatSum: i.vatSum != null ? Number(i.vatSum) : null,
-            })),
-          },
-          // Тот же признак, что и в live-пересчёте: распознанный документ —
-          // эвристика уместна, XML и ручной ввод — нет.
-          { detectRecognitionWarnings: sd.llmProviderId != null },
-        );
-        upd.validation = validation;
-
-        // Исход после правки считает то же правило, что и разбор
-        // (domain/edo/upd-outcome.ts). Раньше здесь жила своя проверка, и она
-        // умела только одно: снять `validation_mismatch`, когда суммы сошлись.
-        // Менеджер, дописавший недостающие позиции или номер, оставался с
-        // `partial_parse` — то есть его работа не доезжала до инспектора.
-        //
-        // Трогаем статус только у документов в работе: `archived` закрыт
-        // человеком осознанно, а заглушки разбираются ниже по явному флагу.
-        // Дубликат сюда не попадает: его снимает отдельное действие «разрешить»
-        // (resolve-duplicate), где человек решает, какой из двух документов
-        // настоящий. Пересчитав ему исход здесь, мы бы стёрли эту пометку при
-        // любой правке поля — и второй экземпляр УПД тихо уехал бы инспектору.
-        const touchable =
-          sd.kind === 'upd' &&
-          (sd.status === 'needs_resolution' || sd.status === 'parsed') &&
-          sd.parseErrorCode !== 'duplicate_upd' &&
-          !isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
-        if (touchable) {
-          const nextNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
-          const outcome = deriveUpdParseOutcome(
+          // Пересчёт validation. Берём актуальные значения шапки и позиций.
+          const updatedItems = await tx
+            .select()
+            .from(sourceDocumentItems)
+            .where(eq(sourceDocumentItems.sourceDocumentId, sd.id))
+            .orderBy(sourceDocumentItems.lineNo);
+          const totalSumForCheck = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
+          const validation = validateUpdTotals(
             {
+              totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
+              vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
               items: updatedItems.map((i) => ({
-                nameRaw: i.nameRaw,
                 qty: Number(i.qty),
                 price: i.price != null ? Number(i.price) : null,
                 sum: i.sum != null ? Number(i.sum) : null,
                 vatRate: i.vatRate != null ? Number(i.vatRate) : null,
+                vatSum: i.vatSum != null ? Number(i.vatSum) : null,
               })),
-              docNumber: nextNumber ?? null,
-              totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
-              confidence: sd.llmConfidence != null ? Number(sd.llmConfidence) : 0,
-              itemsCount: null,
             },
-            validation,
+            // Тот же признак, что и в live-пересчёте: распознанный документ —
+            // эвристика уместна, XML и ручной ввод — нет.
+            { detectRecognitionWarnings: sd.llmProviderId != null },
           );
-          upd.status = outcome.status;
-          upd.parseErrorCode = outcome.parseErrorCode;
-          upd.parseErrorDetails = outcome.parseErrorDetails as never;
-          // Итог, посчитанный по строкам, записываем только если менеджер не
-          // задал его сам в этом же запросе.
-          if (
-            upd.totalSum === undefined &&
-            outcome.totalSumSynthesized &&
-            outcome.totalSum != null
-          ) {
-            upd.totalSum = outcome.totalSum.toString();
-          }
-        }
+          upd.validation = validation;
 
-        // Завершение ручного разбора заглушки. Только по явному флагу: правка
-        // полей сама по себе не значит, что человек закончил.
-        const resolvingManually =
-          req.body.resolveManually === true &&
-          isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
-        if (resolvingManually) {
-          // Куда переводить — решают сами данные, и выбора тут по сути нет:
-          // ограничение source_upd_required запрещает УПД в статусе `parsed` без
-          // номера, даты и суммы. Менеджер ввёл реквизиты (файл действительно был
-          // документом) — `parsed`; закрыл как есть (сертификат, дубль, мусор) —
-          // `archived`: документ уходит из работы, но остаётся видимым вместе с
-          // файлом, а это и есть вся суть правки.
-          const nextDocNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
-          const nextDocDate = upd.docDate !== undefined ? upd.docDate : sd.docDate;
-          const nextTotalSum = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
-          // Комплект реквизитов зависит от вида: CHECK source_upd_required
-          // требует сумму только с УПД. В накладной суммы может не быть вовсе
-          // (перемещение ОС, отпуск материалов), и требовать её значило бы
-          // навсегда запереть такой документ в архиве.
-          const needsTotalSum = sd.kind === 'upd';
-          const complete =
-            nextDocNumber != null &&
-            nextDocDate != null &&
-            (!needsTotalSum || nextTotalSum != null);
-          upd.status = complete ? 'parsed' : 'archived';
-          if (complete) {
-            // Стал полноценным документом — прошлая ошибка распознавания больше
-            // ни на что не влияет.
-            upd.parseErrorCode = null;
-            upd.parseErrorDetails = null;
-          }
-          // В архиве код СОХРАНЯЕТСЯ намеренно, и это не «забыли почистить»: по
-          // нему такие записи не уезжают в /sync на планшет КПП (там документы
-          // отбираются по объекту и дате, без оглядки на статус) и не попадают в
-          // «Ожидаемые». Плюс он объясняет менеджеру, почему документ в архиве.
-        }
-
-        const [updated] = await tx
-          .update(sourceDocuments)
-          .set(upd)
-          .where(eq(sourceDocuments.id, sd.id))
-          .returning();
-        if (!updated) throw new Error('Failed to update source_document');
-
-        // Отметка в реестре входных файлов: кто и когда закрыл вопрос по файлу.
-        // Без неё повторная проверка инварианта считала бы файл незакрытым, а в
-        // сверке (скрипт по бою) не было бы видно ручных разборов.
-        if (resolvingManually && sd.bundleId) {
-          await tx
-            .update(bundleImportItems)
-            .set({
-              resolvedAt: new Date(),
-              resolvedByUserId: req.user?.id ?? null,
-              manualDocumentId: sd.id,
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(bundleImportItems.bundleId, sd.bundleId),
-                drSql`${bundleImportItems.createdDocumentIds} @> ${JSON.stringify([sd.id])}::jsonb`,
-              ),
+          // Исход после правки считает то же правило, что и разбор
+          // (domain/edo/upd-outcome.ts). Раньше здесь жила своя проверка, и она
+          // умела только одно: снять `validation_mismatch`, когда суммы сошлись.
+          // Менеджер, дописавший недостающие позиции или номер, оставался с
+          // `partial_parse` — то есть его работа не доезжала до инспектора.
+          //
+          // Трогаем статус только у документов в работе: `archived` закрыт
+          // человеком осознанно, а заглушки разбираются ниже по явному флагу.
+          // Дубликат сюда не попадает: его снимает отдельное действие «разрешить»
+          // (resolve-duplicate), где человек решает, какой из двух документов
+          // настоящий. Пересчитав ему исход здесь, мы бы стёрли эту пометку при
+          // любой правке поля — и второй экземпляр УПД тихо уехал бы инспектору.
+          const touchable =
+            sd.kind === 'upd' &&
+            (sd.status === 'needs_resolution' || sd.status === 'parsed') &&
+            sd.parseErrorCode !== 'duplicate_upd' &&
+            !isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
+          if (touchable) {
+            const nextNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
+            const outcome = deriveUpdParseOutcome(
+              {
+                items: updatedItems.map((i) => ({
+                  nameRaw: i.nameRaw,
+                  qty: Number(i.qty),
+                  price: i.price != null ? Number(i.price) : null,
+                  sum: i.sum != null ? Number(i.sum) : null,
+                  vatRate: i.vatRate != null ? Number(i.vatRate) : null,
+                })),
+                docNumber: nextNumber ?? null,
+                totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
+                confidence: sd.llmConfidence != null ? Number(sd.llmConfidence) : 0,
+                itemsCount: null,
+              },
+              validation,
             );
-        }
+            upd.status = outcome.status;
+            upd.parseErrorCode = outcome.parseErrorCode;
+            upd.parseErrorDetails = outcome.parseErrorDetails as never;
+            // Итог, посчитанный по строкам, записываем только если менеджер не
+            // задал его сам в этом же запросе.
+            if (
+              upd.totalSum === undefined &&
+              outcome.totalSumSynthesized &&
+              outcome.totalSum != null
+            ) {
+              upd.totalSum = outcome.totalSum.toString();
+            }
+          }
 
-        // Ревизию поднимаем только на то, что ВИДИТ инспектор. Правка
-        // комментария или поставщика не должна выдавать ему «состав машины
-        // изменился» на открытой форме.
-        const inspectorSees =
-          req.body.items !== undefined ||
-          upd.siteId !== undefined ||
-          upd.expectedDate !== undefined ||
-          upd.docNumber !== undefined ||
-          upd.status !== undefined ||
-          upd.contractorId !== undefined ||
-          upd.recipientId !== undefined ||
-          upd.recipientMolId !== undefined;
-        // Под рубильником по той же причине, что и при удалении: до выката
-        // новой модели инспектор не должен видеть ни новых диалогов, ни
-        // перезагрузки состава машины.
-        if (inspectorSees && loadEnv().GROUPS_ROLLOUT) {
-          await bumpGroupRevision(tx, sd.id);
-          // Последней операцией транзакции: событие видно только после
-          // коммита, и чем ближе запись к нему, тем меньше окно, в котором
-          // курсор /sync уйдёт вперёд метки (см. visibility-events).
-          await recordVisibilityTransitions(tx, {
-            documentIds: [sd.id],
-            reason: 'документ изменён менеджером',
+          // Завершение ручного разбора заглушки. Только по явному флагу: правка
+          // полей сама по себе не значит, что человек закончил.
+          const resolvingManually =
+            req.body.resolveManually === true &&
+            isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
+          if (resolvingManually) {
+            // Куда переводить — решают сами данные, и выбора тут по сути нет:
+            // ограничение source_upd_required запрещает УПД в статусе `parsed` без
+            // номера, даты и суммы. Менеджер ввёл реквизиты (файл действительно был
+            // документом) — `parsed`; закрыл как есть (сертификат, дубль, мусор) —
+            // `archived`: документ уходит из работы, но остаётся видимым вместе с
+            // файлом, а это и есть вся суть правки.
+            const nextDocNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
+            const nextDocDate = upd.docDate !== undefined ? upd.docDate : sd.docDate;
+            const nextTotalSum = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
+            // Комплект реквизитов зависит от вида: CHECK source_upd_required
+            // требует сумму только с УПД. В накладной суммы может не быть вовсе
+            // (перемещение ОС, отпуск материалов), и требовать её значило бы
+            // навсегда запереть такой документ в архиве.
+            const needsTotalSum = sd.kind === 'upd';
+            const complete =
+              nextDocNumber != null &&
+              nextDocDate != null &&
+              (!needsTotalSum || nextTotalSum != null);
+            upd.status = complete ? 'parsed' : 'archived';
+            if (complete) {
+              // Стал полноценным документом — прошлая ошибка распознавания больше
+              // ни на что не влияет.
+              upd.parseErrorCode = null;
+              upd.parseErrorDetails = null;
+            }
+            // В архиве код СОХРАНЯЕТСЯ намеренно, и это не «забыли почистить»: по
+            // нему такие записи не уезжают в /sync на планшет КПП (там документы
+            // отбираются по объекту и дате, без оглядки на статус) и не попадают в
+            // «Ожидаемые». Плюс он объясняет менеджеру, почему документ в архиве.
+          }
+
+          const [updated] = await tx
+            .update(sourceDocuments)
+            .set(upd)
+            .where(eq(sourceDocuments.id, sd.id))
+            .returning();
+          if (!updated) throw new Error('Failed to update source_document');
+
+          // Отметка в реестре входных файлов: кто и когда закрыл вопрос по файлу.
+          // Без неё повторная проверка инварианта считала бы файл незакрытым, а в
+          // сверке (скрипт по бою) не было бы видно ручных разборов.
+          if (resolvingManually && sd.bundleId) {
+            await tx
+              .update(bundleImportItems)
+              .set({
+                resolvedAt: new Date(),
+                resolvedByUserId: req.user?.id ?? null,
+                manualDocumentId: sd.id,
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(bundleImportItems.bundleId, sd.bundleId),
+                  drSql`${bundleImportItems.createdDocumentIds} @> ${JSON.stringify([sd.id])}::jsonb`,
+                ),
+              );
+          }
+
+          // Ревизию поднимаем только на то, что ВИДИТ инспектор. Правка
+          // комментария или поставщика не должна выдавать ему «состав машины
+          // изменился» на открытой форме.
+          const inspectorSees =
+            req.body.items !== undefined ||
+            transfer.changed ||
+            upd.expectedDate !== undefined ||
+            upd.docNumber !== undefined ||
+            upd.status !== undefined ||
+            upd.contractorId !== undefined ||
+            upd.recipientId !== undefined ||
+            upd.recipientMolId !== undefined;
+          // Под рубильником по той же причине, что и при удалении: до выката
+          // новой модели инспектор не должен видеть ни новых диалогов, ни
+          // перезагрузки состава машины.
+          if (inspectorSees && loadEnv().GROUPS_ROLLOUT) {
+            await bumpGroupRevision(tx, sd.id);
+          }
+          // Метки переноса — БЕЗ рубильника: снятие карточки с планшета прежнего
+          // объекта не групповая механика, а базовая корректность выдачи. Без них
+          // документ, уехавший на другой объект, остаётся у прежнего инспектора
+          // навсегда: дельта его больше не привозит, а сверка лишнее не удаляет.
+          if (transfer.changed) {
+            await recordSiteTransfer(tx, {
+              documentIds: transfer.documentIds,
+              fromSiteId: transfer.fromSiteId,
+              toSiteId: transfer.toSiteId,
+            });
+          }
+          if (inspectorSees && loadEnv().GROUPS_ROLLOUT) {
+            // Последней операцией транзакции: событие видно только после
+            // коммита, и чем ближе запись к нему, тем меньше окно, в котором
+            // курсор /sync уйдёт вперёд метки (см. visibility-events).
+            await recordVisibilityTransitions(tx, {
+              documentIds: [sd.id],
+              ...(transfer.changed && transfer.rootBundleId
+                ? { groupId: transfer.rootBundleId }
+                : {}),
+              reason: 'документ изменён менеджером',
+            });
+          }
+          return { updated, updatedItems };
+        });
+      } catch (err) {
+        // Пересчитанный ключ пакета столкнулся с уже существующим: тот же
+        // комплект файлов на целевом объекте уже загружен. 23505 обрывает
+        // транзакцию целиком, поэтому обработка только здесь, снаружи.
+        if (isBundleScopeUniqueViolation(err)) {
+          return reply.code(409).send({
+            error: 'bundle_exists_on_site',
+            message: 'На выбранном объекте этот комплект документов уже загружен',
           });
         }
-        return { updated, updatedItems };
-      });
+        throw err;
+      }
+
+      if ('conflict' in result) {
+        // Конфликт возвращается ДО единой записи: transferSite проверяет
+        // занятость машины первым делом, поэтому коммит пустой транзакции
+        // равнозначен откату, а остальные правки (реквизиты, позиции) не
+        // применяются — менеджер не остаётся с «половиной сохранилось».
+        const { deliveries: dCount, shipments: shCount } = result.conflict;
+        const parts = [
+          dCount > 0 ? `приёмок: ${dCount}` : null,
+          shCount > 0 ? `отгрузок: ${shCount}` : null,
+        ].filter(Boolean);
+        return reply.code(409).send({
+          error: result.conflict.error,
+          message: `По этой поставке уже оформлены операции (${parts.join(', ')}) — объект менять нельзя`,
+        });
+      }
+      const { updated, updatedItems } = result;
 
       const attachments = await app.db
         .select()

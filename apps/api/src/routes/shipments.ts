@@ -185,24 +185,44 @@ async function assertSourcesAvailableForShipment(
   app: any,
   sourceDocumentIds: string[],
   _excludeShipmentId: string | null,
+  /** Объект операции: документ чужого объекта в неё попасть не может. */
+  operationSiteId: string | null,
 ) {
   if (sourceDocumentIds.length === 0) return;
-  // Служебные записи пакетов к отгрузке не привязываются — симметрично
-  // приёмкам (см. assertSourcesAvailableForDelivery).
-  const technical = await app.db
-    .select({ id: sourceDocuments.id })
+  // FOR UPDATE и сверка объекта — симметрично приёмкам
+  // (см. assertSourcesAvailableForDelivery): блокировка строк документов и есть
+  // то, что разводит привязку с переносом объекта машины.
+  const rows = await app.db
+    .select({
+      id: sourceDocuments.id,
+      siteId: sourceDocuments.siteId,
+      isTechnical: sourceDocuments.isTechnical,
+    })
     .from(sourceDocuments)
-    .where(
-      and(inArray(sourceDocuments.id, sourceDocumentIds), eq(sourceDocuments.isTechnical, true)),
-    )
-    .limit(1);
-  if (technical.length > 0) throw new TechnicalSourceDocumentError();
+    .where(inArray(sourceDocuments.id, sourceDocumentIds))
+    .for('update');
+  if (rows.some((r: { isTechnical: boolean }) => r.isTechnical)) {
+    throw new TechnicalSourceDocumentError();
+  }
+  if (operationSiteId) {
+    const foreign = rows
+      .filter((r: { siteId: string | null }) => (r.siteId ?? null) !== operationSiteId)
+      .map((r: { id: string }) => r.id);
+    if (foreign.length > 0) throw new ForeignSiteSourceDocumentError(foreign);
+  }
 }
 
 /** Попытка привязать служебную запись пакета — отвечаем 404, её «нет». */
 class TechnicalSourceDocumentError extends Error {
   constructor() {
     super('technical_source_document');
+  }
+}
+
+/** Документ принадлежит другому объекту — см. одноимённый класс в deliveries.ts. */
+class ForeignSiteSourceDocumentError extends Error {
+  constructor(readonly sourceDocumentIds: string[]) {
+    super('source_document_foreign_site');
   }
 }
 
@@ -1161,6 +1181,13 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             message: 'УПД не найдена',
           });
         }
+        if (err instanceof ForeignSiteSourceDocumentError) {
+          return reply.code(409).send({
+            error: 'source_document_foreign_site',
+            message: 'УПД относится к другому объекту — обновите список документов',
+            details: { sourceDocumentIds: err.sourceDocumentIds },
+          });
+        }
         // Объект записи сменился между проверкой и UPDATE — транзакция откатана.
         if (err instanceof ForeignSiteError) {
           return reply.code(403).send(FOREIGN_SITE_RESPONSE);
@@ -1881,6 +1908,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       const [s] = await app.db
         .select({
           id: shipments.id,
+          siteId: shipments.siteId,
           pendingDeletionAt: shipments.pendingDeletionAt,
         })
         .from(shipments)
@@ -1930,6 +1958,9 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
               )
               .limit(1);
             if (already) throw new AlreadyLinkedError();
+            // Симметрично приёмке: блокировка документа и сверка объекта до
+            // вставки связи (см. /deliveries/:id/link-source).
+            await assertSourcesAvailableForShipment({ db: tx }, [src.id], s.id, s.siteId);
             await tx.insert(shipmentSources).values({ shipmentId: s.id, sourceDocumentId: src.id });
 
             const existingItems: {
@@ -2005,6 +2036,19 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           },
         );
       } catch (err) {
+        if (err instanceof ForeignSiteSourceDocumentError) {
+          return reply.code(409).send({
+            error: 'source_document_foreign_site',
+            message: 'УПД относится к другому объекту — обновите список документов',
+            details: { sourceDocumentIds: err.sourceDocumentIds },
+          });
+        }
+        if (err instanceof TechnicalSourceDocumentError) {
+          return reply.code(404).send({
+            error: 'source_document_not_found',
+            message: 'УПД не найдена',
+          });
+        }
         if (err instanceof AlreadyLinkedError) {
           return reply.code(409).send({
             error: 'already_linked',
@@ -2186,7 +2230,12 @@ async function createShipment(
       );
     }
     if (input.sourceDocumentIds.length) {
-      await assertSourcesAvailableForShipment({ db: tx }, input.sourceDocumentIds, created.id);
+      await assertSourcesAvailableForShipment(
+        { db: tx },
+        input.sourceDocumentIds,
+        created.id,
+        input.siteId,
+      );
       try {
         await tx.insert(shipmentSources).values(
           input.sourceDocumentIds.map((sid) => ({
@@ -2384,7 +2433,12 @@ async function updateShipment(
       );
     }
     if (input.sourceDocumentIds.length) {
-      await assertSourcesAvailableForShipment({ db: tx }, input.sourceDocumentIds, id);
+      await assertSourcesAvailableForShipment(
+        { db: tx },
+        input.sourceDocumentIds,
+        id,
+        input.siteId,
+      );
     }
     // Запоминаем какие УПД были привязаны раньше — нужно бампать
     // их updated_at тоже (для УПД, которая отвязывается, видимость

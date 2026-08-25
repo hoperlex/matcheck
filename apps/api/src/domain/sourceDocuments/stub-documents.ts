@@ -22,6 +22,7 @@ import { and, eq, isNull, sql as drSql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { STUB_ERROR_CODES } from '@matcheck/contracts';
 import type { Db } from '../../db/client.js';
+import { resolveMachineSiteId } from './site-transfer.js';
 import {
   bundleImportItems,
   sourceBundles,
@@ -316,7 +317,10 @@ export async function ensureDocumentForRegistryRow(args: {
       contractorId: bundle.contractorId,
       recipientMolId: bundle.recipientMolId,
       recipientSource: manualRecipientSource(bundle),
-      siteId: bundle.siteId,
+      // Объект — из БД, а не из строки пакета, прочитанной до транзакции:
+      // машину могли перенести на другой объект, пока файл ждал заглушки
+      // (см. resolveMachineSiteId).
+      siteId: await resolveMachineSiteId(tx as unknown as Db, row.bundleId),
       expectedDate: bundle.expectedDate,
       originalFilename: row.filename,
       // Разбор завершён и не начнётся снова: заглушку ждёт человек, а не

@@ -205,21 +205,37 @@ async function assertSourcesAvailableForDelivery(
   app: any,
   sourceDocumentIds: string[],
   _excludeDeliveryId: string | null,
+  /** Объект операции: документ чужого объекта в неё попасть не может. */
+  operationSiteId: string | null,
 ) {
   if (sourceDocumentIds.length === 0) return;
+  // FOR UPDATE, а не обычный select. Строки документов — тот самый ресурс, за
+  // который эта проверка спорит с переносом объекта (domain/sourceDocuments/
+  // site-transfer.ts): он держит их до конца своей транзакции, поэтому привязка
+  // либо ждёт и видит уже новый объект, либо успевает первой и тогда перенос
+  // видит её связь. Без блокировки обе стороны проходят проверки и расходятся:
+  // приёмка остаётся на объекте, с которого документы уже уехали.
+  const rows = await app.db
+    .select({
+      id: sourceDocuments.id,
+      siteId: sourceDocuments.siteId,
+      isTechnical: sourceDocuments.isTechnical,
+    })
+    .from(sourceDocuments)
+    .where(inArray(sourceDocuments.id, sourceDocumentIds))
+    .for('update');
   // Служебные записи пакетов к приёмке не привязываются. Это держатели
   // вложений на время разбора и промежуточные документы сборки логических
   // УПД: снаружи их не существует, а до публикации такой документ — половина
   // поставки, позиции которой ещё меняются.
-  const technical = await app.db
-    .select({ id: sourceDocuments.id })
-    .from(sourceDocuments)
-    .where(
-      and(inArray(sourceDocuments.id, sourceDocumentIds), eq(sourceDocuments.isTechnical, true)),
-    )
-    .limit(1);
-  if (technical.length > 0) {
+  if (rows.some((r: { isTechnical: boolean }) => r.isTechnical)) {
     throw new TechnicalSourceDocumentError();
+  }
+  if (operationSiteId) {
+    const foreign = rows
+      .filter((r: { siteId: string | null }) => (r.siteId ?? null) !== operationSiteId)
+      .map((r: { id: string }) => r.id);
+    if (foreign.length > 0) throw new ForeignSiteSourceDocumentError(foreign);
   }
 }
 
@@ -227,6 +243,19 @@ async function assertSourcesAvailableForDelivery(
 class TechnicalSourceDocumentError extends Error {
   constructor() {
     super('technical_source_document');
+  }
+}
+
+/**
+ * Документ принадлежит другому объекту.
+ *
+ * Отдельный класс, а не общий ForeignSiteError: тот про объект ПОЛЬЗОВАТЕЛЯ, а
+ * здесь расходятся объект операции и объект документа — например, машину
+ * перенесли, пока планшет держал форму открытой.
+ */
+class ForeignSiteSourceDocumentError extends Error {
+  constructor(readonly sourceDocumentIds: string[]) {
+    super('source_document_foreign_site');
   }
 }
 
@@ -1044,6 +1073,13 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             message: 'УПД не найдена',
           });
         }
+        if (err instanceof ForeignSiteSourceDocumentError) {
+          return reply.code(409).send({
+            error: 'source_document_foreign_site',
+            message: 'УПД относится к другому объекту — обновите список документов',
+            details: { sourceDocumentIds: err.sourceDocumentIds },
+          });
+        }
         // Объект записи сменился между проверкой и UPDATE — транзакция откатана.
         if (err instanceof ForeignSiteError) {
           return reply.code(403).send(FOREIGN_SITE_RESPONSE);
@@ -1163,15 +1199,13 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           deletedByUserId: req.user?.id ?? null,
         });
         if (keySet.size > 0) {
-          await tx
-            .insert(s3CleanupOutbox)
-            .values(
-              Array.from(keySet, (s3Key) => ({
-                s3Key,
-                entityType: 'delivery',
-                entityId: existing.id,
-              })),
-            );
+          await tx.insert(s3CleanupOutbox).values(
+            Array.from(keySet, (s3Key) => ({
+              s3Key,
+              entityType: 'delivery',
+              entityId: existing.id,
+            })),
+          );
         }
         await touchSourceDocuments({ db: tx }, attachedSdIds);
         await tx.delete(deliveries).where(eq(deliveries.id, req.params.id));
@@ -1580,7 +1614,6 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
   // через «+»). Контрагент резолвится как в UI: delivery.contractorId ||
   // sourceDocument.contractorId первого привязанного УПД.
   {
-
     // Параметры — те же, что у списка, минус пагинация: выгрузка обязана
     // повторять экран. Раньше здесь жила своя схема из восьми полей, и период,
     // displayId, features, reviewState и nophoto в выгрузку не доезжали вовсе.
@@ -2100,6 +2133,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       const [d] = await app.db
         .select({
           id: deliveries.id,
+          siteId: deliveries.siteId,
           pendingDeletionAt: deliveries.pendingDeletionAt,
         })
         .from(deliveries)
@@ -2154,6 +2188,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               )
               .limit(1);
             if (already) throw new AlreadyLinkedError();
+            // Та же проверка, что и при создании приёмки: блокировка строки
+            // документа плюс сверка объекта. Раньше этот маршрут вставлял связь
+            // мимо неё — и мог привязать документ соседнего объекта, например
+            // уехавший вместе с перенесённой машиной.
+            await assertSourcesAvailableForDelivery({ db: tx }, [src.id], d.id, d.siteId);
             await tx.insert(deliverySources).values({ deliveryId: d.id, sourceDocumentId: src.id });
 
             // Существующие items приёмки (ручные + предыдущие из УПД).
@@ -2263,6 +2302,19 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           return reply.code(409).send({
             error: 'already_linked',
             message: 'УПД уже привязана к этой приёмке',
+          });
+        }
+        if (err instanceof ForeignSiteSourceDocumentError) {
+          return reply.code(409).send({
+            error: 'source_document_foreign_site',
+            message: 'УПД относится к другому объекту — обновите список документов',
+            details: { sourceDocumentIds: err.sourceDocumentIds },
+          });
+        }
+        if (err instanceof TechnicalSourceDocumentError) {
+          return reply.code(404).send({
+            error: 'source_document_not_found',
+            message: 'УПД не найдена',
           });
         }
         throw err;
@@ -2474,16 +2526,19 @@ async function createDelivery(
       );
     }
     if (input.sourceDocumentIds.length) {
-      await assertSourcesAvailableForDelivery({ db: tx }, input.sourceDocumentIds, created.id);
+      await assertSourcesAvailableForDelivery(
+        { db: tx },
+        input.sourceDocumentIds,
+        created.id,
+        input.siteId,
+      );
       try {
-        await tx
-          .insert(deliverySources)
-          .values(
-            input.sourceDocumentIds.map((sid) => ({
-              deliveryId: created.id,
-              sourceDocumentId: sid,
-            })),
-          );
+        await tx.insert(deliverySources).values(
+          input.sourceDocumentIds.map((sid) => ({
+            deliveryId: created.id,
+            sourceDocumentId: sid,
+          })),
+        );
       } catch (err) {
         if (isSourceDocumentUniqueViolation(err)) {
           throw new SourceAlreadyLinkedError(input.sourceDocumentIds);

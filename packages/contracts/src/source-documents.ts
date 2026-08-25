@@ -322,10 +322,7 @@ export type UpdValidation = z.infer<typeof UpdValidationSchema>;
  * «шт» когда единицу не распознали, и «шт + дробное qty» давало бы ложные
  * предупреждения на ровном месте.
  */
-export function suspectQtyPriceSwap(item: {
-  qty?: number | null;
-  price?: number | null;
-}): boolean {
+export function suspectQtyPriceSwap(item: { qty?: number | null; price?: number | null }): boolean {
   const { qty, price } = item;
   if (qty == null || price == null) return false;
   if (!Number.isFinite(qty) || !Number.isFinite(price)) return false;
@@ -365,10 +362,7 @@ export function suspectSumEqualsQty(item: {
  * количеству не равна. Почти всегда означает, что графа 4 пуста, а модель
  * подставила единицу, чтобы арифметика сошлась.
  */
-export function suspectUnitPriceOne(item: {
-  price?: number | null;
-  sum?: number | null;
-}): boolean {
+export function suspectUnitPriceOne(item: { price?: number | null; sum?: number | null }): boolean {
   const { price, sum } = item;
   if (price !== 1) return false;
   if (sum == null || !Number.isFinite(sum) || sum === 0) return false;
@@ -409,12 +403,7 @@ const OKEI_BY_UNIT: Readonly<Record<string, number>> = {
 /** «шт.» → «шт», «м²» → «м2», «пог. м» → «погм». */
 function normalizeUnit(unit: string | null | undefined): string {
   if (!unit) return '';
-  return unit
-    .toLowerCase()
-    .replace(/²/g, '2')
-    .replace(/³/g, '3')
-    .replace(/[.\s]/g, '')
-    .trim();
+  return unit.toLowerCase().replace(/²/g, '2').replace(/³/g, '3').replace(/[.\s]/g, '').trim();
 }
 
 /**
@@ -430,10 +419,7 @@ function normalizeUnit(unit: string | null | undefined): string {
  * единицей маловероятно, а цена ошибки высока: инспектор примет 796 штук
  * вместо 200.
  */
-export function suspectUnitCodeAsQty(item: {
-  qty?: number | null;
-  unit?: string | null;
-}): boolean {
+export function suspectUnitCodeAsQty(item: { qty?: number | null; unit?: string | null }): boolean {
   const { qty, unit } = item;
   if (qty == null || !Number.isFinite(qty) || !Number.isInteger(qty)) return false;
   const code = OKEI_BY_UNIT[normalizeUnit(unit)];
@@ -583,6 +569,10 @@ export const SourceDocumentSchema = z.object({
   // загрузок пачка файлов не означает один рейс. Планшет это поле не
   // использует — на нём машина по-прежнему определяется groupId.
   portalGroupId: z.string().uuid().nullable().optional(),
+  // Сколько нетехнических документов в этой машине. Нужно карточке: смена
+  // объекта переносит поставку ЦЕЛИКОМ, и менеджер должен видеть, скольких
+  // строк это коснётся, до сохранения. Непустое там же, где portalGroupId.
+  portalGroupSize: z.number().int().nullable().optional(),
 });
 export type SourceDocument = z.infer<typeof SourceDocumentSchema>;
 

@@ -21,6 +21,8 @@ import { logger } from './lib/logger.js';
 import { installFatalHandlers } from './lib/fatal-visibility.js';
 import { imageMimeOfKey } from './lib/image-kind.js';
 import { db } from './db/client.js';
+import type { Db } from './db/client.js';
+import { resolveMachineSiteId } from './domain/sourceDocuments/site-transfer.js';
 import {
   counterparties,
   entityDeletions,
@@ -33,10 +35,7 @@ import {
 } from './db/schema.js';
 import { sql as drSql } from 'drizzle-orm';
 import { matchOrCreateSupplier } from './domain/sourceDocuments/supplierMatcher.js';
-import {
-  autoAssignContractorFromBuyer,
-  manualRecipientSource,
-} from './domain/sourceDocuments/resolve-contractor.js';
+import { manualRecipientSource } from './domain/sourceDocuments/resolve-contractor.js';
 import {
   consigneeOwnIdentity,
   normalizePartyForDirectory,
@@ -1983,31 +1982,14 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     });
   });
 
-  if (!secondPassQueued) {
-    // Автоподстановка подрядчика по покупателю — только для публичной загрузки.
-    //
-    // Отдельным UPDATE после записи шапки, а не полем в headerValues: условие
-    // «получателя ещё никто не задавал» должно проверяться в момент записи,
-    // иначе менеджер, выбравший подрядчика между разбором и сохранением,
-    // молча потеряет свой выбор. Все guard'ы — внутри, см. resolve-contractor.ts.
-    //
-    // Заказан второй проход — не трогаем: документ ещё не в финальном виде,
-    // подставим по итогам победившего прохода.
-    const autoAssign = await autoAssignContractorFromBuyer(db, {
-      sourceDocumentId,
-      status,
-      confidence,
-      minConfidence: MIN_DEDUP_CONFIDENCE,
-      buyerInn: recipient?.inn ?? null,
-      generation: jobGeneration,
-    });
-    if (autoAssign.assigned) {
-      log.info(
-        { contractorId: autoAssign.contractorId, contractorName: autoAssign.name },
-        'contractor auto-assigned from buyer INN',
-      );
-    }
-  } else {
+  // Подрядчика по ИНН покупателя больше не подставляем. Подстановка жила ради
+  // одного: без получателя документ висел «Черновиком» и не уезжал на планшет.
+  // Теперь у приёмки получатель не обязателен ни для «Обработано», ни для
+  // выдачи инспектору (см. getDocumentDisplayStatus и mobile-visibility), а
+  // планшет показывает грузополучателя из самого документа. Оставшийся эффект
+  // был вредным: в поле «Получатель» появлялся покупатель из шапки — для
+  // поставки субподрядчику это генподрядчик, то есть заведомо чужой подрядчик.
+  if (secondPassQueued) {
     log.warn(
       { reasons: weakReasons, parseMode },
       'weak parse — vision second pass queued as separate job',
@@ -3146,7 +3128,7 @@ export async function handleDocumentRouterJob(
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
             recipientSource: manualRecipientSource(bundle),
-            siteId: bundle.siteId,
+            siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
             expectedDate: bundleExpected,
             originalFilename: a.filename,
             // Разбор завершён (и не начнётся снова) — processedAt честно
@@ -3219,7 +3201,7 @@ export async function handleDocumentRouterJob(
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
             recipientSource: manualRecipientSource(bundle),
-            siteId: bundle.siteId,
+            siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
             expectedDate: bundleExpected,
             originalFilename: a.filename,
             queuedAt: new Date(),
@@ -3284,7 +3266,7 @@ export async function handleDocumentRouterJob(
             // из письма после разбора выглядела бы загруженной вручную.
             origin: bundle.origin,
             parentBundleId: bundleId,
-            siteId: bundle.siteId,
+            siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
             expectedDate: bundle.expectedDate,
@@ -3303,7 +3285,7 @@ export async function handleDocumentRouterJob(
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
             recipientSource: manualRecipientSource(bundle),
-            siteId: bundle.siteId,
+            siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
             expectedDate: bundleExpected,
             originalFilename: a.filename,
             queuedAt: new Date(),
@@ -3585,7 +3567,7 @@ async function createSingleUpdDocument(args: {
       contractorId: bundle.contractorId,
       recipientMolId: bundle.recipientMolId,
       recipientSource: manualRecipientSource(bundle),
-      siteId: bundle.siteId,
+      siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
       expectedDate: bundleExpected,
       originalFilename: a.filename,
       queuedAt: new Date(),
@@ -3663,7 +3645,7 @@ async function startUpdAssembly(args: {
         direction: bundle.direction,
         origin: bundle.origin,
         parentBundleId: bundleId,
-        siteId: bundle.siteId,
+        siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
         contractorId: bundle.contractorId,
         recipientMolId: bundle.recipientMolId,
         expectedDate: bundle.expectedDate,
@@ -3692,7 +3674,7 @@ async function startUpdAssembly(args: {
       contractorId: bundle.contractorId,
       recipientMolId: bundle.recipientMolId,
       recipientSource: manualRecipientSource(bundle),
-      siteId: bundle.siteId,
+      siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
       expectedDate:
         bundle.expectedDate instanceof Date
           ? bundle.expectedDate
@@ -4269,7 +4251,7 @@ export async function handleUpdAssemblyJob(
         contractorId: rootBundle.contractorId,
         recipientMolId: rootBundle.recipientMolId,
         recipientSource: manualRecipientSource(rootBundle),
-        siteId: rootBundle.siteId,
+        siteId: await resolveMachineSiteId(tx as unknown as Db, subBundleId),
         expectedDate:
           rootBundle.expectedDate instanceof Date
             ? rootBundle.expectedDate
@@ -5299,7 +5281,7 @@ async function createSourceDocumentFromWaybill(args: {
       contractorId: bundle.contractorId,
       recipientMolId: bundle.recipientMolId,
       recipientSource: manualRecipientSource(bundle),
-      siteId: bundle.siteId,
+      siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
       docNumber: doc.docNumber ?? null,
       docDate,
       totalSum: doc.totalSum != null ? doc.totalSum.toString() : null,

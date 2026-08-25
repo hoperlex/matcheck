@@ -40,7 +40,10 @@ import {
   mobileVisibleWithinRolloutSql,
 } from '../domain/sourceDocuments/mobile-visibility.js';
 import { loadEnv } from '../lib/env.js';
-import { selectVisibilityTombstones } from '../domain/sourceDocuments/visibility-events.js';
+import {
+  SITE_TRANSFER_REASON,
+  selectVisibilityTombstones,
+} from '../domain/sourceDocuments/visibility-events.js';
 import { parseCapabilities, resolveGroupMode } from '../domain/groups/group-mode.js';
 import {
   decodePageToken,
@@ -570,13 +573,20 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         // дельта его больше не привезёт, а сверка удалять документы не умеет
         // (клиент игнорирует missingOnServer для source_documents). Capability
         // здесь ни при чём: поле deletedIds старая сборка понимает.
-        if (enforceVisibility || groupMode.enabled) {
-          const hidden = await selectVisibilityTombstones(app.db, {
-            since,
-            siteId: inspectorOnly ? userSiteId : null,
-          });
-          deletedSourceDocumentIds.push(...hidden);
-        }
+        //
+        // С ВЫКЛЮЧЕННЫМ рубильником журнал отдаётся не целиком, а только по
+        // переносам объекта. Причина: события пишет и воркер, независимо от
+        // рубильника, — отдав их все, мы применили бы новое правило видимости
+        // задним числом и разом сняли бы с планшетов документы, которые
+        // инспектор по прежнему контракту видел. Перенос же объекта — не
+        // групповая механика: карточка обязана исчезнуть с прежнего объекта в
+        // любом режиме, иначе она живёт там вечно.
+        const hidden = await selectVisibilityTombstones(app.db, {
+          since,
+          siteId: inspectorOnly ? userSiteId : null,
+          ...(enforceVisibility || groupMode.enabled ? {} : { reasons: [SITE_TRANSFER_REASON] }),
+        });
+        deletedSourceDocumentIds.push(...hidden);
       }
 
       // Один id не может приехать и в документах, и в удалениях: клиент

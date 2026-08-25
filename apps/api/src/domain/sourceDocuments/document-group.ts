@@ -138,6 +138,36 @@ export const portalDocumentGroupIdSql = sql<string | null>`(
 )`;
 
 /**
+ * Сколько строк в машине глазами менеджера.
+ *
+ * Считает нетехнические документы того же корневого пакета — то есть ровно то,
+ * что переедет вместе с документом при смене объекта (см. site-transfer.ts).
+ * Карточка показывает это число ДО сохранения: «объект сменится у всей машины
+ * (N док.)».
+ *
+ * Ограничен публичным каналом по той же причине, что portalDocumentGroupIdSql:
+ * у почты и внутренних загрузок пачка файлов не означает один рейс.
+ */
+export const portalDocumentGroupSizeSql = sql<number | null>`(
+  select case
+           when exists (
+             select 1 from ingest_events ie
+              where ie.bundle_id = root.id and ie.channel = 'public'
+           )
+           then (
+             select count(*)::int
+               from ${sourceDocuments} member
+               join ${sourceBundles} mb on mb.id = member.bundle_id
+              where coalesce(mb.parent_bundle_id, mb.id) = root.id
+                and member.is_technical = false
+           )
+         end
+    from ${sourceBundles} b
+    join ${sourceBundles} root on root.id = coalesce(b.parent_bundle_id, b.id)
+   where b.id = ${sourceDocuments.bundleId}
+)`;
+
+/**
  * Версия состава группы. Растёт и когда в машину добавился документ, и когда
  * поменялись реквизиты или позиции любого из её документов.
  *

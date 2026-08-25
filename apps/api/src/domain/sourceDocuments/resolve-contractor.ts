@@ -1,9 +1,12 @@
-// Автоподстановка подрядчика по покупателю распознанного УПД.
+// Сопоставление подрядчика по ИНН покупателя из шапки УПД.
 //
-// Зачем. Документы с публичной страницы /uploads приходят без получателя —
-// поставщик подрядчика не знает, и в форме его не спрашивают. Из-за одного
-// пустого поля такой документ висит «Черновиком», пока менеджер не откроет
-// карточку и не выберет подрядчика руками.
+// АВТОПОДСТАНОВКИ БОЛЬШЕ НЕТ. Она жила ради одного: без получателя документ
+// висел «Черновиком» и не уезжал на планшет. Сейчас у приёмки получатель не
+// обязателен ни для «Обработано», ни для выдачи инспектору, а планшет
+// показывает грузополучателя из самого документа — от подстановки оставался
+// только вред: в поле «Получатель» вставал покупатель из шапки, а у поставки
+// субподрядчику это генподрядчик. Осталось само сопоставление: им пользуется
+// скрипт сверки (scripts/contractor-backtest.ts).
 //
 // Почему покупатель, а не грузополучатель. Справочник контрагентов — это
 // подрядчики, и в УПД они стоят покупателем (графа 6). Сверка на боевых данных:
@@ -23,7 +26,7 @@
 
 import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { counterparties, ingestEvents, sourceBundles, sourceDocuments } from '../../db/schema.js';
+import { counterparties, sourceDocuments } from '../../db/schema.js';
 
 export type ContractorMatch = {
   contractorId: string;
@@ -53,15 +56,12 @@ export function isValidInnChecksum(digits: string): boolean {
   const d = [...digits].map(Number);
   if (d.some(Number.isNaN)) return false;
   const dot = (weights: readonly number[], upTo: number) =>
-    weights.reduce((acc, w, i) => acc + w * d[i]!, 0) % 11 % 10 === d[upTo];
+    (weights.reduce((acc, w, i) => acc + w * d[i]!, 0) % 11) % 10 === d[upTo];
 
   if (digits.length === 10) {
     return dot([2, 4, 10, 3, 5, 9, 4, 6, 8], 9);
   }
-  return (
-    dot([7, 2, 4, 10, 3, 5, 9, 4, 6, 8], 10) &&
-    dot([3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8], 11)
-  );
+  return dot([7, 2, 4, 10, 3, 5, 9, 4, 6, 8], 10) && dot([3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8], 11);
 }
 
 /**
@@ -119,100 +119,6 @@ export async function resolveContractorByBuyerInn(
     .limit(1);
 
   return row ? { contractorId: row.id, name: row.name } : null;
-}
-
-export type AutoAssignParams = {
-  sourceDocumentId: string;
-  /** Итоговый статус разбора: подставляем только в успешно распознанный документ. */
-  status: string;
-  /** Уверенность распознавания и порог, ниже которого реквизитам верить нельзя. */
-  confidence: number;
-  minConfidence: number;
-  /** ИНН покупателя из графы 6 — как его выдал парсер, ненормализованным. */
-  buyerInn: string | null | undefined;
-  /**
-   * Поколение диспетчеризации задания, от имени которого идёт подстановка.
-   *
-   * Запись выполняется ПОСЛЕ сохранения шапки, и за это время документ мог уйти
-   * на повторное распознавание. Без сверки подстановка легла бы поверх нового
-   * поколения — то есть по данным, которых в документе уже нет. Не передали —
-   * ведём себя как раньше (0 = у документа не было ни одного ручного повтора).
-   */
-  generation?: number;
-};
-
-export type AutoAssignResult =
-  | { assigned: false; reason: 'guard' | 'no_inn' | 'no_contractor' | 'not_eligible' }
-  | { assigned: true; contractorId: string; name: string };
-
-/**
- * Подставить подрядчика из покупателя — весь путь целиком, вместе с guard'ами.
- *
- * Живёт здесь, а не в worker.ts, чтобы условие «когда можно подставлять» можно
- * было прочитать и протестировать одним куском: воркер обслуживает публичную
- * загрузку, ручную, почту и ЭДО одним обработчиком, и размазанный по нему guard
- * рано или поздно пропустил бы канал.
- *
- * Разрешено только при ВСЕХ условиях:
- *   - документ успешно распознан (status='parsed'): needs_resolution и дубли
- *     «Черновиком» не считаются, а привязка сразу расширила бы область видимости;
- *   - confidence не ниже порога дедупа — на плохом скане модель выдумывает
- *     реквизиты, и подставленный по выдуманному ИНН подрядчик хуже пустого поля;
- *   - kind='upd' и direction='inbound';
- *   - документ пришёл с публичной страницы /uploads;
- *   - получателя ещё никто не задавал (recipient_source IS NULL).
- *
- * Последние три условия проверяются прямо в WHERE единственного UPDATE, а не
- * отдельным SELECT: менеджер может открыть карточку и выбрать подрядчика ровно
- * между проверкой и записью, и тогда автоподстановка затёрла бы его решение.
- */
-export async function autoAssignContractorFromBuyer(
-  db: Db,
-  params: AutoAssignParams,
-): Promise<AutoAssignResult> {
-  if (params.status !== 'parsed') return { assigned: false, reason: 'guard' };
-  if (params.confidence < params.minConfidence) return { assigned: false, reason: 'guard' };
-
-  const match = await resolveContractorByBuyerInn(db, params.buyerInn);
-  if (!match) {
-    return {
-      assigned: false,
-      reason: normalizeInn(params.buyerInn) ? 'no_contractor' : 'no_inn',
-    };
-  }
-
-  const updated = await db
-    .update(sourceDocuments)
-    .set({
-      contractorId: match.contractorId,
-      recipientSource: 'auto_buyer',
-      // /sync берёт дельту по updated_at — без явного обновления планшет
-      // не увидел бы, что документ перестал быть черновиком.
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(sourceDocuments.id, params.sourceDocumentId),
-        eq(sourceDocuments.dispatchGeneration, params.generation ?? 0),
-        eq(sourceDocuments.kind, 'upd'),
-        eq(sourceDocuments.direction, 'inbound'),
-        eq(sourceDocuments.status, 'parsed'),
-        sql`${sourceDocuments.contractorId} is null`,
-        sql`${sourceDocuments.recipientMolId} is null`,
-        sql`${sourceDocuments.recipientSource} is null`,
-        sql`exists (
-          select 1
-            from ${ingestEvents} ie
-            join ${sourceBundles} b on b.id = ${sourceDocuments.bundleId}
-           where ie.bundle_id = coalesce(b.parent_bundle_id, b.id)
-             and ie.channel = 'public'
-        )`,
-      ),
-    )
-    .returning({ id: sourceDocuments.id });
-
-  if (updated.length === 0) return { assigned: false, reason: 'not_eligible' };
-  return { assigned: true, contractorId: match.contractorId, name: match.name };
 }
 
 /**

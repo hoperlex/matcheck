@@ -80,12 +80,12 @@ type EditForm = {
   docNumber: string | null;
   docDate: Dayjs | null;
   expectedDate: Dayjs | null;
+  // Только outbound: там получатель обязателен и выбирается вручную —
+  // внешний контрагент ЛИБО наш МОЛ. У inbound переключателя нет вовсе
+  // (см. RecipientBlock): подрядчик из карточки не выбирается.
   recipientKind: 'counterparty' | 'mol';
-  // inbound: contractorId — наш подрядчик-приёмник.
-  // outbound: contractorId — наш подрядчик-отправитель (НЕ редактируем здесь
-  // в этой форме, чтобы не путать). Для outbound редактируемое поле «Получатель»
-  // привязано к recipientId (внешний контрагент-получатель).
-  contractorId: string | null;
+  // outbound: внешний контрагент-получатель, которого ждёт mobile при finalize
+  // Stage1 «Выезд». У inbound не используется.
   recipientId: string | null;
   recipientMolId: string | null;
   siteId: string | null;
@@ -168,15 +168,32 @@ function useIsWideViewport(): boolean {
   return wide;
 }
 
+/**
+ * Текст ошибки сохранения карточки.
+ *
+ * Отказы переноса объекта сервер отдаёт кодом, и показывать менеджеру сырой
+ * `machine_has_operation` бессмысленно: ему нужно знать, что делать.
+ */
+function patchErrorText(err: Error): string {
+  if (err instanceof ApiError) {
+    if (err.code === 'machine_has_operation') {
+      return 'По этой поставке уже оформлена приёмка или отгрузка — объект менять нельзя. Сначала отвяжите документы от операции.';
+    }
+    if (err.code === 'bundle_exists_on_site') {
+      return 'На выбранном объекте этот комплект документов уже загружен — переносить некуда.';
+    }
+  }
+  return err.message;
+}
+
 function initialForm(sd: SourceDocumentDetail): EditForm {
   return {
     docNumber: sd.docNumber,
     docDate: sd.docDate ? dayjs(sd.docDate) : null,
     expectedDate: sd.expectedDate ? dayjs(sd.expectedDate) : null,
     // Если у документа сохранён МОЛ — открываем переключатель в его сторону,
-    // иначе по умолчанию — подрядчик (исторический режим).
+    // иначе по умолчанию — контрагент (только outbound).
     recipientKind: sd.recipientMolId ? 'mol' : 'counterparty',
-    contractorId: sd.contractorId,
     recipientId: sd.recipientId,
     recipientMolId: sd.recipientMolId,
     siteId: sd.siteId,
@@ -273,7 +290,7 @@ export function SourceDocumentDetailModal({
       // выйти без сохранения.
       onClose();
     },
-    onError: (err: Error) => message.error(err.message),
+    onError: (err: Error) => message.error(patchErrorText(err)),
   });
 
   const ack = useMutation({
@@ -322,20 +339,25 @@ export function SourceDocumentDetailModal({
 
   function onSave() {
     if (!edit) return;
-    // Получатель — взаимоисключающий выбор. Маппинг полей зависит от
-    // направления документа:
-    //   inbound: counterparty → contractorId (наш приёмник-подрядчик);
-    //   outbound: counterparty → recipientId (внешний контрагент-получатель,
-    //             которого ждёт mobile при finalize Stage1 «Выезд»).
-    // recipientMolId одинаков для обоих направлений.
-    // Очищаем «противоположное» поле явно, чтобы PATCH сбрасывал ранее
-    // сохранённое значение.
+    // Получатель. У ОТГРУЗКИ он обязателен и остаётся взаимоисключающим
+    // выбором: внешний контрагент (recipientId) либо наш МОЛ; «противоположное»
+    // поле чистим явно, иначе PATCH не сбросит ранее сохранённое.
+    //
+    // У ПРИЁМКИ подрядчик из карточки больше не выбирается — он не нужен ни
+    // «Обработано», ни планшету, где показывается грузополучатель из самого
+    // документа. contractorId в тело НЕ кладём вовсе: значение в базе живёт
+    // своей жизнью (фильтр «Подрядчик», роль contractor), и затирать его
+    // сохранением реквизитов нельзя.
     const isOutbound = sd?.direction === 'outbound';
     const body: Record<string, unknown> = {
       docNumber: edit.docNumber,
       docDate: edit.docDate ? edit.docDate.format('YYYY-MM-DD') : null,
       expectedDate: edit.expectedDate ? edit.expectedDate.format('YYYY-MM-DD') : null,
-      recipientMolId: edit.recipientKind === 'mol' ? edit.recipientMolId : null,
+      recipientMolId: isOutbound
+        ? edit.recipientKind === 'mol'
+          ? edit.recipientMolId
+          : null
+        : edit.recipientMolId,
       siteId: edit.siteId,
       totalSum: edit.totalSum,
       items: edit.items.map((it) => ({
@@ -350,8 +372,6 @@ export function SourceDocumentDetailModal({
       // contractorId (наш отправитель) этой формой не правим — оставляем как
       // в БД, не отправляя в PATCH вовсе.
       body.recipientId = edit.recipientKind === 'counterparty' ? edit.recipientId : null;
-    } else {
-      body.contractorId = edit.recipientKind === 'counterparty' ? edit.contractorId : null;
     }
     patch.mutate(body);
   }
@@ -693,55 +713,29 @@ export function SourceDocumentDetailModal({
                         style={{ width: '100%' }}
                       />
                     </Form.Item>
-                    <Form.Item
-                      label="Получатель"
-                      // Подрядчика мог подставить резолвер по ИНН покупателя —
-                      // говорим об этом прямо, чтобы значение сверили с шапкой
-                      // документа: у поставки для субподрядчика покупателем
-                      // стоит генподрядчик, и автоподстановка там ошибается.
-                      extra={
-                        sd.recipientSource === 'auto_buyer'
-                          ? 'Подставлено автоматически из покупателя документа — проверьте и при необходимости измените.'
-                          : undefined
-                      }
-                    >
-                      <Segmented
-                        block
-                        style={{ marginBottom: 8 }}
-                        value={edit.recipientKind}
-                        onChange={(v) => {
-                          const next = v as 'counterparty' | 'mol';
-                          // Чистим «противоположное» поле, чтобы при save XOR
-                          // отправлял правильную пару. Для outbound таргет —
-                          // recipientId, для inbound — contractorId.
-                          setEdit({
-                            ...edit,
-                            recipientKind: next,
-                            contractorId:
-                              sd.direction === 'inbound' && next === 'counterparty'
-                                ? edit.contractorId
-                                : sd.direction === 'inbound'
-                                  ? null
-                                  : edit.contractorId,
-                            recipientId:
-                              sd.direction === 'outbound' && next === 'counterparty'
-                                ? edit.recipientId
-                                : sd.direction === 'outbound'
-                                  ? null
-                                  : edit.recipientId,
-                            recipientMolId: next === 'mol' ? edit.recipientMolId : null,
-                          });
-                        }}
-                        options={[
-                          {
-                            label: sd.direction === 'outbound' ? 'Контрагент' : 'Подрядчик',
-                            value: 'counterparty',
-                          },
-                          { label: 'МОЛ', value: 'mol' },
-                        ]}
-                      />
-                      {edit.recipientKind === 'counterparty' ? (
-                        sd.direction === 'outbound' ? (
+                    {sd.direction === 'outbound' ? (
+                      <Form.Item label="Получатель">
+                        <Segmented
+                          block
+                          style={{ marginBottom: 8 }}
+                          value={edit.recipientKind}
+                          onChange={(v) => {
+                            const next = v as 'counterparty' | 'mol';
+                            // Чистим «противоположное» поле, чтобы при save XOR
+                            // отправлял правильную пару.
+                            setEdit({
+                              ...edit,
+                              recipientKind: next,
+                              recipientId: next === 'counterparty' ? edit.recipientId : null,
+                              recipientMolId: next === 'mol' ? edit.recipientMolId : null,
+                            });
+                          }}
+                          options={[
+                            { label: 'Контрагент', value: 'counterparty' },
+                            { label: 'МОЛ', value: 'mol' },
+                          ]}
+                        />
+                        {edit.recipientKind === 'counterparty' ? (
                           <CustomerCounterpartySelect
                             value={edit.recipientId}
                             displayName={sd.recipientName ?? null}
@@ -749,23 +743,69 @@ export function SourceDocumentDetailModal({
                             placeholder="Выберите получателя"
                           />
                         ) : (
-                          <CustomerCounterpartySelect
-                            value={edit.contractorId}
-                            displayName={sd.contractorName ?? null}
-                            onChange={(v) => setEdit({ ...edit, contractorId: v })}
+                          <ResponsiblePersonSelect
+                            value={edit.recipientMolId}
+                            onChange={(v) => setEdit({ ...edit, recipientMolId: v })}
                             placeholder="Выберите получателя"
+                            source="fot"
                           />
-                        )
-                      ) : (
-                        <ResponsiblePersonSelect
-                          value={edit.recipientMolId}
-                          onChange={(v) => setEdit({ ...edit, recipientMolId: v })}
-                          placeholder="Выберите получателя"
-                          source="fot"
-                        />
-                      )}
-                    </Form.Item>
-                    <Form.Item label="Объект">
+                        )}
+                      </Form.Item>
+                    ) : (
+                      <>
+                        {/* Приёмка: подрядчик из карточки НЕ выбирается. Кому
+                            адресован груз, говорит сам документ — грузополучатель
+                            и покупатель, — и ровно их же показывает планшет при
+                            выборе УПД. Подрядчик остался внутренней привязкой
+                            затрат: на «Обработано» и на выдачу инспектору он не
+                            влияет, а выбор из карточки только путал — резолвер
+                            подставлял туда покупателя, у субподряда это
+                            генподрядчик. */}
+                        <Form.Item label="Стороны по документу">
+                          <Typography.Paragraph style={{ marginBottom: 0 }}>
+                            Грузополучатель:{' '}
+                            {sd.consigneeName ? (
+                              shortenCounterpartyName(sd.consigneeName)
+                            ) : (
+                              <Typography.Text type="secondary">не распознан</Typography.Text>
+                            )}
+                          </Typography.Paragraph>
+                          <Typography.Paragraph style={{ marginBottom: 0 }}>
+                            Покупатель:{' '}
+                            {sd.buyerName ? (
+                              shortenCounterpartyName(sd.buyerName)
+                            ) : (
+                              <Typography.Text type="secondary">не распознан</Typography.Text>
+                            )}
+                          </Typography.Paragraph>
+                        </Form.Item>
+                        <Form.Item
+                          label="МОЛ"
+                          extra="Заполняется, если груз принимает материально ответственное лицо."
+                        >
+                          <ResponsiblePersonSelect
+                            value={edit.recipientMolId}
+                            onChange={(v) => setEdit({ ...edit, recipientMolId: v })}
+                            placeholder="Выберите МОЛ"
+                            source="fot"
+                          />
+                        </Form.Item>
+                      </>
+                    )}
+                    <Form.Item
+                      label="Объект"
+                      // Поставка с портала — это машина: несколько документов
+                      // одного рейса. Объект у неё общий, поэтому смена здесь
+                      // переносит ВСЮ машину вместе с пакетом (см. transferSite
+                      // на сервере). Менеджер должен знать это до сохранения.
+                      extra={
+                        sd.portalGroupId
+                          ? `Поставка загружена через портал: объект сменится у всей машины${
+                              sd.portalGroupSize ? ` (${sd.portalGroupSize} док.)` : ''
+                            }.`
+                          : undefined
+                      }
+                    >
                       <SiteSelect
                         value={edit.siteId}
                         onChange={(v) => setEdit({ ...edit, siteId: v })}
@@ -1471,14 +1511,34 @@ function ReadOnlyHeader({ sd }: { sd: SourceDocumentDetail }) {
       <Typography.Text>
         <b>Дата поставки:</b> {formatDateRu(sd.expectedDate)}
       </Typography.Text>
-      <Typography.Text>
-        <b>Получатель:</b>{' '}
-        {sd.recipientMolName
-          ? `${sd.recipientMolName} (МОЛ)`
-          : sd.contractorName
-            ? `${shortenCounterpartyName(sd.contractorName)} (подрядчик)`
-            : '—'}
-      </Typography.Text>
+      {sd.direction === 'outbound' ? (
+        <Typography.Text>
+          <b>Получатель:</b>{' '}
+          {sd.recipientMolName
+            ? `${sd.recipientMolName} (МОЛ)`
+            : sd.contractorName
+              ? `${shortenCounterpartyName(sd.contractorName)} (подрядчик)`
+              : '—'}
+        </Typography.Text>
+      ) : (
+        <>
+          {/* Приёмка: кому адресован груз, говорит сам документ — то же, что
+              видит инспектор на планшете. Подрядчик отсюда убран вместе с его
+              выбором в форме. */}
+          <Typography.Text>
+            <b>Грузополучатель:</b>{' '}
+            {sd.consigneeName ? shortenCounterpartyName(sd.consigneeName) : '—'}
+          </Typography.Text>
+          <Typography.Text>
+            <b>Покупатель:</b> {sd.buyerName ? shortenCounterpartyName(sd.buyerName) : '—'}
+          </Typography.Text>
+          {sd.recipientMolName ? (
+            <Typography.Text>
+              <b>МОЛ:</b> {sd.recipientMolName}
+            </Typography.Text>
+          ) : null}
+        </>
+      )}
       <Typography.Text>
         <b>Объект:</b> {sd.siteName ?? '—'}
       </Typography.Text>

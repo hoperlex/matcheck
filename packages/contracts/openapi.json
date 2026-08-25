@@ -5607,6 +5607,7 @@
                         "sum_total",
                         "vat_total",
                         "items_count",
+                        "items_sequence",
                         "row_qty_price",
                         "row_vat_rate"
                       ]
@@ -5675,6 +5676,50 @@
                     "ok"
                   ]
                 }
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "enum": [
+                        "qty_price_swap",
+                        "sum_equals_qty",
+                        "unit_price_one",
+                        "unit_code_as_qty",
+                        "consignee_copy_unverified"
+                      ]
+                    },
+                    "scope": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "document"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "row": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0
+                            }
+                          },
+                          "required": [
+                            "row"
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "scope"
+                  ]
+                }
               }
             },
             "required": [
@@ -5705,6 +5750,12 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "portalGroupSize": {
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -6062,6 +6113,7 @@
                         "sum_total",
                         "vat_total",
                         "items_count",
+                        "items_sequence",
                         "row_qty_price",
                         "row_vat_rate"
                       ]
@@ -6130,6 +6182,50 @@
                     "ok"
                   ]
                 }
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "enum": [
+                        "qty_price_swap",
+                        "sum_equals_qty",
+                        "unit_price_one",
+                        "unit_code_as_qty",
+                        "consignee_copy_unverified"
+                      ]
+                    },
+                    "scope": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "document"
+                          ]
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "row": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0
+                            }
+                          },
+                          "required": [
+                            "row"
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "scope"
+                  ]
+                }
               }
             },
             "required": [
@@ -6160,6 +6256,12 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "portalGroupSize": {
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "items": {
             "type": "array",
@@ -6791,6 +6893,7 @@
                               "sum_total",
                               "vat_total",
                               "items_count",
+                              "items_sequence",
                               "row_qty_price",
                               "row_vat_rate"
                             ]
@@ -6859,6 +6962,50 @@
                           "ok"
                         ]
                       }
+                    },
+                    "warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "enum": [
+                              "qty_price_swap",
+                              "sum_equals_qty",
+                              "unit_price_one",
+                              "unit_code_as_qty",
+                              "consignee_copy_unverified"
+                            ]
+                          },
+                          "scope": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "document"
+                                ]
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "row": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "row"
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "scope"
+                        ]
+                      }
                     }
                   },
                   "required": [
@@ -6889,6 +7036,12 @@
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "portalGroupSize": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -9335,6 +9488,7 @@
                               "sum_total",
                               "vat_total",
                               "items_count",
+                              "items_sequence",
                               "row_qty_price",
                               "row_vat_rate"
                             ]
@@ -9403,6 +9557,50 @@
                           "ok"
                         ]
                       }
+                    },
+                    "warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "enum": [
+                              "qty_price_swap",
+                              "sum_equals_qty",
+                              "unit_price_one",
+                              "unit_code_as_qty",
+                              "consignee_copy_unverified"
+                            ]
+                          },
+                          "scope": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "document"
+                                ]
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "row": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "row"
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "scope"
+                        ]
+                      }
                     }
                   },
                   "required": [
@@ -9433,6 +9631,12 @@
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "portalGroupSize": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 },
                 "items": {
                   "type": "array",
