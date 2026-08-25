@@ -113,6 +113,15 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: { querystring: QuerySchema, response: { 200: SyncDeltaResponseSchema } },
     },
     async (req) => {
+      // Замер длительности запроса.
+      //
+      // Полевой прогон 25.08: планшет тратил на ПУСТУЮ дельту 8–14 секунд
+      // (`cycle pull: 12247мс … del=0 ship=0 sd=0` в логе клиента), и по
+      // клиентским цифрам нельзя разделить сеть и сервер. Обработчик всегда
+      // выполняет полтора десятка SELECT'ов независимо от того, есть изменения
+      // или нет, а планшеты опрашивают его на каждое чужое SSE-событие —
+      // поэтому цена холостого запроса решает, куда вкладываться дальше.
+      const handlerStartedAt = Date.now();
       // Курсор дельты фиксируем СЕЙЧАС, ДО SELECT'ов (минус буфер), а не
       // new Date() в КОНЦЕ ответа. Раньше cursor=now в конце создавал гонку:
       // запись, появившаяся между SELECT'ами и концом запроса, не попадала
@@ -139,6 +148,10 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       // это явная ошибка конфигурации, а не "доступ ко всему".
       if (inspectorOnly && !userSiteId) {
         const now = new Date().toISOString();
+        req.log.info(
+          { elapsedMs: Date.now() - handlerStartedAt, reason: 'no_site' },
+          'sync delta',
+        );
         return {
           cursor: syncStartedAt.toISOString(),
           serverNow: now,
@@ -613,6 +626,38 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(since ? gte(assets.updatedAt, since) : undefined)
         .orderBy(desc(assets.updatedAt))
         .limit(500);
+
+      req.log.info(
+        {
+          elapsedMs: Date.now() - handlerStartedAt,
+          role: req.user?.role ?? null,
+          siteId: userSiteId,
+          // initial — самый дорогой случай (окно 90 дней), его надо уметь
+          // отделить от обычной дельты, иначе среднее ни о чём не говорит.
+          initial: since === null,
+          paged: pageToken !== null,
+          hasNext: nextPageToken !== null,
+          rows: {
+            sd: sdRows.length,
+            del: dRows.length,
+            ship: shRows.length,
+            cp: cpRows.length,
+            mat: matRows.length,
+            site: siteRows.length,
+            rp: respPersonRows.length,
+            asset: assetRows.length,
+            status: statusRows.length,
+            unit: unitRows.length,
+            deleted:
+              deletedDeliveryIds.length +
+              deletedShipmentIds.length +
+              dedupedDeletedSourceDocumentIds.length +
+              deletedResponsiblePersonIds.length +
+              deletedAssetIds.length,
+          },
+        },
+        'sync delta',
+      );
 
       return {
         // Курсор прохода — момент СНИМКА, а не now каждой страницы.
