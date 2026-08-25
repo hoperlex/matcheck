@@ -25,6 +25,15 @@ type Entry = {
   expectedDocuments?: {
     docNumber: string;
     consignee: { name: string; inn: string | null; kpp: string | null };
+    totalSum?: number | null;
+    vatSum?: number | null;
+    items?: {
+      rowNo: number;
+      qty?: number | null;
+      price?: number | null;
+      sum?: number | null;
+      vatSum?: number | null;
+    }[];
   }[];
 };
 
@@ -94,6 +103,77 @@ describe('corpus-manifest — покрытие сверки промптов', (
         expect(doc.consignee.name, e.filename).toBeTruthy();
         expect(doc, e.filename).toHaveProperty('consignee.inn');
         expect(doc, e.filename).toHaveProperty('consignee.kpp');
+      }
+    }
+  });
+
+  it('деньги размечены у большинства документов, иначе сверять цены не с чем', () => {
+    // Без этой разметки A/B сравнивает цены только между версиями промпта, и
+    // «обе версии ошиблись одинаково» выглядит успехом. Порог с запасом ниже
+    // фактического покрытия (41 документ): он ловит не мелкий сдвиг, а потерю
+    // разметки при пересборке манифеста.
+    const withMoney = entries.flatMap((e) =>
+      (e.expectedDocuments ?? []).filter((d) => 'totalSum' in d || d.items?.length),
+    );
+    expect(withMoney.length).toBeGreaterThanOrEqual(30);
+  });
+
+  it('номера позиций в эталоне уникальны', () => {
+    // Позиция ищется в разборе ПО НОМЕРУ (checkMoneyAgainstExpectation).
+    // Два эталона с одним номером означают, что сверяться будет один и тот же
+    // разобранный ряд, а второй проверяемый останется без внимания.
+    for (const e of entries) {
+      for (const doc of e.expectedDocuments ?? []) {
+        const nos = (doc.items ?? []).map((i) => i.rowNo);
+        expect(new Set(nos).size, `${e.filename} · ${doc.docNumber}`).toBe(nos.length);
+      }
+    }
+  });
+
+  it('сумма позиций сходится с итогом документа', () => {
+    // Главная гарантия эталона. Разметка снята из текстового слоя
+    // автоматически, и человеческого подтверждения каждой цифры за ней нет —
+    // держится она ровно на этой арифметике: потерянная, задвоенная или
+    // съехавшая по колонкам строка ломает равенство. Проверяем только там, где
+    // размечены И итог, И суммы всех позиций: частичная разметка (цена в бланке
+    // не напечатана) законна и сверке не подлежит.
+    for (const e of entries) {
+      for (const doc of e.expectedDocuments ?? []) {
+        const items = doc.items ?? [];
+        if (doc.totalSum == null || items.length === 0) continue;
+        if (items.some((i) => i.sum == null)) continue;
+        const sum = items.reduce((acc, i) => acc + (i.sum as number), 0);
+        expect(
+          Math.abs(sum - doc.totalSum),
+          `${e.filename} · ${doc.docNumber}: Σ позиций ${sum.toFixed(2)} против итога ${doc.totalSum}`,
+        ).toBeLessThanOrEqual(0.01);
+      }
+    }
+  });
+
+  it('денежные поля эталона — числа, а не строки', () => {
+    // JSON правится руками, и «1 818 243,00» вместо 1818243 сверка сравнила бы
+    // как значение, никогда не равное разобранному числу: регресс промпта
+    // выглядел бы вечным, а настоящий — терялся бы в шуме.
+    const isNumberOrNull = (v: unknown): boolean => v === null || typeof v === 'number';
+    for (const e of entries) {
+      for (const doc of e.expectedDocuments ?? []) {
+        for (const field of ['totalSum', 'vatSum'] as const) {
+          if (!(field in doc)) continue;
+          expect(isNumberOrNull(doc[field]), `${e.filename} · ${doc.docNumber} · ${field}`).toBe(
+            true,
+          );
+        }
+        for (const item of doc.items ?? []) {
+          expect(typeof item.rowNo, `${e.filename} · ${doc.docNumber}`).toBe('number');
+          for (const field of ['qty', 'price', 'sum', 'vatSum'] as const) {
+            if (!(field in item)) continue;
+            expect(
+              isNumberOrNull(item[field]),
+              `${e.filename} · ${doc.docNumber} · строка ${item.rowNo} · ${field}`,
+            ).toBe(true);
+          }
+        }
       }
     }
   });
