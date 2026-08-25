@@ -45,6 +45,7 @@ import {
   selectVisibilityTombstones,
 } from '../domain/sourceDocuments/visibility-events.js';
 import { parseCapabilities, resolveGroupMode } from '../domain/groups/group-mode.js';
+import { hasDeltaChanges } from '../domain/sync/delta-changes.js';
 import {
   decodePageToken,
   encodePageToken,
@@ -173,6 +174,74 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
             assets: [],
           },
         };
+      }
+
+      // Быстрый холостой путь: если с момента `since` не изменилось ничего, что
+      // эта ручка вообще отдаёт, — отвечаем сразу, не выполняя ~40 запросов.
+      //
+      // Только для дельты и только вне обхода страниц. Продолжение уже начатого
+      // снимка пропускать нельзя ни при каких условиях: клиент двигает курсор
+      // лишь после ПОСЛЕДНЕЙ страницы, и «пустой» ответ в середине обхода
+      // оборвал бы его на полпути. Initial-sync (since == null) тоже идёт
+      // полным путём — там всегда есть что отдать.
+      //
+      // Справочники статусов и единиц отдаём и здесь, как раньше. Они крошечные
+      // (десятки строк), а приходят в КАЖДОМ ответе без дельта-фильтра — это
+      // свойство, на которое клиент вправе рассчитывать: планшет, потерявший
+      // справочник, восстанавливает его следующей же синхронизацией. Отдай мы
+      // тут пустые массивы, восстановить его стало бы нечем.
+      if (since !== null && !req.query.pageToken) {
+        const changed = await hasDeltaChanges(app.db, { since, siteId: userSiteId });
+        if (!changed) {
+          const statusRowsFast = await app.db.select().from(statuses);
+          const unitRowsFast = await app.db.select().from(units);
+          req.log.info(
+            {
+              elapsedMs: Date.now() - handlerStartedAt,
+              role: req.user?.role ?? null,
+              siteId: userSiteId,
+              fastEmpty: true,
+            },
+            'sync delta',
+          );
+          return {
+            cursor: syncStartedAt.toISOString(),
+            nextPageToken: null,
+            serverNow: new Date().toISOString(),
+            counterparties: [],
+            materials: [],
+            responsiblePersons: [],
+            assets: [],
+            sites: [],
+            statuses: statusRowsFast.map((st) => ({
+              id: st.id,
+              entityType: st.entityType,
+              code: st.code,
+              label: st.label,
+              color: st.color,
+              sortOrder: st.sortOrder,
+            })),
+            units: unitRowsFast.map((u) => ({
+              id: u.id,
+              code: u.code,
+              name: u.name,
+              okeiCode: u.okeiCode,
+              isActive: u.isActive,
+              createdAt: u.createdAt.toISOString(),
+              updatedAt: u.updatedAt.toISOString(),
+            })),
+            sourceDocuments: [],
+            deliveries: [],
+            shipments: [],
+            deletedIds: {
+              deliveries: [],
+              shipments: [],
+              sourceDocuments: [],
+              responsiblePersons: [],
+              assets: [],
+            },
+          };
+        }
       }
 
       const cpRows = await app.db
