@@ -67,3 +67,72 @@ describe('UpdPdfItemSchema — rowNo', () => {
     expect(parsed.items[0]?.massKg).toBeCloseTo(32, 3);
   });
 });
+
+/**
+ * Тот же принцип для счётчика наименований из шапки бланка.
+ *
+ * До правки поле было строгим (`z.number().int().nonnegative()`), и любая
+ * причуда формата уронила бы ВЕСЬ ответ в `parse_failed` — как уже случилось с
+ * rowNo. Пока промпт про счётчик не спрашивал, риск был теоретическим; просить
+ * его в v14 без этой правки нельзя: чем настойчивее просишь поле, тем выше шанс
+ * получить «12 наименований» вместо 12.
+ */
+describe('UpdPdfParsedSchema — itemsCount', () => {
+  function parseItemsCount(value: unknown): number | null | undefined {
+    const parsed = UpdPdfParsedSchema.parse({
+      docNumber: '1',
+      items: [],
+      confidence: 0.9,
+      itemsCount: value,
+    }) as { itemsCount?: number | null };
+    return parsed.itemsCount;
+  }
+
+  it.each([
+    // Валидные значения проходят как раньше — правка поведенчески нейтральна.
+    [12, 12],
+    ['12', 12],
+    [' 7 ', 7],
+    [0, 0],
+    // Ноль остаётся валидным: прежний контракт его допускал (nonnegative), и
+    // менять это заодно с ослаблением типа нельзя.
+    ['0', 0],
+    // Всё непонятное — null, а не падение разбора.
+    ['12 наименований', null],
+    ['двенадцать', null],
+    [12.5, null],
+    [-3, null],
+    ['', null],
+    [null, null],
+    [{}, null],
+    [true, null],
+    [[], null],
+  ])('itemsCount %p → %p', (input, expected) => {
+    expect(parseItemsCount(input)).toBe(expected);
+  });
+
+  it('отсутствующее поле остаётся undefined — старые промпты его не возвращают', () => {
+    const parsed = UpdPdfParsedSchema.parse({ docNumber: '1', items: [], confidence: 0.9 }) as {
+      itemsCount?: number | null;
+    };
+    expect(parsed.itemsCount).toBeUndefined();
+  });
+
+  it('мусор в счётчике не мешает разобрать остальной документ', () => {
+    // Главное свойство: документ живёт. Номер, стороны и позиции на месте,
+    // потеряна только диагностическая цифра.
+    const parsed = UpdPdfParsedSchema.parse({
+      docNumber: 'ЦБ-641',
+      docDate: '2026-03-13',
+      totalSum: 65104.55,
+      itemsCount: 'Всего наименований 3',
+      supplier: { inn: '7716794678', kpp: null, name: 'ООО «РЕГУЛ»' },
+      recipient: { inn: '7736255508', kpp: null, name: 'СУ-10' },
+      items: [{ rowNo: 1, nameRaw: 'Кабель', qty: 30, unit: 'м', price: 173, sum: 6331.8 }],
+      confidence: 0.95,
+    });
+    expect(parsed.itemsCount).toBeNull();
+    expect(parsed.docNumber).toBe('ЦБ-641');
+    expect(parsed.items[0]?.sum).toBe(6331.8);
+  });
+});

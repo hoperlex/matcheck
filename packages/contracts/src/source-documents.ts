@@ -754,9 +754,18 @@ const SNAKE_TO_CAMEL_ITEM: Record<string, string> = {
  *
  * `positiveInt` — для номеров строк: дробное, ноль и отрицательное значат, что
  * прочитано не то, и тоже дают null.
+ *
+ * `nonNegativeInt` — для счётчиков: то же самое, но ноль допустим. Отдельно от
+ * `positiveInt` намеренно: у `itemsCount` прежний контракт разрешал ноль, и
+ * менять это заодно с ослаблением типа нельзя — правка обязана быть
+ * поведенчески нейтральной для всех значений, которые проходили раньше.
  */
-function lenientNumber(opts: { positiveInt?: boolean } = {}) {
+function lenientNumber(opts: { positiveInt?: boolean; nonNegativeInt?: boolean } = {}) {
   return z.preprocess((raw) => {
+    // Поля вовсе нет — так и оставляем: `optional` означает «старый промпт про
+    // это не спрашивал», и подменять отсутствие на null значило бы менять
+    // поведение там, где ничего не менялось.
+    if (raw === undefined) return undefined;
     let n: number | null = null;
     if (typeof raw === 'number') {
       n = Number.isFinite(raw) ? raw : null;
@@ -773,6 +782,10 @@ function lenientNumber(opts: { positiveInt?: boolean } = {}) {
       return null;
     }
     if (n == null) return null;
+    if (opts.nonNegativeInt) {
+      if (!Number.isInteger(n) || n < 0) return null;
+      return n;
+    }
     if (!opts.positiveInt) return n;
     // «3.» и «3» — номер строки; «2.7» — прочитано не то поле.
     if (!Number.isInteger(n) || n <= 0) return null;
@@ -878,7 +891,14 @@ export const UpdPdfParsedSchema = z.object({
   pricing: UpdPricingSchema,
   // Значение из строки УПД «Всего наименований N»; null/undefined, если парсер
   // не смог его извлечь — тогда сверка по кол-ву позиций пропускается.
-  itemsCount: z.number().int().nonnegative().nullable().optional(),
+  //
+  // Мягкий тип, как у rowNo: строгий `z.number().int().nonnegative()` отверг бы
+  // ВЕСЬ ответ модели из-за одного диагностического поля — корректно
+  // распознанный документ стал бы `parse_failed`. Ровно так уже случилось с
+  // rowNo на промпте v13, когда модель вернула его строкой. Просить счётчик в
+  // промпте (v14) до этой правки было нельзя: чем настойчивее просишь, тем
+  // выше шанс получить «12 наименований» вместо 12.
+  itemsCount: lenientNumber({ nonNegativeInt: true }),
   supplier: UpdPdfPartySchema.nullable().optional(),
   recipient: UpdPdfPartySchema.nullable().optional(),
   // Грузополучатель (графа 4). Появился в промпте v9; на v8 и старше приходит
