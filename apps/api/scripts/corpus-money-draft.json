@@ -738,7 +738,8 @@
               "vatSum": null
             }
           ],
-          "unparsed": []
+          "unparsed": [],
+          "notCovered": "итог «Всего к оплате» не найден — сверять полноту позиций не с чем"
         }
       ]
     },
@@ -835,7 +836,8 @@
           "totalSum": null,
           "vatSum": null,
           "items": [],
-          "unparsed": []
+          "unparsed": [],
+          "notCovered": "итог «Всего к оплате» не найден — сверять полноту позиций не с чем"
         }
       ]
     },
@@ -869,7 +871,8 @@
           "totalSum": null,
           "vatSum": null,
           "items": [],
-          "unparsed": []
+          "unparsed": [],
+          "notCovered": "итог «Всего к оплате» не найден — сверять полноту позиций не с чем"
         }
       ]
     },
@@ -882,7 +885,8 @@
           "totalSum": null,
           "vatSum": null,
           "items": [],
-          "unparsed": []
+          "unparsed": [],
+          "notCovered": "итог «Всего к оплате» не найден — сверять полноту позиций не с чем"
         }
       ]
     },
@@ -931,7 +935,8 @@
               "vatSum": null
             }
           ],
-          "unparsed": []
+          "unparsed": [],
+          "notCovered": "итог «Всего к оплате» не найден — сверять полноту позиций не с чем"
         }
       ]
     },

@@ -38,6 +38,15 @@ export type DraftDocument = {
    * пока человек не разберётся».
    */
   totalsMismatch?: string;
+  /**
+   * Почему документ НЕ покрыт денежной сверкой.
+   *
+   * Пишется явно, а не оставляется умолчанием: документ без итога выглядит в
+   * черновике так же аккуратно, как проверенный, и при переносе в манифест его
+   * легко принять за размеченный. Непокрытый документ в эталон не переносится
+   * вовсе — сверять его позиции не с чем.
+   */
+  notCovered?: string;
 };
 
 export type DraftEntry = {
@@ -194,7 +203,13 @@ export function extract(text: string): DraftDocument[] {
   for (const doc of docs) {
     // Итог документа сверяется с суммой позиций: расхождение почти всегда
     // значит, что строка не попала в черновик (или попала дважды).
-    if (doc.totalSum == null || doc.items.length === 0) continue;
+    if (doc.totalSum == null) {
+      // «Всего к оплате» в бланке не нашлось — проверить полноту позиций
+      // нечем. Такой документ помечается непокрытым и ждёт ручной разметки.
+      doc.notCovered = 'итог «Всего к оплате» не найден — сверять полноту позиций не с чем';
+      continue;
+    }
+    if (doc.items.length === 0) continue;
     if (doc.items.some((i) => i.sum == null)) continue;
     const sum = doc.items.reduce((acc, i) => acc + (i.sum ?? 0), 0);
     const diff = Math.round((sum - doc.totalSum) * 100) / 100;

@@ -96,3 +96,19 @@ describe('extract — разбор таблицы УПД из текстовог
     expect(doc?.totalsMismatch).toContain('против итога');
   });
 });
+
+describe('extract — непокрытые документы помечаются явно', () => {
+  it('без «Всего к оплате» документ помечается непокрытым', () => {
+    // Такой документ выглядит в черновике так же аккуратно, как проверенный:
+    // позиции есть, числа на месте. Но сверить их полноту не с чем — потерянную
+    // строку заметить нечем. Пометка нужна, чтобы его не перенесли в эталон.
+    const [doc] = extract([INVOICE, HEADER, ROW_1].join('\n'));
+    expect(doc?.notCovered).toContain('итог');
+    expect(doc?.items).toHaveLength(1);
+  });
+
+  it('с итогом пометки нет', () => {
+    const [doc] = extract([INVOICE, HEADER, ROW_1, TOTAL].join('\n'));
+    expect(doc?.notCovered).toBeUndefined();
+  });
+});

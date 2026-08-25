@@ -100,6 +100,9 @@ function main(): void {
   const mismatched = out.flatMap((e) =>
     e.documents.filter((d) => d.totalsMismatch).map((d) => ({ file: e.filename, doc: d })),
   );
+  const notCovered = out.flatMap((e) =>
+    e.documents.filter((d) => d.notCovered).map((d) => ({ file: e.filename, doc: d })),
+  );
 
   writeFileSync(
     OUT,
@@ -126,6 +129,13 @@ function main(): void {
       console.log(`  ${m.file} № ${m.doc.docNumber}: ${m.doc.totalsMismatch}`);
     }
   }
+  if (notCovered.length > 0) {
+    console.log(`\nНЕ ПОКРЫТО денежной сверкой (${notCovered.length}) — в эталон не переносить:`);
+    for (const n of notCovered) {
+      console.log(`  ${n.file} № ${n.doc.docNumber}: ${n.doc.notCovered}`);
+    }
+  }
+
   const skipped = out.filter((e) => e.skipped);
   if (skipped.length > 0) {
     console.log(`\nне покрыто (${skipped.length}):`);
