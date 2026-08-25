@@ -1,0 +1,1194 @@
+{
+  "note": "ЧЕРНОВИК. Значения извлечены из текстового слоя PDF (pdftotext -layout), без модели. В corpus-manifest.json переносить ТОЛЬКО после визуальной сверки с бланком.",
+  "generatedBy": "scripts/corpus-money-draft.ts",
+  "columns": "qty = графа 3, price = графа 4 (без НДС), vatSum = графа 8, sum = графа 9 (с НДС)",
+  "entries": [
+    {
+      "filename": "1221312.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "201/21126363",
+          "totalSum": 1818243,
+          "vatSum": 327879.88,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 8400,
+              "price": 87.07,
+              "sum": 892251.34,
+              "vatSum": 160897.78
+            },
+            {
+              "rowNo": 2,
+              "qty": 5350,
+              "price": 44.66,
+              "sum": 291495.82,
+              "vatSum": 52564.82
+            },
+            {
+              "rowNo": 3,
+              "qty": 7800,
+              "price": 34.04,
+              "sum": 323924.64,
+              "vatSum": 58412.64
+            },
+            {
+              "rowNo": 4,
+              "qty": 5700,
+              "price": 44.66,
+              "sum": 310571.2,
+              "vatSum": 56004.64
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "201_2112636922_202606260947_117572_PRINTER2.TXT.pdf",
+      "parsePath": "multi_upd",
+      "documents": [
+        {
+          "docNumber": "201/2112636922",
+          "totalSum": 40411.8,
+          "vatSum": 7287.37,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 221,
+              "price": 1505.66,
+              "sum": 40411.8,
+              "vatSum": 7287.37
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126387-1",
+          "totalSum": 45281.95,
+          "vatSum": 8165.6,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 300,
+              "price": 82.78,
+              "sum": 30297.48,
+              "vatSum": 5463.48
+            },
+            {
+              "rowNo": 2,
+              "qty": 305,
+              "price": 540.27,
+              "sum": 14984.47,
+              "vatSum": 2702.12
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126372",
+          "totalSum": 5984,
+          "vatSum": 1079.08,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 400,
+              "price": 12.26,
+              "sum": 5984,
+              "vatSum": 1079.08
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126371",
+          "totalSum": 71610,
+          "vatSum": 12913.28,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 700,
+              "price": 83.85,
+              "sum": 71610,
+              "vatSum": 12913.28
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126389",
+          "totalSum": 282500,
+          "vatSum": 50942.62,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 2500,
+              "price": 92.62,
+              "sum": 282500,
+              "vatSum": 50942.62
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "Алия.pdf",
+      "parsePath": "multi_upd",
+      "documents": [
+        {
+          "docNumber": "201/21126085-4",
+          "totalSum": 470,
+          "vatSum": 84.75,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 47,
+              "price": 8.2,
+              "sum": 470,
+              "vatSum": 84.75
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126363-8",
+          "totalSum": 21316.33,
+          "vatSum": 3843.93,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 220,
+              "price": 79.42,
+              "sum": 21316.33,
+              "vatSum": 3843.93
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126091",
+          "totalSum": 3800,
+          "vatSum": 685.25,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 500,
+              "price": 6.23,
+              "sum": 3800,
+              "vatSum": 685.25
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/211153230-1",
+          "totalSum": 699720,
+          "vatSum": 126179.02,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 8330,
+              "price": 68.85,
+              "sum": 699720,
+              "vatSum": 126179.02
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126311-2",
+          "totalSum": 6780.42,
+          "vatSum": 1222.7,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 23,
+              "price": 241.64,
+              "sum": 6780.42,
+              "vatSum": 1222.7
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126311-1",
+          "totalSum": 91977.85,
+          "vatSum": 16586.17,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 312,
+              "price": 2241.64,
+              "sum": 91977.85,
+              "vatSum": 16586.17
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126332",
+          "totalSum": 39042.5,
+          "vatSum": 7040.45,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 575,
+              "price": 555.66,
+              "sum": 39042.5,
+              "vatSum": 7040.45
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126332-1",
+          "totalSum": 47150,
+          "vatSum": 8502.46,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 575,
+              "price": 567.21,
+              "sum": 47150,
+              "vatSum": 8502.46
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126363-1",
+          "totalSum": 409.05,
+          "vatSum": 73.76,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 5,
+              "price": 67.06,
+              "sum": 409.05,
+              "vatSum": 73.76
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126373-9",
+          "totalSum": 2742.44,
+          "vatSum": 494.54,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1770,
+              "price": 1.27,
+              "sum": 2742.44,
+              "vatSum": 494.54
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126373-8",
+          "totalSum": 16452.92,
+          "vatSum": 2966.92,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1100,
+              "price": 12.26,
+              "sum": 16452.92,
+              "vatSum": 2966.92
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126085-9",
+          "totalSum": 40726.18,
+          "vatSum": 7344.07,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 48,
+              "price": 618.85,
+              "sum": 36239.86,
+              "vatSum": 6535.06
+            },
+            {
+              "rowNo": 2,
+              "qty": 449,
+              "price": 98.19,
+              "sum": 4486.32,
+              "vatSum": 809.01
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126390-3",
+          "totalSum": 244108.2,
+          "vatSum": 44019.51,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 2254,
+              "price": 88.77,
+              "sum": 244108.2,
+              "vatSum": 44019.51
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126390-2",
+          "totalSum": 117693.8,
+          "vatSum": 21223.48,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 2404,
+              "price": 34.59,
+              "sum": 101448.8,
+              "vatSum": 18294.05
+            },
+            {
+              "rowNo": 2,
+              "qty": 150,
+              "price": 88.77,
+              "sum": 16245,
+              "vatSum": 2929.43
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126373",
+          "totalSum": 2835.4,
+          "vatSum": 511.3,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1830,
+              "price": 1.27,
+              "sum": 2835.4,
+              "vatSum": 511.3
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД (статус 1) № 258 от 2 июля 2026 г.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "258",
+          "totalSum": 225220,
+          "vatSum": 40613.45,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 100,
+              "price": 335.08,
+              "sum": 40880,
+              "vatSum": 7371.8
+            },
+            {
+              "rowNo": 2,
+              "qty": 200,
+              "price": 700.82,
+              "sum": 171000,
+              "vatSum": 30836.07
+            },
+            {
+              "rowNo": 3,
+              "qty": 27,
+              "price": 344.26,
+              "sum": 11340,
+              "vatSum": 2044.92
+            },
+            {
+              "rowNo": 4,
+              "qty": null,
+              "price": null,
+              "sum": 2000,
+              "vatSum": 360.66
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД (статус 1) № 262 от 7 июля 2026 г.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "262",
+          "totalSum": 21590,
+          "vatSum": 3893.28,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 30,
+              "price": 176.23,
+              "sum": 6450,
+              "vatSum": 1163.11
+            },
+            {
+              "rowNo": 2,
+              "qty": 30,
+              "price": 188.52,
+              "sum": 6900,
+              "vatSum": 1244.26
+            },
+            {
+              "rowNo": 3,
+              "qty": 30,
+              "price": 170.49,
+              "sum": 6240,
+              "vatSum": 1125.25
+            },
+            {
+              "rowNo": 4,
+              "qty": null,
+              "price": null,
+              "sum": 2000,
+              "vatSum": 360.66
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД (статус 1) № 273 от 9 июля 2026 г.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "273",
+          "totalSum": 196527.34,
+          "vatSum": 35439.35,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 25.6,
+              "price": 1049.92,
+              "sum": 32791.04,
+              "vatSum": 5913.14
+            },
+            {
+              "rowNo": 2,
+              "qty": 3,
+              "price": 8419.34,
+              "sum": 30814.8,
+              "vatSum": 5556.77
+            },
+            {
+              "rowNo": 3,
+              "qty": 5,
+              "price": 2371.39,
+              "sum": 14465.5,
+              "vatSum": 2608.53
+            },
+            {
+              "rowNo": 4,
+              "qty": 120,
+              "price": 487.7,
+              "sum": 71400,
+              "vatSum": 12875.41
+            },
+            {
+              "rowNo": 5,
+              "qty": 60,
+              "price": 487.71,
+              "sum": 35700,
+              "vatSum": 6437.7
+            },
+            {
+              "rowNo": 6,
+              "qty": 24,
+              "price": 302.46,
+              "sum": 8856,
+              "vatSum": 1596.98
+            },
+            {
+              "rowNo": 7,
+              "qty": null,
+              "price": null,
+              "sum": 2500,
+              "vatSum": 450.82
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №100000.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "1001",
+          "totalSum": 175000,
+          "vatSum": 29166.67,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1,
+              "price": 145833.33,
+              "sum": 175000,
+              "vatSum": 29166.67
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №116 от 30.09.25.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "116",
+          "totalSum": 348915.18,
+          "vatSum": 58152.53,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 54.727,
+              "price": 1010.1373,
+              "sum": 66338.14,
+              "vatSum": 11056.36
+            },
+            {
+              "rowNo": 2,
+              "qty": 43875.862,
+              "price": 5.36698,
+              "sum": 282577.04,
+              "vatSum": 47096.17
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №11618 от 24.10.25.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "11618",
+          "totalSum": 25500,
+          "vatSum": 4250,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 300,
+              "price": 54.17,
+              "sum": 19500,
+              "vatSum": 3250
+            },
+            {
+              "rowNo": 2,
+              "qty": 1,
+              "price": 5000,
+              "sum": 6000,
+              "vatSum": 1000
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №1223-004_1 от 23.12.25.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "1223-004/1",
+          "totalSum": 191700,
+          "vatSum": 31950,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 540,
+              "price": 295.83,
+              "sum": 191700,
+              "vatSum": 31950
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №18266 от 19.12.25.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "18266",
+          "totalSum": 597341,
+          "vatSum": 99556.83,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 280,
+              "price": 1777.8,
+              "sum": 597341,
+              "vatSum": 99556.83
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №24 от 13.01.26.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "24",
+          "totalSum": 2990,
+          "vatSum": 539.18,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1,
+              "price": 2450.82,
+              "sum": 2990,
+              "vatSum": 539.18
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №UT-3843 от 30.12.25.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "UT-3843",
+          "totalSum": null,
+          "vatSum": null,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 4,
+              "price": 3212.5,
+              "sum": 15420,
+              "vatSum": 2570
+            },
+            {
+              "rowNo": 2,
+              "qty": 0,
+              "price": 20,
+              "sum": null,
+              "vatSum": null
+            },
+            {
+              "rowNo": 3,
+              "qty": 0,
+              "price": 20,
+              "sum": null,
+              "vatSum": null
+            },
+            {
+              "rowNo": 4,
+              "qty": 0,
+              "price": 20,
+              "sum": null,
+              "vatSum": null
+            },
+            {
+              "rowNo": 5,
+              "qty": 0,
+              "price": 20,
+              "sum": null,
+              "vatSum": null
+            },
+            {
+              "rowNo": 6,
+              "qty": 0,
+              "price": 20,
+              "sum": null,
+              "vatSum": null
+            },
+            {
+              "rowNo": 815,
+              "qty": 20,
+              "price": 2457.33,
+              "sum": null,
+              "vatSum": null
+            },
+            {
+              "rowNo": 820,
+              "qty": 20,
+              "price": 2464,
+              "sum": null,
+              "vatSum": null
+            },
+            {
+              "rowNo": 840,
+              "qty": 20,
+              "price": 1249.33,
+              "sum": null,
+              "vatSum": null
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №КА-1518 от 07.11.25.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "КА-1518",
+          "totalSum": 364200,
+          "vatSum": 60700,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 29,
+              "price": 5058.33,
+              "sum": 176030,
+              "vatSum": 29338.33
+            },
+            {
+              "rowNo": 2,
+              "qty": 31,
+              "price": 5058.33,
+              "sum": 188170,
+              "vatSum": 31361.67
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №М-1789 от 19.05.26.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "М-1789",
+          "totalSum": 468058,
+          "vatSum": 84403.9,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 2740,
+              "price": 64.02,
+              "sum": 213994,
+              "vatSum": 38589.08
+            },
+            {
+              "rowNo": 2,
+              "qty": 5360,
+              "price": 38.85,
+              "sum": 254064,
+              "vatSum": 45814.82
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №МО1812-00014_4 от 18.12.25.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "МО1812-00014/4",
+          "totalSum": 1862101.5,
+          "vatSum": 310350.25,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 19.985,
+              "price": 39750,
+              "sum": 953284.5,
+              "vatSum": 158880.75
+            },
+            {
+              "rowNo": 2,
+              "qty": 19.974,
+              "price": 37916.67,
+              "sum": 908817,
+              "vatSum": 151469.5
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №ТРМ-МЛН131832 от 10.04.26.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "ТРМ-МЛН131832",
+          "totalSum": null,
+          "vatSum": null,
+          "items": [],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №УТ-1160 от 26.12.25.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "УТ-1160",
+          "totalSum": 187179.98,
+          "vatSum": 31196.66,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 3.6,
+              "price": 43328.7,
+              "sum": 187179.98,
+              "vatSum": 31196.66
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №УТ-2217 от 14.05.26.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "УТ-2217",
+          "totalSum": null,
+          "vatSum": null,
+          "items": [],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №УТ-22170000.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "УТ-2217",
+          "totalSum": null,
+          "vatSum": null,
+          "items": [],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №УТ-6564 от 14.10.25.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "УТ-6564",
+          "totalSum": null,
+          "vatSum": 0,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 10,
+              "price": 921.67,
+              "sum": 11060,
+              "vatSum": 1843.33
+            },
+            {
+              "rowNo": 2,
+              "qty": 200,
+              "price": 30,
+              "sum": 10702,
+              "vatSum": 156
+            },
+            {
+              "rowNo": 3,
+              "qty": 10,
+              "price": 58.33,
+              "sum": 10702,
+              "vatSum": 156
+            },
+            {
+              "rowNo": 4,
+              "qty": 50,
+              "price": 86.67,
+              "sum": 10702,
+              "vatSum": 156
+            },
+            {
+              "rowNo": 10,
+              "qty": null,
+              "price": null,
+              "sum": 1024,
+              "vatSum": null
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №Х-3655 от 06.10.25 (1).pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "Х-3655",
+          "totalSum": 15000,
+          "vatSum": 2500,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1,
+              "price": 12500,
+              "sum": 15000,
+              "vatSum": 2500
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №Х-3655 от 06.10.25.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "Х-3655",
+          "totalSum": 15000,
+          "vatSum": 2500,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1,
+              "price": 12500,
+              "sum": 15000,
+              "vatSum": 2500
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "УПД №ЦБ-641 от 13.03.26.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "ЦБ-641",
+          "totalSum": 65104.55,
+          "vatSum": 11740.16,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 30,
+              "price": 173.23,
+              "sum": 6340.03,
+              "vatSum": 1143.28
+            },
+            {
+              "rowNo": 2,
+              "qty": 9,
+              "price": 340.23,
+              "sum": 3735.69,
+              "vatSum": 673.65
+            },
+            {
+              "rowNo": 3,
+              "qty": 30,
+              "price": 327.54,
+              "sum": 11988,
+              "vatSum": 2161.77
+            },
+            {
+              "rowNo": 4,
+              "qty": 30,
+              "price": 195.53,
+              "sum": 7156.51,
+              "vatSum": 1290.52
+            },
+            {
+              "rowNo": 5,
+              "qty": 9,
+              "price": 415.69,
+              "sum": 4564.32,
+              "vatSum": 823.07
+            },
+            {
+              "rowNo": 6,
+              "qty": 20,
+              "price": 1283.61,
+              "sum": 31320,
+              "vatSum": 5647.87
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "Универсальный передаточный документ (УПД) 51458 от 07.07.2026 (1).pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "51458",
+          "totalSum": 41784,
+          "vatSum": 7534.82,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 8000,
+              "price": 0.99,
+              "sum": 9664,
+              "vatSum": 1742.69
+            },
+            {
+              "rowNo": 2,
+              "qty": 5500,
+              "price": 4.79,
+              "sum": 32120,
+              "vatSum": 5792.13
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "Универсальный передаточный документ (УПД) 51458 от 07.07.2026 (2).pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "51458",
+          "totalSum": 41784,
+          "vatSum": 7534.82,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 8000,
+              "price": 0.99,
+              "sum": 9664,
+              "vatSum": 1742.69
+            },
+            {
+              "rowNo": 2,
+              "qty": 5500,
+              "price": 4.79,
+              "sum": 32120,
+              "vatSum": 5792.13
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "Универсальный передаточный документ (УПД) 51458 от 07.07.2026.pdf",
+      "parsePath": "text_pdf",
+      "documents": [
+        {
+          "docNumber": "51458",
+          "totalSum": 41784,
+          "vatSum": 7534.82,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 8000,
+              "price": 0.99,
+              "sum": 9664,
+              "vatSum": 1742.69
+            },
+            {
+              "rowNo": 2,
+              "qty": 5500,
+              "price": 4.79,
+              "sum": 32120,
+              "vatSum": 5792.13
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    },
+    {
+      "filename": "зиларт.pdf",
+      "parsePath": "multi_upd",
+      "documents": [
+        {
+          "docNumber": "201/21126389",
+          "totalSum": 282500,
+          "vatSum": 50942.62,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 2500,
+              "price": 92.62,
+              "sum": 282500,
+              "vatSum": 50942.62
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126387-1",
+          "totalSum": 45281.95,
+          "vatSum": 8165.6,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 300,
+              "price": 82.78,
+              "sum": 30297.48,
+              "vatSum": 5463.48
+            },
+            {
+              "rowNo": 2,
+              "qty": 305,
+              "price": 540.27,
+              "sum": 14984.47,
+              "vatSum": 2702.12
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126372",
+          "totalSum": 5984,
+          "vatSum": 1079.08,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 400,
+              "price": 12.26,
+              "sum": 5984,
+              "vatSum": 1079.08
+            }
+          ],
+          "unparsed": []
+        },
+        {
+          "docNumber": "201/21126371",
+          "totalSum": 71610,
+          "vatSum": 12913.28,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 700,
+              "price": 83.85,
+              "sum": 71610,
+              "vatSum": 12913.28
+            }
+          ],
+          "unparsed": []
+        }
+      ]
+    }
+  ]
+}
