@@ -374,18 +374,40 @@ async function main(): Promise<void> {
     }
   }
 
-  const regressed = comparisons.filter((c) => c.changed.length > 0);
-  if (regressed.length > 0) {
-    console.log(`\nРЕГРЕСС: изменились стабильные поля (${regressed.length} документов):`);
-    for (const c of regressed) {
+  const critical = comparisons.filter((c) => c.changedCritical.length > 0);
+  if (critical.length > 0) {
+    console.log(`\nРЕГРЕСС КРИТИЧЕСКИХ ПОЛЕЙ (${critical.length} документов) — это блокирует выкат:`);
+    for (const c of critical) {
+      const keys = new Set(c.changedCritical);
       if (details) {
         console.log(`  ${c.label}:`);
-        for (const d of c.changedDetails) console.log(`      ${d.key}: ${d.from} → ${d.to}`);
+        for (const d of c.changedDetails.filter((d) => keys.has(d.key))) {
+          console.log(`      ${d.key}: ${d.from} → ${d.to}`);
+        }
       } else {
-        console.log(`  ${c.label}: ${c.changed.join(', ')}`);
+        console.log(`  ${c.label}: ${c.changedCritical.join(', ')}`);
       }
     }
     if (!details) console.log('  (значения полей — с флагом --details)');
+  }
+
+  // Оценочные поля печатаются отдельно и выкат не держат: это масса, объём,
+  // категория и уверенность — они меняются от любой правки промпта.
+  const soft = comparisons
+    .map((c) => ({ c, keys: new Set(c.changed.filter((k) => !c.changedCritical.includes(k))) }))
+    .filter(({ keys }) => keys.size > 0);
+  if (soft.length > 0) {
+    console.log(`\nизменились оценочные поля (${soft.length} документов) — не блокирует:`);
+    for (const { c, keys } of soft) {
+      if (details) {
+        console.log(`  ${c.label}:`);
+        for (const d of c.changedDetails.filter((d) => keys.has(d.key))) {
+          console.log(`      ${d.key}: ${d.from} → ${d.to}`);
+        }
+      } else {
+        console.log(`  ${c.label}: ${[...keys].join(', ')}`);
+      }
+    }
   }
 
   const shifted = comparisons.filter((c) => c.confidenceShift);

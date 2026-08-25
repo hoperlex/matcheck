@@ -353,6 +353,92 @@ describe('evaluateGate', () => {
     ).toContain('не разобрались файлы: 1');
   });
 
+  it('изменение, совпавшее с эталоном, регрессом не считается', () => {
+    // Боевой случай: на скане 1697 в бланке количество 76,032 и цена 6 846,72.
+    // База читала ценой 76032 (это количество), новая версия прочитала верно.
+    // Diff между версиями тут максимальный — и это ИСПРАВЛЕНИЕ, а не регресс.
+    const wrong = [{ ...parsed().items[0]!, rowNo: 1, qty: 1, price: 76032 }];
+    const right = [{ ...parsed().items[0]!, rowNo: 1, qty: 76.032, price: 6846.72 }];
+    const c = compareUnit({
+      label: '1697.pdf',
+      a1: parsed({ items: wrong }),
+      a2: parsed({ items: wrong }),
+      b: parsed({ items: right }),
+      consigneeFromModel: true,
+      expected: {
+        docNumber: '1421',
+        consignee: { name: 'ООО «СУ-10»', inn: null, kpp: null },
+        items: [{ rowNo: 1, qty: 76.032, price: 6846.72 }],
+      },
+    });
+    expect(c.changed).not.toContain('items[row1].qty');
+    expect(c.changed).not.toContain('items[row1].price');
+    expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [c] })).toEqual([]);
+  });
+
+  it('изменение против эталона остаётся регрессом', () => {
+    // Обратная сторона: если новая версия разошлась с бумагой, «подтверждения»
+    // нет и поле обязано попасть в блокеры.
+    const right = [{ ...parsed().items[0]!, rowNo: 1, qty: 76.032, price: 6846.72 }];
+    const wrong = [{ ...parsed().items[0]!, rowNo: 1, qty: 1, price: 76032 }];
+    const c = compareUnit({
+      label: '1697.pdf',
+      a1: parsed({ items: right }),
+      a2: parsed({ items: right }),
+      b: parsed({ items: wrong }),
+      consigneeFromModel: true,
+      expected: {
+        docNumber: '1421',
+        consignee: { name: 'ООО «СУ-10»', inn: null, kpp: null },
+        items: [{ rowNo: 1, qty: 76.032, price: 6846.72 }],
+      },
+    });
+    expect(c.changedCritical).toContain('items[row1].price');
+    expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [c] })).toContain(
+      'регрессии критических полей: 1',
+    );
+  });
+
+  it('оценочные поля меняются свободно: масса, объём, категория', () => {
+    // Они шевелятся от любой правки промпта, эталона у них нет и быть не может
+    // (это оценка модели, а не то, что напечатано в бланке).
+    const base = parsed().items[0]!;
+    const c = compareUnit({
+      label: 'f.pdf',
+      a1: parsed(),
+      a2: parsed(),
+      b: parsed({
+        items: [{ ...base, massKg: 0.2, volumeM3: 0.0001, groupName: 'Прочее' }],
+        consignee: { inn: null, kpp: null, name: 'ООО «СУ-10»' },
+      }),
+      consigneeFromModel: true,
+      // Эталон нужен любой: гейт отдельно блокирует прогон, где сверять не с
+      // чем вовсе, и без него тест проверял бы не то.
+      expected: { docNumber: '1421', consignee: { name: 'ООО «СУ-10»', inn: null, kpp: null } },
+    });
+    expect(c.changed.length).toBeGreaterThan(0);
+    expect(c.changedCritical).toEqual([]);
+    expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [c] })).toEqual([]);
+  });
+
+  it('дефект базы, дрожащий между прогонами, не объявляется новым', () => {
+    // На сканах модель подставляет ИНН покупателя в графу 4 через раз. Считая
+    // базу по одному прогону, гейт объявил бы это регрессом новой версии.
+    const withInn = { inn: '7736255508', kpp: null, name: 'ООО «СУ-10»' };
+    const clean = { inn: null, kpp: null, name: 'ООО «СУ-10»' };
+    const c = compareUnit({
+      label: 'scan.pdf',
+      a1: parsed({ consignee: clean }),
+      a2: parsed({ consignee: withInn }),
+      b: parsed({ consignee: withInn }),
+      consigneeFromModel: true,
+      expected: { docNumber: '1421', consignee: { name: 'ООО «СУ-10»', inn: null, kpp: null } },
+    });
+    expect(c.expectation.status).toBe('mismatch');
+    expect(c.baseExpectation.status).toBe('mismatch');
+    expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [c] })).toEqual([]);
+  });
+
   it('расхождение, которое есть и у базы, активацию не блокирует', () => {
     // Часть дефектов промптом не лечится: запрет подставлять ИНН покупателя в
     // графу 4 написан ещё в v13, а модель его игнорирует. Абсолютный гейт из-за
@@ -418,7 +504,7 @@ describe('evaluateGate', () => {
       expected: undefined,
     });
     expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [c] })).toContain(
-      'регрессии стабильных полей: 1',
+      'регрессии критических полей: 1',
     );
   });
 
@@ -553,6 +639,7 @@ describe('evaluateGate — деньги блокируют активацию', 
     unstable: [],
     unstableCritical: [],
     changed: [],
+    changedCritical: [],
     changedDetails: [],
     confidenceShift: null,
     expectation: { status: 'ok' },

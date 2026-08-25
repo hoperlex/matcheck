@@ -370,6 +370,16 @@ export type UnitComparison = {
    */
   changedDetails: Array<{ key: string; from: string; to: string }>;
   /**
+   * Изменения, которые действительно решают судьбу документа.
+   *
+   * Остальное — оценочные поля: масса и объём единицы товара, категория
+   * («стекло» → «прочее»), уверенность модели. Они шевелятся от ЛЮБОЙ правки
+   * промпта, эталона у них нет и быть не может (это оценка, а не то, что
+   * напечатано в бланке), а блокировали выкат наравне с ценой. Видеть их в
+   * отчёте полезно, запрещать из-за них исправление цены — нет.
+   */
+  changedCritical: string[];
+  /**
    * Те же расхождения с эталоном у БАЗОВОЙ версии.
    *
    * Нужны, чтобы отделить «новая версия сломала» от «сломано и было». Второе
@@ -381,6 +391,55 @@ export type UnitComparison = {
   baseExpectation: ExpectationVerdict;
   baseMoneyMismatches: MoneyMismatch[];
 };
+
+/**
+ * Совпало ли изменившееся поле с ЭТАЛОНОМ.
+ *
+ * Ключевое различение всего сравнения. Отчёт видит, что поле изменилось, но не
+ * знает, в какую сторону: `price: 76032 → 6846.72` и `price: 6846.72 → 76032`
+ * для diff-а одинаковы. Эталон это знает — на скане 1697 в бланке напечатано
+ * 6 846,72, и новая версия прочитала верно. Считать такое регрессом — значит
+ * запрещать ровно то исправление, ради которого версия и делалась.
+ *
+ * Работает только там, где разметка есть. Неразмеченное поле остаётся в списке
+ * изменений: мы не знаем, как правильно, и решает человек.
+ */
+/** Худший из двух вердиктов базы: дефект «через раз» — это дефект базы. */
+function worstVerdict(a: ExpectationVerdict, b: ExpectationVerdict): ExpectationVerdict {
+  const rank = (v: ExpectationVerdict): number =>
+    v.status === 'mismatch' ? 3 : v.status === 'filled_from_text' ? 2 : v.status === 'ok' ? 1 : 0;
+  return rank(b) > rank(a) ? b : a;
+}
+
+export function confirmedByExpectation(
+  key: string,
+  parsed: UpdPdfParsed,
+  expected: ExpectedDocument | undefined,
+): boolean {
+  if (!expected) return false;
+
+  if (key === 'totalSum' || key === 'vatSum') {
+    if (!(key in expected)) return false;
+    return sameMoney(expected[key] ?? null, parsed[key] ?? null, SCALE.money);
+  }
+
+  // Позиция ищется по номеру из графы 1 — тому же ключу, по которому сверяются
+  // деньги. Индексная форма (`items[0]`) сюда не подходит: при потерянной
+  // строке индексы едут, и «подтверждением» стала бы чужая позиция.
+  const match = /^items\[row(\d+)]\.(qty|price|sum|vatSum)$/.exec(key);
+  if (!match) return false;
+  const rowNo = Number(match[1]);
+  const field = match[2] as 'qty' | 'price' | 'sum' | 'vatSum';
+
+  const want = (expected.items ?? []).find((i) => i.rowNo === rowNo);
+  if (!want || !(field in want)) return false;
+
+  const rows = parsed.items.filter((i) => i.rowNo === rowNo);
+  if (rows.length !== 1) return false;
+
+  const scale = field === 'qty' ? SCALE.qty : field === 'price' ? SCALE.price : SCALE.money;
+  return sameMoney(want[field] ?? null, rows[0]![field] ?? null, scale);
+}
 
 export function compareUnit(args: {
   label: string;
@@ -398,7 +457,13 @@ export function compareUnit(args: {
 
   const unstable = diffKeys(sa1, sa2);
   const unstableSet = new Set(unstable);
-  const changed = diffKeys(sa1, sb).filter((k) => !unstableSet.has(k) && !isConsigneeKey(k));
+  const changed = diffKeys(sa1, sb).filter(
+    (k) =>
+      !unstableSet.has(k) &&
+      !isConsigneeKey(k) &&
+      // Поле, совпавшее с эталоном, изменилось В ПРАВИЛЬНУЮ сторону.
+      !confirmedByExpectation(k, args.b, args.expected),
+  );
 
   const bucketA = confidenceBucket(args.a1.confidence);
   const bucketB = confidenceBucket(args.b.confidence);
@@ -408,6 +473,7 @@ export function compareUnit(args: {
     unstable,
     unstableCritical: unstable.filter(isCriticalKey),
     changed,
+    changedCritical: changed.filter(isCriticalKey),
     changedDetails: changed.map((key) => ({
       key,
       from: sa1[key] ?? '∅',
@@ -420,12 +486,25 @@ export function compareUnit(args: {
       args.hasConsignee,
     ),
     moneyMismatches: checkMoneyAgainstExpectation(args.b, args.expected),
-    baseExpectation: checkConsigneeAgainstExpectation(
-      { label: args.label, parsed: args.a1, consigneeFromModel: args.consigneeFromModel },
-      args.expected,
-      args.hasConsignee,
+    baseExpectation: worstVerdict(
+      checkConsigneeAgainstExpectation(
+        { label: args.label, parsed: args.a1, consigneeFromModel: args.consigneeFromModel },
+        args.expected,
+        args.hasConsignee,
+      ),
+      // Второй прогон базы обязателен: на сканах модель подставляет ИНН
+      // покупателя через раз. Считая базу по одному прогону, мы объявляли бы
+      // «новым» дефект, который у неё просто дрожит.
+      checkConsigneeAgainstExpectation(
+        { label: args.label, parsed: args.a2, consigneeFromModel: args.consigneeFromModel },
+        args.expected,
+        args.hasConsignee,
+      ),
     ),
-    baseMoneyMismatches: checkMoneyAgainstExpectation(args.a1, args.expected),
+    baseMoneyMismatches: [
+      ...checkMoneyAgainstExpectation(args.a1, args.expected),
+      ...checkMoneyAgainstExpectation(args.a2, args.expected),
+    ],
   };
 }
 
@@ -462,8 +541,14 @@ export function evaluateGate(input: GateInput): string[] {
     blockers.push(`не разобрались файлы: ${input.failures.length}`);
   }
 
-  const regressed = input.comparisons.filter((c) => c.changed.length > 0);
-  if (regressed.length > 0) blockers.push(`регрессии стабильных полей: ${regressed.length}`);
+  // Блокируют только КРИТИЧЕСКИЕ изменения: номер, дата, стороны, состав и
+  // деньги позиций. Оценочные поля (масса, объём, категория, уверенность)
+  // шевелятся от любой правки текста промпта, эталона у них нет, и запрет
+  // из-за них означал бы «никаких новых версий никогда».
+  const regressed = input.comparisons.filter((c) => c.changedCritical.length > 0);
+  if (regressed.length > 0) {
+    blockers.push(`регрессии критических полей: ${regressed.length}`);
+  }
 
   const unstableCritical = input.comparisons.filter((c) => c.unstableCritical.length > 0);
   if (unstableCritical.length > 0) {
