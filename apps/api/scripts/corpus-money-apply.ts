@@ -125,6 +125,11 @@ function pairDocuments(
 
 /** Денежные поля позиции, которые реально проверены черновиком. */
 function itemFields(item: DraftDocument['items'][number]): ExpectedItem | null {
+  // Строка, где количество × цена не сходится с её же стоимостью, в эталон не
+  // идёт вовсе — даже частично. Какое из двух чисел испорчено срезом колонки,
+  // отсюда не видно, а половинчатая разметка тут опаснее отсутствующей:
+  // эталон объявит регрессом верный ответ модели.
+  if (item.mismatch) return null;
   const out: ExpectedItem = { rowNo: item.rowNo };
   let filled = 0;
   for (const field of ['qty', 'price', 'sum', 'vatSum'] as const) {
@@ -195,8 +200,17 @@ function main(): void {
       if (doc.totalSum != null) expected.totalSum = doc.totalSum;
       if (doc.vatSum != null) expected.vatSum = doc.vatSum;
 
+      const suspect = doc.items.filter((i) => i.mismatch);
+      for (const item of suspect) {
+        skippedDocs.push(`${entry.filename} · ${doc.docNumber ?? '∅'} · строка ${item.rowNo} — ${item.mismatch}`);
+      }
       const items = doc.items.map(itemFields).filter((i): i is ExpectedItem => i != null);
+      // Полная замена, а не дополнение: источник у позиций один — черновик.
+      // Если после починки разбора строка стала подозрительной и в перенос не
+      // попала, прежнее (уже неверное) значение обязано уйти из эталона, иначе
+      // оно тихо переживёт исправление и продолжит врать.
       if (items.length > 0) expected.items = items;
+      else delete expected.items;
       itemsWritten += items.length;
       partialItems += items.filter((i) => i.price === undefined || i.sum === undefined).length;
       docsWritten += 1;

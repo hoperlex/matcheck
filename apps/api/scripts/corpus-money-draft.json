@@ -56,7 +56,7 @@
           "items": [
             {
               "rowNo": 1,
-              "qty": 221,
+              "qty": 22,
               "price": 1505.66,
               "sum": 40411.8,
               "vatSum": 7287.37
@@ -79,7 +79,7 @@
             {
               "rowNo": 2,
               "qty": 305,
-              "price": 540.27,
+              "price": 40.27,
               "sum": 14984.47,
               "vatSum": 2702.12
             }
@@ -220,7 +220,7 @@
             {
               "rowNo": 1,
               "qty": 312,
-              "price": 2241.64,
+              "price": 241.64,
               "sum": 91977.85,
               "vatSum": 16586.17
             }
@@ -235,7 +235,7 @@
             {
               "rowNo": 1,
               "qty": 575,
-              "price": 555.66,
+              "price": 55.66,
               "sum": 39042.5,
               "vatSum": 7040.45
             }
@@ -250,7 +250,7 @@
             {
               "rowNo": 1,
               "qty": 575,
-              "price": 567.21,
+              "price": 67.21,
               "sum": 47150,
               "vatSum": 8502.46
             }
@@ -317,7 +317,7 @@
             {
               "rowNo": 2,
               "qty": 449,
-              "price": 98.19,
+              "price": 8.19,
               "sum": 4486.32,
               "vatSum": 809.01
             }
@@ -683,14 +683,14 @@
             },
             {
               "rowNo": 2,
-              "qty": 0,
+              "qty": 20,
               "price": 20,
               "sum": null,
               "vatSum": null
             },
             {
               "rowNo": 3,
-              "qty": 0,
+              "qty": 20,
               "price": 20,
               "sum": null,
               "vatSum": null
@@ -717,23 +717,37 @@
               "vatSum": null
             },
             {
-              "rowNo": 815,
+              "rowNo": 8,
               "qty": 20,
               "price": 2457.33,
               "sum": null,
               "vatSum": null
             },
             {
-              "rowNo": 820,
+              "rowNo": 8,
               "qty": 20,
               "price": 2464,
               "sum": null,
               "vatSum": null
             },
             {
-              "rowNo": 840,
+              "rowNo": 8,
               "qty": 20,
               "price": 1249.33,
+              "sum": null,
+              "vatSum": null
+            },
+            {
+              "rowNo": 10,
+              "qty": 0,
+              "price": 20,
+              "sum": null,
+              "vatSum": null
+            },
+            {
+              "rowNo": 10,
+              "qty": 67,
+              "price": 20,
               "sum": null,
               "vatSum": null
             }
@@ -910,22 +924,22 @@
               "rowNo": 2,
               "qty": 200,
               "price": 30,
-              "sum": 10702,
-              "vatSum": 156
+              "sum": null,
+              "vatSum": 0
             },
             {
               "rowNo": 3,
               "qty": 10,
-              "price": 58.33,
-              "sum": 10702,
-              "vatSum": 156
+              "price": 10583.33,
+              "sum": null,
+              "vatSum": 0
             },
             {
               "rowNo": 4,
               "qty": 50,
-              "price": 86.67,
-              "sum": 10702,
-              "vatSum": 156
+              "price": 9333.33,
+              "sum": null,
+              "vatSum": 0
             },
             {
               "rowNo": 10,
@@ -1156,7 +1170,7 @@
             {
               "rowNo": 2,
               "qty": 305,
-              "price": 540.27,
+              "price": 40.27,
               "sum": 14984.47,
               "vatSum": 2702.12
             }

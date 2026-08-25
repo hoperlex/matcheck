@@ -19,6 +19,16 @@ export type DraftItem = {
   price: number | null;
   sum: number | null;
   vatSum: number | null;
+  /**
+   * Почему строке нельзя верить: количество × цена не сходится с её же суммой.
+   *
+   * Отдельно от `totalsMismatch` документа, потому что ловит ДРУГОЕ. Сверка
+   * итога видит потерянную или задвоенную строку, но слепа к подмене внутри
+   * строки: срез колонки приклеил к количеству цифру соседней графы — сумма
+   * осталась прежней, итог сошёлся, а в эталон уехало 221 вместо 22. Строка с
+   * этой пометкой в манифест не переносится.
+   */
+  mismatch?: string;
 };
 
 export type DraftDocument = {
@@ -68,10 +78,26 @@ export type DraftEntry = {
  */
 export function parseNumber(raw: string): number | null {
   const cleaned = raw.replace(/\u00a0/g, ' ');
-  const match = /(\d[\d ]*(?:[.,]\d+)?)/.exec(cleaned);
-  if (!match?.[1]) return null;
-  const normalized = match[1].replace(/ /g, '').replace(',', '.');
-  const n = Number.parseFloat(normalized);
+  const match = NUMBER_TOKEN_RE.exec(cleaned);
+  NUMBER_TOKEN_RE.lastIndex = 0;
+  if (!match?.[0]) return null;
+  return toNumber(match[0]);
+}
+
+/**
+ * Число в бланке: «40 880,00», «33124.43», «100,000».
+ *
+ * Пробел считается разделителем тысяч ТОЛЬКО одиночный и только перед ровно
+ * тремя цифрами. Прежнее правило («любые пробелы внутри числа») склеивало
+ * соседние ячейки: срез графы 3 «22     1», где «1» — уже начало цены 1505.66,
+ * давал 221 вместо 22, и такое количество уезжало в эталон. Сверка итога с
+ * суммой позиций этого не видит: сумма строки при подмене количества остаётся
+ * верной, ловит только построчная арифметика.
+ */
+const NUMBER_TOKEN_RE = /\d+(?: \d{3})*(?:[.,]\d+)?/g;
+
+function toNumber(token: string): number | null {
+  const n = Number.parseFloat(token.replace(/ /g, '').replace(',', '.'));
   return Number.isFinite(n) ? n : null;
 }
 
@@ -119,6 +145,46 @@ export function cell(line: string, range: [number, number] | undefined): string 
   return line.slice(start, Math.min(line.length, to));
 }
 
+/**
+ * Число графы — с отбрасыванием чисел, которые срез разрезал пополам.
+ *
+ * Границы колонки приблизительны: слева срез намеренно расширен (числа заходят
+ * левее метки), справа обрывается на метке следующей графы. Поэтому в срез
+ * регулярно попадают КУСКИ соседних чисел, и оба конца врут по-своему:
+ *
+ *   графа 3 → "          22     1"      «1» — начало цены 1505.66 справа;
+ *   графа 4 → "5         40.27    12"   «5» — хвост количества 305 слева.
+ *
+ * Отличить обрезок от настоящего числа можно по одному признаку: он упирается
+ * в край среза, а сразу за краем в ИСХОДНОЙ строке стоит цифра. Целое число
+ * так не выглядит никогда — вокруг него пробелы или буквы.
+ *
+ * Это важнее, чем кажется: обе ошибки сохраняют сумму строки, поэтому сверка
+ * итога с суммой позиций их не видит. В эталон уехали 7 позиций из 70, и
+ * первый же A/B объявил регрессом верный ответ модели.
+ */
+export function cellNumber(line: string, range: [number, number] | undefined): number | null {
+  if (!range) return null;
+  const [from, to] = range;
+  const start = Math.max(0, from - 6);
+  const end = Math.min(line.length, to);
+  const slice = line.slice(start, end).replace(/\u00a0/g, ' ');
+  const source = line.replace(/\u00a0/g, ' ');
+
+  NUMBER_TOKEN_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = NUMBER_TOKEN_RE.exec(slice)) !== null) {
+    const tokenStart = start + match.index;
+    const tokenEnd = tokenStart + match[0].length;
+    const cutLeft = match.index === 0 && /\d/.test(source[tokenStart - 1] ?? '');
+    const cutRight = tokenEnd === end && /[\d.,]/.test(source[tokenEnd] ?? '');
+    if (cutLeft || cutRight) continue;
+    NUMBER_TOKEN_RE.lastIndex = 0;
+    return toNumber(match[0]);
+  }
+  return null;
+}
+
 export function extract(text: string): DraftDocument[] {
   const docs: DraftDocument[] = [];
   /** Документ по номеру — чтобы отличить второй экземпляр от продолжения. */
@@ -164,8 +230,8 @@ export function extract(text: string): DraftDocument[] {
 
     // Итоги: «Всего к оплате (9)» — суммы стоят в тех же графах 5, 8, 9.
     if (/Всего к оплате/.test(line)) {
-      current.vatSum = parseNumber(cell(line, ranges.get(COL.vatSum)));
-      current.totalSum = parseNumber(cell(line, ranges.get(COL.sum)));
+      current.vatSum = cellNumber(line, ranges.get(COL.vatSum));
+      current.totalSum = cellNumber(line, ranges.get(COL.sum));
       // Таблица кончилась. Дальше идут подписи и шапка следующей страницы, где
       // в координатах графы 1 стоит ИНН продавца — без сброса он попадал в
       // позиции номером 7716794678.
@@ -173,7 +239,7 @@ export function extract(text: string): DraftDocument[] {
       continue;
     }
 
-    const rowNo = parseNumber(cell(line, ranges.get(COL.rowNo)));
+    const rowNo = cellNumber(line, ranges.get(COL.rowNo));
     // Верхняя граница — от реквизитов, попадающих в ту же колонку на других
     // страницах: номер позиции в бланке трёхзначный в самом худшем случае,
     // а ИНН и коды товара — на порядки больше.
@@ -181,10 +247,10 @@ export function extract(text: string): DraftDocument[] {
 
     const item: DraftItem = {
       rowNo,
-      qty: parseNumber(cell(line, ranges.get(COL.qty))),
-      price: parseNumber(cell(line, ranges.get(COL.price))),
-      sum: parseNumber(cell(line, ranges.get(COL.sum))),
-      vatSum: parseNumber(cell(line, ranges.get(COL.vatSum))),
+      qty: cellNumber(line, ranges.get(COL.qty)),
+      price: cellNumber(line, ranges.get(COL.price)),
+      sum: cellNumber(line, ranges.get(COL.sum)),
+      vatSum: cellNumber(line, ranges.get(COL.vatSum)),
     };
     // Строка таблицы — та, где есть номер позиции и хотя бы одно число.
     //
@@ -218,5 +284,32 @@ export function extract(text: string): DraftDocument[] {
     }
   }
 
+  for (const doc of docs) markSuspectRows(doc);
+
   return docs;
+}
+
+/**
+ * Построчная сверка: количество × цена против стоимости без налога.
+ *
+ * База берётся как «графа 9 минус графа 8», а не из графы 5: пятая графа тоже
+ * читается срезом и может быть испорчена тем же способом, а вычитание опирается
+ * на два независимо прочитанных числа.
+ *
+ * Допуск рублёвый: поставщик печатает цену округлённой до копеек, а сумму
+ * считает по неокруглённой — на больших количествах расхождение в рубли
+ * законно. Ошибка же среза сдвигает число в разы.
+ */
+function markSuspectRows(doc: DraftDocument): void {
+  for (const item of doc.items) {
+    const { qty, price, sum } = item;
+    if (qty == null || price == null || sum == null) continue;
+    const base = sum - (item.vatSum ?? 0);
+    const calculated = qty * price;
+    const tolerance = Math.max(1, Math.abs(base) * 0.001);
+    if (Math.abs(calculated - base) <= tolerance) continue;
+    item.mismatch =
+      `${qty} × ${price} = ${calculated.toFixed(2)} против стоимости без налога ` +
+      `${base.toFixed(2)} — похоже, срез колонки прихватил цифру соседней графы`;
+  }
 }

@@ -29,11 +29,26 @@
  *   * значения сверяются с эталоном expectedDocuments из манифеста, а не с
  *     фактом непустоты.
  *
- * Запуск:
+ * Запуск локально:
  *   pnpm --filter @matcheck/api exec tsx scripts/upd-prompt-ab.ts
- *   pnpm --filter @matcheck/api exec tsx scripts/upd-prompt-ab.ts --limit 5
+ *   pnpm --filter @matcheck/api exec tsx scripts/upd-prompt-ab.ts --limit 5 --details
  *   pnpm --filter @matcheck/api exec tsx scripts/upd-prompt-ab.ts --doc-kind m15 \
  *     --dir /path/to/waybills --manifest /path/to/manifest.json
+ *
+ * Запуск на сервере (промпты и ключ модели живут только там). Корпус в образ
+ * НЕ входит — Dockerfile копирует apps/api и packages/contracts, поэтому
+ * `docker exec matcheck-api …` падает с ENOENT на /app/docs/debug-upd. Папку
+ * надо смонтировать и указать через --dir:
+ *   cd /srv/matcheck/app
+ *   docker compose -f infra/docker-compose.prod.yml run --rm \
+ *     -v /srv/matcheck/app/docs/debug-upd:/corpus:ro \
+ *     matcheck-api node_modules/.bin/tsx scripts/upd-prompt-ab.ts \
+ *     --base "default v13" --new "default v14" --limit 5 --dir /corpus
+ * `run --rm` берёт тот же образ и env_file, но не публикует порт — работающий
+ * API не затрагивается. При EACCES на /corpus добавить --user root.
+ *
+ * Флаг --details печатает значения изменившихся полей («было → стало»): без
+ * них список имён не отвечает, улучшение это или регресс.
  *
  * Стоит денег: три прогона по корпусу (A/A + новая версия) — это ~3 LLM-вызова
  * на файл. Для черновых проверок используйте --limit.
@@ -64,6 +79,7 @@ import {
 import type { PromptOverride } from '../src/domain/prompts/registry.js';
 import {
   compareUnit,
+  newMoneyMismatches,
   evaluateGate,
   matchExpectation,
   type ExpectedDocument,
@@ -219,6 +235,9 @@ async function main(): Promise<void> {
   if (docKind !== 'upd' && docKind !== 'm15') {
     throw new Error(`--doc-kind: ожидается upd или m15, получено «${docKind}»`);
   }
+  // Значения изменившихся полей: без них список имён не отвечает на вопрос
+  // «стало лучше или хуже» — а именно это и решается перед активацией.
+  const details = process.argv.includes('--details');
   const dir = resolve(argValue('--dir') ?? join(process.cwd(), '../../docs/debug-upd'));
   const manifestPath = resolve(
     argValue('--manifest') ?? join(process.cwd(), 'scripts/corpus-manifest.json'),
@@ -358,7 +377,15 @@ async function main(): Promise<void> {
   const regressed = comparisons.filter((c) => c.changed.length > 0);
   if (regressed.length > 0) {
     console.log(`\nРЕГРЕСС: изменились стабильные поля (${regressed.length} документов):`);
-    for (const c of regressed) console.log(`  ${c.label}: ${c.changed.join(', ')}`);
+    for (const c of regressed) {
+      if (details) {
+        console.log(`  ${c.label}:`);
+        for (const d of c.changedDetails) console.log(`      ${d.key}: ${d.from} → ${d.to}`);
+      } else {
+        console.log(`  ${c.label}: ${c.changed.join(', ')}`);
+      }
+    }
+    if (!details) console.log('  (значения полей — с флагом --details)');
   }
 
   const shifted = comparisons.filter((c) => c.confidenceShift);
@@ -371,8 +398,12 @@ async function main(): Promise<void> {
   if (moneyProblems.length > 0) {
     console.log(`\nСУММЫ — РАСХОЖДЕНИЯ С ЭТАЛОНОМ (${moneyProblems.length}):`);
     for (const c of moneyProblems) {
+      const fresh = new Set(newMoneyMismatches(c).map((m) => `${m.where}|${m.detail}`));
       for (const m of c.moneyMismatches) {
-        console.log(`  ${c.label} — ${m.where}: ${m.detail}`);
+        // «было и в базе» — дефект существует на активном промпте прямо сейчас.
+        // Такое не блокирует выкат новой версии, но и молчать о нём нельзя.
+        const mark = fresh.has(`${m.where}|${m.detail}`) ? 'НОВОЕ' : 'было и в базе';
+        console.log(`  ${c.label} — ${m.where}: ${m.detail} [${mark}]`);
       }
     }
   }
@@ -384,7 +415,8 @@ async function main(): Promise<void> {
     console.log(`\nГРУЗОПОЛУЧАТЕЛЬ — ПРОБЛЕМЫ (${expectationProblems.length}):`);
     for (const c of expectationProblems) {
       const detail = 'detail' in c.expectation ? c.expectation.detail : '';
-      console.log(`  ${c.label}: ${detail}`);
+      const mark = c.baseExpectation.status === c.expectation.status ? 'было и в базе' : 'НОВОЕ';
+      console.log(`  ${c.label}: ${detail} [${mark}]`);
     }
   }
 

@@ -360,6 +360,26 @@ export type UnitComparison = {
   expectation: ExpectationVerdict;
   /** Расхождения по деньгам с эталоном (пусто — либо всё сошлось, либо не размечено). */
   moneyMismatches: MoneyMismatch[];
+  /**
+   * Что именно изменилось: поле, было, стало.
+   *
+   * Без значений отчёт называет поле, но не отвечает на главный вопрос —
+   * улучшение это или регресс. `itemsCount: ∅ → 1` на бланке, где напечатано
+   * «Всего наименований: 1», и `qty: 22 → 221` выглядят в списке одинаково,
+   * а означают противоположное.
+   */
+  changedDetails: Array<{ key: string; from: string; to: string }>;
+  /**
+   * Те же расхождения с эталоном у БАЗОВОЙ версии.
+   *
+   * Нужны, чтобы отделить «новая версия сломала» от «сломано и было». Второе
+   * блокировать нельзя: часть дефектов промптом не лечится вовсе — запрет
+   * подставлять ИНН покупателя в графу 4 написан ещё в v13, а модель его
+   * игнорирует. Без этого разделения гейт запрещал бы любую новую версию,
+   * пока не вылечен старый дефект, то есть навсегда.
+   */
+  baseExpectation: ExpectationVerdict;
+  baseMoneyMismatches: MoneyMismatch[];
 };
 
 export function compareUnit(args: {
@@ -388,6 +408,11 @@ export function compareUnit(args: {
     unstable,
     unstableCritical: unstable.filter(isCriticalKey),
     changed,
+    changedDetails: changed.map((key) => ({
+      key,
+      from: sa1[key] ?? '∅',
+      to: sb[key] ?? '∅',
+    })),
     confidenceShift: bucketA === bucketB ? null : `${bucketA} → ${bucketB}`,
     expectation: checkConsigneeAgainstExpectation(
       { label: args.label, parsed: args.b, consigneeFromModel: args.consigneeFromModel },
@@ -395,6 +420,12 @@ export function compareUnit(args: {
       args.hasConsignee,
     ),
     moneyMismatches: checkMoneyAgainstExpectation(args.b, args.expected),
+    baseExpectation: checkConsigneeAgainstExpectation(
+      { label: args.label, parsed: args.a1, consigneeFromModel: args.consigneeFromModel },
+      args.expected,
+      args.hasConsignee,
+    ),
+    baseMoneyMismatches: checkMoneyAgainstExpectation(args.a1, args.expected),
   };
 }
 
@@ -408,6 +439,17 @@ export type GateInput = {
  * Итог сверки. Пусто — активировать можно; иначе перечислены причины, по
  * которым нельзя.
  */
+/**
+ * Расхождения по деньгам, которых у базовой версии не было.
+ *
+ * Ключ — «где» плюс «что»: одна и та же строка может разойтись и по цене, и по
+ * количеству, и лечиться эти случаи будут по-разному.
+ */
+export function newMoneyMismatches(c: UnitComparison): MoneyMismatch[] {
+  const was = new Set(c.baseMoneyMismatches.map((m) => `${m.where}|${m.detail}`));
+  return c.moneyMismatches.filter((m) => !was.has(`${m.where}|${m.detail}`));
+}
+
 export function evaluateGate(input: GateInput): string[] {
   const blockers: string[] = [];
 
@@ -431,15 +473,21 @@ export function evaluateGate(input: GateInput): string[] {
   const shifted = input.comparisons.filter((c) => c.confidenceShift);
   if (shifted.length > 0) blockers.push(`confidence пересёк порог: ${shifted.length}`);
 
-  const mismatch = input.comparisons.filter((c) => c.expectation.status === 'mismatch');
-  if (mismatch.length > 0) blockers.push(`расхождение с эталоном: ${mismatch.length}`);
+  // Блокируют только НОВЫЕ расхождения — те, которых у базовой версии не было.
+  // Унаследованные остаются в отчёте (их видно отдельной строкой), но не
+  // запрещают выкат: они существуют и сейчас, на активном промпте, и держать
+  // из-за них улучшение — значит не выпустить его никогда.
+  const mismatch = input.comparisons.filter(
+    (c) => c.expectation.status === 'mismatch' && c.baseExpectation.status !== 'mismatch',
+  );
+  if (mismatch.length > 0) blockers.push(`НОВОЕ расхождение с эталоном: ${mismatch.length}`);
 
-  // Деньги считаются отдельным блокером: «обе версии ошиблись одинаково» не
-  // даёт диффа между прогонами и без этой проверки прошло бы как успех.
-  const money = input.comparisons.filter((c) => c.moneyMismatches.length > 0);
+  // Деньги считаются отдельно: «обе версии ошиблись одинаково» не даёт диффа
+  // между прогонами и без сверки с эталоном прошло бы как успех.
+  const money = input.comparisons.filter((c) => newMoneyMismatches(c).length > 0);
   if (money.length > 0) {
-    const rows = money.reduce((acc, c) => acc + c.moneyMismatches.length, 0);
-    blockers.push(`расхождение сумм с эталоном: ${money.length} док. / ${rows} полей`);
+    const rows = money.reduce((acc, c) => acc + newMoneyMismatches(c).length, 0);
+    blockers.push(`НОВОЕ расхождение сумм с эталоном: ${money.length} док. / ${rows} полей`);
   }
 
   const fromText = input.comparisons.filter((c) => c.expectation.status === 'filled_from_text');

@@ -8,6 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { UpdPdfParsed } from '@matcheck/contracts';
+import type { UnitComparison } from '../scripts/prompt-ab-lib.js';
 import {
   checkConsigneeAgainstExpectation,
   checkMoneyAgainstExpectation,
@@ -17,6 +18,7 @@ import {
   evaluateGate,
   isCriticalKey,
   matchExpectation,
+  newMoneyMismatches,
   snapshotOf,
 } from '../scripts/prompt-ab-lib.js';
 
@@ -351,6 +353,61 @@ describe('evaluateGate', () => {
     ).toContain('не разобрались файлы: 1');
   });
 
+  it('расхождение, которое есть и у базы, активацию не блокирует', () => {
+    // Часть дефектов промптом не лечится: запрет подставлять ИНН покупателя в
+    // графу 4 написан ещё в v13, а модель его игнорирует. Абсолютный гейт из-за
+    // такого запрещал бы ЛЮБУЮ новую версию — то есть навсегда. Блокируют
+    // только новые расхождения; унаследованные остаются в отчёте.
+    const withBuyerInn = { inn: '7736255508', kpp: null, name: 'ООО «СУ-10»' };
+    const c = compareUnit({
+      label: 'f.pdf',
+      a1: parsed({ consignee: withBuyerInn }),
+      a2: parsed({ consignee: withBuyerInn }),
+      b: parsed({ consignee: withBuyerInn }),
+      consigneeFromModel: true,
+      expected: { docNumber: '1421', consignee: { name: 'ООО «СУ-10»', inn: null, kpp: null } },
+    });
+    expect(c.expectation.status).toBe('mismatch');
+    expect(c.baseExpectation.status).toBe('mismatch');
+    expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [c] })).toEqual([]);
+  });
+
+  it('расхождение, появившееся только у новой версии, блокирует', () => {
+    const c = compareUnit({
+      label: 'f.pdf',
+      a1: parsed({ consignee: { inn: null, kpp: null, name: 'ООО «СУ-10»' } }),
+      a2: parsed({ consignee: { inn: null, kpp: null, name: 'ООО «СУ-10»' } }),
+      b: parsed({ consignee: { inn: '7736255508', kpp: null, name: 'ООО «СУ-10»' } }),
+      consigneeFromModel: true,
+      expected: { docNumber: '1421', consignee: { name: 'ООО «СУ-10»', inn: null, kpp: null } },
+    });
+    expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [c] })).toContain(
+      'НОВОЕ расхождение с эталоном: 1',
+    );
+  });
+
+  it('сумма, разошедшаяся с эталоном у обеих версий, не блокирует', () => {
+    // Эталон говорит «цена 1992.33», обе версии читают 1892.33 — дефект общий,
+    // и он виден в отчёте, но выкат новой версии из-за него не держим.
+    const wrongPrice = [{ ...parsed().items[0]!, price: 1892.33 }];
+    const expected = {
+      docNumber: '1421',
+      consignee: { name: 'ООО «СУ-10»', inn: null, kpp: null },
+      items: [{ rowNo: 1, price: 1992.33 }],
+    };
+    const c = compareUnit({
+      label: 'f.pdf',
+      a1: parsed({ items: wrongPrice }),
+      a2: parsed({ items: wrongPrice }),
+      b: parsed({ items: wrongPrice }),
+      consigneeFromModel: true,
+      expected,
+    });
+    expect(c.moneyMismatches.length).toBeGreaterThan(0);
+    expect(newMoneyMismatches(c)).toEqual([]);
+    expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [c] })).toEqual([]);
+  });
+
   it('изменение стабильного поля блокирует', () => {
     const c = compareUnit({
       label: 'f.pdf',
@@ -478,23 +535,72 @@ describe('checkMoneyAgainstExpectation — сверка денег с бумаг
 });
 
 describe('evaluateGate — деньги блокируют активацию', () => {
-  it('расхождение сумм с эталоном — блокер, даже когда версии совпали между собой', () => {
+  /**
+   * Правило сознательно смягчено против первой редакции.
+   *
+   * Было: любое расхождение с эталоном по деньгам — блокер, даже если обе
+   * версии ошиблись одинаково. Замысел верный (одинаковая ошибка не должна
+   * выглядеть успехом), но на практике такой гейт неисполним: модель ошибается
+   * и на активном промпте, поэтому «ноль расхождений» недостижимо, и запрет
+   * висел бы на КАЖДОЙ новой версии — включая ту, что чинит эти же ошибки.
+   *
+   * Стало: блокируют расхождения, которых у базовой версии не было. Общие с
+   * базой остаются в отчёте с пометкой «было и в базе» — они описывают то, что
+   * происходит на бою прямо сейчас, и держать из-за них улучшение бессмысленно.
+   */
+  const comparison = (over: Partial<UnitComparison>): UnitComparison => ({
+    label: 'a.pdf',
+    unstable: [],
+    unstableCritical: [],
+    changed: [],
+    changedDetails: [],
+    confidenceShift: null,
+    expectation: { status: 'ok' },
+    moneyMismatches: [],
+    baseExpectation: { status: 'ok' },
+    baseMoneyMismatches: [],
+    ...over,
+  });
+
+  const rowMismatch = { where: 'строка 1', detail: 'сумма: ожидалось 20.00, получено 72.00' };
+
+  it('расхождение сумм, появившееся у новой версии, — блокер', () => {
+    const blockers = evaluateGate({
+      checkedUnits: 1,
+      failures: [],
+      comparisons: [comparison({ moneyMismatches: [rowMismatch] })],
+    });
+    expect(blockers.some((b) => b.includes('НОВОЕ расхождение сумм с эталоном'))).toBe(true);
+  });
+
+  it('то же расхождение у обеих версий активацию не держит', () => {
     const blockers = evaluateGate({
       checkedUnits: 1,
       failures: [],
       comparisons: [
-        {
-          label: 'a.pdf',
-          unstable: [],
-          unstableCritical: [],
-          changed: [],
-          confidenceShift: null,
-          expectation: { status: 'ok' },
-          moneyMismatches: [{ where: 'строка 1', detail: 'сумма: ожидалось 20.00, получено 72.00' }],
-        },
+        comparison({ moneyMismatches: [rowMismatch], baseMoneyMismatches: [rowMismatch] }),
       ],
     });
-    expect(blockers.some((b) => b.includes('расхождение сумм с эталоном'))).toBe(true);
+    expect(blockers).toEqual([]);
+  });
+
+  it('новое расхождение видно даже рядом с унаследованным', () => {
+    // Строка 1 сломана у обеих версий, строка 2 — только у новой. Гейт обязан
+    // среагировать на вторую и не «утонуть» в первой.
+    const fresh = { where: 'строка 2', detail: 'цена: ожидалось 40.27, получено 540.27' };
+    const blockers = evaluateGate({
+      checkedUnits: 1,
+      failures: [],
+      comparisons: [
+        comparison({
+          moneyMismatches: [rowMismatch, fresh],
+          baseMoneyMismatches: [rowMismatch],
+        }),
+      ],
+    });
+    expect(blockers.some((b) => b.includes('НОВОЕ расхождение сумм с эталоном: 1 док. / 1 полей'))).toBe(
+      true,
+    );
   });
 });
 
