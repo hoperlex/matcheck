@@ -198,7 +198,7 @@
       "parsePath": "vision",
       "hasConsignee": true,
       "source": "manual",
-      "note": "фото УПД, продавец ООО \"ЛИФТОИТ\"",
+      "note": "ФОТО УПД № 328 ЛИФТФИТ. Количество напечатано как «1 140,000» — пробел разделяет тысячи, запятая отделяет дробную часть: главный целевой случай v15, и именно на фотографии, а не на скане",
       "expectedDocuments": [
         {
           "docNumber": "328",
@@ -206,7 +206,18 @@
             "name": "ООО \"СТРОИТЕЛЬНОЕ УПРАВЛЕНИЕ - 10\"",
             "inn": null,
             "kpp": null
-          }
+          },
+          "totalSum": 1557696.0,
+          "vatSum": 280896.0,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1140,
+              "price": 1120.0,
+              "sum": 1557696.0,
+              "vatSum": 280896.0
+            }
+          ]
         }
       ]
     },
@@ -260,7 +271,7 @@
       "parsePath": "vision",
       "hasConsignee": true,
       "source": "manual",
-      "note": "скан УПД, продавец ООО \"ГЛОБАЛ ГЛАСС\"",
+      "note": "скан УПД № 582 ГЛОБАЛ ГЛАСС. ДРОБНОЕ количество 85,725 м² на vision-пути (целевой случай v15) и ставка НДС 20%, а не 22%",
       "expectedDocuments": [
         {
           "docNumber": "582",
@@ -268,7 +279,18 @@
             "name": "ООО \"СУ-10\"",
             "inn": null,
             "kpp": null
-          }
+          },
+          "totalSum": 848677.5,
+          "vatSum": 141446.25,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 85.725,
+              "price": 8250.0,
+              "sum": 848677.5,
+              "vatSum": 141446.25
+            }
+          ]
         }
       ]
     },
@@ -639,7 +661,7 @@
       "parsePath": "vision",
       "hasConsignee": true,
       "source": "manual",
-      "note": "копия предыдущего файла",
+      "note": "копия предыдущего файла; скан УПД № 234 ПСТ Групп, ДРОБНОЕ количество 3,040 тн на vision-пути",
       "expectedDocuments": [
         {
           "docNumber": "234",
@@ -647,7 +669,25 @@
             "name": "ООО \"СУ-10\"",
             "inn": null,
             "kpp": null
-          }
+          },
+          "totalSum": 405080.0,
+          "vatSum": 73047.21,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 3.04,
+              "price": 104098.36,
+              "sum": 386080.0,
+              "vatSum": 69620.98
+            },
+            {
+              "rowNo": 2,
+              "qty": 1,
+              "price": 15573.77,
+              "sum": 19000.0,
+              "vatSum": 3426.23
+            }
+          ]
         }
       ]
     },
@@ -657,7 +697,7 @@
       "parsePath": "vision",
       "hasConsignee": true,
       "source": "manual",
-      "note": "скан УПД, продавец ООО \"ПСТ Групп\"",
+      "note": "скан УПД № 234 ПСТ Групп, ДРОБНОЕ количество 3,040 тн на vision-пути",
       "expectedDocuments": [
         {
           "docNumber": "234",
@@ -665,7 +705,25 @@
             "name": "ООО \"СУ-10\"",
             "inn": null,
             "kpp": null
-          }
+          },
+          "totalSum": 405080.0,
+          "vatSum": 73047.21,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 3.04,
+              "price": 104098.36,
+              "sum": 386080.0,
+              "vatSum": 69620.98
+            },
+            {
+              "rowNo": 2,
+              "qty": 1,
+              "price": 15573.77,
+              "sum": 19000.0,
+              "vatSum": 3426.23
+            }
+          ]
         }
       ]
     },
@@ -693,7 +751,7 @@
       "parsePath": "vision",
       "hasConsignee": true,
       "source": "manual",
-      "note": "скан УПД, продавец ООО \"ПСТ Групп\"",
+      "note": "скан УПД № 219 ПСТ Групп, ДРОБНОЕ количество 12,590 тн на vision-пути",
       "expectedDocuments": [
         {
           "docNumber": "219",
@@ -701,7 +759,18 @@
             "name": "ООО \"СУ-10\"",
             "inn": null,
             "kpp": null
-          }
+          },
+          "totalSum": 1622453.41,
+          "vatSum": 292573.57,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 12.59,
+              "price": 105629.85,
+              "sum": 1622453.41,
+              "vatSum": 292573.57
+            }
+          ]
         }
       ]
     },
@@ -1454,7 +1523,7 @@
       "parsePath": "vision",
       "hasConsignee": true,
       "source": "manual",
-      "note": "скан УПД, продавец ООО \"ПСТ Групп\"",
+      "note": "УПД № 214 ПСТ Групп + транспортная накладная и сертификаты качества на страницах 2-5. Строка 1 — ДРОБНОЕ количество 4,140 тн: целевой случай v15 на vision-пути",
       "expectedDocuments": [
         {
           "docNumber": "214",
@@ -1462,7 +1531,25 @@
             "name": "ООО \"СУ-10\"",
             "inn": null,
             "kpp": null
-          }
+          },
+          "totalSum": 544780.0,
+          "vatSum": 98239.02,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 4.14,
+              "price": 104098.36,
+              "sum": 525780.0,
+              "vatSum": 94812.79
+            },
+            {
+              "rowNo": 2,
+              "qty": 1,
+              "price": 15573.77,
+              "sum": 19000.0,
+              "vatSum": 3426.23
+            }
+          ]
         }
       ]
     },
@@ -1673,7 +1760,7 @@
       "parsePath": "vision",
       "hasConsignee": true,
       "source": "manual",
-      "note": "скан УПД, продавец ТД \"Альфа\"",
+      "note": "скан УПД ТД \"Альбион\", повёрнут на 90°; строка 2 — qty=1, цена равна стоимости без налога",
       "expectedDocuments": [
         {
           "docNumber": "АА0607-0002",
@@ -1681,7 +1768,25 @@
             "name": "ООО \"СУ-10\"",
             "inn": null,
             "kpp": null
-          }
+          },
+          "totalSum": 23488.0,
+          "vatSum": 4235.54,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 12,
+              "price": 1536.07,
+              "sum": 22488.0,
+              "vatSum": 4055.21
+            },
+            {
+              "rowNo": 2,
+              "qty": 1,
+              "price": 819.67,
+              "sum": 1000.0,
+              "vatSum": 180.33
+            }
+          ]
         }
       ]
     },
@@ -1691,15 +1796,40 @@
       "parsePath": "vision",
       "hasConsignee": true,
       "source": "manual",
-      "note": "скан УПД, продавец ТД \"Альфа\"",
+      "note": "скан УПД, продавец ТД \"Альбион\"; повёрнут на 90°, 2 листа",
       "expectedDocuments": [
         {
-          "docNumber": "АА0907-0004",
+          "docNumber": "АА0807-0004",
           "consignee": {
             "name": "ООО \"СУ-10\"",
             "inn": null,
             "kpp": null
-          }
+          },
+          "totalSum": 56415.0,
+          "vatSum": 10173.2,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 37,
+              "price": 1151.64,
+              "sum": 51985.0,
+              "vatSum": 9374.34
+            },
+            {
+              "rowNo": 2,
+              "qty": 6,
+              "price": 331.97,
+              "sum": 2430.0,
+              "vatSum": 438.2
+            },
+            {
+              "rowNo": 3,
+              "qty": 1,
+              "price": 1639.34,
+              "sum": 2000.0,
+              "vatSum": 360.66
+            }
+          ]
         }
       ]
     },
@@ -1709,7 +1839,7 @@
       "parsePath": "vision",
       "hasConsignee": true,
       "source": "manual",
-      "note": "скан того же УПД АА0907-0004, другие позиции",
+      "note": "скан УПД ТД \"Альбион\", повёрнут на 90°, 2 листа; количества с запятой (12,000 = 12)",
       "expectedDocuments": [
         {
           "docNumber": "АА0907-0004",
@@ -1717,7 +1847,39 @@
             "name": "ООО \"СУ-10\"",
             "inn": null,
             "kpp": null
-          }
+          },
+          "totalSum": 177370.0,
+          "vatSum": 31984.75,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 12,
+              "price": 908.2,
+              "sum": 13296.0,
+              "vatSum": 2397.64
+            },
+            {
+              "rowNo": 2,
+              "qty": 50,
+              "price": 256.56,
+              "sum": 15650.0,
+              "vatSum": 2822.13
+            },
+            {
+              "rowNo": 3,
+              "qty": 96,
+              "price": 1224.59,
+              "sum": 143424.0,
+              "vatSum": 25863.34
+            },
+            {
+              "rowNo": 4,
+              "qty": 1,
+              "price": 4098.36,
+              "sum": 5000.0,
+              "vatSum": 901.64
+            }
+          ]
         }
       ]
     },
@@ -1727,7 +1889,7 @@
       "parsePath": "vision",
       "hasConsignee": true,
       "source": "manual",
-      "note": "скан УПД, продавец ООО \"СТК ГРУПП\"",
+      "note": "скан ЧЕТЫРЁХ УПД СТК-ГРУПП (№ 487-490 от 24.06.2026) в одном файле — класс vision_bundle; текстового слоя нет, поэтому multi_upd-путь скрипта его не сегментирует и сверяется тот документ, который вернула модель. Почти все позиции — qty=1, где цена ЗАКОННО равна стоимости без налога",
       "expectedDocuments": [
         {
           "docNumber": "487",
@@ -1735,7 +1897,117 @@
             "name": "ООО \"СУ-10\"",
             "inn": null,
             "kpp": null
-          }
+          },
+          "totalSum": 112084.0,
+          "vatSum": 20211.88,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1,
+              "price": 9923.93,
+              "sum": 12107.2,
+              "vatSum": 2183.27
+            },
+            {
+              "rowNo": 2,
+              "qty": 1,
+              "price": 12696.39,
+              "sum": 15489.6,
+              "vatSum": 2793.21
+            },
+            {
+              "rowNo": 3,
+              "qty": 2,
+              "price": 34625.9,
+              "sum": 84487.2,
+              "vatSum": 15235.4
+            }
+          ]
+        },
+        {
+          "docNumber": "488",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          },
+          "totalSum": 216202.93,
+          "vatSum": 38987.42,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1,
+              "price": 59772.83,
+              "sum": 72922.85,
+              "vatSum": 13150.02
+            },
+            {
+              "rowNo": 2,
+              "qty": 1,
+              "price": 92792.57,
+              "sum": 113206.94,
+              "vatSum": 20414.37
+            },
+            {
+              "rowNo": 3,
+              "qty": 1,
+              "price": 24650.11,
+              "sum": 30073.14,
+              "vatSum": 5423.03
+            }
+          ]
+        },
+        {
+          "docNumber": "489",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          },
+          "totalSum": 227640.52,
+          "vatSum": 41049.93,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1,
+              "price": 134622.08,
+              "sum": 164238.94,
+              "vatSum": 29616.86
+            },
+            {
+              "rowNo": 2,
+              "qty": 1,
+              "price": 51968.51,
+              "sum": 63401.58,
+              "vatSum": 11433.07
+            }
+          ]
+        },
+        {
+          "docNumber": "490",
+          "consignee": {
+            "name": "ООО \"СУ-10\"",
+            "inn": null,
+            "kpp": null
+          },
+          "totalSum": 51300.0,
+          "vatSum": 9250.82,
+          "items": [
+            {
+              "rowNo": 1,
+              "qty": 1,
+              "price": 19715.16,
+              "sum": 24052.5,
+              "vatSum": 4337.34
+            },
+            {
+              "rowNo": 2,
+              "qty": 1,
+              "price": 22334.02,
+              "sum": 27247.5,
+              "vatSum": 4913.48
+            }
+          ]
         }
       ]
     },

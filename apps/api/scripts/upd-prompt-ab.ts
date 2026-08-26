@@ -35,6 +35,16 @@
  *   pnpm --filter @matcheck/api exec tsx scripts/upd-prompt-ab.ts --doc-kind m15 \
  *     --dir /path/to/waybills --manifest /path/to/manifest.json
  *
+ * ЧАСТЯМИ (так гоняют полный корпус, чтобы не долбить провайдера очередью
+ * запросов). Окно задаётся парой --offset/--limit, пауза --delay ставится перед
+ * КАЖДЫМ вызовом модели, отчёт каждой части пишется своим файлом:
+ *   … --base "default v13" --new "default v15" \
+ *     --offset 0 --limit 5 --delay 2000 --out /tmp/ab-00.json
+ *   … --offset 5 --limit 5 --delay 2000 --out /tmp/ab-05.json
+ * Скрипт сам печатает `--offset` следующей части. Свести части в один вердикт:
+ *   pnpm --filter @matcheck/api exec tsx scripts/prompt-ab-merge.ts /tmp/ab-*.json
+ * Отдельные части вердиктом НЕ являются: гейт считается по всему корпусу.
+ *
  * Запуск на сервере (промпты и ключ модели живут только там). Корпус в образ
  * НЕ входит — Dockerfile копирует apps/api и packages/contracts, поэтому
  * `docker exec matcheck-api …` падает с ENOENT на /app/docs/debug-upd. Папку
@@ -51,7 +61,13 @@
  * них список имён не отвечает, улучшение это или регресс.
  *
  * Стоит денег: три прогона по корпусу (A/A + новая версия) — это ~3 LLM-вызова
- * на файл. Для черновых проверок используйте --limit.
+ * на файл, а на пакет из N УПД — 3N. Для черновых проверок используйте --limit.
+ *
+ * Отчёт --out пишет то, без чего прогон невоспроизводим: идентификаторы и хеши
+ * ОБЕИХ версий промпта, хеш манифеста, git SHA, границы окна и — главное —
+ * фактическую модель каждого вызова. Последнее не формальность: при ошибке
+ * текстовый путь молча уходит к следующему провайдеру, и тогда отчёт сравнивает
+ * не два промпта, а две модели. Скрипт предупреждает об этом отдельной строкой.
  *
  * НЕ пишет в source_documents и не меняет активный промпт: читает промпты из
  * таблицы prompts, гоняет парсеры с явным promptOverride и печатает отчёт.
@@ -63,13 +79,15 @@
  * → Промпты после зелёного отчёта) и не проверяет Excel-документы через LLM —
  * их структурный парсер промпт не использует вовсе.
  */
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { extname, join, resolve } from 'node:path';
 import { PDFParse } from 'pdf-parse';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, gte, isNull } from 'drizzle-orm';
 import type { UpdPdfParsed } from '@matcheck/contracts';
 import { db } from '../src/db/client.js';
-import { prompts } from '../src/db/schema.js';
+import { llmCalls, llmProviders, prompts } from '../src/db/schema.js';
 import { parseUpdPdf, extractUpdFromText } from '../src/domain/edo/upd-pdf.parser.js';
 import { parseUpdVision } from '../src/domain/edo/upd-vision.parser.js';
 import {
@@ -82,6 +100,9 @@ import {
   newMoneyMismatches,
   evaluateGate,
   matchExpectation,
+  mixedModelPrompts,
+  parseIntArg,
+  windowOf,
   type ExpectedDocument,
   type UnitComparison,
 } from './prompt-ab-lib.js';
@@ -118,6 +139,53 @@ const DEFAULT_PROMPTS: Record<DocKind, { base: string; fresh: string }> = {
 function argValue(flag: string, fallback: string | null = null): string | null {
   const i = process.argv.indexOf(flag);
   return i >= 0 ? (process.argv[i + 1] ?? fallback) : fallback;
+}
+
+/** Целочисленный аргумент со строгой проверкой (правило — в prompt-ab-lib). */
+function argNumber(flag: string, fallback: number): number {
+  return parseIntArg(argValue(flag), flag, fallback);
+}
+
+/**
+ * Пауза ПЕРЕД КАЖДЫМ вызовом модели.
+ *
+ * Именно перед вызовом, а не между файлами: на файл приходится от одного до N
+ * запросов — пакет из пятнадцати УПД даёт пятнадцать вызовов подряд, и пауза
+ * на уровне файла плотность почти не снижает. Отсчёт ведётся от момента
+ * предыдущего вызова, поэтому время самого запроса засчитывается в паузу и
+ * медленные ответы её не удваивают.
+ */
+let callDelayMs = 0;
+let lastCallStartedAt = 0;
+
+async function throttle(): Promise<void> {
+  if (callDelayMs <= 0) return;
+  const wait = lastCallStartedAt + callDelayMs - Date.now();
+  if (wait > 0) await new Promise((resolveWait) => setTimeout(resolveWait, wait));
+  lastCallStartedAt = Date.now();
+}
+
+function sha256(value: string | Buffer): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+/**
+ * Отпечаток рабочего дерева.
+ *
+ * Отчёт должен отвечать на вопрос «что именно прогоняли». Без SHA двухнедельной
+ * давности отчёт неотличим от сегодняшнего, а промпт с тех пор мог поменяться
+ * вместе с кодом парсеров. `dirty` — незакоммиченные правки в рабочей копии.
+ */
+function gitRevision(): { sha: string | null; dirty: boolean | null } {
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const status = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
+    return { sha, dirty: status.length > 0 };
+  } catch {
+    // В прод-образе .git отсутствует — это не ошибка прогона, но и молчать
+    // нельзя: null в отчёте честнее выдуманного значения.
+    return { sha: null, dirty: null };
+  }
 }
 
 async function loadPrompt(docKind: DocKind, name: string): Promise<{ id: string; content: string }> {
@@ -164,6 +232,11 @@ function cleanPdfText(text: string): string {
  * Один прогон одного файла тем же путём, что и прод, но с разбивкой результата
  * на логические документы.
  *
+ * Пауза (--delay) ставится перед каждым запросом, который делает САМ скрипт.
+ * Вызовы, спрятанные внутри парсера — классификатор страниц prefilter и
+ * транзиентный ретрай vision, — ею не покрыты: лезть ради скрипта в боевой путь
+ * распознавания опаснее, чем недосчитать пару запросов в паузе.
+ *
  * Пакеты (multi_upd) НЕ гоняются через tryParseTextUpdBundle: он возвращает
  * свёрнутый агрегат и теряет partiesFilledFromText, то есть на нём невозможно
  * отличить грузополучателя от модели от дозаполненного регулярками. Вместо
@@ -180,6 +253,7 @@ async function runOne(
 
   if (entry.parsePath === 'vision') {
     const mime = MIME_BY_EXT[extname(entry.filename).toLowerCase()] ?? 'application/pdf';
+    await throttle();
     const res = await parseUpdVision({ buffer, mimeType: mime }, { ...ctx, promptDocKind: docKind });
     // На vision-пути regex-дозаполнения нет вовсе: всё, что есть в ответе, —
     // от модели.
@@ -192,6 +266,7 @@ async function runOne(
       const segments = segmentUpdText(pages);
       const units: Unit[] = [];
       for (const seg of segments) {
+        await throttle();
         const r = await extractUpdFromText(cleanPdfText(seg.text), ctx);
         units.push({
           key: `${entry.filename}#${seg.docNumber}`,
@@ -204,6 +279,7 @@ async function runOne(
     // Не сложился как пакет — прод в этом случае идёт обычным одиночным путём.
   }
 
+  await throttle();
   const res = await parseUpdPdf(buffer, ctx);
   return [
     {
@@ -213,6 +289,59 @@ async function runOne(
     },
   ];
 }
+
+/**
+ * Фактические вызовы модели, сделанные этим прогоном.
+ *
+ * Зачем это в отчёте. Текстовый путь молча переходит на следующего провайдера
+ * при ошибке (см. extractUpdFromText), а vision берёт провайдера по признаку
+ * «основной». Значит две версии промпта могли уехать в РАЗНЫЕ модели, и тогда
+ * отчёт сравнивает не промпты. Без записи модели этого не увидеть никогда.
+ *
+ * Отбор по `source_document_id IS NULL`: так помечены вызовы скриптов — боевой
+ * разбор всегда указывает документ.
+ */
+async function collectCalls(since: Date): Promise<CallRecord[]> {
+  const rows = await db
+    .select({
+      id: llmCalls.id,
+      createdAt: llmCalls.createdAt,
+      promptId: llmCalls.promptId,
+      providerId: llmCalls.providerId,
+      docKind: llmCalls.docKind,
+      model: llmCalls.model,
+      errorCode: llmCalls.errorCode,
+      latencyMs: llmCalls.latencyMs,
+      providerName: llmProviders.name,
+    })
+    .from(llmCalls)
+    .leftJoin(llmProviders, eq(llmProviders.id, llmCalls.providerId))
+    .where(and(isNull(llmCalls.sourceDocumentId), gte(llmCalls.createdAt, since)))
+    .orderBy(llmCalls.createdAt);
+  return rows.map((r) => ({
+    id: r.id,
+    createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt),
+    promptId: r.promptId,
+    providerId: r.providerId,
+    providerName: r.providerName,
+    docKind: r.docKind,
+    model: r.model,
+    errorCode: r.errorCode,
+    latencyMs: r.latencyMs,
+  }));
+}
+
+type CallRecord = {
+  id: string;
+  createdAt: string;
+  promptId: string | null;
+  providerId: string | null;
+  providerName: string | null;
+  docKind: string | null;
+  model: string | null;
+  errorCode: string | null;
+  latencyMs: number | null;
+};
 
 /** Сопоставляет прогоны по ключу документа; расхождение состава — ошибка. */
 function alignUnits(a1: Unit[], a2: Unit[], b: Unit[]): { key: string; a1: Unit; a2: Unit; b: Unit }[] {
@@ -244,10 +373,16 @@ async function main(): Promise<void> {
   );
   const baseName = argValue('--base', DEFAULT_PROMPTS[docKind].base)!;
   const newName = argValue('--new', DEFAULT_PROMPTS[docKind].fresh)!;
-  const limitRaw = argValue('--limit');
-  const limit = limitRaw ? Number(limitRaw) : Infinity;
+  // Окно прогона. Корпус гоняется частями, поэтому нужен именно сдвиг:
+  // одного --limit хватает только на «первые N», и части пересекались бы.
+  const offset = argNumber('--offset', 0);
+  const limit = argNumber('--limit', Number.MAX_SAFE_INTEGER);
+  callDelayMs = argNumber('--delay', 0);
+  const outPath = argValue('--out');
+  const startedAt = new Date();
 
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { entries: ManifestEntry[] };
+  const manifestRaw = await readFile(manifestPath, 'utf8');
+  const manifest = JSON.parse(manifestRaw) as { entries: ManifestEntry[] };
   const all = manifest.entries ?? [];
 
   // Отбор: только нужный тип документа и только пути, где промпт участвует.
@@ -267,7 +402,7 @@ async function main(): Promise<void> {
     }
     selected.push(e);
   }
-  const work = selected.slice(0, Number.isFinite(limit) ? limit : undefined);
+  const work = windowOf(selected, offset, limit);
 
   console.log(`[ab] тип документа: ${docKind}`);
   console.log(`[ab] корпус: ${dir}`);
@@ -276,7 +411,22 @@ async function main(): Promise<void> {
   // «прогнали половину корпуса и промолчали».
   for (const s of skipped) console.log(`[ab] пропущен: ${s}`);
   if (work.length < selected.length) {
-    console.log(`[ab] --limit: из ${selected.length} подходящих взято ${work.length}`);
+    const to = offset + work.length;
+    console.log(
+      `[ab] окно: из ${selected.length} подходящих взяты ${offset + 1}..${to} (${work.length} шт.)`,
+    );
+    if (to < selected.length) {
+      console.log(`[ab] следующая часть: --offset ${to}`);
+    }
+  }
+  if (work.length === 0) {
+    // Пустое окно молча даёт «регрессий нет» на нуле документов — то есть
+    // выглядит как разрешение активировать. Гейт это ловит, но сказать надо
+    // здесь и прямо: скорее всего, --offset ушёл за конец списка.
+    console.log(`[ab] ВНИМАНИЕ: окно пустое (--offset ${offset} при ${selected.length} подходящих)`);
+  }
+  if (callDelayMs > 0) {
+    console.log(`[ab] пауза между вызовами модели: ${callDelayMs} мс`);
   }
   // «Пустая графа 4» — тоже утверждение, и оно проверяется; без эталона
   // остаются только записи, где не сказано вообще ничего.
@@ -450,6 +600,58 @@ async function main(): Promise<void> {
     failures,
     comparisons,
   });
+
+  // Фактические модели прогона. Если их больше одной на версию промпта —
+  // сравнение недостоверно: часть вызовов ушла к другому провайдеру, и разница
+  // в отчёте может объясняться моделью, а не текстом промпта.
+  const calls = await collectCalls(startedAt);
+  const mixed = [...mixedModelPrompts(calls).entries()];
+  if (mixed.length > 0) {
+    console.log('\nОДИН ПРОМПТ ОБСЛУЖИВАЛИ РАЗНЫЕ МОДЕЛИ — сравнение недостоверно:');
+    for (const [promptId, models] of mixed) {
+      const which = promptId === base.id ? baseName : promptId === fresh.id ? newName : promptId;
+      console.log(`  ${which}: ${models.join(', ')}`);
+    }
+    console.log('  Часть вызовов ушла к другому провайдеру (fallback при ошибке).');
+    console.log('  Разница в отчёте может объясняться моделью, а не текстом промпта.');
+  }
+  const failedCalls = calls.filter((c) => c.errorCode != null);
+  if (failedCalls.length > 0) {
+    console.log(`\nвызовов с ошибкой за прогон: ${failedCalls.length} (учтены в отчёте --out)`);
+  }
+
+  if (outPath) {
+    const report = {
+      formatVersion: 1 as const,
+      docKind,
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      // Окно: по нему агрегатор проверяет, что части не пересеклись и ничего
+      // не пропустили.
+      window: { offset, limit, selected: selected.length, taken: work.length },
+      files: work.map((e) => e.filename),
+      corpus: { dir, manifestPath, manifestSha256: sha256(manifestRaw), entries: all.length },
+      git: gitRevision(),
+      prompts: {
+        base: { name: baseName, id: base.id, sha256: sha256(base.content), length: base.content.length },
+        fresh: { name: newName, id: fresh.id, sha256: sha256(fresh.content), length: fresh.content.length },
+      },
+      calls,
+      failures,
+      comparisons,
+      blockers,
+    };
+    await writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+    console.log(`\nотчёт сохранён: ${resolve(outPath)}`);
+  }
+
+  // Смешение моделей блокирует наравне с регрессом. Вердикт «активировать
+  // можно» означает «мы измерили эффект промпта»; если половина вызовов ушла к
+  // другой модели, эффект не измерен, и мягкое предупреждение здесь означало бы
+  // разрешение выкатывать непроверенное.
+  if (mixed.length > 0) {
+    blockers.push(`один промпт обслуживали разные модели: ${mixed.length}`);
+  }
 
   if (blockers.length > 0) {
     console.log(`\nАКТИВИРОВАТЬ «${newName}» НЕЛЬЗЯ — ${blockers.join('; ')}.`);

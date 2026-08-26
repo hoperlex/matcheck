@@ -587,3 +587,179 @@ export function evaluateGate(input: GateInput): string[] {
 
   return blockers;
 }
+
+/**
+ * Целочисленный аргумент командной строки со строгой проверкой.
+ *
+ * Молчаливая интерпретация мусора здесь стоит денег: `--limit abc` давал
+ * `Number('abc')` = NaN, проверка `Number.isFinite(NaN)` возвращала false, и
+ * `slice(0, undefined)` прогонял ВЕСЬ корпус вместо подмножества — опечатка в
+ * команде оборачивалась примерно 180 вызовами модели вместо 15. Поэтому здесь
+ * бросается ошибка, а не подставляется значение по умолчанию.
+ */
+export function parseIntArg(raw: string | null | undefined, flag: string, fallback: number): number {
+  if (raw == null) return fallback;
+  // Пустая строка отдельной проверкой: Number('') равен НУЛЮ, а не NaN,
+  // поэтому `--limit ""` прошло бы валидацию и дало пустое окно — прогон без
+  // единого документа, который гейт объявил бы «нет разобранных документов»
+  // только на выходе, потратив время впустую.
+  if (raw.trim() === '') {
+    throw new Error(`${flag}: ожидается целое число ≥ 0, получено пустое значение`);
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${flag}: ожидается целое число ≥ 0, получено «${raw}»`);
+  }
+  return value;
+}
+
+/**
+ * Окно прогона: часть корпуса, которую берёт этот запуск.
+ *
+ * Отдельная функция, а не `slice` по месту: границы окна — то, чем части
+ * стыкуются между собой, и ошибка здесь тихо оставляет кусок корпуса
+ * непроверенным.
+ */
+export function windowOf<T>(items: readonly T[], offset: number, limit: number): T[] {
+  return items.slice(offset, offset + limit);
+}
+
+export type CoverageWindow = { offset: number; taken: number };
+
+/**
+ * Насколько части покрыли корпус.
+ *
+ * Пропуск и пересечение — разные болезни: первое означает непроверенные
+ * документы (и потому блокирует вывод «регрессий нет»), второе лишь раздувает
+ * статистику повтором одного файла.
+ */
+export function coverageOf(
+  windows: readonly CoverageWindow[],
+  selected: number,
+): { covered: number; overlaps: number; missing: number[] } {
+  const seen = new Set<number>();
+  let overlaps = 0;
+  for (const w of windows) {
+    for (let i = w.offset; i < w.offset + w.taken; i += 1) {
+      if (seen.has(i)) overlaps += 1;
+      seen.add(i);
+    }
+  }
+  const missing: number[] = [];
+  for (let i = 0; i < selected; i += 1) if (!seen.has(i)) missing.push(i);
+  return { covered: seen.size, overlaps, missing };
+}
+
+/**
+ * Поля отчёта, без которых прогон невоспроизводим.
+ *
+ * Список существует потому, что отчёт читается ПОЗЖЕ и другим человеком.
+ * Отсутствие хеша промпта или модели вызова не мешает файлу выглядеть
+ * полноценным, но делает вывод «регрессий нет» непроверяемым: неизвестно, какие
+ * версии сравнивали и одной ли моделью. Поэтому агрегатор такой файл отвергает,
+ * а не сводит молча.
+ */
+const REQUIRED_REPORT_PATHS = [
+  'formatVersion',
+  'docKind',
+  'window.offset',
+  'window.taken',
+  'window.selected',
+  'corpus.manifestSha256',
+  'prompts.base.id',
+  'prompts.base.sha256',
+  'prompts.fresh.id',
+  'prompts.fresh.sha256',
+  'git',
+  'calls',
+  'failures',
+  'comparisons',
+] as const;
+
+function atPath(value: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>((acc, key) => {
+    if (acc == null || typeof acc !== 'object') return undefined;
+    return (acc as Record<string, unknown>)[key];
+  }, value);
+}
+
+/** Какие обязательные поля отчёта отсутствуют. Пустой массив — отчёт пригоден. */
+export function missingReportFields(report: unknown): string[] {
+  return REQUIRED_REPORT_PATHS.filter((path) => atPath(report, path) === undefined);
+}
+
+/** Вызов модели, как он записан в журнале (llm_calls). */
+export type AbCallRecord = {
+  promptId: string | null;
+  model: string | null;
+};
+
+/**
+ * Промпты, которые обслуживали БОЛЕЕ ОДНОЙ модели.
+ *
+ * Это условие достоверности всего сравнения, а не мелочь отчёта. Текстовый путь
+ * при ошибке молча переходит к следующему провайдеру, а vision берёт того, кто
+ * помечен основным. Если половина вызовов одной версии ушла к другой модели,
+ * разница в отчёте объясняется моделью, а не текстом промпта, — и вывод «новая
+ * версия лучше» недоказуем.
+ *
+ * Возвращает карту «промпт → модели», чтобы вызывающий мог назвать версию по
+ * имени: сам идентификатор пользователю ничего не говорит.
+ */
+export function mixedModelPrompts(calls: readonly AbCallRecord[]): Map<string, string[]> {
+  const byPrompt = new Map<string, Set<string>>();
+  for (const call of calls) {
+    if (!call.promptId || !call.model) continue;
+    const set = byPrompt.get(call.promptId) ?? new Set<string>();
+    set.add(call.model);
+    byPrompt.set(call.promptId, set);
+  }
+  const mixed = new Map<string, string[]>();
+  for (const [promptId, models] of byPrompt) {
+    if (models.size > 1) mixed.set(promptId, [...models].sort());
+  }
+  return mixed;
+}
+
+/** Минимум из отчёта, по которому решается, об одном ли прогоне идёт речь. */
+export type AbReportIdentity = {
+  docKind: string;
+  prompts: {
+    base: { name: string; sha256: string };
+    fresh: { name: string; sha256: string };
+  };
+  corpus: { manifestSha256: string };
+  git: { sha: string | null };
+};
+
+/**
+ * Отпечаток условий прогона.
+ *
+ * Разложен по частям, а не свёрнут в строку: когда части не сходятся, надо
+ * сразу видеть, ЧТО именно разошлось — вид прогона, версия промпта, эталон или
+ * код. Сообщение «что-то не совпало» заставляет перепроверять всё подряд.
+ */
+export function reportIdentity(r: AbReportIdentity): Record<string, string> {
+  return {
+    'вид прогона': r.docKind,
+    'базовый промпт': `${r.prompts.base.name} (${r.prompts.base.sha256.slice(0, 12)})`,
+    'новый промпт': `${r.prompts.fresh.name} (${r.prompts.fresh.sha256.slice(0, 12)})`,
+    эталон: r.corpus.manifestSha256.slice(0, 12),
+    'код (git)': r.git.sha ?? 'неизвестен',
+  };
+}
+
+/**
+ * Чем одна часть отличается от другой. Пусто — части можно сводить.
+ *
+ * Сводить несовместимые части опаснее, чем не сводить вовсе: получился бы
+ * внешне полноценный отчёт, в котором половина документов проверена одной
+ * версией промпта, а половина — другой.
+ */
+export function identityDiff(a: AbReportIdentity, b: AbReportIdentity): string[] {
+  const left = reportIdentity(a);
+  const right = reportIdentity(b);
+  return Object.keys(left)
+    .filter((k) => left[k] !== right[k])
+    .map((k) => `${k}: «${left[k]}» против «${right[k]}»`);
+}

@@ -207,6 +207,41 @@ describe('corpus-manifest — покрытие сверки промптов', (
     }
   });
 
+  it('целевые случаи промпта v15 покрыты, и не только текстовым путём', () => {
+    // Доказательная база конкретной версии промпта. v15 учит различать две
+    // вещи: запятая в графе 3 отделяет дробную часть («76,032 м³» — это 76.032,
+    // а не 76032), а цена, равная стоимости строки, означает взятую не ту
+    // колонку — КРОМЕ случая, когда количество равно единице.
+    //
+    // Поэтому и порогов два. Проверять правило только на текстовых PDF
+    // бессмысленно: боевой поток — это фотографии и сканы, а «съехавшие
+    // колонки» живут именно там. Ровно на этом прогон v15 однажды и
+    // остановился: дробное количество было размечено у семи позиций, и лишь у
+    // одной на vision-пути.
+    const items = entries.flatMap((e) =>
+      (e.expectedDocuments ?? []).flatMap((d) =>
+        (d.items ?? []).map((i) => ({ item: i, vision: e.parsePath === 'vision' })),
+      ),
+    );
+
+    const fractional = items.filter(
+      ({ item }) => typeof item.qty === 'number' && !Number.isInteger(item.qty),
+    );
+    expect(fractional.length).toBeGreaterThanOrEqual(10);
+    expect(fractional.filter((x) => x.vision).length).toBeGreaterThanOrEqual(5);
+
+    // Количество = 1, где цена и стоимость без налога СОВПАДАЮТ законно.
+    // Без таких позиций правило «цена равна стоимости — значит не та колонка»
+    // нечем удержать от превращения в запрет: модель начала бы «исправлять»
+    // верно прочитанные строки.
+    const unitQty = items.filter(({ item }) => {
+      if (item.qty !== 1 || item.price == null || item.sum == null) return false;
+      return Math.abs(item.price - (item.sum - (item.vatSum ?? 0))) < 0.02;
+    });
+    expect(unitQty.length).toBeGreaterThanOrEqual(10);
+    expect(unitQty.filter((x) => x.vision).length).toBeGreaterThanOrEqual(5);
+  });
+
   it('пакеты УПД описаны по субдокументам, а не одной строкой на файл', () => {
     // multi_upd содержит 4, 5 и 15 логических УПД: один эталон на файл
     // означал бы, что грузополучатель у одного из пятнадцати сойдёт за успех.

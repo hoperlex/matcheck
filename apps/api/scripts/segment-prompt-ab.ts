@@ -30,6 +30,28 @@
  *   pnpm --filter @matcheck/api exec tsx scripts/segment-prompt-ab.ts --dir /path/to/photos
  *   … --dir /path/to/photos --expected /path/to/expected.json
  *
+ * ЧАСТЯМИ. Комплект из пятнадцати УПД — это сорок пять вызовов распознавания
+ * подряд, поэтому его гоняют окнами по сегментам:
+ *   … --dir ./set --classify-cache /tmp/set.classify.json --plan
+ *   … --dir ./set --classify-cache /tmp/set.classify.json \
+ *       --base "default v13" --new "default v15" \
+ *       --offset 0 --limit 3 --delay 2000 --out /tmp/seg-00.json
+ *   … --offset 3 --limit 3 --delay 2000 --out /tmp/seg-03.json
+ * Свод частей — тем же агрегатором, что и у корпусной сверки:
+ *   pnpm --filter @matcheck/api exec tsx scripts/prompt-ab-merge.ts /tmp/seg-*.json
+ *
+ * --classify-cache при прогоне частями ОБЯЗАТЕЛЕН. Нарезку делает модель, и
+ * без кеша каждое окно получило бы свою: «сегмент 3» во втором окне оказался бы
+ * другим документом, чем в первом, а сводное покрытие — ложным. Кеш привязан к
+ * отпечатку страниц: сменился комплект — скрипт откажется его брать.
+ *
+ * --plan печатает нарезку и число предстоящих вызовов, НЕ запуская
+ * распознавание: сколько будет стоить прогон, видно до его начала.
+ *
+ * Флаги окна и паузы те же, что у upd-prompt-ab.ts: --offset, --limit, --delay
+ * (пауза перед каждым вызовом модели), --out (воспроизводимый отчёт с хешами
+ * версий промпта и фактической моделью каждого вызова).
+ *
  * Файл эталона (необязательный) — тот же формат, что expectedDocuments в
  * манифесте корпуса:
  *   [{ "docNumber": "1691", "consignee": { "name": "ООО «СУ-10»", "inn": null, "kpp": null } }]
@@ -43,13 +65,15 @@
  * Код возврата: 1 при любом блокере — скрипт годится для запуска в пайплайне,
  * а не только для чтения глазами.
  */
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { extname, join, resolve } from 'node:path';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, gte, isNull } from 'drizzle-orm';
 import type { UpdPdfParsed } from '@matcheck/contracts';
 import { db } from '../src/db/client.js';
-import { llmProviderCredentials, llmProviders, prompts } from '../src/db/schema.js';
+import { llmCalls, llmProviderCredentials, llmProviders, prompts } from '../src/db/schema.js';
 import { buildAad, decryptField } from '../src/domain/auth/crypto.js';
 import { imageToPng, renderPdf, toClassifyThumb } from '../src/domain/edo/page-render.js';
 import { classifyPages, type PageClassification } from '../src/domain/edo/upd-page-prefilter.js';
@@ -61,6 +85,9 @@ import {
   compareUnit,
   evaluateGate,
   matchExpectation,
+  mixedModelPrompts,
+  parseIntArg,
+  windowOf,
   type ExpectedDocument,
   type UnitComparison,
 } from './prompt-ab-lib.js';
@@ -77,6 +104,84 @@ const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.webp'];
 function argValue(flag: string, fallback: string | null = null): string | null {
   const i = process.argv.indexOf(flag);
   return i >= 0 ? (process.argv[i + 1] ?? fallback) : fallback;
+}
+
+/** Целочисленный аргумент со строгой проверкой (правило — в prompt-ab-lib). */
+function argNumber(flag: string, fallback: number): number {
+  return parseIntArg(argValue(flag), flag, fallback);
+}
+
+/**
+ * Пауза ПЕРЕД КАЖДЫМ вызовом модели — и классификации, и распознавания.
+ *
+ * На сегментном пути запросы идут особенно плотно: комплект из пятнадцати
+ * УПД даёт сорок пять вызовов распознавания подряд, без единого разрыва.
+ */
+let callDelayMs = 0;
+let lastCallStartedAt = 0;
+
+async function throttle(): Promise<void> {
+  if (callDelayMs <= 0) return;
+  const wait = lastCallStartedAt + callDelayMs - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastCallStartedAt = Date.now();
+}
+
+function sha256(value: string | Buffer): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function gitRevision(): { sha: string | null; dirty: boolean | null } {
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const status = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
+    return { sha, dirty: status.length > 0 };
+  } catch {
+    return { sha: null, dirty: null };
+  }
+}
+
+type CallRecord = {
+  id: string;
+  createdAt: string;
+  promptId: string | null;
+  providerId: string | null;
+  providerName: string | null;
+  docKind: string | null;
+  model: string | null;
+  errorCode: string | null;
+  latencyMs: number | null;
+};
+
+/** Фактические вызовы прогона — см. пояснение в upd-prompt-ab.ts. */
+async function collectCalls(since: Date): Promise<CallRecord[]> {
+  const rows = await db
+    .select({
+      id: llmCalls.id,
+      createdAt: llmCalls.createdAt,
+      promptId: llmCalls.promptId,
+      providerId: llmCalls.providerId,
+      docKind: llmCalls.docKind,
+      model: llmCalls.model,
+      errorCode: llmCalls.errorCode,
+      latencyMs: llmCalls.latencyMs,
+      providerName: llmProviders.name,
+    })
+    .from(llmCalls)
+    .leftJoin(llmProviders, eq(llmProviders.id, llmCalls.providerId))
+    .where(and(isNull(llmCalls.sourceDocumentId), gte(llmCalls.createdAt, since)))
+    .orderBy(llmCalls.createdAt);
+  return rows.map((r) => ({
+    id: r.id,
+    createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt),
+    promptId: r.promptId,
+    providerId: r.providerId,
+    providerName: r.providerName,
+    docKind: r.docKind,
+    model: r.model,
+    errorCode: r.errorCode,
+    latencyMs: r.latencyMs,
+  }));
 }
 
 async function loadPrompt(name: string): Promise<{ id: string; content: string }> {
@@ -145,30 +250,98 @@ async function main(): Promise<void> {
   const baseName = argValue('--base', 'default v8')!;
   const newName = argValue('--new', 'default v9')!;
   const expectedPath = argValue('--expected');
+  const offset = argNumber('--offset', 0);
+  const limit = argNumber('--limit', Number.MAX_SAFE_INTEGER);
+  callDelayMs = argNumber('--delay', 0);
+  const outPath = argValue('--out');
+  const cachePath = argValue('--classify-cache');
+  const planOnly = process.argv.includes('--plan');
+  const startedAt = new Date();
 
-  const expectations: ExpectedDocument[] = expectedPath
-    ? (JSON.parse(await readFile(resolve(expectedPath), 'utf8')) as ExpectedDocument[])
+  const expectedRaw = expectedPath ? await readFile(resolve(expectedPath), 'utf8') : null;
+  const expectations: ExpectedDocument[] = expectedRaw
+    ? (JSON.parse(expectedRaw) as ExpectedDocument[])
     : [];
 
   console.log(`[segment-ab] комплект: ${dir}`);
   const pages = await buildPages(dir);
   console.log(`[segment-ab] страниц: ${pages.length}`);
+  // Отпечаток комплекта: к нему привязан кеш нарезки. Добавили или пересняли
+  // страницу — прежняя нарезка к делу больше не относится.
+  const pagesHash = sha256(Buffer.concat(pages.map((p) => p.full)));
 
   const creds = await resolveOpenRouterCreds();
 
   // ── классификация: один раз на все прогоны ──
-  const chunks: PageClassification[][] = [];
-  const chunkSizes: number[] = [];
-  for (let i = 0; i < pages.length; i += ASSEMBLY_CLASSIFY_CHUNK) {
-    const slice = pages.slice(i, i + ASSEMBLY_CLASSIFY_CHUNK);
-    const res = await classifyPages({ ...creds, thumbs: slice.map((p) => p.thumb) });
-    chunks.push(res.classification);
-    chunkSizes.push(slice.length);
+  //
+  // При прогоне ЧАСТЯМИ её результат обязан быть один и тот же для всех окон.
+  // Классификатор — та же модель, ответ у неё не строго детерминирован, и без
+  // кеша окна получили бы РАЗНУЮ нарезку: «сегмент 3» во втором окне оказался
+  // бы другим документом, а сводное покрытие — ложным. Плюс экономия: иначе
+  // каждое окно заново платит за классификацию всех страниц комплекта.
+  let classification: PageClassification[] | null = null;
+  const cacheFile = cachePath ? resolve(cachePath) : null;
+  if (cacheFile && existsSync(cacheFile)) {
+    const cached = JSON.parse(await readFile(cacheFile, 'utf8')) as {
+      pagesHash: string;
+      classification: PageClassification[];
+    };
+    if (cached.pagesHash !== pagesHash) {
+      throw new Error(
+        `кеш классификации ${cacheFile} снят с другого комплекта страниц. ` +
+          'Удалите файл, если комплект изменился намеренно.',
+      );
+    }
+    classification = cached.classification;
+    console.log(`[segment-ab] нарезка взята из кеша: ${cacheFile} (вызовов классификации: 0)`);
   }
-  const classification = mergeClassificationChunks(chunks, chunkSizes);
+  if (!classification) {
+    const chunks: PageClassification[][] = [];
+    const chunkSizes: number[] = [];
+    for (let i = 0; i < pages.length; i += ASSEMBLY_CLASSIFY_CHUNK) {
+      const slice = pages.slice(i, i + ASSEMBLY_CLASSIFY_CHUNK);
+      await throttle();
+      const res = await classifyPages({ ...creds, thumbs: slice.map((p) => p.thumb) });
+      chunks.push(res.classification);
+      chunkSizes.push(slice.length);
+    }
+    classification = mergeClassificationChunks(chunks, chunkSizes);
+    if (cacheFile) {
+      await writeFile(cacheFile, `${JSON.stringify({ pagesHash, classification }, null, 2)}\n`, 'utf8');
+      console.log(`[segment-ab] нарезка сохранена в кеш: ${cacheFile}`);
+    } else if (offset > 0 || Number.isSafeInteger(limit)) {
+      // Частичный прогон без кеша — та самая ловушка, ради которой кеш и заведён.
+      console.log(
+        '[segment-ab] ВНИМАНИЕ: прогон частями БЕЗ --classify-cache. Нарезка в разных ' +
+          'окнах может разойтись, и свод окажется недостоверным.',
+      );
+    }
+  }
   const plan = planUpdSegments(classification, pages.length, MAX_PAGES_PER_SEGMENT);
 
   console.log(`[segment-ab] сегментов: ${plan.segments.length}, confident: ${plan.confident}`);
+  const allSegments = plan.segments;
+  const work = windowOf(allSegments, offset, limit);
+  if (work.length < allSegments.length) {
+    const to = offset + work.length;
+    console.log(`[segment-ab] окно: сегменты ${offset + 1}..${to} из ${allSegments.length}`);
+    if (to < allSegments.length) console.log(`[segment-ab] следующая часть: --offset ${to}`);
+  }
+  if (callDelayMs > 0) console.log(`[segment-ab] пауза между вызовами модели: ${callDelayMs} мс`);
+  // Три прогона на сегмент: два базовых (A/A) и один новой версии.
+  console.log(`[segment-ab] вызовов распознавания в этом окне: ${work.length * 3}`);
+  if (planOnly) {
+    // Классификация к этому моменту уже выполнена (или взята из кеша) — без
+    // неё нарезка неизвестна, а значит неизвестна и цена прогона. Распознавание
+    // не запускается: именно оно составляет почти всю стоимость.
+    console.log(
+      '[segment-ab] --plan: распознавание НЕ запускалось. ' +
+        (cacheFile
+          ? 'Нарезка в кеше — повторный --plan вызовов модели не сделает.'
+          : 'Классификация выполнена без кеша; добавьте --classify-cache, чтобы не платить за неё снова.'),
+    );
+    return;
+  }
   for (const r of plan.reasons) console.log(`[segment-ab] причина: ${r}`);
   if (!plan.confident) {
     // Не блокер сверки промпта: нарезка зависит от классификатора, а не от
@@ -187,6 +360,7 @@ async function main(): Promise<void> {
     override: PromptOverride,
   ): Promise<UpdPdfParsed> => {
     const buffers = pageNumbers.map((p) => pages[p - 1]!.full);
+    await throttle();
     const r = await extractUpdSegment(buffers, {
       sourceDocumentId: null,
       bundleId: 'segment-ab',
@@ -199,7 +373,11 @@ async function main(): Promise<void> {
   const comparisons: UnitComparison[] = [];
   const failures: { file: string; error: string }[] = [];
 
-  for (const [index, segment] of plan.segments.entries()) {
+  for (const [windowIndex, segment] of work.entries()) {
+    // Эталон ищется по номеру документа, а при его отсутствии — по позиции
+    // среди ВСЕХ сегментов комплекта, а не внутри окна: иначе второе окно
+    // сверялось бы с эталоном первого.
+    const index = offset + windowIndex;
     const label = `сегмент ${segment.segmentIndex} (страницы ${segment.pages.join(',')})`;
     process.stdout.write(`[segment-ab] ${label} … `);
 
@@ -281,7 +459,56 @@ async function main(): Promise<void> {
     );
   }
 
+  const calls = await collectCalls(startedAt);
+  const mixed = [...mixedModelPrompts(calls).entries()];
+  if (mixed.length > 0) {
+    console.log('\n[segment-ab] ОДИН ПРОМПТ ОБСЛУЖИВАЛИ РАЗНЫЕ МОДЕЛИ — сравнение недостоверно:');
+    for (const [promptId, models] of mixed) {
+      const which = promptId === base.id ? baseName : promptId === fresh.id ? newName : promptId;
+      console.log(`  ${which}: ${models.join(', ')}`);
+    }
+  }
+
   const blockers = evaluateGate({ checkedUnits: comparisons.length, failures, comparisons });
+  if (mixed.length > 0) {
+    blockers.push(`один промпт обслуживали разные модели: ${mixed.length}`);
+  }
+
+  if (outPath) {
+    const report = {
+      formatVersion: 1 as const,
+      // Отдельный вид, а не 'upd': свод сегментных частей с корпусными дал бы
+      // бессмысленное покрытие — это разные наборы проверяемых единиц.
+      docKind: 'upd-segment',
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      window: { offset, limit, selected: allSegments.length, taken: work.length },
+      files: work.map((sg) => `сегмент ${sg.segmentIndex} (страницы ${sg.pages.join(',')})`),
+      corpus: {
+        dir,
+        manifestPath: expectedPath ?? null,
+        // Отпечаток того, ПО ЧЕМУ сверяли: эталон, если задан, иначе сам
+        // комплект страниц. Части, снятые с разных комплектов, свести нельзя.
+        manifestSha256: sha256(expectedRaw ?? pagesHash),
+        entries: allSegments.length,
+        pagesHash,
+        pages: pages.length,
+        segmentationConfident: plan.confident,
+      },
+      git: gitRevision(),
+      prompts: {
+        base: { name: baseName, id: base.id, sha256: sha256(base.content), length: base.content.length },
+        fresh: { name: newName, id: fresh.id, sha256: sha256(fresh.content), length: fresh.content.length },
+      },
+      calls,
+      failures,
+      comparisons,
+      blockers,
+    };
+    await writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+    console.log(`\n[segment-ab] отчёт сохранён: ${resolve(outPath)}`);
+  }
+
   if (blockers.length > 0) {
     console.log(`\nСЕГМЕНТНЫЙ ПРОГОН НЕ ПРОЙДЕН — ${blockers.join('; ')}.`);
     process.exitCode = 1;
