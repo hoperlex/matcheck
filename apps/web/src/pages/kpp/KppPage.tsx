@@ -272,7 +272,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   }, [deliveryId, inspectorSiteId]);
 
   const sitesQuery = useQuery({
-    queryKey: ['sites', 'all'],
+    queryKey: ['sites', { activeOnly: true, limit: 200 }],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
     enabled: !isContractor,
   });
@@ -2128,6 +2128,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         if (qVal) qs.set('q', qVal);
         qs.set('direction', 'inbound');
         qs.set('unaccepted', 'true');
+        // Тот же набор типов, что показывает таблица: без него в файл
+        // попадали ещё и заявки, которых на экране нет.
+        qs.set('kind', 'upd,transport_waybill,os2_transfer');
         path = `/source-documents/export.xlsx?${qs.toString()}`;
         fallback = `documents-expected-inbound-${today}.xlsx`;
       } else {

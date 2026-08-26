@@ -104,12 +104,28 @@ export default function OperationsPage() {
     setParams(next, { replace: true });
   };
 
-  // При смене type (Приёмка/Отгрузка) или tab (Ожидаемые/Принятые)
-  // сбрасываем ?page=N — иначе пользователь окажется на стр.7 нового
-  // раздела с total<350 и пустым экраном. Симметрично с тем, как
-  // DeliveriesHistory/ShipmentsHistory сбрасывают page при смене фильтра.
+  // При смене type (Приёмка/Отгрузка) или tab (Ожидаемые/Принятые) снимаем всё,
+  // что относилось к прежнему разделу.
+  //
+  // Кроме страницы это ещё и параметры, чьи значения у приёмок и отгрузок
+  // разные: коды статусов не пересекаются (`filled` против `shipped`), и
+  // перенесённый ?status= отбивался валидацией — вместо таблицы человек видел
+  // красный Alert. Короткие id — свои последовательности, назначение есть
+  // только у отгрузок, а delivery/shipment/new/upd/from открывали карточку
+  // чужого раздела при возврате.
   const updateUrlResetPage = (patch: Record<string, string | null>) => {
-    updateUrl({ ...patch, page: null });
+    updateUrl({
+      ...patch,
+      page: null,
+      status: null,
+      id: null,
+      purpose: null,
+      delivery: null,
+      shipment: null,
+      new: null,
+      upd: null,
+      from: null,
+    });
   };
 
   const trashOn = params.get('trash') === '1';
@@ -277,6 +293,9 @@ export default function OperationsPage() {
         if (qVal) qs.set('q', qVal);
         qs.set('direction', type === 'delivery' ? 'inbound' : 'outbound');
         qs.set('unaccepted', 'true');
+        // Тот же набор типов, что показывает таблица: без него в файл
+        // попадали ещё и заявки, которых на экране нет.
+        qs.set('kind', 'upd,transport_waybill,os2_transfer');
         path = `/source-documents/export.xlsx?${qs.toString()}`;
         fallback = `documents-expected-${type}-${today}.xlsx`;
       } else {

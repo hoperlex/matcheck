@@ -1,17 +1,7 @@
 import { useEffect, useState } from 'react';
-import {
-  Button,
-  Card,
-  Drawer,
-  Form,
-  Input,
-  Popconfirm,
-  Space,
-  Typography,
-  message,
-} from 'antd';
+import { Button, Card, Drawer, Form, Input, Popconfirm, Space, Typography, message } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Material, MaterialUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { usePermissions } from '../../shared/hooks/usePermissions';
@@ -37,9 +27,28 @@ export default function MaterialsPage() {
   const canEdit = can('references.materials', 'edit');
   const canDelete = can('references.materials', 'delete');
 
+  // Серверная пагинация. Справочник большой (тысячи позиций), а сервер по
+  // умолчанию отдавал 50 строк: таблица показывала первую полусотню по алфавиту
+  // и рисовала одну страницу — «есть ли уже такая позиция» проверить было
+  // нельзя, поиск точно так же обрывался на 50 совпадениях.
+  const PAGE_SIZE = 100;
+  const [page, setPage] = useState(1);
+  // Новый запрос — всегда с первой страницы: иначе после сужения поиска
+  // пользователь остаётся на седьмой странице пустого результата.
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
   const list = useQuery({
-    queryKey: ['materials', search],
-    queryFn: () => api.get<List>(`/materials${search ? `?q=${encodeURIComponent(search)}` : ''}`),
+    queryKey: ['materials', { search, page, pageSize: PAGE_SIZE }],
+    queryFn: () => {
+      const qs = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String((page - 1) * PAGE_SIZE),
+      });
+      if (search) qs.set('q', search);
+      return api.get<List>(`/materials?${qs.toString()}`);
+    },
+    placeholderData: keepPreviousData,
   });
 
   function closeDrawer() {
@@ -119,6 +128,15 @@ export default function MaterialsPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        numberedOffset={(page - 1) * PAGE_SIZE}
+        pagination={{
+          current: page,
+          pageSize: PAGE_SIZE,
+          total: list.data?.total ?? 0,
+          onChange: setPage,
+          showSizeChanger: false,
+          showTotal: (total) => `Всего: ${total}`,
+        }}
         onRowClick={canEdit ? openEdit : undefined}
         columns={[
           { title: 'Код', dataIndex: 'code', sorter: stringSorter<Material>((r) => r.code) },
@@ -157,11 +175,7 @@ export default function MaterialsPage() {
             : []),
         ]}
         cardRender={(r) => (
-          <Card
-            style={{ width: '100%' }}
-            size="small"
-            onClick={() => canEdit && openEdit(r)}
-          >
+          <Card style={{ width: '100%' }} size="small" onClick={() => canEdit && openEdit(r)}>
             <Space direction="vertical" size={2}>
               <Typography.Text strong>{r.name}</Typography.Text>
               <Typography.Text type="secondary">

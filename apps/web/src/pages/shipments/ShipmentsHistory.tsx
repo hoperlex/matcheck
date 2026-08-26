@@ -1,19 +1,8 @@
 import type { MouseEvent, ReactNode, RefObject } from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
-import {
-  Alert,
-  Button,
-  Card,
-  Input,
-  Popconfirm,
-  Select,
-  Space,
-  Tooltip,
-  Typography,
-  message,
-} from 'antd';
+import { Alert, Button, Card, Input, Popconfirm, Space, Tooltip, Typography, message } from 'antd';
 import {
   DeleteOutlined,
   EditOutlined,
@@ -48,6 +37,8 @@ import {
 import { operationsRowClass } from '../../shared/utils/operationsRowHighlight';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
+import { FilterSelect } from '../../shared/ui/FilterSelect';
+import { ActiveFilterChips, type ActiveFilterChip } from '../../shared/ui/ActiveFilterChips';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
@@ -188,6 +179,8 @@ export function ShipmentsHistory({
     // ?nophoto=1 — deep-link из дашборда «Статистика». Симметрично с
     // DeliveriesHistory.
     nophoto: boolean;
+    // Порог «давно без фото» (часы) из плашки «Требует внимания».
+    nophotoOlderHours: string | null;
     // Фильтр по отметке проверки (менеджмент): approved|issues|none.
     reviewState: string | null;
     // Диапазон даты отгрузки — дни (YYYY-MM-DD), пустая строка = граница не
@@ -207,6 +200,7 @@ export function ShipmentsHistory({
     purposes: urlPurposes,
     features: urlFeatures,
     nophoto: params.get('nophoto') === '1',
+    nophotoOlderHours: params.get('nophotoHours'),
     reviewState: params.get('review'),
     dateFrom: params.get('dfrom') ?? '',
     dateTo: params.get('dto') ?? '',
@@ -233,6 +227,10 @@ export function ShipmentsHistory({
       next.delete('feature');
       for (const f of patch.features ?? []) next.append('feature', f);
     }
+    // nophoto приходит дип-линком из «Статистики»; писать его панель не умела,
+    // и снять фильтр можно было только правкой адреса.
+    if ('nophoto' in patch) apply('nophoto', patch.nophoto ? '1' : null);
+    if ('nophotoOlderHours' in patch) apply('nophotoHours', patch.nophotoOlderHours);
     if ('reviewState' in patch) apply('review', patch.reviewState);
     if ('dateFrom' in patch) apply('dfrom', patch.dateFrom);
     if ('dateTo' in patch) apply('dto', patch.dateTo);
@@ -288,6 +286,7 @@ export function ShipmentsHistory({
       features: filters.features.join(','),
       status: filters.status,
       nophoto: filters.nophoto,
+      nophotoHours: filters.nophotoOlderHours,
       review: filters.reviewState,
       dateFrom: filters.dateFrom,
       dateTo: filters.dateTo,
@@ -309,7 +308,7 @@ export function ShipmentsHistory({
   // и для маппинга «id справочника заказчика → set операционных id по ИНН».
   // Опции селектов фильтра приходят из заказчиковских справочников.
   const counterpartiesQuery = useQuery({
-    queryKey: ['counterparties', 'all'],
+    queryKey: ['counterparties', { limit: 5000 }],
     queryFn: () => api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=5000'),
     enabled: !isContractor,
   });
@@ -327,7 +326,7 @@ export function ShipmentsHistory({
     enabled: !isContractor,
   });
   const sitesQuery = useQuery({
-    queryKey: ['sites', 'all'],
+    queryKey: ['sites', { limit: 500 }],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?limit=500'),
     enabled: !isContractor,
   });
@@ -520,13 +519,49 @@ export function ShipmentsHistory({
 
   const items = list.data?.items ?? [];
 
+  // Фильтры, задаваемые только адресом (старая ссылка, дип-линк «Статистики»):
+  // без чипа список молча сужается, а на панели ничего не подсвечено.
+  const hiddenFilterChips = useMemo(() => {
+    const chips: ActiveFilterChip[] = [];
+    if (filters.status) {
+      const label =
+        filters.status === 'no_document'
+          ? 'Без документа'
+          : (items.find((r) => r.status.code === filters.status)?.status.label ?? filters.status);
+      chips.push({
+        key: 'status',
+        label: `Статус: ${label}`,
+        onClear: () => updateFilters({ status: null }),
+      });
+    }
+    if (filters.nophoto) {
+      chips.push({
+        key: 'nophoto',
+        label: 'Без фото',
+        onClear: () => updateFilters({ nophoto: false, nophotoOlderHours: null }),
+      });
+    }
+    return chips;
+  }, [filters.status, filters.nophoto, items]);
+
   // Клиентская filteredItems удалена — фильтрация полностью на сервере
   // (см. shipments.ts: contractorIds/supplierIds/siteIds/q/plate/features/
   // purposes/nophoto/status в WHERE). При смене любого фильтра — сброс
   // page=1 и очистка selection.
   const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.purposes.join(',')}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
+  // Сброс страницы и выбора — только на РЕАЛЬНУЮ смену фильтра. Эффект с
+  // массивом зависимостей срабатывает и на монтировании, и ссылка вида
+  // ?page=4 открывалась первой страницей: коллега получал не тот экран,
+  // которым с ним поделились.
+  const lastFilterKey = useRef<string | null>(null);
   useEffect(() => {
+    const first = lastFilterKey.current === null;
+    lastFilterKey.current = filterKey;
+    if (first) return;
     if (page !== 1) setPage(1);
+    // Выбор относился к прежней выдаче: «Удалить выбранные» отправило бы id
+    // строк, которых на экране уже нет.
+    bulk.clear();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterKey]);
 
@@ -794,11 +829,14 @@ export function ShipmentsHistory({
                   />
                   {/* Фильтр по отметке проверки — только менеджменту. */}
                   {canReview && (
-                    <Select
+                    <FilterSelect
                       size="small"
-                      style={{ minWidth: 150 }}
+                      width={150}
+                      allowClear={false}
                       value={filters.reviewState ?? 'all'}
-                      onChange={(v) => updateFilters({ reviewState: v === 'all' ? null : v })}
+                      onChange={(v: string) =>
+                        updateFilters({ reviewState: v === 'all' ? null : v })
+                      }
                       options={[
                         { value: 'all', label: 'Проверка: все' },
                         { value: 'issues', label: 'С замечаниями' },
@@ -811,6 +849,7 @@ export function ShipmentsHistory({
               }
               extra={filtersExtra}
             />
+            <ActiveFilterChips items={hiddenFilterChips} />
             {(() => {
               // См. комментарий-двойник в DeliveriesHistory: если есть tabs —
               // bulk-actions переезжают в PageTabs.extra; иначе рисуются

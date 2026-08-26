@@ -1,10 +1,9 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Button, Card, Space, Tag, Tooltip, Typography } from 'antd';
+import { Button, Card, Space, Tag, Tooltip, Typography, type TableProps } from 'antd';
 import { MinusSquareOutlined, PlusSquareOutlined } from '@ant-design/icons';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import type {
-  Counterparty,
   CustomerCounterparty,
   Site,
   SourceDirection,
@@ -20,8 +19,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
-import { dateSorter, numberSorter, prioritySorter, stringSorter } from '../../shared/ui/tableSorters';
-import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
+import { parseDateRangeKey, serverDateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { documentPartyColumns } from '../../shared/ui/documentPartyColumns';
@@ -29,10 +27,7 @@ import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
 import { usePrefetchSourceDocumentDetails } from '../../shared/hooks/usePrefetchSourceDocumentDetails';
-import {
-  buildInnMatchMap,
-  expandDirectoryIdsToOperational,
-} from '../../shared/utils/directoryFilterMap';
+import { useAuthStore } from '../../stores/auth';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 
@@ -85,6 +80,41 @@ function MismatchTag({ v }: { v: UpdValidation }) {
  * не требуют дополнительного резолва. Параметр q идёт и в URL, и в серверный
  * запрос — сохраняет существующую серверную семантику поиска по docNumber.
  */
+// Поля серверной сортировки — те же, что понимает GET /source-documents.
+const SORT_FIELDS = [
+  'kind',
+  'docNumber',
+  'docDate',
+  'expectedDate',
+  'siteName',
+  'buyerName',
+  'consigneeName',
+  'supplierName',
+  'vatSum',
+  'totalSum',
+] as const;
+type SortField = (typeof SORT_FIELDS)[number];
+
+const COLUMN_TO_SORT_FIELD: Record<string, SortField> = {
+  kind: 'kind',
+  docNumber: 'docNumber',
+  docDate: 'docDate',
+  expectedDate: 'expectedDate',
+  siteName: 'siteName',
+  buyer: 'buyerName',
+  consignee: 'consigneeName',
+  supplier: 'supplierName',
+  vatSum: 'vatSum',
+  totalSum: 'totalSum',
+};
+
+// Колоночный фильтр «Тип»: «Накладная» на экране — это ТН и ОС-2 разом.
+const KIND_FILTER_TO_PARAM: Record<string, string> = {
+  upd: 'upd',
+  waybill: 'transport_waybill,os2_transfer',
+  request: 'request',
+};
+
 export function ExpectedSourceDocsList({
   direction,
   onOpen,
@@ -107,6 +137,29 @@ export function ExpectedSourceDocsList({
   filtersExtra?: ReactNode;
 }) {
   const [params, setParams] = useSearchParams();
+  // Подрядчику справочники закрыты — панель фильтров для него сводится к поиску
+  // (как в «Документах»), иначе три запроса уходят в 403.
+  const isContractor = useAuthStore((s) => s.user?.role) === 'contractor';
+
+  // Страница, сортировка, диапазоны дат и тип документа — в адресе, применяет
+  // их сервер. Клиентских сортировок и фильтров здесь больше нет: на экране
+  // одна страница, и сравнение по ней давало бы неверный ответ.
+  const PAGE_SIZE = 50;
+  const pageRaw = Number.parseInt(params.get('page') ?? '1', 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+  const sortField = SORT_FIELDS.includes((params.get('sort') ?? '') as SortField)
+    ? (params.get('sort') as SortField)
+    : null;
+  const sortOrder: 'asc' | 'desc' = params.get('order') === 'asc' ? 'asc' : 'desc';
+  const docDateFrom = params.get('docFrom');
+  const docDateTo = params.get('docTo');
+  const expectedFrom = params.get('expFrom');
+  const expectedTo = params.get('expTo');
+  // Тип документа: в адресе — те же значения, что понимает сервер. «Накладная»
+  // на экране — это две сущности сразу (ТН и ОС-2), поэтому колоночный фильтр
+  // разворачивается в пару.
+  const kindFilter = params.get('kind') ?? '';
+  const kindParam = kindFilter || 'upd,transport_waybill,os2_transfer';
 
   const filters: ListFiltersValue = {
     contractorIds: parseCsvIds(params.get('contractor')),
@@ -125,6 +178,8 @@ export function ExpectedSourceDocsList({
     if ('supplierIds' in patch) apply('supplier', toCsvIds(patch.supplierIds));
     if ('siteIds' in patch) apply('site', toCsvIds(patch.siteIds));
     if ('q' in patch) apply('q', patch.q);
+    // Новый фильтр — новая выдача: со старой страницы можно попасть в пустоту.
+    next.delete('page');
     setParams(next, { replace: true });
   };
 
@@ -143,44 +198,76 @@ export function ExpectedSourceDocsList({
       }),
   });
 
+  // Фильтры — на сервере. Клиентские отсеивали строки уже ПОСЛЕ лимита в 200,
+  // а непринятых документов на порядок больше: документ подрядчика, лежащий
+  // трёхсотым по свежести, не находился никаким выбором в селекте. Плюс сравнение
+  // шло с operational supplier_id, который у современных УПД пуст, — фильтр
+  // «Поставщик» не возвращал вообще ничего.
+  const listQuery = {
+    contractor: toCsvIds(filters.contractorIds),
+    supplier: toCsvIds(filters.supplierIds),
+    site: toCsvIds(filters.siteIds),
+    q: filters.q.trim(),
+    kind: kindParam,
+    docDateFrom,
+    docDateTo,
+    expectedFrom,
+    expectedTo,
+    sort: sortField,
+    order: sortOrder,
+    page,
+  };
   const list = useQuery({
-    queryKey: ['source-documents', 'unaccepted-upd', direction, filters.q],
+    queryKey: ['source-documents', 'unaccepted-upd', direction, listQuery],
     queryFn: () => {
       const qs = new URLSearchParams({
-        kind: 'upd,transport_waybill,os2_transfer',
+        kind: kindParam,
         direction,
         unaccepted: 'true',
-        limit: '200',
+        limit: String(PAGE_SIZE),
+        offset: String((page - 1) * PAGE_SIZE),
       });
-      if (filters.q.trim()) qs.set('q', filters.q.trim());
+      if (listQuery.q) qs.set('q', listQuery.q);
+      if (listQuery.contractor) qs.set('contractorIds', listQuery.contractor);
+      if (listQuery.supplier) qs.set('supplierIds', listQuery.supplier);
+      if (listQuery.site) qs.set('siteIds', listQuery.site);
+      if (docDateFrom) qs.set('docDateFrom', docDateFrom);
+      if (docDateTo) qs.set('docDateTo', docDateTo);
+      if (expectedFrom) qs.set('expectedDateFrom', expectedFrom);
+      if (expectedTo) qs.set('expectedDateTo', expectedTo);
+      if (sortField) {
+        qs.set('sort', sortField);
+        qs.set('order', sortOrder);
+      }
       return api.get<List>(`/source-documents?${qs.toString()}`);
     },
     placeholderData: keepPreviousData,
   });
 
-  // Опции селектов фильтра «Подрядчик»/«Поставщик» берём из заказчиковских
-  // справочников; маппинг в FK операций — через ИНН (см. directoryFilterMap).
-  const counterpartiesQuery = useQuery({
-    queryKey: ['counterparties', 'all'],
-    queryFn: () =>
-      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=5000'),
-  });
+  // Опции селектов «Подрядчик»/«Поставщик» — заказчиковские справочники (то же,
+  // что во вкладках «Справочники»). Разворот id справочника в FK операций делает
+  // сервер по ИНН — на клиенте ИНН-карты больше нет: она отсеивала строки уже
+  // после серверного лимита и не знала про supplier_directory_id.
+  //
+  // Подрядчику справочники закрыты (403 на всех четырёх маршрутах), поэтому для
+  // него запросы не уходят вовсе, а в панели остаётся только поиск.
   const customerCounterpartiesQuery = useQuery({
     queryKey: ['customer-counterparties', 'all'],
     queryFn: () =>
       api.get<{ items: CustomerCounterparty[]; total: number }>(
         '/customer-counterparties?limit=5000',
       ),
+    enabled: !isContractor,
   });
   const suppliersQuery = useQuery({
     queryKey: ['suppliers', 'all'],
-    queryFn: () =>
-      api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
+    queryFn: () => api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
+    enabled: !isContractor,
   });
   const sitesQuery = useQuery({
-    queryKey: ['sites', 'all'],
-    queryFn: () =>
-      api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
+    queryKey: ['sites', { activeOnly: true, limit: 200 }],
+    queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
+    enabled: !isContractor,
   });
 
   const contractorOptions = useMemo(
@@ -199,58 +286,67 @@ export function ExpectedSourceDocsList({
       })),
     [suppliersQuery.data],
   );
-  const contractorInnMap = useMemo(
-    () =>
-      buildInnMatchMap(
-        customerCounterpartiesQuery.data?.items ?? [],
-        counterpartiesQuery.data?.items ?? [],
-      ),
-    [customerCounterpartiesQuery.data, counterpartiesQuery.data],
-  );
-  const supplierInnMap = useMemo(
-    () =>
-      buildInnMatchMap(
-        suppliersQuery.data?.items ?? [],
-        counterpartiesQuery.data?.items ?? [],
-      ),
-    [suppliersQuery.data, counterpartiesQuery.data],
-  );
-  const contractorOperationalIds = useMemo(
-    () => expandDirectoryIdsToOperational(filters.contractorIds, contractorInnMap),
-    [filters.contractorIds, contractorInnMap],
-  );
-  const supplierOperationalIds = useMemo(
-    () => expandDirectoryIdsToOperational(filters.supplierIds, supplierInnMap),
-    [filters.supplierIds, supplierInnMap],
-  );
 
-  const allItems = list.data?.items ?? [];
-  const filteredItems = useMemo(() => {
-    return allItems.filter((r) => {
-      if (filters.contractorIds.length > 0 && (!r.contractorId || !contractorOperationalIds.has(r.contractorId))) return false;
-      if (filters.supplierIds.length > 0 && (!r.supplierId || !supplierOperationalIds.has(r.supplierId))) return false;
-      if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId))) return false;
-      return true;
-    });
-  }, [
-    allItems,
-    filters.contractorIds,
-    filters.supplierIds,
-    filters.siteIds,
-    contractorOperationalIds,
-    supplierOperationalIds,
-  ]);
+  const filteredItems = list.data?.items ?? [];
 
   // Префетч позиций — фоном после рендера. Раскрытие «+» читает кэш
   // react-query, без обращения к сети (см. usePrefetchSourceDocumentDetails).
   usePrefetchSourceDocumentDetails(useMemo(() => filteredItems.map((r) => r.id), [filteredItems]));
 
+  // Сортировка серверная — колонке достаточно знать, активна ли она.
+  const sortProps = (columnKey: string) => ({
+    sorter: true as const,
+    sortOrder:
+      sortField && COLUMN_TO_SORT_FIELD[columnKey] === sortField
+        ? ((sortOrder === 'asc' ? 'ascend' : 'descend') as 'ascend' | 'descend')
+        : null,
+  });
+
+  // Страница, сортировка и колоночные фильтры — в адрес, оттуда в запрос.
+  const handleTableChange: NonNullable<TableProps<SourceDocument>['onChange']> = (
+    tablePagination,
+    tableFilters,
+    tableSorter,
+  ) => {
+    const single = Array.isArray(tableSorter) ? tableSorter[0] : tableSorter;
+    const columnKey = single && single.order ? String(single.columnKey ?? '') : '';
+    const field = COLUMN_TO_SORT_FIELD[columnKey];
+    const doc = parseDateRangeKey(tableFilters['docDate']?.[0] as string | undefined);
+    const exp = parseDateRangeKey(tableFilters['expectedDate']?.[0] as string | undefined);
+    const kinds = (tableFilters['kind'] ?? [])
+      .map((v) => KIND_FILTER_TO_PARAM[String(v)])
+      .filter(Boolean)
+      .join(',');
+    const nextPage = tablePagination.current ?? 1;
+    const changed =
+      doc.from !== docDateFrom ||
+      doc.to !== docDateTo ||
+      exp.from !== expectedFrom ||
+      exp.to !== expectedTo ||
+      kinds !== kindFilter ||
+      (field ?? null) !== sortField;
+    const next = new URLSearchParams(params);
+    const apply = (key: string, val: string | null): void => {
+      if (val) next.set(key, val);
+      else next.delete(key);
+    };
+    apply('sort', field ?? null);
+    apply('order', field ? (single?.order === 'ascend' ? 'asc' : 'desc') : null);
+    apply('docFrom', doc.from);
+    apply('docTo', doc.to);
+    apply('expFrom', exp.from);
+    apply('expTo', exp.to);
+    apply('kind', kinds || null);
+    // Смена состава выдачи возвращает на первую страницу: иначе можно остаться
+    // на седьмой странице результата, где страниц теперь две.
+    apply('page', changed || nextPage <= 1 ? null : String(nextPage));
+    setParams(next, { replace: true });
+  };
+
   // Раскрытие строк с позициями документа.
   const [expandedIds, setExpandedIds] = useState<string[]>([]);
   const toggleExpand = (id: string) =>
-    setExpandedIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-    );
+    setExpandedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   return (
     <StickyPageHeader
@@ -259,7 +355,7 @@ export function ExpectedSourceDocsList({
           <ListFilters
             value={filters}
             onChange={updateFilters}
-            fields={['contractor', 'supplier', 'site', 'q']}
+            fields={isContractor ? ['q'] : ['contractor', 'supplier', 'site', 'q']}
             contractorOptions={contractorOptions}
             supplierOptions={supplierOptions}
             sites={sitesQuery.data?.items ?? []}
@@ -281,6 +377,15 @@ export function ExpectedSourceDocsList({
         items={filteredItems}
         loading={list.isLoading}
         rowKey="id"
+        numberedOffset={(page - 1) * PAGE_SIZE}
+        pagination={{
+          current: page,
+          pageSize: PAGE_SIZE,
+          total: list.data?.total ?? 0,
+          showSizeChanger: false,
+          showTotal: (total) => `Всего: ${total}`,
+        }}
+        onChange={handleTableChange}
         numbered
         // Три стороны документа получили фиксированные 170px под ИНН второй
         // строкой, и без явной минимальной ширины на 1024-1366px ужимались бы
@@ -289,9 +394,7 @@ export function ExpectedSourceDocsList({
         expandable={{
           showExpandColumn: false,
           expandedRowKeys: expandedIds,
-          expandedRowRender: (r) => (
-            <ExpandedSourceDocumentItems id={r.id} kind={r.kind} />
-          ),
+          expandedRowRender: (r) => <ExpandedSourceDocumentItems id={r.id} kind={r.kind} />,
         }}
         onRowClick={(r) => onOpen(r)}
         emptyText="Нет ожидаемых УПД и накладных"
@@ -300,23 +403,21 @@ export function ExpectedSourceDocsList({
             title: 'Тип',
             key: 'kind',
             width: 150,
-            sorter: prioritySorter<SourceDocument, SourceDocument['kind']>(
-              (r) => r.kind,
-              ['upd', 'request', 'transport_waybill', 'os2_transfer'],
-            ),
-            // Фильтр — чтобы можно было быстро посчитать «сколько УПД,
-            // сколько Накладных, сколько Заявок» прямо в UI без БД.
+            ...sortProps('kind'),
+            // Фильтр по типу применяет сервер: на экране одна страница, и
+            // отсев по ней отвечал бы «сколько УПД на этой странице».
             filters: [
               { text: 'УПД', value: 'upd' },
               { text: 'Накладная', value: 'waybill' },
               { text: 'Заявка', value: 'request' },
             ],
-            onFilter: (value, r) => {
-              if (value === 'waybill') {
-                return r.kind === 'transport_waybill' || r.kind === 'os2_transfer';
-              }
-              return r.kind === value;
-            },
+            filteredValue: kindFilter
+              ? Object.entries(KIND_FILTER_TO_PARAM)
+                  .filter(([, param]) =>
+                    param.split(',').some((k) => kindFilter.split(',').includes(k)),
+                  )
+                  .map(([key]) => key)
+              : null,
             render: (_: unknown, r: SourceDocument) => {
               const expanded = expandedIds.includes(r.id);
               const tag =
@@ -346,7 +447,7 @@ export function ExpectedSourceDocsList({
           {
             title: 'Номер',
             dataIndex: 'docNumber',
-            sorter: stringSorter<SourceDocument>((r) => r.docNumber),
+            ...sortProps('docNumber'),
             render: (v: string | null) => v ?? '— без номера —',
           },
           {
@@ -355,21 +456,24 @@ export function ExpectedSourceDocsList({
             // defaultSortOrder убран по UX-запросу: иначе при каждой
             // перемонтировке (refresh / переход) сортировка возвращалась
             // принудительно. Сервер уже отдаёт документы по parsed_at desc.
-            sorter: dateSorter<SourceDocument>((r) => r.docDate),
-            ...dateRangeColumnFilter<SourceDocument>((r) => r.docDate),
+            ...sortProps('docDate'),
+            ...serverDateRangeColumnFilter<SourceDocument>({ from: docDateFrom, to: docDateTo }),
             render: (v: string | null) => formatDateRu(v),
           },
           {
             title: 'Дата поставки',
             dataIndex: 'expectedDate',
-            sorter: dateSorter<SourceDocument>((r) => r.expectedDate),
-            ...dateRangeColumnFilter<SourceDocument>((r) => r.expectedDate),
+            ...sortProps('expectedDate'),
+            ...serverDateRangeColumnFilter<SourceDocument>({
+              from: expectedFrom,
+              to: expectedTo,
+            }),
             render: (v: string | null) => formatDateRu(v),
           },
           // Тот же набор сторон, что в «Документах»: раньше здесь была пара
           // «Поставщик / Подрядчик», и один документ выглядел на двух экранах
           // по-разному. См. shared/ui/documentPartyColumns.
-          ...documentPartyColumns<SourceDocument>((r) => r),
+          ...documentPartyColumns<SourceDocument>((r) => r, { sortProps }),
           {
             title: 'Объект',
             key: 'site',
@@ -378,7 +482,7 @@ export function ExpectedSourceDocsList({
             // виден в Tooltip при наведении. Единое поведение во всех 4
             // таблицах раздела «Операции».
             ellipsis: { showTitle: false },
-            sorter: stringSorter<SourceDocument>((r) => r.siteName),
+            ...sortProps('siteName'),
             render: (_: unknown, r: SourceDocument) => {
               const name = r.siteName ?? '—';
               return (
@@ -391,13 +495,13 @@ export function ExpectedSourceDocsList({
           {
             title: 'Сумма НДС',
             key: 'vat',
-            sorter: numberSorter<SourceDocument>((r) => r.vatSum),
+            ...sortProps('vatSum'),
             render: (_: unknown, r: SourceDocument) => formatMoneyRu(r.vatSum),
           },
           {
             title: 'Сумма',
             key: 'total',
-            sorter: numberSorter<SourceDocument>((r) => r.totalSum),
+            ...sortProps('totalSum'),
             render: (_: unknown, r: SourceDocument) => (
               <span>
                 {formatMoneyRu(r.totalSum)}
@@ -420,8 +524,8 @@ export function ExpectedSourceDocsList({
                 {r.vatSum ? ` (НДС ${r.vatSum} ₽)` : ''}
               </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {shortenCounterpartyName(r.buyerName)} ·{' '}
-                {shortenCounterpartyName(r.consigneeName)} · {r.siteName ?? '—'}
+                {shortenCounterpartyName(r.buyerName)} · {shortenCounterpartyName(r.consigneeName)}{' '}
+                · {r.siteName ?? '—'}
               </Typography.Text>
             </Space>
           </Card>

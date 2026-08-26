@@ -39,7 +39,9 @@ export default function CounterpartiesPage() {
   const list = useQuery({
     queryKey: ['counterparties', search],
     queryFn: () =>
-      api.get<List>(`/counterparties${search ? `?q=${encodeURIComponent(search)}` : ''}`),
+      api.get<List>(
+        `/counterparties?limit=5000${search ? `&q=${encodeURIComponent(search)}` : ''}`,
+      ),
   });
 
   const create = useMutation({
@@ -158,7 +160,12 @@ export default function CounterpartiesPage() {
             <DebouncedSearch
               placeholder="ИНН или название"
               value={search}
-              onChange={setSearch}
+              // Выбор снимаем вместе со сменой поиска: он относится к прежней
+              // выдаче, а «Удалить выбранные» отправляет id, а не то, что видно.
+              onChange={(v) => {
+                setSearch(v);
+                bulk.clear();
+              }}
               style={{ width: 260 }}
             />
             {canDelete && (
@@ -190,9 +197,7 @@ export default function CounterpartiesPage() {
           {
             title: 'ИНН',
             dataIndex: 'inn',
-            sorter: stringSorter<Counterparty>((r) =>
-              isPlaceholderInn(r.inn) ? null : r.inn,
-            ),
+            sorter: stringSorter<Counterparty>((r) => (isPlaceholderInn(r.inn) ? null : r.inn)),
             render: (v: string) => (isPlaceholderInn(v) ? '—' : v),
           },
           {
@@ -228,7 +233,10 @@ export default function CounterpartiesPage() {
             // (наш / поставщик / заказчик / подрядчик одновременно) выше.
             sorter: (a: Counterparty, b: Counterparty) => {
               const w = (r: Counterparty) =>
-                Number(r.isSelf) + Number(r.isSupplier) + Number(r.isCustomer) + Number(r.isContractor);
+                Number(r.isSelf) +
+                Number(r.isSupplier) +
+                Number(r.isCustomer) +
+                Number(r.isContractor);
               return w(b) - w(a);
             },
             render: (_: unknown, r: Counterparty) => (
@@ -273,11 +281,7 @@ export default function CounterpartiesPage() {
             : []),
         ]}
         cardRender={(r) => (
-          <Card
-            style={{ width: '100%' }}
-            size="small"
-            onClick={() => canEdit && openEdit(r)}
-          >
+          <Card style={{ width: '100%' }} size="small" onClick={() => canEdit && openEdit(r)}>
             <Space direction="vertical" size={4}>
               <Typography.Text strong>{r.name}</Typography.Text>
               <Typography.Text type="secondary">

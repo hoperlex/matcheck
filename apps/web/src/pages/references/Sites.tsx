@@ -50,7 +50,8 @@ export default function SitesPage() {
 
   const list = useQuery({
     queryKey: ['sites', search],
-    queryFn: () => api.get<List>(`/sites${search ? `?q=${encodeURIComponent(search)}` : ''}`),
+    queryFn: () =>
+      api.get<List>(`/sites?limit=500${search ? `&q=${encodeURIComponent(search)}` : ''}`),
   });
 
   const save = useMutation({
@@ -85,8 +86,7 @@ export default function SitesPage() {
     disabled: r.id === SYSTEM_SITE_ID,
   });
   const bulkDel = useMutation({
-    mutationFn: (ids: string[]) =>
-      api.post<BulkDeleteResponse>('/sites/bulk-delete', { ids }),
+    mutationFn: (ids: string[]) => api.post<BulkDeleteResponse>('/sites/bulk-delete', { ids }),
     onSuccess: (res) => {
       bulk.clear();
       if (res.deleted.length > 0) message.success(`Удалено: ${res.deleted.length}`);
@@ -132,7 +132,12 @@ export default function SitesPage() {
             <DebouncedSearch
               placeholder="Код или название"
               value={search}
-              onChange={setSearch}
+              // Выбор снимаем вместе со сменой поиска: он относится к прежней
+              // выдаче, а «Удалить выбранные» отправляет id, а не то, что видно.
+              onChange={(v) => {
+                setSearch(v);
+                bulk.clear();
+              }}
               style={{ width: 240 }}
             />
           </Space>
@@ -211,11 +216,7 @@ export default function SitesPage() {
                         }}
                         onCancel={(e) => e?.stopPropagation()}
                       >
-                        <Button
-                          danger
-                          size="small"
-                          onClick={(e) => e.stopPropagation()}
-                        >
+                        <Button danger size="small" onClick={(e) => e.stopPropagation()}>
                           Удалить
                         </Button>
                       </Popconfirm>
@@ -225,7 +226,11 @@ export default function SitesPage() {
             : []),
         ]}
         cardRender={(r) => (
-          <Card style={{ width: '100%' }} size="small" onClick={() => canEdit && r.id !== SYSTEM_SITE_ID && openEdit(r)}>
+          <Card
+            style={{ width: '100%' }}
+            size="small"
+            onClick={() => canEdit && r.id !== SYSTEM_SITE_ID && openEdit(r)}
+          >
             <Space direction="vertical" size={4} style={{ width: '100%' }}>
               <Space>
                 <Typography.Text strong>{r.code}</Typography.Text>

@@ -62,9 +62,12 @@ import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
 import {
   expandCustomerCounterpartyToOpIds,
   resolveContractorOpIds,
+  expandSupplierToOpIds,
 } from '../lib/contractor-scope.js';
 import { publishEvent } from './events.js';
 import { dateRangeConditions } from '../lib/date-range.js';
+import { parseUuidCsv } from '../lib/uuid-csv.js';
+import { escapeLike } from '../lib/like.js';
 import { MONEY_FMT, QTY_FMT, fmtDateTimeRu, numOrNull } from '../lib/xlsx-format.js';
 
 const ListQuerySchema = z.object({
@@ -101,6 +104,9 @@ const ListQuerySchema = z.object({
   shippedTo: z.string().datetime().optional(),
   // ?nophoto=1 — deep-link «Без фото».
   nophoto: z.coerce.boolean().optional(),
+  // Порог «давно без фото» в часах — его задаёт плашка «Требует внимания»,
+  // чтобы список показывал ровно то, что она посчитала.
+  nophotoOlderHours: z.coerce.number().int().positive().max(720).optional(),
   // Фильтр по отметке проверки (менеджмент): approved|issues|none. См. deliveries.ts.
   reviewState: z.enum(['approved', 'issues', 'none']).optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
@@ -111,16 +117,6 @@ const ListQuerySchema = z.object({
 type ShipmentFilterQuery = Omit<z.infer<typeof ListQuerySchema>, 'limit' | 'offset'>;
 
 // ─── Helpers для server-side фильтров (симметрично deliveries.ts) ──────
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function parseUuidCsv(s: string | undefined): string[] {
-  if (!s) return [];
-  return s
-    .split(',')
-    .map((v) => v.trim())
-    .filter((v) => UUID_RE.test(v));
-}
 
 function parseCsv(s: string | undefined): string[] {
   if (!s) return [];
@@ -140,30 +136,6 @@ const KNOWN_PURPOSES = new Set([
 
 // expandCustomerCounterpartyToOpIds вынесена в lib/contractor-scope.ts (3-й
 // потребитель — скоупинг роли contractor). См. импорт выше.
-
-async function expandSupplierToOpIds(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  app: any,
-  directoryIds: string[],
-): Promise<string[]> {
-  if (directoryIds.length === 0) return [];
-  const rows = await app.db
-    .select({ id: counterparties.id })
-    .from(counterparties)
-    .innerJoin(
-      suppliers,
-      drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g')
-          = regexp_replace(coalesce(${suppliers.inn}, ''), '[^0-9]', '', 'g')`,
-    )
-    .where(
-      and(
-        inArray(suppliers.id, directoryIds),
-        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') != ''`,
-        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') !~ '^0+$'`,
-      ),
-    );
-  return rows.map((r: { id: string }) => r.id);
-}
 
 // Наборы статусов удаления (hard без пометки / soft через mark → admin hard)
 // живут в @matcheck/contracts — общий источник с фронтом, см. statuses.ts.
@@ -564,6 +536,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       shippedFrom,
       shippedTo,
       nophoto,
+      nophotoOlderHours,
       reviewState,
     } = query;
 
@@ -590,7 +563,10 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
     }
     if (kind) filters.push(eq(shipments.kind, kind));
     // Фильтр по отметке проверки. none — не проверено (NULL).
-    if (reviewState) {
+    // Фильтр по отметке проверки — только тем, кому отметка вообще видна.
+    // Селект скрыт правом матрицы, но ?review= из чужой ссылки исполнялся и без
+    // права: человек получал урезанный список без единого признака фильтра.
+    if (reviewState && (await canSeeReviewInMatrix(app, user?.role, 'operations.shipments'))) {
       filters.push(
         reviewState === 'none'
           ? isNull(shipments.reviewState)
@@ -661,7 +637,8 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
 
     // q: поиск по номеру привязанного source_document.
     if (q?.trim()) {
-      const needle = `%${q.trim()}%`;
+      // escapeLike: «100%» ищется как «100%», а не как «100<что угодно>».
+      const needle = `%${escapeLike(q.trim())}%`;
       filters.push(drSql`EXISTS (
       SELECT 1 FROM shipment_sources ss_q
       JOIN source_documents sd_q ON sd_q.id = ss_q.source_document_id
@@ -678,7 +655,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
 
     // plate: ILIKE на госномер.
     if (plate?.trim()) {
-      filters.push(ilike(shipments.vehiclePlate, `%${plate.trim()}%`));
+      filters.push(ilike(shipments.vehiclePlate, `%${escapeLike(plate.trim())}%`));
     }
 
     // purposes: OR между выбранными (легаси отгрузки без purpose не
@@ -729,11 +706,17 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       }),
     );
 
-    // nophoto: нет связанных фото.
+    // nophoto: ни одного ЗАГРУЖЕННОГО фото — см. тот же фильтр в deliveries.ts.
     if (nophoto) {
       filters.push(drSql`NOT EXISTS (
-      SELECT 1 FROM shipment_photos sp WHERE sp.shipment_id = ${shipments.id}
+      SELECT 1 FROM shipment_photos sp
+       WHERE sp.shipment_id = ${shipments.id} AND sp.uploaded_at IS NOT NULL
     )`);
+      if (nophotoOlderHours) {
+        filters.push(
+          drSql`${shipments.createdAt} < now() - make_interval(hours => ${nophotoOlderHours})`,
+        );
+      }
     }
 
     return filters;

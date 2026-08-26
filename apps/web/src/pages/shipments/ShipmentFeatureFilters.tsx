@@ -1,4 +1,4 @@
-import { Select } from 'antd';
+import { FilterSelect } from '../../shared/ui/FilterSelect';
 
 // 4 значения «Тип отгрузки» (shipments.purpose, миграция 0050).
 // Источник правды — ShipmentPage.PURPOSE_OPTIONS. Дублирую сюда, чтобы
@@ -60,8 +60,9 @@ interface Props {
  * showPurpose={false} (там нет purpose-поля у модели). У обоих типов
  * операций «Признаки» работают по симметричным полям delivery/shipment
  * (in_transit, is_assets, item_kind='asset', linked source_documents).
- * `maxTagCount="responsive"` — выбранные значения сворачиваются в «+N»,
- * высота строки не растёт.
+ * Оба поля — общий FilterSelect: фиксированная ширина и «+N» вместо
+ * responsive-режима, из-за которого панель пересчитывала ширину на каждый
+ * ресайз и дрожала (см. комментарий в FilterSelect).
  */
 export function ShipmentFeatureFilters({
   value,
@@ -76,25 +77,21 @@ export function ShipmentFeatureFilters({
   return (
     <>
       {showPurpose && (
-        <Select<ShipmentPurpose[]>
+        <FilterSelect
           mode="multiple"
-          style={{ minWidth: 200 }}
+          width={200}
           placeholder="Тип отгрузки"
           value={value.purposes}
-          onChange={(v) => onChange({ purposes: v })}
-          allowClear
-          maxTagCount="responsive"
+          onChange={(v: ShipmentPurpose[]) => onChange({ purposes: v })}
           options={PURPOSE_VALUES.map((p) => ({ value: p, label: p }))}
         />
       )}
-      <Select<OperationFeature[]>
+      <FilterSelect
         mode="multiple"
-        style={{ minWidth: 180 }}
+        width={180}
         placeholder="Признаки"
         value={value.features}
-        onChange={(v) => onChange({ features: v })}
-        allowClear
-        maxTagCount="responsive"
+        onChange={(v: OperationFeature[]) => onChange({ features: v })}
         options={featureOptions}
       />
     </>

@@ -41,7 +41,8 @@ export default function AssetsPage() {
 
   const list = useQuery({
     queryKey: ['assets', search],
-    queryFn: () => api.get<List>(`/assets${search ? `?q=${encodeURIComponent(search)}` : ''}`),
+    queryFn: () =>
+      api.get<List>(`/assets?limit=500${search ? `&q=${encodeURIComponent(search)}` : ''}`),
   });
 
   function closeDrawer() {
@@ -133,11 +134,7 @@ export default function AssetsPage() {
             key: 'status',
             sorter: (a: Asset, b: Asset) => Number(b.isActive) - Number(a.isActive),
             render: (_: unknown, r: Asset) =>
-              r.isActive ? (
-                <Tag color="green">Активный</Tag>
-              ) : (
-                <Tag color="default">В архиве</Tag>
-              ),
+              r.isActive ? <Tag color="green">Активный</Tag> : <Tag color="default">В архиве</Tag>,
           },
           ...(canDelete
             ? [
@@ -172,11 +169,7 @@ export default function AssetsPage() {
             : []),
         ]}
         cardRender={(r) => (
-          <Card
-            style={{ width: '100%' }}
-            size="small"
-            onClick={() => canEdit && openEdit(r)}
-          >
+          <Card style={{ width: '100%' }} size="small" onClick={() => canEdit && openEdit(r)}>
             <Space direction="vertical" size={2}>
               <Space wrap>
                 <Tag color="purple">ОС</Tag>

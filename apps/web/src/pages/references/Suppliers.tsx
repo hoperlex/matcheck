@@ -157,7 +157,12 @@ export default function SuppliersPage() {
             <DebouncedSearch
               placeholder="ИНН или название"
               value={search}
-              onChange={setSearch}
+              // Выбор снимаем вместе со сменой поиска: он относится к прежней
+              // выдаче, а «Удалить выбранные» отправляет id, а не то, что видно.
+              onChange={(v) => {
+                setSearch(v);
+                bulk.clear();
+              }}
               style={{ width: 260 }}
             />
             {canDelete && (
@@ -246,11 +251,7 @@ export default function SuppliersPage() {
             : []),
         ]}
         cardRender={(r) => (
-          <Card
-            style={{ width: '100%' }}
-            size="small"
-            onClick={() => canEdit && openEdit(r)}
-          >
+          <Card style={{ width: '100%' }} size="small" onClick={() => canEdit && openEdit(r)}>
             <Space direction="vertical" size={4}>
               <Typography.Text strong>{r.name}</Typography.Text>
               <Typography.Text type="secondary">ИНН {r.inn || '—'}</Typography.Text>

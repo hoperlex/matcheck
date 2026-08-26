@@ -56,6 +56,39 @@ export function dateRangeColumnFilter<T>(
   };
 }
 
+/**
+ * Тот же фильтр, но для таблиц с СЕРВЕРНОЙ выборкой: сравнивать строки на
+ * клиенте здесь нельзя — на экране лишь текущая страница. Значение приходит из
+ * адреса, применение уходит в запрос через Table.onChange.
+ */
+export function serverDateRangeColumnFilter<T>(current: {
+  from?: string | null;
+  to?: string | null;
+}): Pick<ColumnType<T>, 'filterDropdown' | 'filteredValue'> {
+  const key = current.from || current.to ? `${current.from ?? ''}|${current.to ?? ''}` : null;
+  return {
+    filterDropdown: ({ setSelectedKeys, selectedKeys, confirm, clearFilters }) => (
+      <DateRangeDropdown
+        selectedKeys={selectedKeys as React.Key[]}
+        setSelectedKeys={(keys) => setSelectedKeys(keys as React.Key[])}
+        confirm={() => confirm()}
+        clearFilters={() => clearFilters?.()}
+      />
+    ),
+    filteredValue: key ? [key] : null,
+  };
+}
+
+/** Разбирает ключ фильтра `from|to` обратно в пару дат. */
+export function parseDateRangeKey(value: React.Key | null | undefined): {
+  from: string | null;
+  to: string | null;
+} {
+  if (typeof value !== 'string' || !value) return { from: null, to: null };
+  const [from, to] = value.split('|');
+  return { from: from || null, to: to || null };
+}
+
 function DateRangeDropdown({
   selectedKeys,
   setSelectedKeys,
@@ -71,10 +104,7 @@ function DateRangeDropdown({
     const k = selectedKeys[0];
     if (typeof k !== 'string') return [null, null] as [Dayjs | null, Dayjs | null];
     const [from, to] = k.split('|');
-    return [
-      from ? dayjs(from) : null,
-      to ? dayjs(to) : null,
-    ] as [Dayjs | null, Dayjs | null];
+    return [from ? dayjs(from) : null, to ? dayjs(to) : null] as [Dayjs | null, Dayjs | null];
   })();
   const [from, setFrom] = useState<Dayjs | null>(current[0]);
   const [to, setTo] = useState<Dayjs | null>(current[1]);

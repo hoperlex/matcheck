@@ -5,6 +5,7 @@ import {
   customerCounterparties,
   deliveries,
   sourceDocuments,
+  suppliers,
 } from '../db/schema.js';
 import type { AuthUser } from '../plugins/auth.js';
 
@@ -38,6 +39,38 @@ export async function expandCustomerCounterpartyToOpIds(
     .where(
       and(
         inArray(customerCounterparties.id, directoryIds),
+        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') != ''`,
+        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') !~ '^0+$'`,
+      ),
+    );
+  return rows.map((r) => r.id);
+}
+
+/**
+ * То же для поставщика: id справочника `suppliers` → операционные
+ * counterparties.id по нормализованному ИНН.
+ *
+ * Жил копией в deliveries.ts и shipments.ts; здесь он потому, что тем же
+ * разворотом теперь пользуется и список документов, а расходиться этим трём
+ * реализациям нельзя — иначе один и тот же выбранный поставщик давал бы разные
+ * выдачи в «Операциях», «Отгрузке» и «Документах».
+ */
+export async function expandSupplierToOpIds(
+  app: FastifyInstance,
+  directoryIds: string[],
+): Promise<string[]> {
+  if (directoryIds.length === 0) return [];
+  const rows = await app.db
+    .select({ id: counterparties.id })
+    .from(counterparties)
+    .innerJoin(
+      suppliers,
+      drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g')
+          = regexp_replace(coalesce(${suppliers.inn}, ''), '[^0-9]', '', 'g')`,
+    )
+    .where(
+      and(
+        inArray(suppliers.id, directoryIds),
         drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') != ''`,
         drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') !~ '^0+$'`,
       ),

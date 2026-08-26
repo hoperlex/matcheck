@@ -63,9 +63,12 @@ import {
   resolveContractorOpIds,
   deliveryContractorPredicate,
   deliveryVisibleToContractor,
+  expandSupplierToOpIds,
 } from '../lib/contractor-scope.js';
 import { publishEvent } from './events.js';
 import { dateRangeConditions } from '../lib/date-range.js';
+import { parseUuidCsv } from '../lib/uuid-csv.js';
+import { escapeLike } from '../lib/like.js';
 import { MONEY_FMT, QTY_FMT, fmtDateTimeRu } from '../lib/xlsx-format.js';
 
 const ListQuerySchema = z.object({
@@ -105,6 +108,9 @@ const ListQuerySchema = z.object({
   arrivedTo: z.string().datetime().optional(),
   // ?nophoto=1 — deep-link «Без фото» из дашборда «Статистика».
   nophoto: z.coerce.boolean().optional(),
+  // Порог «давно без фото» в часах — его задаёт плашка «Требует внимания»,
+  // чтобы список показывал ровно то, что она посчитала.
+  nophotoOlderHours: z.coerce.number().int().positive().max(720).optional(),
   // Фильтр по отметке проверки (роль «Мониторинг» / менеджмент): approved —
   // «Проверено», issues — «С замечаниями», none — «Не проверено». На фронте
   // показывается только менеджменту; на бэке — просто предикат по review_state.
@@ -117,19 +123,6 @@ const ListQuerySchema = z.object({
 // ровно то, что пользователь видит на экране, поэтому фильтры у них общие.
 // См. buildDeliveryFilters — один источник правды для обоих маршрутов.
 type DeliveryFilterQuery = Omit<z.infer<typeof ListQuerySchema>, 'limit' | 'offset'>;
-
-// UUID-regex для безопасного парсинга csv-параметров из URL. Невалидные
-// значения отбрасываем — иначе Postgres падает на `id IN ('not-uuid')`.
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Парсит "a,b,c" в массив UUID, отбрасывая пустые и невалидные значения.
-function parseUuidCsv(s: string | undefined): string[] {
-  if (!s) return [];
-  return s
-    .split(',')
-    .map((v) => v.trim())
-    .filter((v) => UUID_RE.test(v));
-}
 
 // Парсит "a,b,c" в массив строк, отбрасывая пустые. Без UUID-валидации —
 // используется для feature-кодов ('transit', 'assets', ...).
@@ -158,30 +151,6 @@ const KNOWN_FEATURES = new Set(['transit', 'assets', 'upd', 'waybill']);
 // функциональный индекс по нормализованному ИНН (отдельная задача).
 // expandCustomerCounterpartyToOpIds вынесена в lib/contractor-scope.ts —
 // её переиспользует скоупинг роли contractor (тот же ИНН-разворот).
-
-async function expandSupplierToOpIds(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  app: any,
-  directoryIds: string[],
-): Promise<string[]> {
-  if (directoryIds.length === 0) return [];
-  const rows = await app.db
-    .select({ id: counterparties.id })
-    .from(counterparties)
-    .innerJoin(
-      suppliers,
-      drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g')
-          = regexp_replace(coalesce(${suppliers.inn}, ''), '[^0-9]', '', 'g')`,
-    )
-    .where(
-      and(
-        inArray(suppliers.id, directoryIds),
-        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') != ''`,
-        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') !~ '^0+$'`,
-      ),
-    );
-  return rows.map((r: { id: string }) => r.id);
-}
 
 // Наборы статусов удаления (hard без пометки / soft через mark → admin hard)
 // живут в @matcheck/contracts — общий источник с фронтом, см. statuses.ts.
@@ -610,6 +579,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       arrivedFrom,
       arrivedTo,
       nophoto,
+      nophotoOlderHours,
       reviewState,
     } = query;
 
@@ -637,7 +607,10 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       );
     }
     // Фильтр по отметке проверки. none — не проверено (NULL).
-    if (reviewState) {
+    // Фильтр по отметке проверки — только тем, кому отметка вообще видна.
+    // Селект скрыт правом матрицы, но ?review= из чужой ссылки исполнялся и без
+    // права: человек получал урезанный список без единого признака фильтра.
+    if (reviewState && (await canSeeReviewInMatrix(app, user?.role, 'operations.deliveries'))) {
       filters.push(
         reviewState === 'none'
           ? isNull(deliveries.reviewState)
@@ -704,19 +677,35 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     }
 
     // supplierIds: directory ID → operational ID через ИНН-маппинг по
-    // справочнику suppliers. Без inheritance (на клиенте тоже без него).
+    // справочнику suppliers.
+    //
+    // + inheritance от привязанного документа — по той же причине, что и у
+    // подрядчика выше. Собственное поле deliveries.supplier_id заполняется
+    // редко (18 записей из 9617 на момент правки): у приёмки с привязанной УПД
+    // ручной выбор поставщика вовсе запрещён (409 upd_takes_priority), а воркер
+    // пишет поставщика только в справочник документа. Колонка «Поставщик» на
+    // экране показывает именно документ — фильтр обязан искать там же, иначе
+    // человек видит строки, которые его же фильтр не находит.
     if (supplierDirIds.length > 0) {
       const opIds = await expandSupplierToOpIds(app, supplierDirIds);
-      if (opIds.length === 0) {
-        filters.push(drSql`false`);
-      } else {
-        filters.push(inArray(deliveries.supplierId, opIds));
-      }
+      const ownSupplier =
+        opIds.length > 0 ? drSql`${deliveries.supplierId} in ${opIds} or ` : drSql``;
+      const docSupplier =
+        opIds.length > 0
+          ? drSql`(sd_sup.supplier_directory_id in ${supplierDirIds} or sd_sup.supplier_id in ${opIds})`
+          : drSql`sd_sup.supplier_directory_id in ${supplierDirIds}`;
+      filters.push(drSql`(${ownSupplier}exists (
+      SELECT 1 FROM delivery_sources ds_sup
+      JOIN source_documents sd_sup ON sd_sup.id = ds_sup.source_document_id
+      WHERE ds_sup.delivery_id = ${deliveries.id}
+        AND ${docSupplier}
+    ))`);
     }
 
     // q: поиск по номеру привязанного source_document (УПД/ТН).
     if (q?.trim()) {
-      const needle = `%${q.trim()}%`;
+      // escapeLike: «100%» должен искаться как «100%», а не как «100<что угодно>».
+      const needle = `%${escapeLike(q.trim())}%`;
       filters.push(drSql`EXISTS (
       SELECT 1 FROM delivery_sources ds_q
       JOIN source_documents sd_q ON sd_q.id = ds_q.source_document_id
@@ -736,7 +725,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
 
     // plate: ILIKE на госномер.
     if (plate?.trim()) {
-      filters.push(ilike(deliveries.vehiclePlate, `%${plate.trim()}%`));
+      filters.push(ilike(deliveries.vehiclePlate, `%${escapeLike(plate.trim())}%`));
     }
 
     // features (AND между выбранными):
@@ -780,11 +769,24 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       }),
     );
 
-    // nophoto: нет связанных фото (deep-link из дашборда «Статистика»).
+    // nophoto: ни одного ЗАГРУЖЕННОГО фото (deep-link из «Статистики»).
+    //
+    // uploaded_at обязателен: строка без него — это фото, которое планшет ещё
+    // не отдал в хранилище, и операция по-прежнему без снимков. Счётчик на
+    // плашке считает именно так, а фильтр раньше довольствовался наличием
+    // строки — и числа расходились.
     if (nophoto) {
       filters.push(drSql`NOT EXISTS (
-      SELECT 1 FROM delivery_photos dp WHERE dp.delivery_id = ${deliveries.id}
+      SELECT 1 FROM delivery_photos dp
+       WHERE dp.delivery_id = ${deliveries.id} AND dp.uploaded_at IS NOT NULL
     )`);
+      // Порог возраста приходит из той же плашки: свежая операция без фото —
+      // не проблема, снимки ещё грузятся.
+      if (nophotoOlderHours) {
+        filters.push(
+          drSql`${deliveries.createdAt} < now() - make_interval(hours => ${nophotoOlderHours})`,
+        );
+      }
     }
 
     return filters;

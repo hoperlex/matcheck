@@ -1,5 +1,5 @@
 import type { MouseEvent, ReactNode, RefObject } from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -8,7 +8,6 @@ import {
   Card,
   Input,
   Popconfirm,
-  Select,
   Space,
   Tag,
   Tooltip,
@@ -48,6 +47,8 @@ import {
 import { operationsRowClass } from '../../shared/utils/operationsRowHighlight';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
+import { FilterSelect } from '../../shared/ui/FilterSelect';
+import { ActiveFilterChips, type ActiveFilterChip } from '../../shared/ui/ActiveFilterChips';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
@@ -216,6 +217,8 @@ export function DeliveriesHistory({
     // ради единственного use-case городить отдельный псевдо-статус
     // (как было с no_document) избыточно. Сбрасывается ручной очисткой URL.
     nophoto: boolean;
+    // Порог «давно без фото» (часы) из плашки «Требует внимания».
+    nophotoOlderHours: string | null;
     // Фильтр по отметке проверки (менеджмент): approved|issues|none.
     reviewState: string | null;
     // Диапазон даты прибытия — дни (YYYY-MM-DD), пустая строка = граница не
@@ -236,6 +239,7 @@ export function DeliveriesHistory({
     plate: params.get('plate') ?? '',
     features: urlFeatures,
     nophoto: params.get('nophoto') === '1',
+    nophotoOlderHours: params.get('nophotoHours'),
     reviewState: params.get('review'),
     dateFrom: params.get('dfrom') ?? '',
     dateTo: params.get('dto') ?? '',
@@ -258,6 +262,10 @@ export function DeliveriesHistory({
       next.delete('feature');
       for (const f of patch.features ?? []) next.append('feature', f);
     }
+    // nophoto приходит дип-линком из «Статистики»; писать его панель не умела
+    // вовсе, поэтому снять фильтр можно было только правкой адреса.
+    if ('nophoto' in patch) apply('nophoto', patch.nophoto ? '1' : null);
+    if ('nophotoOlderHours' in patch) apply('nophotoHours', patch.nophotoOlderHours);
     if ('reviewState' in patch) apply('review', patch.reviewState);
     if ('dateFrom' in patch) apply('dfrom', patch.dateFrom);
     if ('dateTo' in patch) apply('dto', patch.dateTo);
@@ -319,6 +327,7 @@ export function DeliveriesHistory({
       features: filters.features.join(','),
       status: filters.status,
       nophoto: filters.nophoto,
+      nophotoHours: filters.nophotoOlderHours,
       review: filters.reviewState,
       dateFrom: filters.dateFrom,
       dateTo: filters.dateTo,
@@ -346,7 +355,7 @@ export function DeliveriesHistory({
   // (customer_counterparties / suppliers) — это то, что пользователь видит
   // на вкладках Справочников.
   const counterpartiesQuery = useQuery({
-    queryKey: ['counterparties', 'all'],
+    queryKey: ['counterparties', { limit: 5000 }],
     queryFn: () => api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=5000'),
     enabled: !isContractor,
   });
@@ -364,7 +373,7 @@ export function DeliveriesHistory({
     enabled: !isContractor,
   });
   const sitesQuery = useQuery({
-    queryKey: ['sites', 'all'],
+    queryKey: ['sites', { activeOnly: true, limit: 200 }],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
     enabled: !isContractor,
   });
@@ -618,6 +627,32 @@ export function DeliveriesHistory({
     return opts;
   }, [items]);
 
+  // Фильтры без своего контрола на панели: их задаёт только адрес (старая
+  // ссылка, дип-линк из «Статистики»). Без чипа список молча сужается, и
+  // понять причину нельзя — см. ActiveFilterChips.
+  const hiddenFilterChips = useMemo(() => {
+    const chips: ActiveFilterChip[] = [];
+    if (filters.status) {
+      const label =
+        filters.status === 'no_document'
+          ? 'Без документа'
+          : (items.find((r) => r.status.code === filters.status)?.status.label ?? filters.status);
+      chips.push({
+        key: 'status',
+        label: `Статус: ${label}`,
+        onClear: () => updateFilters({ status: null }),
+      });
+    }
+    if (filters.nophoto) {
+      chips.push({
+        key: 'nophoto',
+        label: 'Без фото',
+        onClear: () => updateFilters({ nophoto: false, nophotoOlderHours: null }),
+      });
+    }
+    return chips;
+  }, [filters.status, filters.nophoto, items]);
+
   // Клиентская filteredItems удалена — фильтрация полностью на сервере
   // (см. apps/api/src/routes/deliveries.ts: contractorIds/supplierIds/
   // siteIds/q/plate/features/nophoto/status в WHERE). items, что пришёл
@@ -629,8 +664,19 @@ export function DeliveriesHistory({
   // комбинированный ключ фильтров.
   const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Сброс страницы и выбора — только на РЕАЛЬНУЮ смену фильтра. Эффект с
+  // массивом зависимостей срабатывает и на монтировании, и ссылка вида
+  // ?page=4 открывалась первой страницей: коллега получал не тот экран,
+  // которым с ним поделились.
+  const lastFilterKey = useRef<string | null>(null);
   useEffect(() => {
+    const first = lastFilterKey.current === null;
+    lastFilterKey.current = filterKey;
+    if (first) return;
     if (page !== 1) setPage(1);
+    // Выбор относился к прежней выдаче: «Удалить выбранные» отправило бы id
+    // строк, которых на экране уже нет.
+    bulk.clear();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterKey]);
 
@@ -907,11 +953,14 @@ export function DeliveriesHistory({
                   />
                   {/* Фильтр по отметке проверки — только менеджменту. */}
                   {canReview && (
-                    <Select
+                    <FilterSelect
                       size="small"
-                      style={{ minWidth: 150 }}
+                      width={150}
+                      allowClear={false}
                       value={filters.reviewState ?? 'all'}
-                      onChange={(v) => updateFilters({ reviewState: v === 'all' ? null : v })}
+                      onChange={(v: string) =>
+                        updateFilters({ reviewState: v === 'all' ? null : v })
+                      }
                       options={[
                         { value: 'all', label: 'Проверка: все' },
                         { value: 'issues', label: 'С замечаниями' },
@@ -922,11 +971,12 @@ export function DeliveriesHistory({
                   )}
                 </>
               }
-              // Инпут «Статус» убран по UX-запросу: если ?status= остался в URL
-              // от старой ссылки — query продолжает фильтровать, а UI просто не
-              // подсвечивает его применённым.
+              // Инпута «Статус» на панели нет по UX-запросу, но параметр из
+              // старой ссылки продолжает фильтровать — поэтому он показывается
+              // чипом ниже и снимается оттуда же.
               extra={filtersExtra}
             />
+            <ActiveFilterChips items={hiddenFilterChips} />
             {(() => {
               // Bulk-actions: набор зависит от вкладки (Активные / Удалённые)
               // и роли (hard-delete только admin). Раньше блок рендерился

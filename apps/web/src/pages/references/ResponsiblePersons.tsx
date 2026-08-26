@@ -54,7 +54,9 @@ export default function ResponsiblePersonsPage() {
   const list = useQuery({
     queryKey: ['responsible-persons', search],
     queryFn: () =>
-      api.get<List>(`/responsible-persons${search ? `?q=${encodeURIComponent(search)}` : ''}`),
+      api.get<List>(
+        `/responsible-persons?limit=500${search ? `&q=${encodeURIComponent(search)}` : ''}`,
+      ),
   });
 
   function closeDrawer() {
@@ -136,7 +138,12 @@ export default function ResponsiblePersonsPage() {
             <DebouncedSearch
               placeholder="ФИО"
               value={search}
-              onChange={setSearch}
+              // Выбор снимаем вместе со сменой поиска: он относится к прежней
+              // выдаче, а «Удалить выбранные» отправляет id, а не то, что видно.
+              onChange={(v) => {
+                setSearch(v);
+                bulk.clear();
+              }}
               style={{ width: 220 }}
             />
             {canDelete && (
@@ -187,11 +194,7 @@ export default function ResponsiblePersonsPage() {
             sorter: (a: ResponsiblePerson, b: ResponsiblePerson) =>
               Number(b.isActive) - Number(a.isActive),
             render: (_: unknown, r: ResponsiblePerson) =>
-              r.isActive ? (
-                <Tag color="green">Активный</Tag>
-              ) : (
-                <Tag color="default">В архиве</Tag>
-              ),
+              r.isActive ? <Tag color="green">Активный</Tag> : <Tag color="default">В архиве</Tag>,
           },
           ...(canDelete
             ? [
@@ -229,9 +232,7 @@ export default function ResponsiblePersonsPage() {
           <Card style={{ width: '100%' }} size="small">
             <Space direction="vertical" size={4}>
               <Typography.Text strong>{r.fullName}</Typography.Text>
-              {r.position && (
-                <Typography.Text type="secondary">{r.position}</Typography.Text>
-              )}
+              {r.position && <Typography.Text type="secondary">{r.position}</Typography.Text>}
               {r.phone && <Typography.Text type="secondary">{r.phone}</Typography.Text>}
               {!r.isActive && <Tag color="default">В архиве</Tag>}
             </Space>

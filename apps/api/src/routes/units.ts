@@ -11,6 +11,7 @@ import {
   UnitUpsertSchema,
 } from '@matcheck/contracts';
 import { units } from '../db/schema.js';
+import { escapeLike } from '../lib/like.js';
 
 // Справочник единиц измерения (см. миграцию 0062, schema.ts → units).
 // CRUD по образцу customer-counterparties / suppliers.
@@ -47,9 +48,8 @@ export async function unitRoutes(rawApp: FastifyInstance): Promise<void> {
       const { q, limit, offset, activeOnly } = req.query;
       const conds = [];
       if (q) {
-        conds.push(
-          or(ilike(units.code, `%${q}%`), ilike(units.name, `%${q}%`)),
-        );
+        const like = escapeLike(q);
+        conds.push(or(ilike(units.code, `%${like}%`), ilike(units.name, `%${like}%`)));
       }
       if (activeOnly) conds.push(eq(units.isActive, true));
       const where = conds.length ? conds.reduce((a, b) => drSql`${a} AND ${b}`) : undefined;

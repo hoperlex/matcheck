@@ -2,7 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import { sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
+import { isUuid, parseUuidCsv } from '../lib/uuid-csv.js';
+import { expandCustomerCounterpartyToOpIds } from '../lib/contractor-scope.js';
 import {
+  InspectorOptionsResponseSchema,
+  MovementsResponseSchema,
   InspectorStatsResponseSchema,
   IntakeJournalResponseSchema,
   OperationsCountersResponseSchema,
@@ -52,6 +56,13 @@ const InspectorStatsQuerySchema = z.object({
   inspectorId: z.string().optional(),
   dateFrom: z.string().datetime().optional(),
   dateTo: z.string().datetime().optional(),
+  // Сортировка серверная: групп больше, чем помещается на страницу, и
+  // сортировать загруженную сотню значило бы отвечать «максимум из первой
+  // страницы» вместо максимума за период.
+  sort: z
+    .enum(['date', 'inspector', 'site', 'deliveries', 'shipments', 'vehicles', 'sumNoVat'])
+    .optional(),
+  order: z.enum(['asc', 'desc']).optional(),
   limit: z.coerce.number().int().positive().max(500).default(500),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
@@ -60,8 +71,14 @@ const InspectorStatsQuerySchema = z.object({
 // from/to — YYYY-MM-DD в МСК. Если не заданы — default 30 дней до сегодня.
 // siteIds/inspectorIds — CSV (как везде в этом файле).
 const StatsSummaryQuerySchema = z.object({
-  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  from: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  to: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
   siteIds: z.string().optional(),
   inspectorIds: z.string().optional(),
 });
@@ -71,24 +88,16 @@ function safeDate(v: string | undefined): string | null {
   return v && DATE_RE.test(v) ? v : null;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHIPMENT_KIND_RE = /^(contractor|return|transfer|writeoff)$/;
 const ISO_TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
 function safeUuid(v: string | undefined): string | null {
-  return v && UUID_RE.test(v) ? v : null;
+  return v && isUuid(v) ? v : null;
 }
 
-// Парсит CSV вида `uuid1,uuid2,uuid3` в массив валидированных UUID-строк.
-// Невалидные элементы отбрасываются молча — defensive, чтобы кривой URL
-// не уронил весь запрос. Пустая строка / undefined → [].
-function safeUuids(v: string | undefined): string[] {
-  if (!v) return [];
-  return v
-    .split(',')
-    .map((x) => x.trim())
-    .filter((x) => UUID_RE.test(x));
-}
+// Разбор csv-списка id — общий для всех маршрутов, см. lib/uuid-csv.
+// Здесь это ещё и граница безопасности: результат уходит в raw SQL.
+const safeUuids = parseUuidCsv;
 
 // Собирает SQL-фрагмент `col IN ('uuid1'::uuid, 'uuid2'::uuid, ...)`.
 // Все uuid уже прошли через safeUuids — экранирование не нужно.
@@ -106,6 +115,19 @@ function safeKind(v: string | undefined): string | null {
 
 function escapeLike(q: string): string {
   return q.replace(/'/g, "''").replace(/\\/g, '\\\\');
+}
+
+/**
+ * Календарный день по Москве для ISO-момента: '2026-08-01T21:00:00Z' → '2026-08-02'.
+ *
+ * Отчёты считают бизнес-день московским, и границы периода обязаны меряться той
+ * же линейкой, что и колонка «Дата», — иначе у пользователя в другом поясе
+ * крайние сутки в таблице и в KPI над ней расходятся.
+ */
+function mskDayOf(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  return d.toLocaleDateString('en-CA', { timeZone: 'Europe/Moscow' });
 }
 
 function maybeDateIso(v: unknown): string | null {
@@ -148,7 +170,13 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       const { siteId, materialId, contractorId, q, date, limit, offset } = req.query;
       const sIds = safeUuids(siteId);
       const mId = safeUuid(materialId);
-      const cIds = safeUuids(contractorId);
+      // contractorId — id справочника заказчика; разворачиваем в операционные,
+      // как в журналах (см. /reports/intake).
+      const contractorDirIds = safeUuids(contractorId);
+      const cIds =
+        contractorDirIds.length > 0
+          ? await expandCustomerCounterpartyToOpIds(app, contractorDirIds)
+          : [];
       const dateTs = safeTimestamp(date);
 
       // qty_in/qty_out агрегируем напрямую из deliveries/shipments, чтобы
@@ -160,15 +188,27 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       const dateFilterShipment = dateTs
         ? `AND COALESCE(s.shipped_at, s.updated_at) <= '${dateTs}'::timestamptz`
         : '';
-      // Фильтр подрядчика(ов) — IN (...) если выбрано несколько.
+      // Фильтр подрядчика(ов) — IN (...) если выбрано несколько. Выбран
+      // подрядчик, у которого нет операционной пары по ИНН → пустая выдача, а
+      // не «фильтра нет»: иначе пользователь увидел бы все остатки подряд.
+      const contractorUnmatched = contractorDirIds.length > 0 && cIds.length === 0;
       const contractorFilterDelivery = cIds.length
         ? `AND ${uuidInClause('d.contractor_id', cIds)}`
-        : '';
+        : contractorUnmatched
+          ? 'AND false'
+          : '';
       const contractorFilterShipment = cIds.length
         ? `AND ${uuidInClause('s.receiver_counterparty_id', cIds)}`
-        : '';
+        : contractorUnmatched
+          ? 'AND false'
+          : '';
 
       const filters: string[] = [];
+      // Инспектор КПП — только свой объект, как в остальных списках.
+      if (req.user?.role === 'inspector_kpp') {
+        if (!req.user.siteId) filters.push('false');
+        else filters.push(uuidInClause('b.site_id', [req.user.siteId]));
+      }
       if (sIds.length) filters.push(uuidInClause('b.site_id', sIds));
       if (mId) filters.push(`b.material_id = '${mId}'::uuid`);
       if (q) {
@@ -361,7 +401,15 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req) => {
       const { siteId, contractorId, q, dateFrom, dateTo, limit, offset } = req.query;
       const sIds = safeUuids(siteId);
-      const cIds = safeUuids(contractorId);
+      // contractorId — id справочника заказчика (то же, что в «Операциях»);
+      // операционный FK получаем разворотом по ИНН. Раньше значение из селекта
+      // сравнивалось с d.contractor_id напрямую, и журнал отвечал «нет данных»
+      // на любого подрядчика, выбранного в соседнем разделе.
+      const contractorDirIds = safeUuids(contractorId);
+      const cIds =
+        contractorDirIds.length > 0
+          ? await expandCustomerCounterpartyToOpIds(app, contractorDirIds)
+          : [];
       const from = safeTimestamp(dateFrom);
       const to = safeTimestamp(dateTo);
 
@@ -369,8 +417,26 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         `st.entity_type = 'delivery'`,
         `st.code IN ('filled', 'confirmed_mol')`,
       ];
+      // Инспектор КПП видит только свой объект — как в /deliveries. Без этого
+      // журнал показывал ему поступления всех площадок.
+      if (req.user?.role === 'inspector_kpp') {
+        if (!req.user.siteId) where.push('false');
+        else where.push(uuidInClause('d.site_id', [req.user.siteId]));
+      }
       if (sIds.length) where.push(uuidInClause('d.site_id', sIds));
-      if (cIds.length) where.push(uuidInClause('d.contractor_id', cIds));
+      if (contractorDirIds.length > 0) {
+        if (cIds.length === 0) {
+          where.push('false');
+        } else {
+          // Подрядчик наследуется от привязанного документа — тем же правилом,
+          // что в списке «Принятых» (deliveryContractorPredicate).
+          where.push(`(${uuidInClause('d.contractor_id', cIds)} OR (d.contractor_id IS NULL AND EXISTS (
+            SELECT 1 FROM delivery_sources ds_c
+              JOIN source_documents sd_c ON sd_c.id = ds_c.source_document_id
+             WHERE ds_c.delivery_id = d.id AND ${uuidInClause('sd_c.contractor_id', cIds)}
+          )))`);
+        }
+      }
       if (from) where.push(`COALESCE(d.arrived_at, d.updated_at) >= '${from}'::timestamptz`);
       if (to) where.push(`COALESCE(d.arrived_at, d.updated_at) <= '${to}'::timestamptz`);
       if (q) {
@@ -472,6 +538,263 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
     },
   );
 
+  // ─── Объединённый журнал «История поступлений» ──────────────────────────
+  //
+  // Поступления и отгрузки живут на одном экране одной лентой по дате, поэтому
+  // и приходят одним ответом. Раньше страница делала два независимых запроса по
+  // 500 строк и склеивала их в браузере: «страница» у такой ленты не значила
+  // ничего, а фильтры по датам и сортировки работали по случайному срезу — при
+  // тысячах записей это последние сутки.
+  const MovementsQuerySchema = z.object({
+    type: z.enum(['intake', 'shipment']).optional(),
+    siteId: z.string().optional(),
+    contractorId: z.string().optional(),
+    q: z.string().trim().min(1).max(200).optional(),
+    dateFrom: z.string().optional(),
+    dateTo: z.string().optional(),
+    docDateFrom: z.string().optional(),
+    docDateTo: z.string().optional(),
+    sort: z
+      .enum(['date', 'siteName', 'materialName', 'qty', 'docNumber', 'docDate', 'sum', 'status'])
+      .optional(),
+    order: z.enum(['asc', 'desc']).optional(),
+    limit: z.coerce.number().int().positive().max(500).default(100),
+    offset: z.coerce.number().int().nonnegative().default(0),
+  });
+
+  app.get(
+    '/api/v1/reports/movements',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp')],
+      schema: { querystring: MovementsQuerySchema, response: { 200: MovementsResponseSchema } },
+    },
+    async (req) => {
+      const { type, siteId, contractorId, q, dateFrom, dateTo, docDateFrom, docDateTo } = req.query;
+      const { sort, order, limit, offset } = req.query;
+      const sIds = safeUuids(siteId);
+      const contractorDirIds = safeUuids(contractorId);
+      const cIds =
+        contractorDirIds.length > 0
+          ? await expandCustomerCounterpartyToOpIds(app, contractorDirIds)
+          : [];
+      const from = safeTimestamp(dateFrom);
+      const to = safeTimestamp(dateTo);
+      const docFrom = safeDate(docDateFrom);
+      const docTo = safeDate(docDateTo);
+      const like = q ? escapeLike(q) : null;
+
+      // Скоуп инспектора — как в /deliveries: свой объект или ничего.
+      const inspectorSite =
+        req.user?.role === 'inspector_kpp' ? (req.user.siteId ?? null) : undefined;
+
+      const intakeWhere: string[] = [
+        `st.entity_type = 'delivery'`,
+        `st.code IN ('filled', 'confirmed_mol')`,
+      ];
+      const shipmentWhere: string[] = [
+        `st.entity_type = 'shipment'`,
+        `st.code IN ('shipped', 'confirmed_mol')`,
+      ];
+      if (inspectorSite === null) {
+        intakeWhere.push('false');
+        shipmentWhere.push('false');
+      } else if (inspectorSite) {
+        intakeWhere.push(uuidInClause('d.site_id', [inspectorSite]));
+        shipmentWhere.push(uuidInClause('s.site_id', [inspectorSite]));
+      }
+      if (sIds.length) {
+        intakeWhere.push(uuidInClause('d.site_id', sIds));
+        shipmentWhere.push(uuidInClause('s.site_id', sIds));
+      }
+      if (contractorDirIds.length > 0) {
+        if (cIds.length === 0) {
+          intakeWhere.push('false');
+          shipmentWhere.push('false');
+        } else {
+          // У приёмки подрядчик наследуется от привязанного документа — то же
+          // правило, что в списке «Принятых».
+          intakeWhere.push(`(${uuidInClause('d.contractor_id', cIds)} OR (d.contractor_id IS NULL AND EXISTS (
+            SELECT 1 FROM delivery_sources ds_c
+              JOIN source_documents sd_c ON sd_c.id = ds_c.source_document_id
+             WHERE ds_c.delivery_id = d.id AND ${uuidInClause('sd_c.contractor_id', cIds)}
+          )))`);
+          shipmentWhere.push(uuidInClause('s.receiver_counterparty_id', cIds));
+        }
+      }
+      if (from) {
+        intakeWhere.push(`COALESCE(d.arrived_at, d.updated_at) >= '${from}'::timestamptz`);
+        shipmentWhere.push(`COALESCE(s.shipped_at, s.updated_at) >= '${from}'::timestamptz`);
+      }
+      if (to) {
+        intakeWhere.push(`COALESCE(d.arrived_at, d.updated_at) <= '${to}'::timestamptz`);
+        shipmentWhere.push(`COALESCE(s.shipped_at, s.updated_at) <= '${to}'::timestamptz`);
+      }
+      if (docFrom) {
+        intakeWhere.push(`sd.doc_date >= '${docFrom}'::date`);
+        shipmentWhere.push(`sd.doc_date >= '${docFrom}'::date`);
+      }
+      if (docTo) {
+        intakeWhere.push(`sd.doc_date <= '${docTo}'::date`);
+        shipmentWhere.push(`sd.doc_date <= '${docTo}'::date`);
+      }
+      if (like) {
+        intakeWhere.push(
+          `(di.name_raw ILIKE '%${like}%' OR COALESCE(m.name, '') ILIKE '%${like}%' OR COALESCE(sup.name, '') ILIKE '%${like}%' OR COALESCE(con.name, '') ILIKE '%${like}%')`,
+        );
+        shipmentWhere.push(
+          `(si2.name_raw ILIKE '%${like}%' OR COALESCE(m.name, '') ILIKE '%${like}%' OR COALESCE(rc.name, '') ILIKE '%${like}%')`,
+        );
+      }
+
+      const intakeSql = `
+        SELECT
+          'intake'::text AS type,
+          'intake:' || di.id::text AS "rowKey",
+          di.id AS "itemId",
+          d.id AS "deliveryId",
+          NULL::uuid AS "shipmentId",
+          COALESCE(d.arrived_at, d.updated_at) AS date,
+          d.site_id AS "siteId",
+          si.code AS "siteCode",
+          si.name AS "siteName",
+          di.material_id AS "materialId",
+          COALESCE(m.name, di.name_raw) AS "materialName",
+          COALESCE(di.qty_actual, di.qty_planned)::text AS qty,
+          di.unit AS unit,
+          sup.name AS "supplierName",
+          con.name AS "contractorName",
+          NULL::text AS "receiverName",
+          sd.doc_number AS "docNumber",
+          sd.doc_date AS "docDate",
+          di.vat_sum::text AS "vatSum",
+          CASE
+            WHEN di.price IS NULL THEN NULL
+            ELSE (COALESCE(di.qty_actual, di.qty_planned) * di.price)::numeric(18,2)::text
+          END AS sum,
+          st.code AS "statusCode",
+          st.label AS "statusLabel",
+          di.line_no AS line_no
+        FROM delivery_items di
+        JOIN deliveries d ON d.id = di.delivery_id
+        JOIN statuses st ON st.id = d.status_id
+        JOIN sites si ON si.id = d.site_id
+        LEFT JOIN materials m ON m.id = di.material_id
+        LEFT JOIN counterparties sup ON sup.id = d.supplier_id
+        LEFT JOIN counterparties con ON con.id = d.contractor_id
+        LEFT JOIN LATERAL (
+          SELECT sdoc.doc_number, sdoc.doc_date
+          FROM delivery_sources ds
+          JOIN source_documents sdoc ON sdoc.id = ds.source_document_id
+          WHERE ds.delivery_id = d.id
+          ORDER BY sdoc.doc_date DESC NULLS LAST
+          LIMIT 1
+        ) sd ON true
+        WHERE ${intakeWhere.join(' AND ')}`;
+
+      const shipmentSql = `
+        SELECT
+          'shipment'::text AS type,
+          'shipment:' || si2.id::text AS "rowKey",
+          si2.id AS "itemId",
+          NULL::uuid AS "deliveryId",
+          s.id AS "shipmentId",
+          COALESCE(s.shipped_at, s.updated_at) AS date,
+          s.site_id AS "siteId",
+          so.code AS "siteCode",
+          so.name AS "siteName",
+          si2.material_id AS "materialId",
+          COALESCE(m.name, si2.name_raw) AS "materialName",
+          COALESCE(si2.qty_actual, si2.qty_planned)::text AS qty,
+          si2.unit AS unit,
+          NULL::text AS "supplierName",
+          NULL::text AS "contractorName",
+          CASE
+            WHEN s.kind = 'writeoff' THEN NULL
+            WHEN s.kind = 'transfer' THEN ds2.name
+            ELSE rc.name
+          END AS "receiverName",
+          sd.doc_number AS "docNumber",
+          sd.doc_date AS "docDate",
+          NULL::text AS "vatSum",
+          NULL::text AS sum,
+          st.code AS "statusCode",
+          st.label AS "statusLabel",
+          si2.line_no AS line_no
+        FROM shipment_items si2
+        JOIN shipments s ON s.id = si2.shipment_id
+        JOIN statuses st ON st.id = s.status_id
+        JOIN sites so ON so.id = s.site_id
+        LEFT JOIN sites ds2 ON ds2.id = s.dest_site_id
+        LEFT JOIN materials m ON m.id = si2.material_id
+        LEFT JOIN counterparties rc ON rc.id = s.receiver_counterparty_id
+        LEFT JOIN LATERAL (
+          SELECT sdoc.doc_number, sdoc.doc_date
+          FROM shipment_sources ss
+          JOIN source_documents sdoc ON sdoc.id = ss.source_document_id
+          WHERE ss.shipment_id = s.id
+          ORDER BY sdoc.doc_date DESC NULLS LAST
+          LIMIT 1
+        ) sd ON true
+        WHERE ${shipmentWhere.join(' AND ')}`;
+
+      const union =
+        type === 'intake'
+          ? intakeSql
+          : type === 'shipment'
+            ? shipmentSql
+            : `${intakeSql} UNION ALL ${shipmentSql}`;
+
+      // Сортировка по колонкам таблицы. qty и sum — числовые, поэтому
+      // приводятся обратно: сравнение текстом поставило бы «9» после «10».
+      const sortExpr: Record<string, string> = {
+        date: 'date',
+        siteName: '"siteName"',
+        materialName: '"materialName"',
+        qty: "NULLIF(qty, '')::numeric",
+        docNumber: '"docNumber"',
+        docDate: '"docDate"',
+        sum: "NULLIF(sum, '')::numeric",
+        status: '"statusLabel"',
+      };
+      const dir = order === 'asc' ? 'ASC' : 'DESC';
+      const orderBy = `${sortExpr[sort ?? 'date'] ?? 'date'} ${dir} NULLS LAST, date DESC, line_no`;
+
+      const rows = await execRows(
+        app,
+        `SELECT * FROM (${union}) t ORDER BY ${orderBy} LIMIT ${limit} OFFSET ${offset}`,
+      );
+      const totalRows = await execRows(app, `SELECT count(*)::int AS count FROM (${union}) t`);
+
+      return {
+        items: rows.map((r) => ({
+          type: r.type as 'intake' | 'shipment',
+          rowKey: String(r.rowKey),
+          itemId: String(r.itemId),
+          deliveryId: (r.deliveryId as string | null) ?? null,
+          shipmentId: (r.shipmentId as string | null) ?? null,
+          date: maybeDateIso(r.date),
+          siteId: String(r.siteId),
+          siteCode: String(r.siteCode),
+          siteName: String(r.siteName),
+          materialId: (r.materialId as string | null) ?? null,
+          materialName: String(r.materialName),
+          qty: r.qty === null || r.qty === undefined ? null : String(r.qty),
+          unit: String(r.unit),
+          supplierName: (r.supplierName as string | null) ?? null,
+          contractorName: (r.contractorName as string | null) ?? null,
+          receiverName: (r.receiverName as string | null) ?? null,
+          docNumber: (r.docNumber as string | null) ?? null,
+          docDate: maybeDocDate(r.docDate),
+          vatSum: r.vatSum === null || r.vatSum === undefined ? null : String(r.vatSum),
+          sum: r.sum === null || r.sum === undefined ? null : String(r.sum),
+          statusCode: String(r.statusCode),
+          statusLabel: String(r.statusLabel),
+        })),
+        total: Number(totalRows[0]?.count ?? 0),
+      };
+    },
+  );
+
   // ─── Журнал «Отгрузка» ─────────────────────────────────────────────────
   app.get(
     '/api/v1/reports/shipment',
@@ -486,7 +809,13 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       const { siteId, kind, contractorId, q, dateFrom, dateTo, limit, offset } = req.query;
       const sIds = safeUuids(siteId);
       const k = safeKind(kind);
-      const cIds = safeUuids(contractorId);
+      // Как и в журнале поступлений: приходит id справочника, сравнивать нужно
+      // с операционным FK.
+      const contractorDirIds = safeUuids(contractorId);
+      const cIds =
+        contractorDirIds.length > 0
+          ? await expandCustomerCounterpartyToOpIds(app, contractorDirIds)
+          : [];
       const from = safeTimestamp(dateFrom);
       const to = safeTimestamp(dateTo);
 
@@ -494,9 +823,16 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         `st.entity_type = 'shipment'`,
         `st.code IN ('shipped', 'confirmed_mol')`,
       ];
+      if (req.user?.role === 'inspector_kpp') {
+        if (!req.user.siteId) where.push('false');
+        else where.push(uuidInClause('s.site_id', [req.user.siteId]));
+      }
       if (sIds.length) where.push(uuidInClause('s.site_id', sIds));
       if (k) where.push(`s.kind = '${k}'::shipment_kind`);
-      if (cIds.length) where.push(uuidInClause('s.receiver_counterparty_id', cIds));
+      if (contractorDirIds.length > 0) {
+        if (cIds.length === 0) where.push('false');
+        else where.push(uuidInClause('s.receiver_counterparty_id', cIds));
+      }
       if (from) where.push(`COALESCE(s.shipped_at, s.updated_at) >= '${from}'::timestamptz`);
       if (to) where.push(`COALESCE(s.shipped_at, s.updated_at) <= '${to}'::timestamptz`);
       if (q) {
@@ -597,6 +933,39 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
   // по delivery_items привязанных приёмок (формула совпадает с
   // /reports/intake — единая трактовка денег во всём портале). У shipments
   // цены обычно нет, для них сумму не считаем.
+  // Справочник инспекторов для селекта «Статистики».
+  //
+  // Опции нельзя строить из строк самого отчёта: стоит выбрать одного
+  // инспектора, как ответ сужается до него — и второго в мульти-селект уже не
+  // добавить, сначала надо снять фильтр. Полный список пользователей лежит в
+  // admin-only /admin/users, а «Статистика» открыта и менеджеру, поэтому здесь
+  // отдельная узкая выдача: id, ФИО, email — и ничего больше.
+  app.get(
+    '/api/v1/reports/inspectors',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: { response: { 200: InspectorOptionsResponseSchema } },
+    },
+    async () => {
+      const rows = await execRows(
+        app,
+        `
+        SELECT u.id, u.full_name AS "fullName", u.email
+          FROM users u
+         WHERE u.role = 'inspector_kpp'
+         ORDER BY COALESCE(NULLIF(BTRIM(u.full_name), ''), u.email)
+        `,
+      );
+      return {
+        items: rows.map((r) => ({
+          id: String(r.id),
+          fullName: (r.fullName as string | null) ?? null,
+          email: String(r.email),
+        })),
+      };
+    },
+  );
+
   app.get(
     '/api/v1/reports/inspector-stats',
     {
@@ -607,9 +976,23 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       },
     },
     async (req) => {
-      const { siteId, inspectorId, dateFrom, dateTo, limit, offset } = req.query;
+      const { siteId, inspectorId, dateFrom, dateTo, sort, order, limit, offset } = req.query;
       const sIds = safeUuids(siteId);
       const iIds = safeUuids(inspectorId);
+      // Порядок колонок таблицы. Второй ключ — дата: она делает вывод
+      // детерминированным при равных значениях (иначе страницы «плавают»).
+      const statsSortExpr: Record<string, string> = {
+        date: 'o.op_date',
+        inspector: 'COALESCE(u.full_name, u.email)',
+        site: 'si.code',
+        deliveries: 'COUNT(*) FILTER (WHERE o.delivery_id IS NOT NULL)',
+        shipments: 'COUNT(*) FILTER (WHERE o.shipment_id IS NOT NULL)',
+        vehicles: 'COUNT(*)',
+        sumNoVat: 'COALESCE(SUM(ds.sum_no_vat), 0)',
+      };
+      const statsOrderBy = `${statsSortExpr[sort ?? 'date'] ?? 'o.op_date'} ${
+        order === 'asc' ? 'ASC' : 'DESC'
+      } NULLS LAST, o.op_date DESC, COALESCE(u.full_name, u.email)`;
       const from = safeTimestamp(dateFrom);
       const to = safeTimestamp(dateTo);
 
@@ -639,13 +1022,19 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         whereD.push(uuidInClause('d.inspector_id', iIds));
         whereS.push(uuidInClause('s.inspector_id', iIds));
       }
-      if (from) {
-        whereD.push(`COALESCE(d.arrived_at, d.updated_at) >= '${from}'::timestamptz`);
-        whereS.push(`COALESCE(s.shipped_at, s.updated_at) >= '${from}'::timestamptz`);
+      // Границы периода — по МСК-календарному дню, тем же выражением, что и
+      // сама колонка «Дата». Раньше сравнение шло с ISO-границами локального дня
+      // браузера: у пользователя не в МСК первый и последний день расходились с
+      // KPI над этой же таблицей ровно на сутки.
+      const fromDay = from ? mskDayOf(from) : null;
+      const toDay = to ? mskDayOf(to) : null;
+      if (fromDay) {
+        whereD.push(`${dateExprD} >= '${fromDay}'::date`);
+        whereS.push(`${dateExprS} >= '${fromDay}'::date`);
       }
-      if (to) {
-        whereD.push(`COALESCE(d.arrived_at, d.updated_at) <= '${to}'::timestamptz`);
-        whereS.push(`COALESCE(s.shipped_at, s.updated_at) <= '${to}'::timestamptz`);
+      if (toDay) {
+        whereD.push(`${dateExprD} <= '${toDay}'::date`);
+        whereS.push(`${dateExprS} <= '${toDay}'::date`);
       }
       const whereDSql = whereD.join(' AND ');
       const whereSSql = whereS.join(' AND ');
@@ -705,7 +1094,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         LEFT JOIN users u ON u.id = o.inspector_id
         LEFT JOIN sites si ON si.id = o.site_id
         GROUP BY o.op_date, o.inspector_id, u.full_name, u.email, o.site_id, si.code, si.name
-        ORDER BY o.op_date DESC, COALESCE(u.full_name, u.email)
+        ORDER BY ${statsOrderBy}
         LIMIT ${limit} OFFSET ${offset}
         `,
       );
@@ -778,12 +1167,8 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       if (req.user?.role === 'inspector_kpp' && !inspectorSiteId) {
         return { completedToday: 0, inProgressToday: 0, overdue: 0 };
       }
-      const siteFilterD = inspectorSiteId
-        ? `AND d.site_id = '${inspectorSiteId}'::uuid`
-        : '';
-      const siteFilterS = inspectorSiteId
-        ? `AND s.site_id = '${inspectorSiteId}'::uuid`
-        : '';
+      const siteFilterD = inspectorSiteId ? `AND d.site_id = '${inspectorSiteId}'::uuid` : '';
+      const siteFilterS = inspectorSiteId ? `AND s.site_id = '${inspectorSiteId}'::uuid` : '';
 
       // Волна 2 — Redis-кэш (необязательный, TTL ~20с + jitter) + single-flight.
       // Ключ включает МСК-дату: на смене суток по Москве ключ меняется →
@@ -954,8 +1339,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       const days = Math.max(
         1,
         Math.round(
-          (Date.parse(`${toStr}T00:00:00Z`) - Date.parse(`${fromStr}T00:00:00Z`)) /
-            86_400_000,
+          (Date.parse(`${toStr}T00:00:00Z`) - Date.parse(`${fromStr}T00:00:00Z`)) / 86_400_000,
         ) + 1,
       );
 
@@ -985,9 +1369,7 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       // inspector_kpp — серверный enforcement по site_id (как в
       // /operations-counters). Для admin/manager — пропускаем.
       const inspectorSiteId =
-        req.user?.role === 'inspector_kpp'
-          ? safeUuid(req.user.siteId ?? undefined)
-          : null;
+        req.user?.role === 'inspector_kpp' ? safeUuid(req.user.siteId ?? undefined) : null;
       if (req.user?.role === 'inspector_kpp' && !inspectorSiteId) {
         return {
           range: { from: fromStr, to: toStr, days },
@@ -1011,33 +1393,46 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
           },
         };
       }
-      const inspectorFilterD = inspectorSiteId
-        ? ` AND d.site_id = '${inspectorSiteId}'::uuid`
-        : '';
-      const inspectorFilterS = inspectorSiteId
-        ? ` AND s.site_id = '${inspectorSiteId}'::uuid`
-        : '';
+      const inspectorFilterD = inspectorSiteId ? ` AND d.site_id = '${inspectorSiteId}'::uuid` : '';
+      const inspectorFilterS = inspectorSiteId ? ` AND s.site_id = '${inspectorSiteId}'::uuid` : '';
       const enforceD = `${filtersD}${inspectorFilterD}`;
       const enforceS = `${filtersS}${inspectorFilterS}`;
 
       // ─── 1) KPI + daily series ─────────────────────────────────────────
       const kpiSql = `
         WITH
+          -- Статусы и «есть инспектор» — те же условия, что у таблицы под KPI
+          -- (/reports/inspector-stats). Без них сводка считала ещё и черновики
+          -- с неоформленными операциями, и число над таблицей не сходилось с
+          -- суммой её же строк.
           del AS (
             SELECT ${dateExprD} AS op_date, d.id
             FROM deliveries d
-            WHERE ${enforceD} AND ${periodD}
+            JOIN statuses st ON st.id = d.status_id
+            WHERE st.entity_type = 'delivery' AND st.code IN ('filled', 'confirmed_mol')
+              AND d.inspector_id IS NOT NULL
+              AND ${enforceD} AND ${periodD}
           ),
           sh AS (
             SELECT ${dateExprS} AS op_date, s.id
             FROM shipments s
-            WHERE ${enforceS} AND ${periodS}
+            JOIN statuses st ON st.id = s.status_id
+            WHERE st.entity_type = 'shipment' AND st.code IN ('shipped', 'confirmed_mol')
+              AND s.inspector_id IS NOT NULL
+              AND ${enforceS} AND ${periodS}
           ),
+          -- Формула та же, что в таблице: COALESCE(qty_actual, qty_planned).
+          -- Пока здесь стояло только qty_actual, KPI недосчитывал позиции,
+          -- принятые «как в документе» (фактическое количество не вводили), и
+          -- сумма над таблицей была меньше суммы её же строк.
           del_sum AS (
-            SELECT COALESCE(SUM(di.qty_actual::numeric * di.price::numeric), 0) AS s
+            SELECT COALESCE(SUM(COALESCE(di.qty_actual, di.qty_planned)::numeric * di.price::numeric), 0) AS s
             FROM delivery_items di
             JOIN deliveries d ON d.id = di.delivery_id
-            WHERE di.price IS NOT NULL AND di.qty_actual IS NOT NULL
+            JOIN statuses st ON st.id = d.status_id
+            WHERE di.price IS NOT NULL
+              AND st.entity_type = 'delivery' AND st.code IN ('filled', 'confirmed_mol')
+              AND d.inspector_id IS NOT NULL
               AND ${enforceD} AND ${periodD}
           )
         SELECT
@@ -1204,16 +1599,8 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
             WHERE sd.parse_error_code = 'validation_mismatch'
               AND DATE(sd.processed_at AT TIME ZONE 'Europe/Moscow')
                 BETWEEN '${fromStr}'::date AND '${toStr}'::date
-              ${
-                sIds.length
-                  ? ` AND ${uuidInClause('sd.site_id', sIds)}`
-                  : ''
-              }
-              ${
-                inspectorSiteId
-                  ? ` AND sd.site_id = '${inspectorSiteId}'::uuid`
-                  : ''
-              }
+              ${sIds.length ? ` AND ${uuidInClause('sd.site_id', sIds)}` : ''}
+              ${inspectorSiteId ? ` AND sd.site_id = '${inspectorSiteId}'::uuid` : ''}
           )
         SELECT
           (SELECT n FROM del_no_doc)    AS "noDocumentDeliveries",

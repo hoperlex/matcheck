@@ -17,6 +17,7 @@ import {
   filterFotResponsiblePersonIds,
   isFotResponsiblePerson,
 } from '../domain/mol/syncFotMol.js';
+import { escapeLike } from '../lib/like.js';
 
 const ListQuerySchema = z.object({
   q: z.string().optional(),
@@ -61,7 +62,7 @@ export async function responsiblePersonRoutes(rawApp: FastifyInstance): Promise<
     async (req) => {
       const { q, activeOnly, source, limit, offset } = req.query;
       const filters = [];
-      if (q) filters.push(ilike(responsiblePersons.fullName, `%${q}%`));
+      if (q) filters.push(ilike(responsiblePersons.fullName, `%${escapeLike(q)}%`));
       if (activeOnly) filters.push(eq(responsiblePersons.isActive, true));
       if (source === 'fot') filters.push(isNotNull(responsiblePersons.fotEmployeeId));
       else if (source === 'local') filters.push(isNull(responsiblePersons.fotEmployeeId));

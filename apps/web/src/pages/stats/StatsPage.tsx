@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Collapse, DatePicker, Select, Space, Typography } from 'antd';
+import { Collapse, DatePicker, Space, Typography, type TableProps } from 'antd';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import dayjs, { type Dayjs } from 'dayjs';
 import type {
+  InspectorOptionsResponse,
   InspectorStatsResponse,
   InspectorStatsRow,
   Site,
@@ -10,13 +11,23 @@ import type {
 } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { FilterSelect } from '../../shared/ui/FilterSelect';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
-import { dateSorter, numberSorter, stringSorter } from '../../shared/ui/tableSorters';
-import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
+
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { KpiStrip } from './widgets/KpiStrip';
 import { DailyBarChart } from './widgets/DailyBarChart';
 import { AttentionCounters } from './widgets/AttentionCounters';
+
+// Поля серверной сортировки отчёта по инспекторам.
+type StatsSort =
+  | 'date'
+  | 'inspector'
+  | 'site'
+  | 'deliveries'
+  | 'shipments'
+  | 'vehicles'
+  | 'sumNoVat';
 
 const SUMMARY_OPEN_KEY = 'matcheck:stats:summary-open';
 
@@ -56,7 +67,7 @@ export default function StatsPage() {
   }, [summaryOpen]);
 
   const sites = useQuery({
-    queryKey: ['sites', 'all'],
+    queryKey: ['sites', { limit: 500 }],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?limit=500'),
   });
   const dateFrom = range?.[0] ? range[0].startOf('day').toISOString() : undefined;
@@ -80,23 +91,40 @@ export default function StatsPage() {
       if (summaryFrom) qs.set('from', summaryFrom);
       if (summaryTo) qs.set('to', summaryTo);
       const qsStr = qs.toString();
-      return api.get<StatsSummaryResponse>(
-        `/reports/stats-summary${qsStr ? `?${qsStr}` : ''}`,
-      );
+      return api.get<StatsSummaryResponse>(`/reports/stats-summary${qsStr ? `?${qsStr}` : ''}`);
     },
     placeholderData: keepPreviousData,
     staleTime: 30_000,
   });
 
+  // Пагинация серверная: групп «день × инспектор × объект» больше, чем потолок
+  // запроса, и раньше половина истории была недоступна — за пределы первых 500
+  // строк нельзя было ни пролистать, ни отсортироваться.
+  const PAGE_SIZE = 100;
+  const [page, setPage] = useState(1);
+  const [sort, setSort] = useState<StatsSort | null>(null);
+  const [order, setOrder] = useState<'asc' | 'desc'>('desc');
+  useEffect(() => {
+    setPage(1);
+  }, [siteIds, inspectorIds, dateFrom, dateTo]);
   const statsQuery = useQuery({
-    queryKey: ['reports', 'inspector-stats', { siteIds, inspectorIds, dateFrom, dateTo }],
+    queryKey: [
+      'reports',
+      'inspector-stats',
+      { siteIds, inspectorIds, dateFrom, dateTo, page, sort, order },
+    ],
     queryFn: () => {
       const qs = new URLSearchParams();
       if (siteIds.length) qs.set('siteId', siteIds.join(','));
       if (inspectorIds.length) qs.set('inspectorId', inspectorIds.join(','));
       if (dateFrom) qs.set('dateFrom', dateFrom);
       if (dateTo) qs.set('dateTo', dateTo);
-      qs.set('limit', '500');
+      qs.set('limit', String(PAGE_SIZE));
+      qs.set('offset', String((page - 1) * PAGE_SIZE));
+      if (sort) {
+        qs.set('sort', sort);
+        qs.set('order', order);
+      }
       return api.get<InspectorStatsResponse>(`/reports/inspector-stats?${qs.toString()}`);
     },
     placeholderData: keepPreviousData,
@@ -104,16 +132,46 @@ export default function StatsPage() {
 
   const rows = useMemo(() => statsQuery.data?.items ?? [], [statsQuery.data]);
 
-  // Опции инспекторов собираем из ответа: «инспекторы которые работали в
-  // выбранном диапазоне». Когда нужен «все инспекторы» — отдельный
-  // endpoint /users?role= (пока не нужен).
-  const inspectorOptions = useMemo(() => {
-    const seen = new Map<string, string>();
-    for (const r of rows) {
-      if (!seen.has(r.inspectorId)) seen.set(r.inspectorId, inspectorName(r));
-    }
-    return Array.from(seen.entries()).map(([value, label]) => ({ value, label }));
-  }, [rows]);
+  // Опции инспекторов — из справочника, а не из строк ответа. Раньше список
+  // строился по выдаче: выбрал одного инспектора — ответ сузился до него, и
+  // добавить второго стало нечем, пока не снимешь фильтр. Плюс инспекторы,
+  // чьи смены не попали в текущую страницу отчёта, в списке не появлялись вовсе.
+  const inspectors = useQuery({
+    queryKey: ['reports', 'inspectors'],
+    queryFn: () => api.get<InspectorOptionsResponse>('/reports/inspectors'),
+    staleTime: 5 * 60_000,
+  });
+  // Сортировка серверная — колонке достаточно знать, активна ли она.
+  const sortProps = (columnKey: StatsSort) => ({
+    sorter: true as const,
+    sortOrder:
+      sort === columnKey
+        ? ((order === 'asc' ? 'ascend' : 'descend') as 'ascend' | 'descend')
+        : null,
+  });
+
+  const handleTableChange: NonNullable<TableProps<InspectorStatsRow>['onChange']> = (
+    tablePagination,
+    _tableFilters,
+    tableSorter,
+  ) => {
+    const single = Array.isArray(tableSorter) ? tableSorter[0] : tableSorter;
+    const nextSort = single?.order ? ((single.columnKey as StatsSort) ?? null) : null;
+    const nextOrder: 'asc' | 'desc' = single?.order === 'ascend' ? 'asc' : 'desc';
+    const changed = nextSort !== sort || nextOrder !== order;
+    setSort(nextSort);
+    setOrder(nextOrder);
+    setPage(changed ? 1 : (tablePagination.current ?? 1));
+  };
+
+  const inspectorOptions = useMemo(
+    () =>
+      (inspectors.data?.items ?? []).map((i) => ({
+        value: i.id,
+        label: i.fullName?.trim() || i.email,
+      })),
+    [inspectors.data],
+  );
 
   return (
     <StickyPageHeader
@@ -139,36 +197,37 @@ export default function StatsPage() {
                     dayjs().subtract(1, 'day').endOf('day'),
                   ],
                 },
-                { label: '7 дней', value: [dayjs().subtract(6, 'day').startOf('day'), dayjs().endOf('day')] },
-                { label: '30 дней', value: [dayjs().subtract(29, 'day').startOf('day'), dayjs().endOf('day')] },
+                {
+                  label: '7 дней',
+                  value: [dayjs().subtract(6, 'day').startOf('day'), dayjs().endOf('day')],
+                },
+                {
+                  label: '30 дней',
+                  value: [dayjs().subtract(29, 'day').startOf('day'), dayjs().endOf('day')],
+                },
               ]}
             />
-            <Select<string[]>
+            {/* Общий FilterSelect: фиксированная ширина и «+N» — панель не
+                меняет геометрию от длины выбранного названия. */}
+            <FilterSelect
               mode="multiple"
-              allowClear
+              width={240}
               placeholder="Все объекты"
-              style={{ minWidth: 240 }}
               value={siteIds}
               onChange={setSiteIds}
-              showSearch
-              optionFilterProp="label"
-              maxTagCount="responsive"
               loading={sites.isLoading}
               options={(sites.data?.items ?? []).map((s) => ({
                 value: s.id,
                 label: `${s.code} · ${s.name}`,
               }))}
             />
-            <Select<string[]>
+            <FilterSelect
               mode="multiple"
-              allowClear
+              width={240}
               placeholder="Все инспекторы"
-              style={{ minWidth: 240 }}
               value={inspectorIds}
               onChange={setInspectorIds}
-              showSearch
-              optionFilterProp="label"
-              maxTagCount="responsive"
+              loading={inspectors.isLoading}
               options={inspectorOptions}
             />
           </Space>
@@ -208,6 +267,13 @@ export default function StatsPage() {
                     <AttentionCounters
                       data={summaryQuery.data}
                       loading={summaryQuery.isLoading}
+                      // Ссылки с плашек уносят тот же период и те же объекты,
+                      // по которым посчитаны числа.
+                      scope={{
+                        siteIds,
+                        dateFrom: summaryQuery.data?.range.from ?? summaryFrom ?? null,
+                        dateTo: summaryQuery.data?.range.to ?? summaryTo ?? null,
+                      }}
                     />
                   </div>
                 </Space>
@@ -222,25 +288,33 @@ export default function StatsPage() {
           rowKey={(r) => `${r.date}:${r.inspectorId}:${r.siteId}`}
           emptyText="Нет данных за выбранный период"
           numbered
+          numberedOffset={(page - 1) * PAGE_SIZE}
+          pagination={{
+            current: page,
+            pageSize: PAGE_SIZE,
+            total: statsQuery.data?.total ?? 0,
+            showSizeChanger: false,
+            showTotal: (total) => `Всего: ${total}`,
+          }}
+          onChange={handleTableChange}
           columns={[
             {
               title: 'Дата',
               dataIndex: 'date',
               width: 130,
-              sorter: dateSorter<InspectorStatsRow>((r) => r.date),
-              ...dateRangeColumnFilter<InspectorStatsRow>((r) => r.date),
+              ...sortProps('date'),
               render: (v: string) => formatDate(v),
             },
             {
               title: 'Инспектор',
               key: 'inspector',
-              sorter: stringSorter<InspectorStatsRow>(inspectorName),
+              ...sortProps('inspector'),
               render: (_: unknown, r: InspectorStatsRow) => inspectorName(r),
             },
             {
               title: 'Объект',
               key: 'site',
-              sorter: stringSorter<InspectorStatsRow>((r) => `${r.siteCode} · ${r.siteName}`),
+              ...sortProps('site'),
               render: (_: unknown, r: InspectorStatsRow) => `${r.siteCode} · ${r.siteName}`,
             },
             {
@@ -248,28 +322,28 @@ export default function StatsPage() {
               dataIndex: 'deliveries',
               width: 110,
               align: 'right' as const,
-              sorter: numberSorter<InspectorStatsRow>((r) => r.deliveries),
+              ...sortProps('deliveries'),
             },
             {
               title: 'Отгрузки',
               dataIndex: 'shipments',
               width: 110,
               align: 'right' as const,
-              sorter: numberSorter<InspectorStatsRow>((r) => r.shipments),
+              ...sortProps('shipments'),
             },
             {
               title: 'Машин',
               dataIndex: 'vehicles',
               width: 110,
               align: 'right' as const,
-              sorter: numberSorter<InspectorStatsRow>((r) => r.vehicles),
+              ...sortProps('vehicles'),
             },
             {
               title: 'Сумма',
               dataIndex: 'sumNoVat',
               width: 180,
               align: 'right' as const,
-              sorter: numberSorter<InspectorStatsRow>((r) => r.sumNoVat),
+              ...sortProps('sumNoVat'),
               render: (v: string) => formatMoneyRu(v),
             },
           ]}

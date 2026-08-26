@@ -5,6 +5,13 @@ import type { StatsSummaryResponse } from '@matcheck/contracts';
 interface Props {
   data: StatsSummaryResponse | undefined;
   loading: boolean;
+  /**
+   * Фильтры, по которым посчитаны сами числа. Ссылка обязана их переносить:
+   * плашка считает за выбранный период и по выбранным объектам, а список без
+   * этих параметров показывал всё за всю историю — число на плашке и число в
+   * списке расходились на порядки.
+   */
+  scope?: { siteIds: string[]; dateFrom: string | null; dateTo: string | null };
 }
 
 type CounterDef = {
@@ -25,8 +32,23 @@ type CounterDef = {
  * params. Если URL-фильтр для счётчика ещё не реализован — счётчик
  * показывается, но как disabled (избегаем тупиковых ссылок).
  */
-export function AttentionCounters({ data, loading }: Props) {
+export function AttentionCounters({ data, loading, scope }: Props) {
   const navigate = useNavigate();
+
+  // Хвост общих параметров для ссылок в «Операции»: объект и период.
+  const scopeQs = (kind: 'operations' | 'documents'): string => {
+    const qs = new URLSearchParams();
+    if (scope?.siteIds.length) qs.set('site', scope.siteIds.join(','));
+    if (kind === 'operations') {
+      if (scope?.dateFrom) qs.set('dfrom', scope.dateFrom.slice(0, 10));
+      if (scope?.dateTo) qs.set('dto', scope.dateTo.slice(0, 10));
+    } else {
+      if (scope?.dateFrom) qs.set('docFrom', scope.dateFrom.slice(0, 10));
+      if (scope?.dateTo) qs.set('docTo', scope.dateTo.slice(0, 10));
+    }
+    const str = qs.toString();
+    return str ? `&${str}` : '';
+  };
 
   if (loading && !data) {
     return <Skeleton.Input active style={{ width: '100%', height: 64 }} />;
@@ -45,43 +67,38 @@ export function AttentionCounters({ data, loading }: Props) {
 
   if (total === 0) {
     return (
-      <Empty
-        description="Всё в порядке за выбранный период"
-        image={Empty.PRESENTED_IMAGE_SIMPLE}
-      />
+      <Empty description="Всё в порядке за выбранный период" image={Empty.PRESENTED_IMAGE_SIMPLE} />
     );
   }
 
-  // URL-таргеты: используем уже работающие в Операциях фильтры —
-  // status=no_document, feature=transit. nophoto=1 — флаг, который
-  // добавляется отдельным мини-патчем (см. DeliveriesHistory). Для
-  // recognized validation_mismatch у нас уже есть статус-проверка через
-  // sourceDocsById на клиенте; готового URL-фильтра под него в Операциях
-  // нет, и счётчик ведёт на /documents (где валидация и происходит).
+  // URL-таргеты: те же фильтры, по которым считались числа. «Без фото» несёт
+  // ещё и порог возраста (nophotoHours): плашка считает операции старше 12
+  // часов, и без этого параметра список показывал бы вдобавок свежие, у
+  // которых фото ещё грузятся.
   const counters: CounterDef[] = [
     {
       key: 'no-doc-delivery',
       label: 'Приёмки без УПД',
       value: a.noDocumentDeliveries,
-      target: '/operations?type=delivery&tab=accepted&status=no_document',
+      target: `/operations?type=delivery&tab=accepted&status=no_document${scopeQs('operations')}`,
     },
     {
       key: 'no-doc-shipment',
       label: 'Отгрузки без УПД',
       value: a.noDocumentShipments,
-      target: '/operations?type=shipment&tab=accepted&status=no_document',
+      target: `/operations?type=shipment&tab=accepted&status=no_document${scopeQs('operations')}`,
     },
     {
       key: 'no-photo-delivery',
       label: 'Приёмки без фото',
       value: a.noPhotosDeliveries,
-      target: '/operations?type=delivery&tab=accepted&nophoto=1',
+      target: `/operations?type=delivery&tab=accepted&nophoto=1&nophotoHours=12${scopeQs('operations')}`,
     },
     {
       key: 'no-photo-shipment',
       label: 'Отгрузки без фото',
       value: a.noPhotosShipments,
-      target: '/operations?type=shipment&tab=accepted&nophoto=1',
+      target: `/operations?type=shipment&tab=accepted&nophoto=1&nophotoHours=12${scopeQs('operations')}`,
     },
     {
       key: 'overdue',
@@ -95,7 +112,7 @@ export function AttentionCounters({ data, loading }: Props) {
       label: 'Расхождение сумм',
       hint: 'Документы с parseError validation_mismatch',
       value: a.mismatchDocs,
-      target: '/documents',
+      target: `/documents?mismatch=1${scopeQs('documents')}`,
     },
     {
       key: 'transit',
@@ -104,7 +121,7 @@ export function AttentionCounters({ data, loading }: Props) {
       value: a.transit,
       // Транзит включает обе стороны; для прямого перехода ведём в
       // Приёмку — там этот признак чаще встречается по бизнес-смыслу.
-      target: '/operations?type=delivery&tab=accepted&feature=transit',
+      target: `/operations?type=delivery&tab=accepted&feature=transit${scopeQs('operations')}`,
     },
   ];
 

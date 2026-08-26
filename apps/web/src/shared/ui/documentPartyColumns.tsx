@@ -44,7 +44,8 @@ type PartyColumn<T> = {
   key: string;
   width?: number;
   ellipsis?: boolean | { showTitle: boolean };
-  sorter: ReturnType<typeof stringSorter<T>>;
+  sorter: ReturnType<typeof stringSorter<T>> | true;
+  sortOrder?: 'ascend' | 'descend' | null;
   render: (_: unknown, r: T) => React.ReactNode;
 };
 
@@ -96,7 +97,15 @@ export function partyCell(
  * `get` вытаскивает стороны из строки таблицы: в списке документов они лежат
  * прямо в строке, в историях операций — внутри primarySourceDocument.
  */
-export function documentPartyColumns<T>(get: (r: T) => DocumentParties): PartyColumn<T>[] {
+/**
+ * `opts.sortProps` — для таблиц с серверной сортировкой: страница отдаёт свои
+ * пропсы (`sorter: true` + текущий порядок) вместо клиентского компаратора.
+ * Сравнивать строки на клиенте там нельзя — на экране лишь одна страница.
+ */
+export function documentPartyColumns<T>(
+  get: (r: T) => DocumentParties,
+  opts?: { sortProps?: (columnKey: string) => Partial<PartyColumn<T>> },
+): PartyColumn<T>[] {
   const party = (
     title: string,
     key: string,
@@ -110,6 +119,7 @@ export function documentPartyColumns<T>(get: (r: T) => DocumentParties): PartyCo
     // ячейку) здесь выключен — обрезкой и тултипами занимается partyCell.
     ellipsis: false,
     sorter: stringSorter<T>((r) => (get(r)[nameField] as string | null | undefined) ?? null),
+    ...(opts?.sortProps ? opts.sortProps(key) : {}),
     // partyCell сам отдаёт «—» на пустом имени (через shortenCounterpartyName).
     render: (_: unknown, r: T) =>
       partyCell(

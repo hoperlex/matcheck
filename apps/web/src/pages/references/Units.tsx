@@ -1,22 +1,8 @@
 import { useState } from 'react';
-import {
-  Button,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Space,
-  Switch,
-  Typography,
-  message,
-} from 'antd';
+import { Button, Form, Input, Modal, Popconfirm, Space, Switch, Typography, message } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type {
-  BulkDeleteResponse,
-  Unit,
-  UnitUpsert,
-} from '@matcheck/contracts';
+import type { BulkDeleteResponse, Unit, UnitUpsert } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
@@ -56,7 +42,7 @@ export default function UnitsPage(): JSX.Element {
   const list = useQuery({
     queryKey: ['units', search],
     queryFn: () =>
-      api.get<List>(`/units${search ? `?q=${encodeURIComponent(search)}` : ''}`),
+      api.get<List>(`/units?limit=2000${search ? `&q=${encodeURIComponent(search)}` : ''}`),
   });
 
   const openCreate = () => {
@@ -105,8 +91,7 @@ export default function UnitsPage(): JSX.Element {
 
   const bulk = useBulkSelection<Unit>((r) => r.id);
   const bulkDel = useMutation({
-    mutationFn: (ids: string[]) =>
-      api.post<BulkDeleteResponse>('/units/bulk-delete', { ids }),
+    mutationFn: (ids: string[]) => api.post<BulkDeleteResponse>('/units/bulk-delete', { ids }),
     onSuccess: (res) => {
       bulk.clear();
       if (res.deleted.length > 0) message.success(`Удалено: ${res.deleted.length}`);
@@ -128,7 +113,12 @@ export default function UnitsPage(): JSX.Element {
             <DebouncedSearch
               placeholder="Код или название"
               value={search}
-              onChange={setSearch}
+              // Выбор снимаем вместе со сменой поиска: он относится к прежней
+              // выдаче, а «Удалить выбранные» отправляет id, а не то, что видно.
+              onChange={(v) => {
+                setSearch(v);
+                bulk.clear();
+              }}
               style={{ width: 240 }}
             />
           </Space>

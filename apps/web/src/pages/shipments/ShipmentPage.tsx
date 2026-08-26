@@ -243,12 +243,12 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   }, [shipmentId, inspectorSiteId]);
 
   const sitesQuery = useQuery({
-    queryKey: ['sites', 'all'],
+    queryKey: ['sites', { activeOnly: true, limit: 200 }],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
     enabled: !isContractor,
   });
   const counterpartiesQuery = useQuery({
-    queryKey: ['counterparties', 'all'],
+    queryKey: ['counterparties', { limit: 500 }],
     queryFn: () =>
       api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
     enabled: !isContractor,

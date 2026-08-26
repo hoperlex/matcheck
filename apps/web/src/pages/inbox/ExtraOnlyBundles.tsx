@@ -1,5 +1,6 @@
-import { Alert, Card, Empty, Space, Spin, Typography } from 'antd';
-import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { Alert, Card, Empty, Pagination, Space, Spin, Typography } from 'antd';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
@@ -17,10 +18,17 @@ import { formatDateRu } from '../../shared/utils/formatRu';
  */
 export default function ExtraOnlyBundles() {
   const navigate = useNavigate();
+  // Пагинация: комплектов бывает больше страницы, а на вкладке ни поиска, ни
+  // фильтров нет — без листания старые были бы недоступны совсем, хотя счётчик
+  // в заголовке их считает.
+  const PAGE_SIZE = 50;
+  const [page, setPage] = useState(1);
   const query = useQuery({
-    queryKey: ['extra-only-bundles'],
-    queryFn: () => apiGetExtraOnlyBundles({ limit: 50 }),
+    queryKey: ['extra-only-bundles', page],
+    queryFn: () => apiGetExtraOnlyBundles({ limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE }),
+    placeholderData: keepPreviousData,
   });
+  const total = query.data?.total ?? 0;
 
   const tabs: PageTabItem[] = [
     { key: 'inbound', label: 'Приёмка', count: null },
@@ -96,6 +104,17 @@ export default function ExtraOnlyBundles() {
             <ExtraFilesBlock files={b.files} />
           </Card>
         ))}
+        {total > PAGE_SIZE && (
+          <Pagination
+            current={page}
+            pageSize={PAGE_SIZE}
+            total={total}
+            onChange={setPage}
+            showSizeChanger={false}
+            showTotal={(n) => `Всего: ${n}`}
+            style={{ alignSelf: 'flex-end' }}
+          />
+        )}
       </Space>
     </>
   );

@@ -1,7 +1,17 @@
 import type { MouseEvent } from 'react';
 import { useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, Card, Popconfirm, Space, Tag, Tooltip, Typography, message } from 'antd';
+import {
+  Button,
+  Card,
+  Popconfirm,
+  Space,
+  Tag,
+  Tooltip,
+  Typography,
+  message,
+  type TableProps,
+} from 'antd';
 import {
   DeleteOutlined,
   DownloadOutlined,
@@ -24,13 +34,14 @@ import {
 } from '../../shared/ui/documentGroupRows';
 import { isPendingRow, pendingAsRow, pendingStateOf } from './pendingRow';
 import type {
-  Counterparty,
+  CustomerCounterparty,
   Site,
   SourceDirection,
   SourceDocumentBulkDeleteResponse,
   SourceDocumentListResponseSchema,
   SourceRecoverResponse,
   SourceReparseResponse,
+  Supplier,
 } from '@matcheck/contracts';
 import { getDocumentDisplayStatus, isActionableStub, isStubDocument } from '@matcheck/contracts';
 import type { z } from 'zod';
@@ -41,17 +52,13 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
-import {
-  dateSorter,
-  numberSorter,
-  prioritySorter,
-  stringSorter,
-} from '../../shared/ui/tableSorters';
-import { dateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
+import { parseDateRangeKey, serverDateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
+import { ActiveFilterChips, type ActiveFilterChip } from '../../shared/ui/ActiveFilterChips';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
 import { usePrefetchSourceDocumentDetails } from '../../shared/hooks/usePrefetchSourceDocumentDetails';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
+import { patchSearchParams, type SearchParamsPatch } from '../../shared/utils/searchParams';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { documentPartyColumns } from '../../shared/ui/documentPartyColumns';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
@@ -394,6 +401,38 @@ function StatusTag({
   }
 }
 
+// Поля серверной сортировки — те же, что понимает GET /source-documents.
+// Ключ колонки таблицы отличается у сторон документа (buyer/consignee/supplier),
+// поэтому рядом лежит перевод.
+const SORT_FIELDS = [
+  'kind',
+  'status',
+  'docNumber',
+  'docDate',
+  'expectedDate',
+  'siteName',
+  'buyerName',
+  'consigneeName',
+  'supplierName',
+  'vatSum',
+  'totalSum',
+] as const;
+type SortField = (typeof SORT_FIELDS)[number];
+
+const COLUMN_TO_SORT_FIELD: Record<string, SortField> = {
+  kind: 'kind',
+  status: 'status',
+  docNumber: 'docNumber',
+  docDate: 'docDate',
+  expectedDate: 'expectedDate',
+  siteName: 'siteName',
+  buyer: 'buyerName',
+  consignee: 'consigneeName',
+  supplier: 'supplierName',
+  vatSum: 'vatSum',
+  totalSum: 'totalSum',
+};
+
 export default function InboxPage() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
@@ -431,13 +470,31 @@ export default function InboxPage() {
   // пережил F5, как остальные.
   const needsAttention = params.get('attention') === '1';
 
-  const updateParams = (patch: Record<string, string | null | undefined>) => {
-    const next = new URLSearchParams(params);
-    for (const [k, v] of Object.entries(patch)) {
-      if (v) next.set(k, v);
-      else next.delete(k);
-    }
-    setParams(next, { replace: true });
+  // Страница, сортировка и диапазоны дат — тоже в адресе и тоже на сервере.
+  // Клиентских сортировок и колоночных фильтров в этой таблице больше нет: с
+  // серверной страницей они работали бы по 50 загруженным строкам и врали бы,
+  // выдавая «последнее по алфавиту» из первой страницы.
+  const PAGE_SIZE = 50;
+  const pageRaw = Number.parseInt(params.get('page') ?? '1', 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+  const sortField = SORT_FIELDS.includes((params.get('sort') ?? '') as SortField)
+    ? (params.get('sort') as SortField)
+    : null;
+  const sortOrder: 'asc' | 'desc' = params.get('order') === 'asc' ? 'asc' : 'desc';
+  // Дип-линк «Расхождение сумм» из «Статистики»: документы, где разбор нашёл
+  // несходящуюся арифметику. Своего контрола у фильтра нет — он показывается
+  // чипом и оттуда же снимается.
+  const mismatch = params.get('mismatch') === '1';
+  const docDateFrom = params.get('docFrom');
+  const docDateTo = params.get('docTo');
+  const expectedFrom = params.get('expFrom');
+  const expectedTo = params.get('expTo');
+
+  // patchSearchParams различает «не трогать» (undefined) и «снять» (null/''):
+  // фильтры шлют частичный патч, и раньше ключи со значением undefined
+  // доходили до delete — ввод номера документа снимал объект и контрагентов.
+  const updateParams = (patch: SearchParamsPatch) => {
+    setParams(patchSearchParams(params, patch), { replace: true });
   };
   const updateFilters = (patch: Partial<ListFiltersValue>) => {
     updateParams({
@@ -445,6 +502,8 @@ export default function InboxPage() {
       supplier: 'supplierIds' in patch ? toCsvIds(patch.supplierIds) : undefined,
       site: 'siteIds' in patch ? toCsvIds(patch.siteIds) : undefined,
       q: 'q' in patch ? patch.q : undefined,
+      // Новый фильтр — новая выдача: со старой страницы можно попасть в пустоту.
+      page: null,
     });
   };
 
@@ -477,13 +536,28 @@ export default function InboxPage() {
   async function handleExportExcel() {
     try {
       setExporting(true);
+      // Ровно те же параметры, что у списка: файл обязан повторять экран.
+      // Без kind и needsAttention выгрузка приносила и заявки, и документы вне
+      // включённой очереди ручной проверки.
       const qs = new URLSearchParams({ direction });
+      if (kind !== 'all') qs.set('kind', kind);
       if (filters.contractorIds.length > 0)
         qs.set('contractorIds', filters.contractorIds.join(','));
       if (filters.supplierIds.length > 0) qs.set('supplierIds', filters.supplierIds.join(','));
       if (filters.siteIds.length > 0) qs.set('siteIds', filters.siteIds.join(','));
       const qTrim = filters.q.trim();
       if (qTrim) qs.set('q', qTrim);
+      if (needsAttention) qs.set('needsAttention', 'true');
+      if (mismatch) qs.set('mismatch', 'true');
+      if (docDateFrom) qs.set('docDateFrom', docDateFrom);
+      if (docDateTo) qs.set('docDateTo', docDateTo);
+      if (expectedFrom) qs.set('expectedDateFrom', expectedFrom);
+      if (expectedTo) qs.set('expectedDateTo', expectedTo);
+      if (sortField) {
+        qs.set('sort', sortField);
+        qs.set('order', sortOrder);
+      }
+      qs.set('offset', String((page - 1) * PAGE_SIZE));
       const { blob, filename } = await apiDownload(
         `/source-documents/export.xlsx?${qs.toString()}`,
       );
@@ -508,18 +582,41 @@ export default function InboxPage() {
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
   const qc = useQueryClient();
 
+  // Фильтры уходят на сервер: раньше подрядчик/поставщик/объект отсеивались в
+  // браузере поверх лимита, а сравнение с operational supplier_id (у современных
+  // УПД он пуст — поставщик в supplier_directory_id) не находило вообще ничего.
+  // Все параметры входят в queryKey, иначе смена фильтра читала бы чужой кэш.
+  const listQuery = {
+    direction,
+    kind,
+    q: filters.q.trim(),
+    contractor: toCsvIds(filters.contractorIds),
+    supplier: toCsvIds(filters.supplierIds),
+    site: toCsvIds(filters.siteIds),
+    attention: needsAttention,
+    mismatch,
+    docDateFrom,
+    docDateTo,
+    expectedFrom,
+    expectedTo,
+    sort: sortField,
+    order: sortOrder,
+    page,
+  };
   const list = useQuery({
-    queryKey: ['source-documents', { direction, kind, q: filters.q.trim() }],
+    queryKey: ['source-documents', listQuery],
     queryFn: () => {
       const qs = new URLSearchParams({ direction });
       if (kind !== 'all') qs.set('kind', kind);
-      if (filters.q.trim()) qs.set('q', filters.q.trim());
-      // Тянем весь набор (до 2000) — таблица сортирует/фильтрует и пагинирует
-      // КЛИЕНТСКИ по всем строкам. Без limit сервер отдавал дефолтные 50, и при
-      // большем числе документов «хвост» не было видно (новые строки не
-      // появлялись, листать некуда). 2000 — потолок API; при дальнейшем росте
-      // понадобится серверная пагинация.
-      qs.set('limit', '2000');
+      if (listQuery.q) qs.set('q', listQuery.q);
+      if (listQuery.contractor) qs.set('contractorIds', listQuery.contractor);
+      if (listQuery.supplier) qs.set('supplierIds', listQuery.supplier);
+      if (listQuery.site) qs.set('siteIds', listQuery.site);
+      if (needsAttention) qs.set('needsAttention', 'true');
+      // Страница, а не «весь набор»: раньше тянулись первые 2000 документов, и
+      // всё, что за этой границей, было недостижимо ни фильтром, ни сортировкой
+      // (в приёмке их уже больше двух тысяч).
+      qs.set('limit', String(PAGE_SIZE));
       return api.get<List>(`/source-documents?${qs.toString()}`);
     },
     // При смене вкладки/фильтра показываем прошлый список, а новые данные
@@ -539,16 +636,38 @@ export default function InboxPage() {
     refetchIntervalInBackground: false,
   });
 
-  const counterpartiesQuery = useQuery({
-    queryKey: ['counterparties', 'all'],
-    queryFn: () => api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+  // Опции «Подрядчик»/«Поставщик» — из справочников заказчика, как в
+  // «Операциях» и «Отгрузке». Прежде здесь стояли операционные counterparties:
+  // список поставщиков расходился со вкладкой «Справочники → Поставщики», а
+  // выбранный id не совпадал с тем, что кладут в общий стор другие разделы, —
+  // после перехода между разделами таблица пустела.
+  const customerCounterpartiesQuery = useQuery({
+    queryKey: ['customer-counterparties', 'all'],
+    queryFn: () =>
+      api.get<{ items: CustomerCounterparty[]; total: number }>(
+        '/customer-counterparties?limit=5000',
+      ),
+    enabled: !isContractor,
+  });
+  const suppliersQuery = useQuery({
+    queryKey: ['suppliers', 'all'],
+    queryFn: () => api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
     enabled: !isContractor,
   });
   const sitesQuery = useQuery({
-    queryKey: ['sites', 'all'],
+    queryKey: ['sites', { activeOnly: true, limit: 200 }],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
     enabled: !isContractor,
   });
+  const contractorOptions = useMemo(
+    () =>
+      (customerCounterpartiesQuery.data?.items ?? []).map((c) => ({ value: c.id, label: c.name })),
+    [customerCounterpartiesQuery.data],
+  );
+  const supplierOptions = useMemo(
+    () => (suppliersQuery.data?.items ?? []).map((s) => ({ value: s.id, label: s.name })),
+    [suppliersQuery.data],
+  );
 
   // Лёгкие count-запросы для вкладок «Приёмка / Отгрузка». limit=1 — серверу
   // достаточно для возврата total. Запросы независимы от текущего direction,
@@ -658,48 +777,41 @@ export default function InboxPage() {
     onError: (err: Error) => message.error(err.message),
   });
 
-  const allItems = list.data?.items ?? [];
-  const filteredItems = useMemo(() => {
-    return allItems.filter((r) => {
-      if (
-        filters.contractorIds.length > 0 &&
-        (!r.contractorId || !filters.contractorIds.includes(r.contractorId))
-      )
-        return false;
-      if (
-        filters.supplierIds.length > 0 &&
-        (!r.supplierId || !filters.supplierIds.includes(r.supplierId))
-      )
-        return false;
-      if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId)))
-        return false;
-      if (needsAttention && (r.validation?.warnings ?? []).length === 0) return false;
-      return true;
-    });
-  }, [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds, needsAttention]);
+  // Сервер уже применил все фильтры, включая «Требуют внимания», — второй раз
+  // отсеивать нечего. Прежняя клиентская копия к тому же сравнивала поставщика
+  // с полем, которого у современных УПД нет.
+  const filteredItems = list.data?.items ?? [];
 
-  // Сколько документов ждут ручной проверки — по тем же фильтрам, что и
-  // список, но без учёта самой кнопки: иначе после нажатия счётчик схлопнулся
-  // бы до числа показанных строк и перестал бы что-либо значить.
-  const attentionCount = useMemo(
-    () =>
-      allItems.filter((r) => {
-        if (
-          filters.contractorIds.length > 0 &&
-          (!r.contractorId || !filters.contractorIds.includes(r.contractorId))
-        )
-          return false;
-        if (
-          filters.supplierIds.length > 0 &&
-          (!r.supplierId || !filters.supplierIds.includes(r.supplierId))
-        )
-          return false;
-        if (filters.siteIds.length > 0 && (!r.siteId || !filters.siteIds.includes(r.siteId)))
-          return false;
-        return (r.validation?.warnings ?? []).length > 0;
-      }).length,
-    [allItems, filters.contractorIds, filters.supplierIds, filters.siteIds],
-  );
+  // Сколько документов ждут ручной проверки — по тем же фильтрам, что и список,
+  // но всегда с needsAttention: иначе после нажатия кнопки счётчик схлопнулся бы
+  // до числа показанных строк и перестал бы что-либо значить. Отдельный запрос
+  // с limit=1 — нужен только total, и считается он по ВСЕЙ выборке, а не по
+  // загруженной странице.
+  const attentionQuery = useQuery({
+    queryKey: [
+      'source-documents',
+      'attention-count',
+      {
+        direction,
+        kind,
+        q: listQuery.q,
+        contractor: listQuery.contractor,
+        supplier: listQuery.supplier,
+        site: listQuery.site,
+      },
+    ],
+    queryFn: () => {
+      const qs = new URLSearchParams({ direction, needsAttention: 'true', limit: '1' });
+      if (kind !== 'all') qs.set('kind', kind);
+      if (listQuery.q) qs.set('q', listQuery.q);
+      if (listQuery.contractor) qs.set('contractorIds', listQuery.contractor);
+      if (listQuery.supplier) qs.set('supplierIds', listQuery.supplier);
+      if (listQuery.site) qs.set('siteIds', listQuery.site);
+      return api.get<{ total: number }>(`/source-documents?${qs.toString()}`);
+    },
+    placeholderData: keepPreviousData,
+  });
+  const attentionCount = attentionQuery.data?.total ?? 0;
 
   // Принятые файлы, до которых разбор ещё не дошёл, — обычные строки списка.
   // Своей таблицы им заводить нельзя: вторая шапка колонок читается как
@@ -719,12 +831,15 @@ export default function InboxPage() {
   // применяет свой sorter после нас, и строки машины могут разойтись; метка
   // при этом остаётся, и машина по-прежнему узнаётся.
   //
-  // Ожидающие файлы идут в тот же поток: файл встаёт рядом с уже разобранными
-  // документами своей поставки, а не отдельной кучей наверху.
-  const groupedItems = useMemo(
-    () => clusterRowsByGroup([...pendingRows, ...filteredItems]),
-    [pendingRows, filteredItems],
-  );
+  // Принятые файлы — отдельным блоком НАД таблицей (тем же набором колонок и
+  // без второй шапки), а не в общем потоке строк.
+  //
+  // В общем потоке они ломали серверную пагинацию: сервер отдаёт их только к
+  // первой странице и сверх лимита, dataSource становился длиннее pageSize, и
+  // antd срезал ровно столько документов, сколько файлов пришло, — они молча
+  // пропадали из выдачи.
+  const groupedItems = useMemo(() => clusterRowsByGroup(filteredItems), [filteredItems]);
+  const pendingGrouped = useMemo(() => clusterRowsByGroup(pendingRows), [pendingRows]);
 
   // Префетч позиций — фоном после рендера списка. Клик «+» раскрывает
   // строку, дёргать сеть в этот момент не приходится: ExpandedSource-
@@ -888,6 +1003,250 @@ export default function InboxPage() {
     return '—';
   };
 
+  // Сортировка — серверная: колонке достаточно знать, активна ли она сейчас.
+  const sortProps = (columnKey: string) => ({
+    sorter: true,
+    sortOrder:
+      sortField && COLUMN_TO_SORT_FIELD[columnKey] === sortField
+        ? ((sortOrder === 'asc' ? 'ascend' : 'descend') as 'ascend' | 'descend')
+        : null,
+  });
+
+  // Смена страницы, сортировки или колоночного фильтра дат — всё это уходит в
+  // адрес, а оттуда в запрос. Выбор строк сбрасываем: он относился к прежней
+  // выдаче, и «Удалить выбранные» отправило бы id, которых на экране нет.
+  const handleTableChange: NonNullable<TableProps<Row>['onChange']> = (
+    tablePagination,
+    tableFilters,
+    tableSorter,
+  ) => {
+    const single = Array.isArray(tableSorter) ? tableSorter[0] : tableSorter;
+    const columnKey = single && single.order ? String(single.columnKey ?? '') : '';
+    const field = COLUMN_TO_SORT_FIELD[columnKey];
+    const doc = parseDateRangeKey(tableFilters['docDate']?.[0] as string | undefined);
+    const exp = parseDateRangeKey(tableFilters['expectedDate']?.[0] as string | undefined);
+    const nextPage = tablePagination.current ?? 1;
+    const filtersChanged =
+      doc.from !== docDateFrom ||
+      doc.to !== docDateTo ||
+      exp.from !== expectedFrom ||
+      exp.to !== expectedTo ||
+      (field ?? null) !== sortField;
+    updateParams({
+      sort: field ?? null,
+      order: field ? (single?.order === 'ascend' ? 'asc' : 'desc') : null,
+      docFrom: doc.from,
+      docTo: doc.to,
+      expFrom: exp.from,
+      expTo: exp.to,
+      // Сортировка и фильтр меняют состав выдачи целиком — возвращаемся на
+      // первую страницу, иначе можно оказаться на пустой седьмой.
+      page: filtersChanged || nextPage <= 1 ? null : String(nextPage),
+    });
+    bulk.clear();
+  };
+
+  // Фильтры без своего контрола на панели — показываем чипами, иначе список
+  // молча сужается и понять причину нельзя.
+  const hiddenFilterChips: ActiveFilterChip[] = mismatch
+    ? [
+        {
+          key: 'mismatch',
+          label: 'Расхождение сумм',
+          onClear: () => updateParams({ mismatch: null, page: null }),
+        },
+      ]
+    : [];
+
+  // Колонки списка. Вынесены в переменную: тем же набором рисуется блок
+  // принятых файлов над таблицей.
+  // Карточка строки для мобильного вида — общая у списка и у блока
+  // принятых файлов над ним.
+  const documentCardRender = (r: Row) => (
+    <Card style={{ width: '100%' }} size="small">
+      <Space direction="vertical" size={2} style={{ width: '100%', position: 'relative' }}>
+        <Space size={4} wrap>
+          {/* Принятый файл: тип ещё неизвестен — как и у нераспознанного. */}
+          {isUnrecognized(r) || isPendingRow(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
+          <StatusTag
+            row={r}
+            onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
+            onManualResolve={isContractor ? undefined : (row) => resolveManually.mutate(row.id)}
+          />
+        </Space>
+        <Typography.Text strong>
+          {r.docNumber ?? (r.originalFilename ? r.originalFilename : '— без номера —')}
+        </Typography.Text>
+        <Typography.Text type="secondary">
+          {r.docDate ?? '—'} · {formatDecimal(r.totalSum) || '—'} ₽
+          {r.llmConfidence != null
+            ? ` · уверенность ${Math.round(Number(r.llmConfidence) * 100)}%`
+            : ''}
+        </Typography.Text>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {r.siteName ?? '—'} · {shortenCounterpartyName(r.buyerName)} ·{' '}
+          {shortenCounterpartyName(r.consigneeName)} · {shortenCounterpartyName(r.supplierName)}
+        </Typography.Text>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {originLabel(r.origin, r.fromSupplierPortal)}
+        </Typography.Text>
+        {!isPendingRow(r) && (
+          <div
+            style={{ position: 'absolute', top: 0, right: 0 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {renderReparseButton(r)}
+            {renderDeleteButton(r)}
+          </div>
+        )}
+      </Space>
+    </Card>
+  );
+
+  const documentColumns: TableProps<Row>['columns'] = [
+    {
+      title: 'Тип',
+      dataIndex: 'kind',
+      width: 150,
+      // По частоте использования: УПД сверху, заявки в середине,
+      // накладные (ТН + ОС-2) вместе внизу.
+      ...sortProps('kind'),
+      // Кнопка ± рядом с тегом — раскрывает/сворачивает позиции
+      // под строкой. stopPropagation чтобы не сработал onRowClick.
+      render: (_: unknown, r: Row) => {
+        // Принятый файл: тип неизвестен, позиций нет — ни тега, ни
+        // раскрытия. Прочерк здесь честнее «УПД», которого может и не
+        // оказаться.
+        if (isPendingRow(r)) {
+          return (
+            <Space size={4}>
+              <Tag>—</Tag>
+              <Tooltip title="Загружен поставщиком через публичную ссылку">
+                <CloudUploadOutlined style={{ color: '#8c8c8c' }} />
+              </Tooltip>
+            </Space>
+          );
+        }
+        const expanded = expandedIds.includes(r.id);
+        return (
+          <Space size={4}>
+            <Button
+              type="text"
+              size="small"
+              icon={expanded ? <MinusSquareOutlined /> : <PlusSquareOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleExpand(r.id);
+              }}
+            />
+            {/* Тип «—»: файл распознать не удалось, и «УПД» здесь ввело
+                      бы в заблуждение — реквизитов в документе нет. */}
+            {isUnrecognized(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
+            {/* Происхождение отмечаем только у почтовых: такой документ
+                      пришёл от подрядчика письмом, а не загружен вручную. */}
+            {r.origin === 'mail' && (
+              <Tooltip title="Пришёл по почте от подрядчика">
+                <MailOutlined style={{ color: '#8c8c8c' }} />
+              </Tooltip>
+            )}
+            {/* Загружен самим поставщиком через публичную ссылку: у таких
+                      документов подрядчик тоже не заполнен, а отправителя видно
+                      в карточке. */}
+            {r.fromSupplierPortal && (
+              <Tooltip title="Загружен поставщиком через публичную ссылку">
+                <CloudUploadOutlined style={{ color: '#8c8c8c' }} />
+              </Tooltip>
+            )}
+          </Space>
+        );
+      },
+    },
+    {
+      // Раньше шапка была двухстрочной «Статус / Уверенность» —
+      // теперь процент в ячейке не рисуется, заголовок упростили
+      // до одного «Статус».
+      title: 'Статус',
+      dataIndex: 'status',
+      // Ширина под самую длинную пару «распознано частично» + «дополнить»
+      // (~227px вместе с отступами ячейки). Уже — и общий ellipsis
+      // обрезал бы действие, которое нужно нажимать.
+      width: 260,
+      // По «требует внимания»: активные вверху, архив внизу.
+      ...sortProps('status'),
+      render: (_: unknown, r: Row) => (
+        <StatusTag
+          row={r}
+          onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
+          onManualResolve={isContractor ? undefined : (row) => resolveManually.mutate(row.id)}
+        />
+      ),
+    },
+    {
+      title: '№',
+      dataIndex: 'docNumber',
+      ...sortProps('docNumber'),
+      render: renderDocNumber,
+    },
+    {
+      title: 'Дата',
+      dataIndex: 'docDate',
+      // defaultSortOrder убран: иначе при каждой перемонтировке
+      // (refresh / переход на другой раздел и обратно) сортировка
+      // возвращалась принудительно. Сервер уже отдаёт документы по
+      // parsed_at desc — свежие сверху без явной сортировки.
+      ...sortProps('docDate'),
+      ...serverDateRangeColumnFilter<Row>({ from: docDateFrom, to: docDateTo }),
+      render: (v: string | null) => formatDateRu(v),
+    },
+    {
+      title: 'Дата поставки',
+      dataIndex: 'expectedDate',
+      ...sortProps('expectedDate'),
+      ...serverDateRangeColumnFilter<Row>({ from: expectedFrom, to: expectedTo }),
+      render: (v: string | null) => formatDateRu(v),
+    },
+    {
+      title: 'Объект',
+      dataIndex: 'siteName',
+      ...sortProps('siteName'),
+      render: (v: string | null | undefined) => v ?? '—',
+    },
+    // Стороны документа — общий набор для всех таблиц с УПД,
+    // см. shared/ui/documentPartyColumns.
+    ...documentPartyColumns<Row>((r) => r, { sortProps }),
+    {
+      title: 'Сумма НДС',
+      dataIndex: 'vatSum',
+      ...sortProps('vatSum'),
+      render: (v: string | null) => formatMoneyRu(v),
+    },
+    {
+      title: 'Сумма',
+      dataIndex: 'totalSum',
+      ...sortProps('totalSum'),
+      render: (v: string | null) => formatMoneyRu(v),
+    },
+    {
+      title: '',
+      key: 'actions',
+      // Две круглые кнопки: повтор распознавания и удаление.
+      width: 96,
+      align: 'right' as const,
+      onCell: () => ({
+        onClick: (e: MouseEvent) => e.stopPropagation(),
+      }),
+      // Принятому файлу нечего повторять и нечего удалять: документа по
+      // нему ещё нет, а сам файл живёт в реестре пакета.
+      render: (_: unknown, r: Row) =>
+        isPendingRow(r) ? null : (
+          <Space size={4}>
+            {renderReparseButton(r)}
+            {renderDeleteButton(r)}
+          </Space>
+        ),
+    },
+  ];
+
   const mailSummary = mailSummaryQuery.data;
   const docsTabs: PageTabItem[] = [
     { key: 'inbound', label: 'Приёмка', count: inboundCountQuery.data?.total ?? null },
@@ -948,7 +1307,7 @@ export default function InboxPage() {
                       navigate('/documents/extra-only');
                       return;
                     }
-                    updateParams({ direction: k === 'outbound' ? 'outbound' : null });
+                    updateParams({ direction: k === 'outbound' ? 'outbound' : null, page: null });
                   }}
                 />
               </div>
@@ -980,9 +1339,14 @@ export default function InboxPage() {
               onChange={updateFilters}
               // Подрядчик: только поиск (справочные фильтры не нужны и закрыты).
               fields={isContractor ? ['q'] : ['contractor', 'supplier', 'site', 'q']}
-              counterparties={counterpartiesQuery.data?.items ?? []}
+              contractorOptions={contractorOptions}
+              supplierOptions={supplierOptions}
               sites={sitesQuery.data?.items ?? []}
-              loading={counterpartiesQuery.isLoading || sitesQuery.isLoading}
+              loading={
+                customerCounterpartiesQuery.isLoading ||
+                suppliersQuery.isLoading ||
+                sitesQuery.isLoading
+              }
               searchPlaceholder="Номер документа"
               extra={
                 <Space size={8}>
@@ -992,7 +1356,9 @@ export default function InboxPage() {
                   <Button
                     type={needsAttention ? 'primary' : 'default'}
                     icon={<QuestionCircleOutlined />}
-                    onClick={() => updateParams({ attention: needsAttention ? null : '1' })}
+                    onClick={() =>
+                      updateParams({ attention: needsAttention ? null : '1', page: null })
+                    }
                   >
                     Требуют внимания
                     {attentionCount > 0 ? ` (${attentionCount})` : ''}
@@ -1017,6 +1383,7 @@ export default function InboxPage() {
                 </Space>
               }
             />
+            <ActiveFilterChips items={hiddenFilterChips} />
           </>
         }
       >
@@ -1031,6 +1398,20 @@ export default function InboxPage() {
               `.matcheck-doc-group-${i} > td:first-child { box-shadow: inset 4px 0 0 ${color}; }`,
           ).join('\n')}
         </style>
+        {pendingGrouped.length > 0 && (
+          <ResponsiveTable<Row>
+            items={pendingGrouped}
+            rowKey="id"
+            numbered
+            showHeader={false}
+            pagination={false}
+            scrollY={false}
+            scrollX={1750}
+            columns={documentColumns}
+            rowClassName={(r) => groupRowClass(documentGroupKey(r))}
+            cardRender={documentCardRender}
+          />
+        )}
         <ResponsiveTable<Row>
           items={groupedItems}
           loading={list.isLoading}
@@ -1042,13 +1423,22 @@ export default function InboxPage() {
           // появлением ИНН получили фиксированные 170px вместо ~110 свободных —
           // отсюда +150 к минимальной ширине.
           scrollX={1750}
-          // Постраничная навигация (как в «Операциях»): по 50 на страницу, с
-          // переключателем размера. Клиентская — по всему загруженному набору.
+          // Постраничная навигация серверная: total считает сервер по тем же
+          // условиям, что и выдачу. Переключателя размера нет намеренно — он
+          // менял бы страницу и оффсет одновременно.
+          //
+          // Строки принятых файлов сервер добавляет только к первой странице и
+          // сверх лимита, поэтому в total они не входят: это очередь разбора, а
+          // не документы.
           pagination={{
-            pageSize: 50,
-            showSizeChanger: true,
-            pageSizeOptions: [50, 100, 200],
+            current: page,
+            pageSize: PAGE_SIZE,
+            total: list.data?.total ?? 0,
+            showSizeChanger: false,
+            showTotal: (total) => `Всего: ${total}`,
           }}
+          onChange={handleTableChange}
+          numberedOffset={(page - 1) * PAGE_SIZE}
           rowSelection={
             isContractor
               ? undefined
@@ -1073,200 +1463,8 @@ export default function InboxPage() {
             if (isPendingRow(r)) return;
             setSelectedId(r.id);
           }}
-          columns={[
-            {
-              title: 'Тип',
-              dataIndex: 'kind',
-              width: 150,
-              // По частоте использования: УПД сверху, заявки в середине,
-              // накладные (ТН + ОС-2) вместе внизу.
-              sorter: prioritySorter<Row, Row['kind']>(
-                (r) => r.kind,
-                ['upd', 'request', 'transport_waybill', 'os2_transfer'],
-              ),
-              // Кнопка ± рядом с тегом — раскрывает/сворачивает позиции
-              // под строкой. stopPropagation чтобы не сработал onRowClick.
-              render: (_: unknown, r: Row) => {
-                // Принятый файл: тип неизвестен, позиций нет — ни тега, ни
-                // раскрытия. Прочерк здесь честнее «УПД», которого может и не
-                // оказаться.
-                if (isPendingRow(r)) {
-                  return (
-                    <Space size={4}>
-                      <Tag>—</Tag>
-                      <Tooltip title="Загружен поставщиком через публичную ссылку">
-                        <CloudUploadOutlined style={{ color: '#8c8c8c' }} />
-                      </Tooltip>
-                    </Space>
-                  );
-                }
-                const expanded = expandedIds.includes(r.id);
-                return (
-                  <Space size={4}>
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={expanded ? <MinusSquareOutlined /> : <PlusSquareOutlined />}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleExpand(r.id);
-                      }}
-                    />
-                    {/* Тип «—»: файл распознать не удалось, и «УПД» здесь ввело
-                      бы в заблуждение — реквизитов в документе нет. */}
-                    {isUnrecognized(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
-                    {/* Происхождение отмечаем только у почтовых: такой документ
-                      пришёл от подрядчика письмом, а не загружен вручную. */}
-                    {r.origin === 'mail' && (
-                      <Tooltip title="Пришёл по почте от подрядчика">
-                        <MailOutlined style={{ color: '#8c8c8c' }} />
-                      </Tooltip>
-                    )}
-                    {/* Загружен самим поставщиком через публичную ссылку: у таких
-                      документов подрядчик тоже не заполнен, а отправителя видно
-                      в карточке. */}
-                    {r.fromSupplierPortal && (
-                      <Tooltip title="Загружен поставщиком через публичную ссылку">
-                        <CloudUploadOutlined style={{ color: '#8c8c8c' }} />
-                      </Tooltip>
-                    )}
-                  </Space>
-                );
-              },
-            },
-            {
-              // Раньше шапка была двухстрочной «Статус / Уверенность» —
-              // теперь процент в ячейке не рисуется, заголовок упростили
-              // до одного «Статус».
-              title: 'Статус',
-              dataIndex: 'status',
-              // Ширина под самую длинную пару «распознано частично» + «дополнить»
-              // (~227px вместе с отступами ячейки). Уже — и общий ellipsis
-              // обрезал бы действие, которое нужно нажимать.
-              width: 260,
-              // По «требует внимания»: активные вверху, архив внизу.
-              sorter: prioritySorter<Row, Row['status']>(
-                (r) => r.status,
-                ['processing', 'queued', 'needs_resolution', 'parse_failed', 'parsed', 'archived'],
-              ),
-              render: (_: unknown, r: Row) => (
-                <StatusTag
-                  row={r}
-                  onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
-                  onManualResolve={
-                    isContractor ? undefined : (row) => resolveManually.mutate(row.id)
-                  }
-                />
-              ),
-            },
-            {
-              title: '№',
-              dataIndex: 'docNumber',
-              sorter: stringSorter<Row>((r) => r.docNumber),
-              render: renderDocNumber,
-            },
-            {
-              title: 'Дата',
-              dataIndex: 'docDate',
-              // defaultSortOrder убран: иначе при каждой перемонтировке
-              // (refresh / переход на другой раздел и обратно) сортировка
-              // возвращалась принудительно. Сервер уже отдаёт документы по
-              // parsed_at desc — свежие сверху без явной сортировки.
-              sorter: dateSorter<Row>((r) => r.docDate),
-              ...dateRangeColumnFilter<Row>((r) => r.docDate),
-              render: (v: string | null) => formatDateRu(v),
-            },
-            {
-              title: 'Дата поставки',
-              dataIndex: 'expectedDate',
-              sorter: dateSorter<Row>((r) => r.expectedDate),
-              ...dateRangeColumnFilter<Row>((r) => r.expectedDate),
-              render: (v: string | null) => formatDateRu(v),
-            },
-            {
-              title: 'Объект',
-              dataIndex: 'siteName',
-              sorter: stringSorter<Row>((r) => r.siteName),
-              render: (v: string | null | undefined) => v ?? '—',
-            },
-            // Стороны документа — общий набор для всех таблиц с УПД,
-            // см. shared/ui/documentPartyColumns.
-            ...documentPartyColumns<Row>((r) => r),
-            {
-              title: 'Сумма НДС',
-              dataIndex: 'vatSum',
-              sorter: numberSorter<Row>((r) => r.vatSum),
-              render: (v: string | null) => formatMoneyRu(v),
-            },
-            {
-              title: 'Сумма',
-              dataIndex: 'totalSum',
-              sorter: numberSorter<Row>((r) => r.totalSum),
-              render: (v: string | null) => formatMoneyRu(v),
-            },
-            {
-              title: '',
-              key: 'actions',
-              // Две круглые кнопки: повтор распознавания и удаление.
-              width: 96,
-              align: 'right' as const,
-              onCell: () => ({
-                onClick: (e: MouseEvent) => e.stopPropagation(),
-              }),
-              // Принятому файлу нечего повторять и нечего удалять: документа по
-              // нему ещё нет, а сам файл живёт в реестре пакета.
-              render: (_: unknown, r: Row) =>
-                isPendingRow(r) ? null : (
-                  <Space size={4}>
-                    {renderReparseButton(r)}
-                    {renderDeleteButton(r)}
-                  </Space>
-                ),
-            },
-          ]}
-          cardRender={(r) => (
-            <Card style={{ width: '100%' }} size="small">
-              <Space direction="vertical" size={2} style={{ width: '100%', position: 'relative' }}>
-                <Space size={4} wrap>
-                  {/* Принятый файл: тип ещё неизвестен — как и у нераспознанного. */}
-                  {isUnrecognized(r) || isPendingRow(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
-                  <StatusTag
-                    row={r}
-                    onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
-                    onManualResolve={
-                      isContractor ? undefined : (row) => resolveManually.mutate(row.id)
-                    }
-                  />
-                </Space>
-                <Typography.Text strong>
-                  {r.docNumber ?? (r.originalFilename ? r.originalFilename : '— без номера —')}
-                </Typography.Text>
-                <Typography.Text type="secondary">
-                  {r.docDate ?? '—'} · {formatDecimal(r.totalSum) || '—'} ₽
-                  {r.llmConfidence != null
-                    ? ` · уверенность ${Math.round(Number(r.llmConfidence) * 100)}%`
-                    : ''}
-                </Typography.Text>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {r.siteName ?? '—'} · {shortenCounterpartyName(r.buyerName)} ·{' '}
-                  {shortenCounterpartyName(r.consigneeName)} ·{' '}
-                  {shortenCounterpartyName(r.supplierName)}
-                </Typography.Text>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {originLabel(r.origin, r.fromSupplierPortal)}
-                </Typography.Text>
-                {!isPendingRow(r) && (
-                  <div
-                    style={{ position: 'absolute', top: 0, right: 0 }}
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    {renderReparseButton(r)}
-                    {renderDeleteButton(r)}
-                  </div>
-                )}
-              </Space>
-            </Card>
-          )}
+          columns={documentColumns}
+          cardRender={documentCardRender}
         />
       </StickyPageHeader>
       <UpdPdfUploadModal

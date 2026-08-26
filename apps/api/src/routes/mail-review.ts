@@ -68,7 +68,11 @@ export async function mailReviewRoutes(rawApp: FastifyInstance): Promise<void> {
   const staff = [app.authenticate, app.authorize('admin', 'manager')];
 
   /** Строки списка вместе с именем ящика, подсказанным объектом и счётчиками вложений. */
-  async function loadMessages(where: ReturnType<typeof eq> | undefined, limit: number) {
+  async function loadMessages(
+    where: ReturnType<typeof eq> | undefined,
+    limit: number,
+    offset = 0,
+  ) {
     // Счётчики вложений отдельным запросом, а не коррелированным подзапросом на
     // строку: писем в разборе немного, а join с group by по двум таблицам сразу
     // читается хуже.
@@ -84,7 +88,8 @@ export async function mailReviewRoutes(rawApp: FastifyInstance): Promise<void> {
       .leftJoin(sites, eq(sites.id, mailMessages.suggestedSiteId))
       .where(where)
       .orderBy(desc(mailMessages.createdAt))
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
 
     const ids = rows.map((r) => r.m.id);
     const counts = new Map<string, { total: number; ingestable: number }>();
@@ -155,6 +160,10 @@ export async function mailReviewRoutes(rawApp: FastifyInstance): Promise<void> {
         querystring: z.object({
           status: MailReviewFilterSchema.default('pending'),
           limit: z.coerce.number().int().min(1).max(500).default(200),
+          // Пагинация: писем в карантине бывает больше страницы, и без offset
+          // до старых нельзя было добраться вообще — ни поиска, ни фильтра по
+          // дате на вкладке нет.
+          offset: z.coerce.number().int().nonnegative().default(0),
         }),
         response: { 200: MailMessageListResponseSchema },
       },
@@ -168,7 +177,7 @@ export async function mailReviewRoutes(rawApp: FastifyInstance): Promise<void> {
             ? inArray(mailMessages.status, [...PENDING_STATUSES])
             : eq(mailMessages.status, filter);
 
-      const items = await loadMessages(where as never, req.query.limit);
+      const items = await loadMessages(where as never, req.query.limit, req.query.offset);
       const [total] = await app.db
         .select({ n: sql<number>`count(*)::int` })
         .from(mailMessages)

@@ -21,6 +21,9 @@ export type OperationsFilters = {
   /** Только у отгрузок: «Тип отгрузки» из мобильной формы. */
   purposes?: string[];
   nophoto: boolean;
+  // Порог «давно без фото» (часы) — приходит из плашки «Требует внимания»,
+  // чтобы список показывал ровно то, что она посчитала.
+  nophotoOlderHours: string | null;
   status: string | null;
   reviewState: string | null;
   /** Дни YYYY-MM-DD; пустая строка — граница не задана. */
@@ -41,6 +44,7 @@ export function readOperationsFilters(params: URLSearchParams): OperationsFilter
     features: params.getAll('feature'),
     purposes: params.getAll('purpose'),
     nophoto: params.get('nophoto') === '1',
+    nophotoOlderHours: params.get('nophotoHours'),
     reviewState: params.get('review'),
     dateFrom: params.get('dfrom') ?? '',
     dateTo: params.get('dto') ?? '',
@@ -74,7 +78,10 @@ export function operationsListQuery(
   if (filters.plate.trim()) qs.set('plate', filters.plate.trim());
   if (filters.purposes?.length) qs.set('purposes', filters.purposes.join(','));
   if (filters.features.length) qs.set('features', filters.features.join(','));
-  if (filters.nophoto) qs.set('nophoto', '1');
+  if (filters.nophoto) {
+    qs.set('nophoto', '1');
+    if (filters.nophotoOlderHours) qs.set('nophotoOlderHours', filters.nophotoOlderHours);
+  }
   // status=no_document — псевдо-значение селекта, на сервере это отдельный
   // параметр. Без маппинга оно не прошло бы валидацию статуса.
   if (filters.status === 'no_document') qs.set('noDocument', 'true');

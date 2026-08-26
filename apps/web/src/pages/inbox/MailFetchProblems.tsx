@@ -62,7 +62,10 @@ export function MailFetchProblems() {
       style={{ marginBottom: 12 }}
       type="warning"
       showIcon
-      message={`Не удалось забрать писем: ${items.length}`}
+      // total, а не items.length: сервер отдаёт срез (по умолчанию 200), и на
+      // большем числе проблем заголовок показывал бы размер страницы вместо
+      // настоящего количества.
+      message={`Не удалось забрать писем: ${list.data?.total ?? items.length}`}
       description={
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
           <Typography.Text type="secondary">

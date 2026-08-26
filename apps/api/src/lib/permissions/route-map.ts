@@ -606,8 +606,14 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ],
   ['GET /api/v1/reports/intake', st('materials_journal', 'view')],
   ['GET /api/v1/reports/shipment', st('materials_journal', 'view')],
+  // Объединённая лента поступлений и отгрузок — тот же экран, что два журнала
+  // выше, поэтому и право то же.
+  ['GET /api/v1/reports/movements', st('materials_journal', 'view')],
   ['GET /api/v1/reports/stock', st('materials_journal', 'view')],
   ['GET /api/v1/reports/inspector-stats', st('stats', 'view')],
+  // Справочник инспекторов для селекта «Статистики»: отдаёт только id, ФИО и
+  // email — то же право, что у самого отчёта.
+  ['GET /api/v1/reports/inspectors', st('stats', 'view')],
   ['GET /api/v1/reports/stats-summary', st('stats', 'view')],
 
   // ─────────────────────────── Справочники ────────────────────────────────

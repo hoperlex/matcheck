@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Alert, Card, Segmented, Space, Tag, Tooltip, Typography } from 'antd';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import dayjs from 'dayjs';
 import type { MailMessageDto, MailReviewFilter } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
+import { patchSearchParams } from '../../shared/utils/searchParams';
 import { MailFetchProblems } from './MailFetchProblems';
 import { MailReviewModal } from './MailReviewModal';
 
@@ -60,9 +61,22 @@ export default function MailReview() {
 
   const filter = (params.get('status') ?? 'pending') as MailReviewFilter;
 
+  // Серверная пагинация. Сервер отдаёт по умолчанию 200 писем, а в карантине
+  // их бывает больше: до старых нельзя было добраться вообще — ни поиска, ни
+  // фильтра по дате на вкладке нет.
+  const PAGE_SIZE = 100;
+  const page = Math.max(1, Number.parseInt(params.get('page') ?? '1', 10) || 1);
+  const setPage = (next: number) =>
+    setParams(patchSearchParams(params, { page: next <= 1 ? null : String(next) }), {
+      replace: true,
+    });
   const list = useQuery({
-    queryKey: ['mail-messages', filter],
-    queryFn: () => api.get<List>(`/mail/messages?status=${filter}`),
+    queryKey: ['mail-messages', filter, page],
+    queryFn: () =>
+      api.get<List>(
+        `/mail/messages?status=${filter}&limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}`,
+      ),
+    placeholderData: keepPreviousData,
   });
   const summary = useQuery({
     queryKey: ['mail-review-summary'],
@@ -105,7 +119,14 @@ export default function MailReview() {
             <Space style={{ marginBottom: 8 }}>
               <Segmented
                 value={filter}
-                onChange={(v) => setParams({ status: String(v) })}
+                // Патч, а не замена: setParams({…}) стирал бы все прочие
+                // параметры адреса — тот же дефект, что был в «Документах».
+                onChange={(v) =>
+                  // page снимаем: на новом фильтре страницы №5 может не быть.
+                  setParams(patchSearchParams(params, { status: String(v), page: null }), {
+                    replace: true,
+                  })
+                }
                 options={[
                   { label: 'Ждут разбора', value: 'pending' },
                   { label: 'Принятые', value: 'ingested' },
@@ -133,6 +154,15 @@ export default function MailReview() {
           items={list.data?.items ?? []}
           loading={list.isLoading}
           rowKey="id"
+          numberedOffset={(page - 1) * PAGE_SIZE}
+          pagination={{
+            current: page,
+            pageSize: PAGE_SIZE,
+            total: list.data?.total ?? 0,
+            onChange: setPage,
+            showSizeChanger: false,
+            showTotal: (total) => `Всего: ${total}`,
+          }}
           numbered
           onRowClick={(r) => setOpenId(r.id)}
           emptyText={
@@ -172,8 +202,7 @@ export default function MailReview() {
               title: 'Получено',
               dataIndex: 'receivedAt',
               width: 140,
-              render: (v: string | null, r) =>
-                dayjs(v ?? r.createdAt).format('DD.MM.YYYY HH:mm'),
+              render: (v: string | null, r) => dayjs(v ?? r.createdAt).format('DD.MM.YYYY HH:mm'),
             },
             {
               title: 'От кого',
@@ -184,7 +213,8 @@ export default function MailReview() {
             {
               title: 'Тема',
               dataIndex: 'subject',
-              render: (v: string | null) => v ?? <Typography.Text type="secondary">без темы</Typography.Text>,
+              render: (v: string | null) =>
+                v ?? <Typography.Text type="secondary">без темы</Typography.Text>,
             },
             {
               title: 'Файлы',

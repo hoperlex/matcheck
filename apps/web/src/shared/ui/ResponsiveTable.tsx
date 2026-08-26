@@ -13,9 +13,7 @@ type Column<T> = NonNullable<TableProps<T>['columns']>[number];
  * это даёт «обрезанный текст с подсказкой на hover», все строки одной
  * высоты, без 2-3-строчных «пляшущих» ячеек.
  */
-function wrapRender<T>(
-  origRender: Column<T>['render'],
-): Column<T>['render'] {
+function wrapRender<T>(origRender: Column<T>['render']): Column<T>['render'] {
   return (value: unknown, record: T, idx: number): ReactNode => {
     const out: ReactNode = origRender
       ? (origRender(value, record, idx) as ReactNode)
@@ -47,6 +45,8 @@ export function ResponsiveTable<T extends object>({
   expandable,
   rowClassName,
   pagination,
+  onChange,
+  showHeader,
   scrollY,
   scrollX,
 }: {
@@ -82,6 +82,13 @@ export function ResponsiveTable<T extends object>({
   // слева от номеров страниц на той же линии. Если undefined — default
   // `{ pageSize: 100, showSizeChanger: false }`.
   pagination?: TableProps<T>['pagination'];
+  // Смена страницы/сортировки/колоночного фильтра. Нужен там, где всё это
+  // считает сервер: страница сама решает, что положить в адрес и в запрос.
+  onChange?: TableProps<T>['onChange'];
+  // Скрыть шапку колонок. Нужно блоку, который продолжает соседнюю таблицу
+  // теми же колонками (принятые файлы над списком документов): вторая шапка
+  // читалась бы как чужеродный блок.
+  showHeader?: boolean;
   /**
    * Высота внутреннего скролла tbody. По умолчанию — «во весь экран под
    * шапкой»: компонент рассчитан на ОДНУ таблицу на странице. `false` убирает
@@ -119,9 +126,7 @@ export function ResponsiveTable<T extends object>({
   // items пересоздаются на каждом ререндере (map/sort/filter), ссылки
   // меняются и Map<T,number> не находила бы их — получался «0» в столбце.
   const getRowKey = (it: T): string =>
-    typeof rowKey === 'function'
-      ? String(rowKey(it))
-      : String(it[rowKey] as unknown);
+    typeof rowKey === 'function' ? String(rowKey(it)) : String(it[rowKey] as unknown);
   const originalIndex = useMemo(() => {
     const m = new Map<string, number>();
     items.forEach((it, i) => m.set(getRowKey(it), i));
@@ -141,8 +146,7 @@ export function ResponsiveTable<T extends object>({
           // снимает сортировку. Нужен, чтобы юзер мог одним кликом
           // развернуть список «снизу вверх», не меняя других сортировок.
           sorter: (a: T, b: T) =>
-            (originalIndex.get(getRowKey(a)) ?? 0) -
-            (originalIndex.get(getRowKey(b)) ?? 0),
+            (originalIndex.get(getRowKey(a)) ?? 0) - (originalIndex.get(getRowKey(b)) ?? 0),
           // Номер привязан к исходной позиции, а не к текущему индексу в
           // отсортированной таблице. Иначе после DESC-сортировки первая
           // строка получала бы «1» вместо ожидаемых «N, N-1, …» — теряется
@@ -196,6 +200,8 @@ export function ResponsiveTable<T extends object>({
               ? false
               : { pageSize: 100, showSizeChanger: false, ...(pagination ?? {}) }
           }
+          onChange={onChange}
+          showHeader={showHeader}
           locale={{ emptyText: emptyText ?? 'Нет данных' }}
           scroll={tableScroll}
           rowClassName={rowClassName}

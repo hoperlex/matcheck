@@ -100,13 +100,57 @@ export const ShipmentJournalResponseSchema = z.object({
 export type ShipmentJournalResponse = z.infer<typeof ShipmentJournalResponseSchema>;
 
 /**
+ * Строка объединённого журнала движений «История поступлений».
+ *
+ * Поступления и отгрузки показываются одной таблицей, отсортированной по дате,
+ * поэтому и приходить они должны одним ответом: два независимо пагинируемых
+ * запроса, склеенные в браузере, дают ленту, где «следующая страница» ничего не
+ * значит — у каждого источника она своя.
+ *
+ * Поля, которых у одного из типов нет (поставщик, суммы, получатель),
+ * приходят null.
+ */
+export const MovementRowSchema = z.object({
+  type: z.enum(['intake', 'shipment']),
+  /** Уникальный ключ строки: `intake:<itemId>` / `shipment:<itemId>`. */
+  rowKey: z.string(),
+  itemId: z.string().uuid(),
+  deliveryId: z.string().uuid().nullable(),
+  shipmentId: z.string().uuid().nullable(),
+  date: z.string().nullable(),
+  siteId: z.string().uuid(),
+  siteCode: z.string(),
+  siteName: z.string(),
+  materialId: z.string().uuid().nullable(),
+  materialName: z.string(),
+  qty: z.string().nullable(),
+  unit: z.string(),
+  supplierName: z.string().nullable(),
+  contractorName: z.string().nullable(),
+  receiverName: z.string().nullable(),
+  docNumber: z.string().nullable(),
+  docDate: z.string().nullable(),
+  vatSum: z.string().nullable(),
+  sum: z.string().nullable(),
+  statusCode: z.string(),
+  statusLabel: z.string(),
+});
+export type MovementRow = z.infer<typeof MovementRowSchema>;
+
+export const MovementsResponseSchema = z.object({
+  items: z.array(MovementRowSchema),
+  total: z.number(),
+});
+export type MovementsResponse = z.infer<typeof MovementsResponseSchema>;
+
+/**
  * Строка отчёта «Статистика по инспекторам КПП».
  * Одна тройка (день × инспектор × объект): сколько машин он провёл и какая
  * суммарная стоимость без НДС (Σ qtyActual × price по delivery_items).
  * У отгрузок цены обычно нет — для них считаем только машины.
  */
 export const InspectorStatsRowSchema = z.object({
-  date: z.string(),                               // 'YYYY-MM-DD' в МСК
+  date: z.string(), // 'YYYY-MM-DD' в МСК
   inspectorId: z.string().uuid(),
   inspectorFullName: z.string().nullable(),
   inspectorEmail: z.string(),
@@ -119,7 +163,7 @@ export const InspectorStatsRowSchema = z.object({
   deliveries: z.number().int(),
   shipments: z.number().int(),
   vehicles: z.number().int(),
-  sumNoVat: z.string(),                           // numeric → string, как остальные деньги
+  sumNoVat: z.string(), // numeric → string, как остальные деньги
 });
 export type InspectorStatsRow = z.infer<typeof InspectorStatsRowSchema>;
 
@@ -128,6 +172,27 @@ export const InspectorStatsResponseSchema = z.object({
   total: z.number(),
 });
 export type InspectorStatsResponse = z.infer<typeof InspectorStatsResponseSchema>;
+
+/**
+ * Справочник инспекторов для селекта «Статистики».
+ *
+ * Отдельный маршрут нужен потому, что опции нельзя строить из строк самого
+ * отчёта: выбрал одного инспектора — ответ сузился до него, и второго в список
+ * уже не добавить. Полный список пользователей лежит в admin-only /admin/users,
+ * а «Статистика» открыта и менеджеру, поэтому здесь — узкая read-only выдача
+ * без каких-либо полей, кроме имени.
+ */
+export const InspectorOptionSchema = z.object({
+  id: z.string().uuid(),
+  fullName: z.string().nullable(),
+  email: z.string(),
+});
+export type InspectorOption = z.infer<typeof InspectorOptionSchema>;
+
+export const InspectorOptionsResponseSchema = z.object({
+  items: z.array(InspectorOptionSchema),
+});
+export type InspectorOptionsResponse = z.infer<typeof InspectorOptionsResponseSchema>;
 
 /**
  * Лёгкие счётчики для шапки раздела «Операции»:
@@ -168,8 +233,14 @@ export type OperationsCountersResponse = z.infer<typeof OperationsCountersRespon
  *    назначенным объектом (как в /operations-counters).
  */
 export const StatsSummaryRequestSchema = z.object({
-  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  from: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  to: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
   siteIds: z.string().optional(),
   inspectorIds: z.string().optional(),
 });

@@ -15,6 +15,7 @@ import {
 import { isNotNull } from 'drizzle-orm';
 import { sites, deliveries, SYSTEM_SITE_ID } from '../db/schema.js';
 import type { Db } from '../db/client.js';
+import { escapeLike } from '../lib/like.js';
 
 // Объект «из ФОТ» — это запись с fot_site_id IS NOT NULL (см. миграцию
 // 0054). Через UI у него нельзя править справочные поля или удалять запись:
@@ -77,7 +78,9 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
       const { q, activeOnly, limit, offset } = req.query;
       const filters = [];
       if (q) {
-        filters.push(or(ilike(sites.name, `%${q}%`), ilike(sites.code, `${q}%`)));
+        // escapeLike: `%` в поиске — символ, а не «показать весь справочник».
+        const like = escapeLike(q);
+        filters.push(or(ilike(sites.name, `%${like}%`), ilike(sites.code, `${like}%`)));
       }
       if (activeOnly) filters.push(eq(sites.isActive, true));
       const where = filters.length ? and(...filters) : undefined;

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, ilike, inArray, isNull, sql as drSql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql as drSql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
@@ -89,10 +89,7 @@ import {
   selectRegistryRows,
   type RegistryRow,
 } from '../domain/sourceDocuments/bundle-import-registry.js';
-import {
-  closeRegistryRowsForDeletedDocument,
-  notStubDocumentSql,
-} from '../domain/sourceDocuments/stub-documents.js';
+import { closeRegistryRowsForDeletedDocument } from '../domain/sourceDocuments/stub-documents.js';
 import {
   REPARSE_BLOCK_MESSAGES,
   isBlocked,
@@ -109,11 +106,9 @@ import { inspectWorkHealth } from '../domain/jobs/job-health.js';
 import { recoverDocumentAttempt } from '../domain/jobs/recognition-recovery.js';
 import { UPD_PARSE_QUEUE } from '../plugins/queue.js';
 import type { Db } from '../db/client.js';
-import {
-  resolveContractorOpIds,
-  sourceDocumentContractorPredicate,
-  sourceDocumentVisible,
-} from '../lib/contractor-scope.js';
+import { sourceDocumentVisible } from '../lib/contractor-scope.js';
+import { buildSourceDocumentFilters } from '../domain/sourceDocuments/list-filters.js';
+import { parseUuidCsv } from '../lib/uuid-csv.js';
 
 const KIND_VALUES = ['upd', 'request', 'transport_waybill', 'os2_transfer'] as const;
 type KindValue = (typeof KIND_VALUES)[number];
@@ -179,6 +174,9 @@ const ListQuerySchema = z.object({
   // выглядят подставленными (validation.warnings). Фильтр серверный, иначе
   // страница показывала бы «5 из 50», а не пятерых из всего потока.
   needsAttention: z.coerce.boolean().optional(),
+  // Документы, где разбор нашёл расхождение в арифметике УПД. Дип-линк из
+  // плашки «Требует внимания» ведёт именно сюда.
+  mismatch: z.coerce.boolean().optional(),
   limit: z.coerce.number().int().positive().max(2000).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
@@ -843,7 +841,6 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     async (req) => {
       const {
         kind,
-        direction,
         q,
         unaccepted,
         limit,
@@ -858,112 +855,14 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         sort,
         order,
         needsAttention,
+        mismatch,
       } = req.query;
-      // Техническая запись пакета — служебная: она живёт от загрузки до
-      // разбора и не является документом. В списке ей делать нечего.
-      const conditions = [eq(sourceDocuments.isTechnical, false)];
-      if (needsAttention) {
-        // Непустой массив warnings. jsonb_array_length по отсутствующему ключу
-        // падает, поэтому сначала проверяем сам ключ и его тип.
-        conditions.push(
-          drSql`${sourceDocuments.validation} -> 'warnings' is not null
-                and jsonb_typeof(${sourceDocuments.validation} -> 'warnings') = 'array'
-                and jsonb_array_length(${sourceDocuments.validation} -> 'warnings') > 0`,
-        );
-      }
-      if (kind && kind.length > 0) {
-        const first = kind[0];
-        if (kind.length === 1 && first) {
-          conditions.push(eq(sourceDocuments.kind, first));
-        } else {
-          conditions.push(inArray(sourceDocuments.kind, kind));
-        }
-      }
-      if (direction) conditions.push(eq(sourceDocuments.direction, direction));
-      // Поиск и по имени файла: у заглушки номера нет вовсе, и поиск только по
-      // doc_number прятал бы её при любом непустом запросе — то есть ровно те
-      // документы, которые менеджер и ищет глазами по названию файла.
-      if (q) {
-        conditions.push(
-          drSql`(${ilike(sourceDocuments.docNumber, `%${q}%`)}
-                 or ${ilike(sourceDocuments.originalFilename, `%${q}%`)})`,
-        );
-      }
-      // inspector_kpp видит только документы своего объекта.
-      // Без объекта — пустой результат.
-      if (req.user?.role === 'inspector_kpp') {
-        if (!req.user.siteId) {
-          conditions.push(drSql`false`);
-        } else {
-          conditions.push(eq(sourceDocuments.siteId, req.user.siteId));
-        }
-      } else if (req.user?.role === 'contractor') {
-        // contractor видит только документы своего подрядчика (по contractor_id).
-        const opIds = await resolveContractorOpIds(app, req.user);
-        if (!opIds || opIds.length === 0) {
-          conditions.push(drSql`false`);
-        } else {
-          conditions.push(sourceDocumentContractorPredicate(opIds));
-        }
-      }
-      // Фильтр «непринятые»: УПД считается ожидаемой, пока на неё нет
-      // привязки в delivery_sources / shipment_sources. Статус приёмки/
-      // отгрузки не учитываем — любая привязка (включая draft) делает УПД
-      // занятой. При удалении приёмки/отгрузки FK CASCADE снесёт строку
-      // junction → УПД автоматически вернётся в «Ожидаемые».
-      if (unaccepted) {
-        if (direction !== 'outbound') {
-          const linkedToDelivery = app.db
-            .select({ id: deliverySources.sourceDocumentId })
-            .from(deliverySources);
-          conditions.push(drSql`${sourceDocuments.id} not in ${linkedToDelivery}`);
-        }
-        if (direction !== 'inbound') {
-          const linkedToShipment = app.db
-            .select({ id: shipmentSources.sourceDocumentId })
-            .from(shipmentSources);
-          conditions.push(drSql`${sourceDocuments.id} not in ${linkedToShipment}`);
-        }
-        // Заглушка под ручной разбор (тип не определён, накладная не читается,
-        // сертификат, технический сбой) реквизитов не содержит. В «Ожидаемых»
-        // на приёмке и КПП ей не место: инспектор не сможет по ней ничего
-        // принять, а при массовой загрузке фото такие строки забьют рабочий
-        // список. partial_parse остаётся ожидаемой — там шапка распознана, не
-        // хватает только позиций.
-        conditions.push(notStubDocumentSql());
-      }
-      // Волна 1C — серверные фильтры (contractor/supplier/site/даты). Опциональны:
-      // добавляются в conditions, только если параметр задан → при пустых
-      // параметрах WHERE не меняется. Логика повторяет экспорт (supplier матчит
-      // и counterparties, и справочник suppliers — как в export.xlsx).
-      const csvIds = (raw: string | undefined): string[] =>
-        (raw ?? '')
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean);
-      const fContractor = csvIds(contractorIds);
-      if (fContractor.length) conditions.push(inArray(sourceDocuments.contractorId, fContractor));
-      const fSupplier = csvIds(supplierIds);
-      if (fSupplier.length) {
-        conditions.push(
-          drSql`(${sourceDocuments.supplierId} in ${fSupplier} or ${sourceDocuments.supplierDirectoryId} in ${fSupplier})`,
-        );
-      }
-      const fSite = csvIds(siteIds);
-      if (fSite.length) conditions.push(inArray(sourceDocuments.siteId, fSite));
-      // Диапазоны дат (docDate/expectedDate — timestamp без TZ, mode:date).
-      // Включительно по дню: >= from и < to+1день.
-      if (docDateFrom) conditions.push(drSql`${sourceDocuments.docDate} >= ${docDateFrom}::date`);
-      if (docDateTo)
-        conditions.push(
-          drSql`${sourceDocuments.docDate} < (${docDateTo}::date + interval '1 day')`,
-        );
-      if (expectedDateFrom)
-        conditions.push(drSql`${sourceDocuments.expectedDate} >= ${expectedDateFrom}::date`);
-      if (expectedDateTo)
-        conditions.push(
-          drSql`${sourceDocuments.expectedDate} < (${expectedDateTo}::date + interval '1 day')`,
-        );
+      // Условия выборки — общие со «Скачать Excel»: см. buildSourceDocumentFilters.
+      // Пока их было два набора, экран и файл показывали разное.
+      const conditions = await buildSourceDocumentFilters(app, req.query, req.user);
+      // Тот же разбор, что внутри фильтра: ниже по объекту сужается ещё и
+      // выборка принятых файлов (у них своя сырая выборка).
+      const fSite = parseUuidCsv(siteIds);
       const where = conditions.length ? and(...conditions) : undefined;
       const supplier = alias(counterparties, 'supplier');
       const supplierDir = alias(suppliers, 'supplier_dir');
@@ -1009,6 +908,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         !kind?.length &&
         !q &&
         !unaccepted &&
+        // «Требуют внимания» — очередь документов с подозрениями. У принятого
+        // файла подозрений нет по определению: показывать его в этой очереди
+        // значит подмешивать строки мимо включённого фильтра.
+        !needsAttention &&
+        !mismatch &&
         !contractorIds?.length &&
         !supplierIds?.length &&
         !docDateFrom &&
@@ -1205,16 +1109,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
   // Экспорт документов с фильтрами в .xlsx. Каждый документ — строка
   // верхнего уровня; его позиции — строки с outlineLevel=1 (свёрнуты по
-  // умолчанию, раскрываются по «+» в Excel). Фильтры зеркалят фильтры
-  // в UI: contractor/supplier/site CSV-списками, q — по номеру документа.
+  // умолчанию, раскрываются по «+» в Excel). Фильтры — те же, что у списка:
+  // общий buildSourceDocumentFilters.
   {
-    const csvUuids = (raw: string | undefined): string[] => {
-      if (!raw) return [];
-      return raw
-        .split(',')
-        .map((s) => s.trim())
-        .filter((s) => /^[0-9a-fA-F-]{36}$/.test(s));
-    };
     const fmtDateRu = (d: Date | string | null): string => {
       if (!d) return '';
       const date = d instanceof Date ? d : new Date(d);
@@ -1246,8 +1143,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       return getDocumentDisplayStatusLabel(display).label;
     };
 
+    // Набор параметров совпадает со списком: выгрузка обязана повторять экран,
+    // а не «примерно то же». Раньше здесь не было kind, дат и «требуют
+    // внимания» — и файл приходил шире того, что человек видел.
     const ExportQuerySchema = z.object({
       direction: z.enum(['inbound', 'outbound']),
+      kind: KindFilterSchema,
       contractorIds: z.string().optional(),
       supplierIds: z.string().optional(),
       siteIds: z.string().optional(),
@@ -1255,6 +1156,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // unaccepted=true — только документы без привязки к delivery/shipment
       // (то, что показывается во вкладке «Ожидаемые» Приёмки/Отгрузки).
       unaccepted: z.coerce.boolean().optional(),
+      mismatch: z.coerce.boolean().optional(),
+      docDateFrom: z.string().optional(),
+      docDateTo: z.string().optional(),
+      expectedDateFrom: z.string().optional(),
+      expectedDateTo: z.string().optional(),
+      needsAttention: z.coerce.boolean().optional(),
     });
 
     app.get(
@@ -1264,54 +1171,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         schema: { querystring: ExportQuerySchema },
       },
       async (req, reply) => {
-        const { direction, contractorIds, supplierIds, siteIds, q, unaccepted } = req.query;
-        const conditions = [eq(sourceDocuments.direction, direction)];
-        if (q) conditions.push(ilike(sourceDocuments.docNumber, `%${q}%`));
-        const cIds = csvUuids(contractorIds);
-        if (cIds.length) conditions.push(inArray(sourceDocuments.contractorId, cIds));
-        const sIds = csvUuids(supplierIds);
-        if (sIds.length) {
-          // ID может быть либо из counterparties (исторические УПД), либо
-          // из suppliers (новые после миграции 0064). Не сужаем выборку
-          // только до старого пути — иначе новые УПД пропадут из экспорта.
-          conditions.push(
-            drSql`(${sourceDocuments.supplierId} in ${sIds} or ${sourceDocuments.supplierDirectoryId} in ${sIds})`,
-          );
-        }
-        const stIds = csvUuids(siteIds);
-        if (stIds.length) conditions.push(inArray(sourceDocuments.siteId, stIds));
-        // unaccepted: документ ещё не привязан к delivery (для inbound) или
-        // shipment (для outbound). Логика повторяет GET /source-documents.
-        if (unaccepted) {
-          if (direction !== 'outbound') {
-            const linkedToDelivery = app.db
-              .select({ id: deliverySources.sourceDocumentId })
-              .from(deliverySources);
-            conditions.push(drSql`${sourceDocuments.id} not in ${linkedToDelivery}`);
-          }
-          if (direction !== 'inbound') {
-            const linkedToShipment = app.db
-              .select({ id: shipmentSources.sourceDocumentId })
-              .from(shipmentSources);
-            conditions.push(drSql`${sourceDocuments.id} not in ${linkedToShipment}`);
-          }
-        }
-        // inspector_kpp видит только свой объект — те же правила, что в GET /.
-        if (req.user?.role === 'inspector_kpp') {
-          if (!req.user.siteId) {
-            conditions.push(drSql`false`);
-          } else {
-            conditions.push(eq(sourceDocuments.siteId, req.user.siteId));
-          }
-        } else if (req.user?.role === 'contractor') {
-          // Экспорт строит свой WHERE отдельно — дублируем contractor-скоуп.
-          const opIds = await resolveContractorOpIds(app, req.user);
-          if (!opIds || opIds.length === 0) {
-            conditions.push(drSql`false`);
-          } else {
-            conditions.push(sourceDocumentContractorPredicate(opIds));
-          }
-        }
+        const { direction } = req.query;
+        // Тот же набор условий, что у списка (включая скоуп роли) — см.
+        // buildSourceDocumentFilters.
+        const conditions = await buildSourceDocumentFilters(app, req.query, req.user);
 
         const supplier = alias(counterparties, 'supplier');
         const supplierDir = alias(suppliers, 'supplier_dir');

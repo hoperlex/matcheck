@@ -9,6 +9,7 @@ import {
   ErrorResponseSchema,
 } from '@matcheck/contracts';
 import { assets, entityDeletions } from '../db/schema.js';
+import { escapeLike } from '../lib/like.js';
 
 const ListQuerySchema = z.object({
   q: z.string().optional(),
@@ -41,7 +42,10 @@ export async function assetRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req) => {
       const { q, activeOnly, limit, offset } = req.query;
       const filters = [];
-      if (q) filters.push(or(ilike(assets.name, `%${q}%`), ilike(assets.code, `${q}%`))!);
+      if (q) {
+        const like = escapeLike(q);
+        filters.push(or(ilike(assets.name, `%${like}%`), ilike(assets.code, `${like}%`))!);
+      }
       if (activeOnly) filters.push(eq(assets.isActive, true));
       const where = filters.length ? and(...filters) : undefined;
 

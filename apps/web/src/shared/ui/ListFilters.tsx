@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react';
-import { DatePicker, Select, Space } from 'antd';
+import { DatePicker, Space } from 'antd';
 import type { Dayjs } from 'dayjs';
 import type { Counterparty, Site } from '@matcheck/contracts';
 import { DebouncedSearch } from './DebouncedSearch';
+import { FilterSelect } from './FilterSelect';
 
 export type ListFilterField =
   | 'displayId'
@@ -84,16 +85,8 @@ export interface ListFiltersProps {
   tail?: ReactNode;
 }
 
-// ФИКСИРОВАННАЯ ширина мульти-селектов (не minWidth/эластичная!). Это
-// принципиально в связке с maxTagCount={1} ниже: при mode="multiple" antd рисует
-// теги через rc-overflow. Режим maxTagCount="responsive" оборачивает контейнер в
-// ResizeObserver и на каждый ресайз пересчитывает, сколько тегов влезло. Если
-// ширина поля при этом ЭЛАСТИЧНА (minWidth/maxWidth, ширина зависит от контента),
-// измерение не сходится: показал тег → поле шире → влезло ещё → свернул → уже →
-// повтор каждый кадр. Так все три селекта в одном <Space wrap> «дребезжали»
-// влево-вправо (и по крестику ✕ было не попасть). Фиксированная width делает
-// clientWidth константой, а maxTagCount={1} вовсе отключает responsive-путь и его
-// ResizeObserver. Длинный одиночный тег обрезается эллипсисом ВНУТРИ поля.
+// Ширины полей панели. Все фиксированные — почему именно так, см. FilterSelect
+// (эластичная ширина в паре с rc-overflow заставляет панель «дребезжать»).
 const SELECT_WIDTH = 240;
 const SEARCH_WIDTH = 220;
 // Поиск по id — короткое числовое поле, поэтому уже остальных. Тоже
@@ -153,9 +146,7 @@ export function ListFilters({
       .map((c) => ({ value: c.id, label: c.name }));
   const effectiveSupplierOptions: SelectOption[] =
     supplierOptions ??
-    (counterparties ?? [])
-      .filter((c) => c.isSupplier)
-      .map((c) => ({ value: c.id, label: c.name }));
+    (counterparties ?? []).filter((c) => c.isSupplier).map((c) => ({ value: c.id, label: c.name }));
 
   const siteOptions = sites.map((s) => ({
     value: s.id,
@@ -177,46 +168,34 @@ export function ListFilters({
         />
       )}
       {showContractor && (
-        <Select<string[]>
+        <FilterSelect
           mode="multiple"
-          style={{ width: SELECT_WIDTH }}
+          width={SELECT_WIDTH}
           placeholder="Подрядчик"
           value={value.contractorIds}
           onChange={(v) => onChange({ contractorIds: v })}
-          allowClear
-          showSearch
-          optionFilterProp="label"
-          maxTagCount={1}
           loading={loading}
           options={effectiveContractorOptions}
         />
       )}
       {showSupplier && (
-        <Select<string[]>
+        <FilterSelect
           mode="multiple"
-          style={{ width: SELECT_WIDTH }}
+          width={SELECT_WIDTH}
           placeholder="Поставщик"
           value={value.supplierIds}
           onChange={(v) => onChange({ supplierIds: v })}
-          allowClear
-          showSearch
-          optionFilterProp="label"
-          maxTagCount={1}
           loading={loading}
           options={effectiveSupplierOptions}
         />
       )}
       {showSite && (
-        <Select<string[]>
+        <FilterSelect
           mode="multiple"
-          style={{ width: SELECT_WIDTH }}
+          width={SELECT_WIDTH}
           placeholder="Объект"
           value={value.siteIds}
           onChange={(v) => onChange({ siteIds: v })}
-          allowClear
-          showSearch
-          optionFilterProp="label"
-          maxTagCount={1}
           loading={loading}
           options={siteOptions}
         />
