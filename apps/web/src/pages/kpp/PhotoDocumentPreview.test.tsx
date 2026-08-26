@@ -8,7 +8,7 @@
  * из-за которого строка и помечена (боевой УПД № 848: «66,294 м² × 8 114,75 ₽»
  * распозналось как qty 8114.75 / price 66.294).
  */
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PhotoRecognition } from '@matcheck/contracts';
@@ -95,5 +95,46 @@ describe('PhotoDocumentPreview — подозрительная строка', (
     // Tooltip antd вешает подсказку на обёртку строки — проверяем сам факт
     // выделения: у подозрительной ячейки есть подчёркивание-намёк.
     expect(marked.getAttribute('style')).toContain('dashed');
+  });
+});
+
+describe('PhotoDocumentPreview — зум скана', () => {
+  it('клик по фото разворачивает просмотрщик, а ESC гасит только его', async () => {
+    const onClose = vi.fn();
+    render(
+      wrap(
+        <PhotoDocumentPreview
+          open
+          onClose={onClose}
+          photoId="11111111-1111-1111-1111-111111111111"
+          imageSrc="blob:thumb"
+        />,
+      ),
+    );
+
+    // Подсказка при наведении — это ещё не доказательство: antd держит маску в
+    // разметке всегда и прячет её только стилями. Поэтому кликаем по-настоящему
+    // и ждём сам оверлей. (Перекрытие клика оверлеями — бейджем размеров,
+    // Spin'ом — так не проверяется: в jsdom нет layout и pointer-events, это
+    // только для живого браузера.)
+    expect(await screen.findByText('Открыть для зума')).toBeTruthy();
+    expect(document.querySelector('.ant-image-preview-wrap')).toBeNull();
+    const imageWrapper = document.querySelector('.ant-image');
+    expect(imageWrapper).toBeTruthy();
+    fireEvent.click(imageWrapper as Element);
+
+    const previewWrap = await waitFor(() => {
+      const el = document.querySelector('.ant-image-preview-wrap');
+      expect(el).toBeTruthy();
+      return el as Element;
+    });
+
+    // ESC внутри просмотрщика не должен доходить до модалки под ним: rc-dialog
+    // просмотрщика гасит событие (stopPropagation), иначе одно нажатие
+    // закрывало бы сразу два окна — split-view схлопывалась бы вместе с зумом.
+    fireEvent.keyDown(previewWrap, { key: 'Escape', keyCode: 27, which: 27 });
+    expect(onClose).not.toHaveBeenCalled();
+    // Сама split-view на месте: таблица позиций никуда не делась.
+    expect(screen.getByText(/451,68/)).toBeTruthy();
   });
 });

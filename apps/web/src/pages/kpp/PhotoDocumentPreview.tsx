@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Alert, Button, Modal, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Image, Modal, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PhotoRecognition, PhotoRecognitionItem } from '@matcheck/contracts';
@@ -64,24 +64,40 @@ export function PhotoDocumentPreview({
     refetchOnWindowFocus: false,
   });
   const [fullUrl, setFullUrl] = useState<string | null>(null);
+  // Разрешение оригинала. Меряем его отдельным экземпляром Image, а не onLoad на
+  // разметке: antd <Image> раскладывает чужие пропсы на обёртку-div, до самого
+  // <img> onLoad не доходит (rc-image/es/common.js — белый список COMMON_PROPS),
+  // а событие load не всплывает. Заодно размеры по построению снимаются только с
+  // оригинала — миниатюру 320px нельзя выдавать за разрешение фото, иначе каждое
+  // открытие на мгновение обвиняет камеру в «низком разрешении».
+  const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
+  useEffect(() => setDims(null), [photoId]);
   useEffect(() => {
     if (!fullBlob.data) {
       setFullUrl(null);
+      setDims(null);
       return;
     }
     const url = URL.createObjectURL(fullBlob.data);
     setFullUrl(url);
-    return () => URL.revokeObjectURL(url);
+    // Старые размеры не должны пережить смену blob: иначе до срабатывания onload
+    // они висят поверх уже другого кадра.
+    setDims(null);
+    const probe = new window.Image();
+    probe.onload = () => setDims({ w: probe.naturalWidth, h: probe.naturalHeight });
+    probe.onerror = () => setDims(null);
+    probe.src = url;
+    return () => {
+      // Отменённый замер не должен записать размеры задним числом.
+      probe.onload = null;
+      probe.onerror = null;
+      URL.revokeObjectURL(url);
+    };
   }, [fullBlob.data]);
   // Оригинал когда загружен, иначе переданная миниатюра как быстрый плейсхолдер.
   const displaySrc = fullUrl ?? imageSrc;
 
-  // Размеры показанного кадра. Храним вместе с src: пока грузится оригинал, в <img>
-  // стоит миниатюра 320px, и её naturalWidth нельзя выдавать за разрешение фото —
-  // иначе каждое открытие на мгновение обвиняет камеру в «низком разрешении».
-  const [dims, setDims] = useState<{ src: string; w: number; h: number } | null>(null);
-  useEffect(() => setDims(null), [photoId]);
-  const fullDims = dims && fullUrl && dims.src === fullUrl ? dims : null;
+  const fullDims = fullUrl ? dims : null;
   const longestSide = fullDims ? Math.max(fullDims.w, fullDims.h) : null;
 
   const recognition = useQuery<PhotoRecognition | null>({
@@ -144,9 +160,11 @@ export function PhotoDocumentPreview({
       }}
       destroyOnClose
     >
-      {/* Слева: фото с zoom через background-image + scroll. Используем
-          стандартный <img> а не antd Image, чтобы лишний preview-оверлей
-          не перехватывал клик внутри модалки. */}
+      {/* Слева: фото. Зум даёт штатный antd-просмотрщик (клик по маске
+          «Открыть для зума» разворачивает его поверх модалки) — то же решение,
+          что в разделе «Документы», см. SourceDocumentDetailModal. Зум прямо в
+          панели не делаем: справа бывает свой скролл, и колесо конфликтовало бы
+          с ним. */}
       <div
         style={{
           flex: '1 1 60%',
@@ -161,16 +179,18 @@ export function PhotoDocumentPreview({
       >
         {displaySrc ? (
           <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-            <img
+            <Image
               src={displaySrc}
               alt="Документ"
-              onLoad={(e) =>
-                setDims({
-                  src: e.currentTarget.currentSrc || e.currentTarget.src,
-                  w: e.currentTarget.naturalWidth,
-                  h: e.currentTarget.naturalHeight,
-                })
-              }
+              // wrapperStyle — на обёртку .ant-image (она же ловит клик и держит
+              // маску), style — на сам <img>.
+              wrapperStyle={{
+                width: '100%',
+                height: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
               style={{
                 // width/height обязательны: без них objectFit не работает вовсе, и
                 // кадр мельче панели рисовался в натуральную величину по центру.
@@ -183,6 +203,7 @@ export function PhotoDocumentPreview({
                 opacity: fullUrl ? 1 : 0.5,
                 transition: 'opacity 0.2s',
               }}
+              preview={{ mask: 'Открыть для зума' }}
             />
             {fullDims && longestSide !== null && (
               <div
@@ -196,6 +217,9 @@ export function PhotoDocumentPreview({
                   padding: '2px 8px',
                   borderRadius: 4,
                   background: 'rgba(255, 255, 255, 0.85)',
+                  // Оверлеи лежат поверх картинки — клик должен проходить сквозь
+                  // них на маску «Открыть для зума».
+                  pointerEvents: 'none',
                 }}
               >
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -215,6 +239,7 @@ export function PhotoDocumentPreview({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
+                  pointerEvents: 'none',
                 }}
               >
                 <Spin tip="Загрузка оригинала…" />
@@ -229,6 +254,7 @@ export function PhotoDocumentPreview({
                   padding: '2px 8px',
                   borderRadius: 4,
                   background: 'rgba(255, 255, 255, 0.85)',
+                  pointerEvents: 'none',
                 }}
               >
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
