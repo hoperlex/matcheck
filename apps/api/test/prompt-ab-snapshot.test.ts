@@ -183,7 +183,7 @@ describe('критические поля', () => {
     expect(isCriticalKey(key)).toBe(critical);
   });
 
-  it('нестабильный номер документа в A/A блокирует активацию', () => {
+  it('нестабильный номер документа в A/A блокирует, когда база шумит повсеместно', () => {
     const c = compareUnit({
       label: 'f.pdf',
       a1: parsed({ docNumber: '1421' }),
@@ -193,8 +193,70 @@ describe('критические поля', () => {
       expected: undefined,
     });
     expect(c.unstableCritical).toContain('docNumber');
-    expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [c] })).toContain(
-      'нестабильные критические поля в A/A: 1',
+    // Один документ из одного — это сто процентов выборки: опоры для
+    // сравнения нет вовсе.
+    expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [c] }).join('; ')).toMatch(
+      /база не воспроизводит сама себя/,
+    );
+  });
+
+  it('ЕДИНИЧНАЯ нестабильность базы выкат не держит', () => {
+    // Боевой случай: v13 дважды прочитала маркировку кабеля с разницей в один
+    // символ («FRHF 2х0.75» против «FRHF х2х0.75»), и этот единственный
+    // документ заблокировал версию, у которой регрессов не было вовсе. Поля,
+    // разошедшиеся в A/A, из сравнения и так исключаются — по такому документу
+    // мы просто не судим, а не запрещаем всё остальное.
+    const noisy = compareUnit({
+      label: 'шумный.pdf',
+      a1: parsed({ docNumber: '1421' }),
+      a2: parsed({ docNumber: '142I' }),
+      b: parsed({ docNumber: '1421' }),
+      consigneeFromModel: true,
+      expected: undefined,
+    });
+    const calm = () =>
+      compareUnit({
+        label: 'спокойный.pdf',
+        a1: parsed({ docNumber: '77' }),
+        a2: parsed({ docNumber: '77' }),
+        b: parsed({ docNumber: '77' }),
+        consigneeFromModel: true,
+        expected: undefined,
+      });
+    const comparisons = [noisy, calm(), calm(), calm(), calm()];
+    // Проверяем именно отсутствие блокера про нестабильность: прочие условия
+    // гейта (например «ни у кого нет эталона») к этому тесту не относятся.
+    const blockers = evaluateGate({
+      checkedUnits: comparisons.length,
+      failures: [],
+      comparisons,
+    }).join('; ');
+    expect(blockers).not.toMatch(/не воспроизводит сама себя/);
+  });
+
+  it('дозаполнение регулярками блокирует, только если его НЕ было у базы', () => {
+    // Отчёт помечал такие документы честным «было и в базе», а гейт всё равно
+    // запрещал выкат — то есть версия наказывалась за состояние, которое
+    // существует и на активном промпте прямо сейчас.
+    const inherited = {
+      ...compareUnit({
+        label: 'унаследованное.pdf',
+        a1: parsed({}),
+        a2: parsed({}),
+        b: parsed({}),
+        consigneeFromModel: true,
+        expected: undefined,
+      }),
+      expectation: { status: 'filled_from_text' as const, detail: 'дозаполнено' },
+      baseExpectation: { status: 'filled_from_text' as const, detail: 'дозаполнено' },
+    };
+    expect(
+      evaluateGate({ checkedUnits: 1, failures: [], comparisons: [inherited] }).join('; '),
+    ).not.toMatch(/грузополучатель от регулярок/);
+
+    const fresh = { ...inherited, baseExpectation: { status: 'ok' as const } };
+    expect(evaluateGate({ checkedUnits: 1, failures: [], comparisons: [fresh] }).join('; ')).toMatch(
+      /грузополучатель от регулярок.*НОВОЕ/,
     );
   });
 });

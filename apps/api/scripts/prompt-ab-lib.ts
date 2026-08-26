@@ -559,9 +559,22 @@ export function evaluateGate(input: GateInput): string[] {
     blockers.push(`регрессии критических полей: ${regressed.length}`);
   }
 
+  // Нестабильность базы блокирует, только если она МАССОВАЯ.
+  //
+  // Единичный шумный документ не должен запрещать выкат: на боевом прогоне
+  // v13 дважды прочитала маркировку кабеля с разницей в один символ
+  // («FRHF 2х0.75» против «FRHF х2х0.75»), и один этот документ заблокировал
+  // версию, у которой регрессов не было вовсе. Такие расхождения у модели
+  // будут всегда, а поля, разошедшиеся в A/A, из сравнения и так исключаются
+  // (см. фильтр в compareUnit) — то есть по этому документу мы просто не
+  // судим. А вот когда база не воспроизводит себя на трети документов,
+  // сравнивать действительно нечего: это уже не шум, а отсутствие опоры.
   const unstableCritical = input.comparisons.filter((c) => c.unstableCritical.length > 0);
-  if (unstableCritical.length > 0) {
-    blockers.push(`нестабильные критические поля в A/A: ${unstableCritical.length}`);
+  if (unstableCritical.length > 0 && unstableCritical.length * 3 > input.checkedUnits) {
+    blockers.push(
+      `база не воспроизводит сама себя: нестабильные критические поля у ` +
+        `${unstableCritical.length} из ${input.checkedUnits} документов`,
+    );
   }
 
   const shifted = input.comparisons.filter((c) => c.confidenceShift);
@@ -584,9 +597,19 @@ export function evaluateGate(input: GateInput): string[] {
     blockers.push(`НОВОЕ расхождение сумм с эталоном: ${money.length} док. / ${rows} полей`);
   }
 
-  const fromText = input.comparisons.filter((c) => c.expectation.status === 'filled_from_text');
+  // Дозаполнение регулярками блокирует, только если оно НОВОЕ.
+  //
+  // Раньше условие сравнения с базой не делало вовсе: отчёт печатал такому
+  // документу честное «было и в базе», а гейт всё равно запрещал выкат. То
+  // есть версия наказывалась за состояние, которое существует и на активном
+  // промпте прямо сейчас, — а значит не прошла бы ни одна.
+  const fromText = input.comparisons.filter(
+    (c) =>
+      c.expectation.status === 'filled_from_text' &&
+      c.baseExpectation.status !== 'filled_from_text',
+  );
   if (fromText.length > 0) {
-    blockers.push(`грузополучатель от регулярок, а не от модели: ${fromText.length}`);
+    blockers.push(`грузополучатель от регулярок, а не от модели (НОВОЕ): ${fromText.length}`);
   }
 
   const noExpectation = input.comparisons.filter((c) => c.expectation.status === 'no_expectation');
