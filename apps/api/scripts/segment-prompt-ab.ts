@@ -88,6 +88,7 @@ import {
   mixedModelPrompts,
   parseIntArg,
   windowOf,
+  writeReportSafely,
   type ExpectedDocument,
   type UnitComparison,
 } from './prompt-ab-lib.js';
@@ -358,7 +359,7 @@ async function main(): Promise<void> {
     segmentIndex: number,
     pageNumbers: number[],
     override: PromptOverride,
-  ): Promise<UpdPdfParsed> => {
+  ): Promise<{ parsed: UpdPdfParsed; providerId: string | null }> => {
     const buffers = pageNumbers.map((p) => pages[p - 1]!.full);
     await throttle();
     const r = await extractUpdSegment(buffers, {
@@ -367,11 +368,15 @@ async function main(): Promise<void> {
       segmentIndex,
       promptOverride: override,
     });
-    return r.parsed;
+    // Провайдер запоминается по каждому сегменту: сравнивать версии, читанные
+    // разными моделями, бессмысленно.
+    return { parsed: r.parsed, providerId: r.llmProviderId ?? null };
   };
 
   const comparisons: UnitComparison[] = [];
   const failures: { file: string; error: string }[] = [];
+  /** Сегменты, которые база и новая версия читали разными моделями. */
+  const providerMismatch: string[] = [];
 
   for (const [windowIndex, segment] of work.entries()) {
     // Эталон ищется по номеру документа, а при его отсутствии — по позиции
@@ -381,9 +386,9 @@ async function main(): Promise<void> {
     const label = `сегмент ${segment.segmentIndex} (страницы ${segment.pages.join(',')})`;
     process.stdout.write(`[segment-ab] ${label} … `);
 
-    let a1: UpdPdfParsed;
-    let a2: UpdPdfParsed;
-    let b: UpdPdfParsed;
+    let a1: { parsed: UpdPdfParsed; providerId: string | null };
+    let a2: { parsed: UpdPdfParsed; providerId: string | null };
+    let b: { parsed: UpdPdfParsed; providerId: string | null };
     try {
       a1 = await runSegment(segment.segmentIndex, segment.pages, { prompt: base, temperature: 0 });
       a2 = await runSegment(segment.segmentIndex, segment.pages, { prompt: base, temperature: 0 });
@@ -394,23 +399,27 @@ async function main(): Promise<void> {
       continue;
     }
 
+    if (new Set([a1.providerId, a2.providerId, b.providerId]).size > 1) {
+      providerMismatch.push(label);
+    }
+
     const comparison = compareUnit({
       label,
-      a1,
-      a2,
-      b,
+      a1: a1.parsed,
+      a2: a2.parsed,
+      b: b.parsed,
       // На сегментном пути regex-дозаполнения нет: страницы уходят картинками,
       // текста для fillPartiesFromText не существует. Всё, что вернулось, — от
       // модели.
       consigneeFromModel: true,
-      expected: matchExpectation(b, index, expectations),
+      expected: matchExpectation(b.parsed, index, expectations),
     });
     comparisons.push(comparison);
 
     console.log(
       (comparison.changed.length === 0 ? 'ок' : `РАСХОЖДЕНИЯ (${comparison.changed.length})`) +
-        `, №${b.docNumber ?? '∅'}, позиций ${b.items.length}` +
-        `, грузополучатель: ${b.consignee?.name ?? '∅'}`,
+        `, №${b.parsed.docNumber ?? '∅'}, позиций ${b.parsed.items.length}` +
+        `, грузополучатель: ${b.parsed.consignee?.name ?? '∅'}`,
     );
   }
 
@@ -462,16 +471,22 @@ async function main(): Promise<void> {
   const calls = await collectCalls(startedAt);
   const mixed = [...mixedModelPrompts(calls).entries()];
   if (mixed.length > 0) {
-    console.log('\n[segment-ab] ОДИН ПРОМПТ ОБСЛУЖИВАЛИ РАЗНЫЕ МОДЕЛИ — сравнение недостоверно:');
+    // Справочно: на сегментном пути провайдер один (только OpenRouter), но в
+    // журнал попадают и вызовы классификатора страниц.
+    console.log('\n[segment-ab] моделей за прогон — больше одной:');
     for (const [promptId, models] of mixed) {
       const which = promptId === base.id ? baseName : promptId === fresh.id ? newName : promptId;
       console.log(`  ${which}: ${models.join(', ')}`);
     }
   }
+  if (providerMismatch.length > 0) {
+    console.log(`\n[segment-ab] РАЗНЫЕ МОДЕЛИ НА ОДНОМ СЕГМЕНТЕ (${providerMismatch.length}):`);
+    for (const label of providerMismatch) console.log(`  ${label}`);
+  }
 
   const blockers = evaluateGate({ checkedUnits: comparisons.length, failures, comparisons });
-  if (mixed.length > 0) {
-    blockers.push(`один промпт обслуживали разные модели: ${mixed.length}`);
+  if (providerMismatch.length > 0) {
+    blockers.push(`разные модели на одном сегменте: ${providerMismatch.length}`);
   }
 
   if (outPath) {
@@ -501,12 +516,12 @@ async function main(): Promise<void> {
         fresh: { name: newName, id: fresh.id, sha256: sha256(fresh.content), length: fresh.content.length },
       },
       calls,
+      providerMismatch,
       failures,
       comparisons,
       blockers,
     };
-    await writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-    console.log(`\n[segment-ab] отчёт сохранён: ${resolve(outPath)}`);
+    await writeReportSafely(outPath, report, (line) => console.log(`[segment-ab] ${line}`));
   }
 
   if (blockers.length > 0) {

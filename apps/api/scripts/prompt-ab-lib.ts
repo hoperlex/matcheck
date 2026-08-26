@@ -8,6 +8,9 @@
  *
  * Здесь нет ни БД, ни сети, ни файловой системы.
  */
+import { writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { UpdPdfParsed } from '@matcheck/contracts';
 // Общий с боевым кодом (party-directory-guard): сравнение названий сторон
 // должно быть одним правилом, иначе гейт сверки разойдётся с воркером.
@@ -94,13 +97,19 @@ export function snapshotOf(p: UpdPdfParsed): Snapshot {
     confidenceBucket: confidenceBucket(p.confidence),
     'supplier.inn': str(p.supplier?.inn),
     'supplier.kpp': str(p.supplier?.kpp),
-    'supplier.name': str(p.supplier?.name),
+    // Названия организаций сравниваются ПО СМЫСЛУ, тем же правилом, что и в
+    // бою (normalizeOrgName). Через str() одно и то же юрлицо в написании
+    // «ООО ЛИФТФИТ» и «ООО "ЛИФТФИТ"» расходилось на кавычках — и это
+    // засчитывалось РЕГРЕССОМ критического поля, то есть блокировало выкат
+    // версии, которая ничего не сломала. Кавычки в ответе модели пляшут от
+    // прогона к прогону, поэтому такой гейт не пропустил бы ни одну версию.
+    'supplier.name': normalizeOrgName(p.supplier?.name) || '∅',
     'recipient.inn': str(p.recipient?.inn),
     'recipient.kpp': str(p.recipient?.kpp),
-    'recipient.name': str(p.recipient?.name),
+    'recipient.name': normalizeOrgName(p.recipient?.name) || '∅',
     'consignee.inn': str(p.consignee?.inn),
     'consignee.kpp': str(p.consignee?.kpp),
-    'consignee.name': str(p.consignee?.name),
+    'consignee.name': normalizeOrgName(p.consignee?.name) || '∅',
     'items.length': String(p.items.length),
   };
   // Позиции целиком, а не только их количество: перепутанные цена и сумма или
@@ -762,4 +771,42 @@ export function identityDiff(a: AbReportIdentity, b: AbReportIdentity): string[]
   return Object.keys(left)
     .filter((k) => left[k] !== right[k])
     .map((k) => `${k}: «${left[k]}» против «${right[k]}»`);
+}
+
+/**
+ * Сохранение отчёта, которое не теряет результат из-за прав на каталог.
+ *
+ * Прогон стоит денег и времени: двадцать семь вызовов модели за одно окно.
+ * Уронить его на последнем шаге из-за EACCES — значит выбросить всю работу,
+ * что однажды и случилось: каталог отчётов создан пользователем matcheck, а
+ * контейнер работает под node. Поэтому при отказе пробуем запасной путь и в
+ * любом случае объясняем, что чинить.
+ */
+export async function writeReportSafely(
+  outPath: string,
+  report: unknown,
+  log: (line: string) => void,
+): Promise<void> {
+  const body = `${JSON.stringify(report, null, 2)}\n`;
+  try {
+    await writeFile(outPath, body, 'utf8');
+    log(`отчёт сохранён: ${resolve(outPath)}`);
+    return;
+  } catch (err) {
+    const code = (err as { code?: string }).code ?? '';
+    log(`не удалось записать ${outPath}${code ? ` (${code})` : ''}`);
+    if (code === 'EACCES') {
+      log('  каталог принадлежит другому пользователю — на сервере поможет:');
+      log(`  chmod 777 ${dirname(resolve(outPath))}`);
+    }
+  }
+  // Запасной путь во временном каталоге: он доступен на запись всегда.
+  const fallback = join(tmpdir(), basename(outPath));
+  try {
+    await writeFile(fallback, body, 'utf8');
+    log(`отчёт сохранён во ВРЕМЕННЫЙ файл: ${fallback}`);
+    log('  заберите его оттуда — при перезапуске контейнера он пропадёт.');
+  } catch {
+    log('запасной путь тоже недоступен — отчёт НЕ сохранён, результат окна потерян.');
+  }
 }

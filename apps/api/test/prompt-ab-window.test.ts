@@ -9,6 +9,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { UnitComparison } from '../scripts/prompt-ab-lib.js';
+import { readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   coverageOf,
   evaluateGate,
@@ -17,6 +20,7 @@ import {
   mixedModelPrompts,
   parseIntArg,
   windowOf,
+  writeReportSafely,
 } from '../scripts/prompt-ab-lib.js';
 
 /** Минимальное сравнение без замечаний: гейт на нём молчит. */
@@ -319,5 +323,41 @@ describe('identityDiff — можно ли сводить части', () => {
     other.docKind = 'upd-segment';
     other.git = { sha: null };
     expect(identityDiff(base, other)).toHaveLength(2);
+  });
+});
+
+describe('writeReportSafely — отчёт не теряется', () => {
+  it('пишет отчёт по указанному пути', async () => {
+    const target = join(tmpdir(), `ab-ok-${process.pid}.json`);
+    const lines: string[] = [];
+    await writeReportSafely(target, { formatVersion: 1, marker: 'вот он' }, (l) => lines.push(l));
+    const body = JSON.parse(await readFile(target, 'utf8')) as { marker: string };
+    expect(body.marker).toBe('вот он');
+    expect(lines.join(' ')).toMatch(/отчёт сохранён/);
+    await rm(target, { force: true });
+  });
+
+  it('при недоступном каталоге НЕ падает и уводит отчёт во временный файл', async () => {
+    // Ровно боевой случай: каталог отчётов создан одним пользователем, а
+    // контейнер работает под другим. Прогон стоил двадцати семи вызовов
+    // модели — терять его результат на последнем шаге недопустимо.
+    const name = `ab-fallback-${process.pid}.json`;
+    const lines: string[] = [];
+    await writeReportSafely(`/proc/nonexistent-dir/${name}`, { formatVersion: 1, n: 42 }, (l) =>
+      lines.push(l),
+    );
+    const fallback = join(tmpdir(), name);
+    const body = JSON.parse(await readFile(fallback, 'utf8')) as { n: number };
+    expect(body.n).toBe(42);
+    expect(lines.join(' ')).toMatch(/ВРЕМЕННЫЙ файл/);
+    await rm(fallback, { force: true });
+  });
+
+  it('подсказывает про права, когда каталог чужой', async () => {
+    const lines: string[] = [];
+    await writeReportSafely('/proc/1/nope/x.json', { formatVersion: 1 }, (l) => lines.push(l));
+    // Сообщение должно называть лечение, а не только диагноз.
+    expect(lines.join(' ')).toMatch(/не удалось записать/);
+    await rm(join(tmpdir(), 'x.json'), { force: true });
   });
 });

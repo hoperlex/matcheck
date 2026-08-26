@@ -52,6 +52,41 @@ function parsed(over: Partial<UpdPdfParsed> = {}): UpdPdfParsed {
   } as UpdPdfParsed;
 }
 
+describe('имена организаций сравниваются по смыслу, а не посимвольно', () => {
+  // Боевой случай, поймавший этот дефект: прогон v13 против v15 на фото УПД
+  // № 328. Обе версии вернули одно и то же юрлицо, но одна в кавычках, другая
+  // без — и сверка объявила это РЕГРЕССОМ критического поля, то есть запретила
+  // выкат версии, которая сторону не трогала вовсе. Кавычки в ответах модели
+  // пляшут от прогона к прогону, поэтому такой гейт не пропустил бы ничего.
+  it('кавычки вокруг названия не считаются изменением', () => {
+    const a = snapshotOf(parsed({ supplier: { inn: null, kpp: null, name: 'ООО ЛИФТФИТ' } }));
+    const b = snapshotOf(parsed({ supplier: { inn: null, kpp: null, name: 'ООО "ЛИФТФИТ"' } }));
+    expect(diffKeys(a, b)).toEqual([]);
+  });
+
+  it('ёлочки и лапки — тоже одно и то же', () => {
+    const a = snapshotOf(parsed({ recipient: { inn: null, kpp: null, name: 'ООО «СУ-10»' } }));
+    const b = snapshotOf(parsed({ recipient: { inn: null, kpp: null, name: 'ООО "СУ-10"' } }));
+    expect(diffKeys(a, b)).toEqual([]);
+  });
+
+  it('РАЗНЫЕ юрлица по-прежнему различаются', () => {
+    // Главная страховка: смягчив сравнение, легко проглядеть подмену стороны.
+    // «СУ-10» против «СУ-104» — ровно тот боевой случай, где рукописная
+    // кавычка была прочитана как цифра.
+    const a = snapshotOf(parsed({ recipient: { inn: null, kpp: null, name: 'ООО «СУ-10»' } }));
+    const b = snapshotOf(parsed({ recipient: { inn: null, kpp: null, name: 'ООО «СУ-104»' } }));
+    expect(diffKeys(a, b)).toEqual(['recipient.name']);
+  });
+
+  it('пустое имя остаётся пустым, а не превращается в пустую строку', () => {
+    // Снимок сравнивает строки, и '' против '∅' дало бы ложное расхождение
+    // на документах, где сторона не заполнена вовсе.
+    const s = snapshotOf(parsed({ supplier: null }));
+    expect(s['supplier.name']).toBe('∅');
+  });
+});
+
 describe('snapshotOf — точность и состав', () => {
   it('видит расхождение в ЧЕТВЁРТОМ знаке qty (в БД scale 4)', () => {
     const a = snapshotOf(parsed());

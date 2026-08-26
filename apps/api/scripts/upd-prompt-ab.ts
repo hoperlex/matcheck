@@ -103,6 +103,7 @@ import {
   mixedModelPrompts,
   parseIntArg,
   windowOf,
+  writeReportSafely,
   type ExpectedDocument,
   type UnitComparison,
 } from './prompt-ab-lib.js';
@@ -205,6 +206,16 @@ type Unit = {
   parsed: UpdPdfParsed;
   /** false — грузополучателя дозаполнили регулярки, а не модель. */
   consigneeFromModel: boolean;
+  /**
+   * Кто именно отвечал на этот запрос.
+   *
+   * Провайдер выбирается путём разбора: текстовые документы уходят по цепочке
+   * активных провайдеров, картинки — к тому, кто помечен основным. Поэтому
+   * «две модели за прогон» — норма, а не сбой. Недостоверно другое: когда ОДИН
+   * И ТОТ ЖЕ документ базовая и новая версия читали РАЗНЫМИ моделями. Тогда
+   * разница объясняется моделью, а не текстом промпта, и сравнивать нечего.
+   */
+  providerId: string | null;
 };
 
 /** Постраничный текст PDF — вход сегментатора пакетов. */
@@ -257,7 +268,14 @@ async function runOne(
     const res = await parseUpdVision({ buffer, mimeType: mime }, { ...ctx, promptDocKind: docKind });
     // На vision-пути regex-дозаполнения нет вовсе: всё, что есть в ответе, —
     // от модели.
-    return [{ key: entry.filename, parsed: res.parsed, consigneeFromModel: true }];
+    return [
+      {
+        key: entry.filename,
+        parsed: res.parsed,
+        consigneeFromModel: true,
+        providerId: res.llmProviderId ?? null,
+      },
+    ];
   }
 
   if (entry.parsePath === 'multi_upd') {
@@ -272,6 +290,7 @@ async function runOne(
           key: `${entry.filename}#${seg.docNumber}`,
           parsed: r.parsed,
           consigneeFromModel: !r.partiesFilledFromText.includes('consignee'),
+          providerId: r.llmProviderId ?? null,
         });
       }
       return units;
@@ -286,6 +305,7 @@ async function runOne(
       key: entry.filename,
       parsed: res.parsed,
       consigneeFromModel: !(res.partiesFilledFromText ?? []).includes('consignee'),
+      providerId: res.llmProviderId ?? null,
     },
   ];
 }
@@ -481,6 +501,8 @@ async function main(): Promise<void> {
 
   const comparisons: UnitComparison[] = [];
   const failures: { file: string; error: string }[] = [];
+  /** Документы, которые базовая и новая версии читали разными моделями. */
+  const providerMismatch: string[] = [];
 
   for (const entry of work) {
     const buffer = await readFile(join(dir, entry.filename));
@@ -510,6 +532,13 @@ async function main(): Promise<void> {
         error: `состав документов различается между прогонами: A/A ${a1.length}/${a2.length}, новый ${b.length}`,
       });
       continue;
+    }
+
+    // Провайдер фиксируется по КАЖДОМУ документу: разные модели у базы и новой
+    // версии на одном документе делают его сравнение бессмысленным.
+    for (const pair of aligned) {
+      const ids = new Set([pair.a1.providerId, pair.a2.providerId, pair.b.providerId]);
+      if (ids.size > 1) providerMismatch.push(pair.key);
     }
 
     const fileComparisons = aligned.map((pair, index) =>
@@ -636,13 +665,19 @@ async function main(): Promise<void> {
   const calls = await collectCalls(startedAt);
   const mixed = [...mixedModelPrompts(calls).entries()];
   if (mixed.length > 0) {
-    console.log('\nОДИН ПРОМПТ ОБСЛУЖИВАЛИ РАЗНЫЕ МОДЕЛИ — сравнение недостоверно:');
+    // Это НОРМА, а не сбой: провайдер выбирается путём разбора — текстовые
+    // документы идут по цепочке активных провайдеров, картинки к основному.
+    // Печатаем справочно, чтобы отчёт объяснял, откуда в журнале две модели.
+    console.log('\nмоделей за прогон — больше одной (так работает выбор провайдера по пути разбора):');
     for (const [promptId, models] of mixed) {
       const which = promptId === base.id ? baseName : promptId === fresh.id ? newName : promptId;
       console.log(`  ${which}: ${models.join(', ')}`);
     }
-    console.log('  Часть вызовов ушла к другому провайдеру (fallback при ошибке).');
-    console.log('  Разница в отчёте может объясняться моделью, а не текстом промпта.');
+  }
+  if (providerMismatch.length > 0) {
+    console.log(`\nРАЗНЫЕ МОДЕЛИ НА ОДНОМ ДОКУМЕНТЕ (${providerMismatch.length}) — сравнение недостоверно:`);
+    for (const key of providerMismatch) console.log(`  ${key}`);
+    console.log('  Здесь разница объясняется моделью, а не текстом промпта.');
   }
   const failedCalls = calls.filter((c) => c.errorCode != null);
   if (failedCalls.length > 0) {
@@ -666,20 +701,19 @@ async function main(): Promise<void> {
         fresh: { name: newName, id: fresh.id, sha256: sha256(fresh.content), length: fresh.content.length },
       },
       calls,
+      providerMismatch,
       failures,
       comparisons,
       blockers,
     };
-    await writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-    console.log(`\nотчёт сохранён: ${resolve(outPath)}`);
+    await writeReportSafely(outPath, report, (line) => console.log(`\n${line}`));
   }
 
-  // Смешение моделей блокирует наравне с регрессом. Вердикт «активировать
-  // можно» означает «мы измерили эффект промпта»; если половина вызовов ушла к
-  // другой модели, эффект не измерен, и мягкое предупреждение здесь означало бы
-  // разрешение выкатывать непроверенное.
-  if (mixed.length > 0) {
-    blockers.push(`один промпт обслуживали разные модели: ${mixed.length}`);
+  // Блокирует не «две модели за прогон» (это норма), а расхождение НА ОДНОМ
+  // документе: там эффект промпта не измерен, и мягкое предупреждение означало
+  // бы разрешение выкатывать непроверенное.
+  if (providerMismatch.length > 0) {
+    blockers.push(`разные модели на одном документе: ${providerMismatch.length}`);
   }
 
   if (blockers.length > 0) {

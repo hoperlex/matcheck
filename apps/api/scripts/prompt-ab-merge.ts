@@ -60,6 +60,8 @@ type Report = {
   git: { sha: string | null; dirty: boolean | null };
   prompts: { base: PromptMeta; fresh: PromptMeta };
   calls: CallRecord[];
+  /** Документы, которые база и новая версия читали разными моделями. */
+  providerMismatch?: string[];
   failures: { file: string; error: string }[];
   comparisons: UnitComparison[];
   blockers: string[];
@@ -132,7 +134,8 @@ async function main(): Promise<void> {
 
   // Та же проверка, что и в самом прогоне, но уже по всем частям сразу: между
   // окнами провайдер мог смениться незаметно.
-  const mixedModels: string[] = [];
+  // Справочно: несколько моделей за прогон — норма, провайдер выбирается путём
+  // разбора (текст идёт по цепочке активных, картинки — к основному).
   for (const [promptId, models] of mixedModelPrompts(calls)) {
     const which =
       promptId === first.prompts.base.id
@@ -140,8 +143,13 @@ async function main(): Promise<void> {
         : promptId === first.prompts.fresh.id
           ? first.prompts.fresh.name
           : promptId;
-    mixedModels.push(which);
-    console.log(`[merge] «${which}» обслуживали разные модели: ${models.join(', ')}`);
+    console.log(`[merge] «${which}» обслуживали модели: ${models.join(', ')}`);
+  }
+  // А вот это уже недостоверность: один документ прочитан разными моделями.
+  const providerMismatch = reports.flatMap((r) => r.providerMismatch ?? []);
+  if (providerMismatch.length > 0) {
+    console.log(`[merge] РАЗНЫЕ МОДЕЛИ НА ОДНОМ ДОКУМЕНТЕ (${providerMismatch.length}):`);
+    for (const key of providerMismatch) console.log(`  ${key}`);
   }
   const errored = calls.filter((c) => c.errorCode != null).length;
   console.log(`[merge] вызовов модели: ${calls.length}, из них с ошибкой: ${errored}`);
@@ -175,8 +183,8 @@ async function main(): Promise<void> {
   }
   // Между окнами провайдер мог смениться незаметно — тогда части сравнивают
   // разные модели, и общий вердикт об эффекте промпта недоказуем.
-  if (mixedModels.length > 0) {
-    blockers.push(`один промпт обслуживали разные модели: ${mixedModels.join(', ')}`);
+  if (providerMismatch.length > 0) {
+    blockers.push(`разные модели на одном документе: ${providerMismatch.length}`);
   }
 
   if (blockers.length > 0) {
