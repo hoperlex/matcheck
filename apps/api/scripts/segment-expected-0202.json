@@ -1,0 +1,120 @@
+[
+  {
+    "docNumber": "487",
+    "consignee": {
+      "name": "ООО \"СУ-10\"",
+      "inn": null,
+      "kpp": null
+    },
+    "totalSum": 112084.0,
+    "vatSum": 20211.88,
+    "items": [
+      {
+        "rowNo": 1,
+        "qty": 1,
+        "price": 9923.93,
+        "sum": 12107.2,
+        "vatSum": 2183.27
+      },
+      {
+        "rowNo": 2,
+        "qty": 1,
+        "price": 12696.39,
+        "sum": 15489.6,
+        "vatSum": 2793.21
+      },
+      {
+        "rowNo": 3,
+        "qty": 2,
+        "price": 34625.9,
+        "sum": 84487.2,
+        "vatSum": 15235.4
+      }
+    ]
+  },
+  {
+    "docNumber": "488",
+    "consignee": {
+      "name": "ООО \"СУ-10\"",
+      "inn": null,
+      "kpp": null
+    },
+    "totalSum": 216202.93,
+    "vatSum": 38987.42,
+    "items": [
+      {
+        "rowNo": 1,
+        "qty": 1,
+        "price": 59772.83,
+        "sum": 72922.85,
+        "vatSum": 13150.02
+      },
+      {
+        "rowNo": 2,
+        "qty": 1,
+        "price": 92792.57,
+        "sum": 113206.94,
+        "vatSum": 20414.37
+      },
+      {
+        "rowNo": 3,
+        "qty": 1,
+        "price": 24650.11,
+        "sum": 30073.14,
+        "vatSum": 5423.03
+      }
+    ]
+  },
+  {
+    "docNumber": "489",
+    "consignee": {
+      "name": "ООО \"СУ-10\"",
+      "inn": null,
+      "kpp": null
+    },
+    "totalSum": 227640.52,
+    "vatSum": 41049.93,
+    "items": [
+      {
+        "rowNo": 1,
+        "qty": 1,
+        "price": 134622.08,
+        "sum": 164238.94,
+        "vatSum": 29616.86
+      },
+      {
+        "rowNo": 2,
+        "qty": 1,
+        "price": 51968.51,
+        "sum": 63401.58,
+        "vatSum": 11433.07
+      }
+    ]
+  },
+  {
+    "docNumber": "490",
+    "consignee": {
+      "name": "ООО \"СУ-10\"",
+      "inn": null,
+      "kpp": null
+    },
+    "totalSum": 51300.0,
+    "vatSum": 9250.82,
+    "items": [
+      {
+        "rowNo": 1,
+        "qty": 1,
+        "price": 19715.16,
+        "sum": 24052.5,
+        "vatSum": 4337.34
+      },
+      {
+        "rowNo": 2,
+        "qty": 1,
+        "price": 22334.02,
+        "sum": 27247.5,
+        "vatSum": 4913.48
+      }
+    ]
+  }
+]

@@ -379,6 +379,7 @@ async function main(): Promise<void> {
   const limit = argNumber('--limit', Number.MAX_SAFE_INTEGER);
   callDelayMs = argNumber('--delay', 0);
   const outPath = argValue('--out');
+  const planOnly = process.argv.includes('--plan');
   const startedAt = new Date();
 
   const manifestRaw = await readFile(manifestPath, 'utf8');
@@ -444,6 +445,34 @@ async function main(): Promise<void> {
     console.log(
       `[ab] графа 4 пуста по манифесту (${emptyGraph.length}): проверяем, что модель ничего не выдумала.`,
     );
+  }
+
+  // ── сухой прогон: сколько это будет стоить ──
+  //
+  // Без него окно «пять файлов» — обманчивая мера. Пакет из пятнадцати УПД в
+  // одном PDF даёт пятнадцать вызовов на прогон, то есть сорок пять на файл, и
+  // попадает в окно незаметно. Здесь считается точно: сегменты пакетов
+  // определяются по тексту, без единого обращения к модели.
+  if (planOnly) {
+    let total = 0;
+    console.log('\n[ab] план прогона (вызовов модели не будет):');
+    for (const [i, entry] of work.entries()) {
+      let docs = 1;
+      if (entry.parsePath === 'multi_upd') {
+        const pages = await pdfPages(await readFile(join(dir, entry.filename)));
+        docs = countUniqueUpdInvoices(pages) >= 2 ? segmentUpdText(pages).length : 1;
+      }
+      const calls = docs * 3;
+      total += calls;
+      const mark = docs > 1 ? `  ← ПАКЕТ из ${docs} УПД` : '';
+      console.log(`  ${offset + i}: ${entry.filename} — ${calls} вызовов${mark}`);
+    }
+    console.log(`[ab] ИТОГО в этом окне: ${total} вызовов модели (три прогона на документ)`);
+    if (total > 30) {
+      console.log('[ab] ВНИМАНИЕ: окно тяжёлое. Разбейте его меньшим --limit,');
+      console.log('     иначе запросы пойдут длинной очередью подряд.');
+    }
+    return;
   }
 
   const base = await loadPrompt(docKind, baseName);
