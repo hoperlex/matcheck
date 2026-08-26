@@ -54,14 +54,13 @@ vi.mock('../../services/api', () => ({
 const { default: InboxPage } = await import('./Inbox');
 
 let search = '';
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 
 function UrlSpy(): null {
   search = useLocation().search;
   return null;
 }
 
-function renderPage(initial: string): void {
+function renderPage(initial: string): ReturnType<typeof render> {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const ui: ReactElement = (
     <QueryClientProvider client={client}>
@@ -71,7 +70,7 @@ function renderPage(initial: string): void {
       </MemoryRouter>
     </QueryClientProvider>
   );
-  render(ui);
+  return render(ui);
 }
 
 afterEach(() => {
@@ -118,9 +117,13 @@ describe('Документы: фильтры не затирают друг др
   });
 });
 
-describe('Документы: принятые файлы и страница списка', () => {
-  it('файлы показываются отдельным блоком и не вытесняют документы', async () => {
-    const docs = Array.from({ length: 50 }, (_, i) => ({
+describe('Документы: принятые файлы в общем списке', () => {
+  it('файлы и документы — одна таблица с одной шапкой, страница не переполняется', async () => {
+    // Сервер отдаёт файлы из того же окна, что и документы: на страницу в 50
+    // строк приходит 1 файл и 49 документов. Пока файлы шли сверх лимита,
+    // таблица срезала лишние строки, а вынесенные в отдельный блок — разрывали
+    // шапку колонок.
+    const docs = Array.from({ length: 49 }, (_, i) => ({
       id: `doc-${String(i).padStart(2, '0')}`,
       kind: 'upd',
       direction: 'inbound',
@@ -171,13 +174,14 @@ describe('Документы: принятые файлы и страница с
         state: 'awaiting_processing',
       },
     ];
-    apiState.response = { items: docs, total: 2064, pendingFiles: pending, pendingTotal: 1 };
+    apiState.response = { items: docs, total: 2126, pendingFiles: pending, pendingTotal: 1 };
 
-    renderPage('/documents');
+    const { container } = renderPage('/documents');
 
-    // Документ №50 остаётся на странице: раньше строка принятого файла
-    // делала dataSource длиннее pageSize, и antd срезал последние документы.
-    expect(await screen.findByText('Д-49')).toBeTruthy();
+    expect(await screen.findByText('Д-48')).toBeTruthy();
+    // Файл — обычная строка того же списка, а не отдельный блок над шапкой.
     expect(screen.getByText('ждёт-разбора.pdf')).toBeTruthy();
+    expect(container.querySelectorAll('.ant-table-thead')).toHaveLength(1);
+    expect(container.querySelectorAll('.ant-table-tbody > tr.ant-table-row')).toHaveLength(50);
   });
 });

@@ -46,7 +46,6 @@ export function ResponsiveTable<T extends object>({
   rowClassName,
   pagination,
   onChange,
-  showHeader,
   scrollY,
   scrollX,
 }: {
@@ -85,10 +84,6 @@ export function ResponsiveTable<T extends object>({
   // Смена страницы/сортировки/колоночного фильтра. Нужен там, где всё это
   // считает сервер: страница сама решает, что положить в адрес и в запрос.
   onChange?: TableProps<T>['onChange'];
-  // Скрыть шапку колонок. Нужно блоку, который продолжает соседнюю таблицу
-  // теми же колонками (принятые файлы над списком документов): вторая шапка
-  // читалась бы как чужеродный блок.
-  showHeader?: boolean;
   /**
    * Высота внутреннего скролла tbody. По умолчанию — «во весь экран под
    * шапкой»: компонент рассчитан на ОДНУ таблицу на странице. `false` убирает
@@ -201,7 +196,6 @@ export function ResponsiveTable<T extends object>({
               : { pageSize: 100, showSizeChanger: false, ...(pagination ?? {}) }
           }
           onChange={onChange}
-          showHeader={showHeader}
           locale={{ emptyText: emptyText ?? 'Нет данных' }}
           scroll={tableScroll}
           rowClassName={rowClassName}

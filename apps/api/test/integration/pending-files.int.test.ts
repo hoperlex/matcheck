@@ -138,6 +138,21 @@ suite('принятые файлы в списке документов (реа�
     };
   }
 
+  /** Та же выдача, но с явным окном страницы. */
+  async function page(limit: number, offset: number) {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/source-documents?limit=${limit}&offset=${offset}&siteIds=${siteId}`,
+    });
+    expect(res.statusCode).toBe(200);
+    return res.json() as {
+      items: Array<{ id: string }>;
+      total: number;
+      pendingFiles?: Array<{ key: string }>;
+      pendingTotal?: number;
+    };
+  }
+
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, { max: 4 });
     app = Fastify();
@@ -297,10 +312,7 @@ suite('принятые файлы в списке документов (реа�
    * Дочерний пакет: сюда уезжает накладная или сборка логических УПД, и
    * документ рождается уже в нём.
    */
-  async function subBundle(
-    parentId: string,
-    opts: { status?: string; kind?: string } = {},
-  ) {
+  async function subBundle(parentId: string, opts: { status?: string; kind?: string } = {}) {
     const id = randomUUID();
     await sql`INSERT INTO source_bundles
         (id, bundle_hash, direction, site_id, status, kind, parent_bundle_id,
@@ -360,6 +372,51 @@ suite('принятые файлы в списке документов (реа�
     expect((await registryStateOf(b))[0]!.resolved_at).not.toBeNull();
     // И файл всё равно не всплыл: закрытая строка ожидающей не считается.
     expect((await list()).pendingFiles ?? []).toHaveLength(0);
+  });
+
+  it('файлы и документы делят одно окно страницы — ничего не теряется и не двоится', async () => {
+    // Раньше файлы приходили СВЕРХ лимита: на странице оказывалось больше строк,
+    // чем помещается, и таблица срезала ровно столько документов, сколько
+    // пришло файлов, — увидеть их было негде.
+    const b = randomUUID();
+    await bundle(b);
+    for (let i = 0; i < 3; i++) {
+      await registryRow(b, { filename: `WND_${i}.jpg`, order: i });
+    }
+    const docIds = new Set<string>();
+    for (let i = 0; i < 4; i++) {
+      const docBundle = randomUUID();
+      await bundle(docBundle);
+      docIds.add(await documentFor(docBundle, `s3/wnd-${i}.pdf`));
+    }
+
+    // Страница на 2 строки: файлы занимают первые полторы страницы, дальше
+    // начинаются документы.
+    const p1 = await page(2, 0);
+    const p2 = await page(2, 2);
+    const p3 = await page(2, 4);
+    const p4 = await page(2, 6);
+
+    // На каждой странице ровно столько строк, сколько просили.
+    expect((p1.pendingFiles?.length ?? 0) + p1.items.length).toBe(2);
+    expect((p2.pendingFiles?.length ?? 0) + p2.items.length).toBe(2);
+    expect((p3.pendingFiles?.length ?? 0) + p3.items.length).toBe(2);
+
+    // Файлы кончились на второй странице, документы продолжились с той же.
+    expect(p1.pendingFiles?.length).toBe(2);
+    expect(p2.pendingFiles?.length).toBe(1);
+    expect(p3.pendingFiles?.length ?? 0).toBe(0);
+
+    // Счётчики описывают весь список, а не текущую страницу.
+    expect(p1.pendingTotal).toBe(3);
+    expect(p1.total).toBe(4);
+
+    // Ни один файл и ни один документ не пропал и не показан дважды.
+    const files = [p1, p2, p3, p4].flatMap((p) => p.pendingFiles?.map((f) => f.key) ?? []);
+    const docs = [p1, p2, p3, p4].flatMap((p) => p.items.map((i) => i.id));
+    expect(new Set(files).size).toBe(3);
+    expect(new Set(docs).size).toBe(4);
+    expect(docs.filter((id) => docIds.has(id)).length).toBe(4);
   });
 
   it('соседние файлы того же пакета остаются ожидающими', async () => {

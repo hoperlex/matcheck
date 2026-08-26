@@ -902,8 +902,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // «Документные» фильтры выдачу выключают: у файла нет ни типа, ни номера,
       // ни поставщика, и показывать его в ответ на запрос «УПД такого-то
       // поставщика» значит выдавать заведомо не то, что искали.
+      // Условие про страницу здесь больше не нужно: файлы делят окно с
+      // документами, и на какой странице они окажутся, решает арифметика окна.
       const pendingAllowed =
-        offset === 0 &&
         (req.user?.role === 'admin' || req.user?.role === 'manager') &&
         !kind?.length &&
         !q &&
@@ -920,6 +921,47 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         !expectedDateFrom &&
         !expectedDateTo;
 
+      // Источник строк «принятый файл, документа ещё нет» — один и тот же для
+      // счётчика и для выборки: разойтись им нельзя, иначе окно страницы
+      // поедет и документы начнут пропадать между страницами.
+      //
+      // Условие «нет документа» то же, что у инварианта видимости
+      // (stub-documents.ts): вложение с этим ключом у нетехнического документа.
+      // Строка без ключа проходит его сама собой — объекта нет, значит и
+      // документа быть не может. `content_sha256 is not null` у строк без ключа
+      // отделяет наши недогруженные файлы от legacy-строк, где ключа нет просто
+      // потому, что реестр тогда не заполняли.
+      const pendingFromSql = drSql`
+        from bundle_import_items bi
+        join source_bundles b on b.id = bi.bundle_id
+        left join sites s on s.id = b.site_id
+       where bi.resolved_at is null
+         and bi.status <> 'skipped'
+         and (bi.input_s3_key is not null or bi.content_sha256 is not null)
+         and (bi.upload_generation = b.active_upload_generation
+              or bi.upload_generation is null)
+         and not exists (
+           select 1
+             from source_document_attachments a
+             join source_documents d on d.id = a.source_document_id
+            where a.s3_key = bi.input_s3_key
+              and d.is_technical = false
+         )
+         -- Сопоставления по ключу мало: сборка склеивает несколько входных
+         -- файлов в один документ, и вложение остаётся лишь у одного из них.
+         -- Остальные строки комплекта иначе висят «в очереди» вечно, хотя
+         -- работа по ним закончена.
+         and not ${assemblyServedRowSql()}
+         ${
+           fSite.length > 0
+             ? drSql`and b.site_id in ${drSql`(${drSql.join(
+                 fSite.map((id) => drSql`${id}::uuid`),
+                 drSql`, `,
+               )})`}`
+             : drSql``
+         }
+      `;
+
       // items, total и pendingFiles — из ОДНОГО снимка базы.
       //
       // Без этого воркер, создавший документ между двумя запросами, показал бы
@@ -929,6 +971,26 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // одном моменте времени.
       const snapshot = await app.db.transaction(
         async (tx) => {
+          // Файлы и документы — один общий список: сначала все ожидающие файлы,
+          // затем документы. Страница режет этот список целиком, поэтому окно
+          // считается заранее.
+          //
+          // Пока файлы приходили СВЕРХ лимита, на странице оказывалось больше
+          // строк, чем pageSize, и таблица молча срезала столько документов,
+          // сколько пришло файлов, — они не показывались вообще нигде.
+          const pendingTotal = pendingAllowed
+            ? Number(
+                (
+                  await tx.execute<{ n: number }>(
+                    drSql`select count(*)::int as n ${pendingFromSql}`,
+                  )
+                )[0]?.n ?? 0,
+              )
+            : 0;
+          const pendingTake = Math.max(0, Math.min(limit, pendingTotal - offset));
+          const docsOffset = Math.max(0, offset - pendingTotal);
+          const docsLimit = limit - pendingTake;
+
           const rows = await tx
             .select({
               sd: sourceDocuments,
@@ -972,90 +1034,56 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
             .where(where)
             .orderBy(...orderByArgs)
-            .limit(limit)
-            .offset(offset);
+            .limit(docsLimit)
+            .offset(docsOffset);
           const [{ count } = { count: 0 }] = await tx
             .select({ count: drSql<number>`count(*)::int` })
             .from(sourceDocuments)
             .where(where);
 
-          // Принятые файлы, по которым документа ещё нет.
-          //
-          // Условие «нет документа» то же, что у инварианта видимости
-          // (stub-documents.ts): вложение с этим ключом у нетехнического
-          // документа. Строка без ключа проходит его сама собой — объекта нет,
-          // значит и документа быть не может.
-          //
-          // `content_sha256 is not null` у строк без ключа отделяет наши
-          // недогруженные файлы от legacy-строк, где ключа нет просто потому, что
-          // реестр тогда не заполняли.
-          const pendingRows = pendingAllowed
-            ? await tx.execute<{
-                item_id: string;
-                bundle_id: string;
-                portal_group_id: string | null;
-                filename: string;
-                mime_type: string | null;
-                size_bytes: number | null;
-                site_name: string | null;
-                expected_date: Date | null;
-                created_at: Date;
-                stored: boolean;
-              }>(drSql`
-                select bi.id as item_id,
-                       bi.bundle_id,
-                       case when exists (
-                              select 1 from ingest_events ie
-                               where ie.bundle_id = coalesce(b.parent_bundle_id, b.id)
-                                 and ie.channel = 'public'
-                            )
-                            then coalesce(b.parent_bundle_id, b.id)
-                       end as portal_group_id,
-                       bi.source_filename as filename,
-                       bi.mime_type,
-                       bi.size_bytes,
-                       s.name as site_name,
-                       b.expected_date,
-                       bi.created_at,
-                       (bi.input_s3_key is not null) as stored
-                  from bundle_import_items bi
-                  join source_bundles b on b.id = bi.bundle_id
-                  left join sites s on s.id = b.site_id
-                 where bi.resolved_at is null
-                   and bi.status <> 'skipped'
-                   and (bi.input_s3_key is not null or bi.content_sha256 is not null)
-                   and (bi.upload_generation = b.active_upload_generation
-                        or bi.upload_generation is null)
-                   and not exists (
-                     select 1
-                       from source_document_attachments a
-                       join source_documents d on d.id = a.source_document_id
-                      where a.s3_key = bi.input_s3_key
-                        and d.is_technical = false
-                   )
-                   -- Сопоставления по ключу мало: сборка склеивает несколько
-                   -- входных файлов в один документ, и вложение остаётся лишь у
-                   -- одного из них. Остальные строки комплекта иначе висят
-                   -- «в очереди» вечно, хотя работа по ним закончена.
-                   and not ${assemblyServedRowSql()}
-                   ${
-                     fSite.length > 0
-                       ? drSql`and b.site_id in ${drSql`(${drSql.join(
-                           fSite.map((id) => drSql`${id}::uuid`),
-                           drSql`, `,
-                         )})`}`
-                       : drSql``
-                   }
-                 order by bi.created_at desc, bi.id
-                 limit 200
-              `)
-            : [];
+          // Сами строки файлов — из того же окна: смещение общее с запросом,
+          // а сколько их влезло, посчитано выше.
+          const pendingRows =
+            pendingTake > 0
+              ? await tx.execute<{
+                  item_id: string;
+                  bundle_id: string;
+                  portal_group_id: string | null;
+                  filename: string;
+                  mime_type: string | null;
+                  size_bytes: number | null;
+                  site_name: string | null;
+                  expected_date: Date | null;
+                  created_at: Date;
+                  stored: boolean;
+                }>(drSql`
+                  select bi.id as item_id,
+                         bi.bundle_id,
+                         case when exists (
+                                select 1 from ingest_events ie
+                                 where ie.bundle_id = coalesce(b.parent_bundle_id, b.id)
+                                   and ie.channel = 'public'
+                              )
+                              then coalesce(b.parent_bundle_id, b.id)
+                         end as portal_group_id,
+                         bi.source_filename as filename,
+                         bi.mime_type,
+                         bi.size_bytes,
+                         s.name as site_name,
+                         b.expected_date,
+                         bi.created_at,
+                         (bi.input_s3_key is not null) as stored
+                    ${pendingFromSql}
+                   order by bi.created_at desc, bi.id
+                   limit ${pendingTake} offset ${offset}
+                `)
+              : [];
 
-          return { rows, count, pendingRows: [...pendingRows] };
+          return { rows, count, pendingRows: [...pendingRows], pendingTotal };
         },
         { isolationLevel: 'repeatable read' },
       );
-      const { rows, count, pendingRows } = snapshot;
+      const { rows, count, pendingRows, pendingTotal } = snapshot;
       return {
         items: await Promise.all(
           rows.map(async (r) => {
@@ -1100,7 +1128,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
                 createdAt: new Date(p.created_at).toISOString(),
                 state: p.stored ? ('awaiting_processing' as const) : ('not_stored' as const),
               })),
-              pendingTotal: pendingRows.length,
+              // Настоящее число ожидающих файлов, а не размер среза: клиент
+              // складывает его с total, чтобы пагинатор знал длину общего списка.
+              pendingTotal,
             }
           : {}),
       };

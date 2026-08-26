@@ -831,15 +831,14 @@ export default function InboxPage() {
   // применяет свой sorter после нас, и строки машины могут разойтись; метка
   // при этом остаётся, и машина по-прежнему узнаётся.
   //
-  // Принятые файлы — отдельным блоком НАД таблицей (тем же набором колонок и
-  // без второй шапки), а не в общем потоке строк.
-  //
-  // В общем потоке они ломали серверную пагинацию: сервер отдаёт их только к
-  // первой странице и сверх лимита, dataSource становился длиннее pageSize, и
-  // antd срезал ровно столько документов, сколько файлов пришло, — они молча
-  // пропадали из выдачи.
-  const groupedItems = useMemo(() => clusterRowsByGroup(filteredItems), [filteredItems]);
-  const pendingGrouped = useMemo(() => clusterRowsByGroup(pendingRows), [pendingRows]);
+  // Ожидающие файлы идут в том же потоке строк, что и документы: файл встаёт
+  // рядом с уже разобранными документами своей поставки. Сервер отдаёт их из
+  // того же окна limit/offset, поэтому строк на странице ровно pageSize и
+  // таблица ничего не срезает.
+  const groupedItems = useMemo(
+    () => clusterRowsByGroup([...pendingRows, ...filteredItems]),
+    [pendingRows, filteredItems],
+  );
 
   // Префетч позиций — фоном после рендера списка. Клик «+» раскрывает
   // строку, дёргать сеть в этот момент не приходится: ExpandedSource-
@@ -1398,20 +1397,6 @@ export default function InboxPage() {
               `.matcheck-doc-group-${i} > td:first-child { box-shadow: inset 4px 0 0 ${color}; }`,
           ).join('\n')}
         </style>
-        {pendingGrouped.length > 0 && (
-          <ResponsiveTable<Row>
-            items={pendingGrouped}
-            rowKey="id"
-            numbered
-            showHeader={false}
-            pagination={false}
-            scrollY={false}
-            scrollX={1750}
-            columns={documentColumns}
-            rowClassName={(r) => groupRowClass(documentGroupKey(r))}
-            cardRender={documentCardRender}
-          />
-        )}
         <ResponsiveTable<Row>
           items={groupedItems}
           loading={list.isLoading}
@@ -1427,13 +1412,12 @@ export default function InboxPage() {
           // условиям, что и выдачу. Переключателя размера нет намеренно — он
           // менял бы страницу и оффсет одновременно.
           //
-          // Строки принятых файлов сервер добавляет только к первой странице и
-          // сверх лимита, поэтому в total они не входят: это очередь разбора, а
-          // не документы.
+          // К числу документов прибавляем ожидающие файлы: они занимают строки
+          // того же списка, и без них пагинатор недосчитался бы страниц.
           pagination={{
             current: page,
             pageSize: PAGE_SIZE,
-            total: list.data?.total ?? 0,
+            total: (list.data?.total ?? 0) + (list.data?.pendingTotal ?? 0),
             showSizeChanger: false,
             showTotal: (total) => `Всего: ${total}`,
           }}
