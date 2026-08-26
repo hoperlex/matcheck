@@ -841,6 +841,13 @@
       "when": 1787160001000,
       "tag": "0120_upd_prompt_v16_price_column",
       "breakpoints": true
+    },
+    {
+      "idx": 121,
+      "version": "7",
+      "when": 1787160002000,
+      "tag": "0121_upd_prompt_v17_price_no_arithmetic",
+      "breakpoints": true
     }
   ]
 }
