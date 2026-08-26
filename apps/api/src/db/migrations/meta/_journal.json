@@ -834,6 +834,13 @@
       "when": 1787160000000,
       "tag": "0119_upd_prompt_v15_decimal_qty",
       "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1787160001000,
+      "tag": "0120_upd_prompt_v16_price_column",
+      "breakpoints": true
     }
   ]
 }
