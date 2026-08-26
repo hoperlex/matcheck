@@ -124,21 +124,37 @@ function extensionFor(mime: string): string {
 type PhotoTable = {
   kind: OperationKind;
   prefix: string;
-  publishUpdated: (app: ReturnType<typeof asZod>, opId: string) => void;
+  /**
+   * siteId — объект РОДИТЕЛЬСКОЙ приёмки/отгрузки: /events отдаёт инспектору
+   * только события его объекта (см. shouldDeliverSseEvent). Параметр
+   * обязательный, а не опциональный: забытый аргумент здесь означал бы
+   * молча разосланное всем событие, а таких мест восемь.
+   */
+  publishUpdated: (app: ReturnType<typeof asZod>, opId: string, siteId: string | null) => void;
 };
 
 const TABLES: Record<OperationKind, PhotoTable> = {
   delivery: {
     kind: 'delivery',
     prefix: 'photos',
-    publishUpdated: (app, id) =>
-      publishEvent(app, { type: 'delivery_updated', entityId: id, ts: new Date().toISOString() }),
+    publishUpdated: (app, id, siteId) =>
+      publishEvent(app, {
+        type: 'delivery_updated',
+        entityId: id,
+        ...(siteId ? { siteId } : {}),
+        ts: new Date().toISOString(),
+      }),
   },
   shipment: {
     kind: 'shipment',
     prefix: 'shipment_photos',
-    publishUpdated: (app, id) =>
-      publishEvent(app, { type: 'shipment_updated', entityId: id, ts: new Date().toISOString() }),
+    publishUpdated: (app, id, siteId) =>
+      publishEvent(app, {
+        type: 'shipment_updated',
+        entityId: id,
+        ...(siteId ? { siteId } : {}),
+        ts: new Date().toISOString(),
+      }),
   },
 };
 
@@ -325,7 +341,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           body.contentType,
         );
         await touchPhotoParent(app, 'delivery', operationId);
-        TABLES.delivery.publishUpdated(app, operationId);
+        TABLES.delivery.publishUpdated(app, operationId, d.siteId);
         return {
           photoId,
           s3Key,
@@ -459,7 +475,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         body.contentType,
       );
       await touchPhotoParent(app, 'shipment', operationId);
-      TABLES.shipment.publishUpdated(app, operationId);
+      TABLES.shipment.publishUpdated(app, operationId, s.siteId);
       return {
         photoId,
         s3Key,
@@ -816,7 +832,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       });
 
       if (outcome === 'ok') {
-        TABLES[found.kind].publishUpdated(app, found.operationId);
+        TABLES[found.kind].publishUpdated(app, found.operationId, found.parentSiteId);
         return { ok: true as const, uploadedAt: now.toISOString() };
       }
 
@@ -938,7 +954,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       // родителя, чтобы delta-sync отдал приёмку/отгрузку с этим фото на
       // мобилу, и будим клиента SSE-событием (раньше confirm их не слал).
       await touchPhotoParent(app, found.kind, found.operationId);
-      TABLES[found.kind].publishUpdated(app, found.operationId);
+      TABLES[found.kind].publishUpdated(app, found.operationId, found.parentSiteId);
       return { ok: true as const, uploadedAt: now.toISOString() };
     },
   );
@@ -1005,7 +1021,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         );
       }
       await touchPhotoParent(app, found.kind, found.operationId);
-      TABLES[found.kind].publishUpdated(app, found.operationId);
+      TABLES[found.kind].publishUpdated(app, found.operationId, found.parentSiteId);
       return { ok: true as const };
     },
   );
@@ -1079,7 +1095,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           .where(eq(shipmentPhotos.id, req.params.id));
       }
       await touchPhotoParent(app, found.kind, found.operationId);
-      TABLES[found.kind].publishUpdated(app, found.operationId);
+      TABLES[found.kind].publishUpdated(app, found.operationId, found.parentSiteId);
       return { ok: true as const, kind: req.body.kind };
     },
   );

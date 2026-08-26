@@ -159,10 +159,27 @@ installFatalHandlers('worker');
 // Redis Pub/Sub (worker в отдельном процессе, in-process bus API ему
 // недоступен). Без него мобила узнавала о готовности новой УПД только
 // через 15-минутный periodic sync.
+//
+// siteId достаём здесь, а не в двадцати двух местах вызова: /events отдаёт
+// инспектору только события его объекта, а распознавание — самый частый
+// источник событий вообще. Оставь мы его глобальным, шторм триггеров уцелел
+// бы наполовину, ради чего вся правка и делается. Один запрос по первичному
+// ключу дешевле любого из шагов распознавания, а место вызова о скоупе знать
+// не обязано.
+//
+// Документа может не оказаться (успели удалить, пока шёл job) — тогда шлём
+// без siteId: событие уедет всем, как раньше. Терять уведомление из-за
+// пропавшей строки хуже, чем разослать лишнее.
 async function notifySourceDocumentUpdated(sourceDocumentId: string): Promise<void> {
+  const [doc] = await db
+    .select({ siteId: sourceDocuments.siteId })
+    .from(sourceDocuments)
+    .where(eq(sourceDocuments.id, sourceDocumentId))
+    .limit(1);
   await publishSseEvent({
     type: 'source_document_updated',
     entityId: sourceDocumentId,
+    ...(doc?.siteId ? { siteId: doc.siteId } : {}),
     ts: new Date().toISOString(),
   });
 }

@@ -217,6 +217,10 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
         publishEvent(app, {
           type: 'site_updated',
           entityId: updated.id,
+          // Событие про объект и адресовано его инспекторам (см.
+          // shouldDeliverSseEvent): переименование чужого объекта планшет
+          // будить не должно.
+          siteId: updated.id,
           ts: new Date().toISOString(),
         });
         return row(updated);

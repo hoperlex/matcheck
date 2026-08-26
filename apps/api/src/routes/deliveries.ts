@@ -887,6 +887,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           id: deliveries.id,
           statusId: deliveries.statusId,
           pendingDeletionAt: deliveries.pendingDeletionAt,
+          // Объект нужен SSE-событию ниже: /events отдаёт инспектору только
+          // события его объекта (см. shouldDeliverSseEvent).
+          siteId: deliveries.siteId,
         })
         .from(deliveries)
         .where(eq(deliveries.id, req.params.id))
@@ -921,6 +924,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       publishEvent(app, {
         type: 'delivery_updated',
         entityId: d.id,
+        siteId: d.siteId,
         ts: new Date().toISOString(),
       });
       const dto = await buildDeliveryDto(app, d.id, req.user?.role);
@@ -1038,6 +1042,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           publishEvent(app, {
             type: 'delivery_updated',
             entityId: dto.id,
+            siteId: dto.siteId,
             ts: new Date().toISOString(),
           });
           return dto;
@@ -1056,6 +1061,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         publishEvent(app, {
           type: 'delivery_updated',
           entityId: dto.id,
+          siteId: dto.siteId,
           ts: new Date().toISOString(),
         });
         return dto;
@@ -1213,6 +1219,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       publishEvent(app, {
         type: 'delivery_deleted',
         entityId: req.params.id,
+        siteId: existing.siteId,
         ts: new Date().toISOString(),
       });
       return { ok: true as const };
@@ -1286,6 +1293,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       publishEvent(app, {
         type: 'delivery_updated',
         entityId: dto.id,
+        siteId: existing.siteId,
         ts: new Date().toISOString(),
       });
       return dto;
@@ -1355,6 +1363,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       publishEvent(app, {
         type: 'delivery_updated',
         entityId: dto.id,
+        siteId: existing.siteId,
         ts: new Date().toISOString(),
       });
       return dto;
@@ -1421,6 +1430,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           publishEvent(app, {
             type: 'delivery_updated',
             entityId: id,
+            siteId: existing.siteId,
             ts: new Date().toISOString(),
           });
           deleted.push(id);
@@ -1493,6 +1503,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           publishEvent(app, {
             type: 'delivery_updated',
             entityId: id,
+            siteId: existing.siteId,
             ts: new Date().toISOString(),
           });
           deleted.push(id);
@@ -1596,6 +1607,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           publishEvent(app, {
             type: 'delivery_deleted',
             entityId: id,
+            siteId: existing.siteId,
             ts: new Date().toISOString(),
           });
           deleted.push(id);
@@ -1914,6 +1926,8 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         .select({
           id: deliveries.id,
           pendingDeletionAt: deliveries.pendingDeletionAt,
+          // Объект — для скоупа SSE (см. shouldDeliverSseEvent).
+          siteId: deliveries.siteId,
         })
         .from(deliveries)
         .where(eq(deliveries.id, req.params.id))
@@ -1951,6 +1965,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         publishEvent(app, {
           type: 'delivery_updated',
           entityId: d.id,
+          siteId: d.siteId,
           ts: new Date().toISOString(),
         });
         const dto = await buildDeliveryDto(app, d.id, req.user?.role);
@@ -2018,6 +2033,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       publishEvent(app, {
         type: 'delivery_updated',
         entityId: d.id,
+        siteId: d.siteId,
         ts: new Date().toISOString(),
       });
 
@@ -2063,6 +2079,8 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         .select({
           id: deliveries.id,
           pendingDeletionAt: deliveries.pendingDeletionAt,
+          // Объект — для скоупа SSE (см. shouldDeliverSseEvent).
+          siteId: deliveries.siteId,
         })
         .from(deliveries)
         .where(eq(deliveries.id, req.params.id))
@@ -2086,6 +2104,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       publishEvent(app, {
         type: 'delivery_updated',
         entityId: d.id,
+        siteId: d.siteId,
         ts: new Date().toISOString(),
       });
 
@@ -2327,6 +2346,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       publishEvent(app, {
         type: 'delivery_updated',
         entityId: d.id,
+        siteId: d.siteId,
         ts: new Date().toISOString(),
       });
 
@@ -2364,7 +2384,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const [d] = await app.db
-        .select({ id: deliveries.id, pendingDeletionAt: deliveries.pendingDeletionAt })
+        // siteId — для скоупа SSE (см. shouldDeliverSseEvent).
+        .select({
+          id: deliveries.id,
+          pendingDeletionAt: deliveries.pendingDeletionAt,
+          siteId: deliveries.siteId,
+        })
         .from(deliveries)
         .where(eq(deliveries.id, req.params.id))
         .limit(1);
@@ -2410,6 +2435,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       publishEvent(app, {
         type: 'delivery_updated',
         entityId: d.id,
+        siteId: d.siteId,
         ts: new Date().toISOString(),
       });
 

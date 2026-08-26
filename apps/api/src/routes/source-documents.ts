@@ -3464,6 +3464,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         | {
             updated: typeof sourceDocuments.$inferSelect;
             updatedItems: (typeof sourceDocumentItems.$inferSelect)[];
+            /**
+             * Итог переноса — наружу через результат, а не через замыкание.
+             * Присваивание `transfer` происходит ВНУТРИ колбэка, поток
+             * управления снаружи этого не видит и сузил бы переменную до
+             * начального { changed: false }. Возврат сохраняет реальный тип.
+             */
+            transfer: SiteTransfer;
           };
       let result: PatchOutcome;
       try {
@@ -3668,7 +3675,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
               reason: 'документ изменён менеджером',
             });
           }
-          return { updated, updatedItems };
+          return { updated, updatedItems, transfer };
         });
       } catch (err) {
         // Пересчитанный ключ пакета столкнулся с уже существующим: тот же
@@ -3698,7 +3705,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           message: `По этой поставке уже оформлены операции (${parts.join(', ')}) — объект менять нельзя`,
         });
       }
-      const { updated, updatedItems } = result;
+      const { updated, updatedItems, transfer: siteTransfer } = result;
 
       const attachments = await app.db
         .select()
@@ -3713,8 +3720,27 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       publishEvent(app, {
         type: 'source_document_updated',
         entityId: updated.id,
+        ...(updated.siteId ? { siteId: updated.siteId } : {}),
         ts: new Date().toISOString(),
       });
+      // Перенос машины на другой объект уведомляет и ПРЕЖНИЙ объект. Событие с
+      // новым siteId до его инспектора не дойдёт (см. shouldDeliverSseEvent), а
+      // снимать карточку с планшета надо именно там: дельта скрытый документ
+      // больше не привозит. Метка переноса уже записана в транзакции
+      // (recordSiteTransfer) — событие лишь ускоряет её доставку, поэтому его
+      // потеря не ломает корректность, а только возвращает прежние 15 минут.
+      if (
+        siteTransfer.changed &&
+        siteTransfer.fromSiteId &&
+        siteTransfer.fromSiteId !== updated.siteId
+      ) {
+        publishEvent(app, {
+          type: 'source_document_updated',
+          entityId: updated.id,
+          siteId: siteTransfer.fromSiteId,
+          ts: new Date().toISOString(),
+        });
+      }
       return {
         ...sdRow(updated, names),
         items: updatedItems.map(itemDto),
@@ -3767,6 +3793,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       publishEvent(app, {
         type: 'source_document_updated',
         entityId: updated.id,
+        ...(updated.siteId ? { siteId: updated.siteId } : {}),
         ts: new Date().toISOString(),
       });
       return {
@@ -3821,6 +3848,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       publishEvent(app, {
         type: 'source_document_deleted',
         entityId: req.params.id,
+        ...(existing.siteId ? { siteId: existing.siteId } : {}),
         ts: new Date().toISOString(),
       });
       return { ok: true as const };
@@ -3850,7 +3878,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
       for (const id of req.body.ids) {
         const [existing] = await app.db
-          .select({ id: sourceDocuments.id })
+          // siteId — для скоупа SSE-события ниже (см. shouldDeliverSseEvent).
+          .select({ id: sourceDocuments.id, siteId: sourceDocuments.siteId })
           .from(sourceDocuments)
           .where(
             and(
@@ -3872,6 +3901,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           publishEvent(app, {
             type: 'source_document_deleted',
             entityId: id,
+            ...(existing.siteId ? { siteId: existing.siteId } : {}),
             ts: new Date().toISOString(),
           });
         } catch (err) {
