@@ -1,4 +1,5 @@
 import {
+  suspectPriceIncludesVat,
   suspectQtyPriceSwap,
   suspectSumEqualsQty,
   suspectUnitCodeAsQty,
@@ -344,6 +345,25 @@ export function validateUpdTotals(
     // второй ярлык на той же строке только запутает.
     if (opts.detectRecognitionWarnings && ok && suspectQtyPriceSwap({ qty, price })) {
       warnings.push({ name: 'qty_price_swap', scope: { row } });
+    }
+    // Цена взята с НДС: произведение сошлось со стоимостью С налогом вместо
+    // стоимости без него. Предъявляем только там, где обычная сверка НЕ
+    // сошлась (`!ok`) — если строка и так сходится, цена прочитана верно, и
+    // второй ярлык только запутает. Строчный vatSum здесь, а не эффективная
+    // ставка документа: признак держится на том, что налог выделен верно,
+    // а это проверяется по фактическому значению.
+    if (
+      opts.detectRecognitionWarnings &&
+      !ok &&
+      suspectPriceIncludesVat({
+        qty,
+        price,
+        sum,
+        vatSum: it.vatSum ?? null,
+        vatRate: effectiveRate,
+      })
+    ) {
+      warnings.push({ name: 'price_includes_vat', scope: { row } });
     }
   });
 
