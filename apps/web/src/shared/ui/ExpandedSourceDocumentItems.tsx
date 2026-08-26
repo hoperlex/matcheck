@@ -4,6 +4,7 @@ import type { SourceDocumentDetail } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { formatDecimal } from '../utils/formatDecimal';
 import { formatMoneyRu } from '../utils/formatRu';
+import { priceWithVat } from '../utils/priceWithVat';
 
 /**
  * Раскрывающаяся панель с позициями source_document. Lazy fetch:
@@ -17,9 +18,18 @@ import { formatMoneyRu } from '../utils/formatRu';
 export function ExpandedSourceDocumentItems({
   id,
   kind,
+  withVat,
 }: {
   id: string;
   kind: SourceDocumentDetail['kind'];
+  /**
+   * Показывать цену С НАЛОГОМ (только для УПД).
+   *
+   * По умолчанию выключено, и это важно: тот же компонент раскрывает строки
+   * на КПП и в отгрузке, а там цена намеренно повторяет бланк — рядом стоит
+   * своя колонка «Сумма НДС». Включается точечно, из списка «Документы».
+   */
+  withVat?: boolean;
 }) {
   const { data, isLoading, error } = useQuery({
     // Тот же ключ, что у префетча списка и карточки документа: один и тот же
@@ -54,6 +64,8 @@ export function ExpandedSourceDocumentItems({
   }
 
   const showInv = kind === 'os2_transfer';
+  // Пересчёт только для УПД и только там, где его явно попросили.
+  const showVat = withVat === true && kind === 'upd';
   type Item = (typeof items)[number];
   const columns: NonNullable<Parameters<typeof Table<Item>>[0]['columns']> = [
     { title: '№', dataIndex: 'lineNo', width: 50 },
@@ -76,10 +88,15 @@ export function ExpandedSourceDocumentItems({
     },
     { title: 'Ед.', dataIndex: 'unit', width: 60 },
     {
-      title: 'Цена',
+      // В бланке УПД цены с налогом нет — она пересчитывается по ставке строки,
+      // чтобы количество × цена сходилось с «Суммой» (графа 9).
+      title: showVat ? 'Цена с НДС' : 'Цена',
       dataIndex: 'price',
       width: 130,
-      render: (v: string | null) => formatMoneyRu(v),
+      render: (v: string | null, r: SourceDocumentDetail['items'][number]) =>
+        formatMoneyRu(
+          showVat ? priceWithVat(v, r.vatRate, data?.totalSum ?? null, data?.vatSum ?? null) : v,
+        ),
     },
     {
       title: 'Сумма НДС',

@@ -1440,7 +1440,7 @@ export default function InboxPage() {
             // Свою колонку с иконкой не рендерим — ± живёт в столбце «Тип».
             showExpandColumn: false,
             expandedRowKeys: expandedIds,
-            expandedRowRender: (r) => <ExpandedSourceDocumentItems id={r.id} kind={r.kind} />,
+            expandedRowRender: (r) => <ExpandedSourceDocumentItems id={r.id} kind={r.kind} withVat />,
           }}
           // Карточки у принятого файла не существует — открывать нечего.
           onRowClick={(r) => {

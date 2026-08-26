@@ -59,6 +59,7 @@ import {
   inputNumberFormatterRu,
   inputNumberParserRu,
 } from '../../shared/utils/formatRu';
+import { priceWithVat, priceWithoutVat } from '../../shared/utils/priceWithVat';
 import { ExtraFilesFooterButton } from './ExtraFilesBlock';
 import { LlmCallsDrawer } from './LlmCallsDrawer';
 import { CustomerCounterpartySelect } from './CustomerCounterpartySelect';
@@ -72,8 +73,32 @@ type EditItem = {
   nameRaw: string;
   qty: string;
   unit: string;
+  /**
+   * Цена БЕЗ налога — ровно как в графе 4 бланка и как хранится в базе.
+   *
+   * В поле ввода показывается цена С налогом, но здесь она остаётся исходной:
+   * пересчёт применяется только к тому, что человек реально ввёл. Прогонять
+   * весь список через пересчёт при сохранении нельзя — пара преобразований
+   * расходится примерно у одной позиции из тысячи, и мы тихо правили бы цены,
+   * которых никто не касался.
+   */
   price: string | null;
   sum: string | null;
+  /**
+   * Ставка строки. Раньше терялась при переходе в форму, из-за чего сохранение
+   * карточки обнуляло НДС у позиций (см. onSave и серверный PATCH).
+   */
+  vatRate: string | null;
+  /**
+   * Цена С НАЛОГОМ — единственное, что правит человек в колонке цены.
+   *
+   * Отдельное поле состояния, а не производная от `price` на каждый рендер.
+   * У antd InputNumber с formatter текст поля перезаписывается из value при
+   * любом изменении, включая момент набора: пересчёт на лету заставлял бы
+   * цифры прыгать под курсором. И blur без единой правки вызывает onChange —
+   * с производным значением это молча переписывало бы цену.
+   */
+  priceGross: number | null;
 };
 
 type EditForm = {
@@ -91,6 +116,15 @@ type EditForm = {
   siteId: string | null;
   totalSum: string | null;
   items: EditItem[];
+  /**
+   * Шапка НА МОМЕНТ ОТКРЫТИЯ карточки — источник ставки для строк, где своя не
+   * распозналась. Заморожена намеренно: `totalSum` в форме редактируется, и
+   * пересчёт от него дёргал бы цены во всех строках прямо во время набора
+   * итога.
+   *
+   * `null` — документ не УПД: цена показывается и сохраняется как есть.
+   */
+  vatSource: { totalSum: string | null; vatSum: string | null } | null;
 };
 
 function directionLabel(d: SourceDirection): string {
@@ -132,14 +166,43 @@ function describeWarning(w: UpdWarning): string {
   return `${name} (${where})`;
 }
 
-function itemToEdit(i: Item): EditItem {
+function itemToEdit(i: Item, vatSource: EditForm['vatSource']): EditItem {
+  const gross = vatSource
+    ? priceWithVat(i.price, i.vatRate, vatSource.totalSum, vatSource.vatSum)
+    : i.price;
   return {
     nameRaw: i.nameRaw,
     qty: i.qty,
     unit: i.unit,
     price: i.price,
     sum: i.sum,
+    vatRate: i.vatRate,
+    priceGross: gross != null && gross !== '' ? Number(gross) : null,
   };
+}
+
+/**
+ * Цена, которая уйдёт на сервер.
+ *
+ * Обратный пересчёт применяется ТОЛЬКО к реально изменённому значению. Строку,
+ * которую человек не трогал, отправляем ровно тем числом, что пришло из базы:
+ * пара пересчётов расходится примерно у одной позиции из тысячи, и прогон
+ * всего списка означал бы тихую правку цен, которых никто не касался.
+ *
+ * Порог в половину копейки — потому что меньше в поле и не ввести: formatter
+ * показывает два знака, и antd на blur сплющивает ввод до них. Без порога
+ * простой клик в поле и мимо переписывал бы цену с четырьмя знаками на
+ * двузначную.
+ */
+function priceForSave(it: EditItem, vatSource: EditForm['vatSource']): string | null {
+  if (it.priceGross == null) return null;
+  if (!vatSource) return String(it.priceGross);
+
+  const pristine = priceWithVat(it.price, it.vatRate, vatSource.totalSum, vatSource.vatSum);
+  if (pristine != null && Math.abs(it.priceGross - Number(pristine)) < 0.005) {
+    return it.price;
+  }
+  return priceWithoutVat(it.priceGross, it.vatRate, vatSource.totalSum, vatSource.vatSum);
 }
 
 // Сплит-режим модалки: 'stacked' — позиции сверху, оригинал снизу (горизонтальный
@@ -199,7 +262,12 @@ function initialForm(sd: SourceDocumentDetail): EditForm {
     recipientMolId: sd.recipientMolId,
     siteId: sd.siteId,
     totalSum: sd.totalSum,
-    items: sd.items.map(itemToEdit),
+    // Единственный гейт «только УПД» в режиме редактирования: у накладных и
+    // ОС-2 источника ставки нет, и весь путь вырождается в прежнее поведение.
+    vatSource: sd.kind === 'upd' ? { totalSum: sd.totalSum, vatSum: sd.vatSum } : null,
+    items: sd.items.map((i) =>
+      itemToEdit(i, sd.kind === 'upd' ? { totalSum: sd.totalSum, vatSum: sd.vatSum } : null),
+    ),
   };
 }
 
@@ -365,8 +433,12 @@ export function SourceDocumentDetailModal({
         nameRaw: it.nameRaw,
         qty: it.qty,
         unit: it.unit,
-        price: it.price,
+        price: priceForSave(it, edit.vatSource),
         sum: it.sum,
+        // Ставку отправляем обратно, иначе сервер перезапишет позиции без неё:
+        // PATCH заменяет строки целиком, и НДС у документа обнулялся после
+        // первой же правки карточки.
+        vatRate: it.vatRate,
       })),
     };
     if (isOutbound) {
@@ -673,7 +745,13 @@ export function SourceDocumentDetailModal({
                     }
                   />
                 ) : (
-                  <ReadOnlyTable items={items} showInvNumber={sd.kind === 'os2_transfer'} />
+                  <ReadOnlyTable
+                    items={items}
+                    showInvNumber={sd.kind === 'os2_transfer'}
+                    withVat={sd.kind === 'upd'}
+                    docTotalSum={sd.totalSum}
+                    docVatSum={sd.vatSum}
+                  />
                 )
               }
               headerNode={
@@ -1445,7 +1523,25 @@ function ThumbBar({
   );
 }
 
-function ReadOnlyTable({ items, showInvNumber }: { items: Item[]; showInvNumber?: boolean }) {
+function ReadOnlyTable({
+  items,
+  showInvNumber,
+  withVat,
+  docTotalSum,
+  docVatSum,
+}: {
+  items: Item[];
+  showInvNumber?: boolean;
+  /**
+   * Показывать цену С НАЛОГОМ. Только для УПД: там рядом стоит сумма из графы 9
+   * (с налогом), и цена без налога из графы 4 не сходилась с ней на экране —
+   * 15 × 240 против показанных 4 392. У накладных и ОС-2 колонка прежняя.
+   */
+  withVat?: boolean;
+  /** Шапка документа — из неё берётся ставка для строк, где она не распозналась. */
+  docTotalSum?: string | null;
+  docVatSum?: string | null;
+}) {
   // Колонка «Инв.№» отображается только для ОС-2 (kind='os2_transfer') —
   // у ТН и УПД она была бы пустой.
   const columns: NonNullable<ComponentProps<typeof Table<Item>>['columns']> = [
@@ -1469,10 +1565,13 @@ function ReadOnlyTable({ items, showInvNumber }: { items: Item[]; showInvNumber?
     },
     { title: 'Ед.', dataIndex: 'unit', width: 60 },
     {
-      title: 'Цена',
+      // Заголовок называет величину прямо: в приёмке цена остаётся без налога,
+      // и одинаковое имя над разными числами читалось бы как расхождение.
+      title: withVat ? 'Цена с НДС' : 'Цена',
       dataIndex: 'price',
       width: 130,
-      render: (v: string | null) => formatMoneyRu(v),
+      render: (v: string | null, r: Item) =>
+        formatMoneyRu(withVat ? priceWithVat(v, r.vatRate, docTotalSum, docVatSum) : v),
     },
     {
       title: 'Сумма',
@@ -1556,6 +1655,10 @@ function EditableTable({
   setEdit: (v: EditForm) => void;
   failedRows: ReadonlySet<number>;
 }) {
+  // Цена показывается с налогом там, где у формы есть источник ставки, — то
+  // есть только у УПД (см. initialForm). Отдельного пропа не нужно: признак
+  // уже едет в самой форме.
+  const withVat = edit.vatSource != null;
   function updateItem(idx: number, patch: Partial<EditItem>) {
     const next = edit.items.map((it, i) => (i === idx ? { ...it, ...patch } : it));
     setEdit({ ...edit, items: next });
@@ -1566,7 +1669,19 @@ function EditableTable({
   function addItem() {
     setEdit({
       ...edit,
-      items: [...edit.items, { nameRaw: '', qty: '1', unit: 'шт', price: null, sum: null }],
+      items: [
+        ...edit.items,
+        // Ставки у новой строки нет: цена пересчитается по ставке документа.
+        {
+          nameRaw: '',
+          qty: '1',
+          unit: 'шт',
+          price: null,
+          sum: null,
+          vatRate: null,
+          priceGross: null,
+        },
+      ],
     });
   }
 
@@ -1626,13 +1741,21 @@ function EditableTable({
               ),
             },
             {
-              title: 'Цена',
-              dataIndex: 'price',
+              // Показываем и принимаем цену С НАЛОГОМ, но в форме храним цену
+              // бланка: `value` пересчитывается на лету, а `onChange`
+              // возвращает введённое обратно к графе 4. Строка, которую не
+              // трогали, так и остаётся с исходным `price` — байт в байт.
+              title: withVat ? 'Цена с НДС' : 'Цена',
+              // Правится цена С НАЛОГОМ, а в базу уходит цена бланка — перевод
+              // делает priceForSave при сохранении, и только для изменённых строк.
+              dataIndex: 'priceGross',
               width: 160,
-              render: (v: string | null, _r, i) => (
+              render: (v: number | null, _r, i) => (
                 <InputNumber
-                  value={v != null ? Number(v) : null}
-                  onChange={(x) => updateItem(i, { price: x != null ? String(x) : null })}
+                  value={v}
+                  onChange={(x) =>
+                    updateItem(i, { priceGross: typeof x === 'number' ? x : null })
+                  }
                   decimalSeparator=","
                   formatter={inputNumberFormatterRu}
                   parser={inputNumberParserRu}

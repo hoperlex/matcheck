@@ -52,6 +52,7 @@ import {
   users,
 } from '../db/schema.js';
 import { parseUpdXml } from '../domain/edo/upd.parser.js';
+import { vatFieldsOf } from '../domain/edo/vat-fields.js';
 import { validateUpdTotals } from '../domain/edo/upd-validation.js';
 import { deriveUpdParseOutcome } from '../domain/edo/upd-outcome.js';
 import { presign, putObject } from '../domain/storage/s3.signer.js';
@@ -3210,6 +3211,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           unit: z.string().default('шт'),
           price: z.union([z.number(), z.string()]).nullable().optional(),
           sum: z.union([z.number(), z.string()]).nullable().optional(),
+          // Ставка НДС строки. Раньше её здесь не было, и PATCH стирал НДС у
+          // всех позиций: строки заменяются целиком, а vat_rate/vat_sum в
+          // новую запись не попадали. Поле необязательное — старые клиенты
+          // продолжают работать как прежде.
+          vatRate: z.union([z.number(), z.string()]).nullable().optional(),
         }),
       )
       .optional(),
@@ -3341,6 +3347,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
                     : typeof it.sum === 'number'
                       ? it.sum.toString()
                       : it.sum,
+                ...vatFieldsOf(it.vatRate, it.sum),
                 lineNo: idx + 1,
               })),
             )
