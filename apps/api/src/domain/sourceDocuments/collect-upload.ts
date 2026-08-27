@@ -10,6 +10,7 @@
 import type { FastifyRequest } from 'fastify';
 import {
   classifyAttachment,
+  isXlsWorkbook,
   isXlsxContainer,
   sniffMime,
 } from '../mail/attachment-filter.js';
@@ -185,10 +186,13 @@ function classifyStrict(
   // (page-render.ts, imageToPng и isHeicBuffer), поэтому запрет снят — с
   // айфона это формат по умолчанию, и отказ бил по самому частому способу
   // сфотографировать документ.
-  // OLE2-сигнатура одинакова у .xls, .doc и .ppt — публично не принимаем
-  // ничего из этого семейства: ради редкого .xls разбирать Workbook-стрим
-  // не окупается, а пропустить .doc как «таблицу» нельзя.
-  if (sniffed === 'application/vnd.ms-excel') {
+  // OLE2-сигнатура одинакова у .xls, .doc и .ppt, поэтому раньше публичный вход
+  // отклонял всё семейство разом. Но 1С у части поставщиков выгружает УПД и
+  // накладные именно в .xls, и отказ означал, что документа у менеджера не
+  // будет вовсе: отклонённый файл не оставляет даже строки в реестре.
+  // Разбирать контейнер до конца не нужно — достаточно его корневого потока,
+  // который у книги и у документа Word разный (см. isXlsWorkbook).
+  if (sniffed === 'application/vnd.ms-excel' && !isXlsWorkbook(buffer)) {
     return { ok: false, reason: 'unsupported_type' };
   }
   // Любой zip выглядит как xlsx: убеждаемся, что внутри действительно книга.

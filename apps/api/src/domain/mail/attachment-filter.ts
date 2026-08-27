@@ -17,6 +17,13 @@
 //
 // Модуль чистый: ни сети, ни БД, ни файловой системы.
 
+// CFB — часть SheetJS, читающая контейнер OLE2 (он же Compound File Binary),
+// в котором лежит старый .xls. Импорт ИМЕННО default-ом: при
+// `import * as XLSX from 'xlsx'` в namespace попадают только read/write/utils
+// и подобные, а `XLSX.CFB` оказывается undefined — проверка ниже молча
+// возвращала бы false для каждой настоящей книги.
+import XLSX from 'xlsx';
+
 /** Состояние вложения — совпадает с `mail_attachments.state`. */
 export type AttachmentState = 'kept' | 'suspected_signature' | 'skipped';
 
@@ -223,6 +230,34 @@ export function isXlsxContainer(buffer: Buffer): boolean {
     p += 46 + nameLen + extraLen + commentLen;
   }
   return false;
+}
+
+/**
+ * Действительно ли OLE2-контейнер — это книга Excel.
+ *
+ * Пара к `isXlsxContainer`, только для старого формата. `sniffMime` отдаёт
+ * `application/vnd.ms-excel` ЛЮБОМУ файлу с сигнатурой D0 CF 11 E0, а она общая
+ * у .xls, .doc и .ppt — это один контейнер Microsoft. Для почты различать их не
+ * требуется (отправитель известен), для публичной загрузки от неизвестного
+ * отправителя — обязательно: иначе вордовский документ дошёл бы до парсера как
+ * «таблица».
+ *
+ * Смотрим КОРНЕВОЙ поток: у книги это `Workbook` (BIFF8) или `Book` (BIFF5), у
+ * Word — `WordDocument`, у PowerPoint — `PowerPoint Document`. Искать имя среди
+ * всех путей контейнера нельзя: .doc с внедрённой таблицей несёт
+ * `ObjectPool/_1234567890/Workbook` и прошёл бы как книга.
+ */
+export function isXlsWorkbook(buffer: Buffer): boolean {
+  try {
+    const cfb = XLSX.CFB.read(buffer, { type: 'buffer' });
+    if (XLSX.CFB.find(cfb, '/WordDocument')) return false;
+    if (XLSX.CFB.find(cfb, '/PowerPoint Document')) return false;
+    return Boolean(XLSX.CFB.find(cfb, '/Workbook') || XLSX.CFB.find(cfb, '/Book'));
+  } catch {
+    // Обрезанный или битый контейнер: CFB.read бросает. Книгой это не является,
+    // и разбирать такой файл всё равно нечем.
+    return false;
+  }
 }
 
 /**

@@ -16,9 +16,17 @@ import * as XLSX from 'xlsx';
 import { classifyFile } from '../src/domain/edo/document-router.js';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const XLS_MIME = 'application/vnd.ms-excel';
 
-/** Бланк ТН по форме 2116 — структура листа как у боевой книги. */
-function waybillWorkbook(): Buffer {
+/**
+ * Бланк ТН по форме 2116 — структура листа как у боевой книги.
+ *
+ * `bookType` вынесен в параметр, потому что тот же бланк приходит и в старом
+ * формате: 1С у части поставщиков выгружает .xls (BIFF), и текст листа оттуда
+ * читает уже не ExcelJS, а SheetJS-фоллбэк. Признак ТН обязан находиться в
+ * обоих — иначе публичный приём .xls отдавал бы накладную в УПД-путь.
+ */
+function waybillWorkbook(bookType: 'xlsx' | 'xls' = 'xlsx'): Buffer {
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([
     ['Приложение № 4 к Правилам перевозок грузов автомобильным транспортом'],
@@ -35,7 +43,7 @@ function waybillWorkbook(): Buffer {
     ['6. Перевозчик', 'ИП Перевозчиков П.П., ИНН 222222222222'],
   ]);
   XLSX.utils.book_append_sheet(wb, ws, 'Транспортная_накладная');
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  return XLSX.write(wb, { type: 'buffer', bookType }) as Buffer;
 }
 
 describe('document-router: настоящая книга с бланком ТН', () => {
@@ -49,6 +57,20 @@ describe('document-router: настоящая книга с бланком ТН'
 
   it('с рубильником уходит к промпту накладных', async () => {
     const c = await classifyFile(waybillWorkbook(), XLSX_MIME, 'НИ00-000001.xlsx', {
+      excelWaybillTextRoute: true,
+    });
+    expect(c.detectedKind).toBe('transport_waybill');
+    expect(c.parserUsed).toBe('parseWaybillBatch');
+    expect(c.signals).toEqual(expect.arrayContaining(['excel:not-upd', 'form:tn']));
+  });
+
+  it('тот же бланк в старом .xls ведёт себя ровно так же', async () => {
+    // Публичная форма принимает .xls с тех пор, как вход научился отличать
+    // книгу от .doc по корневому потоку контейнера. Здесь проверяется вторая
+    // половина обещания: принятый файл не только доезжает, но и маршрутизируется
+    // как его .xlsx-близнец — ExcelJS на BIFF падает, и текст листа берёт
+    // SheetJS-фоллбэк в collectRows.
+    const c = await classifyFile(waybillWorkbook('xls'), XLS_MIME, 'НИ00-000001.xls', {
       excelWaybillTextRoute: true,
     });
     expect(c.detectedKind).toBe('transport_waybill');

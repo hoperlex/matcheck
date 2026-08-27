@@ -13,9 +13,13 @@ import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+// default-импорт обязателен: namespace-форма не отдаёт XLSX.CFB — см. комментарий
+// к тому же импорту в attachment-filter.ts.
+import XLSX from 'xlsx';
 import {
   classifyAttachment,
   inspectZip,
+  isXlsWorkbook,
   sniffMime,
   DEFAULT_ATTACHMENT_LIMITS,
 } from '../src/domain/mail/attachment-filter.js';
@@ -207,6 +211,49 @@ describe('xlsx как ZIP-контейнер', () => {
     expect(inspectZip(broken).ok).toBe(false);
     const v = classifyAttachment({ filename: 'упд.xlsx', declaredMime: null, buffer: broken });
     expect(v.state).toBe('skipped');
+  });
+});
+
+describe('xls как OLE2-контейнер', () => {
+  it('реальная книга .xls опознаётся', () => {
+    expect(isXlsWorkbook(REAL_XLS)).toBe(true);
+  });
+
+  it('BIFF5 с корневым потоком Book — тоже книга', () => {
+    // Excel 5.0/95 кладёт книгу в поток `Book`, а не `Workbook`. Оба варианта
+    // живые: 1С у разных поставщиков выгружает и то, и другое.
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['№', 'Товар'],
+        [1, 'Профнастил'],
+      ]),
+      'Лист1',
+    );
+    expect(isXlsWorkbook(XLSX.write(wb, { bookType: 'biff5', type: 'buffer' }))).toBe(true);
+  });
+
+  it('документ Word со встроенной таблицей книгой не считается', () => {
+    // Ради этого случая и проверяется КОРНЕВОЙ поток: имя `Workbook` есть и
+    // внутри .doc — у внедрённого объекта в ObjectPool. Поиск по всем путям
+    // контейнера пропустил бы такой файл как таблицу.
+    const cfb = XLSX.CFB.utils.cfb_new();
+    XLSX.CFB.utils.cfb_add(cfb, '/WordDocument', Buffer.from('word body'));
+    XLSX.CFB.utils.cfb_add(cfb, '/ObjectPool/_1234567890/Workbook', Buffer.from('embedded'));
+    expect(isXlsWorkbook(XLSX.CFB.write(cfb, { type: 'buffer' }))).toBe(false);
+  });
+
+  it('одна сигнатура OLE2 без содержимого — не книга', () => {
+    const fake = Buffer.concat([
+      Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+      Buffer.alloc(60_000, 0),
+    ]);
+    expect(isXlsWorkbook(fake)).toBe(false);
+  });
+
+  it('пустой буфер — не книга', () => {
+    expect(isXlsWorkbook(Buffer.alloc(0))).toBe(false);
   });
 });
 

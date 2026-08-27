@@ -23,6 +23,8 @@ import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 import { afterEach, describe, expect, it } from 'vitest';
+// default-импорт: namespace-форма не отдаёт XLSX.CFB (см. attachment-filter.ts).
+import XLSX from 'xlsx';
 import {
   collectUploadParts,
   type CollectMode,
@@ -304,9 +306,47 @@ describe('collectUploadParts — режим strict (публичный вход)
     expect(res.accepted).toHaveLength(1);
   });
 
-  it('старый .xls (OLE2) публично не принимается', async () => {
-    // Та же сигнатура у .doc и .ppt — различить их без разбора потока нельзя,
-    // а ради редкого формата это не окупается.
+  it('настоящая книга .xls принимается', async () => {
+    // 1С у части поставщиков выгружает УПД и накладные именно в старом формате.
+    // Отказ означал, что документа у менеджера не будет вовсе: отклонённый файл
+    // не оставляет даже строки в реестре пакета.
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ['№', 'Товар'],
+        [1, 'Профнастил'],
+      ]),
+      'Лист1',
+    );
+    const xls: Buffer = XLSX.write(wb, { bookType: 'xls', type: 'buffer' });
+    const res = await run('strict', {}, [
+      { field: 'files', filename: 'упд.xls', contentType: 'application/vnd.ms-excel', content: xls },
+    ]);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.rejected).toHaveLength(0);
+    expect(res.accepted).toHaveLength(1);
+    expect(res.accepted[0]).toMatchObject({ mimeType: 'application/vnd.ms-excel' });
+  });
+
+  it('документ Word под именем .xls не проходит', async () => {
+    // Сигнатура OLE2 одна на .xls, .doc и .ppt, поэтому решает корневой поток.
+    // Имя `Workbook` встречается и внутри .doc — у внедрённого объекта.
+    const cfb = XLSX.CFB.utils.cfb_new();
+    XLSX.CFB.utils.cfb_add(cfb, '/WordDocument', Buffer.from('word body'));
+    XLSX.CFB.utils.cfb_add(cfb, '/ObjectPool/_1234567890/Workbook', Buffer.from('embedded'));
+    const doc: Buffer = XLSX.CFB.write(cfb, { type: 'buffer' });
+    const res = await run('strict', {}, [
+      { field: 'files', filename: 'накладная.xls', contentType: 'application/vnd.ms-excel', content: doc },
+    ]);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.accepted).toHaveLength(0);
+    expect(res.rejected[0]).toMatchObject({ reason: 'unsupported_type' });
+  });
+
+  it('битый OLE2 не проходит', async () => {
     const ole2 = Buffer.concat([
       Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
       Buffer.alloc(60_000, 0),

@@ -18,6 +18,8 @@ import multipart from '@fastify/multipart';
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+// default-импорт: namespace-форма не отдаёт XLSX.CFB (см. attachment-filter.ts).
+import XLSX from 'xlsx';
 
 const mocks = vi.hoisted(() => ({
   putObject: vi.fn(),
@@ -72,6 +74,20 @@ function multipartBody(
 
 function pdf(marker: string): Buffer {
   return Buffer.from(`%PDF-1.4\n%${marker}\n1 0 obj\n<<>>\nendobj\ntrailer\n%%EOF\n`);
+}
+
+/** Настоящая книга старого формата (BIFF/OLE2) — то, что выгружает 1С. */
+function xls(): Buffer {
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.aoa_to_sheet([
+      ['№', 'Товар', 'Кол-во'],
+      [1, 'Профнастил', 200],
+    ]),
+    'Лист1',
+  );
+  return XLSX.write(wb, { bookType: 'xls', type: 'buffer' });
 }
 
 /**
@@ -247,6 +263,45 @@ suite('публичная загрузка документов (реальны�
     expect(job?.dedupe_key).toBe(`bundle~${bundle!.id}~parse~0`);
     expect(job?.payload).toMatchObject({ bundleId: bundle!.id, mode: 'router' });
     expect(mocks.queueAdd).not.toHaveBeenCalled();
+  });
+
+  it('книга .xls доезжает до хранилища и реестра', async () => {
+    // 1С у части поставщиков выгружает УПД и накладные в старом формате, а
+    // публичный вход отклонял всё семейство OLE2 разом: файл не оставлял даже
+    // строки в реестре, и документа у менеджера не появлялось. Здесь важен не
+    // сам факт приёма (это проверяет коллектор), а то, что файл доехал до S3,
+    // реестра и очереди — то есть исходная потеря закрыта.
+    const res = await upload([
+      { field: 'files', filename: 'упд.xls', contentType: 'application/vnd.ms-excel', content: xls() },
+    ]);
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({ filesAccepted: 1, filesRejected: [] });
+
+    // Расширение в ключе — не косметика: воркер по нему решает, что файл
+    // Excel-книга, и включает конвертацию BIFF → OOXML перед разбором.
+    const s3Key = mocks.putObject.mock.calls[0]![0] as string;
+    expect(s3Key.endsWith('.xls')).toBe(true);
+
+    const [bundle] = await sql<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE site_id = ${siteId}`;
+    const [row] = await sql<
+      { source_filename: string; mime_type: string | null; status: string; input_s3_key: string | null }[]
+    >`SELECT source_filename, mime_type, status, input_s3_key
+        FROM bundle_import_items WHERE bundle_id = ${bundle!.id}`;
+    expect(row).toMatchObject({
+      source_filename: 'упд.xls',
+      mime_type: 'application/vnd.ms-excel',
+    });
+    expect(row!.status).not.toBe('failed');
+    expect(row!.input_s3_key).toBeTruthy();
+
+    const [ev] = await sql<{ submission_manifest: Array<{ filename: string; accepted: boolean }> }[]>`
+      SELECT submission_manifest FROM ingest_events WHERE bundle_id = ${bundle!.id}`;
+    expect(ev!.submission_manifest).toMatchObject([{ filename: 'упд.xls', accepted: true }]);
+
+    const [job] = await sql<{ payload: Record<string, unknown> }[]>`
+      SELECT payload FROM job_outbox WHERE payload->>'bundleId' = ${bundle!.id}`;
+    expect(job?.payload).toMatchObject({ bundleId: bundle!.id, mode: 'router' });
   });
 
   it('часть файлов отбракована — годные всё равно приняты', async () => {

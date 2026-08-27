@@ -55,7 +55,8 @@ const PUBLIC_LIMITS = {
 // серверный sniff (см. classifyStrict).
 const ACCEPT =
   'application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,' +
-  'image/jpeg,image/png,image/webp,.pdf,.xlsx,.jpg,.jpeg,.png,.webp';
+  'application/vnd.ms-excel,image/jpeg,image/png,image/webp,' +
+  '.pdf,.xlsx,.xls,.jpg,.jpeg,.png,.webp';
 
 /**
  * Одна поставка: объект, дата, комментарий и свой комплект документов.
