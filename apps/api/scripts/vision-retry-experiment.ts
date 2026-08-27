@@ -40,7 +40,7 @@
  * Окнами и с паузой — по тем же причинам, что корпусная сверка: квота
  * провайдера общая с боевым распознаванием, и она уже однажды исчерпалась.
  */
-import { writeFile } from 'node:fs/promises';
+import { writeReportSafely } from './prompt-ab-lib.js';
 import { eq } from 'drizzle-orm';
 import type { UpdPdfParsed } from '@matcheck/contracts';
 import { validateUpdTotals } from '../src/domain/edo/upd-validation.js';
@@ -120,9 +120,38 @@ function argNumber(flag: string, fallback: number): number {
   return n;
 }
 
+/**
+ * Покрытие проверок: сколько каждого типа ПРИМЕНИМО к разбору.
+ *
+ * Без этого числа вывод «стало лучше» недоказуем. Валидатор засчитывает
+ * отсутствующее значение успешно пропущенной проверкой: строка без цены не даёт
+ * провала `row_qty_price`, пустой итог — провала `sum_total`. Значит разбор,
+ * потерявший данные, выглядит в отчёте чище того, что данные сохранил.
+ */
+function checkCoverage(parsed: UpdPdfParsed): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const c of validation(parsed).checks) {
+    if (c.skipReason != null) continue;
+    out[c.name] = (out[c.name] ?? 0) + 1;
+  }
+  return out;
+}
+
+/**
+ * Похоже ли, что в документе вообще нет товарной таблицы.
+ *
+ * В поток УПД попадают сертификаты соответствия и паспорта качества — модель
+ * честно не находит в них позиций, и повторять такой документ бессмысленно.
+ * Без пометки эти случаи считались бы неудачей повтора наравне с настоящими
+ * сбоями распознавания.
+ */
+function looksWithoutItemsTable(parsed: UpdPdfParsed): boolean {
+  return parsed.items.length === 0 && parsed.totalSum == null && parsed.vatSum == null;
+}
+
 /** Проваленные проверки — по именам, чтобы отчёт читался без расшифровки. */
-function failedChecks(parsed: UpdPdfParsed): string[] {
-  const v = validateUpdTotals({
+function validation(parsed: UpdPdfParsed) {
+  return validateUpdTotals({
     totalSum: parsed.totalSum ?? null,
     vatSum: parsed.vatSum ?? null,
     itemsCount: parsed.itemsCount ?? null,
@@ -136,7 +165,12 @@ function failedChecks(parsed: UpdPdfParsed): string[] {
       vatSum: i.vatSum ?? null,
     })),
   });
-  return v.checks.filter((c) => !c.ok).map((c) => c.name);
+}
+
+function failedChecks(parsed: UpdPdfParsed): string[] {
+  return validation(parsed)
+    .checks.filter((c) => !c.ok && c.skipReason == null)
+    .map((c) => c.name);
 }
 
 /**
@@ -180,7 +214,11 @@ async function loadBaseline(id: string): Promise<{ parsed: UpdPdfParsed; s3Key: 
       recipient: null,
       consignee: null,
       items: items.map((i) => ({
-        rowNo: i.lineNo ?? null,
+        // Номер из ГРАФЫ 1 бланка, а не наш порядковый: колонка row_no для
+        // этого и заведена. Подстановка lineNo скрывала потерянные и
+        // задвоенные номера — проверка items_sequence работала не на тех
+        // данных.
+        rowNo: i.rowNo ?? null,
         nameRaw: i.nameRaw,
         qty: num(i.qty),
         unit: i.unit,
@@ -247,6 +285,8 @@ async function main(): Promise<void> {
         docNumber: base.parsed.docNumber,
         totalSum: base.parsed.totalSum,
         failedChecks: failedChecks(base.parsed),
+        coverage: checkCoverage(base.parsed),
+        looksWithoutItemsTable: looksWithoutItemsTable(base.parsed),
       },
       after: candidate
         ? {
@@ -255,6 +295,8 @@ async function main(): Promise<void> {
             docNumber: candidate.docNumber,
             totalSum: candidate.totalSum,
             failedChecks: failedChecks(candidate),
+            coverage: checkCoverage(candidate),
+            looksWithoutItemsTable: looksWithoutItemsTable(candidate),
           }
         : null,
       // Решение НЫНЕШНЕГО comparator — колонка отчёта, а не эталон качества:
@@ -287,8 +329,10 @@ async function main(): Promise<void> {
   };
 
   if (outPath) {
-    await writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-    console.log(`\n[retry] отчёт сохранён: ${outPath}`);
+    // Не голый writeFile: прогон уже падал с EACCES ПОСЛЕ того, как все вызовы
+    // к модели были потрачены — каталог принадлежал другому пользователю.
+    // writeReportSafely уводит отчёт во временный файл и объясняет, что чинить.
+    await writeReportSafely(outPath, report, (line) => console.log(`\n[retry] ${line}`));
   }
   const next = offset + window.length;
   if (next < SAMPLE.length) console.log(`[retry] следующее окно: --offset ${next}`);
