@@ -970,7 +970,7 @@ export const UpdPdfItemSchema = z.preprocess(
     // и sum (с НДС) на разных налоговых базах — построчная проверка
     // qty × price ≈ sum / (1 + vatRate/100), см. upd-validation.ts.
     sum: z.number().nullable().optional(),
-    // Налоговая ставка в процентах (например, 20, 10, 0). null допустим,
+    // Налоговая ставка в процентах (например, 22, 20, 10, 0). null допустим,
     // если строка «Без НДС» — тогда vatSum обычно тоже null/0.
     vatRate: z.number().nullable().optional(),
     // Сумма налога по строке в рублях (отдельная колонка «Сумма налога»

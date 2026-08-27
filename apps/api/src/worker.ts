@@ -96,6 +96,7 @@ import { MIN_DEDUP_CONFIDENCE, validateUpdTotals } from './domain/edo/upd-valida
 import { deriveUpdParseOutcome } from './domain/edo/upd-outcome.js';
 import { chooseBetterUpdResult, mergeParties } from './domain/edo/upd-result-compare.js';
 import { normalizeM15ZeroTotals } from './domain/edo/m15-normalize.js';
+import { normalizeLineVatAgainstHeader } from './domain/edo/vat-rate-normalize.js';
 import { normalizeUpdNoPricingTotals } from './domain/edo/upd-no-pricing-normalize.js';
 import {
   getExcelVisionFallbackReasons,
@@ -1584,6 +1585,18 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // причина для лишнего vision-прохода. При выключенном флаге это строгий
   // no-op, поэтому старые активные промпты сохраняют прежнее поведение.
   parsed = normalizeUpdNoPricingTotals(parsed, loadEnv().UPD_NO_PRICING_V1);
+
+  // Построчный НДС, противоречащий шапке, — выдуманная моделью ставка.
+  //
+  // Через УПД-поток идут не только УПД: счета и товарные чеки попадают туда же,
+  // а построчного налога в них нет вовсе, и модель заполняет графу сама —
+  // привычными 20 % вместо действующих с 2026 года 22 %. Ставка и сумма при
+  // этом согласованы друг с другом, поэтому построчные проверки подвоха не
+  // видят, а с шапкой документ расходится: на счёте № 223379 — на 790 ₽.
+  //
+  // Стоит ДО preValidation и до ветки дубликата: обе пишут позиции, и правка
+  // после них оставила бы часть документов с прежним, неверным налогом.
+  parsed = normalizeLineVatAgainstHeader(parsed);
 
   // ─── Решение о втором проходе — ДО дедупликации ───────────────────────────
   //

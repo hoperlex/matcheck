@@ -84,6 +84,25 @@
       "image",
     ],
   },
+  "20260819_2760231_order_152683.pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:25",
+    ],
+  },
+  "20260825_17-18-29 (1).pdf": {
+    "confidence": 0.3,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "text:ambiguous",
+    ],
+  },
   "2e10213e-fbff-4750-9ff8-b0e5a8762eb6.jpg": {
     "confidence": 0,
     "detectedKind": "unknown",
@@ -112,6 +131,15 @@
     ],
   },
   "605e8287-6a38-46b5-960b-0a6a159adaec.jpg": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "image",
+    ],
+  },
+  "7559ECE5-AF86-4B50-8CBE-06C05BAF445D.webp": {
     "confidence": 0,
     "detectedKind": "unknown",
     "needsVision": true,
@@ -288,6 +316,15 @@
       "name:m15",
     ],
   },
+  "МЕЭ00395398 (1).pdf": {
+    "confidence": 0.3,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "text:ambiguous",
+    ],
+  },
   "Накладная.pdf": {
     "confidence": 0,
     "detectedKind": "unknown",
@@ -325,6 +362,16 @@
     "parserUsed": "parseUpdXlsx",
     "signals": [
       "ext:excel",
+    ],
+  },
+  "Скан счетов согл. 4 шт. 19.08.26.pdf": {
+    "confidence": 0,
+    "detectedKind": "unknown",
+    "needsVision": true,
+    "parserUsed": "none",
+    "signals": [
+      "pdf:scan",
+      "textLen:51",
     ],
   },
   "Су-10 06.07..pdf": {

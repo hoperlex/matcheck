@@ -181,6 +181,25 @@
       },
     ],
   },
+  "20260819_2760231_order_152683.pdf": {
+    "path": "no_text",
+    "textLength": 0,
+  },
+  "20260825_17-18-29 (1).pdf": {
+    "parsed": {
+      "confidence": 0,
+      "docDate": null,
+      "docNumber": null,
+      "items": [],
+      "itemsCount": 9,
+      "itemsLength": 0,
+      "recipient": null,
+      "supplier": null,
+      "totalSum": null,
+      "vatSum": null,
+    },
+    "path": "text_pdf",
+  },
   "85072371.PDF": {
     "parsed": {
       "confidence": 0,
@@ -558,6 +577,21 @@
     },
     "path": "text_pdf",
   },
+  "МЕЭ00395398 (1).pdf": {
+    "parsed": {
+      "confidence": 0,
+      "docDate": null,
+      "docNumber": null,
+      "items": [],
+      "itemsCount": 11,
+      "itemsLength": 0,
+      "recipient": null,
+      "supplier": null,
+      "totalSum": null,
+      "vatSum": null,
+    },
+    "path": "text_pdf",
+  },
   "Накладная.pdf": {
     "path": "no_text",
     "textLength": 0,
@@ -673,6 +707,10 @@
       "vatSum": 15692.31,
     },
     "path": "excel",
+  },
+  "Скан счетов согл. 4 шт. 19.08.26.pdf": {
+    "path": "no_text",
+    "textLength": 0,
   },
   "Су-10 06.07..pdf": {
     "path": "no_text",
