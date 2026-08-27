@@ -15,6 +15,34 @@ import type { UpdPdfParsed } from '@matcheck/contracts';
 // Общий с боевым кодом (party-directory-guard): сравнение названий сторон
 // должно быть одним правилом, иначе гейт сверки разойдётся с воркером.
 import { normalizeOrgName } from '../src/domain/sourceDocuments/org-name.js';
+// Итог документа считается ТОЙ ЖЕ функцией, что и в бою. Повторить её правило
+// здесь означало бы сверять промпт по выдуманному критерию: сравнение сказало
+// бы «всё хорошо», а воркер отправил бы документ в partial_parse.
+import { deriveUpdParseOutcome } from '../src/domain/edo/upd-outcome.js';
+import { validateUpdTotals } from '../src/domain/edo/upd-validation.js';
+
+/**
+ * Тип файла для модели по расширению — ОДНА таблица на все скрипты сверки.
+ *
+ * Копий было три (upd-prompt-ab, waybill-prompt-ab, corpus-manifest-build), и
+ * они успели разойтись: `.jfif` — обычный JPEG с телефона — знала только одна.
+ * Итог расхождения тихий: генератор манифеста такой файл пропускал, а сверка
+ * помечала его как PDF и отправляла в модель заведомо неверно.
+ *
+ * Excel сюда не входит намеренно: его разбирает структурный парсер, промпт в
+ * этом пути не участвует вовсе (см. corpus-manifest-build, где офисные типы
+ * добавляются поверх этой таблицы).
+ */
+export const DOC_MIME_BY_EXT: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  // .jfif и .jpe — тот же JPEG, приходят с телефонов и из мессенджеров.
+  '.jfif': 'image/jpeg',
+  '.jpe': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+};
 
 /** Нормализованный снимок разбора: то, что сравнивается между прогонами. */
 export type Snapshot = Record<string, string>;
@@ -169,6 +197,20 @@ export type ExpectedItem = {
   price?: number | null;
   sum?: number | null;
   vatSum?: number | null;
+  /**
+   * Поля, которые новая версия ОБЯЗАНА исправить на этой строке.
+   *
+   * Гейт до этого умел только запрещать: он ловил регрессии, но версия,
+   * повторившая поведение базы без единого улучшения, проходила зелёной. Для
+   * промпта, который выпускают РАДИ исправления конкретного дефекта, это не
+   * проверка вовсе.
+   *
+   * Цель адресуется тройкой «номер документа + номер строки + поле»:
+   * `docNumber` берётся у объемлющего ExpectedDocument, `rowNo` — отсюда.
+   * Пометка на уровне файла распалась бы на пакетах, где в одном PDF лежит
+   * пятнадцать логических УПД.
+   */
+  mustFix?: Array<'qty' | 'price' | 'sum' | 'vatSum'>;
 };
 
 /** Эталон одного логического документа из манифеста. */
@@ -399,6 +441,16 @@ export type UnitComparison = {
    */
   baseExpectation: ExpectationVerdict;
   baseMoneyMismatches: MoneyMismatch[];
+  /**
+   * Куда поехал ИТОГ документа — то, что боевой код сделает с этим разбором.
+   * Сравнение направленное: улучшение не блокирует (см. compareOutcome).
+   */
+  outcomeShift: OutcomeShift;
+  /**
+   * Целевые строки: дефекты, которые новая версия обязана исправить.
+   * Пусто — у документа целей не размечено (см. checkTargets).
+   */
+  targets: TargetVerdict[];
 };
 
 /**
@@ -448,6 +500,218 @@ export function confirmedByExpectation(
 
   const scale = field === 'qty' ? SCALE.qty : field === 'price' ? SCALE.price : SCALE.money;
   return sameMoney(want[field] ?? null, rows[0]![field] ?? null, scale);
+}
+
+/**
+ * Итог документа глазами БОЕВОГО кода: что воркер сделает с этим разбором.
+ *
+ * Зачем отдельно от снимка. Поле `itemsCount` («Всего наименований» из бланка)
+ * само по себе не критично — на бланке с одной строкой переход `∅ → 1` это
+ * улучшение. Но именно оно решает судьбу документа: если заявленное число не
+ * сходится с извлечённым, deriveUpdParseOutcome отправляет документ в
+ * `partial_parse`, и на планшет он не попадёт вовсе. Сравнивать надо результат,
+ * а не промежуточное поле.
+ */
+export type OutcomeSnapshot = {
+  status: 'parsed' | 'needs_resolution';
+  parseErrorCode: string | null;
+  /** Причины partial_parse: docNumber / items / itemsIncomplete. */
+  missing: string[];
+};
+
+export function outcomeOf(parsed: UpdPdfParsed): OutcomeSnapshot {
+  const validation = validateUpdTotals(parsed);
+  const outcome = deriveUpdParseOutcome(parsed, validation);
+  const details = outcome.parseErrorDetails as { missing?: unknown } | null;
+  const missing = Array.isArray(details?.missing)
+    ? (details.missing as unknown[]).map(String)
+    : [];
+  return {
+    status: outcome.status,
+    parseErrorCode: outcome.parseErrorCode,
+    missing: [...missing].sort(),
+  };
+}
+
+/** Куда поехал итог документа: в худшую сторону, в лучшую или никуда. */
+export type OutcomeShift = {
+  from: string;
+  to: string;
+  /** true — активацию блокирует. Улучшения не блокируют никогда. */
+  regressed: boolean;
+  detail: string | null;
+};
+
+function outcomeLabel(o: OutcomeSnapshot): string {
+  const code = o.parseErrorCode ?? 'без ошибки';
+  return o.missing.length ? `${o.status}/${code} (${o.missing.join(', ')})` : `${o.status}/${code}`;
+}
+
+/**
+ * НАПРАВЛЕННОЕ сравнение исхода.
+ *
+ * Обычное сравнение снимка симметрично: любое расхождение критического ключа
+ * считается регрессией (см. compareUnit). Для исхода это неверно и вредно —
+ * `needs_resolution → parsed` есть ровно та победа, ради которой версию и
+ * выпускают, а симметричный гейт запретил бы её наравне с поломкой.
+ *
+ * Поэтому здесь перечислены направления, а не различия:
+ *   * parsed → needs_resolution — блокер: документ перестал доезжать;
+ *   * needs_resolution → parsed — улучшение, молчим;
+ *   * без ошибки → validation_mismatch — регресс: суммы разъехались;
+ *   * validation_mismatch → без ошибки — улучшение;
+ *   * тот же статус, но ДОБАВИЛАСЬ причина в missing — блокер. Без разбора
+ *     причин «нет номера» и «список неполон» выглядят одинаково, хотя это
+ *     разные болезни и лечатся по-разному.
+ */
+export function compareOutcome(base: OutcomeSnapshot, fresh: OutcomeSnapshot): OutcomeShift {
+  const from = outcomeLabel(base);
+  const to = outcomeLabel(fresh);
+  const same = { from, to, regressed: false, detail: null };
+
+  if (base.status === 'parsed' && fresh.status === 'needs_resolution') {
+    return { from, to, regressed: true, detail: 'документ перестал доезжать до планшета' };
+  }
+  if (base.status === 'needs_resolution' && fresh.status === 'parsed') {
+    return same; // улучшение
+  }
+
+  if (base.status === 'parsed' && fresh.status === 'parsed') {
+    if (base.parseErrorCode == null && fresh.parseErrorCode != null) {
+      return { from, to, regressed: true, detail: `появилось «${fresh.parseErrorCode}»` };
+    }
+    return same;
+  }
+
+  // Оба в needs_resolution: смотрим, не добавилось ли причин.
+  const was = new Set(base.missing);
+  const added = fresh.missing.filter((m) => !was.has(m));
+  if (added.length > 0) {
+    return { from, to, regressed: true, detail: `добавилась причина: ${added.join(', ')}` };
+  }
+  return same;
+}
+
+/**
+ * Вердикт по одной целевой строке: исправила ли новая версия то, ради чего
+ * выпускалась.
+ */
+export type TargetVerdict = {
+  /** «№ 223379, строка 3, цена» — чтобы отчёт читался без сверки с манифестом. */
+  where: string;
+  status: 'исправлено' | 'не исправлено' | 'не воспроизвелось' | 'нестабильно' | 'не размечено';
+  detail: string;
+};
+
+const FIELD_LABEL = {
+  qty: 'количество',
+  price: 'цена',
+  sum: 'сумма',
+  vatSum: 'НДС',
+} as const;
+
+const FIELD_SCALE = {
+  qty: SCALE.qty,
+  price: SCALE.price,
+  sum: SCALE.money,
+  vatSum: SCALE.money,
+} as const;
+
+/** Значение поля у строки с данным номером. `found: false` — строки нет или их две. */
+function rowValue(
+  parsed: UpdPdfParsed,
+  rowNo: number,
+  field: 'qty' | 'price' | 'sum' | 'vatSum',
+): { found: boolean; value: number | null } {
+  const rows = parsed.items.filter((i) => i.rowNo === rowNo);
+  if (rows.length !== 1) return { found: false, value: null };
+  return { found: true, value: rows[0]![field] ?? null };
+}
+
+/**
+ * Доказательство исправления: три условия, все обязательны.
+ *
+ *   1. дефект воспроизвели ОБА прогона базы (A1 и A2) — иначе доказывать нечего;
+ *   2. A1 и A2 дали одно и то же — иначе дефект плавающий, и совпадение новой
+ *      версии с эталоном может быть той же случайностью;
+ *   3. новая версия вернула ровно эталон.
+ *
+ * Второй пункт важнее, чем кажется. Без него достаточно было бы одного удачного
+ * прогона, чтобы объявить дефект вылеченным, — а на сканах модель ошибается
+ * через раз, и «зелёный» отчёт означал бы только везение.
+ */
+export function checkTargets(args: {
+  a1: UpdPdfParsed;
+  a2: UpdPdfParsed;
+  b: UpdPdfParsed;
+  expected: ExpectedDocument | undefined;
+}): TargetVerdict[] {
+  const expected = args.expected;
+  if (!expected) return [];
+  const out: TargetVerdict[] = [];
+
+  for (const want of expected.items ?? []) {
+    for (const field of want.mustFix ?? []) {
+      const where = `№ ${expected.docNumber}, строка ${want.rowNo}, ${FIELD_LABEL[field]}`;
+      const scale = FIELD_SCALE[field];
+
+      if (!(field in want)) {
+        out.push({
+          where,
+          status: 'не размечено',
+          detail: `поле помечено как целевое, но эталонного значения нет — сверять не с чем`,
+        });
+        continue;
+      }
+      const target = want[field] ?? null;
+
+      const r1 = rowValue(args.a1, want.rowNo, field);
+      const r2 = rowValue(args.a2, want.rowNo, field);
+      const rb = rowValue(args.b, want.rowNo, field);
+
+      // Нестабильность базы проверяется ПЕРВОЙ: она обесценивает и «дефект
+      // воспроизведён», и «дефект исправлен».
+      if (r1.found !== r2.found || !sameMoney(r1.value, r2.value, scale)) {
+        out.push({
+          where,
+          status: 'нестабильно',
+          detail:
+            `база дала разное в двух прогонах: ${num(r1.value, scale)} и ${num(r2.value, scale)} — ` +
+            `дефект плавающий, доказательством служить не может`,
+        });
+        continue;
+      }
+
+      const baseMatches = r1.found && sameMoney(target, r1.value, scale);
+      if (baseMatches) {
+        out.push({
+          where,
+          status: 'не воспроизвелось',
+          detail: `база прочитала верно (${num(target, scale)}) — дефекта здесь нет, разметка целей устарела`,
+        });
+        continue;
+      }
+
+      if (rb.found && sameMoney(target, rb.value, scale)) {
+        out.push({
+          where,
+          status: 'исправлено',
+          detail: `база давала ${num(r1.value, scale)}, новая версия — ${num(target, scale)}`,
+        });
+        continue;
+      }
+
+      out.push({
+        where,
+        status: 'не исправлено',
+        detail: rb.found
+          ? `ожидалось ${num(target, scale)}, получено ${num(rb.value, scale)} (у базы ${num(r1.value, scale)})`
+          : `строки с номером ${want.rowNo} в разборе новой версии нет`,
+      });
+    }
+  }
+
+  return out;
 }
 
 export function compareUnit(args: {
@@ -514,6 +778,10 @@ export function compareUnit(args: {
       ...checkMoneyAgainstExpectation(args.a1, args.expected),
       ...checkMoneyAgainstExpectation(args.a2, args.expected),
     ],
+    // База берётся по ПЕРВОМУ прогону: второй нужен для проверки стабильности,
+    // а исходное состояние документа одно.
+    outcomeShift: compareOutcome(outcomeOf(args.a1), outcomeOf(args.b)),
+    targets: checkTargets({ a1: args.a1, a2: args.a2, b: args.b, expected: args.expected }),
   };
 }
 
@@ -617,6 +885,47 @@ export function evaluateGate(input: GateInput): string[] {
     blockers.push('ни у одного документа нет эталона в манифесте (сверять не с чем)');
   }
 
+  // Итог документа — направленно: блокирует только ухудшение.
+  //
+  // В снимке этого не выразить: сравнение снимка симметрично, и переход
+  // partial_parse → parsed запретил бы активацию наравне с поломкой. А не
+  // проверять итог нельзя: неверный itemsCount отправляет документ в
+  // partial_parse, то есть на планшет он не попадёт вовсе, — при том что сам
+  // itemsCount критическим полем не считается и считаться не должен.
+  const outcomeRegressed = input.comparisons.filter((c) => c.outcomeShift.regressed);
+  if (outcomeRegressed.length > 0) {
+    blockers.push(`итог документа ухудшился: ${outcomeRegressed.length}`);
+  }
+
+  // Позитивный критерий: версия обязана исправить то, ради чего выпускалась.
+  //
+  // Без него гейт умел только запрещать, и версия, дословно повторившая
+  // поведение базы, проходила зелёной — то есть проверка не отличала
+  // исправление от бездействия.
+  const targets = input.comparisons.flatMap((c) => c.targets);
+  if (targets.length > 0) {
+    const notFixed = targets.filter((t) => t.status === 'не исправлено');
+    if (notFixed.length > 0) {
+      blockers.push(`целевой дефект НЕ исправлен: ${notFixed.length} стр.`);
+    }
+    // Три следующих случая — не «плохо», а «доказательства нет». Пропускать их
+    // молча нельзя: отчёт выглядел бы подтверждением, ничего не подтвердив.
+    const notReproduced = targets.filter((t) => t.status === 'не воспроизвелось');
+    if (notReproduced.length > 0) {
+      blockers.push(
+        `целевой дефект не воспроизвёлся у базы: ${notReproduced.length} стр. — разметка целей устарела`,
+      );
+    }
+    const unstable = targets.filter((t) => t.status === 'нестабильно');
+    if (unstable.length > 0) {
+      blockers.push(`целевая строка нестабильна в A/A: ${unstable.length} стр.`);
+    }
+    const unmarked = targets.filter((t) => t.status === 'не размечено');
+    if (unmarked.length > 0) {
+      blockers.push(`целевое поле без эталонного значения: ${unmarked.length} стр.`);
+    }
+  }
+
   return blockers;
 }
 
@@ -706,6 +1015,11 @@ const REQUIRED_REPORT_PATHS = [
   'calls',
   'failures',
   'comparisons',
+  // Сводка по целевым строкам. Обязательна по той же причине, что и хеши
+  // промптов: без неё нельзя проверить, что часть вообще проверяла цели.
+  // Часть, снятая до появления критерия, отвергается, а не сводится молча.
+  'targets.total',
+  'targets.fixed',
 ] as const;
 
 function atPath(value: unknown, path: string): unknown {
@@ -718,6 +1032,33 @@ function atPath(value: unknown, path: string): unknown {
 /** Какие обязательные поля отчёта отсутствуют. Пустой массив — отчёт пригоден. */
 export function missingReportFields(report: unknown): string[] {
   return REQUIRED_REPORT_PATHS.filter((path) => atPath(report, path) === undefined);
+}
+
+/** Сводка по целевым строкам всего прогона. */
+export type TargetSummary = {
+  total: number;
+  fixed: number;
+  notFixed: number;
+  notReproduced: number;
+  unstable: number;
+  unmarked: number;
+  /** Поимённо — чтобы отчёт читался без сверки с манифестом. */
+  rows: TargetVerdict[];
+};
+
+export function summarizeTargets(comparisons: readonly UnitComparison[]): TargetSummary {
+  const rows = comparisons.flatMap((c) => c.targets);
+  const count = (status: TargetVerdict['status']): number =>
+    rows.filter((t) => t.status === status).length;
+  return {
+    total: rows.length,
+    fixed: count('исправлено'),
+    notFixed: count('не исправлено'),
+    notReproduced: count('не воспроизвелось'),
+    unstable: count('нестабильно'),
+    unmarked: count('не размечено'),
+    rows,
+  };
 }
 
 /** Вызов модели, как он записан в журнале (llm_calls). */
@@ -782,6 +1123,22 @@ export function reportIdentity(r: AbReportIdentity): Record<string, string> {
 }
 
 /**
+ * Можно ли вообще начинать прогон: известен ли код, на котором он снят.
+ *
+ * Возвращает причину отказа или null. Отдельной функцией — чтобы правило было
+ * покрыто тестом: молчаливое согласие здесь и создало дыру, из-за которой части
+ * с разных деплоев сводились как одинаковые.
+ */
+export function revisionBlocker(rev: { sha: string | null }): string | null {
+  if (rev.sha) return null;
+  return (
+    'Отпечаток кода неизвестен: нет ни рабочей копии git, ни файла BUILD_SHA в образе.\n' +
+    'Отчёт без отпечатка нельзя свести с другими частями — прогон остановлен.\n' +
+    'Пересоберите образ: сборка кладёт BUILD_SHA сама (см. apps/api/Dockerfile).'
+  );
+}
+
+/**
  * Чем одна часть отличается от другой. Пусто — части можно сводить.
  *
  * Сводить несовместимые части опаснее, чем не сводить вовсе: получился бы
@@ -791,9 +1148,22 @@ export function reportIdentity(r: AbReportIdentity): Record<string, string> {
 export function identityDiff(a: AbReportIdentity, b: AbReportIdentity): string[] {
   const left = reportIdentity(a);
   const right = reportIdentity(b);
-  return Object.keys(left)
+  const diffs = Object.keys(left)
     .filter((k) => left[k] !== right[k])
     .map((k) => `${k}: «${left[k]}» против «${right[k]}»`);
+  // «Неизвестен» не равен «неизвестну».
+  //
+  // Сравнение строк здесь молчало на самом опасном случае: в прод-образе нет
+  // `.git`, отпечаток кода был null у ВСЕХ частей, и они признавались снятыми
+  // на одном коде — хотя между ними мог лежать любой деплой. Отсутствие
+  // отпечатка — это не совпадение, а невозможность сравнить.
+  if (a.git.sha == null || b.git.sha == null) {
+    diffs.push(
+      'код (git): отпечаток неизвестен хотя бы у одной части — свести нельзя. ' +
+        'Пересоберите образ (BUILD_SHA кладёт сборка) и снимите части заново.',
+    );
+  }
+  return diffs;
 }
 
 /**

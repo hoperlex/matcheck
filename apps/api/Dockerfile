@@ -16,6 +16,32 @@ COPY --from=deps /repo/apps/api/node_modules ./apps/api/node_modules
 COPY --from=deps /repo/apps/web/node_modules ./apps/web/node_modules
 COPY --from=deps /repo/packages/contracts/node_modules ./packages/contracts/node_modules
 COPY . .
+# Отпечаток кода, вшитый в образ.
+#
+# Зачем. Скрипты сверки промптов (scripts/upd-prompt-ab.ts) пишут в отчёт
+# ревизию, на которой он снят, и отказываются сводить части, снятые на разном
+# коде. В runtime-стадию `.git` не попадает — она копирует только apps/api и
+# packages/contracts, — поэтому `git rev-parse` там возвращает null, и все
+# прод-отчёты выглядели одинаково «неизвестными», то есть совместимыми между
+# собой. Фиксируем SHA здесь, файлом.
+#
+# Сборка ПАДАЕТ на грязном рабочем дереве. Образ с незакоммиченными правками,
+# помеченный SHA чистого коммита, хуже отсутствия отпечатка: отчёт уверенно
+# назовёт не тот код, и расхождение будут искать в промпте.
+#
+# git ставится только в build-стадии и в финальный образ не уезжает.
+RUN apk add --no-cache git \
+ && git config --global --add safe.directory /repo \
+ && if [ ! -d .git ]; then \
+      echo 'СБОРКА ОСТАНОВЛЕНА: в контексте нет .git, отпечаток кода взять неоткуда' >&2; \
+      exit 1; \
+    fi \
+ && if [ -n "$(git status --porcelain)" ]; then \
+      echo 'СБОРКА ОСТАНОВЛЕНА: рабочее дерево грязное, отпечаток был бы неверным:' >&2; \
+      git status --porcelain >&2; \
+      exit 1; \
+    fi \
+ && git rev-parse HEAD > /repo/BUILD_SHA
 RUN pnpm --filter @matcheck/contracts typecheck \
  && pnpm --filter @matcheck/api typecheck
 
@@ -52,6 +78,8 @@ COPY --from=build /repo/package.json /repo/pnpm-workspace.yaml /repo/tsconfig.ba
 COPY --from=build /repo/node_modules ./node_modules
 COPY --from=build /repo/apps/api ./apps/api
 COPY --from=build /repo/packages/contracts ./packages/contracts
+# Отпечаток кода для скриптов сверки промптов (см. build-стадию выше).
+COPY --from=build /repo/BUILD_SHA ./BUILD_SHA
 # tsx запускает TypeScript-источники напрямую: tsc-сборка не делается, потому что
 # @matcheck/contracts имеет main: ./src/index.ts (без отдельного dist).
 WORKDIR /app/apps/api

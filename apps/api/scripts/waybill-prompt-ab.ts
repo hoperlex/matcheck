@@ -50,14 +50,8 @@ import { prompts } from '../src/db/schema.js';
 import { parseWaybillBatch, type WaybillInputImage } from '../src/domain/edo/waybill-batch.parser.js';
 import { expandPdfAttachmentsForOpenRouter } from '../src/domain/edo/waybill-pdf.js';
 import { getDefaultProviderKind } from '../src/domain/llm/registry.js';
-
-const MIME_BY_EXT: Record<string, string> = {
-  '.pdf': 'application/pdf',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.png': 'image/png',
-  '.webp': 'image/webp',
-};
+// Одна таблица типов на все скрипты сверки — три копии успели разойтись.
+import { DOC_MIME_BY_EXT as MIME_BY_EXT } from './prompt-ab-lib.js';
 
 function argValue(flag: string, fallback: string | null = null): string | null {
   const i = process.argv.indexOf(flag);

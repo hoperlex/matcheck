@@ -30,6 +30,7 @@ import { existsSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 import { PDFParse } from 'pdf-parse';
 import { classifyFile } from '../src/domain/edo/document-router.js';
+import { DOC_MIME_BY_EXT } from './prompt-ab-lib.js';
 
 type ParsePath = 'vision' | 'text_pdf' | 'multi_upd' | 'excel';
 
@@ -64,12 +65,11 @@ type ManifestEntry = {
   note?: string;
 };
 
+// Общая таблица плюс форматы, которые разбирает НЕ модель: Excel идёт через
+// структурный парсер, .txt — через текстовый путь. Промпт в них не участвует,
+// но в корпусе такие файлы лежат, и генератор обязан их видеть.
 const MIME_BY_EXT: Record<string, string> = {
-  '.pdf': 'application/pdf',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.png': 'image/png',
-  '.webp': 'image/webp',
+  ...DOC_MIME_BY_EXT,
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   '.xls': 'application/vnd.ms-excel',
   '.txt': 'text/plain',

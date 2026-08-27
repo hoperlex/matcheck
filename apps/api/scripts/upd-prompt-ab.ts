@@ -79,10 +79,12 @@
  * → Промпты после зелёного отчёта) и не проверяет Excel-документы через LLM —
  * их структурный парсер промпт не использует вовсе.
  */
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { extname, join, resolve } from 'node:path';
+import { dirname, extname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PDFParse } from 'pdf-parse';
 import { and, eq, gte, isNull } from 'drizzle-orm';
 import type { UpdPdfParsed } from '@matcheck/contracts';
@@ -102,6 +104,9 @@ import {
   matchExpectation,
   mixedModelPrompts,
   parseIntArg,
+  revisionBlocker,
+  DOC_MIME_BY_EXT as MIME_BY_EXT,
+  summarizeTargets,
   windowOf,
   writeReportSafely,
   type ExpectedDocument,
@@ -122,14 +127,6 @@ type ManifestEntry = {
    * потому что в одном файле может лежать несколько логических УПД.
    */
   expectedDocuments?: ExpectedDocument[];
-};
-
-const MIME_BY_EXT: Record<string, string> = {
-  '.pdf': 'application/pdf',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.png': 'image/png',
-  '.webp': 'image/webp',
 };
 
 const DEFAULT_PROMPTS: Record<DocKind, { base: string; fresh: string }> = {
@@ -171,21 +168,48 @@ function sha256(value: string | Buffer): string {
 }
 
 /**
- * Отпечаток рабочего дерева.
+ * Отпечаток кода, вшитый в образ на сборке (см. Dockerfile, build-стадия).
  *
- * Отчёт должен отвечать на вопрос «что именно прогоняли». Без SHA двухнедельной
- * давности отчёт неотличим от сегодняшнего, а промпт с тех пор мог поменяться
- * вместе с кодом парсеров. `dirty` — незакоммиченные правки в рабочей копии.
+ * Путь считается от самого файла, а не от cwd: скрипт запускают и из корня
+ * репозитория, и из /app/apps/api внутри контейнера.
  */
-function gitRevision(): { sha: string | null; dirty: boolean | null } {
+function imageBuildSha(): string | null {
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const candidate of [resolve(here, '../../../BUILD_SHA'), '/app/BUILD_SHA']) {
+    try {
+      const sha = readFileSync(candidate, 'utf8').trim();
+      if (sha) return sha;
+    } catch {
+      // Файла нет — пробуем следующий кандидат.
+    }
+  }
+  return null;
+}
+
+/**
+ * Отпечаток кода, на котором снят прогон.
+ *
+ * Отчёт должен отвечать на вопрос «что именно прогоняли». Без SHA отчёт
+ * двухнедельной давности неотличим от сегодняшнего, а промпт с тех пор мог
+ * поменяться вместе с кодом парсеров. `dirty` — незакоммиченные правки.
+ *
+ * Два источника, и второй здесь не запасной, а основной. В прод-образе `.git`
+ * отсутствует вовсе, поэтому `git rev-parse` там всегда падал и отчёт получал
+ * `sha: null`. Части, снятые на РАЗНЫХ деплоях, выглядели одинаково
+ * «неизвестными» — то есть совместимыми, — и сводились молча. Отпечаток из
+ * образа (`BUILD_SHA`) закрывает эту дыру: сборка кладёт его файлом и падает,
+ * если дерево грязное.
+ */
+function gitRevision(): { sha: string | null; dirty: boolean | null; source: string } {
   try {
     const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     const status = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
-    return { sha, dirty: status.length > 0 };
+    return { sha, dirty: status.length > 0, source: 'git' };
   } catch {
-    // В прод-образе .git отсутствует — это не ошибка прогона, но и молчать
-    // нельзя: null в отчёте честнее выдуманного значения.
-    return { sha: null, dirty: null };
+    // Не рабочая копия — значит контейнер. Отпечаток должен лежать файлом.
+    const sha = imageBuildSha();
+    // dirty здесь заведомо false: сборка не даёт собрать грязное дерево.
+    return { sha, dirty: sha ? false : null, source: sha ? 'image' : 'нет' };
   }
 }
 
@@ -263,7 +287,19 @@ async function runOne(
   const ctx = { sourceDocumentId: null, promptOverride: override };
 
   if (entry.parsePath === 'vision') {
-    const mime = MIME_BY_EXT[extname(entry.filename).toLowerCase()] ?? 'application/pdf';
+    // Неизвестное расширение — ОШИБКА, а не «наверное, PDF».
+    //
+    // Прежний фолбэк молчал: картинка с незнакомым расширением уезжала в модель
+    // помеченной как application/pdf, прогон отрабатывал и давал бессмысленный
+    // результат, который в отчёте выглядел обычным расхождением с эталоном.
+    const ext = extname(entry.filename).toLowerCase();
+    const mime = MIME_BY_EXT[ext];
+    if (!mime) {
+      throw new Error(
+        `${entry.filename}: расширение «${ext}» неизвестно, тип файла для модели не определён. ` +
+          `Допустимые: ${Object.keys(MIME_BY_EXT).join(', ')}`,
+      );
+    }
     await throttle();
     const res = await parseUpdVision({ buffer, mimeType: mime }, { ...ctx, promptDocKind: docKind });
     // На vision-пути regex-дозаполнения нет вовсе: всё, что есть в ответе, —
@@ -401,6 +437,26 @@ async function main(): Promise<void> {
   const outPath = argValue('--out');
   const planOnly = process.argv.includes('--plan');
   const startedAt = new Date();
+
+  // Отпечаток кода — до всего остального, включая --plan.
+  //
+  // Прогон без отпечатка не просто хуже документирован: части такого прогона
+  // невозможно отличить друг от друга, и prompt-ab-merge сводит их молча. Это
+  // и была дыра — на проде `.git` нет, отпечаток брался неоткуда, и все части
+  // выглядели одинаково «неизвестными». Проверка стоит раньше сухого прогона
+  // намеренно: узнать о неверно собранном образе надо ДО того, как потрачены
+  // полторы сотни вызовов модели, а не после.
+  const revision = gitRevision();
+  const revisionProblem = revisionBlocker(revision);
+  // Второе условие — только ради сужения типа: revisionBlocker уже гарантирует
+  // непустой отпечаток, но связать одно с другим TypeScript не умеет.
+  if (revisionProblem || !revision.sha) {
+    throw new Error(revisionProblem ?? 'отпечаток кода неизвестен');
+  }
+  if (revision.dirty) {
+    console.log('[ab] ВНИМАНИЕ: рабочее дерево грязное, отпечаток относится к последнему коммиту.');
+  }
+  console.log(`[ab] код: ${revision.sha.slice(0, 12)} (источник: ${revision.source})`);
 
   const manifestRaw = await readFile(manifestPath, 'utf8');
   const manifest = JSON.parse(manifestRaw) as { entries: ManifestEntry[] };
@@ -653,6 +709,22 @@ async function main(): Promise<void> {
   const okConsignee = comparisons.filter((c) => c.expectation.status === 'ok').length;
   console.log(`\nГрузополучатель совпал с эталоном (от модели): ${okConsignee}`);
 
+  // Целевые строки — то, ради чего версия выпускается. Печатаются отдельным
+  // блоком, а не в общем списке изменений: «ничего не сломал» и «починил» —
+  // разные утверждения, и второе должно быть видно прямо.
+  const targets = summarizeTargets(comparisons);
+  if (targets.total > 0) {
+    console.log(`\nЦелевые строки (${targets.total}): исправлено ${targets.fixed}`);
+    for (const t of targets.rows) {
+      const mark = t.status === 'исправлено' ? '✔' : '✘';
+      console.log(`  ${mark} ${t.where} — ${t.status}: ${t.detail}`);
+    }
+  } else {
+    // Молчаливое отсутствие целей опаснее их провала: отчёт выглядел бы
+    // подтверждением, ничего не подтвердив.
+    console.log('\nЦелевых строк в окне нет: прогон показывает только отсутствие регрессий.');
+  }
+
   const blockers = evaluateGate({
     checkedUnits: comparisons.length,
     failures,
@@ -695,7 +767,7 @@ async function main(): Promise<void> {
       window: { offset, limit, selected: selected.length, taken: work.length },
       files: work.map((e) => e.filename),
       corpus: { dir, manifestPath, manifestSha256: sha256(manifestRaw), entries: all.length },
-      git: gitRevision(),
+      git: revision,
       prompts: {
         base: { name: baseName, id: base.id, sha256: sha256(base.content), length: base.content.length },
         fresh: { name: newName, id: fresh.id, sha256: sha256(fresh.content), length: fresh.content.length },
@@ -704,6 +776,7 @@ async function main(): Promise<void> {
       providerMismatch,
       failures,
       comparisons,
+      targets,
       blockers,
     };
     await writeReportSafely(outPath, report, (line) => console.log(`\n${line}`));

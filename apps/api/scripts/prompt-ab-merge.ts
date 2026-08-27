@@ -37,6 +37,7 @@ import {
   mixedModelPrompts,
   newMoneyMismatches,
   type UnitComparison,
+  summarizeTargets,
 } from './prompt-ab-lib.js';
 
 type PromptMeta = { name: string; id: string; sha256: string; length: number };
@@ -175,7 +176,31 @@ async function main(): Promise<void> {
     }
   }
 
+  // Целевые строки: то, ради чего версия выпускается. В отдельном окне их может
+  // не быть законно — целевые документы лежат не во всех окнах. А вот в СВОДЕ по
+  // всему корпусу их отсутствие означает, что прогон не доказал ничего, кроме
+  // отсутствия регрессий, и принимать его за подтверждение исправления нельзя.
+  const targets = summarizeTargets(comparisons);
+  console.log(`\nЦЕЛЕВЫЕ СТРОКИ: всего ${targets.total}, исправлено ${targets.fixed}`);
+  for (const t of targets.rows) {
+    console.log(`  ${t.status === 'исправлено' ? '✔' : '✘'} ${t.where} — ${t.status}: ${t.detail}`);
+  }
+
+  const outcomeRegressed = comparisons.filter((c) => c.outcomeShift.regressed);
+  if (outcomeRegressed.length > 0) {
+    console.log(`\nИТОГ ДОКУМЕНТА УХУДШИЛСЯ (${outcomeRegressed.length}):`);
+    for (const c of outcomeRegressed) {
+      console.log(`  ${c.label}: ${c.outcomeShift.from} → ${c.outcomeShift.to} — ${c.outcomeShift.detail}`);
+    }
+  }
+
   const blockers = evaluateGate({ checkedUnits: comparisons.length, failures, comparisons });
+  if (targets.total === 0) {
+    blockers.push(
+      'ни одной целевой строки во всём корпусе — прогон не доказывает исправление, ' +
+        'только отсутствие регрессий',
+    );
+  }
   // Неполное покрытие — блокер свода, а не самого гейта: гейт про качество
   // разбора, а это про то, что часть корпуса вообще не проверяли.
   if (missing.length > 0) {

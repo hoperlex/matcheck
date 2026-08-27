@@ -16,6 +16,12 @@
  *   pnpm --filter @matcheck/api exec tsx scripts/corpus-export.ts --out /path/to/corpus
  *   … --doc-kind m15 --limit 5
  *
+ * Точечно, когда в корпус добавляются КОНКРЕТНЫЕ документы (например те, на
+ * которых зафиксирован дефект, ради исправления которого выпускается версия):
+ *   … --ids 0092586f-…,4fcea668-… --out /path/to/corpus
+ * По номеру документа такой отбор невозможен: номер повторяется у разных
+ * записей, а нужен ровно тот разбор, который проверяли глазами.
+ *
  * Только ЧИТАЕТ базу и S3; пишет исключительно в каталог --out (файлы
  * оригиналов и manifest.json рядом с ними). Ничего не меняет в проде.
  *
@@ -72,6 +78,40 @@ async function main(): Promise<void> {
   const limitRaw = argValue('--limit');
   const limit = limitRaw ? Number(limitRaw) : 500;
 
+  // Точечный отбор по идентификаторам.
+  //
+  // Отбор «последние N этого типа» годится, чтобы собрать корпус с нуля, но не
+  // годится, чтобы добавить в него КОНКРЕТНЫЕ документы — например те, на
+  // которых зафиксирован дефект, ради исправления которого выпускается новая
+  // версия промпта. По номеру документа их не выбрать: номер повторяется
+  // (у одного УПД в базе пять записей — по фото на страницу), а нужен ровно
+  // тот разбор, который проверяли глазами.
+  const idsRaw = argValue('--ids');
+  const ids = (idsRaw ?? '')
+    .split(',')
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0);
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  for (const id of ids) {
+    // Проверка формата, а не вкус к аккуратности: идентификаторы уходят в
+    // запрос, и опечатка должна остановить выгрузку, а не молча дать пустой
+    // результат, который выглядит как «таких документов нет».
+    if (!UUID.test(id)) throw new Error(`--ids: «${id}» не похож на идентификатор документа`);
+  }
+  // При точечном отборе фильтр по журналу вызовов не применяется: документ мог
+  // быть разобран другим путём, а нужен именно он.
+  const byIds = ids.length > 0;
+  const idFilter = byIds
+    ? drSql`sd.id in (${drSql.join(
+        ids.map((id) => drSql`${id}::uuid`),
+        drSql`, `,
+      )})`
+    : drSql`EXISTS (
+             SELECT 1 FROM llm_calls lc
+              WHERE lc.source_document_id = sd.id
+                AND lc.doc_kind = ${docKind}
+           )`;
+
   const rows = await db.execute<Row>(drSql`
     SELECT sd.id,
            sd.doc_number,
@@ -84,14 +124,20 @@ async function main(): Promise<void> {
       FROM source_documents sd
       JOIN source_document_attachments a ON a.source_document_id = sd.id
      WHERE sd.is_technical = false
-       AND EXISTS (
-             SELECT 1 FROM llm_calls lc
-              WHERE lc.source_document_id = sd.id
-                AND lc.doc_kind = ${docKind}
-           )
+       AND ${idFilter}
      ORDER BY sd.created_at DESC
      LIMIT ${limit}
   `);
+
+  if (byIds) {
+    // Молчаливая недостача опаснее ошибки: недостающий документ означал бы
+    // корпус без той самой строки, ради которой всё затевалось.
+    const got = new Set([...rows].map((r) => (r as Row).id));
+    const lost = ids.filter((id) => !got.has(id));
+    if (lost.length > 0) {
+      throw new Error(`не найдены документы или вложения к ним: ${lost.join(', ')}`);
+    }
+  }
 
   const list = [...rows] as Row[];
   console.log(`[corpus-export] doc_kind=${docKind}: документов найдено ${list.length}`);
@@ -119,9 +165,11 @@ async function main(): Promise<void> {
     entries.push({
       filename,
       kind: docKind,
-      // М-15 в проде всегда идёт vision-путём (у сканов и фото нет текстового
-      // слоя, а у PDF из 1С он часто «битый»).
-      parsePath: 'vision',
+      // Картинка разбирается только vision-путём; у PDF путь зависит от того,
+      // есть ли в нём текстовый слой, и определяется это не по расширению, а
+      // попыткой его извлечь. Поэтому здесь — предположение (source: "guess"),
+      // которое человек уточняет вместе с эталоном.
+      parsePath: (r.mime_type ?? '').startsWith('image/') ? 'vision' : 'text_pdf',
       hasConsignee: null,
       source: 'guess',
       note: `sd:${r.id}; doc:${r.doc_number ?? '∅'} от ${r.doc_date ?? '∅'}; позиций: ${r.items}`,

@@ -21,6 +21,7 @@ import {
   parseIntArg,
   windowOf,
   writeReportSafely,
+  type AbReportIdentity,
 } from '../scripts/prompt-ab-lib.js';
 
 /** Минимальное сравнение без замечаний: гейт на нём молчит. */
@@ -37,6 +38,9 @@ function clean(label: string): UnitComparison {
     changedCritical: [],
     baseExpectation: { status: 'ok' },
     baseMoneyMismatches: [],
+    // Итог документа не изменился, целей у документа не размечено — гейт молчит.
+    outcomeShift: { from: 'parsed/без ошибки', to: 'parsed/без ошибки', regressed: false, detail: null },
+    targets: [],
   };
 }
 
@@ -184,6 +188,7 @@ describe('missingReportFields — пригодность отчёта к све�
     calls: [],
     failures: [],
     comparisons: [],
+    targets: { total: 0, fixed: 0, notFixed: 0, notReproduced: 0, unstable: 0, unmarked: 0, rows: [] },
   };
 
   it('полный отчёт претензий не вызывает', () => {
@@ -203,9 +208,18 @@ describe('missingReportFields — пригодность отчёта к све�
   });
 
   it('git с пустым sha полем считается заполненным', () => {
-    // В прод-образе .git отсутствует, и sha честно равен null. Это не повод
-    // отвергать отчёт — важно, что поле присутствует и не выдумано.
+    // Здесь проверяется только НАЛИЧИЕ поля: важно, что оно есть и не выдумано.
+    // Свести такие части всё равно нельзя — этим занимается identityDiff, и
+    // отказывает он именно на пустом отпечатке.
     expect(missingReportFields({ ...full, git: { sha: null, dirty: null } })).toEqual([]);
+  });
+
+  it('отчёт БЕЗ сводки целей отвергается', () => {
+    // Часть, снятая до появления позитивного критерия, целей не проверяла
+    // вовсе. Сведя её с новыми, мы получили бы вердикт «дефект исправлен» на
+    // документах, которых никто не проверял.
+    const { targets: _targets, ...broken } = full;
+    expect(missingReportFields(broken)).toEqual(['targets.total', 'targets.fixed']);
   });
 
   it('мусор вместо отчёта не роняет проверку', () => {
@@ -269,7 +283,9 @@ describe('mixedModelPrompts — достоверность сравнения', 
 });
 
 describe('identityDiff — можно ли сводить части', () => {
-  const base = {
+  // Тип объявлен явно: без него TS выводит `sha: string` из литерала, и тест
+  // про отсутствующий отпечаток не компилируется.
+  const base: AbReportIdentity = {
     docKind: 'upd',
     prompts: {
       base: { name: 'default v13', sha256: 'a'.repeat(64) },
@@ -322,7 +338,26 @@ describe('identityDiff — можно ли сводить части', () => {
     const other = structuredClone(base);
     other.docKind = 'upd-segment';
     other.git = { sha: null };
-    expect(identityDiff(base, other)).toHaveLength(2);
+    // Три, а не два: вид прогона, отпечаток «deadbeef» против «неизвестен» и
+    // отдельная строка про невозможность сравнить отпечатки вовсе.
+    expect(identityDiff(base, other)).toHaveLength(3);
+  });
+
+  it('ДВЕ части без отпечатка кода не сводятся', () => {
+    // Главная страховка правки. В прод-образе нет `.git`, поэтому отпечаток был
+    // null у ВСЕХ частей — и сравнение строк признавало их снятыми на одном
+    // коде. Части, между которыми лежал деплой, сводились молча, а отчёт
+    // выглядел полноценным.
+    const left = { ...structuredClone(base), git: { sha: null } };
+    const right = { ...structuredClone(base), git: { sha: null } };
+    const diff = identityDiff(left, right);
+    expect(diff).toHaveLength(1);
+    expect(diff[0]).toMatch(/отпечаток неизвестен/);
+  });
+
+  it('обе части с одним отпечатком по-прежнему сводятся', () => {
+    // Ужесточение не должно мешать нормальному прогону.
+    expect(identityDiff(base, structuredClone(base))).toEqual([]);
   });
 });
 
