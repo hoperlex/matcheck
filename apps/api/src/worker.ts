@@ -13,7 +13,7 @@ import * as Sentry from '@sentry/node';
 import { Queue, Worker, type Job } from 'bullmq';
 import { and, eq, inArray, isNull, lt, lte, notInArray, or } from 'drizzle-orm';
 import {
-  bumpGroupRevision,
+  markSourceDocumentContentChanged,
   publishGroupDocuments,
 } from './domain/sourceDocuments/document-group.js';
 import { recordVisibilityTransitions } from './domain/sourceDocuments/visibility-events.js';
@@ -1997,10 +1997,14 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
 
     // Позиции документа только что переписаны заново, с новыми id. Набор
     // документов машины при этом прежний, поэтому форма на планшете не увидит
-    // расхождения по составу — единственный сигнал, что содержимое поменялось,
-    // это group_revision. В той же транзакции, что и сама правка: иначе
-    // планшет успел бы забрать документ до бампа.
-    await bumpGroupRevision(txDb, sourceDocumentId);
+    // расхождения по составу — сигналом, что содержимое поменялось, служат
+    // group_revision машины и version самого документа. В той же транзакции,
+    // что и сама правка: иначе планшет успел бы забрать документ до бампа.
+    //
+    // Не bumpGroupRevision: он вырождается в no-op для пакета, машиной не
+    // являющегося, и одиночный документ оставался с прежним version — сверка
+    // такую копию не находила (52 документа на бою, см. helper).
+    await markSourceDocumentContentChanged(txDb, sourceDocumentId);
 
     // Разбор изменил статус и реквизиты, а значит мог изменить и видимость —
     // как самого документа, так и его соседей по машине: пока он был в
@@ -5551,6 +5555,14 @@ async function handleWaybillSingleReparseJob(
         .delete(sourceDocumentItems)
         .where(eq(sourceDocumentItems.sourceDocumentId, sourceDocumentId));
       if (itemRows.length > 0) await txDb.insert(sourceDocumentItems).values(itemRows);
+
+      // Шапка и позиции заменены — планшет обязан забрать накладную заново.
+      // Раньше этот путь бампа не звал ВООБЩЕ (в отличие от общего пути
+      // распознавания), поэтому после успешного повтора version оставался
+      // прежним и сверка устаревшую копию не находила: на бою так осталось
+      // 18 накладных. После проверки `saved`, иначе устаревшее поколение
+      // добавило бы инкремент поверх уже актуальной версии.
+      await markSourceDocumentContentChanged(txDb, sourceDocumentId);
     });
 
     log.info({ itemsCount: picked.items.length, form: picked.form }, 'накладная распознана заново');

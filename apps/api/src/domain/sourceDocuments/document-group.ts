@@ -296,3 +296,76 @@ export async function bumpGroupRevision(
        and sd.is_technical = false
   `);
 }
+
+/**
+ * Отметить, что РАСПОЗНАННОЕ СОДЕРЖИМОЕ документа заменено: шапка и позиции
+ * переписаны заново, и планшет обязан забрать документ заново.
+ *
+ * Зачем отдельно от [bumpGroupRevision], хотя тело почти совпадает. Тот —
+ * про смену СОСТАВА машины, и для пакета, машиной не являющегося, он
+ * no-op ЦЕЛИКОМ: пустой CTE `bumped` обнуляет и финальный UPDATE. Для смены
+ * состава это верно (нет машины — нет и состава), а для смены содержимого
+ * губительно: одиночный документ после повторного распознавания оставался с
+ * прежним `version`, и сверка его не находила.
+ *
+ * Замер на бою 27.08: из 72 успешных повторов за 30 дней у 52 версия так и
+ * осталась равной единице — 34 одиночные УПД (машины нет) и 18 накладных
+ * (путь waybill_single бампа не звал вовсе). Планшет, пропустивший дельту,
+ * оставался с пустой карточкой навсегда: `/sync` отбирает по `updated_at`,
+ * а `/sync/reconcile` — строго по `version > clientVersion`.
+ *
+ * Правило: изменённый документ бампается ВСЕГДА, машина и её соседи — если
+ * машина есть. Один UPDATE на оба случая, поэтому строка, попавшая под оба
+ * условия сразу, инкрементируется РОВНО ОДИН раз; два отдельных запроса дали
+ * бы документу машины двойной инкремент.
+ *
+ * `statement_timestamp()`, а не `now()`: последний возвращает время НАЧАЛА
+ * транзакции, курсор /sync берётся с запасом от текущего времени, и отметка
+ * от начала длинной транзакции оказывается ниже уже отданного курсора —
+ * документ не приедет НИКОГДА. Та же причина, что у bumpGroupRevision.
+ *
+ * Соседи ищутся через EXISTS, а не через FROM-джойн пакета: документ из EDO
+ * или почты живёт БЕЗ пакета вовсе, и джойн выбросил бы его из выдачи —
+ * то есть повторил бы ровно тот дефект, ради которого helper и заводится.
+ *
+ * Вызывать ВНУТРИ той же транзакции, что и замена шапки с позициями, и ТОЛЬКО
+ * после того, как запись подтвердилась: устаревшее поколение обязано отломиться
+ * раньше (StaleGenerationError), иначе оно добавит свой инкремент поверх уже
+ * актуальной версии.
+ */
+export async function markSourceDocumentContentChanged(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tx: any,
+  sourceDocumentId: string,
+): Promise<void> {
+  await tx.execute(sql`
+    with root as (
+      select coalesce(b.parent_bundle_id, b.id) as id
+        from ${sourceDocuments} sd
+        join ${sourceBundles} b on b.id = sd.bundle_id
+       where sd.id = ${sourceDocumentId}
+    ),
+    bumped as (
+      update ${sourceBundles} sb
+         set group_revision = sb.group_revision + 1,
+             updated_at = statement_timestamp()
+        from root
+       where sb.id = root.id
+         and ${machineRootSql('sb')}
+      returning sb.id
+    )
+    update ${sourceDocuments} sd
+       set updated_at = statement_timestamp(),
+           version = sd.version + 1
+     where sd.is_technical = false
+       and (
+         sd.id = ${sourceDocumentId}
+         or exists (
+           select 1
+             from ${sourceBundles} b
+            where b.id = sd.bundle_id
+              and coalesce(b.parent_bundle_id, b.id) in (select id from bumped)
+         )
+       )
+  `);
+}
