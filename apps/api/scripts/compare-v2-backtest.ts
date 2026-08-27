@@ -18,7 +18,7 @@
  *
  * Запуск на сервере:
  *   docker compose -f infra/docker-compose.prod.yml run --rm --no-deps -T --user root \
- *     -v /srv/matcheck/app/retry-reports:/reports \
+ *     -v /srv/matcheck/retry-reports:/reports \
  *     matcheck-api node_modules/.bin/tsx scripts/compare-v2-backtest.ts \
  *     --days 60 --out /reports/backtest.json
  *

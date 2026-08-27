@@ -33,12 +33,17 @@
  *
  * Запуск на сервере (локально нет ни БД, ни ключа провайдера):
  *   docker compose -f infra/docker-compose.prod.yml run --rm --no-deps -T \
- *     -v /srv/matcheck/app/retry-reports:/reports \
+ *     -v /srv/matcheck/retry-reports:/reports \
  *     matcheck-api node_modules/.bin/tsx scripts/vision-retry-experiment.ts \
  *     --offset 0 --limit 5 --delay 5000 --out /reports/retry-00.json
  *
  * Окнами и с паузой — по тем же причинам, что корпусная сверка: квота
  * провайдера общая с боевым распознаванием, и она уже однажды исчерпалась.
+ *
+ * Каталог отчётов — ВНЕ репозитория. Сборка образа падает на грязном рабочем
+ * дереве (apps/api/Dockerfile), и каталог, созданный внутри /srv/matcheck/app,
+ * останавливал деплой как неотслеживаемый. В .gitignore на этот случай стоит
+ * страховка, но держать артефакты вне дерева исходников правильнее.
  */
 import { writeReportSafely } from './prompt-ab-lib.js';
 import { eq } from 'drizzle-orm';
