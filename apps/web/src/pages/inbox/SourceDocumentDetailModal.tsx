@@ -28,12 +28,14 @@ import {
   BorderHorizontalOutlined,
   BorderVerticleOutlined,
   DeleteOutlined,
+  DownOutlined,
   DownloadOutlined,
   FileExcelOutlined,
   FilePdfOutlined,
   FileTextOutlined,
   PlusOutlined,
   ReloadOutlined,
+  UpOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
@@ -211,6 +213,7 @@ function priceForSave(it: EditItem, vatSource: EditForm['vatSource']): string | 
 // layout='horizontal' = панели рядом.
 type SplitMode = 'stacked' | 'sideBySide';
 const LAYOUT_LS_KEY = 'matcheck.docModal.layout';
+const VALIDATION_LS_KEY = 'matcheck.docModal.validation';
 
 function readLayout(): SplitMode {
   if (typeof window === 'undefined') return 'stacked';
@@ -697,35 +700,21 @@ export function SourceDocumentDetailModal({
                 description={(sd.parseErrorDetails as { message?: string } | null)?.message ?? null}
               />
             )}
-            {failedChecks.length > 0 && (
-              <Alert
-                style={{ marginBottom: 12 }}
-                type="warning"
-                showIcon
-                message="Расхождения в суммах"
-                description={
-                  <ul style={{ margin: 0, paddingLeft: 16 }}>
-                    {failedChecks.map((c, i) => (
-                      <li key={i}>{describeCheck(c)}</li>
-                    ))}
-                  </ul>
-                }
-              />
-            )}
-            {warnings.length > 0 && (
-              <Alert
-                style={{ marginBottom: 12 }}
-                type="info"
-                showIcon
-                message="Проверьте строки по документу"
-                description={
-                  <ul style={{ margin: 0, paddingLeft: 16 }}>
-                    {warnings.map((w, i) => (
-                      <li key={i}>{describeWarning(w)}</li>
-                    ))}
-                  </ul>
-                }
-              />
+            {/* flexShrink:0 — блок не должен сжиматься в flex-колонке body;
+                maxHeight + внутренний скролл — страховка на случай, когда
+                пользователь оставил список развёрнутым: DetailBody ниже всё
+                равно получает большую часть высоты и остаётся рабочим. */}
+            {(failedChecks.length > 0 || warnings.length > 0) && (
+              <div
+                style={{
+                  flexShrink: 0,
+                  maxHeight: '22vh',
+                  overflowY: 'auto',
+                  marginBottom: 12,
+                }}
+              >
+                <ValidationSummary failedChecks={failedChecks} warnings={warnings} />
+              </div>
             )}
             <DetailBody
               isWide={isWide}
@@ -932,6 +921,125 @@ function computeStackedTopPct(itemsCount: number): number {
   if (itemsCount <= 5) return 32;
   if (itemsCount <= 10) return 42;
   return 50;
+}
+
+/**
+ * Расхождения и подозрения по документу — сворачиваемым блоком.
+ *
+ * Перечень растёт по пункту на каждую проблемную строку: у УПД на девять
+ * позиций, где цена взята с НДС, набегает два десятка пунктов. Статичным
+ * списком они занимали всю высоту модалки, и DetailBody (он берёт остаток,
+ * flex:1) схлопывался почти в ноль — не видно было ни таблицы позиций, ни
+ * превью оригинала, а вместе с превью пропадала и кнопка «Скачать оригинал»:
+ * она живёт внутри той же панели. Поэтому список сворачивается в одну полосу
+ * со счётчиками.
+ *
+ * Порог автосворачивания: до трёх пунктов включительно список занимает пару
+ * строк и прятать его незачем — расхождение должно бросаться в глаза само.
+ */
+const VALIDATION_AUTO_COLLAPSE_OVER = 3;
+
+function readValidationOpen(total: number): boolean {
+  try {
+    if (typeof window !== 'undefined') {
+      const v = window.localStorage.getItem(VALIDATION_LS_KEY);
+      // Явный выбор пользователя сильнее автопорога: кому нужны детали на
+      // каждом документе, тот не должен кликать «Показать» в каждой карточке.
+      if (v === 'expanded') return true;
+      if (v === 'collapsed') return false;
+    }
+  } catch {
+    // localStorage может быть недоступен (privacy mode) — молча игнорируем.
+  }
+  return total <= VALIDATION_AUTO_COLLAPSE_OVER;
+}
+
+function ValidationSummary({
+  failedChecks,
+  warnings,
+}: {
+  failedChecks: UpdCheck[];
+  warnings: UpdWarning[];
+}): JSX.Element | null {
+  const total = failedChecks.length + warnings.length;
+  const [open, setOpen] = useState<boolean>(() => readValidationOpen(total));
+
+  function toggle(next: boolean) {
+    setOpen(next);
+    try {
+      window.localStorage.setItem(VALIDATION_LS_KEY, next ? 'expanded' : 'collapsed');
+    } catch {
+      // localStorage может быть недоступен (privacy mode) — молча игнорируем.
+    }
+  }
+
+  if (total === 0) return null;
+
+  if (!open) {
+    return (
+      <Alert
+        type={failedChecks.length > 0 ? 'warning' : 'info'}
+        showIcon
+        // Счётчик показываем только у непустой группы: «Расхождения: 0» —
+        // ложная тревога на пустом месте.
+        message={
+          <Space size={8} wrap>
+            {failedChecks.length > 0 && <span>Расхождения в суммах: {failedChecks.length}</span>}
+            {warnings.length > 0 && <span>Проверьте строки: {warnings.length}</span>}
+          </Space>
+        }
+        action={
+          <Button type="link" size="small" icon={<DownOutlined />} onClick={() => toggle(true)}>
+            Показать
+          </Button>
+        }
+      />
+    );
+  }
+
+  // Кнопка «Свернуть» — в ПЕРВОМ отрисованном блоке: при пустых checks это блок
+  // подозрений, иначе свернуть список было бы нечем.
+  const collapseButton = (
+    <Button type="link" size="small" icon={<UpOutlined />} onClick={() => toggle(false)}>
+      Свернуть
+    </Button>
+  );
+
+  return (
+    <>
+      {failedChecks.length > 0 && (
+        <Alert
+          style={{ marginBottom: warnings.length > 0 ? 12 : 0 }}
+          type="warning"
+          showIcon
+          message="Расхождения в суммах"
+          action={collapseButton}
+          description={
+            <ul style={{ margin: 0, paddingLeft: 16 }}>
+              {failedChecks.map((c, i) => (
+                <li key={i}>{describeCheck(c)}</li>
+              ))}
+            </ul>
+          }
+        />
+      )}
+      {warnings.length > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          message="Проверьте строки по документу"
+          action={failedChecks.length === 0 ? collapseButton : undefined}
+          description={
+            <ul style={{ margin: 0, paddingLeft: 16 }}>
+              {warnings.map((w, i) => (
+                <li key={i}>{describeWarning(w)}</li>
+              ))}
+            </ul>
+          }
+        />
+      )}
+    </>
+  );
 }
 
 // Тело модалки: на широком экране — Collapse «Реквизиты» + Splitter «Позиции/Оригинал»
