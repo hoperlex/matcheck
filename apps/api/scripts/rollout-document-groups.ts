@@ -26,14 +26,27 @@
  * подъём привезёт планшету документ заново, а метка удалит его лишь следующей
  * синхронизацией, и инспектор увидит мигание.
  *
+ * ОТКАТ. Выключить рубильник недостаточно: `group_id` считается на лету, в базу
+ * выключение не пишет ничего, и планшет остаётся с машинами, которые уже
+ * синхронизировал. Обратный прогон — флаг --rollback, запускать ПОСЛЕ
+ * выключения GROUPS_ROLLOUT и перезапуска API и worker.
+ *
  * Запуск:
  *   pnpm --filter @matcheck/api tsx scripts/rollout-document-groups.ts
  *   pnpm --filter @matcheck/api tsx scripts/rollout-document-groups.ts --apply
  *   pnpm --filter @matcheck/api tsx scripts/rollout-document-groups.ts --site <uuid> --apply
+ *   pnpm --filter @matcheck/api tsx scripts/rollout-document-groups.ts --rollback
+ *   pnpm --filter @matcheck/api tsx scripts/rollout-document-groups.ts --rollback --apply
  */
-import { sql as drSql } from 'drizzle-orm';
+import { sql as drSql, type SQL } from 'drizzle-orm';
 import { db, sql } from '../src/db/client.js';
 import { mobileVisibleWithinRolloutSql } from '../src/domain/sourceDocuments/mobile-visibility.js';
+import { recordVisibilityTransitions } from '../src/domain/sourceDocuments/visibility-events.js';
+import {
+  ROLLBACK_MARKER,
+  ROLLOUT_MARKER,
+  markedByCurrentRolloutSql,
+} from '../src/domain/sourceDocuments/rollout-markers.js';
 import { loadEnv } from '../src/lib/env.js';
 
 /**
@@ -42,8 +55,23 @@ import { loadEnv } from '../src/lib/env.js';
  * ночная перестраховка «прогоню ещё раз» рассылает всем планшетам лишнюю
  * дельту.
  */
-const ROLLOUT_MARKER = 'rollout:groups-v1';
 const BUMP_SETTING_KEY = 'rollout.groups_v1.bumped_at';
+
+/**
+ * Обратный прогон. Выключить рубильник — НЕ значит откатиться.
+ *
+ * `group_id` считается на лету, поэтому выключение GROUPS_ROLLOUT меняет
+ * правило мгновенно, но в `source_documents` не пишет ни строки. Планшет,
+ * который уже синхронизировал машины по новому правилу, останется с ними
+ * навсегда: дельта `/sync` отбирает по `updated_at`, а он не изменился. То
+ * есть без этого режима откат существует только на сервере, а у инспектора на
+ * экране — нет.
+ *
+ * Зеркало выката: вернуть видимость тем, кого выкат пометил скрытыми, поднять
+ * отметки у тех же машин, чтобы планшет перечитал состав, и снять признак
+ * выполненного подъёма — иначе повторный выкат промолчит.
+ */
+const ROLLBACK_SETTING_KEY = 'rollout.groups_v1.rolled_back_at';
 
 function hasFlag(flag: string): boolean {
   return process.argv.includes(flag);
@@ -60,6 +88,11 @@ async function main(): Promise<void> {
   const site = siteFilter
     ? drSql`and source_documents.site_id = ${siteFilter}::uuid`
     : drSql``;
+
+  if (hasFlag('--rollback')) {
+    await rollback(apply, site);
+    return;
+  }
 
   if (!loadEnv().GROUPS_ROLLOUT) {
     // Не отказ, а предупреждение: скрипт останется корректным и при выключенном
@@ -87,11 +120,7 @@ async function main(): Promise<void> {
        and source_documents.site_id is not null
        ${site}
        and not (${mobileVisibleWithinRolloutSql()})
-       and not exists (
-         select 1 from source_document_visibility_events e
-          where e.source_document_id = source_documents.id
-            and e.reason = ${ROLLOUT_MARKER}
-       )
+       and not ${markedByCurrentRolloutSql()}
   `);
   const hidden = [...hiddenRows] as Array<{ id: string }>;
 
@@ -119,11 +148,7 @@ async function main(): Promise<void> {
          and source_documents.site_id is not null
          ${site}
          and not (${mobileVisibleWithinRolloutSql()})
-         and not exists (
-           select 1 from source_document_visibility_events e
-            where e.source_document_id = source_documents.id
-              and e.reason = ${ROLLOUT_MARKER}
-         )
+         and not ${markedByCurrentRolloutSql()}
     `);
     console.log('[rollout] метки записаны');
   }
@@ -200,6 +225,9 @@ async function main(): Promise<void> {
       values (${BUMP_SETTING_KEY}, ${JSON.stringify({ machines: machines.length })}::jsonb)
       on conflict (key) do nothing
     `);
+    // Признак прошлого отката снимаем: иначе следующий --rollback решит, что
+    // уже отработал, и планшеты останутся с новыми машинами.
+    await db.execute(drSql`delete from settings where key = ${ROLLBACK_SETTING_KEY}`);
     console.log('[rollout] отметки подняты');
   }
 
@@ -250,6 +278,132 @@ async function main(): Promise<void> {
 
   if (!apply) {
     console.log('\n[rollout] это был холостой прогон. Запись — с флагом --apply.');
+  }
+}
+
+/**
+ * Обратный прогон: вернуть планшетам состояние до выката.
+ *
+ * Запускать ПОСЛЕ выключения GROUPS_ROLLOUT и перезапуска API и worker —
+ * предикат и правило машины должны уже считаться по-старому, иначе прогон
+ * вернёт ровно то, от чего уходим.
+ *
+ * По умолчанию НИЧЕГО НЕ ПИШЕТ, как и прямой прогон. Запись только с --apply.
+ */
+async function rollback(apply: boolean, site: SQL): Promise<void> {
+  if (loadEnv().GROUPS_ROLLOUT) {
+    console.warn(
+      '[rollback] GROUPS_ROLLOUT ВКЛЮЧЁН. Порядок обратный выкату: сначала выключите\n' +
+        '           рубильник и перезапустите API и worker, потом этот прогон.\n' +
+        '           Иначе видимость посчитается по новому правилу и откат ничего не вернёт.',
+    );
+  }
+
+  // ── 1. Вернуть то, что выкат снял с планшетов ────────────────────────────
+  //
+  // Событие пишет recordVisibilityTransitions, а не прямая вставка: она сверяет
+  // фактическую видимость с последним событием и запишет 'visible' ТОЛЬКО тем,
+  // кто по действующему (старому) правилу снова виден. Документ, скрытый и
+  // раньше, останется скрытым и лишней дельты не создаст.
+  const markedRows = await db.execute(drSql`
+    select source_documents.id
+      from source_documents
+     where source_documents.is_technical = false
+       ${site}
+       and ${markedByCurrentRolloutSql()}
+  `);
+  const marked = [...markedRows] as Array<{ id: string }>;
+  console.log(`[rollback] помечено выкатом: ${marked.length} документ(ов)`);
+
+  if (apply && marked.length > 0) {
+    // Пачками: функция собирает все id в один запрос, и на нескольких сотнях
+    // документов он вырос бы до неприличного размера.
+    const CHUNK = 200;
+    for (let i = 0; i < marked.length; i += CHUNK) {
+      const chunk = marked.slice(i, i + CHUNK).map((r) => r.id);
+      await db.transaction(async (tx) => {
+        await recordVisibilityTransitions(tx, { documentIds: chunk, reason: ROLLBACK_MARKER });
+      });
+    }
+    console.log('[rollback] видимость пересчитана');
+  }
+
+  // ── 2. Опустить машины обратно ───────────────────────────────────────────
+  //
+  // Тот же список и тот же подъём, что у выката: планшету всё равно, в какую
+  // сторону поменялся состав, — он узнаёт о нём только по выросшей отметке.
+  // Отсечка берётся из окружения; если её уже сняли, список окажется шире
+  // выкатного, и это безопасно: лишняя дельта дороже трафиком, но не данными.
+  const [alreadyRolledBack] = [
+    ...(await db.execute(drSql`select value from settings where key = ${ROLLBACK_SETTING_KEY}`)),
+  ] as Array<{ value: unknown } | undefined>;
+
+  const rolloutSince = loadEnv().GROUPS_ROLLOUT_SINCE;
+  const notOlder = rolloutSince
+    ? drSql`and root.created_at >= ${rolloutSince.toISOString()}::timestamptz`
+    : drSql``;
+  const machineRows = await db.execute(drSql`
+    select root.id,
+           count(*) filter (where d.is_technical = false) as docs
+      from source_bundles root
+      join source_bundles member on coalesce(member.parent_bundle_id, member.id) = root.id
+      join source_documents d on d.bundle_id = member.id
+     where root.parent_bundle_id is null
+       ${notOlder}
+       and exists (
+         select 1 from ingest_events ie
+          where ie.bundle_id = root.id and ie.channel = 'public'
+       )
+     group by root.id
+    having count(*) filter (where d.is_technical = false) > 1
+  `);
+  const machines = [...machineRows] as Array<{ id: string; docs: number }>;
+
+  if (alreadyRolledBack) {
+    console.log(
+      `[rollback] откат уже выполнялся (${ROLLBACK_SETTING_KEY}) — пропускаем ` +
+        `${machines.length} машин(ы)`,
+    );
+  } else {
+    console.log(
+      `[rollback] опустить отметки: ${machines.length} машин(ы), ` +
+        `${machines.reduce((s, m) => s + Number(m.docs), 0)} документ(ов)`,
+    );
+  }
+
+  if (apply && !alreadyRolledBack && machines.length > 0) {
+    for (const m of machines) {
+      await db.transaction(async (tx) => {
+        await tx.execute(drSql`
+          update source_bundles
+             set group_revision = group_revision + 1,
+                 updated_at = statement_timestamp()
+           where id = ${m.id}::uuid
+        `);
+        await tx.execute(drSql`
+          update source_documents sd
+             set updated_at = statement_timestamp(),
+                 version = sd.version + 1
+            from source_bundles b
+           where b.id = sd.bundle_id
+             and coalesce(b.parent_bundle_id, b.id) = ${m.id}::uuid
+             and sd.is_technical = false
+        `);
+      });
+    }
+    await db.execute(drSql`
+      insert into settings (key, value)
+      values (${ROLLBACK_SETTING_KEY}, ${JSON.stringify({ machines: machines.length })}::jsonb)
+      on conflict (key) do nothing
+    `);
+    // Снимаем признак выката: иначе повторное включение рубильника не поднимет
+    // отметки, и планшеты не узнают о возврате к машинам.
+    await db.execute(drSql`delete from settings where key = ${BUMP_SETTING_KEY}`);
+    console.log('[rollback] отметки подняты');
+  }
+
+  if (!apply) {
+    console.log('\n[rollback] это был холостой прогон. Запись — с флагом --apply.');
   }
 }
 

@@ -41,6 +41,7 @@
  * из пяти документов стоит десяти вызовов.
  */
 import { writeReportSafely } from './prompt-ab-lib.js';
+import { Jimp } from 'jimp';
 import { eq } from 'drizzle-orm';
 import type { UpdPdfParsed } from '@matcheck/contracts';
 import { parseUpdVision } from '../src/domain/edo/upd-vision.parser.js';
@@ -203,6 +204,15 @@ async function main() {
       continue;
     }
     row.bytes = buffer.length;
+    // Размер кадра до и после нормализации — иначе «ничья» между путями
+    // неинтерпретируема: у снимка меньше 2400 px по длинной стороне ресайз не
+    // срабатывает вовсе, и путь B отличается от A только перекодировкой.
+    try {
+      const src = await Jimp.read(buffer);
+      row.srcPx = `${src.bitmap.width}x${src.bitmap.height}`;
+    } catch {
+      row.srcPx = 'не прочитано';
+    }
 
     // A — боевой одиночный путь, файл уходит как есть.
     try {
@@ -221,6 +231,12 @@ async function main() {
     try {
       const page = await imageToVisionPage(buffer);
       row.pngBytes = page.length;
+      try {
+        const norm = await Jimp.read(page);
+        row.normPx = `${norm.bitmap.width}x${norm.bitmap.height}`;
+      } catch {
+        row.normPx = 'не прочитано';
+      }
       const b = await extractUpdSegment([page], {
         sourceDocumentId: null,
         bundleId: 'path-ab',
@@ -233,6 +249,7 @@ async function main() {
 
     row.elapsedMs = Date.now() - started;
     rows.push(row);
+    log(`    кадр: ${String(row.srcPx)} -> ${String(row.normPx ?? '?')}, ${row.bytes} b -> ${String(row.pngBytes ?? '?')} b`);
     log(`    A=${JSON.stringify(row.A)}`);
     log(`    B=${JSON.stringify(row.B)}`);
     if (n < window.length - 1) await sleep(delayMs);
