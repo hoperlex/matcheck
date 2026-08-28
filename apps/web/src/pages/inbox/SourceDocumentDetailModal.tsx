@@ -164,6 +164,8 @@ function describeWarning(w: UpdWarning): string {
       price_includes_vat: 'цена взята с НДС: количество × цена дало стоимость с налогом вместо графы 4',
       consignee_copy_unverified:
         'грузополучатель совпал с покупателем, но в графе 4 напечатано другое',
+      duplicate_unconfirmed:
+        'реквизиты совпали с другим документом, но совпадение содержимого не подтверждено — дубликатом не считаем',
     }[w.name] || w.name;
   return `${name} (${where})`;
 }

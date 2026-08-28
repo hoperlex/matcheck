@@ -97,6 +97,7 @@ import { deriveUpdParseOutcome } from './domain/edo/upd-outcome.js';
 import { chooseBetterUpdResult, mergeParties } from './domain/edo/upd-result-compare.js';
 import { normalizeM15ZeroTotals } from './domain/edo/m15-normalize.js';
 import { normalizeLineVatAgainstHeader } from './domain/edo/vat-rate-normalize.js';
+import { verdictForDuplicate, type DuplicateVerdict } from './domain/edo/duplicate-verdict.js';
 import { normalizeUpdNoPricingTotals } from './domain/edo/upd-no-pricing-normalize.js';
 import {
   getExcelVisionFallbackReasons,
@@ -1705,53 +1706,26 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       await notifySourceDocumentUpdated(sourceDocumentId);
       return;
     } else if (existing) {
+      // Дубликат — ПОМЕТКА ПОВЕРХ СОХРАНЁННОГО, а не вместо него.
+      //
+      // Раньше эта ветка была терминальной: писала шапку и выходила `return`,
+      // так что позиции, разобранные моделью, в базу не попадали вовсе. На бою
+      // за месяц так потеряли разбор 28 документов из 29, прошедших этой
+      // веткой (у сегментов, где пометка ставится после сохранения, потерь
+      // ноль из 108). Цена ошибки при этом несимметрична: если совпадение
+      // распознано неверно, восстановить данные нечем — только повторным
+      // обращением к модели.
+      //
+      // Теперь документ идёт общим путём и сохраняется целиком, а пометка
+      // ставится в той же транзакции, ниже. Заодно он получает больше полей,
+      // чем писала эта ветка: номер, дату, итоги, валидацию и parseMode.
       duplicate = { id: existing.id };
-      const duplicateValues = {
-        status: 'needs_resolution' as const,
-        parseErrorCode: 'duplicate_upd' as const,
-        parseErrorDetails: {
-          existingId: existing.id,
-          supplierName: existing.supplierName,
-          docNumber: parsed.docNumber,
-          docDate: parsed.docDate,
-        },
-        // supplier_id оставляем NULL — для новых УПД поставщик теперь
-        // живёт в supplier_directory_id (FK на suppliers).
-        supplierId: null,
-        supplierDirectoryId,
-        recipientId,
-        // Дубль — тоже распознанный документ, и в списке он виден. Стороны
-        // пишем здесь же: этот UPDATE терминальный, до записи шапки ниже
-        // выполнение не доходит.
-        ...documentParties,
-        llmProviderId,
-        llmConfidence: parsed.confidence.toString(),
-        processedAt: new Date(),
-        updatedAt: new Date(),
-      };
-      // Слабый дубль тоже заслуживает второго прохода: у обоих прод-дублей нет
-      // ни одной позиции, и без повтора они так и останутся пустыми карточками.
-      const queued = wantSecondPass
-        ? await queueSecondPass({
-            sourceDocumentId,
-            s3Key,
-            reasons: weakReasons,
-            values: duplicateValues,
-            generation: jobGeneration,
-            reparse: reparseJob,
-          })
-        : false;
-      if (!queued) {
-        await db
-          .update(sourceDocuments)
-          .set(duplicateValues)
-          .where(generationScoped(sourceDocumentId, jobGeneration));
-      }
       log.warn(
-        { existingId: existing.id, confidence, parsedViaVision, secondPassQueued: queued },
-        'duplicate detected — needs_resolution',
+        { existingId: existing.id, confidence, parsedViaVision },
+        'duplicate detected — сохраняем полностью, пометка ниже',
       );
-      await notifySourceDocumentUpdated(sourceDocumentId);
+      // Уведомление НЕ здесь: документ ещё не сохранён. Общий путь пошлёт его
+      // после транзакции, как для всех прочих документов.
     }
   } else if (!canDedup && supplierDirectoryId && parsed.docNumber && docDate) {
     // Диагностика: distinguishable fields есть, но confidence низкая.
@@ -1762,9 +1736,6 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     );
   }
 
-  // Обычный путь на дубликате заканчивается: шапка записана веткой выше.
-  // Сегмент идёт дальше — его результат сохраняется целиком.
-  if (duplicate && !segmentContext) return;
 
   // Толлинг-М-15 без стоимостной части (итог прописью «Ноль»): доопределяем
   // totalSum/vatSum в 0, чтобы документ не падал в partial_parse из-за
@@ -1851,10 +1822,70 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // автоматически нечем, решение за менеджером.
     ...(possibleDuplicateOf ? { possibleDuplicateOf } : {}),
   };
-  const parseErrorDetails: Record<string, unknown> | null =
-    outcome.parseErrorDetails || Object.keys(detailExtras).length > 0
-      ? { ...(outcome.parseErrorDetails ?? {}), ...detailExtras }
+
+  // Совпадения реквизитов мало — дубликат подтверждается СОДЕРЖИМЫМ.
+  //
+  // Ключ «вид + поставщик + номер + дата» находит и разные отгрузки: за месяц
+  // из 126 таких пар у 23 разошлись итоги, у 21 — число позиций, а в 9 случаях
+  // спрятанный разбор оказался ТОЧНЕЕ оставшегося. Цена ошибки несимметрична:
+  // лишняя видимая карточка — неудобство, а скрытый документ означает
+  // недостачу материалов в приёмке.
+  //
+  // Поэтому решение трёхзначное (см. duplicate-verdict.ts), и `duplicate_upd`
+  // ставится ТОЛЬКО на доказанном совпадении. Остальное остаётся видимым с
+  // предупреждением.
+  //
+  // Считается ЗДЕСЬ, а не сразу после поиска кандидата: выше `parsed` ещё
+  // проходит нормализацию нулевых итогов М-15 и синтез итога по строкам, а
+  // существующий документ читается из БД уже нормализованным. Сравнение
+  // сырого разбора с нормализованным давало бы ложное «не подтверждено».
+  let duplicateVerdict: DuplicateVerdict | null = null;
+  if (duplicate) {
+    const existingParsed = await loadParsedBaseline(duplicate.id);
+    duplicateVerdict = existingParsed
+      ? // Хеш файла здесь не сравниваем: у вложений он почти не заполнен
+        // (2 записи из 2434 за месяц), поэтому решает отпечаток содержимого.
+        verdictForDuplicate(parsed, existingParsed, false)
+      : { kind: 'unknown', detail: 'разбор существующего документа не читается' };
+    log.info(
+      { existingId: duplicate.id, verdict: duplicateVerdict.kind, detail: duplicateVerdict.detail },
+      'вердикт по дубликату',
+    );
+  }
+  // След проверки остаётся в самом документе, а не только в логе: разбираться
+  // в спорной паре приходится и через недели, когда логи уже ротировались, —
+  // и бэкфиллу по уже скрытым документам нужен тот же след.
+  const duplicateCheck =
+    duplicate && duplicateVerdict
+      ? {
+          comparedWith: duplicate.id,
+          verdict: duplicateVerdict.kind,
+          detail: duplicateVerdict.detail,
+        }
       : null;
+  const parseErrorDetails: Record<string, unknown> | null =
+    outcome.parseErrorDetails || Object.keys(detailExtras).length > 0 || duplicateCheck
+      ? {
+          ...(outcome.parseErrorDetails ?? {}),
+          ...detailExtras,
+          ...(duplicateCheck ? { duplicateCheck } : {}),
+        }
+      : null;
+
+  // Совпали реквизиты, но не содержимое — след для человека.
+  //
+  // Документ остаётся обычным и доезжает до планшета, однако рядом с ним в
+  // списке окажется похожий. Без пометки это выглядит сбоем; с ней видно, что
+  // система совпадение заметила и сознательно не стала прятать документ.
+  if (duplicate && duplicateVerdict && duplicateVerdict.kind !== 'confirmed') {
+    validation = {
+      ...validation,
+      warnings: [
+        ...(validation.warnings ?? []),
+        { name: 'duplicate_unconfirmed' as const, scope: 'document' as const },
+      ],
+    };
+  }
 
   // Запись шапки. Для новых распознанных УПД поставщик живёт в
   // supplier_directory_id (FK на suppliers), supplier_id (FK на counterparties)
@@ -1964,9 +1995,14 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       .where(eq(sourceDocumentItems.sourceDocumentId, sourceDocumentId));
     if (itemRows.length > 0) await txDb.insert(sourceDocumentItems).values(itemRows);
 
-    // Дубликат у собранного документа — предупреждение поверх сохранённого
-    // результата: позиции и реквизиты остаются, менеджер решает, что делать.
-    if (duplicate && segmentContext) {
+    // Дубликат — предупреждение ПОВЕРХ сохранённого результата: позиции и
+    // реквизиты остаются, решает человек. Раньше так вёл себя только собранный
+    // документ, а обычный терял позиции целиком (см. ветку выше).
+    //
+    // Скрывается только ДОКАЗАННОЕ совпадение. При `different` и `unknown`
+    // документ остаётся обычным: статус и код ошибки не трогаем, чтобы он
+    // доехал до планшета наравне с прочими.
+    if (duplicate && duplicateVerdict?.kind === 'confirmed') {
       await txDb
         .update(sourceDocuments)
         .set({
@@ -1976,6 +2012,9 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             existingId: duplicate.id,
             docNumber: parsed.docNumber,
             docDate: parsed.docDate,
+            // Чем именно подтверждено: хешем файла или отпечатком содержимого.
+            // Без этого спорную пометку нечем перепроверить постфактум.
+            duplicateCheck,
           },
           updatedAt: new Date(),
         })
