@@ -3,7 +3,6 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert,
   Button,
-  Card,
   Col,
   Collapse,
   Input,
@@ -33,6 +32,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   Counterparty,
+  OperationSourceDocument,
   ResponsiblePerson,
   Shipment,
   ShipmentKind,
@@ -46,6 +46,8 @@ import type {
 import { api } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
 import { usePermissions } from '../../shared/hooks/usePermissions';
+import { OperationItemsSections } from '../shared/OperationItemsSections';
+import { OperationDocumentsChips } from '../shared/OperationDocumentsChips';
 import { capturePhoto, onPhotoUploadSettled } from '../../services/photoPipeline';
 import {
   applyLocalEdit,
@@ -61,7 +63,6 @@ import { AssetTag } from '../../shared/ui/AssetTag';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { runSync } from '../../services/sync';
 import { db, SYSTEM_SITE_ID } from '../../lib/db';
-import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
 import { FlagChip } from '../../shared/ui/FlagChip';
@@ -79,6 +80,17 @@ import { UnitSelect } from '../../shared/ui/UnitSelect';
 
 type DraftItem = {
   clientKey: string;
+  // id строки на сервере (shipment_items.id). null — строка ещё не сохранена.
+  // Уходит в save-payload: upsert устроен как DELETE + INSERT, и сервер по
+  // этому id переносит происхождение строки. Раньше поля не было вовсе, каждая
+  // строка уезжала со свежим случайным uuid — сопоставление по id не работало
+  // никогда, а запасное (название, единица, номер) рвалось от любого удаления:
+  // одно удаление обнуляло атрибуцию всего хвоста.
+  serverId: string | null;
+  // Происхождение: документ, из которого приехала строка. По нему карточка
+  // раскладывает материалы на блоки «Материалы · УПД № …».
+  sourceDocumentId: string | null;
+  sourceDocumentItemId: string | null;
   lineNo: number;
   nameRaw: string;
   qtyPlanned: string | null;
@@ -127,17 +139,11 @@ const KIND_OPTIONS: { label: string; value: ShipmentKind }[] = [
 // Семантический «Тип отгрузки» (shipments.purpose, миграция 0050). Мобила
 // записывает один из этих 4 вариантов через dropdown на форме «Новая
 // отгрузка». Менеджер на портале может дозaпoлнить/изменить тот же набор.
-const PURPOSE_OPTIONS = [
-  'Вывоз материала',
-  'Перемещение на объект',
-  'Вывоз мусора',
-  'Другое',
-];
+const PURPOSE_OPTIONS = ['Вывоз материала', 'Перемещение на объект', 'Вывоз мусора', 'Другое'];
 
 type ListTab = 'expected' | 'accepted';
 
-const trimQty = (s: string) =>
-  s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
+const trimQty = (s: string) => (s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
 
 function formatMolDate(iso: string | null): string {
   if (!iso) return '—';
@@ -197,6 +203,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const { can, hasCapability } = usePermissions();
   const canEditShipment = can('operations.shipments', 'edit');
   const canPickSupplier = canEditShipment && hasCapability('operations.edit.supplier_directory');
+  const canUnlinkUpd = canEditShipment && hasCapability('operations.edit.unlink_source');
   const canUploadPhoto =
     can('operations.shipments', 'create') && hasCapability('operations.photo.upload');
 
@@ -396,6 +403,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       setItems(
         s.items.map((it, idx) => ({
           clientKey: newKey(),
+          serverId: it.id,
+          sourceDocumentId: it.sourceDocumentId ?? null,
+          sourceDocumentItemId: it.sourceDocumentItemId ?? null,
           lineNo: idx + 1,
           nameRaw: it.nameRaw,
           qtyPlanned: it.qtyPlanned,
@@ -484,6 +494,12 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     setItems(
       detail.items.map((it, idx) => ({
         clientKey: newKey(),
+        // Строки документа, а не БД-строки отгрузки: serverId появится после
+        // первого сохранения. Происхождение проставляем сразу — createShipment
+        // берёт его только из запроса.
+        serverId: null,
+        sourceDocumentId: detail.id,
+        sourceDocumentItemId: it.id,
         lineNo: idx + 1,
         nameRaw: it.nameRaw,
         qtyPlanned: it.qty,
@@ -522,6 +538,40 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   });
   // Единый источник для шапки: при isNew — из URL, иначе — из сохранённой отгрузки.
   const linkedSource = isNew ? newFromUpdQuery.data : linkedSourceQuery.data;
+
+  // Документы отгрузки для шапки и блоков материалов: сервер отдаёт связанные и
+  // те, что остались только в происхождении позиций после отвязки.
+  const sectionDocuments: OperationSourceDocument[] = useMemo(() => {
+    const fromServer = loadedShipment?.sourceDocuments ?? [];
+    if (fromServer.length > 0) return fromServer;
+    // Черновик «из УПД» ещё не сохранён — сводки с сервера нет, но документ уже
+    // выбран: иначе строки префилла попали бы в блок «неизвестный документ».
+    if (linkedSource) {
+      return [
+        {
+          id: linkedSource.id,
+          kind: linkedSource.kind,
+          status: linkedSource.status,
+          docNumber: linkedSource.docNumber ?? null,
+          docDate: linkedSource.docDate ?? null,
+          expectedDate: linkedSource.expectedDate ?? null,
+          totalSum: linkedSource.totalSum ?? null,
+          vatSum: linkedSource.vatSum ?? null,
+          linked: true,
+        },
+      ];
+    }
+    return [];
+  }, [loadedShipment?.sourceDocuments, linkedSource]);
+
+  /** Шапка считает только по связанным: иначе «Отвязать» выглядит несработавшим. */
+  const linkedDocuments = useMemo(
+    () => sectionDocuments.filter((d) => d.linked),
+    [sectionDocuments],
+  );
+
+  /** Офлайн-снимок от /sync сводки не несёт — показываем хотя бы число связей. */
+  const offlineDocumentCount = loadedShipment?.sourceDocumentIds.length ?? 0;
 
   /**
    * Открывает форму новой пустой отгрузки. UUID кладётся в URL под флагом new=1.
@@ -583,9 +633,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           if (outcome.ok) {
             message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
           } else {
-            message.error(
-              'Фото сохранено в браузере, но не отправлено — повторим автоматически',
-            );
+            message.error('Фото сохранено в браузере, но не отправлено — повторим автоматически');
           }
         });
         void runSync();
@@ -610,12 +658,19 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     setItems((prev) => prev.map((it) => (it.clientKey === key ? { ...it, ...patch } : it)));
   };
 
-  const addItem = () => {
+  /** Новая строка. `sourceDocumentId` — блок, в который её добавили. */
+  const addItem = (sourceDocumentId: string | null = null) => {
     setItems((prev) => [
       ...prev,
       {
         clientKey: newKey(),
-        lineNo: prev.length + 1,
+        serverId: null,
+        sourceDocumentId,
+        sourceDocumentItemId: null,
+        // Номер — от максимума, а не от длины: после удаления строки длина
+        // повторяет уже занятый номер, и порядок выдачи (ORDER BY line_no)
+        // переставал быть определённым.
+        lineNo: prev.reduce((max, it) => Math.max(max, it.lineNo), 0) + 1,
         nameRaw: '',
         qtyPlanned: null,
         qtyActual: null,
@@ -633,9 +688,11 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   };
 
   const removeItem = (key: string) => {
-    setItems((prev) =>
-      prev.filter((it) => it.clientKey !== key).map((it, i) => ({ ...it, lineNo: i + 1 })),
-    );
+    // Перенумерации нет намеренно (как в приёмке): lineNo — запасной ключ, по
+    // которому сервер сопоставляет строки при переносе происхождения. Сдвиг
+    // номеров после удаления рвал это сопоставление у всех строк ниже, и они
+    // теряли привязку к своему документу.
+    setItems((prev) => prev.filter((it) => it.clientKey !== key));
   };
 
   const buildPatch = (nextCode: ShipmentStatusCode): Partial<Shipment> => {
@@ -665,7 +722,14 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
         .map((i) => {
           const computed = computeVatSum(i);
           return {
-            id: crypto.randomUUID(),
+            // Существующая строка уходит со СВОИМ id из БД: по нему сервер
+            // переносит происхождение (domain/operations/item-origin.ts). Со
+            // случайным id он строку не узнаёт и вынужден угадывать по названию
+            // и номеру — а переименование или удаление соседней строки такое
+            // сопоставление рвут.
+            id: i.serverId ?? crypto.randomUUID(),
+            sourceDocumentId: i.sourceDocumentId,
+            sourceDocumentItemId: i.sourceDocumentItemId,
             itemKind: i.itemKind,
             materialId: i.itemKind === 'asset' ? null : i.materialId,
             assetId: i.itemKind === 'asset' ? i.assetId : null,
@@ -754,17 +818,46 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const linkUpd = useMutation({
     mutationFn: async (upd: SourceDocument): Promise<Shipment> => {
       if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
-      return await api.post<Shipment>(
-        `/shipments/${loadedShipment.id}/link-source`,
-        { sourceDocumentId: upd.id },
-      );
+      return await api.post<Shipment>(`/shipments/${loadedShipment.id}/link-source`, {
+        sourceDocumentId: upd.id,
+      });
     },
     onSuccess: async (dto) => {
       await upsertServerSnapshot([dto]);
       message.success('УПД привязана');
       setLinkUpdOpen(false);
       setLinkUpdError(null);
-      hydratedIdRef.current = null;
+      // Раньше здесь стоял hydratedIdRef.current = null — принудительная
+      // перегидратация серверным снимком. Пока кнопка была видна только у
+      // отгрузки без документов, правок в таблице обычно не было; теперь
+      // документ можно добавить к заполненной отгрузке, и сброс затирал бы
+      // несохранённые правки. Домерживаем: link-source вставляет строки строго
+      // в конец, поэтому достаточно добавить те, чьих serverId ещё нет.
+      setItems((prev) => {
+        const known = new Set(prev.map((it) => it.serverId).filter((id): id is string => !!id));
+        const added = dto.items
+          .filter((it) => !known.has(it.id))
+          .map((it, idx) => ({
+            clientKey: newKey(),
+            serverId: it.id,
+            sourceDocumentId: it.sourceDocumentId ?? null,
+            sourceDocumentItemId: it.sourceDocumentItemId ?? null,
+            lineNo: prev.reduce((max, r) => Math.max(max, r.lineNo), 0) + idx + 1,
+            nameRaw: it.nameRaw,
+            qtyPlanned: it.qtyPlanned,
+            qtyActual: it.qtyActual ?? it.qtyPlanned,
+            unit: it.unit,
+            materialId: it.materialId,
+            itemKind: it.itemKind,
+            assetId: it.assetId,
+            inventoryNumber: it.inventoryNumber,
+            serialNumber: it.serialNumber,
+            price: it.price ?? null,
+            vatRate: it.vatRate ?? null,
+            vatSum: it.vatSum ?? null,
+          }));
+        return added.length > 0 ? [...prev, ...added] : prev;
+      });
       void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
@@ -772,6 +865,28 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     },
     onError: (err: Error) => {
       setLinkUpdError(err.message);
+    },
+  });
+
+  // Отвязка документа. Позиции сервер намеренно не трогает — меняется только
+  // состав связей, то есть шапка.
+  const unlinkUpd = useMutation({
+    mutationFn: async (doc: OperationSourceDocument): Promise<Shipment> => {
+      if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
+      return await api.post<Shipment>(`/shipments/${loadedShipment.id}/unlink-source`, {
+        sourceDocumentId: doc.id,
+      });
+    },
+    onSuccess: async (dto) => {
+      await upsertServerSnapshot([dto]);
+      message.success('Документ отвязан');
+      void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
+      void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
+      void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
+    },
+    onError: (err: Error) => {
+      message.error(err.message);
     },
   });
 
@@ -1047,12 +1162,12 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     [editingNameKey, isContractor],
   );
 
-  const cardRender = (r: DraftItem) => {
+  const cardRender = (r: DraftItem, displayNo: number) => {
     const isEditing = !isContractor && editingNameKey === r.clientKey;
     return (
     <div style={{ width: '100%' }}>
       <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-        <Typography.Text strong>№{r.lineNo}</Typography.Text>
+        <Typography.Text strong>№{displayNo}</Typography.Text>
         {!isContractor && (
           <Popconfirm
             title="Удалить позицию?"
@@ -1257,7 +1372,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           }}
           onPick={(upd) => linkUpd.mutate(upd)}
           direction="outbound"
-          siteId={loadedShipment?.siteId === SYSTEM_SITE_ID ? null : loadedShipment?.siteId ?? null}
+          siteId={
+            loadedShipment?.siteId === SYSTEM_SITE_ID ? null : (loadedShipment?.siteId ?? null)
+          }
           busy={linkUpd.isPending}
           error={linkUpdError}
         />
@@ -1555,67 +1672,44 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 />
               )}
 
-              {/* УПД/Накладная — read-only чипы (значения приходят от
-                  привязки УПД, в этой шапке не редактируются).
-                  Симметрично с KppPage: если УПД нет, рисуем чип
-                  «— без УПД — Привязать» прямо в строке шапки,
-                  не сверху отдельным баннером. */}
-              {linkedSource ? (
-                <>
-                  <Tag
-                    color={
-                      linkedSource.kind === 'transport_waybill' ||
-                      linkedSource.kind === 'os2_transfer'
-                        ? 'purple'
-                        : 'blue'
-                    }
-                    style={{ marginInlineEnd: 0 }}
-                  >
-                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                      {linkedSource.kind === 'transport_waybill' ||
-                      linkedSource.kind === 'os2_transfer'
-                        ? 'Накладная'
-                        : 'УПД'}
-                      :
-                    </Typography.Text>{' '}
-                    <Typography.Text strong style={{ fontSize: 12 }}>
-                      {linkedSource.docNumber ?? '— без номера —'}
-                    </Typography.Text>
-                  </Tag>
-                  {linkedSource.docDate && (
-                    <Tag style={{ marginInlineEnd: 0 }}>
-                      Дата документа: {linkedSource.docDate}
-                    </Tag>
-                  )}
-                  {linkedSource.totalSum && (
-                    <Tag style={{ marginInlineEnd: 0 }}>
-                      Сумма: {linkedSource.totalSum} ₽
-                    </Tag>
-                  )}
-                </>
+              {/* Документы отгрузки — read-only чипы: номера всех связанных
+                  через запятую по видам, даты и сумма — по всем сразу.
+                  Зеркало приёмки (см. KppPage и OperationDocumentsChips):
+                  раньше здесь показывался только sourceDocumentIds[0]. */}
+              {linkedDocuments.length > 0 ? (
+                <OperationDocumentsChips
+                  documents={linkedDocuments}
+                  onUnlink={canUnlinkUpd ? (doc) => unlinkUpd.mutate(doc) : undefined}
+                  unlinkPending={unlinkUpd.isPending}
+                />
+              ) : offlineDocumentCount > 0 ? (
+                // Офлайн-снимок от /sync сводку документов не содержит.
+                <Tag style={{ marginInlineEnd: 0 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    Документов: {offlineDocumentCount}
+                  </Typography.Text>
+                </Tag>
               ) : (
                 <Tag style={{ marginInlineEnd: 0 }}>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     — без УПД —
                   </Typography.Text>
-                  {!isInspector &&
-                    !isContractor &&
-                    loadedShipment?.sourceDocumentIds.length === 0 &&
-                    !isNew && (
-                      <Button
-                        type="link"
-                        size="small"
-                        icon={<LinkOutlined />}
-                        style={{ padding: '0 4px', fontSize: 12 }}
-                        onClick={() => {
-                          setLinkUpdError(null);
-                          setLinkUpdOpen(true);
-                        }}
-                      >
-                        Привязать
-                      </Button>
-                    )}
                 </Tag>
+              )}
+              {/* «Документ» — добавить ещё одну УПД или накладную. Раньше кнопка
+                  исчезала, как только был привязан хоть один документ. */}
+              {!isInspector && !isContractor && !isNew && (
+                <Button
+                  size="small"
+                  type="dashed"
+                  icon={<LinkOutlined />}
+                  onClick={() => {
+                    setLinkUpdError(null);
+                    setLinkUpdOpen(true);
+                  }}
+                >
+                  Документ
+                </Button>
               )}
             </Space>
           );
@@ -1653,35 +1747,29 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                   {/* Загрузка кадра — «Создавать» плюс возможность маршрута. */}
                   {canUploadPhoto && (
-                  <Space wrap>
-                    <Upload {...photoPropsStage1}>
-                      <Button size="large" icon={<CameraOutlined />}>
-                        Добавить фото: 1 этап
-                      </Button>
-                    </Upload>
-                    <Tooltip
-                      title={
-                        stage2Enabled
-                          ? null
-                          : '2 Этап доступен после сборки отгрузки (1 этап)'
-                      }
-                    >
-                      <Upload {...photoPropsStage2} disabled={!stage2Enabled}>
-                        <Button
-                          size="large"
-                          icon={<CameraOutlined />}
-                          disabled={!stage2Enabled}
-                        >
-                          Добавить фото: 2 этап
+                    <Space wrap>
+                      <Upload {...photoPropsStage1}>
+                        <Button size="large" icon={<CameraOutlined />}>
+                          Добавить фото: 1 этап
                         </Button>
                       </Upload>
-                    </Tooltip>
-                    {photosCount === 0 && (
-                      <Typography.Text type="secondary">
-                        Хотя бы одно фото нужно для сохранения.
-                      </Typography.Text>
-                    )}
-                  </Space>
+                      <Tooltip
+                        title={
+                          stage2Enabled ? null : '2 Этап доступен после сборки отгрузки (1 этап)'
+                        }
+                      >
+                        <Upload {...photoPropsStage2} disabled={!stage2Enabled}>
+                          <Button size="large" icon={<CameraOutlined />} disabled={!stage2Enabled}>
+                            Добавить фото: 2 этап
+                          </Button>
+                        </Upload>
+                      </Tooltip>
+                      {photosCount === 0 && (
+                        <Typography.Text type="secondary">
+                          Хотя бы одно фото нужно для сохранения.
+                        </Typography.Text>
+                      )}
+                    </Space>
                   )}
                   {shipmentId && loadedShipment && (
                     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -1749,33 +1837,16 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           ]}
         />
 
-        <Card
-          size="small"
-          title={`Материалы${items.length ? ` (${items.length})` : ''}`}
-          extra={
-            isContractor ? null : (
-              <Button size="small" icon={<PlusOutlined />} onClick={addItem}>
-                Добавить
-              </Button>
-            )
-          }
-          styles={{ body: { padding: 0 } }}
-        >
-          {items.length === 0 ? (
-            <div style={{ padding: 16 }}>
-              <Typography.Text type="secondary">
-                Добавьте позиции вручную или сохраните без них (статус «Не оформлена»).
-              </Typography.Text>
-            </div>
-          ) : (
-            <ResponsiveTable<DraftItem>
-              items={items}
-              columns={columns}
-              rowKey="clientKey"
-              cardRender={cardRender}
-            />
-          )}
-        </Card>
+        {/* Материалы — сворачиваемыми блоками, по одному на документ поставки
+            (см. OperationItemsSections), зеркало карточки приёмки. */}
+        <OperationItemsSections<DraftItem>
+          items={items}
+          documents={sectionDocuments}
+          columns={columns}
+          cardRender={cardRender}
+          onAddItem={isContractor ? undefined : addItem}
+          emptyHint="Добавьте позиции вручную или сохраните без них (статус «Не оформлена»)."
+        />
 
         <Collapse
           size="small"

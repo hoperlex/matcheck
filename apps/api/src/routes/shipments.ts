@@ -30,6 +30,7 @@ import {
   SHIPMENT_HARD_DELETE_STATUSES,
   SHIPMENT_SOFT_DELETE_STATUSES,
   type PrimarySourceDocument,
+  type OperationSourceDocument,
 } from '@matcheck/contracts';
 import { computeItemsTotal, computeItemsVatSum } from '../lib/operation-sums.js';
 import {
@@ -56,6 +57,11 @@ import { isShipmentDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
 import { resolveItemOrigins } from '../domain/operations/item-origin.js';
+import {
+  buildOperationSourceDocuments,
+  SOURCE_DOCUMENT_SUMMARY_COLUMNS,
+  type SourceDocumentSummaryRow,
+} from '../domain/operations/source-document-summary.js';
 import { canSeeReviewInMatrix } from '../lib/review.js';
 import { assertPermission } from '../lib/permissions/assert.js';
 import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
@@ -262,6 +268,9 @@ function assembleShipmentDto(
   sources: { sourceDocumentId: string }[],
   showReview: boolean,
   primaryDoc: PrimarySourceDocument | null = null,
+  // Все документы операции — связанные и оставшиеся в происхождении позиций
+  // (зеркало приёмки, см. routes/deliveries.ts).
+  sourceDocumentSummaries: OperationSourceDocument[] = [],
 ) {
   const s = r.s;
   const st = r.st;
@@ -349,6 +358,7 @@ function assembleShipmentDto(
     itemsTotal: computeItemsTotal(mappedItems),
     itemsVatSum: computeItemsVatSum(mappedItems),
     primarySourceDocument: primaryDoc,
+    sourceDocuments: sourceDocumentSummaries,
     createdAt: s.createdAt.toISOString(),
     updatedAt: s.updatedAt.toISOString(),
   };
@@ -362,20 +372,48 @@ async function buildShipmentDto(app: any, id: string, viewerRole?: string | null
   const rows = await selectShipmentHeaders(app).where(eq(shipments.id, id)).limit(1);
   const r = rows[0] as ShipmentHeaderRow | undefined;
   if (!r) return null;
+  // Сортировки явные и совпадают с батч-путём: lineNo дублируется, а
+  // sources/photos не сортировались вовсе — «форма одиночного DTO равна форме
+  // батча» держалось только на комментарии.
   const items: (typeof shipmentItems.$inferSelect)[] = await app.db
     .select()
     .from(shipmentItems)
     .where(eq(shipmentItems.shipmentId, id))
-    .orderBy(shipmentItems.lineNo);
+    .orderBy(shipmentItems.lineNo, shipmentItems.id);
   const photos: (typeof shipmentPhotos.$inferSelect)[] = await app.db
     .select()
     .from(shipmentPhotos)
-    .where(eq(shipmentPhotos.shipmentId, id));
+    .where(eq(shipmentPhotos.shipmentId, id))
+    .orderBy(shipmentPhotos.id);
   const sources: { sourceDocumentId: string }[] = await app.db
     .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
     .from(shipmentSources)
-    .where(eq(shipmentSources.shipmentId, id));
-  return assembleShipmentDto(r, items, photos, sources, showReview);
+    .where(eq(shipmentSources.shipmentId, id))
+    .orderBy(shipmentSources.sourceDocumentId);
+
+  const linkedIds = sources.map((x) => x.sourceDocumentId);
+  const mentionedIds = [
+    ...new Set([
+      ...linkedIds,
+      ...items.map((i) => i.sourceDocumentId).filter((sid): sid is string => sid !== null),
+    ]),
+  ];
+  const summaryRows: SourceDocumentSummaryRow[] = mentionedIds.length
+    ? await app.db
+        .select(SOURCE_DOCUMENT_SUMMARY_COLUMNS)
+        .from(sourceDocuments)
+        .where(inArray(sourceDocuments.id, mentionedIds))
+    : [];
+
+  return assembleShipmentDto(
+    r,
+    items,
+    photos,
+    sources,
+    showReview,
+    null,
+    buildOperationSourceDocuments({ rows: summaryRows, linkedIds, mentionedIds }),
+  );
 }
 
 // Батч-построение DTO для списка: ~5 запросов на страницу вместо 4×N (устранение
@@ -393,7 +431,7 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
     .select()
     .from(shipmentItems)
     .where(inArray(shipmentItems.shipmentId, ids))
-    .orderBy(shipmentItems.shipmentId, shipmentItems.lineNo);
+    .orderBy(shipmentItems.shipmentId, shipmentItems.lineNo, shipmentItems.id);
   const photoRows: (typeof shipmentPhotos.$inferSelect)[] = await app.db
     .select()
     .from(shipmentPhotos)
@@ -437,9 +475,22 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
     const first = sourcesById.get(id)?.[0]?.sourceDocumentId;
     if (first) primaryIdByShipment.set(id, first);
   }
+  // Документы всех отгрузок страницы: связанные плюс те, что остались только в
+  // происхождении позиций. Оба набора уже в памяти — реквизиты приезжают тем же
+  // запросом, что и primarySourceDocument.
+  const mentionedByShipment = new Map<string, string[]>();
+  for (const id of ids) {
+    const linked = (sourcesById.get(id) ?? []).map((x) => x.sourceDocumentId);
+    const fromItems = (itemsById.get(id) ?? [])
+      .map((i) => i.sourceDocumentId)
+      .filter((sid): sid is string => sid !== null);
+    mentionedByShipment.set(id, [...new Set([...linked, ...fromItems])]);
+  }
+  const allDocIds = [...new Set([...mentionedByShipment.values()].flat())];
+
   const primaryDocById = new Map<string, PrimarySourceDocument>();
-  const uniquePrimaryIds = [...new Set(primaryIdByShipment.values())];
-  if (uniquePrimaryIds.length) {
+  const summaryRowById = new Map<string, SourceDocumentSummaryRow>();
+  if (allDocIds.length) {
     const sdSupplier = alias(counterparties, 'sd_supplier');
     const sdSupplierDir = alias(suppliers, 'sd_supplier_dir');
     const sdContractor = alias(counterparties, 'sd_contractor');
@@ -452,6 +503,12 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
         docNumber: sourceDocuments.docNumber,
         totalSum: sourceDocuments.totalSum,
         contractorId: sourceDocuments.contractorId,
+        // Реквизиты для сводки sourceDocuments — тем же запросом (см.
+        // SOURCE_DOCUMENT_SUMMARY_COLUMNS).
+        status: sourceDocuments.status,
+        docDate: sourceDocuments.docDate,
+        expectedDate: sourceDocuments.expectedDate,
+        vatSum: sourceDocuments.vatSum,
         supplierName: drSql<string | null>`COALESCE(${sdSupplierDir.name}, ${sdSupplier.name})`,
         contractorName: sdContractor.name,
         // Стороны из шапки УПД — тем же COALESCE, что в основном DTO
@@ -483,8 +540,36 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
       .leftJoin(sdContractor, eq(sourceDocuments.contractorId, sdContractor.id))
       .leftJoin(sdBuyer, eq(sourceDocuments.buyerId, sdBuyer.id))
       .leftJoin(sdConsignee, eq(sourceDocuments.consigneeId, sdConsignee.id))
-      .where(inArray(sourceDocuments.id, uniquePrimaryIds))) as PrimarySourceDocument[];
-    for (const sd of sdRows) primaryDocById.set(sd.id, sd);
+      .where(inArray(sourceDocuments.id, allDocIds))) as (PrimarySourceDocument &
+      SourceDocumentSummaryRow)[];
+    for (const sd of sdRows) {
+      // primarySourceDocument собираем явным набором полей: сводочные колонки в
+      // его схеме не описаны и попадать туда не должны.
+      primaryDocById.set(sd.id, {
+        id: sd.id,
+        kind: sd.kind,
+        docNumber: sd.docNumber,
+        totalSum: sd.totalSum,
+        contractorId: sd.contractorId,
+        supplierName: sd.supplierName,
+        contractorName: sd.contractorName,
+        buyerName: sd.buyerName,
+        consigneeName: sd.consigneeName,
+        supplierInn: sd.supplierInn,
+        buyerInn: sd.buyerInn,
+        consigneeInn: sd.consigneeInn,
+      });
+      summaryRowById.set(sd.id, {
+        id: sd.id,
+        kind: sd.kind,
+        status: sd.status,
+        docNumber: sd.docNumber,
+        docDate: sd.docDate,
+        expectedDate: sd.expectedDate,
+        totalSum: sd.totalSum,
+        vatSum: sd.vatSum,
+      });
+    }
   }
 
   const result: ReturnType<typeof assembleShipmentDto>[] = [];
@@ -500,6 +585,13 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
         sourcesById.get(id) ?? [],
         showReview,
         (primaryId ? primaryDocById.get(primaryId) : null) ?? null,
+        buildOperationSourceDocuments({
+          rows: (mentionedByShipment.get(id) ?? [])
+            .map((docId) => summaryRowById.get(docId))
+            .filter((row): row is SourceDocumentSummaryRow => row !== undefined),
+          linkedIds: (sourcesById.get(id) ?? []).map((x) => x.sourceDocumentId),
+          mentionedIds: mentionedByShipment.get(id) ?? [],
+        }),
       ),
     );
   }
@@ -1970,22 +2062,39 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
               unit: string;
               qtyPlanned: string | null;
               lineNo: number;
+              sourceDocumentId: string | null;
+              sourceDocumentItemId: string | null;
             }[] = await tx
               .select({
                 nameRaw: shipmentItems.nameRaw,
                 unit: shipmentItems.unit,
                 qtyPlanned: shipmentItems.qtyPlanned,
                 lineNo: shipmentItems.lineNo,
+                sourceDocumentId: shipmentItems.sourceDocumentId,
+                sourceDocumentItemId: shipmentItems.sourceDocumentItemId,
               })
               .from(shipmentItems)
               .where(eq(shipmentItems.shipmentId, s.id));
 
+            // Дедупликация — ВНУТРИ документа, как в приёмке (см. одноимённый
+            // маршрут в deliveries.ts). Раньше ключ (name, unit, qty) сравнивался
+            // со всеми позициями отгрузки сразу, и одинаковая строка из второй
+            // УПД молча пропадала: отгрузка занижалась ровно на неё. Основной
+            // признак повторной привязки — сохранённое происхождение строки,
+            // ключ остаётся запасным (для строк, чей sourceDocumentItemId
+            // обнулился переразбором документа).
             const buildKey = (name: string, unit: string, qty: string | null): string =>
               `${name.trim().toLowerCase()}|${unit.trim().toLowerCase()}|${
                 qty == null ? '' : Number(qty).toString()
               }`;
+            const itemsFromThisDoc = existingItems.filter((i) => i.sourceDocumentId === src.id);
+            const existingSourceItemIds = new Set(
+              itemsFromThisDoc
+                .map((i) => i.sourceDocumentItemId)
+                .filter((v): v is string => v !== null),
+            );
             const existingKeys = new Set(
-              existingItems.map((i) => buildKey(i.nameRaw, i.unit, i.qtyPlanned)),
+              itemsFromThisDoc.map((i) => buildKey(i.nameRaw, i.unit, i.qtyPlanned)),
             );
             const startLineNo =
               existingItems.length === 0 ? 1 : Math.max(...existingItems.map((i) => i.lineNo)) + 1;
@@ -1999,11 +2108,18 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             const newRows: (typeof shipmentItems.$inferInsert)[] = [];
             let lineNo = startLineNo;
             for (const r of updRows) {
+              if (existingSourceItemIds.has(r.id)) continue;
               if (existingKeys.has(buildKey(r.nameRaw, r.unit, r.qty))) {
                 continue;
               }
               newRows.push({
                 shipmentId: s.id,
+                // Происхождение строки: по нему карточка раскладывает материалы
+                // на блоки «Материалы · УПД № …», а upsert переносит атрибуцию
+                // через resolveItemOrigins. Приёмка писала его с миграции 0096,
+                // отгрузка — нет, и её позиции оставались «без привязки».
+                sourceDocumentId: src.id,
+                sourceDocumentItemId: r.id,
                 itemKind: 'material' as const,
                 materialId: r.materialId,
                 assetId: null,
@@ -2061,6 +2177,94 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       }
 
       await touchSourceDocuments(app, [src.id]);
+      publishEvent(app, {
+        type: 'shipment_updated',
+        entityId: s.id,
+        siteId: s.siteId,
+        ts: new Date().toISOString(),
+      });
+
+      const dto = await buildShipmentDto(app, s.id, req.user?.role);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
+      return dto;
+    },
+  );
+
+  // Отвязка документа от отгрузки — парное действие к link-source и зеркало
+  // приёмочного маршрута.
+  //
+  // Понадобилась вместе с правилом «upsert не меняет привязки»: без явной
+  // отвязки ошибочную привязку стало бы нечем откатить.
+  //
+  // Позиции НЕ удаляются и происхождение НЕ обнуляется: строка могла быть уже
+  // проверена и исправлена, а знание «откуда она взялась» — данные, а не
+  // следствие связи. В карточке такая группа показывается блоком «Материалы ·
+  // отвязан УПД № …», а повторная привязка находит свои строки по сохранённому
+  // sourceDocumentItemId и не задваивает их.
+  app.post(
+    '/api/v1/shipments/:id/unlink-source',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: z.object({ sourceDocumentId: z.string().uuid() }),
+        response: {
+          200: ShipmentSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [s] = await app.db
+        // siteId — для скоупа SSE (см. shouldDeliverSseEvent).
+        .select({
+          id: shipments.id,
+          pendingDeletionAt: shipments.pendingDeletionAt,
+          siteId: shipments.siteId,
+        })
+        .from(shipments)
+        .where(eq(shipments.id, req.params.id))
+        .limit(1);
+      if (!s) return reply.code(404).send({ error: 'not_found' });
+      if (s.pendingDeletionAt !== null) {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — мутации запрещены',
+        });
+      }
+
+      const removed = await app.db.transaction(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async (tx: any) => {
+          const deleted = await tx
+            .delete(shipmentSources)
+            .where(
+              and(
+                eq(shipmentSources.shipmentId, s.id),
+                eq(shipmentSources.sourceDocumentId, req.body.sourceDocumentId),
+              ),
+            )
+            .returning({ sourceDocumentId: shipmentSources.sourceDocumentId });
+          if (deleted.length === 0) return false;
+
+          await tx
+            .update(shipments)
+            .set({ version: drSql`${shipments.version} + 1`, updatedAt: new Date() })
+            .where(eq(shipments.id, s.id));
+          return true;
+        },
+      );
+
+      if (!removed) {
+        return reply.code(404).send({
+          error: 'not_linked',
+          message: 'Этот документ не привязан к отгрузке',
+        });
+      }
+
+      // Документ снова свободен — мобильный Inbox должен его увидеть.
+      await touchSourceDocuments(app, [req.body.sourceDocumentId]);
       publishEvent(app, {
         type: 'shipment_updated',
         entityId: s.id,
@@ -2408,9 +2612,16 @@ async function updateShipment(
       .from(shipmentItems)
       .where(eq(shipmentItems.shipmentId, id));
 
-    // В отличие от приёмки, набор связей отгрузки upsert ПЕРЕПИСЫВАЕТ (ниже
-    // delete + insert по input.sourceDocumentIds), поэтому авторитетным списком
-    // здесь служит присланный, а не сохранённый.
+    // Авторитетный список связей — сохранённый в БД, а не присланный: upsert
+    // связи больше не переписывает (см. ниже). Если бы источником остался
+    // input.sourceDocumentIds, происхождение новых строк отбрасывалось бы у
+    // любого клиента с устаревшим снимком.
+    const linkedSources: { sourceDocumentId: string }[] = await tx
+      .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
+      .from(shipmentSources)
+      .where(eq(shipmentSources.shipmentId, id));
+    const linkedDocumentIds = linkedSources.map((x) => x.sourceDocumentId);
+
     const origins = resolveItemOrigins({
       existing: previousItems,
       incoming: itemsForInsert.map((i) => ({
@@ -2421,7 +2632,7 @@ async function updateShipment(
         sourceDocumentId: i.sourceDocumentId ?? null,
         sourceDocumentItemId: i.sourceDocumentItemId ?? null,
       })),
-      linkedDocumentIds: input.sourceDocumentIds,
+      linkedDocumentIds,
     });
 
     await tx.delete(shipmentItems).where(eq(shipmentItems.shipmentId, id));
@@ -2435,43 +2646,22 @@ async function updateShipment(
         })),
       );
     }
-    if (input.sourceDocumentIds.length) {
-      await assertSourcesAvailableForShipment(
-        { db: tx },
-        input.sourceDocumentIds,
-        id,
-        input.siteId,
-      );
-    }
-    // Запоминаем какие УПД были привязаны раньше — нужно бампать
-    // их updated_at тоже (для УПД, которая отвязывается, видимость
-    // в Inbox должна вернуться).
-    const previousSources: { sourceDocumentId: string }[] = await tx
-      .select({ sourceDocumentId: shipmentSources.sourceDocumentId })
-      .from(shipmentSources)
-      .where(eq(shipmentSources.shipmentId, id));
-    await tx.delete(shipmentSources).where(eq(shipmentSources.shipmentId, id));
-    if (input.sourceDocumentIds.length) {
-      try {
-        await tx
-          .insert(shipmentSources)
-          .values(
-            input.sourceDocumentIds.map((sid) => ({ shipmentId: id, sourceDocumentId: sid })),
-          );
-      } catch (err) {
-        if (isSourceDocumentUniqueViolation(err)) {
-          throw new SourceAlreadyLinkedError(input.sourceDocumentIds);
-        }
-        throw err;
-      }
-    }
-    // Бамп updated_at для всех затронутых УПД: и для новопривязанных,
-    // и для тех, которые отвязались.
-    const affected = new Set<string>([
-      ...previousSources.map((p) => p.sourceDocumentId),
-      ...input.sourceDocumentIds,
-    ]);
-    await touchSourceDocuments({ db: tx }, [...affected]);
+    // Привязки существующей отгрузки upsert НЕ меняет — то же правило, что уже
+    // действует у приёмки (см. updateDelivery).
+    //
+    // Раньше здесь стоял DELETE всех связей + INSERT присланного списка. Пока
+    // документ был один, это работало; с несколькими — клиент, знающий про одну
+    // УПД, стирал остальные, привязанные менеджером, а устаревший снимок мог
+    // воскресить явно отвязанный документ. Опереться на baseVersion нельзя: в
+    // контракте он необязателен.
+    //
+    // Набор связей меняют только явные действия: POST /:id/link-source и
+    // POST /:id/unlink-source. При СОЗДАНИИ отгрузки связи по-прежнему берутся
+    // из запроса — см. createShipment.
+    //
+    // Бамп updated_at всё равно нужен: реквизиты отгрузки могли поменяться, а
+    // мобильный Inbox фильтрует документы по привязкам и ждёт дельту.
+    await touchSourceDocuments({ db: tx }, linkedDocumentIds);
   });
 }
 

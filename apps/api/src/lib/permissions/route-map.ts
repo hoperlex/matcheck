@@ -384,6 +384,15 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
       expandableBy: UNSCOPED,
     }),
   ],
+  // Отвязка — та же ячейка, но своя возможность (зеркало приёмки): кнопка
+  // «Отвязать» в шапке отгрузки рисуется отдельно от «Документ».
+  [
+    'POST /api/v1/shipments/:id/unlink-source',
+    st('operations.shipments', 'edit', {
+      capability: 'operations.edit.unlink_source',
+      expandableBy: UNSCOPED,
+    }),
+  ],
   [
     'POST /api/v1/shipments/:id/share-link',
     st('operations.shipments', 'edit', {

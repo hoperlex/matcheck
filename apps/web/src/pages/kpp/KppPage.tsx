@@ -3,7 +3,6 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert,
   Button,
-  Card,
   Col,
   Collapse,
   Input,
@@ -37,6 +36,7 @@ import type {
   Delivery,
   DeliveryPhoto,
   DeliveryStatusCode,
+  OperationSourceDocument,
   Site,
   SourceDocument,
   SourceDocumentDetail,
@@ -60,7 +60,6 @@ import {
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { runSync } from '../../services/sync';
 import { db } from '../../lib/db';
-import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
 import { FlagChip } from '../../shared/ui/FlagChip';
@@ -82,15 +81,23 @@ import {
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
 import { operationsListQuery, readOperationsFilters } from '../operations/operationsQuery';
+import { OperationItemsSections } from '../shared/OperationItemsSections';
+import { OperationDocumentsChips } from '../shared/OperationDocumentsChips';
 
 type DraftItem = {
   clientKey: string;
   // id строки на сервере (delivery_items.id). null — строка только что
-  // добавлена в UI и ещё не сохранена. Используется кнопкой удаления для
-  // выбора UX-режима: для несохранённых — удаляем сразу, для сохранённых
-  // — через Popconfirm. Сам id в save-payload не передаётся (бэк wipes
-  // and reinserts по deliveryId, генерирует новые UUID).
+  // добавлена в UI и ещё не сохранена. Кнопка удаления по нему выбирает
+  // UX-режим (несохранённые удаляются сразу, сохранённые — через Popconfirm),
+  // и он же уходит в save-payload: upsert устроен как DELETE + INSERT, и
+  // сервер по этому id переносит происхождение строки (см. buildPatch).
   serverId: string | null;
+  // Происхождение: документ, из которого приехала строка. По нему карточка
+  // раскладывает материалы на блоки «Материалы · УПД № …». Для существующей
+  // строки сервер значение из запроса игнорирует и берёт своё, для новой —
+  // принимает, но только в пределах привязанных документов.
+  sourceDocumentId: string | null;
+  sourceDocumentItemId: string | null;
   lineNo: number;
   nameRaw: string;
   qtyPlanned: string | null;
@@ -209,6 +216,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const canEditDelivery = can('operations.deliveries', 'edit');
   const canEditFlags = canEditDelivery && hasCapability('operations.edit.flags');
   const canLinkUpd = canEditDelivery && hasCapability('operations.edit.link_source');
+  const canUnlinkUpd = canEditDelivery && hasCapability('operations.edit.unlink_source');
   const canPickSupplier = canEditDelivery && hasCapability('operations.edit.supplier_directory');
   const canUploadPhoto =
     can('operations.deliveries', 'create') && hasCapability('operations.photo.upload');
@@ -525,6 +533,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         d.items.map((it, idx) => ({
           clientKey: newKey(),
           serverId: it.id,
+          sourceDocumentId: it.sourceDocumentId ?? null,
+          sourceDocumentItemId: it.sourceDocumentItemId ?? null,
           lineNo: idx + 1,
           nameRaw: it.nameRaw,
           qtyPlanned: it.qtyPlanned,
@@ -586,6 +596,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         // На момент prefill приёмки эти строки ещё не сохранены как
         // delivery_items — serverId=null до первого сохранения.
         serverId: null,
+        // Происхождение проставляем сразу: приёмка создаётся из этого
+        // документа, и без него сервер запишет строки как «без привязки» —
+        // createDelivery берёт происхождение только из запроса.
+        sourceDocumentId: detail.id,
+        sourceDocumentItemId: it.id,
         lineNo: idx + 1,
         nameRaw: it.nameRaw,
         qtyPlanned: it.qty,
@@ -707,13 +722,26 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     setItems((prev) => prev.filter((it) => it.clientKey !== key));
   };
 
-  const addItem = () => {
+  /**
+   * Новая строка материала. `sourceDocumentId` — блок, в который её добавили:
+   * кнопка живёт в заголовке блока документа, и позиция, которой не хватило в
+   * распознавании этой УПД, должна остаться под её подписью. Сервер примет
+   * такое происхождение только для связанного документа, поэтому у блоков
+   * отвязанных документов кнопки нет.
+   */
+  const addItem = (sourceDocumentId: string | null = null) => {
     setItems((prev) => [
       ...prev,
       {
         clientKey: newKey(),
         serverId: null,
-        lineNo: prev.length + 1,
+        sourceDocumentId,
+        sourceDocumentItemId: null,
+        // Номер — от максимума, а не от длины списка: после удаления строки
+        // длина повторяет уже занятый номер, и в БД оказывались две строки с
+        // одним line_no. Порядок выдачи (ORDER BY line_no) переставал быть
+        // определённым, и строки прыгали между рефетчами.
+        lineNo: prev.reduce((max, it) => Math.max(max, it.lineNo), 0) + 1,
         nameRaw: '',
         qtyPlanned: null,
         qtyActual: null,
@@ -748,13 +776,22 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     return {
       status: nextStatus,
       siteId: siteId ?? loadedDelivery.siteId,
-      supplierId: selectedUpd?.supplierId ?? loadedDelivery.supplierId ?? null,
+      // Поставщик — собственное поле операции: его правит чип «Поставщик»
+      // (PATCH /supplier-from-directory). Из документа он берётся только при
+      // создании приёмки из УПД; у существующей перезаписывать его «первым
+      // документом» нельзя — документов может быть несколько.
+      supplierId: (isNew ? selectedUpd?.supplierId : null) ?? loadedDelivery.supplierId ?? null,
       contractorId: recipientKind === 'counterparty' ? contractorId : null,
       recipientMolId: recipientKind === 'mol' ? recipientMolId : null,
       vehiclePlate: plate || null,
       arrivedAt: loadedDelivery.arrivedAt ?? new Date().toISOString(),
       comment: effectiveComment,
-      sourceDocumentIds: selectedUpd ? [selectedUpd.id] : loadedDelivery.sourceDocumentIds,
+      // Набор связей существующей приёмки upsert на сервере не меняет, но это
+      // же значение ложится в локальный overlay — и до отправки очереди
+      // карточка показывала бы один документ из четырёх (видно офлайн).
+      // Ветка с selectedUpd нужна только первому сохранению новой приёмки:
+      // createDelivery берёт связи из запроса.
+      sourceDocumentIds: isNew && selectedUpd ? [selectedUpd.id] : loadedDelivery.sourceDocumentIds,
       items: items
         .filter((i) => i.nameRaw.trim().length > 0)
         .map((i) => {
@@ -770,6 +807,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             // теряется. В БД присланный id не пишется (его генерирует
             // Postgres), так что для новой строки годится любой валидный uuid.
             id: i.serverId ?? crypto.randomUUID(),
+            // Происхождение новой строки: сервер примет его только в пределах
+            // документов, привязанных к приёмке; у существующей строки возьмёт
+            // сохранённое и присланное проигнорирует.
+            sourceDocumentId: i.sourceDocumentId,
+            sourceDocumentItemId: i.sourceDocumentItemId,
             itemKind: i.itemKind,
             materialId: i.itemKind === 'asset' ? null : i.materialId,
             assetId: i.itemKind === 'asset' ? i.assetId : null,
@@ -816,9 +858,18 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       // Обычное «Сохранить» не должно «понижать» подтверждённый документ.
       // Без УПД оформить как filled нельзя — сервер всё равно понизит,
       // но локальный optimistic-state должен совпадать.
+      //
+      // Наличие документов берём из списка связей приёмки, а не из загруженного
+      // selectedUpd: у мультидок-приёмки он лишь один из нескольких, а после
+      // отвязки последнего документа оставался бы загруженным и держал filled.
+      // Сервер понижение всё равно отбивает (status-guard), но локальный
+      // optimistic-state показал бы «Не оформлена» до следующего pullSync.
       const currentCode = loadedDelivery.status.code as DeliveryStatusCode;
+      const hasDocuments =
+        (isNew ? selectedUpd !== null : loadedDelivery.sourceDocumentIds.length > 0) ||
+        currentCode === 'filled';
       const nextCode: DeliveryStatusCode =
-        currentCode === 'confirmed_mol' ? 'confirmed_mol' : selectedUpd ? 'filled' : 'not_filled';
+        currentCode === 'confirmed_mol' ? 'confirmed_mol' : hasDocuments ? 'filled' : 'not_filled';
       await persistStatus(nextCode);
     },
     onSuccess: () => {
@@ -865,7 +916,42 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       message.success('УПД привязана');
       setLinkUpdOpen(false);
       setLinkUpdError(null);
-      hydratedIdRef.current = null;
+      // Раньше здесь стоял hydratedIdRef.current = null — принудительная
+      // перегидратация формы серверным снимком. Пока кнопка «Привязать» была
+      // видна только у приёмки без документов, правок в таблице обычно не было.
+      // Теперь документ можно добавить к уже заполненной приёмке, и сброс
+      // затирал бы несохранённые «Факт»/цены. Поэтому домерживаем: link-source
+      // вставляет строки строго в конец, поэтому достаточно добавить те, чьих
+      // serverId ещё нет в форме.
+      setItems((prev) => {
+        const known = new Set(prev.map((it) => it.serverId).filter((id): id is string => !!id));
+        const added = dto.items
+          .filter((it) => !known.has(it.id))
+          .map((it, idx) => ({
+            clientKey: newKey(),
+            serverId: it.id,
+            sourceDocumentId: it.sourceDocumentId ?? null,
+            sourceDocumentItemId: it.sourceDocumentItemId ?? null,
+            lineNo: prev.reduce((max, r) => Math.max(max, r.lineNo), 0) + idx + 1,
+            nameRaw: it.nameRaw,
+            qtyPlanned: it.qtyPlanned,
+            qtyActual: it.qtyActual,
+            unit: it.unit,
+            materialId: it.materialId,
+            itemKind: it.itemKind,
+            assetId: it.assetId,
+            inventoryNumber: it.inventoryNumber,
+            serialNumber: it.serialNumber,
+            volumeM3: it.volumeM3 ?? null,
+            massKg: it.massKg ?? null,
+            price: it.price ?? null,
+            vatRate: it.vatRate ?? null,
+            vatSum: it.vatSum ?? null,
+            volumeConfidence: it.volumeConfidence ?? null,
+            groupName: it.groupName ?? null,
+          }));
+        return added.length > 0 ? [...prev, ...added] : prev;
+      });
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
@@ -873,6 +959,30 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     },
     onError: (err: Error) => {
       setLinkUpdError(err.message);
+    },
+  });
+
+  // Отвязка документа. Позиции сервер намеренно не трогает: строка могла быть
+  // уже проверена инспектором, а «откуда она взялась» — данные, а не следствие
+  // связи. Поэтому и перегидратация items тут не нужна — меняется только состав
+  // связей, то есть шапка.
+  const unlinkUpd = useMutation({
+    mutationFn: async (doc: OperationSourceDocument): Promise<Delivery> => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      return await api.post<Delivery>(`/deliveries/${loadedDelivery.id}/unlink-source`, {
+        sourceDocumentId: doc.id,
+      });
+    },
+    onSuccess: async (dto) => {
+      await upsertServerSnapshot([dto]);
+      message.success('Документ отвязан');
+      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
+      void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
+    },
+    onError: (err: Error) => {
+      message.error(err.message);
     },
   });
 
@@ -940,6 +1050,46 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // Мерджим серверные photos и локальные IDB-записи по id. Это покрывает оба сценария:
   // (а) черновик ещё не на сервере — фото есть только локально;
   // (б) фото только что снято и ещё не подтянуто очередным pullSync.
+  // Документы приёмки для шапки и блоков материалов. Сервер отдаёт и связанные,
+  // и те, что остались только в происхождении позиций после отвязки: шапка
+  // считает номера и суммы по linked, блоки подписываются по всем.
+  const sectionDocuments: OperationSourceDocument[] = useMemo(() => {
+    const fromServer = loadedDelivery?.sourceDocuments ?? [];
+    if (fromServer.length > 0) return fromServer;
+    // Черновик «из УПД» ещё не сохранён — сводки с сервера нет, но документ уже
+    // выбран. Без этой ветки строки префилла попали бы в блок «неизвестный
+    // документ»: их происхождение проставлено, а подписать его нечем.
+    if (selectedUpd) {
+      return [
+        {
+          id: selectedUpd.id,
+          kind: selectedUpd.kind,
+          status: selectedUpd.status,
+          docNumber: selectedUpd.docNumber ?? null,
+          docDate: selectedUpd.docDate ?? null,
+          expectedDate: selectedUpd.expectedDate ?? null,
+          totalSum: selectedUpd.totalSum ?? null,
+          vatSum: selectedUpd.vatSum ?? null,
+          linked: true,
+        },
+      ];
+    }
+    return [];
+  }, [loadedDelivery?.sourceDocuments, selectedUpd]);
+
+  /**
+   * Сколько документов у приёмки по её же списку связей. Нужен офлайн-режиму:
+   * снимок от /sync поля sourceDocuments не несёт, и шапка иначе показала бы
+   * «— без УПД —» у приёмки с четырьмя УПД.
+   */
+  const offlineDocumentCount = loadedDelivery?.sourceDocumentIds.length ?? 0;
+
+  /** Шапка считает только по связанным: иначе «Отвязать» выглядит несработавшим. */
+  const linkedDocuments = useMemo(
+    () => sectionDocuments.filter((d) => d.linked),
+    [sectionDocuments],
+  );
+
   const mergedPhotos: GalleryPhoto[] = useMemo(() => {
     const server = loadedDelivery?.photos ?? [];
     const local = localPhotosQuery.data ?? [];
@@ -1189,14 +1339,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     [editingNameKey, isContractor],
   );
 
-  const cardRender = (r: DraftItem) => {
+  const cardRender = (r: DraftItem, displayNo: number) => {
     const priceNum = toNum(r.price);
     const vatNum = computeVatSum(r);
     const locked = !!r.materialId;
     const isEditing = !locked && editingNameKey === r.clientKey;
     return (
       <div style={{ width: '100%' }}>
-        <Typography.Text strong>№{r.lineNo}</Typography.Text>
+        <Typography.Text strong>№{displayNo}</Typography.Text>
         {isEditing ? (
           <Input.TextArea
             autoSize={{ minRows: 1, maxRows: 4 }}
@@ -1563,48 +1713,47 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     Принято: {formatMolDate(loadedDelivery.arrivedAt)}
                   </Tag>
                 </>
-              ) : selectedUpd ? (
+              ) : linkedDocuments.length > 0 ? (
                 <>
-                  <Tag color="blue" style={{ marginInlineEnd: 0 }}>
-                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                      УПД:
-                    </Typography.Text>{' '}
-                    <Typography.Text strong style={{ fontSize: 12 }}>
-                      {selectedUpd.docNumber ?? '— без номера —'}
-                    </Typography.Text>
-                  </Tag>
-                  {selectedUpd.docDate && (
-                    <Tag style={{ marginInlineEnd: 0 }}>Дата документа: {selectedUpd.docDate}</Tag>
-                  )}
-                  {selectedUpd.expectedDate && (
-                    <Tag style={{ marginInlineEnd: 0 }}>
-                      Дата поставки: {selectedUpd.expectedDate}
-                    </Tag>
-                  )}
-                  {selectedUpd.totalSum && (
-                    <Tag style={{ marginInlineEnd: 0 }}>Сумма: {selectedUpd.totalSum} ₽</Tag>
-                  )}
+                  {/* Все связанные документы поставки: номера через запятую по
+                      видам, даты и сумма — по всем сразу. Полный список с
+                      кнопкой «Отвязать» открывается кликом по чипу. */}
+                  <OperationDocumentsChips
+                    documents={linkedDocuments}
+                    onUnlink={canUnlinkUpd ? (doc) => unlinkUpd.mutate(doc) : undefined}
+                    unlinkPending={unlinkUpd.isPending}
+                  />
                 </>
+              ) : offlineDocumentCount > 0 ? (
+                // Офлайн-снимок от /sync сводку документов не содержит: честно
+                // говорим, сколько их, вместо «— без УПД —».
+                <Tag style={{ marginInlineEnd: 0 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    Документов: {offlineDocumentCount}
+                  </Typography.Text>
+                </Tag>
               ) : (
                 <Tag style={{ marginInlineEnd: 0 }}>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     — без УПД —
                   </Typography.Text>
-                  {canLinkUpd && loadedDelivery?.sourceDocumentIds.length === 0 && !isNew && (
-                    <Button
-                      type="link"
-                      size="small"
-                      icon={<LinkOutlined />}
-                      style={{ padding: '0 4px', fontSize: 12 }}
-                      onClick={() => {
-                        setLinkUpdError(null);
-                        setLinkUpdOpen(true);
-                      }}
-                    >
-                      Привязать
-                    </Button>
-                  )}
                 </Tag>
+              )}
+              {/* «Документ» — добавить ещё одну УПД или накладную. Раньше кнопка
+                  исчезала, как только был привязан хоть один документ, и добрать
+                  второй документ поставки из карточки было нельзя. */}
+              {canLinkUpd && !isNew && !loadedDelivery?.sourceShipmentId && (
+                <Button
+                  size="small"
+                  type="dashed"
+                  icon={<LinkOutlined />}
+                  onClick={() => {
+                    setLinkUpdError(null);
+                    setLinkUpdOpen(true);
+                  }}
+                >
+                  Документ
+                </Button>
               )}
               {/* Транзит — admin/manager могут поставить/снять прямо
                   с портала (PATCH /deliveries/:id/flags). Inspector_kpp
@@ -1786,34 +1935,17 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           ]}
         />
 
-        <Card
-          size="small"
-          title={`Материалы${items.length ? ` (${items.length})` : ''}`}
-          extra={
-            isContractor ? null : (
-              <Button size="small" icon={<PlusOutlined />} onClick={addItem}>
-                Материал
-              </Button>
-            )
-          }
-          styles={{ body: { padding: 0 } }}
-        >
-          {items.length === 0 ? (
-            <div style={{ padding: 16 }}>
-              <Typography.Text type="secondary">
-                Материалы можно не добавлять — приёмка сохранится со статусом «Не оформлена». Чтобы
-                оформить, добавьте строки вручную или выберите УПД.
-              </Typography.Text>
-            </div>
-          ) : (
-            <ResponsiveTable<DraftItem>
-              items={items}
-              columns={columns}
-              rowKey="clientKey"
-              cardRender={cardRender}
-            />
-          )}
-        </Card>
+        {/* Материалы — сворачиваемыми блоками, по одному на документ поставки
+            (см. OperationItemsSections). Раньше здесь был один плоский список,
+            и при нескольких УПД было не понять, чьи это строки. */}
+        <OperationItemsSections<DraftItem>
+          items={items}
+          documents={sectionDocuments}
+          columns={columns}
+          cardRender={cardRender}
+          onAddItem={isContractor ? undefined : addItem}
+          emptyHint="Материалы можно не добавлять — приёмка сохранится со статусом «Не оформлена». Чтобы оформить, добавьте строки вручную или выберите УПД."
+        />
 
         {(() => {
           // Мобильный пишет comment как multiline с маркерами «1 Этап: "…"»,

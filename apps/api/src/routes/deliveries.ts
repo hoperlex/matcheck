@@ -29,6 +29,7 @@ import {
   DELIVERY_HARD_DELETE_STATUSES,
   DELIVERY_SOFT_DELETE_STATUSES,
   type PrimarySourceDocument,
+  type OperationSourceDocument,
 } from '@matcheck/contracts';
 import { computeItemsTotal, computeItemsVatSum } from '../lib/operation-sums.js';
 import {
@@ -56,6 +57,11 @@ import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import { resolveItemOrigins } from '../domain/operations/item-origin.js';
+import {
+  buildOperationSourceDocuments,
+  SOURCE_DOCUMENT_SUMMARY_COLUMNS,
+  type SourceDocumentSummaryRow,
+} from '../domain/operations/source-document-summary.js';
 import { canSeeReviewInMatrix } from '../lib/review.js';
 import { assertPermission } from '../lib/permissions/assert.js';
 import {
@@ -296,6 +302,11 @@ function assembleDeliveryDto(
   sources: { sourceDocumentId: string }[],
   showReview: boolean,
   primaryDoc: PrimarySourceDocument | null = null,
+  // Все документы операции — связанные и оставшиеся в происхождении позиций.
+  // Пустой массив = у операции документов нет; отсутствие сводок как таковых
+  // (например, у продюсера, который их не считает) выражается пустым массивом
+  // тоже — форма ответа обязана совпадать у одиночного и батч-пути.
+  sourceDocumentSummaries: OperationSourceDocument[] = [],
 ) {
   const d = r.d;
   const s = r.s;
@@ -384,6 +395,7 @@ function assembleDeliveryDto(
     itemsTotal: computeItemsTotal(mappedItems),
     itemsVatSum: computeItemsVatSum(mappedItems),
     primarySourceDocument: primaryDoc,
+    sourceDocuments: sourceDocumentSummaries,
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),
   };
@@ -397,20 +409,52 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
   const rows = await selectDeliveryHeaders(app).where(eq(deliveries.id, id)).limit(1);
   const r = rows[0] as DeliveryHeaderRow | undefined;
   if (!r) return null;
+  // Сортировки явные и совпадают с батч-путём ниже. Без них порядок задавала
+  // бы физическая выкладка строк: lineNo дублируется (две строки могут иметь
+  // один номер), а sources/photos не сортировались вовсе — и «форма одиночного
+  // DTO равна форме батча» держалось только на комментарии.
   const items: (typeof deliveryItems.$inferSelect)[] = await app.db
     .select()
     .from(deliveryItems)
     .where(eq(deliveryItems.deliveryId, id))
-    .orderBy(deliveryItems.lineNo);
+    .orderBy(deliveryItems.lineNo, deliveryItems.id);
   const photos: (typeof deliveryPhotos.$inferSelect)[] = await app.db
     .select()
     .from(deliveryPhotos)
-    .where(eq(deliveryPhotos.deliveryId, id));
+    .where(eq(deliveryPhotos.deliveryId, id))
+    .orderBy(deliveryPhotos.id);
   const sources: { sourceDocumentId: string }[] = await app.db
     .select({ sourceDocumentId: deliverySources.sourceDocumentId })
     .from(deliverySources)
-    .where(eq(deliverySources.deliveryId, id));
-  return assembleDeliveryDto(r, items, photos, sources, showReview);
+    .where(eq(deliverySources.deliveryId, id))
+    .orderBy(deliverySources.sourceDocumentId);
+
+  // Документы операции: связанные плюс те, что остались только в происхождении
+  // позиций после отвязки. Оба набора уже в памяти — отдельного UNION в SQL не
+  // нужно, доборным запросом идут только реквизиты самих документов.
+  const linkedIds = sources.map((x) => x.sourceDocumentId);
+  const mentionedIds = [
+    ...new Set([
+      ...linkedIds,
+      ...items.map((i) => i.sourceDocumentId).filter((sid): sid is string => sid !== null),
+    ]),
+  ];
+  const summaryRows: SourceDocumentSummaryRow[] = mentionedIds.length
+    ? await app.db
+        .select(SOURCE_DOCUMENT_SUMMARY_COLUMNS)
+        .from(sourceDocuments)
+        .where(inArray(sourceDocuments.id, mentionedIds))
+    : [];
+
+  return assembleDeliveryDto(
+    r,
+    items,
+    photos,
+    sources,
+    showReview,
+    null,
+    buildOperationSourceDocuments({ rows: summaryRows, linkedIds, mentionedIds }),
+  );
 }
 
 // Батч-построение DTO для списка: ~5 запросов на страницу вместо 4×N (устранение
@@ -429,7 +473,7 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
     .select()
     .from(deliveryItems)
     .where(inArray(deliveryItems.deliveryId, ids))
-    .orderBy(deliveryItems.deliveryId, deliveryItems.lineNo);
+    .orderBy(deliveryItems.deliveryId, deliveryItems.lineNo, deliveryItems.id);
   const photoRows: (typeof deliveryPhotos.$inferSelect)[] = await app.db
     .select()
     .from(deliveryPhotos)
@@ -476,9 +520,23 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
     const first = sourcesById.get(id)?.[0]?.sourceDocumentId;
     if (first) primaryIdByDelivery.set(id, first);
   }
+  // Документы всех приёмок страницы: связанные плюс те, что остались только в
+  // происхождении позиций (после отвязки). Оба набора уже в памяти — UNION в
+  // SQL не нужен, а реквизиты приезжают тем же запросом, что и
+  // primarySourceDocument: число запросов на страницу не меняется.
+  const mentionedByDelivery = new Map<string, string[]>();
+  for (const id of ids) {
+    const linked = (sourcesById.get(id) ?? []).map((x) => x.sourceDocumentId);
+    const fromItems = (itemsById.get(id) ?? [])
+      .map((i) => i.sourceDocumentId)
+      .filter((sid): sid is string => sid !== null);
+    mentionedByDelivery.set(id, [...new Set([...linked, ...fromItems])]);
+  }
+  const allDocIds = [...new Set([...mentionedByDelivery.values()].flat())];
+
   const primaryDocById = new Map<string, PrimarySourceDocument>();
-  const uniquePrimaryIds = [...new Set(primaryIdByDelivery.values())];
-  if (uniquePrimaryIds.length) {
+  const summaryRowById = new Map<string, SourceDocumentSummaryRow>();
+  if (allDocIds.length) {
     const sdSupplier = alias(counterparties, 'sd_supplier');
     const sdSupplierDir = alias(suppliers, 'sd_supplier_dir');
     const sdContractor = alias(counterparties, 'sd_contractor');
@@ -491,6 +549,12 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
         docNumber: sourceDocuments.docNumber,
         totalSum: sourceDocuments.totalSum,
         contractorId: sourceDocuments.contractorId,
+        // Реквизиты для сводки sourceDocuments — тем же запросом, что и поля
+        // primarySourceDocument (см. SOURCE_DOCUMENT_SUMMARY_COLUMNS).
+        status: sourceDocuments.status,
+        docDate: sourceDocuments.docDate,
+        expectedDate: sourceDocuments.expectedDate,
+        vatSum: sourceDocuments.vatSum,
         supplierName: drSql<string | null>`COALESCE(${sdSupplierDir.name}, ${sdSupplier.name})`,
         contractorName: sdContractor.name,
         // Стороны из шапки УПД — тем же COALESCE, что в основном DTO
@@ -524,8 +588,36 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
       .leftJoin(sdContractor, eq(sourceDocuments.contractorId, sdContractor.id))
       .leftJoin(sdBuyer, eq(sourceDocuments.buyerId, sdBuyer.id))
       .leftJoin(sdConsignee, eq(sourceDocuments.consigneeId, sdConsignee.id))
-      .where(inArray(sourceDocuments.id, uniquePrimaryIds))) as PrimarySourceDocument[];
-    for (const sd of sdRows) primaryDocById.set(sd.id, sd);
+      .where(inArray(sourceDocuments.id, allDocIds))) as (PrimarySourceDocument &
+      SourceDocumentSummaryRow)[];
+    for (const sd of sdRows) {
+      // primarySourceDocument собираем явным набором полей: сводочные колонки
+      // в его схеме не описаны, и попадать в это поле они не должны.
+      primaryDocById.set(sd.id, {
+        id: sd.id,
+        kind: sd.kind,
+        docNumber: sd.docNumber,
+        totalSum: sd.totalSum,
+        contractorId: sd.contractorId,
+        supplierName: sd.supplierName,
+        contractorName: sd.contractorName,
+        buyerName: sd.buyerName,
+        consigneeName: sd.consigneeName,
+        supplierInn: sd.supplierInn,
+        buyerInn: sd.buyerInn,
+        consigneeInn: sd.consigneeInn,
+      });
+      summaryRowById.set(sd.id, {
+        id: sd.id,
+        kind: sd.kind,
+        status: sd.status,
+        docNumber: sd.docNumber,
+        docDate: sd.docDate,
+        expectedDate: sd.expectedDate,
+        totalSum: sd.totalSum,
+        vatSum: sd.vatSum,
+      });
+    }
   }
 
   const result: ReturnType<typeof assembleDeliveryDto>[] = [];
@@ -541,6 +633,13 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
         sourcesById.get(id) ?? [],
         showReview,
         (primaryId ? primaryDocById.get(primaryId) : null) ?? null,
+        buildOperationSourceDocuments({
+          rows: (mentionedByDelivery.get(id) ?? [])
+            .map((docId) => summaryRowById.get(docId))
+            .filter((row): row is SourceDocumentSummaryRow => row !== undefined),
+          linkedIds: (sourcesById.get(id) ?? []).map((x) => x.sourceDocumentId),
+          mentionedIds: mentionedByDelivery.get(id) ?? [],
+        }),
       ),
     );
   }

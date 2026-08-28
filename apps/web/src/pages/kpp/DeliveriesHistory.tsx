@@ -77,6 +77,11 @@ import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 import { operationsListQuery } from '../operations/operationsQuery';
+import {
+  formatDocumentsShort,
+  sumDocumentTotals,
+} from '../../shared/utils/operationDocumentsSummary';
+import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
@@ -581,19 +586,21 @@ export function DeliveriesHistory({
     const { id: contractorId } = resolveContractor(r);
     const { id: siteId } = resolveSite(r);
     const sd = r.primarySourceDocument ?? null;
-    const kindLabel = sd
-      ? sd.kind === 'upd'
-        ? 'УПД'
-        : sd.kind === 'transport_waybill' || sd.kind === 'os2_transfer'
-          ? 'Накладная'
-          : sd.kind === 'request'
-            ? 'Заявка'
-            : null
-      : null;
-    const totalSum =
+    // Все связанные документы операции, а не только «основной»: у поставки из
+    // нескольких УПД просмотр показывал номер одной бумаги и её сумму вместо
+    // суммы по всем. Отвязанные (linked: false) сюда не входят — их место в
+    // блоках материалов, а не в шапке.
+    const linkedDocs = (r.sourceDocuments ?? []).filter((d) => d.linked);
+    const short = formatDocumentsShort(linkedDocs);
+    const kindLabel =
+      short.kindLabel ?? (linkedDocs.length === 0 && sd ? sourceKindLabel(sd.kind) : null);
+    const money = sumDocumentTotals(linkedDocs);
+    // Фолбэк на «основной» документ нужен офлайн-снимку: сводки в нём нет.
+    const fallbackSum =
       sd?.totalSum != null && sd.totalSum !== '' && Number.isFinite(Number(sd.totalSum))
         ? Number(sd.totalSum)
         : null;
+    const totalSum = money ? money.total : linkedDocs.length === 0 ? fallbackSum : null;
     return {
       delivery: r,
       contractorName:
@@ -603,7 +610,7 @@ export function DeliveriesHistory({
         null,
       supplierName: resolveSupplierName(r),
       siteName: r.siteName ?? (siteId ? (sitesMap.get(siteId) ?? null) : null),
-      docNumber: sd?.docNumber ?? null,
+      docNumber: short.numbers ?? sd?.docNumber ?? null,
       docKindLabel: kindLabel,
       docTotalSum: totalSum,
     };

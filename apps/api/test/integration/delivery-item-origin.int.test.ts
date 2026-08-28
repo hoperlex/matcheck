@@ -285,10 +285,7 @@ suite('происхождение позиций приёмки (реальны�
     const after = await itemsOf(deliveryId);
     expect(after).toHaveLength(2);
     expect(after.map((i) => i.source_document_id)).toEqual([upd.id, upd.id]);
-    expect(after.map((i) => i.source_document_item_id)).toEqual([
-      upd.itemIds[0],
-      upd.itemIds[2],
-    ]);
+    expect(after.map((i) => i.source_document_item_id)).toEqual([upd.itemIds[0], upd.itemIds[2]]);
   });
 
   it('клиент не может переписать происхождение существующей строки', async () => {
@@ -514,6 +511,169 @@ suite('происхождение позиций приёмки (реальны�
     expect(await sourcesOf(deliveryId)).toEqual([]);
   });
 
+  it('сводка sourceDocuments: связанные первыми, отвязанный остаётся с linked:false', async () => {
+    // Шапка карточки считает номера и суммы по linked, блоки материалов — по
+    // всем упомянутым. Поэтому отвязанный документ обязан приехать в сводке, но
+    // с linked:false: иначе его блок остался бы без подписи.
+    const first = await makeUpd('О-17', [{ name: 'Труба 108', qty: '3' }]);
+    const second = await makeUpd('О-18', [{ name: 'Отвод 108', qty: '6' }]);
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, first.id);
+    await link(deliveryId, second.id);
+    expect((await unlink(deliveryId, first.id)).statusCode).toBe(200);
+
+    const res = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    expect(res.statusCode, res.body).toBe(200);
+    const dto = res.json() as {
+      sourceDocumentIds: string[];
+      sourceDocuments: {
+        id: string;
+        linked: boolean;
+        docNumber: string | null;
+        docDate: string | null;
+      }[];
+    };
+
+    expect(dto.sourceDocumentIds).toEqual([second.id]);
+    expect(dto.sourceDocuments.map((d) => d.id)).toEqual([second.id, first.id]);
+    expect(dto.sourceDocuments.map((d) => d.linked)).toEqual([true, false]);
+    expect(dto.sourceDocuments.map((d) => d.docNumber)).toEqual(['О-18', 'О-17']);
+    // Дата — YYYY-MM-DD, а не ISO-таймстемп: карточка печатает её как есть.
+    expect(dto.sourceDocuments[0]!.docDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
+    // Позиции обоих документов на месте — отвязка их не трогает.
+    const items = await itemsOf(deliveryId);
+    expect(items.map((i) => i.source_document_id).sort()).toEqual([first.id, second.id].sort());
+  });
+
+  it('связанный документ без позиций всё равно попадает в сводку', async () => {
+    // Распознавание не дало ни одной строки — блок «Материалы · УПД № … (0)»
+    // должен появиться, иначе документ исчезает из карточки целиком.
+    const empty = await makeUpd('О-19', []);
+    const deliveryId = await makeDelivery();
+    expect((await link(deliveryId, empty.id)).statusCode).toBe(200);
+
+    const res = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    const dto = res.json() as { sourceDocuments: { id: string; linked: boolean }[] };
+    expect(dto.sourceDocuments).toEqual([expect.objectContaining({ id: empty.id, linked: true })]);
+    expect(await itemsOf(deliveryId)).toHaveLength(0);
+  });
+
+  it('форма одиночного DTO совпадает с элементом списка', async () => {
+    // Инвариант «batch == одиночный» держался на комментарии: sources и photos
+    // не сортировались вовсе, а lineNo дублируется. Сверяем то, что сравнимо:
+    // порядок позиций, порядок связей и всю сводку документов.
+    const first = await makeUpd('О-20', [{ name: 'Швеллер 16', qty: '2' }]);
+    const second = await makeUpd('О-21', [{ name: 'Уголок 50', qty: '8' }]);
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, first.id);
+    await link(deliveryId, second.id);
+
+    const single = (
+      await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` })
+    ).json() as Record<string, unknown>;
+    const listRes = await app.inject({ method: 'GET', url: '/api/v1/deliveries?limit=200' });
+    expect(listRes.statusCode, listRes.body).toBe(200);
+    const fromList = (listRes.json() as { items: Record<string, unknown>[] }).items.find(
+      (d) => d.id === deliveryId,
+    );
+
+    expect(fromList).toBeDefined();
+    expect(fromList!.sourceDocuments).toEqual(single.sourceDocuments);
+    expect(fromList!.sourceDocumentIds).toEqual(single.sourceDocumentIds);
+    expect((fromList!.items as { id: string }[]).map((i) => i.id)).toEqual(
+      (single.items as { id: string }[]).map((i) => i.id),
+    );
+    // В батче есть ещё и primarySourceDocument — он обязан указывать на первый
+    // элемент сводки, иначе список и карточка назовут «основными» разные бумаги.
+    const primary = fromList!.primarySourceDocument as { id: string } | null;
+    expect(primary?.id).toBe((single.sourceDocuments as { id: string }[])[0]!.id);
+  });
+
+  it('сохранение приёмки из нескольких документов не теряет строк и происхождения', async () => {
+    // Карточка показывает материалы блоками по документам, но в state и в
+    // payload они остаются одним плоским списком: upsert переписывает
+    // delivery_items целиком, и строка, выпавшая из списка, исчезла бы из БД.
+    const first = await makeUpd('О-22', [
+      { name: 'Кабель ВВГнг 3х2.5', qty: '100' },
+      { name: 'Гофра 20', qty: '50' },
+    ]);
+    const second = await makeUpd('О-23', [{ name: 'Щит ЩРН-12', qty: '2' }]);
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, first.id);
+    await link(deliveryId, second.id);
+
+    const before = await itemsOf(deliveryId);
+    expect(before).toHaveLength(3);
+
+    // Правим одну строку и добавляем новую в блок второго документа — ровно то,
+    // что делает кнопка «+ Материал» в заголовке блока.
+    const res = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [first.id, second.id],
+      items: [
+        ...before.map((i) => ({
+          id: i.id,
+          nameRaw: i.name_raw,
+          qtyActual: i.name_raw === 'Гофра 20' ? '45' : null,
+          unit: 'шт',
+          lineNo: i.line_no,
+        })),
+        {
+          nameRaw: 'Клеммник WAGO',
+          qtyPlanned: '10',
+          unit: 'шт',
+          lineNo: 4,
+          sourceDocumentId: second.id,
+        },
+      ],
+    });
+    expect(res.statusCode, res.body).toBe(200);
+
+    const after = await itemsOf(deliveryId);
+    expect(after).toHaveLength(4);
+    // Ни одна строка не потеряла свой документ.
+    expect(after.filter((i) => i.source_document_id === first.id)).toHaveLength(2);
+    expect(after.filter((i) => i.source_document_id === second.id)).toHaveLength(2);
+    // Новая строка получила происхождение блока, в который её добавили.
+    const added = after.find((i) => i.name_raw === 'Клеммник WAGO')!;
+    expect(added.source_document_id).toBe(second.id);
+    expect(added.source_document_item_id).toBeNull();
+  });
+
+  it('происхождение из запроса принимается только для привязанных документов', async () => {
+    // Клиент не должен уметь приписать строку чужой бумаге: у карточки блоки
+    // подписаны документами приёмки, и «чужое» происхождение сделало бы блок,
+    // которого в поставке нет.
+    const linked = await makeUpd('О-24', [{ name: 'Лоток 100', qty: '5' }]);
+    const foreign = await makeUpd('О-25', [{ name: 'Крышка лотка', qty: '5' }]);
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, linked.id);
+
+    const res = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [linked.id],
+      items: [
+        {
+          nameRaw: 'Подвес',
+          qtyPlanned: '3',
+          unit: 'шт',
+          lineNo: 9,
+          sourceDocumentId: foreign.id,
+        },
+      ],
+    });
+    expect(res.statusCode, res.body).toBe(200);
+
+    const items = await itemsOf(deliveryId);
+    const added = items.find((i) => i.name_raw === 'Подвес')!;
+    expect(added.source_document_id).toBeNull();
+  });
+
   it('документ, чьи позиции лежат в приёмке, удалить нельзя', async () => {
     const upd = await makeUpd('О-16', [{ name: 'Саморезы', qty: '1000' }]);
     const deliveryId = await makeDelivery();
@@ -521,8 +681,8 @@ suite('происхождение позиций приёмки (реальны�
     await unlink(deliveryId, upd.id);
 
     // Связи уже нет, но происхождение осталось — RESTRICT держит документ.
-    await expect(
-      sql`DELETE FROM source_documents WHERE id = ${upd.id}`,
-    ).rejects.toMatchObject({ code: '23503' });
+    await expect(sql`DELETE FROM source_documents WHERE id = ${upd.id}`).rejects.toMatchObject({
+      code: '23503',
+    });
   });
 });

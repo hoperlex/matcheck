@@ -1,7 +1,11 @@
 import { z } from 'zod';
 import { decimalString } from './decimal-string.js';
 import { DeliveryStatusCodeSchema, StatusSchema } from './statuses.js';
-import { VolumeConfidenceSchema, PrimarySourceDocumentSchema } from './source-documents.js';
+import {
+  VolumeConfidenceSchema,
+  PrimarySourceDocumentSchema,
+  OperationSourceDocumentSchema,
+} from './source-documents.js';
 import { ReviewFieldsShape } from './review.js';
 import { GroupOperationFields } from './group-operations.js';
 
@@ -139,6 +143,11 @@ export const DeliverySchema = z.object({
   itemsTotal: z.number().nullable().optional(),
   itemsVatSum: z.number().nullable().optional(),
   primarySourceDocument: PrimarySourceDocumentSchema.nullable().optional(),
+  // Все документы приёмки: связанные плюс те, что остались только в
+  // происхождении позиций. Карточка строит по ним шапку (номера и суммы —
+  // только по linked) и блоки материалов. Optional по той же причине, что и
+  // блок выше: /sync поле не собирает, мобильный клиент его игнорирует.
+  sourceDocuments: z.array(OperationSourceDocumentSchema).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

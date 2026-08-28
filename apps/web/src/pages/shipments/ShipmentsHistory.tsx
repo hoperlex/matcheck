@@ -58,6 +58,11 @@ import { formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { partyCell } from '../../shared/ui/documentPartyColumns';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 import { operationsListQuery } from '../operations/operationsQuery';
+import {
+  formatDocumentsShort,
+  sumDocumentTotals,
+} from '../../shared/utils/operationDocumentsSummary';
+import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
 // directoryFilterMap (ИНН-маппинг customer_counterparties → operational
 // counterparties) больше не нужен — фильтрация переехала на сервер.
 
@@ -589,25 +594,27 @@ export function ShipmentsHistory({
       (r.receiverCounterpartyId ? (counterpartiesMap.get(r.receiverCounterpartyId) ?? null) : null);
     const destSiteName = r.destSiteId ? (sitesMap.get(r.destSiteId) ?? null) : null;
     const sd = r.primarySourceDocument ?? null;
-    const kindLabel = sd
-      ? sd.kind === 'upd'
-        ? 'УПД'
-        : sd.kind === 'transport_waybill' || sd.kind === 'os2_transfer'
-          ? 'Накладная'
-          : sd.kind === 'request'
-            ? 'Заявка'
-            : null
-      : null;
-    const totalSum =
+    // Все связанные документы операции, а не только «основной»: у поставки из
+    // нескольких УПД просмотр показывал номер одной бумаги и её сумму вместо
+    // суммы по всем. Отвязанные (linked: false) сюда не входят — их место в
+    // блоках материалов, а не в шапке.
+    const linkedDocs = (r.sourceDocuments ?? []).filter((d) => d.linked);
+    const short = formatDocumentsShort(linkedDocs);
+    const kindLabel =
+      short.kindLabel ?? (linkedDocs.length === 0 && sd ? sourceKindLabel(sd.kind) : null);
+    const money = sumDocumentTotals(linkedDocs);
+    // Фолбэк на «основной» документ нужен офлайн-снимку: сводки в нём нет.
+    const fallbackSum =
       sd?.totalSum != null && sd.totalSum !== '' && Number.isFinite(Number(sd.totalSum))
         ? Number(sd.totalSum)
         : null;
+    const totalSum = money ? money.total : linkedDocs.length === 0 ? fallbackSum : null;
     return {
       shipment: r,
       receiverName,
       siteName: r.siteName ?? sitesMap.get(r.siteId) ?? null,
       destSiteName,
-      docNumber: sd?.docNumber ?? null,
+      docNumber: short.numbers ?? sd?.docNumber ?? null,
       docKindLabel: kindLabel,
       docTotalSum: totalSum,
     };

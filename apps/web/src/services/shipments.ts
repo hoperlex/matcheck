@@ -157,6 +157,13 @@ export function buildUpsertPayload(r: ShipmentRecord): ShipmentUpsert {
     sourceDocumentIds: effective.sourceDocumentIds,
     items: effective.items.map((it) => ({
       id: it.id,
+      // Происхождение позиции. Без него строки, заведённые с портала «из УПД»,
+      // приезжали на сервер без атрибуции: createDelivery/createShipment берут
+      // её только из запроса, и карточка показывала бы материалы «без привязки
+      // к документу». Для существующей строки сервер присланное значение
+      // игнорирует и берёт сохранённое — переписать атрибуцию клиент не может.
+      sourceDocumentId: it.sourceDocumentId ?? null,
+      sourceDocumentItemId: it.sourceDocumentItemId ?? null,
       itemKind: it.itemKind,
       materialId: it.materialId,
       assetId: it.assetId,

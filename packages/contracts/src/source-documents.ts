@@ -797,6 +797,33 @@ export const PrimarySourceDocumentSchema = z.object({
 });
 export type PrimarySourceDocument = z.infer<typeof PrimarySourceDocumentSchema>;
 
+// Все документы операции: и связанные (delivery_sources / shipment_sources), и
+// те, что остались только в происхождении позиций после отвязки. Нужен карточке
+// операции: шапка перечисляет номера СВЯЗАННЫХ документов и складывает их
+// суммы, а материалы разложены по блокам — по одному на каждый упомянутый
+// документ, чтобы было видно, чьи это строки.
+//
+// Отдельная схема, а не расширение PrimarySourceDocumentSchema: там снимок
+// «основного» документа с контрагентами для колонок списка, здесь — реквизиты
+// самой бумаги. supplierId сюда намеренно не входит: поставщик операции — её
+// собственное поле (его правит /supplier-from-directory), и переписывать его
+// «первым документом» нельзя.
+export const OperationSourceDocumentSchema = z.object({
+  id: z.string().uuid(),
+  kind: SourceKindSchema,
+  status: SourceStatusSchema,
+  docNumber: z.string().nullable(),
+  // YYYY-MM-DD, как в GET /source-documents: карточка печатает значение как есть.
+  docDate: z.string().nullable(),
+  expectedDate: z.string().nullable(),
+  totalSum: z.string().nullable(),
+  vatSum: z.string().nullable(),
+  // true — документ привязан к операции сейчас; false — связь снята, а позиции с
+  // этим происхождением остались (unlink-source их намеренно не трогает).
+  linked: z.boolean(),
+});
+export type OperationSourceDocument = z.infer<typeof OperationSourceDocumentSchema>;
+
 export const ManualUpdUploadRequestSchema = z.object({
   xml: z.string().min(1).max(10_000_000),
   direction: SourceDirectionSchema,
