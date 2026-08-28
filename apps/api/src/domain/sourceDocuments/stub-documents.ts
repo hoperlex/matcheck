@@ -23,6 +23,7 @@ import { randomUUID } from 'node:crypto';
 import { STUB_ERROR_CODES } from '@matcheck/contracts';
 import type { Db } from '../../db/client.js';
 import { resolveMachineSiteId } from './site-transfer.js';
+import { resolveMachineExpectedDate } from './expected-date-transfer.js';
 import {
   bundleImportItems,
   sourceBundles,
@@ -317,11 +318,11 @@ export async function ensureDocumentForRegistryRow(args: {
       contractorId: bundle.contractorId,
       recipientMolId: bundle.recipientMolId,
       recipientSource: manualRecipientSource(bundle),
-      // Объект — из БД, а не из строки пакета, прочитанной до транзакции:
-      // машину могли перенести на другой объект, пока файл ждал заглушки
-      // (см. resolveMachineSiteId).
+      // Объект и дата — из БД, а не из строки пакета, прочитанной до транзакции:
+      // машину могли перенести на другой объект или день, пока файл ждал
+      // заглушки (см. resolveMachineSiteId / resolveMachineExpectedDate).
       siteId: await resolveMachineSiteId(tx as unknown as Db, row.bundleId),
-      expectedDate: bundle.expectedDate,
+      expectedDate: await resolveMachineExpectedDate(tx as unknown as Db, row.bundleId),
       originalFilename: row.filename,
       // Разбор завершён и не начнётся снова: заглушку ждёт человек, а не
       // очередь. Задание намеренно не ставим — распознавать нечем.

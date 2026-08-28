@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { idempotencyKeyOf } from '../src/domain/sourceDocuments/bundle-key.js';
 import {
-  isBundleScopeUniqueViolation,
-  replaceSiteInIdempotencyKey,
-} from '../src/domain/sourceDocuments/site-transfer.js';
+  idempotencyKeyOf,
+  replaceScopeInIdempotencyKey,
+} from '../src/domain/sourceDocuments/bundle-key.js';
+import { isBundleScopeUniqueViolation } from '../src/domain/sourceDocuments/site-transfer.js';
 
 /**
  * Чистая часть переноса объекта — без БД.
@@ -17,7 +17,7 @@ import {
 const SITE_A = '11111111-1111-1111-1111-111111111111';
 const SITE_B = '22222222-2222-2222-2222-222222222222';
 
-describe('replaceSiteInIdempotencyKey', () => {
+describe('replaceScopeInIdempotencyKey', () => {
   it('меняет объект в ключе v1, не трогая остальные компоненты', () => {
     const key = idempotencyKeyOf({
       siteId: SITE_A,
@@ -27,7 +27,7 @@ describe('replaceSiteInIdempotencyKey', () => {
       expectedDate: '2026-08-25',
       contentHash: 'abc123',
     });
-    const moved = replaceSiteInIdempotencyKey(key, SITE_B);
+    const moved = replaceScopeInIdempotencyKey(key, { siteId: SITE_B });
     expect(moved).toBe(
       idempotencyKeyOf({
         siteId: SITE_B,
@@ -49,7 +49,7 @@ describe('replaceSiteInIdempotencyKey', () => {
       modesHash: 'modes-hash',
     });
     expect(key.startsWith('v2|manual|')).toBe(true);
-    const moved = replaceSiteInIdempotencyKey(key, SITE_B)!;
+    const moved = replaceScopeInIdempotencyKey(key, { siteId: SITE_B })!;
     expect(moved.startsWith('v2|manual|')).toBe(true);
     expect(moved.endsWith('|modes-hash')).toBe(true);
     expect(moved.split('|')[2]).toBe(SITE_B);
@@ -62,16 +62,83 @@ describe('replaceSiteInIdempotencyKey', () => {
       expectedDate: null,
       contentHash: 'abc123',
     });
-    const moved = replaceSiteInIdempotencyKey(key, null)!;
+    const moved = replaceScopeInIdempotencyKey(key, { siteId: null })!;
     expect(moved.split('|')).toHaveLength(key.split('|').length);
     expect(moved.split('|')[2]).toBe('');
+  });
+
+  it('меняет дату поставки, не трогая объект', () => {
+    const key = idempotencyKeyOf({
+      siteId: SITE_A,
+      direction: 'inbound',
+      expectedDate: '2026-08-25',
+      contentHash: 'abc123',
+    });
+    const moved = replaceScopeInIdempotencyKey(key, { expectedDate: '2026-08-26' })!;
+    expect(moved).toBe(
+      idempotencyKeyOf({
+        siteId: SITE_A,
+        direction: 'inbound',
+        expectedDate: '2026-08-26',
+        contentHash: 'abc123',
+      }),
+    );
+  });
+
+  it('объект и дата в одном пересчёте дают ключ, который построил бы приём', () => {
+    // Менеджер меняет и объект, и дату одним сохранением. Два независимых
+    // пересчёта второй раз читали бы уже переписанную строку, поэтому компоненты
+    // подменяются за один проход.
+    const key = idempotencyKeyOf({
+      siteId: SITE_A,
+      direction: 'inbound',
+      expectedDate: '2026-08-25',
+      contentHash: 'abc123',
+      modesHash: 'modes-hash',
+    });
+    const moved = replaceScopeInIdempotencyKey(key, {
+      siteId: SITE_B,
+      expectedDate: '2026-08-26',
+    })!;
+    expect(moved).toBe(
+      idempotencyKeyOf({
+        siteId: SITE_B,
+        direction: 'inbound',
+        expectedDate: '2026-08-26',
+        contentHash: 'abc123',
+        modesHash: 'modes-hash',
+      }),
+    );
+  });
+
+  it('снятая дата — пустой компонент, а не выпавший', () => {
+    const key = idempotencyKeyOf({
+      siteId: SITE_A,
+      direction: 'inbound',
+      expectedDate: '2026-08-25',
+      contentHash: 'abc123',
+    });
+    const moved = replaceScopeInIdempotencyKey(key, { expectedDate: null })!;
+    expect(moved.split('|')).toHaveLength(key.split('|').length);
+    expect(moved.split('|')[6]).toBe('');
+  });
+
+  it('непереданный компонент остаётся прежним', () => {
+    const key = idempotencyKeyOf({
+      siteId: SITE_A,
+      direction: 'inbound',
+      expectedDate: '2026-08-25',
+      contentHash: 'abc123',
+    });
+    expect(replaceScopeInIdempotencyKey(key, {})).toBe(key);
+    expect(replaceScopeInIdempotencyKey(key, { siteId: SITE_B })!.split('|')[6]).toBe('2026-08-25');
   });
 
   it('ключ чужого формата не «чинится» — возвращается null', () => {
     // Иначе перенос собрал бы строку, которую не построит ни один канал приёма,
     // и повторная загрузка того же комплекта завела бы второй пакет.
-    expect(replaceSiteInIdempotencyKey('legacy-key', SITE_B)).toBeNull();
-    expect(replaceSiteInIdempotencyKey('v1|manual|site|inbound', SITE_B)).toBeNull();
+    expect(replaceScopeInIdempotencyKey('legacy-key', { siteId: SITE_B })).toBeNull();
+    expect(replaceScopeInIdempotencyKey('v1|manual|site|inbound', { siteId: SITE_B })).toBeNull();
   });
 });
 

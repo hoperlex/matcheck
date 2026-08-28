@@ -454,6 +454,17 @@ export function SourceDocumentDetailModal({
     patch.mutate(body);
   }
 
+  // Снятие даты поставки у машины: без даты поставка пропадает у инспектора
+  // ЦЕЛИКОМ — предикат видимости требует дату у каждого документа рейса, и один
+  // пустой гасит остальные. Спрашиваем только в этом случае: подтверждение на
+  // каждом сохранении менеджер перестал бы читать.
+  const clearsMachineDate =
+    !!sd &&
+    !!edit &&
+    sd.expectedDate != null &&
+    edit.expectedDate == null &&
+    (sd.portalGroupSize ?? 0) > 1;
+
   const isMismatchPending =
     sd?.status === 'needs_resolution' && sd.parseErrorCode === 'validation_mismatch';
   const isDuplicate = sd?.status === 'needs_resolution' && sd.parseErrorCode === 'duplicate_upd';
@@ -624,9 +635,25 @@ export function SourceDocumentDetailModal({
                 </Popconfirm>
               )}
               {!isProcessing && !isDuplicate && (
-                <Button type="primary" onClick={onSave} loading={patch.isPending}>
-                  Сохранить
-                </Button>
+                // Popconfirm с disabled: пока очистка даты машине не грозит, он
+                // отключён и клик уходит прямо в onSave — лишнего шага у обычного
+                // сохранения не появляется.
+                <Popconfirm
+                  title="Снять дату поставки у всей машины?"
+                  description={`Без даты поставка целиком (${sd?.portalGroupSize ?? 0} док.) пропадёт у инспектора на планшете.`}
+                  okText="Снять дату"
+                  cancelText="Отмена"
+                  disabled={!clearsMachineDate}
+                  onConfirm={onSave}
+                >
+                  <Button
+                    type="primary"
+                    onClick={clearsMachineDate ? undefined : onSave}
+                    loading={patch.isPending}
+                  >
+                    Сохранить
+                  </Button>
+                </Popconfirm>
               )}
             </Space>
           ) : null
@@ -775,7 +802,22 @@ export function SourceDocumentDetailModal({
                         style={{ width: '100%' }}
                       />
                     </Form.Item>
-                    <Form.Item label="Дата поставки">
+                    <Form.Item
+                      label="Дата поставки"
+                      // Дата поставки описывает РЕЙС, а не бумагу: у машины с
+                      // портала она общая, поэтому смена здесь переносит её на
+                      // все документы поставки и на сам пакет (см.
+                      // transferExpectedDate на сервере). Разъехавшись по дням,
+                      // машина ломает инспектору вкладку «Сегодня», а пустая
+                      // дата у одной строки гасит поставку целиком.
+                      extra={
+                        sd.portalGroupId
+                          ? `Поставка загружена через портал: дата сменится у всей машины${
+                              sd.portalGroupSize ? ` (${sd.portalGroupSize} док.)` : ''
+                            }.`
+                          : undefined
+                      }
+                    >
                       <DatePicker
                         value={edit.expectedDate}
                         onChange={(d) => setEdit({ ...edit, expectedDate: d })}

@@ -82,6 +82,14 @@ import {
   type SiteTransfer,
   type SiteTransferConflict,
 } from '../domain/sourceDocuments/site-transfer.js';
+import {
+  lockMachine,
+  resyncMachineBundleKeys,
+} from '../domain/sourceDocuments/machine-lock.js';
+import {
+  transferExpectedDate,
+  type ExpectedDateTransfer,
+} from '../domain/sourceDocuments/expected-date-transfer.js';
 import { loadEnv } from '../lib/env.js';
 import { fromSupplierPortalSql } from '../domain/sourceDocuments/public-origin.js';
 import { manualRecipientSource } from '../domain/sourceDocuments/resolve-contractor.js';
@@ -3331,21 +3339,23 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         .limit(1);
       if (!sd) return reply.code(404).send({ error: 'not_found' });
 
-      const upd: Partial<typeof sourceDocuments.$inferInsert> = { updatedAt: new Date() };
+      // updatedAt здесь НЕ ставится: время берётся уже в транзакции
+      // (statement_timestamp при UPDATE ниже). Значение, посчитанное сейчас,
+      // оказалось бы РАНЬШЕ метки переноса машины, и правленый документ стал бы
+      // «старше» своих соседей — а дельта /sync отбирает именно по updated_at.
+      const upd: Partial<typeof sourceDocuments.$inferInsert> = {};
       if (req.body.docNumber !== undefined) upd.docNumber = req.body.docNumber;
       if (req.body.docDate !== undefined) {
         upd.docDate = req.body.docDate ? new Date(req.body.docDate) : null;
       }
-      if (req.body.expectedDate !== undefined) {
-        upd.expectedDate = req.body.expectedDate ? new Date(req.body.expectedDate) : null;
-      }
       if (req.body.contractorId !== undefined) upd.contractorId = req.body.contractorId;
       if (req.body.recipientId !== undefined) upd.recipientId = req.body.recipientId;
       if (req.body.recipientMolId !== undefined) upd.recipientMolId = req.body.recipientMolId;
-      // siteId здесь НЕ пишется: смена объекта — отдельная операция со своим
-      // порядком блокировок и переносом всей машины (см. transferSite ниже).
-      // Оставь мы поле здесь, документ уехал бы на новый объект в одиночку, а
-      // пакет и соседи остались бы на прежнем.
+      // siteId и expectedDate здесь НЕ пишутся: и объект, и дата поставки —
+      // свойства МАШИНЫ, и меняются отдельными операциями со своим порядком
+      // блокировок (transferSite / transferExpectedDate ниже). Оставь мы поля
+      // здесь, документ уехал бы на новый объект и новый день в одиночку, а
+      // пакет и соседи остались бы на прежних.
 
       // Пометка «получателя задал человек» — только когда пара получателя
       // ДЕЙСТВИТЕЛЬНО изменилась. Форма карточки кладёт contractorId в тело при
@@ -3431,33 +3441,54 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // новыми позициями, но со старой ревизией — то есть форма приёмки
       // считала состав неизменившимся.
       let transfer: SiteTransfer = { changed: false };
+      let dateTransfer: ExpectedDateTransfer = { changed: false };
       type PatchOutcome =
         | { conflict: SiteTransferConflict }
+        /** Документ исчез между чтением шапки и захватом машины. */
+        | { gone: true }
         | {
             updated: typeof sourceDocuments.$inferSelect;
             updatedItems: (typeof sourceDocumentItems.$inferSelect)[];
             /**
-             * Итог переноса — наружу через результат, а не через замыкание.
-             * Присваивание `transfer` происходит ВНУТРИ колбэка, поток
-             * управления снаружи этого не видит и сузил бы переменную до
-             * начального { changed: false }. Возврат сохраняет реальный тип.
+             * Итоги переносов — наружу через результат, а не через замыкание.
+             * Присваивание происходит ВНУТРИ колбэка, поток управления снаружи
+             * этого не видит и сузил бы переменные до начального
+             * { changed: false }. Возврат сохраняет реальный тип.
              */
             transfer: SiteTransfer;
+            dateTransfer: ExpectedDateTransfer;
           };
       let result: PatchOutcome;
       try {
         result = await app.db.transaction(async (tx): Promise<PatchOutcome> => {
-          // ПЕРВЫМ действием: перенос берёт блокировки в порядке «пакет →
+          // ПЕРВЫМ действием: захват машины берёт блокировки в порядке «пакет →
           // документ», и любая правка документа до него дала бы обратный порядок,
           // то есть взаимную блокировку с воркером (fenceBundleAttempt).
+          //
+          // Захват ОДИН на оба переноса: объект и дата поставки — свойства одной
+          // машины, и второй заход за теми же строками только добавил бы кругов
+          // ожидания.
+          const lock = await lockMachine(tx as unknown as Db, sd.id);
+          if (!lock) return { gone: true };
           if (req.body.siteId !== undefined) {
-            const outcome = await transferSite(tx as unknown as Db, {
-              documentId: sd.id,
-              toSiteId: req.body.siteId,
-            });
+            const outcome = await transferSite(tx as unknown as Db, lock, req.body.siteId);
             if ('conflict' in outcome) return { conflict: outcome.conflict };
             transfer = outcome.transfer;
           }
+          if (req.body.expectedDate !== undefined) {
+            dateTransfer = await transferExpectedDate(
+              tx as unknown as Db,
+              lock,
+              req.body.expectedDate ?? null,
+            );
+          }
+          // Ключи корня несут и объект, и дату — пересчёт ОДИН, после обоих
+          // переносов. Два пересчёта подряд второй раз читали бы строку, которую
+          // первый уже переписал.
+          await resyncMachineBundleKeys(tx as unknown as Db, lock, {
+            ...(transfer.changed ? { siteId: transfer.toSiteId } : {}),
+            ...(dateTransfer.changed ? { expectedDate: dateTransfer.toDateKey } : {}),
+          });
           if (req.body.items) {
             // Полная замена позиций. Старые удаляются каскадом по delete + insert.
             await tx
@@ -3581,7 +3612,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
           const [updated] = await tx
             .update(sourceDocuments)
-            .set(upd)
+            .set({ ...upd, updatedAt: drSql`statement_timestamp()` })
             .where(eq(sourceDocuments.id, sd.id))
             .returning();
           if (!updated) throw new Error('Failed to update source_document');
@@ -3612,7 +3643,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           const inspectorSees =
             req.body.items !== undefined ||
             transfer.changed ||
-            upd.expectedDate !== undefined ||
+            dateTransfer.changed ||
             upd.docNumber !== undefined ||
             upd.status !== undefined ||
             upd.contractorId !== undefined ||
@@ -3639,15 +3670,23 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             // Последней операцией транзакции: событие видно только после
             // коммита, и чем ближе запись к нему, тем меньше окно, в котором
             // курсор /sync уйдёт вперёд метки (см. visibility-events).
+            // Скоуп — вся машина, если менялся объект ИЛИ дата. Дата тут не
+            // «за компанию»: снятая дата у одного документа гасит по
+            // groupIsCompleteSql ВСЮ машину, и соседи без метки видимости
+            // остались бы на планшете навсегда — дельта их больше не привозит,
+            // а сверка лишнее не удаляет.
+            const machineScopeId = transfer.changed
+              ? transfer.rootBundleId
+              : dateTransfer.changed
+                ? dateTransfer.rootBundleId
+                : null;
             await recordVisibilityTransitions(tx, {
               documentIds: [sd.id],
-              ...(transfer.changed && transfer.rootBundleId
-                ? { groupId: transfer.rootBundleId }
-                : {}),
+              ...(machineScopeId ? { groupId: machineScopeId } : {}),
               reason: 'документ изменён менеджером',
             });
           }
-          return { updated, updatedItems, transfer };
+          return { updated, updatedItems, transfer, dateTransfer };
         });
       } catch (err) {
         // Пересчитанный ключ пакета столкнулся с уже существующим: тот же
@@ -3656,12 +3695,18 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         if (isBundleScopeUniqueViolation(err)) {
           return reply.code(409).send({
             error: 'bundle_exists_on_site',
-            message: 'На выбранном объекте этот комплект документов уже загружен',
+            message:
+              'Такой же комплект документов уже загружен на этот объект с этой датой поставки',
           });
         }
         throw err;
       }
 
+      if ('gone' in result) {
+        // Документ удалили между чтением шапки и захватом машины: писать больше
+        // некуда, а 404 здесь честнее пустого 200.
+        return reply.code(404).send({ error: 'not_found' });
+      }
       if ('conflict' in result) {
         // Конфликт возвращается ДО единой записи: transferSite проверяет
         // занятость машины первым делом, поэтому коммит пустой транзакции

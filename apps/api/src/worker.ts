@@ -23,6 +23,7 @@ import { imageMimeOfKey } from './lib/image-kind.js';
 import { db } from './db/client.js';
 import type { Db } from './db/client.js';
 import { resolveMachineSiteId } from './domain/sourceDocuments/site-transfer.js';
+import { resolveMachineExpectedDate } from './domain/sourceDocuments/expected-date-transfer.js';
 import {
   counterparties,
   entityDeletions,
@@ -2960,12 +2961,11 @@ export async function handleDocumentRouterJob(
     return;
   }
 
-  const bundleExpected =
-    bundle.expectedDate instanceof Date
-      ? bundle.expectedDate
-      : bundle.expectedDate
-        ? new Date(bundle.expectedDate)
-        : null;
+  // Дата поставки здесь НЕ вычисляется: она читается из БД внутри каждой
+  // транзакции создания документа (resolveMachineExpectedDate). Значение,
+  // снятое со строки пакета один раз на весь разбор, устаревало ровно так же,
+  // как объект: менеджер правит дату, задание в этот момент ждёт fence — и
+  // документ ложился со старым днём, разводя машину по датам.
 
   // Происхождение наследуется от пакета: документ, приехавший письмом, должен
   // остаться почтовым и после разбора. У пакетов, загруженных кнопкой,
@@ -3202,7 +3202,7 @@ export async function handleDocumentRouterJob(
             recipientMolId: bundle.recipientMolId,
             recipientSource: manualRecipientSource(bundle),
             siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
-            expectedDate: bundleExpected,
+            expectedDate: await resolveMachineExpectedDate(tx as unknown as Db, bundleId),
             originalFilename: a.filename,
             // Разбор завершён (и не начнётся снова) — processedAt честно
             // фиксирует момент, дальше документ ждёт человека.
@@ -3275,7 +3275,7 @@ export async function handleDocumentRouterJob(
             recipientMolId: bundle.recipientMolId,
             recipientSource: manualRecipientSource(bundle),
             siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
-            expectedDate: bundleExpected,
+            expectedDate: await resolveMachineExpectedDate(tx as unknown as Db, bundleId),
             originalFilename: a.filename,
             queuedAt: new Date(),
             parsedAt: new Date(),
@@ -3330,6 +3330,14 @@ export async function handleDocumentRouterJob(
         const subJobId = bundleDispatchKeyOf(subId, 0);
         await db.transaction(async (tx) => {
           await fenceBundleAttempt(tx as unknown as typeof db, bundleId, bundleGeneration);
+          // Дата машины — из БД и ОДИН раз на всю транзакцию: пакет и его
+          // служебная запись обязаны получить одно значение, а строка пакета,
+          // прочитанная до транзакции, могла устареть (менеджер как раз правил
+          // дату). То же соображение, что и у resolveMachineSiteId.
+          const machineExpected = await resolveMachineExpectedDate(
+            tx as unknown as Db,
+            bundleId,
+          );
           await tx.insert(sourceBundles).values({
             id: subId,
             bundleHash: subHash,
@@ -3342,7 +3350,7 @@ export async function handleDocumentRouterJob(
             siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
             contractorId: bundle.contractorId,
             recipientMolId: bundle.recipientMolId,
-            expectedDate: bundle.expectedDate,
+            expectedDate: machineExpected,
             status: 'queued',
             jobId: subJobId,
             createdByUserId: bundle.createdByUserId,
@@ -3359,7 +3367,7 @@ export async function handleDocumentRouterJob(
             recipientMolId: bundle.recipientMolId,
             recipientSource: manualRecipientSource(bundle),
             siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
-            expectedDate: bundleExpected,
+            expectedDate: machineExpected,
             originalFilename: a.filename,
             queuedAt: new Date(),
             bundleId: subId,
@@ -3411,7 +3419,6 @@ export async function handleDocumentRouterJob(
           bundleGeneration,
           bundle,
           bundleOrigin,
-          bundleExpected,
           file: a,
           cls,
         });
@@ -3466,7 +3473,6 @@ export async function handleDocumentRouterJob(
             bundleGeneration,
             bundle,
             bundleOrigin,
-            bundleExpected,
             file: c.file,
             cls: c.cls,
           });
@@ -3604,7 +3610,6 @@ async function createSingleUpdDocument(args: {
   bundleGeneration: number;
   bundle: typeof sourceBundles.$inferSelect;
   bundleOrigin: NonNullable<typeof sourceBundles.$inferSelect.origin>;
-  bundleExpected: Date | null;
   file: RouterInputFile;
   cls: FileClassification;
   /** Пакет попытки может отличаться от пакета создаваемого документа при rollback. */
@@ -3613,7 +3618,7 @@ async function createSingleUpdDocument(args: {
   /** Причина в реестре: у отката она своя. */
   reasonOverride?: string;
 }): Promise<string> {
-  const { bundleId, bundleGeneration, bundle, bundleOrigin, bundleExpected, file: a, cls } = args;
+  const { bundleId, bundleGeneration, bundle, bundleOrigin, file: a, cls } = args;
   const docId = randomUUID();
   const dedupeKey = dispatchKeyOf(docId);
   const reason =
@@ -3641,7 +3646,7 @@ async function createSingleUpdDocument(args: {
       recipientMolId: bundle.recipientMolId,
       recipientSource: manualRecipientSource(bundle),
       siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
-      expectedDate: bundleExpected,
+      expectedDate: await resolveMachineExpectedDate(tx as unknown as Db, bundleId),
       originalFilename: a.filename,
       queuedAt: new Date(),
       parsedAt: new Date(),
@@ -3709,6 +3714,10 @@ async function startUpdAssembly(args: {
 
   await db.transaction(async (tx) => {
     await fenceBundleAttempt(tx as unknown as typeof db, bundleId, bundleGeneration);
+    // Дата машины — из БД и один раз на транзакцию: дочерний пакет и его
+    // служебная запись обязаны совпасть, а значение из памяти могло устареть,
+    // пока задание ждало fence (см. resolveMachineExpectedDate).
+    const machineExpected = await resolveMachineExpectedDate(tx as unknown as Db, bundleId);
     const inserted = await tx
       .insert(sourceBundles)
       .values({
@@ -3721,7 +3730,7 @@ async function startUpdAssembly(args: {
         siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
         contractorId: bundle.contractorId,
         recipientMolId: bundle.recipientMolId,
-        expectedDate: bundle.expectedDate,
+        expectedDate: machineExpected,
         status: 'queued',
         jobId: assemblyJobId,
         createdByUserId: bundle.createdByUserId,
@@ -3748,12 +3757,7 @@ async function startUpdAssembly(args: {
       recipientMolId: bundle.recipientMolId,
       recipientSource: manualRecipientSource(bundle),
       siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
-      expectedDate:
-        bundle.expectedDate instanceof Date
-          ? bundle.expectedDate
-          : bundle.expectedDate
-            ? new Date(bundle.expectedDate)
-            : null,
+      expectedDate: machineExpected,
       originalFilename: candidates[0]?.file.filename ?? null,
       queuedAt: new Date(),
       bundleId: subId,
@@ -4325,12 +4329,7 @@ export async function handleUpdAssemblyJob(
         recipientMolId: rootBundle.recipientMolId,
         recipientSource: manualRecipientSource(rootBundle),
         siteId: await resolveMachineSiteId(tx as unknown as Db, subBundleId),
-        expectedDate:
-          rootBundle.expectedDate instanceof Date
-            ? rootBundle.expectedDate
-            : rootBundle.expectedDate
-              ? new Date(rootBundle.expectedDate)
-              : null,
+        expectedDate: await resolveMachineExpectedDate(tx as unknown as Db, subBundleId),
         originalFilename: attachmentsByOrder.get(orders[0] ?? 0)?.filename ?? null,
         queuedAt: new Date(),
         parsedAt: new Date(),
@@ -5030,12 +5029,6 @@ async function rollbackUpdAssembly(args: {
             : rootBundle.dispatchGeneration,
         bundle: rootBundle,
         bundleOrigin: rootBundle.origin ?? 'manual_pdf',
-        bundleExpected:
-          rootBundle.expectedDate instanceof Date
-            ? rootBundle.expectedDate
-            : rootBundle.expectedDate
-              ? new Date(rootBundle.expectedDate)
-              : null,
         file,
         cls: {
           detectedKind: 'upd',
@@ -5323,16 +5316,6 @@ async function createSourceDocumentFromWaybill(args: {
   const docDate = parseLlmDocDate(doc.docDate);
   const kind = doc.form === 'os2' ? 'os2_transfer' : 'transport_waybill';
 
-  // Защита от несоответствия типов: bundle.expectedDate может прийти как
-  // строка 'YYYY-MM-DD' (исторически — если колонка осталась типа PG date
-  // до миграции 0043) или как Date. Приводим к Date или null.
-  const bundleExpected =
-    bundle.expectedDate instanceof Date
-      ? bundle.expectedDate
-      : bundle.expectedDate
-        ? new Date(bundle.expectedDate)
-        : null;
-
   const id = randomUUID();
   await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as typeof db;
@@ -5358,7 +5341,7 @@ async function createSourceDocumentFromWaybill(args: {
       docNumber: doc.docNumber ?? null,
       docDate,
       totalSum: doc.totalSum != null ? doc.totalSum.toString() : null,
-      expectedDate: bundleExpected,
+      expectedDate: await resolveMachineExpectedDate(tx as unknown as Db, bundleId),
       // Наследуем от пакета: накладная из письма остаётся почтовой.
       origin: bundle.origin ?? 'manual_pdf',
       llmProviderId,

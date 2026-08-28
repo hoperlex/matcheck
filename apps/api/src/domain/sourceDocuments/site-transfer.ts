@@ -8,17 +8,16 @@
 // /sync его больше не привозит, tombstone без смены видимости не пишется,
 // reconcile лишнее не удаляет.
 //
-// Поэтому перенос — отдельная операция со своим порядком блокировок:
-//   корневой пакет → дочерние пакеты (по id) → документы (по id).
-// Тот же порядок начинает воркер (fenceBundleAttempt берёт строку пакета раньше
-// любых вставок и создаёт дочерние пакеты под fence родителя), поэтому
-// блокировка корня закрывает и появление новых веток дерева.
+// Блокировки берёт вызывающий (lockMachine, см. machine-lock.ts) — тем же
+// порядком «пакет → документ», что и воркер. Канонические ключи корня тоже
+// пересчитывает он: объект и дата поставки входят в ОДИН ключ, и переносу
+// каждого поля свой пересчёт не полагается.
 //
 // Документ вне публичной загрузки (почта, ЭДО, ручная загрузка, документ без
 // пакета) переносится ПООДИНОЧКЕ и пакет не трогает: там пачка файлов не
 // означает один рейс, и перенос пакета увёл бы и соседей, и будущие файлы.
 
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
   deliverySources,
@@ -27,7 +26,7 @@ import {
   sourceBundles,
   sourceDocuments,
 } from '../../db/schema.js';
-import { bundleIdentityHashOf } from './bundle-key.js';
+import type { MachineLock } from './machine-lock.js';
 
 export type SiteTransferConflict =
   /** По машине уже оформлена приёмка или отгрузка — объект менять нельзя. */
@@ -53,8 +52,8 @@ export type SiteTransferOutcome =
 /**
  * Нарушение уникальности пакета после пересчёта ключей.
  *
- * Оба ограничения означают одно и то же: такой же комплект файлов на целевом
- * объекте уже загружен. Ловится ВНЕ транзакции — 23505 обрывает её целиком, и
+ * Оба ограничения означают одно и то же: такой же комплект файлов в этом scope
+ * уже загружен. Ловится ВНЕ транзакции — 23505 обрывает её целиком, и
  * продолжать перенос всё равно нельзя.
  */
 export function isBundleScopeUniqueViolation(err: unknown): boolean {
@@ -84,109 +83,26 @@ export function isBundleScopeUniqueViolation(err: unknown): boolean {
 }
 
 /**
- * Подменяет объект в каноническом ключе пакета, сохраняя его версию.
- *
- * Пересобирать ключ из колонок нельзя: формат v2 несёт ещё и `modesHash`
- * (раскладка файлов по зонам формы), а он в source_bundles не хранится —
- * пересборка молча превратила бы v2 в v1, и повторная загрузка той же пачки
- * перестала бы узнаваться. Поэтому правим ровно один компонент.
- *
- * Формат (см. idempotencyKeyOf): `<ver>|manual|<site>|<dir>|<contractor>|<mol>|
- * <date>|<contentHash>[|<modesHash>]` — объект третий по счёту.
- */
-export function replaceSiteInIdempotencyKey(key: string, siteId: string | null): string | null {
-  const parts = key.split('|');
-  // Меньше базовой длины — ключ не нашего формата (ручная правка, чужой backfill).
-  // Молча «чинить» его нельзя: получится ключ, которого не построит ни один
-  // канал приёма.
-  if (parts.length < 8) return null;
-  parts[2] = siteId ?? '';
-  return parts.join('|');
-}
-
-/**
  * Переносит документ (и всю его портальную машину) на другой объект.
  *
- * Вызывать ПЕРВЫМ действием транзакции правки документа: блокировки берутся в
- * порядке «пакет → документ», и обратный порядок дал бы взаимную блокировку с
- * воркером. Событий видимости здесь нет намеренно — их пишет вызывающий
- * последними операциями транзакции (см. recordSiteTransfer).
+ * Машина уже заблокирована вызывающим — значения берутся из `lock`, то есть из
+ * строк, прочитанных ПОД блокировкой: значение, прочитанное до транзакции,
+ * могло устареть, и два параллельных переноса A→B и A→C оставили бы один из
+ * объектов без метки скрытия.
+ *
+ * Событий видимости здесь нет намеренно — их пишет вызывающий последними
+ * операциями транзакции (см. recordSiteTransfer).
  */
 export async function transferSite(
   tx: Db,
-  args: { documentId: string; toSiteId: string | null },
+  lock: MachineLock,
+  toSiteId: string | null,
 ): Promise<SiteTransferOutcome> {
-  const { documentId, toSiteId } = args;
-
-  const [head] = await tx
-    .select({ bundleId: sourceDocuments.bundleId })
-    .from(sourceDocuments)
-    .where(eq(sourceDocuments.id, documentId))
-    .limit(1);
-
-  // Корень машины и признак публичной загрузки — до блокировок, чтобы знать, что
-  // именно блокировать. Значения перечитываются ниже уже под блокировкой.
-  const rootRows = head?.bundleId
-    ? await tx.execute<{ root_id: string; is_portal: boolean }>(sql`
-        select coalesce(b.parent_bundle_id, b.id) as root_id,
-               exists (
-                 select 1 from ingest_events ie
-                  where ie.bundle_id = coalesce(b.parent_bundle_id, b.id)
-                    and ie.channel = 'public'
-               ) as is_portal
-          from ${sourceBundles} b
-         where b.id = ${head.bundleId}::uuid
-      `)
-    : [];
-  const root = [...rootRows][0];
-  const machineRootId = root?.is_portal ? root.root_id : null;
-
-  const bundleIds: string[] = [];
-  if (machineRootId) {
-    // 1) корень, 2) дочерние пакеты по возрастанию id — фиксированный порядок
-    // против взаимной блокировки двух переносов внутри одного дерева.
-    await tx.execute(sql`
-      select id from ${sourceBundles} where id = ${machineRootId}::uuid for update
-    `);
-    const children = await tx.execute<{ id: string }>(sql`
-      select id
-        from ${sourceBundles}
-       where parent_bundle_id = ${machineRootId}::uuid
-       order by id
-         for update
-    `);
-    bundleIds.push(machineRootId, ...[...children].map((r) => r.id));
-  }
-
-  // Документы машины — под блокировкой, после пакетов. Технические тоже: из них
-  // растут заглушки и сегменты сборки, и объект у них обязан совпадать.
-  const lockedDocs = machineRootId
-    ? await tx.execute<{ id: string; site_id: string | null; is_technical: boolean }>(sql`
-        select sd.id, sd.site_id, sd.is_technical
-          from ${sourceDocuments} sd
-          join ${sourceBundles} b on b.id = sd.bundle_id
-         where coalesce(b.parent_bundle_id, b.id) = ${machineRootId}::uuid
-         order by sd.id
-           for update of sd
-      `)
-    : await tx.execute<{ id: string; site_id: string | null; is_technical: boolean }>(sql`
-        select sd.id, sd.site_id, sd.is_technical
-          from ${sourceDocuments} sd
-         where sd.id = ${documentId}::uuid
-           for update
-      `);
-  const docs = [...lockedDocs];
-  const self = docs.find((d) => d.id === documentId);
-  if (!self) return { ok: true, transfer: { changed: false } };
-
-  // Объект «откуда» читаем ЗАНОВО, из заблокированной строки: значение,
-  // прочитанное до транзакции, могло устареть, и два параллельных переноса
-  // A→B и A→C оставили бы один из объектов без метки скрытия.
-  const fromSiteId = self.site_id;
+  const fromSiteId = lock.self.siteId;
   if ((fromSiteId ?? null) === (toSiteId ?? null))
     return { ok: true, transfer: { changed: false } };
 
-  const docIds = docs.map((d) => d.id);
+  const docIds = lock.docs.map((d) => d.id);
   const [{ count: deliveriesCount } = { count: 0 }] = await tx
     .select({ count: sql<number>`count(*)::int` })
     .from(deliverySources)
@@ -197,11 +113,11 @@ export async function transferSite(
     .where(inArray(shipmentSources.sourceDocumentId, docIds));
   // Claim пока не занимает никто (enforceGroupClaim в бою не вызывается), но
   // проверка бесплатна и станет значимой в тот день, когда его подключат.
-  const claims = machineRootId
+  const claims = lock.machineRootId
     ? await tx
         .select({ groupId: operationGroupClaims.groupId })
         .from(operationGroupClaims)
-        .where(eq(operationGroupClaims.groupId, machineRootId))
+        .where(eq(operationGroupClaims.groupId, lock.machineRootId))
         .limit(1)
     : [];
   if (deliveriesCount > 0 || shipmentsCount > 0 || claims.length > 0) {
@@ -218,7 +134,7 @@ export async function transferSite(
   // бампаются БЕЗУСЛОВНО — дельта /sync отбирает по updated_at, reconcile по
   // version, а bumpGroupRevision условен (рубильник, непортальный пакет) и
   // молча оказался бы no-op'ом, оставив новый объект без машины.
-  const visibleIds = docs.filter((d) => !d.is_technical).map((d) => d.id);
+  const visibleIds = lock.docs.filter((d) => !d.isTechnical).map((d) => d.id);
   if (visibleIds.length > 0) {
     await tx.execute(sql`
       update ${sourceDocuments}
@@ -231,7 +147,7 @@ export async function transferSite(
        )})
     `);
   }
-  const technicalIds = docs.filter((d) => d.is_technical).map((d) => d.id);
+  const technicalIds = lock.docs.filter((d) => d.isTechnical).map((d) => d.id);
   if (technicalIds.length > 0) {
     // Служебные записи на планшет не едут: version им не нужен, а объект нужен —
     // по нему создаются заглушки и сегменты сборки.
@@ -241,39 +157,11 @@ export async function transferSite(
       .where(inArray(sourceDocuments.id, technicalIds));
   }
 
-  if (machineRootId && bundleIds.length > 0) {
+  if (lock.machineRootId && lock.bundleIds.length > 0) {
     await tx
       .update(sourceBundles)
       .set({ siteId: toSiteId ?? null, updatedAt: new Date() })
-      .where(inArray(sourceBundles.id, bundleIds));
-
-    // Ключи корня несут объект. Без пересчёта повторная отправка того же
-    // комплекта на ПРЕЖНИЙ объект узнала бы этот пакет и дописала файлы в
-    // машину, которая уже стоит на другом объекте.
-    const [rootRow] = await tx
-      .select({
-        idempotencyKey: sourceBundles.idempotencyKey,
-      })
-      .from(sourceBundles)
-      .where(eq(sourceBundles.id, machineRootId))
-      .limit(1);
-    const nextKey = rootRow?.idempotencyKey
-      ? replaceSiteInIdempotencyKey(rootRow.idempotencyKey, toSiteId ?? null)
-      : null;
-    // Ключа нет (legacy-строки до перевода writers) или он чужого формата —
-    // не трогаем ничего: уникальность по ключу частичная и на такие пакеты не
-    // распространяется, а bundle_hash у них исторический.
-    if (nextKey) {
-      await tx
-        .update(sourceBundles)
-        .set({ idempotencyKey: nextKey, bundleHash: bundleIdentityHashOf(nextKey) })
-        .where(
-          and(
-            eq(sourceBundles.id, machineRootId),
-            eq(sourceBundles.idempotencyKey, rootRow!.idempotencyKey!),
-          ),
-        );
-    }
+      .where(inArray(sourceBundles.id, lock.bundleIds));
   }
 
   return {
@@ -282,7 +170,7 @@ export async function transferSite(
       changed: true,
       fromSiteId,
       toSiteId: toSiteId ?? null,
-      rootBundleId: machineRootId,
+      rootBundleId: lock.machineRootId,
       documentIds: visibleIds,
     },
   };
