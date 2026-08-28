@@ -56,6 +56,15 @@ suite('фильтры документов (реальный PostgreSQL)', { tim
   const docLegacy = randomUUID(); // поставщик через counterparties
   const docOther = randomUUID(); // без поставщика, с подрядчиком
   const docTechnical = randomUUID(); // техническая запись пакета
+  // Тройка для проверки ПОРЯДКА и дат поставки: суммы и даты различаются, номер
+  // общим префиксом — чтобы отобрать ровно их поиском по номеру.
+  const docSortLow = randomUUID();
+  const docSortMid = randomUUID();
+  const docSortHigh = randomUUID();
+  // Поставка: один пакет — пять документов. На ней проверяется, что страница
+  // не разрезает машину пополам.
+  const deliveryBundle = randomUUID();
+  const deliveryDocs = Array.from({ length: 5 }, () => randomUUID());
 
   const manager = { id: randomUUID(), role: 'manager', siteId: null } as unknown as AuthUser;
 
@@ -110,12 +119,48 @@ suite('фильтры документов (реальный PostgreSQL)', { tim
     await insertDoc(docLegacy, { supplierOp: supplierOpId });
     await insertDoc(docOther, { contractor: contractorOpId });
     await insertDoc(docTechnical, { supplierDir: supplierDirId, technical: true });
+
+    // parsed_at задаём намеренно «вразнобой» с суммами: порядок по умолчанию
+    // (parsed_at desc) обязан отличаться и от возрастания, и от убывания по
+    // сумме. Иначе тест сортировки был бы зелёным даже с выключенной
+    // сортировкой — просто по совпадению.
+    const insertSortDoc = async (
+      id: string,
+      num: string,
+      total: string,
+      expected: string,
+      parsedAt: string,
+    ) => {
+      await sql`INSERT INTO source_documents
+                  (id, kind, direction, status, origin, site_id, doc_number, doc_date,
+                   total_sum, expected_date, parsed_at, is_technical)
+                VALUES (${id}, 'upd', 'inbound', 'parsed', 'manual_pdf', ${siteId},
+                        ${num}, '2026-08-01', ${total}, ${expected}, ${parsedAt}, false)`;
+    };
+    await insertSortDoc(docSortLow, 'SORT-1', '10.00', '2026-09-01', '2026-08-27T10:02:00Z');
+    await insertSortDoc(docSortMid, 'SORT-2', '20.00', '2026-09-02', '2026-08-27T10:03:00Z');
+    await insertSortDoc(docSortHigh, 'SORT-3', '30.00', '2026-09-03', '2026-08-27T10:01:00Z');
+
+    // Пять документов одной загрузки. Суммы разные и «вперемешку» с одиночками
+    // выше — чтобы сортировка по сумме реально пыталась их растащить.
+    await sql`INSERT INTO source_bundles (id, bundle_hash, direction, status, site_id)
+              VALUES (${deliveryBundle}, ${`hash-${deliveryBundle}`}, 'inbound', 'parsed', ${siteId})`;
+    for (const [i, id] of deliveryDocs.entries()) {
+      await sql`INSERT INTO source_documents
+                  (id, kind, direction, status, origin, site_id, bundle_id, doc_number, doc_date,
+                   total_sum, expected_date, parsed_at, is_technical)
+                VALUES (${id}, 'upd', 'inbound', 'parsed', 'manual_pdf', ${siteId},
+                        ${deliveryBundle}, ${`PACK-${i + 1}`}, '2026-08-01',
+                        ${`${(i + 1) * 7}.00`}, '2026-09-05',
+                        ${`2026-08-27T11:0${i}:00Z`}, false)`;
+    }
   });
 
   afterAll(async () => {
     if (!sql) return;
     await app.close();
     await sql`DELETE FROM source_documents WHERE site_id = ${siteId}`;
+    await sql`DELETE FROM source_bundles WHERE id = ${deliveryBundle}`;
     await sql`DELETE FROM counterparties WHERE id IN (${supplierOpId}, ${contractorOpId})`;
     await sql`DELETE FROM customer_counterparties WHERE id = ${contractorDirId}`;
     await sql`DELETE FROM suppliers WHERE id = ${supplierDirId}`;
@@ -162,6 +207,146 @@ suite('фильтры документов (реальный PostgreSQL)', { tim
       expect(ids).toEqual([]);
     } finally {
       await sql`DELETE FROM customer_counterparties WHERE id = ${orphan}`;
+    }
+  });
+
+  it('без sort порядок прежний — по свежести разбора', async () => {
+    // Опора для тестов ниже: естественный порядок ОТЛИЧАЕТСЯ от порядка по
+    // сумме в обе стороны, поэтому совпадение там означает работу сортировки.
+    const ids = await listIds(`direction=inbound&siteIds=${siteId}&q=SORT-`);
+    expect(ids).toEqual([docSortMid, docSortLow, docSortHigh]);
+  });
+
+  it('сортировка по сумме упорядочивает выдачу, а не только принимается', async () => {
+    // Проверяем сами значения, а не наличие параметра: список долго «принимал»
+    // sort и отдавал прежний порядок, потому что клиент его не слал, и никакой
+    // тест этого не ловил.
+    const asc = await listIds(`direction=inbound&siteIds=${siteId}&q=SORT-&sort=totalSum&order=asc`);
+    expect(asc).toEqual([docSortLow, docSortMid, docSortHigh]);
+
+    const desc = await listIds(
+      `direction=inbound&siteIds=${siteId}&q=SORT-&sort=totalSum&order=desc`,
+    );
+    expect(desc).toEqual([docSortHigh, docSortMid, docSortLow]);
+  });
+
+  it('смещение работает вместе с сортировкой', async () => {
+    // Страница считается окном по УЖЕ отсортированной выборке: без этого
+    // вторая страница показывала бы те же строки, что и первая.
+    const second = await listIds(
+      `direction=inbound&siteIds=${siteId}&q=SORT-&sort=totalSum&order=asc&limit=1&offset=1`,
+    );
+    expect(second).toEqual([docSortMid]);
+  });
+
+  it('фильтр по дате поставки включает обе границы', async () => {
+    const single = await listIds(
+      `direction=inbound&siteIds=${siteId}&q=SORT-&expectedDateFrom=2026-09-02&expectedDateTo=2026-09-02`,
+    );
+    expect(single).toEqual([docSortMid]);
+
+    const range = await listIds(
+      `direction=inbound&siteIds=${siteId}&q=SORT-&expectedDateFrom=2026-09-01&expectedDateTo=2026-09-03&sort=expectedDate&order=asc`,
+    );
+    expect(range).toEqual([docSortLow, docSortMid, docSortHigh]);
+  });
+
+  it('выгрузка повторяет порядок экрана', async () => {
+    const query = `direction=inbound&siteIds=${siteId}&q=SORT-&sort=totalSum&order=desc`;
+    const list = await listIds(query);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/source-documents/export.xlsx?${query}`,
+    });
+    expect(res.statusCode).toBe(200);
+    const ExcelJS = (await import('exceljs')).default;
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(res.rawPayload as unknown as ArrayBuffer);
+    const ws = wb.worksheets[0]!;
+    const numbers: string[] = [];
+    ws.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return; // шапка
+      const value = row.getCell(4).value; // «№ документа»
+      if (typeof value === 'string' && value.startsWith('SORT-')) numbers.push(value);
+    });
+    // Файл обязан повторять экран: раньше схема экспорта не принимала sort и
+    // выгрузка всегда шла по parsed_at desc.
+    expect(numbers).toEqual(['SORT-3', 'SORT-2', 'SORT-1']);
+    expect(list).toEqual([docSortHigh, docSortMid, docSortLow]);
+  });
+
+  it('поставка не разрывается между страницами', async () => {
+    // Страница в три строки на выборке из пяти документов одной машины: режь
+    // мы по документам, на первой оказалось бы три из пяти, а два уехали бы на
+    // вторую — и связь между ними на экране терялась.
+    const query = `direction=inbound&siteIds=${siteId}&q=PACK-&limit=3`;
+    const first = await listIds(`${query}&offset=0`);
+    expect(first).toHaveLength(5);
+    expect(new Set(first)).toEqual(new Set(deliveryDocs));
+
+    // Дальше страниц нет: вся поставка уместилась на первой.
+    const second = await listIds(`${query}&offset=3`);
+    expect(second).toEqual([]);
+  });
+
+  it('сортировка переставляет поставки целиком, а не документы по отдельности', async () => {
+    // В выборке: поставка из пяти (суммы 7..35) и три одиночки (10, 20, 30).
+    // Сортировка по убыванию суммы поставила бы одиночки МЕЖДУ документами
+    // машины, если бы сортировала строки, а не поставки.
+    const ids = await listIds(
+      `direction=inbound&siteIds=${siteId}&sort=totalSum&order=desc&limit=50`,
+    );
+    const packPositions = deliveryDocs
+      .map((id) => ids.indexOf(id))
+      .filter((i) => i >= 0)
+      .sort((a, b) => a - b);
+    expect(packPositions).toHaveLength(5);
+    // Позиции идут подряд — машина осталась цельной.
+    expect(packPositions[4]! - packPositions[0]!).toBe(4);
+  });
+
+  it('документ без пакета — сам себе поставка, а не общая куча', async () => {
+    // У SORT-1..3 нет bundle_id. Если бы ключом поставки был NULL, они слиплись
+    // бы в одну группу и всегда ходили вместе.
+    const ids = await listIds(
+      `direction=inbound&siteIds=${siteId}&q=SORT-&sort=totalSum&order=asc&limit=1&offset=1`,
+    );
+    expect(ids).toEqual([docSortMid]);
+  });
+
+  it('страницы покрывают выборку целиком, без потерь и повторов', async () => {
+    const query = `direction=inbound&siteIds=${siteId}&limit=3`;
+    const first = await app.inject({
+      method: 'GET',
+      url: `/api/v1/source-documents?${query}&offset=0`,
+    });
+    const { total, pageCount } = first.json() as { total: number; pageCount: number };
+
+    const seen: string[] = [];
+    for (let p = 0; p < pageCount; p++) {
+      seen.push(...(await listIds(`${query}&offset=${p * 3}`)));
+    }
+    // Ни одна строка не потерялась между страницами и не показалась дважды.
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).toHaveLength(total);
+  });
+
+  it('кривая дата даёт 400, а не пятисотку из Postgres', async () => {
+    const fields = ['docDateFrom', 'docDateTo', 'expectedDateFrom', 'expectedDateTo'];
+    // Несуществующее число тоже отказ: `2026-02-30` проходит regex, но Date
+    // молча превращает его во второе марта — фильтр отобрал бы другой день.
+    const values = ['не-дата', '2026-02-30', '01.09.2026'];
+    for (const field of fields) {
+      for (const value of values) {
+        for (const path of ['/api/v1/source-documents', '/api/v1/source-documents/export.xlsx']) {
+          const res = await app.inject({
+            method: 'GET',
+            url: `${path}?direction=inbound&siteIds=${siteId}&${field}=${encodeURIComponent(value)}`,
+          });
+          expect(res.statusCode, `${path} ${field}=${value}`).toBe(400);
+        }
+      }
     }
   });
 

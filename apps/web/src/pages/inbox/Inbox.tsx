@@ -33,6 +33,7 @@ import {
   groupRowClass,
 } from '../../shared/ui/documentGroupRows';
 import { isPendingRow, pendingAsRow, pendingStateOf } from './pendingRow';
+import { buildDocumentListParams, type DocumentListParamsInput } from './listParams';
 import type {
   CustomerCounterparty,
   Site,
@@ -525,6 +526,29 @@ export default function InboxPage() {
       }),
   });
 
+  // Условия выборки — один объект на все три запроса страницы: список,
+  // счётчик «Требуют внимания» и выгрузку. Пока каждый собирал query-строку
+  // сам, список тихо растерял половину параметров (даты, сортировку, страницу,
+  // mismatch) — фильтры «работали» только в адресе. См. listParams.ts.
+  const listParamsInput: DocumentListParamsInput = {
+    direction,
+    kind,
+    q: filters.q,
+    contractorIds: filters.contractorIds,
+    supplierIds: filters.supplierIds,
+    siteIds: filters.siteIds,
+    needsAttention,
+    mismatch,
+    docDateFrom,
+    docDateTo,
+    expectedDateFrom: expectedFrom,
+    expectedDateTo: expectedTo,
+    sort: sortField,
+    order: sortOrder,
+    page,
+    pageSize: PAGE_SIZE,
+  };
+
   const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const [twModalOpen, setTwModalOpen] = useState(false);
   const [docsModalOpen, setDocsModalOpen] = useState(false);
@@ -536,28 +560,9 @@ export default function InboxPage() {
   async function handleExportExcel() {
     try {
       setExporting(true);
-      // Ровно те же параметры, что у списка: файл обязан повторять экран.
-      // Без kind и needsAttention выгрузка приносила и заявки, и документы вне
-      // включённой очереди ручной проверки.
-      const qs = new URLSearchParams({ direction });
-      if (kind !== 'all') qs.set('kind', kind);
-      if (filters.contractorIds.length > 0)
-        qs.set('contractorIds', filters.contractorIds.join(','));
-      if (filters.supplierIds.length > 0) qs.set('supplierIds', filters.supplierIds.join(','));
-      if (filters.siteIds.length > 0) qs.set('siteIds', filters.siteIds.join(','));
-      const qTrim = filters.q.trim();
-      if (qTrim) qs.set('q', qTrim);
-      if (needsAttention) qs.set('needsAttention', 'true');
-      if (mismatch) qs.set('mismatch', 'true');
-      if (docDateFrom) qs.set('docDateFrom', docDateFrom);
-      if (docDateTo) qs.set('docDateTo', docDateTo);
-      if (expectedFrom) qs.set('expectedDateFrom', expectedFrom);
-      if (expectedTo) qs.set('expectedDateTo', expectedTo);
-      if (sortField) {
-        qs.set('sort', sortField);
-        qs.set('order', sortOrder);
-      }
-      qs.set('offset', String((page - 1) * PAGE_SIZE));
+      // Ровно те же условия и тот же порядок, что у списка: файл обязан
+      // повторять экран. Окна страницы в выгрузке нет — это весь набор.
+      const qs = buildDocumentListParams(listParamsInput, 'export');
       const { blob, filename } = await apiDownload(
         `/source-documents/export.xlsx?${qs.toString()}`,
       );
@@ -606,17 +611,11 @@ export default function InboxPage() {
   const list = useQuery({
     queryKey: ['source-documents', listQuery],
     queryFn: () => {
-      const qs = new URLSearchParams({ direction });
-      if (kind !== 'all') qs.set('kind', kind);
-      if (listQuery.q) qs.set('q', listQuery.q);
-      if (listQuery.contractor) qs.set('contractorIds', listQuery.contractor);
-      if (listQuery.supplier) qs.set('supplierIds', listQuery.supplier);
-      if (listQuery.site) qs.set('siteIds', listQuery.site);
-      if (needsAttention) qs.set('needsAttention', 'true');
       // Страница, а не «весь набор»: раньше тянулись первые 2000 документов, и
       // всё, что за этой границей, было недостижимо ни фильтром, ни сортировкой
-      // (в приёмке их уже больше двух тысяч).
-      qs.set('limit', String(PAGE_SIZE));
+      // (в приёмке их уже больше двух тысяч). Все условия, порядок и окно
+      // страницы собирает общий билдер — см. listParams.ts.
+      const qs = buildDocumentListParams(listParamsInput, 'list');
       return api.get<List>(`/source-documents?${qs.toString()}`);
     },
     // При смене вкладки/фильтра показываем прошлый список, а новые данные
@@ -788,6 +787,9 @@ export default function InboxPage() {
   // с limit=1 — нужен только total, и считается он по ВСЕЙ выборке, а не по
   // загруженной странице.
   const attentionQuery = useQuery({
+    // Даты и mismatch входят в ключ наравне с остальными фильтрами: без них
+    // при выбранном диапазоне кэш отдавал бы число из другой выборки, и на
+    // кнопке стояло бы больше, чем покажет переход по ней.
     queryKey: [
       'source-documents',
       'attention-count',
@@ -798,15 +800,15 @@ export default function InboxPage() {
         contractor: listQuery.contractor,
         supplier: listQuery.supplier,
         site: listQuery.site,
+        mismatch,
+        docDateFrom,
+        docDateTo,
+        expectedFrom,
+        expectedTo,
       },
     ],
     queryFn: () => {
-      const qs = new URLSearchParams({ direction, needsAttention: 'true', limit: '1' });
-      if (kind !== 'all') qs.set('kind', kind);
-      if (listQuery.q) qs.set('q', listQuery.q);
-      if (listQuery.contractor) qs.set('contractorIds', listQuery.contractor);
-      if (listQuery.supplier) qs.set('supplierIds', listQuery.supplier);
-      if (listQuery.site) qs.set('siteIds', listQuery.site);
+      const qs = buildDocumentListParams(listParamsInput, 'attention');
       return api.get<{ total: number }>(`/source-documents?${qs.toString()}`);
     },
     placeholderData: keepPreviousData,
@@ -1402,6 +1404,10 @@ export default function InboxPage() {
           loading={list.isLoading}
           rowKey="id"
           numbered
+          // Сортировка списка серверная, поэтому по «№» не сортируем: этот
+          // компаратор переставил бы только загруженную страницу, а сам клик
+          // сбрасывал бы сортировку по колонке, выбранную пользователем.
+          numberedSortable={false}
           // Колонок 14 (плюс чекбоксы при массовом выборе): четыре фиксированные,
           // десяти свободным нужно от ~110px. На 1024-1366px скроллим таблицу,
           // а не жмём колонки; на 1920px вид прежний. Три стороны документа с
@@ -1417,9 +1423,24 @@ export default function InboxPage() {
           pagination={{
             current: page,
             pageSize: PAGE_SIZE,
-            total: (list.data?.total ?? 0) + (list.data?.pendingTotal ?? 0),
+            // Страницы «плавающие»: сервер режет список по поставкам, поэтому
+            // строк на странице около PAGE_SIZE, а не ровно столько, и вывести
+            // их число из total нельзя. antd умеет считать страницы только как
+            // total / pageSize — отдаём ему эквивалент, а человеку показываем
+            // настоящее количество документов.
+            total:
+              (list.data?.pageCount ??
+                // Ответ без pageCount (старая сборка API): считаем страницы
+                // как раньше, иначе пагинатор схлопнулся бы в одну страницу.
+                Math.max(
+                  1,
+                  Math.ceil(
+                    ((list.data?.total ?? 0) + (list.data?.pendingTotal ?? 0)) / PAGE_SIZE,
+                  ),
+                )) * PAGE_SIZE,
             showSizeChanger: false,
-            showTotal: (total) => `Всего: ${total}`,
+            showTotal: () =>
+              `Всего: ${(list.data?.total ?? 0) + (list.data?.pendingTotal ?? 0)}`,
           }}
           onChange={handleTableChange}
           numberedOffset={(page - 1) * PAGE_SIZE}

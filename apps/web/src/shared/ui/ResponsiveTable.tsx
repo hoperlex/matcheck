@@ -41,6 +41,7 @@ export function ResponsiveTable<T extends object>({
   onRowClick,
   numbered,
   numberedOffset,
+  numberedSortable = true,
   rowSelection,
   expandable,
   rowClassName,
@@ -64,6 +65,14 @@ export function ResponsiveTable<T extends object>({
   // странице 2 (offset=50) нумерация должна начинаться с 51, а не с 1.
   // Если не задан — нумерация в рамках принятого items (старое поведение).
   numberedOffset?: number;
+  // Можно ли сортировать по «№». По умолчанию да — прежнее поведение.
+  //
+  // Таблицам с СЕРВЕРНОЙ сортировкой нужно false: компаратор ниже переставляет
+  // только загруженную страницу, а сам клик приходит в onChange с ключом
+  // `__num__`, которого нет среди серверных полей, — и обработчик снимает
+  // текущую сортировку. То есть колонка «№» не столько сортирует, сколько
+  // ломает сортировку по соседним колонкам.
+  numberedSortable?: boolean;
   // Необязательный antd rowSelection для массового выбора строк
   // (см. useBulkSelection). В карточном (mobile) режиме игнорируется.
   rowSelection?: TableProps<T>['rowSelection'];
@@ -140,8 +149,14 @@ export function ResponsiveTable<T extends object>({
           // ASC (как пришли с бэка), второй — DESC (инверсия), третий —
           // снимает сортировку. Нужен, чтобы юзер мог одним кликом
           // развернуть список «снизу вверх», не меняя других сортировок.
-          sorter: (a: T, b: T) =>
-            (originalIndex.get(getRowKey(a)) ?? 0) - (originalIndex.get(getRowKey(b)) ?? 0),
+          // При серверной выборке отключается (numberedSortable=false): там
+          // переставлять загруженную страницу нечестно, см. проп выше.
+          ...(numberedSortable
+            ? {
+                sorter: (a: T, b: T) =>
+                  (originalIndex.get(getRowKey(a)) ?? 0) - (originalIndex.get(getRowKey(b)) ?? 0),
+              }
+            : {}),
           // Номер привязан к исходной позиции, а не к текущему индексу в
           // отсортированной таблице. Иначе после DESC-сортировки первая
           // строка получала бы «1» вместо ожидаемых «N, N-1, …» — теряется

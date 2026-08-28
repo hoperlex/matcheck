@@ -378,6 +378,10 @@ suite('принятые файлы в списке документов (реа�
     // Раньше файлы приходили СВЕРХ лимита: на странице оказывалось больше строк,
     // чем помещается, и таблица срезала ровно столько документов, сколько
     // пришло файлов, — увидеть их было негде.
+    //
+    // Теперь окно режется по ПОСТАВКАМ: строк на странице около `limit`, а не
+    // ровно столько. Три файла ниже — один пакет, то есть одна поставка, и
+    // делить её между страницами нельзя (см. domain/group-paging.ts).
     const b = randomUUID();
     await bundle(b);
     for (let i = 0; i < 3; i++) {
@@ -390,21 +394,21 @@ suite('принятые файлы в списке документов (реа�
       docIds.add(await documentFor(docBundle, `s3/wnd-${i}.pdf`));
     }
 
-    // Страница на 2 строки: файлы занимают первые полторы страницы, дальше
-    // начинаются документы.
+    // Страница на 2 строки: поставка из трёх файлов идёт первой и целиком,
+    // дальше по две строки-документа (каждый в своём пакете, то есть сам себе
+    // поставка).
     const p1 = await page(2, 0);
     const p2 = await page(2, 2);
     const p3 = await page(2, 4);
     const p4 = await page(2, 6);
 
-    // На каждой странице ровно столько строк, сколько просили.
-    expect((p1.pendingFiles?.length ?? 0) + p1.items.length).toBe(2);
-    expect((p2.pendingFiles?.length ?? 0) + p2.items.length).toBe(2);
-    expect((p3.pendingFiles?.length ?? 0) + p3.items.length).toBe(2);
-
-    // Файлы кончились на второй странице, документы продолжились с той же.
-    expect(p1.pendingFiles?.length).toBe(2);
-    expect(p2.pendingFiles?.length).toBe(1);
+    // Поставка не разорвана: все три файла на одной странице.
+    expect(p1.pendingFiles?.length).toBe(3);
+    expect(p1.items).toHaveLength(0);
+    // Дальше идут документы — по два, как и просили.
+    expect(p2.items).toHaveLength(2);
+    expect(p2.pendingFiles?.length ?? 0).toBe(0);
+    expect(p3.items).toHaveLength(2);
     expect(p3.pendingFiles?.length ?? 0).toBe(0);
 
     // Счётчики описывают весь список, а не текущую страницу.

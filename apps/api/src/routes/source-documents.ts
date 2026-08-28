@@ -28,6 +28,7 @@ import {
   ImportResultSchema,
   ExtraOnlyBundleListResponseSchema,
   ErrorResponseSchema,
+  CalendarDateSchema,
   getDocumentDisplayStatus,
   getDocumentDisplayStatusLabel,
   isActionableStub,
@@ -109,6 +110,12 @@ import { UPD_PARSE_QUEUE } from '../plugins/queue.js';
 import type { Db } from '../db/client.js';
 import { sourceDocumentVisible } from '../lib/contractor-scope.js';
 import { buildSourceDocumentFilters } from '../domain/sourceDocuments/list-filters.js';
+import { pageOfGroupedRows } from '../domain/sourceDocuments/group-paging.js';
+import {
+  SOURCE_DOCUMENT_SORT_FIELDS,
+  buildSourceDocumentOrderBy,
+  type SortAliasColumns,
+} from '../domain/sourceDocuments/list-order.js';
 import { parseUuidCsv } from '../lib/uuid-csv.js';
 
 const KIND_VALUES = ['upd', 'request', 'transport_waybill', 'os2_transfer'] as const;
@@ -138,21 +145,9 @@ const KindFilterSchema = z
   })
   .optional();
 
-// Волна 1C: поля серверной сортировки Inbox (совпадают с колонками таблицы).
-const SORT_FIELDS = [
-  'kind',
-  'status',
-  'docNumber',
-  'docDate',
-  'expectedDate',
-  'siteName',
-  'contractorName',
-  'buyerName',
-  'consigneeName',
-  'supplierName',
-  'vatSum',
-  'totalSum',
-] as const;
+// Поля серверной сортировки и выражения порядка живут в domain/list-order.ts:
+// список и выгрузка обязаны сортировать одинаково.
+const SORT_FIELDS = SOURCE_DOCUMENT_SORT_FIELDS;
 
 const ListQuerySchema = z.object({
   kind: KindFilterSchema,
@@ -165,10 +160,13 @@ const ListQuerySchema = z.object({
   contractorIds: z.string().optional(),
   supplierIds: z.string().optional(),
   siteIds: z.string().optional(),
-  docDateFrom: z.string().optional(),
-  docDateTo: z.string().optional(),
-  expectedDateFrom: z.string().optional(),
-  expectedDateTo: z.string().optional(),
+  // Строго календарная дата: голая строка уходила в `::date` и роняла запрос
+  // пятисоткой вместо внятного 400. CalendarDateSchema ловит и формат, и
+  // несуществующее число вроде 2026-02-30.
+  docDateFrom: CalendarDateSchema.optional(),
+  docDateTo: CalendarDateSchema.optional(),
+  expectedDateFrom: CalendarDateSchema.optional(),
+  expectedDateTo: CalendarDateSchema.optional(),
   sort: z.enum(SORT_FIELDS).optional(),
   order: z.enum(['asc', 'desc']).optional(),
   // Очередь ручной проверки: документы, где арифметика сошлась, но числа
@@ -872,30 +870,17 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // Стороны документа: покупатель (графа 6) и грузополучатель (графа 4).
       const buyer = alias(counterparties, 'buyer');
       const consignee = alias(counterparties, 'consignee');
-      // Волна 1C — динамическая сортировка (совпадает с клиентскими sorter'ами:
-      // приоритет для kind/status, NULLS LAST, tie-breaker по id для детерминизма).
-      // Без sort — прежний порядок parsed_at DESC (+ id).
-      const dirNulls = drSql.raw(order === 'desc' ? 'desc nulls last' : 'asc nulls last');
-      const kindPriority = drSql`case ${sourceDocuments.kind} when 'upd' then 0 when 'request' then 1 when 'transport_waybill' then 2 when 'os2_transfer' then 3 else 4 end`;
-      const statusPriority = drSql`case ${sourceDocuments.status} when 'processing' then 0 when 'queued' then 1 when 'needs_resolution' then 2 when 'parse_failed' then 3 when 'parsed' then 4 when 'archived' then 5 else 6 end`;
-      const sortExprMap = {
-        kind: kindPriority,
-        status: statusPriority,
-        docNumber: drSql`${sourceDocuments.docNumber}`,
-        docDate: drSql`${sourceDocuments.docDate}`,
-        expectedDate: drSql`${sourceDocuments.expectedDate}`,
-        siteName: drSql`${sites.name}`,
-        contractorName: drSql`${contractor.name}`,
-        // Сортируем по тому же выражению, что показываем.
+      // Порядок — общий с выгрузкой Excel (domain/list-order.ts): приоритеты для
+      // kind/status, NULLS LAST, tie-breaker по id. Сортируем по тем же
+      // выражениям, что показываем.
+      const sortAliases: SortAliasColumns = {
+        siteName: sites.name,
+        contractorName: contractor.name,
         buyerName: drSql`coalesce(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
         consigneeName: drSql`coalesce(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
         supplierName: drSql`coalesce(${supplierDir.name}, ${supplier.name})`,
-        vatSum: drSql`${sourceDocuments.vatSum}`,
-        totalSum: drSql`${sourceDocuments.totalSum}`,
-      } as const;
-      const orderByArgs = sort
-        ? [drSql`${sortExprMap[sort]} ${dirNulls}`, desc(sourceDocuments.id)]
-        : [desc(sourceDocuments.parsedAt), desc(sourceDocuments.id)];
+      };
+      const orderByArgs = buildSourceDocumentOrderBy(sort, order, sortAliases);
       // Принятые файлы без документа — только на первой странице и только
       // менеджеру с админом (тот же круг, что у вкладки «Без документов»: это
       // инструмент разбора, а не витрина для объекта).
@@ -988,9 +973,69 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
                 )[0]?.n ?? 0,
               )
             : 0;
-          const pendingTake = Math.max(0, Math.min(limit, pendingTotal - offset));
-          const docsOffset = Math.max(0, offset - pendingTotal);
-          const docsLimit = limit - pendingTake;
+
+          // Окно страницы считается по ПОСТАВКАМ, а не по документам: пять
+          // УПД, приехавшие одной машиной, не должны разъезжаться по разным
+          // страницам (см. domain/group-paging.ts). Поэтому сначала берём
+          // «скелет» выборки — только id и поставку, в нужном порядке, —
+          // раскладываем его на страницы, и лишь потом читаем полные строки.
+          const docBundle = alias(sourceBundles, 'doc_bundle');
+          const rootBundle = alias(sourceBundles, 'root_bundle');
+          const skeleton = await tx
+            .select({
+              id: sourceDocuments.id,
+              // Поставка — корневой пакет загрузки. Документ без пакета (таких
+              // ~190 из исторических и XML-загрузок) сам себе поставка, иначе
+              // все они слиплись бы в одну гигантскую группу.
+              groupId: drSql<string>`coalesce(${rootBundle.id}::text, ${sourceDocuments.id}::text)`,
+            })
+            .from(sourceDocuments)
+            .leftJoin(docBundle, eq(docBundle.id, sourceDocuments.bundleId))
+            .leftJoin(
+              rootBundle,
+              eq(rootBundle.id, drSql`coalesce(${docBundle.parentBundleId}, ${docBundle.id})`),
+            )
+            // Джоины ровно те же, что у полной выборки: от них зависят
+            // выражения сортировки (имена сторон и объекта).
+            .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
+            .leftJoin(supplierDir, eq(sourceDocuments.supplierDirectoryId, supplierDir.id))
+            .leftJoin(contractor, eq(sourceDocuments.contractorId, contractor.id))
+            .leftJoin(buyer, eq(sourceDocuments.buyerId, buyer.id))
+            .leftJoin(consignee, eq(sourceDocuments.consigneeId, consignee.id))
+            .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
+            .where(where)
+            .orderBy(...orderByArgs);
+
+          // Скелет принятых файлов: тот же ключ поставки, порядок прежний —
+          // свежие сверху. Файл своей поставки встанет внутрь её группы.
+          const pendingSkeleton = pendingAllowed
+            ? await tx.execute<{ item_id: string; group_id: string }>(drSql`
+                select bi.id::text as item_id,
+                       coalesce(b.parent_bundle_id, b.id)::text as group_id
+                  ${pendingFromSql}
+                 order by bi.created_at desc, bi.id
+              `)
+            : [];
+
+          // Файлы идут перед документами, как и раньше: свежая машина, ещё не
+          // разобранная, должна быть видна сверху. Но если её документы уже
+          // появились, файл встаёт внутрь своей поставки — за счёт того, что
+          // группировка идёт по первому появлению ключа.
+          const pageRows = pageOfGroupedRows(
+            [
+              ...[...pendingSkeleton].map((p) => ({
+                id: p.item_id,
+                groupId: p.group_id,
+                kind: 'pending' as const,
+              })),
+              ...skeleton.map((r) => ({ id: r.id, groupId: r.groupId, kind: 'doc' as const })),
+            ],
+            // Клиент листает страницами, поэтому offset всегда кратен limit.
+            Math.floor(offset / limit) + 1,
+            limit,
+          );
+          const pageDocIds = pageRows.rows.filter((r) => r.kind === 'doc').map((r) => r.id);
+          const pagePendingIds = pageRows.rows.filter((r) => r.kind === 'pending').map((r) => r.id);
 
           const rows = await tx
             .select({
@@ -1033,19 +1078,19 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             .leftJoin(consignee, eq(sourceDocuments.consigneeId, consignee.id))
             .leftJoin(responsiblePersons, eq(sourceDocuments.recipientMolId, responsiblePersons.id))
             .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
-            .where(where)
-            .orderBy(...orderByArgs)
-            .limit(docsLimit)
-            .offset(docsOffset);
-          const [{ count } = { count: 0 }] = await tx
-            .select({ count: drSql<number>`count(*)::int` })
-            .from(sourceDocuments)
-            .where(where);
+            // Страницу задал скелет выше — здесь читаем ровно её строки.
+            .where(pageDocIds.length > 0 ? inArray(sourceDocuments.id, pageDocIds) : drSql`false`);
+          // Порядок восстанавливаем по скелету: `in (...)` его не сохраняет.
+          const docOrder = new Map(pageDocIds.map((id, i) => [id, i]));
+          rows.sort((a, b) => (docOrder.get(a.sd.id) ?? 0) - (docOrder.get(b.sd.id) ?? 0));
+          // total — по-прежнему число ДОКУМЕНТОВ: надпись «Всего» на экране
+          // считает документы, а не поставки.
+          const count = skeleton.length;
 
           // Сами строки файлов — из того же окна: смещение общее с запросом,
           // а сколько их влезло, посчитано выше.
           const pendingRows =
-            pendingTake > 0
+            pagePendingIds.length > 0
               ? await tx.execute<{
                   item_id: string;
                   bundle_id: string;
@@ -1075,16 +1120,25 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
                          bi.created_at,
                          (bi.input_s3_key is not null) as stored
                     ${pendingFromSql}
+                     and bi.id::text in ${drSql`(${drSql.join(
+                       pagePendingIds.map((id) => drSql`${id}`),
+                       drSql`, `,
+                     )})`}
                    order by bi.created_at desc, bi.id
-                   limit ${pendingTake} offset ${offset}
                 `)
               : [];
 
-          return { rows, count, pendingRows: [...pendingRows], pendingTotal };
+          return {
+            rows,
+            count,
+            pendingRows: [...pendingRows],
+            pendingTotal,
+            pageCount: pageRows.pageCount,
+          };
         },
         { isolationLevel: 'repeatable read' },
       );
-      const { rows, count, pendingRows, pendingTotal } = snapshot;
+      const { rows, count, pendingRows, pendingTotal, pageCount } = snapshot;
       return {
         items: await Promise.all(
           rows.map(async (r) => {
@@ -1109,6 +1163,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           }),
         ),
         total: count,
+        // Сколько страниц получилось при упаковке по поставкам: пагинатор не
+        // может вывести это из total, потому что страницы плавающие.
+        pageCount,
         ...(pendingAllowed
           ? {
               pendingFiles: pendingRows.map((p) => ({
@@ -1188,11 +1245,17 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // (то, что показывается во вкладке «Ожидаемые» Приёмки/Отгрузки).
       unaccepted: z.coerce.boolean().optional(),
       mismatch: z.coerce.boolean().optional(),
-      docDateFrom: z.string().optional(),
-      docDateTo: z.string().optional(),
-      expectedDateFrom: z.string().optional(),
-      expectedDateTo: z.string().optional(),
+      docDateFrom: CalendarDateSchema.optional(),
+      docDateTo: CalendarDateSchema.optional(),
+      expectedDateFrom: CalendarDateSchema.optional(),
+      expectedDateTo: CalendarDateSchema.optional(),
       needsAttention: z.coerce.boolean().optional(),
+      // Порядок тот же, что на экране: менеджер сортирует по сумме, скачивает
+      // файл — и первым в нём обязан быть тот же документ. Раньше схема эти
+      // параметры не принимала, выгрузка молча шла по parsed_at desc.
+      // limit/offset здесь нет намеренно: файл — весь набор, а не страница.
+      sort: z.enum(SORT_FIELDS).optional(),
+      order: z.enum(['asc', 'desc']).optional(),
     });
 
     app.get(
@@ -1202,7 +1265,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         schema: { querystring: ExportQuerySchema },
       },
       async (req, reply) => {
-        const { direction } = req.query;
+        const { direction, sort, order } = req.query;
         // Тот же набор условий, что у списка (включая скоуп роли) — см.
         // buildSourceDocumentFilters.
         const conditions = await buildSourceDocumentFilters(app, req.query, req.user);
@@ -1234,7 +1297,16 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           .leftJoin(consignee, eq(sourceDocuments.consigneeId, consignee.id))
           .leftJoin(sites, eq(sourceDocuments.siteId, sites.id))
           .where(and(...conditions))
-          .orderBy(desc(sourceDocuments.parsedAt));
+          // Тот же порядок, что у списка — см. domain/list-order.ts.
+          .orderBy(
+            ...buildSourceDocumentOrderBy(sort, order, {
+              siteName: sites.name,
+              contractorName: contractor.name,
+              buyerName: drSql`coalesce(${sourceDocuments.buyerNameRaw}, ${buyer.name})`,
+              consigneeName: drSql`coalesce(${sourceDocuments.consigneeNameRaw}, ${consignee.name})`,
+              supplierName: drSql`coalesce(${supplierDir.name}, ${supplier.name})`,
+            }),
+          );
 
         const sdIds = rows.map((r) => r.sd.id);
         const itemsBySd = new Map<string, (typeof sourceDocumentItems.$inferSelect)[]>();
