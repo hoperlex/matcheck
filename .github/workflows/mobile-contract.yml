@@ -1,0 +1,83 @@
+name: mobile-contract
+
+# Контракт обмена с мобильным приложением: финансовые поля позиций
+# (price / vatRate / vatSum) не должны исчезнуть ни из схем, ни из базы после
+# сохранения операции.
+#
+# Почему отдельный workflow, а не шаг в contracts-drift. Тот следит за
+# соответствием openapi.json схемам и запускается только на изменения
+# packages/contracts. Здесь предмет другой — сохранность данных, приезжающих с
+# планшетов, — и ему нужна живая база.
+#
+# Проверка намеренно узкая: два файла тестов, прогон секунды. Общий набор,
+# ESLint и Redocly сюда не входят — они требуют отдельной уборки, а красный
+# check перестают читать.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/contracts/**'
+      - 'apps/api/src/routes/deliveries.ts'
+      - 'apps/api/src/routes/shipments.ts'
+      - 'apps/api/test/mobile-contract-lock.test.ts'
+      - 'apps/api/test/integration/mobile-financials-roundtrip.int.test.ts'
+      - '.github/workflows/mobile-contract.yml'
+  pull_request:
+    paths:
+      - 'packages/contracts/**'
+      - 'apps/api/src/routes/deliveries.ts'
+      - 'apps/api/src/routes/shipments.ts'
+      - 'apps/api/test/mobile-contract-lock.test.ts'
+      - 'apps/api/test/integration/mobile-financials-roundtrip.int.test.ts'
+      - '.github/workflows/mobile-contract.yml'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    # Круговой тест проверяет строки в базе после upsert: `null` проходит и
+    # схему, и ограничения таблицы, поэтому потерю видно только чтением.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: matcheck_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/matcheck_test
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/matcheck_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Схема таблиц нужна целиком: тест пишет приёмки, отгрузки и их позиции.
+      - name: Migrate test database
+        run: pnpm --filter @matcheck/api exec tsx scripts/migrate.ts
+
+      - name: Contract lock + financial round-trip
+        run: |
+          pnpm --filter @matcheck/api exec vitest run \
+            test/mobile-contract-lock.test.ts \
+            test/integration/mobile-financials-roundtrip.int.test.ts
