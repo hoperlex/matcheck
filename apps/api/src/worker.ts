@@ -94,6 +94,11 @@ import { detectWaybill1t } from './domain/edo/waybill-1t-detect.js';
 import { getDefaultProviderKind } from './domain/llm/registry.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
 import { MIN_DEDUP_CONFIDENCE, validateUpdTotals } from './domain/edo/upd-validation.js';
+import {
+  buildRepairHint,
+  decideSegmentRepair,
+  preserveDocumentIdentity,
+} from './domain/edo/segment-repair-arbiter.js';
 import { deriveUpdParseOutcome } from './domain/edo/upd-outcome.js';
 import { chooseBetterUpdResult, mergeParties } from './domain/edo/upd-result-compare.js';
 import { normalizeM15ZeroTotals } from './domain/edo/m15-normalize.js';
@@ -124,6 +129,7 @@ import { selectUnreferencedS3Keys } from './domain/sourceDocuments/s3-key-usage.
 import { classifyImageKind } from './domain/edo/vision-classifier.js';
 import {
   assemblyDispatchKeyOf,
+  segmentRepairKeyOf,
   bundleDispatchKeyOf,
   documentSecondPassKeyOf,
   dispatchKeyOf,
@@ -152,7 +158,12 @@ import { resolveRootBundle } from './domain/sourceDocuments/bundle-import-regist
 import { llmProviders, llmProviderCredentials } from './db/schema.js';
 import { buildAad, decryptField } from './domain/auth/crypto.js';
 import { repairStuckJobs, STUCK_INTERVAL_MS } from './domain/jobs/stuck-jobs.js';
-import type { SourceStatus, UpdPdfParsed, WaybillDocument } from '@matcheck/contracts';
+import type {
+  SourceStatus,
+  UpdPdfParsed,
+  UpdValidation,
+  WaybillDocument,
+} from '@matcheck/contracts';
 
 // Падение процесса обязано оставлять след в логе и в Sentry — см.
 // lib/fatal-visibility.ts (инцидент 21.08: 854 немых рестарта API).
@@ -566,6 +577,207 @@ async function loadParsedBaseline(sourceDocumentId: string): Promise<UpdPdfParse
 }
 
 /**
+ * Ставит АВТОПОВТОР того же сегмента после расхождения сумм.
+ *
+ * Почему не resolveReparsePlan, которым пользуется кнопка «Распознать
+ * повторно»: он рассчитан на уже опубликованный комплект и отказывает, пока
+ * корневой пакет в `processing` (blocked: 'assembly_busy'). А здесь мы ровно
+ * внутри сборки — то есть через него автоповтор был бы заблокирован всегда.
+ *
+ * КЛЮЧЕВОЕ ОТЛИЧИЕ ОТ queueSecondPass: документ остаётся в `queued`, а не
+ * уходит в терминальный статус. Публикация комплекта ждёт этого сама —
+ * segmentOutcome считает `queued`/`processing` незавершённым, и
+ * tryFinalizeUpdAssembly не публикует ни одного документа группы, пока повтор
+ * не закончит. Иначе комплект успел бы опубликоваться между записью результата
+ * и стартом повтора, и менеджер увидел бы документ, который вот-вот изменится.
+ *
+ * Обратная сторона: повтор ОБЯЗАН довести документ до терминала при любом
+ * исходе, включая падение и исчерпание попыток. Снимок для этого лежит в
+ * second_pass.restore, а подбирает зависшее задание generation-aware recovery.
+ */
+async function queueSegmentRepair(args: {
+  sourceDocumentId: string;
+  segmentId: string;
+  /** Поколение сборки корневого пакета — fencing сегментного задания. */
+  assemblyGeneration: number;
+  segmentGeneration: number;
+  bundleGeneration: number | undefined;
+  reasons: string[];
+  values: Record<string, unknown>;
+  /** Поколение документа: и для fencing, и для ключа повтора. */
+  generation: number;
+  tx: typeof db;
+}): Promise<boolean> {
+  const [current] = await args.tx
+    .select({ secondPass: sourceDocuments.secondPass })
+    .from(sourceDocuments)
+    .where(generationScoped(args.sourceDocumentId, args.generation))
+    .limit(1);
+  // Одна попытка на поколение: третьего прохода не бывает.
+  if (!current || current.secondPass != null) return false;
+
+  await args.tx
+    .update(sourceDocuments)
+    .set({
+      ...args.values,
+      // Документ не выходит из работы — см. KDoc выше.
+      status: 'queued',
+      secondPass: {
+        state: 'queued',
+        mode: 'segment_repair',
+        requestedAt: new Date().toISOString(),
+        reasons: args.reasons,
+        // Куда вернуть документ, если повтор не доедет до конца: терминальный
+        // исход ПЕРВОГО разбора, посчитанный общим путём.
+        restore: {
+          status: args.values.status ?? null,
+          parseErrorCode: args.values.parseErrorCode ?? null,
+          parseErrorDetails: args.values.parseErrorDetails ?? null,
+        },
+      },
+    })
+    .where(generationScoped(args.sourceDocumentId, args.generation));
+
+  await enqueueJob(args.tx, {
+    queue: UPD_PARSE_QUEUE,
+    jobName: 'parse',
+    payload: {
+      sourceDocumentId: args.sourceDocumentId,
+      segmentId: args.segmentId,
+      generation: args.assemblyGeneration,
+      segmentGeneration: args.segmentGeneration,
+      bundleGeneration: args.bundleGeneration,
+      docGeneration: args.generation,
+      pass: 'segment_repair',
+    },
+    dedupeKey: segmentRepairKeyOf(args.segmentId, args.generation),
+  });
+  return true;
+}
+
+/** Снимок для арбитража автоповтора сегмента: строже, чем loadParsedBaseline. */
+export type SegmentRepairBaseline = {
+  parsed: UpdPdfParsed;
+  /** Куда вернуть документ, если кандидат проиграет или повтор упадёт. */
+  restore: {
+    status: SourceStatus;
+    parseErrorCode: string | null;
+    parseErrorDetails: Record<string, unknown> | null;
+  };
+};
+
+/**
+ * Снимок сохранённого разбора для арбитража повтора сегмента.
+ *
+ * Почему не loadParsedBaseline. Тот снимок делался для второго прохода
+ * одиночного пути, где важно было не потерять шапку, и ради простоты он
+ * жёстко ставит `itemsCount: null` и `supplier: null`, а `rowNo` не переносит
+ * вовсе. Для арбитража это недопустимо: покрытие сравнивается по типам
+ * проверок, и обеднённый baseline потерял бы `items_count` и `items_sequence`
+ * — кандидат «выигрывал» бы у снимка, а не у настоящего разбора. Поставщик
+ * нужен по той же причине: без него защита идентичности не смогла бы
+ * отличить «кандидат дозаполнил пустое» от «кандидат подменил чужим».
+ */
+export async function loadSegmentRepairBaseline(
+  sourceDocumentId: string,
+): Promise<SegmentRepairBaseline | null> {
+  const [doc] = await db
+    .select()
+    .from(sourceDocuments)
+    .where(eq(sourceDocuments.id, sourceDocumentId))
+    .limit(1);
+  if (!doc) return null;
+
+  const items = await db
+    .select()
+    .from(sourceDocumentItems)
+    .where(eq(sourceDocumentItems.sourceDocumentId, sourceDocumentId))
+    .orderBy(sourceDocumentItems.lineNo);
+
+  // «Всего наименований» нигде не хранится отдельной колонкой — единственный
+  // его след остался в снимке валидации, в expected проверки items_count.
+  const checks = ((doc.validation as UpdValidation | null)?.checks ??
+    []) as UpdValidation['checks'];
+  const declaredCount = checks.find(
+    (c) => c.name === 'items_count' && c.skipReason == null,
+  )?.expected;
+
+  // Куда вернуть документ, если кандидат проиграет. Берём СНИМОК, сделанный
+  // при постановке повтора, а не текущие поля: сейчас документ намеренно лежит
+  // в `queued` (публикация комплекта ждёт повтора), и «оставить как есть»
+  // означало бы оставить его в работе навсегда — комплект не опубликуется
+  // никогда, потому что segmentOutcome считает queued незавершённым.
+  const savedRestore = (
+    doc.secondPass as {
+      restore?: {
+        status?: SourceStatus | null;
+        parseErrorCode?: string | null;
+        parseErrorDetails?: Record<string, unknown> | null;
+      } | null;
+    } | null
+  )?.restore;
+
+  let supplier: UpdPdfParsed['supplier'] = null;
+  if (doc.supplierDirectoryId) {
+    const [row] = await db
+      .select({ inn: suppliers.inn, name: suppliers.name })
+      .from(suppliers)
+      .where(eq(suppliers.id, doc.supplierDirectoryId))
+      .limit(1);
+    if (row) supplier = { inn: row.inn || null, kpp: null, name: row.name };
+  }
+
+  const num = (v: string | null): number | null => (v == null ? null : Number(v));
+  return {
+    parsed: {
+      docNumber: doc.docNumber,
+      docDate: doc.docDate ? doc.docDate.toISOString().slice(0, 10) : null,
+      totalSum: num(doc.totalSum),
+      vatSum: num(doc.vatSum),
+      itemsCount: typeof declaredCount === 'number' ? declaredCount : null,
+      supplier,
+      recipient: doc.buyerNameRaw
+        ? { inn: doc.buyerInnRaw, kpp: null, name: doc.buyerNameRaw }
+        : null,
+      consignee: doc.consigneeNameRaw
+        ? { inn: doc.consigneeInnRaw, kpp: null, name: doc.consigneeNameRaw }
+        : null,
+      items: items.map((i) => ({
+        nameRaw: i.nameRaw,
+        qty: num(i.qty),
+        unit: i.unit,
+        price: num(i.price),
+        sum: num(i.sum),
+        vatRate: num(i.vatRate),
+        vatSum: num(i.vatSum),
+        volumeM3: num(i.volumeM3),
+        massKg: num(i.massKg),
+        volumeConfidence: (i.volumeConfidence as 'low' | 'medium' | 'high' | null) ?? null,
+        groupName: i.groupName,
+        // Номер из бланка — по нему валидатор проверяет целостность списка.
+        rowNo: i.rowNo ?? null,
+      })),
+      confidence: doc.llmConfidence != null ? Number(doc.llmConfidence) : 0,
+    } as UpdPdfParsed,
+    restore: savedRestore?.status
+      ? {
+          status: savedRestore.status,
+          parseErrorCode: savedRestore.parseErrorCode ?? null,
+          parseErrorDetails: savedRestore.parseErrorDetails ?? null,
+        }
+      : {
+          // Снимка нет — документ поставлен на повтор версией кода без него.
+          // Тогда единственное разумное «куда вернуть» — текущие поля, но статус
+          // берём терминальный: в момент повтора документ лежит в queued, и
+          // вернуть его туда же значило бы подвесить комплект навсегда.
+          status: 'parsed' as SourceStatus,
+          parseErrorCode: doc.parseErrorCode ?? null,
+          parseErrorDetails: (doc.parseErrorDetails as Record<string, unknown> | null) ?? null,
+        },
+  };
+}
+
+/**
  * Обработчик задания очереди UPD_PARSE_QUEUE.
  *
  * Экспортируется ради интеграционных тестов границы сохранения (какие поля
@@ -637,6 +849,11 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         }
       : null;
 
+  // Автоповтор сегмента: то же задание, но результат проходит арбитраж и
+  // применяется, только если доказуемо лучше сохранённого разбора.
+  const segmentRepairJob =
+    segmentJob != null && 'pass' in job.data && job.data.pass === 'segment_repair';
+
   if (!job.data.sourceDocumentId || (!job.data.s3Key && !segmentJob)) {
     logger.warn({ jobId: job.id, data: job.data }, 'unknown job payload — skipping');
     return;
@@ -684,6 +901,11 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // Второй проход сравнивает свой результат с уже сохранённым, поэтому снимок
   // делается ДО того, как документ уйдёт в processing и начнётся разбор.
   const baseline = secondPassJob ? await loadParsedBaseline(sourceDocumentId) : null;
+  // У повтора сегмента снимок свой: loadParsedBaseline теряет itemsCount,
+  // rowNo и поставщика, а арбитраж сравнивает именно покрытие проверок.
+  const repairBaseline = segmentRepairJob
+    ? await loadSegmentRepairBaseline(sourceDocumentId)
+    : null;
 
   // Переводим в processing + считаем attempt. Пустой returning() значит одно из
   // двух: документ удалён через DELETE /:id либо его успели переразобрать, и
@@ -763,6 +985,11 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         sourceDocumentId,
         bundleId: segmentContext.rootId,
         segmentIndex: segmentContext.segmentIndex,
+        // На повторе называем модели её же расхождение. Без этого повтор — тот
+        // же запрос с той же картинкой, и ответ, скорее всего, повторится.
+        // Никакой арифметики в подсказке: требование «умножь и сверь» ломало
+        // чтение колонок (версии промпта v15/v16), поэтому здесь только факт.
+        ...(repairBaseline ? { repairHint: buildRepairHint(repairBaseline.parsed) } : {}),
       });
       parsed = r.parsed;
       llmProviderId = r.llmProviderId;
@@ -1458,6 +1685,78 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     log.info({ reasons: decision.reasons }, 'vision second pass better than baseline — replacing');
   }
 
+  // ─── Автоповтор сегмента: принимаем результат только при доказанном улучшении ──
+  //
+  // Стоит ДО работы со справочниками намеренно: отклонённый кандидат не должен
+  // оставлять после себя ни поставщика, ни материалов. На № 53 первый разбор
+  // уже завёл в справочник два одинаковых «ВРУ2.2(ПОН)» — повторять это на
+  // каждой неудачной попытке нельзя.
+  if (segmentRepairJob && repairBaseline) {
+    const repairMode = loadEnv().UPD_SEGMENT_REPAIR;
+    const verdict = decideSegmentRepair(repairBaseline.parsed, parsed);
+    // В shadow победивший кандидат НЕ применяется: решение только записывается,
+    // чтобы его можно было разобрать до того, как хоть один боевой документ
+    // изменится.
+    const applied = verdict.accept && repairMode === 'on';
+    if (!applied) {
+      // Документ обязан выйти из работы: перед повтором он оставлен в `queued`,
+      // и без этого UPDATE комплект не опубликуется никогда — публикация ждёт
+      // терминального статуса всех сегментов.
+      await db
+        .update(sourceDocuments)
+        .set({
+          status: repairBaseline.restore.status,
+          parseErrorCode: repairBaseline.restore.parseErrorCode,
+          parseErrorDetails: repairBaseline.restore.parseErrorDetails,
+          secondPass: {
+            state: 'done',
+            mode: 'segment_repair',
+            outcome: verdict.accept ? 'shadow_would_replace' : 'kept_baseline',
+            reasons: verdict.reasons,
+            candidateItems: parsed.items.length,
+            baselineItems: repairBaseline.parsed.items.length,
+            finishedAt: new Date().toISOString(),
+            restore: repairBaseline.restore,
+          },
+          processedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(generationScoped(sourceDocumentId, jobGeneration));
+      log.info(
+        {
+          mode: repairMode,
+          accept: verdict.accept,
+          reasons: verdict.reasons,
+          baselineItems: repairBaseline.parsed.items.length,
+          candidateItems: parsed.items.length,
+        },
+        verdict.accept
+          ? 'segment repair: кандидат лучше, но режим shadow — оставлен прежний разбор'
+          : 'segment repair: кандидат не лучше — оставлен прежний разбор',
+      );
+      await notifySourceDocumentUpdated(sourceDocumentId);
+      if (segmentContext) {
+        await tryFinalizeUpdAssembly(segmentContext.rootId, segmentContext.generation, log, {
+          subBundleId: segmentContext.subBundleId,
+          bundleGeneration: segmentContext.bundleGeneration,
+        });
+      }
+      return;
+    }
+    // Кандидат победил — но реквизиты остаются от первого разбора: повтор
+    // затевался ради строк, а не ради шапки, и подменять уже прочитанный номер
+    // или поставщика он не вправе.
+    parsed = preserveDocumentIdentity(repairBaseline.parsed, parsed);
+    log.info(
+      {
+        reasons: verdict.reasons,
+        baselineItems: repairBaseline.parsed.items.length,
+        candidateItems: parsed.items.length,
+      },
+      'segment repair: кандидат лучше — заменяем разбор',
+    );
+  }
+
   // Поставщик — сравниваем со справочником `suppliers` (CRUD в Справочниках).
   // Если нашли по ИНН/fuzzy name — возвращается id найденной записи; не нашли
   // — INSERT в справочник (счётчик «Поставщики» вырастает). В counterparties
@@ -1626,6 +1925,23 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   const wantSecondPass =
     !secondPassJob && weakReasons.length > 0 && SECOND_PASS_MODES.has(parseMode);
 
+  // Автоповтор сегмента. Условие расхождения — hasMismatch, а НЕ
+  // hasMoneyMismatch: второй исключает items_count, и документ, где в бланке
+  // «Всего наименований: 3», распознано 2 строки, а итог отсутствует или
+  // случайно сошёлся, повтора бы не получил — то есть ровно класс потери строк
+  // прошёл бы мимо. Практического прироста это почти не даёт («Всего
+  // наименований» печатают редко), но именно этот класс мы и чиним.
+  //
+  // Область — только первичный разбор сегмента: ручной повтор опубликованного
+  // комплекта (segmentJob.reparse) сюда не входит, там нужен учёт приёмок и
+  // отгрузок, которого у этой фазы нет.
+  const wantSegmentRepair =
+    !segmentRepairJob &&
+    segmentContext != null &&
+    segmentJob?.reparse !== true &&
+    loadEnv().UPD_SEGMENT_REPAIR !== 'off' &&
+    preValidation.hasMismatch;
+
   // Документ без даты: проверка на дубль по паре «поставщик + номер».
   //
   // Раньше такой документ до `parsed` не доходил вовсе, и вопрос не стоял.
@@ -1736,7 +2052,6 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       'dedup skipped: confidence below MIN_DEDUP_CONFIDENCE',
     );
   }
-
 
   // Толлинг-М-15 без стоимостной части (итог прописью «Ноль»): доопределяем
   // totalSum/vatSum в 0, чтобы документ не падал в partial_parse из-за
@@ -1924,6 +2239,18 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           },
         }
       : {}),
+    // То же для повтора сегмента: дошёл сюда — значит выиграл арбитраж.
+    // Без отметки recovery посчитал бы попытку незавершённой и поставил заново.
+    ...(segmentRepairJob
+      ? {
+          secondPass: {
+            state: 'done',
+            mode: 'segment_repair',
+            outcome: 'replaced',
+            finishedAt: new Date().toISOString(),
+          },
+        }
+      : {}),
   };
   // Материалы заводим ДО транзакции: findOrCreateMaterial ходит в справочник на
   // каждую позицию, и внутри транзакции это растянуло бы её на все вставки.
@@ -1966,8 +2293,23 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // почти незаметно (терять было нечего), но для повтора — ровно тот исход,
   // ради предотвращения которого кнопка и делается.
   let secondPassQueued = false;
+  let segmentRepairQueued = false;
   await db.transaction(async (tx) => {
     const txDb = tx as unknown as typeof db;
+
+    if (wantSegmentRepair && segmentContext && segmentJob) {
+      segmentRepairQueued = await queueSegmentRepair({
+        sourceDocumentId,
+        segmentId: segmentJob.segmentId,
+        assemblyGeneration: segmentContext.generation,
+        segmentGeneration: segmentJob.dispatchGeneration,
+        bundleGeneration: segmentContext.bundleGeneration,
+        reasons: preValidation.checks.filter((c) => !c.ok).map((c) => c.name),
+        values: headerValues,
+        generation: jobGeneration,
+        tx: txDb,
+      });
+    }
 
     if (wantSecondPass) {
       secondPassQueued = await queueSecondPass({
@@ -1981,7 +2323,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       });
     }
 
-    if (!secondPassQueued) {
+    if (!secondPassQueued && !segmentRepairQueued) {
       const [saved] = await txDb
         .update(sourceDocuments)
         .set(headerValues)
@@ -2067,6 +2409,17 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     log.warn(
       { reasons: weakReasons, parseMode },
       'weak parse — vision second pass queued as separate job',
+    );
+  }
+  if (segmentRepairQueued) {
+    log.info(
+      {
+        mode: loadEnv().UPD_SEGMENT_REPAIR,
+        failed: preValidation.checks.filter((c) => !c.ok).map((c) => c.name),
+        items: parsed.items.length,
+        totalSum: parsed.totalSum,
+      },
+      'segment repair: расхождение валидации — повтор поставлен отдельным заданием',
     );
   }
 
@@ -5875,6 +6228,81 @@ worker.on('failed', async (job, err) => {
       );
       if (rolledBack) {
         await notifySourceDocumentUpdated(docId);
+        return;
+      }
+    }
+
+    // Автоповтор сегмента исчерпал попытки. Документ возвращается к разбору
+    // ПЕРВОГО захода, а не получает parse_failed: первый результат был
+    // пригодным (просто с расхождением сумм), и терять его из-за неудачи
+    // необязательного уточнения нельзя — иначе распознанная УПД исчезла бы с
+    // портала и планшета. Ветка стоит раньше общей сегментной по той же
+    // причине, по которой раньше стоит откат ручного повтора.
+    if (
+      'pass' in job.data &&
+      job.data.pass === 'segment_repair' &&
+      job.data.sourceDocumentId &&
+      job.data.segmentId
+    ) {
+      const docId = job.data.sourceDocumentId;
+      const [cur] = await db
+        .select({ secondPass: sourceDocuments.secondPass })
+        .from(sourceDocuments)
+        .where(generationScoped(docId, failedDocGeneration))
+        .limit(1);
+      const restore = (
+        cur?.secondPass as {
+          restore?: {
+            status?: SourceStatus | null;
+            parseErrorCode?: string | null;
+            parseErrorDetails?: Record<string, unknown> | null;
+          } | null;
+        } | null
+      )?.restore;
+      if (restore?.status) {
+        await db
+          .update(sourceDocuments)
+          .set({
+            status: restore.status,
+            parseErrorCode: restore.parseErrorCode ?? null,
+            parseErrorDetails: restore.parseErrorDetails ?? null,
+            secondPass: {
+              state: 'done',
+              mode: 'segment_repair',
+              outcome: 'failed',
+              reasons: [err.message],
+              finishedAt: new Date().toISOString(),
+              restore,
+            },
+            processedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(generationScoped(docId, failedDocGeneration));
+        logger.warn(
+          { sourceDocumentId: docId, err: err.message },
+          'segment repair: попытка не выполнилась — восстановлен прежний разбор',
+        );
+        await notifySourceDocumentUpdated(docId);
+        const [seg] = await db
+          .select({
+            rootId: bundleSegments.bundleId,
+            generation: bundleSegments.generation,
+            subBundleId: sourceDocuments.bundleId,
+          })
+          .from(bundleSegments)
+          .innerJoin(sourceDocuments, eq(sourceDocuments.id, bundleSegments.sourceDocumentId))
+          .where(eq(bundleSegments.id, job.data.segmentId))
+          .limit(1);
+        if (seg) {
+          await tryFinalizeUpdAssembly(
+            seg.rootId,
+            seg.generation,
+            logger,
+            job.data.bundleGeneration !== undefined && seg.subBundleId
+              ? { subBundleId: seg.subBundleId, bundleGeneration: job.data.bundleGeneration }
+              : undefined,
+          );
+        }
         return;
       }
     }

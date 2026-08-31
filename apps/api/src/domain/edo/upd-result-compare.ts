@@ -87,9 +87,9 @@ function itemsCountMatches(p: UpdPdfParsed): boolean {
  *
  * Отсюда правило: сравнивать провалы можно только при НЕ МЕНЬШЕМ покрытии.
  */
-type CheckProfile = Map<string, { applicable: number; failed: number }>;
+export type CheckProfile = Map<string, { applicable: number; failed: number }>;
 
-function checkProfile(p: UpdPdfParsed): CheckProfile {
+export function checkProfile(p: UpdPdfParsed): CheckProfile {
   const v = validateUpdTotals({
     totalSum: p.totalSum ?? null,
     vatSum: p.vatSum ?? null,

@@ -100,6 +100,41 @@ const manyProblems = makeDetail({
   })),
 });
 
+// УПД № 53: три строки в бланке, распознаны две — сумма позиций меньше итога
+// ровно на потерянную строку. Знак разницы и есть подсказка менеджеру.
+const lostLine = makeDetail({
+  checks: [
+    {
+      name: 'sum_total',
+      scope: 'document',
+      expected: 2557288,
+      actual: 1513703,
+      // diff беззнаковый: валидатор пишет туда Math.abs, и направление по нему
+      // не восстановить — его считает сама карточка.
+      diff: 1043585,
+      tolerance: 0.02,
+      ok: false,
+    },
+  ],
+  warnings: [],
+});
+
+// Обратный случай, самый частый на бою: строка задвоилась при склейке копий.
+const doubledLine = makeDetail({
+  checks: [
+    {
+      name: 'sum_total',
+      scope: 'document',
+      expected: 1000000,
+      actual: 1500000,
+      diff: 500000,
+      tolerance: 0.02,
+      ok: false,
+    },
+  ],
+  warnings: [],
+});
+
 const manyWarningsOnly = makeDetail({
   checks: [],
   warnings: Array.from({ length: 9 }, (_, i) => ({
@@ -235,5 +270,27 @@ describe('карточка документа — много расхожден�
     fireEvent.click(screen.getByRole('button', { name: /Показать/ }));
     expect(screen.getByText('Проверьте строки по документу')).toBeTruthy();
     expect(screen.getByText(/цена взята с НДС.*\(строка 1\)/)).toBeTruthy();
+  });
+});
+
+describe('карточка документа — что значит расхождение сумм', () => {
+  it('сумма позиций меньше итога: названа недостача и её причина', async () => {
+    window.localStorage.setItem(VALIDATION_LS_KEY, 'expanded');
+    state.detail = lostLine;
+    open();
+
+    expect(await screen.findByText('Расхождения в суммах')).toBeTruthy();
+    expect(
+      screen.getByText(/не хватает 1 043 585,00 ₽, вероятно, строка не распозналась/),
+    ).toBeTruthy();
+  });
+
+  it('сумма позиций больше итога: названы лишние деньги и задвоение', async () => {
+    window.localStorage.setItem(VALIDATION_LS_KEY, 'expanded');
+    state.detail = doubledLine;
+    open();
+
+    expect(await screen.findByText('Расхождения в суммах')).toBeTruthy();
+    expect(screen.getByText(/лишние 500 000,00 ₽, вероятно, строка задвоилась/)).toBeTruthy();
   });
 });

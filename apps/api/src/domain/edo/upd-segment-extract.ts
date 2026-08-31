@@ -73,6 +73,15 @@ export async function extractUpdSegment(
     // температуру. В бою не передаётся — тогда берётся промпт из БД, как и
     // раньше. Тот же механизм, что у parseUpdVision.
     promptOverride?: PromptOverride;
+    /**
+     * Подсказка автоповтора, ДОПИСЫВАЕМАЯ к активному промпту.
+     *
+     * Именно дописываемая, а не подменяющая: promptOverride возвращает свой
+     * текст ВМЕСТО активной версии (см. resolvePrompt), и через него повтор
+     * потерял бы всю действующую инструкцию. Здесь же нужно обратное — тот же
+     * промпт плюс факт, что прошлый ответ не сошёлся с итогом документа.
+     */
+    repairHint?: string;
   },
 ): Promise<SegmentExtractResult> {
   if (pages.length === 0) throw new Error('сегмент без страниц');
@@ -116,7 +125,8 @@ export async function extractUpdSegment(
     promptMeta.content +
     '\n\n# КРИТИЧНО: формат ответа\n' +
     'Верни ровно ОДИН JSON-объект на верхнем уровне ({"docNumber":..., "items":[...]}).\n' +
-    'НЕ оборачивай его в массив. Ответ должен начинаться с символа `{`, а НЕ с `[`.';
+    'НЕ оборачивай его в массив. Ответ должен начинаться с символа `{`, а НЕ с `[`.' +
+    (ctx.repairHint ? '\n\n' + ctx.repairHint : '');
 
   const runOneAttempt = async (attempt: number): Promise<SegmentExtractResult> => {
     const startedAt = Date.now();

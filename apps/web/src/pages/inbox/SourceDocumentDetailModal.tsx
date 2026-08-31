@@ -146,7 +146,29 @@ function describeCheck(c: UpdCheck): string {
     }[c.name] || c.name;
   const exp = c.expected != null ? c.expected.toFixed(2) : '—';
   const act = c.actual != null ? c.actual.toFixed(2) : '—';
-  return `${name} (${where}): ожидается ${exp}, по факту ${act}`;
+  return `${name} (${where}): ожидается ${exp}, по факту ${act}${explainGap(c)}`;
+}
+
+/**
+ * Что расхождение значит на практике: не хватает строки или строка задвоилась.
+ *
+ * Само по себе «ожидается 2 557 288, по факту 1 513 703» требует от менеджера
+ * вычесть одно из другого и догадаться, что за этим стоит. Знак разницы говорит
+ * прямо: меньше итога — позицию потеряли при распознавании, больше — задвоили.
+ *
+ * Направление считается как actual − expected, а НЕ берётся из поля `diff`:
+ * оно беззнаковое, валидатор пишет туда Math.abs (см. upd-validation.ts).
+ */
+function explainGap(c: UpdCheck): string {
+  if (c.scope !== 'document') return '';
+  if (c.name !== 'sum_total' && c.name !== 'vat_total') return '';
+  if (c.expected == null || c.actual == null) return '';
+  const gap = c.actual - c.expected;
+  if (gap === 0) return '';
+  const amount = formatMoneyRu(Math.abs(gap));
+  return gap < 0
+    ? ` — не хватает ${amount}, вероятно, строка не распозналась`
+    : ` — лишние ${amount}, вероятно, строка задвоилась`;
 }
 
 /**
