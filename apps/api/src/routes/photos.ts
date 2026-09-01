@@ -34,6 +34,10 @@ import {
 } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { recognizePhotoItems } from '../domain/photos/recognize.js';
+import { recognizePhotoUpd } from '../domain/photos/recognize-upd.js';
+import { classifyImageKind } from '../domain/edo/vision-classifier.js';
+import { MIN_DEDUP_CONFIDENCE } from '../domain/edo/upd-validation.js';
+import { loadEnv } from '../lib/env.js';
 import { buildExistingPhotoPresign } from '../domain/photos/presign-existing.js';
 import { publishEvent } from './events.js';
 import { FOREIGN_SITE_RESPONSE } from '../domain/operations/foreign-site.js';
@@ -1100,6 +1104,19 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
     },
   );
 
+  // ── Бюджет времени на синхронное распознавание ────────────────────────
+  //
+  // Запрос ждут снаружи: клиент отваливается через 610 000 мс
+  // (PhotoDocumentPreview), сервер — через requestTimeout 660 000 мс. Внутри
+  // же теперь может быть до трёх вызовов модели подряд: классификация (до 180
+  // 000 мс по умолчанию), УПД-разбор (VISION_TOTAL_TIMEOUT_MS = 240 000) и
+  // фолбэк на прежний промпт (прошитые 600 000). Сумма — 1 020 000 мс, вдвое
+  // больше клиентского терпения: соединение оборвалось бы, не сохранив ничего.
+  //
+  // Поэтому общий дедлайн на весь обработчик, короткий лимит классификатору
+  // (ему хватает: один снимок, ≤200 токенов ответа) и остаток бюджета —
+  // фолбэку.
+
   // ── Распознавание материалов из фото-документа ────────────────────────
   // Используется split-view модалкой в Принятых (клик на фото с
   // kind='document'). Логика:
@@ -1205,13 +1222,115 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         ext === 'heif' ? 'image/heif' :
         'image/jpeg';
 
+      // Развилка по типу документа (PHOTO_RECOGNIZE_UPD_ROUTE).
+      //
+      // На этих фото не только УПД: транспортные накладные, ОС-2, М-15,
+      // рукописные. Терпимый промпт recognize.ts написан ровно для них и с
+      // ними справляется; съезжает он на УПД — берёт количество из графы 2
+      // («Код по ОКЕИ»), цену из подграфы «в одном месте». Правила против
+      // этого есть в активном УПД-промпте, поэтому УПД уходит туда, а
+      // остальное остаётся как было.
+      //
+      // Опереться на docForm из ответа самого промпта нельзя: за 30 дней он
+      // вернул 'other' в 12 024 случаях из 13 444 и УПД как класс не выделяет.
+      const label = `photo:${req.params.id}`;
+      const deadlineAt = Date.now() + PHOTO_RECOGNIZE_BUDGET_MS;
+      // Результат УПД-ветки, не прошедший порог: пустой список или низкая
+      // уверенность. Держим отдельно — если на фолбэк не останется времени,
+      // отдать слабый разбор лучше, чем оборвать запрос без ответа.
+      let weakUpd: Awaited<ReturnType<typeof recognizePhotoUpd>> | null = null;
+
+      if (loadEnv().PHOTO_RECOGNIZE_UPD_ROUTE) {
+        const cls = await classifyImageKind(buffer, mimeType, {
+          sourceDocumentId: null,
+          label,
+          timeoutMs: PHOTO_CLASSIFY_TIMEOUT_MS,
+        });
+        // null («не смогли решить»), низкая уверенность и любой не-УПД —
+        // прежний путь. Классификатор ошибок не бросает по построению.
+        if (cls && cls.kind === 'upd' && cls.confidence >= MIN_DEDUP_CONFIDENCE) {
+          try {
+            const upd = await recognizePhotoUpd({ buffer, mimeType, label });
+            if (upd.items.length > 0 && (upd.confidence ?? 0) >= MIN_DEDUP_CONFIDENCE) {
+              const saved = await upsertRecognition(app, found.kind, req.params.id, {
+                status: 'done',
+                items: upd.items,
+                docForm: 'upd',
+                docNumber: upd.docNumber,
+                docDate: upd.docDate,
+                totalSum: upd.totalSum,
+                confidence: upd.confidence,
+                model: upd.model,
+                errorMessage: null,
+                parser: 'upd_vision',
+                vatSum: upd.vatSum,
+                itemsCount: upd.itemsCount,
+                validation: upd.validation,
+              });
+              return saved;
+            }
+            // Пусто или неуверенно — не сохраняем: терпимый промпт на кривом
+            // кадре нередко извлекает то, что строгий пропустил.
+            weakUpd = upd;
+            req.log.warn(
+              { photoId: req.params.id, items: upd.items.length, confidence: upd.confidence },
+              'photo upd route: слабый результат, фолбэк на прежний промпт',
+            );
+          } catch (err) {
+            // parseUpdVision бросает при ошибке провайдера, битом JSON, Zod и
+            // таймауте. Это не повод оставить менеджера без разбора вовсе.
+            req.log.warn({ err, photoId: req.params.id }, 'photo upd route failed, фолбэк');
+          }
+        }
+      }
+
       // Используем отдельный, более терпимый промпт под split-view
       // (domain/photos/recognize.ts) — он не требует жёсткой классификации
       // формы и лучше работает на наклонных фото и нестандартных
       // накладных, чем parseWaybillBatch.
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs < PHOTO_FALLBACK_MIN_MS) {
+        // Бюджета на второй вызов не осталось. Отдаём то, что есть: слабый
+        // разбор УПД-ветки — если он был, иначе честная ошибка. Начать вызов
+        // на 600 с здесь значило бы перевалить за клиентские 610 с и оборвать
+        // соединение, не сохранив ничего.
+        if (weakUpd) {
+          return await upsertRecognition(app, found.kind, req.params.id, {
+            status: 'done',
+            items: weakUpd.items,
+            docForm: 'upd',
+            docNumber: weakUpd.docNumber,
+            docDate: weakUpd.docDate,
+            totalSum: weakUpd.totalSum,
+            confidence: weakUpd.confidence,
+            model: weakUpd.model,
+            errorMessage: null,
+            parser: 'upd_vision',
+            vatSum: weakUpd.vatSum,
+            itemsCount: weakUpd.itemsCount,
+            validation: weakUpd.validation,
+          });
+        }
+        const message = 'Распознавание не уложилось в отведённое время. Попробуйте ещё раз.';
+        req.log.error({ photoId: req.params.id }, 'photo recognize: бюджет исчерпан до фолбэка');
+        await upsertRecognition(app, found.kind, req.params.id, {
+          status: 'failed',
+          items: [],
+          docForm: null,
+          docNumber: null,
+          docDate: null,
+          totalSum: null,
+          confidence: null,
+          model: null,
+          errorMessage: message,
+          parser: 'photo_v1',
+        });
+        return reply.code(500).send({ error: 'recognition_failed', message });
+      }
+
       let llmResult;
       try {
-        llmResult = await recognizePhotoItems(buffer, mimeType);
+        llmResult = await recognizePhotoItems(buffer, mimeType, { timeoutMs: remainingMs });
       } catch (err) {
         req.log.error({ err }, 'recognizePhotoItems failed');
         const message = err instanceof Error ? err.message : 'Распознавание не удалось';
@@ -1225,6 +1344,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           confidence: null,
           model: null,
           errorMessage: message,
+          parser: 'photo_v1',
         });
         return reply.code(500).send({ error: 'recognition_failed', message });
       }
@@ -1246,11 +1366,24 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         confidence: llmResult.confidence,
         model: llmResult.model,
         errorMessage: null,
+        // Ветка прежнего промпта: НДС не извлекается, sum — стоимость БЕЗ
+        // налога. Сверка по таким данным была бы неверной, поэтому её нет.
+        parser: 'photo_v1',
+        vatSum: null,
+        itemsCount: null,
+        validation: null,
       });
       return saved;
     },
   );
 }
+
+/** Общий бюджет обработчика распознавания: запас до клиентских 610 000 мс. */
+const PHOTO_RECOGNIZE_BUDGET_MS = 540_000;
+/** Классификация типа документа — короткий вызов внутри общего бюджета. */
+const PHOTO_CLASSIFY_TIMEOUT_MS = 45_000;
+/** Меньше этого остатка фолбэк не начинаем: не успеет и оборвёт запрос. */
+const PHOTO_FALLBACK_MIN_MS = 60_000;
 
 // Читает кэш распознавания фото. Возвращает null, если кэша нет.
 async function loadRecognition(
@@ -1278,6 +1411,13 @@ async function loadRecognition(
     model: row.model,
     errorMessage: row.errorMessage,
     recognizedAt: row.updatedAt.toISOString(),
+    // Записи, сделанные до миграции 0122, читаются как прежний путь: колонка
+    // NOT NULL DEFAULT 'photo_v1', но COALESCE защищает и от чтения через
+    // старый снимок схемы в тестах.
+    parser: row.parser === 'upd_vision' ? 'upd_vision' : 'photo_v1',
+    vatSum: row.vatSum !== null ? Number(row.vatSum) : null,
+    itemsCount: row.itemsCount ?? null,
+    validation: (row.validation as z.infer<typeof PhotoRecognitionSchema>['validation']) ?? null,
   };
 }
 
@@ -1297,6 +1437,10 @@ async function upsertRecognition(
     confidence: number | null;
     model: string | null;
     errorMessage: string | null;
+    parser: z.infer<typeof PhotoRecognitionSchema>['parser'];
+    vatSum?: number | null;
+    itemsCount?: number | null;
+    validation?: z.infer<typeof PhotoRecognitionSchema>['validation'];
   },
 ): Promise<z.infer<typeof PhotoRecognitionSchema>> {
   const values = {
@@ -1310,6 +1454,10 @@ async function upsertRecognition(
     confidence: data.confidence !== null ? String(data.confidence) : null,
     model: data.model,
     errorMessage: data.errorMessage,
+    parser: data.parser,
+    vatSum: data.vatSum != null ? String(data.vatSum) : null,
+    itemsCount: data.itemsCount ?? null,
+    validation: data.validation ?? null,
     updatedAt: new Date(),
   };
   const conflictCol = kind === 'delivery'
@@ -1332,6 +1480,13 @@ async function upsertRecognition(
         confidence: values.confidence,
         model: values.model,
         errorMessage: values.errorMessage,
+        // Перезаписываем все поля разбора, включая пустые: «Повторить» могло
+        // увести фото на другую ветку, и остатки прошлой (сверка от УПД-пути
+        // при результате прежнего) читались бы как относящиеся к новым числам.
+        parser: values.parser,
+        vatSum: values.vatSum,
+        itemsCount: values.itemsCount,
+        validation: values.validation,
         updatedAt: values.updatedAt,
       },
     });

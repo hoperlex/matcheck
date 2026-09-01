@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PhotoRecognition, PhotoRecognitionItem } from '@matcheck/contracts';
 import { suspectQtyPriceSwap } from '@matcheck/contracts';
 import { api, apiDownload, ApiError } from '../../services/api';
+import { UpdValidationSummary } from '../../shared/ui/UpdValidationSummary';
 import { enqueueFullLoad } from '../../lib/thumbQueue';
 
 /**
@@ -355,6 +356,11 @@ function RecognitionPanel({
     );
   }
 
+  // Каким путём разобрано фото. Различие не косметическое: у 'upd_vision'
+  // items.sum — стоимость С налогом (графа 9), у 'photo_v1' — без него
+  // (графа 5), и НДС там не извлекается вовсе.
+  const isUpdParser = data.parser === 'upd_vision';
+
   return (
     <div>
       <div
@@ -381,13 +387,29 @@ function RecognitionPanel({
               ? 'ТТН (1-Т)'
               : data.docForm === 'os2'
                 ? 'ОС-2'
-                : data.docForm}
+                : data.docForm === 'upd'
+                  ? 'УПД'
+                  : data.docForm}
           </Tag>
         )}
         {data.docNumber && <Tag>№ {data.docNumber}</Tag>}
         {data.docDate && <Tag>{data.docDate}</Tag>}
         {data.totalSum !== null && <Tag color="green">Итого: {formatMoney(data.totalSum)}</Tag>}
+        {data.vatSum !== null && <Tag>НДС: {formatMoney(data.vatSum)}</Tag>}
       </div>
+
+      {/* Сверка сумм — та же, что в карточке документа, и теми же словами.
+          Есть только у УПД-ветки: терпимый промпт накладных не извлекает ни
+          НДС, ни номера позиций, и посчитанная по его данным сверка врала бы. */}
+      {data.validation && (
+        <div style={{ marginBottom: 12 }}>
+          <UpdValidationSummary
+            failedChecks={data.validation.checks.filter((c) => !c.ok)}
+            warnings={data.validation.warnings ?? []}
+            storageKey="matcheck.photoDoc.validation"
+          />
+        </div>
+      )}
 
       {data.items.length === 0 ? (
         <Alert
@@ -410,10 +432,14 @@ function RecognitionPanel({
           }
           columns={[
             {
+              // У УПД-ветки — номер, НАПЕЧАТАННЫЙ в графе 1: по нему видно
+              // дыру в списке (1, 3 — вторая строка потерялась). Прежний путь
+              // номеров не читает, там остаётся порядковый индекс.
               title: '№',
               key: '__num__',
               width: 40,
-              render: (_, __, idx) => idx + 1,
+              render: (_, record: PhotoRecognitionItem, idx) =>
+                isUpdParser ? (record.rowNo ?? idx + 1) : idx + 1,
             },
             {
               title: 'Название',
@@ -453,10 +479,26 @@ function RecognitionPanel({
                 );
               },
             },
+            // НДС есть только у УПД-ветки: прежний промпт налог не извлекает,
+            // и пустая колонка читалась бы как «налога в документе нет».
+            ...(isUpdParser
+              ? [
+                  {
+                    title: 'НДС',
+                    dataIndex: 'vatSum',
+                    width: 90,
+                    align: 'right' as const,
+                    render: (v: number | null | undefined) => (v == null ? '—' : formatMoney(v)),
+                  },
+                ]
+              : []),
             {
-              title: 'Сумма',
+              // Заголовок разный не для красоты: у УПД-ветки это графа 9
+              // (с налогом), у прежней — графа 5 (без налога). Одна и та же
+              // подпись над разными базами занижала бы строку на ставку.
+              title: isUpdParser ? 'Сумма с НДС' : 'Сумма',
               dataIndex: 'sum',
-              width: 100,
+              width: 110,
               align: 'right' as const,
               render: (v: number | null | undefined) => (v == null ? '—' : formatMoney(v)),
             },

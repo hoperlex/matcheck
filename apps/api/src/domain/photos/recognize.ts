@@ -57,6 +57,9 @@ const PROMPT = `Ты — ассистент, который извлекает �
 
 Если совсем ничего нельзя извлечь (фото нечитаемо целиком): { "items": [], "confidence": 0, "docForm": null, "docNumber": null, "docDate": null, "totalSum": null }.`;
 
+/** Прежний прошитый таймаут вызова — дефолт, чтобы поведение не менялось. */
+const DEFAULT_TIMEOUT_MS = 600_000;
+
 const RESPONSE_SCHEMA = {
   type: 'object',
   required: ['items', 'confidence'],
@@ -116,6 +119,16 @@ export type RecognizePhotoResult = {
 export async function recognizePhotoItems(
   buffer: Buffer,
   mimeType: string,
+  /**
+   * Таймаут вызова. По умолчанию прежние 600 с.
+   *
+   * Параметр появился вместе с маршрутизацией УПД: этот путь стал ещё и
+   * фолбэком, то есть начинается после классификации и попытки УПД-разбора.
+   * Прошитые 600 с в такой позиции складываются с предыдущими шагами и
+   * переваливают за клиентские 610 с — запрос обрывается, и пользователь не
+   * получает ничего вместо «хоть что-то распозналось».
+   */
+  opts: { timeoutMs?: number } = {},
 ): Promise<RecognizePhotoResult> {
   const [provider] = await db
     .select()
@@ -148,6 +161,7 @@ export async function recognizePhotoItems(
     maxTokens: provider.maxTokens ?? 8192,
     buffer,
     mimeType,
+    timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   };
   const raw =
     provider.kind === 'google_ai_studio'
@@ -186,6 +200,7 @@ type CallArgs = {
   maxTokens: number;
   buffer: Buffer;
   mimeType: string;
+  timeoutMs: number;
 };
 
 async function callGemini(args: CallArgs): Promise<string> {
@@ -211,7 +226,7 @@ async function callGemini(args: CallArgs): Promise<string> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(600_000),
+    signal: AbortSignal.timeout(args.timeoutMs),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -254,7 +269,7 @@ async function callOpenRouter(args: CallArgs): Promise<string> {
       'X-Title': 'matcheck',
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(600_000),
+    signal: AbortSignal.timeout(args.timeoutMs),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');

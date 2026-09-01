@@ -705,6 +705,15 @@ export type GeminiCallArgs = {
   maxTokens: number;
   promptText: string;
   file: { buffer: Buffer; mimeType: string };
+  /**
+   * Таймаут одной попытки. По умолчанию VISION_ATTEMPT_TIMEOUT_MS (180 с) —
+   * то есть для всех прежних вызывающих поведение не меняется.
+   *
+   * Нужен там, где вызов делается внутри чужого бюджета времени: короткая
+   * классификация типа документа не должна иметь право съесть три минуты из
+   * синхронного HTTP-запроса, который клиент ждёт всего 610 с.
+   */
+  timeoutMs?: number;
 };
 
 // Экспортируется для multi-UPD bundle (Шаг 2): отдельный extract-helper
@@ -718,6 +727,8 @@ export type OpenRouterCallArgs = {
   maxTokens: number;
   promptText: string;
   files: { buffer: Buffer; mimeType: string }[];
+  /** См. GeminiCallArgs.timeoutMs — дефолт тот же, VISION_ATTEMPT_TIMEOUT_MS. */
+  timeoutMs?: number;
 };
 
 export type VisionCallResult = {
@@ -761,7 +772,7 @@ export async function callGemini(args: GeminiCallArgs): Promise<VisionCallResult
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(VISION_ATTEMPT_TIMEOUT_MS),
+      signal: AbortSignal.timeout(args.timeoutMs ?? VISION_ATTEMPT_TIMEOUT_MS),
     });
   } catch (err) {
     rethrowVisionTimeout(err, startMs);
@@ -868,7 +879,7 @@ export async function callOpenRouter(args: OpenRouterCallArgs): Promise<VisionCa
         'X-Title': 'matcheck',
       },
       body: requestBody,
-      signal: AbortSignal.timeout(VISION_ATTEMPT_TIMEOUT_MS),
+      signal: AbortSignal.timeout(args.timeoutMs ?? VISION_ATTEMPT_TIMEOUT_MS),
     });
   } catch (err) {
     rethrowVisionTimeout(err, startMs);

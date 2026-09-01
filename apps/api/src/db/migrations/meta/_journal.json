@@ -848,6 +848,13 @@
       "when": 1787160002000,
       "tag": "0121_upd_prompt_v17_price_no_arithmetic",
       "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1787160003000,
+      "tag": "0122_photo_recognized_upd_route",
+      "breakpoints": true
     }
   ]
 }

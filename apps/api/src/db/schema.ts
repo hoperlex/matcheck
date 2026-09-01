@@ -1749,6 +1749,20 @@ export const photoRecognizedItems = pgTable(
     confidence: numeric('confidence', { precision: 3, scale: 2 }),
     model: text('model'),
     errorMessage: text('error_message'),
+    // Каким путём разобрано фото (миграция 0122): 'photo_v1' — терпимый
+    // промпт накладных, 'upd_vision' — основной УПД-парсер. Различие не
+    // косметическое: у первого items.sum — стоимость БЕЗ налога (графа 5),
+    // у второго — С налогом (графа 9). NOT NULL с дефолтом 'photo_v1',
+    // потому что все записи до миграции сделаны именно им.
+    parser: varchar('parser', { length: 16 }).notNull().default('photo_v1'),
+    // Полный UpdValidation по этому же результату — обе группы, checks и
+    // warnings. Считается при распознавании, а не при чтении: у записей
+    // photo_v1 нет ни построчного НДС, ни rowNo, и пересчёт по ним дал бы
+    // неверную сверку. NULL — сверки не было.
+    validation: jsonb('validation'),
+    // Шапочные поля УПД-ветки.
+    vatSum: numeric('vat_sum', { precision: 20, scale: 2 }),
+    itemsCount: integer('items_count'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

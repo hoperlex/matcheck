@@ -79,7 +79,17 @@ export function normalizeKind(k: string | undefined): ImageDocKind {
 export async function classifyImageKind(
   buffer: Buffer,
   mimeType: string,
-  ctx: { sourceDocumentId: string | null } = { sourceDocumentId: null },
+  ctx: {
+    sourceDocumentId: string | null;
+    /**
+     * Метка вызова для журнала llm_calls. Без неё запись обезличена
+     * («[router image classify]»), и разобрать жалобу «на этом фото не то
+     * количество» нечем: source_document_id у фото-пути нет вовсе.
+     */
+    label?: string | null;
+    /** Таймаут вызова. По умолчанию — общий VISION_ATTEMPT_TIMEOUT_MS (180 с). */
+    timeoutMs?: number;
+  } = { sourceDocumentId: null },
 ): Promise<{ kind: ImageDocKind; confidence: number } | null> {
   try {
     const mime = (mimeType || '').toLowerCase();
@@ -120,6 +130,7 @@ export async function classifyImageKind(
         maxTokens: MAX_TOKENS,
         promptText: CLASSIFY_PROMPT,
         file,
+        timeoutMs: ctx.timeoutMs,
       });
       raw = r.raw;
     } else {
@@ -131,6 +142,7 @@ export async function classifyImageKind(
         maxTokens: MAX_TOKENS,
         promptText: CLASSIFY_PROMPT,
         files: [file],
+        timeoutMs: ctx.timeoutMs,
       });
       raw = r.raw;
     }
@@ -156,7 +168,9 @@ export async function classifyImageKind(
         promptId: null,
         docKind: 'router_classify',
         model: row.model,
-        requestMessages: [{ role: 'user', content: '[router image classify]' }],
+        requestMessages: [
+          { role: 'user', content: `[router image classify: ${ctx.label ?? 'no-label'}]` },
+        ],
         requestSchema: null,
         responseRaw: raw,
         responseParsed: { kind, confidence } as object,

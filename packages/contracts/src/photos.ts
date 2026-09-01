@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { DeliveryPhotoStageSchema } from './deliveries.js';
+import { UpdValidationSchema } from './source-documents.js';
 
 export const PhotoKindSchema = z.enum(['document', 'cargo', 'vehicle', 'other']);
 
@@ -94,13 +95,29 @@ export type PhotoConfirmResponse = z.infer<typeof PhotoConfirmResponseSchema>;
 
 // ─── Распознавание позиций из фото-документа ──────────────────────────────
 // Используется split-view модалкой в портале (раздел Принятые → клик на
-// фото с kind='document'). LLM-парсер тот же, что у накладных
-// (domain/edo/waybill-batch.parser.ts); результат кэшируется в БД
-// (миграция 0058) и повторно отдаётся без LLM-вызова.
+// фото с kind='document'). Результат кэшируется в БД (миграции 0058 и 0122)
+// и повторно отдаётся без LLM-вызова.
 
-// Одна строка таблицы материалов. Цена/сумма/количество — числа, но
-// храним как string|null, чтобы избежать потери точности у numeric:
-// фронт всё равно форматирует как валюту.
+/**
+ * Каким путём разобрано фото.
+ *
+ *  `photo_v1`   — терпимый промпт под накладные, ОС-2, М-15 и рукописные
+ *                 бумаги (`domain/photos/recognize.ts`). `sum` позиции —
+ *                 стоимость БЕЗ налога (графа 5 формы УПД), НДС не
+ *                 извлекается вовсе.
+ *  `upd_vision` — основной УПД-парсер с активным промптом из БД
+ *                 (`domain/photos/recognize-upd.ts`). `sum` — стоимость
+ *                 С налогом (графа 9), есть построчный НДС и номер позиции
+ *                 из графы 1.
+ *
+ * Признак хранится, а не выводится: базы у `sum` разные, и показать их в одной
+ * колонке как одно и то же — значит соврать на величину налога. Записи,
+ * сделанные до появления поля, читаются как `photo_v1`.
+ */
+export const PhotoRecognitionParserSchema = z.enum(['photo_v1', 'upd_vision']);
+export type PhotoRecognitionParser = z.infer<typeof PhotoRecognitionParserSchema>;
+
+// Одна строка таблицы материалов.
 export const PhotoRecognitionItemSchema = z.object({
   nameRaw: z.string(),
   qty: z.number().nullable().optional(),
@@ -108,6 +125,12 @@ export const PhotoRecognitionItemSchema = z.object({
   invNumber: z.string().nullable().optional(),
   price: z.number().nullable().optional(),
   sum: z.number().nullable().optional(),
+  // Ниже — поля УПД-ветки. У `photo_v1` их нет: тот промпт не читает ни НДС,
+  // ни номер позиции, и подставлять сюда нули значило бы выдумать данные.
+  /** Номер позиции, НАПЕЧАТАННЫЙ в графе 1 бланка. По нему сверяется целостность списка. */
+  rowNo: z.number().int().nullable().optional(),
+  vatRate: z.number().nullable().optional(),
+  vatSum: z.number().nullable().optional(),
 });
 export type PhotoRecognitionItem = z.infer<typeof PhotoRecognitionItemSchema>;
 
@@ -126,5 +149,22 @@ export const PhotoRecognitionSchema = z.object({
   model: z.string().nullable(),
   errorMessage: z.string().nullable(),
   recognizedAt: z.string(),
+  // Путь разбора. У записей, сделанных до миграции 0122, — `photo_v1`.
+  parser: PhotoRecognitionParserSchema,
+  // Шапочные поля УПД-ветки: общий НДС документа и «Всего наименований».
+  vatSum: z.number().nullable(),
+  itemsCount: z.number().int().nullable(),
+  /**
+   * Сверка сумм по этому же результату — целиком, обе группы.
+   *
+   * `checks` держат доказанные расхождения (`sum_total`, `row_qty_price`,
+   * `items_sequence`), `warnings` — подозрения на съехавшие колонки
+   * (`unit_code_as_qty`, `sum_equals_qty`, `price_includes_vat`). Хранить
+   * только вторые нельзя: расхождение строки с итогом попадает в первые.
+   *
+   * `null` — сверки не было: ветка `photo_v1` не извлекает НДС и номера
+   * позиций, и посчитанная по её данным сверка была бы неверной.
+   */
+  validation: UpdValidationSchema.nullable(),
 });
 export type PhotoRecognition = z.infer<typeof PhotoRecognitionSchema>;

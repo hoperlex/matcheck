@@ -35,6 +35,11 @@ const recognition: PhotoRecognition = {
   model: 'gemini',
   errorMessage: null,
   recognizedAt: '2026-08-18T12:59:22.000Z',
+  // Прежний путь: сумма БЕЗ налога, НДС не извлекается, сверки нет.
+  parser: 'photo_v1',
+  vatSum: null,
+  itemsCount: null,
+  validation: null,
 };
 
 vi.mock('../../services/api', () => ({
