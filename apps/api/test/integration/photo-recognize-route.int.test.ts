@@ -18,6 +18,7 @@ import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod
 import postgres from 'postgres';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthUser } from '../../src/plugins/auth.js';
+import type * as EnvModule from '../../src/lib/env.js';
 
 const mocks = vi.hoisted(() => ({
   getObject: vi.fn(),
@@ -49,7 +50,7 @@ vi.mock('../../src/domain/edo/vision-classifier.js', () => ({
 }));
 // Флаг переключается по тесту, остальное окружение — настоящее.
 vi.mock('../../src/lib/env.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../src/lib/env.js')>();
+  const actual = await importOriginal<typeof EnvModule>();
   return {
     ...actual,
     loadEnv: () => ({ ...actual.loadEnv(), PHOTO_RECOGNIZE_UPD_ROUTE: mocks.updRoute }),
@@ -199,7 +200,9 @@ suite('фото документа: развилка УПД / прежний п�
     mocks.recognizePhotoUpd.mockReset();
     mocks.classifyImageKind.mockReset();
     mocks.updRoute = false;
-    mocks.getObject.mockResolvedValue({ body: Buffer.from('jpeg-bytes') });
+    // getObject отдаёт Buffer напрямую — мок обязан повторять это, иначе тест
+    // разрешает то, что на бою не работает.
+    mocks.getObject.mockResolvedValue(Buffer.from('jpeg-bytes'));
     mocks.recognizePhotoItems.mockResolvedValue(PHOTO_V1_RESULT);
     await sql`DELETE FROM photo_recognized_items WHERE delivery_photo_id = ${photoId}`;
   });
@@ -212,6 +215,10 @@ suite('фото документа: развилка УПД / прежний п�
 
   const recognize = () =>
     app.inject({ method: 'POST', url: `/api/v1/photos/${photoId}/recognize?force=true` });
+
+  // Без force: именно так ходит модалка, когда кэша ещё нет.
+  const recognizeNoForce = () =>
+    app.inject({ method: 'POST', url: `/api/v1/photos/${photoId}/recognize` });
 
   const savedRow = async () =>
     (
@@ -233,6 +240,11 @@ suite('фото документа: развилка УПД / прежний п�
     expect(mocks.classifyImageKind).not.toHaveBeenCalled();
     expect(mocks.recognizePhotoUpd).not.toHaveBeenCalled();
     expect(mocks.recognizePhotoItems).toHaveBeenCalledTimes(1);
+    // Аргументы, а не факт вызова: общий дедлайн заводится только вместе с
+    // веткой, и при выключенном флаге прежний распознаватель обязан получить
+    // пустые опции — то есть остаться на своём прошитом таймауте 600 с.
+    // Проверка «просто вызвался» такой регресс пропустила бы.
+    expect(mocks.recognizePhotoItems).toHaveBeenCalledWith(expect.any(Buffer), 'image/jpeg', {});
     const body = res.json();
     expect(body.parser).toBe('photo_v1');
     expect(body.validation).toBeNull();
@@ -370,6 +382,49 @@ suite('фото документа: развилка УПД / прежний п�
     expect(mocks.recognizePhotoItems).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(200);
     expect(res.json().parser).toBe('upd_vision');
+  });
+
+  it('при включённом флаге фолбэк получает остаток общего бюджета', async () => {
+    mocks.updRoute = true;
+    mocks.classifyImageKind.mockResolvedValue({ kind: 'transport_waybill', confidence: 0.99 });
+
+    await recognize();
+
+    const opts = mocks.recognizePhotoItems.mock.calls[0]![2] as { timeoutMs?: number };
+    // Не прежние 600 000: три вызова подряд не влезают в клиентские 610 с.
+    expect(opts.timeoutMs).toBeGreaterThan(0);
+    expect(opts.timeoutMs).toBeLessThanOrEqual(540_000);
+  });
+
+  it('два одновременных запроса дают один вызов модели', async () => {
+    // Кэш пуст (beforeEach чистит), обе модалки придут без force — ровно так,
+    // как ходит интерфейс, когда результата ещё нет.
+    let release: (() => void) | null = null;
+    mocks.recognizePhotoItems.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve(PHOTO_V1_RESULT);
+        }),
+    );
+
+    const first = recognizeNoForce();
+    const second = recognizeNoForce();
+    await vi.waitFor(() => expect(mocks.recognizePhotoItems).toHaveBeenCalledTimes(1));
+    release!();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(mocks.recognizePhotoItems).toHaveBeenCalledTimes(1);
+    expect(a.statusCode).toBe(200);
+    expect(b.statusCode).toBe(200);
+    expect(a.json()).toEqual(b.json());
+  });
+
+  it('force идёт мимо очереди: это команда «распознать заново»', async () => {
+    const first = recognize();
+    const second = recognize();
+    await Promise.all([first, second]);
+
+    expect(mocks.recognizePhotoItems).toHaveBeenCalledTimes(2);
   });
 
   it('запись, сделанная до миграции, читается как прежний путь', async () => {

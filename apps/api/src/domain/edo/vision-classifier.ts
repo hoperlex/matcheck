@@ -82,15 +82,22 @@ export async function classifyImageKind(
   ctx: {
     sourceDocumentId: string | null;
     /**
-     * Метка вызова для журнала llm_calls. Без неё запись обезличена
-     * («[router image classify]»), и разобрать жалобу «на этом фото не то
-     * количество» нечем: source_document_id у фото-пути нет вовсе.
+     * Метка вызова для журнала llm_calls. Без неё запись остаётся ровно такой,
+     * какой была всегда («[router image classify]»), — воркер документов зовёт
+     * классификатор без метки, и его журнал не должен меняться.
+     *
+     * Фото-путь метку передаёт: source_document_id у него нет вовсе, и разобрать
+     * жалобу «на этом фото не то количество» иначе нечем.
      */
     label?: string | null;
     /** Таймаут вызова. По умолчанию — общий VISION_ATTEMPT_TIMEOUT_MS (180 с). */
     timeoutMs?: number;
   } = { sourceDocumentId: null },
 ): Promise<{ kind: ImageDocKind; confidence: number } | null> {
+  // Реквизиты для журнала: заполняются по ходу и нужны ветке ошибки.
+  let providerId: string | null = null;
+  let model: string | null = null;
+  let startMs = Date.now();
   try {
     const mime = (mimeType || '').toLowerCase();
 
@@ -100,6 +107,8 @@ export async function classifyImageKind(
       .where(eq(llmProviders.isDefault, true))
       .limit(1);
     if (!row || (row.kind !== 'google_ai_studio' && row.kind !== 'openrouter')) return null;
+    providerId = row.id;
+    model = row.model;
 
     const [cred] = await db
       .select()
@@ -119,7 +128,7 @@ export async function classifyImageKind(
       file = { buffer, mimeType: mime || 'image/jpeg' };
     }
 
-    const startMs = Date.now();
+    startMs = Date.now();
     let raw = '';
     if (row.kind === 'google_ai_studio') {
       const r = await callGemini({
@@ -148,11 +157,15 @@ export async function classifyImageKind(
     }
     const latencyMs = Date.now() - startMs;
 
-    if (!raw) return null;
+    if (!raw) {
+      await logFailure(ctx, providerId, model, latencyMs, 'provider_error', 'пустой ответ модели');
+      return null;
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(stripJsonFences(raw));
-    } catch {
+    } catch (err) {
+      await logFailure(ctx, providerId, model, latencyMs, 'json_failed', errText(err), raw);
       return null;
     }
     if (Array.isArray(parsed) && parsed.length === 1) parsed = parsed[0];
@@ -168,9 +181,7 @@ export async function classifyImageKind(
         promptId: null,
         docKind: 'router_classify',
         model: row.model,
-        requestMessages: [
-          { role: 'user', content: `[router image classify: ${ctx.label ?? 'no-label'}]` },
-        ],
+        requestMessages: [{ role: 'user', content: requestLabel(ctx.label) }],
         requestSchema: null,
         responseRaw: raw,
         responseParsed: { kind, confidence } as object,
@@ -185,8 +196,71 @@ export async function classifyImageKind(
     }
 
     return { kind, confidence };
-  } catch {
-    // Любая ошибка (рендер PDF, vision-таймаут, сеть) — не ломаем router-цикл.
+  } catch (err) {
+    // Любая ошибка (рендер PDF, vision-таймаут, сеть, HTTP 429) — не ломаем
+    // router-цикл, но и не теряем: см. logFailure.
+    await logFailure(ctx, providerId, model, Date.now() - startMs, 'provider_error', errText(err));
     return null;
+  }
+}
+
+/**
+ * Строка запроса в журнале.
+ *
+ * Без метки — ровно та, что была до появления фото-пути: воркер документов
+ * зовёт классификатор без неё, и его записи обязаны остаться прежними.
+ */
+function requestLabel(label: string | null | undefined): string {
+  return label ? `[router image classify: ${label}]` : '[router image classify]';
+}
+
+function errText(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).slice(0, 500);
+}
+
+/**
+ * Запись о неудачной классификации — ТОЛЬКО для вызовов с меткой.
+ *
+ * Зачем вообще. Классификатор глушит любую ошибку в `null`, и до сих пор при
+ * сбое в журнале не оставалось ничего. Для роутера документов это осознанно:
+ * его вердикт лишь выбирает форму, а сам разбор всё равно оставит свою запись.
+ * Для фото-пути наоборот — классификация делается на КАЖДОЕ фото и стала самым
+ * массовым вызовом к провайдеру: если он начнёт отвечать 429, увидеть это
+ * можно только здесь.
+ *
+ * Условие по метке, а не по флагу: так журнал воркера не меняется ни на строку,
+ * что и требовалось от выкладки.
+ */
+async function logFailure(
+  ctx: { sourceDocumentId: string | null; label?: string | null },
+  providerId: string | null,
+  model: string | null,
+  latencyMs: number,
+  errorCode: string,
+  errorMessage: string,
+  raw?: string,
+): Promise<void> {
+  if (!ctx.label) return;
+  try {
+    await db.insert(llmCalls).values({
+      sourceDocumentId: ctx.sourceDocumentId,
+      providerId,
+      promptId: null,
+      docKind: 'router_classify',
+      model,
+      requestMessages: [{ role: 'user', content: requestLabel(ctx.label) }],
+      requestSchema: null,
+      responseRaw: raw ?? null,
+      responseParsed: null,
+      promptTokens: null,
+      completionTokens: null,
+      // Колонка NOT NULL: пишем фактическое время до отказа, оно же показывает
+      // таймаут (45 000 у фото-пути) отдельно от быстрых сетевых обрывов.
+      latencyMs: Math.max(0, Math.round(latencyMs)),
+      errorCode,
+      errorMessage,
+    });
+  } catch {
+    /* журнал не должен ронять распознавание */
   }
 }

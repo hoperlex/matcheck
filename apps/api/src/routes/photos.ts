@@ -1180,7 +1180,8 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       },
     },
     async (req, reply) => {
-      const found = await findPhoto(app, req.params.id);
+      const photoId = req.params.id;
+      const found = await findPhoto(app, photoId);
       if (!found) return reply.code(404).send({ error: 'not_found' });
 
       await assertPermission(req, pageOfKind(found.kind), 'edit');
@@ -1200,182 +1201,257 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         });
       }
 
-      // Скачиваем оригинал из S3 (полное разрешение для LLM; thumb
-      // обрезает и снижает качество). Размер ~1-5 МБ.
-      let buffer: Buffer;
-      try {
-        buffer = await getObject(found.s3Key);
-      } catch (err) {
-        req.log.error({ err, key: found.s3Key }, 's3 get failed for recognize');
-        return reply
-          .code(500)
-          .send({ error: 's3_unavailable', message: 'Не удалось загрузить фото из хранилища' });
-      }
-
-      // Расширение → MIME. Если не угадать, по дефолту image/jpeg —
-      // подавляющее большинство фото с мобилы именно так.
-      const ext = found.s3Key.split('.').pop()?.toLowerCase() ?? 'jpg';
-      const mimeType =
-        ext === 'png' ? 'image/png' :
-        ext === 'webp' ? 'image/webp' :
-        ext === 'heic' ? 'image/heic' :
-        ext === 'heif' ? 'image/heif' :
-        'image/jpeg';
-
-      // Развилка по типу документа (PHOTO_RECOGNIZE_UPD_ROUTE).
+      // Одно распознавание на фото при одновременных запросах.
       //
-      // На этих фото не только УПД: транспортные накладные, ОС-2, М-15,
-      // рукописные. Терпимый промпт recognize.ts написан ровно для них и с
-      // ними справляется; съезжает он на УПД — берёт количество из графы 2
-      // («Код по ОКЕИ»), цену из подграфы «в одном месте». Правила против
-      // этого есть в активном УПД-промпте, поэтому УПД уходит туда, а
-      // остальное остаётся как было.
+      // Кэш идемпотентен по конечному состоянию (уникальный индекс + upsert),
+      // но исполнение — нет: два одновременных запроса при пустом кэше оба
+      // ушли бы в модель, и второй перезаписал бы первый. С маршрутизацией УПД
+      // цена такой гонки выросла с одного лишнего вызова до двух-трёх, причём
+      // по тому самому провайдеру, который фото-путь делит с разбором
+      // документов.
       //
-      // Опереться на docForm из ответа самого промпта нельзя: за 30 дней он
-      // вернул 'other' в 12 024 случаях из 13 444 и УПД как класс не выделяет.
-      const label = `photo:${req.params.id}`;
-      const deadlineAt = Date.now() + PHOTO_RECOGNIZE_BUDGET_MS;
-      // Результат УПД-ветки, не прошедший порог: пустой список или низкая
-      // уверенность. Держим отдельно — если на фолбэк не останется времени,
-      // отдать слабый разбор лучше, чем оборвать запрос без ответа.
-      let weakUpd: Awaited<ReturnType<typeof recognizePhotoUpd>> | null = null;
-
-      if (loadEnv().PHOTO_RECOGNIZE_UPD_ROUTE) {
-        const cls = await classifyImageKind(buffer, mimeType, {
-          sourceDocumentId: null,
-          label,
-          timeoutMs: PHOTO_CLASSIFY_TIMEOUT_MS,
-        });
-        // null («не смогли решить»), низкая уверенность и любой не-УПД —
-        // прежний путь. Классификатор ошибок не бросает по построению.
-        if (cls && cls.kind === 'upd' && cls.confidence >= MIN_DEDUP_CONFIDENCE) {
-          try {
-            const upd = await recognizePhotoUpd({ buffer, mimeType, label });
-            if (upd.items.length > 0 && (upd.confidence ?? 0) >= MIN_DEDUP_CONFIDENCE) {
-              const saved = await upsertRecognition(app, found.kind, req.params.id, {
-                status: 'done',
-                items: upd.items,
-                docForm: 'upd',
-                docNumber: upd.docNumber,
-                docDate: upd.docDate,
-                totalSum: upd.totalSum,
-                confidence: upd.confidence,
-                model: upd.model,
-                errorMessage: null,
-                parser: 'upd_vision',
-                vatSum: upd.vatSum,
-                itemsCount: upd.itemsCount,
-                validation: upd.validation,
-              });
-              return saved;
-            }
-            // Пусто или неуверенно — не сохраняем: терпимый промпт на кривом
-            // кадре нередко извлекает то, что строгий пропустил.
-            weakUpd = upd;
-            req.log.warn(
-              { photoId: req.params.id, items: upd.items.length, confidence: upd.confidence },
-              'photo upd route: слабый результат, фолбэк на прежний промпт',
-            );
-          } catch (err) {
-            // parseUpdVision бросает при ошибке провайдера, битом JSON, Zod и
-            // таймауте. Это не повод оставить менеджера без разбора вовсе.
-            req.log.warn({ err, photoId: req.params.id }, 'photo upd route failed, фолбэк');
-          }
-        }
-      }
-
-      // Используем отдельный, более терпимый промпт под split-view
-      // (domain/photos/recognize.ts) — он не требует жёсткой классификации
-      // формы и лучше работает на наклонных фото и нестандартных
-      // накладных, чем parseWaybillBatch.
-      const remainingMs = deadlineAt - Date.now();
-      if (remainingMs < PHOTO_FALLBACK_MIN_MS) {
-        // Бюджета на второй вызов не осталось. Отдаём то, что есть: слабый
-        // разбор УПД-ветки — если он был, иначе честная ошибка. Начать вызов
-        // на 600 с здесь значило бы перевалить за клиентские 610 с и оборвать
-        // соединение, не сохранив ничего.
-        if (weakUpd) {
-          return await upsertRecognition(app, found.kind, req.params.id, {
-            status: 'done',
-            items: weakUpd.items,
-            docForm: 'upd',
-            docNumber: weakUpd.docNumber,
-            docDate: weakUpd.docDate,
-            totalSum: weakUpd.totalSum,
-            confidence: weakUpd.confidence,
-            model: weakUpd.model,
-            errorMessage: null,
-            parser: 'upd_vision',
-            vatSum: weakUpd.vatSum,
-            itemsCount: weakUpd.itemsCount,
-            validation: weakUpd.validation,
+      // `force` намеренно мимо очереди: это явная команда «распознать заново».
+      const flightKey = `${found.kind}:${photoId}`;
+      const joined = req.query.force ? undefined : recognizeInFlight.get(flightKey);
+      let outcome: RecognizeOutcome;
+      if (joined) {
+        outcome = await joined;
+      } else {
+        const task = runPhotoRecognition(app, found, photoId, req.log);
+        if (!req.query.force) {
+          recognizeInFlight.set(flightKey, task);
+          void task.finally(() => {
+            // Сравнение по той же ссылке: пока мы ждали, ключ мог занять
+            // следующий запрос, и снимать чужую задачу нельзя.
+            if (recognizeInFlight.get(flightKey) === task) recognizeInFlight.delete(flightKey);
           });
         }
-        const message = 'Распознавание не уложилось в отведённое время. Попробуйте ещё раз.';
-        req.log.error({ photoId: req.params.id }, 'photo recognize: бюджет исчерпан до фолбэка');
-        await upsertRecognition(app, found.kind, req.params.id, {
-          status: 'failed',
-          items: [],
-          docForm: null,
-          docNumber: null,
-          docDate: null,
-          totalSum: null,
-          confidence: null,
-          model: null,
-          errorMessage: message,
-          parser: 'photo_v1',
-        });
-        return reply.code(500).send({ error: 'recognition_failed', message });
+        outcome = await task;
       }
-
-      let llmResult;
-      try {
-        llmResult = await recognizePhotoItems(buffer, mimeType, { timeoutMs: remainingMs });
-      } catch (err) {
-        req.log.error({ err }, 'recognizePhotoItems failed');
-        const message = err instanceof Error ? err.message : 'Распознавание не удалось';
-        await upsertRecognition(app, found.kind, req.params.id, {
-          status: 'failed',
-          items: [],
-          docForm: null,
-          docNumber: null,
-          docDate: null,
-          totalSum: null,
-          confidence: null,
-          model: null,
-          errorMessage: message,
-          parser: 'photo_v1',
-        });
-        return reply.code(500).send({ error: 'recognition_failed', message });
+      if (!outcome.ok) {
+        return reply.code(outcome.status).send({ error: outcome.error, message: outcome.message });
       }
-
-      const saved = await upsertRecognition(app, found.kind, req.params.id, {
-        status: 'done',
-        items: llmResult.items.map((it) => ({
-          nameRaw: it.nameRaw,
-          qty: it.qty ?? null,
-          unit: it.unit ?? null,
-          invNumber: it.invNumber ?? null,
-          price: it.price ?? null,
-          sum: it.sum ?? null,
-        })),
-        docForm: llmResult.docForm,
-        docNumber: llmResult.docNumber,
-        docDate: llmResult.docDate,
-        totalSum: llmResult.totalSum,
-        confidence: llmResult.confidence,
-        model: llmResult.model,
-        errorMessage: null,
-        // Ветка прежнего промпта: НДС не извлекается, sum — стоимость БЕЗ
-        // налога. Сверка по таким данным была бы неверной, поэтому её нет.
-        parser: 'photo_v1',
-        vatSum: null,
-        itemsCount: null,
-        validation: null,
-      });
-      return saved;
+      return outcome.value;
     },
   );
+}
+
+/**
+ * Исход распознавания. Ошибка возвращается значением, а не через reply: тело
+ * выполняется под single-flight и может быть разделено между несколькими
+ * запросами — отвечать своему клиенту каждый обязан сам.
+ */
+type RecognizeOutcome =
+  | { ok: true; value: z.infer<typeof PhotoRecognitionSchema> }
+  | { ok: false; status: 500; error: string; message: string };
+
+/**
+ * Распознавания, выполняющиеся прямо сейчас, по ключу «вид операции + фото».
+ *
+ * In-process: API запускается одним процессом Node, без кластера, поэтому карты
+ * достаточно. Появятся реплики — понадобится lease в БД, но городить
+ * распределённую блокировку под одну реплику незачем.
+ */
+const recognizeInFlight = new Map<string, Promise<RecognizeOutcome>>();
+
+/**
+ * Распознавание одного фото: загрузка оригинала, развилка по типу документа и
+ * запись в кэш. Вынесено из обработчика, чтобы результат можно было разделить
+ * между одновременными запросами.
+ */
+async function runPhotoRecognition(
+  app: ReturnType<typeof asZod>,
+  found: { kind: OperationKind; s3Key: string },
+  photoId: string,
+  log: { error: (obj: object, msg: string) => void; warn: (obj: object, msg: string) => void },
+): Promise<RecognizeOutcome> {
+  // Скачиваем оригинал из S3 (полное разрешение для LLM; thumb
+  // обрезает и снижает качество). Размер ~1-5 МБ.
+  let buffer: Buffer;
+  try {
+    buffer = await getObject(found.s3Key);
+  } catch (err) {
+    log.error({ err, key: found.s3Key }, 's3 get failed for recognize');
+    return {
+      ok: false,
+      status: 500,
+      error: 's3_unavailable',
+      message: 'Не удалось загрузить фото из хранилища',
+    };
+  }
+
+  // Расширение → MIME. Если не угадать, по дефолту image/jpeg —
+  // подавляющее большинство фото с мобилы именно так.
+  const ext = found.s3Key.split('.').pop()?.toLowerCase() ?? 'jpg';
+  const mimeType =
+    ext === 'png' ? 'image/png' :
+    ext === 'webp' ? 'image/webp' :
+    ext === 'heic' ? 'image/heic' :
+    ext === 'heif' ? 'image/heif' :
+    'image/jpeg';
+
+  // Развилка по типу документа (PHOTO_RECOGNIZE_UPD_ROUTE).
+  //
+  // На этих фото не только УПД: транспортные накладные, ОС-2, М-15,
+  // рукописные. Терпимый промпт recognize.ts написан ровно для них и с
+  // ними справляется; съезжает он на УПД — берёт количество из графы 2
+  // («Код по ОКЕИ»), цену из подграфы «в одном месте». Правила против
+  // этого есть в активном УПД-промпте, поэтому УПД уходит туда, а
+  // остальное остаётся как было.
+  //
+  // Опереться на docForm из ответа самого промпта нельзя: за 30 дней он
+  // вернул 'other' в 12 024 случаях из 13 444 и УПД как класс не выделяет.
+  const label = `photo:${photoId}`;
+  const updRouteEnabled = loadEnv().PHOTO_RECOGNIZE_UPD_ROUTE;
+  // Бюджет заводится ТОЛЬКО вместе с веткой. При выключенном флаге вызов
+  // один, как и был, и урезать ему таймаут не за чем: 540 с вместо прошитых
+  // 600 — уже изменение поведения там, где обещано «как сейчас».
+  const deadlineAt = updRouteEnabled ? Date.now() + PHOTO_RECOGNIZE_BUDGET_MS : null;
+  // Результат УПД-ветки, не прошедший порог: пустой список или низкая
+  // уверенность. Держим отдельно — если на фолбэк не останется времени,
+  // отдать слабый разбор лучше, чем оборвать запрос без ответа.
+  let weakUpd: Awaited<ReturnType<typeof recognizePhotoUpd>> | null = null;
+
+  if (updRouteEnabled) {
+    const cls = await classifyImageKind(buffer, mimeType, {
+      sourceDocumentId: null,
+      label,
+      timeoutMs: PHOTO_CLASSIFY_TIMEOUT_MS,
+    });
+    // null («не смогли решить»), низкая уверенность и любой не-УПД —
+    // прежний путь. Классификатор ошибок не бросает по построению.
+    if (cls && cls.kind === 'upd' && cls.confidence >= MIN_DEDUP_CONFIDENCE) {
+      try {
+        const upd = await recognizePhotoUpd({ buffer, mimeType, label });
+        if (upd.items.length > 0 && (upd.confidence ?? 0) >= MIN_DEDUP_CONFIDENCE) {
+          const saved = await upsertRecognition(app, found.kind, photoId, {
+            status: 'done',
+            items: upd.items,
+            docForm: 'upd',
+            docNumber: upd.docNumber,
+            docDate: upd.docDate,
+            totalSum: upd.totalSum,
+            confidence: upd.confidence,
+            model: upd.model,
+            errorMessage: null,
+            parser: 'upd_vision',
+            vatSum: upd.vatSum,
+            itemsCount: upd.itemsCount,
+            validation: upd.validation,
+          });
+          return { ok: true, value: saved };
+        }
+        // Пусто или неуверенно — не сохраняем: терпимый промпт на кривом
+        // кадре нередко извлекает то, что строгий пропустил.
+        weakUpd = upd;
+        log.warn(
+          { photoId: photoId, items: upd.items.length, confidence: upd.confidence },
+          'photo upd route: слабый результат, фолбэк на прежний промпт',
+        );
+      } catch (err) {
+        // parseUpdVision бросает при ошибке провайдера, битом JSON, Zod и
+        // таймауте. Это не повод оставить менеджера без разбора вовсе.
+        log.warn({ err, photoId: photoId }, 'photo upd route failed, фолбэк');
+      }
+    }
+  }
+
+  // Используем отдельный, более терпимый промпт под split-view
+  // (domain/photos/recognize.ts) — он не требует жёсткой классификации
+  // формы и лучше работает на наклонных фото и нестандартных
+  // накладных, чем parseWaybillBatch.
+  const remainingMs = deadlineAt != null ? deadlineAt - Date.now() : null;
+  if (remainingMs != null && remainingMs < PHOTO_FALLBACK_MIN_MS) {
+    // Бюджета на второй вызов не осталось. Отдаём то, что есть: слабый
+    // разбор УПД-ветки — если он был, иначе честная ошибка. Начать вызов
+    // на 600 с здесь значило бы перевалить за клиентские 610 с и оборвать
+    // соединение, не сохранив ничего.
+    if (weakUpd) {
+      const savedWeak = await upsertRecognition(app, found.kind, photoId, {
+        status: 'done',
+        items: weakUpd.items,
+        docForm: 'upd',
+        docNumber: weakUpd.docNumber,
+        docDate: weakUpd.docDate,
+        totalSum: weakUpd.totalSum,
+        confidence: weakUpd.confidence,
+        model: weakUpd.model,
+        errorMessage: null,
+        parser: 'upd_vision',
+        vatSum: weakUpd.vatSum,
+        itemsCount: weakUpd.itemsCount,
+        validation: weakUpd.validation,
+      });
+      return { ok: true, value: savedWeak };
+    }
+    const message = 'Распознавание не уложилось в отведённое время. Попробуйте ещё раз.';
+    log.error({ photoId: photoId }, 'photo recognize: бюджет исчерпан до фолбэка');
+    await upsertRecognition(app, found.kind, photoId, {
+      status: 'failed',
+      items: [],
+      docForm: null,
+      docNumber: null,
+      docDate: null,
+      totalSum: null,
+      confidence: null,
+      model: null,
+      errorMessage: message,
+      parser: 'photo_v1',
+    });
+    return { ok: false, status: 500, error: 'recognition_failed', message };
+  }
+
+  let llmResult;
+  try {
+    // Без бюджета — ровно прежний вызов с прошитым в модуле таймаутом.
+    llmResult = await recognizePhotoItems(
+      buffer,
+      mimeType,
+      remainingMs != null ? { timeoutMs: remainingMs } : {},
+    );
+  } catch (err) {
+    log.error({ err }, 'recognizePhotoItems failed');
+    const message = err instanceof Error ? err.message : 'Распознавание не удалось';
+    await upsertRecognition(app, found.kind, photoId, {
+      status: 'failed',
+      items: [],
+      docForm: null,
+      docNumber: null,
+      docDate: null,
+      totalSum: null,
+      confidence: null,
+      model: null,
+      errorMessage: message,
+      parser: 'photo_v1',
+    });
+    return { ok: false, status: 500, error: 'recognition_failed', message };
+  }
+
+  const saved = await upsertRecognition(app, found.kind, photoId, {
+    status: 'done',
+    items: llmResult.items.map((it) => ({
+      nameRaw: it.nameRaw,
+      qty: it.qty ?? null,
+      unit: it.unit ?? null,
+      invNumber: it.invNumber ?? null,
+      price: it.price ?? null,
+      sum: it.sum ?? null,
+    })),
+    docForm: llmResult.docForm,
+    docNumber: llmResult.docNumber,
+    docDate: llmResult.docDate,
+    totalSum: llmResult.totalSum,
+    confidence: llmResult.confidence,
+    model: llmResult.model,
+    errorMessage: null,
+    // Ветка прежнего промпта: НДС не извлекается, sum — стоимость БЕЗ
+    // налога. Сверка по таким данным была бы неверной, поэтому её нет.
+    parser: 'photo_v1',
+    vatSum: null,
+    itemsCount: null,
+    validation: null,
+  });
+  return { ok: true, value: saved };
 }
 
 /** Общий бюджет обработчика распознавания: запас до клиентских 610 000 мс. */
