@@ -44,6 +44,9 @@ const OSD_MIN_CONFIDENCE = 1.0;
 
 const OSD_TIMEOUT_MS = 20_000;
 const CLASSIFY_TIMEOUT_MS = 60_000;
+// Потолок ответа классификатора по умолчанию — ровно тот, что был до
+// появления параметра maxTokens.
+const DEFAULT_CLASSIFY_MAX_TOKENS = 1024;
 // Таймаут pdftoppm переехал в page-render вместе с самим рендером.
 const PDFINFO_TIMEOUT_MS = 5_000;
 
@@ -63,7 +66,22 @@ export type PageType =
   | 'certificate'
   | 'other';
 
-export type PageClassification = { page: number; type: PageType; use: boolean };
+export type PageClassification = {
+  page: number;
+  type: PageType;
+  use: boolean;
+  /**
+   * Номер документа, НАПЕЧАТАННЫЙ на этой странице в её собственной шапке.
+   *
+   * Возвращает только расширенный промпт (PAGE_CLASSIFY_WITH_NUMBER_PROMPT);
+   * у прежнего ответа поля нет вовсе — и не появляется как null, иначе
+   * сравнение «план не изменился» перестало бы быть побайтовым.
+   *
+   * Ради него всё и затевалось: без номера «оборот того же УПД» и «шапка
+   * следующего» неразличимы, и второй документ молча приклеивается к первому.
+   */
+  docNumber?: string;
+};
 
 export type PrefilterResult = {
   // Финальные страницы для extract: только УПД, в нормальном DPI, выпрямленные.
@@ -107,6 +125,27 @@ export const PAGE_CLASSIFY_PROMPT = `Ты классифицируешь стр�
 - Страница повёрнута боком? Всё равно классифицируй по содержимому.
 - Если сомневаешься между upd и не-upd — выбирай не-upd только когда явно видишь признаки накладной/сертификата; иначе считай страницу частью УПД.
 - Верни ровно один JSON-объект, без markdown-ограждений и пояснений.`;
+
+/**
+ * Расширенный промпт: тот же текст плюс номер документа со страницы.
+ *
+ * Отдельной константой, а не правкой базового: включение сборочной ветки не
+ * должно менять поведение одиночного пути и prefilter'а. Формулировка
+ * «номер ЭТОГО документа» принципиальна — в бланке УПД есть ссылки на чужие
+ * номера («к платёжно-расчётному документу №…», «документ об отгрузке №…»),
+ * и, приняв их за свои, нарезка порезала бы документ по живому.
+ *
+ * Ничего про арифметику и самопроверку здесь нет сознательно: утяжеление
+ * промпта уже приводило к ухудшению чтения колонок.
+ */
+export const PAGE_CLASSIFY_WITH_NUMBER_PROMPT = `${PAGE_CLASSIFY_PROMPT}
+
+Дополнительно для каждой страницы верни поле "docNumber":
+- Это номер ТОГО документа, чья шапка напечатана на ЭТОЙ странице: «Счёт-фактура № ...», «Универсальный передаточный документ N ...», в том числе в колонтитуле страницы-продолжения («Лист:2 ... документ N ...»).
+- Ссылки на ДРУГИЕ документы номером страницы не являются: «к платёжно-расчётному документу №», «документ об отгрузке №», «к счёту-фактуре №» — их игнорируй.
+- Если номер на странице не напечатан или неразборчив — верни null. Не переноси номер с соседней страницы и не угадывай.
+
+Пример: {"pages":[{"page":1,"type":"upd_main","docNumber":"УТ-4304"},{"page":2,"type":"upd_continuation","docNumber":null}]}`;
 
 /**
  * Главный оркестратор prefilter'а. Принимает оригинальный PDF-буфер,
@@ -244,6 +283,20 @@ type ClassifyArgs = {
   apiKey: string;
   model: string;
   thumbs: Buffer[];
+  /**
+   * Текст промпта. Пусто — константа PAGE_CLASSIFY_PROMPT, то есть прежнее
+   * поведение. Параметр существует ради сборки: она умеет спрашивать у модели
+   * ещё и номер документа со страницы, а одиночный путь и prefilter обязаны
+   * остаться на прежнем тексте — иначе включение сборочной ветки молча
+   * поменяло бы классификацию всем вызывающим сразу.
+   */
+  prompt?: string;
+  /**
+   * Потолок ответа. Поднимать его имеет смысл только вместе с расширенным
+   * промптом: 15 страниц с номерами в 1024 токена не помещаются, а обрезанный
+   * JSON превращается в пустую классификацию и откат всего пакета.
+   */
+  maxTokens?: number;
 };
 
 type ClassifyResult = {
@@ -251,6 +304,12 @@ type ClassifyResult = {
   raw: string | null;
   promptTokens: number | null;
   completionTokens: number | null;
+  /**
+   * finish_reason провайдера. Нужен, чтобы отличить «модель ответила плохо»
+   * от «ответ обрезали по лимиту токенов»: во втором случае classification
+   * пустая по технической причине, и лечится это лимитом, а не промптом.
+   */
+  finishReason: string | null;
 };
 
 /**
@@ -269,13 +328,13 @@ export async function classifyPages(args: ClassifyArgs): Promise<ClassifyResult>
       image_url: { url: `data:image/png;base64,${t.toString('base64')}` },
     });
   });
-  content.push({ type: 'text', text: PAGE_CLASSIFY_PROMPT });
+  content.push({ type: 'text', text: args.prompt ?? PAGE_CLASSIFY_PROMPT });
 
   const body = {
     model: args.model,
     messages: [{ role: 'user', content }],
     temperature: 0,
-    max_tokens: 1024,
+    max_tokens: args.maxTokens ?? DEFAULT_CLASSIFY_MAX_TOKENS,
     response_format: { type: 'json_object' as const },
   };
 
@@ -296,15 +355,24 @@ export async function classifyPages(args: ClassifyArgs): Promise<ClassifyResult>
     throw new Error(`page-classify HTTP ${res.status}: ${text.slice(0, 300)}`);
   }
   const json = (await res.json()) as {
-    choices?: { message?: { content?: string } }[];
+    choices?: { message?: { content?: string }; finish_reason?: string }[];
     usage?: { prompt_tokens?: number; completion_tokens?: number };
   };
   const raw = json.choices?.[0]?.message?.content ?? null;
+  const finishReason = json.choices?.[0]?.finish_reason ?? null;
+  // Обрыв по лимиту токенов — это не «модель не разобралась», а наша ошибка
+  // конфигурации: JSON пришёл незакрытым, и parseClassification вернёт [].
+  // Молча уйти в fallback здесь нельзя — на сборочном пути пустая
+  // классификация означает откат всего пакета, и причину надо видеть.
+  if (finishReason === 'length') {
+    throw new Error(`page-classify: ответ обрезан по лимиту токенов (finish_reason=length)`);
+  }
   return {
     classification: parseClassification(raw, args.thumbs.length),
     raw,
     promptTokens: json.usage?.prompt_tokens ?? null,
     completionTokens: json.usage?.completion_tokens ?? null,
+    finishReason,
   };
 }
 
@@ -344,14 +412,24 @@ export function parseClassification(raw: string | null, totalPages: number): Pag
   const seen = new Set<number>();
   for (const entry of arr) {
     if (!entry || typeof entry !== 'object') continue;
-    const e = entry as { page?: unknown; type?: unknown };
+    const e = entry as { page?: unknown; type?: unknown; docNumber?: unknown };
     const page = Number(e.page);
     if (!Number.isInteger(page) || page < 1 || page > totalPages || seen.has(page)) continue;
     const t = typeof e.type === 'string' ? (e.type as PageType) : 'other';
     const type: PageType = ALL_TYPES.has(t) ? t : 'other';
     seen.add(page);
+    // Номер берём только строкой разумной длины: null, число и «простыня»
+    // вместо номера — не номер. Ключ не добавляем вовсе, если его нет: ответ
+    // прежнего промпта обязан разбираться ровно как раньше.
+    const rawNumber = typeof e.docNumber === 'string' ? e.docNumber.trim() : '';
+    const docNumber = rawNumber !== '' && rawNumber.length <= 64 ? rawNumber : undefined;
     // use = страница ОСТАЁТСЯ в extract (исключаем только уверенно-чужие).
-    out.push({ page, type, use: !DROP_TYPES.has(type) });
+    out.push({
+      page,
+      type,
+      use: !DROP_TYPES.has(type),
+      ...(docNumber !== undefined ? { docNumber } : {}),
+    });
   }
   return out;
 }

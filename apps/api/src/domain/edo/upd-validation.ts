@@ -5,6 +5,7 @@ import {
   suspectUnitCodeAsQty,
   suspectUnitPriceOne,
 } from '@matcheck/contracts';
+import { isPersistentUpdWarning } from '@matcheck/contracts';
 import type { UpdCheck, UpdValidation, UpdWarning } from '@matcheck/contracts';
 import { consigneeCopyUnverified } from '../sourceDocuments/party-directory-guard.js';
 
@@ -464,4 +465,44 @@ export function validateUpdTotals(
     checks,
     ...(warnings.length > 0 ? { warnings } : {}),
   };
+}
+
+/**
+ * Переносит пакетные предупреждения из прошлого снимка validation в новый.
+ *
+ * Зачем. validateUpdTotals пересчитывает validation с нуля по items и шапке —
+ * так и задумано для арифметических подозрений: логика валидатора меняется, и
+ * документ не должен носить устаревший вердикт. Но пакетные предупреждения
+ * («в файле были неразобранные страницы», «номеру со страницы не нашлось
+ * документа») вычислить по items невозможно в принципе: они относятся к
+ * нарезке пакета, а не к числам документа. Без переноса они исчезали бы при
+ * первом же повторном разборе или ручной правке.
+ *
+ * Вызывать НА ГРАНИЦЕ ЗАПИСИ — там, где новый validation отправляется в базу
+ * или в ответ, — а не после каждого вызова валидатора: у создания документа
+ * из XML прошлого снимка нет вовсе, и переносить там нечего.
+ *
+ * Чистый no-op, когда устойчивых предупреждений в прошлом снимке не было:
+ * возвращает тот же объект, не создавая лишних полей.
+ */
+export function mergePersistentUpdWarnings(
+  previous: UpdValidation | null | undefined,
+  next: UpdValidation,
+): UpdValidation {
+  const carried = (previous?.warnings ?? []).filter((w) => isPersistentUpdWarning(w.name));
+  if (carried.length === 0) return next;
+
+  // Дубли возможны: пересчёт мог сам выставить то же имя (например, аудит
+  // нумерации отработал в этом же проходе). Ключ — имя + область.
+  const seen = new Set(
+    (next.warnings ?? []).map((w) => `${w.name}|${JSON.stringify(w.scope)}`),
+  );
+  const merged: UpdWarning[] = [...(next.warnings ?? [])];
+  for (const w of carried) {
+    const key = `${w.name}|${JSON.stringify(w.scope)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(w);
+  }
+  return { ...next, warnings: merged };
 }

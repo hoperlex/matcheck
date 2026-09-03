@@ -246,7 +246,7 @@ function StatusTag({
             </Tooltip>
           )}
           {!hasMismatch && warnings.length > 0 && (
-            <Tooltip title="Требует внимания: числа сходятся, но выглядят подставленными">
+            <Tooltip title="Требует внимания — откройте документ">
               <QuestionCircleOutlined style={{ color: '#8c8c8c', fontSize: 12 }} />
             </Tooltip>
           )}

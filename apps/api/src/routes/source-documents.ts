@@ -54,7 +54,7 @@ import {
 } from '../db/schema.js';
 import { parseUpdXml } from '../domain/edo/upd.parser.js';
 import { vatFieldsOf } from '../domain/edo/vat-fields.js';
-import { validateUpdTotals } from '../domain/edo/upd-validation.js';
+import { mergePersistentUpdWarnings, validateUpdTotals } from '../domain/edo/upd-validation.js';
 import { deriveUpdParseOutcome } from '../domain/edo/upd-outcome.js';
 import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
@@ -1531,7 +1531,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // в суммах» отражал актуальную логику, а не устарел вместе с
       // конкретным документом, пересчитываем validation по текущим
       // данным items + шапке. Стоимость операции — O(n) по строкам.
-      const liveValidation = validateUpdTotals(
+      const liveValidation = mergePersistentUpdWarnings(
+        sd.validation,
+        validateUpdTotals(
         {
           totalSum: sd.totalSum != null ? Number(sd.totalSum) : null,
           vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
@@ -1544,9 +1546,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             vatSum: it.vatSum != null ? Number(it.vatSum) : null,
           })),
         },
-        // Эвристика подозрения — только для распознанных документов: у XML и
-        // ручного ввода точная дробная цена ошибкой не является.
-        { detectRecognitionWarnings: sd.llmProviderId != null },
+          // Эвристика подозрения — только для распознанных документов: у XML и
+          // ручного ввода точная дробная цена ошибкой не является.
+          { detectRecognitionWarnings: sd.llmProviderId != null },
+        ),
       );
       const workHealth = await sourceDocumentWorkHealth(app, sd);
       const base = sdRow(sd, {
@@ -3522,7 +3525,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             // эвристика уместна, XML и ручной ввод — нет.
             { detectRecognitionWarnings: sd.llmProviderId != null },
           );
-          upd.validation = validation;
+          // Граница записи: пересчёт стирает всё, чего валидатор не считает.
+          // Пакетные предупреждения относятся к нарезке файла, а не к числам
+          // документа, и обязаны пережить правку позиций менеджером.
+          upd.validation = mergePersistentUpdWarnings(sd.validation, validation);
 
           // Исход после правки считает то же правило, что и разбор
           // (domain/edo/upd-outcome.ts). Раньше здесь жила своя проверка, и она

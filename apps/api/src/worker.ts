@@ -11,7 +11,7 @@
 import './instrument.js'; // ПЕРВЫМ — Sentry.init до bullmq/postgres/undici
 import * as Sentry from '@sentry/node';
 import { Queue, Worker, type Job } from 'bullmq';
-import { and, eq, inArray, isNull, lt, lte, notInArray, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lt, lte, notInArray, or } from 'drizzle-orm';
 import {
   markSourceDocumentContentChanged,
   publishGroupDocuments,
@@ -93,7 +93,11 @@ import {
 import { detectWaybill1t } from './domain/edo/waybill-1t-detect.js';
 import { getDefaultProviderKind } from './domain/llm/registry.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
-import { MIN_DEDUP_CONFIDENCE, validateUpdTotals } from './domain/edo/upd-validation.js';
+import {
+  MIN_DEDUP_CONFIDENCE,
+  mergePersistentUpdWarnings,
+  validateUpdTotals,
+} from './domain/edo/upd-validation.js';
 import {
   buildRepairHint,
   decideSegmentRepair,
@@ -140,12 +144,22 @@ import {
 } from './domain/jobs/job-outbox.js';
 import { loadEnv } from './lib/env.js';
 import { bundleSegments, ingestEvents, jobOutbox, recognitionEvidenceEvents } from './db/schema.js';
-import { classifyPages, type PageClassification } from './domain/edo/upd-page-prefilter.js';
+import {
+  classifyPages,
+  PAGE_CLASSIFY_WITH_NUMBER_PROMPT,
+  type PageClassification,
+} from './domain/edo/upd-page-prefilter.js';
+import {
+  differentDocNumber,
+  findNumberGaps,
+  normalizeDocNumber,
+} from './domain/edo/upd-doc-number.js';
 import { imageToVisionPage, renderPdf, toClassifyThumb } from './domain/edo/page-render.js';
 import {
   mergeClassificationChunks,
   pageRefsOfSegment,
   planUpdSegments,
+  rollbackKindsByFile,
   type AssemblyPage,
   type PageRef,
 } from './domain/edo/upd-assembly.js';
@@ -155,13 +169,14 @@ import {
   planAssemblyDocumentMergesLegacy,
 } from './domain/edo/upd-assembly-merge.js';
 import { resolveRootBundle } from './domain/sourceDocuments/bundle-import-registry.js';
-import { llmProviders, llmProviderCredentials } from './db/schema.js';
+import { llmCalls, llmProviders, llmProviderCredentials } from './db/schema.js';
 import { buildAad, decryptField } from './domain/auth/crypto.js';
 import { repairStuckJobs, STUCK_INTERVAL_MS } from './domain/jobs/stuck-jobs.js';
 import type {
   SourceStatus,
   UpdPdfParsed,
   UpdValidation,
+  UpdWarning,
   WaybillDocument,
 } from '@matcheck/contracts';
 
@@ -924,7 +939,14 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       updatedAt: new Date(),
     })
     .where(generationScoped(sourceDocumentId, jobGeneration))
-    .returning({ id: sourceDocuments.id, kind: sourceDocuments.kind });
+    // validation берём здесь же: повторный разбор перезапишет его целиком, и
+    // пакетные предупреждения («в файле были неразобранные страницы») иначе
+    // потерялись бы — вычислить их заново по items нечем.
+    .returning({
+      id: sourceDocuments.id,
+      kind: sourceDocuments.kind,
+      validation: sourceDocuments.validation,
+    });
   if (!proc) {
     log.warn({ jobGeneration }, 'source document is gone or superseded — skipping job');
     return;
@@ -2203,6 +2225,11 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     };
   }
 
+  // Граница записи: дальше validation уходит в базу и перетирает прежний
+  // снимок. Пакетные предупреждения относятся к нарезке файла, а не к числам
+  // документа, — валидатор их не вычисляет, поэтому переносим руками.
+  validation = mergePersistentUpdWarnings(proc.validation, validation);
+
   // Запись шапки. Для новых распознанных УПД поставщик живёт в
   // supplier_directory_id (FK на suppliers), supplier_id (FK на counterparties)
   // оставляем NULL — DTO supplierName собирается из COALESCE двух источников.
@@ -3154,6 +3181,71 @@ async function recordRecognitionEvidence(args: {
 }
 
 /**
+ * Журнал одного vision-вызова классификации страниц сборки.
+ *
+ * Одиночный путь такую запись делает давно (upd-vision.parser), а сборка — нет:
+ * сырой ответ модели там просто выбрасывался, и разобрать инцидент «почему
+ * страница названа оборотом» было нечем. Пишем её и здесь.
+ *
+ * source_document_id на этом этапе НЕТ: документы сегментов ещё не созданы, а
+ * классификация относится к пакету целиком. Поэтому адрес пакета кладём в
+ * responseParsed — иначе запись не связать ни с чем.
+ *
+ * Ошибку вставки глушим: журнал не может быть причиной развала сборки.
+ */
+async function recordAssemblyClassifyCall(args: {
+  bundleId: string;
+  generation: number;
+  subBundleId: string | null;
+  providerId: string;
+  model: string;
+  chunkIndex: number;
+  pageCount: number;
+  raw: string | null;
+  classification: PageClassification[];
+  promptTokens: number | null;
+  completionTokens: number | null;
+  finishReason: string | null;
+  latencyMs: number;
+  log: WorkerLog;
+}): Promise<void> {
+  try {
+    await db.insert(llmCalls).values({
+      sourceDocumentId: null,
+      providerId: args.providerId,
+      promptId: null,
+      docKind: 'upd_page_classify',
+      model: args.model,
+      requestMessages: [
+        {
+          role: 'user',
+          content: `[upd assembly page classify: bundle=${args.bundleId}, generation=${args.generation}, chunk=${args.chunkIndex}, pages=${args.pageCount}]`,
+        },
+      ],
+      requestSchema: null,
+      responseRaw: args.raw,
+      responseParsed: {
+        bundleId: args.bundleId,
+        generation: args.generation,
+        subBundleId: args.subBundleId,
+        chunkIndex: args.chunkIndex,
+        pageCount: args.pageCount,
+        finishReason: args.finishReason,
+        classification: args.classification,
+      } as object,
+      promptTokens: args.promptTokens,
+      completionTokens: args.completionTokens,
+      latencyMs: args.latencyMs,
+    });
+  } catch (err) {
+    args.log.warn(
+      { err: err instanceof Error ? err.message : String(err), chunk: args.chunkIndex },
+      'сборка УПД: не удалось записать журнал классификации страниц',
+    );
+  }
+}
+
+/**
  * Обёртка над markSubBundleItemsFailed: ошибку разметки глушим — она не повод
  * валить обработчик, а исход перепроверит периодическая проверка инварианта.
  */
@@ -3667,91 +3759,16 @@ export async function handleDocumentRouterJob(
         });
         createdCount++;
       } else if (isWaybill) {
-        // Разворачиваем в waybill-flow: отдельный под-bundle на этот файл
-        // (тот же путь, что «Загрузить накладные»).
-        //
-        // ПОКОЛЕНИЕ ЗАГРУЗКИ В КЛЮЧЕ ОБЯЗАТЕЛЬНО. Без него повторная отправка
-        // того же файла даёт тот же хеш, вставка гасится onConflictDoNothing —
-        // и дочерний пакет не создаётся, а накладная остаётся без разбора. Это
-        // ровно та мёртвая зона, что была у сборки УПД (`assembly:<root>:<gen>`),
-        // только для накладных: там поколение в ключе было, здесь его не было.
-        const subHash = createHash('sha256')
-          .update(`router:${bundleId}:${bundle.activeUploadGeneration}:${a.s3Key}`)
-          .digest('hex');
-        const subId = randomUUID();
-        const subTechId = randomUUID();
-        const subJobId = bundleDispatchKeyOf(subId, 0);
-        await db.transaction(async (tx) => {
-          await fenceBundleAttempt(tx as unknown as typeof db, bundleId, bundleGeneration);
-          // Дата машины — из БД и ОДИН раз на всю транзакцию: пакет и его
-          // служебная запись обязаны получить одно значение, а строка пакета,
-          // прочитанная до транзакции, могла устареть (менеджер как раз правил
-          // дату). То же соображение, что и у resolveMachineSiteId.
-          const machineExpected = await resolveMachineExpectedDate(
-            tx as unknown as Db,
-            bundleId,
-          );
-          await tx.insert(sourceBundles).values({
-            id: subId,
-            bundleHash: subHash,
-            kind: 'waybill',
-            direction: bundle.direction,
-            // Дочерний пакет наследует происхождение родителя — иначе накладная
-            // из письма после разбора выглядела бы загруженной вручную.
-            origin: bundle.origin,
-            parentBundleId: bundleId,
-            siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
-            contractorId: bundle.contractorId,
-            recipientMolId: bundle.recipientMolId,
-            expectedDate: machineExpected,
-            status: 'queued',
-            jobId: subJobId,
-            createdByUserId: bundle.createdByUserId,
-          });
-          await tx.insert(sourceDocuments).values({
-            id: subTechId,
-            kind: 'transport_waybill',
-            // Служебная запись sub-пакета — тоже вне выдачи инспектору.
-            isTechnical: true,
-            direction: bundle.direction,
-            origin: bundleOrigin,
-            status: 'queued',
-            contractorId: bundle.contractorId,
-            recipientMolId: bundle.recipientMolId,
-            recipientSource: manualRecipientSource(bundle),
-            siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
-            expectedDate: machineExpected,
-            originalFilename: a.filename,
-            queuedAt: new Date(),
-            bundleId: subId,
-            createdByUserId: bundle.createdByUserId,
-          });
-          await tx.insert(sourceDocumentAttachments).values({
-            sourceDocumentId: subTechId,
-            s3Key: a.s3Key,
-            filename: a.filename,
-            mimeType: a.mimeType,
-            sizeBytes: a.sizeBytes,
-            role: 'original',
-          });
-          await enqueueJob(tx as unknown as typeof db, {
-            queue: UPD_PARSE_QUEUE,
-            jobName: 'parse',
-            payload: { bundleId: subId, bundleGeneration: 0 },
-            dedupeKey: subJobId,
-          });
-          await recordImportItem(tx as unknown as typeof db, bundleId, a, {
-            detectedKind: cls.detectedKind,
-            confidence: cls.confidence.toString(),
-            parserUsed: 'parseWaybillBatch',
-            status: 'created',
-            createdDocumentIds: [],
-            // Итоговый документ появится в ДОЧЕРНЕМ пакете, поэтому связь на
-            // него явная: по bundle_id родителя его не найти.
-            subBundleId: subId,
-            reason: 'накладная → waybill-парсер',
-            metadata: { signals: cls.signals, subBundleId: subId },
-          });
+        await createWaybillSubBundle({
+          bundleId,
+          bundleGeneration,
+          bundle,
+          bundleOrigin,
+          file: a,
+          detectedKind: cls.detectedKind,
+          confidence: cls.confidence,
+          signals: cls.signals,
+          reason: 'накладная → waybill-парсер',
         });
         createdCount++;
       } else if (assemblyEnabled && isAssemblyCandidate(a, cls)) {
@@ -3955,6 +3972,117 @@ function isAssemblyCandidate(file: RouterInputFile, cls: FileClassification): bo
   return (
     mime.startsWith('image/') || mime === 'application/pdf' || /\.(jpe?g|png|webp|pdf)$/i.test(name)
   );
+}
+
+/**
+ * Разворачивает файл в waybill-flow: дочерний пакет + служебный документ +
+ * задание разбора накладной. Это тот же путь, которым идёт «Загрузить
+ * накладные», и единственный способ отдать файл парсеру накладных.
+ *
+ * Вынесено из router, потому что вызывающих стало два: сам router и откат
+ * сборки. До этого откат умел только `createSingleUpdDocument`, то есть любой
+ * файл — даже целиком состоящий из страниц транспортной накладной — уезжал в
+ * УПД-парсер с видом «УПД».
+ */
+async function createWaybillSubBundle(args: {
+  bundleId: string;
+  bundleGeneration: number;
+  bundle: typeof sourceBundles.$inferSelect;
+  bundleOrigin: NonNullable<typeof sourceBundles.$inferSelect.origin>;
+  file: RouterInputFile;
+  detectedKind: string;
+  confidence: number;
+  signals: string[];
+  /** Причина в реестре: у отката она своя. */
+  reason: string;
+}): Promise<string> {
+  const {
+    bundleId,
+    bundleGeneration,
+    bundle,
+    bundleOrigin,
+    file: a,
+    detectedKind,
+    confidence,
+    signals,
+    reason,
+  } = args;
+  const subHash = createHash('sha256')
+    .update(`router:${bundleId}:${bundle.activeUploadGeneration}:${a.s3Key}`)
+    .digest('hex');
+  const subId = randomUUID();
+  const subTechId = randomUUID();
+  const subJobId = bundleDispatchKeyOf(subId, 0);
+  await db.transaction(async (tx) => {
+    await fenceBundleAttempt(tx as unknown as typeof db, bundleId, bundleGeneration);
+    // Дата машины — из БД и ОДИН раз на всю транзакцию: пакет и его
+    // служебная запись обязаны получить одно значение, а строка пакета,
+    // прочитанная до транзакции, могла устареть (менеджер как раз правил
+    // дату). То же соображение, что и у resolveMachineSiteId.
+    const machineExpected = await resolveMachineExpectedDate(tx as unknown as Db, bundleId);
+    await tx.insert(sourceBundles).values({
+      id: subId,
+      bundleHash: subHash,
+      kind: 'waybill',
+      direction: bundle.direction,
+      // Дочерний пакет наследует происхождение родителя — иначе накладная
+      // из письма после разбора выглядела бы загруженной вручную.
+      origin: bundle.origin,
+      parentBundleId: bundleId,
+      siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
+      contractorId: bundle.contractorId,
+      recipientMolId: bundle.recipientMolId,
+      expectedDate: machineExpected,
+      status: 'queued',
+      jobId: subJobId,
+      createdByUserId: bundle.createdByUserId,
+    });
+    await tx.insert(sourceDocuments).values({
+      id: subTechId,
+      kind: 'transport_waybill',
+      // Служебная запись sub-пакета — тоже вне выдачи инспектору.
+      isTechnical: true,
+      direction: bundle.direction,
+      origin: bundleOrigin,
+      status: 'queued',
+      contractorId: bundle.contractorId,
+      recipientMolId: bundle.recipientMolId,
+      recipientSource: manualRecipientSource(bundle),
+      siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
+      expectedDate: machineExpected,
+      originalFilename: a.filename,
+      queuedAt: new Date(),
+      bundleId: subId,
+      createdByUserId: bundle.createdByUserId,
+    });
+    await tx.insert(sourceDocumentAttachments).values({
+      sourceDocumentId: subTechId,
+      s3Key: a.s3Key,
+      filename: a.filename,
+      mimeType: a.mimeType,
+      sizeBytes: a.sizeBytes,
+      role: 'original',
+    });
+    await enqueueJob(tx as unknown as typeof db, {
+      queue: UPD_PARSE_QUEUE,
+      jobName: 'parse',
+      payload: { bundleId: subId, bundleGeneration: 0 },
+      dedupeKey: subJobId,
+    });
+    await recordImportItem(tx as unknown as typeof db, bundleId, a, {
+      detectedKind,
+      confidence: confidence.toString(),
+      parserUsed: 'parseWaybillBatch',
+      status: 'created',
+      createdDocumentIds: [],
+      // Итоговый документ появится в ДОЧЕРНЕМ пакете, поэтому связь на
+      // него явная: по bundle_id родителя его не найти.
+      subBundleId: subId,
+      reason,
+      metadata: { signals, subBundleId: subId },
+    });
+  });
+  return subId;
 }
 
 /** Одиночный путь «файл = документ»: документ, вложение, задание, реестр. */
@@ -4322,6 +4450,9 @@ async function loadSegmentPages(ctx: SegmentJobContext): Promise<Buffer[]> {
 
 /** Ключи OpenRouter для классификации страниц. null — работать нечем. */
 async function resolveOpenRouterCreds(): Promise<{
+  // Нужен только журналу: llm_calls.provider_id ссылается на llm_providers,
+  // а без него запись классификации сборки не связать с провайдером.
+  providerId: string;
   apiBaseUrl: string;
   apiKey: string;
   model: string;
@@ -4340,6 +4471,7 @@ async function resolveOpenRouterCreds(): Promise<{
   if (!cred) return null;
   try {
     return {
+      providerId: provider.id,
       apiBaseUrl: cred.apiBaseUrl,
       apiKey: decryptField(cred.apiKeyEncrypted, buildAad('llm_provider_credentials', cred.kind)),
       model: provider.model,
@@ -4388,6 +4520,11 @@ async function buildAssemblyPages(
 // Сколько страниц уходит в один вызов классификатора. Тот же предел, что у
 // prefilter: больше — и модель начинает путать номера.
 const ASSEMBLY_CLASSIFY_CHUNK = 15;
+
+// Отметка правила нарезки в улике. Меняется вместе с правилом, а не с кодом
+// вообще: по ней на бою отличают пакеты, нарезанные прежним «по типу
+// страницы», от нарезанных с учётом номера документа.
+const ASSEMBLY_PLANNER_VERSION = 'page_type_v1';
 
 /**
  * Сборка логических УПД: классификация страниц, нарезка, манифест, документы.
@@ -4534,14 +4671,69 @@ export async function handleUpdAssemblyJob(
     // Классификация порциями. Смещение номеров обязательно: classifyPages в
     // каждом вызове нумерует страницы заново с единицы и про предыдущие порции
     // ничего не знает.
+    const splitMode = loadEnv().UPD_ASSEMBLY_SPLIT_BY_DOC_NUMBER;
     const chunks: PageClassification[][] = [];
     const chunkSizes: number[] = [];
+    // Метаданные каждой порции — для улики: по ним видно, обрезан ли ответ,
+    // сколько стоил вызов и сколько он занял.
+    const chunkMeta: Array<{
+      chunkIndex: number;
+      pageCount: number;
+      finishReason: string | null;
+      promptTokens: number | null;
+      completionTokens: number | null;
+      latencyMs: number;
+      rawLength: number | null;
+    }> = [];
     try {
       for (let i = 0; i < pages.length; i += ASSEMBLY_CLASSIFY_CHUNK) {
         const slice = pages.slice(i, i + ASSEMBLY_CLASSIFY_CHUNK);
-        const res = await classifyPages({ ...creds, thumbs: slice.map((p) => p.thumb) });
+        const chunkIndex = chunks.length;
+        const startedAt = Date.now();
+        const res = await classifyPages({
+          apiBaseUrl: creds.apiBaseUrl,
+          apiKey: creds.apiKey,
+          model: creds.model,
+          thumbs: slice.map((p) => p.thumb),
+          // Номера спрашиваем и в shadow: без них теневой план ничем не
+          // отличался бы от применяемого и не сказал бы ничего нового.
+          // Промпт передаётся ЯВНО и только здесь — одиночный путь и
+          // prefilter остаются на прежнем тексте при любом значении флага.
+          ...(splitMode === 'off'
+            ? {}
+            : {
+                prompt: PAGE_CLASSIFY_WITH_NUMBER_PROMPT,
+                maxTokens: loadEnv().UPD_ASSEMBLY_CLASSIFY_MAX_TOKENS,
+              }),
+        });
+        const latencyMs = Date.now() - startedAt;
         chunks.push(res.classification);
         chunkSizes.push(slice.length);
+        chunkMeta.push({
+          chunkIndex,
+          pageCount: slice.length,
+          finishReason: res.finishReason,
+          promptTokens: res.promptTokens,
+          completionTokens: res.completionTokens,
+          latencyMs,
+          rawLength: res.raw?.length ?? null,
+        });
+        await recordAssemblyClassifyCall({
+          bundleId: rootId,
+          generation,
+          subBundleId,
+          providerId: creds.providerId,
+          model: creds.model,
+          chunkIndex,
+          pageCount: slice.length,
+          raw: res.raw,
+          classification: res.classification,
+          promptTokens: res.promptTokens,
+          completionTokens: res.completionTokens,
+          finishReason: res.finishReason,
+          latencyMs,
+          log,
+        });
       }
     } catch (err) {
       await rollbackUpdAssembly({
@@ -4558,10 +4750,24 @@ export async function handleUpdAssemblyJob(
     const classification = mergeClassificationChunks(chunks, chunkSizes);
     // Карта «страница → файл» нужна перестановке: переставлять можно только
     // файлы целиком, порядок листов внутри PDF задан самим документом.
+    const pageOwners = new Map(pages.map((page) => [page.globalPage, page.ref.inputOrder]));
     const plan = planUpdSegments(classification, pages.length, MAX_PAGES_FOR_OPENROUTER_SEGMENT, {
-      pageOwners: new Map(pages.map((page) => [page.globalPage, page.ref.inputOrder])),
+      pageOwners,
       reorder: loadEnv().UPD_ASSEMBLY_REORDER_V1,
+      splitByDocNumber: splitMode === 'on',
     });
+    // В shadow считаем ВТОРОЙ план — тот, что получился бы с разрезами по
+    // номеру, — и записываем расхождение. Применяется по-прежнему первый:
+    // решение о включении принимается по накопленным расхождениям, а не на
+    // боевом трафике вслепую.
+    const shadowPlan =
+      splitMode === 'shadow'
+        ? planUpdSegments(classification, pages.length, MAX_PAGES_FOR_OPENROUTER_SEGMENT, {
+            pageOwners,
+            reorder: loadEnv().UPD_ASSEMBLY_REORDER_V1,
+            splitByDocNumber: true,
+          })
+        : null;
     await recordRecognitionEvidence({
       bundleId: rootId,
       generation,
@@ -4574,6 +4780,45 @@ export async function handleUpdAssemblyJob(
         segments: plan.segments,
         confident: plan.confident,
         reasons: plan.reasons,
+        // Страницы, исключённые как чужие. Единственное место, где они вообще
+        // сохраняются: аудит нумерации читает их отсюда при публикации.
+        droppedPages: plan.droppedPages,
+        // Каким правилом нарезан пакет. Флаг в env кэшируется и действует
+        // только на новые манифесты, поэтому после его переключения понять
+        // происхождение конкретной нарезки можно лишь по этой отметке.
+        plannerVersion: splitMode === 'on' ? 'doc_number_v1' : ASSEMBLY_PLANNER_VERSION,
+        splitMode,
+        chunks: chunkMeta,
+        ...(shadowPlan
+          ? {
+              shadow: {
+                segments: shadowPlan.segments,
+                confident: shadowPlan.confident,
+                reasons: shadowPlan.reasons,
+              },
+              diff: {
+                segmentsApplied: plan.segments.length,
+                segmentsShadow: shadowPlan.segments.length,
+                confidentApplied: plan.confident,
+                confidentShadow: shadowPlan.confident,
+                // Где именно теневой план поставил бы границу — это и есть
+                // список для ручной сверки с исходным PDF перед включением.
+                wouldSplit: shadowPlan.segments
+                  .filter((seg) => seg.reasons[0] === 'opened_by_doc_number_change')
+                  .map((seg) => ({
+                    atPage: seg.pages[0] ?? null,
+                    segmentIndex: seg.segmentIndex,
+                    docNumber: seg.docNumber ?? null,
+                  })),
+                numbersRead: classification.filter((c) => c.docNumber != null).length,
+                numbersReadMain: classification.filter(
+                  (c) => c.type === 'upd_main' && c.docNumber != null,
+                ).length,
+                pagesMain: classification.filter((c) => c.type === 'upd_main').length,
+                pagesTotal: pages.length,
+              },
+            }
+          : {}),
       },
     });
     if (!plan.confident) {
@@ -4612,6 +4857,11 @@ export async function handleUpdAssemblyJob(
           segmentIndex: seg.segmentIndex,
           pageRefs: pageRefsOfSegment(seg, pages),
           confidence: seg.confidence,
+          // Номер, увиденный классификатором на страницах сегмента. Колонка
+          // существует с миграции 0096 и до сих пор пустовала; теперь по ней
+          // сверяют, тот ли документ извлёк парсер, и видят номер, которому
+          // не нашлось карточки.
+          docNumber: seg.docNumber ?? null,
         })),
       );
       return true;
@@ -4952,10 +5202,17 @@ async function consolidateAssemblyDocuments(
       vatRate: item.vatRate == null ? null : Number(item.vatRate),
       vatSum: item.vatSum == null ? null : Number(item.vatSum),
     }));
-    const validation = validateUpdTotals(
-      { totalSum, vatSum, itemsCount: declaredItemsCount, items: validationItems },
-      // Позиции собраны из распознанных сегментов — эвристика применима.
-      { detectRecognitionWarnings: true },
+    // Граница записи: склейка перезапишет validation победителя. Пакетные
+    // предупреждения (неразобранные страницы, неучтённый номер) относятся ко
+    // ВСЕМУ пакету, поэтому переносим их из прежнего снимка победителя —
+    // иначе склейка двух экземпляров стирала бы след о потере.
+    const validation = mergePersistentUpdWarnings(
+      (keeper.validation ?? null) as UpdValidation | null,
+      validateUpdTotals(
+        { totalSum, vatSum, itemsCount: declaredItemsCount, items: validationItems },
+        // Позиции собраны из распознанных сегментов — эвристика применима.
+        { detectRecognitionWarnings: true },
+      ),
     );
     // Исход считает общее правило системы, а не отдельная ветка склейки:
     // денежное расхождение оставляет документ обработанным и вешает жёлтую
@@ -5048,6 +5305,160 @@ function segmentOutcome(doc: {
 }
 
 /**
+ * Аудит нумерации пакета: помечает документы, если файл мог потерять документ.
+ *
+ * Два признака, оба — пометки, а НЕ блокировки:
+ *
+ *  - в пакете были страницы, уверенно опознанные как чужой документ
+ *    (накладная, сертификат): в сегменты они не идут, и до сих пор исчезали
+ *    бесследно;
+ *  - номера документов пакета образуют ряд с дыркой (4304…4309 без 4308) —
+ *    ровно так выглядит документ, чью шапку классификатор принял за оборот
+ *    предыдущего.
+ *
+ * Статус, parse_error_code, hasMismatch и видимость документа не меняются:
+ * инспектор обязан получить материалы на планшет в любом случае, а разбирается
+ * с сомнением менеджер на портале.
+ *
+ * Ошибку глушим: аудит не может быть причиной несостоявшейся публикации.
+ */
+async function auditAssemblyNumbers(
+  tx: typeof db,
+  args: {
+    rootId: string;
+    generation: number;
+    docIds: string[];
+    /** Номера, увиденные классификатором на страницах (манифест сегментов). */
+    manifestNumbers?: string[];
+    log: WorkerLog;
+  },
+): Promise<void> {
+  const { rootId, generation, docIds, manifestNumbers = [], log } = args;
+  if (docIds.length === 0) return;
+  try {
+    const docs = await tx
+      .select({
+        id: sourceDocuments.id,
+        docNumber: sourceDocuments.docNumber,
+        validation: sourceDocuments.validation,
+      })
+      .from(sourceDocuments)
+      .where(inArray(sourceDocuments.id, docIds));
+
+    // Список выброшенных страниц знает только планировщик, а к моменту
+    // публикации плана уже нет — читаем его из улики того же поколения.
+    const [evidence] = await tx
+      .select({ payload: recognitionEvidenceEvents.payload })
+      .from(recognitionEvidenceEvents)
+      .where(
+        and(
+          eq(recognitionEvidenceEvents.bundleId, rootId),
+          eq(recognitionEvidenceEvents.generation, generation),
+          eq(recognitionEvidenceEvents.evidenceType, 'page_classification'),
+        ),
+      )
+      .orderBy(desc(recognitionEvidenceEvents.createdAt))
+      .limit(1);
+    const dropped = (
+      (evidence?.payload as { droppedPages?: Array<{ page: number; type: string }> } | null)
+        ?.droppedPages ?? []
+    ).filter((d) => Number.isInteger(d?.page));
+
+    const gaps = findNumberGaps(docs.map((d) => d.docNumber));
+
+    const warnings: UpdWarning[] = [];
+    if (dropped.length > 0) {
+      warnings.push({
+        name: 'dropped_pages_not_parsed',
+        scope: 'document',
+        details: {
+          pages: dropped.map((d) => d.page),
+          pageKinds: [...new Set(dropped.map((d) => d.type))],
+        },
+      });
+    }
+    if (gaps.length > 0) {
+      warnings.push({
+        name: 'sibling_number_gap',
+        scope: 'document',
+        details: {
+          docNumbers: gaps.flatMap((g) => g.missing.map((n) => `${g.prefix}${n}`)),
+        },
+      });
+    }
+
+    // Прямой признак потери, в отличие от дырки в ряду: на страницах файла
+    // напечатан номер, которому не нашлось ни одного распознанного документа.
+    // Так выглядит и съеденный сегментом документ, и разрез не по границе.
+    //
+    // Работает только когда классификатор возвращает номера (расширенный
+    // промпт); при выключенном рубильнике манифест пуст, и проверка молчит.
+    const unaccounted = manifestNumbers.filter(
+      (manifestNumber) =>
+        !docs.some((d) => !differentDocNumber(manifestNumber, d.docNumber)),
+    );
+    if (unaccounted.length > 0) {
+      warnings.push({
+        name: 'page_doc_number_unaccounted',
+        scope: 'document',
+        details: { docNumbers: [...new Set(unaccounted)] },
+      });
+    }
+
+    // Одинаковый номер у двух опубликованных документов пакета. Склейка их не
+    // свела — значит разошлись поставщик или дата, и это законно: один номер
+    // у разных поставщиков не редкость. Но точно так же выглядит разрез не по
+    // границе документа, поэтому помечаем, не вмешиваясь в состав пакета.
+    const byNumber = new Map<string, number>();
+    for (const d of docs) {
+      const normalized = normalizeDocNumber(d.docNumber);
+      if (normalized == null) continue;
+      byNumber.set(normalized, (byNumber.get(normalized) ?? 0) + 1);
+    }
+    const repeated = [...byNumber.entries()].filter(([, n]) => n > 1).map(([number]) => number);
+    if (repeated.length > 0) {
+      warnings.push({
+        name: 'sibling_number_duplicate',
+        scope: 'document',
+        details: { docNumbers: repeated },
+      });
+    }
+    if (warnings.length === 0) return;
+
+    // Пометка вешается на ВСЕ документы пакета: сомнение относится к файлу
+    // целиком, и менеджер должен увидеть его из любой карточки, а не угадывать,
+    // в какой именно спрятан след.
+    for (const doc of docs) {
+      const previous = doc.validation;
+      const next: UpdValidation = previous ?? {
+        hasMismatch: false,
+        checkedAt: new Date().toISOString(),
+        checks: [],
+      };
+      const existing = next.warnings ?? [];
+      const missing = warnings.filter((w) => !existing.some((e) => e.name === w.name));
+      if (missing.length === 0) continue;
+      await tx
+        .update(sourceDocuments)
+        .set({
+          validation: { ...next, warnings: [...existing, ...missing] },
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceDocuments.id, doc.id));
+    }
+    log.info(
+      { dropped: dropped.length, gaps: gaps.length, docs: docs.length },
+      'сборка УПД: аудит нумерации отметил пакет',
+    );
+  } catch (err) {
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err), rootId, generation },
+      'сборка УПД: аудит нумерации не выполнен',
+    );
+  }
+}
+
+/**
  * Публикует комплект, когда все сегменты дошли до терминального состояния.
  *
  * Вызывается после КАЖДОГО сегментного задания (в том числе провалившегося) —
@@ -5104,6 +5515,9 @@ export async function tryFinalizeUpdAssembly(
         confidence: bundleSegments.confidence,
         docId: bundleSegments.sourceDocumentId,
         pageRefs: bundleSegments.pageRefs,
+        // Номер, увиденный классификатором. Нужен аудиту: если парсер извлёк
+        // из сегмента другой номер, значит границу провели не там.
+        manifestDocNumber: bundleSegments.docNumber,
       })
       .from(bundleSegments)
       .where(and(eq(bundleSegments.bundleId, rootId), eq(bundleSegments.generation, generation)))
@@ -5171,6 +5585,24 @@ export async function tryFinalizeUpdAssembly(
 
     // ── публикация ──────────────────────────────────────────────────────────
     const now = new Date();
+    // Аудит нумерации — до публикации, но ПОСЛЕ склейки: считать пропуски по
+    // ещё не сведённым экземплярам одной УПД бессмысленно.
+    //
+    // Ничего не блокирует и не меняет статусы: документ с материалами обязан
+    // доехать до планшета, даже если к пакету есть вопросы. Задача пометки —
+    // показать менеджеру на портале, что файл стоит открыть глазами.
+    if (loadEnv().UPD_ASSEMBLY_NUMBER_AUDIT) {
+      await auditAssemblyNumbers(tx as unknown as typeof db, {
+        rootId,
+        generation,
+        docIds: publishedDocIds,
+        manifestNumbers: segments
+          .map((seg) => seg.manifestDocNumber)
+          .filter((n): n is string => n != null),
+        log,
+      });
+    }
+
     // Публикуем сегменты И бампаем сиблингов группы — иначе накладная, уже
     // видимая до публикации, навсегда осталась бы на планшете отдельной
     // карточкой. Подробнее — в KDoc publishGroupDocuments.
@@ -5358,6 +5790,61 @@ async function rollbackUpdAssembly(args: {
       r.s3Key !== null &&
       (subBundleId ? r.subBundleId === subBundleId : r.effectiveStatus === null),
   );
+
+  // Кому на самом деле принадлежит файл. Классификация страниц уже сделана —
+  // грех её не спросить: иначе целиком-накладная уедет в УПД-парсер только
+  // потому, что нарезке не поверили.
+  const rollbackKindMode = loadEnv().UPD_ASSEMBLY_ROLLBACK_KIND;
+  let kindByFile = new Map<string, 'transport_waybill' | 'supplementary'>();
+  if (rollbackKindMode !== 'off') {
+    try {
+      const [evidence] = await db
+        .select({ payload: recognitionEvidenceEvents.payload })
+        .from(recognitionEvidenceEvents)
+        .where(
+          and(
+            eq(recognitionEvidenceEvents.bundleId, rootId),
+            eq(recognitionEvidenceEvents.generation, generation),
+            eq(recognitionEvidenceEvents.evidenceType, 'page_classification'),
+          ),
+        )
+        .orderBy(desc(recognitionEvidenceEvents.createdAt))
+        .limit(1);
+      const payload = evidence?.payload as {
+        classification?: PageClassification[];
+        pageMap?: Array<{ globalPage: number; registryItemId: string | null }>;
+      } | null;
+      if (payload?.classification && payload.pageMap) {
+        kindByFile = rollbackKindsByFile(payload.classification, payload.pageMap);
+      }
+      if (kindByFile.size > 0) {
+        // След пишется в обоих режимах: в shadow это единственный результат
+        // работы, а в on по нему видно, почему файл ушёл не в УПД.
+        await recordRecognitionEvidence({
+          bundleId: rootId,
+          generation,
+          evidenceType: 'assembly_rollback',
+          payload: {
+            subBundleId,
+            mode: rollbackKindMode,
+            routing: [...kindByFile.entries()].map(([registryItemId, kind]) => ({
+              registryItemId,
+              kind,
+            })),
+          },
+        });
+      }
+    } catch (err) {
+      // Не смогли определить вид — значит откат идёт как раньше. Молчаливая
+      // деградация здесь безопаснее отказа: документы всё равно создадутся.
+      log.warn(
+        { err: err instanceof Error ? err.message : String(err), rootId },
+        'сборка УПД: не удалось определить вид файлов для отката',
+      );
+      kindByFile = new Map();
+    }
+  }
+
   const createdIds: string[] = [];
   for (const r of rows) {
     const file: RouterInputFile = {
@@ -5372,6 +5859,40 @@ async function rollbackUpdAssembly(args: {
       processingMode: r.processingMode,
     };
     try {
+      const routedKind = rollbackKindMode === 'on' ? kindByFile.get(r.id) : undefined;
+      if (routedKind === 'transport_waybill') {
+        // Тот же путь, что у «Загрузить накладные»: дочерний пакет и парсер
+        // накладных. Одной смены detectedKind было бы мало —
+        // createSingleUpdDocument всё равно создаёт kind='upd' и ставит
+        // задание в очередь УПД.
+        await createWaybillSubBundle({
+          bundleId: rootId,
+          bundleGeneration: rootBundle.dispatchGeneration,
+          bundle: rootBundle,
+          bundleOrigin: rootBundle.origin ?? 'manual_pdf',
+          file,
+          detectedKind: 'transport_waybill',
+          confidence: 0,
+          signals: ['assembly:rollback', 'assembly:rollback:kind=transport_waybill'],
+          reason: `сборка отменена (${reason}) → накладная в waybill-парсер`,
+        });
+        continue;
+      }
+      if (routedKind === 'supplementary') {
+        // Сертификат и паспорт качества не распознаются нигде: у них нет
+        // своего парсера, и штатный исход — строка реестра со статусом
+        // skipped. Раньше такой файл уезжал в УПД-парсер пустым черновиком.
+        await recordImportItemForAttempt(rootId, rootBundle.dispatchGeneration, file, {
+          detectedKind: 'supplementary',
+          confidence: '0',
+          parserUsed: 'none',
+          status: 'skipped',
+          createdDocumentIds: [],
+          reason: `сборка отменена (${reason}) → сопроводительный документ`,
+          metadata: { signals: ['assembly:rollback', 'assembly:rollback:kind=supplementary'] },
+        });
+        continue;
+      }
       const docId = await createSingleUpdDocument({
         bundleId: rootId,
         bundleGeneration: rootBundle.dispatchGeneration,

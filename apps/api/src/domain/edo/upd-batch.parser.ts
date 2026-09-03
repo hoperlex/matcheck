@@ -14,6 +14,7 @@
 // «487, 488, 489, 490». Сейчас НИЧЕГО из этого не сохраняем.
 
 import type { PageClassification, PageType } from './upd-page-prefilter.js';
+import { differentDocNumber } from './upd-doc-number.js';
 import type { UpdPdfParsed, UpdPdfItem } from '@matcheck/contracts';
 
 // ─────────────────────────────── Сегментация ───────────────────────────────
@@ -40,6 +41,14 @@ export type UpdPageSegment = {
   pages: number[];
   confidence: SegmentConfidence;
   reasons: string[];
+  /**
+   * Номер документа сегмента — первый прочитанный среди его страниц.
+   *
+   * Заполняется только когда классификатор возвращает номера. Нужен дважды:
+   * чтобы решить, где кончается один документ и начинается другой, и чтобы
+   * потом сверить решение с тем, что извлёк из сегмента полноценный парсер.
+   */
+  docNumber?: string;
 };
 
 /**
@@ -65,10 +74,24 @@ export type UpdPageSegment = {
 export function segmentUpdPages(
   classification: PageClassification[],
   selectedPages?: number[],
-  opts?: { preserveOrder?: boolean },
+  opts?: {
+    preserveOrder?: boolean;
+    /**
+     * Резать сегмент, когда на странице напечатан ЧУЖОЙ номер документа.
+     *
+     * Выключено по умолчанию: без явной передачи функция ведёт себя ровно так
+     * же, как до появления номеров в классификации, даже если номера в ней
+     * есть. Это и есть граница «выключенный рубильник — прежнее поведение».
+     */
+    splitByDocNumber?: boolean;
+  },
 ): UpdPageSegment[] {
   const typeByPage = new Map<number, PageType>();
-  for (const c of classification) typeByPage.set(c.page, c.type);
+  const numberByPage = new Map<number, string>();
+  for (const c of classification) {
+    typeByPage.set(c.page, c.type);
+    if (c.docNumber != null) numberByPage.set(c.page, c.docNumber);
+  }
 
   // Набор страниц для сегментации.
   const rawPages =
@@ -88,14 +111,35 @@ export function segmentUpdPages(
   // делает вызывающий код в теле цикла, чтобы TS видел сужение типа
   // (присваивание только внутри замыкания ломает control-flow analysis).
   const open = (page: number, confidence: SegmentConfidence, reason: string): UpdPageSegment => {
+    const number = numberByPage.get(page);
     const seg: UpdPageSegment = {
       segmentIndex: segments.length,
       pages: [page],
       confidence,
       reasons: [reason],
+      ...(number !== undefined ? { docNumber: number } : {}),
     };
     segments.push(seg);
     return seg;
+  };
+  /**
+   * Начинается ли на странице ДРУГОЙ документ.
+   *
+   * Только при включённом правиле и только когда оба номера читаются и их
+   * числовые хвосты различны — см. differentDocNumber. Любая неизвестность
+   * («номера нет», «номер без цифр», «потерян префикс») трактуется как «тот же
+   * документ»: лишний разрез рвёт настоящий документ пополам, и цена такой
+   * ошибки выше, чем цена невыполненного разреза, который поймает аудит.
+   */
+  const startsAnotherDocument = (seg: UpdPageSegment | null, page: number): boolean => {
+    if (!opts?.splitByDocNumber || !seg) return false;
+    return differentDocNumber(seg.docNumber, numberByPage.get(page));
+  };
+  /** Номер сегменту достаётся от первой его страницы, где он вообще прочитан. */
+  const rememberNumber = (seg: UpdPageSegment, page: number): void => {
+    if (seg.docNumber !== undefined) return;
+    const number = numberByPage.get(page);
+    if (number !== undefined) seg.docNumber = number;
   };
   const markUncertain = (seg: UpdPageSegment, reason: string): void => {
     if (seg.confidence === 'normal') seg.confidence = 'uncertain';
@@ -109,9 +153,17 @@ export function segmentUpdPages(
       continue;
     }
     if (type === 'upd_continuation') {
+      // Шапка следующего документа, прочитанная как продолжение предыдущего, —
+      // ровно тот случай, из-за которого пропадали целые УПД: номер на такой
+      // странице свой, и по нему видно, что документ уже другой.
+      if (startsAnotherDocument(current, page)) {
+        current = open(page, 'normal', 'opened_by_doc_number_change');
+        continue;
+      }
       if (current) {
         current.pages.push(page);
         current.reasons.push(`continuation_page_${page}`);
+        rememberNumber(current, page);
       } else {
         current = open(page, 'fallback', 'continuation_without_main');
       }
@@ -119,9 +171,16 @@ export function segmentUpdPages(
     }
     // other / certificate / transport_waybill / unknown(undefined)
     const label = type ?? 'unknown';
+    // То же и для страницы неопознанного типа: на бою терялся документ, чья
+    // шапка приехала как `other` и молча приклеилась к соседу.
+    if (startsAnotherDocument(current, page)) {
+      current = open(page, 'normal', 'opened_by_doc_number_change');
+      continue;
+    }
     if (current) {
       current.pages.push(page);
       markUncertain(current, `attached_${label}_page_${page}`);
+      rememberNumber(current, page);
     } else {
       current = open(page, 'fallback', `opened_by_${label}_page`);
     }

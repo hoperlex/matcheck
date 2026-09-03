@@ -37,8 +37,20 @@ export type AssemblyPage = {
   thumb: Buffer;
 };
 
+export type DroppedPage = { page: number; type: PageType };
+
 export type SegmentPlan = {
   segments: UpdPageSegment[];
+  /**
+   * Страницы, уверенно опознанные как чужой документ (накладная, сертификат) и
+   * потому не попавшие ни в один сегмент.
+   *
+   * Раньше они исчезали совсем бесследно — при том что для страниц, которые
+   * классификатор просто не упомянул, причина в reasons писалась. Из-за этой
+   * асимметрии смешанный пакет молча терял накладную: файл оставался
+   * вложением УПД, а документа по нему не появлялось.
+   */
+  droppedPages: DroppedPage[];
   /**
    * Можно ли публиковать результат сборки.
    *
@@ -93,6 +105,12 @@ export type PlanUpdSegmentsOptions = {
   pageOwners?: ReadonlyMap<number, number>;
   /** Рубильник UPD_ASSEMBLY_REORDER_V1. Выключен — поведение прежнее целиком. */
   reorder?: boolean;
+  /**
+   * Рубильник UPD_ASSEMBLY_SPLIT_BY_DOC_NUMBER в режиме `on`: страница с
+   * чужим номером документа открывает свой сегмент. Выключен — план считается
+   * ровно как раньше, даже если номера в классификации есть.
+   */
+  splitByDocNumber?: boolean;
 };
 
 /**
@@ -181,18 +199,34 @@ export function planUpdSegments(
   // сомнительным.
   const selectedPages: number[] = [];
   const unclassified: number[] = [];
+  const droppedPages: DroppedPage[] = [];
   for (let page = 1; page <= totalPages; page++) {
     const known = byPage.get(page);
-    if (known && DROPPED_TYPES.has(known.type)) continue;
+    if (known && DROPPED_TYPES.has(known.type)) {
+      droppedPages.push({ page, type: known.type });
+      continue;
+    }
     if (!known) unclassified.push(page);
     selectedPages.push(page);
   }
   if (unclassified.length > 0) {
     reasons.push(`классификатор не упомянул страницы: ${unclassified.join(', ')}`);
   }
+  if (droppedPages.length > 0) {
+    // Причина пишется всегда, даже когда сборка удалась: по ней разбирают
+    // жалобу «загрузили шесть документов, видим пять».
+    reasons.push(
+      `исключены как чужие: ${droppedPages.map((d) => `${d.page} (${d.type})`).join(', ')}`,
+    );
+  }
 
   if (selectedPages.length === 0) {
-    return { segments: [], confident: false, reasons: [...reasons, 'нет ни одной УПД-страницы'] };
+    return {
+      segments: [],
+      droppedPages,
+      confident: false,
+      reasons: [...reasons, 'нет ни одной УПД-страницы'],
+    };
   }
 
   const plan = evaluatePageOrder(
@@ -202,15 +236,16 @@ export function planUpdSegments(
     reasons,
     unclassified.length === 0,
     false,
+    opts?.splitByDocNumber ?? false,
   );
-  if (plan.confident) return plan;
+  if (plan.confident) return { ...plan, droppedPages };
 
   // Нарезке не поверили. Единственный отказ, который лечится перестановкой, —
   // «продолжение без начала»: страница с шапкой в пакете есть, но загружена
   // второй. Пробуем поставить её вперёд и пересчитать.
-  if (!opts?.reorder) return plan;
+  if (!opts?.reorder) return { ...plan, droppedPages };
   const headerFirst = headerFirstOrder(classification, selectedPages, totalPages, plan, opts.pageOwners);
-  if (!headerFirst) return plan;
+  if (!headerFirst) return { ...plan, droppedPages };
   const reordered = evaluatePageOrder(
     classification,
     headerFirst,
@@ -218,11 +253,12 @@ export function planUpdSegments(
     reasons,
     unclassified.length === 0,
     true,
+    opts?.splitByDocNumber ?? false,
   );
   // Перестановка не помогла — отдаём ИСХОДНЫЙ план: он честно описывает, что
   // увидел классификатор, и по нему разбирают инциденты.
-  if (!reordered.confident) return plan;
-  return { ...reordered, reasons: [...reordered.reasons, REORDERED_REASON] };
+  if (!reordered.confident) return { ...plan, droppedPages };
+  return { ...reordered, droppedPages, reasons: [...reordered.reasons, REORDERED_REASON] };
 }
 
 /** Отметка в reasons: по ней на бою видно, что план получен перестановкой. */
@@ -242,11 +278,20 @@ function evaluatePageOrder(
   baseReasons: string[],
   classifiedFully: boolean,
   preserveOrder: boolean,
+  splitByDocNumber: boolean,
 ): SegmentPlan {
   const reasons = [...baseReasons];
-  const segments = segmentUpdPages(classification, selectedPages, { preserveOrder });
+  const segments = segmentUpdPages(classification, selectedPages, {
+    preserveOrder,
+    splitByDocNumber,
+  });
   if (segments.length === 0) {
-    return { segments, confident: false, reasons: [...reasons, 'сегментация не дала документов'] };
+    return {
+      segments,
+      droppedPages: [],
+      confident: false,
+      reasons: [...reasons, 'сегментация не дала документов'],
+    };
   }
 
   let confident = classifiedFully;
@@ -267,7 +312,13 @@ function evaluatePageOrder(
     // А вот `fallback` доверия по-прежнему лишает — это сегмент, открытый НЕ
     // шапкой: продолжение без начала либо непонятная страница сама по себе.
     // Там неизвестно даже, сколько документов в пачке.
-    const startedByHeader = seg.reasons[0] === 'opened_by_upd_main';
+    // Сегмент, открытый сменой номера документа, доверия достоин ровно так же,
+    // как открытый шапкой: границу в обоих случаях провёл прочитанный на
+    // странице реквизит, а не догадка. Не учесть его здесь означало бы, что
+    // каждый верный разрез валит доверие ко всему плану и разворачивает пакет
+    // обратно в «файл = документ» — то есть починка оборачивалась бы откатами.
+    const startedByHeader =
+      seg.reasons[0] === 'opened_by_upd_main' || seg.reasons[0] === 'opened_by_doc_number_change';
     const trustworthy = seg.confidence === 'normal' || (seg.confidence === 'uncertain' && startedByHeader);
     if (!trustworthy) {
       confident = false;
@@ -287,7 +338,10 @@ function evaluatePageOrder(
     }
   }
 
-  return { segments, confident, reasons };
+  // droppedPages знает только planUpdSegments — он и подставит их в итог:
+  // здесь оценивается один конкретный порядок страниц, а список исключённых
+  // от порядка не зависит.
+  return { segments, droppedPages: [], confident, reasons };
 }
 
 /**
@@ -316,4 +370,50 @@ export function inputOrdersOfSegment(segment: UpdPageSegment, pages: AssemblyPag
     if (page) orders.add(page.ref.inputOrder);
   }
   return [...orders].sort((a, b) => a - b);
+}
+
+/**
+ * Какому парсеру принадлежит файл, судя по классификации его страниц.
+ *
+ * Нужна откату сборки: когда нарезке нельзя доверять, файл разворачивают в
+ * один документ — и до сих пор всегда в УПД, даже если классификатор страниц
+ * только что честно написал «здесь одна транспортная накладная».
+ *
+ * Правило намеренно узкое — только ОДНОРОДНЫЙ файл:
+ *
+ *  - все страницы `transport_waybill` → накладная;
+ *  - все страницы `certificate` → сопроводительный документ;
+ *  - всё остальное (есть УПД-страница, смешанный набор, страница без типа,
+ *    файл без страниц) → null, то есть «как раньше».
+ *
+ * Смешанный файл здесь не разбирается сознательно: разложить его по разным
+ * парсерам — отдельная задача, а угадывание «по большинству» ровно тем же
+ * способом теряет документы, от которого мы уходим.
+ */
+export function rollbackKindsByFile(
+  classification: ReadonlyArray<PageClassification>,
+  pageMap: ReadonlyArray<{ globalPage: number; registryItemId: string | null }>,
+): Map<string, 'transport_waybill' | 'supplementary'> {
+  const typeByPage = new Map(classification.map((c) => [c.page, c.type]));
+  const pagesByFile = new Map<string, PageType[]>();
+  for (const ref of pageMap) {
+    if (!ref.registryItemId) continue;
+    const type = typeByPage.get(ref.globalPage);
+    // Страница, которую классификатор не упомянул, делает файл неоднородным:
+    // о ней мы не знаем ничего, и «остальные же накладные» — не довод.
+    const list = pagesByFile.get(ref.registryItemId) ?? [];
+    list.push(type ?? 'other');
+    pagesByFile.set(ref.registryItemId, list);
+  }
+
+  const out = new Map<string, 'transport_waybill' | 'supplementary'>();
+  for (const [registryItemId, types] of pagesByFile) {
+    if (types.length === 0) continue;
+    if (types.every((t) => t === 'transport_waybill')) {
+      out.set(registryItemId, 'transport_waybill');
+      continue;
+    }
+    if (types.every((t) => t === 'certificate')) out.set(registryItemId, 'supplementary');
+  }
+  return out;
 }
