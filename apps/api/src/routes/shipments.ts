@@ -62,6 +62,11 @@ import {
   SOURCE_DOCUMENT_SUMMARY_COLUMNS,
   type SourceDocumentSummaryRow,
 } from '../domain/operations/source-document-summary.js';
+import { loadEnv } from '../lib/env.js';
+import {
+  documentsNeedingRowIds,
+  loadProblemRowItemIds,
+} from '../domain/operations/source-document-validation.js';
 import { canSeeReviewInMatrix } from '../lib/review.js';
 import { assertPermission } from '../lib/permissions/assert.js';
 import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
@@ -132,7 +137,7 @@ function parseCsv(s: string | undefined): string[] {
     .filter(Boolean);
 }
 
-const KNOWN_FEATURES = new Set(['transit', 'assets', 'upd', 'waybill']);
+const KNOWN_FEATURES = new Set(['transit', 'assets', 'upd', 'waybill', 'doc_attention']);
 const KNOWN_PURPOSES = new Set([
   'Вывоз материала',
   'Перемещение на объект',
@@ -404,6 +409,9 @@ async function buildShipmentDto(app: any, id: string, viewerRole?: string | null
         .from(sourceDocuments)
         .where(inArray(sourceDocuments.id, mentionedIds))
     : [];
+  // Идентичность строк нужна только там, где есть построчные проблемы: у
+  // здорового документа запрос не выполняется вовсе.
+  const rowItemIds = await loadProblemRowItemIds(app.db, documentsNeedingRowIds(summaryRows));
 
   return assembleShipmentDto(
     r,
@@ -412,7 +420,7 @@ async function buildShipmentDto(app: any, id: string, viewerRole?: string | null
     sources,
     showReview,
     null,
-    buildOperationSourceDocuments({ rows: summaryRows, linkedIds, mentionedIds }),
+    buildOperationSourceDocuments({ rows: summaryRows, linkedIds, mentionedIds, rowItemIds }),
   );
 }
 
@@ -533,6 +541,11 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
         consigneeInn: drSql<
           string | null
         >`COALESCE(NULLIF(BTRIM(${sourceDocuments.consigneeInnRaw}), ''), NULLIF(BTRIM(${sdConsignee.inn}), ''))`,
+        // Снимок сверки — тот же источник, что у одиночного пути через
+        // SOURCE_DOCUMENT_SUMMARY_COLUMNS. Здесь колонки перечислены руками, и
+        // забыть эту строку значило бы: в карточке плашка есть, в списке её
+        // молча нет. Ровно это и стерегут parity-тесты.
+        validation: sourceDocuments.validation,
       })
       .from(sourceDocuments)
       .leftJoin(sdSupplier, eq(sourceDocuments.supplierId, sdSupplier.id))
@@ -568,9 +581,18 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
         expectedDate: sd.expectedDate,
         totalSum: sd.totalSum,
         vatSum: sd.vatSum,
+        validation: sd.validation,
       });
     }
   }
+
+  // Одна загрузка идентичности строк на всю страницу, а не на операцию: иначе
+  // список из 50 приёмок дал бы 50 запросов. Документы без построчных проблем
+  // сюда не попадают вовсе.
+  const rowItemIds = await loadProblemRowItemIds(
+    app.db,
+    documentsNeedingRowIds([...summaryRowById.values()]),
+  );
 
   const result: ReturnType<typeof assembleShipmentDto>[] = [];
   for (const id of ids) {
@@ -591,6 +613,7 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
             .filter((row): row is SourceDocumentSummaryRow => row !== undefined),
           linkedIds: (sourcesById.get(id) ?? []).map((x) => x.sourceDocumentId),
           mentionedIds: mentionedByShipment.get(id) ?? [],
+          rowItemIds,
         }),
       ),
     );
@@ -779,6 +802,57 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         JOIN source_documents sd_u ON sd_u.id = ss_u.source_document_id
         WHERE ss_u.shipment_id = ${shipments.id} AND sd_u.kind = 'upd'
       )`);
+      } else if (f === 'doc_attention') {
+        // Очередь ручной проверки: документ, у которого разбор нашёл
+        // расхождение ИЛИ подозрение.
+        //
+        // Именно ИЛИ, а не один `hasMismatch`: предупреждения намеренно не
+        // входят в него (upd-validation.ts), а мониторинг на бою цитирует
+        // ровно их — замечания по приёмкам 13318 и 13322 дословно повторяют
+        // текст «в количестве стоит код единицы измерения из бланка».
+        //
+        // Вторая ветка (по происхождению позиций) нужна, чтобы фильтр совпадал
+        // с плашкой: карточка показывает сводку и по отвязанным документам,
+        // строки которых остались в операции.
+        //
+        // OPERATION_DOC_VALIDATION гасит фильтр вместе со сводкой: иначе
+        // выключённый рубильник оставил бы пункт меню, который ничего не находит.
+        if (loadEnv().OPERATION_DOC_VALIDATION) {
+          filters.push(drSql`(
+        EXISTS (
+          SELECT 1 FROM shipment_sources ds_a
+          JOIN source_documents sd_a ON sd_a.id = ds_a.source_document_id
+          WHERE ds_a.shipment_id = ${shipments.id}
+            AND (
+              jsonb_path_exists(sd_a.validation, '$.checks[*] ? (@.ok == false && !exists(@.skipReason))')
+              OR jsonb_array_length(COALESCE(sd_a.validation->'warnings', '[]'::jsonb)) > 0
+            )
+        )
+        OR EXISTS (
+          SELECT 1 FROM shipment_items di_a2
+          JOIN source_documents sd_a2 ON sd_a2.id = di_a2.source_document_id
+          WHERE di_a2.shipment_id = ${shipments.id}
+            AND (
+              jsonb_path_exists(sd_a2.validation, '$.checks[*] ? (@.ok == false && !exists(@.skipReason))')
+              OR jsonb_array_length(COALESCE(sd_a2.validation->'warnings', '[]'::jsonb)) > 0
+            )
+        )
+        OR EXISTS (
+          -- Третий источник — сверка фото документа, снятого на планшете.
+          -- Он не покрывается двумя предыдущими: у 73 приёмок за месяц сигнал
+          -- есть ТОЛЬКО здесь, документа к ним не привязано. Мониторинг этой
+          -- сводкой уже пользуется — замечания 13318 и 13322 дословно повторяют
+          -- её текст, хотя привязанный документ в них чист.
+          SELECT 1 FROM shipment_photos p_a
+          JOIN photo_recognized_items r_a ON r_a.shipment_photo_id = p_a.id
+          WHERE p_a.shipment_id = ${shipments.id}
+            AND (
+              jsonb_path_exists(r_a.validation, '$.checks[*] ? (@.ok == false && !exists(@.skipReason))')
+              OR jsonb_array_length(COALESCE(r_a.validation->'warnings', '[]'::jsonb)) > 0
+            )
+        )
+      )`);
+        }
       } else if (f === 'waybill') {
         filters.push(drSql`EXISTS (
         SELECT 1 FROM shipment_sources ss_w

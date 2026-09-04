@@ -22,7 +22,11 @@ export type ShipmentPurpose = (typeof PURPOSE_VALUES)[number];
 //   transit — флаг inTransit, выставленный инспектором в мобиле
 //             на 1-м этапе. У delivery и shipment поля симметричны
 //             (миграции 0051 in_transit, 0065 is_assets).
-export const FEATURE_VALUES = ['assets', 'waybill', 'upd', 'transit'] as const;
+//   doc_attention — разбор документа нашёл расхождение ИЛИ подозрение.
+//             Источников три: связанные документы, документы в происхождении
+//             позиций и сверка фото документа. Третий не лишний: у 73 приёмок
+//             за месяц сигнал есть только там, документа к ним не привязано.
+export const FEATURE_VALUES = ['assets', 'waybill', 'upd', 'transit', 'doc_attention'] as const;
 export type OperationFeature = (typeof FEATURE_VALUES)[number];
 // Обратно-совместимое имя для существующих импортов в ShipmentsHistory.
 export type ShipmentFeature = OperationFeature;
@@ -32,6 +36,9 @@ const FEATURE_LABELS: Record<OperationFeature, string> = {
   waybill: 'Накладные',
   upd: 'УПД',
   transit: 'Транзит',
+  // Не «Расхождение»: признак включает и подозрения, у которых арифметика
+  // сошлась. Название обещает ровно то, что фильтр отбирает.
+  doc_attention: 'Требует проверки',
 };
 
 export interface ShipmentFeatureFiltersValue {

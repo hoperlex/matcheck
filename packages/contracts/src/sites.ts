@@ -8,7 +8,7 @@ export const SiteCodeSchema = z
   .string()
   .min(1)
   .max(16)
-  .regex(/^[A-Za-zА-Яа-я0-9_.\-]+$/, 'Code allows letters, digits, dash, dot and underscore');
+  .regex(/^[A-Za-zА-Яа-я0-9_.-]+$/, 'Code allows letters, digits, dash, dot and underscore');
 
 export const SiteSchema = z.object({
   id: z.string().uuid(),

@@ -328,7 +328,7 @@ export default function OperationsPage() {
       setExporting(false);
     }
   }
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   const _apiSink = api; // keep import used (для будущих RPC из этой страницы)
 
   const createButton = (

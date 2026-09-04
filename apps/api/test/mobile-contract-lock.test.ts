@@ -24,6 +24,8 @@ import {
   DeliveryUpsertItemSchema,
   ShipmentItemSchema,
   ShipmentUpsertItemSchema,
+  DeliverySchema,
+  OperationSourceDocumentSchema,
 } from '@matcheck/contracts';
 
 /** Три поля, потеря любого из которых обнуляет деньги в операции. */
@@ -83,5 +85,57 @@ describe('финансовые поля живут в контракте с мо
     expect(shipment.price).toBe('82.5');
     expect(shipment.vatRate).toBe('22');
     expect(shipment.vatSum).toBe('1815');
+  });
+});
+
+describe('сводка сверки документа не ломает контракт с мобильным приложением', () => {
+  /**
+   * Мобильный клиент `sourceDocuments` вообще не объявляет и разбирает JSON с
+   * ignoreUnknownKeys, а через /sync это поле не уходит. Здесь закрепляется то,
+   * на чём держится безопасность добавления: сводка ОПЦИОНАЛЬНА на всех уровнях.
+   *
+   * Оговорка: TypeScript-тест не может доказать поведение Kotlin-клиента —
+   * это проверяется отдельно, на самом приложении.
+   */
+  const documentBase = {
+    id: '00000000-0000-0000-0000-0000000000d1',
+    kind: 'upd' as const,
+    status: 'parsed' as const,
+    docNumber: '1282',
+    docDate: '2026-09-01',
+    expectedDate: null,
+    totalSum: '185909.16',
+    vatSum: '33524.60',
+    linked: true,
+  };
+
+  it('поле validation объявлено в схеме документа операции', () => {
+    expect(Object.keys(OperationSourceDocumentSchema.shape)).toContain('validation');
+  });
+
+  it('документ БЕЗ сводки разбирается — иначе сломались бы все здоровые', () => {
+    const parsed = OperationSourceDocumentSchema.parse(documentBase);
+    expect('validation' in parsed).toBe(false);
+  });
+
+  it('пустые массивы в сводке — законное состояние', () => {
+    // Так выглядит устаревший снимок: текст есть, подсветки нет.
+    const parsed = OperationSourceDocumentSchema.parse({
+      ...documentBase,
+      validation: {
+        hasMismatch: true,
+        failedChecks: [],
+        warnings: [],
+        problemItemIds: [],
+      },
+    });
+    expect(parsed.validation?.problemItemIds).toEqual([]);
+  });
+
+  it('sourceDocuments у приёмки остаётся необязательным: инвариант /sync', () => {
+    // /sync снимок этого поля не собирает вовсе. Сделай его обязательным — и
+    // офлайн-снимок перестанет проходить схему, а карточка на планшете упадёт
+    // не на новом поле, а на его отсутствии.
+    expect(DeliverySchema.shape.sourceDocuments.isOptional()).toBe(true);
   });
 });

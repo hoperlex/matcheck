@@ -4,10 +4,10 @@ import { and, desc, eq, gt, isNull } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
+import type { PublicSharedShipmentSchema } from '@matcheck/contracts';
 import {
   ShareLinkSchema,
   ShareLinkListResponseSchema,
-  PublicSharedShipmentSchema,
   PublicSharedEntitySchema,
   PublicShareMessageListResponseSchema,
   PublicShareMessageCreateRequestSchema,
@@ -274,7 +274,11 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
       config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
       schema: {
         params: z.object({ token: z.string().min(20).max(64) }),
-        response: { 200: PublicSharedEntitySchema, 404: ErrorResponseSchema, 410: ErrorResponseSchema },
+        response: {
+          200: PublicSharedEntitySchema,
+          404: ErrorResponseSchema,
+          410: ErrorResponseSchema,
+        },
       },
     },
     async (req, reply) => {
@@ -298,10 +302,7 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
           .innerJoin(statuses, eq(deliveries.statusId, statuses.id))
           .leftJoin(supplier, eq(deliveries.supplierId, supplier.id))
           .leftJoin(contractor, eq(deliveries.contractorId, contractor.id))
-          .leftJoin(
-            responsiblePersons,
-            eq(deliveries.recipientMolId, responsiblePersons.id),
-          )
+          .leftJoin(responsiblePersons, eq(deliveries.recipientMolId, responsiblePersons.id))
           .leftJoin(sites, eq(deliveries.siteId, sites.id))
           .where(eq(deliveries.id, t.entityId))
           .limit(1);
@@ -395,10 +396,7 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
         .from(shipments)
         .innerJoin(statuses, eq(shipments.statusId, statuses.id))
         .leftJoin(receiver, eq(shipments.receiverCounterpartyId, receiver.id))
-        .leftJoin(
-          responsiblePersons,
-          eq(shipments.receiverMolId, responsiblePersons.id),
-        )
+        .leftJoin(responsiblePersons, eq(shipments.receiverMolId, responsiblePersons.id))
         .leftJoin(sites, eq(shipments.siteId, sites.id))
         .where(eq(shipments.id, t.entityId))
         .limit(1);
@@ -524,8 +522,9 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!s3Key) return reply.code(404).send({ error: 'not_found' });
 
       const url = new URL(req.url, `http://${req.hostname}`);
-      const wantsThumb = url.pathname.endsWith('/thumb') || url.searchParams.get('thumb') === 'true';
-      const keyToFetch = wantsThumb ? thumbKey ?? s3Key : s3Key;
+      const wantsThumb =
+        url.pathname.endsWith('/thumb') || url.searchParams.get('thumb') === 'true';
+      const keyToFetch = wantsThumb ? (thumbKey ?? s3Key) : s3Key;
 
       try {
         const buf = await getObject(keyToFetch);
@@ -535,12 +534,14 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
           : keyToFetch.toLowerCase().endsWith('.webp')
             ? 'image/webp'
             : 'image/jpeg';
-        return reply
-          .header('Content-Type', ct)
-          // Кеш на 5 минут — токен живёт долго, фото неизменяемое.
-          // private — потому что доступно только по знанию токена.
-          .header('Cache-Control', 'private, max-age=300')
-          .send(buf);
+        return (
+          reply
+            .header('Content-Type', ct)
+            // Кеш на 5 минут — токен живёт долго, фото неизменяемое.
+            // private — потому что доступно только по знанию токена.
+            .header('Cache-Control', 'private, max-age=300')
+            .send(buf)
+        );
       } catch (err) {
         req.log.warn({ err, key: keyToFetch }, 'share: failed to fetch photo from s3');
         return reply.code(502).send({ error: 's3_fetch_failed' });
@@ -667,4 +668,3 @@ export async function shareRoutes(rawApp: FastifyInstance): Promise<void> {
     },
   );
 }
-

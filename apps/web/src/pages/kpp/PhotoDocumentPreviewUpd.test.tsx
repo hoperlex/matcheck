@@ -114,7 +114,7 @@ describe('PhotoDocumentPreview — фото, разобранное УПД-ве�
 
     // checks: доказанное расхождение, с объяснением знака разницы.
     expect(await screen.findByText(/сумма позиций vs итог документа/)).toBeTruthy();
-    expect(screen.getByText(/не хватает 16 838,11/)).toBeTruthy();
+    expect(screen.getByText(/сумма строк меньше итога на 16 838,11/)).toBeTruthy();
     // warnings: подозрение на код ОКЕИ в количестве.
     expect(screen.getByText(/код единицы измерения из бланка/)).toBeTruthy();
   });

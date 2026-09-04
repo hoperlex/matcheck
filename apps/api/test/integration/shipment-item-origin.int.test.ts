@@ -299,4 +299,56 @@ suite('происхождение позиций отгрузки (реальн�
     expect(dto.sourceDocuments.map((d) => d.id)).toEqual([second.id, first.id]);
     expect(dto.sourceDocuments.map((d) => d.linked)).toEqual([true, false]);
   });
+
+  it('сводка сверки: одинаковая форма в карточке и в списке (parity)', async () => {
+    // Зеркало теста приёмок. Отдельно, а не «по аналогии»: колонки документов в
+    // батч-пути отгрузок перечислены своим списком, и разъехаться они могут
+    // независимо от приёмок.
+    const doc = await makeUpd('О-40', [{ name: 'Кабель', qty: '5' }]);
+    const validation = {
+      hasMismatch: true,
+      checkedAt: new Date().toISOString(),
+      checks: [
+        {
+          name: 'row_qty_price',
+          scope: { row: 1 },
+          expected: 1000,
+          actual: 10,
+          diff: 990,
+          tolerance: 1,
+          ok: false,
+        },
+        {
+          name: 'items_count',
+          scope: 'document',
+          expected: 1,
+          actual: 1,
+          diff: 0,
+          tolerance: 0,
+          ok: true,
+        },
+      ],
+    };
+    await sql`UPDATE source_documents SET validation = ${JSON.stringify(validation)}::jsonb WHERE id = ${doc.id}`;
+
+    const shipmentId = await makeShipment();
+    await link(shipmentId, doc.id);
+
+    const single = await app.inject({ method: 'GET', url: `/api/v1/shipments/${shipmentId}` });
+    expect(single.statusCode, single.body).toBe(200);
+    const singleDto = single.json() as { sourceDocuments: { validation?: unknown }[] };
+    const v = singleDto.sourceDocuments[0]!.validation as {
+      failedChecks: unknown[];
+      problemItemIds: string[];
+    };
+    expect(v.failedChecks).toHaveLength(1);
+    expect(v.problemItemIds).toEqual([doc.itemIds[0]]);
+
+    const list = await app.inject({ method: 'GET', url: '/api/v1/shipments?limit=50' });
+    const fromList = (
+      list.json() as { items: { id: string; sourceDocuments?: unknown[] }[] }
+    ).items.find((x) => x.id === shipmentId);
+    expect(fromList?.sourceDocuments).toEqual(singleDto.sourceDocuments);
+  });
+
 });

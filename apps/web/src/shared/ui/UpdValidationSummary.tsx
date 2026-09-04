@@ -14,9 +14,15 @@ import { formatMoneyRu } from '../utils/formatRu';
  * по-разному — ровно та беда, из-за которой у фото и появился свой промпт.
  */
 
-export function describeCheck(c: UpdCheck): string {
-  const where = c.scope === 'document' ? 'по документу' : `строка ${c.scope.row}`;
-  const name =
+/**
+ * Название проверки человеческими словами.
+ *
+ * Отдельной функцией, потому что этих слов теперь два потребителя: карточка
+ * документа и карточка операции. Вторая копия словаря разошлась бы с первой —
+ * та же беда, из-за которой у фото когда-то завёлся собственный промпт.
+ */
+export function updCheckLabel(name: UpdCheck['name']): string {
+  return (
     {
       sum_total: 'сумма позиций vs итог документа',
       vat_total: 'НДС позиций vs НДС документа',
@@ -24,7 +30,13 @@ export function describeCheck(c: UpdCheck): string {
       items_sequence: 'номера позиций идут не подряд — строка потеряна или задвоена',
       row_qty_price: 'qty × price ≠ sum',
       row_vat_rate: 'sum × ставка ≠ НДС',
-    }[c.name] || c.name;
+    }[name] || name
+  );
+}
+
+export function describeCheck(c: UpdCheck): string {
+  const where = c.scope === 'document' ? 'по документу' : `строка ${c.scope.row}`;
+  const name = updCheckLabel(c.name);
   const exp = c.expected != null ? c.expected.toFixed(2) : '—';
   const act = c.actual != null ? c.actual.toFixed(2) : '—';
   return `${name} (${where}): ожидается ${exp}, по факту ${act}${explainGap(c)}`;
@@ -47,18 +59,22 @@ export function explainGap(c: UpdCheck): string {
   const gap = c.actual - c.expected;
   if (gap === 0) return '';
   const amount = formatMoneyRu(Math.abs(gap));
+  // Формулировка намеренно не называет причину единственной: недостача бывает и
+  // от пропущенной строки, и от неверно прочитанного итога, и от ошибки в
+  // числах одной позиции. Раньше текст утверждал «строка не распозналась» — на
+  // документе с неверным итогом это уводило проверяющего не туда.
   return gap < 0
-    ? ` — не хватает ${amount}, вероятно, строка не распозналась`
-    : ` — лишние ${amount}, вероятно, строка задвоилась`;
+    ? ` — сумма строк меньше итога на ${amount}: проверьте пропуск строки или ошибку в числах`
+    : ` — сумма строк больше итога на ${amount}: проверьте задвоение строки или ошибку в числах`;
 }
 
 /**
  * Подозрения читаются иначе, чем расхождения: арифметика сошлась, доказательства
  * нет — есть только повод перепроверить строку глазами по бумаге.
  */
-export function describeWarning(w: UpdWarning): string {
-  const where = w.scope === 'document' ? 'по документу' : `строка ${w.scope.row}`;
-  const name =
+/** Название подозрения человеческими словами — общее для документа и операции. */
+export function updWarningLabel(name: UpdWarning['name']): string {
+  return (
     {
       qty_price_swap: 'похоже, количество и цена стоят не в своих колонках',
       unit_code_as_qty: 'в количестве стоит код единицы измерения из бланка, а не количество',
@@ -76,7 +92,13 @@ export function describeWarning(w: UpdWarning): string {
       page_doc_number_unaccounted:
         'на страницах файла есть номер документа, которому не нашлось карточки',
       sibling_number_duplicate: 'в пакете два документа с одним номером — сверьте с оригиналом',
-    }[w.name] || w.name;
+    }[name] || name
+  );
+}
+
+export function describeWarning(w: UpdWarning): string {
+  const where = w.scope === 'document' ? 'по документу' : `строка ${w.scope.row}`;
+  const name = updWarningLabel(w.name);
   // У пакетных предупреждений «строка N» смысла не имеет, зато полезны номера
   // страниц: именно их менеджер откроет в оригинале.
   const pages = w.details?.pages;

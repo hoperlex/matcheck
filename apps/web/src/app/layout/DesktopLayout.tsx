@@ -67,6 +67,11 @@ export function DesktopLayout() {
     }));
   }, [user, perms, operationsCount]);
 
+  // Хуки — строго до early-return: при выходе (user → null) React иначе
+  // увидит другое число хуков между рендерами. useMemo выше поднят по той же
+  // причине, а этот useState оставался ниже.
+  const [profileOpen, setProfileOpen] = useState(false);
+
   if (!user) return null;
   const selected = items.find(
     (i) => location.pathname === i.key || (i.key !== '/' && location.pathname.startsWith(i.key)),
@@ -86,7 +91,6 @@ export function DesktopLayout() {
   // первая буква от того, что показываем (быстрая идентификация).
   const displayName = user.fullName?.trim() || user.email;
   const avatarLetter = displayName.charAt(0).toUpperCase();
-  const [profileOpen, setProfileOpen] = useState(false);
 
   const siderWidth = collapsed ? 64 : 240;
   return (

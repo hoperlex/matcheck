@@ -7,23 +7,20 @@ import {
   List,
   Modal,
   Segmented,
-  Select,
   Space,
   Tag,
-  Typography,
   Upload,
   message,
 } from 'antd';
 import { InboxOutlined, FileImageOutlined } from '@ant-design/icons';
 import type { UploadFile, UploadProps } from 'antd';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import type { Dayjs } from 'dayjs';
 import type {
-  ResponsiblePerson,
   SourceDirection,
   UpdPdfQueueResponse,
 } from '@matcheck/contracts';
-import { api, apiUploadFiles, ApiError } from '../../services/api';
+import { apiUploadFiles, ApiError } from '../../services/api';
 import { CustomerCounterpartySelect } from './CustomerCounterpartySelect';
 import { ResponsiblePersonSelect } from '../../components/ResponsiblePersonSelect';
 import { SiteSelect } from './SiteSelect';
@@ -60,15 +57,6 @@ export function WaybillUploadModal({
   const [expectedDate, setExpectedDate] = useState<Dayjs | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [uploading, setUploading] = useState(false);
-
-  const responsiblePersonsQuery = useQuery({
-    queryKey: ['responsible-persons', 'active'],
-    queryFn: () =>
-      api.get<{ items: ResponsiblePerson[]; total: number }>(
-        '/responsible-persons?activeOnly=true&limit=500',
-      ),
-  });
-  const responsiblePersons = responsiblePersonsQuery.data?.items ?? [];
 
   function reset() {
     setRecipientKind('counterparty');

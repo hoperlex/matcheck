@@ -36,7 +36,6 @@ import type {
   ResponsiblePerson,
   Shipment,
   ShipmentKind,
-  ShipmentPhoto,
   ShipmentStatusCode,
   Site,
   SourceDocument,
@@ -128,13 +127,6 @@ function computeVatSum(it: {
   if (qty === null || price === null || rate === null) return null;
   return (qty * price * rate) / 100;
 }
-
-const KIND_OPTIONS: { label: string; value: ShipmentKind }[] = [
-  { label: 'Подрядчику', value: 'contractor' },
-  { label: 'Возврат', value: 'return' },
-  { label: 'Перемещение', value: 'transfer' },
-  { label: 'Списание', value: 'writeoff' },
-];
 
 // Семантический «Тип отгрузки» (shipments.purpose, миграция 0050). Мобила
 // записывает один из этих 4 вариантов через dropdown на форме «Новая

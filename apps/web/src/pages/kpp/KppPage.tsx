@@ -34,7 +34,6 @@ import type {
   Counterparty,
   ResponsiblePerson,
   Delivery,
-  DeliveryPhoto,
   DeliveryStatusCode,
   OperationSourceDocument,
   Site,
@@ -82,6 +81,7 @@ import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
 import { operationsListQuery, readOperationsFilters } from '../operations/operationsQuery';
 import { OperationItemsSections } from '../shared/OperationItemsSections';
+import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
 import { OperationDocumentsChips } from '../shared/OperationDocumentsChips';
 
 type DraftItem = {
@@ -165,14 +165,6 @@ function newKey(): string {
  * Компактный inline-label для полей шапки. Мелкий шрифт, серый цвет —
  * заметен, но не съедает место как antd Form.Item label или Card title.
  */
-function FieldLabel({ children, required }: { children: React.ReactNode; required?: boolean }) {
-  return (
-    <Typography.Text style={{ fontSize: 11, color: '#8c8c8c', display: 'block', marginBottom: 2 }}>
-      {children}
-      {required && <span style={{ color: '#ff4d4f' }}> *</span>}
-    </Typography.Text>
-  );
-}
 
 /**
  * Edit-режим приёмки. Прежде это была отдельная страница `/kpp?delivery=…`,
@@ -1078,6 +1070,30 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   }, [loadedDelivery?.sourceDocuments, selectedUpd]);
 
   /**
+   * Позиции документов, к которым относятся проблемные строки сверки.
+   *
+   * Ключ — `sourceDocumentItemId`, а НЕ номер строки: приёмка нумерует свои
+   * позиции сама, и на боевых данных её `lineNo` совпадает с номером строки
+   * документа лишь у 77% строк. По номеру подсветка красила бы чужую строку.
+   */
+  const problemItemIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const doc of sectionDocuments) {
+      for (const id of doc.validation?.problemItemIds ?? []) ids.add(id);
+    }
+    return ids;
+  }, [sectionDocuments]);
+
+  /** Имена позиций по id строки документа — чтобы плашка называла их словами. */
+  const itemNameByDocumentItemId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const it of items) {
+      if (it.sourceDocumentItemId && it.nameRaw) map.set(it.sourceDocumentItemId, it.nameRaw);
+    }
+    return map;
+  }, [items]);
+
+  /**
    * Сколько документов у приёмки по её же списку связей. Нужен офлайн-режиму:
    * снимок от /sync поля sourceDocuments не несёт, и шапка иначе показала бы
    * «— без УПД —» у приёмки с четырьмя УПД.
@@ -1935,12 +1951,21 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           ]}
         />
 
+        {/* Сверка документа — НАД блоками материалов: блоки по умолчанию
+            свёрнуты, и подсветка проблемных строк внутри них не видна, пока
+            блок не раскрыт. Плашка поэтому самодостаточна. */}
+        <OperationDocumentValidationAlert
+          documents={sectionDocuments}
+          itemNameByDocumentItemId={itemNameByDocumentItemId}
+        />
+
         {/* Материалы — сворачиваемыми блоками, по одному на документ поставки
             (см. OperationItemsSections). Раньше здесь был один плоский список,
             и при нескольких УПД было не понять, чьи это строки. */}
         <OperationItemsSections<DraftItem>
           items={items}
           documents={sectionDocuments}
+          problemItemIds={problemItemIds}
           columns={columns}
           cardRender={cardRender}
           onAddItem={isContractor ? undefined : addItem}

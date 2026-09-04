@@ -197,6 +197,23 @@ export function PhotoGallery({
     },
   });
 
+  // Все хуки — строго до early-return ниже: у галереи без фото он срабатывал
+  // раньше этих useState/useRef, и появление первого фото меняло число хуков
+  // между рендерами (React: «Rendered more hooks than during the previous
+  // render»). Пояснения к каждому состоянию — у мест, где они используются.
+  //
+  // docPreview (данные) и docPreviewOpen (видимость) разделены намеренно:
+  // rc-dialog вызывает afterClose только при переходе open true→false. Если
+  // закрытие сразу обнуляет docPreview, компонент размонтируется без этого
+  // перехода и afterClose (возврат фокуса) не отработает.
+  const [docPreview, setDocPreview] = useState<{ id: string; src: string } | null>(null);
+  const [docPreviewOpen, setDocPreviewOpen] = useState(false);
+  const galleryRef = useRef<HTMLDivElement>(null);
+  // Общий previewOpen-флаг для всей PreviewGroup: при открытии fullscreen
+  // preview ЛЮБОГО фото он становится true → enabled для fullQuery включается
+  // сразу у всех фото группы.
+  const [previewOpen, setPreviewOpen] = useState(false);
+
   if (photos.length === 0) return null;
 
   // Сортировка фото внутри stage'а (1/2 Этап родитель делит на отдельные
@@ -227,9 +244,6 @@ export function PhotoGallery({
   // закрытие сразу обнулять docPreview, компонент размонтируется без этого
   // перехода и afterClose (возврат фокуса) не отработает. Поэтому закрытие
   // меняет только open, а очистку данных делаем в afterClose.
-  const [docPreview, setDocPreview] = useState<{ id: string; src: string } | null>(null);
-  const [docPreviewOpen, setDocPreviewOpen] = useState(false);
-  const galleryRef = useRef<HTMLDivElement>(null);
 
   // После закрытия вложенной модалки просмотра документа rc-dialog возвращает
   // фокус на document.body (миниатюра-триггер — не focusable <img>), из-за чего
@@ -255,7 +269,6 @@ export function PhotoGallery({
   // через стрелки на соседние фото, у которых local previewOpen остался
   // false, и preview показывает растянутый thumbnail 140 px вместо
   // оригинала. Текст на сканах документов в таком виде нечитаем.
-  const [previewOpen, setPreviewOpen] = useState(false);
 
   return (
     <div

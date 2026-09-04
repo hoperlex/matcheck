@@ -35,6 +35,9 @@ suite('claim группы: одна машина — одна операция (
   let sql: ReturnType<typeof postgres>;
   let db: Db;
   /** Импортируется после подмены env: loadEnv кэширует разбор окружения. */
+  // Тип позднего динамического импорта иначе не выразить: сам импорт обязан
+  // случиться после подмены env, статический import его бы опередил.
+  // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   let claim: typeof import('../../src/domain/groups/claim.js');
 
   const siteId = randomUUID();

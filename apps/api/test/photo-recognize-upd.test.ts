@@ -103,7 +103,7 @@ describe('recognizePhotoUpd', () => {
       parsed: parsed({
         totalSum: 94537.74,
         vatSum: null,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
         items: [
           {
             nameRaw: 'Пена монтажная Империал 65 UNIVERSAL',
@@ -159,7 +159,7 @@ describe('recognizePhotoUpd', () => {
       parsed: parsed({
         totalSum: 1220,
         vatSum: 220,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
         items: [
           {
             nameRaw: 'Товар',

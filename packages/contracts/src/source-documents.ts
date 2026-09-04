@@ -861,6 +861,47 @@ export type PrimarySourceDocument = z.infer<typeof PrimarySourceDocumentSchema>;
 // самой бумаги. supplierId сюда намеренно не входит: поставщик операции — её
 // собственное поле (его правит /supplier-from-directory), и переписывать его
 // «первым документом» нельзя.
+/**
+ * Сводка сверки документа ДЛЯ КАРТОЧКИ ОПЕРАЦИИ — узкая проекция UpdValidation.
+ *
+ * Зачем не сам `validation`. Полный снимок весит в среднем 1,7 КБ, а на
+ * патологическом документе — 64 КБ; список приёмок отдаёт десятки документов за
+ * раз. Здесь остаются только провалившиеся проверки и подозрения — в среднем
+ * 138 байт, то есть в двенадцать раз меньше.
+ *
+ * Почему `failedChecks` — объекты `UpdCheck`, а не имена. Готовый
+ * `UpdValidationSummary` (карточка документа, фото-документ) принимает ровно
+ * `UpdCheck[]` и `UpdWarning[]`, и карточка приёмки должна показывать те же
+ * слова и те же числа. Имена потребовали бы второго словаря объяснений — ровно
+ * той расходящейся копии, из-за которой у фото когда-то завёлся свой промпт.
+ *
+ * Числа тут обязаны быть: `documents.list:view` есть только у manager и
+ * contractor, а замечания оставляет monitor — уйти за подробностями в раздел
+ * «Документы» он не может, сводка для него единственный источник.
+ */
+export const OperationDocumentValidationSchema = z.object({
+  hasMismatch: z.boolean(),
+  // Только `ok: false` и без `skipReason`: пропущенная проверка — не проблема.
+  failedChecks: z.array(UpdCheckSchema),
+  warnings: z.array(UpdWarningSchema),
+  /**
+   * Позиции документа, к которым относятся проблемные строки, — по id, а НЕ по
+   * номеру строки.
+   *
+   * `scope.row` — порядковый номер позиции внутри документа, и на боевых данных
+   * он сегодня совпадает с `source_document_items.line_no` (11 724 строки, ноль
+   * расхождений). А вот `delivery_items.line_no` совпадает с ним лишь у 77%
+   * строк: приёмка нумерует свои позиции сама. Поэтому подсветка в карточке
+   * операции идёт строго через `sourceDocumentItemId`.
+   *
+   * Пустой массив — законное состояние: снимок мог устареть (см. guard в
+   * summarizeForOperation) или у строк нет связи с документом. Тогда текст
+   * сводки остаётся, а подсветки нет.
+   */
+  problemItemIds: z.array(z.string().uuid()),
+});
+export type OperationDocumentValidation = z.infer<typeof OperationDocumentValidationSchema>;
+
 export const OperationSourceDocumentSchema = z.object({
   id: z.string().uuid(),
   kind: SourceKindSchema,
@@ -874,6 +915,16 @@ export const OperationSourceDocumentSchema = z.object({
   // true — документ привязан к операции сейчас; false — связь снята, а позиции с
   // этим происхождением остались (unlink-source их намеренно не трогает).
   linked: z.boolean(),
+  /**
+   * Сверка документа — только когда есть что показать.
+   *
+   * Строго `.optional()`, а не `.nullable()`: у здорового документа ключа нет
+   * вовсе, и ответ остаётся байт-в-байт прежним. Это же позволяет ручной сборке
+   * литерала `OperationSourceDocument` на фронте компилироваться без правок, а
+   * мобильному клиенту — не заметить изменения (он `sourceDocuments` вообще не
+   * объявляет, а `/sync` их не шлёт).
+   */
+  validation: OperationDocumentValidationSchema.optional(),
 });
 export type OperationSourceDocument = z.infer<typeof OperationSourceDocumentSchema>;
 

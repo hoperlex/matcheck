@@ -13,6 +13,7 @@ import { setupInvalidation } from './services/invalidation';
 import { startSyncLoop, syncAvailableForRole } from './services/sync';
 import { useAuthStore } from './stores/auth';
 import { UpdateBanner } from './shared/ui/UpdateBanner';
+import { MismatchRowStyle } from './shared/ui/MismatchRowStyle';
 
 dayjs.locale('ru');
 
@@ -52,48 +53,51 @@ function SideEffects() {
 
 export function App() {
   return (
-    <ConfigProvider
-      locale={ruRU}
-      theme={{
-        token: { colorPrimary: '#1677ff', borderRadius: 8, colorBgLayout: '#f5f5f5' },
-        components: {
-          // Плотные таблицы: на 1080p помещается ~24 строки вместо 17.
-          // Шрифт ячеек 13px против базовых 14 — плотнее, но всё ещё крупнее
-          // тегов (12px), так что иерархия «текст ячейки > тег» сохраняется.
-          // Дефолты antd, которые здесь перекрываются: cellPaddingBlock = 16,
-          // …MD = 12, …SM = 8; все три cellFontSize* равны 14 — size="small"
-          // сам по себе шрифт НЕ уменьшает, только отступы.
-          Table: {
-            cellFontSize: 13,
-            cellFontSizeMD: 13,
-            cellFontSizeSM: 13,
-            cellPaddingBlock: 6,
-            cellPaddingBlockMD: 6,
-            cellPaddingBlockSM: 6,
-            cellPaddingInlineMD: 8,
-            cellPaddingInlineSM: 8,
+    <>
+      <MismatchRowStyle />
+      <ConfigProvider
+        locale={ruRU}
+        theme={{
+          token: { colorPrimary: '#1677ff', borderRadius: 8, colorBgLayout: '#f5f5f5' },
+          components: {
+            // Плотные таблицы: на 1080p помещается ~24 строки вместо 17.
+            // Шрифт ячеек 13px против базовых 14 — плотнее, но всё ещё крупнее
+            // тегов (12px), так что иерархия «текст ячейки > тег» сохраняется.
+            // Дефолты antd, которые здесь перекрываются: cellPaddingBlock = 16,
+            // …MD = 12, …SM = 8; все три cellFontSize* равны 14 — size="small"
+            // сам по себе шрифт НЕ уменьшает, только отступы.
+            Table: {
+              cellFontSize: 13,
+              cellFontSizeMD: 13,
+              cellFontSizeSM: 13,
+              cellPaddingBlock: 6,
+              cellPaddingBlockMD: 6,
+              cellPaddingBlockSM: 6,
+              cellPaddingInlineMD: 8,
+              cellPaddingInlineSM: 8,
+            },
           },
-        },
-      }}
-    >
-      <AntApp>
-        <Sentry.ErrorBoundary
-          fallback={
-            <div style={{ padding: 24 }}>Произошла ошибка интерфейса. Обновите страницу.</div>
-          }
-        >
-          <QueryProvider>
-            <AuthProvider>
-              <SideEffects />
-              <RouterProvider router={router} />
-              {/* PWA-баннер обновления. Внутри useRegisterSW (vite-plugin-pwa)
+        }}
+      >
+        <AntApp>
+          <Sentry.ErrorBoundary
+            fallback={
+              <div style={{ padding: 24 }}>Произошла ошибка интерфейса. Обновите страницу.</div>
+            }
+          >
+            <QueryProvider>
+              <AuthProvider>
+                <SideEffects />
+                <RouterProvider router={router} />
+                {/* PWA-баннер обновления. Внутри useRegisterSW (vite-plugin-pwa)
                   и фиксированной позиции снизу-центра. Появляется только при
                   реальном обнаружении нового SW; обычный первый load — null. */}
-              <UpdateBanner />
-            </AuthProvider>
-          </QueryProvider>
-        </Sentry.ErrorBoundary>
-      </AntApp>
-    </ConfigProvider>
+                <UpdateBanner />
+              </AuthProvider>
+            </QueryProvider>
+          </Sentry.ErrorBoundary>
+        </AntApp>
+      </ConfigProvider>
+    </>
   );
 }

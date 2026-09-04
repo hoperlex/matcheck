@@ -9,7 +9,6 @@ import {
   Input,
   Popconfirm,
   Space,
-  Tag,
   Tooltip,
   Typography,
   message,
@@ -21,6 +20,7 @@ import {
   EyeOutlined,
   ShareAltOutlined,
   UndoOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
@@ -52,15 +52,9 @@ import { ActiveFilterChips, type ActiveFilterChip } from '../../shared/ui/Active
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
-import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import {
-  dateSorter,
-  numberSorter,
-  prioritySorter,
-  stringSorter,
 } from '../../shared/ui/tableSorters';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
-import { matchText } from '../../shared/utils/matchText';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { partyCell } from '../../shared/ui/documentPartyColumns';
@@ -86,7 +80,6 @@ import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
 
-const SELECT_WIDTH = 200;
 // Статусы, для которых вместо hard-delete показываем «Пометить на удаление»,
 // берём из @matcheck/contracts — общий источник с сервером (см. statuses.ts).
 
@@ -558,10 +551,6 @@ export function DeliveriesHistory({
   const resolveSite = (r: Row): { id: string | null; inherited: boolean } => {
     return { id: r.siteId, inherited: false };
   };
-  const resolveDocNumber = (r: Row): string | null => {
-    const sd = r.primarySourceDocument ?? null;
-    return sd?.docNumber ?? null;
-  };
   // Имя поставщика: сначала старое прямое поле deliveries.supplier_id
   // → counterparties (legacy + ручной выбор), потом fallback на
   // sourceDocuments.supplierName, которое сервер сам COALESCE-резолвит
@@ -619,20 +608,6 @@ export function DeliveriesHistory({
   // Опции селекта «Статус» собираем из реальных данных и добавляем
   // псевдо-опцию «Без документа» — это не код статуса в БД, а способ
   // отфильтровать приёмки с пустым sourceDocumentIds.
-  const statusOptions = useMemo(() => {
-    const seen = new Map<string, { label: string; color: string | null }>();
-    for (const r of items) {
-      if (!seen.has(r.status.code)) {
-        seen.set(r.status.code, { label: r.status.label, color: r.status.color });
-      }
-    }
-    const opts = Array.from(seen.entries()).map(([code, v]) => ({
-      value: code,
-      label: v.label,
-    }));
-    opts.push({ value: 'no_document', label: 'Без документа' });
-    return opts;
-  }, [items]);
 
   // Фильтры без своего контрола на панели: их задаёт только адрес (старая
   // ссылка, дип-линк из «Статистики»). Без чипа список молча сужается, и
@@ -670,7 +645,7 @@ export function DeliveriesHistory({
   // забыв что они с прошлой выборки). useEffect ниже отслеживает
   // комбинированный ключ фильтров.
   const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   // Сброс страницы и выбора — только на РЕАЛЬНУЮ смену фильтра. Эффект с
   // массивом зависимостей срабатывает и на монтировании, и ссылка вида
   // ?page=4 открывалась первой страницей: коллега получал не тот экран,
@@ -835,6 +810,14 @@ export function DeliveriesHistory({
       noDocument={r.sourceDocumentIds.length === 0}
       extra={
         <>
+          {/* Разбор документа нашёл расхождение или подозрение. Тот же признак,
+              что у фильтра «Требует проверки»: очередь и значок обязаны
+              совпадать, иначе строка со значком не находится фильтром. */}
+          {(r.sourceDocuments ?? []).some((d) => d.validation !== undefined) && (
+            <Tooltip title="Разбор документа нашёл расхождение или подозрение — откройте приёмку">
+              <WarningOutlined style={{ color: '#fa8c16' }} />
+            </Tooltip>
+          )}
           {/* Значок проверки — приходит в DTO только менеджменту (иначе null →
               значка нет). Расшифровка — в легенде сверху (showReview). */}
           <ReviewStatusIcon state={r.reviewState} />

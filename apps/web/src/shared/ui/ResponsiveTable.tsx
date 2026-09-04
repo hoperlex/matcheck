@@ -235,6 +235,10 @@ export function ResponsiveTable<T extends object>({
         <List.Item
           key={typeof rowKey === 'function' ? rowKey(item) : String(item[rowKey])}
           onClick={onRowClick ? () => onRowClick(item) : undefined}
+          // rowClassName раньше уходил только в десктопную таблицу, и подсветка
+          // проблемной строки на планшете/узком экране просто пропадала — как
+          // раз там, где карточку чаще всего и открывают.
+          className={rowClassName?.(item) || undefined}
           style={onRowClick ? { cursor: 'pointer' } : undefined}
         >
           {numbered ? (

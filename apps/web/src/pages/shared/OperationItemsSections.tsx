@@ -24,7 +24,13 @@ import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
  * группировка при рендере.
  */
 
-type RowBase = { clientKey: string; sourceDocumentId: string | null };
+type RowBase = {
+  clientKey: string;
+  sourceDocumentId: string | null;
+  // Ключ подсветки: сверка адресует строку id позиции ДОКУМЕНТА, а не номером
+  // строки операции — та нумерует свои позиции сама.
+  sourceDocumentItemId?: string | null;
+};
 
 function sectionTitle<T extends RowBase>(section: ItemSection<T>, hasDocuments: boolean): string {
   const count = section.items.length;
@@ -49,6 +55,7 @@ export function OperationItemsSections<T extends RowBase>({
   cardRender,
   onAddItem,
   emptyHint,
+  problemItemIds,
 }: {
   items: T[];
   /** Сводка документов операции: связанные и оставшиеся в происхождении строк. */
@@ -64,6 +71,11 @@ export function OperationItemsSections<T extends RowBase>({
   onAddItem?: (sourceDocumentId: string | null) => void;
   /** Подсказка в блоке, когда позиций нет вовсе. */
   emptyHint: ReactNode;
+  /**
+   * Позиции документов, у которых сверка нашла проблему. Подсвечиваются строки,
+   * чей `sourceDocumentItemId` попал в набор; пустой набор — подсветки нет.
+   */
+  problemItemIds?: ReadonlySet<string>;
 }) {
   const sections = useMemo(() => buildItemSections<T>({ items, documents }), [items, documents]);
 
@@ -116,6 +128,14 @@ export function OperationItemsSections<T extends RowBase>({
                 items={section.items}
                 columns={columns}
                 rowKey="clientKey"
+                // Один и тот же класс, что у карточки документа: подсветка
+                // «этой строке не верь» должна выглядеть одинаково в обоих
+                // местах, иначе она читается как два разных сигнала.
+                rowClassName={(row) =>
+                  row.sourceDocumentItemId && problemItemIds?.has(row.sourceDocumentItemId)
+                    ? 'matcheck-row-mismatch'
+                    : ''
+                }
                 cardRender={(row) => cardRender(row, displayNoByKey.get(row.clientKey) ?? 1)}
                 // Блоков на экране несколько, и собственный «во весь экран»
                 // скролл у каждого превратил бы карточку в набор окон.

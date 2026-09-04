@@ -202,7 +202,7 @@ function cellToString(v: ExcelJS.CellValue): string {
 }
 
 function normCell(v: ExcelJS.CellValue): string {
-  return cellToString(v).replace(/[\s \n\t]+/g, ' ').trim();
+  return cellToString(v).replace(/[\s\u00A0\n\t]+/g, ' ').trim();
 }
 
 function parseNum(v: ExcelJS.CellValue): number | null {
@@ -216,9 +216,9 @@ function parseNum(v: ExcelJS.CellValue): number | null {
   // «1 234,56» / «1234.56» / «1 234 567,89». Убираем пробелы и nbsp,
   // запятую → точку, отбрасываем всё лишнее (валютные символы, «руб.»).
   const cleaned = s
-    .replace(/[\s ]/g, '')
+    .replace(/[\s\u00A0]/g, '')
     .replace(/,/g, '.')
-    .replace(/[^0-9.\-]/g, '');
+    .replace(/[^0-9.-]/g, '');
   if (!cleaned || cleaned === '-' || cleaned === '.') return null;
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : null;

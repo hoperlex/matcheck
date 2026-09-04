@@ -1161,6 +1161,258 @@
               "consigneeInn"
             ]
           },
+          "sourceDocuments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "upd",
+                    "request",
+                    "transport_waybill",
+                    "os2_transfer"
+                  ]
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "parsed",
+                    "parse_failed",
+                    "archived",
+                    "queued",
+                    "processing",
+                    "needs_resolution"
+                  ]
+                },
+                "docNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "docDate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "expectedDate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "totalSum": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "vatSum": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "linked": {
+                  "type": "boolean"
+                },
+                "validation": {
+                  "type": "object",
+                  "properties": {
+                    "hasMismatch": {
+                      "type": "boolean"
+                    },
+                    "failedChecks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "enum": [
+                              "sum_total",
+                              "vat_total",
+                              "items_count",
+                              "items_sequence",
+                              "row_qty_price",
+                              "row_vat_rate"
+                            ]
+                          },
+                          "scope": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "document"
+                                ]
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "row": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "row"
+                                ]
+                              }
+                            ]
+                          },
+                          "expected": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "actual": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "diff": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "tolerance": {
+                            "type": "number"
+                          },
+                          "ok": {
+                            "type": "boolean"
+                          },
+                          "skipReason": {
+                            "type": "string",
+                            "enum": [
+                              "no_expected",
+                              "no_actual"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "scope",
+                          "expected",
+                          "actual",
+                          "diff",
+                          "tolerance",
+                          "ok"
+                        ]
+                      }
+                    },
+                    "warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "enum": [
+                              "qty_price_swap",
+                              "sum_equals_qty",
+                              "unit_price_one",
+                              "price_includes_vat",
+                              "unit_code_as_qty",
+                              "consignee_copy_unverified",
+                              "duplicate_unconfirmed",
+                              "dropped_pages_not_parsed",
+                              "sibling_number_gap",
+                              "page_doc_number_unaccounted",
+                              "sibling_number_duplicate"
+                            ]
+                          },
+                          "scope": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "document"
+                                ]
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "row": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "row"
+                                ]
+                              }
+                            ]
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {
+                              "pages": {
+                                "type": "array",
+                                "items": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0
+                                }
+                              },
+                              "pageKinds": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "docNumbers": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "scope"
+                        ]
+                      }
+                    },
+                    "problemItemIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "format": "uuid"
+                      }
+                    }
+                  },
+                  "required": [
+                    "hasMismatch",
+                    "failedChecks",
+                    "warnings",
+                    "problemItemIds"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "status",
+                "docNumber",
+                "docDate",
+                "expectedDate",
+                "totalSum",
+                "vatSum",
+                "linked"
+              ]
+            }
+          },
           "createdAt": {
             "type": "string"
           },
@@ -2035,6 +2287,258 @@
                     "consigneeInn"
                   ]
                 },
+                "sourceDocuments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "upd",
+                          "request",
+                          "transport_waybill",
+                          "os2_transfer"
+                        ]
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "parsed",
+                          "parse_failed",
+                          "archived",
+                          "queued",
+                          "processing",
+                          "needs_resolution"
+                        ]
+                      },
+                      "docNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "docDate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "expectedDate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "totalSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "linked": {
+                        "type": "boolean"
+                      },
+                      "validation": {
+                        "type": "object",
+                        "properties": {
+                          "hasMismatch": {
+                            "type": "boolean"
+                          },
+                          "failedChecks": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string",
+                                  "enum": [
+                                    "sum_total",
+                                    "vat_total",
+                                    "items_count",
+                                    "items_sequence",
+                                    "row_qty_price",
+                                    "row_vat_rate"
+                                  ]
+                                },
+                                "scope": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "document"
+                                      ]
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "row": {
+                                          "type": "integer",
+                                          "exclusiveMinimum": 0
+                                        }
+                                      },
+                                      "required": [
+                                        "row"
+                                      ]
+                                    }
+                                  ]
+                                },
+                                "expected": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "actual": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "diff": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "tolerance": {
+                                  "type": "number"
+                                },
+                                "ok": {
+                                  "type": "boolean"
+                                },
+                                "skipReason": {
+                                  "type": "string",
+                                  "enum": [
+                                    "no_expected",
+                                    "no_actual"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "scope",
+                                "expected",
+                                "actual",
+                                "diff",
+                                "tolerance",
+                                "ok"
+                              ]
+                            }
+                          },
+                          "warnings": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string",
+                                  "enum": [
+                                    "qty_price_swap",
+                                    "sum_equals_qty",
+                                    "unit_price_one",
+                                    "price_includes_vat",
+                                    "unit_code_as_qty",
+                                    "consignee_copy_unverified",
+                                    "duplicate_unconfirmed",
+                                    "dropped_pages_not_parsed",
+                                    "sibling_number_gap",
+                                    "page_doc_number_unaccounted",
+                                    "sibling_number_duplicate"
+                                  ]
+                                },
+                                "scope": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "document"
+                                      ]
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "row": {
+                                          "type": "integer",
+                                          "exclusiveMinimum": 0
+                                        }
+                                      },
+                                      "required": [
+                                        "row"
+                                      ]
+                                    }
+                                  ]
+                                },
+                                "details": {
+                                  "type": "object",
+                                  "properties": {
+                                    "pages": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "integer",
+                                        "exclusiveMinimum": 0
+                                      }
+                                    },
+                                    "pageKinds": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "docNumbers": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string"
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "scope"
+                              ]
+                            }
+                          },
+                          "problemItemIds": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "format": "uuid"
+                            }
+                          }
+                        },
+                        "required": [
+                          "hasMismatch",
+                          "failedChecks",
+                          "warnings",
+                          "problemItemIds"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "kind",
+                      "status",
+                      "docNumber",
+                      "docDate",
+                      "expectedDate",
+                      "totalSum",
+                      "vatSum",
+                      "linked"
+                    ]
+                  }
+                },
                 "createdAt": {
                   "type": "string"
                 },
@@ -2682,6 +3186,258 @@
                   "buyerInn",
                   "consigneeInn"
                 ]
+              },
+              "sourceDocuments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "upd",
+                        "request",
+                        "transport_waybill",
+                        "os2_transfer"
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "parsed",
+                        "parse_failed",
+                        "archived",
+                        "queued",
+                        "processing",
+                        "needs_resolution"
+                      ]
+                    },
+                    "docNumber": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "docDate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "expectedDate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "totalSum": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "vatSum": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "linked": {
+                      "type": "boolean"
+                    },
+                    "validation": {
+                      "type": "object",
+                      "properties": {
+                        "hasMismatch": {
+                          "type": "boolean"
+                        },
+                        "failedChecks": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "enum": [
+                                  "sum_total",
+                                  "vat_total",
+                                  "items_count",
+                                  "items_sequence",
+                                  "row_qty_price",
+                                  "row_vat_rate"
+                                ]
+                              },
+                              "scope": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "document"
+                                    ]
+                                  },
+                                  {
+                                    "type": "object",
+                                    "properties": {
+                                      "row": {
+                                        "type": "integer",
+                                        "exclusiveMinimum": 0
+                                      }
+                                    },
+                                    "required": [
+                                      "row"
+                                    ]
+                                  }
+                                ]
+                              },
+                              "expected": {
+                                "type": [
+                                  "number",
+                                  "null"
+                                ]
+                              },
+                              "actual": {
+                                "type": [
+                                  "number",
+                                  "null"
+                                ]
+                              },
+                              "diff": {
+                                "type": [
+                                  "number",
+                                  "null"
+                                ]
+                              },
+                              "tolerance": {
+                                "type": "number"
+                              },
+                              "ok": {
+                                "type": "boolean"
+                              },
+                              "skipReason": {
+                                "type": "string",
+                                "enum": [
+                                  "no_expected",
+                                  "no_actual"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "scope",
+                              "expected",
+                              "actual",
+                              "diff",
+                              "tolerance",
+                              "ok"
+                            ]
+                          }
+                        },
+                        "warnings": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "enum": [
+                                  "qty_price_swap",
+                                  "sum_equals_qty",
+                                  "unit_price_one",
+                                  "price_includes_vat",
+                                  "unit_code_as_qty",
+                                  "consignee_copy_unverified",
+                                  "duplicate_unconfirmed",
+                                  "dropped_pages_not_parsed",
+                                  "sibling_number_gap",
+                                  "page_doc_number_unaccounted",
+                                  "sibling_number_duplicate"
+                                ]
+                              },
+                              "scope": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "document"
+                                    ]
+                                  },
+                                  {
+                                    "type": "object",
+                                    "properties": {
+                                      "row": {
+                                        "type": "integer",
+                                        "exclusiveMinimum": 0
+                                      }
+                                    },
+                                    "required": [
+                                      "row"
+                                    ]
+                                  }
+                                ]
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {
+                                  "pages": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "integer",
+                                      "exclusiveMinimum": 0
+                                    }
+                                  },
+                                  "pageKinds": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "docNumbers": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "scope"
+                            ]
+                          }
+                        },
+                        "problemItemIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid"
+                          }
+                        }
+                      },
+                      "required": [
+                        "hasMismatch",
+                        "failedChecks",
+                        "warnings",
+                        "problemItemIds"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "status",
+                    "docNumber",
+                    "docDate",
+                    "expectedDate",
+                    "totalSum",
+                    "vatSum",
+                    "linked"
+                  ]
+                }
               },
               "createdAt": {
                 "type": "string"
@@ -3518,6 +4274,258 @@
               "buyerInn",
               "consigneeInn"
             ]
+          },
+          "sourceDocuments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "upd",
+                    "request",
+                    "transport_waybill",
+                    "os2_transfer"
+                  ]
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "parsed",
+                    "parse_failed",
+                    "archived",
+                    "queued",
+                    "processing",
+                    "needs_resolution"
+                  ]
+                },
+                "docNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "docDate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "expectedDate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "totalSum": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "vatSum": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "linked": {
+                  "type": "boolean"
+                },
+                "validation": {
+                  "type": "object",
+                  "properties": {
+                    "hasMismatch": {
+                      "type": "boolean"
+                    },
+                    "failedChecks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "enum": [
+                              "sum_total",
+                              "vat_total",
+                              "items_count",
+                              "items_sequence",
+                              "row_qty_price",
+                              "row_vat_rate"
+                            ]
+                          },
+                          "scope": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "document"
+                                ]
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "row": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "row"
+                                ]
+                              }
+                            ]
+                          },
+                          "expected": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "actual": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "diff": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "tolerance": {
+                            "type": "number"
+                          },
+                          "ok": {
+                            "type": "boolean"
+                          },
+                          "skipReason": {
+                            "type": "string",
+                            "enum": [
+                              "no_expected",
+                              "no_actual"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "scope",
+                          "expected",
+                          "actual",
+                          "diff",
+                          "tolerance",
+                          "ok"
+                        ]
+                      }
+                    },
+                    "warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "enum": [
+                              "qty_price_swap",
+                              "sum_equals_qty",
+                              "unit_price_one",
+                              "price_includes_vat",
+                              "unit_code_as_qty",
+                              "consignee_copy_unverified",
+                              "duplicate_unconfirmed",
+                              "dropped_pages_not_parsed",
+                              "sibling_number_gap",
+                              "page_doc_number_unaccounted",
+                              "sibling_number_duplicate"
+                            ]
+                          },
+                          "scope": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "document"
+                                ]
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "row": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "row"
+                                ]
+                              }
+                            ]
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {
+                              "pages": {
+                                "type": "array",
+                                "items": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0
+                                }
+                              },
+                              "pageKinds": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "docNumbers": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "scope"
+                        ]
+                      }
+                    },
+                    "problemItemIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "format": "uuid"
+                      }
+                    }
+                  },
+                  "required": [
+                    "hasMismatch",
+                    "failedChecks",
+                    "warnings",
+                    "problemItemIds"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "status",
+                "docNumber",
+                "docDate",
+                "expectedDate",
+                "totalSum",
+                "vatSum",
+                "linked"
+              ]
+            }
           },
           "createdAt": {
             "type": "string"
@@ -4412,6 +5420,258 @@
                     "consigneeInn"
                   ]
                 },
+                "sourceDocuments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "upd",
+                          "request",
+                          "transport_waybill",
+                          "os2_transfer"
+                        ]
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "parsed",
+                          "parse_failed",
+                          "archived",
+                          "queued",
+                          "processing",
+                          "needs_resolution"
+                        ]
+                      },
+                      "docNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "docDate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "expectedDate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "totalSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "linked": {
+                        "type": "boolean"
+                      },
+                      "validation": {
+                        "type": "object",
+                        "properties": {
+                          "hasMismatch": {
+                            "type": "boolean"
+                          },
+                          "failedChecks": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string",
+                                  "enum": [
+                                    "sum_total",
+                                    "vat_total",
+                                    "items_count",
+                                    "items_sequence",
+                                    "row_qty_price",
+                                    "row_vat_rate"
+                                  ]
+                                },
+                                "scope": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "document"
+                                      ]
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "row": {
+                                          "type": "integer",
+                                          "exclusiveMinimum": 0
+                                        }
+                                      },
+                                      "required": [
+                                        "row"
+                                      ]
+                                    }
+                                  ]
+                                },
+                                "expected": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "actual": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "diff": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "tolerance": {
+                                  "type": "number"
+                                },
+                                "ok": {
+                                  "type": "boolean"
+                                },
+                                "skipReason": {
+                                  "type": "string",
+                                  "enum": [
+                                    "no_expected",
+                                    "no_actual"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "scope",
+                                "expected",
+                                "actual",
+                                "diff",
+                                "tolerance",
+                                "ok"
+                              ]
+                            }
+                          },
+                          "warnings": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string",
+                                  "enum": [
+                                    "qty_price_swap",
+                                    "sum_equals_qty",
+                                    "unit_price_one",
+                                    "price_includes_vat",
+                                    "unit_code_as_qty",
+                                    "consignee_copy_unverified",
+                                    "duplicate_unconfirmed",
+                                    "dropped_pages_not_parsed",
+                                    "sibling_number_gap",
+                                    "page_doc_number_unaccounted",
+                                    "sibling_number_duplicate"
+                                  ]
+                                },
+                                "scope": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "document"
+                                      ]
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "row": {
+                                          "type": "integer",
+                                          "exclusiveMinimum": 0
+                                        }
+                                      },
+                                      "required": [
+                                        "row"
+                                      ]
+                                    }
+                                  ]
+                                },
+                                "details": {
+                                  "type": "object",
+                                  "properties": {
+                                    "pages": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "integer",
+                                        "exclusiveMinimum": 0
+                                      }
+                                    },
+                                    "pageKinds": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "docNumbers": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string"
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "scope"
+                              ]
+                            }
+                          },
+                          "problemItemIds": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "format": "uuid"
+                            }
+                          }
+                        },
+                        "required": [
+                          "hasMismatch",
+                          "failedChecks",
+                          "warnings",
+                          "problemItemIds"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "kind",
+                      "status",
+                      "docNumber",
+                      "docDate",
+                      "expectedDate",
+                      "totalSum",
+                      "vatSum",
+                      "linked"
+                    ]
+                  }
+                },
                 "createdAt": {
                   "type": "string"
                 },
@@ -5055,6 +6315,258 @@
                   "consigneeInn"
                 ]
               },
+              "sourceDocuments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "upd",
+                        "request",
+                        "transport_waybill",
+                        "os2_transfer"
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "parsed",
+                        "parse_failed",
+                        "archived",
+                        "queued",
+                        "processing",
+                        "needs_resolution"
+                      ]
+                    },
+                    "docNumber": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "docDate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "expectedDate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "totalSum": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "vatSum": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "linked": {
+                      "type": "boolean"
+                    },
+                    "validation": {
+                      "type": "object",
+                      "properties": {
+                        "hasMismatch": {
+                          "type": "boolean"
+                        },
+                        "failedChecks": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "enum": [
+                                  "sum_total",
+                                  "vat_total",
+                                  "items_count",
+                                  "items_sequence",
+                                  "row_qty_price",
+                                  "row_vat_rate"
+                                ]
+                              },
+                              "scope": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "document"
+                                    ]
+                                  },
+                                  {
+                                    "type": "object",
+                                    "properties": {
+                                      "row": {
+                                        "type": "integer",
+                                        "exclusiveMinimum": 0
+                                      }
+                                    },
+                                    "required": [
+                                      "row"
+                                    ]
+                                  }
+                                ]
+                              },
+                              "expected": {
+                                "type": [
+                                  "number",
+                                  "null"
+                                ]
+                              },
+                              "actual": {
+                                "type": [
+                                  "number",
+                                  "null"
+                                ]
+                              },
+                              "diff": {
+                                "type": [
+                                  "number",
+                                  "null"
+                                ]
+                              },
+                              "tolerance": {
+                                "type": "number"
+                              },
+                              "ok": {
+                                "type": "boolean"
+                              },
+                              "skipReason": {
+                                "type": "string",
+                                "enum": [
+                                  "no_expected",
+                                  "no_actual"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "scope",
+                              "expected",
+                              "actual",
+                              "diff",
+                              "tolerance",
+                              "ok"
+                            ]
+                          }
+                        },
+                        "warnings": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "enum": [
+                                  "qty_price_swap",
+                                  "sum_equals_qty",
+                                  "unit_price_one",
+                                  "price_includes_vat",
+                                  "unit_code_as_qty",
+                                  "consignee_copy_unverified",
+                                  "duplicate_unconfirmed",
+                                  "dropped_pages_not_parsed",
+                                  "sibling_number_gap",
+                                  "page_doc_number_unaccounted",
+                                  "sibling_number_duplicate"
+                                ]
+                              },
+                              "scope": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "document"
+                                    ]
+                                  },
+                                  {
+                                    "type": "object",
+                                    "properties": {
+                                      "row": {
+                                        "type": "integer",
+                                        "exclusiveMinimum": 0
+                                      }
+                                    },
+                                    "required": [
+                                      "row"
+                                    ]
+                                  }
+                                ]
+                              },
+                              "details": {
+                                "type": "object",
+                                "properties": {
+                                  "pages": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "integer",
+                                      "exclusiveMinimum": 0
+                                    }
+                                  },
+                                  "pageKinds": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "docNumbers": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "scope"
+                            ]
+                          }
+                        },
+                        "problemItemIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid"
+                          }
+                        }
+                      },
+                      "required": [
+                        "hasMismatch",
+                        "failedChecks",
+                        "warnings",
+                        "problemItemIds"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "kind",
+                    "status",
+                    "docNumber",
+                    "docDate",
+                    "expectedDate",
+                    "totalSum",
+                    "vatSum",
+                    "linked"
+                  ]
+                }
+              },
               "createdAt": {
                 "type": "string"
               },
@@ -5688,8 +7200,14 @@
                         "qty_price_swap",
                         "sum_equals_qty",
                         "unit_price_one",
+                        "price_includes_vat",
                         "unit_code_as_qty",
-                        "consignee_copy_unverified"
+                        "consignee_copy_unverified",
+                        "duplicate_unconfirmed",
+                        "dropped_pages_not_parsed",
+                        "sibling_number_gap",
+                        "page_doc_number_unaccounted",
+                        "sibling_number_duplicate"
                       ]
                     },
                     "scope": {
@@ -5713,6 +7231,30 @@
                           ]
                         }
                       ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "pages": {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          }
+                        },
+                        "pageKinds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "docNumbers": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
                     }
                   },
                   "required": [
@@ -6194,8 +7736,14 @@
                         "qty_price_swap",
                         "sum_equals_qty",
                         "unit_price_one",
+                        "price_includes_vat",
                         "unit_code_as_qty",
-                        "consignee_copy_unverified"
+                        "consignee_copy_unverified",
+                        "duplicate_unconfirmed",
+                        "dropped_pages_not_parsed",
+                        "sibling_number_gap",
+                        "page_doc_number_unaccounted",
+                        "sibling_number_duplicate"
                       ]
                     },
                     "scope": {
@@ -6219,6 +7767,30 @@
                           ]
                         }
                       ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "pages": {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          }
+                        },
+                        "pageKinds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "docNumbers": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
                     }
                   },
                   "required": [
@@ -6974,8 +8546,14 @@
                               "qty_price_swap",
                               "sum_equals_qty",
                               "unit_price_one",
+                              "price_includes_vat",
                               "unit_code_as_qty",
-                              "consignee_copy_unverified"
+                              "consignee_copy_unverified",
+                              "duplicate_unconfirmed",
+                              "dropped_pages_not_parsed",
+                              "sibling_number_gap",
+                              "page_doc_number_unaccounted",
+                              "sibling_number_duplicate"
                             ]
                           },
                           "scope": {
@@ -6999,6 +8577,30 @@
                                 ]
                               }
                             ]
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {
+                              "pages": {
+                                "type": "array",
+                                "items": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0
+                                }
+                              },
+                              "pageKinds": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "docNumbers": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
                           }
                         },
                         "required": [
@@ -7157,6 +8759,9 @@
             }
           },
           "pendingTotal": {
+            "type": "number"
+          },
+          "pageCount": {
             "type": "number"
           }
         },
@@ -8509,6 +10114,258 @@
                     "consigneeInn"
                   ]
                 },
+                "sourceDocuments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "upd",
+                          "request",
+                          "transport_waybill",
+                          "os2_transfer"
+                        ]
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "parsed",
+                          "parse_failed",
+                          "archived",
+                          "queued",
+                          "processing",
+                          "needs_resolution"
+                        ]
+                      },
+                      "docNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "docDate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "expectedDate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "totalSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "linked": {
+                        "type": "boolean"
+                      },
+                      "validation": {
+                        "type": "object",
+                        "properties": {
+                          "hasMismatch": {
+                            "type": "boolean"
+                          },
+                          "failedChecks": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string",
+                                  "enum": [
+                                    "sum_total",
+                                    "vat_total",
+                                    "items_count",
+                                    "items_sequence",
+                                    "row_qty_price",
+                                    "row_vat_rate"
+                                  ]
+                                },
+                                "scope": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "document"
+                                      ]
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "row": {
+                                          "type": "integer",
+                                          "exclusiveMinimum": 0
+                                        }
+                                      },
+                                      "required": [
+                                        "row"
+                                      ]
+                                    }
+                                  ]
+                                },
+                                "expected": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "actual": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "diff": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "tolerance": {
+                                  "type": "number"
+                                },
+                                "ok": {
+                                  "type": "boolean"
+                                },
+                                "skipReason": {
+                                  "type": "string",
+                                  "enum": [
+                                    "no_expected",
+                                    "no_actual"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "scope",
+                                "expected",
+                                "actual",
+                                "diff",
+                                "tolerance",
+                                "ok"
+                              ]
+                            }
+                          },
+                          "warnings": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string",
+                                  "enum": [
+                                    "qty_price_swap",
+                                    "sum_equals_qty",
+                                    "unit_price_one",
+                                    "price_includes_vat",
+                                    "unit_code_as_qty",
+                                    "consignee_copy_unverified",
+                                    "duplicate_unconfirmed",
+                                    "dropped_pages_not_parsed",
+                                    "sibling_number_gap",
+                                    "page_doc_number_unaccounted",
+                                    "sibling_number_duplicate"
+                                  ]
+                                },
+                                "scope": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "document"
+                                      ]
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "row": {
+                                          "type": "integer",
+                                          "exclusiveMinimum": 0
+                                        }
+                                      },
+                                      "required": [
+                                        "row"
+                                      ]
+                                    }
+                                  ]
+                                },
+                                "details": {
+                                  "type": "object",
+                                  "properties": {
+                                    "pages": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "integer",
+                                        "exclusiveMinimum": 0
+                                      }
+                                    },
+                                    "pageKinds": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "docNumbers": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string"
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "scope"
+                              ]
+                            }
+                          },
+                          "problemItemIds": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "format": "uuid"
+                            }
+                          }
+                        },
+                        "required": [
+                          "hasMismatch",
+                          "failedChecks",
+                          "warnings",
+                          "problemItemIds"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "kind",
+                      "status",
+                      "docNumber",
+                      "docDate",
+                      "expectedDate",
+                      "totalSum",
+                      "vatSum",
+                      "linked"
+                    ]
+                  }
+                },
                 "createdAt": {
                   "type": "string"
                 },
@@ -9122,6 +10979,258 @@
                     "consigneeInn"
                   ]
                 },
+                "sourceDocuments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "upd",
+                          "request",
+                          "transport_waybill",
+                          "os2_transfer"
+                        ]
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "parsed",
+                          "parse_failed",
+                          "archived",
+                          "queued",
+                          "processing",
+                          "needs_resolution"
+                        ]
+                      },
+                      "docNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "docDate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "expectedDate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "totalSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "vatSum": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "linked": {
+                        "type": "boolean"
+                      },
+                      "validation": {
+                        "type": "object",
+                        "properties": {
+                          "hasMismatch": {
+                            "type": "boolean"
+                          },
+                          "failedChecks": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string",
+                                  "enum": [
+                                    "sum_total",
+                                    "vat_total",
+                                    "items_count",
+                                    "items_sequence",
+                                    "row_qty_price",
+                                    "row_vat_rate"
+                                  ]
+                                },
+                                "scope": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "document"
+                                      ]
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "row": {
+                                          "type": "integer",
+                                          "exclusiveMinimum": 0
+                                        }
+                                      },
+                                      "required": [
+                                        "row"
+                                      ]
+                                    }
+                                  ]
+                                },
+                                "expected": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "actual": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "diff": {
+                                  "type": [
+                                    "number",
+                                    "null"
+                                  ]
+                                },
+                                "tolerance": {
+                                  "type": "number"
+                                },
+                                "ok": {
+                                  "type": "boolean"
+                                },
+                                "skipReason": {
+                                  "type": "string",
+                                  "enum": [
+                                    "no_expected",
+                                    "no_actual"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "scope",
+                                "expected",
+                                "actual",
+                                "diff",
+                                "tolerance",
+                                "ok"
+                              ]
+                            }
+                          },
+                          "warnings": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string",
+                                  "enum": [
+                                    "qty_price_swap",
+                                    "sum_equals_qty",
+                                    "unit_price_one",
+                                    "price_includes_vat",
+                                    "unit_code_as_qty",
+                                    "consignee_copy_unverified",
+                                    "duplicate_unconfirmed",
+                                    "dropped_pages_not_parsed",
+                                    "sibling_number_gap",
+                                    "page_doc_number_unaccounted",
+                                    "sibling_number_duplicate"
+                                  ]
+                                },
+                                "scope": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "enum": [
+                                        "document"
+                                      ]
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "row": {
+                                          "type": "integer",
+                                          "exclusiveMinimum": 0
+                                        }
+                                      },
+                                      "required": [
+                                        "row"
+                                      ]
+                                    }
+                                  ]
+                                },
+                                "details": {
+                                  "type": "object",
+                                  "properties": {
+                                    "pages": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "integer",
+                                        "exclusiveMinimum": 0
+                                      }
+                                    },
+                                    "pageKinds": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "docNumbers": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "string"
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "scope"
+                              ]
+                            }
+                          },
+                          "problemItemIds": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "format": "uuid"
+                            }
+                          }
+                        },
+                        "required": [
+                          "hasMismatch",
+                          "failedChecks",
+                          "warnings",
+                          "problemItemIds"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "kind",
+                      "status",
+                      "docNumber",
+                      "docDate",
+                      "expectedDate",
+                      "totalSum",
+                      "vatSum",
+                      "linked"
+                    ]
+                  }
+                },
                 "createdAt": {
                   "type": "string"
                 },
@@ -9569,8 +11678,14 @@
                               "qty_price_swap",
                               "sum_equals_qty",
                               "unit_price_one",
+                              "price_includes_vat",
                               "unit_code_as_qty",
-                              "consignee_copy_unverified"
+                              "consignee_copy_unverified",
+                              "duplicate_unconfirmed",
+                              "dropped_pages_not_parsed",
+                              "sibling_number_gap",
+                              "page_doc_number_unaccounted",
+                              "sibling_number_duplicate"
                             ]
                           },
                           "scope": {
@@ -9594,6 +11709,30 @@
                                 ]
                               }
                             ]
+                          },
+                          "details": {
+                            "type": "object",
+                            "properties": {
+                              "pages": {
+                                "type": "array",
+                                "items": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0
+                                }
+                              },
+                              "pageKinds": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "docNumbers": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
                           }
                         },
                         "required": [
@@ -10350,6 +12489,10 @@
             ]
           },
           "entityId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "siteId": {
             "type": "string",
             "format": "uuid"
           },

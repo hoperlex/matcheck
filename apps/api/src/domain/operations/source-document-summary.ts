@@ -15,8 +15,10 @@
  * сработавшим: номер и сумма остались бы на месте.
  */
 
-import type { OperationSourceDocument } from '@matcheck/contracts';
+import type { OperationSourceDocument, UpdValidation } from '@matcheck/contracts';
 import { sourceDocuments } from '../../db/schema.js';
+import { loadEnv } from '../../lib/env.js';
+import { summarizeForOperation } from './source-document-validation.js';
 
 export type SourceDocumentSummaryRow = {
   id: string;
@@ -27,6 +29,7 @@ export type SourceDocumentSummaryRow = {
   expectedDate: Date | string | null;
   totalSum: string | null;
   vatSum: string | null;
+  validation: UpdValidation | null;
 };
 
 /**
@@ -42,6 +45,7 @@ export const SOURCE_DOCUMENT_SUMMARY_COLUMNS = {
   expectedDate: sourceDocuments.expectedDate,
   totalSum: sourceDocuments.totalSum,
   vatSum: sourceDocuments.vatSum,
+  validation: sourceDocuments.validation,
 } as const;
 
 /** YYYY-MM-DD — ровно как в GET /source-documents: карточка печатает как есть. */
@@ -62,22 +66,40 @@ export function buildOperationSourceDocuments(args: {
   rows: readonly SourceDocumentSummaryRow[];
   linkedIds: readonly string[];
   mentionedIds: readonly string[];
+  /**
+   * Позиции документов В ПОРЯДКЕ `line_no` — только для тех документов, у
+   * которых в снимке есть построчные проблемы (см. hasRowScopedProblems).
+   * Необязателен намеренно: без него сводка всё равно считается, просто без
+   * подсветки строк, и старые вызовы с тремя полями продолжают работать.
+   */
+  rowItemIds?: ReadonlyMap<string, readonly string[]>;
 }): OperationSourceDocument[] {
-  const { rows, linkedIds, mentionedIds } = args;
+  const { rows, linkedIds, mentionedIds, rowItemIds } = args;
   const byId = new Map(rows.map((r) => [r.id, r]));
   const linked = new Set(linkedIds);
+  // Рубильник читается ЗДЕСЬ, в единственной точке сборки сводки: так он гасит
+  // и карточку, и список, и выгрузку разом. Фильтр `doc_attention` смотрит на
+  // тот же флаг у себя — иначе выключённая сводка оставила бы фильтр, который
+  // ничего не находит.
+  const enabled = loadEnv().OPERATION_DOC_VALIDATION;
 
-  const toSummary = (row: SourceDocumentSummaryRow): OperationSourceDocument => ({
-    id: row.id,
-    kind: row.kind,
-    status: row.status,
-    docNumber: row.docNumber,
-    docDate: dateOnly(row.docDate),
-    expectedDate: dateOnly(row.expectedDate),
-    totalSum: row.totalSum,
-    vatSum: row.vatSum,
-    linked: linked.has(row.id),
-  });
+  const toSummary = (row: SourceDocumentSummaryRow): OperationSourceDocument => {
+    const validation = enabled
+      ? summarizeForOperation(row.validation, rowItemIds?.get(row.id))
+      : undefined;
+    return {
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      docNumber: row.docNumber,
+      docDate: dateOnly(row.docDate),
+      expectedDate: dateOnly(row.expectedDate),
+      totalSum: row.totalSum,
+      vatSum: row.vatSum,
+      linked: linked.has(row.id),
+      ...(validation ? { validation } : {}),
+    };
+  };
 
   const head: OperationSourceDocument[] = [];
   for (const id of linkedIds) {

@@ -132,6 +132,47 @@ suite('происхождение позиций приёмки (реальны�
     return { id, itemIds };
   }
 
+  /** Проставляет документу снимок сверки — как его пишет валидатор при разборе. */
+  async function setValidation(
+    docId: string,
+    v: {
+      hasMismatch: boolean;
+      checks?: unknown[];
+      warnings?: unknown[];
+      itemsCountActual?: number;
+    },
+  ) {
+    const checks = [...(v.checks ?? [])];
+    if (v.itemsCountActual !== undefined) {
+      checks.push({
+        name: 'items_count',
+        scope: 'document',
+        expected: v.itemsCountActual,
+        actual: v.itemsCountActual,
+        diff: 0,
+        tolerance: 0,
+        ok: true,
+      });
+    }
+    const payload = {
+      hasMismatch: v.hasMismatch,
+      checkedAt: new Date().toISOString(),
+      checks,
+      ...(v.warnings ? { warnings: v.warnings } : {}),
+    };
+    await sql`UPDATE source_documents SET validation = ${JSON.stringify(payload)}::jsonb WHERE id = ${docId}`;
+  }
+
+  const failedRowCheck = (row: number) => ({
+    name: 'row_qty_price',
+    scope: { row },
+    expected: 42941.57,
+    actual: 6438.78,
+    diff: 36502.79,
+    tolerance: 42.94,
+    ok: false,
+  });
+
   const upsert = (body: Record<string, unknown>) =>
     app.inject({ method: 'POST', url: '/api/v1/deliveries', payload: body });
 
@@ -685,4 +726,152 @@ suite('происхождение позиций приёмки (реальны�
       code: '23503',
     });
   });
+
+  // ── Сводка сверки документа в карточке и списке ──────────────────────────
+  //
+  // Главное, что здесь закреплено: форма ответа одиночного и батч-пути
+  // совпадает. Колонки документов в батч-пути перечислены вручную, мимо общего
+  // SOURCE_DOCUMENT_SUMMARY_COLUMNS, и забыть там поле — значит получить плашку
+  // в карточке и её молчаливое отсутствие в списке.
+
+  it('здоровый документ: поля validation нет вовсе', async () => {
+    const doc = await makeUpd('О-30', [{ name: 'Труба', qty: '2' }]);
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, doc.id);
+
+    const res = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    const dto = res.json() as { sourceDocuments: Record<string, unknown>[] };
+    expect(dto.sourceDocuments[0]).toBeDefined();
+    expect('validation' in dto.sourceDocuments[0]!).toBe(false);
+  });
+
+  it('расхождение: сводка одинакова в карточке и в списке (parity)', async () => {
+    const doc = await makeUpd('О-31', [
+      { name: 'Воздуховод 600', qty: '2' },
+      { name: 'Воздуховод 1150', qty: '3' },
+    ]);
+    await setValidation(doc.id, {
+      hasMismatch: true,
+      checks: [failedRowCheck(1), failedRowCheck(2)],
+      itemsCountActual: 2,
+    });
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, doc.id);
+
+    const single = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    const singleDto = single.json() as { sourceDocuments: { validation?: unknown }[] };
+    const v = singleDto.sourceDocuments[0]!.validation as {
+      hasMismatch: boolean;
+      failedChecks: unknown[];
+      problemItemIds: string[];
+    };
+    expect(v.hasMismatch).toBe(true);
+    expect(v.failedChecks).toHaveLength(2);
+    // Подсветка адресуется id позиций документа, а не номерами строк приёмки.
+    expect(v.problemItemIds).toEqual(doc.itemIds);
+
+    const list = await app.inject({ method: 'GET', url: '/api/v1/deliveries?limit=50' });
+    const listDto = list.json() as {
+      items: { id: string; sourceDocuments?: unknown[] }[];
+    };
+    const fromList = listDto.items.find((d) => d.id === deliveryId);
+    expect(fromList?.sourceDocuments).toEqual(singleDto.sourceDocuments);
+  });
+
+  it('только подозрение: сводка есть, hasMismatch остаётся false', async () => {
+    // Кейс мониторинга: арифметика сошлась, но в количестве стоит код единицы
+    // измерения. Признак очереди потому и «checks ИЛИ warnings».
+    const doc = await makeUpd('О-32', [{ name: 'Кабель', qty: '796' }]);
+    await setValidation(doc.id, {
+      hasMismatch: false,
+      warnings: [{ name: 'unit_code_as_qty', scope: { row: 1 } }],
+      itemsCountActual: 1,
+    });
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, doc.id);
+
+    const res = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    const dto = res.json() as { sourceDocuments: { validation?: Record<string, unknown> }[] };
+    const v = dto.sourceDocuments[0]!.validation!;
+    expect(v.hasMismatch).toBe(false);
+    expect(v.warnings).toHaveLength(1);
+    expect(v.problemItemIds).toEqual([doc.itemIds[0]]);
+  });
+
+  it('устаревший снимок: текст остаётся, подсветки нет', async () => {
+    const doc = await makeUpd('О-33', [{ name: 'Труба', qty: '1' }]);
+    // В снимке пять позиций, а в базе одна: он описывает другой список.
+    await setValidation(doc.id, {
+      hasMismatch: true,
+      checks: [failedRowCheck(1)],
+      itemsCountActual: 5,
+    });
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, doc.id);
+
+    const res = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    const dto = res.json() as { sourceDocuments: { validation?: Record<string, unknown> }[] };
+    expect((dto.sourceDocuments[0]!.validation!.failedChecks as unknown[]).length).toBe(1);
+    expect(dto.sourceDocuments[0]!.validation!.problemItemIds).toEqual([]);
+  });
+
+  it('фильтр doc_attention отбирает и расхождение, и подозрение', async () => {
+    const mismatchDoc = await makeUpd('О-34', [{ name: 'Труба', qty: '2' }]);
+    await setValidation(mismatchDoc.id, {
+      hasMismatch: true,
+      checks: [failedRowCheck(1)],
+      itemsCountActual: 1,
+    });
+    const warnDoc = await makeUpd('О-35', [{ name: 'Кабель', qty: '796' }]);
+    await setValidation(warnDoc.id, {
+      hasMismatch: false,
+      warnings: [{ name: 'unit_code_as_qty', scope: { row: 1 } }],
+      itemsCountActual: 1,
+    });
+    const cleanDoc = await makeUpd('О-36', [{ name: 'Отвод', qty: '4' }]);
+
+    const withMismatch = await makeDelivery();
+    await link(withMismatch, mismatchDoc.id);
+    const withWarning = await makeDelivery();
+    await link(withWarning, warnDoc.id);
+    const healthy = await makeDelivery();
+    await link(healthy, cleanDoc.id);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/deliveries?limit=100&features=doc_attention',
+    });
+    const ids = (res.json() as { items: { id: string }[] }).items.map((d) => d.id);
+    expect(ids).toContain(withMismatch);
+    expect(ids).toContain(withWarning);
+    expect(ids).not.toContain(healthy);
+  });
+
+
+  it('мониторинг видит сводку: она для него единственный источник', async () => {
+    // Замечания в приёмках оставляет роль monitor, а documents.list:view есть
+    // только у manager и contractor — уйти за подробностями в «Документы» он не
+    // может. Если сводка не доедет до его DTO, вся затея бессмысленна.
+    const doc = await makeUpd('О-37', [{ name: 'Труба', qty: '2' }]);
+    await setValidation(doc.id, {
+      hasMismatch: true,
+      checks: [failedRowCheck(1)],
+      itemsCountActual: 1,
+    });
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, doc.id);
+
+    const asManager = currentUser;
+    currentUser = { ...asManager, role: 'monitor' };
+    try {
+      const res = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+      expect(res.statusCode, res.body).toBe(200);
+      const dto = res.json() as { sourceDocuments: { validation?: Record<string, unknown> }[] };
+      expect(dto.sourceDocuments[0]!.validation).toBeDefined();
+      expect(dto.sourceDocuments[0]!.validation!.problemItemIds).toEqual([doc.itemIds[0]]);
+    } finally {
+      currentUser = asManager;
+    }
+  });
+
 });

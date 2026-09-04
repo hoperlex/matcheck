@@ -139,7 +139,7 @@ describe('worker.ts fail-fast обработка известных ошибок
       /status:.*'parse_failed'[\s\S]{0,400}?return;/g,
     );
     expect(failFastBlocks).not.toBeNull();
-    for (const block of failFastBlocks ?? []) {
+    for (const _block of failFastBlocks ?? []) {
       // Каждый блок (кроме одного waybill-batch — он notify'ит позже)
       // должен иметь notifySourceDocumentUpdated.
       // Проверяем через подсчёт: блоков fail-fast столько же,

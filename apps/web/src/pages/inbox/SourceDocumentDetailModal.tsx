@@ -9,10 +9,10 @@ import {
   Image,
   Input,
   InputNumber,
+  message,
   Modal,
   Popconfirm,
   Segmented,
-  Select,
   Space,
   Spin,
   Splitter,
@@ -21,7 +21,6 @@ import {
   Tag,
   Tooltip,
   Typography,
-  message,
 } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
 import {
@@ -37,7 +36,6 @@ import {
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
-  ResponsiblePerson,
   SourceDirection,
   SourceDocumentDetail,
   SourceDocumentFileResponse,
@@ -268,15 +266,6 @@ export function SourceDocumentDetailModal({
     queryFn: () => api.get<SourceDocumentDetail>(`/source-documents/${id}`),
     enabled: open && !!id,
   });
-
-  const responsiblePersonsQuery = useQuery({
-    queryKey: ['responsible-persons', 'active'],
-    queryFn: () =>
-      api.get<{ items: ResponsiblePerson[]; total: number }>(
-        '/responsible-persons?activeOnly=true&limit=500',
-      ),
-  });
-  const responsiblePersons = responsiblePersonsQuery.data?.items ?? [];
 
   const file = useQuery({
     queryKey: ['source-document-file', id],
@@ -1799,7 +1788,7 @@ function EditableTable({
       >
         Добавить позицию
       </Button>
-      <style>{`.matcheck-row-mismatch td { background-color: #fff7e6 !important; }`}</style>
+
     </>
   );
 }

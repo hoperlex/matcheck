@@ -81,7 +81,7 @@ export function inputNumberFormatterRu(value: string | number | undefined): stri
 export function inputNumberParserRu(displayValue: string | undefined): string {
   if (!displayValue) return '';
   return displayValue
-    .replace(/[\s  ]/g, '')
+    .replace(/[\s\u00A0\u202F]/g, '')
     .replace(/[^\d,.-]/g, '')
     .replace(',', '.');
 }
