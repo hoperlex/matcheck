@@ -2096,6 +2096,9 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         rowNo: i.rowNo ?? null,
         qty: i.qty,
         unit: i.unit ?? null,
+        // Наименование — для подозрения на цену упаковки: фасовку поставщик
+        // объявляет прямо в названии («200 шт/уп»), другого источника нет.
+        nameRaw: i.nameRaw ?? null,
         price: i.price ?? null,
         sum: i.sum ?? null,
         vatRate: i.vatRate ?? null,
@@ -2108,7 +2111,10 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       consigneeRaw: parsed.consigneeRaw ?? null,
     },
     // Числа пришли от модели — здесь эвристика подозрения уместна.
-    { detectRecognitionWarnings: true },
+    {
+      detectRecognitionWarnings: true,
+      detectPackPriceScale: loadEnv().UPD_SCALE_WARNINGS,
+    },
   );
 
   // Готов ли документ к приёмке — единое правило, общее с ручной правкой на

@@ -1,5 +1,6 @@
 import {
   suspectPriceIncludesVat,
+  suspectPackPriceScale,
   suspectQtyPriceSwap,
   suspectSumEqualsQty,
   suspectUnitCodeAsQty,
@@ -25,6 +26,12 @@ export type UpdLikeForValidation = {
     qty?: number | null;
     /** Условное обозначение единицы (графа 2а) — для проверки на код из графы 2. */
     unit?: string | null;
+    /**
+     * Наименование строкой — только для подозрения на цену упаковки: фасовку
+     * поставщик объявляет в самом названии («200 шт/уп»). Необязательное: у
+     * live-пересчёта и XML-пути его нет, и проверка там просто спит.
+     */
+    nameRaw?: string | null;
     price?: number | null;
     sum?: number | null;
     vatRate?: number | null;
@@ -99,6 +106,15 @@ function effectiveDocVatRate(
  */
 export type ValidateUpdOptions = {
   detectRecognitionWarnings?: boolean;
+  /**
+   * Предъявлять ли подозрение на цену упаковки (`price_is_pack_price`).
+   *
+   * Отдельным ключом, а не внутри detectRecognitionWarnings: признак новый и
+   * едет за рубильником UPD_SCALE_WARNINGS, а валидатор обязан остаться чистым —
+   * его зовут XML-путь, сравнение вариантов разбора и бэктест-скрипты, где env
+   * нет вовсе.
+   */
+  detectPackPriceScale?: boolean;
 };
 
 export function validateUpdTotals(
@@ -346,6 +362,18 @@ export function validateUpdTotals(
     // второй ярлык на той же строке только запутает.
     if (opts.detectRecognitionWarnings && ok && suspectQtyPriceSwap({ qty, price })) {
       warnings.push({ name: 'qty_price_swap', scope: { row } });
+    }
+    // Цена упаковки при штучном количестве — тоже только на сошедшейся строке:
+    // перенос множителя произведение не меняет, поэтому арифметика молчит, а на
+    // уже красной строке второй ярлык только запутает. Правило «одна строка —
+    // один ярлык» соблюдается порядком: перестановка предъявляется первой.
+    else if (
+      opts.detectRecognitionWarnings &&
+      opts.detectPackPriceScale === true &&
+      ok &&
+      suspectPackPriceScale({ qty, price, unit: it.unit ?? null, nameRaw: it.nameRaw ?? null })
+    ) {
+      warnings.push({ name: 'price_is_pack_price', scope: { row } });
     }
     // Цена взята с НДС: произведение сошлось со стоимостью С налогом вместо
     // стоимости без него. Предъявляем только там, где обычная сверка НЕ
