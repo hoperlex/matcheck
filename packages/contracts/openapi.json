@@ -1399,6 +1399,14 @@
                     "warnings",
                     "problemItemIds"
                   ]
+                },
+                "itemsCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "coveredItemsCount": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
@@ -2526,6 +2534,14 @@
                           "warnings",
                           "problemItemIds"
                         ]
+                      },
+                      "itemsCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "coveredItemsCount": {
+                        "type": "integer",
+                        "minimum": 0
                       }
                     },
                     "required": [
@@ -3427,6 +3443,14 @@
                         "warnings",
                         "problemItemIds"
                       ]
+                    },
+                    "itemsCount": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "coveredItemsCount": {
+                      "type": "integer",
+                      "minimum": 0
                     }
                   },
                   "required": [
@@ -4516,6 +4540,14 @@
                     "warnings",
                     "problemItemIds"
                   ]
+                },
+                "itemsCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "coveredItemsCount": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               "required": [
@@ -5662,6 +5694,14 @@
                           "warnings",
                           "problemItemIds"
                         ]
+                      },
+                      "itemsCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "coveredItemsCount": {
+                        "type": "integer",
+                        "minimum": 0
                       }
                     },
                     "required": [
@@ -6558,6 +6598,14 @@
                         "warnings",
                         "problemItemIds"
                       ]
+                    },
+                    "itemsCount": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "coveredItemsCount": {
+                      "type": "integer",
+                      "minimum": 0
                     }
                   },
                   "required": [
@@ -10361,6 +10409,14 @@
                           "warnings",
                           "problemItemIds"
                         ]
+                      },
+                      "itemsCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "coveredItemsCount": {
+                        "type": "integer",
+                        "minimum": 0
                       }
                     },
                     "required": [
@@ -11227,6 +11283,14 @@
                           "warnings",
                           "problemItemIds"
                         ]
+                      },
+                      "itemsCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "coveredItemsCount": {
+                        "type": "integer",
+                        "minimum": 0
                       }
                     },
                     "required": [

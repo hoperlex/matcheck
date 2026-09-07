@@ -13,7 +13,7 @@
  * числа, и подозрения — она для него единственный источник.
  */
 
-import { asc, inArray } from 'drizzle-orm';
+import { asc, inArray, sql as drSql } from 'drizzle-orm';
 import type {
   OperationDocumentValidation,
   UpdCheck,
@@ -181,4 +181,52 @@ export function describeDocAttention(validation: UpdValidation | null | undefine
   if (summary.failedChecks.length > 0) parts.push(`расхождений: ${summary.failedChecks.length}`);
   if (summary.warnings.length > 0) parts.push(`подозрений: ${summary.warnings.length}`);
   return parts.join(', ');
+}
+
+/**
+ * Сколько позиций у каждого документа — знаменатель для «перенесено N из M».
+ *
+ * Отдельный сгруппированный запрос, один на карточку и один на страницу списка:
+ * считать это в цикле по операциям означало бы полсотни запросов на страницу.
+ */
+export async function loadDocumentItemCounts(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  documentIds: readonly string[],
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  if (documentIds.length === 0) return result;
+
+  const rows: { sourceDocumentId: string; count: number }[] = await db
+    .select({
+      sourceDocumentId: sourceDocumentItems.sourceDocumentId,
+      count: drSql<number>`count(*)::int`,
+    })
+    .from(sourceDocumentItems)
+    .where(inArray(sourceDocumentItems.sourceDocumentId, [...documentIds]))
+    .groupBy(sourceDocumentItems.sourceDocumentId);
+
+  for (const row of rows) result.set(row.sourceDocumentId, Number(row.count));
+  return result;
+}
+
+/**
+ * Сколько РАЗНЫХ позиций документа доехало до операции.
+ *
+ * Именно уникальные `sourceDocumentItemId`, а не число строк: строка документа
+ * может попасть в операцию дважды (повторная привязка, ручное дублирование), и
+ * тогда простой счётчик показал бы «3 из 3» там, где одна позиция потеряна, а
+ * другая задвоена. Потеря — то, ради чего всё и считается.
+ */
+export function countCoveredDocumentItems(
+  items: readonly { sourceDocumentId: string | null; sourceDocumentItemId: string | null }[],
+): Map<string, number> {
+  const seen = new Map<string, Set<string>>();
+  for (const item of items) {
+    if (!item.sourceDocumentId || !item.sourceDocumentItemId) continue;
+    const set = seen.get(item.sourceDocumentId);
+    if (set) set.add(item.sourceDocumentItemId);
+    else seen.set(item.sourceDocumentId, new Set([item.sourceDocumentItemId]));
+  }
+  return new Map([...seen].map(([docId, ids]) => [docId, ids.size]));
 }

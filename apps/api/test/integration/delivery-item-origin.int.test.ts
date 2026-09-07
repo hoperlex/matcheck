@@ -922,4 +922,58 @@ suite('происхождение позиций приёмки (реальны�
     expect(ids).not.toContain(deliveryId);
   });
 
+
+  it('покрытие позиций: доехали не все — DTO это показывает', async () => {
+    // Воспроизведение приёмки 13157: в документе три позиции, в приёмке две.
+    const doc = await makeUpd('О-39', [
+      { name: 'Трубка 13x035', qty: '300', unit: 'м' },
+      { name: 'Трубка 13x042', qty: '230', unit: 'м' },
+      { name: 'Трубка 13x048', qty: '60', unit: 'м' },
+    ]);
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, doc.id);
+
+    // Планшет присылает усечённый список — так теряется позиция на бою.
+    const after = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      items: [
+        {
+          nameRaw: 'Трубка 13x042',
+          qtyActual: '230',
+          unit: 'м',
+          lineNo: 1,
+          sourceDocumentId: doc.id,
+          sourceDocumentItemId: doc.itemIds[1],
+        },
+        {
+          nameRaw: 'Трубка 13x048',
+          qtyActual: '60',
+          unit: 'м',
+          lineNo: 2,
+          sourceDocumentId: doc.id,
+          sourceDocumentItemId: doc.itemIds[2],
+        },
+      ],
+    });
+    expect(after.statusCode, after.body).toBe(200);
+
+    const single = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    const dto = single.json() as {
+      sourceDocuments: { itemsCount?: number; coveredItemsCount?: number }[];
+    };
+    expect(dto.sourceDocuments[0]!.itemsCount).toBe(3);
+    expect(dto.sourceDocuments[0]!.coveredItemsCount).toBe(2);
+
+    // Та же форма в списке — счётчик считается на странице одним запросом.
+    const list = await app.inject({ method: 'GET', url: '/api/v1/deliveries?limit=100' });
+    const fromList = (
+      list.json() as { items: { id: string; sourceDocuments?: unknown[] }[] }
+    ).items.find((d) => d.id === deliveryId);
+    expect(fromList?.sourceDocuments).toEqual(dto.sourceDocuments);
+  });
+
 });
+
+

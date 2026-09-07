@@ -40,7 +40,15 @@ function sectionTitle<T extends RowBase>(section: ItemSection<T>, hasDocuments: 
     // Отвязанный документ остаётся подписью блока: unlink-source намеренно не
     // трогает позиции, и без подписи было бы непонятно, откуда эти строки.
     const prefix = section.document.linked ? '' : 'отвязан ';
-    return `Материалы · ${prefix}${kind} ${number} (${count})`;
+    // Недобор позиций виден прямо в заголовке. На приёмке 13157 в УПД было три
+    // позиции, а доехали две — и счётчик «(2)» выглядел так, будто столько и
+    // было. Показываем «N из M» только при недоборе: у здорового документа
+    // лишняя дробь в заголовке — шум.
+    const total = section.document.itemsCount;
+    const covered = section.document.coveredItemsCount;
+    const short = total != null && covered != null && covered < total;
+    const counter = short ? `${covered} из ${total}` : `${count}`;
+    return `Материалы · ${prefix}${kind} ${number} (${counter})`;
   }
   if (section.unknownDocumentId) {
     return `Материалы · документ ${section.unknownDocumentId.slice(0, 8)} (${count})`;

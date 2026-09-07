@@ -83,8 +83,20 @@ export function buildOperationSourceDocuments(args: {
    * ручной работой мониторинга.
    */
   operationClosed?: boolean;
+  /** Сколько позиций в каждом документе — знаменатель «перенесено N из M». */
+  itemCounts?: ReadonlyMap<string, number>;
+  /** Сколько РАЗНЫХ позиций документа доехало до операции — числитель. */
+  coveredCounts?: ReadonlyMap<string, number>;
 }): OperationSourceDocument[] {
-  const { rows, linkedIds, mentionedIds, rowItemIds, operationClosed } = args;
+  const {
+    rows,
+    linkedIds,
+    mentionedIds,
+    rowItemIds,
+    operationClosed,
+    itemCounts,
+    coveredCounts,
+  } = args;
   const byId = new Map(rows.map((r) => [r.id, r]));
   const linked = new Set(linkedIds);
   // Рубильник читается ЗДЕСЬ, в единственной точке сборки сводки: так он гасит
@@ -108,6 +120,15 @@ export function buildOperationSourceDocuments(args: {
       vatSum: row.vatSum,
       linked: linked.has(row.id),
       ...(validation ? { validation } : {}),
+      // Покрытие показываем ТОЛЬКО когда знаменатель известен: без него «0 из
+      // ?» ничего не сообщает, а заголовок должен оставаться прежним у
+      // продюсеров, которые счётчики не считают (черновик «из УПД», офлайн).
+      ...(itemCounts?.has(row.id)
+        ? {
+            itemsCount: itemCounts.get(row.id)!,
+            coveredItemsCount: coveredCounts?.get(row.id) ?? 0,
+          }
+        : {}),
     };
   };
 

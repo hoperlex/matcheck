@@ -118,3 +118,43 @@ describe('подсветка проблемной строки в блоке м�
     expect(container.querySelectorAll('.matcheck-row-mismatch')).toHaveLength(0);
   });
 });
+
+describe('заголовок блока показывает недобор позиций', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  function renderWith(doc: OperationSourceDocument, items: Row[] = rows) {
+    return render(
+      <OperationItemsSections<Row>
+        items={items}
+        documents={[doc]}
+        columns={[{ title: 'Название', dataIndex: 'nameRaw', key: 'nameRaw' }]}
+        cardRender={(row) => <div>{row.nameRaw}</div>}
+        emptyHint="пусто"
+      />,
+    );
+  }
+
+  it('доехали не все позиции — в заголовке «2 из 3»', () => {
+    // Приёмка 13157: в УПД три позиции, в приёмке две. Счётчик «(2)» выглядел
+    // так, будто столько в документе и было.
+    renderWith({ ...document_, itemsCount: 3, coveredItemsCount: 2 });
+    expect(screen.getByText(/Материалы · УПД № 1282 \(2 из 3\)/)).toBeTruthy();
+  });
+
+  it('доехали все — счётчик прежний, лишней дроби нет', () => {
+    renderWith({ ...document_, itemsCount: 2, coveredItemsCount: 2 });
+    expect(screen.getByText(/Материалы · УПД № 1282 \(2\)/)).toBeTruthy();
+  });
+
+  it('счётчиков нет вовсе (офлайн, черновик) — заголовок как раньше', () => {
+    renderWith(document_);
+    expect(screen.getByText(/Материалы · УПД № 1282 \(2\)/)).toBeTruthy();
+  });
+
+  it('не доехало ничего — «0 из 3», а не пустой блок без объяснения', () => {
+    renderWith({ ...document_, itemsCount: 3, coveredItemsCount: 0 }, []);
+    expect(screen.getByText(/Материалы · УПД № 1282 \(0 из 3\)/)).toBeTruthy();
+  });
+});

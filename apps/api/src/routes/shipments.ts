@@ -64,7 +64,9 @@ import {
 } from '../domain/operations/source-document-summary.js';
 import { loadEnv } from '../lib/env.js';
 import {
+  countCoveredDocumentItems,
   documentsNeedingRowIds,
+  loadDocumentItemCounts,
   loadProblemRowItemIds,
 } from '../domain/operations/source-document-validation.js';
 import { canSeeReviewInMatrix } from '../lib/review.js';
@@ -412,6 +414,10 @@ async function buildShipmentDto(app: any, id: string, viewerRole?: string | null
   // Идентичность строк нужна только там, где есть построчные проблемы: у
   // здорового документа запрос не выполняется вовсе.
   const rowItemIds = await loadProblemRowItemIds(app.db, documentsNeedingRowIds(summaryRows));
+  // «Перенесено N из M»: знаменатель — из документа, числитель — уникальные
+  // позиции операции с этим происхождением.
+  const itemCounts = await loadDocumentItemCounts(app.db, mentionedIds);
+  const coveredCounts = countCoveredDocumentItems(items);
 
   return assembleShipmentDto(
     r,
@@ -425,6 +431,8 @@ async function buildShipmentDto(app: any, id: string, viewerRole?: string | null
       linkedIds,
       mentionedIds,
       rowItemIds,
+      itemCounts,
+      coveredCounts,
       operationClosed: r.st.code === 'confirmed_mol',
     }),
   );
@@ -599,6 +607,9 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
     app.db,
     documentsNeedingRowIds([...summaryRowById.values()]),
   );
+  // Один запрос на страницу, а не на операцию: у списка из 50 строк иначе было
+  // бы полсотни походов в базу за одним и тем же.
+  const itemCounts = await loadDocumentItemCounts(app.db, [...summaryRowById.keys()]);
 
   const result: ReturnType<typeof assembleShipmentDto>[] = [];
   for (const id of ids) {
@@ -620,6 +631,8 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
           linkedIds: (sourcesById.get(id) ?? []).map((x) => x.sourceDocumentId),
           mentionedIds: mentionedByShipment.get(id) ?? [],
           rowItemIds,
+          itemCounts,
+          coveredCounts: countCoveredDocumentItems(itemsById.get(id) ?? []),
           operationClosed: r.st.code === 'confirmed_mol',
         }),
       ),
