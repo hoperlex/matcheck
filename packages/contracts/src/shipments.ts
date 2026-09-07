@@ -137,6 +137,8 @@ export const ShipmentSchema = z.object({
   // только по linked) и блоки материалов. Optional по той же причине, что и
   // блок выше: /sync поле не собирает, мобильный клиент его игнорирует.
   sourceDocuments: z.array(OperationSourceDocumentSchema).optional(),
+  /** Разбор документа нашёл расхождение или подозрение, операция ещё открыта. */
+  docAttention: z.boolean().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -150,11 +152,11 @@ export type ShipmentMarkDeletion = z.infer<typeof ShipmentMarkDeletionSchema>;
 export const ShipmentUpsertItemSchema = z.object({
   id: z.string().uuid().optional(),
   /**
-   * Происхождение НОВОЙ позиции — те же правила, что у приёмки
-   * (DeliveryUpsertItemSchema). Для строки, которая уже есть в отгрузке,
-   * значение игнорируется: сервер берёт сохранённое из БД по id, иначе одного
-   * устаревшего планшета хватило бы, чтобы приписать позиции чужому документу.
-   * Присланный документ, не привязанный к этой отгрузке, отбрасывается в null.
+   * Происхождение позиции — те же правила, что у приёмки
+   * (DeliveryUpsertItemSchema): `sourceDocumentId` существующей строки сервер
+   * берёт из БД, а `sourceDocumentItemId` служит ключом восстановления для
+   * строки с устаревшим `id` (item-origin.ts, шаг 1.5). Присланный документ,
+   * не привязанный к этой отгрузке, отбрасывается в null.
    */
   sourceDocumentId: z.string().uuid().nullable().optional(),
   sourceDocumentItemId: z.string().uuid().nullable().optional(),
@@ -163,7 +165,14 @@ export const ShipmentUpsertItemSchema = z.object({
   assetId: z.string().uuid().nullable().optional(),
   inventoryNumber: z.string().max(200).nullable().optional(),
   serialNumber: z.string().max(200).nullable().optional(),
-  nameRaw: z.string().min(1),
+  /**
+   * `trim()` не косметика: без него строка из одних пробелов проходит `min(1)`
+   * и попадает в БД как «пустое» название. Портал такую строку раньше молча
+   * выбрасывал при сохранении — вместе с количеством, ценой и привязкой к
+   * документу. Инвариант «у позиции есть непустое имя» должен держать сервер, а
+   * не только форма.
+   */
+  nameRaw: z.string().trim().min(1),
   qtyPlanned: decimalString({ precision: 18, scale: 4 }),
   qtyActual: decimalString({ precision: 18, scale: 4 }),
   unit: z.string().min(1).default('шт'),

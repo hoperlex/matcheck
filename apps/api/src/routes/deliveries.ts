@@ -56,13 +56,19 @@ import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/fo
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
-import { resolveItemOrigins } from '../domain/operations/item-origin.js';
+import { findDroppedOrigins, resolveItemOrigins } from '../domain/operations/item-origin.js';
 import {
   buildOperationSourceDocuments,
   SOURCE_DOCUMENT_SUMMARY_COLUMNS,
   type SourceDocumentSummaryRow,
 } from '../domain/operations/source-document-summary.js';
 import { loadEnv } from '../lib/env.js';
+import {
+  DELIVERY_TABLES,
+  docAttentionColumn,
+  docAttentionExists,
+  operationIsClosed,
+} from '../domain/operations/doc-attention.js';
 import type { UpdValidation } from '@matcheck/contracts';
 import {
   countCoveredDocumentItems,
@@ -275,6 +281,17 @@ function selectDeliveryHeaders(app: any) {
       siteName: deliverySite.name,
       supplierName: supplierCp.name,
       contractorName: contractorCp.name,
+      // Признак «нужна проверка» считается ЗДЕСЬ, в общем для одиночного и
+      // батч-пути селекте: так значок, колонка выгрузки и фильтр не могут
+      // разойтись — раньше каждый считал своё, и приёмка с сигналом только от
+      // фото попадала в фильтр, но выглядела чистой.
+      docAttention: loadEnv().OPERATION_DOC_VALIDATION
+        ? docAttentionColumn(
+            DELIVERY_TABLES,
+            drSql`${deliveries.id}`,
+            drSql`${deliveries.statusId}`,
+          )
+        : drSql<boolean>`false`,
     })
     .from(deliveries)
     .innerJoin(statuses, eq(deliveries.statusId, statuses.id))
@@ -300,6 +317,7 @@ type DeliveryHeaderRow = {
   siteName: string | null;
   supplierName: string | null;
   contractorName: string | null;
+  docAttention: boolean;
 };
 
 // Чистая сборка DTO из уже полученных данных — ЕДИНСТВЕННЫЙ источник формы
@@ -391,6 +409,10 @@ function assembleDeliveryDto(
     pendingDeletionByUserEmail: r.pendingEmail,
     pendingDeletionReason: d.pendingDeletionReason,
     version: d.version,
+    // Признак «нужна проверка» — тот же, что у фильтра doc_attention и у
+    // значка в списке. Приходит из общего селекта заголовков, поэтому
+    // одиночный и батч-путь не могут разойтись.
+    docAttention: r.docAttention === true,
     sourceDocumentIds: sources.map((x) => x.sourceDocumentId),
     sourceShipmentId: d.sourceShipmentId,
     sourceShipmentShippedAt: r.srcShippedAt?.toISOString() ?? null,
@@ -911,48 +933,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         // OPERATION_DOC_VALIDATION гасит фильтр вместе со сводкой: иначе
         // выключённый рубильник оставил бы пункт меню, который ничего не находит.
         if (loadEnv().OPERATION_DOC_VALIDATION) {
-          // Закрытые операции в очередь не попадают: сигнал нужен там, где его
-          // ещё можно отработать, а разбор архива остаётся ручной работой
-          // мониторинга. Подзапрос, а не join: список строит WHERE из плоского
-          // набора условий, и join сюда пришлось бы тащить через все ветки.
-          filters.push(drSql`NOT EXISTS (
-        SELECT 1 FROM statuses st_a
-        WHERE st_a.id = ${deliveries.statusId} AND st_a.code = 'confirmed_mol'
-      )`);
-          filters.push(drSql`(
-        EXISTS (
-          SELECT 1 FROM delivery_sources ds_a
-          JOIN source_documents sd_a ON sd_a.id = ds_a.source_document_id
-          WHERE ds_a.delivery_id = ${deliveries.id}
-            AND (
-              jsonb_path_exists(sd_a.validation, '$.checks[*] ? (@.ok == false && !exists(@.skipReason))')
-              OR jsonb_array_length(COALESCE(sd_a.validation->'warnings', '[]'::jsonb)) > 0
-            )
-        )
-        OR EXISTS (
-          SELECT 1 FROM delivery_items di_a2
-          JOIN source_documents sd_a2 ON sd_a2.id = di_a2.source_document_id
-          WHERE di_a2.delivery_id = ${deliveries.id}
-            AND (
-              jsonb_path_exists(sd_a2.validation, '$.checks[*] ? (@.ok == false && !exists(@.skipReason))')
-              OR jsonb_array_length(COALESCE(sd_a2.validation->'warnings', '[]'::jsonb)) > 0
-            )
-        )
-        OR EXISTS (
-          -- Третий источник — сверка фото документа, снятого на планшете.
-          -- Он не покрывается двумя предыдущими: у 73 приёмок за месяц сигнал
-          -- есть ТОЛЬКО здесь, документа к ним не привязано. Мониторинг этой
-          -- сводкой уже пользуется — замечания 13318 и 13322 дословно повторяют
-          -- её текст, хотя привязанный документ в них чист.
-          SELECT 1 FROM delivery_photos p_a
-          JOIN photo_recognized_items r_a ON r_a.delivery_photo_id = p_a.id
-          WHERE p_a.delivery_id = ${deliveries.id}
-            AND (
-              jsonb_path_exists(r_a.validation, '$.checks[*] ? (@.ok == false && !exists(@.skipReason))')
-              OR jsonb_array_length(COALESCE(r_a.validation->'warnings', '[]'::jsonb)) > 0
-            )
-        )
-      )`);
+          // Ровно то же условие, что у колонки docAttention в селекте
+          // заголовков (domain/operations/doc-attention.ts): очередь и значок
+          // обязаны совпадать, а раньше каждый считал своё.
+          filters.push(drSql`NOT ${operationIsClosed(drSql`${deliveries.statusId}`)}`);
+          filters.push(docAttentionExists(DELIVERY_TABLES, drSql`${deliveries.id}`));
         }
       } else if (f === 'waybill') {
         filters.push(drSql`EXISTS (
@@ -1854,6 +1839,15 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           .select({
             d: deliveries,
             statusCode: statuses.code,
+            // Тот же признак, что у фильтра и значка: выгрузка обязана помечать
+            // ровно те строки, которые фильтр отобрал.
+            docAttentionFlag: loadEnv().OPERATION_DOC_VALIDATION
+              ? docAttentionColumn(
+                  DELIVERY_TABLES,
+                  drSql`${deliveries.id}`,
+                  drSql`${deliveries.statusId}`,
+                )
+              : drSql<boolean>`false`,
             statusLabel: statuses.label,
             supplierName: supplier.name,
             contractorName: contractor.name,
@@ -1922,18 +1916,18 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           // По ВСЕМ документам приёмки, а не только по первому: фильтр
           // doc_attention срабатывает на любом из них, и выгрузка обязана
           // отбирать те же строки.
-          // У закрытой приёмки колонка пустая — так же, как нет плашки и как
-          // фильтр её не отбирает. Иначе «отфильтровал и выгрузил» давало бы
-          // разные наборы строк.
-          const docAttention =
-            r.statusCode === 'confirmed_mol'
-              ? ''
-              : links
-                  .map((l) =>
-                    describeDocAttention(sdById.get(l.sourceDocumentId)?.validation ?? null),
-                  )
-                  .filter(Boolean)
-                  .join('; ');
+          // Текст колонки собирается по связанным документам, но САМ ПРИЗНАК
+          // берётся из общего выражения (docAttentionFlag ниже): у приёмки
+          // сигнал может быть только в сверке фото, и тогда описывать нечего, а
+          // пометить строку всё равно надо — иначе выгрузка разойдётся с
+          // фильтром, по которому её отобрали.
+          const docAttentionText = links
+            .map((l) => describeDocAttention(sdById.get(l.sourceDocumentId)?.validation ?? null))
+            .filter(Boolean)
+            .join('; ');
+          const docAttention = !r.docAttentionFlag
+            ? ''
+            : docAttentionText || 'по сверке фото документа';
           return {
             ...r,
             contractorIdResolved: contractorIdR,
@@ -2980,6 +2974,15 @@ async function updateDelivery(
       })),
       linkedDocumentIds,
     });
+
+    // Наблюдение за промахами сопоставления: строка, у которой привязка к
+    // позиции документа БЫЛА и после upsert исчезла. Валовое число позиций без
+    // `source_document_item_id` этого не показывает — туда попадают и строки,
+    // заведённые руками, и последствия переразбора УПД (FK обнуляется штатно).
+    const droppedOrigins = findDroppedOrigins({ existing: previousItems, origins });
+    if (droppedOrigins.length) {
+      app.log.warn({ deliveryId: id, dropped: droppedOrigins }, 'item origin dropped on upsert');
+    }
 
     await tx.delete(deliveryItems).where(eq(deliveryItems.deliveryId, id));
     if (itemsForInsert.length) {

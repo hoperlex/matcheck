@@ -974,6 +974,124 @@ suite('происхождение позиций приёмки (реальны�
     expect(fromList?.sourceDocuments).toEqual(dto.sourceDocuments);
   });
 
+
+  // ── Согласованность признака «Требует проверки» ──────────────────────────
+  //
+  // Фильтр, значок в списке и колонка выгрузки обязаны отбирать ОДНИ И ТЕ ЖЕ
+  // приёмки. До правки каждый считал своё: фильтр учитывал сверку фото, а
+  // значок и выгрузка — только сводки связанных документов, и приёмка с
+  // сигналом лишь от фото попадала в отфильтрованную выдачу, выглядя чистой.
+
+  async function makePhotoWithValidation(deliveryId: string, hasSignal: boolean) {
+    const photoId = randomUUID();
+    await sql`
+      INSERT INTO delivery_photos (id, delivery_id, kind, stage, s3_key, content_hash)
+      VALUES (${photoId}, ${deliveryId}, 'document', 'before', ${`test/${photoId}.jpg`}, ${randomUUID().replace(/-/g, '')})`;
+    const validation = hasSignal
+      ? {
+          hasMismatch: true,
+          checkedAt: new Date().toISOString(),
+          checks: [
+            {
+              name: 'row_qty_price',
+              scope: { row: 1 },
+              expected: 2400,
+              actual: 38400,
+              diff: 36000,
+              tolerance: 2.4,
+              ok: false,
+            },
+          ],
+        }
+      : { hasMismatch: false, checkedAt: new Date().toISOString(), checks: [] };
+    await sql`
+      INSERT INTO photo_recognized_items (id, delivery_photo_id, parser, validation)
+      VALUES (${randomUUID()}, ${photoId}, 'photo_v1', ${JSON.stringify(validation)}::jsonb)`;
+  }
+
+  it('сигнал только от фото: и фильтр, и признак в DTO его видят', async () => {
+    const deliveryId = await makeDelivery();
+    await makePhotoWithValidation(deliveryId, true);
+
+    const single = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    expect((single.json() as { docAttention?: boolean }).docAttention).toBe(true);
+
+    const list = await app.inject({ method: 'GET', url: '/api/v1/deliveries?limit=100' });
+    const fromList = (list.json() as { items: { id: string; docAttention?: boolean }[] }).items.find(
+      (d) => d.id === deliveryId,
+    );
+    expect(fromList?.docAttention).toBe(true);
+
+    const queue = await app.inject({
+      method: 'GET',
+      url: '/api/v1/deliveries?limit=100&features=doc_attention',
+    });
+    expect((queue.json() as { items: { id: string }[] }).items.map((d) => d.id)).toContain(
+      deliveryId,
+    );
+  });
+
+  it('здоровое фото сигнала не даёт — ни в DTO, ни в очереди', async () => {
+    const deliveryId = await makeDelivery();
+    await makePhotoWithValidation(deliveryId, false);
+
+    const single = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    expect((single.json() as { docAttention?: boolean }).docAttention).toBe(false);
+
+    const queue = await app.inject({
+      method: 'GET',
+      url: '/api/v1/deliveries?limit=100&features=doc_attention',
+    });
+    expect((queue.json() as { items: { id: string }[] }).items.map((d) => d.id)).not.toContain(
+      deliveryId,
+    );
+  });
+
+  it('признак и очередь совпадают на всей странице списка', async () => {
+    // Главный инвариант: не бывает строки со значком вне фильтра и наоборот.
+    const withDoc = await makeDelivery();
+    const doc = await makeUpd('О-41', [{ name: 'Труба', qty: '2' }]);
+    await setValidation(doc.id, {
+      hasMismatch: true,
+      checks: [failedRowCheck(1)],
+      itemsCountActual: 1,
+    });
+    await link(withDoc, doc.id);
+    const withPhoto = await makeDelivery();
+    await makePhotoWithValidation(withPhoto, true);
+    await makeDelivery();
+
+    const list = await app.inject({ method: 'GET', url: '/api/v1/deliveries?limit=200' });
+    const flagged = new Set(
+      (list.json() as { items: { id: string; docAttention?: boolean }[] }).items
+        .filter((d) => d.docAttention === true)
+        .map((d) => d.id),
+    );
+    const queue = await app.inject({
+      method: 'GET',
+      url: '/api/v1/deliveries?limit=200&features=doc_attention',
+    });
+    const inQueue = new Set(
+      (queue.json() as { items: { id: string }[] }).items.map((d) => d.id),
+    );
+
+    expect([...flagged].sort()).toEqual([...inQueue].sort());
+    expect(flagged.has(withDoc)).toBe(true);
+    expect(flagged.has(withPhoto)).toBe(true);
+  });
+
+  it('подтверждённая МОЛ приёмка признака не получает даже с фото-сигналом', async () => {
+    const deliveryId = await makeDelivery();
+    await makePhotoWithValidation(deliveryId, true);
+    await sql`
+      UPDATE deliveries SET status_id = (
+        SELECT id FROM statuses WHERE code = 'confirmed_mol' AND entity_type = 'delivery'
+      ) WHERE id = ${deliveryId}`;
+
+    const single = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    expect((single.json() as { docAttention?: boolean }).docAttention).toBe(false);
+  });
+
 });
 
 

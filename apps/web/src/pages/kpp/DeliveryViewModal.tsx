@@ -8,6 +8,7 @@ import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
 import { usePermissions } from '../../shared/hooks/usePermissions';
+import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
 
 type Row = z.infer<typeof DeliveryListResponseSchema>['items'][number];
 type Item = Row['items'][number];
@@ -237,6 +238,11 @@ export function DeliveryViewModal({
             updatedAt={d.updatedAt}
             pendingDeletion={d.pendingDeletionAt != null}
           />
+
+          {/* Сверка документа — здесь же, а не только в полной карточке:
+              мониторинг чаще всего открывает именно просмотр, а раздела
+              «Документы» у его роли нет вовсе. */}
+          <OperationDocumentValidationAlert documents={d.sourceDocuments ?? []} />
 
           <Collapse
             // По умолчанию фото раскрыты — основной контент просмотра.

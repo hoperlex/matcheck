@@ -56,13 +56,19 @@ import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isShipmentDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
-import { resolveItemOrigins } from '../domain/operations/item-origin.js';
+import { findDroppedOrigins, resolveItemOrigins } from '../domain/operations/item-origin.js';
 import {
   buildOperationSourceDocuments,
   SOURCE_DOCUMENT_SUMMARY_COLUMNS,
   type SourceDocumentSummaryRow,
 } from '../domain/operations/source-document-summary.js';
 import { loadEnv } from '../lib/env.js';
+import {
+  SHIPMENT_TABLES,
+  docAttentionColumn,
+  docAttentionExists,
+  operationIsClosed,
+} from '../domain/operations/doc-attention.js';
 import {
   countCoveredDocumentItems,
   documentsNeedingRowIds,
@@ -244,6 +250,12 @@ function selectShipmentHeaders(app: any) {
       siteName: shipmentSite.name,
       supplierName: supplierCp.name,
       receiverName: receiverCp.name,
+      // Признак «нужна проверка» — общий для фильтра, значка и выгрузки, как у
+      // приёмок. Считается в селекте заголовков, чтобы одиночный и батч-путь
+      // не могли разойтись.
+      docAttention: loadEnv().OPERATION_DOC_VALIDATION
+        ? docAttentionColumn(SHIPMENT_TABLES, drSql`${shipments.id}`, drSql`${shipments.statusId}`)
+        : drSql<boolean>`false`,
     })
     .from(shipments)
     .innerJoin(statuses, eq(shipments.statusId, statuses.id))
@@ -264,6 +276,7 @@ type ShipmentHeaderRow = {
   siteName: string | null;
   supplierName: string | null;
   receiverName: string | null;
+  docAttention: boolean;
 };
 
 // Чистая сборка DTO из уже полученных данных — ЕДИНСТВЕННЫЙ источник формы
@@ -357,6 +370,8 @@ function assembleShipmentDto(
     pendingDeletionReason: s.pendingDeletionReason,
     version: s.version,
     sourceDocumentIds: sources.map((x) => x.sourceDocumentId),
+    // Тот же признак, что у фильтра doc_attention и значка в списке.
+    docAttention: r.docAttention === true,
     items: mappedItems,
     photos: mappedPhotos,
     // Волна 1B — предподсчёты для списка «Операции» (см. ShipmentSchema).
@@ -838,48 +853,10 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         // OPERATION_DOC_VALIDATION гасит фильтр вместе со сводкой: иначе
         // выключённый рубильник оставил бы пункт меню, который ничего не находит.
         if (loadEnv().OPERATION_DOC_VALIDATION) {
-          // Закрытые операции в очередь не попадают: сигнал нужен там, где его
-          // ещё можно отработать, а разбор архива остаётся ручной работой
-          // мониторинга. Подзапрос, а не join: список строит WHERE из плоского
-          // набора условий, и join сюда пришлось бы тащить через все ветки.
-          filters.push(drSql`NOT EXISTS (
-        SELECT 1 FROM statuses st_a
-        WHERE st_a.id = ${shipments.statusId} AND st_a.code = 'confirmed_mol'
-      )`);
-          filters.push(drSql`(
-        EXISTS (
-          SELECT 1 FROM shipment_sources ds_a
-          JOIN source_documents sd_a ON sd_a.id = ds_a.source_document_id
-          WHERE ds_a.shipment_id = ${shipments.id}
-            AND (
-              jsonb_path_exists(sd_a.validation, '$.checks[*] ? (@.ok == false && !exists(@.skipReason))')
-              OR jsonb_array_length(COALESCE(sd_a.validation->'warnings', '[]'::jsonb)) > 0
-            )
-        )
-        OR EXISTS (
-          SELECT 1 FROM shipment_items di_a2
-          JOIN source_documents sd_a2 ON sd_a2.id = di_a2.source_document_id
-          WHERE di_a2.shipment_id = ${shipments.id}
-            AND (
-              jsonb_path_exists(sd_a2.validation, '$.checks[*] ? (@.ok == false && !exists(@.skipReason))')
-              OR jsonb_array_length(COALESCE(sd_a2.validation->'warnings', '[]'::jsonb)) > 0
-            )
-        )
-        OR EXISTS (
-          -- Третий источник — сверка фото документа, снятого на планшете.
-          -- Он не покрывается двумя предыдущими: у 73 приёмок за месяц сигнал
-          -- есть ТОЛЬКО здесь, документа к ним не привязано. Мониторинг этой
-          -- сводкой уже пользуется — замечания 13318 и 13322 дословно повторяют
-          -- её текст, хотя привязанный документ в них чист.
-          SELECT 1 FROM shipment_photos p_a
-          JOIN photo_recognized_items r_a ON r_a.shipment_photo_id = p_a.id
-          WHERE p_a.shipment_id = ${shipments.id}
-            AND (
-              jsonb_path_exists(r_a.validation, '$.checks[*] ? (@.ok == false && !exists(@.skipReason))')
-              OR jsonb_array_length(COALESCE(r_a.validation->'warnings', '[]'::jsonb)) > 0
-            )
-        )
-      )`);
+          // Ровно то же условие, что у колонки docAttention в селекте
+          // заголовков (domain/operations/doc-attention.ts).
+          filters.push(drSql`NOT ${operationIsClosed(drSql`${shipments.statusId}`)}`);
+          filters.push(docAttentionExists(SHIPMENT_TABLES, drSql`${shipments.id}`));
         }
       } else if (f === 'waybill') {
         filters.push(drSql`EXISTS (
@@ -2736,6 +2713,15 @@ async function updateShipment(
       })),
       linkedDocumentIds,
     });
+
+    // Наблюдение за промахами сопоставления: строка, у которой привязка к
+    // позиции документа БЫЛА и после upsert исчезла. Валовое число позиций без
+    // `source_document_item_id` этого не показывает — туда попадают и строки,
+    // заведённые руками, и последствия переразбора УПД (FK обнуляется штатно).
+    const droppedOrigins = findDroppedOrigins({ existing: previousItems, origins });
+    if (droppedOrigins.length) {
+      app.log.warn({ shipmentId: id, dropped: droppedOrigins }, 'item origin dropped on upsert');
+    }
 
     await tx.delete(shipmentItems).where(eq(shipmentItems.shipmentId, id));
     if (itemsForInsert.length) {
