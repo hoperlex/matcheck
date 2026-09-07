@@ -874,4 +874,52 @@ suite('происхождение позиций приёмки (реальны�
     }
   });
 
+
+  it('подтверждённая МОЛ приёмка сводки не получает и в очередь не попадает', async () => {
+    // Сигнал нужен там, где его ещё можно отработать: от разбора документа до
+    // «Подтвердить МОЛ» проходит в медиане 142 минуты, и это всё окно. У
+    // закрытой приёмки правка невозможна, а плашка на ней превратила бы историю
+    // в стену пометок — на момент выката таких приёмок 432 из 435. Разбор
+    // архива остаётся ручной работой мониторинга.
+    const doc = await makeUpd('О-38', [{ name: 'Труба', qty: '2' }]);
+    await setValidation(doc.id, {
+      hasMismatch: true,
+      checks: [failedRowCheck(1)],
+      itemsCountActual: 1,
+    });
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, doc.id);
+
+    // Пока приёмка открыта — сводка есть.
+    const open = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    expect(
+      (open.json() as { sourceDocuments: { validation?: unknown }[] }).sourceDocuments[0]!
+        .validation,
+    ).toBeDefined();
+
+    await sql`
+      UPDATE deliveries SET status_id = (
+        SELECT id FROM statuses WHERE code = 'confirmed_mol' AND entity_type = 'delivery'
+      ) WHERE id = ${deliveryId}`;
+
+    const closed = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+    const closedDoc = (closed.json() as { sourceDocuments: Record<string, unknown>[] })
+      .sourceDocuments[0]!;
+    expect('validation' in closedDoc).toBe(false);
+
+    // Та же форма в списке — иначе карточка и список разошлись бы.
+    const list = await app.inject({ method: 'GET', url: '/api/v1/deliveries?limit=100' });
+    const fromList = (
+      list.json() as { items: { id: string; sourceDocuments?: Record<string, unknown>[] }[] }
+    ).items.find((d) => d.id === deliveryId);
+    expect('validation' in (fromList!.sourceDocuments![0] ?? {})).toBe(false);
+
+    const queue = await app.inject({
+      method: 'GET',
+      url: '/api/v1/deliveries?limit=100&features=doc_attention',
+    });
+    const ids = (queue.json() as { items: { id: string }[] }).items.map((d) => d.id);
+    expect(ids).not.toContain(deliveryId);
+  });
+
 });

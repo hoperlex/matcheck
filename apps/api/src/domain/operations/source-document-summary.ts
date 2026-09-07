@@ -73,15 +73,25 @@ export function buildOperationSourceDocuments(args: {
    * подсветки строк, и старые вызовы с тремя полями продолжают работать.
    */
   rowItemIds?: ReadonlyMap<string, readonly string[]>;
+  /**
+   * Операция уже подтверждена МОЛ — сводку не показываем.
+   *
+   * Сигнал нужен там, где он ещё может что-то изменить: от разбора документа до
+   * «Подтвердить МОЛ» проходит в медиане 142 минуты, и это всё окно. У закрытой
+   * приёмки правка невозможна, а плашка на ней превращает историю в стену
+   * пометок — на момент выката таких приёмок 432 из 435. Разбор архива остаётся
+   * ручной работой мониторинга.
+   */
+  operationClosed?: boolean;
 }): OperationSourceDocument[] {
-  const { rows, linkedIds, mentionedIds, rowItemIds } = args;
+  const { rows, linkedIds, mentionedIds, rowItemIds, operationClosed } = args;
   const byId = new Map(rows.map((r) => [r.id, r]));
   const linked = new Set(linkedIds);
   // Рубильник читается ЗДЕСЬ, в единственной точке сборки сводки: так он гасит
   // и карточку, и список, и выгрузку разом. Фильтр `doc_attention` смотрит на
   // тот же флаг у себя — иначе выключённая сводка оставила бы фильтр, который
   // ничего не находит.
-  const enabled = loadEnv().OPERATION_DOC_VALIDATION;
+  const enabled = loadEnv().OPERATION_DOC_VALIDATION && operationClosed !== true;
 
   const toSummary = (row: SourceDocumentSummaryRow): OperationSourceDocument => {
     const validation = enabled

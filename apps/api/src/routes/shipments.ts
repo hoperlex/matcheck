@@ -420,7 +420,13 @@ async function buildShipmentDto(app: any, id: string, viewerRole?: string | null
     sources,
     showReview,
     null,
-    buildOperationSourceDocuments({ rows: summaryRows, linkedIds, mentionedIds, rowItemIds }),
+    buildOperationSourceDocuments({
+      rows: summaryRows,
+      linkedIds,
+      mentionedIds,
+      rowItemIds,
+      operationClosed: r.st.code === 'confirmed_mol',
+    }),
   );
 }
 
@@ -614,6 +620,7 @@ async function buildShipmentDtosBatch(app: any, ids: string[], viewerRole?: stri
           linkedIds: (sourcesById.get(id) ?? []).map((x) => x.sourceDocumentId),
           mentionedIds: mentionedByShipment.get(id) ?? [],
           rowItemIds,
+          operationClosed: r.st.code === 'confirmed_mol',
         }),
       ),
     );
@@ -818,6 +825,14 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         // OPERATION_DOC_VALIDATION гасит фильтр вместе со сводкой: иначе
         // выключённый рубильник оставил бы пункт меню, который ничего не находит.
         if (loadEnv().OPERATION_DOC_VALIDATION) {
+          // Закрытые операции в очередь не попадают: сигнал нужен там, где его
+          // ещё можно отработать, а разбор архива остаётся ручной работой
+          // мониторинга. Подзапрос, а не join: список строит WHERE из плоского
+          // набора условий, и join сюда пришлось бы тащить через все ветки.
+          filters.push(drSql`NOT EXISTS (
+        SELECT 1 FROM statuses st_a
+        WHERE st_a.id = ${shipments.statusId} AND st_a.code = 'confirmed_mol'
+      )`);
           filters.push(drSql`(
         EXISTS (
           SELECT 1 FROM shipment_sources ds_a
