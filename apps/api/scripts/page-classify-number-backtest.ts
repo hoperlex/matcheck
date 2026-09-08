@@ -8,13 +8,22 @@
  * ВНЕ боевого пути — здесь.
  *
  * Скрипт НИЧЕГО не пишет: только SELECT, чтение файлов из S3 и вызовы модели.
+ * Вызовы платные — перед стартом печатается их ожидаемое число.
  *
- * Что меряет:
- *   - расхождения в типах страниц (главный риск: upd_main → не-main теряет
- *     документ так же, как терял старый механизм);
- *   - долю страниц-шапок, на которых номер вообще прочитан (ниже 80 % правило
- *     почти не сработает — сначала надо поднимать разрешение миниатюры);
- *   - как изменилась бы нарезка.
+ * ЧТО ЭТОТ СКРИПТ ДОЛЖЕН ДОКАЗАТЬ. Не «полезность» разреза по номеру, а его
+ * БЕЗОПАСНОСТЬ: ни одна страница-шапка не потеряна и ни одна граница не
+ * проведена там, где её не было. Доля прочитанных номеров — метрика пользы, и
+ * воротами она не является.
+ *
+ * Прежняя версия таких гарантий не давала, и это выяснилось при разборе:
+ *   - потерянные шапки считались обходом ТОЛЬКО нового ответа, поэтому
+ *     страница, которую модель не вернула вовсе, в счётчик не попадала;
+ *   - изменение нарезки фиксировалось по числу сегментов — сдвиг границы при
+ *     том же количестве проходил незаметно;
+ *   - за эталон принимался результат ПРЕЖНЕГО вызова модели, а он
+ *     недетерминирован: часть расхождений объяснялась не промптом, а разбросом
+ *     самой модели;
+ *   - выборка была «10 пакетов, отсортированных по UUID».
  *
  * ВАЖНО про подготовку страниц: повторяется путь СБОРКИ — рендер в адаптивном
  * разрешении и уменьшение toClassifyThumb до 700 px. Рендерить сразу в
@@ -25,6 +34,10 @@
  *   pnpm --filter @matcheck/api tsx scripts/page-classify-number-backtest.ts \
  *     --bundle 62eac60f-d661-4cff-b1a9-503fd2f51e9c
  *   pnpm --filter @matcheck/api tsx scripts/page-classify-number-backtest.ts --days 14 --limit 20
+ *   # контрольный случай — пакет приёмки, где два УПД слиплись в один документ:
+ *   pnpm --filter @matcheck/api tsx scripts/page-classify-number-backtest.ts --delivery 13754
+ *   # оценить разброс самой модели, не меняя промпта:
+ *   pnpm --filter @matcheck/api tsx scripts/page-classify-number-backtest.ts --repeat 3
  */
 import postgres from 'postgres';
 import { getObject } from '../src/domain/storage/s3.signer.js';
@@ -35,7 +48,11 @@ import {
   PAGE_CLASSIFY_WITH_NUMBER_PROMPT,
   type PageClassification,
 } from '../src/domain/edo/upd-page-prefilter.js';
-import { planUpdSegments } from '../src/domain/edo/upd-assembly.js';
+import {
+  analyseBundle,
+  safetyGate,
+  type BundleReport,
+} from '../src/domain/edo/page-classify-backtest-report.js';
 import { decryptField, buildAad } from '../src/domain/auth/crypto.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -50,8 +67,23 @@ const argOf = (name: string): string | undefined => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const bundleArg = argOf('bundle');
+const deliveryArg = argOf('delivery');
 const days = Number(argOf('days') ?? 14);
 const limit = Number(argOf('limit') ?? 10);
+/** Сколько раз повторить НОВЫЙ промпт на одном пакете: разброс модели. */
+const repeat = Math.max(1, Number(argOf('repeat') ?? 1));
+/**
+ * Откуда берётся эталон.
+ *
+ * `evidence` (по умолчанию) — сохранённый боевой ответ классификатора из
+ * recognition_evidence_events. Это единственный способ сравнивать с тем, что
+ * на бою действительно произошло: повторный вызов старого промпта даёт свой
+ * разброс, и часть расхождений придётся списать на модель, а не на промпт.
+ * `model` — перевызвать старый промпт (нужно, когда улики нет).
+ */
+const baselineMode = (argOf('baseline') ?? 'evidence') as 'evidence' | 'model';
+/** Только пакеты, где документов было больше одного: там разрез и применим. */
+const multiOnly = args.includes('--multi-only');
 /** Предел страниц на сегмент — тот же, что в воркере. */
 const MAX_PAGES_PER_SEGMENT = 5;
 /** Размер порции классификации — тот же, что в воркере. */
@@ -109,91 +141,197 @@ async function classifyAll(
   return out.sort((a, b) => a.page - b.page);
 }
 
+/**
+ * Сохранённый боевой ответ классификатора.
+ *
+ * Возвращает null, если улики нет или её нумерация не сходится с нашими
+ * страницами: улика пишется для ДОЧЕРНЕГО пакета, и при другом составе файлов
+ * номера страниц означали бы не то же самое. Молча подставлять такой эталон
+ * нельзя — сравнение стало бы бессмысленным, а выглядело бы рабочим.
+ */
+async function baselineFromEvidence(
+  bundleId: string,
+  pageCount: number,
+): Promise<PageClassification[] | null> {
+  const [row] = await sql<{ payload: { classification?: PageClassification[] } }[]>`
+    SELECT payload FROM recognition_evidence_events
+    WHERE bundle_id = ${bundleId} AND evidence_type = 'page_classification'
+    ORDER BY created_at DESC LIMIT 1`;
+  const cls = row?.payload?.classification;
+  if (!Array.isArray(cls) || cls.length === 0) return null;
+  const maxPage = Math.max(...cls.map((c) => c.page));
+  if (maxPage > pageCount) return null;
+  return [...cls].sort((a, b) => a.page - b.page);
+}
+
+async function selectBundles(): Promise<string[]> {
+  if (bundleArg) return [bundleArg];
+  if (deliveryArg) {
+    // Пакет по номеру приёмки: документы висят на ДОЧЕРНЕМ пакете, а файлы —
+    // на корневом, поэтому поднимаемся к родителю.
+    const rows = await sql<{ id: string }[]>`
+      SELECT DISTINCT coalesce(b.parent_bundle_id, b.id) AS id
+      FROM deliveries d
+      JOIN delivery_sources ds ON ds.delivery_id = d.id
+      JOIN source_documents sd ON sd.id = ds.source_document_id
+      JOIN source_bundles b ON b.id = sd.bundle_id
+      WHERE d.display_id = ${Number(deliveryArg)}`;
+    return rows.map((r) => r.id);
+  }
+  // Выборка: свежие корневые пакеты с файлами. Прежняя сортировка по UUID
+  // давала произвольные десять штук и ничего не представляла.
+  const rows = await sql<{ id: string }[]>`
+    SELECT b.id
+    FROM source_bundles b
+    WHERE b.parent_bundle_id IS NULL
+      AND b.created_at >= now() - ${`${days} days`}::interval
+      AND EXISTS (
+        SELECT 1 FROM bundle_import_items i
+        WHERE i.bundle_id = b.id AND i.input_s3_key IS NOT NULL)
+      ${
+        multiOnly
+          ? sql`AND (
+              SELECT count(*) FROM source_documents sd
+              JOIN source_bundles sb ON sb.id = sd.bundle_id
+              WHERE (sb.id = b.id OR sb.parent_bundle_id = b.id) AND sd.is_technical = false
+            ) >= 2`
+          : sql``
+      }
+    ORDER BY b.created_at DESC
+    LIMIT ${limit}`;
+  return rows.map((r) => r.id);
+}
+
 async function main(): Promise<void> {
   const c = await creds();
-  const bundles = bundleArg
-    ? [{ id: bundleArg }]
-    : await sql<{ id: string }[]>`
-        SELECT DISTINCT b.id
-        FROM source_bundles b
-        JOIN bundle_import_items i ON i.bundle_id = b.id
-        JOIN recognition_evidence_events e ON e.bundle_id = b.id
-         AND e.evidence_type = 'page_classification'
-        WHERE b.created_at >= now() - ${`${days} days`}::interval
-        ORDER BY b.id
-        LIMIT ${limit}`;
+  const bundleIds = await selectBundles();
+  if (bundleIds.length === 0) {
+    console.error('пакеты не найдены — проверьте --bundle / --delivery / --days');
+    await sql.end({ timeout: 5 });
+    process.exit(1);
+  }
+  console.info(
+    `пакетов: ${bundleIds.length}; эталон: ${baselineMode}; ` +
+      `повторов нового промпта: ${repeat}` +
+      (baselineMode === 'model' ? '; ВНИМАНИЕ: эталон перевызывается, разброс модели войдёт в расхождения' : ''),
+  );
 
-  let pagesTotal = 0;
-  let mainPages = 0;
-  let mainWithNumber = 0;
-  let typeChanges = 0;
-  let mainLost = 0;
-  const splits: Array<{ bundleId: string; was: number; will: number }> = [];
+  const reports: BundleReport[] = [];
+  const skipped: Array<{ bundleId: string; reason: string }> = [];
 
-  for (const b of bundles) {
+  for (const bundleId of bundleIds) {
     const files = await sql<FileRow[]>`
       SELECT bundle_id, input_s3_key AS s3_key, source_filename AS filename, mime_type
       FROM bundle_import_items
-      WHERE bundle_id = ${b.id} AND input_s3_key IS NOT NULL
+      WHERE bundle_id = ${bundleId} AND input_s3_key IS NOT NULL
       ORDER BY input_order`;
-    if (files.length === 0) continue;
+    if (files.length === 0) {
+      skipped.push({ bundleId, reason: 'нет файлов' });
+      continue;
+    }
 
     let thumbs: Buffer[];
     try {
       thumbs = await thumbsOfBundle(files);
     } catch (err) {
-      console.error(`пакет ${b.id}: не удалось подготовить страницы — ${String(err)}`);
+      skipped.push({ bundleId, reason: `страницы не подготовились: ${String(err)}` });
       continue;
     }
-    if (thumbs.length === 0) continue;
-
-    const oldCls = await classifyAll(thumbs, PAGE_CLASSIFY_PROMPT, 1024, c);
-    const newCls = await classifyAll(thumbs, PAGE_CLASSIFY_WITH_NUMBER_PROMPT, 3072, c);
-
-    const oldByPage = new Map(oldCls.map((x) => [x.page, x]));
-    for (const page of newCls) {
-      pagesTotal++;
-      const before = oldByPage.get(page.page);
-      if (before?.type === 'upd_main') {
-        mainPages++;
-        if (page.docNumber != null) mainWithNumber++;
-        if (page.type !== 'upd_main') mainLost++;
-      }
-      if (before && before.type !== page.type) {
-        typeChanges++;
-        console.info(
-          `пакет ${b.id} стр.${page.page}: тип ${before.type} → ${page.type}` +
-            (page.docNumber ? ` (номер ${page.docNumber})` : ''),
-        );
-      }
+    if (thumbs.length === 0) {
+      skipped.push({ bundleId, reason: 'нет страниц' });
+      continue;
     }
 
-    const planOld = planUpdSegments(oldCls, thumbs.length, MAX_PAGES_PER_SEGMENT);
-    const planNew = planUpdSegments(newCls, thumbs.length, MAX_PAGES_PER_SEGMENT, {
-      splitByDocNumber: true,
+    let baseline =
+      baselineMode === 'evidence' ? await baselineFromEvidence(bundleId, thumbs.length) : null;
+    if (!baseline) {
+      if (baselineMode === 'evidence') {
+        // Честно сообщаем о подмене эталона: иначе часть расхождений
+        // объяснялась бы разбросом модели, а выглядела бы эффектом промпта.
+        console.info(`  ${bundleId}: сохранённого ответа нет — эталон перевызывается моделью`);
+      }
+      baseline = await classifyAll(thumbs, PAGE_CLASSIFY_PROMPT, 1024, c);
+    }
+
+    const repeats: PageClassification[][] = [];
+    for (let i = 0; i < repeat; i += 1) {
+      repeats.push(await classifyAll(thumbs, PAGE_CLASSIFY_WITH_NUMBER_PROMPT, 3072, c));
+    }
+    const next = repeats[0]!;
+
+    const report = analyseBundle({
+      bundleId,
+      pageCount: thumbs.length,
+      maxPagesPerSegment: MAX_PAGES_PER_SEGMENT,
+      baseline,
+      next,
+      repeats,
     });
-    if (planOld.segments.length !== planNew.segments.length) {
-      splits.push({ bundleId: b.id, was: planOld.segments.length, will: planNew.segments.length });
-      const opened = planNew.segments.filter((s) => s.reasons[0] === 'opened_by_doc_number_change');
-      console.info(
-        `пакет ${b.id}: сегментов ${planOld.segments.length} → ${planNew.segments.length}` +
-          (opened.length > 0
-            ? `; разрез на стр. ${opened.map((s) => `${s.pages[0]} (${s.docNumber ?? '—'})`).join(', ')}`
-            : ''),
-      );
+    reports.push(report);
+
+    const changed = report.boundariesBefore !== report.boundariesAfter;
+    if (changed || report.lostMain.length > 0 || report.missingNew.length > 0) {
+      console.info(`\nпакет ${bundleId} · страниц ${report.pages}`);
+      if (changed) {
+        console.info(`  границы: ${report.boundariesBefore} → ${report.boundariesAfter}`);
+      }
+      for (const t of report.typeChanges) {
+        console.info(
+          `  стр.${t.page}: ${t.from} → ${t.to}${t.docNumber ? ` (номер ${t.docNumber})` : ''}`,
+        );
+      }
+      for (const l of report.lostMain) console.info(`  ПОТЕРЯНА ШАПКА стр.${l.page} → ${l.became}`);
+      if (report.missingNew.length > 0) {
+        console.info(`  модель не вернула страницы: ${report.missingNew.join(', ')}`);
+      }
+      if (report.confidentBefore !== report.confidentAfter) {
+        console.info(`  confident: ${report.confidentBefore} → ${report.confidentAfter}`);
+      }
+      if (report.unstablePages.length > 0) {
+        console.info(`  разброс самого промпта на стр.: ${report.unstablePages.join(', ')}`);
+      }
     }
   }
 
+  const sum = (pick: (r: BundleReport) => number): number =>
+    reports.reduce((a, r) => a + pick(r), 0);
+  const gate = safetyGate(reports);
+  const mainPages = sum((r) => r.mainPages);
+  const mainWithNumber = sum((r) => r.mainWithNumber);
+  const boundaryChanged = reports.filter((r) => r.boundariesBefore !== r.boundariesAfter);
+  const unstable = sum((r) => r.unstablePages.length);
+
   console.info('\n── итог ──');
-  console.info(`страниц: ${pagesTotal}`);
-  console.info(`изменений типа: ${typeChanges}`);
-  console.info(`из них потерянных шапок (upd_main → не main): ${mainLost}  ← должно быть 0`);
+  console.info(`пакетов разобрано: ${reports.length}, пропущено: ${skipped.length}`);
+  for (const s of skipped) console.info(`  пропущен ${s.bundleId}: ${s.reason}`);
+  console.info(`страниц: ${sum((r) => r.pages)}`);
+  console.info(`изменений типа: ${sum((r) => r.typeChanges.length)}`);
+  console.info(`пакетов с изменившимися ГРАНИЦАМИ: ${gate.boundariesChanged}`);
+  for (const r of boundaryChanged) {
+    console.info(`  ${r.bundleId}: ${r.boundariesBefore} → ${r.boundariesAfter}`);
+  }
+  console.info(`потеря уверенности (confident true → false): ${gate.confidenceLost}`);
+  if (repeat > 1) console.info(`страниц с разбросом самого промпта: ${unstable}`);
   console.info(
     `номер прочитан на шапках: ${mainWithNumber}/${mainPages}` +
-      (mainPages > 0 ? ` (${Math.round((100 * mainWithNumber) / mainPages)}%)  ← нужно ≥80%` : ''),
+      (mainPages > 0 ? ` (${Math.round((100 * mainWithNumber) / mainPages)}%)` : '') +
+      ' — метрика ПОЛЬЗЫ, не ворота',
   );
-  console.info(`пакетов с изменившейся нарезкой: ${splits.length}`);
+
+  // Ворота безопасности. Изменившиеся границы сами по себе не провал — ради
+  // них всё и затевалось, — но каждую надо разметить глазами по оригиналу.
+  console.info('\n── ворота безопасности ──');
+  console.info(`потерянных шапок: ${gate.lostMain}  ← должно быть 0`);
+  console.info(`страниц, не вернувшихся из модели: ${gate.missingNew}  ← должно быть 0`);
+  console.info(
+    `границ к ручной разметке: ${gate.boundariesChanged}` +
+      (gate.boundariesChanged > 0 ? ' — сверить с оригиналами до включения' : ''),
+  );
+  console.info(gate.passed ? 'ВОРОТА ПРОЙДЕНЫ' : 'ВОРОТА НЕ ПРОЙДЕНЫ');
+
   await sql.end({ timeout: 5 });
+  // Ненулевой код — чтобы ворота нельзя было «пройти», не заметив вывода.
+  if (!gate.passed) process.exit(1);
 }
 
 main().catch(async (err) => {
