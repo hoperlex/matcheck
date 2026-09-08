@@ -33,6 +33,11 @@ const sql = TEST_DATABASE_URL ? postgres(TEST_DATABASE_URL, { max: 4 }) : null;
 // vitest гоняет наборы в общем процессе, и глобальная правка включала бы сборку
 // в соседних наборах — там она ломает ожидания (router перестаёт создавать
 // документ на файл).
+// Режим relaxed-прохода меняется внутри теста: только так «off» и «on»
+// сравниваются на одном и том же входе. vi.hoisted — потому что vi.mock
+// поднимается выше объявлений.
+const flags = vi.hoisted(() => ({ relaxed: 'off' as 'off' | 'shadow' | 'on' }));
+
 vi.mock('../../src/lib/env.js', async (importOriginal) => {
   const actual = await importOriginal<typeof EnvModule>();
   return {
@@ -43,6 +48,7 @@ vi.mock('../../src/lib/env.js', async (importOriginal) => {
       // Сопоставление строк вместо дедупа по тексту наименования: набор
       // описывает поведение, ради которого рубильник и заводился.
       UPD_ASSEMBLY_COPY_DEDUP_V1: true,
+      UPD_ASSEMBLY_RELAXED_COPY: flags.relaxed,
     }),
   };
 });
@@ -194,6 +200,7 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
     });
     classifyPages.mockReset();
     extractUpdSegment.mockReset();
+    flags.relaxed = 'off';
   });
 
   /**
@@ -823,5 +830,137 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
       SELECT id FROM source_bundles WHERE parent_bundle_id = ${bundle!.id}`;
     expect(subs).toHaveLength(0);
     expect((await docsOf()).filter((d) => !d.is_technical)).toHaveLength(1);
+  });
+
+  /** Сегмент боевого пакета 13776: номер один, различаются дата и состав строк. */
+  function segment(
+    docDate: string,
+    totalSum: number,
+    items: Array<{ nameRaw: string; qty: number; price: number; sum: number }>,
+  ) {
+    return {
+      parsed: {
+        docNumber: '201/21126719-1',
+        docDate,
+        totalSum,
+        vatSum: null,
+        itemsCount: items.length,
+        supplier: { name: 'ООО Поставщик', inn: '7743429410' },
+        recipient: { name: 'ООО СУ-10', inn: '7736255508' },
+        items: items.map((i) => ({ ...i, unit: 'шт' })),
+        confidence: 0.9,
+      },
+      llmProviderId: null as string | null,
+    };
+  }
+
+  const ZAZHIM = { nameRaw: 'Зажим фальцевый', qty: 17, price: 394.26, sum: 8177 };
+  const SOEDINITEL = {
+    nameRaw: 'Соединитель пруток - полоса, 80х80 мм',
+    qty: 47,
+    price: 265.57,
+    sum: 15227.53,
+  };
+
+  /** Три страницы боевого пакета: две своей датой, третья — чужой. */
+  async function bundle13776(): Promise<string> {
+    const bundleId = await publicBundle(['1.jpg', '2.jpg', '3.jpg']);
+    pagesAre('upd_main', 'upd_main', 'upd_main');
+    extractUpdSegment
+      .mockResolvedValueOnce(segment('2026-09-04', 23404.53, [ZAZHIM, SOEDINITEL]))
+      .mockResolvedValueOnce(segment('2026-09-04', 8177, [ZAZHIM]))
+      .mockResolvedValueOnce(segment('2025-11-25', 23404.53, [SOEDINITEL]));
+    await handleDocumentRouterJob(bundleId, log);
+    const [sub] = await db<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE parent_bundle_id = ${bundleId}`;
+    await handleUpdAssemblyJob(sub!.id, 0, log);
+    await runSegmentJobs(bundleId);
+    return bundleId;
+  }
+
+  const itemsOf = (docId: string) => db<{ name_raw: string; qty: string }[]>`
+    SELECT name_raw, qty FROM source_document_items
+     WHERE source_document_id = ${docId} ORDER BY line_no`;
+
+  it('off — обрезок с чужой датой публикуется вторым документом (сегодняшнее поведение)', async () => {
+    // Характеризационный тест: фиксирует дефект, ради которого писался проход.
+    // Он же — замок на обещание «выключенный рубильник ничего не меняет».
+    flags.relaxed = 'off';
+    await bundle13776();
+
+    const published = (await docsOf()).filter((doc) => !doc.is_technical);
+    expect(published).toHaveLength(2);
+    // Позиция «Соединитель» лежит в двух документах сразу — оба привязались бы
+    // к одной приёмке, и 47 шт стали бы 94.
+    const names = (
+      await Promise.all(published.map(async (doc) => (await itemsOf(doc.id)).map((i) => i.name_raw)))
+    ).flat();
+    expect(names.filter((n) => n.startsWith('Соединитель'))).toHaveLength(2);
+  });
+
+  it('on — обрезок присоединяется к своей УПД, позиция остаётся одна', async () => {
+    flags.relaxed = 'on';
+    await bundle13776();
+
+    const all = await docsOf();
+    const published = all.filter((doc) => !doc.is_technical);
+    expect(published).toHaveLength(1);
+
+    const rows = await itemsOf(published[0]!.id);
+    expect(rows.map((r) => r.name_raw)).toEqual([ZAZHIM.nameRaw, SOEDINITEL.nameRaw]);
+    // Ровно одна строка «Соединитель», и количество не удвоено.
+    expect(rows.filter((r) => r.name_raw.startsWith('Соединитель'))).toHaveLength(1);
+    expect(Number(rows[1]!.qty)).toBe(47);
+
+    // Дата берётся от keeper строгой группы, а не от обрезка: иначе документ
+    // уехал бы в приёмку с датой на год мимо при верных строках.
+    const [header] = await db<{ doc_date: string; total_sum: string }[]>`
+      SELECT to_char(doc_date, 'YYYY-MM-DD') AS doc_date, total_sum
+        FROM source_documents WHERE id = ${published[0]!.id}`;
+    expect(header!.doc_date).toBe('2026-09-04');
+    expect(header!.total_sum).toBe('23404.53');
+
+    // Присоединённый документ не удалён, а помечен архивным со ссылкой на
+    // победителя — след для разбора остаётся.
+    const archived = all.filter((doc) => doc.is_technical && doc.status === 'archived');
+    expect(archived.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('shadow — состав пакета прежний, но случай записан в улику', async () => {
+    flags.relaxed = 'shadow';
+    const bundleId = await bundle13776();
+
+    const published = (await docsOf()).filter((doc) => !doc.is_technical);
+    expect(published).toHaveLength(2);
+
+    // Улика адресуется КОРНЕВОМУ пакету — тому же, что и классификация страниц.
+    const [evidence] = await db<{ payload: Record<string, unknown> }[]>`
+      SELECT payload FROM recognition_evidence_events
+       WHERE bundle_id = ${bundleId} AND evidence_type = 'assembly_relaxed_copy'
+       ORDER BY created_at DESC LIMIT 1`;
+    expect(evidence).toBeTruthy();
+    expect(evidence!.payload).toMatchObject({ mode: 'shadow', applied: false, documentsWouldJoin: 1 });
+  });
+
+  it('другой поставщик при том же номере не склеивается ни в одном режиме', async () => {
+    // Один номер у разных поставщиков законен: проход обязан оставить их
+    // раздельными, иначе склеит чужие документы.
+    flags.relaxed = 'on';
+    const bundleId = await publicBundle(['1.jpg', '2.jpg', '3.jpg']);
+    pagesAre('upd_main', 'upd_main', 'upd_main');
+    const foreign = segment('2025-11-25', 23404.53, [SOEDINITEL]);
+    foreign.parsed.supplier = { name: 'ООО Другой поставщик', inn: '7707083893' };
+    extractUpdSegment
+      .mockResolvedValueOnce(segment('2026-09-04', 23404.53, [ZAZHIM, SOEDINITEL]))
+      .mockResolvedValueOnce(segment('2026-09-04', 8177, [ZAZHIM]))
+      .mockResolvedValueOnce(foreign);
+    await handleDocumentRouterJob(bundleId, log);
+    const [sub] = await db<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE parent_bundle_id = ${bundleId}`;
+    await handleUpdAssemblyJob(sub!.id, 0, log);
+    await runSegmentJobs(bundleId);
+
+    const published = (await docsOf()).filter((doc) => !doc.is_technical);
+    expect(published).toHaveLength(2);
   });
 });
