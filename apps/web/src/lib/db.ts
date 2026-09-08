@@ -97,7 +97,7 @@ export type SettingsRecord = {
  * `index('byDelivery').getAll(deliveryId)` требовал литерал `'deliveryId'`
  * вместо самого id — три таких вызова и были частью скрытых ошибок типов.
  */
-interface MatcheckDB extends DBSchema {
+export interface MatcheckDB extends DBSchema {
   deliveries: { key: string; value: DeliveryRecord; indexes: { byTombstone: IDBValidKey } };
   shipments: { key: string; value: ShipmentRecord; indexes: { byTombstone: IDBValidKey } };
   mutations: { key: string; value: MutationRecord; indexes: { byEntity: string } };

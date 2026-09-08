@@ -715,6 +715,173 @@ suite('происхождение позиций приёмки (реальны�
     expect(added.source_document_id).toBeNull();
   });
 
+  it('переименование строки ОТВЯЗАННОГО документа не теряет привязку', async () => {
+    // Гонка, ради которой введён шаг 1.5. Пока документ привязан, атрибуцию
+    // спасает шаг 3: клиент возвращает происхождение, и сервер принимает его в
+    // пределах привязанных документов. У отвязанного документа этой страховки
+    // нет — присланное происхождение отбрасывается намеренно, чтобы позиции
+    // нельзя было приписать чужой УПД. Тогда всё держится на сопоставлении со
+    // строкой в БД: по id (устарел после сохранения с планшета) или по названию
+    // (изменилось, потому что менеджер и правил текст). Ключом остаётся только
+    // ссылка на позицию документа.
+    const upd = await makeUpd('О-20', [{ name: 'погворгрнт', qty: '21' }]);
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, upd.id);
+
+    const opened = await itemsOf(deliveryId);
+    const staleId = opened[0]!.id;
+
+    // Приёмку сохранил планшет: id строк пересозданы (их выдаёт Postgres,
+    // upsert устроен как DELETE + INSERT).
+    const fromTablet = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [upd.id],
+      items: [{ id: staleId, nameRaw: 'погворгрнт', qtyActual: '21', unit: 'м3', lineNo: 1 }],
+    });
+    expect(fromTablet.statusCode, fromTablet.body).toBe(200);
+    expect((await itemsOf(deliveryId))[0]!.id).not.toBe(staleId);
+
+    // Документ отвязали — позиции и их происхождение остаются (unlink их не
+    // трогает намеренно).
+    expect((await unlink(deliveryId, upd.id)).statusCode).toBe(200);
+
+    // Портал шлёт устаревший id, исправленный текст и АКТУАЛЬНУЮ версию: со
+    // старой маршрут ответил бы 409 и до сопоставления дело бы не дошло.
+    const [row] = await sql<{ version: number }[]>`
+      SELECT version FROM deliveries WHERE id = ${deliveryId}
+    `;
+    const res = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      baseVersion: row!.version,
+      sourceDocumentIds: [],
+      items: [
+        {
+          id: staleId,
+          sourceDocumentId: upd.id,
+          sourceDocumentItemId: upd.itemIds[0],
+          nameRaw: 'пог/погрузчик',
+          qtyActual: '21',
+          unit: 'м3',
+          lineNo: 1,
+        },
+      ],
+    });
+
+    expect(res.statusCode, res.body).toBe(200);
+    const after = await itemsOf(deliveryId);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.name_raw).toBe('пог/погрузчик');
+    expect(after[0]!.source_document_id).toBe(upd.id);
+    expect(after[0]!.source_document_item_id).toBe(upd.itemIds[0]);
+  });
+
+  it('переименование сохраняет привязку, даже если клиент прислал только ссылку на позицию', async () => {
+    // Клиент вправе не присылать sourceDocumentId (поле необязательное), и
+    // тогда шаг 3 промолчит: он опирается именно на документ. Ссылки на позицию
+    // достаточно, чтобы узнать строку в БД и унаследовать её происхождение
+    // ОТТУДА — присланному значению сервер по-прежнему не верит.
+    const upd = await makeUpd('О-20а', [{ name: 'Бордюр БР 100', qty: '40' }]);
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, upd.id);
+
+    const opened = await itemsOf(deliveryId);
+    const staleId = opened[0]!.id;
+    await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [upd.id],
+      items: [{ id: staleId, nameRaw: 'Бордюр БР 100', qtyActual: '40', unit: 'шт', lineNo: 1 }],
+    });
+
+    const res = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [upd.id],
+      items: [
+        {
+          id: staleId,
+          sourceDocumentItemId: upd.itemIds[0],
+          nameRaw: 'Бордюр БР 100.20.8',
+          qtyActual: '40',
+          unit: 'шт',
+          lineNo: 1,
+        },
+      ],
+    });
+
+    expect(res.statusCode, res.body).toBe(200);
+    const after = await itemsOf(deliveryId);
+    expect(after[0]!.name_raw).toBe('Бордюр БР 100.20.8');
+    expect(after[0]!.source_document_id).toBe(upd.id);
+    expect(after[0]!.source_document_item_id).toBe(upd.itemIds[0]);
+  });
+
+  it('переименованная строка не двоится при повторной привязке документа', async () => {
+    // Дедупликация в link-source опирается на sourceDocumentItemId, а запасным
+    // ключом — на «название + единица + количество». Сохранённая привязка
+    // (предыдущий тест) закрывает и этот путь: без неё повторный link добавил бы
+    // строку заново, и позиция задвоилась бы.
+    const upd = await makeUpd('О-21', [{ name: 'погворгрнт', qty: '21' }]);
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, upd.id);
+
+    const opened = await itemsOf(deliveryId);
+    const res = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [upd.id],
+      items: [
+        {
+          id: opened[0]!.id,
+          nameRaw: 'пог/погрузчик',
+          qtyActual: '21',
+          unit: 'м3',
+          lineNo: 1,
+        },
+      ],
+    });
+    expect(res.statusCode, res.body).toBe(200);
+
+    expect((await unlink(deliveryId, upd.id)).statusCode).toBe(200);
+    expect((await link(deliveryId, upd.id)).statusCode).toBe(200);
+
+    const after = await itemsOf(deliveryId);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.name_raw).toBe('пог/погрузчик');
+    expect(after[0]!.source_document_item_id).toBe(upd.itemIds[0]);
+  });
+
+  it('пустое название отклоняется, позиция остаётся прежней', async () => {
+    // Портал раньше молча выбрасывал такую строку при сохранении — вместе с
+    // количеством, ценой и привязкой к документу. Инвариант держит контракт:
+    // trim().min(1), поэтому строка из пробелов тоже не проходит.
+    const upd = await makeUpd('О-22', [{ name: 'Щебень 20-40', qty: '12' }]);
+    const deliveryId = await makeDelivery();
+    await link(deliveryId, upd.id);
+    const before = await itemsOf(deliveryId);
+
+    const res = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [upd.id],
+      items: [{ id: before[0]!.id, nameRaw: '   ', qtyActual: '12', unit: 'т', lineNo: 1 }],
+    });
+
+    expect(res.statusCode).toBe(400);
+    const after = await itemsOf(deliveryId);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.name_raw).toBe('Щебень 20-40');
+    expect(after[0]!.source_document_item_id).toBe(upd.itemIds[0]);
+  });
+
   it('документ, чьи позиции лежат в приёмке, удалить нельзя', async () => {
     const upd = await makeUpd('О-16', [{ name: 'Саморезы', qty: '1000' }]);
     const deliveryId = await makeDelivery();
@@ -847,7 +1014,6 @@ suite('происхождение позиций приёмки (реальны�
     expect(ids).not.toContain(healthy);
   });
 
-
   it('мониторинг видит сводку: она для него единственный источник', async () => {
     // Замечания в приёмках оставляет роль monitor, а documents.list:view есть
     // только у manager и contractor — уйти за подробностями в «Документы» он не
@@ -873,7 +1039,6 @@ suite('происхождение позиций приёмки (реальны�
       currentUser = asManager;
     }
   });
-
 
   it('подтверждённая МОЛ приёмка сводки не получает и в очередь не попадает', async () => {
     // Сигнал нужен там, где его ещё можно отработать: от разбора документа до
@@ -921,7 +1086,6 @@ suite('происхождение позиций приёмки (реальны�
     const ids = (queue.json() as { items: { id: string }[] }).items.map((d) => d.id);
     expect(ids).not.toContain(deliveryId);
   });
-
 
   it('покрытие позиций: доехали не все — DTO это показывает', async () => {
     // Воспроизведение приёмки 13157: в документе три позиции, в приёмке две.
@@ -974,7 +1138,6 @@ suite('происхождение позиций приёмки (реальны�
     expect(fromList?.sourceDocuments).toEqual(dto.sourceDocuments);
   });
 
-
   // ── Согласованность признака «Требует проверки» ──────────────────────────
   //
   // Фильтр, значок в списке и колонка выгрузки обязаны отбирать ОДНИ И ТЕ ЖЕ
@@ -1017,9 +1180,9 @@ suite('происхождение позиций приёмки (реальны�
     expect((single.json() as { docAttention?: boolean }).docAttention).toBe(true);
 
     const list = await app.inject({ method: 'GET', url: '/api/v1/deliveries?limit=100' });
-    const fromList = (list.json() as { items: { id: string; docAttention?: boolean }[] }).items.find(
-      (d) => d.id === deliveryId,
-    );
+    const fromList = (
+      list.json() as { items: { id: string; docAttention?: boolean }[] }
+    ).items.find((d) => d.id === deliveryId);
     expect(fromList?.docAttention).toBe(true);
 
     const queue = await app.inject({
@@ -1071,9 +1234,7 @@ suite('происхождение позиций приёмки (реальны�
       method: 'GET',
       url: '/api/v1/deliveries?limit=200&features=doc_attention',
     });
-    const inQueue = new Set(
-      (queue.json() as { items: { id: string }[] }).items.map((d) => d.id),
-    );
+    const inQueue = new Set((queue.json() as { items: { id: string }[] }).items.map((d) => d.id));
 
     expect([...flagged].sort()).toEqual([...inQueue].sort());
     expect(flagged.has(withDoc)).toBe(true);
@@ -1091,7 +1252,4 @@ suite('происхождение позиций приёмки (реальны�
     const single = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
     expect((single.json() as { docAttention?: boolean }).docAttention).toBe(false);
   });
-
 });
-
-

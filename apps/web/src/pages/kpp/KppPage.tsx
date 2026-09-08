@@ -58,6 +58,11 @@ import {
 } from '../../services/deliveries';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { runSync } from '../../services/sync';
+import { flushMutation, type MutationResult } from '../../services/mutationQueue';
+import { describeEmptyNames } from '../../shared/utils/emptyItemNames';
+import { EditableItemName } from '../shared/EditableItemName';
+import { itemNameLock } from '../shared/itemNameLock';
+import { shouldReplaceItems } from '../shared/itemsHydration';
 import { db } from '../../lib/db';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
@@ -214,10 +219,21 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     can('operations.deliveries', 'create') && hasCapability('operations.photo.upload');
 
   const [items, setItems] = useState<DraftItem[]>([]);
-  // Inline-edit названия материала: clientKey строки в режиме редактирования.
-  // Клик по тексту → инпут с autoFocus; blur/Enter → обратно в текст.
-  // Для позиций из справочника материалов (materialId !== null) редактирование
-  // отключено — название берётся из материала и не должно править в приёмке.
+  /**
+   * В форме есть правка позиций, которую сервер ещё не подтвердил.
+   *
+   * Карточка поллит /deliveries/:id раз в 5 секунд, и у приёмки в
+   * confirmed_mol любой сдвиг серверного updatedAt перегидратирует items с
+   * новыми clientKey. Пока человек печатает, это стирает набранное прямо
+   * из-под рук. Сбрасываем только по подтверждению сервера (server_acked):
+   * после локальной постановки в очередь снимок ещё старый, и следующий
+   * поллинг вернул бы прежний текст.
+   */
+  const itemsDirtyRef = useRef(false);
+  // Inline-edit названия материала: clientKey строки в режиме правки. Само
+  // правило «можно ли править» — в pages/shared/itemNameLock.ts, общее для
+  // таблицы, карточного режима и отгрузки. Держать состояние здесь, а не внутри
+  // ячейки, обязательно: гидратация пересоздаёт clientKey строк.
   const [editingNameKey, setEditingNameKey] = useState<string | null>(null);
   const [plate, setPlate] = useState('');
   const [comment, setComment] = useState('');
@@ -259,6 +275,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // siteId восстанавливается из назначенного объекта (не очищается).
   useEffect(() => {
     if (!deliveryId) {
+      itemsDirtyRef.current = false;
       setItems([]);
       setPlate('');
       setComment('');
@@ -498,6 +515,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       isReadOnlyConfirmed && lastSyncedUpdatedAtRef.current !== d.updatedAt;
 
     if (isFirstHydration || hasNewServerSnapshot) {
+      // Другая приёмка — прежняя правка к ней отношения не имеет.
+      if (isFirstHydration) itemsDirtyRef.current = false;
       hydratedIdRef.current = d.id;
       lastSyncedUpdatedAtRef.current = d.updatedAt;
       setPlate(d.vehiclePlate ?? '');
@@ -521,31 +540,40 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         setContractorId((prev) => prev ?? d.contractorId ?? null);
         setRecipientMolId(null);
       }
-      setItems(
-        d.items.map((it, idx) => ({
-          clientKey: newKey(),
-          serverId: it.id,
-          sourceDocumentId: it.sourceDocumentId ?? null,
-          sourceDocumentItemId: it.sourceDocumentItemId ?? null,
-          lineNo: idx + 1,
-          nameRaw: it.nameRaw,
-          qtyPlanned: it.qtyPlanned,
-          qtyActual: it.qtyActual,
-          unit: it.unit,
-          materialId: it.materialId,
-          itemKind: it.itemKind,
-          assetId: it.assetId,
-          inventoryNumber: it.inventoryNumber,
-          serialNumber: it.serialNumber,
-          volumeM3: it.volumeM3 ?? null,
-          massKg: it.massKg ?? null,
-          price: it.price ?? null,
-          vatRate: it.vatRate ?? null,
-          vatSum: it.vatSum ?? null,
-          volumeConfidence: it.volumeConfidence ?? null,
-          groupName: it.groupName ?? null,
-        })),
-      );
+      // Позиции не трогаем, пока в форме есть неотправленная правка: иначе
+      // поллинг стирает набранный текст (правило — shared/itemsHydration.ts).
+      if (
+        shouldReplaceItems({
+          isFirstHydration,
+          hasNewServerSnapshot,
+          hasUnsavedItemEdits: itemsDirtyRef.current,
+        })
+      )
+        setItems(
+          d.items.map((it, idx) => ({
+            clientKey: newKey(),
+            serverId: it.id,
+            sourceDocumentId: it.sourceDocumentId ?? null,
+            sourceDocumentItemId: it.sourceDocumentItemId ?? null,
+            lineNo: idx + 1,
+            nameRaw: it.nameRaw,
+            qtyPlanned: it.qtyPlanned,
+            qtyActual: it.qtyActual,
+            unit: it.unit,
+            materialId: it.materialId,
+            itemKind: it.itemKind,
+            assetId: it.assetId,
+            inventoryNumber: it.inventoryNumber,
+            serialNumber: it.serialNumber,
+            volumeM3: it.volumeM3 ?? null,
+            massKg: it.massKg ?? null,
+            price: it.price ?? null,
+            vatRate: it.vatRate ?? null,
+            vatSum: it.vatSum ?? null,
+            volumeConfidence: it.volumeConfidence ?? null,
+            groupName: it.groupName ?? null,
+          })),
+        );
     }
     // Подгрузка выбранного УПД идемпотентна по флагу !selectedUpd — оставляем
     // вне условия гидратации, чтобы она сработала и после первого получения данных,
@@ -701,6 +729,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     loadedDelivery?.status.code === 'filled' || loadedDelivery?.status.code === 'confirmed_mol';
 
   const updateField = (key: string, patch: Partial<DraftItem>) => {
+    itemsDirtyRef.current = true;
     setItems((prev) => prev.map((it) => (it.clientKey === key ? { ...it, ...patch } : it)));
   };
 
@@ -711,6 +740,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // нет данных, которые он мог бы потерять. Для сохранённых вызывающий код
   // обязан показать Popconfirm (см. ниже в колонке actions).
   const removeItem = (key: string) => {
+    itemsDirtyRef.current = true;
     setItems((prev) => prev.filter((it) => it.clientKey !== key));
   };
 
@@ -722,6 +752,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
    * отвязанных документов кнопки нет.
    */
   const addItem = (sourceDocumentId: string | null = null) => {
+    itemsDirtyRef.current = true;
     setItems((prev) => [
       ...prev,
       {
@@ -784,64 +815,107 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       // Ветка с selectedUpd нужна только первому сохранению новой приёмки:
       // createDelivery берёт связи из запроса.
       sourceDocumentIds: isNew && selectedUpd ? [selectedUpd.id] : loadedDelivery.sourceDocumentIds,
-      items: items
-        .filter((i) => i.nameRaw.trim().length > 0)
-        .map((i) => {
-          const computed = computeVatSum(i);
-          return {
-            // Существующая строка уходит со СВОИМ id из БД, а не со свежим
-            // случайным. Upsert позиций устроен как DELETE + INSERT, и сервер
-            // по этому id переносит происхождение строки (source_document_id,
-            // см. domain/operations/item-origin.ts). Со случайным id сервер
-            // строку не узнаёт и вынужден сопоставлять её по названию, единице
-            // и номеру — а переименование или сдвиг номера после удаления
-            // соседней строки такое сопоставление рвут, и привязка к УПД
-            // теряется. В БД присланный id не пишется (его генерирует
-            // Postgres), так что для новой строки годится любой валидный uuid.
-            id: i.serverId ?? crypto.randomUUID(),
-            // Происхождение новой строки: сервер примет его только в пределах
-            // документов, привязанных к приёмке; у существующей строки возьмёт
-            // сохранённое и присланное проигнорирует.
-            sourceDocumentId: i.sourceDocumentId,
-            sourceDocumentItemId: i.sourceDocumentItemId,
-            itemKind: i.itemKind,
-            materialId: i.itemKind === 'asset' ? null : i.materialId,
-            assetId: i.itemKind === 'asset' ? i.assetId : null,
-            inventoryNumber: i.inventoryNumber,
-            serialNumber: i.serialNumber,
-            nameRaw: i.nameRaw,
-            qtyPlanned: i.qtyPlanned,
-            qtyActual: i.qtyActual,
-            unit: i.unit,
-            comment: null,
-            lineNo: i.lineNo,
-            volumeM3: i.volumeM3,
-            massKg: i.massKg,
-            price: i.price,
-            vatRate: i.vatRate,
-            vatSum: computed !== null ? computed.toFixed(2) : (i.vatSum ?? null),
-            volumeConfidence: i.volumeConfidence,
-            groupName: i.groupName,
-          };
-        }),
+      // Фильтра пустых названий здесь больше нет: он молча удалял позицию
+      // вместе с количеством, ценой и привязкой к документу. Инвариант держат
+      // проверка в persistStatus и trim().min(1) в контракте.
+      items: items.map((i) => {
+        const computed = computeVatSum(i);
+        return {
+          // Существующая строка уходит со СВОИМ id из БД, а не со свежим
+          // случайным. Upsert позиций устроен как DELETE + INSERT, и сервер
+          // по этому id переносит происхождение строки (source_document_id,
+          // см. domain/operations/item-origin.ts). Со случайным id сервер
+          // строку не узнаёт и вынужден сопоставлять её по названию, единице
+          // и номеру — а переименование или сдвиг номера после удаления
+          // соседней строки такое сопоставление рвут, и привязка к УПД
+          // теряется. В БД присланный id не пишется (его генерирует
+          // Postgres), так что для новой строки годится любой валидный uuid.
+          id: i.serverId ?? crypto.randomUUID(),
+          // Происхождение новой строки: сервер примет его только в пределах
+          // документов, привязанных к приёмке; у существующей строки возьмёт
+          // сохранённое и присланное проигнорирует.
+          sourceDocumentId: i.sourceDocumentId,
+          sourceDocumentItemId: i.sourceDocumentItemId,
+          itemKind: i.itemKind,
+          materialId: i.itemKind === 'asset' ? null : i.materialId,
+          assetId: i.itemKind === 'asset' ? i.assetId : null,
+          inventoryNumber: i.inventoryNumber,
+          serialNumber: i.serialNumber,
+          nameRaw: i.nameRaw,
+          qtyPlanned: i.qtyPlanned,
+          qtyActual: i.qtyActual,
+          unit: i.unit,
+          comment: null,
+          lineNo: i.lineNo,
+          volumeM3: i.volumeM3,
+          massKg: i.massKg,
+          price: i.price,
+          vatRate: i.vatRate,
+          vatSum: computed !== null ? computed.toFixed(2) : (i.vatSum ?? null),
+          volumeConfidence: i.volumeConfidence,
+          groupName: i.groupName,
+        };
+      }),
     };
   };
 
-  const persistStatus = async (nextCode: DeliveryStatusCode) => {
+  /**
+   * Сохранение приёмки. Возвращает ИСХОД отправки, а не void: «Сохранено»
+   * нельзя показывать, пока сервер не подтвердил запись — при конфликте версий
+   * правка не применяется, и молчаливый зелёный тост врал бы человеку.
+   *
+   * Проверка пустых названий живёт здесь, а не на кнопке «Сохранить»: этот же
+   * persistStatus вызывает подтверждение МОЛ, и проверка на одной кнопке
+   * оставила бы вторую дверь открытой.
+   */
+  const persistStatus = async (nextCode: DeliveryStatusCode): Promise<MutationResult> => {
     if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+    const emptyNames = describeEmptyNames({ items, documents: sectionDocuments });
+    if (emptyNames.length > 0) {
+      throw new Error(`Заполните название материала — ${emptyNames.join('; ')}`);
+    }
     await applyLocalEdit(loadedDelivery.id, buildPatch(nextCode));
+    const mutationId = crypto.randomUUID();
     await enqueueMutation({
-      id: crypto.randomUUID(),
+      id: mutationId,
       kind: 'delivery_upsert',
       entityId: loadedDelivery.id,
       baseVersion: loadedDelivery.version,
       payload: null,
     });
-    // Ждём пока mutation физически уйдёт на сервер и придёт свежий
-    // snapshot через pullSync. Без await invalidateQueries в onSuccess
-    // делает refetch /deliveries раньше, чем mutation push доехал, и
-    // таблица показывает старый siteId/contractorId до F5.
-    await runSync();
+    const result = await flushMutation(mutationId);
+    if (result.outcome === 'server_acked') {
+      itemsDirtyRef.current = false;
+      // Ждём свежий snapshot через pullSync. Без него invalidateQueries в
+      // onSuccess делает refetch /deliveries раньше, чем изменения доехали, и
+      // таблица показывает старый siteId/contractorId до F5.
+      await runSync();
+    }
+    return result;
+  };
+
+  /**
+   * Общая реакция на исход сохранения. Успех уводит в список, всё остальное
+   * оставляет человека в карточке — правка ещё не на сервере, и уходить с ней
+   * нельзя.
+   */
+  const handlePersistResult = (result: MutationResult, successText: string): void => {
+    if (result.outcome === 'server_acked') {
+      message.success(successText);
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
+      navigate('/operations?type=delivery&tab=accepted');
+      return;
+    }
+    if (result.outcome === 'queued') {
+      message.warning('Сохранено на устройстве. Отправим на сервер, как появится связь');
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      message.error('Приёмку изменили на другом устройстве. Откройте карточку заново');
+      return;
+    }
+    message.error(result.error?.message ?? 'Сервер отклонил сохранение');
   };
 
   const save = useMutation({
@@ -862,27 +936,15 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         currentCode === 'filled';
       const nextCode: DeliveryStatusCode =
         currentCode === 'confirmed_mol' ? 'confirmed_mol' : hasDocuments ? 'filled' : 'not_filled';
-      await persistStatus(nextCode);
+      return persistStatus(nextCode);
     },
-    onSuccess: () => {
-      message.success('Приёмка сохранена');
-      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
-      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
-      navigate('/operations?type=delivery&tab=accepted');
-    },
+    onSuccess: (result) => handlePersistResult(result, 'Приёмка сохранена'),
     onError: (err: Error) => message.error(err.message),
   });
 
   const confirmMol = useMutation({
-    mutationFn: async () => {
-      await persistStatus('confirmed_mol');
-    },
-    onSuccess: () => {
-      message.success('Приёмка подтверждена МОЛ');
-      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
-      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
-      navigate('/operations?type=delivery&tab=accepted');
-    },
+    mutationFn: async () => persistStatus('confirmed_mol'),
+    onSuccess: (result) => handlePersistResult(result, 'Приёмка подтверждена МОЛ'),
     onError: (err: Error) => message.error(err.message),
   });
 
@@ -1160,38 +1222,16 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       {
         title: 'Название',
         dataIndex: 'nameRaw',
-        render: (_: unknown, r: DraftItem) => {
-          const locked = !!r.materialId || isContractor;
-          if (!locked && editingNameKey === r.clientKey) {
-            return (
-              <Input.TextArea
-                autoSize={{ minRows: 1, maxRows: 4 }}
-                autoFocus
-                value={r.nameRaw}
-                placeholder="Наименование"
-                onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
-                onBlur={() => setEditingNameKey(null)}
-              />
-            );
-          }
-          return (
-            <div
-              onClick={() => {
-                if (!locked) setEditingNameKey(r.clientKey);
-              }}
-              style={{
-                cursor: locked ? 'default' : 'text',
-                whiteSpace: 'pre-wrap',
-                minHeight: 22,
-                padding: '4px 0',
-              }}
-            >
-              {r.nameRaw || (
-                <Typography.Text type="secondary">— нажмите, чтобы заполнить —</Typography.Text>
-              )}
-            </div>
-          );
-        },
+        render: (_: unknown, r: DraftItem) => (
+          <EditableItemName
+            value={r.nameRaw}
+            onChange={(next) => updateField(r.clientKey, { nameRaw: next })}
+            disabledReason={itemNameLock({ canEdit: canEditDelivery, materialId: r.materialId })}
+            editing={editingNameKey === r.clientKey}
+            onStartEdit={() => setEditingNameKey(r.clientKey)}
+            onStopEdit={() => setEditingNameKey(null)}
+          />
+        ),
       },
       {
         title: 'План',
@@ -1352,44 +1392,24 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         },
       },
     ],
-    [editingNameKey, isContractor],
+    [editingNameKey, isContractor, canEditDelivery],
   );
 
   const cardRender = (r: DraftItem, displayNo: number) => {
     const priceNum = toNum(r.price);
     const vatNum = computeVatSum(r);
-    const locked = !!r.materialId;
-    const isEditing = !locked && editingNameKey === r.clientKey;
     return (
       <div style={{ width: '100%' }}>
         <Typography.Text strong>№{displayNo}</Typography.Text>
-        {isEditing ? (
-          <Input.TextArea
-            autoSize={{ minRows: 1, maxRows: 4 }}
-            autoFocus
-            value={r.nameRaw}
-            placeholder="Наименование"
-            onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
-            onBlur={() => setEditingNameKey(null)}
-            style={{ marginTop: 4 }}
-          />
-        ) : (
-          <div
-            onClick={() => {
-              if (!locked) setEditingNameKey(r.clientKey);
-            }}
-            style={{
-              marginTop: 4,
-              cursor: locked ? 'default' : 'text',
-              whiteSpace: 'pre-wrap',
-              minHeight: 22,
-            }}
-          >
-            {r.nameRaw || (
-              <Typography.Text type="secondary">— нажмите, чтобы заполнить —</Typography.Text>
-            )}
-          </div>
-        )}
+        <EditableItemName
+          variant="card"
+          value={r.nameRaw}
+          onChange={(next) => updateField(r.clientKey, { nameRaw: next })}
+          disabledReason={itemNameLock({ canEdit: canEditDelivery, materialId: r.materialId })}
+          editing={editingNameKey === r.clientKey}
+          onStartEdit={() => setEditingNameKey(r.clientKey)}
+          onStopEdit={() => setEditingNameKey(null)}
+        />
         <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
           <Col span={8}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>

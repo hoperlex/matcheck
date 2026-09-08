@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  findDroppedOrigins,
   resolveItemOrigins,
   type ExistingItemRow,
   type IncomingItem,
@@ -172,5 +173,124 @@ describe('resolveItemOrigins', () => {
     expect(origins[0]).toEqual({ sourceDocumentId: null, sourceDocumentItemId: null });
     expect(origins[1]?.sourceDocumentId).toBe(DOC_A);
     expect(origins[2]).toEqual({ sourceDocumentId: DOC_A, sourceDocumentItemId: null });
+  });
+});
+
+describe('resolveItemOrigins: ссылка на позицию документа', () => {
+  it('переименованная строка с устаревшим id сохраняет привязку', () => {
+    // Гонка, ради которой шаг и вводился: карточка открыта до сохранения с
+    // планшета (id пересозданы), менеджер исправил опечатку распознавания.
+    // Ключ с названием здесь промахивается по определению.
+    const rows = [existing({ id: 'row-fresh' })];
+
+    const [origin] = resolveItemOrigins({
+      existing: rows,
+      incoming: [
+        incoming({
+          id: 'row-stale',
+          nameRaw: 'Арматура А500С 12 мм',
+          sourceDocumentItemId: ITEM_A1,
+        }),
+      ],
+      linkedDocumentIds: [DOC_A],
+    });
+
+    expect(origin).toEqual({ sourceDocumentId: DOC_A, sourceDocumentItemId: ITEM_A1 });
+  });
+
+  it('не угадывает, когда одну позицию документа заявили две строки', () => {
+    const rows = [existing({ id: 'row-1' })];
+
+    const origins = resolveItemOrigins({
+      existing: rows,
+      incoming: [
+        incoming({ nameRaw: 'Первая половина', sourceDocumentItemId: ITEM_A1 }),
+        incoming({ nameRaw: 'Вторая половина', sourceDocumentItemId: ITEM_A1 }),
+      ],
+      linkedDocumentIds: [DOC_A],
+    });
+
+    // Ни одна не наследует атрибуцию строки из БД: ключ неоднозначен. Шаг 3
+    // тоже молчит — сам по себе sourceDocumentItemId заявкой не является,
+    // происхождение новой строки задаёт sourceDocumentId.
+    expect(origins[0]).toEqual({ sourceDocumentId: null, sourceDocumentItemId: null });
+    expect(origins[1]).toEqual({ sourceDocumentId: null, sourceDocumentItemId: null });
+  });
+
+  it('не угадывает, когда в приёмке две строки с одной позицией документа', () => {
+    const rows = [
+      existing({ id: 'row-1', lineNo: 1, sourceDocumentItemId: ITEM_A1 }),
+      existing({ id: 'row-2', lineNo: 2, sourceDocumentItemId: ITEM_A1 }),
+    ];
+
+    const [origin] = resolveItemOrigins({
+      existing: rows,
+      incoming: [incoming({ nameRaw: 'Переименовали', lineNo: 9, sourceDocumentItemId: ITEM_A1 })],
+      linkedDocumentIds: [],
+    });
+
+    // Документ не привязан — шаг 3 присланное отбрасывает, и промах шага 1.5
+    // виден в чистом виде.
+    expect(origin).toEqual({ sourceDocumentId: null, sourceDocumentItemId: null });
+  });
+
+  it('сопоставление по id сильнее ссылки на позицию документа', () => {
+    const rows = [
+      existing({ id: 'row-1', sourceDocumentItemId: ITEM_A1 }),
+      existing({ id: 'row-2', lineNo: 2, sourceDocumentItemId: ITEM_A2 }),
+    ];
+
+    const origins = resolveItemOrigins({
+      existing: rows,
+      incoming: [
+        // Клиент прислал живой id одной строки и ссылку на позицию другой.
+        incoming({ id: 'row-1', sourceDocumentItemId: ITEM_A2 }),
+        incoming({ id: undefined, lineNo: 2, sourceDocumentItemId: ITEM_A2 }),
+      ],
+      linkedDocumentIds: [DOC_A],
+    });
+
+    expect(origins[0]?.sourceDocumentItemId).toBe(ITEM_A1);
+    expect(origins[1]?.sourceDocumentItemId).toBe(ITEM_A2);
+  });
+
+  it('строка без ссылки на позицию по-прежнему ловится названием и номером', () => {
+    const rows = [existing({ id: 'row-1', sourceDocumentItemId: null })];
+
+    const [origin] = resolveItemOrigins({
+      existing: rows,
+      incoming: [incoming({ id: undefined, sourceDocumentItemId: null })],
+      linkedDocumentIds: [DOC_A],
+    });
+
+    expect(origin).toEqual({ sourceDocumentId: DOC_A, sourceDocumentItemId: null });
+  });
+});
+
+describe('findDroppedOrigins', () => {
+  it('молчит, пока привязки сохранены', () => {
+    const rows = [existing({ id: 'row-1' })];
+    const origins = resolveItemOrigins({
+      existing: rows,
+      incoming: [incoming({ id: 'row-1' })],
+      linkedDocumentIds: [DOC_A],
+    });
+
+    expect(findDroppedOrigins({ existing: rows, origins })).toEqual([]);
+  });
+
+  it('называет позицию документа, привязка к которой исчезла', () => {
+    const rows = [existing({ id: 'row-1', nameRaw: 'погворгрнт' })];
+    // Клиент прислал переименованную строку без id и без ссылки — все три шага
+    // промахиваются, атрибуция теряется.
+    const origins = resolveItemOrigins({
+      existing: rows,
+      incoming: [incoming({ id: undefined, nameRaw: 'пог/погрузчик' })],
+      linkedDocumentIds: [DOC_A],
+    });
+
+    expect(findDroppedOrigins({ existing: rows, origins })).toEqual([
+      { sourceDocumentItemId: ITEM_A1, lineNo: 1, nameRaw: 'погворгрнт' },
+    ]);
   });
 });

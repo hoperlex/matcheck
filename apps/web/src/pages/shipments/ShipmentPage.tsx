@@ -61,6 +61,10 @@ import {
 import { AssetTag } from '../../shared/ui/AssetTag';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { runSync } from '../../services/sync';
+import { flushMutation, type MutationResult } from '../../services/mutationQueue';
+import { describeEmptyNames } from '../../shared/utils/emptyItemNames';
+import { EditableItemName } from '../shared/EditableItemName';
+import { itemNameLock } from '../shared/itemNameLock';
 import { db, SYSTEM_SITE_ID } from '../../lib/db';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
@@ -248,8 +252,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   });
   const counterpartiesQuery = useQuery({
     queryKey: ['counterparties', { limit: 500 }],
-    queryFn: () =>
-      api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
+    queryFn: () => api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
     enabled: !isContractor,
   });
   const responsiblePersonsQuery = useQuery({
@@ -331,10 +334,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     queryFn: async (): Promise<GalleryPhoto[]> => {
       if (!shipmentId) return [];
       const dbi = await db();
-      const all = await dbi
-        .transaction('photos')
-        .store.index('byDelivery')
-        .getAll(shipmentId);
+      const all = await dbi.transaction('photos').store.index('byDelivery').getAll(shipmentId);
       return all
         .filter((p) => p.operationKind === 'shipment')
         .map((p) => ({
@@ -646,8 +646,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   // (confirmed_mol). Это даёт менеджеру дослать фото 2 Этапа с портала,
   // не дожидаясь подписи МОЛ. До shipped кнопка заблокирована.
   const stage2Enabled =
-    loadedShipment?.status.code === 'shipped' ||
-    loadedShipment?.status.code === 'confirmed_mol';
+    loadedShipment?.status.code === 'shipped' || loadedShipment?.status.code === 'confirmed_mol';
 
   const updateField = (key: string, patch: Partial<DraftItem>) => {
     setItems((prev) => prev.map((it) => (it.clientKey === key ? { ...it, ...patch } : it)));
@@ -712,57 +711,95 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       shippedAt: loadedShipment.shippedAt ?? new Date().toISOString(),
       comment: comment || null,
       purpose: purpose || null,
-      items: items
-        .filter((i) => i.nameRaw.trim().length > 0)
-        .map((i) => {
-          const computed = computeVatSum(i);
-          return {
-            // Существующая строка уходит со СВОИМ id из БД: по нему сервер
-            // переносит происхождение (domain/operations/item-origin.ts). Со
-            // случайным id он строку не узнаёт и вынужден угадывать по названию
-            // и номеру — а переименование или удаление соседней строки такое
-            // сопоставление рвут.
-            id: i.serverId ?? crypto.randomUUID(),
-            sourceDocumentId: i.sourceDocumentId,
-            sourceDocumentItemId: i.sourceDocumentItemId,
-            itemKind: i.itemKind,
-            materialId: i.itemKind === 'asset' ? null : i.materialId,
-            assetId: i.itemKind === 'asset' ? i.assetId : null,
-            inventoryNumber: i.inventoryNumber,
-            serialNumber: i.serialNumber,
-            nameRaw: i.nameRaw,
-            qtyPlanned: i.qtyPlanned,
-            qtyActual: i.qtyActual,
-            unit: i.unit,
-            comment: null,
-            lineNo: i.lineNo,
-            volumeM3: null,
-            massKg: null,
-            price: i.price,
-            vatRate: i.vatRate,
-            vatSum: computed !== null ? computed.toFixed(2) : (i.vatSum ?? null),
-            volumeConfidence: null,
-            groupName: null,
-          };
-        }),
+      // Фильтра пустых названий здесь больше нет: он молча удалял позицию
+      // вместе с количеством, ценой и привязкой к документу. Инвариант держат
+      // проверка в persistStatus и trim().min(1) в контракте.
+      items: items.map((i) => {
+        const computed = computeVatSum(i);
+        return {
+          // Существующая строка уходит со СВОИМ id из БД: по нему сервер
+          // переносит происхождение (domain/operations/item-origin.ts). Со
+          // случайным id он строку не узнаёт и вынужден угадывать по названию
+          // и номеру — а переименование или удаление соседней строки такое
+          // сопоставление рвут.
+          id: i.serverId ?? crypto.randomUUID(),
+          sourceDocumentId: i.sourceDocumentId,
+          sourceDocumentItemId: i.sourceDocumentItemId,
+          itemKind: i.itemKind,
+          materialId: i.itemKind === 'asset' ? null : i.materialId,
+          assetId: i.itemKind === 'asset' ? i.assetId : null,
+          inventoryNumber: i.inventoryNumber,
+          serialNumber: i.serialNumber,
+          nameRaw: i.nameRaw,
+          qtyPlanned: i.qtyPlanned,
+          qtyActual: i.qtyActual,
+          unit: i.unit,
+          comment: null,
+          lineNo: i.lineNo,
+          volumeM3: null,
+          massKg: null,
+          price: i.price,
+          vatRate: i.vatRate,
+          vatSum: computed !== null ? computed.toFixed(2) : (i.vatSum ?? null),
+          volumeConfidence: null,
+          groupName: null,
+        };
+      }),
     };
   };
 
-  const persistStatus = async (nextCode: ShipmentStatusCode) => {
+  /**
+   * Сохранение отгрузки. Возвращает ИСХОД отправки — зеркально приёмке
+   * (KppPage.persistStatus): «Сохранено» показываем только после подтверждения
+   * сервера, иначе конфликт версий выглядел бы успехом. Проверка пустых
+   * названий стоит здесь, потому что этот же метод вызывает подтверждение МОЛ.
+   */
+  const persistStatus = async (nextCode: ShipmentStatusCode): Promise<MutationResult> => {
     if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
+    const emptyNames = describeEmptyNames({ items, documents: sectionDocuments });
+    if (emptyNames.length > 0) {
+      throw new Error(`Заполните название материала — ${emptyNames.join('; ')}`);
+    }
     await applyLocalEdit(loadedShipment.id, buildPatch(nextCode));
+    const mutationId = crypto.randomUUID();
     await enqueueMutation({
-      id: crypto.randomUUID(),
+      id: mutationId,
       kind: 'shipment_upsert',
       entityId: loadedShipment.id,
       baseVersion: loadedShipment.version,
       payload: null,
     });
-    // Ждём пока mutation физически уйдёт на сервер и придёт свежий
-    // snapshot через pullSync. Без await invalidateQueries в onSuccess
-    // делает refetch раньше, чем push доехал, и таблица показывает
-    // старый siteId/getReceiver до F5.
-    await runSync();
+    const result = await flushMutation(mutationId);
+    if (result.outcome === 'server_acked') {
+      // Ждём свежий snapshot через pullSync. Без него invalidateQueries в
+      // onSuccess делает refetch раньше, чем изменения доехали, и таблица
+      // показывает старый siteId/получателя до F5.
+      await runSync();
+    }
+    return result;
+  };
+
+  /** Общая реакция на исход: успех уводит в список, всё остальное — оставляет в карточке. */
+  const handlePersistResult = (result: MutationResult, successText: string): void => {
+    if (result.outcome === 'server_acked') {
+      message.success(successText);
+      void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
+      // Вкладка «Принятые» — там сохранённая отгрузка и появится. Без
+      // tab=accepted попадаем на «Ожидаемые» (default) и ищем запись там, где
+      // её нет.
+      navigate('/operations?type=shipment&tab=accepted');
+      return;
+    }
+    if (result.outcome === 'queued') {
+      message.warning('Сохранено на устройстве. Отправим на сервер, как появится связь');
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      message.error('Отгрузку изменили на другом устройстве. Откройте карточку заново');
+      return;
+    }
+    message.error(result.error?.message ?? 'Сервер отклонил сохранение');
   };
 
   const save = useMutation({
@@ -773,35 +810,16 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       const hasUpd = loadedShipment.sourceDocumentIds.length > 0;
       const currentCode = loadedShipment.status.code as ShipmentStatusCode;
       const nextCode: ShipmentStatusCode =
-        currentCode === 'confirmed_mol'
-          ? 'confirmed_mol'
-          : hasUpd
-            ? 'shipped'
-            : 'not_filled';
-      await persistStatus(nextCode);
+        currentCode === 'confirmed_mol' ? 'confirmed_mol' : hasUpd ? 'shipped' : 'not_filled';
+      return persistStatus(nextCode);
     },
-    onSuccess: () => {
-      message.success('Отгрузка сохранена');
-      void queryClient.invalidateQueries({ queryKey: ['shipments'] });
-      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
-      // Перебрасываем на вкладку «Принятые» — там сохранённая отгрузка
-      // и появится. Без tab=accepted попадаем на «Ожидаемые» (default)
-      // и ищем запись там, где её нет.
-      navigate('/operations?type=shipment&tab=accepted');
-    },
+    onSuccess: (result) => handlePersistResult(result, 'Отгрузка сохранена'),
     onError: (err: Error) => message.error(err.message),
   });
 
   const confirmMol = useMutation({
-    mutationFn: async () => {
-      await persistStatus('confirmed_mol');
-    },
-    onSuccess: () => {
-      message.success('Отгрузка подтверждена МОЛ');
-      void queryClient.invalidateQueries({ queryKey: ['shipments'] });
-      void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
-      navigate('/operations?type=shipment&tab=accepted');
-    },
+    mutationFn: async () => persistStatus('confirmed_mol'),
+    onSuccess: (result) => handlePersistResult(result, 'Отгрузка подтверждена МОЛ'),
     onError: (err: Error) => message.error(err.message),
   });
 
@@ -988,7 +1006,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     }
     if (kind === 'transfer') {
       if (!destSiteId) reasons.push('Выберите объект «Куда»');
-      else if (destSiteId === siteId) reasons.push('Объект-приёмник должен отличаться от источника');
+      else if (destSiteId === siteId)
+        reasons.push('Объект-приёмник должен отличаться от источника');
       if (!receiverId) reasons.push('Выберите получателя на новом объекте');
     }
     if (!plate.trim()) reasons.push('Заполните госномер');
@@ -997,10 +1016,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     // оформляется одними фото — позиции подтянутся позже при ручной
     // привязке УПД на портале (см. updateShipment на сервере).
     const hasUpdNow = (loadedShipment?.sourceDocumentIds.length ?? 0) > 0;
-    if (
-      hasUpdNow &&
-      items.filter((it) => it.nameRaw.trim().length > 0).length === 0
-    )
+    if (hasUpdNow && items.filter((it) => it.nameRaw.trim().length > 0).length === 0)
       reasons.push('Добавьте хотя бы одну позицию');
     return reasons.length ? reasons.join(' · ') : null;
   })();
@@ -1033,38 +1049,20 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               )}
             </Space>
           );
-          const isEditing = !isContractor && editingNameKey === r.clientKey;
           return (
             <Space.Compact direction="vertical" style={{ width: '100%' }}>
               {assetMeta}
-              {isEditing ? (
-                <Input.TextArea
-                  autoSize={{ minRows: 1, maxRows: 4 }}
-                  autoFocus
-                  value={r.nameRaw}
-                  placeholder="Наименование"
-                  onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
-                  onBlur={() => setEditingNameKey(null)}
-                />
-              ) : (
-                <div
-                  onClick={() => {
-                    if (!isContractor) setEditingNameKey(r.clientKey);
-                  }}
-                  style={{
-                    cursor: isContractor ? 'default' : 'text',
-                    whiteSpace: 'pre-wrap',
-                    minHeight: 22,
-                    padding: '4px 0',
-                  }}
-                >
-                  {r.nameRaw || (
-                    <Typography.Text type="secondary">
-                      — нажмите, чтобы заполнить —
-                    </Typography.Text>
-                  )}
-                </div>
-              )}
+              <EditableItemName
+                value={r.nameRaw}
+                onChange={(next) => updateField(r.clientKey, { nameRaw: next })}
+                disabledReason={itemNameLock({
+                  canEdit: canEditShipment,
+                  materialId: r.materialId,
+                })}
+                editing={editingNameKey === r.clientKey}
+                onStartEdit={() => setEditingNameKey(r.clientKey)}
+                onStopEdit={() => setEditingNameKey(null)}
+              />
             </Space.Compact>
           );
         },
@@ -1073,9 +1071,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
         title: 'План',
         width: 90,
         render: (_: unknown, r: DraftItem) =>
-          r.qtyPlanned !== null && r.qtyPlanned !== ''
-            ? trimQty(r.qtyPlanned)
-            : '—',
+          r.qtyPlanned !== null && r.qtyPlanned !== '' ? trimQty(r.qtyPlanned) : '—',
       },
       {
         title: 'Факт',
@@ -1154,115 +1150,96 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
         },
       },
     ],
-    [editingNameKey, isContractor],
+    [editingNameKey, isContractor, canEditShipment],
   );
 
   const cardRender = (r: DraftItem, displayNo: number) => {
-    const isEditing = !isContractor && editingNameKey === r.clientKey;
     return (
-    <div style={{ width: '100%' }}>
-      <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-        <Typography.Text strong>№{displayNo}</Typography.Text>
-        {!isContractor && (
-          <Popconfirm
-            title="Удалить позицию?"
-            okText="Да"
-            cancelText="Нет"
-            onConfirm={() => removeItem(r.clientKey)}
-          >
-            <Button size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
-        )}
-      </Space>
-      {r.itemKind === 'asset' && (
-        <Space size={4} style={{ marginTop: 4 }} wrap>
-          <AssetTag />
-          {r.inventoryNumber && (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              Инв. № {r.inventoryNumber}
-            </Typography.Text>
-          )}
-          {r.serialNumber && (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              SN {r.serialNumber}
-            </Typography.Text>
+      <div style={{ width: '100%' }}>
+        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+          <Typography.Text strong>№{displayNo}</Typography.Text>
+          {!isContractor && (
+            <Popconfirm
+              title="Удалить позицию?"
+              okText="Да"
+              cancelText="Нет"
+              onConfirm={() => removeItem(r.clientKey)}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
           )}
         </Space>
-      )}
-      {isEditing ? (
-        <Input.TextArea
-          autoSize={{ minRows: 1, maxRows: 4 }}
-          autoFocus
+        {r.itemKind === 'asset' && (
+          <Space size={4} style={{ marginTop: 4 }} wrap>
+            <AssetTag />
+            {r.inventoryNumber && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                Инв. № {r.inventoryNumber}
+              </Typography.Text>
+            )}
+            {r.serialNumber && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                SN {r.serialNumber}
+              </Typography.Text>
+            )}
+          </Space>
+        )}
+        <EditableItemName
+          variant="card"
           value={r.nameRaw}
-          placeholder="Наименование"
-          onChange={(e) => updateField(r.clientKey, { nameRaw: e.target.value })}
-          onBlur={() => setEditingNameKey(null)}
-          style={{ marginTop: 4 }}
+          onChange={(next) => updateField(r.clientKey, { nameRaw: next })}
+          disabledReason={itemNameLock({ canEdit: canEditShipment, materialId: r.materialId })}
+          editing={editingNameKey === r.clientKey}
+          onStartEdit={() => setEditingNameKey(r.clientKey)}
+          onStopEdit={() => setEditingNameKey(null)}
         />
-      ) : (
-        <div
-          onClick={() => {
-            if (!isContractor) setEditingNameKey(r.clientKey);
-          }}
-          style={{
-            marginTop: 4,
-            cursor: isContractor ? 'default' : 'text',
-            whiteSpace: 'pre-wrap',
-            minHeight: 22,
-          }}
-        >
-          {r.nameRaw || (
-            <Typography.Text type="secondary">— нажмите, чтобы заполнить —</Typography.Text>
-          )}
-        </div>
-      )}
-      <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
-        <Col span={8}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            План
-          </Typography.Text>
-          <div>{r.qtyPlanned !== null && r.qtyPlanned !== '' ? trimQty(r.qtyPlanned) : '—'}</div>
-        </Col>
-        <Col span={10}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            Факт
-          </Typography.Text>
-          <InputNumber
-            min={0}
-            style={{ width: '100%' }}
-            value={r.qtyActual !== null && r.qtyActual !== '' ? Number(r.qtyActual) : null}
-            onChange={(v) =>
-              updateField(r.clientKey, {
-                qtyActual: v !== null && v !== undefined ? String(v) : null,
-              })
-            }
-          />
-        </Col>
-        <Col span={6}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            Ед.
-          </Typography.Text>
-          <Input
-            value={r.unit}
-            onChange={(e) => updateField(r.clientKey, { unit: e.target.value })}
-          />
-        </Col>
-      </Row>
-      <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
-        <Col span={12}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            Цена
-          </Typography.Text>
-          <div>{formatMoneyRu(toNum(r.price))}</div>
-        </Col>
-        <Col span={12}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            Сумма НДС
-          </Typography.Text>
-          <div>{formatMoneyRu(computeVatSum(r))}</div>
-        </Col>
-      </Row>
-    </div>
+        <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
+          <Col span={8}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              План
+            </Typography.Text>
+            <div>{r.qtyPlanned !== null && r.qtyPlanned !== '' ? trimQty(r.qtyPlanned) : '—'}</div>
+          </Col>
+          <Col span={10}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Факт
+            </Typography.Text>
+            <InputNumber
+              min={0}
+              style={{ width: '100%' }}
+              value={r.qtyActual !== null && r.qtyActual !== '' ? Number(r.qtyActual) : null}
+              onChange={(v) =>
+                updateField(r.clientKey, {
+                  qtyActual: v !== null && v !== undefined ? String(v) : null,
+                })
+              }
+            />
+          </Col>
+          <Col span={6}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Ед.
+            </Typography.Text>
+            <Input
+              value={r.unit}
+              onChange={(e) => updateField(r.clientKey, { unit: e.target.value })}
+            />
+          </Col>
+        </Row>
+        <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
+          <Col span={12}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Цена
+            </Typography.Text>
+            <div>{formatMoneyRu(toNum(r.price))}</div>
+          </Col>
+          <Col span={12}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Сумма НДС
+            </Typography.Text>
+            <div>{formatMoneyRu(computeVatSum(r))}</div>
+          </Col>
+        </Row>
+      </div>
     );
   };
 
@@ -1283,10 +1260,13 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     const pendingAt = loadedShipment?.pendingDeletionAt ?? null;
     const isPending = pendingAt !== null;
     const isAdmin = authUser?.role === 'admin';
-    const canUnmark =
-      isAdmin || authUser?.id === (loadedShipment?.pendingDeletionByUserId ?? null);
+    const canUnmark = isAdmin || authUser?.id === (loadedShipment?.pendingDeletionByUserId ?? null);
     return (
-      <Space direction="vertical" size="middle" style={{ width: '100%', paddingBottom: isDesktop ? 0 : 96 }}>
+      <Space
+        direction="vertical"
+        size="middle"
+        style={{ width: '100%', paddingBottom: isDesktop ? 0 : 96 }}
+      >
         {!embedded && (
           <Space style={{ width: '100%' }} align="center">
             {fromList && (
@@ -1927,10 +1907,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               {/* Явное сообщение почему Save disabled — раньше показывался
                   только в Tooltip при hover, теперь видно сразу. */}
               {verifyReason && (
-                <Typography.Text
-                  type="warning"
-                  style={{ marginRight: 'auto', fontSize: 12 }}
-                >
+                <Typography.Text type="warning" style={{ marginRight: 'auto', fontSize: 12 }}>
                   ⚠ {verifyReason}
                 </Typography.Text>
               )}
@@ -2097,13 +2074,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               visibility: trashSwitchVisible ? 'visible' : 'hidden',
             }}
           >
-            <Switch
-              checked={trashOn}
-              onChange={(checked) => setTrash(checked)}
-            />
-            <Typography.Text type={trashOn ? undefined : 'secondary'}>
-              Удалённые
-            </Typography.Text>
+            <Switch checked={trashOn} onChange={(checked) => setTrash(checked)} />
+            <Typography.Text type={trashOn ? undefined : 'secondary'}>Удалённые</Typography.Text>
           </div>
         </div>
       }

@@ -14,6 +14,7 @@ import { startSyncLoop, syncAvailableForRole } from './services/sync';
 import { useAuthStore } from './stores/auth';
 import { UpdateBanner } from './shared/ui/UpdateBanner';
 import { MismatchRowStyle } from './shared/ui/MismatchRowStyle';
+import { EditableCellStyle } from './shared/ui/EditableCellStyle';
 
 dayjs.locale('ru');
 
@@ -55,6 +56,7 @@ export function App() {
   return (
     <>
       <MismatchRowStyle />
+      <EditableCellStyle />
       <ConfigProvider
         locale={ruRU}
         theme={{

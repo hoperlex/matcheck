@@ -280,6 +280,75 @@ suite('происхождение позиций отгрузки (реальн�
     expect((await unlink(shipmentId, upd.id)).statusCode).toBe(404);
   });
 
+  it('переименование строки отвязанного документа не теряет привязку', async () => {
+    // Зеркало приёмки: пока документ привязан, присланное происхождение
+    // принимает шаг 3; у отвязанного его отбрасывают намеренно, и строку надо
+    // узнать в БД. По id не выйдет (пересоздаются каждым upsert), по названию —
+    // тоже, потому что именно его и правят. Остаётся ссылка на позицию.
+    const upd = await makeUpd('ОО-20', [{ name: 'плита пкж', qty: '6' }]);
+    const shipmentId = await makeShipment();
+    expect((await link(shipmentId, upd.id)).statusCode).toBe(200);
+
+    const opened = await itemsOf(shipmentId);
+    const staleId = opened[0]!.id;
+
+    const again = await upsert(
+      shipmentBody(shipmentId, {
+        sourceDocumentIds: [upd.id],
+        items: [{ id: staleId, nameRaw: 'плита пкж', qtyActual: '6', unit: 'шт', lineNo: 1 }],
+      }),
+    );
+    expect(again.statusCode, again.body).toBe(200);
+    expect((await itemsOf(shipmentId))[0]!.id).not.toBe(staleId);
+
+    expect((await unlink(shipmentId, upd.id)).statusCode).toBe(200);
+
+    const res = await upsert(
+      shipmentBody(shipmentId, {
+        sourceDocumentIds: [],
+        items: [
+          {
+            id: staleId,
+            sourceDocumentId: upd.id,
+            sourceDocumentItemId: upd.itemIds[0],
+            nameRaw: 'Плита ПКЖ 6х1,5',
+            qtyActual: '6',
+            unit: 'шт',
+            lineNo: 1,
+          },
+        ],
+      }),
+    );
+
+    expect(res.statusCode, res.body).toBe(200);
+    const after = await itemsOf(shipmentId);
+    expect(after[0]!.name_raw).toBe('Плита ПКЖ 6х1,5');
+    expect(after[0]!.source_document_id).toBe(upd.id);
+    expect(after[0]!.source_document_item_id).toBe(upd.itemIds[0]);
+  });
+
+  it('пустое название отклоняется, позиция остаётся прежней', async () => {
+    // Портал раньше молча выбрасывал такую строку при сохранении. Инвариант
+    // держит контракт: trim().min(1), поэтому и строка из пробелов не проходит.
+    const upd = await makeUpd('ОО-21', [{ name: 'Швеллер 16П', qty: '4' }]);
+    const shipmentId = await makeShipment();
+    expect((await link(shipmentId, upd.id)).statusCode).toBe(200);
+    const before = await itemsOf(shipmentId);
+
+    const res = await upsert(
+      shipmentBody(shipmentId, {
+        sourceDocumentIds: [upd.id],
+        items: [{ id: before[0]!.id, nameRaw: '  ', qtyActual: '4', unit: 'шт', lineNo: 1 }],
+      }),
+    );
+
+    expect(res.statusCode).toBe(400);
+    const after = await itemsOf(shipmentId);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.name_raw).toBe('Швеллер 16П');
+    expect(after[0]!.source_document_item_id).toBe(upd.itemIds[0]);
+  });
+
   it('сводка sourceDocuments отдаёт связанные и отвязанные документы', async () => {
     const first = await makeUpd('ОО-8', [{ name: 'Труба 108', qty: '3' }]);
     const second = await makeUpd('ОО-9', [{ name: 'Отвод 108', qty: '6' }]);
@@ -350,5 +419,4 @@ suite('происхождение позиций отгрузки (реальн�
     ).items.find((x) => x.id === shipmentId);
     expect(fromList?.sourceDocuments).toEqual(singleDto.sourceDocuments);
   });
-
 });
