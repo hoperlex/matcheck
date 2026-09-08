@@ -22,8 +22,11 @@ export function formatStageTime(photos: PhotoLite[]): string | null {
   const valid = photos.filter((p) => p.takenAt && !Number.isNaN(Date.parse(p.takenAt)));
   if (!valid.length) return null;
 
-  const pickLatest = (arr: PhotoLite[]) =>
-    arr.reduce((a, b) => (a.takenAt > b.takenAt ? a : b), arr[0]);
+  const pickLatest = (arr: PhotoLite[]): PhotoLite | undefined =>
+    arr.reduce<PhotoLite | undefined>(
+      (best, p) => (best && best.takenAt > p.takenAt ? best : p),
+      undefined,
+    );
 
   const vehicleOrCargo = valid.filter((p) => p.kind === 'cargo' || p.kind === 'vehicle');
   const documents = valid.filter((p) => p.kind === 'document');
@@ -33,6 +36,10 @@ export function formatStageTime(photos: PhotoLite[]): string | null {
       : documents.length > 0
         ? pickLatest(documents)
         : pickLatest(valid);
+
+  // valid непуст (проверено выше), поэтому ветка недостижима — но типам о
+  // непустоте массива неизвестно.
+  if (!target) return null;
 
   return formatRu(target.takenAt);
 }

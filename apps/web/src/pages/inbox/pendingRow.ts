@@ -16,9 +16,9 @@
  * «документ без номера» — имя файла курсивом в колонке «№» и тег в «Статусе»,
  * ровно так показываются нераспознанные. Ожидающий файл занимает то же место.
  */
-import type { PendingFile, SourceDocumentListResponse } from '@matcheck/contracts';
+import type { PendingFile, SourceDocument } from '@matcheck/contracts';
 
-type Row = SourceDocumentListResponse['items'][number];
+type Row = SourceDocument;
 
 /**
  * Префикс ключа такой строки.

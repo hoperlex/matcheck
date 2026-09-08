@@ -29,6 +29,7 @@ const DOC_KIND_LABEL: Record<PromptDocKind, string> = {
   request: 'Заявка (письмо)',
   transport_waybill: 'Накладные (ТН/ОС-2, фото)',
   m15: 'Накладная М-15 (отпуск материалов)',
+  transport_waybill_1t: 'Накладная 1-Т (товарно-транспортная)',
 };
 
 type FormValues = PromptUpsert;

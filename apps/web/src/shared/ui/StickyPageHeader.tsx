@@ -22,7 +22,9 @@ export function StickyPageHeader({
   children,
 }: {
   header: ReactNode;
-  children: ReactNode;
+  // Необязателен: страница «Без документов» рисует только шапку, а содержимое
+  // держит соседним блоком.
+  children?: ReactNode;
 }) {
   const parentHeight = useContext(StickyHeaderHeightContext);
   const ref = useRef<HTMLDivElement>(null);

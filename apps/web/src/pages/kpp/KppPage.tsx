@@ -1462,6 +1462,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
 
   // === Режим формы (открыта приёмка) ===
   if (deliveryId) {
+    // «deliveryId есть ⇒ приёмка загружена» следует из early-return выше, но
+    // это корреляция двух переменных, и TypeScript её не выводит. Ветка
+    // недостижима: при незагруженной приёмке выше уже отрисован спиннер.
+    if (!loadedDelivery) return null;
     const pendingAt = loadedDelivery?.pendingDeletionAt ?? null;
     const isPending = pendingAt !== null;
     const isAdmin = authUser?.role === 'admin';

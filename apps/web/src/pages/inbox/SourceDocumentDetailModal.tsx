@@ -1192,8 +1192,9 @@ function OriginalAttachments({
       setActiveId(null);
       return;
     }
-    if (!attachments.some((a) => a.id === activeId)) {
-      setActiveId(attachments[0].id);
+    const first = attachments[0];
+    if (first && !attachments.some((a) => a.id === activeId)) {
+      setActiveId(first.id);
     }
   }, [attachments, activeId]);
 

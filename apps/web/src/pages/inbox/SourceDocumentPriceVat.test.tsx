@@ -63,7 +63,7 @@ const waybill = { ...upd, id: '22222222-2222-2222-2222-222222222222', kind: 'tra
  */
 const processing = { ...upd, id: '33333333-3333-3333-3333-333333333333', status: 'processing' };
 
-const patch = vi.fn(() => Promise.resolve(upd));
+const patch = vi.fn((_path: string, _body?: unknown) => Promise.resolve(upd));
 let current: typeof upd = upd;
 
 vi.mock('../../services/api', () => ({
@@ -77,7 +77,7 @@ vi.mock('../../services/api', () => ({
       return Promise.resolve(current);
     }),
     post: vi.fn(),
-    patch: (...args: unknown[]) => patch(...(args as [])),
+    patch: (...args: unknown[]) => patch(...(args as [string, unknown])),
   },
   apiDownload: vi.fn(),
   ApiError: class ApiError extends Error {

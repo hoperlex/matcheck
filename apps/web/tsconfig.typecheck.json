@@ -1,0 +1,14 @@
+{
+  // Настоящая проверка типов веба.
+  //
+  // tsconfig.json — solution-файл с "files": [], поэтому `tsc --noEmit`
+  // возвращал успех, не проверив ни одного файла: 69 ошибок в src были
+  // невидимы, а `pnpm -r typecheck` подтверждал только API.
+  //
+  // Проверять напрямую tsconfig.app.json нельзя: с "composite": true все
+  // файлы программы обязаны принадлежать проекту, а контракты приходят
+  // исходниками через paths — и tsc падает на TS6307 вместо проверки кода.
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": { "composite": false, "tsBuildInfoFile": null },
+  "include": ["src"]
+}

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Alert, Space, Tag, Typography } from 'antd';
+import { Alert, Card, Space, Tag, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import type { MolListResponse, MolPerson } from '@matcheck/contracts';
 import { api } from '../../services/api';
@@ -95,11 +95,25 @@ export default function MolPersons() {
             title: 'ID ФОТ',
             dataIndex: 'employeeId',
             width: 120,
-            render: (v: number) => (
-              <Tag style={{ marginInlineEnd: 0 }}>{v}</Tag>
-            ),
+            render: (v: number) => <Tag style={{ marginInlineEnd: 0 }}>{v}</Tag>,
           },
         ]}
+        // На узком экране ResponsiveTable рисует карточки, а не таблицу, и без
+        // cardRender страница справочника падала бы прямо при рендере списка.
+        cardRender={(r) => (
+          <Card style={{ width: '100%' }} size="small">
+            <Space direction="vertical" size={4}>
+              <Typography.Text strong>{r.fullName}</Typography.Text>
+              <Typography.Text type="secondary">{r.positionName}</Typography.Text>
+              <Space size={8} wrap>
+                {r.tabNumber && (
+                  <Typography.Text type="secondary">Таб. № {r.tabNumber}</Typography.Text>
+                )}
+                <Tag style={{ marginInlineEnd: 0 }}>{r.employeeId}</Tag>
+              </Space>
+            </Space>
+          </Card>
+        )}
       />
       {fetchedAt && (
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>

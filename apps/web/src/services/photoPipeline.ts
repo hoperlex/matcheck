@@ -4,7 +4,7 @@ import type {
   PhotoPresignResponse,
 } from '@matcheck/contracts';
 import { api, apiUploadPhoto } from './api';
-import { db, type OperationKind } from '../lib/db';
+import { withDb, type OperationKind } from '../lib/db';
 import { backoffMs, classifyUploadError, toErrorInfo } from './uploadRetryPolicy';
 
 /**
@@ -116,16 +116,42 @@ export async function capturePhoto(
   const contentHash = await sha256Hex(main);
   const id = crypto.randomUUID();
   const idempotencyKey = crypto.randomUUID();
-  const dbi = await db();
+  // Через withDb: соединение с локальной базой мог закрыть браузер, и тогда
+  // первая же транзакция падала пользователю в лицо («Не удалось добавить
+  // фото: The database connection is closing»), а починить это было нечем —
+  // мёртвый хэндл раздавался до конца жизни вкладки.
+  //
+  // Внутрь withDb попадает ТОЛЬКО работа с базой: повтор не должен ни сжимать
+  // картинку заново, ни переотправлять файл на сервер.
+  const existing = await withDb(async (dbi) => {
+    // De-dup locally если такой же hash уже есть для этой операции
+    // (поле deliveryId хранит operationId — для приёмки и отгрузки).
+    const found = await dbi
+      .transaction('photos')
+      .objectStore('photos')
+      .index('byHash')
+      .get(contentHash);
+    if (found && found.deliveryId === operationId && found.operationKind === operationKind) {
+      return found;
+    }
+    await dbi.put('photos', {
+      id,
+      deliveryId: operationId,
+      operationKind,
+      origin: 'local',
+      kind,
+      stage,
+      contentHash,
+      idempotencyKey,
+      blob: main,
+      thumbBlob: thumb,
+      takenAt: Date.now(),
+      uploaded: false,
+    });
+    return null;
+  });
 
-  // De-dup locally если такой же hash уже есть для этой операции
-  // (поле deliveryId хранит operationId — для приёмки и отгрузки).
-  const existing = await dbi
-    .transaction('photos')
-    .objectStore('photos')
-    .index('byHash')
-    .get(contentHash);
-  if (existing && existing.deliveryId === operationId && existing.operationKind === operationKind) {
+  if (existing) {
     // Уже есть локальная запись с этим contentHash. Если она ещё не uploaded —
     // переиспользуем её promise upload'а, а не плодим параллельные попытки.
     const uploadPromise = existing.uploaded
@@ -133,21 +159,6 @@ export async function capturePhoto(
       : settle(uploadPhoto(existing.id));
     return { id: existing.id, uploadPromise };
   }
-
-  await dbi.put('photos', {
-    id,
-    deliveryId: operationId,
-    operationKind,
-    origin: 'local',
-    kind,
-    stage,
-    contentHash,
-    idempotencyKey,
-    blob: main,
-    thumbBlob: thumb,
-    takenAt: Date.now(),
-    uploaded: false,
-  });
 
   // Best-effort immediate upload — выставляем результат наружу, чтобы UI мог
   // дождаться обмена local-id на server-id, пере-invalidate queryClient и
@@ -157,8 +168,7 @@ export async function capturePhoto(
 }
 
 export async function uploadPhoto(photoId: string): Promise<void> {
-  const dbi = await db();
-  const p = await dbi.get('photos', photoId);
+  const p = await withDb((dbi) => dbi.get('photos', photoId));
   if (!p || p.uploaded || !p.blob) return;
 
   // Любой исход попытки меняет то, что должна показать галерея: успех — id-swap
@@ -195,37 +205,59 @@ export async function uploadPhoto(photoId: string): Promise<void> {
       p.thumbBlob,
     );
 
-    // Пользователь мог удалить фото, пока шёл upload (presign/PUT/confirm). Если
-    // исходной IDB-записи уже нет — НЕ воскрешаем её put'ом ниже, а подчищаем
-    // созданную на сервере строку, иначе появится «мёртвый» orphan или воскресшее
-    // confirmed-фото. Проверяем именно по исходному p.id (id-swap делает этот же вызов).
-    const still = await dbi.get('photos', p.id);
-    if (!still) {
+    // Файл уже на сервере — а запись результата шла в ту же незащищённую базу,
+    // и на закрытом соединении фото зависало «незагруженным» при фактически
+    // успешной отправке. Поэтому финализация тоже через withDb, и вся она —
+    // ОДНА транзакция: повтор после переоткрытия видит либо прежнее
+    // состояние, либо конечное, но не половину id-swap'а.
+    const kept = await withDb(async (dbi) => {
+      const tx = dbi.transaction('photos', 'readwrite');
+      const store = tx.objectStore('photos');
+      // Пользователь мог удалить фото, пока шёл upload (presign/PUT/confirm). Если
+      // исходной IDB-записи уже нет — НЕ воскрешаем её put'ом ниже, а подчищаем
+      // созданную на сервере строку, иначе появится «мёртвый» orphan или воскресшее
+      // confirmed-фото. Проверяем именно по исходному p.id (id-swap делает этот же вызов).
+      const still = await store.get(p.id);
+      // Запись под серверным id означает, что предыдущая попытка финализации
+      // уже прошла: удалять фото на сервере в этом случае нельзя.
+      const swapped = presign.photoId === p.id ? still : await store.get(presign.photoId);
+      if (!still && !swapped) {
+        await tx.done;
+        return false;
+      }
+
+      // Сервер генерирует photoId сам (см. apps/api/routes/photos.ts: insert с
+      // crypto.randomUUID()). Чтобы merged-список в UI не показывал ДВА фото
+      // (server + local с разными id), синхронизируем локальный id с серверным —
+      // тот же приём, что в matcheck.mobile PhotoUploadProcessor.kt.
+      await store.put({
+        ...p,
+        id: presign.photoId,
+        s3Key: presign.s3Key,
+        thumbS3Key: presign.thumbS3Key ?? undefined,
+        uploaded: true,
+        // Полноразмерный снимок теперь есть на сервере, и вторая копия в
+        // браузере только приближает эвикт по квоте: база росла неограниченно,
+        // а вытесняет браузер её целиком. Миниатюру сохраняем — на ней держится
+        // галерея приёмки; оригинал галерея догрузит через API-прокси.
+        blob: undefined,
+        // Успех — сбрасываем накопленное состояние ретраев.
+        uploadState: undefined,
+        uploadAttempts: undefined,
+        nextRetryAt: undefined,
+        lastUploadError: undefined,
+      });
+      if (presign.photoId !== p.id) await store.delete(p.id);
+      await tx.done;
+      return true;
+    });
+
+    if (!kept) {
       await api.delete(`/photos/${presign.photoId}`).catch(() => undefined);
       return;
     }
-
-    // Сервер генерирует photoId сам (см. apps/api/routes/photos.ts: insert с
-    // crypto.randomUUID()). Чтобы merged-список в UI не показывал ДВА фото
-    // (server + local с разными id), синхронизируем локальный id с серверным —
-    // тот же приём, что в matcheck.mobile PhotoUploadProcessor.kt.
-    if (presign.photoId !== p.id) {
-      await dbi.delete('photos', p.id);
-    }
-    await dbi.put('photos', {
-      ...p,
-      id: presign.photoId,
-      s3Key: presign.s3Key,
-      thumbS3Key: presign.thumbS3Key ?? undefined,
-      uploaded: true,
-      // Успех — сбрасываем накопленное состояние ретраев.
-      uploadState: undefined,
-      uploadAttempts: undefined,
-      nextRetryAt: undefined,
-      lastUploadError: undefined,
-    });
   } catch (err) {
-    await recordUploadFailure(dbi, p.id, err);
+    await recordUploadFailure(p.id, err);
     throw err;
   } finally {
     notifyPhotoSettled(p.operationKind, p.deliveryId);
@@ -238,37 +270,73 @@ export async function uploadPhoto(photoId: string): Promise<void> {
  * → capped backoff. Локальная копия фото сохраняется всегда — она может быть
  * единственной.
  */
-async function recordUploadFailure(
-  dbi: Awaited<ReturnType<typeof db>>,
-  id: string,
-  err: unknown,
-): Promise<void> {
-  const cur = await dbi.get('photos', id);
-  if (!cur || cur.uploaded) return; // запись удалена или уже залита — фиксировать нечего
+async function recordUploadFailure(id: string, err: unknown): Promise<void> {
   const info = toErrorInfo(err);
   const cls = classifyUploadError(info);
-  const attempts = (cur.uploadAttempts ?? 0) + 1;
-  const lastUploadError = {
-    status: info.status,
-    code: info.code ?? (info.network ? 'network' : 'unknown'),
-    at: Date.now(),
-  };
-  if (cls === 'terminal') {
-    await dbi.put('photos', {
-      ...cur,
-      uploadState: 'blocked',
-      uploadAttempts: attempts,
-      lastUploadError,
-    });
-  } else {
-    await dbi.put('photos', {
-      ...cur,
-      uploadAttempts: attempts,
-      nextRetryAt: Date.now() + backoffMs(attempts, cls),
-      lastUploadError,
-    });
-  }
+  await withDb(async (dbi) => {
+    const cur = await dbi.get('photos', id);
+    if (!cur || cur.uploaded) return; // запись удалена или уже залита — фиксировать нечего
+    const attempts = (cur.uploadAttempts ?? 0) + 1;
+    const lastUploadError = {
+      status: info.status,
+      code: info.code ?? (info.network ? 'network' : 'unknown'),
+      at: Date.now(),
+    };
+    if (cls === 'terminal') {
+      await dbi.put('photos', {
+        ...cur,
+        uploadState: 'blocked',
+        uploadAttempts: attempts,
+        lastUploadError,
+      });
+    } else {
+      await dbi.put('photos', {
+        ...cur,
+        uploadAttempts: attempts,
+        nextRetryAt: Date.now() + backoffMs(attempts, cls),
+        lastUploadError,
+      });
+    }
+  });
 }
+
+/**
+ * Удаляет полноразмерные blob'ы у фото, отправка которых подтверждена.
+ *
+ * Одной правкой «не сохранять новые» уже накопленное не освободить, а именно
+ * оно и делает эвикт по квоте реальным: локальная копия каждого снимка (1–5 МБ)
+ * лежала в базе бессрочно. Границы намеренно узкие:
+ *
+ *  - удаляется только `blob` и только при `uploaded: true` — файл заведомо на
+ *    сервере;
+ *  - `thumbBlob` сохраняется: политика хранения миниатюр не определена, а без
+ *    превью галерея приёмки станет пустой;
+ *  - записи в `pending` и `blocked` не трогаются вовсе — их файл ещё не
+ *    отправлен, и удаление blob означало бы потерю снимка.
+ *
+ * Идемпотентно: повторный проход не находит ничего.
+ */
+export async function pruneUploadedPhotoBlobs(): Promise<number> {
+  return withDb(async (dbi) => {
+    const tx = dbi.transaction('photos', 'readwrite');
+    const store = tx.objectStore('photos');
+    let freed = 0;
+    let cursor = await store.openCursor();
+    while (cursor) {
+      const rec = cursor.value;
+      if (rec.uploaded && rec.blob) {
+        await cursor.update({ ...rec, blob: undefined });
+        freed += 1;
+      }
+      cursor = await cursor.continue();
+    }
+    await tx.done;
+    return freed;
+  });
+}
+
+/** Чистка накопленного нужна один раз за жизнь вкладки, а не каждую минуту. */
+let blobsPruned = false;
 
 /**
  * Сериализует retryPendingUploads МЕЖДУ вкладками. Без этого каждая открытая
@@ -288,9 +356,18 @@ async function withPhotoRetryLock(fn: () => Promise<void>): Promise<void> {
 
 export async function retryPendingUploads(): Promise<void> {
   await withPhotoRetryLock(async () => {
-    const dbi = await db();
+    // Под тем же Web Lock: чистка ходит по всем фото, и две вкладки не должны
+    // делать это одновременно. Неудача чистки не должна мешать отправке.
+    if (!blobsPruned) {
+      blobsPruned = true;
+      try {
+        await pruneUploadedPhotoBlobs();
+      } catch {
+        // Освобождение места — best-effort, отправку фото это не блокирует.
+      }
+    }
     // getAll ВНУТРИ лока: к моменту захвата другая вкладка могла изменить записи.
-    const all = await dbi.getAll('photos');
+    const all = await withDb((dbi) => dbi.getAll('photos'));
     const now = Date.now();
     for (const p of all) {
       if (p.uploaded) continue;
@@ -299,10 +376,10 @@ export async function retryPendingUploads(): Promise<void> {
       // Операция должна быть уже на сервере, иначе /photos/presign даст 404.
       // Ждём следующего прохода runSync после успешного push *_upsert.
       if (p.operationKind === 'shipment') {
-        const sh = await dbi.get('shipments', p.deliveryId);
+        const sh = await withDb((dbi) => dbi.get('shipments', p.deliveryId));
         if (!sh || sh.server === null) continue;
       } else {
-        const dlv = await dbi.get('deliveries', p.deliveryId);
+        const dlv = await withDb((dbi) => dbi.get('deliveries', p.deliveryId));
         if (!dlv || dlv.server === null) continue;
       }
       try {

@@ -253,9 +253,7 @@ export function PhotoGallery({
   // приходит на этот обработчик и модалка закрывается. В full-page режиме
   // (embedded=false) внешней модалки нет — closest вернёт null, focus — no-op.
   const restoreOuterModalFocus = () => {
-    galleryRef.current
-      ?.closest<HTMLElement>('.ant-modal-wrap')
-      ?.focus({ preventScroll: true });
+    galleryRef.current?.closest<HTMLElement>('.ant-modal-wrap')?.focus({ preventScroll: true });
   };
   // afterClose (после полного закрытия): вернуть фокус, затем очистить данные.
   const handleDocPreviewAfterClose = () => {
@@ -408,7 +406,12 @@ function PhotoThumb({
         if (rec?.thumbBlob) thumbUrl = URL.createObjectURL(rec.thumbBlob);
         if (rec?.blob) fullUrl = URL.createObjectURL(rec.blob);
         setLocalThumb(thumbUrl);
-        setLocalFull(fullUrl ?? thumbUrl);
+        // Раньше сюда подставлялась миниатюра, когда полноразмерного blob нет.
+        // С удалением blob у подтверждённых фото (photoPipeline) это означало
+        // бы, что при открытии превью пользователь навсегда видит снимок
+        // 320px: needsRemoteFull ниже считает, что оригинал уже есть. Держим
+        // localFull честным — нет blob, значит оригинал грузим с сервера.
+        setLocalFull(fullUrl);
       } finally {
         if (!cancelled) setIdbChecked(true);
       }
@@ -428,6 +431,10 @@ function PhotoThumb({
   // delivery каждые несколько секунд, пока в photos есть хоть один orphan.
   const isUploading = photo.uploadedAt === null && !localThumb;
   const needsRemote = idbChecked && !localThumb && !isUploading;
+  // Миниатюра и оригинал живут в базе по отдельности: у подтверждённого фото
+  // остаётся только миниатюра, и оригинал нужно догрузить, даже когда
+  // needsRemote уже false.
+  const needsRemoteFull = idbChecked && !localFull && !isUploading;
 
   // previewOpen приходит сверху (из PhotoGallery) — это общий флаг на всю
   // PreviewGroup, см. комментарий у его объявления в родительском
@@ -473,7 +480,7 @@ function PhotoThumb({
     // preview, не превентивно. До этого пользователь видит миниатюру,
     // ничего лишнего не качается. enabled триггерится previewOpen из
     // controlled antd Image, см. ниже onVisibleChange.
-    enabled: needsRemote && previewOpen,
+    enabled: needsRemoteFull && previewOpen,
     staleTime: PHOTO_STALE,
     gcTime: PHOTO_GC,
     retry: 2,

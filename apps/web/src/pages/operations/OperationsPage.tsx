@@ -329,8 +329,6 @@ export default function OperationsPage() {
     }
   }
 
-  const _apiSink = api; // keep import used (для будущих RPC из этой страницы)
-
   const createButton = (
     <Button
       type="primary"

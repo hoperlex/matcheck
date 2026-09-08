@@ -340,6 +340,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
         .map((p) => ({
           id: p.id,
           kind: p.kind,
+          // Этап есть и у фото отгрузки (ShipmentPhotoSchema.stage) — без него
+          // локальная запись не подходила под контракт галереи.
+          stage: p.stage,
           s3Key: p.s3Key ?? '',
           thumbS3Key: p.thumbS3Key ?? null,
           contentHash: p.contentHash ?? null,
@@ -1273,6 +1276,10 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
 
   // ─── Режим формы ─────────────────────────────────────────────────────────
   if (shipmentId) {
+    // «shipmentId есть ⇒ отгрузка загружена» следует из early-return выше, но
+    // это корреляция двух переменных, и TypeScript её не выводит. Ветка
+    // недостижима: при незагруженной отгрузке выше уже отрисован спиннер.
+    if (!loadedShipment) return null;
     const pendingAt = loadedShipment?.pendingDeletionAt ?? null;
     const isPending = pendingAt !== null;
     const isAdmin = authUser?.role === 'admin';

@@ -7,16 +7,19 @@
  * отдельный /confirm больше не нужен (его делает сам эндпоинт), и что об исходе
  * попытки узнаёт UI — раньше ошибка глохла и пользователь видел «Фото
  * добавлено» на потерянном фото.
+ *
+ * Локальная база здесь настоящая (fake-indexeddb), а не набор моков: правки
+ * про закрытое соединение и удаление полноразмерного blob проверяются только
+ * по фактическому содержимому хранилища.
  */
+import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PhotoRecord } from '../lib/db';
 
 const mocks = vi.hoisted(() => ({
   apiPost: vi.fn(),
   apiDelete: vi.fn(),
   apiUploadPhoto: vi.fn(),
-  dbGet: vi.fn(),
-  dbPut: vi.fn(),
-  dbDelete: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -24,16 +27,15 @@ vi.mock('./api', () => ({
   apiUploadPhoto: mocks.apiUploadPhoto,
 }));
 
-vi.mock('../lib/db', () => ({
-  db: async () => ({ get: mocks.dbGet, put: mocks.dbPut, delete: mocks.dbDelete }),
-}));
-
-const { uploadPhoto, onPhotoUploadSettled } = await import('./photoPipeline');
+const { uploadPhoto, onPhotoUploadSettled, pruneUploadedPhotoBlobs } = await import(
+  './photoPipeline'
+);
+const { db } = await import('../lib/db');
 
 const LOCAL_ID = 'local-uuid';
 const SERVER_ID = 'server-uuid';
 
-function photoRecord(over: Record<string, unknown> = {}) {
+function photoRecord(over: Partial<PhotoRecord> = {}): PhotoRecord {
   return {
     id: LOCAL_ID,
     deliveryId: 'delivery-1',
@@ -51,6 +53,16 @@ function photoRecord(over: Record<string, unknown> = {}) {
   };
 }
 
+async function putPhoto(over: Partial<PhotoRecord> = {}): Promise<void> {
+  const dbi = await db();
+  await dbi.put('photos', photoRecord(over));
+}
+
+async function readPhoto(id: string) {
+  const dbi = await db();
+  return await dbi.get('photos', id);
+}
+
 const presignResponse = {
   photoId: SERVER_ID,
   s3Key: 'site/cp/deliveries/delivery-1/server-uuid.jpg',
@@ -61,17 +73,17 @@ const presignResponse = {
   alreadyExists: false,
 };
 
-describe('uploadPhoto — отправка через API-прокси', () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-    mocks.apiPost.mockReset().mockResolvedValue(presignResponse);
-    mocks.apiDelete.mockReset().mockResolvedValue(undefined);
-    mocks.apiUploadPhoto.mockReset().mockResolvedValue({ ok: true, uploadedAt: 'now' });
-    mocks.dbGet.mockReset().mockResolvedValue(photoRecord());
-    mocks.dbPut.mockReset().mockResolvedValue(undefined);
-    mocks.dbDelete.mockReset().mockResolvedValue(undefined);
-  });
+beforeEach(async () => {
+  vi.restoreAllMocks();
+  mocks.apiPost.mockReset().mockResolvedValue(presignResponse);
+  mocks.apiDelete.mockReset().mockResolvedValue(undefined);
+  mocks.apiUploadPhoto.mockReset().mockResolvedValue({ ok: true, uploadedAt: 'now' });
+  const dbi = await db();
+  await dbi.clear('photos');
+  await putPhoto();
+});
 
+describe('uploadPhoto — отправка через API-прокси', () => {
   it('шлёт кадр и миниатюру на /photos/:id/content серверным id', async () => {
     await uploadPhoto(LOCAL_ID);
 
@@ -97,11 +109,13 @@ describe('uploadPhoto — отправка через API-прокси', () => {
   it('на успехе меняет локальный id на серверный и помечает uploaded', async () => {
     await uploadPhoto(LOCAL_ID);
 
-    expect(mocks.dbDelete).toHaveBeenCalledWith('photos', LOCAL_ID);
-    expect(mocks.dbPut).toHaveBeenLastCalledWith(
-      'photos',
-      expect.objectContaining({ id: SERVER_ID, uploaded: true, lastUploadError: undefined }),
-    );
+    expect(await readPhoto(LOCAL_ID)).toBeUndefined();
+    expect(await readPhoto(SERVER_ID)).toMatchObject({
+      id: SERVER_ID,
+      uploaded: true,
+      s3Key: presignResponse.s3Key,
+    });
+    expect((await readPhoto(SERVER_ID))?.lastUploadError).toBeUndefined();
   });
 
   it('ошибка отправки доходит до вызывающего и фиксируется в записи', async () => {
@@ -111,13 +125,11 @@ describe('uploadPhoto — отправка через API-прокси', () => {
     mocks.apiUploadPhoto.mockRejectedValue(failure);
 
     await expect(uploadPhoto(LOCAL_ID)).rejects.toThrow('нет сети');
-    expect(mocks.dbPut).toHaveBeenLastCalledWith(
-      'photos',
-      expect.objectContaining({
-        uploaded: false,
-        lastUploadError: expect.objectContaining({ code: 'network' }),
-      }),
-    );
+    const rec = await readPhoto(LOCAL_ID);
+    expect(rec).toMatchObject({ uploaded: false });
+    expect(rec?.lastUploadError).toMatchObject({ code: 'network' });
+    // Локальная копия — единственная, пока файл не на сервере.
+    expect(rec?.blob).toBeInstanceOf(Blob);
   });
 
   it('сообщает подписчикам об исходе — и на успехе, и на ошибке', async () => {
@@ -127,6 +139,7 @@ describe('uploadPhoto — отправка через API-прокси', () => {
     const off = onPhotoUploadSettled((kind, id) => seen.push([kind, id]));
 
     await uploadPhoto(LOCAL_ID);
+    await putPhoto();
     mocks.apiUploadPhoto.mockRejectedValue(new Error('boom'));
     await expect(uploadPhoto(LOCAL_ID)).rejects.toThrow('boom');
     off();
@@ -138,9 +151,79 @@ describe('uploadPhoto — отправка через API-прокси', () => {
   });
 
   it('уже загруженное фото не трогает сеть', async () => {
-    mocks.dbGet.mockResolvedValue(photoRecord({ uploaded: true }));
+    await putPhoto({ uploaded: true });
     await uploadPhoto(LOCAL_ID);
     expect(mocks.apiPost).not.toHaveBeenCalled();
     expect(mocks.apiUploadPhoto).not.toHaveBeenCalled();
+  });
+
+  it('после успеха оригинал в браузере не хранится, миниатюра остаётся', async () => {
+    // Полноразмерный кадр (1–5 МБ) уже на сервере; вторая копия только
+    // приближала эвикт по квоте. Миниатюра нужна галерее приёмки.
+    await uploadPhoto(LOCAL_ID);
+    const rec = await readPhoto(SERVER_ID);
+    expect(rec?.blob).toBeUndefined();
+    expect(rec?.thumbBlob).toBeInstanceOf(Blob);
+  });
+
+  it('доводит запись до конца, если соединение закрылось на финализации', async () => {
+    // Файл уже ушёл на сервер, а запись результата падала на закрытом
+    // соединении — фото повисало «незагруженным» при успешной отправке.
+    const proto = IDBDatabase.prototype as unknown as {
+      transaction: (...args: unknown[]) => unknown;
+    };
+    const original = proto.transaction;
+    let thrown = false;
+    proto.transaction = function patched(this: unknown, ...args: unknown[]) {
+      if (!thrown && args[1] === 'readwrite') {
+        thrown = true;
+        throw Object.assign(
+          new Error(
+            "Failed to execute 'transaction' on 'IDBDatabase': The database connection is closing.",
+          ),
+          { name: 'InvalidStateError' },
+        );
+      }
+      return original.apply(this, args as never);
+    } as typeof original;
+
+    try {
+      await uploadPhoto(LOCAL_ID);
+    } finally {
+      proto.transaction = original;
+    }
+
+    expect(thrown).toBe(true);
+    expect(mocks.apiDelete).not.toHaveBeenCalled();
+    expect(await readPhoto(SERVER_ID)).toMatchObject({ uploaded: true });
+    expect(await readPhoto(LOCAL_ID)).toBeUndefined();
+  });
+});
+
+describe('pruneUploadedPhotoBlobs', () => {
+  it('освобождает место у подтверждённых и не трогает неотправленные', async () => {
+    const dbi = await db();
+    await dbi.clear('photos');
+    await putPhoto({ id: 'sent', uploaded: true });
+    await putPhoto({ id: 'pending', uploaded: false });
+    await putPhoto({ id: 'blocked', uploaded: false, uploadState: 'blocked' });
+
+    expect(await pruneUploadedPhotoBlobs()).toBe(1);
+
+    expect((await readPhoto('sent'))?.blob).toBeUndefined();
+    expect((await readPhoto('sent'))?.thumbBlob).toBeInstanceOf(Blob);
+    // Файл этих двух ещё только в браузере — удаление blob означало бы потерю
+    // снимка, а не экономию места.
+    expect((await readPhoto('pending'))?.blob).toBeInstanceOf(Blob);
+    expect((await readPhoto('blocked'))?.blob).toBeInstanceOf(Blob);
+  });
+
+  it('идемпотентна — повторный проход не находит ничего', async () => {
+    const dbi = await db();
+    await dbi.clear('photos');
+    await putPhoto({ id: 'sent', uploaded: true });
+
+    expect(await pruneUploadedPhotoBlobs()).toBe(1);
+    expect(await pruneUploadedPhotoBlobs()).toBe(0);
   });
 });

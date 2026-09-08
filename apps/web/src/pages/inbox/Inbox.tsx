@@ -1006,7 +1006,9 @@ export default function InboxPage() {
 
   // Сортировка — серверная: колонке достаточно знать, активна ли она сейчас.
   const sortProps = (columnKey: string) => ({
-    sorter: true,
+    // Литерал, а не boolean: колонки сторон документа (PartyColumn) принимают
+    // `sorter: true`, и расширение до boolean ломало их типизацию.
+    sorter: true as const,
     sortOrder:
       sortField && COLUMN_TO_SORT_FIELD[columnKey] === sortField
         ? ((sortOrder === 'asc' ? 'ascend' : 'descend') as 'ascend' | 'descend')
