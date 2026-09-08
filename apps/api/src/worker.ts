@@ -168,6 +168,12 @@ import {
   planAssemblyDocumentMerges,
   planAssemblyDocumentMergesLegacy,
 } from './domain/edo/upd-assembly-merge.js';
+import {
+  applyRelaxedJoins,
+  assertDisjointActions,
+  planRelaxedCopyJoins,
+  type RelaxedReport,
+} from './domain/edo/upd-assembly-relaxed.js';
 import { resolveRootBundle } from './domain/sourceDocuments/bundle-import-registry.js';
 import { llmCalls, llmProviders, llmProviderCredentials } from './db/schema.js';
 import { buildAad, decryptField } from './domain/auth/crypto.js';
@@ -3174,7 +3180,11 @@ async function recordRecognitionEvidence(args: {
   bundleId: string;
   sourceDocumentId?: string | null;
   generation: number;
-  evidenceType: 'file_classification' | 'page_classification' | 'assembly_rollback';
+  evidenceType:
+    | 'file_classification'
+    | 'page_classification'
+    | 'assembly_rollback'
+    | 'assembly_relaxed_copy';
   payload: Record<string, unknown>;
 }): Promise<void> {
   await db.insert(recognitionEvidenceEvents).values({
@@ -5040,12 +5050,12 @@ async function consolidateAssemblyDocuments(
     validation: unknown;
     llmConfidence: string | null;
   }>,
-): Promise<string[]> {
+): Promise<{ publishedIds: string[]; relaxed: RelaxedReport | null }> {
   const orderedSegments = [...segments].sort((a, b) => a.segmentIndex - b.segmentIndex);
   const initialDocIds = orderedSegments
     .map((segment) => segment.docId)
     .filter((id): id is string => id != null);
-  if (initialDocIds.length < 2) return initialDocIds;
+  if (initialDocIds.length < 2) return { publishedIds: initialDocIds, relaxed: null };
 
   const [items, attachments] = await Promise.all([
     tx
@@ -5064,34 +5074,47 @@ async function consolidateAssemblyDocuments(
   // страниц целиком.
   const copyDedup = loadEnv().UPD_ASSEMBLY_COPY_DEDUP_V1;
   const plan = copyDedup ? planAssemblyDocumentMerges : planAssemblyDocumentMergesLegacy;
-  const actions = plan(
-    initialDocIds.flatMap((id) => {
-      const doc = docById.get(id);
-      return doc
-        ? [
-            {
-              id,
-              supplierDirectoryId: doc.supplierDirectoryId,
-              docNumber: doc.docNumber,
-              docDate: doc.docDate,
-              declaredTotal: doc.totalSum,
-              items: items
-                .filter((item) => item.sourceDocumentId === id)
-                .map((item) => ({
-                  id: item.id,
-                  nameRaw: item.nameRaw,
-                  qty: item.qty,
-                  sum: item.sum,
-                  unit: item.unit,
-                  price: item.price,
-                  rowNo: item.rowNo,
-                })),
-            },
-          ]
-        : [];
-    }),
-  );
-  if (actions.length === 0) return initialDocIds;
+  const planDocuments = initialDocIds.flatMap((id) => {
+    const doc = docById.get(id);
+    return doc
+      ? [
+          {
+            id,
+            supplierDirectoryId: doc.supplierDirectoryId,
+            docNumber: doc.docNumber,
+            docDate: doc.docDate,
+            declaredTotal: doc.totalSum,
+            items: items
+              .filter((item) => item.sourceDocumentId === id)
+              .map((item) => ({
+                id: item.id,
+                nameRaw: item.nameRaw,
+                qty: item.qty,
+                sum: item.sum,
+                unit: item.unit,
+                price: item.price,
+                rowNo: item.rowNo,
+                // Только для расширенного ключа relaxed-прохода; строгий проход
+                // эти поля не смотрит.
+                vatRate: item.vatRate,
+                vatSum: item.vatSum,
+              })),
+          },
+        ]
+      : [];
+  });
+  const strictActions = plan(planDocuments);
+  // Relaxed-проход — только поверх нового правила склейки: он опирается на
+  // прогнозируемый набор строк строгого действия, а legacy-план такого набора
+  // не строит. При выключенном рубильнике считать нечего.
+  const relaxedMode = loadEnv().UPD_ASSEMBLY_RELAXED_COPY;
+  const relaxed =
+    copyDedup && relaxedMode !== 'off'
+      ? planRelaxedCopyJoins(planDocuments, strictActions, relaxedMode)
+      : null;
+  const actions = relaxed ? applyRelaxedJoins(strictActions, relaxed) : strictActions;
+  if (relaxed) assertDisjointActions(actions);
+  if (actions.length === 0) return { publishedIds: initialDocIds, relaxed };
 
   const publishedIds = new Set(initialDocIds);
   for (const action of actions) {
@@ -5147,7 +5170,9 @@ async function consolidateAssemblyDocuments(
 
     // У частей с разными строками keeper должен помнить страницы всех частей,
     // иначе ручной reparse позднее увидел бы только первый кусок документа.
-    if (!action.identicalItems) {
+    // Присоединённый relaxed-обрезок нарезан со своих страниц, и они обязаны
+    // остаться у keeper: иначе ручной reparse увидит документ без них.
+    if (!action.identicalItems || (action.relaxedDocumentIds?.length ?? 0) > 0) {
       const refs = new Map<
         string,
         { registryItemId: string | null; inputOrder: number; pageInFile: number }
@@ -5286,7 +5311,7 @@ async function consolidateAssemblyDocuments(
       for (const id of action.droppedDocumentIds) publishedIds.delete(id);
     }
   }
-  return initialDocIds.filter((id) => publishedIds.has(id));
+  return { publishedIds: initialDocIds.filter((id) => publishedIds.has(id)), relaxed };
 }
 
 /**
@@ -5583,11 +5608,39 @@ export async function tryFinalizeUpdAssembly(
     // Совпавшие реквизиты внутри поколения означают части/копии одной УПД,
     // а не повторную загрузку. До этой точки все сегменты терминальны, но ещё
     // технические, поэтому состав можно изменить атомарно.
-    const publishedDocIds = await consolidateAssemblyDocuments(
+    const consolidation = await consolidateAssemblyDocuments(
       tx as unknown as typeof db,
       segments,
       docs,
     );
+    const publishedDocIds = consolidation.publishedIds;
+    // Улика relaxed-прохода. В shadow это ЕДИНСТВЕННЫЙ его результат: состав
+    // пакета не менялся, и решение о включении принимается по накопленным
+    // случаям, а не на боевом трафике вслепую. В `on` запись объясняет, почему
+    // документ перестал публиковаться отдельно.
+    const relaxedReport = consolidation.relaxed;
+    if (
+      relaxedReport &&
+      (relaxedReport.joins.length > 0 ||
+        relaxedReport.singletonPairs.length > 0 ||
+        relaxedReport.rejected.length > 0)
+    ) {
+      await recordRecognitionEvidence({
+        bundleId: rootId,
+        generation,
+        evidenceType: 'assembly_relaxed_copy',
+        payload: {
+          mode: relaxedReport.mode,
+          applied: relaxedReport.mode === 'on',
+          joins: relaxedReport.joins,
+          rejected: relaxedReport.rejected,
+          // Пары одиночек не склеиваются ни в одном режиме — это список к
+          // разбору перед тем, как расширять правило.
+          singletonPairs: relaxedReport.singletonPairs,
+          documentsWouldJoin: relaxedReport.documentsWouldJoin,
+        },
+      });
+    }
 
     // ── публикация ──────────────────────────────────────────────────────────
     const now = new Date();

@@ -31,6 +31,13 @@ export type AssemblyMergeItem = {
   price?: string | number | null;
   /** Номер позиции, напечатанный в бланке (графа 1). NULL до миграции 0115. */
   rowNo?: number | null;
+  /**
+   * Ставка и сумма налога. Строгий проход их НЕ смотрит — его ключ намеренно
+   * узкий. Расширенному ключу relaxed-прохода они обязательны: две строки с
+   * одинаковой стоимостью, но разной ставкой — разные позиции.
+   */
+  vatRate?: string | number | null;
+  vatSum?: string | number | null;
 };
 
 export type AssemblyMergeDocument = {
@@ -63,6 +70,15 @@ export type AssemblyMergeAction = {
   relation: AssemblyMergeRelation;
   /** Человекочитаемые причины решения — уходят в лог worker'а. */
   reasons: string[];
+  /**
+   * Документы, присоединённые relaxed-проходом (совпали поставщик, номер и
+   * итог, разошлась дата). Пусто при выключенном рубильнике.
+   *
+   * Отдельным списком, а не растворены в documentIds: worker должен собрать в
+   * keeper страницы присоединённых обрезков, даже когда строгая группа
+   * состояла из одинаковых копий и переносить страницы было незачем.
+   */
+  relaxedDocumentIds?: string[];
 };
 
 /**
@@ -85,7 +101,7 @@ function identityKey(doc: AssemblyMergeDocument): string | null {
   return JSON.stringify([doc.supplierDirectoryId, doc.docNumber, dateKey(doc.docDate)]);
 }
 
-function decimalKey(value: string | number | null | undefined): string {
+export function decimalKey(value: string | number | null | undefined): string {
   if (value == null) return '∅';
   const raw = String(value).trim().replace(',', '.');
   const match = /^([+-]?)(\d+)(?:\.(\d+))?$/.exec(raw);
@@ -110,7 +126,7 @@ export function normalizeItemName(raw: string): string {
     .replace(/[^0-9a-zа-я]/gi, '');
 }
 
-function nameCloseEnough(a: string, b: string): boolean {
+export function nameCloseEnough(a: string, b: string): boolean {
   const na = normalizeItemName(a);
   const nb = normalizeItemName(b);
   if (!na || !nb) return false;
