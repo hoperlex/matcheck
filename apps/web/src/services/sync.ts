@@ -1,10 +1,9 @@
 import type { SyncDeltaResponse, UserDto } from '@matcheck/contracts';
 import { api, ApiError } from './api';
-import { db } from '../lib/db';
 import { upsertServerSnapshot } from './deliveries';
 import { upsertServerSnapshot as upsertShipmentSnapshot } from './shipments';
 import { pushPendingMutations, withQueueLock } from './mutationQueue';
-import { getSetting, setSetting } from '../lib/db';
+import { getSetting, setSetting, withDb } from '../lib/db';
 import { useAuthStore } from '../stores/auth';
 import { retryPendingUploads } from './photoPipeline';
 
@@ -33,21 +32,22 @@ export async function pullSync(): Promise<void> {
   await upsertServerSnapshot(res.deliveries);
   await upsertShipmentSnapshot(res.shipments);
 
-  const d = await db();
-  const tx = d.transaction(['source_documents', 'references'], 'readwrite');
-  for (const sd of res.sourceDocuments) {
-    await tx.objectStore('source_documents').put(sd);
-  }
-  for (const cp of res.counterparties) {
-    await tx.objectStore('references').put({ ...cp, kind: 'counterparty' });
-  }
-  for (const m of res.materials) {
-    await tx.objectStore('references').put({ ...m, kind: 'material' });
-  }
-  for (const s of res.sites) {
-    await tx.objectStore('references').put({ ...s, kind: 'site' });
-  }
-  await tx.done;
+  await withDb(async (dbi) => {
+    const tx = dbi.transaction(['source_documents', 'references'], 'readwrite');
+    for (const sd of res.sourceDocuments) {
+      await tx.objectStore('source_documents').put(sd);
+    }
+    for (const cp of res.counterparties) {
+      await tx.objectStore('references').put({ ...cp, kind: 'counterparty' });
+    }
+    for (const m of res.materials) {
+      await tx.objectStore('references').put({ ...m, kind: 'material' });
+    }
+    for (const s of res.sites) {
+      await tx.objectStore('references').put({ ...s, kind: 'site' });
+    }
+    await tx.done;
+  });
   await setSetting(CURSOR_KEY, res.serverNow);
 }
 

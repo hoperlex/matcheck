@@ -125,10 +125,32 @@ async function buildApp(opts: {
     { preHandler: [authorize('admin')] as never },
     async () => ({ ok: 'hard-delete' }),
   );
+  // Веб-загрузка кадра — это ДВА маршрута подряд: presign выдаёт id, а байты
+  // уходят в /content (отдельного /confirm портал не зовёт, его делает сам
+  // эндпоинт). Правило у них разное по классу — dynamic против in-handler, —
+  // поэтому проверять надо оба: раньше тест закреплял только первый.
   instance.post(
     '/api/v1/photos/presign',
     { preHandler: [authorize('admin', 'manager', 'inspector_kpp')] as never },
-    async () => ({ ok: 'presign' }),
+    async (req) => ({ ok: 'presign', stage: (req.body as { stage?: string }).stage ?? 'before' }),
+  );
+  instance.post(
+    '/api/v1/photos/:id/content',
+    { preHandler: [authorize('admin', 'manager', 'inspector_kpp')] as never },
+    async (req) => {
+      // Как в бою: вид операции известен только после findPhoto, поэтому право
+      // сверяется в обработчике.
+      await assertPermission(req, 'operations.deliveries', 'create');
+      return { ok: 'content' };
+    },
+  );
+  instance.post(
+    '/api/v1/photos/:id/confirm',
+    { preHandler: [authorize('admin', 'manager', 'inspector_kpp')] as never },
+    async (req) => {
+      await assertPermission(req, 'operations.deliveries', 'create');
+      return { ok: 'confirm' };
+    },
   );
 
   await instance.ready();
@@ -158,6 +180,8 @@ describe('Мониторинг без выданных прав', () => {
     expect((await patch(app, '/api/v1/deliveries/1/flags')).statusCode).toBe(403);
     expect((await post(app, '/api/v1/photos/presign', { operationKind: 'delivery' })).statusCode)
       .toBe(403);
+    // Второй маршрут веб-загрузки закрыт на том же первом слое.
+    expect((await post(app, '/api/v1/photos/photo-1/content')).statusCode).toBe(403);
   });
 });
 
@@ -169,10 +193,27 @@ describe('администратор выдал Мониторингу «Соз�
     expect(res.json()).toMatchObject({ ok: 'create' });
   });
 
-  it('загрузка фото приёмки тоже открывается', async () => {
+  it('загрузка фото приёмки тоже открывается — оба маршрута веб-пути', async () => {
     app = await buildApp({ role: 'monitor', overrides: monitorGranted({ canCreate: true }) });
-    const res = await post(app, '/api/v1/photos/presign', { operationKind: 'delivery' });
+    const presign = await post(app, '/api/v1/photos/presign', { operationKind: 'delivery' });
+    expect(presign.statusCode).toBe(200);
+    // Без этой проверки право «доезжало» до presign, а байты упирались в 403:
+    // у /content другой класс правила и своя сверка после findPhoto.
+    expect((await post(app, '/api/v1/photos/photo-1/content')).statusCode).toBe(200);
+    expect((await post(app, '/api/v1/photos/photo-1/confirm')).statusCode).toBe(200);
+  });
+
+  it('фото 2 Этапа открыто тем же правом, что и 1 Этапа', async () => {
+    // Жалоба мониторинга звучала как «нельзя добавить фото на 2 этапе», поэтому
+    // закрепляем: этап на решение о доступе не влияет — stage доезжает до
+    // обработчика как есть.
+    app = await buildApp({ role: 'monitor', overrides: monitorGranted({ canCreate: true }) });
+    const res = await post(app, '/api/v1/photos/presign', {
+      operationKind: 'delivery',
+      stage: 'after',
+    });
     expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: 'presign', stage: 'after' });
   });
 
   it('но правка существующей записи — нет: это другое право', async () => {

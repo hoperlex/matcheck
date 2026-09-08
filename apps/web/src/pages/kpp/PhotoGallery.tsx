@@ -24,7 +24,7 @@ import { usePermissions } from '../../shared/hooks/usePermissions';
 import { api, apiDownload, ApiError } from '../../services/api';
 import { uploadPhoto } from '../../services/photoPipeline';
 import { enqueueThumbLoad, enqueueFullLoad } from '../../lib/thumbQueue';
-import { db, type OperationKind } from '../../lib/db';
+import { withDb, type OperationKind } from '../../lib/db';
 import { PhotoDocumentPreview } from './PhotoDocumentPreview';
 
 const THUMB_SIZE = 140;
@@ -102,22 +102,25 @@ export function PhotoGallery({
     { prevServer: unknown; prevLocal: unknown }
   >({
     mutationFn: async (id: string) => {
-      const dbi = await db();
-      const local = await dbi.get('photos', id);
+      // База и сеть — порознь: `withDb` повторяет свой колбэк на новом
+      // соединении, если браузер закрыл старое, и DELETE ушёл бы дважды.
+      const forgetLocal = () =>
+        withDb((dbi) => dbi.delete('photos', id)).catch(() => undefined);
+      const local = await withDb((dbi) => dbi.get('photos', id));
       // Локальное несинхронизированное фото — на сервере его нет, не дёргаем бэк.
       if (local && !local.uploaded) {
-        await dbi.delete('photos', id).catch(() => undefined);
+        await forgetLocal();
         return { ok: true };
       }
       try {
         const result = await api.delete<PhotoDeleteResponse>(`/photos/${id}`);
-        await dbi.delete('photos', id).catch(() => undefined);
+        await forgetLocal();
         return result;
       } catch (err) {
         // Фото уже удалено на сервере (каскад / другой клиент) — чистим IDB и
         // считаем мутацию успешной, чтобы UI пришёл к консистентному состоянию.
         if (err instanceof ApiError && err.status === 404) {
-          await dbi.delete('photos', id).catch(() => undefined);
+          await forgetLocal();
           return { ok: true };
         }
         throw err;
@@ -400,8 +403,7 @@ function PhotoThumb({
     let fullUrl: string | null = null;
     void (async () => {
       try {
-        const dbi = await db();
-        const rec = await dbi.get('photos', photo.id);
+        const rec = await withDb((dbi) => dbi.get('photos', photo.id));
         if (cancelled) return;
         if (rec?.thumbBlob) thumbUrl = URL.createObjectURL(rec.thumbBlob);
         if (rec?.blob) fullUrl = URL.createObjectURL(rec.blob);

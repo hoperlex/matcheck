@@ -1,4 +1,4 @@
-import { db, SYSTEM_SITE_ID, type MutationRecord, type ShipmentRecord } from '../lib/db';
+import { withDb, SYSTEM_SITE_ID, type MutationRecord, type ShipmentRecord } from '../lib/db';
 import type {
   Shipment,
   ShipmentKind,
@@ -18,13 +18,11 @@ const PLACEHOLDER_NOT_FILLED: Status = {
 };
 
 export async function listLocalShipments(): Promise<ShipmentRecord[]> {
-  const d = await db();
-  return d.getAll('shipments');
+  return withDb((dbi) => dbi.getAll('shipments'));
 }
 
 export async function getShipment(id: string): Promise<ShipmentRecord | undefined> {
-  const d = await db();
-  return d.get('shipments', id);
+  return withDb((dbi) => dbi.get('shipments', id));
 }
 
 export function effectiveState(r: ShipmentRecord): Shipment | null {
@@ -60,60 +58,66 @@ export function effectiveState(r: ShipmentRecord): Shipment | null {
 }
 
 export async function upsertServerSnapshot(items: Shipment[]): Promise<void> {
-  const d = await db();
-  const tx = d.transaction('shipments', 'readwrite');
-  for (const item of items) {
-    const existing = await tx.store.get(item.id);
-    if (existing) {
-      await tx.store.put({
-        ...existing,
-        server: item,
-        version: item.version,
-        lastSyncedAt: Date.now(),
-      });
-    } else {
-      await tx.store.put({
-        id: item.id,
-        server: item,
-        local: null,
-        tombstone: false,
-        version: item.version,
-        lastSyncedAt: Date.now(),
-      });
+  await withDb(async (dbi) => {
+    const tx = dbi.transaction('shipments', 'readwrite');
+    for (const item of items) {
+      const existing = await tx.store.get(item.id);
+      if (existing) {
+        await tx.store.put({
+          ...existing,
+          server: item,
+          version: item.version,
+          lastSyncedAt: Date.now(),
+        });
+      } else {
+        await tx.store.put({
+          id: item.id,
+          server: item,
+          local: null,
+          tombstone: false,
+          version: item.version,
+          lastSyncedAt: Date.now(),
+        });
+      }
     }
-  }
-  await tx.done;
+    await tx.done;
+  });
 }
 
 export async function applyLocalEdit(id: string, patch: Partial<Shipment>): Promise<void> {
-  const d = await db();
-  const existing = await d.get('shipments', id);
-  const next: ShipmentRecord = existing
-    ? { ...existing, local: { ...(existing.local ?? {}), ...patch } }
-    : {
-        id,
-        server: null,
-        local: patch,
-        tombstone: false,
-        version: 0,
-        lastSyncedAt: null,
-      };
-  await d.put('shipments', next);
+  // Чтение и запись — одной транзакцией: `withDb` повторяет колбэк на новом
+  // соединении, и разнесённые get/put повторились бы поверх чужой правки.
+  await withDb(async (dbi) => {
+    const tx = dbi.transaction('shipments', 'readwrite');
+    const existing = await tx.store.get(id);
+    const next: ShipmentRecord = existing
+      ? { ...existing, local: { ...(existing.local ?? {}), ...patch } }
+      : {
+          id,
+          server: null,
+          local: patch,
+          tombstone: false,
+          version: 0,
+          lastSyncedAt: null,
+        };
+    await tx.store.put(next);
+    await tx.done;
+  });
 }
 
 export async function markTombstone(id: string): Promise<void> {
-  const d = await db();
-  const existing = await d.get('shipments', id);
-  if (existing) {
-    await d.put('shipments', { ...existing, tombstone: true });
-  }
+  await withDb(async (dbi) => {
+    const tx = dbi.transaction('shipments', 'readwrite');
+    const existing = await tx.store.get(id);
+    if (existing) await tx.store.put({ ...existing, tombstone: true });
+    await tx.done;
+  });
 }
 
 export async function enqueueMutation(
   m: Omit<MutationRecord, 'attempts' | 'createdAt'>,
 ): Promise<void> {
-  const d = await db();
-  await d.put('mutations', { ...m, attempts: 0, createdAt: Date.now() });
+  await withDb((dbi) => dbi.put('mutations', { ...m, attempts: 0, createdAt: Date.now() }));
 }
 
 // Soft-delete операции — см. одноимённые функции в services/deliveries.ts.

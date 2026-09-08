@@ -18,9 +18,7 @@
  */
 
 import { api, ApiError, ConflictError } from './api';
-import { db, type MutationRecord } from '../lib/db';
-import type { MatcheckDB } from '../lib/db';
-import type { IDBPDatabase } from 'idb';
+import { withDb, type MutationRecord } from '../lib/db';
 import { buildUpsertPayload } from './deliveries';
 import { buildUpsertPayload as buildShipmentUpsertPayload } from './shipments';
 import { useAuthStore } from '../stores/auth';
@@ -70,76 +68,113 @@ function rememberOutcome(id: string, result: MutationResult): void {
 }
 
 export async function getMutation(id: string): Promise<MutationRecord | undefined> {
-  const d = await db();
-  return d.get('mutations', id);
+  return withDb((dbi) => dbi.get('mutations', id));
 }
 
-async function processMutation(
-  d: IDBPDatabase<MatcheckDB>,
-  m: MutationRecord,
-): Promise<MutationResult> {
-  try {
-    if (m.kind === 'delivery_upsert' || m.kind === 'shipment_upsert') {
-      const store = m.kind === 'delivery_upsert' ? 'deliveries' : 'shipments';
-      const rec = await d.get(store, m.entityId);
-      if (!rec) {
-        // Записи, ради которой ставилась мутация, в хранилище нет — отправлять
-        // нечего. Для вызывающего это отказ: молчаливым успехом такое считать
-        // нельзя, иначе правка «сохранится» в никуда.
-        await d.delete('mutations', m.id);
-        return {
-          outcome: 'terminal_error',
-          error: new Error('Черновик не найден в локальном хранилище'),
-        };
-      }
-      const payload =
-        m.kind === 'delivery_upsert'
-          ? buildUpsertPayload(rec as Parameters<typeof buildUpsertPayload>[0])
-          : buildShipmentUpsertPayload(rec as Parameters<typeof buildShipmentUpsertPayload>[0]);
-      await api.post(m.kind === 'delivery_upsert' ? '/deliveries' : '/shipments', payload);
-      const fresh = await d.get(store, m.entityId);
-      if (fresh) await d.put(store, { ...fresh, local: null });
-      await d.delete('mutations', m.id);
-      return { outcome: 'server_acked' };
-    }
-
-    if (m.kind === 'delivery_delete' || m.kind === 'shipment_delete') {
-      const store = m.kind === 'delivery_delete' ? 'deliveries' : 'shipments';
-      await api.delete(`/${store}/${m.entityId}`);
-      await d.delete(store, m.entityId);
-      await d.delete('mutations', m.id);
-      return { outcome: 'server_acked' };
-    }
-
-    return { outcome: 'server_acked' };
-  } catch (err) {
-    if (err instanceof ConflictError) {
-      await d.put('mutations', { ...m, conflictPending: true });
-      return { outcome: 'conflict', error: err };
-    }
-    if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
-      // 4xx — повтор не поможет (сломанное локальное состояние либо отказ по
-      // правам). Мутацию снимаем, но исход возвращаем как отказ.
-      await d.delete('mutations', m.id);
-      return { outcome: 'terminal_error', error: err };
-    }
-    const next = { ...m, attempts: m.attempts + 1 };
-    await d.put('mutations', next);
-    return { outcome: 'queued', error: err as Error };
+/**
+ * Исход неудачной ОТПРАВКИ. Вынесен из `processMutation`, чтобы разбор ошибки
+ * не накрывал работу с базой: см. комментарий к фазам ниже.
+ */
+async function recordSendFailure(m: MutationRecord, err: unknown): Promise<MutationResult> {
+  if (err instanceof ConflictError) {
+    await withDb((dbi) => dbi.put('mutations', { ...m, conflictPending: true }));
+    return { outcome: 'conflict', error: err };
   }
+  if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
+    // 4xx — повтор не поможет (сломанное локальное состояние либо отказ по
+    // правам). Мутацию снимаем, но исход возвращаем как отказ.
+    await withDb((dbi) => dbi.delete('mutations', m.id));
+    return { outcome: 'terminal_error', error: err };
+  }
+  await withDb((dbi) => dbi.put('mutations', { ...m, attempts: m.attempts + 1 }));
+  return { outcome: 'queued', error: err as Error };
+}
+
+/**
+ * Отправка одной мутации в ТРИ фазы: чтение из базы → один сетевой вызов →
+ * фиксация результата.
+ *
+ * Фазы разделены, потому что `withDb` повторяет свой колбэк на новом
+ * соединении, если браузер закрыл старое под нами. Сетевой вызов внутри такого
+ * колбэка ушёл бы на сервер дважды — поэтому в базу и в сеть ходим порознь.
+ *
+ * По той же причине `try/catch` накрывает ТОЛЬКО запрос. Пока он охватывал всю
+ * функцию, падение финальной записи (уже ПОСЛЕ успешного ответа сервера)
+ * разбиралось как сетевой сбой: мутация возвращалась в `queued` с ростом
+ * attempts и уходила на сервер второй раз, хотя тот её принял.
+ */
+async function processMutation(m: MutationRecord): Promise<MutationResult> {
+  const isUpsert = m.kind === 'delivery_upsert' || m.kind === 'shipment_upsert';
+  const isDelete = m.kind === 'delivery_delete' || m.kind === 'shipment_delete';
+  if (!isUpsert && !isDelete) return { outcome: 'server_acked' };
+
+  const store =
+    m.kind === 'delivery_upsert' || m.kind === 'delivery_delete' ? 'deliveries' : 'shipments';
+
+  // ── Фаза 1. Читаем то, что предстоит отправить.
+  let payload: unknown = null;
+  if (isUpsert) {
+    const rec = await withDb((dbi) => dbi.get(store, m.entityId));
+    if (!rec) {
+      // Записи, ради которой ставилась мутация, в хранилище нет — отправлять
+      // нечего. Для вызывающего это отказ: молчаливым успехом такое считать
+      // нельзя, иначе правка «сохранится» в никуда.
+      await withDb((dbi) => dbi.delete('mutations', m.id));
+      return {
+        outcome: 'terminal_error',
+        error: new Error('Черновик не найден в локальном хранилище'),
+      };
+    }
+    payload =
+      m.kind === 'delivery_upsert'
+        ? buildUpsertPayload(rec as Parameters<typeof buildUpsertPayload>[0])
+        : buildShipmentUpsertPayload(rec as Parameters<typeof buildShipmentUpsertPayload>[0]);
+  }
+
+  // ── Фаза 2. Ровно один сетевой вызов, и под catch — только он.
+  try {
+    if (isUpsert) await api.post(`/${store}`, payload);
+    else await api.delete(`/${store}/${m.entityId}`);
+  } catch (err) {
+    return await recordSendFailure(m, err);
+  }
+
+  // ── Фаза 3. Сервер принял — фиксируем это локально одной транзакцией на оба
+  // хранилища: снятие мутации и правка записи не должны расходиться. Порядок
+  // внутри неважен, транзакция атомарна.
+  try {
+    await withDb(async (dbi) => {
+      const tx = dbi.transaction([store, 'mutations'], 'readwrite');
+      if (isUpsert) {
+        const fresh = await tx.objectStore(store).get(m.entityId);
+        if (fresh) await tx.objectStore(store).put({ ...fresh, local: null });
+      } else {
+        await tx.objectStore(store).delete(m.entityId);
+      }
+      await tx.objectStore('mutations').delete(m.id);
+      await tx.done;
+    });
+  } catch (err) {
+    // Сервер запись ПРИНЯЛ — значит исход именно `server_acked`, и человеку
+    // нельзя показывать «не сохранилось». Не трогаем attempts и не переводим в
+    // `queued`: локальная неудача не повод повторять отправку. Мутация может
+    // остаться в очереди и уйти повторно — upsert на сервере идемпотентен по id.
+    return { outcome: 'server_acked', error: err as Error };
+  }
+
+  return { outcome: 'server_acked' };
 }
 
 /** Максимум повторов, после которого проход прекращается, чтобы не молотить очередь. */
 const MAX_ATTEMPTS = 6;
 
 export async function pushPendingMutations(): Promise<{ pushed: number; conflicts: number }> {
-  const d = await db();
-  const all = await d.getAll('mutations');
+  const all = await withDb((dbi) => dbi.getAll('mutations'));
   const pending = all.filter((m) => !m.conflictPending);
   let pushed = 0;
   let conflicts = 0;
   for (const m of pending) {
-    const result = await processMutation(d, m);
+    const result = await processMutation(m);
     rememberOutcome(m.id, result);
     if (result.outcome === 'server_acked') pushed += 1;
     else if (result.outcome === 'conflict') conflicts += 1;
@@ -156,8 +191,7 @@ export async function pushPendingMutations(): Promise<{ pushed: number; conflict
  */
 export async function flushMutation(mutationId: string): Promise<MutationResult> {
   return withQueueLock(async () => {
-    const d = await db();
-    const m = await d.get('mutations', mutationId);
+    const m = await withDb((dbi) => dbi.get('mutations', mutationId));
     if (!m) {
       // Очередь пуста: запись обработал предыдущий проход — берём его исход.
       // Если памяти о нём нет (другая вкладка, перезапуск), считаем принятой:
@@ -166,7 +200,7 @@ export async function flushMutation(mutationId: string): Promise<MutationResult>
     }
     if (m.conflictPending) return { outcome: 'conflict' as const };
     if (!useAuthStore.getState().accessToken) return { outcome: 'queued' as const };
-    const result = await processMutation(d, m);
+    const result = await processMutation(m);
     rememberOutcome(mutationId, result);
     return result;
   });

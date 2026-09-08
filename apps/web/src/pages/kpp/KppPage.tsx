@@ -63,7 +63,8 @@ import { describeEmptyNames } from '../../shared/utils/emptyItemNames';
 import { EditableItemName } from '../shared/EditableItemName';
 import { itemNameLock } from '../shared/itemNameLock';
 import { shouldReplaceItems } from '../shared/itemsHydration';
-import { db } from '../../lib/db';
+import { withDb } from '../../lib/db';
+import { reportPhotoCaptureError } from '../../services/photoCaptureError';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
 import { FlagChip } from '../../shared/ui/FlagChip';
@@ -377,8 +378,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     queryKey: ['source-document-offline', updIdFromUrl],
     queryFn: async (): Promise<SourceDocumentDetail> => {
       if (!updIdFromUrl) throw new Error('no upd id');
-      const dbi = await db();
-      const cached = await dbi.get('source_documents', updIdFromUrl);
+      const cached = await withDb((dbi) => dbi.get('source_documents', updIdFromUrl));
       if (cached) return cached;
       return await api.get<SourceDocumentDetail>(`/source-documents/${updIdFromUrl}`);
     },
@@ -452,8 +452,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     queryKey: ['photos-local', 'delivery', deliveryId],
     queryFn: async (): Promise<GalleryPhoto[]> => {
       if (!deliveryId) return [];
-      const dbi = await db();
-      const all = await dbi.transaction('photos').store.index('byDelivery').getAll(deliveryId);
+      const all = await withDb((dbi) =>
+        dbi.transaction('photos').store.index('byDelivery').getAll(deliveryId),
+      );
       return all
         .filter((p) => p.operationKind === 'delivery')
         .map((p) => ({
@@ -712,7 +713,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         });
         void runSync();
       } catch (err) {
-        message.error(`Не удалось добавить фото: ${(err as Error).message}`);
+        message.error(reportPhotoCaptureError(err, { operationKind: 'delivery', stage }));
       }
       return false;
     },

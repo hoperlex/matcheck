@@ -22,7 +22,10 @@ vi.mock('../../shared/hooks/usePermissions', () => ({
 // IndexedDB, очередь загрузки и сеть к предмету теста отношения не имеют:
 // проверяется, какие контролы попали в разметку, а не как грузится кадр.
 vi.mock('../../lib/db', () => ({
-  db: async () => ({ get: async () => undefined, delete: async () => undefined }),
+  // Галерея ходит в локальную базу через withDb (переоткрывает соединение,
+  // если браузер закрыл его под нами) — мокаем именно её.
+  withDb: async <T,>(fn: (dbi: unknown) => Promise<T>) =>
+    fn({ get: async () => undefined, delete: async () => undefined }),
 }));
 vi.mock('../../lib/thumbQueue', () => ({
   enqueueThumbLoad: <T,>(fn: () => Promise<T>) => fn(),

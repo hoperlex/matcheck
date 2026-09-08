@@ -317,12 +317,10 @@ export async function withDb<T>(fn: (dbi: IDBPDatabase<MatcheckDB>) => Promise<T
 }
 
 export async function getSetting<T = unknown>(key: string): Promise<T | null> {
-  const d = await db();
-  const row = await d.get('settings', key);
+  const row = await withDb((dbi) => dbi.get('settings', key));
   return (row?.value as T) ?? null;
 }
 
 export async function setSetting(key: string, value: unknown): Promise<void> {
-  const d = await db();
-  await d.put('settings', { key, value });
+  await withDb((dbi) => dbi.put('settings', { key, value }));
 }

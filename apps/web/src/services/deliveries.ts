@@ -1,4 +1,4 @@
-import { db, SYSTEM_SITE_ID, type DeliveryRecord, type MutationRecord } from '../lib/db';
+import { withDb, SYSTEM_SITE_ID, type DeliveryRecord, type MutationRecord } from '../lib/db';
 import type { Delivery, DeliveryStatusCode, DeliveryUpsert, Status } from '@matcheck/contracts';
 import { api } from './api';
 
@@ -12,13 +12,11 @@ const PLACEHOLDER_NOT_FILLED: Status = {
 };
 
 export async function listLocalDeliveries(): Promise<DeliveryRecord[]> {
-  const d = await db();
-  return d.getAll('deliveries');
+  return withDb((dbi) => dbi.getAll('deliveries'));
 }
 
 export async function getDelivery(id: string): Promise<DeliveryRecord | undefined> {
-  const d = await db();
-  return d.get('deliveries', id);
+  return withDb((dbi) => dbi.get('deliveries', id));
 }
 
 export function effectiveState(r: DeliveryRecord): Delivery | null {
@@ -55,60 +53,66 @@ export function effectiveState(r: DeliveryRecord): Delivery | null {
 }
 
 export async function upsertServerSnapshot(items: Delivery[]): Promise<void> {
-  const d = await db();
-  const tx = d.transaction('deliveries', 'readwrite');
-  for (const item of items) {
-    const existing = await tx.store.get(item.id);
-    if (existing) {
-      await tx.store.put({
-        ...existing,
-        server: item,
-        version: item.version,
-        lastSyncedAt: Date.now(),
-      });
-    } else {
-      await tx.store.put({
-        id: item.id,
-        server: item,
-        local: null,
-        tombstone: false,
-        version: item.version,
-        lastSyncedAt: Date.now(),
-      });
+  await withDb(async (dbi) => {
+    const tx = dbi.transaction('deliveries', 'readwrite');
+    for (const item of items) {
+      const existing = await tx.store.get(item.id);
+      if (existing) {
+        await tx.store.put({
+          ...existing,
+          server: item,
+          version: item.version,
+          lastSyncedAt: Date.now(),
+        });
+      } else {
+        await tx.store.put({
+          id: item.id,
+          server: item,
+          local: null,
+          tombstone: false,
+          version: item.version,
+          lastSyncedAt: Date.now(),
+        });
+      }
     }
-  }
-  await tx.done;
+    await tx.done;
+  });
 }
 
 export async function applyLocalEdit(id: string, patch: Partial<Delivery>): Promise<void> {
-  const d = await db();
-  const existing = await d.get('deliveries', id);
-  const next: DeliveryRecord = existing
-    ? { ...existing, local: { ...(existing.local ?? {}), ...patch } }
-    : {
-        id,
-        server: null,
-        local: patch,
-        tombstone: false,
-        version: 0,
-        lastSyncedAt: null,
-      };
-  await d.put('deliveries', next);
+  // Чтение и запись — одной транзакцией: `withDb` повторяет колбэк на новом
+  // соединении, и разнесённые get/put повторились бы поверх чужой правки.
+  await withDb(async (dbi) => {
+    const tx = dbi.transaction('deliveries', 'readwrite');
+    const existing = await tx.store.get(id);
+    const next: DeliveryRecord = existing
+      ? { ...existing, local: { ...(existing.local ?? {}), ...patch } }
+      : {
+          id,
+          server: null,
+          local: patch,
+          tombstone: false,
+          version: 0,
+          lastSyncedAt: null,
+        };
+    await tx.store.put(next);
+    await tx.done;
+  });
 }
 
 export async function markTombstone(id: string): Promise<void> {
-  const d = await db();
-  const existing = await d.get('deliveries', id);
-  if (existing) {
-    await d.put('deliveries', { ...existing, tombstone: true });
-  }
+  await withDb(async (dbi) => {
+    const tx = dbi.transaction('deliveries', 'readwrite');
+    const existing = await tx.store.get(id);
+    if (existing) await tx.store.put({ ...existing, tombstone: true });
+    await tx.done;
+  });
 }
 
 export async function enqueueMutation(
   m: Omit<MutationRecord, 'attempts' | 'createdAt'>,
 ): Promise<void> {
-  const d = await db();
-  await d.put('mutations', { ...m, attempts: 0, createdAt: Date.now() });
+  await withDb((dbi) => dbi.put('mutations', { ...m, attempts: 0, createdAt: Date.now() }));
 }
 
 // Soft-delete операции — обращаемся к серверу напрямую и возвращаем свежий DTO.
