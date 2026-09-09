@@ -56,7 +56,11 @@ import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/fo
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
-import { findDroppedOrigins, resolveItemOrigins } from '../domain/operations/item-origin.js';
+import {
+  findDroppedOrigins,
+  resolveItemOrigins,
+  type ExistingItemRow,
+} from '../domain/operations/item-origin.js';
 import {
   buildOperationSourceDocuments,
   SOURCE_DOCUMENT_SUMMARY_COLUMNS,
@@ -2982,6 +2986,22 @@ async function updateDelivery(
     const droppedOrigins = findDroppedOrigins({ existing: previousItems, origins });
     if (droppedOrigins.length) {
       app.log.warn({ deliveryId: id, dropped: droppedOrigins }, 'item origin dropped on upsert');
+    }
+
+    // Обратный случай: строка лежала БЕЗ привязки, и клиент её вернул. Раньше
+    // это было невозможно (пустое наследство перекрывало присланное значение),
+    // поэтому за первым выкатом стоит понаблюдать именно по этой строке лога.
+    const previouslyUnlinked = new Set<string>(
+      previousItems
+        .filter((r: ExistingItemRow) => r.sourceDocumentId === null)
+        .map((r: ExistingItemRow) => r.id),
+    );
+    const restoredOrigins = itemsForInsert.filter(
+      (item, idx) =>
+        item.clientId && previouslyUnlinked.has(item.clientId) && origins[idx]?.sourceDocumentId,
+    ).length;
+    if (restoredOrigins) {
+      app.log.info({ deliveryId: id, restored: restoredOrigins }, 'item origin restored on upsert');
     }
 
     await tx.delete(deliveryItems).where(eq(deliveryItems.deliveryId, id));

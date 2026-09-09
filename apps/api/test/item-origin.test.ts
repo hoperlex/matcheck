@@ -267,6 +267,84 @@ describe('resolveItemOrigins: ссылка на позицию документ�
   });
 });
 
+describe('resolveItemOrigins: строка, у которой привязки не было', () => {
+  it('принимает присланное происхождение, когда в БД пусто', () => {
+    // Случай приёмки 14289: строку завёл планшет без происхождения, документ к
+    // приёмке привязан. Пустое наследство не должно перекрывать шаг 3, иначе
+    // привязку такой строке не вернуть уже никогда.
+    const rows = [existing({ id: 'row-1', sourceDocumentId: null, sourceDocumentItemId: null })];
+
+    const [origin] = resolveItemOrigins({
+      existing: rows,
+      incoming: [incoming({ id: 'row-1', sourceDocumentId: DOC_A, sourceDocumentItemId: ITEM_A1 })],
+      linkedDocumentIds: [DOC_A],
+    });
+
+    expect(origin).toEqual({ sourceDocumentId: DOC_A, sourceDocumentItemId: ITEM_A1 });
+  });
+
+  it('не принимает документ, не привязанный к приёмке', () => {
+    const rows = [existing({ id: 'row-1', sourceDocumentId: null, sourceDocumentItemId: null })];
+
+    const [origin] = resolveItemOrigins({
+      existing: rows,
+      incoming: [incoming({ id: 'row-1', sourceDocumentId: DOC_B })],
+      linkedDocumentIds: [DOC_A],
+    });
+
+    expect(origin).toEqual({ sourceDocumentId: null, sourceDocumentItemId: null });
+  });
+
+  it('оставляет строку пустой, когда клиент происхождение не прислал', () => {
+    const rows = [existing({ id: 'row-1', sourceDocumentId: null, sourceDocumentItemId: null })];
+
+    const [origin] = resolveItemOrigins({
+      existing: rows,
+      incoming: [incoming({ id: 'row-1' })],
+      linkedDocumentIds: [DOC_A],
+    });
+
+    expect(origin).toEqual({ sourceDocumentId: null, sourceDocumentItemId: null });
+  });
+
+  it('непустую привязку по-прежнему не даёт переписать', () => {
+    // Обратная сторона правки: ослабло только условие «наследство пустое»,
+    // защита существующей атрибуции осталась прежней.
+    const rows = [existing({ id: 'row-1' })];
+
+    const [origin] = resolveItemOrigins({
+      existing: rows,
+      incoming: [incoming({ id: 'row-1', sourceDocumentId: DOC_B, sourceDocumentItemId: null })],
+      linkedDocumentIds: [DOC_A, DOC_B],
+    });
+
+    expect(origin).toEqual({ sourceDocumentId: DOC_A, sourceDocumentItemId: ITEM_A1 });
+  });
+
+  it('восстанавливает привязку строке с исправленной единицей измерения', () => {
+    // Единица входит в ключ запасного сопоставления, поэтому «шт» против «м³»
+    // промахивается мимо шага 2 — выручает присланное происхождение.
+    const rows = [
+      existing({ id: 'row-1', unit: 'м³', sourceDocumentId: null, sourceDocumentItemId: null }),
+    ];
+
+    const [origin] = resolveItemOrigins({
+      existing: rows,
+      incoming: [
+        incoming({
+          id: 'row-1',
+          unit: 'шт',
+          sourceDocumentId: DOC_A,
+          sourceDocumentItemId: ITEM_A1,
+        }),
+      ],
+      linkedDocumentIds: [DOC_A],
+    });
+
+    expect(origin).toEqual({ sourceDocumentId: DOC_A, sourceDocumentItemId: ITEM_A1 });
+  });
+});
+
 describe('findDroppedOrigins', () => {
   it('молчит, пока привязки сохранены', () => {
     const rows = [existing({ id: 'row-1' })];

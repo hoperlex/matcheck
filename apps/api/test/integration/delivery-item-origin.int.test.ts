@@ -290,6 +290,90 @@ suite('происхождение позиций приёмки (реальны�
     expect(after[0]!.source_document_item_id).toBe(upd.itemIds[0]);
   });
 
+  it('строка, созданная без происхождения, получает привязку следующим сохранением', async () => {
+    // Инцидент 14289: планшет создал приёмку сразу со связью на УПД, но позицию
+    // прислал без происхождения — при СОЗДАНИИ оно берётся только из запроса,
+    // поэтому в БД лёг null. Раньше такая строка оставалась без привязки
+    // навсегда: пустое наследство перекрывало присланное значение на шаге 3.
+    const upd = await makeUpd('О-5б', [{ name: 'ЦПС-С5', qty: '22' }]);
+    const deliveryId = randomUUID();
+
+    const created = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [upd.id],
+      items: [{ nameRaw: 'ЦПС-С5', qtyActual: '22', unit: 'шт', lineNo: 1 }],
+    });
+    expect(created.statusCode, created.body).toBe(200);
+
+    const before = await itemsOf(deliveryId);
+    expect(before[0]!.source_document_id).toBeNull();
+
+    const again = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [upd.id],
+      items: [
+        {
+          id: before[0]!.id,
+          nameRaw: 'ЦПС-С5',
+          qtyActual: '22',
+          // Единица исправлена относительно документа — запасное сопоставление
+          // по названию и единице такую строку не ловит.
+          unit: 'шт',
+          lineNo: 1,
+          sourceDocumentId: upd.id,
+          sourceDocumentItemId: upd.itemIds[0],
+        },
+      ],
+    });
+    expect(again.statusCode, again.body).toBe(200);
+
+    const after = await itemsOf(deliveryId);
+    expect(after[0]!.source_document_id).toBe(upd.id);
+    expect(after[0]!.source_document_item_id).toBe(upd.itemIds[0]);
+  });
+
+  it('строке без происхождения нельзя приписать непривязанный документ', async () => {
+    const mine = await makeUpd('О-5в', [{ name: 'Сетка кладочная', qty: '15' }]);
+    const foreign = await makeUpd('О-5г', [{ name: 'Сетка кладочная', qty: '15' }]);
+    const deliveryId = randomUUID();
+
+    await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [mine.id],
+      items: [{ nameRaw: 'Сетка кладочная', qtyActual: '15', unit: 'шт', lineNo: 1 }],
+    });
+    const before = await itemsOf(deliveryId);
+
+    const res = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [mine.id],
+      items: [
+        {
+          id: before[0]!.id,
+          nameRaw: 'Сетка кладочная',
+          qtyActual: '15',
+          unit: 'шт',
+          lineNo: 1,
+          sourceDocumentId: foreign.id,
+          sourceDocumentItemId: foreign.itemIds[0],
+        },
+      ],
+    });
+
+    expect(res.statusCode, res.body).toBe(200);
+    const after = await itemsOf(deliveryId);
+    expect(after[0]!.source_document_id).toBeNull();
+    expect(after[0]!.source_document_item_id).toBeNull();
+  });
+
   it('удаление строки из середины не рвёт атрибуцию соседей (портал)', async () => {
     // Портал шлёт позиции со своими id из БД и пересчитывает lineNo сплошняком
     // (KppPage.buildPatch), а происхождение не шлёт вовсе. После удаления

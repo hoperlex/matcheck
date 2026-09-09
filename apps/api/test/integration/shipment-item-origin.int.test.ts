@@ -198,6 +198,47 @@ suite('происхождение позиций отгрузки (реальн�
     expect(items[0]!.source_document_item_id).toBe(upd.itemIds[0]);
   });
 
+  it('строка, созданная без происхождения, получает привязку следующим сохранением', async () => {
+    // Зеркало сценария приёмки 14289: при создании происхождение берётся только
+    // из запроса, поэтому строка ложится с null. Раньше вернуть ей привязку
+    // было нельзя уже никогда — пустое наследство перекрывало присланное.
+    const upd = await makeUpd('ОО-1а', [{ name: 'ЦПС-С5', qty: '22', unit: 'м³' }]);
+    const shipmentId = randomUUID();
+
+    const created = await upsert(
+      shipmentBody(shipmentId, {
+        sourceDocumentIds: [upd.id],
+        items: [{ nameRaw: 'ЦПС-С5', qtyActual: '22', unit: 'шт', lineNo: 1 }],
+      }),
+    );
+    expect(created.statusCode, created.body).toBe(200);
+
+    const before = await itemsOf(shipmentId);
+    expect(before[0]!.source_document_id).toBeNull();
+
+    const again = await upsert(
+      shipmentBody(shipmentId, {
+        sourceDocumentIds: [upd.id],
+        items: [
+          {
+            id: before[0]!.id,
+            nameRaw: 'ЦПС-С5',
+            qtyActual: '22',
+            unit: 'шт',
+            lineNo: 1,
+            sourceDocumentId: upd.id,
+            sourceDocumentItemId: upd.itemIds[0],
+          },
+        ],
+      }),
+    );
+    expect(again.statusCode, again.body).toBe(200);
+
+    const after = await itemsOf(shipmentId);
+    expect(after[0]!.source_document_id).toBe(upd.id);
+    expect(after[0]!.source_document_item_id).toBe(upd.itemIds[0]);
+  });
+
   it('одинаковые позиции двух УПД дают две строки', async () => {
     // Дедуп шёл по всей отгрузке: одинаковая строка второй УПД молча
     // пропадала, и отгрузка занижалась ровно на неё.
