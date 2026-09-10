@@ -32,6 +32,7 @@ import { Jimp } from 'jimp';
 // Рендер PDF живёт в общем модуле: тем же кодом, DPI и таймаутами страницы
 // готовит сборка логических УПД (worker: upd_assembly).
 import { CLASSIFY_DPI, renderPdf } from './page-render.js';
+import { llmFetchWithOverloadRetry } from '../llm/overload-retry.js';
 
 // Сколько страниц максимум рендерим/классифицируем. Защита от аномального
 // PDF на сотню страниц: УПД-пакеты реально 1-8 страниц. Если УПД-страница
@@ -339,17 +340,24 @@ export async function classifyPages(args: ClassifyArgs): Promise<ClassifyResult>
   };
 
   const url = `${args.apiBaseUrl.replace(/\/$/, '')}/chat/completions`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${args.apiKey}`,
-      'HTTP-Referer': 'https://matcheck.local',
-      'X-Title': 'matcheck',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(CLASSIFY_TIMEOUT_MS),
-  });
+  // Перегрузка ОБЩЕЙ очереди прокси не должна ронять сборку пакета: один ответ
+  // «queue_full»/502 откатывал её целиком, и пакет из пяти УПД становился одной
+  // карточкой со списком номеров (приёмка 14601, 10.09.2026). Успешный ответ и
+  // любой ответ по существу проходят помощник насквозь — ветка `!res.ok` ниже
+  // остаётся прежней.
+  const res = await llmFetchWithOverloadRetry(() =>
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${args.apiKey}`,
+        'HTTP-Referer': 'https://matcheck.local',
+        'X-Title': 'matcheck',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(CLASSIFY_TIMEOUT_MS),
+    }),
+  );
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`page-classify HTTP ${res.status}: ${text.slice(0, 300)}`);

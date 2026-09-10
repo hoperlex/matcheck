@@ -4639,6 +4639,7 @@ export async function handleUpdAssemblyJob(
         generation,
         bundleGeneration,
         reason: 'в реестре нет файлов сборки',
+        kind: 'planned',
         log,
       });
       return;
@@ -4665,6 +4666,7 @@ export async function handleUpdAssemblyJob(
         generation,
         bundleGeneration,
         reason: 'провайдер классификации недоступен',
+        kind: 'technical',
         log,
       });
       return;
@@ -4679,6 +4681,7 @@ export async function handleUpdAssemblyJob(
         generation,
         bundleGeneration,
         reason: `не удалось подготовить страницы: ${err instanceof Error ? err.message : String(err)}`,
+        kind: 'technical',
         log,
       });
       return;
@@ -4758,6 +4761,7 @@ export async function handleUpdAssemblyJob(
         generation,
         bundleGeneration,
         reason: `классификация страниц не удалась: ${err instanceof Error ? err.message : String(err)}`,
+        kind: 'technical',
         log,
       });
       return;
@@ -4844,6 +4848,7 @@ export async function handleUpdAssemblyJob(
         generation,
         bundleGeneration,
         reason: `нарезке нельзя доверять: ${plan.reasons.join('; ')}`,
+        kind: 'planned',
         log,
       });
       return;
@@ -5717,6 +5722,7 @@ export async function tryFinalizeUpdAssembly(
       generation,
       bundleGeneration: sub?.generation,
       reason: decision.reason,
+      kind: 'planned',
       log,
     });
     return;
@@ -5745,9 +5751,20 @@ async function rollbackUpdAssembly(args: {
   generation: number;
   bundleGeneration?: number;
   reason: string;
+  /**
+   * Почему откатываем. `planned` — сборка сама решила, что нарезке доверять
+   * нельзя (чужие страницы, неуверенный сегмент): результат правильный, пакет
+   * штатно уходит в «файл = документ». `technical` — авария снаружи
+   * (перегруженная очередь прокси, 5xx, таймаут): нарезка могла бы удаться, и
+   * пакет из нескольких УПД становится одной карточкой по чужой вине.
+   *
+   * Разделение нужно для наблюдения: за 7 дней из 161 отката техническими были
+   * 5, и именно они дают жалобы вида «все УПД в одной карточке» (14601).
+   */
+  kind: 'planned' | 'technical';
   log: WorkerLog;
 }): Promise<void> {
-  const { rootId, subBundleId, bundleGeneration, generation, reason, log } = args;
+  const { rootId, subBundleId, bundleGeneration, generation, reason, kind, log } = args;
 
   // Опубликованное поколение не откатываем НИКОГДА. Ниже идёт hard DELETE
   // документов сегментов без записи в entity_deletions — это осознанно, но
@@ -5781,7 +5798,7 @@ async function rollbackUpdAssembly(args: {
     bundleId: rootId,
     generation,
     evidenceType: 'assembly_rollback',
-    payload: { subBundleId, bundleGeneration: bundleGeneration ?? null, reason },
+    payload: { subBundleId, bundleGeneration: bundleGeneration ?? null, reason, kind },
   });
 
   // 1. Снимаем манифест и технические документы. Задания сегментов, ещё не
@@ -6783,6 +6800,7 @@ worker.on('failed', async (job, err) => {
           generation: job.data.generation,
           bundleGeneration: job.data.bundleGeneration ?? 0,
           reason: `задание сборки не выполнилось: ${err.message}`,
+          kind: 'technical',
           log: logger,
         });
       }
