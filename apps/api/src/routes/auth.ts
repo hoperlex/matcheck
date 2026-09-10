@@ -1,6 +1,7 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { eq, and, ne, isNull, sql } from 'drizzle-orm';
 import { asZod } from '../lib/fastify.js';
+import { isMobileClient } from '../lib/client-type.js';
 import {
   ChangePasswordRequestSchema,
   LoginRequestSchema,
@@ -99,9 +100,10 @@ async function registerLoginFailure(app: FastifyInstance, userId: string): Promi
 // Mobile-клиенты (Android/iOS) не могут хранить HttpOnly-cookie между запросами,
 // поэтому при заголовке X-Client-Type: mobile отдаём refresh-token в теле ответа
 // и не ставим cookies. Веб остаётся на cookie-flow без изменений.
-function isMobileClient(req: FastifyRequest): boolean {
-  return req.headers['x-client-type'] === 'mobile';
-}
+//
+// Само определение переехало в lib/client-type.ts: теперь по нему различает
+// клиентов не только авторизация (см. восстановление единицы измерения в
+// routes/deliveries.ts).
 
 function refreshExpiresInSeconds(expiresAt: Date): number {
   return Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000));

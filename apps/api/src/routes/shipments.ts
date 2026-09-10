@@ -61,6 +61,8 @@ import {
   resolveItemOrigins,
   type ExistingItemRow,
 } from '../domain/operations/item-origin.js';
+import { decideUnitsFromDocument, type DocumentItemUnit } from '../domain/operations/item-units.js';
+import { isMobileClient } from '../lib/client-type.js';
 import {
   buildOperationSourceDocuments,
   SOURCE_DOCUMENT_SUMMARY_COLUMNS,
@@ -1258,7 +1260,14 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             // приходит с уже сгенерированным UUID, поэтому create/edit решает
             // наличие строки в БД, а не наличие input.id.
             await assertPermission(req, 'operations.shipments', 'create');
-            await createShipment(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
+            await createShipment(
+              app,
+              input,
+              statusId,
+              inspectorId,
+              req.user?.sessionId ?? null,
+              unitModeFor(req, input.statusCode),
+            );
           } else {
             await assertPermission(req, 'operations.shipments', 'edit');
             // Инспектор редактирует только записи СВОЕГО объекта. Раньше проверки
@@ -1295,6 +1304,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
               // Для инспектора апдейт идёт с условием по объекту — чтобы между
               // чтением existing и UPDATE менеджер не успел перенести запись.
               req.user?.role === 'inspector_kpp' ? existing.siteId : null,
+              unitModeFor(req, input.statusCode),
             );
           }
           if (input.kind === 'transfer') {
@@ -1318,6 +1328,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           statusId,
           inspectorId,
           req.user?.sessionId ?? null,
+          unitModeFor(req, input.statusCode),
         );
         if (input.kind === 'transfer') {
           await syncPairedTransferDelivery(app, created.id);
@@ -2419,6 +2430,19 @@ function validateKindLinks(input: z.infer<typeof ShipmentUpsertSchema>): KindLin
   return null;
 }
 
+/**
+ * Режим восстановления единицы измерения для ЭТОГО запроса — зеркало
+ * unitModeFor в deliveries.ts: только планшет, только финализация.
+ */
+function unitModeFor(
+  req: { headers: Record<string, unknown> },
+  statusCode: string,
+): 'off' | 'shadow' | 'on' {
+  if (!isMobileClient(req as Parameters<typeof isMobileClient>[0])) return 'off';
+  if (statusCode !== 'confirmed_mol') return 'off';
+  return loadEnv().UNIT_FROM_DOCUMENT;
+}
+
 async function createShipment(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   app: any,
@@ -2427,6 +2451,8 @@ async function createShipment(
   inspectorId: string | null,
   /** Устройство, заведшее запись — см. одноимённый параметр createDelivery. */
   createdBySessionId: string | null = null,
+  /** Режим восстановления единицы измерения — см. createDelivery. */
+  unitMode: 'off' | 'shadow' | 'on' = 'off',
 ) {
   // «Ручной вынос» на мобиле — зеркало «Ручного внеса» для приёмок: инспектор
   // создаёт отгрузку сразу со статусом confirmed_mol (без выбора УПД, минуя
@@ -2487,9 +2513,44 @@ async function createShipment(
       // отгрузки, — документ должен быть в её наборе связей (симметрично
       // createDelivery).
       const linkedOnCreate = new Set(input.sourceDocumentIds);
+      // Единица измерения: зеркало createDelivery. Отгрузки теряют её тем же
+      // способом (DispatchStage2FormViewModel собирает позиции без unit), просто
+      // в данных это пока не проявлено — привязанных к документам строк там нет.
+      const originsOnCreate = input.items.map((i) =>
+        i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
+          ? {
+              sourceDocumentId: i.sourceDocumentId,
+              sourceDocumentItemId: i.sourceDocumentItemId ?? null,
+            }
+          : { sourceDocumentId: null, sourceDocumentItemId: null },
+      );
+      const unitDecisions = await decideUnitsFromDocument({
+        mode: unitMode,
+        incoming: input.items.map((i) => ({ unit: i.unit })),
+        origins: originsOnCreate,
+        linkedDocumentIds: [...linkedOnCreate],
+        loadDocumentItems: async (ids) =>
+          (await tx
+            .select({
+              id: sourceDocumentItems.id,
+              sourceDocumentId: sourceDocumentItems.sourceDocumentId,
+              unit: sourceDocumentItems.unit,
+            })
+            .from(sourceDocumentItems)
+            .where(inArray(sourceDocumentItems.id, [...ids]))) as DocumentItemUnit[],
+      });
+      if (unitDecisions.length) {
+        app.log.info(
+          { shipmentId: created.id, mode: unitMode, restored: unitDecisions.length },
+          'unit restored from document',
+        );
+      }
+      const unitByIndex =
+        unitMode === 'on' ? new Map(unitDecisions.map((d) => [d.index, d.unit])) : new Map();
       await tx.insert(shipmentItems).values(
-        input.items.map((i) => ({
+        input.items.map((i, idx) => ({
           shipmentId: created.id,
+          unit: unitByIndex.get(idx) ?? i.unit,
           sourceDocumentId:
             i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
               ? i.sourceDocumentId
@@ -2506,7 +2567,6 @@ async function createShipment(
           nameRaw: i.nameRaw,
           qtyPlanned: i.qtyPlanned ?? null,
           qtyActual: i.qtyActual ?? null,
-          unit: i.unit,
           comment: i.comment ?? null,
           lineNo: i.lineNo,
           volumeM3: i.volumeM3 ?? null,
@@ -2560,6 +2620,8 @@ async function updateShipment(
    * Ноль задетых строк → [ForeignSiteError] и откат транзакции.
    */
   expectedSiteId: string | null = null,
+  /** Режим восстановления единицы измерения — см. updateDelivery. */
+  unitMode: 'off' | 'shadow' | 'on' = 'off',
 ) {
   const id = existing.id;
   // Защита от downgrade жизненного статуса. См. status-guard.ts:
@@ -2742,12 +2804,38 @@ async function updateShipment(
       app.log.info({ shipmentId: id, restored: restoredOrigins }, 'item origin restored on upsert');
     }
 
+    // Единица измерения — зеркало updateDelivery (см. item-units.ts).
+    const unitDecisions = await decideUnitsFromDocument({
+      mode: unitMode,
+      incoming: itemsForInsert.map((i) => ({ unit: i.unit })),
+      origins,
+      linkedDocumentIds,
+      loadDocumentItems: async (ids) =>
+        (await tx
+          .select({
+            id: sourceDocumentItems.id,
+            sourceDocumentId: sourceDocumentItems.sourceDocumentId,
+            unit: sourceDocumentItems.unit,
+          })
+          .from(sourceDocumentItems)
+          .where(inArray(sourceDocumentItems.id, [...ids]))) as DocumentItemUnit[],
+    });
+    if (unitDecisions.length) {
+      app.log.info(
+        { shipmentId: id, mode: unitMode, restored: unitDecisions.length },
+        'unit restored from document',
+      );
+    }
+    const unitByIndex =
+      unitMode === 'on' ? new Map(unitDecisions.map((d) => [d.index, d.unit])) : new Map();
+
     await tx.delete(shipmentItems).where(eq(shipmentItems.shipmentId, id));
     if (itemsForInsert.length) {
       await tx.insert(shipmentItems).values(
         itemsForInsert.map(({ clientId: _clientId, ...i }, idx) => ({
           ...i,
           shipmentId: id,
+          unit: unitByIndex.get(idx) ?? i.unit,
           sourceDocumentId: origins[idx]?.sourceDocumentId ?? null,
           sourceDocumentItemId: origins[idx]?.sourceDocumentItemId ?? null,
         })),

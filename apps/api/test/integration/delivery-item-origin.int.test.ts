@@ -14,7 +14,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 import postgres from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { deliveryRoutes } from '../../src/routes/deliveries.js';
 import {
   deliveries,
@@ -28,6 +28,17 @@ import {
   users,
 } from '../../src/db/schema.js';
 import type { AuthUser } from '../../src/plugins/auth.js';
+
+// Восстановление единицы измерения проверяется здесь же: инфраструктура та же,
+// а на тесты происхождения флаг не влияет — они не шлют X-Client-Type, и режим
+// для них остаётся 'off'.
+//
+// vi.hoisted, а не обычное присваивание: loadEnv кеширует разбор окружения при
+// ПЕРВОМ обращении, а его делают модули верхнего уровня (db/client, s3.signer и
+// другие) прямо во время импорта — то есть раньше тела файла.
+vi.hoisted(() => {
+  process.env.UNIT_FROM_DOCUMENT = 'on';
+});
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const suite = TEST_DATABASE_URL ? describe : describe.skip;
@@ -173,8 +184,12 @@ suite('происхождение позиций приёмки (реальны�
     ok: false,
   });
 
-  const upsert = (body: Record<string, unknown>) =>
-    app.inject({ method: 'POST', url: '/api/v1/deliveries', payload: body });
+  const upsert = (body: Record<string, unknown>, headers?: Record<string, string>) =>
+    app.inject({ method: 'POST', url: '/api/v1/deliveries', payload: body, headers });
+
+  /** Запрос «как с планшета»: заголовок ставит AuthHeaderInterceptor. */
+  const upsertFromTablet = (body: Record<string, unknown>) =>
+    upsert(body, { 'x-client-type': 'mobile' });
 
   const link = (deliveryId: string, sourceDocumentId: string) =>
     app.inject({
@@ -1335,5 +1350,194 @@ suite('происхождение позиций приёмки (реальны�
 
     const single = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
     expect((single.json() as { docAttention?: boolean }).docAttention).toBe(false);
+  });
+  describe('единица измерения восстанавливается из документа', () => {
+    /** Единицы строк приёмки по порядку. */
+    async function unitsOf(deliveryId: string): Promise<string[]> {
+      const rows = await sql<{ unit: string }[]>`
+        SELECT unit FROM delivery_items WHERE delivery_id = ${deliveryId} ORDER BY line_no`;
+      return rows.map((r) => r.unit);
+    }
+
+    const itemFromDoc = (
+      upd: { id: string; itemIds: string[] },
+      over: Record<string, unknown> = {},
+    ) => ({
+      nameRaw: 'Плиты минераловатные',
+      qtyActual: '30',
+      unit: 'шт',
+      lineNo: 1,
+      sourceDocumentId: upd.id,
+      sourceDocumentItemId: upd.itemIds[0],
+      ...over,
+    });
+
+    it('планшет прислал «шт» на финализации — берём единицу документа', async () => {
+      // Ровно потеря Stage2FormViewModel: форма знает «м³», а в запрос уезжает «шт».
+      const upd = await makeUpd('ЕД-1', [{ name: 'Плиты минераловатные', qty: '30', unit: 'м³' }]);
+      const deliveryId = randomUUID();
+      await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'filled',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: [itemFromDoc(upd)],
+      });
+
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: [itemFromDoc(upd)],
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await unitsOf(deliveryId)).toEqual(['м³']);
+    });
+
+    it('оба этапа офлайн: приёмка впервые приезжает как confirmed_mol', async () => {
+      // Очередь мутаций схлопывает upsert'ы в последний, поэтому строки в БД ещё
+      // нет и ветка create обязана уметь то же, что update.
+      const upd = await makeUpd('ЕД-2', [{ name: 'Кабель', qty: '84', unit: 'м' }]);
+      const deliveryId = randomUUID();
+
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: [itemFromDoc(upd, { nameRaw: 'Кабель', qtyActual: '84' })],
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await unitsOf(deliveryId)).toEqual(['м']);
+    });
+
+    it('запрос без поля unit — так шлёт старый APK', async () => {
+      const upd = await makeUpd('ЕД-3', [{ name: 'Гайка', qty: '70', unit: 'кг' }]);
+      const deliveryId = randomUUID();
+      const { unit: _unit, ...withoutUnit } = itemFromDoc(upd, {
+        nameRaw: 'Гайка',
+        qtyActual: '70',
+      });
+
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: [withoutUnit],
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await unitsOf(deliveryId)).toEqual(['кг']);
+    });
+
+    it('портал сохраняет осознанное «шт»: там единицу выбирают руками', async () => {
+      const upd = await makeUpd('ЕД-4', [{ name: 'Шайба', qty: '75', unit: 'кг' }]);
+      const deliveryId = randomUUID();
+
+      const res = await upsert({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: [itemFromDoc(upd, { nameRaw: 'Шайба', qtyActual: '75' })],
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await unitsOf(deliveryId)).toEqual(['шт']);
+    });
+
+    it('осознанную единицу планшета не трогаем', async () => {
+      const upd = await makeUpd('ЕД-5', [{ name: 'Труба', qty: '12', unit: 'м' }]);
+      const deliveryId = randomUUID();
+
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: [itemFromDoc(upd, { nameRaw: 'Труба', qtyActual: '12', unit: 'пог.м' })],
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await unitsOf(deliveryId)).toEqual(['пог.м']);
+    });
+
+    it('до финализации ничего не подменяем', async () => {
+      const upd = await makeUpd('ЕД-6', [{ name: 'Профиль', qty: '5', unit: 'м' }]);
+      const deliveryId = randomUUID();
+
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'filled',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: [itemFromDoc(upd, { nameRaw: 'Профиль', qtyActual: '5' })],
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await unitsOf(deliveryId)).toEqual(['шт']);
+    });
+
+    it('строка чужого документа не даёт единицу', async () => {
+      // Происхождение указывает на свой документ, а ссылка на строку — на чужой:
+      // в схеме это два независимых FK, и согласованность не гарантирована.
+      const mine = await makeUpd('ЕД-7', [{ name: 'Уголок', qty: '3', unit: 'шт' }]);
+      const foreign = await makeUpd('ЕД-8', [{ name: 'Уголок', qty: '3', unit: 'т' }]);
+      const deliveryId = randomUUID();
+
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        sourceDocumentIds: [mine.id],
+        items: [
+          itemFromDoc(mine, {
+            nameRaw: 'Уголок',
+            qtyActual: '3',
+            sourceDocumentItemId: foreign.itemIds[0],
+          }),
+        ],
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await unitsOf(deliveryId)).toEqual(['шт']);
+    });
+
+    it('отвязанный документ единицу не отдаёт', async () => {
+      const upd = await makeUpd('ЕД-9', [{ name: 'Сетка', qty: '15', unit: 'м2' }]);
+      const deliveryId = randomUUID();
+      await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'filled',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: [itemFromDoc(upd, { nameRaw: 'Сетка', qtyActual: '15' })],
+      });
+      expect((await unlink(deliveryId, upd.id)).statusCode).toBe(200);
+
+      const before = await itemsOf(deliveryId);
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        sourceDocumentIds: [],
+        items: [
+          {
+            id: before[0]!.id,
+            nameRaw: 'Сетка',
+            qtyActual: '15',
+            unit: 'шт',
+            lineNo: 1,
+          },
+        ],
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await unitsOf(deliveryId)).toEqual(['шт']);
+    });
   });
 });

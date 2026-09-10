@@ -61,6 +61,8 @@ import {
   resolveItemOrigins,
   type ExistingItemRow,
 } from '../domain/operations/item-origin.js';
+import { decideUnitsFromDocument, type DocumentItemUnit } from '../domain/operations/item-units.js';
+import { isMobileClient } from '../lib/client-type.js';
 import {
   buildOperationSourceDocuments,
   SOURCE_DOCUMENT_SUMMARY_COLUMNS,
@@ -1192,7 +1194,14 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             // запись с планшета всегда приходит с уже сгенерированным UUID,
             // поэтому решает наличие строки в БД.
             await assertPermission(req, 'operations.deliveries', 'create');
-            await createDelivery(app, input, statusId, inspectorId, req.user?.sessionId ?? null);
+            await createDelivery(
+              app,
+              input,
+              statusId,
+              inspectorId,
+              req.user?.sessionId ?? null,
+              unitModeFor(req, input.statusCode),
+            );
           } else {
             await assertPermission(req, 'operations.deliveries', 'edit');
             // Инспектор редактирует только записи СВОЕГО объекта. Раньше проверки
@@ -1230,6 +1239,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               // Для инспектора апдейт идёт с условием по объекту — чтобы между
               // чтением existing и UPDATE менеджер не успел перенести запись.
               req.user?.role === 'inspector_kpp' ? existing.siteId : null,
+              unitModeFor(req, input.statusCode),
             );
           }
           const dto = await buildDeliveryDto(app, input.id, req.user?.role);
@@ -1250,6 +1260,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           statusId,
           inspectorId,
           req.user?.sessionId ?? null,
+          unitModeFor(req, input.statusCode),
         );
         const dto = await buildDeliveryDto(app, created.id, req.user?.role);
         if (!dto) throw new Error('Delivery missing after create');
@@ -2675,6 +2686,24 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
   );
 }
 
+/**
+ * Режим восстановления единицы измерения ДЛЯ ЭТОГО ЗАПРОСА.
+ *
+ * Правило включается там и только там, где единица заведомо потеряна клиентом:
+ * планшет на финализации 2 Этапа собирает позиции без неё, и в запрос уезжает
+ * «шт». Портал единицу показывает и даёт выбрать руками (UnitSelect в
+ * KppPage), поэтому его «шт» — осознанный ввод менеджера, и подменять его
+ * нельзя. Статус `confirmed_mol` отсекает всё, кроме самой финализации.
+ */
+function unitModeFor(
+  req: { headers: Record<string, unknown> },
+  statusCode: string,
+): 'off' | 'shadow' | 'on' {
+  if (!isMobileClient(req as Parameters<typeof isMobileClient>[0])) return 'off';
+  if (statusCode !== 'confirmed_mol') return 'off';
+  return loadEnv().UNIT_FROM_DOCUMENT;
+}
+
 async function createDelivery(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   app: any,
@@ -2688,6 +2717,11 @@ async function createDelivery(
    * сессии нет (парная transfer-приёмка, серверные сценарии).
    */
   createdBySessionId: string | null = null,
+  /**
+   * Режим восстановления единицы измерения из документа — см. одноимённый
+   * параметр updateDelivery и domain/operations/item-units.ts.
+   */
+  unitMode: 'off' | 'shadow' | 'on' = 'off',
 ) {
   // «Ручной внос» на мобиле: инспектор создаёт приёмку сразу со статусом
   // confirmed_mol (без выбора УПД, минуя 1-2 этап). В этом случае
@@ -2748,17 +2782,47 @@ async function createDelivery(
       // нет, переносить нечего. Ограничение то же, что и дальше по жизни
       // приёмки, — документ должен быть в её наборе связей.
       const linkedOnCreate = new Set(input.sourceDocumentIds);
+      // Происхождение считаем ОДИН раз и переиспользуем: по нему же решается,
+      // восстанавливать ли единицу измерения. Приёмка, оба этапа которой прошли
+      // офлайн, впервые приезжает сюда уже как confirmed_mol — очередь мутаций
+      // на планшете схлопывает upsert'ы в последний, — поэтому ветка создания
+      // обязана уметь то же, что и updateDelivery.
+      const originsOnCreate = input.items.map((i) =>
+        i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
+          ? {
+              sourceDocumentId: i.sourceDocumentId,
+              sourceDocumentItemId: i.sourceDocumentItemId ?? null,
+            }
+          : { sourceDocumentId: null, sourceDocumentItemId: null },
+      );
+      const unitDecisions = await decideUnitsFromDocument({
+        mode: unitMode,
+        incoming: input.items.map((i) => ({ unit: i.unit })),
+        origins: originsOnCreate,
+        linkedDocumentIds: [...linkedOnCreate],
+        loadDocumentItems: async (ids) =>
+          (await tx
+            .select({
+              id: sourceDocumentItems.id,
+              sourceDocumentId: sourceDocumentItems.sourceDocumentId,
+              unit: sourceDocumentItems.unit,
+            })
+            .from(sourceDocumentItems)
+            .where(inArray(sourceDocumentItems.id, [...ids]))) as DocumentItemUnit[],
+      });
+      if (unitDecisions.length) {
+        app.log.info(
+          { deliveryId: created.id, mode: unitMode, restored: unitDecisions.length },
+          'unit restored from document',
+        );
+      }
+      const unitByIndex =
+        unitMode === 'on' ? new Map(unitDecisions.map((d) => [d.index, d.unit])) : new Map();
       await tx.insert(deliveryItems).values(
-        input.items.map((i) => ({
+        input.items.map((i, idx) => ({
           deliveryId: created.id,
-          sourceDocumentId:
-            i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
-              ? i.sourceDocumentId
-              : null,
-          sourceDocumentItemId:
-            i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
-              ? (i.sourceDocumentItemId ?? null)
-              : null,
+          sourceDocumentId: originsOnCreate[idx]?.sourceDocumentId ?? null,
+          sourceDocumentItemId: originsOnCreate[idx]?.sourceDocumentItemId ?? null,
           itemKind: i.itemKind,
           materialId: i.itemKind === 'asset' ? null : (i.materialId ?? null),
           assetId: i.itemKind === 'asset' ? (i.assetId ?? null) : null,
@@ -2767,7 +2831,7 @@ async function createDelivery(
           nameRaw: i.nameRaw,
           qtyPlanned: i.qtyPlanned ?? null,
           qtyActual: i.qtyActual ?? null,
-          unit: i.unit,
+          unit: unitByIndex.get(idx) ?? i.unit,
           comment: i.comment ?? null,
           lineNo: i.lineNo,
           volumeM3: i.volumeM3 ?? null,
@@ -2823,6 +2887,12 @@ async function updateDelivery(
    * Ноль задетых строк → [ForeignSiteError] и откат транзакции.
    */
   expectedSiteId: string | null = null,
+  /**
+   * Режим восстановления единицы измерения из документа. Вычисляется в
+   * маршруте: правило применимо только к запросам планшета на confirmed_mol
+   * (см. domain/operations/item-units.ts и UNIT_FROM_DOCUMENT в env).
+   */
+  unitMode: 'off' | 'shadow' | 'on' = 'off',
 ) {
   const id = existing.id;
   // Защита от downgrade жизненного статуса. См. status-guard.ts:
@@ -3004,12 +3074,41 @@ async function updateDelivery(
       app.log.info({ deliveryId: id, restored: restoredOrigins }, 'item origin restored on upsert');
     }
 
+    // Единица измерения: планшет теряет её на финализации 2 Этапа, подставляя
+    // «шт» вместо документной (см. domain/operations/item-units.ts). Решение
+    // считается по подтверждённой привязке, а не по присланным полям.
+    const unitDecisions = await decideUnitsFromDocument({
+      mode: unitMode,
+      incoming: itemsForInsert.map((i) => ({ unit: i.unit })),
+      origins,
+      linkedDocumentIds,
+      loadDocumentItems: async (ids) =>
+        (await tx
+          .select({
+            id: sourceDocumentItems.id,
+            sourceDocumentId: sourceDocumentItems.sourceDocumentId,
+            unit: sourceDocumentItems.unit,
+          })
+          .from(sourceDocumentItems)
+          .where(inArray(sourceDocumentItems.id, [...ids]))) as DocumentItemUnit[],
+    });
+    if (unitDecisions.length) {
+      app.log.info(
+        { deliveryId: id, mode: unitMode, restored: unitDecisions.length },
+        'unit restored from document',
+      );
+    }
+    // В shadow решение только посчитано и записано в лог — данные прежние.
+    const unitByIndex =
+      unitMode === 'on' ? new Map(unitDecisions.map((d) => [d.index, d.unit])) : new Map();
+
     await tx.delete(deliveryItems).where(eq(deliveryItems.deliveryId, id));
     if (itemsForInsert.length) {
       await tx.insert(deliveryItems).values(
         itemsForInsert.map(({ clientId: _clientId, ...i }, idx) => ({
           ...i,
           deliveryId: id,
+          unit: unitByIndex.get(idx) ?? i.unit,
           sourceDocumentId: origins[idx]?.sourceDocumentId ?? null,
           sourceDocumentItemId: origins[idx]?.sourceDocumentItemId ?? null,
         })),
