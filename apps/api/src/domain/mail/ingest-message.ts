@@ -19,6 +19,7 @@ import type { ParsedMail } from 'mailparser';
 import type { Db } from '../../db/client.js';
 import { mailAttachments, mailMessages } from '../../db/schema.js';
 import { matchSite, type SiteMatch, type SiteRef } from '../sourceDocuments/siteHint.js';
+import { sanitizeFilenameForKey } from '../storage/s3.path.js';
 import {
   classifyAttachment,
   DEFAULT_ATTACHMENT_LIMITS,
@@ -82,7 +83,11 @@ export function buildMailAttachmentKey(
   idx: number,
   filename: string | null | undefined,
 ): string {
-  return `mail/${p.accountId}/${p.uidValidity}/${p.uid}/att-${idx + 1}-${safeName(filename, idx)}`;
+  // Ключ собирается здесь, мимо buildS3Key, поэтому фильтр опасных символов
+  // зовём явно: вложение «счёт + акт.pdf» иначе не легло бы в бакет вовсе
+  // (см. FILENAME_UNSAFE_IN_KEY).
+  const name = sanitizeFilenameForKey(safeName(filename, idx));
+  return `mail/${p.accountId}/${p.uidValidity}/${p.uid}/att-${idx + 1}-${name}`;
 }
 
 export async function ingestLetter(

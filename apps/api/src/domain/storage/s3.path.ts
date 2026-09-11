@@ -89,11 +89,48 @@ function counterpartyKey(input: S3PathInput): string {
 }
 
 /**
- * Формирует полный S3-ключ. Все сегменты ASCII, безопасные для AWS S3.
+ * Символы, из-за которых S3-ключ в базе и реально лежащий в бакете объект
+ * расходятся. Заменяются на `_` — и только в ключе: имя файла, которое видят
+ * поставщик и менеджер, остаётся прежним.
+ *
+ * `+` — главный виновник. Перед подписью запроса aws4fetch прогоняет путь через
+ * `decodeURIComponent(pathname.replace(/\+/g, ' '))`, то есть подписывает
+ * `B%20.png`, тогда как в сеть уходит `B+.png`; S3 отвечает
+ * `403 SignatureDoesNotMatch`, и файл не грузится ВООБЩЕ. Ретрай не помогает:
+ * это не сбой сети, а неверная подпись.
+ *
+ * `%` — тот же `decodeURIComponent` либо бросит на неполной паре, либо
+ * развернёт `%XX` в другой символ.
+ *
+ * `?` и `#` — `new URL()` уводит хвост имени в query и fragment, и ключ молча
+ * обрезается: в базе лежит одно, в бакете — другое.
+ *
+ * Остальное не трогаем намеренно: кириллица, пробелы, скобки и `№` проходят
+ * подпись без искажений — это подтверждают 4273 успешно загруженных файла.
+ */
+const FILENAME_UNSAFE_IN_KEY = /[+%?#]/g;
+
+/**
+ * Имя файла, пригодное для S3-КЛЮЧА. Для показа человеку не годится — там
+ * нужно исходное имя.
+ */
+export function sanitizeFilenameForKey(filename: string): string {
+  return filename.replace(FILENAME_UNSAFE_IN_KEY, '_');
+}
+
+/**
+ * Формирует полный S3-ключ.
+ *
+ * Сегменты объекта и контрагента — ASCII (sanitizeKey/slugify), а вот имя файла
+ * ASCII НЕ становится: кириллицу в нём сохраняем сознательно, иначе ключ
+ * перестанет читаться глазами. Снимаются только символы, ломающие подпись
+ * запроса, — см. FILENAME_UNSAFE_IN_KEY.
  */
 export function buildS3Key(input: S3PathInput): string {
   const siteCode = sanitizeKey(input.site?.code ?? null);
   const cp = counterpartyKey(input);
-  const filename = input.filename.replace(/\.+/g, '.').replace(/^\/+|\/+$/g, '');
+  const filename = sanitizeFilenameForKey(
+    input.filename.replace(/\.+/g, '.').replace(/^\/+|\/+$/g, ''),
+  );
   return `${siteCode}/${cp}/${input.entityType}/${input.entityId}/${filename}`;
 }

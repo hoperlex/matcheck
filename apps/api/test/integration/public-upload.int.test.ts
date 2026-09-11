@@ -8,6 +8,11 @@
  * S3 замокан, очередь — нет: публичный путь пишет задание в job_outbox в одной
  * транзакции с пакетом, и именно эту строку тест и проверяет.
  *
+ * А вот сборка ключа (s3.path) НЕ мокается, и это принципиально. Пока здесь
+ * стоял мок `test/${entityId}/${filename}`, проверка «файл с плюсом в имени
+ * загрузился» была бы зелёной и на сломанном коде: мок принимал любой ключ,
+ * тогда как боевой дефект жил именно в настоящем buildS3Key.
+ *
  * Запуск: см. заголовок upload-documents-characterization.int.test.ts.
  * Без TEST_DATABASE_URL набор пропускается.
  */
@@ -31,9 +36,6 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../src/domain/storage/s3.signer.js', () => ({
   putObject: mocks.putObject,
   presign: mocks.presign,
-}));
-vi.mock('../../src/domain/storage/s3.path.js', () => ({
-  buildS3Key: (o: { entityId: string; filename: string }) => `test/${o.entityId}/${o.filename}`,
 }));
 
 const { publicUploadRoutes } = await import('../../src/routes/public-upload.js');
@@ -263,6 +265,42 @@ suite('публичная загрузка документов (реальны�
     expect(job?.dedupe_key).toBe(`bundle~${bundle!.id}~parse~0`);
     expect(job?.payload).toMatchObject({ bundleId: bundle!.id, mode: 'router' });
     expect(mocks.queueAdd).not.toHaveBeenCalled();
+  });
+
+  it('плюс в имени файла: ключ обезврежен, само имя сохранено', async () => {
+    // Инцидент 11.09: поставщик отправлял `6+6565.pdf` и получал «Хранилище
+    // временно недоступно». Плюс доезжал до S3-ключа, а aws4fetch перед
+    // подписью превращал его в пробел — подпись считалась для одного пути,
+    // запрос уходил на другой, S3 отвечал 403. В пачке файл был один, поэтому
+    // не доходило НИЧЕГО и пакет отвергался целиком.
+    const res = await upload([
+      { field: 'files', filename: '6+6565.pdf', contentType: 'application/pdf', content: pdf('plus') },
+    ]);
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({ filesAccepted: 1, filesRejected: [] });
+
+    const [bundle] = await sql<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE site_id = ${siteId}`;
+    const [row] = await sql<{ source_filename: string; input_s3_key: string | null }[]>`
+      SELECT source_filename, input_s3_key
+        FROM bundle_import_items WHERE bundle_id = ${bundle!.id}`;
+
+    // Имя для человека — ровно то, что прислал поставщик: в реестре и на
+    // портале файл должен называться как у него на диске.
+    expect(row!.source_filename).toBe('6+6565.pdf');
+    // А в ключе плюса нет. Проверяем точное имя, а не только отсутствие `+`:
+    // правило, которое заодно срезало бы расширение, тоже дало бы ключ без
+    // плюса и было бы не менее сломанным.
+    expect(row!.input_s3_key).toMatch(/\/doc-1-6_6565\.pdf$/);
+    // И главное — в бакет ушёл ТОТ ЖЕ ключ, что записан в базу. Расхождение
+    // между «что в БД» и «что в S3» и есть суть дефекта.
+    expect(mocks.putObject.mock.calls[0]![0]).toBe(row!.input_s3_key);
+
+    // Манифест публичной отправки тоже хранит исходное имя — по нему менеджер
+    // сверяет, что прислали, со строками реестра.
+    const [ev] = await sql<{ submission_manifest: Array<{ filename: string }> }[]>`
+      SELECT submission_manifest FROM ingest_events WHERE bundle_id = ${bundle!.id}`;
+    expect(ev!.submission_manifest[0]!.filename).toBe('6+6565.pdf');
   });
 
   it('книга .xls доезжает до хранилища и реестра', async () => {
