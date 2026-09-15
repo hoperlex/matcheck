@@ -71,6 +71,7 @@ import { FlagChip } from '../../shared/ui/FlagChip';
 import { ReviewControls } from '../../shared/ui/ReviewControls';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { DeliveriesHistory } from './DeliveriesHistory';
+import { SourceDocumentOriginalModal } from '../shared/SourceDocumentOriginalModal';
 import { ExpectedUpds } from './ExpectedUpds';
 import { PhotoGallery, type GalleryPhoto } from './PhotoGallery';
 import { formatStageTime } from './stageTime';
@@ -218,6 +219,24 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const canPickSupplier = canEditDelivery && hasCapability('operations.edit.supplier_directory');
   const canUploadPhoto =
     can('operations.deliveries', 'create') && hasCapability('operations.photo.upload');
+
+  /**
+   * Просмотр оригинала документа поверх карточки.
+   *
+   * Данные (originalDoc) и видимость (originalOpen) разделены намеренно:
+   * rc-dialog вызывает afterClose только при переходе open true→false. Если
+   * закрытие сразу обнуляет документ, компонент размонтируется без перехода —
+   * фокус не вернётся на внешнюю модалку, и следующий ESC не закроет приёмку.
+   */
+  const [originalDoc, setOriginalDoc] = useState<OperationSourceDocument | null>(null);
+  const [originalOpen, setOriginalOpen] = useState(false);
+  /**
+   * Узел внутри модалки «Приёмка». Нужен, чтобы после закрытия вложенного
+   * окна вернуть фокус на её .ant-modal-wrap (см. PhotoGallery): и триггер в
+   * Popover, и сама Modal живут в порталах, поэтому найти внешнюю обёртку
+   * через closest от них нельзя.
+   */
+  const formRootRef = useRef<HTMLDivElement>(null);
 
   const [items, setItems] = useState<DraftItem[]>([]);
   /**
@@ -1493,6 +1512,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     const canUnmark = isAdmin || authUser?.id === (loadedDelivery?.pendingDeletionByUserId ?? null);
     return (
       <Space
+        ref={formRootRef}
         direction="vertical"
         size="middle"
         style={{ width: '100%', paddingBottom: isDesktop ? 0 : 96 }}
@@ -1762,6 +1782,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   <OperationDocumentsChips
                     documents={linkedDocuments}
                     onUnlink={canUnlinkUpd ? (doc) => unlinkUpd.mutate(doc) : undefined}
+                    onOpenOriginal={
+                      embedded
+                        ? (doc) => {
+                            setOriginalDoc(doc);
+                            setOriginalOpen(true);
+                          }
+                        : undefined
+                    }
                     unlinkPending={unlinkUpd.isPending}
                   />
                 </>
@@ -1860,6 +1888,22 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           }
           busy={linkUpd.isPending}
           error={linkUpdError}
+        />
+
+        <SourceDocumentOriginalModal
+          documentId={originalDoc?.id ?? null}
+          open={originalOpen}
+          onClose={() => setOriginalOpen(false)}
+          afterClose={() => {
+            // Порядок важен: сначала фокус на внешнюю модалку, потом очистка
+            // данных. rc-dialog отдаёт фокус на document.body, и без этого
+            // следующий ESC не доходит до «Приёмки». В полноэкранном режиме
+            // closest вернёт null, focus — no-op.
+            formRootRef.current
+              ?.closest<HTMLElement>('.ant-modal-wrap')
+              ?.focus({ preventScroll: true });
+            setOriginalDoc(null);
+          }}
         />
 
         {/* Отдельная карточка «Дата поставки» убрана: значение теперь

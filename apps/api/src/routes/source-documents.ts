@@ -125,6 +125,7 @@ import {
   type SortAliasColumns,
 } from '../domain/sourceDocuments/list-order.js';
 import { parseUuidCsv } from '../lib/uuid-csv.js';
+import { imageMimeOfKey } from '../lib/image-kind.js';
 
 const KIND_VALUES = ['upd', 'request', 'transport_waybill', 'os2_transfer'] as const;
 type KindValue = (typeof KIND_VALUES)[number];
@@ -224,6 +225,25 @@ type UpdFileFormat = {
   ext: 'pdf' | 'xlsx' | 'xls' | 'jpg' | 'png' | 'webp';
   mimeType: string;
 };
+
+/**
+ * MIME по имени файла — для вложений, у которых он не сохранён в БД.
+ *
+ * Картинки отдаёт imageMimeOfKey (там же учтены .jfif и .heic — список
+ * писался после боевого инцидента с распознаванием), здесь добавлены только
+ * документные форматы. Неизвестное расширение — честный octet-stream:
+ * угадывать тип по содержимому на этом маршруте нечем, файл стримится.
+ */
+function mimeByFilename(filename: string): string {
+  const image = imageMimeOfKey(filename);
+  if (image) return image;
+  if (/\.pdf$/i.test(filename)) return 'application/pdf';
+  if (/\.xlsx$/i.test(filename)) {
+    return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  }
+  if (/\.xls$/i.test(filename)) return 'application/vnd.ms-excel';
+  return 'application/octet-stream';
+}
 
 function detectUpdFileFormat(mime: string, filename: string): UpdFileFormat | null {
   const m = (mime ?? '').toLowerCase();
@@ -1861,7 +1881,16 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         const v = upstream.headers.get(h);
         if (v) reply.header(h, v);
       }
-      reply.header('content-type', att.mimeType);
+      // mime_type в БД nullable: у старых вложений его нет, и заголовок
+      // уходил пустым — браузер не открывал ни PDF, ни скан. Восстанавливаем
+      // тип по расширению; неизвестное остаётся octet-stream.
+      //
+      // Один resolvedMimeType на оба заголовка: если оставить проверку Excel
+      // на исходном att.mimeType, xlsx без mime получил бы верный
+      // content-type, но inline-disposition — и загрузка в iframe снова
+      // запустила бы автоскачивание, от которого эта ветка и защищает.
+      const resolvedMimeType = att.mimeType ?? mimeByFilename(att.filename);
+      reply.header('content-type', resolvedMimeType);
       // PDF и изображения встроены в iframe/<Image> на портале — отдаём
       // inline, чтобы Chrome открыл свой viewer. Excel браузер inline не
       // показывает (нет viewer'а) — при inline-CD загрузка iframe запускает
@@ -1870,8 +1899,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       // автозащита: для xlsx-mime отдаём attachment и явное `download=1`
       // — клиент сохранит файл через apiDownload, а не «как-будто-вьюер».
       const isExcelMime =
-        (att.mimeType?.includes('spreadsheetml') ?? false) ||
-        att.mimeType === 'application/vnd.ms-excel';
+        resolvedMimeType.includes('spreadsheetml') ||
+        resolvedMimeType === 'application/vnd.ms-excel';
       const wantAttachment = req.query.download === '1' || isExcelMime;
       reply.header(
         'content-disposition',

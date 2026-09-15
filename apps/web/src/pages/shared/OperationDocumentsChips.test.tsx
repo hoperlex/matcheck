@@ -99,4 +99,94 @@ describe('OperationDocumentsChips', () => {
     fireEvent.click(screen.getByText('0000-0082603'));
     expect(screen.queryByText('Отвязать')).toBeNull();
   });
+
+  it('номер открывает оригинал — именно свой, а не соседний', () => {
+    const onOpenOriginal = vi.fn();
+    render(
+      <OperationDocumentsChips
+        documents={[
+          doc({ id: 'a', docNumber: '0000-0082603' }),
+          doc({ id: 'b', docNumber: '0000-0082604' }),
+        ]}
+        onOpenOriginal={onOpenOriginal}
+      />,
+    );
+
+    fireEvent.click(screen.getByText(/0000-0082603, 0000-0082604/));
+    fireEvent.click(screen.getByText('УПД 0000-0082604'));
+
+    expect(onOpenOriginal).toHaveBeenCalledTimes(1);
+    expect(onOpenOriginal).toHaveBeenCalledWith(expect.objectContaining({ id: 'b' }));
+  });
+
+  it('клик по номеру закрывает поповер — иначе он повиснет поверх окна просмотра', () => {
+    render(<OperationDocumentsChips documents={[doc()]} onOpenOriginal={vi.fn()} />);
+
+    fireEvent.click(screen.getByText('0000-0082603'));
+    expect(document.querySelectorAll('.ant-popover:not(.ant-popover-hidden)')).toHaveLength(1);
+
+    fireEvent.click(screen.getByText('УПД 0000-0082603'));
+
+    expect(document.querySelectorAll('.ant-popover:not(.ant-popover-hidden)')).toHaveLength(0);
+  });
+
+  it('без обработчика номер остаётся текстом, а не ссылкой', () => {
+    render(<OperationDocumentsChips documents={[doc()]} />);
+
+    fireEvent.click(screen.getByText('0000-0082603'));
+
+    const row = screen.getByText('УПД 0000-0082603');
+    expect(row.closest('a')).toBeNull();
+  });
+
+  it('«Отвязать» не открывает оригинал — у разрушительного действия свой клик', () => {
+    const onOpenOriginal = vi.fn();
+    const onUnlink = vi.fn();
+    render(
+      <OperationDocumentsChips
+        documents={[doc()]}
+        onUnlink={onUnlink}
+        onOpenOriginal={onOpenOriginal}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('0000-0082603'));
+    fireEvent.click(screen.getByText('Отвязать'));
+    fireEvent.click(screen.getAllByText('Отвязать').slice(-1)[0]!);
+
+    expect(onUnlink).toHaveBeenCalledTimes(1);
+    expect(onOpenOriginal).not.toHaveBeenCalled();
+  });
+
+  it('у документа без номера кликается подпись целиком', () => {
+    const onOpenOriginal = vi.fn();
+    render(
+      <OperationDocumentsChips
+        documents={[doc({ id: 'w', kind: 'transport_waybill', docNumber: null })]}
+        onOpenOriginal={onOpenOriginal}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('— без номера —'));
+    fireEvent.click(screen.getByText('Накладная — без номера —'));
+
+    expect(onOpenOriginal).toHaveBeenCalledWith(expect.objectContaining({ id: 'w' }));
+  });
+
+  it('поповеры разных видов документов не раскрываются разом', () => {
+    render(
+      <OperationDocumentsChips
+        documents={[
+          doc({ id: 'a' }),
+          doc({ id: 'b', kind: 'transport_waybill', docNumber: 'ТН-7' }),
+        ]}
+        onOpenOriginal={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('ТН-7'));
+
+    // Один раскрытый поповер, а не два: состояние хранится на группу.
+    expect(document.querySelectorAll('.ant-popover:not(.ant-popover-hidden)')).toHaveLength(1);
+  });
 });

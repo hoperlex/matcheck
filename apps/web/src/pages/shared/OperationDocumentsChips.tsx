@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { Button, Popconfirm, Popover, Space, Tag, Typography } from 'antd';
-import { DisconnectOutlined } from '@ant-design/icons';
+import { DisconnectOutlined, EyeOutlined } from '@ant-design/icons';
 import type { OperationSourceDocument } from '@matcheck/contracts';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import {
@@ -31,14 +32,29 @@ function docLabel(doc: OperationSourceDocument): string {
 export function OperationDocumentsChips({
   documents,
   onUnlink,
+  onOpenOriginal,
   unlinkPending = false,
 }: {
   /** Связанные документы операции. */
   documents: OperationSourceDocument[];
   /** undefined — прав на отвязку нет, кнопки не будет. */
   onUnlink?: (document: OperationSourceDocument) => void;
+  /**
+   * Открыть оригинал документа. undefined — номер остаётся обычным текстом
+   * (карточки в режиме просмотра и отгрузка пока без этой возможности).
+   */
+  onOpenOriginal?: (document: OperationSourceDocument) => void;
   unlinkPending?: boolean;
 }) {
+  // Какой поповер раскрыт. Состояние на ГРУППУ, а не общий флаг: чипов
+  // столько, сколько видов документов, и один boolean раскрыл бы поповеры
+  // УПД и накладной разом.
+  //
+  // Хук объявлен до раннего return ниже: иначе появление первого документа
+  // меняло бы число хуков между рендерами («Rendered more hooks than during
+  // the previous render»).
+  const [openGroup, setOpenGroup] = useState<string | null>(null);
+
   if (documents.length === 0) return null;
 
   const docDate = summarizeDates(documents, 'docDate');
@@ -51,9 +67,28 @@ export function OperationDocumentsChips({
     <Space direction="vertical" size={4} style={{ maxWidth: 420 }}>
       {documents.map((doc) => (
         <Space key={doc.id} size={8} wrap>
-          <Typography.Text strong style={{ fontSize: 12 }}>
-            {sourceKindLabel(doc.kind)} {docLabel(doc)}
-          </Typography.Text>
+          {onOpenOriginal ? (
+            // Открывает сам номер: менеджер тянется к нему, а не к
+            // отдельной кнопке. Иконка глаза показывает, что строка
+            // кликается. «Отвязать» остаётся отдельной красной кнопкой —
+            // разрушительное действие не должно делить клик с просмотром.
+            <Typography.Link
+              style={{ fontSize: 12 }}
+              onClick={() => {
+                setOpenGroup(null);
+                onOpenOriginal(doc);
+              }}
+            >
+              <EyeOutlined style={{ marginInlineEnd: 4 }} />
+              <Typography.Text strong style={{ fontSize: 12, color: 'inherit' }}>
+                {sourceKindLabel(doc.kind)} {docLabel(doc)}
+              </Typography.Text>
+            </Typography.Link>
+          ) : (
+            <Typography.Text strong style={{ fontSize: 12 }}>
+              {sourceKindLabel(doc.kind)} {docLabel(doc)}
+            </Typography.Text>
+          )}
           {doc.docDate && (
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               {doc.docDate}
@@ -96,7 +131,14 @@ export function OperationDocumentsChips({
         const shown = numbers.slice(0, INLINE_NUMBERS).join(', ');
         const restCount = numbers.length - INLINE_NUMBERS;
         return (
-          <Popover key={group.kindLabel} content={details} trigger="click" placement="bottomLeft">
+          <Popover
+            key={group.kindLabel}
+            content={details}
+            trigger="click"
+            placement="bottomLeft"
+            open={openGroup === group.kindLabel}
+            onOpenChange={(visible) => setOpenGroup(visible ? group.kindLabel : null)}
+          >
             <Tag color="blue" style={{ marginInlineEnd: 0, cursor: 'pointer' }}>
               <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                 {group.kindLabel}:

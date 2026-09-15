@@ -290,6 +290,60 @@ suite('документ «не распознано» (реальный PostgreS
     }
   });
 
+  it('вложение без mime отдаётся с типом по расширению, а не пустым заголовком', async () => {
+    // mime_type в БД nullable, и у старых вложений его нет. Заголовок уходил
+    // пустым — браузер не открывал ни PDF, ни скан, а просто скачивал файл.
+    // Тип восстанавливаем по расширению; неизвестное остаётся octet-stream.
+    const id = await document('no_waybill_found');
+    const attachment = async (filename: string): Promise<string> => {
+      const [row] = await sql<{ id: string }[]>`
+        INSERT INTO source_document_attachments
+          (source_document_id, s3_key, filename, mime_type, size_bytes, role)
+        VALUES (${id}, ${`upload/${id}/${filename}`}, ${filename}, NULL, 12, 'original')
+        RETURNING id`;
+      return row!.id;
+    };
+    const pdf = await attachment('упд.pdf');
+    const jpg = await attachment('скан.jpg');
+    const bin = await attachment('dump.bin');
+    const xlsx = await attachment('накладная.xlsx');
+
+    // Новый Response на каждый вызов: тело читается один раз, и общий объект
+    // на втором запросе падает с «ReadableStream is locked».
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => new Response(Buffer.from('bytes'), { status: 200 }));
+
+    try {
+      const head = async (attachmentId: string) => {
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/v1/source-documents/${id}/file/raw?attachmentId=${attachmentId}`,
+        });
+        expect(res.statusCode).toBe(200);
+        return res.headers;
+      };
+
+      expect((await head(pdf))['content-type']).toBe('application/pdf');
+      expect((await head(jpg))['content-type']).toBe('image/jpeg');
+      expect((await head(bin))['content-type']).toBe('application/octet-stream');
+
+      // Excel по восстановленному типу должен уехать вложением: при inline
+      // его загрузка в iframe запускает автоскачивание — ровно то, от чего
+      // маршрут и защищает документы с заполненным mime.
+      const excel = await head(xlsx);
+      expect(excel['content-type']).toBe(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      expect(String(excel['content-disposition'])).toContain('attachment');
+
+      // А PDF остаётся inline — иначе портал не покажет его во вьюере.
+      expect(String((await head(pdf))['content-disposition'])).toContain('inline');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('поиск находит заглушку по имени файла — номера у неё нет', async () => {
     // Поиск шёл только по doc_number, поэтому любой непустой запрос прятал
     // ровно те документы, которые менеджер и ищет глазами по названию файла.

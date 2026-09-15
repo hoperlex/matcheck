@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Alert,
   Button,
@@ -6,7 +6,6 @@ import {
   ConfigProvider,
   DatePicker,
   Form,
-  Image,
   Input,
   InputNumber,
   message,
@@ -27,10 +26,6 @@ import {
   BorderHorizontalOutlined,
   BorderVerticleOutlined,
   DeleteOutlined,
-  DownloadOutlined,
-  FileExcelOutlined,
-  FilePdfOutlined,
-  FileTextOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
@@ -39,7 +34,6 @@ import type {
   SourceDirection,
   SourceDocumentDetail,
   SourceDocumentFileResponse,
-  SourceDocumentPagesResponse,
   SourceRecoverResponse,
   SourceReparseResponse,
   UpdCheck,
@@ -48,8 +42,7 @@ import type {
 import { getDocumentDisplayStatus } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
 import { usePermissions } from '../../shared/hooks/usePermissions';
-import { api, apiDownload, ApiError } from '../../services/api';
-import { formatDecimal } from '../../shared/utils/formatDecimal';
+import { api, ApiError } from '../../services/api';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import {
   formatDateRu,
@@ -65,6 +58,8 @@ import { UnitSelect } from '../../shared/ui/UnitSelect';
 import { UpdValidationSummary } from '../../shared/ui/UpdValidationSummary';
 import { SiteSelect } from './SiteSelect';
 import { ResponsiblePersonSelect } from '../../components/ResponsiblePersonSelect';
+import { DocumentOriginalViewer } from '../shared/DocumentOriginalViewer';
+import { SourceDocumentItemsTable } from '../shared/SourceDocumentItemsTable';
 
 type Item = SourceDocumentDetail['items'][number];
 
@@ -713,7 +708,7 @@ export function SourceDocumentDetailModal({
                     }
                   />
                 ) : (
-                  <ReadOnlyTable
+                  <SourceDocumentItemsTable
                     items={items}
                     showInvNumber={sd.kind === 'os2_transfer'}
                     withVat={sd.kind === 'upd'}
@@ -881,7 +876,7 @@ export function SourceDocumentDetailModal({
               }
               originalNode={
                 sd.attachments.length > 0 ? (
-                  <OriginalAttachments attachments={sd.attachments} id={id!} compact={isWide} />
+                  <DocumentOriginalViewer attachments={sd.attachments} id={id!} compact={isWide} />
                 ) : file.isLoading ? (
                   <Spin />
                 ) : (
@@ -1134,7 +1129,7 @@ function DetailBody({
               <Typography.Text type="secondary" style={{ fontSize: 12, marginBottom: 4 }}>
                 Оригинал{attachmentsCount > 1 ? ` (${attachmentsCount})` : ''}
               </Typography.Text>
-              {/* overflow:hidden у обёртки + OriginalAttachments сам занимает
+              {/* overflow:hidden у обёртки + DocumentOriginalViewer сам занимает
                   100% (lightbox с iframe/Image имеет внутренний скролл).
                   Раньше тут был overflow:auto — давало лишний правый скролл
                   поверх iframe PDF-viewer'а. */}
@@ -1144,438 +1139,6 @@ function DetailBody({
         </Splitter>
       </div>
     </div>
-  );
-}
-
-// Минимальный набор полей attachment, которого хватает для рендера превью.
-// Берём подмножество SourceAttachment — компонент не зависит от других
-// полей DTO (role/s3Key и пр.), это упрощает тесты и переиспользование.
-type AttachmentLike = {
-  id: string;
-  filename: string;
-  mimeType: string | null;
-  sizeBytes: number | null;
-};
-
-// Lightbox-паттерн: одно вложение крупно + полоса миниатюр снизу для
-// переключения. Раньше стекали все вложения 1/N высоты — для ТН с
-// 3–4 фото каждое уменьшалось до нечитаемого размера.
-function OriginalAttachments({
-  attachments,
-  id,
-  compact,
-}: {
-  attachments: ReadonlyArray<AttachmentLike>;
-  id: string;
-  // compact=true — внутри Splitter (правая/нижняя панель), занимает 100% высоты;
-  // compact=false — внутри Tabs (узкий экран), фиксированная высота как раньше.
-  compact: boolean;
-}) {
-  const [activeId, setActiveId] = useState<string | null>(attachments[0]?.id ?? null);
-
-  // Страницы этого документа внутри файла. Пакет из одного PDF режут на
-  // несколько УПД, а вложением к карточке остаётся файл целиком — без этой
-  // подсказки вьюер открывал двадцатистраничный скан с первой страницы, и
-  // менеджер видел на экране чужой лист вместо позиций своего документа.
-  // Отдельный маршрут: то же поле в DTO документа уехало бы и на планшет.
-  const pagesQuery = useQuery({
-    queryKey: ['source-document-pages', id],
-    queryFn: () => api.get<SourceDocumentPagesResponse>(`/source-documents/${id}/pages`),
-    staleTime: 5 * 60_000,
-  });
-
-  // Если открыли другой документ — attachments сменились, нужно сбросить
-  // активный на первый. Сравниваем по списку id, потому что массив
-  // attachments — readonly прокси с новой ссылкой на каждом ререндере.
-  useEffect(() => {
-    if (attachments.length === 0) {
-      setActiveId(null);
-      return;
-    }
-    const first = attachments[0];
-    if (first && !attachments.some((a) => a.id === activeId)) {
-      setActiveId(first.id);
-    }
-  }, [attachments, activeId]);
-
-  if (attachments.length === 0 || !activeId) return null;
-  const active = attachments.find((a) => a.id === activeId) ?? attachments[0];
-  if (!active) return null;
-  const activeIndex = attachments.findIndex((a) => a.id === active.id);
-  const activeUrl = `/api/v1/source-documents/${id}/file/raw?attachmentId=${active.id}`;
-  const activePages =
-    pagesQuery.data?.attachments.find((a) => a.attachmentId === active.id)?.pages ?? [];
-  const pagesLabel = formatPagesLabel(activePages);
-  // Chrome PDF Viewer понимает page= внутри того же fragment. Отдельный «#»
-  // ломает якорь целиком, поэтому дописываем параметр к существующему.
-  const pdfFragment = `#toolbar=1&navpanes=0${activePages.length > 0 ? `&page=${activePages[0]}` : ''}`;
-
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 6,
-        height: compact ? '100%' : '75vh',
-        minHeight: 320,
-      }}
-    >
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        <Typography.Text
-          type="secondary"
-          style={{ fontSize: 11, display: 'block', marginBottom: 2 }}
-        >
-          {attachments.length > 1
-            ? `Фото ${activeIndex + 1} из ${attachments.length} · ${active.filename}`
-            : active.filename}
-          {pagesLabel ? ` · ${pagesLabel}` : ''}
-        </Typography.Text>
-        {isImageExt(active.filename, active.mimeType) ? (
-          // antd Image даёт встроенный lightbox (zoom/rotate/fullscreen) —
-          // для скана накладной это удобнее, чем image в <iframe>, где у
-          // Chrome нет ни зума, ни поворота. Меняем active.id ⇒ Image
-          // перегружает src.
-          <div
-            key={active.id}
-            style={{
-              flex: 1,
-              minHeight: 200,
-              border: '1px solid #f0f0f0',
-              background: '#fafafa',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              overflow: 'hidden',
-            }}
-          >
-            <Image
-              src={activeUrl}
-              alt={active.filename}
-              wrapperStyle={{
-                width: '100%',
-                height: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-              style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
-              preview={{ mask: 'Открыть для зума' }}
-            />
-          </div>
-        ) : isExcelExt(active.filename, active.mimeType) ? (
-          // Excel в браузере inline не открывается (нет встроенного
-          // viewer'а ни у Chrome, ни у Firefox). Раньше URL попадал в
-          // <iframe> — браузер при загрузке iframe запускал автоматическое
-          // скачивание xlsx. Теперь рендерим карточку: иконка + имя +
-          // размер + явная кнопка «Скачать». Распознанные позиции уже
-          // видны в левой/верхней панели «Позиции».
-          <ExcelPreviewCard id={id} attachment={active} />
-        ) : (
-          <iframe
-            key={active.id}
-            // #toolbar=1&navpanes=0 — Chrome PDF Viewer прячет левую панель
-            // с миниатюрами страниц, освобождая место для самого документа.
-            src={`${activeUrl}${pdfFragment}`}
-            title={active.filename}
-            style={{
-              flex: 1,
-              width: '100%',
-              minHeight: 200,
-              border: '1px solid #f0f0f0',
-            }}
-          />
-        )}
-      </div>
-      {attachments.length > 1 && (
-        <ThumbBar attachments={attachments} activeId={activeId} onSelect={setActiveId} id={id} />
-      )}
-    </div>
-  );
-}
-
-// Картинка ли это. Главный источник правды — mime-тип из БД: расширений у
-// изображений больше, чем стоит перечислять. Боевой случай — .jfif (так
-// Outlook и Windows сохраняют обычный JPEG): mime у файла image/jpeg, но по
-// расширению он не опознавался, уходил в <iframe> вместо antd Image (без зума
-// и лайтбокса), а в полосе миниатюр рисовался серой иконкой файла — инспектор
-// не понимал, как открыть второе фото. Расширение остаётся запасным путём для
-// вложений без mime.
-function isImageExt(name: string, mimeType?: string | null): boolean {
-  if (mimeType && mimeType.toLowerCase().startsWith('image/')) return true;
-  return /\.(jpe?g|jfif|jfi|pjpeg|png|webp|gif|bmp|heic|heif|avif)$/i.test(name);
-}
-
-function isExcelExt(name: string, mimeType?: string | null): boolean {
-  if (/\.xlsx?$/i.test(name)) return true;
-  if (!mimeType) return false;
-  return mimeType.includes('spreadsheetml') || mimeType === 'application/vnd.ms-excel';
-}
-
-/**
- * «Стр. 17–20» для смежных страниц, «Стр. 15, 17» для разрывов.
- *
- * Диапазон не додумываем: сегмент собирается из адресов конкретных страниц, и
- * при пропуске посередине «17–20» соврало бы про два листа.
- */
-function formatPagesLabel(pages: number[]): string {
-  if (pages.length === 0) return '';
-  if (pages.length === 1) return `Стр. ${pages[0]}`;
-  const first = pages[0]!;
-  const last = pages[pages.length - 1]!;
-  const contiguous = pages.every((p, i) => p === first + i);
-  return contiguous ? `Стр. ${first}–${last}` : `Стр. ${pages.join(', ')}`;
-}
-
-function isPdfExt(name: string): boolean {
-  return /\.pdf$/i.test(name);
-}
-
-function formatFileSize(bytes: number | null): string | null {
-  if (bytes == null) return null;
-  if (bytes < 1024) return `${bytes} Б`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
-  return `${(bytes / 1024 / 1024).toFixed(2)} МБ`;
-}
-
-async function downloadAttachment(id: string, attachment: AttachmentLike): Promise<void> {
-  // download=1 заставляет сервер выставить Content-Disposition: attachment
-  // даже для PDF/изображений; для xlsx attachment ставится автоматически
-  // по mime-типу (см. routes/source-documents.ts). apiDownload сам
-  // приклеивает префикс BASE='/api/v1' (см. services/api.ts), поэтому
-  // здесь путь относительный — без `/api/v1/`, иначе получим двойной
-  // префикс и 404 Route not found.
-  const { blob, filename } = await apiDownload(
-    `/source-documents/${id}/file/raw?attachmentId=${attachment.id}&download=1`,
-  );
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename || attachment.filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function ExcelPreviewCard({ id, attachment }: { id: string; attachment: AttachmentLike }) {
-  const [downloading, setDownloading] = useState(false);
-  const size = formatFileSize(attachment.sizeBytes);
-  const handleDownload = async () => {
-    try {
-      setDownloading(true);
-      await downloadAttachment(id, attachment);
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : 'Не удалось скачать файл');
-    } finally {
-      setDownloading(false);
-    }
-  };
-  return (
-    <div
-      style={{
-        flex: 1,
-        minHeight: 200,
-        border: '1px solid #f0f0f0',
-        background: '#fafafa',
-        borderRadius: 4,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 24,
-        gap: 12,
-      }}
-    >
-      <FileExcelOutlined style={{ fontSize: 64, color: '#22863a' }} />
-      <Typography.Text strong style={{ textAlign: 'center', wordBreak: 'break-word' }}>
-        {attachment.filename}
-      </Typography.Text>
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        Excel-файл{size ? ` · ${size}` : ''} · распознан
-      </Typography.Text>
-      <Button
-        type="primary"
-        icon={<DownloadOutlined />}
-        loading={downloading}
-        onClick={handleDownload}
-      >
-        Скачать оригинал
-      </Button>
-      <Typography.Text
-        type="secondary"
-        style={{ fontSize: 11, textAlign: 'center', maxWidth: 380 }}
-      >
-        Браузер не отображает Excel внутри страницы. Реквизиты и позиции документа уже распознаны и
-        доступны в панели «Позиции».
-      </Typography.Text>
-    </div>
-  );
-}
-
-function ThumbBar({
-  attachments,
-  activeId,
-  onSelect,
-  id,
-}: {
-  attachments: ReadonlyArray<AttachmentLike>;
-  activeId: string;
-  onSelect: (id: string) => void;
-  id: string;
-}) {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        gap: 6,
-        overflowX: 'auto',
-        paddingBottom: 4,
-        flexShrink: 0,
-      }}
-    >
-      {attachments.map((a, i) => {
-        const isImg = isImageExt(a.filename, a.mimeType);
-        const isActive = a.id === activeId;
-        const thumbUrl = `/api/v1/source-documents/${id}/file/raw?attachmentId=${a.id}`;
-        const isPdf = isPdfExt(a.filename);
-        const isExcel = isExcelExt(a.filename, a.mimeType);
-        return (
-          <Tooltip key={a.id} title={a.filename} placement="top">
-            <div
-              role="button"
-              tabIndex={0}
-              onClick={() => onSelect(a.id)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  onSelect(a.id);
-                }
-              }}
-              style={{
-                flexShrink: 0,
-                width: 64,
-                height: 64,
-                border: isActive ? '2px solid #1677ff' : '1px solid #d9d9d9',
-                borderRadius: 4,
-                cursor: 'pointer',
-                overflow: 'hidden',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                position: 'relative',
-                background: '#fafafa',
-                transition: 'border-color 0.15s',
-              }}
-            >
-              {isImg ? (
-                <img
-                  src={thumbUrl}
-                  alt=""
-                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                />
-              ) : isPdf ? (
-                <FilePdfOutlined style={{ fontSize: 28, color: '#d4380d' }} />
-              ) : isExcel ? (
-                // Не подставляем xlsx-URL в <img> — браузер всё равно не
-                // сможет его декодировать, а запрос дёрнет /file/raw → 200
-                // и при некоторых настройках вызовет лишнюю сетевую работу.
-                <FileExcelOutlined style={{ fontSize: 28, color: '#22863a' }} />
-              ) : (
-                <FileTextOutlined style={{ fontSize: 28, color: '#8c8c8c' }} />
-              )}
-              <div
-                style={{
-                  position: 'absolute',
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  background: 'rgba(0,0,0,0.55)',
-                  color: '#fff',
-                  fontSize: 10,
-                  textAlign: 'center',
-                  padding: '1px 2px',
-                  lineHeight: 1.2,
-                }}
-              >
-                {i + 1}
-              </div>
-            </div>
-          </Tooltip>
-        );
-      })}
-    </div>
-  );
-}
-
-function ReadOnlyTable({
-  items,
-  showInvNumber,
-  withVat,
-  docTotalSum,
-  docVatSum,
-}: {
-  items: Item[];
-  showInvNumber?: boolean;
-  /**
-   * Показывать цену С НАЛОГОМ. Только для УПД: там рядом стоит сумма из графы 9
-   * (с налогом), и цена без налога из графы 4 не сходилась с ней на экране —
-   * 15 × 240 против показанных 4 392. У накладных и ОС-2 колонка прежняя.
-   */
-  withVat?: boolean;
-  /** Шапка документа — из неё берётся ставка для строк, где она не распозналась. */
-  docTotalSum?: string | null;
-  docVatSum?: string | null;
-}) {
-  // Колонка «Инв.№» отображается только для ОС-2 (kind='os2_transfer') —
-  // у ТН и УПД она была бы пустой.
-  const columns: NonNullable<ComponentProps<typeof Table<Item>>['columns']> = [
-    { title: '№', dataIndex: 'lineNo', width: 50 },
-    { title: 'Наименование', dataIndex: 'nameRaw' },
-  ];
-  if (showInvNumber) {
-    columns.push({
-      title: 'Инв.№',
-      dataIndex: 'inventoryNumber',
-      width: 110,
-      render: (v: string | null) => v ?? '—',
-    });
-  }
-  columns.push(
-    {
-      title: 'Кол-во',
-      dataIndex: 'qty',
-      width: 90,
-      render: (v: string | null) => formatDecimal(v),
-    },
-    { title: 'Ед.', dataIndex: 'unit', width: 60 },
-    {
-      // Заголовок называет величину прямо: в приёмке цена остаётся без налога,
-      // и одинаковое имя над разными числами читалось бы как расхождение.
-      title: withVat ? 'Цена с НДС' : 'Цена',
-      dataIndex: 'price',
-      width: 130,
-      render: (v: string | null, r: Item) =>
-        formatMoneyRu(withVat ? priceWithVat(v, r.vatRate, docTotalSum, docVatSum) : v),
-    },
-    {
-      title: 'Сумма',
-      dataIndex: 'sum',
-      width: 150,
-      render: (v: string | null) => formatMoneyRu(v),
-    },
-  );
-  return (
-    <Table<Item>
-      dataSource={items}
-      rowKey="id"
-      size="small"
-      pagination={false}
-      showSorterTooltip={false}
-      // scroll={y} убран — давал внутренний tbody-скролл поверх скролла
-      // Splitter.Panel. Тaблица растягивается по содержимому, скроллит
-      // только внешняя панель.
-      columns={columns}
-    />
   );
 }
 
