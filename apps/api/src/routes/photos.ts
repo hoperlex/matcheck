@@ -24,6 +24,7 @@ import {
   shipments,
   shipmentPhotos,
   sites,
+  statuses,
 } from '../db/schema.js';
 import {
   deleteObject,
@@ -35,6 +36,7 @@ import {
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { recognizePhotoItems } from '../domain/photos/recognize.js';
 import { recognizePhotoUpd } from '../domain/photos/recognize-upd.js';
+import type { QtyRepairTrace } from '../domain/edo/qty-repair.js';
 import { classifyImageKind } from '../domain/edo/vision-classifier.js';
 import { MIN_DEDUP_CONFIDENCE } from '../domain/edo/upd-validation.js';
 import { loadEnv } from '../lib/env.js';
@@ -1259,6 +1261,76 @@ const recognizeInFlight = new Map<string, Promise<RecognizeOutcome>>();
  * запись в кэш. Вынесено из обработчика, чтобы результат можно было разделить
  * между одновременными запросами.
  */
+/**
+ * Можно ли ПРИМЕНЯТЬ восстановление количества к этому фото.
+ *
+ * У фото-кэша нет ни dispatch_generation, ни operationTrace, поэтому условия
+ * свои и проверяются здесь, у самой записи:
+ *   * операция не подтверждена — подтверждённые числа машиной не трогаем;
+ *   * распознавание первичное. Существующая запись означает «Повторить», а
+ *     повтор по уже показанному менеджеру результату не должен молча менять
+ *     количества (в том числе поверх собственной прошлой правки).
+ *
+ * Любая ошибка чтения — запрет: не знать состояние операции и всё равно
+ * править опаснее, чем не править.
+ */
+async function qtyRepairApplyAllowed(
+  app: ReturnType<typeof asZod>,
+  kind: OperationKind,
+  photoId: string,
+): Promise<boolean> {
+  try {
+    const [existing] = await app.db
+      .select({ id: photoRecognizedItems.id })
+      .from(photoRecognizedItems)
+      .where(
+        kind === 'delivery'
+          ? eq(photoRecognizedItems.deliveryPhotoId, photoId)
+          : eq(photoRecognizedItems.shipmentPhotoId, photoId),
+      )
+      .limit(1);
+    if (existing) return false;
+    return await qtyRepairApplyAllowedNow(app, kind, photoId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Состояние операции ПРЯМО СЕЙЧАС — без проверки «первично ли распознавание».
+ *
+ * Отдельно от предыдущей, потому что вызывается дважды: перед распознаванием и
+ * ещё раз у самой записи. Между ними — вызов модели длиной в десятки секунд.
+ */
+async function qtyRepairApplyAllowedNow(
+  app: ReturnType<typeof asZod>,
+  kind: OperationKind,
+  photoId: string,
+): Promise<boolean> {
+  try {
+    if (kind === 'delivery') {
+      const [row] = await app.db
+        .select({ code: statuses.code })
+        .from(deliveryPhotos)
+        .innerJoin(deliveries, eq(deliveries.id, deliveryPhotos.deliveryId))
+        .innerJoin(statuses, eq(statuses.id, deliveries.statusId))
+        .where(eq(deliveryPhotos.id, photoId))
+        .limit(1);
+      return row != null && row.code !== 'confirmed_mol';
+    }
+    const [row] = await app.db
+      .select({ code: statuses.code })
+      .from(shipmentPhotos)
+      .innerJoin(shipments, eq(shipments.id, shipmentPhotos.shipmentId))
+      .innerJoin(statuses, eq(statuses.id, shipments.statusId))
+      .where(eq(shipmentPhotos.id, photoId))
+      .limit(1);
+    return row != null && row.code !== 'confirmed_mol';
+  } catch {
+    return false;
+  }
+}
+
 async function runPhotoRecognition(
   app: ReturnType<typeof asZod>,
   found: { kind: OperationKind; s3Key: string },
@@ -1322,7 +1394,17 @@ async function runPhotoRecognition(
     // прежний путь. Классификатор ошибок не бросает по построению.
     if (cls && cls.kind === 'upd' && cls.confidence >= MIN_DEDUP_CONFIDENCE) {
       try {
-        const upd = await recognizePhotoUpd({ buffer, mimeType, label });
+        // Состояние операции спрашиваем у базы ТОЛЬКО когда правило реально
+        // может что-то применить. При off и shadow ответ всё равно не нужен, а
+        // два запроса на каждое распознавание — работа впустую.
+        const qtyRepairMode = loadEnv().UPD_QTY_REPAIR;
+        const upd = await recognizePhotoUpd({
+          buffer,
+          mimeType,
+          label,
+          allowQtyRepairApply:
+            qtyRepairMode === 'on' ? await qtyRepairApplyAllowed(app, found.kind, photoId) : false,
+        });
         if (upd.items.length > 0 && (upd.confidence ?? 0) >= MIN_DEDUP_CONFIDENCE) {
           const saved = await upsertRecognition(app, found.kind, photoId, {
             status: 'done',
@@ -1338,6 +1420,7 @@ async function runPhotoRecognition(
             vatSum: upd.vatSum,
             itemsCount: upd.itemsCount,
             validation: upd.validation,
+            qtyRepair: upd.qtyRepair,
           });
           return { ok: true, value: saved };
         }
@@ -1381,6 +1464,7 @@ async function runPhotoRecognition(
         vatSum: weakUpd.vatSum,
         itemsCount: weakUpd.itemsCount,
         validation: weakUpd.validation,
+        qtyRepair: weakUpd.qtyRepair,
       });
       return { ok: true, value: savedWeak };
     }
@@ -1517,6 +1601,8 @@ async function upsertRecognition(
     vatSum?: number | null;
     itemsCount?: number | null;
     validation?: z.infer<typeof PhotoRecognitionSchema>['validation'];
+    /** Служебный след правила количества; в контракт ответа не входит. */
+    qtyRepair?: QtyRepairTrace | null;
   },
 ): Promise<z.infer<typeof PhotoRecognitionSchema>> {
   const values = {
@@ -1536,12 +1622,40 @@ async function upsertRecognition(
     validation: data.validation ?? null,
     updatedAt: new Date(),
   };
+  // Версия результата, к которому относится след, — время этой записи. У фото
+  // нет поколения разбора, и без версии откат не отличил бы след от прошлого
+  // распознавания, относящийся уже к другим числам.
+  let qtyRepair: QtyRepairTrace | null = data.qtyRepair
+    ? { ...data.qtyRepair, docVersion: values.updatedAt.toISOString() }
+    : null;
+
+  // Между проверкой перед распознаванием и этой записью прошёл вызов модели —
+  // десятки секунд, за которые приёмку могли подтвердить. Проверяем ещё раз, у
+  // самой записи, и при подтверждении возвращаем прочитанные моделью
+  // количества: подтверждённые числа машиной не меняем.
+  const appliedRows = qtyRepair?.entries.filter((e) => e.state === 'applied') ?? [];
+  if (appliedRows.length > 0 && !(await qtyRepairApplyAllowedNow(app, kind, photoId))) {
+    const items = [...(values.items as Array<Record<string, unknown>>)];
+    for (const entry of appliedRows) {
+      const target = items[entry.row - 1];
+      if (target) items[entry.row - 1] = { ...target, qty: entry.qtyFrom };
+    }
+    values.items = items as typeof values.items;
+    qtyRepair = {
+      ...qtyRepair!,
+      entries: qtyRepair!.entries.map((e) =>
+        e.state === 'applied'
+          ? { ...e, state: 'observed' as const, blockedBy: 'operation_trace' as const }
+          : e,
+      ),
+    };
+  }
   const conflictCol = kind === 'delivery'
     ? photoRecognizedItems.deliveryPhotoId
     : photoRecognizedItems.shipmentPhotoId;
   await app.db
     .insert(photoRecognizedItems)
-    .values(values)
+    .values({ ...values, qtyRepair })
     .onConflictDoUpdate({
       target: conflictCol,
       targetWhere: kind === 'delivery'
@@ -1563,6 +1677,9 @@ async function upsertRecognition(
         vatSum: values.vatSum,
         itemsCount: values.itemsCount,
         validation: values.validation,
+        // Перечисление полей здесь явное, и новое поле без этой строки просто
+        // не сохранилось бы при повторном распознавании.
+        qtyRepair,
         updatedAt: values.updatedAt,
       },
     });

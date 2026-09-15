@@ -19,6 +19,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import type { UpdValidation } from '@matcheck/contracts';
+import type { QtyRepairTrace } from '../domain/edo/qty-repair.js';
 
 // ─── Enums ─────────────────────────────────────────────────────────────────
 
@@ -811,6 +812,12 @@ export const sourceDocuments = pgTable(
     queuedAt: timestamp('queued_at', { withTimezone: true }),
     processedAt: timestamp('processed_at', { withTimezone: true }),
     validation: jsonb('validation').$type<UpdValidation | null>(),
+    // След правила восстановления количества (миграция 0123). Отдельной
+    // колонкой, а не внутри parse_error_details: тот обнуляется после удачной
+    // сверки и целиком заменяется веткой подтверждённого дубля, а след нужен
+    // для отката — в нём исходное количество, версия разбора и состояние
+    // записи. Служебное поле: веб его не читает, в контракты не входит.
+    qtyRepair: jsonb('qty_repair').$type<QtyRepairTrace | null>(),
     // Пользователь, загрузивший УПД через /upload-upd или /upload-upd-pdf.
     // Для EDO/mail-полученных документов — NULL (poller, не юзер).
     // Используется мобильным клиентом для отображения контакта менеджера
@@ -1760,6 +1767,10 @@ export const photoRecognizedItems = pgTable(
     // photo_v1 нет ни построчного НДС, ни rowNo, и пересчёт по ним дал бы
     // неверную сверку. NULL — сверки не было.
     validation: jsonb('validation'),
+    // След правила восстановления количества по этому снимку (миграция 0123).
+    // Версия разбора здесь — updated_at записи: dispatch_generation на
+    // фото-кэш не распространяется.
+    qtyRepair: jsonb('qty_repair').$type<QtyRepairTrace | null>(),
     // Шапочные поля УПД-ветки.
     vatSum: numeric('vat_sum', { precision: 20, scale: 2 }),
     itemsCount: integer('items_count'),

@@ -107,6 +107,14 @@ import { deriveUpdParseOutcome } from './domain/edo/upd-outcome.js';
 import { chooseBetterUpdResult, mergeParties } from './domain/edo/upd-result-compare.js';
 import { normalizeM15ZeroTotals } from './domain/edo/m15-normalize.js';
 import { normalizeLineVatAgainstHeader } from './domain/edo/vat-rate-normalize.js';
+import {
+  applyQtyRepairs,
+  buildQtyRepairTrace,
+  detectQtyRepairs,
+  type QtyRepairCandidate,
+  type QtyRepairTrace,
+} from './domain/edo/qty-repair.js';
+import { operationTrace } from './domain/sourceDocuments/operation-trace.js';
 import { verdictForDuplicate, type DuplicateVerdict } from './domain/edo/duplicate-verdict.js';
 import { normalizeUpdNoPricingTotals } from './domain/edo/upd-no-pricing-normalize.js';
 import {
@@ -353,6 +361,21 @@ type ParseMode =
  *   * vision_* и image_vision — картинка уже была, повторять нечем.
  */
 const SECOND_PASS_MODES: ReadonlySet<ParseMode> = new Set<ParseMode>(['text']);
+
+/**
+ * Режимы разбора, где разрешено восстановление количества.
+ *
+ * Только vision-пути: дефект «количество съехало на соседнюю графу» — свойство
+ * чтения картинки. У текстового PDF и у Excel числа берутся из самого файла,
+ * и подменять их арифметикой не за чем.
+ */
+const QTY_REPAIR_PARSE_MODES: ReadonlySet<ParseMode> = new Set<ParseMode>([
+  'vision_pdf',
+  'vision_bundle',
+  'image_vision',
+  'm15_vision',
+  'segment_vision',
+]);
 
 /** Слабый результат: документ формально разобран, но пользоваться им нельзя. */
 function weakParseReasons(parsed: UpdPdfParsed, hasMismatch: boolean): string[] {
@@ -1925,7 +1948,14 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   //
   // Стоит ДО preValidation и до ветки дубликата: обе пишут позиции, и правка
   // после них оставила бы часть документов с прежним, неверным налогом.
+  // Сравнение ссылок, а не флаг внутри функции: normalizeLineVatAgainstHeader
+  // документированно возвращает ТОТ ЖЕ объект, когда ничего не меняла, и копию
+  // — когда переписала построчный налог. Признак нужен qty-repair: после
+  // нашего же пересчёта сходимость row_vat_rate подтверждает наш расчёт, а не
+  // чтение с документа, и опираться на неё нельзя.
+  const parsedBeforeVatNormalize = parsed;
   parsed = normalizeLineVatAgainstHeader(parsed);
+  const lineVatRewritten = parsed !== parsedBeforeVatNormalize;
 
   // ─── Решение о втором проходе — ДО дедупликации ───────────────────────────
   //
@@ -2086,6 +2116,56 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // недетерминизма vision (0 vs null). Для всех прочих документов — no-op.
   // См. m15-normalize.ts.
   parsed = normalizeM15ZeroTotals(parsed, 'docKind' in job.data ? job.data.docKind : undefined);
+
+  // ─── Восстановление количества из арифметики строки ──────────────────────
+  //
+  // Ставится ПОСЛЕ preValidation: решение о втором проходе и автоповторе
+  // сегмента принимается по исходным числам, иначе правило меняло бы
+  // маршрутизацию документов, а оно её не касается.
+  //
+  // Наблюдение идёт при любом режиме, кроме off, — кандидаты по всем классам
+  // нужны для анализа. Применение обставлено отдельно: арифметика не отличает
+  // ошибку в количестве от ошибки в цене (см. qty-repair.ts), поэтому правится
+  // только разрешённый класс и только там, где результат никуда не уехал.
+  const qtyRepairMode = loadEnv().UPD_QTY_REPAIR;
+  let qtyRepairCandidates: QtyRepairCandidate[] = [];
+  let qtyRepairApplied: QtyRepairCandidate[] = [];
+  if (qtyRepairMode !== 'off') {
+    // Весь блок под try/catch, и это не перестраховка ради красоты. Наблюдение
+    // — необязательная диагностика: права уронить разбор документа у неё быть
+    // не должно ни при каких входных числах. При сбое возвращаемся ровно к
+    // тому состоянию, в котором были до блока, то есть к поведению при `off`.
+    const parsedBeforeQtyRepair = parsed;
+    try {
+      qtyRepairCandidates = detectQtyRepairs(parsed, { lineVatRewritten });
+      // Повтор (второй проход, автоповтор сегмента) выбирает лучший результат
+      // сравнением с базой из БД. Подменённое количество исказило бы сравнение,
+      // причём в обе стороны: и как кандидат, и как baseline. Поэтому в обоих
+      // ролях — и когда мы САМИ повтор, и когда мы его ставим — только наблюдаем.
+      const repairAllowed =
+        qtyRepairMode === 'on' &&
+        QTY_REPAIR_PARSE_MODES.has(parseMode) &&
+        !secondPassJob &&
+        !segmentRepairJob &&
+        !wantSecondPass &&
+        !wantSegmentRepair &&
+        // Ручной повтор поднимает поколение. Там документ уже жил на портале, и
+        // менять его состав машиной нельзя.
+        jobGeneration === 0;
+      if (repairAllowed) {
+        const repaired = applyQtyRepairs(parsed, qtyRepairCandidates);
+        parsed = repaired.parsed;
+        qtyRepairApplied = repaired.applied;
+      }
+    } catch (err) {
+      // Частичного применения не остаётся: и числа, и списки кандидатов
+      // возвращаются к исходным.
+      parsed = parsedBeforeQtyRepair;
+      qtyRepairCandidates = [];
+      qtyRepairApplied = [];
+      log.warn({ err, sourceDocumentId }, 'qty repair: сбой наблюдения, разбор продолжен без него');
+    }
+  }
 
   // Валидация сумм. `let`: после синтеза итога по строкам сверку пересчитываем
   // — предупреждение, посчитанное по пустой сумме, ввело бы в заблуждение.
@@ -2260,6 +2340,10 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     llmProviderId,
     llmConfidence: parsed.confidence.toString(),
     validation,
+    // След правила восстановления количества. Заполняется ниже, уже в
+    // транзакции: до проверки следа в операциях неизвестно, останутся ли
+    // применённые правки применёнными.
+    qtyRepair: null as QtyRepairTrace | null,
     // Чем документ разобран. Читает это только повтор: он обязан пойти ТЕМ ЖЕ
     // путём, а по типу документа его не вывести — kind='transport_waybill'
     // одинаков и у М-15, и у ТН из пакетного разбора.
@@ -2336,6 +2420,109 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   await db.transaction(async (tx) => {
     const txDb = tx as unknown as typeof db;
 
+    // След документа в операциях проверяем ЗДЕСЬ, а не при решении о правке:
+    // между решением и записью документ могли привязать к приёмке или
+    // перенести его строки в проведённую операцию. operationTrace принимает
+    // транзакцию именно для этого и смотрит не только привязку документа, но и
+    // происхождение позиций — после unlink-source документ выглядит свободным,
+    // хотя его строки уже уехали.
+    //
+    // Отмена правки вынесена в функцию: она нужна в двух случаях — когда след
+    // НАЙДЕН и когда проверить его НЕ УДАЛОСЬ. Второй случай обрабатывается так
+    // же строго, как первый: не смогли убедиться, что документ свободен, —
+    // значит не применяем. Сохранить правку «потому что проверка упала» было бы
+    // ровно тем решением, из-за которого потом ищут, откуда в приёмке чужое
+    // количество.
+    const rollbackQtyRepair = (reason: string, details: Record<string, unknown>): void => {
+      if (qtyRepairApplied.length === 0) return;
+      {
+        // Возвращаем прочитанные моделью количества и пересчитываем сверку по
+        // ним: иначе в карточке осталась бы сверка от исправленных чисел, а в
+        // позициях — исходные.
+        for (const c of qtyRepairApplied) {
+          const row = itemRows[c.row - 1];
+          if (row) row.qty = c.qtyFrom.toString();
+        }
+        const rolledBack = {
+          ...parsed,
+          items: parsed.items.map((item, idx) => {
+            const c = qtyRepairApplied.find((x) => x.row === idx + 1);
+            return c ? { ...item, qty: c.qtyFrom } : item;
+          }),
+        };
+        headerValues.validation = validateUpdTotals(
+          {
+            totalSum: rolledBack.totalSum ?? null,
+            vatSum: rolledBack.vatSum ?? null,
+            itemsCount: rolledBack.itemsCount ?? null,
+            items: rolledBack.items.map((i) => ({
+              rowNo: i.rowNo ?? null,
+              qty: i.qty,
+              unit: i.unit ?? null,
+              nameRaw: i.nameRaw ?? null,
+              price: i.price ?? null,
+              sum: i.sum ?? null,
+              vatRate: i.vatRate ?? null,
+              vatSum: i.vatSum ?? null,
+            })),
+            recipient: rolledBack.recipient ?? null,
+            consignee: rolledBack.consignee ?? null,
+            consigneeRaw: rolledBack.consigneeRaw ?? null,
+          },
+          {
+            detectRecognitionWarnings: true,
+            detectPackPriceScale: loadEnv().UPD_SCALE_WARNINGS,
+          },
+        );
+        qtyRepairCandidates = qtyRepairCandidates.map((c) =>
+          qtyRepairApplied.some((a) => a.row === c.row)
+            ? { ...c, applicable: false, blockedBy: 'operation_trace' as const }
+            : c,
+        );
+        log.warn({ ...details, rows: qtyRepairApplied.map((c) => c.row) }, reason);
+        qtyRepairApplied = [];
+      }
+    };
+
+    try {
+      if (qtyRepairApplied.length > 0) {
+        const existingItemIds = await txDb
+          .select({ id: sourceDocumentItems.id })
+          .from(sourceDocumentItems)
+          .where(eq(sourceDocumentItems.sourceDocumentId, sourceDocumentId))
+          .for('update');
+        const trace = await operationTrace(
+          txDb,
+          sourceDocumentId,
+          existingItemIds.map((r) => r.id),
+        );
+        if (trace) {
+          rollbackQtyRepair(
+            'qty repair: документ уехал в операцию между решением и записью — правка отменена',
+            { trace },
+          );
+        }
+      }
+      headerValues.qtyRepair = buildQtyRepairTrace({
+        mode: qtyRepairMode,
+        candidates: qtyRepairCandidates,
+        appliedRows: new Set(qtyRepairApplied.map((c) => c.row)),
+        generation: jobGeneration,
+        // Версия результата разбора: время этой записи. Откат сверяет её с
+        // processed_at документа — след от прошлого разбора относится к другим
+        // числам, и возвращать по нему количество нельзя.
+        docVersion: headerValues.processedAt.toISOString(),
+      });
+    } catch (err) {
+      // Сюда попадаем и при сбое проверки следа, и при сбое сборки следа.
+      // Правка отменяется, а сам след не пишется: правка без следа необратима,
+      // и хранить её нельзя — наблюдение этого документа мы просто теряем.
+      rollbackQtyRepair('qty repair: не удалось проверить след в операциях — правка отменена', {
+        err,
+      });
+      headerValues.qtyRepair = null;
+    }
+
     if (wantSegmentRepair && segmentContext && segmentJob) {
       segmentRepairQueued = await queueSegmentRepair({
         sourceDocumentId,
@@ -2375,7 +2562,34 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     await txDb
       .delete(sourceDocumentItems)
       .where(eq(sourceDocumentItems.sourceDocumentId, sourceDocumentId));
-    if (itemRows.length > 0) await txDb.insert(sourceDocumentItems).values(itemRows);
+    const insertedItems =
+      itemRows.length > 0
+        ? await txDb
+            .insert(sourceDocumentItems)
+            .values(itemRows)
+            .returning({ id: sourceDocumentItems.id, lineNo: sourceDocumentItems.lineNo })
+        : [];
+
+    // Привязываем след к идентификаторам строк: откат обязан находить ту самую
+    // позицию, а не полагаться на нумерацию, которая при следующем разборе
+    // может смениться. Отдельным UPDATE, потому что id появляются только после
+    // вставки; та же транзакция — значит либо есть и правка, и привязка, либо
+    // нет ни того, ни другого.
+    if (qtyRepairApplied.length > 0 && headerValues.qtyRepair) {
+      const idByLine = new Map(insertedItems.map((r) => [r.lineNo, r.id]));
+      await txDb
+        .update(sourceDocuments)
+        .set({
+          qtyRepair: {
+            ...headerValues.qtyRepair,
+            entries: headerValues.qtyRepair.entries.map((e) => {
+              const id = idByLine.get(e.row);
+              return id ? { ...e, itemId: id } : e;
+            }),
+          },
+        })
+        .where(eq(sourceDocuments.id, sourceDocumentId));
+    }
 
     // Дубликат — предупреждение ПОВЕРХ сохранённого результата: позиции и
     // реквизиты остаются, решает человек. Раньше так вёл себя только собранный

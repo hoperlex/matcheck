@@ -7,6 +7,12 @@ import { normalizeUpdNoPricingTotals } from '../edo/upd-no-pricing-normalize.js'
 import { parseUpdVision } from '../edo/upd-vision.parser.js';
 import { synthesizeTotalSum } from '../edo/upd-outcome.js';
 import { validateUpdTotals } from '../edo/upd-validation.js';
+import {
+  applyQtyRepairs,
+  buildQtyRepairTrace,
+  detectQtyRepairs,
+  type QtyRepairTrace,
+} from '../edo/qty-repair.js';
 import { loadEnv } from '../../lib/env.js';
 
 /**
@@ -37,6 +43,11 @@ export type PhotoUpdRecognition = {
   confidence: number | null;
   model: string | null;
   validation: UpdValidation;
+  /**
+   * След правила восстановления количества — служебный, карточка его не
+   * показывает. null, когда кандидатов не было или правило выключено.
+   */
+  qtyRepair: QtyRepairTrace | null;
 };
 
 export async function recognizePhotoUpd(args: {
@@ -44,6 +55,14 @@ export async function recognizePhotoUpd(args: {
   mimeType: string;
   /** Метка для журнала llm_calls: без неё вызов пишется как `no-name`. */
   label: string;
+  /**
+   * Разрешено ли ПРИМЕНЯТЬ восстановление количества (режим `on`).
+   *
+   * Решает вызывающий, а не этот модуль: условия у фото свои — приёмка не
+   * подтверждена, распознавание первичное, следа применённой правки ещё нет.
+   * Проверять их надо там, где есть доступ к записи и транзакция.
+   */
+  allowQtyRepairApply?: boolean;
 }): Promise<PhotoUpdRecognition> {
   const result = await parseUpdVision(
     { buffer: args.buffer, mimeType: args.mimeType, filename: args.label },
@@ -56,7 +75,39 @@ export async function recognizePhotoUpd(args: {
     result.parsed,
     loadEnv().UPD_NO_PRICING_V1,
   );
+  // Сравнение ссылок: функция возвращает тот же объект, когда налог не
+  // переписывала. После нашего пересчёта сходимость построчного НДС
+  // подтверждает наш расчёт, а не чтение с документа, — qty-repair обязан это
+  // знать.
+  const beforeVatNormalize = parsed;
   parsed = normalizeLineVatAgainstHeader(parsed);
+  const lineVatRewritten = parsed !== beforeVatNormalize;
+
+  // Восстановление количества: наблюдение при любом режиме, кроме off.
+  // Применение у фото своё — здесь нет ни dispatch_generation, ни
+  // operationTrace: правило разрешено только при первичном распознавании и
+  // только вызывающим, который передал allowApply (роут проверяет, что
+  // приёмка не подтверждена и следа правки ещё нет).
+  const qtyRepairMode = loadEnv().UPD_QTY_REPAIR;
+  let qtyRepairTrace: QtyRepairTrace | null = null;
+  if (qtyRepairMode !== 'off') {
+    const candidates = detectQtyRepairs(parsed, { lineVatRewritten });
+    let appliedRows = new Set<number>();
+    if (qtyRepairMode === 'on' && args.allowQtyRepairApply === true) {
+      const repaired = applyQtyRepairs(parsed, candidates);
+      parsed = repaired.parsed;
+      appliedRows = new Set(repaired.applied.map((c) => c.row));
+    }
+    qtyRepairTrace = buildQtyRepairTrace({
+      mode: qtyRepairMode,
+      candidates,
+      appliedRows,
+      // У фото-кэша поколения разбора нет; версия результата — updated_at
+      // записи, его проставляет роут при сохранении.
+      generation: null,
+      docVersion: null,
+    });
+  }
 
   let validation = validateUpdTotals(toValidatorInput(parsed), {
     detectRecognitionWarnings: true,
@@ -96,6 +147,7 @@ export async function recognizePhotoUpd(args: {
     confidence: parsed.confidence,
     model: await modelNameOf(result.llmProviderId),
     validation,
+    qtyRepair: qtyRepairTrace,
   };
 }
 

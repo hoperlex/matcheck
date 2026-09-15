@@ -549,6 +549,17 @@ export function suspectUnitCodeAsQty(item: { qty?: number | null; unit?: string 
 }
 
 /**
+ * Код ОКЕИ, соответствующий написанию единицы, или null.
+ *
+ * Та же таблица, что у `suspectUnitCodeAsQty`, но отданная наружу: разбору
+ * дефектов количества нужен не булев признак, а сам код — чтобы отличить
+ * «шт с 796» от «м с 6». Вторая копия таблицы в api разошлась бы с этой.
+ */
+export function okeiCodeForUnit(unit: string | null | undefined): number | null {
+  return OKEI_BY_UNIT[normalizeUnit(unit)] ?? null;
+}
+
+/**
  * Похоже ли, что в цену попала стоимость упаковки, а в количество — число упаковок.
  *
  * Зачем эвристика. Класс не ловится ничем: произведение не меняется от переноса
