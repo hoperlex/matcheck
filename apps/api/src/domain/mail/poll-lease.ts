@@ -1,25 +1,21 @@
 // Лиз на опрос почтового ящика.
 //
-// Ящик опрашивает ровно один экземпляр воркера за раз: параллельный опрос
-// приведёт к двойному скачиванию писем и гонке за watermark. Лиз с ВЛАДЕЛЬЦЕМ
-// и ТОКЕНОМ, а не просто «занято до»: перезапущенный воркер не должен отбирать
-// лиз у живого, а «зависший» — продлевать чужой.
-//
-// Всё время берётся из now() базы, а не из часов процесса: воркер и PostgreSQL
-// живут на разных машинах, и расхождение часов иначе отдало бы ящик двум
-// воркерам сразу (ровно эта ошибка уже ловилась в job-outbox).
+// Механика вынесена в domain/shared/poll-lease.ts: ровно то же требование
+// появилось у учётных записей ЭДО, а две копии разошлись бы при первой правке.
+// Здесь остались прежние сигнатуры — вызывающий код и тесты почты не меняются,
+// и их прогон как раз и доказывает, что вынос ничего не сломал.
 
-import { and, eq, isNull, lt, or, sql as drSql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { mailAccounts } from '../../db/schema.js';
+import {
+  acquirePollLease as acquireShared,
+  releasePollLease as releaseShared,
+  renewPollLease as renewShared,
+  type LeaseHandle,
+} from '../shared/poll-lease.js';
 
-export type LeaseHandle = {
-  accountId: string;
-  /** UUID экземпляра воркера — по нему в логах видно, кто держит ящик. */
-  owner: string;
-  /** UUID конкретного захвата: продлить и освободить можно только им. */
-  token: string;
-};
+export type { LeaseHandle } from '../shared/poll-lease.js';
 
 /**
  * Пытается занять ящик под опрос.
@@ -41,74 +37,19 @@ export async function acquirePollLease(
     requirePollEnabled?: boolean;
   },
 ): Promise<LeaseHandle | null> {
-  const token = crypto.randomUUID();
-  const conditions = [
-    eq(mailAccounts.id, params.accountId),
-    eq(mailAccounts.isActive, true),
-    // Свободен либо лиз истёк. Условие целиком считается базой, поэтому двум
-    // воркерам одновременно ящик не достанется.
-    or(isNull(mailAccounts.pollLeaseUntil), lt(mailAccounts.pollLeaseUntil, drSql`now()`)),
-  ];
-  if (params.requirePollEnabled !== false) {
-    conditions.push(eq(mailAccounts.pollEnabled, true));
-  }
-
-  const [row] = await db
-    .update(mailAccounts)
-    .set({
-      pollLeaseOwner: params.owner,
-      pollLeaseToken: token,
-      pollLeaseUntil: drSql`now() + make_interval(secs => ${params.ttlSeconds})`,
-      updatedAt: new Date(),
-    })
-    .where(and(...conditions))
-    .returning({ id: mailAccounts.id });
-
-  return row ? { accountId: params.accountId, owner: params.owner, token } : null;
+  return acquireShared(db, mailAccounts, params);
 }
 
-/**
- * Продлевает лиз — только своим токеном.
- *
- * `false` означает, что лиз уже перехвачен другим воркером: продолжать работу
- * с ящиком нельзя, иначе начнётся параллельный опрос.
- */
 export async function renewPollLease(
   db: Db,
   lease: LeaseHandle,
   ttlSeconds: number,
 ): Promise<boolean> {
-  const [row] = await db
-    .update(mailAccounts)
-    .set({
-      pollLeaseUntil: drSql`now() + make_interval(secs => ${ttlSeconds})`,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(eq(mailAccounts.id, lease.accountId), eq(mailAccounts.pollLeaseToken, lease.token)),
-    )
-    .returning({ id: mailAccounts.id });
-  return Boolean(row);
+  return renewShared(db, mailAccounts, lease, ttlSeconds);
 }
 
-/**
- * Освобождает ящик — тоже только своим токеном, иначе перезапустившийся
- * экземпляр снял бы лиз у того, кто прямо сейчас качает письма.
- */
 export async function releasePollLease(db: Db, lease: LeaseHandle): Promise<boolean> {
-  const [row] = await db
-    .update(mailAccounts)
-    .set({
-      pollLeaseOwner: null,
-      pollLeaseToken: null,
-      pollLeaseUntil: null,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(eq(mailAccounts.id, lease.accountId), eq(mailAccounts.pollLeaseToken, lease.token)),
-    )
-    .returning({ id: mailAccounts.id });
-  return Boolean(row);
+  return releaseShared(db, mailAccounts, lease);
 }
 
 /**

@@ -1,3 +1,15 @@
+/**
+ * УСТАРЕВШИЙ путь импорта из ЭДО. Не используется ни одним маршрутом.
+ *
+ * Пишет source_documents напрямую: без хранилища, без вложений, без объекта и
+ * без журнала — то есть карточка получалась бы без оригинала, который можно
+ * открыть. Заменяется сагой приёма (domain/edo/ingest-document.ts) вместе с
+ * журналом событий и курсором ленты.
+ *
+ * Пока оставлен ради интеграционного теста xml-parties.int.test.ts: он
+ * проверяет перенос сторон и их ИНН на XML-маршруте, и эти проверки обязаны
+ * пережить замену — тест переписывается на новую точку входа вместе с ней.
+ */
 import { and, eq, sql as drSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import {
@@ -63,6 +75,10 @@ export async function runEdoSyncForAccount(
           origin: 'edo_diadoc',
           edoAccountId: account.id,
           providerMessageId: incoming.providerMessageId,
+          // Устаревший путь не различает сущности внутри сообщения: у него одна
+          // запись на сообщение. Пустая строка — то же значение, что у всех
+          // прежних строк, поэтому ключ остаётся совместимым.
+          providerEntityId: '',
           supplierId,
           supplierInnRaw: parsed.supplier.inn ?? null,
           recipientId,
@@ -86,7 +102,15 @@ export async function runEdoSyncForAccount(
         // Тот же дефект уже был на почтовом пути (см. mail-requests.ts); здесь
         // он не проявлялся только потому, что таблица edo_accounts пуста.
         .onConflictDoNothing({
-          target: [sourceDocuments.edoAccountId, sourceDocuments.providerMessageId],
+          // Третья колонка добавлена миграцией 0124: одно сообщение Диадока
+          // может нести несколько документов, и пара (учётка, сообщение)
+          // пропускала только первый. Набор колонок обязан ТОЧНО совпадать с
+          // индексом — иначе PostgreSQL отвечает 42P10 на каждом документе.
+          target: [
+            sourceDocuments.edoAccountId,
+            sourceDocuments.providerMessageId,
+            sourceDocuments.providerEntityId,
+          ],
           where: drSql`${sourceDocuments.edoAccountId} is not null`,
         })
         .returning({ id: sourceDocuments.id });

@@ -738,6 +738,28 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     'POST /api/v1/admin/edo-accounts/:id/sync',
     { ...legacy('admin.edo_accounts', 'edit', ['manager'], GAP), matrixOnly: NO },
   ],
+  // Правка учётки, проверка доступа и разведка ящика появились вместе с
+  // приёмом документов из Диадока. Все три — admin-only и идут по той же
+  // паре, что и sync: действия `edit` у страницы нет (actions:
+  // view/create/delete), выдать такую ячейку невозможно, поэтому матрица их не
+  // открывает, а источником истины остаётся authorize в самом маршруте.
+  //
+  // Добавлять странице действие `edit` здесь сознательно НЕ стали: оно сделало
+  // бы применимой и ячейку sync, то есть поменяло бы поведение read-only-гарда
+  // у уже существующего маршрута. Это отдельное решение по матрице прав, а не
+  // побочный эффект приёма документов.
+  [
+    'PATCH /api/v1/admin/edo-accounts/:id',
+    { ...legacy('admin.edo_accounts', 'edit', [], GAP), matrixOnly: NO },
+  ],
+  [
+    'POST /api/v1/admin/edo-accounts/:id/check',
+    { ...legacy('admin.edo_accounts', 'edit', [], GAP), matrixOnly: NO },
+  ],
+  [
+    'POST /api/v1/admin/edo-accounts/:id/inventory',
+    { ...legacy('admin.edo_accounts', 'edit', [], GAP), matrixOnly: NO },
+  ],
 
   ['GET /api/v1/admin/mail-accounts', st('admin.mail_accounts', 'view')],
   ['POST /api/v1/admin/mail-accounts', st('admin.mail_accounts', 'create')],

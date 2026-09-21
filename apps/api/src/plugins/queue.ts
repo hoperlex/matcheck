@@ -117,6 +117,7 @@ export type S3CleanupJobData = {
 export const UPD_PARSE_QUEUE = 'upd-parse';
 export const S3_CLEANUP_QUEUE = 's3-cleanup';
 export const MAIL_POLL_QUEUE = 'mail-poll';
+export const EDO_POLL_QUEUE = 'edo-poll';
 
 /**
  * Опции заданий распознавания — ОДНИ на все экземпляры очереди.
@@ -160,12 +161,28 @@ export const UPD_PARSE_WORKER_OPTIONS = {
 /** Ручной запрос «проверить ящик сейчас» из админки. */
 export type MailPollJobData = { accountId: string };
 
+/**
+ * Ручная работа по учётной записи ЭДО из админки.
+ *
+ * Три вида, а не один: проверка доступа и инвентаризация ничего не импортируют,
+ * но по объёму обхода инвентаризация сопоставима с синхронизацией — держать её
+ * синхронным HTTP-запросом нельзя (нынешняя кнопка /sync именно этим и плоха:
+ * браузер ждёт её десять минут).
+ */
+export type EdoPollJobData = {
+  accountId: string;
+  mode: 'sync' | 'check' | 'inventory';
+  /** Для инвентаризации: с какой даты смотреть ленту. */
+  since?: string;
+};
+
 declare module 'fastify' {
   interface FastifyInstance {
     queues: {
       updParse: Queue<UpdParseJobData>;
       s3Cleanup: Queue<S3CleanupJobData>;
       mailPoll: Queue<MailPollJobData>;
+      edoPoll: Queue<EdoPollJobData>;
     };
   }
 }
@@ -230,11 +247,25 @@ export default fp(async (app) => {
     },
   });
 
+  // Ручные работы по ЭДО. Живут в том же процессе, что и почта: опрос Диадока —
+  // это HTTP и небольшой XML, отдельный контейнер ради такой нагрузки не нужен,
+  // а воркер распознавания занимать нельзя (он идёт с concurrency = 1).
+  const edoPoll = new Queue<EdoPollJobData>(EDO_POLL_QUEUE, {
+    connection: buildQueueConnection(),
+    defaultJobOptions: {
+      attempts: 2,
+      backoff: { type: 'exponential', delay: 30_000 },
+      removeOnComplete: { age: 24 * 60 * 60, count: 200 },
+      removeOnFail: { age: 7 * 24 * 60 * 60 },
+    },
+  });
+
   watch(updParse, UPD_PARSE_QUEUE);
   watch(s3Cleanup, S3_CLEANUP_QUEUE);
   watch(mailPoll, MAIL_POLL_QUEUE);
+  watch(edoPoll, EDO_POLL_QUEUE);
 
-  app.decorate('queues', { updParse, s3Cleanup, mailPoll });
+  app.decorate('queues', { updParse, s3Cleanup, mailPoll, edoPoll });
   app.addHook('onClose', async () => {
     try {
       await updParse.close();
@@ -251,7 +282,15 @@ export default fp(async (app) => {
     } catch {
       /* ignore */
     }
+    try {
+      await edoPoll.close();
+    } catch {
+      /* ignore */
+    }
   });
 
-  app.log.info({ queues: [UPD_PARSE_QUEUE, S3_CLEANUP_QUEUE, MAIL_POLL_QUEUE] }, 'queues ready');
+  app.log.info(
+    { queues: [UPD_PARSE_QUEUE, S3_CLEANUP_QUEUE, MAIL_POLL_QUEUE, EDO_POLL_QUEUE] },
+    'queues ready',
+  );
 });

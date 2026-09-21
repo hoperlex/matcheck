@@ -18,7 +18,7 @@ import {
   bigserial,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
-import type { UpdValidation } from '@matcheck/contracts';
+import type { EdoInventoryReport, UpdValidation } from '@matcheck/contracts';
 import type { QtyRepairTrace } from '../domain/edo/qty-repair.js';
 
 // ─── Enums ─────────────────────────────────────────────────────────────────
@@ -578,12 +578,140 @@ export const edoAccounts = pgTable('edo_accounts', {
   id: uuid('id').primaryKey().defaultRandom(),
   provider: varchar('provider', { length: 32 }).notNull().default('diadoc'),
   name: text('name').notNull(),
+  // Введённые человеком секреты подключения (client_id/client_secret и т.п.).
   credentialsEncrypted: text('credentials_encrypted').notNull(),
   isActive: boolean('is_active').notNull().default(true),
+  // Опрос включается ОТДЕЛЬНО от is_active: учётную запись заводят и проверяют
+  // до того, как её начнёт опрашивать воркер. Вторая защита — EDO_POLL_ENABLED.
+  pollEnabled: boolean('poll_enabled').notNull().default(false),
+  // Лиз владения: продлить или снять может только владелец токена.
+  pollLeaseOwner: uuid('poll_lease_owner'),
+  pollLeaseToken: uuid('poll_lease_token'),
+  pollLeaseUntil: timestamp('poll_lease_until', { withTimezone: true }),
+  authMode: text('auth_mode').$type<'oidc_refresh' | 'developer_key'>().notNull().default('oidc_refresh'),
+  // Ротируемое состояние авторизации. ОТДЕЛЬНО от credentialsEncrypted: иначе
+  // правка названия учётной записи затирала бы живой refresh_token, а вернуть
+  // его можно только руками через браузер.
+  authStateEncrypted: text('auth_state_encrypted'),
+  // Счётчик для compare-and-swap при обмене токена.
+  authStateVersion: integer('auth_state_version').notNull().default(0),
+  refreshTokenUsedAt: timestamp('refresh_token_used_at', { withTimezone: true }),
+  // Площадка именем, а не адресом: URL и scope живут в коде (diadoc.http.ts).
+  environment: text('environment').$type<'production' | 'staging'>().notNull().default('production'),
+  boxId: text('box_id'),
+  orgInn: varchar('org_inn', { length: 12 }),
+  // Курсор ленты GetNewEvents. Именно IndexKey: afterEventId в V8 устарел.
+  lastIndexKey: text('last_index_key'),
+  lastEventAt: timestamp('last_event_at', { withTimezone: true }),
+  // Отсечка первичной загрузки: уходит в сам запрос к Диадоку, поэтому история
+  // ящика не перебирается. Фиксируется при заведении и не пересчитывается.
+  backfillSince: timestamp('backfill_since', { withTimezone: true }),
+  defaultSiteId: uuid('default_site_id').references(() => sites.id, { onDelete: 'set null' }),
   lastSyncAt: timestamp('last_sync_at', { withTimezone: true }),
+  lastOkAt: timestamp('last_ok_at', { withTimezone: true }),
+  lastError: text('last_error'),
+  // Отчёт разведки ящика: какие типы документов там встречаются и сколько их.
+  lastInventory: jsonb('last_inventory').$type<EdoInventoryReport>(),
+  lastInventoryAt: timestamp('last_inventory_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Журнал событий ленты Диадока: по нему двигается курсор.
+ *
+ * Отдельно от журнала вложений намеренно. Событие может нести сообщение либо
+ * патч к уже доставленному, патч может не содержать нового документа, а одна
+ * сущность встречается в нескольких событиях. Ключ «сообщение + сущность»
+ * состояния события не выражает — считая курсор по нему, мы бы либо застряли,
+ * либо перескочили событие, то есть потеряли документ молча.
+ */
+export const edoEvents = pgTable(
+  'edo_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    edoAccountId: uuid('edo_account_id')
+      .notNull()
+      .references(() => edoAccounts.id, { onDelete: 'cascade' }),
+    eventId: text('event_id').notNull(),
+    indexKey: text('index_key').notNull(),
+    kind: text('kind').$type<'message' | 'patch'>().notNull().default('message'),
+    eventAt: timestamp('event_at', { withTimezone: true }),
+    // Терминальные статусы пропускают курсор дальше; 'pending' останавливает
+    // продвижение на себе.
+    status: text('status')
+      .$type<'pending' | 'processed' | 'no_entities' | 'skipped_by_age' | 'failed'>()
+      .notNull()
+      .default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('edo_events_account_event_unique').on(t.edoAccountId, t.eventId),
+    index('edo_events_account_status_idx').on(t.edoAccountId, t.status, t.createdAt),
+  ],
+);
+
+/**
+ * Журнал вложений: судьба каждого документа из ленты.
+ *
+ * Транспорт и маршрутизация разведены на два поля сознательно. Терминальность
+ * для КУРСОРА определяет только транспорт: файл забран и сохранён — событие
+ * можно пройти. Иначе первое же вложение, ждущее включения разбора, застопорило
+ * бы весь ящик, и следующие за ним обычные УПД не импортировались бы никогда.
+ */
+export const edoReceipts = pgTable(
+  'edo_receipts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    edoAccountId: uuid('edo_account_id')
+      .notNull()
+      .references(() => edoAccounts.id, { onDelete: 'cascade' }),
+    eventId: text('event_id'),
+    messageId: text('message_id').notNull(),
+    entityId: text('entity_id').notNull(),
+    documentType: text('document_type'),
+    documentFunction: text('document_function'),
+    documentVersion: text('document_version'),
+    documentNumber: text('document_number'),
+    documentDate: timestamp('document_date', { withTimezone: false, mode: 'date' }),
+    counteragentBoxId: text('counteragent_box_id'),
+    receivedAt: timestamp('received_at', { withTimezone: true }),
+    transportStatus: text('transport_status')
+      .$type<
+        'fetching' | 'stored' | 'skipped' | 'too_large' | 'encrypted' | 'vanished' | 'failed'
+      >()
+      .notNull()
+      .default('fetching'),
+    routeStatus: text('route_status')
+      .$type<'none' | 'imported' | 'awaiting' | 'routed' | 'duplicate' | 'not_applicable'>()
+      .notNull()
+      .default('none'),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    rawS3Key: text('raw_s3_key'),
+    contentSha256: varchar('content_sha256', { length: 64 }),
+    // Чем разобрали: локальным парсером или силами Диадока. Нужно, чтобы чинить
+    // парсер по фактам, а не по догадкам.
+    parseSource: text('parse_source').$type<'local_xml' | 'diadoc_title'>(),
+    sourceDocumentId: uuid('source_document_id').references(() => sourceDocuments.id, {
+      onDelete: 'set null',
+    }),
+    replayRequestedAt: timestamp('replay_requested_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('edo_receipts_entity_unique').on(t.edoAccountId, t.messageId, t.entityId),
+    index('edo_receipts_account_transport_idx').on(
+      t.edoAccountId,
+      t.transportStatus,
+      t.createdAt,
+    ),
+  ],
+);
 
 export const mailAccounts = pgTable('mail_accounts', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -789,6 +917,10 @@ export const sourceDocuments = pgTable(
     origin: sourceOriginEnum('origin').notNull(),
     edoAccountId: uuid('edo_account_id').references(() => edoAccounts.id, { onDelete: 'set null' }),
     providerMessageId: text('provider_message_id'),
+    // Сущность (вложение) внутри сообщения ЭДО. Одно сообщение Диадока может
+    // нести несколько документов, и без этой части ключа второй из них молча не
+    // вставлялся бы. У записей до 0124 и у всех не-ЭДО документов — пустая строка.
+    providerEntityId: text('provider_entity_id').notNull().default(''),
     mailAccountId: uuid('mail_account_id').references(() => mailAccounts.id, {
       onDelete: 'set null',
     }),
@@ -842,7 +974,7 @@ export const sourceDocuments = pgTable(
   },
   (t) => [
     uniqueIndex('source_edo_message_unique')
-      .on(t.edoAccountId, t.providerMessageId)
+      .on(t.edoAccountId, t.providerMessageId, t.providerEntityId)
       .where(sql`${t.edoAccountId} is not null`),
     uniqueIndex('source_mail_message_unique')
       .on(t.mailAccountId, t.messageId)
