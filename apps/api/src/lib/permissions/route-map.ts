@@ -760,6 +760,8 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     'POST /api/v1/admin/edo-accounts/:id/inventory',
     { ...legacy('admin.edo_accounts', 'edit', [], GAP), matrixOnly: NO },
   ],
+  // Журнал приёма — чтение состояния учётной записи, поэтому по «Просмотру».
+  ['GET /api/v1/admin/edo-accounts/:id/journal', st('admin.edo_accounts', 'view')],
 
   ['GET /api/v1/admin/mail-accounts', st('admin.mail_accounts', 'view')],
   ['POST /api/v1/admin/mail-accounts', st('admin.mail_accounts', 'create')],

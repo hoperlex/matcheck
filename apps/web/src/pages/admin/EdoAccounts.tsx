@@ -22,6 +22,7 @@ import type {
   EdoAccountDto,
   EdoCheckResult,
   EdoJobQueued,
+  EdoJournalSummary,
 } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
@@ -60,6 +61,9 @@ export default function AdminEdoAccountsPage() {
   const canManage = canCreate || can('admin.edo_accounts', 'delete');
   const [open, setOpen] = useState(false);
   const [checkResult, setCheckResult] = useState<EdoCheckResult | null>(null);
+  // Какую учётную запись проверяем: без этого выбранный ящик некуда записать.
+  const [checkedAccountId, setCheckedAccountId] = useState<string | null>(null);
+  const [journal, setJournal] = useState<EdoJournalSummary | null>(null);
   const [form] = Form.useForm<EdoAccountCreate>();
 
   const list = useQuery({
@@ -89,8 +93,23 @@ export default function AdminEdoAccountsPage() {
 
   const check = useMutation({
     mutationFn: (id: string) => api.post<EdoCheckResult>(`/admin/edo-accounts/${id}/check`),
-    onSuccess: (r) => {
+    onSuccess: (r, id) => {
       setCheckResult(r);
+      setCheckedAccountId(id);
+      invalidate();
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  // Ящик выбирается прямо из результата проверки: переписывать GUID руками —
+  // лишний повод ошибиться, а ошибка здесь тихая (чужой ящик отвечает 403).
+  const chooseBox = useMutation({
+    mutationFn: ({ id, boxId, inn }: { id: string; boxId: string; inn: string | null }) =>
+      api.patch(`/admin/edo-accounts/${id}`, { boxId, ...(inn ? { orgInn: inn } : {}) }),
+    onSuccess: () => {
+      message.success('Ящик выбран');
+      setCheckResult(null);
+      setCheckedAccountId(null);
       invalidate();
     },
     onError: (err: Error) => message.error(err.message),
@@ -102,6 +121,15 @@ export default function AdminEdoAccountsPage() {
   const sync = useMutation({
     mutationFn: (id: string) => api.post<EdoJobQueued>(`/admin/edo-accounts/${id}/sync`),
     onSuccess: () => message.success('Синхронизация запущена'),
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  // Журнал приёма: без него на вопрос «почему документ не приехал» пришлось бы
+  // отвечать запросом в базу.
+  const openJournal = useMutation({
+    mutationFn: (id: string) =>
+      api.get<EdoJournalSummary>(`/admin/edo-accounts/${id}/journal?limit=50`),
+    onSuccess: (r) => setJournal(r),
     onError: (err: Error) => message.error(err.message),
   });
 
@@ -130,6 +158,9 @@ export default function AdminEdoAccountsPage() {
       </Tooltip>
       <Button size="small" onClick={() => sync.mutate(r.id)} loading={sync.isPending}>
         Синхронизировать
+      </Button>
+      <Button size="small" onClick={() => openJournal.mutate(r.id)} loading={openJournal.isPending}>
+        Журнал
       </Button>
     </Space>
   );
@@ -231,8 +262,85 @@ export default function AdminEdoAccountsPage() {
       />
 
       <Modal
+        open={journal !== null}
+        onCancel={() => setJournal(null)}
+        footer={null}
+        title="Журнал приёма"
+        width={860}
+      >
+        {journal && (
+          <Space direction="vertical" style={{ width: '100%' }}>
+            {journal.entries.length === 0 && (
+              <Alert
+                type="info"
+                showIcon
+                message="Пока пусто"
+                description="Ни одного вложения не забирали. Проверьте, что выбран ящик, и запустите синхронизацию."
+              />
+            )}
+            {journal.eventsPending > 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                message={`Незакрытых событий: ${journal.eventsPending}`}
+                description="Курсор ленты стоит на первом из них и не пойдёт дальше, пока они не разберутся."
+              />
+            )}
+            <Space wrap>
+              {journal.byTransport.map((s2) => (
+                <Tag key={`t-${s2.status}`}>
+                  файлы · {s2.status}: {s2.count}
+                </Tag>
+              ))}
+              {journal.byRoute.map((s2) => (
+                <Tag key={`r-${s2.status}`} color="blue">
+                  разбор · {s2.status}: {s2.count}
+                </Tag>
+              ))}
+            </Space>
+            <ResponsiveTable<EdoJournalSummary['entries'][number]>
+              items={journal.entries}
+              rowKey="id"
+              columns={[
+                { title: 'Документ', dataIndex: 'documentNumber', render: (n: string | null) => n ?? '—' },
+                { title: 'Тип', dataIndex: 'documentType', render: (t: string | null) => t ?? '—' },
+                { title: 'Версия', dataIndex: 'documentVersion', render: (v: string | null) => v ?? '—' },
+                { title: 'Файл', dataIndex: 'transportStatus' },
+                { title: 'Разбор', dataIndex: 'routeStatus' },
+                { title: 'Попыток', dataIndex: 'attempts' },
+                {
+                  title: 'Причина',
+                  dataIndex: 'lastError',
+                  render: (e: string | null) =>
+                    e ? (
+                      <Typography.Text type="secondary">{e}</Typography.Text>
+                    ) : (
+                      <Typography.Text type="secondary">—</Typography.Text>
+                    ),
+                },
+              ]}
+              cardRender={(e) => (
+                <Card size="small" style={{ width: '100%' }}>
+                  <Space direction="vertical" size={0}>
+                    <Typography.Text strong>{e.documentNumber ?? e.entityId}</Typography.Text>
+                    <Typography.Text type="secondary">
+                      файл: {e.transportStatus} · разбор: {e.routeStatus}
+                    </Typography.Text>
+                    {e.lastError && <Typography.Text type="secondary">{e.lastError}</Typography.Text>}
+                  </Space>
+                </Card>
+              )}
+            />
+          </Space>
+        )}
+      </Modal>
+
+      <Modal
         open={checkResult !== null}
-        onCancel={() => setCheckResult(null)}
+        onCancel={() => {
+          setCheckResult(null);
+          setCheckedAccountId(null);
+        }}
         footer={null}
         title="Доступ к Диадоку"
         width={620}
@@ -257,19 +365,47 @@ export default function AdminEdoAccountsPage() {
               </Descriptions.Item>
             </Descriptions>
             <Typography.Text strong>Доступные ящики</Typography.Text>
-            {checkResult.boxes.map((b) => (
-              <Card key={b.boxId} size="small">
-                <Space direction="vertical" size={0}>
-                  <Typography.Text>{b.title || '(без названия)'}</Typography.Text>
-                  <Typography.Text type="secondary">
-                    ИНН {b.inn ?? '—'} · КПП {b.kpp ?? '—'}
-                  </Typography.Text>
-                  <Typography.Text copyable code>
-                    {b.boxId}
-                  </Typography.Text>
-                </Space>
-              </Card>
-            ))}
+            {checkResult.boxes.map((b) => {
+              const account = (list.data ?? []).find((a) => a.id === checkedAccountId);
+              const isCurrent = account?.boxId === b.boxId;
+              // Менять ящик у учётной записи, которая уже читала ленту, нельзя:
+              // курсор указывает на позицию в ДРУГОМ ящике. Сервер это
+              // запрещает, поэтому и кнопку не показываем.
+              const locked = Boolean(account?.lastEventAt) && !isCurrent;
+              return (
+                <Card key={b.boxId} size="small">
+                  <Space direction="vertical" size={0} style={{ width: '100%' }}>
+                    <Typography.Text>{b.title || '(без названия)'}</Typography.Text>
+                    <Typography.Text type="secondary">
+                      ИНН {b.inn ?? '—'} · КПП {b.kpp ?? '—'}
+                    </Typography.Text>
+                    <Typography.Text copyable code>
+                      {b.boxId}
+                    </Typography.Text>
+                    {isCurrent ? (
+                      <Tag color="green">выбран</Tag>
+                    ) : locked ? (
+                      <Typography.Text type="secondary">
+                        учётная запись уже читала ленту другого ящика — заведите новую
+                      </Typography.Text>
+                    ) : (
+                      <Button
+                        size="small"
+                        type="link"
+                        style={{ padding: 0 }}
+                        loading={chooseBox.isPending}
+                        onClick={() =>
+                          checkedAccountId &&
+                          chooseBox.mutate({ id: checkedAccountId, boxId: b.boxId, inn: b.inn })
+                        }
+                      >
+                        Использовать этот ящик
+                      </Button>
+                    )}
+                  </Space>
+                </Card>
+              );
+            })}
           </Space>
         )}
       </Modal>

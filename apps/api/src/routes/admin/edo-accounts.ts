@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { desc, eq } from 'drizzle-orm';
+import { and, count, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../../lib/fastify.js';
 import {
@@ -8,11 +8,12 @@ import {
   EdoAccountPatchSchema,
   EdoCheckResultSchema,
   EdoJobQueuedSchema,
+  EdoJournalSummarySchema,
   ErrorResponseSchema,
   StoredEdoCredentialsSchema,
   type EdoCredentials,
 } from '@matcheck/contracts';
-import { edoAccounts } from '../../db/schema.js';
+import { edoAccounts, edoEvents, edoReceipts } from '../../db/schema.js';
 import { buildAad, encryptToString, decryptField } from '../../domain/auth/crypto.js';
 import { loadEnv } from '../../lib/env.js';
 import { checkEdoAccess } from '../../domain/edo/check-access.js';
@@ -300,6 +301,79 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
       const job = await app.queues.edoPoll.add('sync', { accountId: row.id, mode: 'sync' });
       reply.code(202);
       return { queued: true as const, jobId: String(job.id) };
+    },
+  );
+
+  /**
+   * Журнал приёма: что произошло с документами ящика.
+   *
+   * Без него единственный ответ на «почему документ не приехал» — запрос в
+   * базу. Транспорт и маршрут показываются раздельно: «файл не забрали» и
+   * «файл забрали, но не разобрали» — разные неполадки с разными действиями.
+   */
+  app.get(
+    '/api/v1/admin/edo-accounts/:id/journal',
+    {
+      preHandler: [app.authenticate, app.authorize('admin')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        querystring: z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }),
+        response: { 200: EdoJournalSummarySchema, 404: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      const [row] = await app.db
+        .select({ id: edoAccounts.id })
+        .from(edoAccounts)
+        .where(eq(edoAccounts.id, req.params.id))
+        .limit(1);
+      if (!row) return reply.code(404).send({ error: 'not_found' });
+
+      const byTransport = await app.db
+        .select({ status: edoReceipts.transportStatus, count: count() })
+        .from(edoReceipts)
+        .where(eq(edoReceipts.edoAccountId, row.id))
+        .groupBy(edoReceipts.transportStatus);
+
+      const byRoute = await app.db
+        .select({ status: edoReceipts.routeStatus, count: count() })
+        .from(edoReceipts)
+        .where(eq(edoReceipts.edoAccountId, row.id))
+        .groupBy(edoReceipts.routeStatus);
+
+      // Незакрытые события — прямой ответ на «почему лента не идёт дальше»:
+      // курсор стоит на первом из них.
+      const [pending] = await app.db
+        .select({ count: count() })
+        .from(edoEvents)
+        .where(and(eq(edoEvents.edoAccountId, row.id), eq(edoEvents.status, 'pending')));
+
+      const entries = await app.db
+        .select()
+        .from(edoReceipts)
+        .where(eq(edoReceipts.edoAccountId, row.id))
+        .orderBy(desc(edoReceipts.createdAt))
+        .limit(req.query.limit);
+
+      return {
+        byTransport: byTransport.map((r) => ({ status: r.status, count: Number(r.count) })),
+        byRoute: byRoute.map((r) => ({ status: r.status, count: Number(r.count) })),
+        eventsPending: Number(pending?.count ?? 0),
+        entries: entries.map((e) => ({
+          id: e.id,
+          messageId: e.messageId,
+          entityId: e.entityId,
+          documentNumber: e.documentNumber,
+          documentType: e.documentType,
+          documentVersion: e.documentVersion,
+          transportStatus: e.transportStatus,
+          routeStatus: e.routeStatus,
+          attempts: e.attempts,
+          lastError: e.lastError,
+          sourceDocumentId: e.sourceDocumentId,
+          createdAt: e.createdAt.toISOString(),
+        })),
+      };
     },
   );
 

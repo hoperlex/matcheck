@@ -51,6 +51,7 @@ import {
 } from './plugins/queue.js';
 import {
   pollAllEdoAccounts,
+  pollEdoAccountById,
   runEdoInventory,
   type EdoRunnerDeps,
 } from './domain/jobs/edo-poll-runner.js';
@@ -127,8 +128,9 @@ const edoWorker = new Worker<EdoPollJobData>(
       edoLog.info({ accountId, ok: !('error' in result) }, 'проверка доступа завершена');
       return;
     }
-    // mode === 'sync': сам проход по ленте появится вместе с журналом событий.
-    edoLog.info({ accountId }, 'синхронизация ЭДО поставлена в очередь');
+    // mode === 'sync' — ручной проход по ленте.
+    const result = await pollEdoAccountById(edoDeps, accountId);
+    edoLog.info({ accountId, ...result }, 'синхронизация ЭДО завершена');
   },
   { connection: buildQueueConnection(), concurrency: 1 },
 );

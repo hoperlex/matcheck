@@ -171,6 +171,37 @@ export const EdoJobQueuedSchema = z.object({
 });
 export type EdoJobQueued = z.infer<typeof EdoJobQueuedSchema>;
 
+/**
+ * Журнал приёма: что произошло с документами ящика.
+ *
+ * Нужен не «для полноты»: без него единственный ответ на «почему документ не
+ * приехал» — лезть в базу. Транспорт и маршрут показываются раздельно, потому
+ * что это разные вопросы: забрали ли файл и что с ним сделали дальше.
+ */
+export const EdoJournalEntrySchema = z.object({
+  id: z.string().uuid(),
+  messageId: z.string(),
+  entityId: z.string(),
+  documentNumber: z.string().nullable(),
+  documentType: z.string().nullable(),
+  documentVersion: z.string().nullable(),
+  transportStatus: z.string(),
+  routeStatus: z.string(),
+  attempts: z.number().int(),
+  lastError: z.string().nullable(),
+  sourceDocumentId: z.string().uuid().nullable(),
+  createdAt: z.string(),
+});
+export type EdoJournalEntry = z.infer<typeof EdoJournalEntrySchema>;
+
+export const EdoJournalSummarySchema = z.object({
+  byTransport: z.array(z.object({ status: z.string(), count: z.number().int() })),
+  byRoute: z.array(z.object({ status: z.string(), count: z.number().int() })),
+  eventsPending: z.number().int(),
+  entries: z.array(EdoJournalEntrySchema),
+});
+export type EdoJournalSummary = z.infer<typeof EdoJournalSummarySchema>;
+
 /** Сводка инвентаризации: что лежит в ящике, без единого импорта. */
 export const EdoInventoryReportSchema = z.object({
   from: z.string().nullable(),

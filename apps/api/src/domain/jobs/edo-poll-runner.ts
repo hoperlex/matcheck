@@ -21,6 +21,7 @@ import {
   releaseEdoLease,
   type LeaseHandle,
 } from '../edo/poll-lease.js';
+import { pollEdoAccount, type EdoPollResult } from './edo-poll.js';
 
 export type EdoRunnerDeps = {
   db: Db;
@@ -120,6 +121,18 @@ export async function runEdoInventory(
   return result;
 }
 
+/** Ручной проход по кнопке «Синхронизировать»: работает и до включения опроса. */
+export async function pollEdoAccountById(
+  deps: EdoRunnerDeps,
+  accountId: string,
+): Promise<EdoPollResult> {
+  return pollEdoAccount(
+    { db: deps.db, log: deps.log, owner: deps.owner },
+    accountId,
+    { manual: true },
+  );
+}
+
 /**
  * Обход всех включённых учётных записей.
  *
@@ -130,10 +143,13 @@ export async function pollAllEdoAccounts(deps: EdoRunnerDeps): Promise<void> {
   const accounts = await listPollableEdoAccounts(deps.db);
   for (const account of accounts) {
     try {
-      // Сам проход по ленте появится вместе с журналом событий (Э3).
-      // До тех пор обход существует, чтобы расписание и рубильники можно было
-      // включить и проверить отдельно от импорта.
-      deps.log.debug({ accountId: account.id }, 'edo poll: account ready');
+      const result = await pollEdoAccount(
+        { db: deps.db, log: deps.log, owner: deps.owner },
+        account.id,
+      );
+      if (result.imported || result.unparsed || result.skipped) {
+        deps.log.info({ accountId: account.id, ...result }, 'edo: проход завершён');
+      }
     } catch (err) {
       deps.log.warn({ err, accountId: account.id }, 'edo poll failed for account');
     }
