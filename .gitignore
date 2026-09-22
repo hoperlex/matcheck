@@ -177,6 +177,8 @@ Thumbs.db
 
 # Editor
 .idea/
+# Локальная раскраска окна проекта — персональная, в репозиторий не едет.
+.vscode/
 
 # Claude local settings (project shared go in .claude/settings.json)
 .claude/settings.local.json
