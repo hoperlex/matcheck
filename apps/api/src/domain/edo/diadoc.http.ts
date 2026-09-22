@@ -135,6 +135,25 @@ export class DiadocGone extends Error {
   }
 }
 
+/**
+ * Сервис авторизации отклонил выдачу токена.
+ *
+ * По OAuth2 такие отказы приходят кодом 400 с телом `{error, error_description}`,
+ * и именно в этом теле лежит ответ на вопрос «что не так с ключами». Тело
+ * ответов Диадока мы наружу не показываем — там реквизиты организаций, — но у
+ * identity.kontur.ru в теле только коды протокола, и прятать их значит
+ * оставлять администратора один на один с «HTTP 400».
+ */
+export class DiadocAuthRejected extends Error {
+  constructor(
+    readonly code: string,
+    readonly description: string | null,
+  ) {
+    super(`Diadoc: сервис авторизации отклонил запрос (${code}${description ? `: ${description}` : ''})`);
+    this.name = 'DiadocAuthRejected';
+  }
+}
+
 /** Тело ответа превысило лимит. Бросается ДО того, как оно прочитано целиком. */
 export class DiadocPayloadTooLarge extends Error {
   constructor(readonly limitBytes: number) {
@@ -171,6 +190,27 @@ export function parseRetryAfterMs(header: string | null, now = Date.now()): numb
 
 function withJitter(ms: number): number {
   return Math.round(ms * (0.85 + Math.random() * 0.3));
+}
+
+/**
+ * Достаёт код ошибки из ответа сервиса авторизации.
+ *
+ * Возвращает `null`, если тело не разобралось: отказ от этого не перестаёт быть
+ * отказом, и терять его из-за неожиданного формата нельзя. Описание обрезаем —
+ * оно идёт в интерфейс и в поле состояния учётной записи.
+ */
+async function readOidcError(
+  res: Response,
+): Promise<{ code: string; description: string | null } | null> {
+  try {
+    const body = (await res.json()) as { error?: unknown; error_description?: unknown };
+    if (typeof body?.error !== 'string' || !body.error) return null;
+    const description =
+      typeof body.error_description === 'string' ? body.error_description.slice(0, 200) : null;
+    return { code: body.error, description };
+  } catch {
+    return null;
+  }
 }
 
 export type DiadocFetchOptions = {
@@ -242,8 +282,21 @@ export async function diadocFetch(opts: DiadocFetchOptions): Promise<Response> {
           await sleep(withJitter(500 * Math.pow(3, attempt)));
           continue;
         }
-        // Прочие 4xx — дефект запроса. Повтор не поможет, тело не показываем.
-        throw new Error(`Diadoc: запрос отклонён (HTTP ${res.status})`);
+        // Прочие 4xx — дефект запроса, повтор не поможет. Показывать ли тело,
+        // решает ХОСТ, а не код ответа: это единственный признак, который
+        // нельзя перепутать. У сервиса авторизации в теле коды протокола —
+        // без них отказ неотличим от любого другого; у Диадока в теле данные
+        // организаций, поэтому оттуда берём только заголовок с кодом ошибки.
+        if (url.hostname === 'identity.kontur.ru') {
+          const parsed = await readOidcError(res);
+          if (parsed) throw new DiadocAuthRejected(parsed.code, parsed.description);
+        }
+        {
+          const code = res.headers.get('X-Diadoc-ErrorCode');
+          throw new Error(
+            `Diadoc: запрос отклонён (HTTP ${res.status}${code ? `, ${code}` : ''})`,
+          );
+        }
     }
   }
 

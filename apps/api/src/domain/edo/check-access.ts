@@ -26,6 +26,7 @@ import { DiadocClient } from './diadoc.client.js';
 import {
   DiadocAccessDenied,
   DiadocAuthExpired,
+  DiadocAuthRejected,
   DiadocRateLimited,
   DiadocSubscriptionExpired,
   DiadocTransient,
@@ -65,6 +66,41 @@ export function describeFailure(err: unknown): CheckFailure {
       message: 'Доступ к API приостановлен: истёк срок действия подписки Диадока.',
     };
   }
+  // Отказ сервиса авторизации. Коды протокола сами по себе ничего не говорят
+  // администратору, поэтому каждый переводится в конкретное «что проверить».
+  if (err instanceof DiadocAuthRejected) {
+    const detail = err.description ? ` Ответ сервиса: ${err.description}.` : '';
+    if (err.code === 'invalid_client') {
+      return {
+        error: 'auth_rejected',
+        status: 409,
+        message:
+          `Диадок не принял пару client_id и ключ приложения (invalid_client). Проверьте, что ключ выпущен для этого же приложения, и что в Кабинете интегратора в разделе «Способ получения токенов» выбран AuthorizationCode — для работы по refresh-токену нужен именно он.${detail}`,
+      };
+    }
+    if (err.code === 'invalid_grant') {
+      return {
+        error: 'auth_rejected',
+        status: 409,
+        message:
+          `Refresh-токен недействителен (invalid_grant). Обычно это значит, что его отозвали, он выпущен для другого приложения или другой площадки, либо им не пользовались больше 30 дней. Выпустите новый в Кабинете интегратора.${detail}`,
+      };
+    }
+    if (err.code === 'invalid_scope') {
+      return {
+        error: 'auth_rejected',
+        status: 409,
+        message:
+          `У приложения нет нужного доступа (invalid_scope). При выпуске refresh-токена должен быть отмечен scope Diadoc.PublicAPI — для тестовой площадки Diadoc.PublicAPI.Staging.${detail}`,
+      };
+    }
+    return {
+      error: 'auth_rejected',
+      status: 409,
+      message: `Сервис авторизации отклонил запрос: ${err.code}.${detail}`,
+    };
+  }
+
   if (err instanceof DiadocAuthExpired) {
     return {
       error: 'auth_failed',

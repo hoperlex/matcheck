@@ -19,6 +19,7 @@ vi.mock('../src/lib/env.js', () => ({
 const { describeFailure } = await import('../src/domain/edo/check-access.js');
 const {
   DiadocAccessDenied,
+  DiadocAuthRejected,
   DiadocRateLimited,
   DiadocSubscriptionExpired,
 } = await import('../src/domain/edo/diadoc.http.js');
@@ -51,6 +52,28 @@ describe('объяснение отказа', () => {
     expect(failure.error).toBe('unexpected_response');
     expect(failure.message).not.toContain('7712345678');
     expect(failure.message).toMatch(/неожиданном формате/i);
+  });
+
+  it('коды отказа авторизации переводятся в «что проверить»', () => {
+    // Сам по себе invalid_client администратору ничего не говорит: причин
+    // три, и они в разных местах Кабинета интегратора.
+    const client = describeFailure(new DiadocAuthRejected('invalid_client', null));
+    expect(client.message).toMatch(/AuthorizationCode/);
+    expect(client.message).toMatch(/ключ приложения/i);
+
+    const grant = describeFailure(new DiadocAuthRejected('invalid_grant', null));
+    expect(grant.message).toMatch(/30 дней|отозвал/i);
+
+    const scope = describeFailure(new DiadocAuthRejected('invalid_scope', null));
+    expect(scope.message).toMatch(/Diadoc\.PublicAPI/);
+  });
+
+  it('незнакомый код показывается как есть, вместе с пояснением сервиса', () => {
+    const failure = describeFailure(
+      new DiadocAuthRejected('unsupported_grant_type', 'grant type not allowed'),
+    );
+    expect(failure.message).toContain('unsupported_grant_type');
+    expect(failure.message).toContain('grant type not allowed');
   });
 
   it('длинная ошибка обрезается, чтобы не раздувать поле состояния', () => {

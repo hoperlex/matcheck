@@ -14,6 +14,7 @@ vi.mock('../src/lib/env.js', () => ({
 
 const {
   DiadocAccessDenied,
+  DiadocAuthRejected,
   DiadocGone,
   DiadocPayloadTooLarge,
   DiadocRateLimited,
@@ -173,6 +174,69 @@ describe('матрица ошибок', () => {
         fetchImpl: fetchImpl as unknown as typeof fetch,
       }),
     ).rejects.not.toThrow(new RegExp(secret));
+  });
+});
+
+describe('отказ сервиса авторизации', () => {
+  const identityUrl = new URL('https://identity.kontur.ru/connect/token');
+
+  it('код ошибки OAuth2 доходит до вызывающего, а не теряется в «HTTP 400»', async () => {
+    // Без этого администратор видит только номер кода и не знает, что чинить:
+    // ключ, refresh-токен или настройку в Кабинете интегратора.
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: 'invalid_client', error_description: 'bad key' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    );
+    const err = await diadocFetch({
+      method: 'POST',
+      url: identityUrl,
+      timeoutMs: 1000,
+      sleep: noSleep,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(DiadocAuthRejected);
+    expect(err.code).toBe('invalid_client');
+    expect(err.description).toBe('bad key');
+  });
+
+  it('нечитаемое тело не проглатывает сам отказ', async () => {
+    const fetchImpl = vi.fn(async () => new Response('<html>oops</html>', { status: 400 }));
+    await expect(
+      diadocFetch({
+        method: 'POST',
+        url: identityUrl,
+        timeoutMs: 1000,
+        sleep: noSleep,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow(/HTTP 400/);
+  });
+
+  it('тело ответа ДИАДОКА не раскрывается: там реквизиты организаций', async () => {
+    const secret = 'ООО «Ромашка», ИНН 7712345678';
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: 'oops', detail: secret }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json', 'X-Diadoc-ErrorCode': 'BadRequest' },
+        }),
+    );
+    const err = await diadocFetch({
+      method: 'GET',
+      url: new URL(`${API}/V8/GetNewEvents`),
+      timeoutMs: 1000,
+      sleep: noSleep,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    }).catch((e) => e);
+
+    expect(err).not.toBeInstanceOf(DiadocAuthRejected);
+    expect(String(err.message)).not.toContain('7712345678');
+    // Код ошибки из заголовка показать можно: это не данные.
+    expect(String(err.message)).toContain('BadRequest');
   });
 });
 
