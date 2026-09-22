@@ -71,6 +71,26 @@ const noParamPrefix = {
       : Promise.resolve(),
 };
 
+/**
+ * В client_id вставлен адрес почты.
+ *
+ * Логин сотрудника в OIDC не передаётся вовсе — он «зашит» в refresh-токен, —
+ * но поле выглядит как обычный текстовый ввод, и браузер охотно подставляет
+ * туда сохранённый адрес. На боевой настройке так и вышло: вместо `ci_su-10`
+ * ушло `esenov.m.n@su10.ru`, а сервис авторизации ответил тем же
+ * `invalid_client`, что и на неверный ключ.
+ */
+const notAnEmail = {
+  validator: (_: unknown, value?: string) =>
+    value && value.includes('@')
+      ? Promise.reject(
+          new Error(
+            'Похоже на адрес почты. В client_id нужен идентификатор приложения из Кабинета интегратора (ci_…), логин там не используется',
+          ),
+        )
+      : Promise.resolve(),
+};
+
 export default function AdminEdoAccountsPage() {
   const qc = useQueryClient();
   // Страницу можно выдать на просмотр отдельно от управления, поэтому контролы
@@ -570,13 +590,13 @@ export default function AdminEdoAccountsPage() {
           </Form.Item>
           <Form.Item
             name={['credentials', 'clientId']}
-            rules={[noParamPrefix]}
+            rules={[noParamPrefix, notAnEmail]}
             label="client_id"
             extra={
               editing?.clientId ? `Сейчас сохранено: ${editing.clientId}` : 'Сейчас не заполнен'
             }
           >
-            <Input placeholder="оставьте пустым, чтобы не менять" />
+            <Input autoComplete="off" placeholder="оставьте пустым, чтобы не менять" />
           </Form.Item>
           <Form.Item
             name={['credentials', 'clientSecret']}
@@ -588,7 +608,7 @@ export default function AdminEdoAccountsPage() {
                 : 'Сейчас не заполнен'
             }
           >
-            <Input.Password placeholder="оставьте пустым, чтобы не менять" />
+            <Input.Password autoComplete="new-password" placeholder="оставьте пустым, чтобы не менять" />
           </Form.Item>
           <Form.Item
             name={['credentials', 'refreshToken']}
@@ -600,7 +620,7 @@ export default function AdminEdoAccountsPage() {
                 : 'Сейчас не заполнен'
             }
           >
-            <Input.Password placeholder="оставьте пустым, чтобы не менять" />
+            <Input.Password autoComplete="new-password" placeholder="оставьте пустым, чтобы не менять" />
           </Form.Item>
           <Form.Item
             name="boxId"
@@ -673,17 +693,20 @@ export default function AdminEdoAccountsPage() {
           <Form.Item
             name={['credentials', 'clientId']}
             label="client_id"
-            rules={[{ required: true }, noParamPrefix]}
+            rules={[{ required: true }, noParamPrefix, notAnEmail]}
             extra="Только значение: ci_… , без «clientId=»."
           >
-            <Input />
+            {/* Браузер принимает это поле за адрес почты и подставляет туда
+                сохранённый логин — именно так в client_id однажды попал
+                esenov.m.n@su10.ru вместо ci_su-10. */}
+            <Input autoComplete="off" />
           </Form.Item>
           <Form.Item
             name={['credentials', 'clientSecret']}
             label="Ключ приложения (client_secret)"
             rules={[{ required: true }, noParamPrefix]}
           >
-            <Input.Password />
+            <Input.Password autoComplete="new-password" />
           </Form.Item>
           <Form.Item
             name={['credentials', 'refreshToken']}
@@ -691,7 +714,7 @@ export default function AdminEdoAccountsPage() {
             rules={[{ required: true }, noParamPrefix]}
             extra="Действует 30 дней с момента последнего использования."
           >
-            <Input.Password />
+            <Input.Password autoComplete="new-password" />
           </Form.Item>
           <Form.Item
             name="boxId"
