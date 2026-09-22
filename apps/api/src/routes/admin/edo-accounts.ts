@@ -14,7 +14,7 @@ import {
   type EdoCredentials,
 } from '@matcheck/contracts';
 import { edoAccounts, edoEvents, edoReceipts } from '../../db/schema.js';
-import { buildAad, encryptToString, decryptField } from '../../domain/auth/crypto.js';
+import { buildAad, encryptToString, decryptField, sha256Hex } from '../../domain/auth/crypto.js';
 import { loadEnv } from '../../lib/env.js';
 import { checkEdoAccess } from '../../domain/edo/check-access.js';
 
@@ -34,6 +34,8 @@ function dto(a: typeof edoAccounts.$inferSelect) {
   let clientId: string | null = null;
   let clientSecretLength: number | null = null;
   let refreshTokenLength: number | null = null;
+  let clientSecretFingerprint: string | null = null;
+  let refreshTokenFingerprint: string | null = null;
   try {
     const creds = StoredEdoCredentialsSchema.parse(
       JSON.parse(decryptField(a.credentialsEncrypted, buildAad('edo_accounts', a.id))),
@@ -47,6 +49,11 @@ function dto(a: typeof edoAccounts.$inferSelect) {
       clientId = creds.clientId;
       clientSecretLength = creds.clientSecret.length;
       refreshTokenLength = creds.refreshToken.length;
+      // Отпечаток, а не значение: длина ловит обрезанное, но не подменённое —
+      // два разных ключа одной длины по ней неразличимы. Восьми символов хеша
+      // хватает, чтобы сравнить глазами, и мало, чтобы что-то раскрыть.
+      clientSecretFingerprint = sha256Hex(creds.clientSecret).slice(0, 8);
+      refreshTokenFingerprint = sha256Hex(creds.refreshToken).slice(0, 8);
     } else {
       hasClientSecret = Boolean(creds.password);
     }
@@ -72,6 +79,8 @@ function dto(a: typeof edoAccounts.$inferSelect) {
     hasRefreshToken,
     clientSecretLength,
     refreshTokenLength,
+    clientSecretFingerprint,
+    refreshTokenFingerprint,
     refreshTokenAgeDays: usedAt ? Math.floor((Date.now() - usedAt.getTime()) / DAY_MS) : null,
     lastEventAt: a.lastEventAt?.toISOString() ?? null,
     lastSyncAt: a.lastSyncAt?.toISOString() ?? null,

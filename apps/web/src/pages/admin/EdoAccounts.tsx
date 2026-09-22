@@ -301,9 +301,17 @@ export default function AdminEdoAccountsPage() {
             render: (_: unknown, r: EdoAccountDto) =>
               r.clientId ? (
                 <Tooltip
-                  title={`Ключ приложения: ${r.clientSecretLength ?? 0} симв., refresh-токен: ${
-                    r.refreshTokenLength ?? 0
-                  } симв. Сверьте длины с Кабинетом интегратора.`}
+                  title={
+                    <span>
+                      Ключ приложения: {r.clientSecretLength ?? 0} симв., отпечаток{' '}
+                      <b>{r.clientSecretFingerprint ?? '—'}</b>
+                      <br />
+                      Refresh-токен: {r.refreshTokenLength ?? 0} симв., отпечаток{' '}
+                      <b>{r.refreshTokenFingerprint ?? '—'}</b>
+                      <br />
+                      Сверить у себя: printf %s &apos;ЗНАЧЕНИЕ&apos; | sha256sum | cut -c1-8
+                    </span>
+                  }
                 >
                   <Typography.Text code copyable={{ text: r.clientId }}>
                     {r.clientId.length > 12 ? `${r.clientId.slice(0, 12)}…` : r.clientId}
@@ -573,7 +581,11 @@ export default function AdminEdoAccountsPage() {
                 Без имён параметров и знака равенства: в поле должно быть{' '}
                 <Typography.Text code>ci_…</Typography.Text>, а не{' '}
                 <Typography.Text code>clientId=ci_…</Typography.Text>. Поля секретов можно
-                оставить пустыми — тогда прежние значения сохранятся.
+                оставить пустыми — тогда прежние значения сохранятся. Сверить сохранённое с
+                оригиналом, не раскрывая его:{' '}
+                <Typography.Text code>
+                  printf %s &apos;ЗНАЧЕНИЕ&apos; | sha256sum | cut -c1-8
+                </Typography.Text>
               </>
             }
           />
@@ -604,7 +616,9 @@ export default function AdminEdoAccountsPage() {
             label="Ключ приложения (client_secret)"
             extra={
               editing?.clientSecretLength
-                ? `Сейчас сохранено значение длиной ${editing.clientSecretLength} символов`
+                ? `Сейчас сохранено: ${editing.clientSecretLength} символов, отпечаток ${
+                    editing.clientSecretFingerprint ?? '—'
+                  }`
                 : 'Сейчас не заполнен'
             }
           >
@@ -616,7 +630,9 @@ export default function AdminEdoAccountsPage() {
             label="Refresh-токен"
             extra={
               editing?.refreshTokenLength
-                ? `Сейчас сохранено значение длиной ${editing.refreshTokenLength} символов`
+                ? `Сейчас сохранено: ${editing.refreshTokenLength} символов, отпечаток ${
+                    editing.refreshTokenFingerprint ?? '—'
+                  }`
                 : 'Сейчас не заполнен'
             }
           >

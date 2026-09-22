@@ -115,6 +115,17 @@ export const EdoAccountDtoSchema = z.object({
   /** Длины секретов: сравнить с тем, что выдал Кабинет, не раскрывая значений. */
   clientSecretLength: z.number().int().nullable(),
   refreshTokenLength: z.number().int().nullable(),
+  /**
+   * Первые 8 символов sha256 от секрета.
+   *
+   * Длина ловит обрезанное значение, но не подменённое: два разных ключа одной
+   * длины неразличимы. Отпечаток закрывает этот пробел — его можно посчитать у
+   * себя (`printf %s 'ЗНАЧЕНИЕ' | sha256sum | cut -c1-8`) и сравнить глазами,
+   * не пересылая сам секрет. Восемь шестнадцатеричных символов от хеша
+   * высокоэнтропийного значения обратно не разворачиваются.
+   */
+  clientSecretFingerprint: z.string().nullable(),
+  refreshTokenFingerprint: z.string().nullable(),
   refreshTokenAgeDays: z.number().int().nullable(),
   lastEventAt: z.string().nullable(),
   lastSyncAt: z.string().nullable(),
