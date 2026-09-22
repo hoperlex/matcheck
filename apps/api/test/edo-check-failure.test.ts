@@ -16,7 +16,9 @@ vi.mock('../src/lib/env.js', () => ({
   loadEnv: () => ({ EDO_HTTP_MAX_RETRIES: 0, EDO_POLL_LEASE_SEC: 900 }),
 }));
 
-const { describeFailure } = await import('../src/domain/edo/check-access.js');
+const { describeFailure, describeClientProbe, shouldProbeClientAuth } = await import(
+  '../src/domain/edo/check-access.js'
+);
 const {
   DiadocAccessDenied,
   DiadocAuthRejected,
@@ -79,5 +81,39 @@ describe('объяснение отказа', () => {
   it('длинная ошибка обрезается, чтобы не раздувать поле состояния', () => {
     const failure = describeFailure(new Error('x'.repeat(1000)));
     expect(failure.message.length).toBeLessThan(400);
+  });
+});
+
+describe('проба аутентификации приложения', () => {
+  it('запускается только на invalid_client', async () => {
+    // Остальные коды уже однозначны, и лишнее обращение к сервису авторизации
+    // ничего к ним не добавит.
+    expect(shouldProbeClientAuth(new DiadocAuthRejected('invalid_client', null))).toBe(true);
+    expect(shouldProbeClientAuth(new DiadocAuthRejected('invalid_grant', null))).toBe(false);
+    expect(shouldProbeClientAuth(new DiadocAuthRejected('invalid_scope', null))).toBe(false);
+    expect(shouldProbeClientAuth(new DiadocRateLimited(1000))).toBe(false);
+    expect(shouldProbeClientAuth(new Error('что угодно'))).toBe(false);
+  });
+
+  it('принятые ключи переводят разговор на refresh-токен', () => {
+    const text = describeClientProbe({ outcome: 'client_accepted', code: 'invalid_grant' });
+    expect(text).toMatch(/refresh-токен/i);
+    expect(text).toMatch(/новый|обменян/i);
+    // Про ключи приложения говорить больше нечего — они приняты.
+    expect(text).not.toMatch(/ключ API/i);
+  });
+
+  it('отвергнутые ключи снимают подозрение с токена', () => {
+    const text = describeClientProbe({ outcome: 'client_rejected', code: 'invalid_client' });
+    expect(text).toMatch(/ни при чём/i);
+    expect(text).toMatch(/client_secret/);
+  });
+
+  it('невнятный ответ пробы не выдаётся за вывод', () => {
+    // Ни одна из версий отсюда не следует, и текст обязан это признавать.
+    const text = describeClientProbe({ outcome: 'inconclusive', reason: 'таймаут' });
+    expect(text).toMatch(/ответа не дала/i);
+    expect(text).toContain('таймаут');
+    expect(text).not.toMatch(/значит|следовательно/i);
   });
 });

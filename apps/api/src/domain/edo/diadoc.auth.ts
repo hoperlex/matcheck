@@ -22,6 +22,7 @@
  *      Два параллельных обмена одного токена закончились бы тем, что один из
  *      них остался бы с отозванным значением.
  */
+import { ZodError } from 'zod';
 import { eq, and, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { edoAccounts } from '../../db/schema.js';
@@ -32,7 +33,14 @@ import {
   type EdoAuthState,
   type EdoCredentials,
 } from '@matcheck/contracts';
-import { DIADOC_ENDPOINTS, DiadocAuthExpired, diadocFetch, type DiadocEnvironment } from './diadoc.http.js';
+import {
+  DIADOC_ENDPOINTS,
+  DiadocAuthExpired,
+  DiadocAuthRejected,
+  diadocFetch,
+  type DiadocEnvironment,
+  type DiadocRequestSnapshot,
+} from './diadoc.http.js';
 
 /** Запас до истечения access_token: обновляем заранее, а не в последний миг. */
 const ACCESS_TOKEN_SAFETY_MS = 60 * 60 * 1000;
@@ -76,6 +84,11 @@ export type DiadocAuthDeps = {
   db: Db;
   now?: () => number;
   fetchImpl?: typeof fetch;
+  /**
+   * Снимок готового запроса за токеном. Нужен диагностике: при отказе снаружи
+   * виден только ответ, а вопрос стоит о запросе.
+   */
+  onRequest?: (snapshot: DiadocRequestSnapshot) => void;
 };
 
 type TokenResponse = {
@@ -84,9 +97,38 @@ type TokenResponse = {
   refresh_token?: string;
 };
 
+/**
+ * Объясняет, что не так с сохранёнными реквизитами, НЕ раскрывая значений.
+ *
+ * Из ZodError берутся только имена полей: в нём может лежать и само значение,
+ * а это секрет. Пустая строка до сюда доезжает штатно — схема обрезает пробелы
+ * и требует непустое, поэтому «поле осталось пустым» выглядит как ошибка
+ * разбора.
+ */
+function credentialsProblem(err: unknown): string {
+  if (err instanceof ZodError) {
+    const fields = [...new Set(err.issues.map((i) => i.path.join('.')).filter(Boolean))];
+    return fields.length
+      ? `реквизиты учётной записи не проходят проверку (${fields.join(', ')}) — впишите значения заново в карточке`
+      : 'реквизиты учётной записи не проходят проверку — впишите значения заново в карточке';
+  }
+  return 'реквизиты учётной записи не читаются — впишите значения заново в карточке';
+}
+
+/**
+ * Читает реквизиты, переводя любую неудачу в понятную человеку причину.
+ *
+ * Без этого ошибка СВОЕЙ карточки доходила до администратора как «Диадок
+ * ответил в неожиданном формате» (ZodError попадает в общую ветку разбора
+ * ответов), то есть отправляла разбираться не в ту сторону.
+ */
 function readCredentials(row: EdoAccountAuthRow): EdoCredentials {
-  const raw = decryptField(row.credentialsEncrypted, buildAad('edo_accounts', row.id));
-  return StoredEdoCredentialsSchema.parse(JSON.parse(raw));
+  try {
+    const raw = decryptField(row.credentialsEncrypted, buildAad('edo_accounts', row.id));
+    return StoredEdoCredentialsSchema.parse(JSON.parse(raw));
+  } catch (err) {
+    throw new DiadocAuthMisconfigured(credentialsProblem(err));
+  }
 }
 
 function readAuthState(row: EdoAccountAuthRow): EdoAuthState | null {
@@ -153,6 +195,7 @@ class OidcRefreshAuth implements DiadocAuth {
     // Первичный refresh_token лежит в credentials; всё, что пришло позже, — в
     // состоянии. Состояние приоритетнее: оно и есть актуальное значение.
     this.refreshToken = state?.refreshToken ?? credentials.refreshToken;
+    this.refreshSource = state?.refreshToken ? 'auth_state' : 'credentials';
     if (state?.accessToken && state.accessTokenExpiresAt) {
       this.accessToken = state.accessToken;
       this.accessTokenExpiresAt = state.accessTokenExpiresAt;
@@ -161,6 +204,8 @@ class OidcRefreshAuth implements DiadocAuth {
 
   private readonly clientId: string;
   private readonly clientSecret: string;
+  /** Какой из двух источников дал токен. Нужен диагностике, см. снимок. */
+  private readonly refreshSource: 'auth_state' | 'credentials';
 
   invalidate(): void {
     this.accessToken = null;
@@ -192,6 +237,9 @@ class OidcRefreshAuth implements DiadocAuth {
       }).toString(),
       timeoutMs: TOKEN_REQUEST_TIMEOUT_MS,
       fetchImpl: this.deps.fetchImpl,
+      onRequest: this.deps.onRequest
+        ? (snapshot) => this.deps.onRequest?.({ ...snapshot, refreshTokenSource: this.refreshSource })
+        : undefined,
     });
 
     const body = (await res.json()) as TokenResponse;
@@ -225,6 +273,113 @@ class OidcRefreshAuth implements DiadocAuth {
 }
 
 /**
+ * Префикс заведомо негодного токена для пробы.
+ *
+ * Настоящий refresh-токен так выглядеть не может, поэтому ни в журнале, ни в
+ * снимке его не спутать с боевым значением.
+ */
+const PROBE_TOKEN_PREFIX = 'probe-not-a-token-';
+
+/**
+ * Итог пробы аутентификации приложения.
+ *
+ * `client_accepted` — сервис проверил пару client_id + ключ и перешёл к
+ * проверке гранта; `client_rejected` — отверг саму пару либо способ её
+ * передачи; `inconclusive` — ответ не даёт основания ни для одного вывода, и
+ * выдавать его за доказательство нельзя.
+ */
+export type ClientAuthProbe =
+  | { outcome: 'client_accepted'; code: string }
+  | { outcome: 'client_rejected'; code: string }
+  | { outcome: 'inconclusive'; reason: string };
+
+/**
+ * Проверяет ТОЛЬКО аутентификацию приложения, не расходуя refresh-токен.
+ *
+ * Зачем она нужна. `invalid_client` по стандарту покрывает и неверную пару
+ * ключей, и негодный способ её передачи, а Диадок тем же кодом отвечает, когда
+ * токен выпущен под другое приложение. Различить эти случаи по одному ответу
+ * нельзя — а различать нужно, потому что действия у них противоположные.
+ *
+ * Приём опирается на порядок проверок в OAuth: клиент аутентифицируется до
+ * проверки гранта. Значит, подставив заведомо негодный `refresh_token`, мы
+ * узнаём судьбу ключей и не тратим настоящий токен. Это важно: при каждом
+ * удачном обмене Диадок выдаёт новый refresh-токен, а прежний перестаёт
+ * действовать, поэтому «проверить ещё раз по-настоящему» — значит потерять
+ * доступ, если проверка вдруг удастся, а её результат никто не сохранит.
+ *
+ * Запрос собирается тем же кодом и теми же реквизитами, что и штатный обмен:
+ * отличается ровно одно значение.
+ */
+export async function probeClientAuth(
+  deps: DiadocAuthDeps,
+  account: EdoAccountAuthRow,
+): Promise<ClientAuthProbe> {
+  const credentials = readCredentials(account);
+  if (credentials.authMode !== 'oidc_refresh') {
+    return { outcome: 'inconclusive', reason: 'учётная запись не на схеме OIDC' };
+  }
+
+  const endpoints = DIADOC_ENDPOINTS[account.environment];
+  const url = new URL('/connect/token', endpoints.identity);
+
+  try {
+    await diadocFetch({
+      method: 'POST',
+      url,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: credentials.clientId,
+        client_secret: credentials.clientSecret,
+        refresh_token: `${PROBE_TOKEN_PREFIX}${crypto.randomUUID()}`,
+      }).toString(),
+      timeoutMs: TOKEN_REQUEST_TIMEOUT_MS,
+      // Повторять пробу незачем: ответ детерминирован, а лишние обращения к
+      // сервису авторизации с негодным токеном выглядят как перебор.
+      maxRetries: 0,
+      fetchImpl: deps.fetchImpl,
+      onRequest: deps.onRequest
+        ? (snapshot) => deps.onRequest?.({ ...snapshot, probe: true })
+        : undefined,
+    });
+    // Сервис выдал токен по недействительному значению. Вывода о ключах из
+    // этого делать нельзя — только зафиксировать странность.
+    return { outcome: 'inconclusive', reason: 'сервис принял заведомо негодный токен' };
+  } catch (err) {
+    if (err instanceof DiadocAuthRejected) {
+      if (err.code === 'invalid_client') return { outcome: 'client_rejected', code: err.code };
+      if (err.code === 'invalid_grant') return { outcome: 'client_accepted', code: err.code };
+      return { outcome: 'inconclusive', reason: `ответ сервиса: ${err.code}` };
+    }
+    return {
+      outcome: 'inconclusive',
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Отвергает сохранённую маску вместо значения.
+ *
+ * Такое уже случалось: браузер подставил в поле своё, форма сохранилась, и в
+ * базу легло не то, что видел администратор. Маска уходит в сеть и возвращается
+ * как `invalid_client` — то есть дефект ввода выглядит как отказ Диадока, и
+ * разбирательство уходит не туда.
+ *
+ * На пустоту здесь не проверяем намеренно: хранимые реквизиты описаны схемой
+ * `z.string().trim().min(1)`, поэтому пустое значение сюда не доходит — чтение
+ * отвергает его раньше. Такая ветка была бы недостижимой.
+ */
+function assertNotMasked(label: string, value: string): void {
+  if (/^[*•●·]+$/.test(value.trim())) {
+    throw new DiadocAuthMisconfigured(
+      `вместо значения «${label}» сохранена маска — впишите значение заново`,
+    );
+  }
+}
+
+/**
  * Собирает механизм авторизации для учётной записи.
  *
  * Вызывающий обязан держать лиз учётной записи: обмен refresh_token не терпит
@@ -243,5 +398,10 @@ export function createDiadocAuth(deps: DiadocAuthDeps, account: EdoAccountAuthRo
   }
 
   const state = readAuthState(account);
+  // Проверяем ИМЕННО то, что уйдёт в запрос: refresh-токен берётся из
+  // состояния, когда оно есть, и только иначе — из реквизитов.
+  assertNotMasked('идентификатор приложения (client_id)', credentials.clientId);
+  assertNotMasked('ключ приложения (client_secret)', credentials.clientSecret);
+  assertNotMasked('refresh-токен', state?.refreshToken ?? credentials.refreshToken);
   return new OidcRefreshAuth(deps, account, credentials, state);
 }

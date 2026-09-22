@@ -21,7 +21,14 @@ import type { Db } from '../../db/client.js';
 import { edoAccounts } from '../../db/schema.js';
 import { loadEnv } from '../../lib/env.js';
 import type { EdoCheckResult } from '@matcheck/contracts';
-import { createDiadocAuth, DiadocAuthConflict, DiadocAuthMisconfigured } from './diadoc.auth.js';
+import {
+  createDiadocAuth,
+  probeClientAuth,
+  DiadocAuthConflict,
+  DiadocAuthMisconfigured,
+  type ClientAuthProbe,
+} from './diadoc.auth.js';
+import type { DiadocRequestSnapshot } from './diadoc.http.js';
 import { DiadocClient } from './diadoc.client.js';
 import {
   DiadocAccessDenied,
@@ -69,7 +76,10 @@ export function describeFailure(err: unknown): CheckFailure {
   // Отказ сервиса авторизации. Коды протокола сами по себе ничего не говорят
   // администратору, поэтому каждый переводится в конкретное «что проверить».
   if (err instanceof DiadocAuthRejected) {
-    const detail = err.description ? ` Ответ сервиса: ${err.description}.` : '';
+    // Идентификатор запроса показываем всегда: с ним поддержка Контура видит
+    // причину отказа, не спрашивая ключи, — а без него обращение бесполезно.
+    const trace = err.traceId ? ` Идентификатор запроса: ${err.traceId}.` : '';
+    const detail = (err.description ? ` Ответ сервиса: ${err.description}.` : '') + trace;
     if (err.code === 'invalid_client') {
       return {
         error: 'auth_rejected',
@@ -154,6 +164,41 @@ export function describeFailure(err: unknown): CheckFailure {
   };
 }
 
+/**
+ * Что добавить к сообщению по итогу пробы аутентификации приложения.
+ *
+ * Формулировки обещают ровно то, что проба доказывает. Она не отвечает на
+ * вопрос «правильно ли выпущен ключ» — только на вопрос, принял ли сервис
+ * приложение до проверки самого токена.
+ */
+export function shouldProbeClientAuth(err: unknown): boolean {
+  // Только invalid_client. Остальные коды уже однозначны: invalid_grant прямо
+  // называет токен, invalid_scope — права приложения, и лишнее обращение к
+  // сервису авторизации ничего к ним не добавит.
+  return err instanceof DiadocAuthRejected && err.code === 'invalid_client';
+}
+
+export function describeClientProbe(probe: ClientAuthProbe): string {
+  if (probe.outcome === 'client_accepted') {
+    return (
+      ' Дополнительная проверка: с тем же client_id и ключом, но заведомо негодным токеном,' +
+      ` сервис ответил ${probe.code} — значит пару ключей он принимает, а отказ относится к самому` +
+      ' refresh-токену. Обычно это означает, что токен выпущен для другого приложения либо уже' +
+      ' обменян: при каждом обмене Диадок выдаёт новый и прежний перестаёт действовать.' +
+      ' Выпустите новый refresh-токен для этого приложения.'
+    );
+  }
+  if (probe.outcome === 'client_rejected') {
+    return (
+      ' Дополнительная проверка: тот же отказ приходит и с заведомо негодным токеном, то есть' +
+      ' refresh-токен ни при чём — сервис не принимает саму пару client_id и ключ приложения' +
+      ' либо способ их передачи. Сверьте, что в поле ключа стоит client_secret приложения, а не' +
+      ' ключ API.'
+    );
+  }
+  return ` Дополнительная проверка ключа приложения ответа не дала: ${probe.reason}.`;
+}
+
 export async function checkEdoAccess(
   db: Db,
   account: typeof edoAccounts.$inferSelect,
@@ -176,8 +221,15 @@ export async function checkEdoAccess(
     };
   }
 
+  // Снимки запросов за токеном: наполняются перед каждой отправкой и нужны
+  // только при отказе — сравнить фактический запрос со схемой Контура.
+  const tokenRequests: DiadocRequestSnapshot[] = [];
+
   try {
-    const auth = createDiadocAuth({ db }, account);
+    const auth = createDiadocAuth(
+      { db, onRequest: (snapshot) => tokenRequests.push(snapshot) },
+      account,
+    );
     const client = new DiadocClient({ auth, environment: account.environment });
 
     const boxes = await client.getMyOrganizations();
@@ -211,7 +263,31 @@ export async function checkEdoAccess(
     };
   } catch (err) {
     const failure = describeFailure(err);
-    log.warn({ err, accountId: account.id }, 'edo check failed');
+
+    // Отказ `invalid_client` сам по себе не различает «не те ключи» и «токен
+    // выпущен под другое приложение», а действия у этих случаев разные.
+    // Различает проба: тот же запрос с заведомо негодным токеном. Делается
+    // ровно один раз и только на этот код — она стоит одного обращения к
+    // сервису авторизации, и тратить его на понятные отказы незачем.
+    let probe: ClientAuthProbe | null = null;
+    if (shouldProbeClientAuth(err)) {
+      probe = await probeClientAuth(
+        { db, onRequest: (snapshot) => tokenRequests.push(snapshot) },
+        account,
+      ).catch((probeErr): ClientAuthProbe => ({
+        outcome: 'inconclusive',
+        reason: probeErr instanceof Error ? probeErr.message : String(probeErr),
+      }));
+      failure.message += describeClientProbe(probe);
+    }
+
+    // Снимок пишем В ЛОГ, а не в состояние учётной записи: в интерфейсе нужна
+    // причина и что делать, а разбор запроса — материал для разработчика.
+    // Секретов в снимке нет по построению: только имена, длины и отпечатки.
+    log.warn(
+      { err, accountId: account.id, tokenRequests, probe },
+      'edo check failed; снимок запроса за токеном снят перед отправкой в HTTP-клиент',
+    );
     await db
       .update(edoAccounts)
       .set({ lastError: failure.message, updatedAt: new Date() })

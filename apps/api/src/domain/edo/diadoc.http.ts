@@ -15,6 +15,7 @@
  * (закончилась подписка) повтором не лечатся, а ретраи только жгут квоту и
  * прячут причину от человека.
  */
+import { createHash } from 'node:crypto';
 import { loadEnv } from '../../lib/env.js';
 
 export type DiadocEnvironment = 'production' | 'staging';
@@ -148,6 +149,12 @@ export class DiadocAuthRejected extends Error {
   constructor(
     readonly code: string,
     readonly description: string | null,
+    /**
+     * Идентификатор запроса в системе Контура (`x-kontur-trace-id`).
+     * По нему поддержка видит точную причину отказа, не спрашивая ключи, —
+     * поэтому он сохраняется вместе с ошибкой, а не теряется.
+     */
+    readonly traceId: string | null = null,
   ) {
     super(`Diadoc: сервис авторизации отклонил запрос (${code}${description ? `: ${description}` : ''})`);
     this.name = 'DiadocAuthRejected';
@@ -213,6 +220,99 @@ async function readOidcError(
   }
 }
 
+/**
+ * Снимок запроса ПЕРЕД отправкой в HTTP-клиент.
+ *
+ * Зачем он нужен. При отказе авторизации снаружи виден только ответ, а вопрос
+ * стоит о запросе: неверны реквизиты или он собран не по схеме. Одинаковый
+ * отказ у портала и у ручной команды доказывает воспроизводимость, но не
+ * корректность — если обе стороны ошибаются одинаково, ответ тоже совпадёт.
+ *
+ * ГРАНИЦА ЧЕСТНОСТИ: это последняя точка нашего кода. Дальше запрос трогает
+ * HTTP-клиент платформы — он добавит Host, Content-Length, User-Agent,
+ * Accept-Encoding и выполнит TLS. Поэтому снимок называется «перед отправкой в
+ * клиент», а не «то, что ушло в сеть».
+ *
+ * Что попадает внутрь: значения только у безопасных полей (Content-Type,
+ * grant_type), у остальных — имя, длина и отпечаток. Отпечаток отвечает на
+ * вопрос «то ли значение ушло», которого длина не закрывает: два разных ключа
+ * бывают одной длины. Сами секреты не пишутся никуда и никогда.
+ */
+export type DiadocRequestSnapshot = {
+  method: string;
+  /** origin + pathname, без строки запроса. */
+  url: string;
+  contentType: string | null;
+  headerNames: string[];
+  hasAuthorization: boolean;
+  /** Как разобралось тело: form — urlencoded, то есть то, что требует OAuth. */
+  bodyKind: 'form' | 'json' | 'empty' | 'other';
+  grantType: string | null;
+  params: { name: string; length: number; fingerprint: string }[];
+  /**
+   * Откуда взят refresh-токен. Источников два — состояние авторизации и
+   * реквизиты учётной записи, — и состояние приоритетнее. Это ровно то место,
+   * где значение может оказаться не тем, что вписал администратор, поэтому по
+   * снимку должно быть видно, какой из двух сработал.
+   */
+  refreshTokenSource?: 'auth_state' | 'credentials';
+  /** Снимок пробы аутентификации приложения, а не штатного обмена. */
+  probe?: boolean;
+};
+
+const fingerprintOf = (value: string): string =>
+  createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 8);
+
+/** Имена параметров, значения которых безопасно показывать целиком. */
+const SAFE_PARAM_VALUES = new Set(['grant_type']);
+
+export function buildRequestSnapshot(
+  method: string,
+  url: URL,
+  headers: Record<string, string> | undefined,
+  body: string | undefined,
+): DiadocRequestSnapshot {
+  const entries = Object.entries(headers ?? {});
+  const contentType =
+    entries.find(([name]) => name.toLowerCase() === 'content-type')?.[1] ?? null;
+
+  let bodyKind: DiadocRequestSnapshot['bodyKind'] = 'empty';
+  let grantType: string | null = null;
+  const params: DiadocRequestSnapshot['params'] = [];
+
+  if (body) {
+    const trimmed = body.trimStart();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      bodyKind = 'json';
+    } else if (body.includes('=')) {
+      bodyKind = 'form';
+      // Разбираем тем же разбором, что применит сервер: так видно не только
+      // состав, но и то, что значения закодированы разборчиво.
+      for (const [name, value] of new URLSearchParams(body)) {
+        if (SAFE_PARAM_VALUES.has(name)) {
+          grantType = name === 'grant_type' ? value : grantType;
+          params.push({ name, length: value.length, fingerprint: fingerprintOf(value) });
+        } else {
+          params.push({ name, length: value.length, fingerprint: fingerprintOf(value) });
+        }
+      }
+    } else {
+      bodyKind = 'other';
+    }
+  }
+
+  return {
+    method,
+    url: `${url.origin}${url.pathname}`,
+    contentType,
+    headerNames: entries.map(([name]) => name),
+    hasAuthorization: entries.some(([name]) => name.toLowerCase() === 'authorization'),
+    bodyKind,
+    grantType,
+    params,
+  };
+}
+
 export type DiadocFetchOptions = {
   method: 'GET' | 'POST';
   url: URL;
@@ -222,6 +322,11 @@ export type DiadocFetchOptions = {
   maxRetries?: number;
   sleep?: (ms: number) => Promise<void>;
   fetchImpl?: typeof fetch;
+  /**
+   * Вызывается перед КАЖДОЙ отправкой (включая повторы) со снимком готового
+   * запроса. Нужен для диагностики отказов: снаружи виден только ответ.
+   */
+  onRequest?: (snapshot: DiadocRequestSnapshot) => void;
 };
 
 /**
@@ -243,6 +348,9 @@ export async function diadocFetch(opts: DiadocFetchOptions): Promise<Response> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let res: Response;
     try {
+      // Снимаем ровно то, что сейчас уйдёт в HTTP-клиент: тело уже собрано,
+      // заголовки окончательны. Раньше по коду — это ещё заготовка.
+      opts.onRequest?.(buildRequestSnapshot(method, url, headers, body));
       res = await doFetch(url, {
         method,
         headers,
@@ -288,8 +396,9 @@ export async function diadocFetch(opts: DiadocFetchOptions): Promise<Response> {
         // без них отказ неотличим от любого другого; у Диадока в теле данные
         // организаций, поэтому оттуда берём только заголовок с кодом ошибки.
         if (url.hostname === 'identity.kontur.ru') {
+          const traceId = res.headers.get('x-kontur-trace-id');
           const parsed = await readOidcError(res);
-          if (parsed) throw new DiadocAuthRejected(parsed.code, parsed.description);
+          if (parsed) throw new DiadocAuthRejected(parsed.code, parsed.description, traceId);
         }
         {
           const code = res.headers.get('X-Diadoc-ErrorCode');
