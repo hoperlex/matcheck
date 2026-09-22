@@ -65,15 +65,32 @@ export class DiadocClient {
    *
    * Второй 401 подряд означает, что дело не в протухшем токене, — повторять
    * бессмысленно, нужен человек.
+   *
+   * `Accept: application/json` обязателен и не является вкусовщиной: по
+   * умолчанию Диадок сериализует ответы в Protocol Buffers, и без этого
+   * заголовка приходят бинарные данные. Первая боевая проба 22.09.2026 упала
+   * именно здесь — разбор JSON не удавался на всех методах сразу, а выглядело
+   * это как «проверка доступа не удалась».
+   *
+   * Исключение — содержимое документа: там бинарность законна, и заголовок
+   * запрашивается отдельно (см. getEntityContent).
    */
-  private async request(url: URL, method: 'GET' | 'POST' = 'GET'): Promise<Response> {
+  private async request(
+    url: URL,
+    method: 'GET' | 'POST' = 'GET',
+    opts: { json?: boolean } = {},
+  ): Promise<Response> {
+    const wantJson = opts.json !== false;
     for (let attempt = 0; attempt < 2; attempt++) {
       const header = await this.deps.auth.header();
       try {
         return await diadocFetch({
           method,
           url,
-          headers: { Authorization: header },
+          headers: {
+            Authorization: header,
+            ...(wantJson ? { Accept: 'application/json' } : {}),
+          },
           timeoutMs: method === 'GET' ? LIST_TIMEOUT_MS : CONTENT_TIMEOUT_MS,
           fetchImpl: this.deps.fetchImpl,
         });
@@ -172,7 +189,8 @@ export class DiadocClient {
     url.searchParams.set('boxId', boxId);
     url.searchParams.set('messageId', messageId);
     url.searchParams.set('entityId', entityId);
-    const res = await this.request(url);
+    // Здесь ответ — сам файл документа, а не структура: просить JSON нечего.
+    const res = await this.request(url, 'GET', { json: false });
     return readBodyWithLimit(res, maxBytes ?? loadEnv().EDO_XML_MAX_BYTES);
   }
 }

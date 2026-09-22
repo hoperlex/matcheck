@@ -49,7 +49,7 @@ export type CheckOutcome = { value: EdoCheckResult } | CheckFailure;
  * Тела ответов сюда не попадают: в них реквизиты организаций, а сообщение
  * уходит в интерфейс и в лог.
  */
-function describeFailure(err: unknown): CheckFailure {
+export function describeFailure(err: unknown): CheckFailure {
   if (err instanceof DiadocAccessDenied) {
     return {
       error: 'access_denied',
@@ -93,7 +93,29 @@ function describeFailure(err: unknown): CheckFailure {
   if (err instanceof DiadocTransient) {
     return { error: 'upstream_unavailable', status: 502, message: 'Диадок временно недоступен.' };
   }
-  return { error: 'check_failed', status: 502, message: 'Проверка доступа не удалась.' };
+
+  // Ответ пришёл, но разобрать его не удалось. Текст ошибки разбора наружу НЕ
+  // отдаём: в нём полученные значения полей, то есть реквизиты организаций.
+  if (err instanceof Error && err.name === 'ZodError') {
+    return {
+      error: 'unexpected_response',
+      status: 502,
+      message:
+        'Диадок ответил в неожиданном формате — разобрать ответ не удалось. Подробности в журнале сервера.',
+    };
+  }
+
+  // Всё остальное. Прежде здесь была фраза без причины, и по ней нельзя было
+  // понять ничего: первая боевая проба показала «проверка доступа не удалась»,
+  // а настоящая ошибка (ответ в Protocol Buffers вместо JSON) осталась только в
+  // логе сервера. Текст исключения короткий и тел ответов не содержит —
+  // diadocFetch их в ошибки не кладёт.
+  const detail = err instanceof Error ? err.message : String(err);
+  return {
+    error: 'check_failed',
+    status: 502,
+    message: `Проверка доступа не удалась: ${detail.slice(0, 300)}`,
+  };
 }
 
 export async function checkEdoAccess(
