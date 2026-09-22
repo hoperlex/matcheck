@@ -31,7 +31,12 @@ import { eq } from 'drizzle-orm';
 import { UpdPdfParsedSchema, type UpdPdfParsed } from '@matcheck/contracts';
 import { resolvePrompt, type PromptOverride } from '../prompts/registry.js';
 import { computePdfRenderDpi } from './pdf-render-dpi.js';
-import { prefilterUpdPages, type PrefilterResult } from './upd-page-prefilter.js';
+import {
+  pageClassifyPrompt,
+  prefilterUpdPages,
+  type PrefilterResult,
+} from './upd-page-prefilter.js';
+import { loadEnv } from '../../lib/env.js';
 import { imageToPng, isHeicBuffer, recodePageToJpeg } from './page-render.js';
 import { buildAad, decryptField } from '../auth/crypto.js';
 import type { ParsePdfResult } from './upd-pdf.parser.js';
@@ -385,6 +390,12 @@ const RESPONSE_JSON_SCHEMA = {
           sum: { type: ['number', 'null'] },
           vatRate: { type: ['number', 'null'] },
           vatSum: { type: ['number', 'null'] },
+          // Графы 7, 8 и 10 бланка ТОРГ-12: «в одном месте», «мест» и
+          // «Количество (масса нетто)». Количество из них считает код
+          // (torg12-qty), промпт только читает напечатанное.
+          qtyPerPlace: { type: ['number', 'null'] },
+          places: { type: ['number', 'null'] },
+          massNetKg: { type: ['number', 'null'] },
           volumeM3: { type: ['number', 'null'] },
           massKg: { type: ['number', 'null'] },
           volumeConfidence: {
@@ -491,6 +502,11 @@ export async function parseUpdVision(
       apiKey,
       model: row.model,
       maxPages: MAX_PAGES_FOR_OPENROUTER,
+      // Рубильник читается здесь, а не в prefilter: тот остаётся чистым от
+      // окружения. Выключен — ключа нет вовсе и промпт прежний.
+      ...(loadEnv().PAGE_CLASSIFY_TORG12
+        ? { classifyPrompt: pageClassifyPrompt({ torg12: true }) }
+        : {}),
     });
     convertedPngPages = prefilter.pages;
     // Отдельная запись в llm_calls (docKind='upd_page_classify') — в админке

@@ -268,6 +268,11 @@ export async function parseWaybillBatch(
     try {
       await db.insert(llmCalls).values({
         sourceDocumentId: ctx.sourceDocumentId,
+        // Пакет — вторая, переживающая координата вызова: sourceDocumentId
+        // здесь указывает на ТЕХНИЧЕСКУЮ запись, которую воркер удалит сразу
+        // после создания реальных документов (до миграции 0127 запись журнала
+        // уходила вместе с ней каскадом).
+        bundleId: ctx.bundleId,
         providerId: row.id,
         promptId: promptMeta.id,
         docKind: ctx.promptDocKind ?? 'transport_waybill',

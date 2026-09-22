@@ -20,6 +20,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import type { EdoInventoryReport, UpdValidation } from '@matcheck/contracts';
 import type { QtyRepairTrace } from '../domain/edo/qty-repair.js';
+import type { Torg12QtyTrace } from '../domain/edo/torg12-qty.js';
 
 // ─── Enums ─────────────────────────────────────────────────────────────────
 
@@ -950,6 +951,11 @@ export const sourceDocuments = pgTable(
     // для отката — в нём исходное количество, версия разбора и состояние
     // записи. Служебное поле: веб его не читает, в контракты не входит.
     qtyRepair: jsonb('qty_repair').$type<QtyRepairTrace | null>(),
+    // След правила количества по графам товарной накладной ТОРГ-12 (миграция
+    // 0125). Отдельно от qty_repair: у правил разные поводы срабатывания и
+    // разные режимы, и смешанный след нельзя было бы ни прочитать, ни
+    // откатить. Служебное поле: веб его не читает, в контракты не входит.
+    torg12Qty: jsonb('torg12_qty').$type<Torg12QtyTrace | null>(),
     // Пользователь, загрузивший УПД через /upload-upd или /upload-upd-pdf.
     // Для EDO/mail-полученных документов — NULL (poller, не юзер).
     // Используется мобильным клиентом для отображения контакта менеджера
@@ -1361,9 +1367,18 @@ export const llmCalls = pgTable(
   'llm_calls',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    // SET NULL, а не CASCADE (миграция 0127). Разбор пакета накладных
+    // логируется на ТЕХНИЧЕСКУЮ запись документа, которую воркер после разбора
+    // удаляет, — с каскадом вместе с ней исчезала и запись журнала. На бою это
+    // означало, что по накладным журнала нет вовсе: у документа № 20 144
+    // заполнены llm_provider_id и llm_confidence, а вызова в журнале нет.
     sourceDocumentId: uuid('source_document_id').references(() => sourceDocuments.id, {
-      onDelete: 'cascade',
+      onDelete: 'set null',
     }),
+    // Пакет, в рамках которого сделан вызов. Нужен как раз потому, что
+    // source_document_id у пакетного разбора указывает на временную запись:
+    // по пакету вызов находится и после её удаления.
+    bundleId: uuid('bundle_id').references(() => sourceBundles.id, { onDelete: 'set null' }),
     providerId: uuid('provider_id').references(() => llmProviders.id, { onDelete: 'set null' }),
     promptId: uuid('prompt_id').references(() => prompts.id, { onDelete: 'set null' }),
     docKind: text('doc_kind').notNull(),
@@ -1382,6 +1397,7 @@ export const llmCalls = pgTable(
   (t) => [
     index('llm_calls_source_doc_idx').on(t.sourceDocumentId, t.createdAt),
     index('llm_calls_created_at_idx').on(t.createdAt),
+    index('llm_calls_bundle_idx').on(t.bundleId, t.createdAt),
   ],
 );
 
@@ -2062,6 +2078,10 @@ export const recognitionEvidenceEvents = pgTable(
   },
   (t) => [
     index('recognition_evidence_events_bundle_idx').on(t.bundleId, t.generation, t.createdAt),
+    // Отдельно по возрасту: ретенция удаляет строки по created_at, а у
+    // составного индекса ведущая колонка другая — по нему чистка сканировала
+    // бы таблицу целиком на каждом батче.
+    index('recognition_evidence_events_created_at_idx').on(t.createdAt),
   ],
 );
 

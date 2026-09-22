@@ -114,6 +114,13 @@ import {
   type QtyRepairCandidate,
   type QtyRepairTrace,
 } from './domain/edo/qty-repair.js';
+import {
+  applyTorg12Qty,
+  buildTorg12QtyTrace,
+  detectTorg12Qty,
+  type Torg12QtyCandidate,
+  type Torg12QtyTrace,
+} from './domain/edo/torg12-qty.js';
 import { operationTrace } from './domain/sourceDocuments/operation-trace.js';
 import { verdictForDuplicate, type DuplicateVerdict } from './domain/edo/duplicate-verdict.js';
 import { normalizeUpdNoPricingTotals } from './domain/edo/upd-no-pricing-normalize.js';
@@ -154,7 +161,7 @@ import { loadEnv } from './lib/env.js';
 import { bundleSegments, ingestEvents, jobOutbox, recognitionEvidenceEvents } from './db/schema.js';
 import {
   classifyPages,
-  PAGE_CLASSIFY_WITH_NUMBER_PROMPT,
+  pageClassifyPrompt,
   type PageClassification,
 } from './domain/edo/upd-page-prefilter.js';
 import {
@@ -186,6 +193,7 @@ import { resolveRootBundle } from './domain/sourceDocuments/bundle-import-regist
 import { llmCalls, llmProviders, llmProviderCredentials } from './db/schema.js';
 import { buildAad, decryptField } from './domain/auth/crypto.js';
 import { repairStuckJobs, STUCK_INTERVAL_MS } from './domain/jobs/stuck-jobs.js';
+import { cleanupRecognitionLogs } from './domain/jobs/log-retention.js';
 import type {
   SourceStatus,
   UpdPdfParsed,
@@ -2167,6 +2175,45 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     }
   }
 
+  // ─── Количество по графам товарной накладной ТОРГ-12 ─────────────────────
+  //
+  // Отдельно от правила выше и с другой уликой: то восстанавливает количество
+  // из арифметики строки и для накладной БЕЗ ЦЕН не работает вовсе (делить
+  // нечего), а здесь количество берётся из самих граф бланка — «в одном
+  // месте» × «мест».
+  //
+  // Ограничения те же, и по той же причине: правка не должна менять числа,
+  // с которыми документ уже уехал на повтор или на портал.
+  const torg12QtyMode = loadEnv().TORG12_QTY;
+  let torg12QtyCandidates: Torg12QtyCandidate[] = [];
+  let torg12QtyApplied: Torg12QtyCandidate[] = [];
+  if (torg12QtyMode !== 'off') {
+    const parsedBeforeTorg12 = parsed;
+    try {
+      torg12QtyCandidates = detectTorg12Qty(parsed);
+      const allowed =
+        torg12QtyMode === 'on' &&
+        QTY_REPAIR_PARSE_MODES.has(parseMode) &&
+        !secondPassJob &&
+        !segmentRepairJob &&
+        !wantSecondPass &&
+        !wantSegmentRepair &&
+        jobGeneration === 0;
+      if (allowed) {
+        const repaired = applyTorg12Qty(parsed, torg12QtyCandidates);
+        parsed = repaired.parsed;
+        torg12QtyApplied = repaired.applied;
+      }
+    } catch (err) {
+      // Диагностика не имеет права уронить разбор: возвращаемся ровно в то
+      // состояние, в котором были бы при `off`.
+      parsed = parsedBeforeTorg12;
+      torg12QtyCandidates = [];
+      torg12QtyApplied = [];
+      log.warn({ err, sourceDocumentId }, 'torg12 qty: сбой наблюдения, разбор продолжен без него');
+    }
+  }
+
   // Валидация сумм. `let`: после синтеза итога по строкам сверку пересчитываем
   // — предупреждение, посчитанное по пустой сумме, ввело бы в заблуждение.
   let validation = validateUpdTotals(
@@ -2344,6 +2391,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // транзакции: до проверки следа в операциях неизвестно, останутся ли
     // применённые правки применёнными.
     qtyRepair: null as QtyRepairTrace | null,
+    torg12Qty: null as Torg12QtyTrace | null,
     // Чем документ разобран. Читает это только повтор: он обязан пойти ТЕМ ЖЕ
     // путём, а по типу документа его не вывести — kind='transport_waybill'
     // одинаков и у М-15, и у ТН из пакетного разбора.
@@ -2434,7 +2482,10 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // ровно тем решением, из-за которого потом ищут, откуда в приёмке чужое
     // количество.
     const rollbackQtyRepair = (reason: string, details: Record<string, unknown>): void => {
-      if (qtyRepairApplied.length === 0) return;
+      // Оба правила количества откатываются вместе: у них один повод (документ
+      // уже уехал в операцию) и одна сверка, которую после возврата чисел
+      // нужно пересчитать РОВНО один раз.
+      if (qtyRepairApplied.length === 0 && torg12QtyApplied.length === 0) return;
       {
         // Возвращаем прочитанные моделью количества и пересчитываем сверку по
         // ним: иначе в карточке осталась бы сверка от исправленных чисел, а в
@@ -2443,11 +2494,20 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           const row = itemRows[c.row - 1];
           if (row) row.qty = c.qtyFrom.toString();
         }
+        for (const c of torg12QtyApplied) {
+          const row = itemRows[c.row - 1];
+          // Количества в бланке могло не быть вовсе. Возвращаем ровно то, что
+          // записал бы разбор без правила, — '0' (колонка NOT NULL, и тот же
+          // дефолт ставится при вставке позиций).
+          if (row) row.qty = c.qtyFrom != null ? c.qtyFrom.toString() : '0';
+        }
         const rolledBack = {
           ...parsed,
           items: parsed.items.map((item, idx) => {
             const c = qtyRepairApplied.find((x) => x.row === idx + 1);
-            return c ? { ...item, qty: c.qtyFrom } : item;
+            if (c) return { ...item, qty: c.qtyFrom };
+            const t = torg12QtyApplied.find((x) => x.row === idx + 1);
+            return t ? { ...item, qty: t.qtyFrom } : item;
           }),
         };
         headerValues.validation = validateUpdTotals(
@@ -2479,13 +2539,25 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             ? { ...c, applicable: false, blockedBy: 'operation_trace' as const }
             : c,
         );
-        log.warn({ ...details, rows: qtyRepairApplied.map((c) => c.row) }, reason);
+        torg12QtyCandidates = torg12QtyCandidates.map((c) =>
+          torg12QtyApplied.some((a) => a.row === c.row)
+            ? { ...c, blockedBy: 'operation_trace' as const }
+            : c,
+        );
+        log.warn(
+          {
+            ...details,
+            rows: [...qtyRepairApplied, ...torg12QtyApplied].map((c) => c.row),
+          },
+          reason,
+        );
         qtyRepairApplied = [];
+        torg12QtyApplied = [];
       }
     };
 
     try {
-      if (qtyRepairApplied.length > 0) {
+      if (qtyRepairApplied.length > 0 || torg12QtyApplied.length > 0) {
         const existingItemIds = await txDb
           .select({ id: sourceDocumentItems.id })
           .from(sourceDocumentItems)
@@ -2503,6 +2575,13 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
           );
         }
       }
+      headerValues.torg12Qty = buildTorg12QtyTrace({
+        mode: torg12QtyMode,
+        candidates: torg12QtyCandidates,
+        appliedRows: new Set(torg12QtyApplied.map((c) => c.row)),
+        generation: jobGeneration,
+        docVersion: headerValues.processedAt.toISOString(),
+      });
       headerValues.qtyRepair = buildQtyRepairTrace({
         mode: qtyRepairMode,
         candidates: qtyRepairCandidates,
@@ -2520,7 +2599,10 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       rollbackQtyRepair('qty repair: не удалось проверить след в операциях — правка отменена', {
         err,
       });
+      // Правка без следа необратима, поэтому ни одного следа не остаётся —
+      // ни у арифметического правила, ни у правила по графам ТОРГ-12.
       headerValues.qtyRepair = null;
+      headerValues.torg12Qty = null;
     }
 
     if (wantSegmentRepair && segmentContext && segmentJob) {
@@ -2575,18 +2657,35 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // может смениться. Отдельным UPDATE, потому что id появляются только после
     // вставки; та же транзакция — значит либо есть и правка, и привязка, либо
     // нет ни того, ни другого.
-    if (qtyRepairApplied.length > 0 && headerValues.qtyRepair) {
+    if (
+      (qtyRepairApplied.length > 0 && headerValues.qtyRepair) ||
+      (torg12QtyApplied.length > 0 && headerValues.torg12Qty)
+    ) {
       const idByLine = new Map(insertedItems.map((r) => [r.lineNo, r.id]));
+      const withItemIds = <E extends { row: number }>(entries: E[]): E[] =>
+        entries.map((e) => {
+          const id = idByLine.get(e.row);
+          return id ? { ...e, itemId: id } : e;
+        });
       await txDb
         .update(sourceDocuments)
         .set({
-          qtyRepair: {
-            ...headerValues.qtyRepair,
-            entries: headerValues.qtyRepair.entries.map((e) => {
-              const id = idByLine.get(e.row);
-              return id ? { ...e, itemId: id } : e;
-            }),
-          },
+          ...(qtyRepairApplied.length > 0 && headerValues.qtyRepair
+            ? {
+                qtyRepair: {
+                  ...headerValues.qtyRepair,
+                  entries: withItemIds(headerValues.qtyRepair.entries),
+                },
+              }
+            : {}),
+          ...(torg12QtyApplied.length > 0 && headerValues.torg12Qty
+            ? {
+                torg12Qty: {
+                  ...headerValues.torg12Qty,
+                  entries: withItemIds(headerValues.torg12Qty.entries),
+                },
+              }
+            : {}),
         })
         .where(eq(sourceDocuments.id, sourceDocumentId));
     }
@@ -3153,6 +3252,35 @@ async function handleWaybillBundleJob(
     created.push({ id: newId, docNumber: doc.docNumber ?? null, form: doc.form });
   }
 
+  // След разбора пакета накладных.
+  //
+  // Зачем отдельная улика, когда есть журнал вызовов: журнал отвечает на вопрос
+  // «что вернула модель», а эта запись — на вопрос «как загрузка превратилась в
+  // документы». Router заводит дочерний пакет на КАЖДЫЙ файл, поэтому загрузка
+  // из двух накладных даёт не одну улику «2 → 2», а две «1 → 1» на общем корне,
+  // и собрать их можно только по корневому пакету с его поколением загрузки.
+  //
+  // Семантика — ОДНА УЛИКА НА ПОПЫТКУ разбора: повтор задания (BullMQ retry,
+  // ручной перезапуск) закономерно добавит ещё одну запись, и это не дубликат,
+  // а вторая попытка. Различаются они `created_at` и `jobId`.
+  //
+  // Пишется на КОРНЕВОЙ пакет с его `activeUploadGeneration`: дочернее
+  // поколение всегда 0, и записать его как поколение корня значило бы сделать
+  // события разных загрузок неразличимыми после дозагрузки. Дочерние
+  // координаты лежат в payload.
+  await recordWaybillBatchEvidence(
+    {
+      childBundleId: bundleId,
+      childDispatchGeneration: bundleGeneration,
+      jobId: bundle.jobId ?? null,
+      promptKind,
+      attachments,
+      returnedDocuments: parsed.documents,
+      createdDocumentIds: created.map((c) => c.id),
+    },
+    log,
+  );
+
   // Удаляем техническую запись — она больше не нужна, её attachments уже
   // продублированы в реальные source_documents. Вместе с tombstone: клиент,
   // получивший её до внедрения фильтра `is_technical`, должен узнать об
@@ -3398,7 +3526,8 @@ async function recordRecognitionEvidence(args: {
     | 'file_classification'
     | 'page_classification'
     | 'assembly_rollback'
-    | 'assembly_relaxed_copy';
+    | 'assembly_relaxed_copy'
+    | 'waybill_batch_result';
   payload: Record<string, unknown>;
 }): Promise<void> {
   await db.insert(recognitionEvidenceEvents).values({
@@ -3408,6 +3537,109 @@ async function recordRecognitionEvidence(args: {
     evidenceType: args.evidenceType,
     payload: args.payload,
   });
+}
+
+/**
+ * Улика, записываемая по принципу «лучшее усилие»: ошибка вставки гасится.
+ *
+ * Отдельно от `recordRecognitionEvidence`, а не глобальная замена: у сборки
+ * улика — часть механики (по `page_classification` считается откат и аудит
+ * нумерации), и молча терять её там нельзя. А для чисто диагностической записи
+ * обратное верно: сбой служебной таблицы не имеет права превратить успешный
+ * разбор в ошибку и отправить пакет в retry.
+ */
+async function recordRecognitionEvidenceSafe(
+  args: Parameters<typeof recordRecognitionEvidence>[0],
+  log: WorkerLog,
+): Promise<void> {
+  try {
+    await recordRecognitionEvidence(args);
+  } catch (err) {
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err), evidence: args.evidenceType },
+      'улика не записана — разбор продолжен',
+    );
+  }
+}
+
+/**
+ * След разбора пакета накладных: как загрузка превратилась в документы.
+ *
+ * Журнал вызовов отвечает на вопрос «что вернула модель», а эта запись — на
+ * вопрос «сколько файлов ушло в разбор и сколько документов из них вышло».
+ * Router заводит дочерний пакет на КАЖДЫЙ файл, поэтому загрузка из двух
+ * накладных даёт не одну улику «2 → 2», а две «1 → 1» на общем корне; собрать
+ * их можно только по корневому пакету и его поколению загрузки.
+ *
+ * Семантика — ОДНА УЛИКА НА ПОПЫТКУ разбора: повтор задания (BullMQ retry,
+ * ручной перезапуск) добавит ещё одну запись, и это не дубликат, а вторая
+ * попытка; различаются они `created_at` и `jobId`.
+ *
+ * Пишется на КОРНЕВОЙ пакет с его `activeUploadGeneration`: дочернее поколение
+ * всегда 0, и записать его как поколение корня значило бы сделать события
+ * разных загрузок неразличимыми после дозагрузки. Дочерние координаты лежат в
+ * payload.
+ */
+async function recordWaybillBatchEvidence(
+  args: {
+    childBundleId: string;
+    childDispatchGeneration: number;
+    jobId: string | null;
+    promptKind: string | null;
+    attachments: { s3Key: string; filename: string }[];
+    returnedDocuments: WaybillDocument[];
+    createdDocumentIds: string[];
+  },
+  log: WorkerLog,
+): Promise<void> {
+  try {
+    const root = await resolveRootBundle(db, args.childBundleId);
+    const registry = root
+      ? (await selectRegistryRows(db, root.id, root.activeUploadGeneration)).filter(
+          (r) => r.subBundleId === args.childBundleId,
+        )
+      : [];
+    // Строка реестра сопоставляется по s3-ключу: порядок attachments дочернего
+    // пакета и порядок строк реестра совпадать не обязаны.
+    const rowByKey = new Map(registry.map((r) => [r.s3Key, r]));
+    await recordRecognitionEvidenceSafe(
+      {
+        bundleId: root?.id ?? args.childBundleId,
+        generation: root?.activeUploadGeneration ?? args.childDispatchGeneration,
+        evidenceType: 'waybill_batch_result',
+        payload: {
+          childBundleId: args.childBundleId,
+          childDispatchGeneration: args.childDispatchGeneration,
+          rootUploadGeneration: root?.activeUploadGeneration ?? null,
+          jobId: args.jobId,
+          promptKind: args.promptKind ?? 'transport_waybill',
+          inputFiles: args.attachments.map((a, idx) => ({
+            filename: a.filename,
+            s3Key: a.s3Key,
+            registryItemId: rowByKey.get(a.s3Key)?.id ?? null,
+            inputOrder: rowByKey.get(a.s3Key)?.inputOrder ?? idx,
+          })),
+          returnedDocuments: args.returnedDocuments.map((d) => ({
+            form: d.form,
+            docNumber: d.docNumber ?? null,
+            docDate: d.docDate ?? null,
+            totalSum: d.totalSum ?? null,
+            itemsCount: d.items?.length ?? 0,
+          })),
+          createdDocumentIds: args.createdDocumentIds,
+        },
+      },
+      log,
+    );
+  } catch (err) {
+    // Сюда попадают сбои ПОДГОТОВКИ улики (чтение корня и реестра). Сама
+    // вставка уже под своим try/catch; диагностика не имеет права уронить
+    // успешный разбор.
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'след разбора пакета накладных не записан — разбор продолжен',
+    );
+  }
 }
 
 /**
@@ -3930,62 +4162,16 @@ export async function handleDocumentRouterJob(
       }
 
       if (cls.detectedKind === 'm15') {
-        // М-15 (накладная на отпуск материалов). Создаём документ типа
-        // «Накладная» (transport_waybill — новых enum не вводим) и ставим
-        // одиночный job с docKind:'m15' → handleJob распознает его vision'ом по
-        // форме М-15. Изолировано: УПД/ТН/ОС-2 не затрагиваются.
-        // Идентификатор задаём сами: тогда ключ задания известен до вставки и
-        // документ вместе с заданием попадает в БД одной транзакцией.
-        const docId = randomUUID();
-        const dedupeKey = dispatchKeyOf(docId);
-        await db.transaction(async (tx) => {
-          await fenceBundleAttempt(tx as unknown as typeof db, bundleId, bundleGeneration);
-          await tx.insert(sourceDocuments).values({
-            id: docId,
-            kind: 'transport_waybill',
-            direction: bundle.direction,
-            origin: bundleOrigin,
-            status: 'queued',
-            contractorId: bundle.contractorId,
-            recipientMolId: bundle.recipientMolId,
-            recipientSource: manualRecipientSource(bundle),
-            siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
-            expectedDate: await resolveMachineExpectedDate(tx as unknown as Db, bundleId),
-            originalFilename: a.filename,
-            queuedAt: new Date(),
-            parsedAt: new Date(),
-            jobId: dedupeKey,
-            // Связь с пакетом: без неё от документа не дойти до истории
-            // загрузки, а сам пакет выглядит осиротевшим и повторная загрузка
-            // того же комплекта запускала бы разбор заново.
-            bundleId,
-            createdByUserId: bundle.createdByUserId,
-          });
-          await tx.insert(sourceDocumentAttachments).values({
-            sourceDocumentId: docId,
-            s3Key: a.s3Key,
-            filename: a.filename,
-            mimeType: a.mimeType,
-            sizeBytes: a.sizeBytes,
-            role: 'original',
-          });
-          await enqueueJob(tx as unknown as typeof db, {
-            queue: UPD_PARSE_QUEUE,
-            jobName: 'parse',
-            payload: { sourceDocumentId: docId, s3Key: a.s3Key, docKind: 'm15' },
-            dedupeKey,
-          });
-          // В ТОЙ ЖЕ транзакции, что документ и задание: иначе крах между ними
-          // оставит файл незакрытым в реестре, и повтор создаст второй документ.
-          await recordImportItem(tx as unknown as typeof db, bundleId, a, {
-            detectedKind: 'm15',
-            confidence: cls.confidence.toString(),
-            parserUsed: 'parseUpdVision',
-            status: 'created',
-            createdDocumentIds: [docId],
-            reason: 'М-15 (отпуск материалов) → распознавание по форме М-15',
-            metadata: { signals: cls.signals, needsVision: cls.needsVision },
-          });
+        await createM15Document({
+          bundleId,
+          bundleGeneration,
+          bundle,
+          bundleOrigin,
+          file: a,
+          confidence: cls.confidence,
+          signals: cls.signals,
+          needsVision: cls.needsVision,
+          reason: 'М-15 (отпуск материалов) → распознавание по форме М-15',
         });
         createdCount++;
       } else if (isWaybill) {
@@ -4202,6 +4388,93 @@ function isAssemblyCandidate(file: RouterInputFile, cls: FileClassification): bo
   return (
     mime.startsWith('image/') || mime === 'application/pdf' || /\.(jpe?g|png|webp|pdf)$/i.test(name)
   );
+}
+
+/**
+ * Заводит документ по форме М-15 (накладная на отпуск материалов) и задание
+ * на его разбор.
+ *
+ * Вид документа — 'transport_waybill' (новых значений enum не вводим), а
+ * форму задаёт docKind:'m15' в задании: handleJob разбирает его своим
+ * промптом. Идентификатор задаём сами — тогда ключ задания известен до
+ * вставки, и документ вместе с заданием попадает в БД одной транзакцией.
+ *
+ * Вынесено из router, потому что вызывающих стало два: сам router и откат
+ * сборки. До этого откат умел только накладную и сертификат, а однородный
+ * файл М-15 уезжал в УПД-парсер и оседал пустым черновиком.
+ */
+async function createM15Document(args: {
+  bundleId: string;
+  bundleGeneration: number;
+  bundle: typeof sourceBundles.$inferSelect;
+  bundleOrigin: NonNullable<typeof sourceBundles.$inferSelect.origin>;
+  file: RouterInputFile;
+  confidence: number;
+  signals: string[];
+  needsVision: boolean;
+  /** Причина в реестре: у отката она своя. */
+  reason: string;
+  /** Пакет попытки может отличаться от пакета документа при откате. */
+  attemptBundleId?: string;
+  attemptBundleGeneration?: number;
+}): Promise<string> {
+  const { bundleId, bundleGeneration, bundle, bundleOrigin, file: a } = args;
+  const docId = randomUUID();
+  const dedupeKey = dispatchKeyOf(docId);
+  await db.transaction(async (tx) => {
+    await fenceBundleAttempt(
+      tx as unknown as typeof db,
+      args.attemptBundleId ?? bundleId,
+      args.attemptBundleGeneration ?? bundleGeneration,
+    );
+    await tx.insert(sourceDocuments).values({
+      id: docId,
+      kind: 'transport_waybill',
+      direction: bundle.direction,
+      origin: bundleOrigin,
+      status: 'queued',
+      contractorId: bundle.contractorId,
+      recipientMolId: bundle.recipientMolId,
+      recipientSource: manualRecipientSource(bundle),
+      siteId: await resolveMachineSiteId(tx as unknown as Db, bundleId),
+      expectedDate: await resolveMachineExpectedDate(tx as unknown as Db, bundleId),
+      originalFilename: a.filename,
+      queuedAt: new Date(),
+      parsedAt: new Date(),
+      jobId: dedupeKey,
+      // Связь с пакетом: без неё от документа не дойти до истории загрузки,
+      // а сам пакет выглядит осиротевшим и повторная загрузка того же
+      // комплекта запускала бы разбор заново.
+      bundleId,
+      createdByUserId: bundle.createdByUserId,
+    });
+    await tx.insert(sourceDocumentAttachments).values({
+      sourceDocumentId: docId,
+      s3Key: a.s3Key,
+      filename: a.filename,
+      mimeType: a.mimeType,
+      sizeBytes: a.sizeBytes,
+      role: 'original',
+    });
+    await enqueueJob(tx as unknown as typeof db, {
+      queue: UPD_PARSE_QUEUE,
+      jobName: 'parse',
+      payload: { sourceDocumentId: docId, s3Key: a.s3Key, docKind: 'm15' },
+      dedupeKey,
+    });
+    // В ТОЙ ЖЕ транзакции, что документ и задание: иначе крах между ними
+    // оставит файл незакрытым в реестре, и повтор создаст второй документ.
+    await recordImportItem(tx as unknown as typeof db, bundleId, a, {
+      detectedKind: 'm15',
+      confidence: args.confidence.toString(),
+      parserUsed: 'parseUpdVision',
+      status: 'created',
+      createdDocumentIds: [docId],
+      reason: args.reason,
+      metadata: { signals: args.signals, needsVision: args.needsVision },
+    });
+  });
+  return docId;
 }
 
 /**
@@ -4905,6 +5178,7 @@ export async function handleUpdAssemblyJob(
     // каждом вызове нумерует страницы заново с единицы и про предыдущие порции
     // ничего не знает.
     const splitMode = loadEnv().UPD_ASSEMBLY_SPLIT_BY_DOC_NUMBER;
+    const torg12Classify = loadEnv().PAGE_CLASSIFY_TORG12;
     const chunks: PageClassification[][] = [];
     const chunkSizes: number[] = [];
     // Метаданные каждой порции — для улики: по ним видно, обрезан ли ответ,
@@ -4930,13 +5204,21 @@ export async function handleUpdAssemblyJob(
           thumbs: slice.map((p) => p.thumb),
           // Номера спрашиваем и в shadow: без них теневой план ничем не
           // отличался бы от применяемого и не сказал бы ничего нового.
-          // Промпт передаётся ЯВНО и только здесь — одиночный путь и
-          // prefilter остаются на прежнем тексте при любом значении флага.
-          ...(splitMode === 'off'
+          // Промпт выбирается ЯВНО и только здесь — два независимых
+          // рубильника (номера и ТОРГ-12) дают четыре текста, и какой из них
+          // ушёл модели, видно по улике вызова.
+          ...(splitMode === 'off' && !torg12Classify
             ? {}
             : {
-                prompt: PAGE_CLASSIFY_WITH_NUMBER_PROMPT,
-                maxTokens: loadEnv().UPD_ASSEMBLY_CLASSIFY_MAX_TOKENS,
+                prompt: pageClassifyPrompt({
+                  withDocNumber: splitMode !== 'off',
+                  torg12: torg12Classify,
+                }),
+                // Потолок поднимаем только ради номеров: текст с ТОРГ-12
+                // длиннее в промпте, а не в ответе.
+                ...(splitMode === 'off'
+                  ? {}
+                  : { maxTokens: loadEnv().UPD_ASSEMBLY_CLASSIFY_MAX_TOKENS }),
               }),
         });
         const latencyMs = Date.now() - startedAt;
@@ -5022,6 +5304,9 @@ export async function handleUpdAssemblyJob(
         // происхождение конкретной нарезки можно лишь по этой отметке.
         plannerVersion: splitMode === 'on' ? 'doc_number_v1' : ASSEMBLY_PLANNER_VERSION,
         splitMode,
+        // По улике должно быть видно, каким текстом промпта получена эта
+        // классификация: иначе разбор инцидента упирается в догадку.
+        torg12Prompt: torg12Classify,
         chunks: chunkMeta,
         ...(shadowPlan
           ? {
@@ -6085,7 +6370,7 @@ async function rollbackUpdAssembly(args: {
   // грех её не спросить: иначе целиком-накладная уедет в УПД-парсер только
   // потому, что нарезке не поверили.
   const rollbackKindMode = loadEnv().UPD_ASSEMBLY_ROLLBACK_KIND;
-  let kindByFile = new Map<string, 'transport_waybill' | 'supplementary'>();
+  let kindByFile = new Map<string, 'transport_waybill' | 'm15' | 'supplementary'>();
   if (rollbackKindMode !== 'off') {
     try {
       const [evidence] = await db
@@ -6165,6 +6450,22 @@ async function rollbackUpdAssembly(args: {
           confidence: 0,
           signals: ['assembly:rollback', 'assembly:rollback:kind=transport_waybill'],
           reason: `сборка отменена (${reason}) → накладная в waybill-парсер`,
+        });
+        continue;
+      }
+      if (routedKind === 'm15') {
+        // Файл целиком из страниц М-15: свой промпт разбирает его по графам
+        // формы, а УПД-парсер возвращал по нему пустой черновик.
+        await createM15Document({
+          bundleId: rootId,
+          bundleGeneration: rootBundle.dispatchGeneration,
+          bundle: rootBundle,
+          bundleOrigin: rootBundle.origin ?? 'manual_pdf',
+          file,
+          confidence: 0,
+          signals: ['assembly:rollback', 'assembly:rollback:kind=m15'],
+          needsVision: true,
+          reason: `сборка отменена (${reason}) → М-15 в свой парсер`,
         });
         continue;
       }
@@ -7412,3 +7713,27 @@ setTimeout(() => {
   runRepair();
   setInterval(runRepair, STUCK_INTERVAL_MS).unref();
 }, 60 * 1000).unref();
+
+// Ретенция служебных журналов распознавания. Раз в сутки, первый прогон через
+// 5 минут после старта — со сдвигом от остальных периодик, чтобы не будить БД
+// одновременно с ними.
+//
+// По умолчанию рубильники равны 0, то есть задача просыпается и сразу выходит:
+// удаление необратимо, и включают его осознанно на бою, а не выкладкой кода.
+const LOG_RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
+setTimeout(() => {
+  const runRetention = () => {
+    const env = loadEnv();
+    const llmCallsDays = env.LLM_CALLS_RETENTION_DAYS;
+    const evidenceDays = env.RECOGNITION_EVIDENCE_RETENTION_DAYS;
+    if (llmCallsDays === 0 && evidenceDays === 0) return;
+    void cleanupRecognitionLogs({ db, llmCallsDays, evidenceDays })
+      .then((res) => {
+        if (res.llmCallsDeleted === 0 && res.evidenceDeleted === 0) return;
+        logger.info({ task: 'log-retention', ...res }, 'ретенция журналов: удалены старые записи');
+      })
+      .catch((err) => logger.error({ err, task: 'log-retention' }, 'log retention failed'));
+  };
+  runRetention();
+  setInterval(runRetention, LOG_RETENTION_INTERVAL_MS).unref();
+}, 5 * 60 * 1000).unref();

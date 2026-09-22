@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, inArray, isNull, sql as drSql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or, sql as drSql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
@@ -3246,6 +3246,19 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
   );
 
   // ──────────── Журнал LLM-вызовов по документу (только админ) ────────────
+  //
+  // Поиск идёт по трём координатам, и это не расширение «на всякий случай».
+  // Разбор ПАКЕТА накладных логируется на техническую запись документа, а её
+  // воркер удаляет сразу после создания реальных документов: с миграции 0127
+  // ссылка на документ у такой записи обнуляется, и найти вызов можно только по
+  // пакету. Поэтому:
+  //   * сам документ — обычный одиночный разбор;
+  //   * его пакет — пакетный разбор накладных;
+  //   * непосредственный корень этого пакета — router-классификация файла,
+  //     которая пишется на корневую загрузку.
+  //
+  // Соседние дочерние пакеты той же загрузки НЕ включаются: у каждого файла
+  // свой дочерний пакет, и окно одного документа показывало бы чужие вызовы.
   app.get(
     '/api/v1/source-documents/:id/llm-calls',
     {
@@ -3256,10 +3269,32 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       },
     },
     async (req) => {
+      const [doc] = await app.db
+        .select({ bundleId: sourceDocuments.bundleId })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, req.params.id))
+        .limit(1);
+      const bundleIds: string[] = [];
+      if (doc?.bundleId) {
+        bundleIds.push(doc.bundleId);
+        const [ownBundle] = await app.db
+          .select({ parentBundleId: sourceBundles.parentBundleId })
+          .from(sourceBundles)
+          .where(eq(sourceBundles.id, doc.bundleId))
+          .limit(1);
+        if (ownBundle?.parentBundleId) bundleIds.push(ownBundle.parentBundleId);
+      }
       const rows = await app.db
         .select()
         .from(llmCalls)
-        .where(eq(llmCalls.sourceDocumentId, req.params.id))
+        .where(
+          bundleIds.length > 0
+            ? or(
+                eq(llmCalls.sourceDocumentId, req.params.id),
+                inArray(llmCalls.bundleId, bundleIds),
+              )
+            : eq(llmCalls.sourceDocumentId, req.params.id),
+        )
         .orderBy(desc(llmCalls.createdAt));
       return {
         items: rows.map((r) => ({

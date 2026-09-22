@@ -89,7 +89,15 @@ export function mergeClassificationChunks(
   return out.sort((a, b) => a.page - b.page);
 }
 
-/** Типы страниц, которые уверенно не относятся к УПД и в сегменты не идут. */
+/**
+ * Типы страниц, которые уверенно не относятся к УПД и в сегменты не идут.
+ *
+ * 'm15' сюда НЕ входит намеренно: отброшенная страница документа не создаёт,
+ * по ней ставится лишь пометка, — и файл, состоящий из одних М-15-страниц,
+ * остался бы без документа вовсе. Пока у сборки нет маршрута для такого
+ * файла, страница М-15 ведёт себя как 'other': остаётся в сегменте, ровно
+ * как сегодня.
+ */
 const DROPPED_TYPES: ReadonlySet<PageType> = new Set<PageType>([
   'transport_waybill',
   'certificate',
@@ -393,7 +401,7 @@ export function inputOrdersOfSegment(segment: UpdPageSegment, pages: AssemblyPag
 export function rollbackKindsByFile(
   classification: ReadonlyArray<PageClassification>,
   pageMap: ReadonlyArray<{ globalPage: number; registryItemId: string | null }>,
-): Map<string, 'transport_waybill' | 'supplementary'> {
+): Map<string, 'transport_waybill' | 'm15' | 'supplementary'> {
   const typeByPage = new Map(classification.map((c) => [c.page, c.type]));
   const pagesByFile = new Map<string, PageType[]>();
   for (const ref of pageMap) {
@@ -406,11 +414,18 @@ export function rollbackKindsByFile(
     pagesByFile.set(ref.registryItemId, list);
   }
 
-  const out = new Map<string, 'transport_waybill' | 'supplementary'>();
+  const out = new Map<string, 'transport_waybill' | 'm15' | 'supplementary'>();
   for (const [registryItemId, types] of pagesByFile) {
     if (types.length === 0) continue;
     if (types.every((t) => t === 'transport_waybill')) {
       out.set(registryItemId, 'transport_waybill');
+      continue;
+    }
+    // Форму М-15 возвращает только промпт с ТОРГ-12; при прежнем тексте этой
+    // ветки не бывает. Без неё однородный файл М-15 уезжал при откате в
+    // УПД-парсер и оседал пустым черновиком.
+    if (types.every((t) => t === 'm15')) {
+      out.set(registryItemId, 'm15');
       continue;
     }
     if (types.every((t) => t === 'certificate')) out.set(registryItemId, 'supplementary');
