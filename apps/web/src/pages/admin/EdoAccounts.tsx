@@ -8,6 +8,7 @@ import {
   Form,
   Input,
   Modal,
+  Popconfirm,
   Select,
   Space,
   Switch,
@@ -20,6 +21,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   EdoAccountCreate,
   EdoAccountDto,
+  EdoAccountPatch,
   EdoCheckResult,
   EdoJobQueued,
   EdoJournalSummary,
@@ -48,6 +50,27 @@ function TokenAge({ days }: { days: number | null }) {
   return <Tag color="green">{days} дн.</Tag>;
 }
 
+/**
+ * Значение вставлено вместе с именем параметра.
+ *
+ * Ровно так и сорвалась первая настройка: в поле попало `clientId=ci_…`, и
+ * сервис авторизации ответил `invalid_client` — тем же кодом, что и на неверный
+ * ключ. Отличить одно от другого по ответу невозможно, поэтому ловим на входе.
+ *
+ * Проверка именно предупреждающая, а не «умная»: молча срезать приставку у
+ * чужого секрета опаснее, чем попросить человека вставить значение заново.
+ */
+const PARAM_PREFIX = /^\s*(client[_-]?id|client[_-]?secret|refresh[_-]?token|grant[_-]?type)\s*=/i;
+
+const noParamPrefix = {
+  validator: (_: unknown, value?: string) =>
+    value && PARAM_PREFIX.test(value)
+      ? Promise.reject(
+          new Error('Похоже, скопировано вместе с именем параметра — вставьте только значение после «=»'),
+        )
+      : Promise.resolve(),
+};
+
 export default function AdminEdoAccountsPage() {
   const qc = useQueryClient();
   // Страницу можно выдать на просмотр отдельно от управления, поэтому контролы
@@ -64,6 +87,8 @@ export default function AdminEdoAccountsPage() {
   // Какую учётную запись проверяем: без этого выбранный ящик некуда записать.
   const [checkedAccountId, setCheckedAccountId] = useState<string | null>(null);
   const [journal, setJournal] = useState<EdoJournalSummary | null>(null);
+  const [editing, setEditing] = useState<EdoAccountDto | null>(null);
+  const [editForm] = Form.useForm<EdoAccountPatch>();
   const [form] = Form.useForm<EdoAccountCreate>();
 
   const list = useQuery({
@@ -124,6 +149,29 @@ export default function AdminEdoAccountsPage() {
     onError: (err: Error) => message.error(err.message),
   });
 
+  // Правка учётной записи. Пустые поля секретов означают «оставить прежние»:
+  // показать их форме неоткуда — наружу они не отдаются.
+  const update = useMutation({
+    mutationFn: ({ id, body }: { id: string; body: EdoAccountPatch }) =>
+      api.patch(`/admin/edo-accounts/${id}`, body),
+    onSuccess: () => {
+      message.success('Сохранено');
+      setEditing(null);
+      editForm.resetFields();
+      invalidate();
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api.delete(`/admin/edo-accounts/${id}`),
+    onSuccess: () => {
+      message.success('Учётная запись удалена');
+      invalidate();
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
   // Журнал приёма: без него на вопрос «почему документ не приехал» пришлось бы
   // отвечать запросом в базу.
   const openJournal = useMutation({
@@ -162,6 +210,32 @@ export default function AdminEdoAccountsPage() {
       <Button size="small" onClick={() => openJournal.mutate(r.id)} loading={openJournal.isPending}>
         Журнал
       </Button>
+      <Button
+        size="small"
+        onClick={() => {
+          setEditing(r);
+          editForm.setFieldsValue({
+            name: r.name,
+            environment: r.environment,
+            orgInn: r.orgInn,
+            ...(r.boxId ? { boxId: r.boxId } : {}),
+          });
+        }}
+      >
+        Изменить
+      </Button>
+      <Popconfirm
+        title="Удалить учётную запись?"
+        description="Настройки и журнал приёма будут удалены. Документы, уже попавшие в портал, останутся."
+        okText="Удалить"
+        cancelText="Отмена"
+        okButtonProps={{ danger: true }}
+        onConfirm={() => remove.mutate(r.id)}
+      >
+        <Button size="small" danger loading={remove.isPending}>
+          Удалить
+        </Button>
+      </Popconfirm>
     </Space>
   );
 
@@ -434,6 +508,117 @@ export default function AdminEdoAccountsPage() {
       </Modal>
 
       <Drawer
+        open={editing !== null}
+        onClose={() => {
+          setEditing(null);
+          editForm.resetFields();
+        }}
+        title={`Изменить: ${editing?.name ?? ''}`}
+        width={520}
+        destroyOnClose
+        maskClosable={false}
+      >
+        <Form<EdoAccountPatch>
+          form={editForm}
+          layout="vertical"
+          onFinish={(v) => {
+            if (!editing) return;
+            // Пустые поля секретов не отправляем вовсе: на сервере «поле не
+            // передано» означает «оставить прежнее», а пустая строка была бы
+            // попыткой стереть ключ.
+            const credentials = {
+              ...(v.credentials?.clientId ? { clientId: v.credentials.clientId } : {}),
+              ...(v.credentials?.clientSecret ? { clientSecret: v.credentials.clientSecret } : {}),
+              ...(v.credentials?.refreshToken ? { refreshToken: v.credentials.refreshToken } : {}),
+            };
+            update.mutate({
+              id: editing.id,
+              body: {
+                name: v.name,
+                environment: v.environment,
+                orgInn: v.orgInn || null,
+                ...(v.boxId ? { boxId: v.boxId } : {}),
+                ...(Object.keys(credentials).length > 0 ? { credentials } : {}),
+              },
+            });
+          }}
+        >
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="Вставляйте только значения"
+            description={
+              <>
+                Без имён параметров и знака равенства: в поле должно быть{' '}
+                <Typography.Text code>ci_…</Typography.Text>, а не{' '}
+                <Typography.Text code>clientId=ci_…</Typography.Text>. Поля секретов можно
+                оставить пустыми — тогда прежние значения сохранятся.
+              </>
+            }
+          />
+          <Form.Item name="name" label="Название" rules={[{ required: true }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="environment" label="Площадка">
+            <Select
+              options={[
+                { value: 'production', label: 'Боевая' },
+                { value: 'staging', label: 'Тестовая' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            name={['credentials', 'clientId']}
+            rules={[noParamPrefix]}
+            label="client_id"
+            extra={
+              editing?.clientId ? `Сейчас сохранено: ${editing.clientId}` : 'Сейчас не заполнен'
+            }
+          >
+            <Input placeholder="оставьте пустым, чтобы не менять" />
+          </Form.Item>
+          <Form.Item
+            name={['credentials', 'clientSecret']}
+            rules={[noParamPrefix]}
+            label="Ключ приложения (client_secret)"
+            extra={
+              editing?.clientSecretLength
+                ? `Сейчас сохранено значение длиной ${editing.clientSecretLength} символов`
+                : 'Сейчас не заполнен'
+            }
+          >
+            <Input.Password placeholder="оставьте пустым, чтобы не менять" />
+          </Form.Item>
+          <Form.Item
+            name={['credentials', 'refreshToken']}
+            rules={[noParamPrefix]}
+            label="Refresh-токен"
+            extra={
+              editing?.refreshTokenLength
+                ? `Сейчас сохранено значение длиной ${editing.refreshTokenLength} символов`
+                : 'Сейчас не заполнен'
+            }
+          >
+            <Input.Password placeholder="оставьте пустым, чтобы не менять" />
+          </Form.Item>
+          <Form.Item
+            name="boxId"
+            label="Box ID"
+            extra="После первого чтения ленты ящик менять нельзя — понадобится новая учётная запись."
+          >
+            <Input />
+          </Form.Item>
+          <Form.Item name="orgInn" label="ИНН нашей организации">
+            <Input />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" block size="large" loading={update.isPending}>
+            Сохранить
+          </Button>
+        </Form>
+      </Drawer>
+
+      <Drawer
         open={open}
         onClose={() => setOpen(false)}
         title="Новая учётная запись ЭДО"
@@ -488,21 +673,22 @@ export default function AdminEdoAccountsPage() {
           <Form.Item
             name={['credentials', 'clientId']}
             label="client_id"
-            rules={[{ required: true }]}
+            rules={[{ required: true }, noParamPrefix]}
+            extra="Только значение: ci_… , без «clientId=»."
           >
             <Input />
           </Form.Item>
           <Form.Item
             name={['credentials', 'clientSecret']}
             label="Ключ приложения (client_secret)"
-            rules={[{ required: true }]}
+            rules={[{ required: true }, noParamPrefix]}
           >
             <Input.Password />
           </Form.Item>
           <Form.Item
             name={['credentials', 'refreshToken']}
             label="Первичный refresh-токен"
-            rules={[{ required: true }]}
+            rules={[{ required: true }, noParamPrefix]}
             extra="Действует 30 дней с момента последнего использования."
           >
             <Input.Password />
