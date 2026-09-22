@@ -197,6 +197,29 @@ export default function AdminEdoAccountsPage() {
             ),
           },
           {
+            // Отказ `invalid_client` выглядит одинаково и при неверном ключе, и
+            // при опечатке в идентификаторе, и при лишнем пробеле из буфера
+            // обмена. Поэтому показываем, что именно сохранено: идентификатор
+            // целиком (он не секрет) и длины секретов — их можно сверить с
+            // Кабинетом интегратора, не раскрывая значений.
+            title: 'Приложение',
+            key: 'app',
+            render: (_: unknown, r: EdoAccountDto) =>
+              r.clientId ? (
+                <Tooltip
+                  title={`Ключ приложения: ${r.clientSecretLength ?? 0} симв., refresh-токен: ${
+                    r.refreshTokenLength ?? 0
+                  } симв. Сверьте длины с Кабинетом интегратора.`}
+                >
+                  <Typography.Text code copyable={{ text: r.clientId }}>
+                    {r.clientId.length > 12 ? `${r.clientId.slice(0, 12)}…` : r.clientId}
+                  </Typography.Text>
+                </Tooltip>
+              ) : (
+                <Typography.Text type="secondary">—</Typography.Text>
+              ),
+          },
+          {
             title: 'Ящик',
             dataIndex: 'boxId',
             render: (b: string | null) =>

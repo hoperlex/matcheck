@@ -31,6 +31,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function dto(a: typeof edoAccounts.$inferSelect) {
   let hasClientSecret = false;
   let hasRefreshToken = Boolean(a.authStateEncrypted);
+  let clientId: string | null = null;
+  let clientSecretLength: number | null = null;
+  let refreshTokenLength: number | null = null;
   try {
     const creds = StoredEdoCredentialsSchema.parse(
       JSON.parse(decryptField(a.credentialsEncrypted, buildAad('edo_accounts', a.id))),
@@ -38,6 +41,12 @@ function dto(a: typeof edoAccounts.$inferSelect) {
     if (creds.authMode === 'oidc_refresh') {
       hasClientSecret = Boolean(creds.clientSecret);
       hasRefreshToken = hasRefreshToken || Boolean(creds.refreshToken);
+      // Наружу уходит идентификатор приложения и ДЛИНЫ секретов, но не они
+      // сами: длина ловит обрезанное или склеенное значение, а на отказ
+      // сервис отвечает одинаково и на «не тот ключ», и на «лишний пробел».
+      clientId = creds.clientId;
+      clientSecretLength = creds.clientSecret.length;
+      refreshTokenLength = creds.refreshToken.length;
     } else {
       hasClientSecret = Boolean(creds.password);
     }
@@ -58,8 +67,11 @@ function dto(a: typeof edoAccounts.$inferSelect) {
     boxId: a.boxId,
     orgInn: a.orgInn,
     defaultSiteId: a.defaultSiteId,
+    clientId,
     hasClientSecret,
     hasRefreshToken,
+    clientSecretLength,
+    refreshTokenLength,
     refreshTokenAgeDays: usedAt ? Math.floor((Date.now() - usedAt.getTime()) / DAY_MS) : null,
     lastEventAt: a.lastEventAt?.toISOString() ?? null,
     lastSyncAt: a.lastSyncAt?.toISOString() ?? null,

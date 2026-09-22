@@ -26,12 +26,22 @@ export type EdoEnvironment = z.infer<typeof EdoEnvironmentSchema>;
 export const EdoAuthModeSchema = z.enum(['oidc_refresh', 'developer_key']);
 export type EdoAuthMode = z.infer<typeof EdoAuthModeSchema>;
 
+/**
+ * Секреты обрезаются по краям, и это не косметика.
+ *
+ * Их вставляют из буфера обмена, где к значению легко цепляется пробел или
+ * перенос строки. Визуально поле выглядит правильным, а сервис авторизации
+ * отвечает `invalid_client` — то есть ошибка неотличима от «ключ не тот», и
+ * человек идёт искать проблему не там.
+ */
+const secret = () => z.string().trim().min(1);
+
 export const EdoOidcCredentialsSchema = z.object({
   authMode: z.literal('oidc_refresh'),
-  clientId: z.string().min(1),
-  clientSecret: z.string().min(1),
+  clientId: secret(),
+  clientSecret: secret(),
   /** Первичный refresh_token из Кабинета интегратора. Дальше ротируется сам. */
-  refreshToken: z.string().min(1),
+  refreshToken: secret(),
 });
 
 export const EdoDeveloperKeyCredentialsSchema = z.object({
@@ -94,8 +104,17 @@ export const EdoAccountDtoSchema = z.object({
   boxId: z.string().nullable(),
   orgInn: z.string().nullable(),
   defaultSiteId: z.string().uuid().nullable(),
+  /**
+   * client_id — идентификатор приложения, не секрет. Показывается целиком:
+   * без него опечатку в нём невозможно заметить глазами, а отвечает на неё
+   * сервис авторизации тем же `invalid_client`, что и на неверный ключ.
+   */
+  clientId: z.string().nullable(),
   hasClientSecret: z.boolean(),
   hasRefreshToken: z.boolean(),
+  /** Длины секретов: сравнить с тем, что выдал Кабинет, не раскрывая значений. */
+  clientSecretLength: z.number().int().nullable(),
+  refreshTokenLength: z.number().int().nullable(),
   refreshTokenAgeDays: z.number().int().nullable(),
   lastEventAt: z.string().nullable(),
   lastSyncAt: z.string().nullable(),
@@ -137,9 +156,9 @@ export const EdoAccountPatchSchema = z
     orgInn: z.string().min(10).max(12).nullable(),
     defaultSiteId: z.string().uuid().nullable(),
     credentials: z.object({
-      clientId: z.string().min(1).optional(),
-      clientSecret: z.string().min(1).optional(),
-      refreshToken: z.string().min(1).optional(),
+      clientId: secret().optional(),
+      clientSecret: secret().optional(),
+      refreshToken: secret().optional(),
     }),
   })
   .partial();
