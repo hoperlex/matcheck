@@ -293,17 +293,14 @@ class OidcRefreshAuth implements DiadocAuth {
       });
     };
 
-    let res: Response;
-    try {
-      res = await attempt('post');
-    } catch (err) {
-      // Второй способ пробуем ТОЛЬКО на invalid_client: это единственный код,
-      // которым сервис отвечает и на «не те ключи», и на «не тот способ их
-      // передачи». Прочие отказы означают что-то определённое, и повторять их
-      // другим способом — просто лишний запрос.
-      if (!(err instanceof DiadocAuthRejected) || err.code !== 'invalid_client') throw err;
-      res = await attempt('basic');
-    }
+    // Способ ровно один, и это требование Диадока: `client_id` и `client_secret`
+    // передаются в теле `x-www-form-urlencoded`, а заголовок `Authorization` в
+    // запросе за токеном должен отсутствовать. Здесь был повтор через Basic на
+    // случай приложения, зарегистрированного иначе, — он убран: документация
+    // такого варианта не допускает, а на боевой учётной записи второй способ
+    // получил тот же отказ. Пользы ноль, а обращений к сервису авторизации при
+    // каждом отказе вдвое больше.
+    const res = await attempt('post');
 
     const body = (await res.json()) as TokenResponse;
     if (!body.access_token) {
