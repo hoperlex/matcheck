@@ -258,6 +258,8 @@ export type DiadocRequestSnapshot = {
   refreshTokenSource?: 'auth_state' | 'credentials';
   /** Снимок пробы аутентификации приложения, а не штатного обмена. */
   probe?: boolean;
+  /** Как переданы реквизиты приложения: в теле или заголовком Authorization. */
+  clientAuthMethod?: 'post' | 'basic';
 };
 
 const fingerprintOf = (value: string): string =>

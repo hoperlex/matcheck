@@ -60,8 +60,13 @@ describe('объяснение отказа', () => {
     // Сам по себе invalid_client администратору ничего не говорит: причин
     // три, и они в разных местах Кабинета интегратора.
     const client = describeFailure(new DiadocAuthRejected('invalid_client', null));
-    expect(client.message).toMatch(/AuthorizationCode/);
-    expect(client.message).toMatch(/ключ приложения/i);
+    // «Ключ API» и client_secret у Диадока — одно значение, и подсказка обязана
+    // вести к нему, а не к несуществующему отдельному ключу. Про способ
+    // получения токенов тут молчим: после выпуска refresh-токена его можно
+    // менять, и ранее выданный токен остаётся действующим.
+    expect(client.message).toMatch(/Ключ API/i);
+    expect(client.message).toMatch(/одного приложения|ОДНОГО приложения/i);
+    expect(client.message).not.toMatch(/AuthorizationCode/);
 
     const grant = describeFailure(new DiadocAuthRejected('invalid_grant', null));
     expect(grant.message).toMatch(/30 дней|отозвал/i);
@@ -96,9 +101,13 @@ describe('проба аутентификации приложения', () => {
   });
 
   it('принятые ключи переводят разговор на refresh-токен', () => {
-    const text = describeClientProbe({ outcome: 'client_accepted', code: 'invalid_grant' });
+    const text = describeClientProbe({
+      outcome: 'client_accepted',
+      code: 'invalid_grant',
+      method: 'post',
+    });
     expect(text).toMatch(/refresh-токен/i);
-    expect(text).toMatch(/новый|обменян/i);
+    expect(text).toMatch(/отозван|заменён|другого приложения/i);
     // Про ключи приложения говорить больше нечего — они приняты.
     expect(text).not.toMatch(/ключ API/i);
   });
@@ -106,7 +115,24 @@ describe('проба аутентификации приложения', () => {
   it('отвергнутые ключи снимают подозрение с токена', () => {
     const text = describeClientProbe({ outcome: 'client_rejected', code: 'invalid_client' });
     expect(text).toMatch(/ни при чём/i);
-    expect(text).toMatch(/client_secret/);
+    expect(text).toMatch(/Ключ API/i);
+    // Ровно та ошибка, которая была в первой редакции: ключ API
+    // противопоставлялся client_secret, хотя это одно и то же значение.
+    expect(text).not.toMatch(/а не ключ API/i);
+  });
+
+  it('принятые ключи при передаче заголовком называют способ, а не ключи', () => {
+    // Ровно версия, которую нельзя было отличить снаружи: ключи верны, а
+    // приложение зарегистрировано на другой способ их передачи.
+    const text = describeClientProbe({
+      outcome: 'client_accepted',
+      code: 'invalid_grant',
+      method: 'basic',
+    });
+    expect(text).toMatch(/заголовк/i);
+    expect(text).toMatch(/повторите проверку/i);
+    // Про выпуск нового refresh-токена здесь говорить нечего — он ни при чём.
+    expect(text).not.toMatch(/выпустите свежий/i);
   });
 
   it('невнятный ответ пробы не выдаётся за вывод', () => {

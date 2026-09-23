@@ -7,14 +7,17 @@
  * человек один раз получает refresh_token в Кабинете интегратора под сервисной
  * учётной записью, дальше приложение работает само.
  *
- * ГЛАВНАЯ ОПАСНОСТЬ этого модуля — потеря refresh_token. Он живёт 30 дней,
- * счётчик продлевается при каждом использовании, а восстановить его можно
- * только руками через браузер. Поэтому здесь три правила, каждое из которых
- * существует ради конкретного способа его потерять:
+ * ГЛАВНАЯ ОПАСНОСТЬ этого модуля — потеря refresh_token: восстановить его
+ * можно только руками через браузер. Токен, выпущенный кнопкой в Кабинете
+ * интегратора, действует, пока его там не отозвали, но в ответе на обмен МОЖЕТ
+ * прийти новый — и тогда действующим следует считать именно его. Обещания, что
+ * прежний продолжит работать, документация не даёт, поэтому здесь три правила,
+ * каждое ради конкретного способа потерять доступ:
  *
  *   1. Если в ответе пришёл НОВЫЙ refresh_token, он сохраняется ДО того, как мы
  *      воспользуемся полученным access_token. Иначе падение между «обменяли» и
- *      «сохранили» оставит в базе токен, который сервер уже отозвал.
+ *      «сохранили» оставит в базе значение, на которое больше нельзя
+ *      полагаться.
  *   2. Запись идёт через compare-and-swap по auth_state_version. Ноль
  *      обновлённых строк означает, что состояние поменял кто-то другой, и тогда
  *      мы НЕ перетираем его своим, а прекращаем работу.
@@ -41,6 +44,41 @@ import {
   type DiadocEnvironment,
   type DiadocRequestSnapshot,
 } from './diadoc.http.js';
+
+/**
+ * Способ передачи реквизитов приложения.
+ *
+ * OAuth разрешает оба, и `identity.kontur.ru` в своём описании объявляет оба
+ * (`client_secret_post`, `client_secret_basic`). Но у КОНКРЕТНОГО приложения
+ * способ задан при регистрации, и несовпадение даёт `invalid_client` — тот же
+ * ответ, что и на неверные ключи. Различить это снаружи нельзя, поэтому при
+ * отказе мы пробуем второй способ, прежде чем винить реквизиты.
+ */
+export type ClientAuthMethod = 'post' | 'basic';
+
+/** Заголовки и тело запроса за токеном для выбранного способа. */
+function buildTokenRequest(
+  method: ClientAuthMethod,
+  credentials: { clientId: string; clientSecret: string },
+  refreshToken: string,
+): { headers: Record<string, string>; body: string } {
+  const form = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken });
+  if (method === 'post') {
+    form.set('client_id', credentials.clientId);
+    form.set('client_secret', credentials.clientSecret);
+    return { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form.toString() };
+  }
+  // RFC 6749 §2.3.1: перед base64 значения кодируются как в форме — иначе
+  // двоеточие или спецсимвол в ключе разорвёт пару.
+  const encoded = `${encodeURIComponent(credentials.clientId)}:${encodeURIComponent(credentials.clientSecret)}`;
+  return {
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: `Basic ${Buffer.from(encoded, 'utf8').toString('base64')}`,
+    },
+    body: form.toString(),
+  };
+}
 
 /** Запас до истечения access_token: обновляем заранее, а не в последний миг. */
 const ACCESS_TOKEN_SAFETY_MS = 60 * 60 * 1000;
@@ -225,22 +263,47 @@ class OidcRefreshAuth implements DiadocAuth {
     const endpoints = DIADOC_ENDPOINTS[this.account.environment];
     const url = new URL('/connect/token', endpoints.identity);
 
-    const res = await diadocFetch({
-      method: 'POST',
-      url,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: this.clientId,
-        client_secret: this.clientSecret,
-        refresh_token: this.refreshToken,
-      }).toString(),
-      timeoutMs: TOKEN_REQUEST_TIMEOUT_MS,
-      fetchImpl: this.deps.fetchImpl,
-      onRequest: this.deps.onRequest
-        ? (snapshot) => this.deps.onRequest?.({ ...snapshot, refreshTokenSource: this.refreshSource })
-        : undefined,
-    });
+    const attempt = async (authMethod: ClientAuthMethod): Promise<Response> => {
+      const { headers, body } = buildTokenRequest(
+        authMethod,
+        { clientId: this.clientId, clientSecret: this.clientSecret },
+        this.refreshToken,
+      );
+      return diadocFetch({
+        method: 'POST',
+        url,
+        headers,
+        body,
+        timeoutMs: TOKEN_REQUEST_TIMEOUT_MS,
+        // Повторять обмен НЕЛЬЗЯ. Сетевой сбой или таймаут не означают, что
+        // запрос не дошёл: сервер мог его выполнить и выдать новый
+        // refresh_token, которого мы не увидели. Повтор с прежним значением в
+        // таком случае — это попытка воспользоваться тем, что уже обменяно.
+        // Отказ здесь дешевле: следующий проход начнёт заново и по-честному.
+        maxRetries: 0,
+        fetchImpl: this.deps.fetchImpl,
+        onRequest: this.deps.onRequest
+          ? (snapshot) =>
+              this.deps.onRequest?.({
+                ...snapshot,
+                refreshTokenSource: this.refreshSource,
+                clientAuthMethod: authMethod,
+              })
+          : undefined,
+      });
+    };
+
+    let res: Response;
+    try {
+      res = await attempt('post');
+    } catch (err) {
+      // Второй способ пробуем ТОЛЬКО на invalid_client: это единственный код,
+      // которым сервис отвечает и на «не те ключи», и на «не тот способ их
+      // передачи». Прочие отказы означают что-то определённое, и повторять их
+      // другим способом — просто лишний запрос.
+      if (!(err instanceof DiadocAuthRejected) || err.code !== 'invalid_client') throw err;
+      res = await attempt('basic');
+    }
 
     const body = (await res.json()) as TokenResponse;
     if (!body.access_token) {
@@ -289,7 +352,7 @@ const PROBE_TOKEN_PREFIX = 'probe-not-a-token-';
  * выдавать его за доказательство нельзя.
  */
 export type ClientAuthProbe =
-  | { outcome: 'client_accepted'; code: string }
+  | { outcome: 'client_accepted'; code: string; method: ClientAuthMethod }
   | { outcome: 'client_rejected'; code: string }
   | { outcome: 'inconclusive'; reason: string };
 
@@ -303,10 +366,10 @@ export type ClientAuthProbe =
  *
  * Приём опирается на порядок проверок в OAuth: клиент аутентифицируется до
  * проверки гранта. Значит, подставив заведомо негодный `refresh_token`, мы
- * узнаём судьбу ключей и не тратим настоящий токен. Это важно: при каждом
- * удачном обмене Диадок выдаёт новый refresh-токен, а прежний перестаёт
- * действовать, поэтому «проверить ещё раз по-настоящему» — значит потерять
- * доступ, если проверка вдруг удастся, а её результат никто не сохранит.
+ * узнаём судьбу ключей и не трогаем настоящий токен. Это важно: удачный обмен
+ * может вернуть новый refresh_token, и если его никто не сохранит, дальше
+ * непонятно, какое из двух значений действующее. Проба такой неясности не
+ * создаёт.
  *
  * Запрос собирается тем же кодом и теми же реквизитами, что и штатный обмен:
  * отличается ровно одно значение.
@@ -323,40 +386,50 @@ export async function probeClientAuth(
   const endpoints = DIADOC_ENDPOINTS[account.environment];
   const url = new URL('/connect/token', endpoints.identity);
 
-  try {
-    await diadocFetch({
-      method: 'POST',
-      url,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: credentials.clientId,
-        client_secret: credentials.clientSecret,
-        refresh_token: `${PROBE_TOKEN_PREFIX}${crypto.randomUUID()}`,
-      }).toString(),
-      timeoutMs: TOKEN_REQUEST_TIMEOUT_MS,
-      // Повторять пробу незачем: ответ детерминирован, а лишние обращения к
-      // сервису авторизации с негодным токеном выглядят как перебор.
-      maxRetries: 0,
-      fetchImpl: deps.fetchImpl,
-      onRequest: deps.onRequest
-        ? (snapshot) => deps.onRequest?.({ ...snapshot, probe: true })
-        : undefined,
-    });
-    // Сервис выдал токен по недействительному значению. Вывода о ключах из
-    // этого делать нельзя — только зафиксировать странность.
-    return { outcome: 'inconclusive', reason: 'сервис принял заведомо негодный токен' };
-  } catch (err) {
-    if (err instanceof DiadocAuthRejected) {
-      if (err.code === 'invalid_client') return { outcome: 'client_rejected', code: err.code };
-      if (err.code === 'invalid_grant') return { outcome: 'client_accepted', code: err.code };
-      return { outcome: 'inconclusive', reason: `ответ сервиса: ${err.code}` };
+  const attempt = async (authMethod: ClientAuthMethod): Promise<ClientAuthProbe> => {
+    const { headers, body } = buildTokenRequest(
+      authMethod,
+      credentials,
+      `${PROBE_TOKEN_PREFIX}${crypto.randomUUID()}`,
+    );
+    try {
+      await diadocFetch({
+        method: 'POST',
+        url,
+        headers,
+        body,
+        timeoutMs: TOKEN_REQUEST_TIMEOUT_MS,
+        // Повторять пробу незачем: ответ детерминирован, а лишние обращения к
+        // сервису авторизации с негодным токеном выглядят как перебор.
+        maxRetries: 0,
+        fetchImpl: deps.fetchImpl,
+        onRequest: deps.onRequest
+          ? (snapshot) => deps.onRequest?.({ ...snapshot, probe: true, clientAuthMethod: authMethod })
+          : undefined,
+      });
+      // Сервис выдал токен по недействительному значению. Вывода о ключах из
+      // этого делать нельзя — только зафиксировать странность.
+      return { outcome: 'inconclusive', reason: 'сервис принял заведомо негодный токен' };
+    } catch (err) {
+      if (err instanceof DiadocAuthRejected) {
+        if (err.code === 'invalid_client') return { outcome: 'client_rejected', code: err.code };
+        if (err.code === 'invalid_grant') {
+          return { outcome: 'client_accepted', code: err.code, method: authMethod };
+        }
+        return { outcome: 'inconclusive', reason: `ответ сервиса: ${err.code}` };
+      }
+      return {
+        outcome: 'inconclusive',
+        reason: err instanceof Error ? err.message : String(err),
+      };
     }
-    return {
-      outcome: 'inconclusive',
-      reason: err instanceof Error ? err.message : String(err),
-    };
-  }
+  };
+
+  const viaPost = await attempt('post');
+  // Отвергнутые ключи — ещё не приговор реквизитам: способ их передачи задаётся
+  // при регистрации приложения, и несовпадение даёт тот же самый код.
+  if (viaPost.outcome !== 'client_rejected') return viaPost;
+  return attempt('basic');
 }
 
 /**

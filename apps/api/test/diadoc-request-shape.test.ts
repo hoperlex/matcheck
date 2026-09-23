@@ -254,7 +254,7 @@ describe('проба аутентификации приложения', () => {
       { db: makeDb(), fetchImpl: rejectingFetch('invalid_grant').fetchImpl },
       account,
     );
-    expect(probe).toEqual({ outcome: 'client_accepted', code: 'invalid_grant' });
+    expect(probe).toEqual({ outcome: 'client_accepted', code: 'invalid_grant', method: 'post' });
   });
 
   it('invalid_client означает, что дело не в refresh-токене', async () => {
@@ -336,5 +336,84 @@ describe('непригодные реквизиты отвергаются до 
       ),
     ).toThrow(/маска/i);
     expect(probe.calls()).toBe(0);
+  });
+});
+
+/** Отвечает по очереди заданными парами «код ответа → тело», запоминая запросы. */
+function scriptedFetch(steps: { status: number; body: unknown }[]) {
+  const seen: { headers: Record<string, string>; body: string }[] = [];
+  let i = 0;
+  const fetchImpl = (async (_url: URL, init?: RequestInit) => {
+    seen.push({
+      headers: (init?.headers as Record<string, string>) ?? {},
+      body: String(init?.body ?? ''),
+    });
+    const step = steps[Math.min(i, steps.length - 1)]!;
+    i += 1;
+    return new Response(JSON.stringify(step.body), { status: step.status });
+  }) as unknown as typeof fetch;
+  return { fetchImpl, seen };
+}
+
+const basicOf = (headers: Record<string, string>) =>
+  Object.entries(headers).find(([n]) => n.toLowerCase() === 'authorization')?.[1] ?? null;
+
+describe('способ передачи реквизитов приложения', () => {
+  it('при invalid_client реквизиты повторно уходят заголовком Authorization', async () => {
+    // Тот же invalid_client приходит и на верные ключи, если приложение
+    // зарегистрировано на другой способ их передачи. Снаружи это неразличимо,
+    // поэтому второй способ пробуется до того, как винить реквизиты.
+    const net = scriptedFetch([
+      { status: 400, body: { error: 'invalid_client' } },
+      { status: 200, body: { access_token: 'a', expires_in: 3600 } },
+    ]);
+    const auth = createDiadocAuth({ db: makeDb(), fetchImpl: net.fetchImpl }, account);
+    await expect(auth.header()).resolves.toBe('Bearer a');
+
+    expect(net.seen).toHaveLength(2);
+    // Первая попытка — как требует документация: всё в теле, без Authorization.
+    expect(basicOf(net.seen[0]!.headers)).toBeNull();
+    expect(new URLSearchParams(net.seen[0]!.body).get('client_secret')).toBe(TRICKY.clientSecret);
+    // Вторая — реквизиты в заголовке и, что важно, НЕ продублированы в теле.
+    const auth2 = basicOf(net.seen[1]!.headers);
+    expect(auth2).toMatch(/^Basic /);
+    expect(Buffer.from(auth2!.slice(6), 'base64').toString('utf8')).toBe(
+      `${encodeURIComponent(TRICKY.clientId)}:${encodeURIComponent(TRICKY.clientSecret)}`,
+    );
+    expect(new URLSearchParams(net.seen[1]!.body).get('client_secret')).toBeNull();
+    // Токен во второй попытке тот же самый: меняется способ, а не грант.
+    expect(new URLSearchParams(net.seen[1]!.body).get('refresh_token')).toBe(TRICKY.refreshToken);
+  });
+
+  it('удачный обмен вторым способом не пробуется', async () => {
+    const net = scriptedFetch([{ status: 200, body: { access_token: 'a', expires_in: 3600 } }]);
+    const auth = createDiadocAuth({ db: makeDb(), fetchImpl: net.fetchImpl }, account);
+    await auth.header();
+    expect(net.seen).toHaveLength(1);
+  });
+
+  it('другие отказы вторым способом не повторяются', async () => {
+    // invalid_grant говорит о самом токене, и повтор другим способом к этому
+    // ничего не добавит — только лишний запрос.
+    const net = scriptedFetch([{ status: 400, body: { error: 'invalid_grant' } }]);
+    const auth = createDiadocAuth({ db: makeDb(), fetchImpl: net.fetchImpl }, account);
+    await expect(auth.header()).rejects.toThrow(/invalid_grant/);
+    expect(net.seen).toHaveLength(1);
+  });
+
+  it('проба различает «не те ключи» и «не тот способ»', async () => {
+    const net = scriptedFetch([
+      { status: 400, body: { error: 'invalid_client' } },
+      { status: 400, body: { error: 'invalid_grant' } },
+    ]);
+    const probe = await probeClientAuth({ db: makeDb(), fetchImpl: net.fetchImpl }, account);
+    expect(probe).toEqual({ outcome: 'client_accepted', code: 'invalid_grant', method: 'basic' });
+  });
+
+  it('отказ обоими способами означает именно реквизиты', async () => {
+    const net = scriptedFetch([{ status: 400, body: { error: 'invalid_client' } }]);
+    const probe = await probeClientAuth({ db: makeDb(), fetchImpl: net.fetchImpl }, account);
+    expect(probe).toEqual({ outcome: 'client_rejected', code: 'invalid_client' });
+    expect(net.seen).toHaveLength(2);
   });
 });
