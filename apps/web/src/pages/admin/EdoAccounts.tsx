@@ -30,6 +30,7 @@ import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { usePermissions } from '../../shared/hooks/usePermissions';
+import { describeAccessCheck } from './edo-access-check';
 
 /**
  * Возраст refresh-токена: он живёт 30 дней, и счётчик продлевается только при
@@ -107,6 +108,9 @@ export default function AdminEdoAccountsPage() {
   // Какую учётную запись проверяем: без этого выбранный ящик некуда записать.
   const [checkedAccountId, setCheckedAccountId] = useState<string | null>(null);
   const [journal, setJournal] = useState<EdoJournalSummary | null>(null);
+  // Итог проверки доступа в словах: правило живёт отдельно от вёрстки, потому
+  // что «ящиков нет», «прав мало» и «учётка заблокирована» лечатся по-разному.
+  const verdict = checkResult ? describeAccessCheck(checkResult) : null;
   const [editing, setEditing] = useState<EdoAccountDto | null>(null);
   const [editForm] = Form.useForm<EdoAccountPatch>();
   const [form] = Form.useForm<EdoAccountCreate>();
@@ -472,24 +476,33 @@ export default function AdminEdoAccountsPage() {
       >
         {checkResult && (
           <Space direction="vertical" style={{ width: '100%' }}>
-            {!checkResult.employee.hasRequiredAccess && (
+            {/*
+              Какое из состояний показать, решает describeAccessCheck: пустой
+              список ящиков, ограниченный доступ и блокировка — разные неполадки
+              с разными действиями, и правило проверяется тестом отдельно от
+              вёрстки.
+            */}
+            {verdict && verdict.kind !== 'ok' && (
               <Alert
                 type="warning"
                 showIcon
-                message="Прав недостаточно"
-                description={
-                  checkResult.employee.isBlocked
-                    ? 'Учётная запись заблокирована в Диадоке.'
-                    : 'Интеграции нужен доступ ко всем документам ящика (AllDocuments). При ограниченном доступе часть документов не удастся прочитать.'
-                }
+                message={verdict.title}
+                description={verdict.description}
               />
             )}
             <Descriptions size="small" column={1} bordered>
               <Descriptions.Item label="Уровень доступа">
-                {checkResult.employee.documentAccessLevel ?? '—'}
+                {checkResult.employee.documentAccessLevel ??
+                  (checkResult.boxes.length === 0 ? 'не проверялся — нет ящика' : '—')}
               </Descriptions.Item>
             </Descriptions>
             <Typography.Text strong>Доступные ящики</Typography.Text>
+            {checkResult.boxes.length === 0 && (
+              <Typography.Text type="secondary">
+                Список пуст. Пока в нём не появится ящик, читать документы не из чего: запрос к
+                ленте адресуется конкретным ящиком.
+              </Typography.Text>
+            )}
             {checkResult.boxes.map((b) => {
               const account = (list.data ?? []).find((a) => a.id === checkedAccountId);
               const isCurrent = account?.boxId === b.boxId;
