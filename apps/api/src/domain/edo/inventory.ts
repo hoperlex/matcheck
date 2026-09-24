@@ -13,7 +13,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { EdoInventoryReport } from '@matcheck/contracts';
 import { classifyMessageEntities } from './diadoc.entities.js';
 import type { DiadocClient } from './diadoc.client.js';
-import { diadocTimestampToDate } from './diadoc.types.js';
+import { resolveEventTime } from './diadoc.types.js';
 
 export type InventoryParams = {
   boxId: string;
@@ -49,6 +49,10 @@ export async function inventoryBox(
   let truncated = false;
   let firstAt: Date | null = null;
   let lastAt: Date | null = null;
+  // Сколько событий вообще имеют время и откуда оно взято. Без этого пустой
+  // период в отчёте неотличим от «ящик пуст».
+  let timedEvents = 0;
+  let timeSource: 'event' | 'message' | null = null;
 
   for (let page = 0; page < maxPages; page++) {
     const { events } = await client.getNewEvents({
@@ -60,10 +64,12 @@ export async function inventoryBox(
 
     for (const event of events) {
       eventsSeen += 1;
-      const at = diadocTimestampToDate(event.Timestamp);
-      if (at) {
-        if (!firstAt || at < firstAt) firstAt = at;
-        if (!lastAt || at > lastAt) lastAt = at;
+      const time = resolveEventTime(event);
+      if (time.at) {
+        timedEvents += 1;
+        timeSource = timeSource ?? time.source;
+        if (!firstAt || time.at < firstAt) firstAt = time.at;
+        if (!lastAt || time.at > lastAt) lastAt = time.at;
       }
 
       // Патчи без сообщения считаем как событие, но разбирать в них нечего.
@@ -117,6 +123,8 @@ export async function inventoryBox(
     eventsSeen,
     entitiesSeen,
     truncated,
+    timedEvents,
+    timeSource,
     byType: [...buckets.values()].sort((a, b) => b.count - a.count),
   };
 }

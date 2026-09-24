@@ -33,7 +33,7 @@ import {
   DiadocTransient,
 } from '../edo/diadoc.http.js';
 import { classifyMessageEntities } from '../edo/diadoc.entities.js';
-import { diadocTimestampToDate } from '../edo/diadoc.types.js';
+import { resolveEventTime } from '../edo/diadoc.types.js';
 import {
   advanceCursor,
   terminalPrefixLength,
@@ -169,7 +169,9 @@ export async function pollEdoAccount(
       for (const event of events) {
         result.events += 1;
         const indexKey = event.IndexKey ?? event.EventId;
-        const eventAt = diadocTimestampToDate(event.Timestamp);
+        // Событие ленты время не несёт — оно лежит в сообщении (проверено
+        // разведкой боевого ящика). Берём первое доступное.
+        const eventAt = resolveEventTime(event).at;
         if (eventAt) lastEventAt = eventAt;
 
         const row = await claimEvent(deps.db, {

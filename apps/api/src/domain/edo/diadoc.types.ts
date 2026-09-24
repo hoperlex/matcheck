@@ -165,6 +165,28 @@ export function diadocTimestampToDate(value: string | number | undefined): Date 
   return Number.isFinite(parsed) ? new Date(parsed) : null;
 }
 
+/**
+ * Когда произошло событие ленты.
+ *
+ * Разведка боевого ящика 24.09.2026 показала, что `Timestamp` у события пуст:
+ * две тысячи событий — и ни одной даты. Между тем из неё заполняется «когда
+ * пришёл документ», поэтому спрашиваем ещё и сообщение внутри события.
+ *
+ * Источник возвращается вместе со значением: по нему видно, откуда Диадок на
+ * самом деле отдаёт время, и следующая разведка подтвердит это фактом, а не
+ * догадкой. Если пусто и там — искать дальше, в DocumentInfo сущности.
+ */
+export function resolveEventTime(event: {
+  Timestamp?: string | number;
+  Message?: { Timestamp?: string | number };
+}): { at: Date | null; source: 'event' | 'message' | null } {
+  const fromEvent = diadocTimestampToDate(event.Timestamp);
+  if (fromEvent) return { at: fromEvent, source: 'event' };
+  const fromMessage = diadocTimestampToDate(event.Message?.Timestamp);
+  if (fromMessage) return { at: fromMessage, source: 'message' };
+  return { at: null, source: null };
+}
+
 /** Обратное преобразование: отсечку первичной загрузки Диадок ждёт тиками. */
 export function dateToDiadocTicks(date: Date): string {
   return String(BigInt(date.getTime()) * 10_000n + TICKS_AT_UNIX_EPOCH);

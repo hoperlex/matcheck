@@ -94,6 +94,18 @@ export const EdoInventoryReportSchema = z.object({
   eventsSeen: z.number().int(),
   entitiesSeen: z.number().int(),
   truncated: z.boolean(),
+  /**
+   * Сколько событий несли время и откуда оно взято.
+   *
+   * Нужно, чтобы пустой период в отчёте не выглядел как «ящик пуст»: на боевом
+   * ящике 24.09.2026 время не нашлось ни у одного из двух тысяч событий, и
+   * отличить это от отсутствия документов было нечем.
+   *
+   * Поля необязательные: отчёты, снятые до появления счётчика, их не содержат,
+   * а ответ со списком учётных записей проверяется по этой же схеме.
+   */
+  timedEvents: z.number().int().optional(),
+  timeSource: z.enum(['event', 'message']).nullable().optional(),
   byType: z.array(
     z.object({
       typeNamedId: z.string(),

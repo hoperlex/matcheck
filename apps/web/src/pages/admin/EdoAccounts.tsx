@@ -571,6 +571,30 @@ export default function AdminEdoAccountsPage() {
                       ? new Date(inventoryRow.lastInventory.to).toLocaleString()
                       : '—'}
                   </Descriptions.Item>
+                  {/*
+                    Пустой период в отчёте означает не «ящик пуст», а «время
+                    события не разобралось». Показываем это прямо, иначе разница
+                    видна только по коду.
+                  */}
+                  <Descriptions.Item label="Время событий" span={2}>
+                    {inventoryRow.lastInventory.timedEvents === undefined ? (
+                      <Typography.Text type="secondary">
+                        не считалось — отчёт снят до появления проверки
+                      </Typography.Text>
+                    ) : inventoryRow.lastInventory.timedEvents === 0 ? (
+                      <Typography.Text type="warning">
+                        не нашлось ни у одного события — период показать не из чего
+                      </Typography.Text>
+                    ) : (
+                      <>
+                        {inventoryRow.lastInventory.timedEvents} из{' '}
+                        {inventoryRow.lastInventory.eventsSeen}
+                        {inventoryRow.lastInventory.timeSource === 'message'
+                          ? ' (из сообщения, а не из события)'
+                          : ''}
+                      </>
+                    )}
+                  </Descriptions.Item>
                   <Descriptions.Item label="Когда смотрели" span={2}>
                     {inventoryRow.lastInventoryAt
                       ? new Date(inventoryRow.lastInventoryAt).toLocaleString()
