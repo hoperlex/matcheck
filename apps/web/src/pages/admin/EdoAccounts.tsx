@@ -24,6 +24,7 @@ import type {
   EdoAccountDto,
   EdoAccountPatch,
   EdoCheckResult,
+  EdoInventoryReport,
   EdoJobQueued,
   EdoJournalSummary,
 } from '@matcheck/contracts';
@@ -32,6 +33,11 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { describeAccessCheck } from './edo-access-check';
+import {
+  INVENTORY_PERIODS,
+  inventorySince,
+  type InventoryPeriod,
+} from './edo-inventory-period';
 
 /**
  * Возраст refresh-токена: он живёт 30 дней, и счётчик продлевается только при
@@ -112,6 +118,10 @@ export default function AdminEdoAccountsPage() {
   // Итог проверки доступа в словах: правило живёт отдельно от вёрстки, потому
   // что «ящиков нет», «прав мало» и «учётка заблокирована» лечатся по-разному.
   const verdict = checkResult ? describeAccessCheck(checkResult) : null;
+  // Окно осмотра: выбор периода и результат прошлой разведки. Раньше кнопка
+  // запускала работу молча, а отчёт оставался только в базе.
+  const [inventoryFor, setInventoryFor] = useState<EdoAccountDto | null>(null);
+  const [inventoryPeriod, setInventoryPeriod] = useState<InventoryPeriod>('d90');
   const [editing, setEditing] = useState<EdoAccountDto | null>(null);
   const [editForm] = Form.useForm<EdoAccountPatch>();
   const [form] = Form.useForm<EdoAccountCreate>();
@@ -122,6 +132,13 @@ export default function AdminEdoAccountsPage() {
   });
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ['admin', 'edo-accounts'] });
+
+  // Для окна осмотра берём свежую запись из списка, а не снимок на момент
+  // открытия: работа идёт в очереди, и «Обновить» иначе показывал бы прежний
+  // отчёт. Снимок остаётся запасным вариантом, если запись из списка пропала.
+  const inventoryRow = inventoryFor
+    ? ((list.data ?? []).find((a) => a.id === inventoryFor.id) ?? inventoryFor)
+    : null;
 
   const create = useMutation({
     mutationFn: (body: EdoAccountCreate) => api.post('/admin/edo-accounts', body),
@@ -207,10 +224,12 @@ export default function AdminEdoAccountsPage() {
   });
 
   const inventory = useMutation({
-    mutationFn: (id: string) =>
-      api.post<EdoJobQueued>(`/admin/edo-accounts/${id}/inventory`, {}),
+    mutationFn: ({ id, since }: { id: string; since?: string }) =>
+      api.post<EdoJobQueued>(`/admin/edo-accounts/${id}/inventory`, since ? { since } : {}),
     onSuccess: () =>
-      message.success('Разведка запущена: ничего не импортируется, отчёт появится в карточке'),
+      message.success(
+        'Разведка запущена: ничего не импортируется. Отчёт появится здесь через минуту — нажмите «Обновить».',
+      ),
     onError: (err: Error) => message.error(err.message),
   });
 
@@ -232,8 +251,7 @@ export default function AdminEdoAccountsPage() {
       <Tooltip title="Пройти по ленте и показать, какие документы лежат в ящике. Ничего не импортирует.">
         <Button
           size="small"
-          onClick={() => inventory.mutate(r.id)}
-          loading={inventory.isPending}
+          onClick={() => setInventoryFor(r)}
           disabled={!r.boxId}
         >
           Осмотреть ящик
@@ -485,6 +503,142 @@ export default function AdminEdoAccountsPage() {
                 </Card>
               )}
             />
+          </Space>
+        )}
+      </Modal>
+
+      {/*
+        Осмотр ящика. Период выбирается здесь, а не берётся молча из отсечки
+        учётной записи: подключение может быть сделано сегодня, и с ней разведка
+        покажет пустоту, тогда как вопрос ровно обратный — что в ящике вообще
+        лежит. Отсечку импорта это не меняет.
+      */}
+      <Modal
+        open={inventoryFor !== null}
+        onCancel={() => setInventoryFor(null)}
+        footer={null}
+        title="Осмотр ящика"
+        width={760}
+      >
+        {inventoryRow && (
+          <Space direction="vertical" style={{ width: '100%' }}>
+            <Alert
+              type="info"
+              showIcon
+              message="Разведка ничего не импортирует"
+              description="Проход по ленте только считает, какие документы лежат в ящике. Ни карточек, ни записей в журнале приёма не появится."
+            />
+            <Space wrap>
+              <Select<InventoryPeriod>
+                value={inventoryPeriod}
+                onChange={setInventoryPeriod}
+                options={INVENTORY_PERIODS}
+                style={{ width: 220 }}
+              />
+              <Button
+                type="primary"
+                loading={inventory.isPending}
+                onClick={() =>
+                  inventory.mutate({
+                    id: inventoryRow.id,
+                    since: inventorySince(inventoryPeriod),
+                  })
+                }
+              >
+                Запустить осмотр
+              </Button>
+              {/* Работа идёт в очереди, поэтому отчёт приходится переспрашивать. */}
+              <Button onClick={() => invalidate()} loading={list.isFetching}>
+                Обновить
+              </Button>
+            </Space>
+
+            {inventoryRow.lastInventory ? (
+              <>
+                <Descriptions size="small" column={2} bordered>
+                  <Descriptions.Item label="Просмотрено событий">
+                    {inventoryRow.lastInventory.eventsSeen}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Документов в них">
+                    {inventoryRow.lastInventory.entitiesSeen}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Период" span={2}>
+                    {inventoryRow.lastInventory.from
+                      ? new Date(inventoryRow.lastInventory.from).toLocaleString()
+                      : 'с начала ленты'}{' '}
+                    —{' '}
+                    {inventoryRow.lastInventory.to
+                      ? new Date(inventoryRow.lastInventory.to).toLocaleString()
+                      : '—'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Когда смотрели" span={2}>
+                    {inventoryRow.lastInventoryAt
+                      ? new Date(inventoryRow.lastInventoryAt).toLocaleString()
+                      : '—'}
+                  </Descriptions.Item>
+                </Descriptions>
+                {inventoryRow.lastInventory.truncated && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="Обход остановлен на пределе"
+                    description="Показана часть ленты: разведка ограничена по числу страниц и событий. Возьмите более короткий период, чтобы увидеть картину целиком."
+                  />
+                )}
+                <Typography.Text strong>Что лежит в ящике</Typography.Text>
+                <ResponsiveTable<EdoInventoryReport['byType'][number]>
+                  items={inventoryRow.lastInventory.byType}
+                  rowKey={(b) => `${b.typeNamedId}|${b.function ?? ''}|${b.version ?? ''}`}
+                  columns={[
+                    { title: 'Тип документа', dataIndex: 'typeNamedId', ellipsis: true },
+                    {
+                      title: 'Функция',
+                      dataIndex: 'function',
+                      width: 120,
+                      render: (f: string | null) => f ?? '—',
+                    },
+                    {
+                      title: 'Версия',
+                      dataIndex: 'version',
+                      width: 120,
+                      render: (v: string | null) => v ?? '—',
+                    },
+                    {
+                      title: 'Формат',
+                      dataIndex: 'formalized',
+                      width: 150,
+                      render: (f: boolean) =>
+                        f ? (
+                          <Tag color="green">машиночитаемый</Tag>
+                        ) : (
+                          <Tag>скан или PDF</Tag>
+                        ),
+                    },
+                    { title: 'Сколько', dataIndex: 'count', width: 90 },
+                  ]}
+                  cardRender={(b) => (
+                    <Card size="small" style={{ width: '100%' }}>
+                      <Space direction="vertical" size={0}>
+                        <Typography.Text strong>{b.typeNamedId}</Typography.Text>
+                        <Typography.Text type="secondary">
+                          функция: {b.function ?? '—'} · версия: {b.version ?? '—'} · {b.count} шт.
+                        </Typography.Text>
+                        {b.formalized ? (
+                          <Tag color="green">машиночитаемый</Tag>
+                        ) : (
+                          <Tag>скан или PDF</Tag>
+                        )}
+                      </Space>
+                    </Card>
+                  )}
+                  emptyText="Входящих документов за этот период нет"
+                />
+              </>
+            ) : (
+              <Typography.Text type="secondary">
+                Осмотр ещё не проводился. Выберите период и запустите — это безопасно.
+              </Typography.Text>
+            )}
           </Space>
         )}
       </Modal>

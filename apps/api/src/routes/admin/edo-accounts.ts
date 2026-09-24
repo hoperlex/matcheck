@@ -87,6 +87,10 @@ function dto(a: typeof edoAccounts.$inferSelect) {
     lastOkAt: a.lastOkAt?.toISOString() ?? null,
     lastError: a.lastError,
     backfillSince: a.backfillSince?.toISOString() ?? null,
+    // Отчёт разведки отдаём прямо в карточке: он маленький, а отдельный запрос
+    // ради него заставил бы интерфейс гадать, закончилась работа или ещё идёт.
+    lastInventory: a.lastInventory ?? null,
+    lastInventoryAt: a.lastInventoryAt?.toISOString() ?? null,
     createdAt: a.createdAt.toISOString(),
   };
 }

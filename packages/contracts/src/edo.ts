@@ -87,6 +87,25 @@ export const EdoAuthStateSchema = z.object({
 });
 export type EdoAuthState = z.infer<typeof EdoAuthStateSchema>;
 
+/** Сводка инвентаризации: что лежит в ящике, без единого импорта. */
+export const EdoInventoryReportSchema = z.object({
+  from: z.string().nullable(),
+  to: z.string().nullable(),
+  eventsSeen: z.number().int(),
+  entitiesSeen: z.number().int(),
+  truncated: z.boolean(),
+  byType: z.array(
+    z.object({
+      typeNamedId: z.string(),
+      function: z.string().nullable(),
+      version: z.string().nullable(),
+      formalized: z.boolean(),
+      count: z.number().int(),
+    }),
+  ),
+});
+export type EdoInventoryReport = z.infer<typeof EdoInventoryReportSchema>;
+
 /**
  * Наружу секреты не уходят никогда — только признаки их наличия и возраст
  * токена. Возраст нужен по делу: refresh_token живёт 30 дней, счётчик
@@ -132,6 +151,13 @@ export const EdoAccountDtoSchema = z.object({
   lastOkAt: z.string().nullable(),
   lastError: z.string().nullable(),
   backfillSince: z.string().nullable(),
+  /**
+   * Последняя разведка ящика. Лежит в карточке, а не в отдельном запросе:
+   * отчёт маленький, а без него кнопка «Осмотреть ящик» бесполезна — работа
+   * уходит в очередь, и человеку негде увидеть, чем она кончилась.
+   */
+  lastInventory: EdoInventoryReportSchema.nullable(),
+  lastInventoryAt: z.string().nullable(),
   createdAt: z.string(),
 });
 export type EdoAccountDto = z.infer<typeof EdoAccountDtoSchema>;
@@ -231,25 +257,6 @@ export const EdoJournalSummarySchema = z.object({
   entries: z.array(EdoJournalEntrySchema),
 });
 export type EdoJournalSummary = z.infer<typeof EdoJournalSummarySchema>;
-
-/** Сводка инвентаризации: что лежит в ящике, без единого импорта. */
-export const EdoInventoryReportSchema = z.object({
-  from: z.string().nullable(),
-  to: z.string().nullable(),
-  eventsSeen: z.number().int(),
-  entitiesSeen: z.number().int(),
-  truncated: z.boolean(),
-  byType: z.array(
-    z.object({
-      typeNamedId: z.string(),
-      function: z.string().nullable(),
-      version: z.string().nullable(),
-      formalized: z.boolean(),
-      count: z.number().int(),
-    }),
-  ),
-});
-export type EdoInventoryReport = z.infer<typeof EdoInventoryReportSchema>;
 
 /**
  * Совместимость: прежнее имя схемы создания. Старый контракт требовал
