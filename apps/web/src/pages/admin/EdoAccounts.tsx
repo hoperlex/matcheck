@@ -17,6 +17,7 @@ import {
   Typography,
   message,
 } from 'antd';
+import { DeleteOutlined, EditOutlined, ProfileOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   EdoAccountCreate,
@@ -213,8 +214,18 @@ export default function AdminEdoAccountsPage() {
     onError: (err: Error) => message.error(err.message),
   });
 
+  /**
+   * Подписи оставлены только у действий, которыми пользуются по ходу настройки.
+   * Редкие — журнал, правка, удаление — свёрнуты в иконки с подсказками, как на
+   * странице пользователей: иначе шесть подписанных кнопок переносятся и строка
+   * таблицы растёт до трёх этажей.
+   *
+   * `wrap` оставлен намеренно: в таблице колонка теперь получает достаточную
+   * ширину и переносить нечего, но эти же кнопки показываются в карточке на
+   * узком экране — без переноса они вылезли бы за её край.
+   */
   const actions = (r: EdoAccountDto) => (
-    <Space wrap size="small">
+    <Space size={4} wrap>
       <Button size="small" onClick={() => check.mutate(r.id)} loading={check.isPending}>
         Проверить доступ
       </Button>
@@ -231,23 +242,31 @@ export default function AdminEdoAccountsPage() {
       <Button size="small" onClick={() => sync.mutate(r.id)} loading={sync.isPending}>
         Синхронизировать
       </Button>
-      <Button size="small" onClick={() => openJournal.mutate(r.id)} loading={openJournal.isPending}>
-        Журнал
-      </Button>
-      <Button
-        size="small"
-        onClick={() => {
-          setEditing(r);
-          editForm.setFieldsValue({
-            name: r.name,
-            environment: r.environment,
-            orgInn: r.orgInn,
-            ...(r.boxId ? { boxId: r.boxId } : {}),
-          });
-        }}
-      >
-        Изменить
-      </Button>
+      <Tooltip title="Журнал приёма">
+        <Button
+          size="small"
+          type="text"
+          icon={<ProfileOutlined />}
+          onClick={() => openJournal.mutate(r.id)}
+          loading={openJournal.isPending}
+        />
+      </Tooltip>
+      <Tooltip title="Изменить">
+        <Button
+          size="small"
+          type="text"
+          icon={<EditOutlined />}
+          onClick={() => {
+            setEditing(r);
+            editForm.setFieldsValue({
+              name: r.name,
+              environment: r.environment,
+              orgInn: r.orgInn,
+              ...(r.boxId ? { boxId: r.boxId } : {}),
+            });
+          }}
+        />
+      </Tooltip>
       <Popconfirm
         title="Удалить учётную запись?"
         description="Настройки и журнал приёма будут удалены. Документы, уже попавшие в портал, останутся."
@@ -256,9 +275,9 @@ export default function AdminEdoAccountsPage() {
         okButtonProps={{ danger: true }}
         onConfirm={() => remove.mutate(r.id)}
       >
-        <Button size="small" danger loading={remove.isPending}>
-          Удалить
-        </Button>
+        <Tooltip title="Удалить">
+          <Button size="small" type="text" danger icon={<DeleteOutlined />} loading={remove.isPending} />
+        </Tooltip>
       </Popconfirm>
     </Space>
   );
@@ -284,10 +303,11 @@ export default function AdminEdoAccountsPage() {
         rowKey="id"
         numbered
         columns={[
-          { title: 'Имя', dataIndex: 'name' },
+          { title: 'Имя', dataIndex: 'name', width: 180, ellipsis: true },
           {
             title: 'Площадка',
             dataIndex: 'environment',
+            width: 96,
             render: (e: EdoAccountDto['environment']) => (
               <Tag color={e === 'production' ? 'blue' : 'orange'}>
                 {e === 'production' ? 'боевая' : 'тестовая'}
@@ -302,6 +322,7 @@ export default function AdminEdoAccountsPage() {
             // Кабинетом интегратора, не раскрывая значений.
             title: 'Приложение',
             key: 'app',
+            width: 140,
             render: (_: unknown, r: EdoAccountDto) =>
               r.clientId ? (
                 <Tooltip
@@ -328,6 +349,7 @@ export default function AdminEdoAccountsPage() {
           {
             title: 'Ящик',
             dataIndex: 'boxId',
+            width: 104,
             render: (b: string | null) =>
               b ? (
                 <Typography.Text code>{b.slice(0, 8)}…</Typography.Text>
@@ -338,6 +360,7 @@ export default function AdminEdoAccountsPage() {
           {
             title: 'Опрос',
             key: 'poll',
+            width: 72,
             render: (_: unknown, r: EdoAccountDto) => (
               <Switch
                 size="small"
@@ -350,11 +373,13 @@ export default function AdminEdoAccountsPage() {
           {
             title: 'Токен',
             key: 'token',
+            width: 84,
             render: (_: unknown, r: EdoAccountDto) => <TokenAge days={r.refreshTokenAgeDays} />,
           },
           {
             title: 'Состояние',
             key: 'state',
+            width: 116,
             render: (_: unknown, r: EdoAccountDto) =>
               r.lastError ? (
                 <Tooltip title={r.lastError}>
