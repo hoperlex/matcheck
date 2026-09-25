@@ -178,6 +178,46 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 /**
+ * Человеческое описание сетевого отказа.
+ *
+ * Прежде сюда попадало только `err.name`, и администратор видел
+ * «временный сбой — TypeError». Из такой строки нельзя понять ничего: под
+ * `TypeError` у fetch скрывается всё сразу — недостижимый хост, оборванное
+ * соединение, ошибка TLS. Настоящая причина лежит в `cause.code`
+ * (`ECONNRESET`, `ENOTFOUND`, `ETIMEDOUT`), и именно она отличает «у сервера
+ * нет связи» от «сервис отвечает, но рвёт ответ».
+ *
+ * Адреса и заголовки сюда не попадают — только вид отказа.
+ */
+export function describeNetworkFailure(err: unknown): string {
+  if (!(err instanceof Error)) return 'сетевая ошибка';
+
+  // Таймаут AbortSignal приходит как TimeoutError и означает совсем другое:
+  // соединение было, но ответа не дождались.
+  if (err.name === 'TimeoutError') return 'истекло время ожидания ответа';
+
+  const cause = (err as { cause?: unknown }).cause;
+  const code =
+    cause && typeof cause === 'object' && 'code' in cause
+      ? String((cause as { code: unknown }).code)
+      : null;
+
+  const known: Record<string, string> = {
+    ENOTFOUND: 'имя хоста не разрешается (DNS)',
+    ECONNREFUSED: 'соединение отклонено',
+    ECONNRESET: 'соединение оборвано',
+    ETIMEDOUT: 'соединение не установилось (таймаут сети)',
+    EAI_AGAIN: 'временный сбой DNS',
+    CERT_HAS_EXPIRED: 'сертификат сервера просрочен',
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'не проверяется сертификат сервера',
+  };
+
+  if (code && known[code]) return `${known[code]} (${code})`;
+  if (code) return `${err.message} (${code})`;
+  return err.message || err.name;
+}
+
+/**
  * Retry-After приходит в секундах либо датой; заголовка может не быть вовсе.
  * Джиттер обязателен: без него несколько процессов, получив 429 одновременно,
  * вернутся тоже одновременно и повторят отказ.
@@ -361,7 +401,7 @@ export async function diadocFetch(opts: DiadocFetchOptions): Promise<Response> {
       });
     } catch (err) {
       // Сеть или таймаут: повторяем, пока есть попытки.
-      lastTransient = err instanceof Error ? err.name : 'network error';
+      lastTransient = describeNetworkFailure(err);
       if (attempt >= maxRetries) throw new DiadocTransient(lastTransient);
       await sleep(withJitter(500 * Math.pow(3, attempt)));
       continue;
