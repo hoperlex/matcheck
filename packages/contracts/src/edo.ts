@@ -277,3 +277,77 @@ export type EdoJournalSummary = z.infer<typeof EdoJournalSummarySchema>;
  */
 export const EdoAccountUpsertSchema = EdoAccountCreateSchema;
 export type EdoAccountUpsert = EdoAccountCreate;
+
+/**
+ * Пробный разбор: что вычитается из настоящих документов ящика.
+ *
+ * Нужен потому, что до сих пор выбор был из двух крайностей — разведка, которая
+ * только считает типы, и импорт, который сразу создаёт карточки. Разбор XML на
+ * бою не выполнялся ни разу, и пускать его результат прямо в раздел «Документы»
+ * вслепую незачем: сначала видно, что именно парсер прочитал.
+ *
+ * Отчёт нигде не сохраняется — он одноразовый и возвращается прямо в ответе.
+ */
+export const EdoDryRunItemSchema = z.object({
+  lineNo: z.number().int(),
+  name: z.string(),
+  qty: z.number(),
+  unit: z.string(),
+  price: z.number().nullable(),
+  sum: z.number().nullable(),
+  vatRate: z.number().nullable(),
+});
+
+export const EdoDryRunPartySchema = z.object({
+  inn: z.string(),
+  kpp: z.string().nullable(),
+  name: z.string(),
+});
+
+export const EdoDryRunDocumentSchema = z.object({
+  messageId: z.string(),
+  entityId: z.string(),
+  /** Что о документе знает сам Диадок, до чтения содержимого. */
+  meta: z.object({
+    typeNamedId: z.string().nullable(),
+    function: z.string().nullable(),
+    version: z.string().nullable(),
+    documentNumber: z.string().nullable(),
+    documentDate: z.string().nullable(),
+    fileName: z.string().nullable(),
+    counteragentBoxId: z.string().nullable(),
+  }),
+  /** Что вычитал наш разбор. null — разбор не состоялся, причина в reasons. */
+  parsed: z
+    .object({
+      docNumber: z.string(),
+      docDate: z.string(),
+      supplier: EdoDryRunPartySchema,
+      recipient: EdoDryRunPartySchema.nullable(),
+      itemsCount: z.number().int(),
+      totalSum: z.number().nullable(),
+      vatSum: z.number().nullable(),
+      /** Первые несколько позиций — чтобы увидеть, что читаются именно они. */
+      sampleItems: z.array(EdoDryRunItemSchema),
+    })
+    .nullable(),
+  /** Попал бы документ в карточку при настоящем импорте. */
+  accepted: z.boolean(),
+  reasons: z.array(z.string()),
+  /**
+   * Расхождения между метаданными Диадока и разбором XML. Самый быстрый признак
+   * того, что парсер читает не те поля: провайдер и содержимое не сойдутся.
+   */
+  mismatches: z.array(z.string()),
+  sizeBytes: z.number().int().nullable(),
+});
+
+export const EdoDryRunReportSchema = z.object({
+  eventsSeen: z.number().int(),
+  /** Сколько формализованных УПД встретилось за просмотренный отрезок. */
+  candidates: z.number().int(),
+  /** Сколько из них разобрано: предел намеренно небольшой. */
+  examined: z.number().int(),
+  documents: z.array(EdoDryRunDocumentSchema),
+});
+export type EdoDryRunReport = z.infer<typeof EdoDryRunReportSchema>;

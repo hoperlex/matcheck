@@ -24,6 +24,7 @@ import type {
   EdoAccountDto,
   EdoAccountPatch,
   EdoCheckResult,
+  EdoDryRunReport,
   EdoInventoryReport,
   EdoJobQueued,
   EdoJournalSummary,
@@ -122,6 +123,9 @@ export default function AdminEdoAccountsPage() {
   // запускала работу молча, а отчёт оставался только в базе.
   const [inventoryFor, setInventoryFor] = useState<EdoAccountDto | null>(null);
   const [inventoryPeriod, setInventoryPeriod] = useState<InventoryPeriod>('d90');
+  // Пробный разбор нигде не хранится: отчёт живёт ровно столько, сколько открыто
+  // окно. Хранить в базе реквизиты чужих документов ради одной проверки незачем.
+  const [dryRun, setDryRun] = useState<EdoDryRunReport | null>(null);
   const [editing, setEditing] = useState<EdoAccountDto | null>(null);
   const [editForm] = Form.useForm<EdoAccountPatch>();
   const [form] = Form.useForm<EdoAccountCreate>();
@@ -230,6 +234,24 @@ export default function AdminEdoAccountsPage() {
       message.success(
         'Разведка запущена: ничего не импортируется. Отчёт появится здесь через минуту — нажмите «Обновить».',
       ),
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  // Разбор идёт синхронно и скачивает несколько документов, поэтому обычные
+  // двадцать секунд ему малы.
+  const dryRunMutation = useMutation({
+    mutationFn: ({ id, since }: { id: string; since?: string }) =>
+      api.post<EdoDryRunReport>(
+        `/admin/edo-accounts/${id}/dry-run`,
+        since ? { since } : {},
+        { timeoutMs: 60_000 },
+      ),
+    onSuccess: (r) => {
+      setDryRun(r);
+      if (r.candidates === 0) {
+        message.info('За выбранный период машиночитаемых УПД не нашлось');
+      }
+    },
     onError: (err: Error) => message.error(err.message),
   });
 
@@ -551,6 +573,19 @@ export default function AdminEdoAccountsPage() {
               <Button onClick={() => invalidate()} loading={list.isFetching}>
                 Обновить
               </Button>
+              <Tooltip title="Скачать несколько УПД и показать, что из них вычитается. Карточки не создаются.">
+                <Button
+                  loading={dryRunMutation.isPending}
+                  onClick={() =>
+                    dryRunMutation.mutate({
+                      id: inventoryRow.id,
+                      since: inventorySince(inventoryPeriod),
+                    })
+                  }
+                >
+                  Пробный разбор
+                </Button>
+              </Tooltip>
             </Space>
 
             {inventoryRow.lastInventory ? (
@@ -662,6 +697,98 @@ export default function AdminEdoAccountsPage() {
               <Typography.Text type="secondary">
                 Осмотр ещё не проводился. Выберите период и запустите — это безопасно.
               </Typography.Text>
+            )}
+
+            {/*
+              Пробный разбор: что именно вычитается из настоящих документов.
+              Показывается рядом с разведкой, потому что отвечает на следующий
+              вопрос — не «что лежит в ящике», а «прочитаем ли мы это».
+            */}
+            {dryRun && (
+              <>
+                <Typography.Text strong>
+                  Пробный разбор: {dryRun.examined} из {dryRun.candidates} найденных УПД
+                </Typography.Text>
+                {dryRun.candidates === 0 && (
+                  <Typography.Text type="secondary">
+                    За период машиночитаемых УПД не встретилось — разбирать нечего.
+                  </Typography.Text>
+                )}
+                {dryRun.documents.map((d) => (
+                  <Card
+                    key={d.entityId}
+                    size="small"
+                    title={
+                      <Space>
+                        {d.accepted ? (
+                          <Tag color="green">попал бы в документы</Tag>
+                        ) : (
+                          <Tag color="red">не прошёл бы</Tag>
+                        )}
+                        <Typography.Text>
+                          {d.parsed?.docNumber || d.meta.documentNumber || '(без номера)'} от{' '}
+                          {d.parsed?.docDate || d.meta.documentDate || '—'}
+                        </Typography.Text>
+                      </Space>
+                    }
+                  >
+                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                      <Typography.Text type="secondary">
+                        {d.meta.typeNamedId} · {d.meta.function} · {d.meta.version}
+                        {d.sizeBytes !== null ? ` · ${Math.round(d.sizeBytes / 1024)} КБ` : ''}
+                      </Typography.Text>
+
+                      {d.parsed ? (
+                        <>
+                          <Typography.Text>
+                            Поставщик: {d.parsed.supplier.name} (ИНН {d.parsed.supplier.inn}
+                            {d.parsed.supplier.kpp ? `, КПП ${d.parsed.supplier.kpp}` : ''})
+                          </Typography.Text>
+                          <Typography.Text>
+                            Получатель:{' '}
+                            {d.parsed.recipient
+                              ? `${d.parsed.recipient.name} (ИНН ${d.parsed.recipient.inn})`
+                              : '—'}
+                          </Typography.Text>
+                          <Typography.Text>
+                            Позиций: {d.parsed.itemsCount} · итого:{' '}
+                            {d.parsed.totalSum ?? '—'} · НДС: {d.parsed.vatSum ?? '—'}
+                          </Typography.Text>
+                          {d.parsed.sampleItems.map((i) => (
+                            <Typography.Text key={i.lineNo} type="secondary">
+                              {i.lineNo}. {i.name} — {i.qty} {i.unit} × {i.price ?? '—'} ={' '}
+                              {i.sum ?? '—'}
+                              {i.vatRate !== null ? ` (НДС ${i.vatRate}%)` : ''}
+                            </Typography.Text>
+                          ))}
+                        </>
+                      ) : null}
+
+                      {d.reasons.length > 0 && (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          message="Почему не прошёл"
+                          description={d.reasons.join('; ')}
+                        />
+                      )}
+                      {/*
+                        Расхождение с метаданными — самый ранний признак того,
+                        что парсер читает не те поля: провайдер знает номер и
+                        дату независимо от содержимого.
+                      */}
+                      {d.mismatches.length > 0 && (
+                        <Alert
+                          type="error"
+                          showIcon
+                          message="Разбор не сходится с метаданными Диадока"
+                          description={d.mismatches.join('; ')}
+                        />
+                      )}
+                    </Space>
+                  </Card>
+                ))}
+              </>
             )}
           </Space>
         )}

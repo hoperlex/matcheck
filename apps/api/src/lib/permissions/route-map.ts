@@ -760,6 +760,12 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     'POST /api/v1/admin/edo-accounts/:id/inventory',
     { ...legacy('admin.edo_accounts', 'edit', [], GAP), matrixOnly: NO },
   ],
+  // Пробный разбор читает содержимое документов и ничего не создаёт. Права те
+  // же, что у разведки: это чтение чужого ящика, доступное только админу.
+  [
+    'POST /api/v1/admin/edo-accounts/:id/dry-run',
+    { ...legacy('admin.edo_accounts', 'edit', [], GAP), matrixOnly: NO },
+  ],
   // Журнал приёма — чтение состояния учётной записи, поэтому по «Просмотру».
   ['GET /api/v1/admin/edo-accounts/:id/journal', st('admin.edo_accounts', 'view')],
 

@@ -7,6 +7,7 @@ import {
   EdoAccountDtoSchema,
   EdoAccountPatchSchema,
   EdoCheckResultSchema,
+  EdoDryRunReportSchema,
   EdoJobQueuedSchema,
   EdoJournalSummarySchema,
   ErrorResponseSchema,
@@ -17,6 +18,7 @@ import { edoAccounts, edoEvents, edoReceipts } from '../../db/schema.js';
 import { buildAad, encryptToString, decryptField, sha256Hex } from '../../domain/auth/crypto.js';
 import { loadEnv } from '../../lib/env.js';
 import { checkEdoAccess } from '../../domain/edo/check-access.js';
+import { runEdoDryRun } from '../../domain/edo/dry-run.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -293,6 +295,52 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!row) return reply.code(404).send({ error: 'not_found' });
 
       const result = await checkEdoAccess(app.db, row, app.log);
+      if ('error' in result) {
+        return reply.code(result.status).send({ error: result.error, message: result.message });
+      }
+      return result.value;
+    },
+  );
+
+  /**
+   * Пробный разбор: что вычитается из настоящих документов, без их создания.
+   *
+   * Синхронно и без очереди — работа короткая (пять документов), а результат
+   * нужен человеку прямо сейчас и нигде не хранится. Держать ради него колонку
+   * в таблице означало бы хранить реквизиты чужих документов без нужды.
+   */
+  app.post(
+    '/api/v1/admin/edo-accounts/:id/dry-run',
+    {
+      preHandler: [app.authenticate, app.authorize('admin')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: z
+          .object({
+            since: z.string().datetime().optional(),
+            limit: z.coerce.number().int().min(1).max(10).optional(),
+          })
+          .optional(),
+        response: {
+          200: EdoDryRunReportSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          502: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [row] = await app.db
+        .select()
+        .from(edoAccounts)
+        .where(eq(edoAccounts.id, req.params.id))
+        .limit(1);
+      if (!row) return reply.code(404).send({ error: 'not_found' });
+
+      const result = await runEdoDryRun(app.db, row, app.log, {
+        since: req.body?.since ? new Date(req.body.since) : null,
+        limit: req.body?.limit,
+      });
       if ('error' in result) {
         return reply.code(result.status).send({ error: result.error, message: result.message });
       }
