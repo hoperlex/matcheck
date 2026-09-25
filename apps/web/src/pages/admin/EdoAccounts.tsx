@@ -29,7 +29,7 @@ import type {
   EdoJobQueued,
   EdoJournalSummary,
 } from '@matcheck/contracts';
-import { api } from '../../services/api';
+import { api, ApiError } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { usePermissions } from '../../shared/hooks/usePermissions';
@@ -238,13 +238,15 @@ export default function AdminEdoAccountsPage() {
   });
 
   // Разбор идёт синхронно и скачивает несколько документов, поэтому обычные
-  // двадцать секунд ему малы.
+  // двадцать секунд ему малы. Запас крупный: время ответа Диадока от нас не
+  // зависит, а обрыв ожидания выглядит как «ничего не произошло», хотя работа
+  // на сервере к этому моменту уже идёт.
   const dryRunMutation = useMutation({
     mutationFn: ({ id, since }: { id: string; since?: string }) =>
       api.post<EdoDryRunReport>(
         `/admin/edo-accounts/${id}/dry-run`,
         since ? { since } : {},
-        { timeoutMs: 60_000 },
+        { timeoutMs: 180_000 },
       ),
     onSuccess: (r) => {
       setDryRun(r);
@@ -252,7 +254,18 @@ export default function AdminEdoAccountsPage() {
         message.info('За выбранный период машиночитаемых УПД не нашлось');
       }
     },
-    onError: (err: Error) => message.error(err.message),
+    onError: (err: Error) => {
+      // Обрыв ожидания — не то же самое, что отказ: работа на сервере могла
+      // выполниться, просто ответ не доехал. Говорим об этом прямо, иначе
+      // человек видит «ничего не произошло» и не знает, что делать.
+      if (err instanceof ApiError && err.code === 'timeout') {
+        message.warning(
+          'Ответ не пришёл вовремя. Разбор на сервере мог выполниться — повторите попытку или возьмите период короче.',
+        );
+        return;
+      }
+      message.error(err.message);
+    },
   });
 
   /**
@@ -711,7 +724,9 @@ export default function AdminEdoAccountsPage() {
                 </Typography.Text>
                 {dryRun.candidates === 0 && (
                   <Typography.Text type="secondary">
-                    За период машиночитаемых УПД не встретилось — разбирать нечего.
+                    {dryRun.truncated
+                      ? `В первых ${dryRun.eventsSeen} событиях машиночитаемых УПД не встретилось — это не весь ящик.`
+                      : 'За период машиночитаемых УПД не встретилось — разбирать нечего.'}
                   </Typography.Text>
                 )}
                 {dryRun.documents.map((d) => (

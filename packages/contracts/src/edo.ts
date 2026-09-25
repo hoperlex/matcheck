@@ -344,6 +344,8 @@ export const EdoDryRunDocumentSchema = z.object({
 
 export const EdoDryRunReportSchema = z.object({
   eventsSeen: z.number().int(),
+  /** Обход остановлен на пределе: «не нашли» относится к просмотренному отрезку. */
+  truncated: z.boolean(),
   /** Сколько формализованных УПД встретилось за просмотренный отрезок. */
   candidates: z.number().int(),
   /** Сколько из них разобрано: предел намеренно небольшой. */

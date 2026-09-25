@@ -162,6 +162,27 @@ describe('пробный разбор', () => {
     expect(report.examined).toBe(2);
   });
 
+  it('предел обхода помечается, чтобы «не нашли» не читалось как «пусто»', async () => {
+    // Запрос синхронный, поэтому лента просматривается неглубоко. Отчёт обязан
+    // признаться в этом: иначе пустой результат неотличим от пустого ящика.
+    const many = Array.from({ length: 4 }, (_, i) => updEvent(`p${i}`));
+    const report = await dryRunBox(
+      clientWith(many),
+      { boxId: 'box-наш', since: null, maxEvents: 2, limit: 1 },
+      log,
+    );
+    expect(report.truncated).toBe(true);
+    expect(report.eventsSeen).toBe(2);
+  });
+
+  it('полностью просмотренная лента пределом не помечается', async () => {
+    const report = await dryRunBox(clientWith([updEvent('q')]), {
+      boxId: 'box-наш',
+      since: null,
+    }, log);
+    expect(report.truncated).toBe(false);
+  });
+
   it('неформализованные вложения не трогает', async () => {
     const scan = {
       EventId: 'i',

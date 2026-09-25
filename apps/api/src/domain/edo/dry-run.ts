@@ -40,9 +40,16 @@ export type DryRunParams = {
   maxEvents?: number;
 };
 
-const DEFAULT_LIMIT = 5;
-const DEFAULT_MAX_PAGES = 10;
-const DEFAULT_MAX_EVENTS = 500;
+/**
+ * Пределы намеренно тесные: запрос синхронный, и человек ждёт ответа в
+ * браузере. Разведка боевого ящика показала, что УПД встречаются часто — 209
+ * машиночитаемых на 458 документов, — поэтому несколько штук находятся на
+ * первой же странице ленты, а не в её глубине. Глубокий обход тут только
+ * растянул бы ожидание.
+ */
+const DEFAULT_LIMIT = 3;
+const DEFAULT_MAX_PAGES = 3;
+const DEFAULT_MAX_EVENTS = 200;
 /** Позиций в отчёте по каждому документу: достаточно, чтобы увидеть форму. */
 const SAMPLE_ITEMS = 3;
 
@@ -127,7 +134,15 @@ export async function dryRunBox(
     'edo dry-run finished',
   );
 
-  return { eventsSeen, candidates, examined: documents.length, documents };
+  // Упёрлись в предел обхода — значит «не нашли» относится к просмотренному
+  // отрезку, а не ко всему ящику. Без этого пустой отчёт неотличим от сбоя.
+  return {
+    eventsSeen,
+    candidates,
+    examined: documents.length,
+    truncated: eventsSeen >= maxEvents,
+    documents,
+  };
 }
 
 /** Скачивает один документ, разбирает его и складывает результат в отчёт. */
