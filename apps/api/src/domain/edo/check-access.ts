@@ -137,7 +137,16 @@ export function describeFailure(err: unknown): CheckFailure {
     };
   }
   if (err instanceof DiadocTransient) {
-    return { error: 'upstream_unavailable', status: 502, message: 'Диадок временно недоступен.' };
+    // Причину и адрес показываем всегда. Прежде здесь стояла одна фраза, и
+    // 25.09.2026 по красной метке нельзя было понять ничего: оборвалось ли
+    // соединение, не разрешилось ли имя, на каком шаге встало. Адрес — без
+    // строки запроса, в ней идентификаторы ящика и сообщения.
+    const where = err.endpoint ? ` — ${err.endpoint}` : '';
+    return {
+      error: 'upstream_unavailable',
+      status: 502,
+      message: `Диадок временно недоступен: ${err.detail}${where}.`,
+    };
   }
 
   // Ответ пришёл, но разобрать его не удалось. Текст ошибки разбора наружу НЕ

@@ -130,6 +130,12 @@ export const EdoAccountDtoSchema = z.object({
   name: z.string(),
   isActive: z.boolean(),
   pollEnabled: z.boolean(),
+  /**
+   * Включён ли импорт (флаг окружения `EDO_IMPORT_ENABLED`, общий для всех
+   * учётных записей). Пока он выключен, сервер отклоняет синхронизацию и
+   * включение опроса, а интерфейс гасит эти кнопки заранее.
+   */
+  importEnabled: z.boolean(),
   authMode: EdoAuthModeSchema,
   environment: EdoEnvironmentSchema,
   boxId: z.string().nullable(),

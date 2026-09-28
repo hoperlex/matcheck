@@ -13,6 +13,7 @@ import {
   DiadocAuthExpired,
   diadocFetch,
   readBodyWithLimit,
+  readJson,
   type DiadocEnvironment,
 } from './diadoc.http.js';
 import {
@@ -117,7 +118,7 @@ export class DiadocClient {
     const url = new URL('/GetMyOrganizations', this.api);
     url.searchParams.set('autoRegister', 'false');
     const res = await this.request(url);
-    const parsed = DiadocOrganizationListSchema.parse(await res.json());
+    const parsed = DiadocOrganizationListSchema.parse(await readJson(res, url));
     return parsed.Organizations.flatMap((org) =>
       org.Boxes.map((box) => ({
         boxId: box.BoxId,
@@ -140,7 +141,7 @@ export class DiadocClient {
     const url = new URL('/GetMyEmployee', this.api);
     url.searchParams.set('boxId', boxId);
     const res = await this.request(url);
-    return DiadocEmployeeSchema.parse(await res.json());
+    return DiadocEmployeeSchema.parse(await readJson(res, url));
   }
 
   /**
@@ -160,7 +161,7 @@ export class DiadocClient {
       url.searchParams.set('timestampFromTicks', dateToDiadocTicks(params.fromTimestamp));
     }
     const res = await this.request(url);
-    const parsed = DiadocBoxEventListSchema.parse(await res.json());
+    const parsed = DiadocBoxEventListSchema.parse(await readJson(res, url));
     return { events: parsed.Events };
   }
 
@@ -170,7 +171,7 @@ export class DiadocClient {
     url.searchParams.set('boxId', boxId);
     url.searchParams.set('messageId', messageId);
     const res = await this.request(url);
-    return DiadocMessageSchema.parse(await res.json());
+    return DiadocMessageSchema.parse(await readJson(res, url));
   }
 
   /**
@@ -191,6 +192,6 @@ export class DiadocClient {
     url.searchParams.set('entityId', entityId);
     // Здесь ответ — сам файл документа, а не структура: просить JSON нечего.
     const res = await this.request(url, 'GET', { json: false });
-    return readBodyWithLimit(res, maxBytes ?? loadEnv().EDO_XML_MAX_BYTES);
+    return readBodyWithLimit(res, maxBytes ?? loadEnv().EDO_XML_MAX_BYTES, url);
   }
 }

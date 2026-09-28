@@ -22,6 +22,9 @@ import { runEdoDryRun } from '../../domain/edo/dry-run.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+const IMPORT_DISABLED_MESSAGE =
+  'Импорт из ЭДО выключен (EDO_IMPORT_ENABLED=0): пока нет правила сопоставления с уже загруженными УПД, он создал бы дубли. Осмотр ящика и пробный разбор работают.';
+
 /**
  * Секреты наружу не отдаются никогда — только признаки их наличия.
  *
@@ -71,6 +74,10 @@ function dto(a: typeof edoAccounts.$inferSelect) {
     name: a.name,
     isActive: a.isActive,
     pollEnabled: a.pollEnabled,
+    // Флаг окружения, общий для всех учётных записей. Отдаётся в карточке,
+    // чтобы интерфейс мог честно погасить «Синхронизировать» и «Опрос» и
+    // сказать почему, а не ждать, пока сервер откажет.
+    importEnabled: loadEnv().EDO_IMPORT_ENABLED,
     authMode: a.authMode,
     environment: a.environment,
     boxId: a.boxId,
@@ -168,6 +175,16 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(edoAccounts.id, req.params.id))
         .limit(1);
       if (!row) return reply.code(404).send({ error: 'not_found' });
+
+      // Опрос без импорта бессмыслен, а сохранённое `true` сработало бы само в
+      // момент будущего включения импорта — то есть опрос начался бы
+      // следствием деплоя, а не решением человека.
+      if (req.body.pollEnabled === true && !loadEnv().EDO_IMPORT_ENABLED) {
+        return reply.code(409).send({
+          error: 'import_disabled',
+          message: IMPORT_DISABLED_MESSAGE,
+        });
+      }
 
       const patch: Partial<typeof edoAccounts.$inferInsert> = { updatedAt: new Date() };
       if (req.body.name !== undefined) patch.name = req.body.name;
@@ -360,7 +377,7 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
-        response: { 202: EdoJobQueuedSchema, 404: ErrorResponseSchema },
+        response: { 202: EdoJobQueuedSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema },
       },
     },
     async (req, reply) => {
@@ -370,6 +387,12 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(edoAccounts.id, req.params.id))
         .limit(1);
       if (!row) return reply.code(404).send({ error: 'not_found' });
+
+      // Задание всё равно ничего бы не сделало — проход проверяет тот же флаг.
+      // Отказываем сразу, чтобы человек увидел причину, а не «запущено».
+      if (!loadEnv().EDO_IMPORT_ENABLED) {
+        return reply.code(409).send({ error: 'import_disabled', message: IMPORT_DISABLED_MESSAGE });
+      }
 
       const job = await app.queues.edoPoll.add('sync', { accountId: row.id, mode: 'sync' });
       reply.code(202);

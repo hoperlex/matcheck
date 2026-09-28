@@ -47,6 +47,9 @@ import {
  */
 const TOKEN_WARN_DAYS = 25;
 
+const IMPORT_DISABLED_HINT =
+  'Импорт выключен (EDO_IMPORT_ENABLED=0): пока нет правила сопоставления с уже загруженными УПД, он создал бы дубли.';
+
 function TokenAge({ days }: { days: number | null }) {
   if (days === null) return <Typography.Text type="secondary">—</Typography.Text>;
   if (days >= TOKEN_WARN_DAYS) {
@@ -292,9 +295,23 @@ export default function AdminEdoAccountsPage() {
           Осмотреть ящик
         </Button>
       </Tooltip>
-      <Button size="small" onClick={() => sync.mutate(r.id)} loading={sync.isPending}>
-        Синхронизировать
-      </Button>
+      {/*
+        Пока импорт выключен, синхронизация ничего бы не сделала — сервер
+        откажет. Кнопка гаснет заранее и говорит почему. Обёртка span нужна,
+        чтобы подсказка показывалась и над неактивной кнопкой.
+      */}
+      <Tooltip title={r.importEnabled ? undefined : IMPORT_DISABLED_HINT}>
+        <span>
+          <Button
+            size="small"
+            onClick={() => sync.mutate(r.id)}
+            loading={sync.isPending}
+            disabled={!r.importEnabled}
+          >
+            Синхронизировать
+          </Button>
+        </span>
+      </Tooltip>
       <Tooltip title="Журнал приёма">
         <Button
           size="small"
@@ -350,6 +367,19 @@ export default function AdminEdoAccountsPage() {
         </Space>
       }
     >
+      {/*
+        Флаг общий для всех учётных записей, поэтому смотрим на первую: он
+        приходит в каждой карточке одинаковым.
+      */}
+      {list.data && list.data.length > 0 && !list.data[0]!.importEnabled && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="Импорт из ЭДО выключен"
+          description="Пока нет правила сопоставления с уже загруженными УПД, импорт создал бы дубли документов, принятых по скану. «Синхронизировать» и опрос недоступны; «Проверить доступ», «Осмотреть ящик» и «Пробный разбор» работают — они ничего не создают."
+        />
+      )}
       <ResponsiveTable<EdoAccountDto>
         items={list.data ?? []}
         loading={list.isLoading}
@@ -414,13 +444,21 @@ export default function AdminEdoAccountsPage() {
             title: 'Опрос',
             key: 'poll',
             width: 72,
+            // Без импорта опрос включить нельзя (сервер откажет). Выключить —
+            // можно всегда: оставшееся с прошлого `true` не должно висеть.
             render: (_: unknown, r: EdoAccountDto) => (
-              <Switch
-                size="small"
-                checked={r.pollEnabled}
-                disabled={!canManage || togglePoll.isPending}
-                onChange={(v) => togglePoll.mutate({ id: r.id, pollEnabled: v })}
-              />
+              <Tooltip title={r.importEnabled ? undefined : IMPORT_DISABLED_HINT}>
+                <span>
+                  <Switch
+                    size="small"
+                    checked={r.pollEnabled}
+                    disabled={
+                      !canManage || togglePoll.isPending || (!r.importEnabled && !r.pollEnabled)
+                    }
+                    onChange={(v) => togglePoll.mutate({ id: r.id, pollEnabled: v })}
+                  />
+                </span>
+              </Tooltip>
             ),
           },
           {

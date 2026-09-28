@@ -36,27 +36,49 @@ import { classifyMessageEntities } from '../edo/diadoc.entities.js';
 import { resolveEventTime } from '../edo/diadoc.types.js';
 import {
   advanceCursor,
+  isEventTerminal,
   terminalPrefixLength,
   type EventState,
+  type ReceiptState,
 } from '../edo/event-cursor.js';
 import {
   claimEvent,
   claimReceipt,
+  closeExhaustedReceipt,
   finishEvent,
   loadReceiptsForEvent,
+  markReceiptFailed,
   releaseReceiptAttempt,
+  type EdoReceiptRow,
 } from '../edo/journal.js';
-import { ingestEdoEntity } from '../edo/ingest-document.js';
+import {
+  EdoImportDisabled,
+  EdoStorageUnavailable,
+  ingestEdoEntity,
+} from '../edo/ingest-document.js';
 import { acquireEdoLease, releaseEdoLease, renewEdoLease } from '../edo/poll-lease.js';
+import type { putObject } from '../storage/s3.signer.js';
 
 export type EdoPollDeps = {
   db: Db;
   log: FastifyBaseLogger;
   owner: string;
+  /** Подменяется в тестах: настоящий клиент ходит в Диадок. */
+  createClient?: (account: typeof edoAccounts.$inferSelect) => DiadocClient;
+  /** Подменяется в тестах, чтобы не ходить в хранилище. */
+  put?: typeof putObject;
 };
 
 export type EdoPollResult = {
-  skipped?: 'lease_taken' | 'no_box' | 'not_found' | 'rate_limited' | 'auth_failed' | 'upstream';
+  skipped?:
+    | 'lease_taken'
+    | 'no_box'
+    | 'not_found'
+    | 'rate_limited'
+    | 'auth_failed'
+    | 'upstream'
+    | 'storage'
+    | 'import_disabled';
   events: number;
   imported: number;
   duplicates: number;
@@ -67,7 +89,13 @@ export type EdoPollResult = {
   cursorAfter: string | null;
 };
 
-/** Отказ транспорта: проход прекращается, документы ни при чём. */
+/**
+ * Отказ не по вине документа: проход прекращается, попытка возвращается.
+ *
+ * Сюда относятся и хранилище (оно не приняло файл — документ ни при чём), и
+ * выключенный импорт. Всё, чего здесь нет, считается сбоем конкретного
+ * документа и расходует его попытку.
+ */
 function isTransportFailure(err: unknown): boolean {
   return (
     err instanceof DiadocRateLimited ||
@@ -75,11 +103,15 @@ function isTransportFailure(err: unknown): boolean {
     err instanceof DiadocAuthExpired ||
     err instanceof DiadocAccessDenied ||
     err instanceof DiadocSubscriptionExpired ||
-    err instanceof DiadocAuthConflict
+    err instanceof DiadocAuthConflict ||
+    err instanceof EdoStorageUnavailable ||
+    err instanceof EdoImportDisabled
   );
 }
 
 function failureKind(err: unknown): EdoPollResult['skipped'] {
+  if (err instanceof EdoImportDisabled) return 'import_disabled';
+  if (err instanceof EdoStorageUnavailable) return 'storage';
   if (err instanceof DiadocRateLimited) return 'rate_limited';
   if (err instanceof DiadocAccessDenied || err instanceof DiadocSubscriptionExpired) {
     return 'auth_failed';
@@ -114,6 +146,10 @@ async function saveCursor(
   return rows.length > 0;
 }
 
+function receiptState(r: EdoReceiptRow): ReceiptState {
+  return { transportStatus: r.transportStatus, attempts: r.attempts };
+}
+
 export async function pollEdoAccount(
   deps: EdoPollDeps,
   accountId: string,
@@ -139,6 +175,11 @@ export async function pollEdoAccount(
   if (!account) return { ...empty, skipped: 'not_found' };
   if (!account.boxId) return { ...empty, skipped: 'no_box' };
 
+  // Главный выключатель — здесь, в единственной точке, через которую идёт
+  // любой проход: и кнопка, и автоопрос, и то, что добавят потом. До лиза и до
+  // первого запроса: при выключенном импорте не трогаем ни ленту, ни курсор.
+  if (!env.EDO_IMPORT_ENABLED) return { ...empty, skipped: 'import_disabled' };
+
   const lease = await acquireEdoLease(deps.db, {
     accountId,
     owner: deps.owner,
@@ -152,8 +193,12 @@ export async function pollEdoAccount(
   let cursor = account.lastIndexKey;
 
   try {
-    const auth = createDiadocAuth({ db: deps.db }, account);
-    const client = new DiadocClient({ auth, environment: account.environment });
+    const client = deps.createClient
+      ? deps.createClient(account)
+      : new DiadocClient({
+          auth: createDiadocAuth({ db: deps.db }, account),
+          environment: account.environment,
+        });
 
     while (result.events < env.EDO_POLL_MAX_EVENTS) {
       const { events } = await client.getNewEvents({
@@ -182,10 +227,13 @@ export async function pollEdoAccount(
           eventAt,
         });
 
-        // Событие уже закрыто прошлым проходом — считаем пройденным и идём
-        // дальше, иначе повтор страницы заново качал бы те же документы.
+        // Событие закрыто прошлым проходом. Для курсора всё равно берём его
+        // вложения из журнала, а не пустой список: пустой список терминален по
+        // определению, и курсор прошёл бы событие, даже если в нём что-то
+        // осталось незакрытым.
         if (!row) {
-          states.push({ eventId: event.EventId, indexKey, receipts: [] });
+          const closed = await loadReceiptsForEvent(deps.db, accountId, event.EventId);
+          states.push({ eventId: event.EventId, indexKey, receipts: closed.map(receiptState) });
           continue;
         }
 
@@ -220,8 +268,17 @@ export async function pollEdoAccount(
             counteragentBoxId: entity.counteragentBoxId,
             receivedAt: eventAt,
           });
-          // Вложение уже доведено до терминала либо исчерпало попытки.
-          if (!receipt) continue;
+          // Вложение уже доведено до терминала либо исчерпало попытки. Во втором
+          // случае оно может так и остаться в `fetching` (процесс падал раз за
+          // разом) — закрываем его, иначе курсор встанет на нём навсегда.
+          if (!receipt) {
+            await closeExhaustedReceipt(deps.db, {
+              accountId,
+              messageId: event.Message.MessageId,
+              entityId: entity.entityId,
+            });
+            continue;
+          }
 
           try {
             const outcome = await ingestEdoEntity(
@@ -229,7 +286,9 @@ export async function pollEdoAccount(
                 db: deps.db,
                 client,
                 log: deps.log,
+                put: deps.put,
                 xmlMaxBytes: env.EDO_XML_MAX_BYTES,
+                fileMaxBytes: env.EDO_FILE_MAX_BYTES,
               },
               { account, receipt, entity, messageId: event.Message.MessageId },
             );
@@ -241,30 +300,32 @@ export async function pollEdoAccount(
           } catch (err) {
             if (isTransportFailure(err)) {
               // Попытку возвращаем: документ не виноват в том, что Диадок
-              // ограничил частоту или отказал в доступе.
+              // ограничил частоту, хранилище не ответило или импорт выключен.
               await releaseReceiptAttempt(deps.db, receipt.id);
               throw err;
             }
+            // Сбой самого документа: он тратит свою попытку и видим в журнале.
+            // Прежде квитанция оставалась в `fetching`, а ошибка уходила в
+            // состояние учётки — одно битое вложение красило её «ошибкой», а
+            // сам документ после первого же сбоя перешагивался курсором.
             const message = err instanceof Error ? err.message : 'сбой разбора';
             deps.log.warn({ err, receiptId: receipt.id }, 'edo: вложение не принято');
-            await deps.db
-              .update(edoAccounts)
-              .set({ lastError: message.slice(0, 500), updatedAt: new Date() })
-              .where(eq(edoAccounts.id, accountId));
+            await markReceiptFailed(deps.db, receipt.id, message);
           }
         }
 
+        // Закрыто ли событие — по тем же правилам, что у курсора. Прежний
+        // признак «нет `fetching`» считал закрытым и событие с `failed`
+        // вложением, у которого ещё остались попытки, — и оно больше не
+        // повторялось.
         const receipts = await loadReceiptsForEvent(deps.db, accountId, event.EventId);
-        const allClosed = receipts.every((r) => r.transportStatus !== 'fetching');
-        await finishEvent(deps.db, row.id, allClosed ? 'processed' : 'failed');
-        states.push({
+        const state: EventState = {
           eventId: event.EventId,
           indexKey,
-          receipts: receipts.map((r) => ({
-            transportStatus: r.transportStatus,
-            attempts: r.attempts,
-          })),
-        });
+          receipts: receipts.map(receiptState),
+        };
+        await finishEvent(deps.db, row.id, isEventTerminal(state) ? 'processed' : 'failed');
+        states.push(state);
       }
 
       const nextCursor = advanceCursor(cursor, states);
@@ -297,10 +358,14 @@ export async function pollEdoAccount(
     const kind = isTransportFailure(err) ? failureKind(err) : 'upstream';
     const message = err instanceof Error ? err.message : 'проход не удался';
     deps.log.warn({ err, accountId }, 'edo: проход прекращён');
-    await deps.db
-      .update(edoAccounts)
-      .set({ lastError: message.slice(0, 500), updatedAt: new Date() })
-      .where(eq(edoAccounts.id, accountId));
+    // Выключенный импорт — не неисправность учётной записи: красить её
+    // «ошибкой» незачем, причина видна в интерфейсе отдельно.
+    if (kind !== 'import_disabled') {
+      await deps.db
+        .update(edoAccounts)
+        .set({ lastError: message.slice(0, 500), updatedAt: new Date() })
+        .where(eq(edoAccounts.id, accountId));
+    }
     return { ...result, skipped: kind };
   } finally {
     await releaseEdoLease(deps.db, lease).catch(() => {});

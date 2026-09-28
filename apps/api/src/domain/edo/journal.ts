@@ -52,10 +52,14 @@ export async function claimEvent(
     })
     .onConflictDoUpdate({
       target: [edoEvents.edoAccountId, edoEvents.eventId],
-      // Берём в работу только то, что ещё не закрыто. Условие считает база,
-      // поэтому двум процессам одно событие не достанется.
+      // Берём в работу всё, что не закрыто: и новое, и `failed`. Статус
+      // `failed` ставится ровно тогда, когда у события остались нетерминальные
+      // вложения, — без повторного захвата они не повторялись бы никогда.
+      // Прежде здесь стояло только 'pending', и на втором проходе такое
+      // событие считалось пройденным: курсор уходил дальше, документ застревал.
+      // Одновременный проход двух процессов исключает лиз учётной записи.
       set: { indexKey: params.indexKey, updatedAt: new Date() },
-      setWhere: drSql`${edoEvents.status} = 'pending'`,
+      setWhere: drSql`${edoEvents.status} in ('pending', 'failed')`,
     })
     .returning();
 
@@ -141,7 +145,14 @@ export async function claimReceipt(
 export async function markReceiptStored(
   db: Db,
   receiptId: string,
-  params: { rawS3Key: string; contentSha256: string; documentNumber?: string | null },
+  params: {
+    rawS3Key: string;
+    contentSha256: string;
+    documentNumber?: string | null;
+    originalFilename: string | null;
+    mimeType: string;
+    sizeBytes: number;
+  },
 ): Promise<void> {
   await db
     .update(edoReceipts)
@@ -150,10 +161,46 @@ export async function markReceiptStored(
       rawS3Key: params.rawS3Key,
       contentSha256: params.contentSha256,
       documentNumber: params.documentNumber ?? undefined,
+      originalFilename: params.originalFilename,
+      mimeType: params.mimeType,
+      sizeBytes: params.sizeBytes,
       lastError: null,
       updatedAt: new Date(),
     })
     .where(eq(edoReceipts.id, receiptId));
+}
+
+/**
+ * Закрывает вложение, на котором процесс падал раз за разом.
+ *
+ * Захват увеличивает счётчик ДО работы, поэтому процесс, упавший посреди
+ * скачивания, оставляет запись в `fetching` с израсходованной попыткой. Когда
+ * попытки кончаются, захват её больше не отдаёт, а курсор терминальной её не
+ * считает (`fetching` — не конец). Без этой функции один такой документ
+ * навсегда остановил бы ленту. Переводим в видимый `failed`: курсор пройдёт,
+ * а документ останется в журнале для повторного разбора.
+ */
+export async function closeExhaustedReceipt(
+  db: Db,
+  params: { accountId: string; messageId: string; entityId: string },
+  maxAttempts = EDO_RECEIPT_MAX_ATTEMPTS,
+): Promise<void> {
+  await db
+    .update(edoReceipts)
+    .set({
+      transportStatus: 'failed',
+      lastError: 'попытки исчерпаны: обработка прерывалась, не дойдя до конца',
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(edoReceipts.edoAccountId, params.accountId),
+        eq(edoReceipts.messageId, params.messageId),
+        eq(edoReceipts.entityId, params.entityId),
+        eq(edoReceipts.transportStatus, 'fetching'),
+        drSql`${edoReceipts.attempts} >= ${maxAttempts}`,
+      ),
+    );
 }
 
 /** Забирать нечего: не наш документ, служебное вложение, зашифрованное. */

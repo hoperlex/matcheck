@@ -95,10 +95,28 @@ export class DiadocRateLimited extends Error {
 }
 
 export class DiadocTransient extends Error {
-  constructor(message: string) {
-    super(`Diadoc: временный сбой — ${message}`);
+  /** Вид отказа без префикса — то, что увидит администратор. */
+  readonly detail: string;
+  /**
+   * Хост и путь запроса. Строки запроса здесь нет намеренно: в ней boxId и
+   * messageId, а сообщение уходит и в интерфейс, и в поле состояния учётки.
+   */
+  readonly endpoint: string | null;
+
+  constructor(detail: string, opts: { endpoint?: string | null; cause?: unknown } = {}) {
+    const endpoint = opts.endpoint ?? null;
+    super(`Diadoc: временный сбой — ${detail}${endpoint ? ` (${endpoint})` : ''}`, {
+      cause: opts.cause,
+    });
     this.name = 'DiadocTransient';
+    this.detail = detail;
+    this.endpoint = endpoint;
   }
+}
+
+/** Адрес для сообщений: хост и путь, без строки запроса. */
+export function endpointOf(url: URL): string {
+  return `${url.hostname}${url.pathname}`;
 }
 
 /** 401: токен просрочен или повреждён. Лечится одной переавторизацией. */
@@ -202,14 +220,22 @@ export function describeNetworkFailure(err: unknown): string {
       ? String((cause as { code: unknown }).code)
       : null;
 
+  // Коды UND_ERR_* — собственные коды HTTP-клиента Node (undici). Именно их
+  // чаще всего несёт `fetch failed`, а без перевода они ничего не говорят.
   const known: Record<string, string> = {
     ENOTFOUND: 'имя хоста не разрешается (DNS)',
     ECONNREFUSED: 'соединение отклонено',
     ECONNRESET: 'соединение оборвано',
     ETIMEDOUT: 'соединение не установилось (таймаут сети)',
     EAI_AGAIN: 'временный сбой DNS',
+    EHOSTUNREACH: 'хост недостижим',
+    ENETUNREACH: 'сеть недостижима',
     CERT_HAS_EXPIRED: 'сертификат сервера просрочен',
     UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'не проверяется сертификат сервера',
+    UND_ERR_CONNECT_TIMEOUT: 'соединение не установилось за отведённое время',
+    UND_ERR_SOCKET: 'сервер закрыл соединение',
+    UND_ERR_HEADERS_TIMEOUT: 'сервер не прислал ответ вовремя',
+    UND_ERR_BODY_TIMEOUT: 'ответ сервера оборвался на середине',
   };
 
   if (code && known[code]) return `${known[code]} (${code})`;
@@ -402,7 +428,9 @@ export async function diadocFetch(opts: DiadocFetchOptions): Promise<Response> {
     } catch (err) {
       // Сеть или таймаут: повторяем, пока есть попытки.
       lastTransient = describeNetworkFailure(err);
-      if (attempt >= maxRetries) throw new DiadocTransient(lastTransient);
+      if (attempt >= maxRetries) {
+        throw new DiadocTransient(lastTransient, { endpoint: endpointOf(url), cause: err });
+      }
       await sleep(withJitter(500 * Math.pow(3, attempt)));
       continue;
     }
@@ -428,7 +456,9 @@ export async function diadocFetch(opts: DiadocFetchOptions): Promise<Response> {
       default:
         if (res.status >= 500) {
           lastTransient = `HTTP ${res.status}`;
-          if (attempt >= maxRetries) throw new DiadocTransient(lastTransient);
+          if (attempt >= maxRetries) {
+            throw new DiadocTransient(lastTransient, { endpoint: endpointOf(url) });
+          }
           await sleep(withJitter(500 * Math.pow(3, attempt)));
           continue;
         }
@@ -451,7 +481,38 @@ export async function diadocFetch(opts: DiadocFetchOptions): Promise<Response> {
     }
   }
 
-  throw new DiadocTransient(lastTransient ?? 'исчерпаны попытки');
+  throw new DiadocTransient(lastTransient ?? 'исчерпаны попытки', { endpoint: endpointOf(url) });
+}
+
+/**
+ * Обрыв при чтении тела — тот же сетевой отказ, что и до заголовков.
+ *
+ * `diadocFetch` заканчивается на заголовках, а тело читается потом. Если связь
+ * рвётся в этот момент, наружу выходит голый `TypeError: terminated` — и
+ * вызывающий код принимает его за сбой самого документа: тратит его попытки,
+ * хотя документ ни при чём. Здесь такой отказ становится `DiadocTransient`.
+ */
+function asTransientBodyFailure(err: unknown, url: URL | null): DiadocTransient {
+  return new DiadocTransient(`ответ оборвался при чтении: ${describeNetworkFailure(err)}`, {
+    endpoint: url ? endpointOf(url) : null,
+    cause: err,
+  });
+}
+
+/**
+ * Читает JSON-ответ.
+ *
+ * Ошибка разбора (`SyntaxError`) — это не сеть, а неожиданный формат ответа, и
+ * она остаётся собой: её показывают иначе.
+ */
+export async function readJson(res: Response, url: URL): Promise<unknown> {
+  let text: string;
+  try {
+    text = await res.text();
+  } catch (err) {
+    throw asTransientBodyFailure(err, url);
+  }
+  return JSON.parse(text);
 }
 
 /**
@@ -462,7 +523,11 @@ export async function diadocFetch(opts: DiadocFetchOptions): Promise<Response> {
  * после ущерба. Content-Length проверяем тоже, но полагаться только на него
  * нельзя — при chunked-ответе заголовка нет.
  */
-export async function readBodyWithLimit(res: Response, maxBytes: number): Promise<Buffer> {
+export async function readBodyWithLimit(
+  res: Response,
+  maxBytes: number,
+  url: URL | null = null,
+): Promise<Buffer> {
   const declared = Number(res.headers.get('Content-Length'));
   if (Number.isFinite(declared) && declared > maxBytes) {
     await res.body?.cancel().catch(() => {});
@@ -476,7 +541,15 @@ export async function readBodyWithLimit(res: Response, maxBytes: number): Promis
   let total = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      let step: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        step = await reader.read();
+      } catch (err) {
+        // Превышение размера бросается ниже, в этом же цикле, и сюда не
+        // попадает: здесь только отказы самого чтения.
+        throw asTransientBodyFailure(err, url);
+      }
+      const { done, value } = step;
       if (done) break;
       if (!value) continue;
       total += value.byteLength;

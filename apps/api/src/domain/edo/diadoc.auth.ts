@@ -41,6 +41,7 @@ import {
   DiadocAuthExpired,
   DiadocAuthRejected,
   diadocFetch,
+  readJson,
   type DiadocEnvironment,
   type DiadocRequestSnapshot,
 } from './diadoc.http.js';
@@ -302,7 +303,11 @@ class OidcRefreshAuth implements DiadocAuth {
     // каждом отказе вдвое больше.
     const res = await attempt('post');
 
-    const body = (await res.json()) as TokenResponse;
+    // Обрыв при чтении тела — сетевой отказ, а не «сломанный ответ»: иначе в
+    // проходе по ленте он считался бы сбоем документа и тратил его попытки.
+    // Повторять обмен всё равно нельзя (см. maxRetries выше) — просто
+    // классифицируем честно.
+    const body = (await readJson(res, url)) as TokenResponse;
     if (!body.access_token) {
       throw new DiadocAuthExpired('сервер не вернул access_token');
     }

@@ -24,6 +24,7 @@ const {
   DiadocAuthRejected,
   DiadocRateLimited,
   DiadocSubscriptionExpired,
+  DiadocTransient,
 } = await import('../src/domain/edo/diadoc.http.js');
 
 describe('объяснение отказа', () => {
@@ -31,6 +32,25 @@ describe('объяснение отказа', () => {
     expect(describeFailure(new DiadocAccessDenied()).message).toMatch(/площадк/i);
     expect(describeFailure(new DiadocSubscriptionExpired()).message).toMatch(/подписк/i);
     expect(describeFailure(new DiadocRateLimited(1000)).error).toBe('rate_limited');
+  });
+
+  it('временный сбой называет причину и адрес, а не одну общую фразу', () => {
+    // 25.09.2026 в карточке стояло «Диадок временно недоступен.» — и по ней
+    // нельзя было понять, что оборвалось и где.
+    const failure = describeFailure(
+      new DiadocTransient('соединение оборвано (ECONNRESET)', {
+        endpoint: 'diadoc-api.kontur.ru/GetMyOrganizations',
+      }),
+    );
+    expect(failure.error).toBe('upstream_unavailable');
+    expect(failure.message).toBe(
+      'Диадок временно недоступен: соединение оборвано (ECONNRESET) — diadoc-api.kontur.ru/GetMyOrganizations.',
+    );
+  });
+
+  it('временный сбой без адреса всё равно называет причину', () => {
+    const failure = describeFailure(new DiadocTransient('HTTP 503'));
+    expect(failure.message).toBe('Диадок временно недоступен: HTTP 503.');
   });
 
   it('неопознанная ошибка доносит причину, а не общую фразу', () => {

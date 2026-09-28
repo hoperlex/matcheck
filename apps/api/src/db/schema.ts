@@ -694,6 +694,12 @@ export const edoReceipts = pgTable(
     lastError: text('last_error'),
     rawS3Key: text('raw_s3_key'),
     contentSha256: varchar('content_sha256', { length: 64 }),
+    // Что именно сохранено (миграция 0128). Прежде любое вложение ложилось в
+    // хранилище как `.xml` с типом application/xml, а имя и тип нигде не
+    // оставались — PDF нельзя было ни распознать, ни переразобрать позже.
+    originalFilename: text('original_filename'),
+    mimeType: varchar('mime_type', { length: 100 }),
+    sizeBytes: integer('size_bytes'),
     // Чем разобрали: локальным парсером или силами Диадока. Нужно, чтобы чинить
     // парсер по фактам, а не по догадкам.
     parseSource: text('parse_source').$type<'local_xml' | 'diadoc_title'>(),

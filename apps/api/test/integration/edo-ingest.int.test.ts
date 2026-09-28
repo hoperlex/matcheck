@@ -13,6 +13,13 @@ import { and, eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Импорт включается ДО загрузки модулей: окружение читается один раз и
+// кешируется, а хранилище читает его уже при импорте. Выключенный импорт
+// проверяется отдельно — в edo-poll-retry.int.test.ts.
+vi.hoisted(() => {
+  process.env.EDO_IMPORT_ENABLED = '1';
+});
 import type { Db } from '../../src/db/client.js';
 import {
   edoAccounts,
@@ -104,6 +111,7 @@ suite('приём документов из Диадока', () => {
   });
 
   afterAll(async () => {
+    delete process.env.EDO_IMPORT_ENABLED;
     await sql.end({ timeout: 5 });
   });
 
@@ -140,7 +148,7 @@ suite('приём документов из Диадока', () => {
     });
     if (!receipt) return { outcome: 'claim_refused' as const };
     return ingestEdoEntity(
-      { db, client: fakeClient(contents), log, put: put as never, xmlMaxBytes: 5_000_000 },
+      { db, client: fakeClient(contents), log, put: put as never, xmlMaxBytes: 5_000_000, fileMaxBytes: 25_000_000 },
       { account: account!, receipt, entity, messageId },
     );
   }
@@ -220,7 +228,7 @@ suite('приём документов из Диадока', () => {
         entityId: entity.entityId,
       });
       await ingestEdoEntity(
-        { db, client, log, put: put as never, xmlMaxBytes: 5_000_000 },
+        { db, client, log, put: put as never, xmlMaxBytes: 5_000_000, fileMaxBytes: 25_000_000 },
         { account: account!, receipt: receipt!, entity, messageId: 'msg-multi' },
       );
     }
@@ -287,6 +295,7 @@ suite('приём документов из Диадока', () => {
         log,
         put: put as never,
         xmlMaxBytes: 5_000_000,
+        fileMaxBytes: 25_000_000,
       },
       { account: account!, receipt: receipt!, entity, messageId: 'msg-scan' },
     );
@@ -300,6 +309,10 @@ suite('приём документов из Диадока', () => {
     // Маршрут ждёт отдельно: разбор распознаванием включается флагом.
     expect(row?.transportStatus).toBe('stored');
     expect(row?.routeStatus).toBe('awaiting');
+    // Сохранён как PDF, а не как «.xml»: иначе распознать его потом нельзя.
+    expect(row?.mimeType).toBe('application/pdf');
+    expect(row?.originalFilename).toBe('скан.pdf');
+    expect(row?.rawS3Key).toMatch(/\/original\.pdf$/);
   });
 
   it('исчезнувший документ закрывается без карточки и без потери прохода', async () => {

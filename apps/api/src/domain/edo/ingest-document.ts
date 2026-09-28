@@ -39,8 +39,10 @@ import {
   type EdoReceiptRow,
 } from './journal.js';
 import { findOrCreateCounterparty } from './counterparty.js';
+import { detectEdoFile } from './edo-file-kind.js';
 import { assessUpdParse, parseUpdXml } from './upd.parser.js';
 import { decodeXmlBuffer } from './upd-xml-decode.js';
+import { loadEnv } from '../../lib/env.js';
 
 export type IngestDeps = {
   db: Db;
@@ -48,8 +50,44 @@ export type IngestDeps = {
   log: FastifyBaseLogger;
   /** Подменяется в тестах, чтобы не ходить в хранилище. */
   put?: typeof putObject;
+  /** Предел для машиночитаемого XML: титул УПД — десятки-сотни килобайт. */
   xmlMaxBytes: number;
+  /** Предел для остального — PDF и сканы законно тяжелее XML. */
+  fileMaxBytes: number;
 };
+
+/**
+ * Хранилище не приняло файл.
+ *
+ * Это сбой инфраструктуры, а не документа: проход останавливается, попытка
+ * документа возвращается. Иначе час недоступности хранилища сжёг бы бюджет
+ * попыток всей очереди. Поэтому ключ хранилища собирается только из
+ * идентификатора квитанции и расширения — без номера документа и других данных
+ * отправителя: ошибка записи не может зависеть от самого документа, а значит,
+ * и не может вечно останавливать ленту на одном из них.
+ */
+export class EdoStorageUnavailable extends Error {
+  constructor(cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`хранилище не приняло файл: ${detail.slice(0, 200)}`, { cause });
+    this.name = 'EdoStorageUnavailable';
+  }
+}
+
+/**
+ * Импорт выключен (`EDO_IMPORT_ENABLED=0`).
+ *
+ * Проверка стоит на самой границе записи — перед созданием контрагента и
+ * карточки, — а не только в начале прохода: любой будущий путь к этой функции
+ * (повторный разбор, ручной запуск) упрётся в неё же. Для прохода это остановка,
+ * а не сбой документа: попытка не расходуется.
+ */
+export class EdoImportDisabled extends Error {
+  constructor() {
+    super('импорт документов из ЭДО выключен (EDO_IMPORT_ENABLED=0)');
+    this.name = 'EdoImportDisabled';
+  }
+}
 
 export type IngestParams = {
   account: typeof edoAccounts.$inferSelect;
@@ -80,42 +118,59 @@ async function fetchAndStore(
   const { account, receipt, entity } = params;
   const put = deps.put ?? putObject;
 
+  // Предел — по маршруту. Прежде всем вложениям доставался предел XML (5 МБ),
+  // и PDF крупнее навсегда становился `too_large`, хотя для файлов объявлен
+  // свой предел.
+  const maxBytes = entity.route === 'utd_xml' ? deps.xmlMaxBytes : deps.fileMaxBytes;
+
   let buffer: Buffer;
   try {
     buffer = await deps.client.getEntityContent(
       account.boxId as string,
       params.messageId,
       entity.entityId,
-      deps.xmlMaxBytes,
+      maxBytes,
     );
   } catch (err) {
     if (err instanceof DiadocGone) {
       return { skipped: 'документа больше нет в Диадоке', status: 'vanished' };
     }
     if (err instanceof DiadocPayloadTooLarge) {
-      return { skipped: `размер превышает ${deps.xmlMaxBytes} байт`, status: 'too_large' };
+      return { skipped: `размер превышает ${maxBytes} байт`, status: 'too_large' };
     }
     throw err;
   }
 
+  const kind = detectEdoFile(buffer, entity.fileName);
+
   // Ключ детерминирован: повтор перезапишет тот же объект, а не оставит мусор.
   // Объекта у документа из ЭДО ещё нет — папка будет общей, и это принято
   // сознательно: перекладывать ключ после назначения объекта опаснее (ключ в
-  // базе и объект в хранилище разъезжаются).
+  // базе и объект в хранилище разъезжаются). В имени — только расширение по
+  // содержимому: исходное имя хранится в квитанции, а в ключ не попадает ничего,
+  // что задаёт отправитель (см. EdoStorageUnavailable).
   const s3Key = buildS3Key({
     site: null,
     counterparty: null,
     fallbackCounterparty: 'edo',
     entityType: 'source-documents',
     entityId: receipt.id,
-    filename: `upd-${(entity.documentNumber ?? receipt.id).replace(/[\\/]/g, '-')}.xml`,
+    filename: `original.${kind.ext}`,
   });
 
-  await put(s3Key, buffer, 'application/xml', { sha256: fileHashOf(buffer) });
+  const sha256 = fileHashOf(buffer);
+  try {
+    await put(s3Key, buffer, kind.mimeType, { sha256 });
+  } catch (err) {
+    throw new EdoStorageUnavailable(err);
+  }
   await markReceiptStored(deps.db, receipt.id, {
     rawS3Key: s3Key,
-    contentSha256: fileHashOf(buffer),
+    contentSha256: sha256,
     documentNumber: entity.documentNumber,
+    originalFilename: entity.fileName,
+    mimeType: kind.mimeType,
+    sizeBytes: buffer.length,
   });
 
   return { buffer, s3Key };
@@ -126,6 +181,11 @@ export async function ingestEdoEntity(
   params: IngestParams,
 ): Promise<IngestOutcome> {
   const { account, receipt, entity } = params;
+
+  // Выключенный импорт не должен даже скачивать: сохранённый файл закрыл бы
+  // вложение для курсора, а карточка так и не появилась бы. Попытка при этом не
+  // расходуется — проход останавливается целиком.
+  if (!loadEnv().EDO_IMPORT_ENABLED) throw new EdoImportDisabled();
 
   const stored = await fetchAndStore(deps, params);
   if ('skipped' in stored) {
@@ -167,6 +227,11 @@ export async function ingestEdoEntity(
     );
     return { outcome: 'unparsed', reasons: assessment.reasons };
   }
+
+  // Граница записи: дальше создаются контрагент и карточка. Без флага импорта
+  // сюда не должен дойти ни один путь, но проверка стоит именно здесь, чтобы
+  // её нельзя было обойти новым вызовом в обход прохода по ленте.
+  if (!loadEnv().EDO_IMPORT_ENABLED) throw new EdoImportDisabled();
 
   const supplierId = await findOrCreateCounterparty(deps.db, parsed.supplier, 'supplier');
   const recipientId = parsed.recipient
