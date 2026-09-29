@@ -46,6 +46,22 @@ export type GetNewEventsParams = {
    * историю ящика: на давно живущем ящике это десятки тысяч лишних событий.
    */
   fromTimestamp?: Date | null;
+  signal?: AbortSignal;
+};
+
+/** Общие параметры запроса: сигнал отмены всей операции. */
+export type RequestOptions = { signal?: AbortSignal };
+
+/**
+ * Тип документа по справочнику Диадока.
+ *
+ * `isFormal` — машиночитаем ли первый титул (титул продавца) у данной версии.
+ * `null` — справочник об этом не сообщил.
+ */
+export type DiadocDocumentTypeInfo = {
+  name: string;
+  title: string | null;
+  versions: { fn: string | null; version: string; isFormal: boolean | null }[];
 };
 
 export type DiadocClientDeps = {
@@ -79,7 +95,7 @@ export class DiadocClient {
   private async request(
     url: URL,
     method: 'GET' | 'POST' = 'GET',
-    opts: { json?: boolean } = {},
+    opts: { json?: boolean; signal?: AbortSignal } = {},
   ): Promise<Response> {
     const wantJson = opts.json !== false;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -94,6 +110,7 @@ export class DiadocClient {
           },
           timeoutMs: method === 'GET' ? LIST_TIMEOUT_MS : CONTENT_TIMEOUT_MS,
           fetchImpl: this.deps.fetchImpl,
+          signal: opts.signal,
         });
       } catch (err) {
         if (err instanceof DiadocAuthExpired && attempt === 0) {
@@ -160,9 +177,24 @@ export class DiadocClient {
     if (params.fromTimestamp) {
       url.searchParams.set('timestampFromTicks', dateToDiadocTicks(params.fromTimestamp));
     }
-    const res = await this.request(url);
+    const res = await this.request(url, 'GET', { signal: params.signal });
     const parsed = DiadocBoxEventListSchema.parse(await readJson(res, url));
     return { events: parsed.Events };
+  }
+
+  /**
+   * Справочник типов документов ящика.
+   *
+   * Нужен, чтобы «машиночитаемый» в осмотре определял Диадок, а не наша
+   * догадка: прежде машиночитаемым считался только УПД, и счёт-фактура в XML
+   * показывалась как «скан или PDF». Разбор намеренно терпимый — справочник
+   * вспомогательный, и его незнакомая форма не должна ронять осмотр.
+   */
+  async getDocumentTypes(boxId: string, opts: RequestOptions = {}): Promise<DiadocDocumentTypeInfo[]> {
+    const url = new URL('/V2/GetDocumentTypes', this.api);
+    url.searchParams.set('boxId', boxId);
+    const res = await this.request(url, 'GET', { signal: opts.signal });
+    return parseDocumentTypes(await readJson(res, url));
   }
 
   /** Метаданные сообщения со списком сущностей. */
@@ -185,13 +217,42 @@ export class DiadocClient {
     messageId: string,
     entityId: string,
     maxBytes?: number,
+    opts: RequestOptions = {},
   ): Promise<Buffer> {
     const url = new URL('/V4/GetEntityContent', this.api);
     url.searchParams.set('boxId', boxId);
     url.searchParams.set('messageId', messageId);
     url.searchParams.set('entityId', entityId);
     // Здесь ответ — сам файл документа, а не структура: просить JSON нечего.
-    const res = await this.request(url, 'GET', { json: false });
+    const res = await this.request(url, 'GET', { json: false, signal: opts.signal });
     return readBodyWithLimit(res, maxBytes ?? loadEnv().EDO_XML_MAX_BYTES, url);
   }
+}
+
+function asArray(v: unknown): Record<string, unknown>[] {
+  return Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === 'object') : [];
+}
+
+function str(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() ? v : null;
+}
+
+/** Разбор ответа GetDocumentTypes: берём только то, что понимаем. */
+export function parseDocumentTypes(raw: unknown): DiadocDocumentTypeInfo[] {
+  const root = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  return asArray(root.DocumentTypes).flatMap((type) => {
+    const name = str(type.Name);
+    if (!name) return [];
+    const versions = asArray(type.Functions).flatMap((fn) =>
+      asArray(fn.Versions).flatMap((v) => {
+        const version = str(v.Version);
+        if (!version) return [];
+        const titles = asArray(v.Titles);
+        const first = titles.find((t) => t.Index === 0) ?? titles[0];
+        const isFormal = typeof first?.IsFormal === 'boolean' ? first.IsFormal : null;
+        return [{ fn: str(fn.Name), version, isFormal }];
+      }),
+    );
+    return [{ name, title: str(type.Title), versions }];
+  });
 }

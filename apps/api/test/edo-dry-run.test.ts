@@ -99,7 +99,8 @@ describe('пробный разбор', () => {
     expect(doc.parsed?.supplier.inn).toBe('7712345678');
     expect(doc.parsed?.recipient?.inn).toBe('7736255508');
     // Позиции показываются, иначе «прочитал» невозможно отличить от «угадал».
-    expect(doc.parsed?.sampleItems[0]).toMatchObject({ qty: 2.5, sum: 160000 });
+    // Сумма строки — с НДС, как в карточке; без НДС — рядом.
+    expect(doc.parsed?.sampleItems[0]).toMatchObject({ qty: 2.5, sum: 192000, sumExVat: 160000 });
   });
 
   it('разный формат даты расхождением не считает', async () => {
@@ -203,5 +204,148 @@ describe('пробный разбор', () => {
     const report = await dryRunBox(clientWith([scan]), { boxId: 'box-наш', since: null }, log);
     expect(report.candidates).toBe(0);
     expect(report.documents).toEqual([]);
+  });
+
+  it('УПД на работы и услуги виден в отчёте, но в карточки не прошёл бы', async () => {
+    const services = UTD.replace(
+      '<СумНал><СумНал>32000</СумНал></СумНал>',
+      '<СумНал><СумНал>32000</СумНал></СумНал><ДопСведТов ПрТовРаб="2"/>',
+    );
+    const report = await dryRunBox(clientWith([updEvent('s')], services), { boxId: 'box-наш', since: null }, log);
+    const doc = report.documents[0]!;
+    expect(doc.content?.category).toBe('services');
+    expect(doc.accepted).toBe(false);
+    expect(doc.reasons[0]).toMatch(/не материалы/);
+    expect(report.selection.byContent).toEqual([
+      { category: 'services', label: 'работы или услуги', count: 1 },
+    ]);
+  });
+
+  it('показывает сырые поля Диадока, строение XML и чего не хватает до карточки', async () => {
+    const report = await dryRunBox(clientWith([updEvent('r')]), { boxId: 'box-наш', since: null }, log);
+    const doc = report.documents[0]!;
+    expect(doc.diadocFields).toContainEqual({ path: 'Entity.DocumentInfo.Function', value: 'СЧФДОП' });
+    expect(doc.diadocFields.some((f) => f.path.includes('Content'))).toBe(false);
+    expect(doc.xmlOutline).toContain('Файл/Документ/СвСчФакт/@НомерСчФ');
+    expect(doc.missingForCard.map((m) => m.field)).toEqual(['Объект', 'Ожидаемая дата', 'Объём и масса']);
+  });
+
+  it('скачивает не больше десяти документов, даже если материалов среди них нет', async () => {
+    const services = UTD.replace(
+      '<СумНал><СумНал>32000</СумНал></СумНал>',
+      '<СумНал><СумНал>32000</СумНал></СумНал><ДопСведТов ПрТовРаб="3"/>',
+    );
+    const events = Array.from({ length: 12 }, (_, i) => updEvent(`d${i}`));
+    let downloads = 0;
+    const client = {
+      getNewEvents: (() => {
+        let page = 0;
+        return async () => ({ events: (page++ === 0 ? events : []) as never[] });
+      })(),
+      getEntityContent: async () => {
+        downloads += 1;
+        return Buffer.from(services, 'utf8');
+      },
+    } as unknown as Client;
+    const report = await dryRunBox(client, { boxId: 'box-наш', since: null }, log);
+    expect(downloads).toBe(10);
+    expect(report.candidates).toBe(12);
+    expect(report.examined).toBe(10);
+  });
+
+  it('останавливается на трёх УПД с материалами', async () => {
+    const events = Array.from({ length: 6 }, (_, i) => updEvent(`m${i}`));
+    const report = await dryRunBox(clientWith(events), { boxId: 'box-наш', since: null }, log);
+    expect(report.examined).toBe(3);
+    expect(report.documents.every((d) => d.content?.category === 'materials')).toBe(true);
+  });
+
+  it('по истечении времени отменяет скачивание и возвращает то, что успел', async () => {
+    let sawSignal = false;
+    const client = {
+      getNewEvents: (() => {
+        let page = 0;
+        return async () => ({ events: (page++ === 0 ? [updEvent('t1'), updEvent('t2')] : []) as never[] });
+      })(),
+      // Диадок «завис»: ответ не приходит, пока запрос не отменят.
+      getEntityContent: (_b: string, _m: string, _e: string, _max: number, opts: { signal?: AbortSignal }) =>
+        new Promise<Buffer>((_, reject) => {
+          sawSignal = Boolean(opts?.signal);
+          opts.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    } as unknown as Client;
+    const report = await dryRunBox(client, { boxId: 'box-наш', since: null, deadlineMs: 30 }, log);
+    expect(sawSignal).toBe(true);
+    expect(report.interrupted).toBe('deadline');
+    // Первый документ оборван, второй даже не начинался.
+    expect(report.examined).toBe(1);
+    expect(report.documents[0]!.reasons[0]).toMatch(/истёк предел времени/);
+  });
+
+  it('итог отбора по метаданным считает и то, что не скачивалось', async () => {
+    const invoice = updEvent('inv', { TypeNamedId: 'Invoice', Function: 'default' });
+    const act = updEvent('act', { TypeNamedId: 'AcceptanceCertificate' });
+    const report = await dryRunBox(
+      clientWith([updEvent('u'), invoice, act]),
+      { boxId: 'box-наш', since: null },
+      log,
+    );
+    const byMeta = Object.fromEntries(report.selection.byMeta.map((c) => [c.category, c.count]));
+    expect(byMeta).toEqual({ utd_candidate: 1, invoice: 1, not_delivery: 1 });
+    expect(report.examined).toBe(1);
+  });
+
+  it('сканы без типа показываются метаданными, без скачивания', async () => {
+    const scan = (id: string) => ({
+      EventId: id,
+      IndexKey: `idx-${id}`,
+      Message: {
+        MessageId: `msg-${id}`,
+        ToBoxId: 'box-наш',
+        Entities: [
+          {
+            EntityId: `ent-${id}`,
+            EntityType: 'Attachment',
+            FileName: `${id}.pdf`,
+            Content: { Size: 100, Data: 'JVBERi0=' },
+            DocumentInfo: { DocumentDirection: 'Inbound', TypeNamedId: 'Nonformalized' },
+          },
+        ],
+      },
+    });
+    const report = await dryRunBox(
+      clientWith([scan('a'), scan('b'), scan('c')], () => {
+        throw new Error('сканы скачиваться не должны');
+      }),
+      { boxId: 'box-наш', since: null },
+      log,
+    );
+    expect(report.scans).toHaveLength(2);
+    expect(report.scans[0]!.meta.fileName).toBe('a.pdf');
+    expect(report.scans[0]!.diadocFields.some((f) => f.path.includes('Content'))).toBe(false);
+    expect(report.selection.byMeta).toEqual([
+      { category: 'scan', label: 'скан без типа — пока не берём', count: 3 },
+    ]);
+  });
+
+  it('подсказка из портала: возил ли поставщик материалы раньше', async () => {
+    const asked: string[] = [];
+    const report = await dryRunBox(
+      clientWith([updEvent('h')]),
+      {
+        boxId: 'box-наш',
+        since: null,
+        supplierHistory: async (inn) => {
+          asked.push(inn);
+          return { deliveries: 4, lastAt: '2026-09-20T08:00:00.000Z' };
+        },
+      },
+      log,
+    );
+    expect(asked).toEqual(['7712345678']);
+    expect(report.documents[0]!.supplierHistory).toEqual({
+      deliveries: 4,
+      lastAt: '2026-09-20T08:00:00.000Z',
+    });
   });
 });

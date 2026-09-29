@@ -40,6 +40,7 @@ import {
 } from './journal.js';
 import { findOrCreateCounterparty } from './counterparty.js';
 import { detectEdoFile } from './edo-file-kind.js';
+import { CONTENT_CATEGORY_LABELS, classifyUtdContent } from './document-kind.js';
 import { assessUpdParse, parseUpdXml } from './upd.parser.js';
 import { decodeXmlBuffer } from './upd-xml-decode.js';
 import { loadEnv } from '../../lib/env.js';
@@ -226,6 +227,22 @@ export async function ingestEdoEntity(
       'edo: документ не принят, разбор неполон',
     );
     return { outcome: 'unparsed', reasons: assessment.reasons };
+  }
+
+  // В портал идут только УПД с материалами. Проверяется ПОСЛЕ полноты
+  // разбора: документ без номера и позиций — прежде всего «не прочитан».
+  // УПД на работы и услуги сохранён и виден в журнале, но карточкой не
+  // становится. «Не определено» не решается наугад: документ ждёт человека
+  // или уточнённого правила (повторный разбор).
+  const content = classifyUtdContent(parsed);
+  if (content.category !== 'materials') {
+    const reason = `${CONTENT_CATEGORY_LABELS[content.category]}: ${content.reason}`;
+    if (content.category === 'undetermined') {
+      await markReceiptRoute(deps.db, receipt.id, 'awaiting', { parseSource: 'local_xml', error: reason });
+      return { outcome: 'awaiting' };
+    }
+    await markReceiptRoute(deps.db, receipt.id, 'not_applicable', { parseSource: 'local_xml', error: reason });
+    return { outcome: 'skipped', reason };
   }
 
   // Граница записи: дальше создаются контрагент и карточка. Без флага импорта

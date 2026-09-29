@@ -5,28 +5,30 @@
  * ничего не пропадает молча», поэтому каждое решение явно названо и покрыто
  * тестами.
  *
- * Два правила, которые легко нарушить по невнимательности:
+ * Три правила, которые легко нарушить по невнимательности:
  *
  *   1. Обходим ВСЕ сущности сообщения, а не первую. Одно сообщение Диадока
  *      может нести несколько документов; прежний каркас брал первый попавшийся
  *      EntityId — остальные терялись бы без следа.
- *   2. Классифицируем по DocumentInfo (тип, функция, версия, направление), а не
- *      по виду вложения. Вид говорит «это файл», а не «это УПД».
+ *   2. Классифицируем по DocumentInfo (тип, функция, признаки), а не по виду
+ *      вложения. Вид говорит «это файл», а не «это УПД».
+ *   3. Документ, который не берём, остаётся ДОКУМЕНТОМ с причиной (`skip`), а
+ *      не исчезает: в журнале видно, что счёт-фактура или акт пришли и почему
+ *      их нет в портале. Молча пропускаются только подписи и прочие
+ *      производные сущности — документами они не являются.
  */
 import type { DiadocEntity, DiadocMessage } from './diadoc.types.js';
-
-/** Формализованный УПД: его титул продавца и есть машиночитаемый документ. */
-const UTD_TYPE_NAMED_IDS = new Set([
-  'UniversalTransferDocument',
-  'UniversalTransferDocumentRevision',
-]);
+import { classifyDocumentMeta, type EdoMetaCategory } from './document-kind.js';
+import { normalizeDocumentInfo, type EdoDocumentMeta } from './document-meta.js';
 
 export type EntityRoute =
-  /** Формализованный УПД — читаем XML напрямую, без распознавания. */
+  /** УПД-кандидат — читаем XML напрямую, без распознавания. */
   | 'utd_xml'
-  /** Неформализованный файл — в существующий конвейер распознавания. */
+  /** Скан или файл без типа — сохраняется и ждёт распознавания. */
   | 'unformalized'
-  /** Брать нечего: подпись, служебное, исходящее, удалённое. */
+  /** Документ, который не берём: счёт-фактура, акт, тестовый, аннулированный… */
+  | 'skip'
+  /** Не документ: подпись, производная сущность. */
   | 'ignored';
 
 export type ClassifiedEntity = {
@@ -34,6 +36,8 @@ export type ClassifiedEntity = {
   route: EntityRoute;
   /** Почему именно так — попадает в журнал и отвечает на вопрос «а где документ?». */
   reason: string;
+  /** Категория по метаданным; у подписей её нет. */
+  category: EdoMetaCategory | null;
   typeNamedId: string | null;
   documentFunction: string | null;
   documentVersion: string | null;
@@ -43,15 +47,16 @@ export type ClassifiedEntity = {
   counteragentBoxId: string | null;
   /** Зашифрованное содержимое расшифровать нечем — забирать бессмысленно. */
   isEncrypted: boolean;
+  meta: EdoDocumentMeta;
 };
 
 export type ClassifiedMessage = {
-  /** Сообщение целиком пропущено (исходящее, черновик, удалённое). */
+  /** Сообщение целиком пропущено (исходящее, черновик, удалённое, тестовое). */
   skipped: string | null;
   entities: ClassifiedEntity[];
 };
 
-function isSignature(entity: DiadocEntity): boolean {
+export function isSignature(entity: DiadocEntity): boolean {
   if (entity.EntityType && /signature/i.test(entity.EntityType)) return true;
   if (entity.AttachmentType && /signature/i.test(entity.AttachmentType)) return true;
   // Подпись и прочие производные сущности привязаны к родителю; титул продавца
@@ -72,50 +77,50 @@ export function classifyMessageEntities(
   }
   if (message.IsDraft) return { skipped: 'черновик', entities: [] };
   if (message.IsDeleted) return { skipped: 'сообщение удалено', entities: [] };
+  // Тестовый документооборот юридической силы не имеет: такие УПД в портал
+  // попадать не должны, даже если выглядят настоящими.
+  if (message.IsTest) return { skipped: 'тестовое сообщение', entities: [] };
 
   const entities = message.Entities.map((entity): ClassifiedEntity => {
     const info = entity.DocumentInfo;
+    const meta = normalizeDocumentInfo(entity, message);
     const typeNamedId = info?.TypeNamedId ?? info?.DocumentType ?? null;
     const base = {
       entityId: entity.EntityId,
       typeNamedId,
       documentFunction: info?.Function ?? null,
       documentVersion: info?.Version ?? null,
-      documentNumber: info?.DocumentNumber ?? null,
-      documentDate: info?.DocumentDate ?? null,
+      documentNumber: meta.number,
+      documentDate: meta.date,
       fileName: entity.FileName ?? info?.FileName ?? null,
       counteragentBoxId: info?.CounteragentBoxId ?? null,
       isEncrypted: Boolean(info?.IsEncryptedContent),
+      meta,
     };
 
     if (isSignature(entity)) {
-      return { ...base, route: 'ignored', reason: 'подпись или производная сущность' };
-    }
-    if (info?.IsDeleted) {
-      return { ...base, route: 'ignored', reason: 'документ удалён' };
-    }
-    // Направление проверяем по самому документу, а не только по ящикам: в одном
-    // сообщении встречаются документы обеих сторон.
-    if (info?.DocumentDirection && /outbound/i.test(info.DocumentDirection)) {
-      return { ...base, route: 'ignored', reason: 'исходящий документ' };
-    }
-    if (base.isEncrypted) {
-      // Ключа у нас нет и не будет: забирать шифротекст незачем, но факт
-      // фиксируем — иначе документ выглядел бы пропавшим.
-      return { ...base, route: 'ignored', reason: 'содержимое зашифровано' };
+      return { ...base, route: 'ignored', category: null, reason: 'подпись или производная сущность' };
     }
 
-    if (typeNamedId && UTD_TYPE_NAMED_IDS.has(typeNamedId)) {
-      return { ...base, route: 'utd_xml', reason: 'формализованный УПД' };
-    }
+    const decision = classifyDocumentMeta({
+      typeNamedId,
+      documentFunction: base.documentFunction,
+      isTest: meta.isTest,
+      revoked: meta.revoked,
+      isDeleted: meta.isDeleted,
+      // Направление проверяем по самому документу, а не только по ящикам: в
+      // одном сообщении встречаются документы обеих сторон.
+      outbound: Boolean(info?.DocumentDirection && /outbound/i.test(info.DocumentDirection)),
+      encrypted: base.isEncrypted,
+    });
 
-    return {
-      ...base,
-      route: 'unformalized',
-      reason: typeNamedId
-        ? `неформализованный документ (${typeNamedId})`
-        : 'вложение без типа документа',
-    };
+    const route: EntityRoute =
+      decision.category === 'utd_candidate'
+        ? 'utd_xml'
+        : decision.category === 'scan'
+          ? 'unformalized'
+          : 'skip';
+    return { ...base, route, category: decision.category, reason: decision.reason };
   });
 
   return { skipped: null, entities };

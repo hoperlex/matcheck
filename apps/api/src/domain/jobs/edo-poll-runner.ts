@@ -14,11 +14,12 @@ import { edoAccounts } from '../../db/schema.js';
 import { loadEnv } from '../../lib/env.js';
 import { createDiadocAuth } from '../edo/diadoc.auth.js';
 import { DiadocClient } from '../edo/diadoc.client.js';
-import { inventoryBox } from '../edo/inventory.js';
+import { EdoLeaseLost, inventoryBox } from '../edo/inventory.js';
 import {
   acquireEdoLease,
   listPollableEdoAccounts,
   releaseEdoLease,
+  renewEdoLease,
   type LeaseHandle,
 } from '../edo/poll-lease.js';
 import { pollEdoAccount, type EdoPollResult } from './edo-poll.js';
@@ -28,11 +29,21 @@ export type EdoRunnerDeps = {
   log: FastifyBaseLogger;
   /** UUID экземпляра процесса — по нему в логах видно, кто держал лиз. */
   owner: string;
+  /** Клиент Диадока — для тестов; по умолчанию настоящий. */
+  createClient?: (account: typeof edoAccounts.$inferSelect) => DiadocClient;
 };
 
 export type EdoRunOutcome =
-  | { skipped: 'lease_taken' | 'no_box' | 'not_found' }
+  | { skipped: 'lease_taken' | 'lease_lost' | 'no_box' | 'not_found' }
   | { ok: true; detail?: string };
+
+/**
+ * Проверка содержимого при осмотре: сотня УПД в память, по одному. Предел
+ * времени щедрый — работа идёт в очереди, а не в ожидании браузера, — но
+ * конечный: зависший Диадок не должен держать учётку бесконечно.
+ */
+const CONTENT_CHECK_MAX_DOWNLOADS = 100;
+const CONTENT_CHECK_DEADLINE_MS = 10 * 60_000;
 
 /**
  * Учётная запись без выбранного ящика опрашиваться не может: boxId — часть
@@ -75,20 +86,36 @@ export async function runEdoInventory(
   deps: EdoRunnerDeps,
   accountId: string,
   since?: string,
+  opts: { checkContent?: boolean } = {},
 ): Promise<EdoRunOutcome> {
   const account = await loadAccount(deps.db, accountId);
   if (!account) return { skipped: 'not_found' };
   if (!account.boxId) return { skipped: 'no_box' };
 
-  const result = await withLease(deps, accountId, false, async () => {
-    const auth = createDiadocAuth({ db: deps.db }, account);
-    const client = new DiadocClient({ auth, environment: account.environment });
+  const result = await withLease(deps, accountId, false, async (lease) => {
+    const client = deps.createClient
+      ? deps.createClient(account)
+      : new DiadocClient({
+          auth: createDiadocAuth({ db: deps.db }, account),
+          environment: account.environment,
+        });
     const from = since ? new Date(since) : account.backfillSince;
 
     try {
+      const ttlSeconds = loadEnv().EDO_POLL_LEASE_SEC;
       const report = await inventoryBox(
         client,
-        { boxId: account.boxId as string, since: from ?? null },
+        {
+          boxId: account.boxId as string,
+          since: from ?? null,
+          contentCheck: opts.checkContent
+            ? {
+                maxDownloads: CONTENT_CHECK_MAX_DOWNLOADS,
+                deadlineMs: CONTENT_CHECK_DEADLINE_MS,
+                renewLease: () => renewEdoLease(deps.db, lease, ttlSeconds),
+              }
+            : undefined,
+        },
         deps.log,
       );
       await deps.db
@@ -103,9 +130,18 @@ export async function runEdoInventory(
         .where(eq(edoAccounts.id, account.id));
       return {
         ok: true as const,
-        detail: `событий: ${report.eventsSeen}, вложений: ${report.entitiesSeen}`,
+        detail: `событий: ${report.eventsSeen}, вложений: ${report.entitiesSeen}${
+          report.contentCheck ? `, проверено УПД: ${report.contentCheck.checked}` : ''
+        }`,
       };
     } catch (err) {
+      // Лиз потерян посреди проверки содержимого: учётку мог взять другой
+      // процесс. Отчёт не сохраняем — он неполон, а ошибкой учётки это не
+      // является: связь с Диадоком в порядке.
+      if (err instanceof EdoLeaseLost) {
+        deps.log.warn({ accountId }, 'edo inventory stopped: lease lost');
+        return { skipped: 'lease_lost' as const };
+      }
       // Текст ошибки виден администратору в админке, поэтому он без тел
       // ответов и внутренних деталей.
       const message = err instanceof Error ? err.message : 'разведка не удалась';

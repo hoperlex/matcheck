@@ -16,6 +16,14 @@ import { z } from 'zod';
 /** Дата-время Диадока приходит тиками .NET либо ISO-строкой. */
 export const DiadocTimestampSchema = z.union([z.string(), z.number()]);
 
+/**
+ * Поле, которое мы только читаем для отчёта. Неожиданный тип значения не должен
+ * ронять разбор всего сообщения — поле просто считается незаполненным.
+ */
+const LooseTimestamp = DiadocTimestampSchema.optional().catch(undefined);
+const LooseString = z.string().optional().catch(undefined);
+const LooseBoolean = z.boolean().optional().catch(undefined);
+
 export const DiadocDocumentInfoSchema = z
   .object({
     // Идентификаторы.
@@ -28,18 +36,29 @@ export const DiadocDocumentInfoSchema = z
     Function: z.string().optional(),
     Version: z.string().optional(),
     DocumentDirection: z.string().optional(),
-    // Реквизиты для журнала.
+    // Реквизиты для журнала. Прямые поля номера и даты Диадок объявил
+    // устаревшими: актуальные значения лежат в коллекции Metadata
+    // («ключ → значение»). Её форма проверяется при чтении, а не здесь: чужой
+    // вид коллекции не должен останавливать приём.
     DocumentNumber: z.string().optional(),
     DocumentDate: z.string().optional(),
+    Metadata: z.unknown().optional(),
+    Title: LooseString,
+    // Время: доставка документа — главное «когда пришёл»; отправка и создание —
+    // для диагностики.
+    DeliveryTimestampTicks: LooseTimestamp,
+    SendTimestampTicks: LooseTimestamp,
+    CreationTimestampTicks: LooseTimestamp,
     CounteragentBoxId: z.string().optional(),
     FileName: z.string().optional(),
     TotalSum: z.union([z.string(), z.number()]).optional(),
     // Состояния, из-за которых документ нельзя или не нужно забирать.
     IsDeleted: z.boolean().optional(),
     IsEncryptedContent: z.boolean().optional(),
-    IsTest: z.boolean().optional(),
-    SenderSignatureStatus: z.string().optional(),
-    RevocationStatus: z.string().optional(),
+    IsTest: LooseBoolean,
+    SenderSignatureStatus: LooseString,
+    RevocationStatus: LooseString,
+    DocflowStatus: z.unknown().optional(),
   })
   .passthrough();
 export type DiadocDocumentInfo = z.infer<typeof DiadocDocumentInfoSchema>;
@@ -67,11 +86,16 @@ export const DiadocMessageSchema = z
   .object({
     MessageId: z.string(),
     FromBoxId: z.string().optional(),
+    FromTitle: LooseString,
     ToBoxId: z.string().optional(),
-    Timestamp: DiadocTimestampSchema.optional(),
+    // Время сообщения Диадок отдаёт в TimestampTicks; поля Timestamp в ответе
+    // нет, но прежние фикстуры его используют — читаем оба.
+    Timestamp: LooseTimestamp,
+    TimestampTicks: LooseTimestamp,
+    LastPatchTimestampTicks: LooseTimestamp,
     IsDraft: z.boolean().optional(),
     IsDeleted: z.boolean().optional(),
-    IsTest: z.boolean().optional(),
+    IsTest: LooseBoolean,
     Entities: z.array(DiadocEntitySchema).default([]),
   })
   .passthrough();
@@ -86,10 +110,10 @@ export const DiadocBoxEventSchema = z
   .object({
     EventId: z.string(),
     IndexKey: z.string().optional(),
-    Timestamp: DiadocTimestampSchema.optional(),
+    Timestamp: LooseTimestamp,
     Message: DiadocMessageSchema.optional(),
     Patch: z
-      .object({ MessageId: z.string().optional() })
+      .object({ MessageId: z.string().optional(), TimestampTicks: LooseTimestamp })
       .passthrough()
       .optional(),
   })
@@ -156,6 +180,8 @@ const TICKS_AT_UNIX_EPOCH = 621_355_968_000_000_000n;
 export function diadocTimestampToDate(value: string | number | undefined): Date | null {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value === 'number' || /^\d{15,}$/.test(String(value))) {
+    // Дробное число тиками быть не может, а BigInt на нём бросает исключение.
+    if (typeof value === 'number' && !Number.isInteger(value)) return null;
     const ticks = BigInt(value);
     const ms = (ticks - TICKS_AT_UNIX_EPOCH) / 10_000n;
     const asNumber = Number(ms);
@@ -168,22 +194,29 @@ export function diadocTimestampToDate(value: string | number | undefined): Date 
 /**
  * Когда произошло событие ленты.
  *
- * Разведка боевого ящика 24.09.2026 показала, что `Timestamp` у события пуст:
- * две тысячи событий — и ни одной даты. Между тем из неё заполняется «когда
- * пришёл документ», поэтому спрашиваем ещё и сообщение внутри события.
+ * Своего времени у события V8 нет. Разведка 24.09.2026 искала его в
+ * `Timestamp` — и у события, и у сообщения — и не нашла ни в одном из двух
+ * тысяч событий: у сообщения время лежит в `TimestampTicks`, у патча — тоже в
+ * `TimestampTicks`. `Timestamp` оставлен первым на случай, если он появится.
  *
- * Источник возвращается вместе со значением: по нему видно, откуда Диадок на
- * самом деле отдаёт время, и следующая разведка подтвердит это фактом, а не
- * догадкой. Если пусто и там — искать дальше, в DocumentInfo сущности.
+ * Источник возвращается вместе со значением: по нему в отчёте осмотра видно,
+ * откуда Диадок на самом деле отдаёт время.
  */
+export type EventTimeSource = 'event' | 'message' | 'patch';
+
 export function resolveEventTime(event: {
   Timestamp?: string | number;
-  Message?: { Timestamp?: string | number };
-}): { at: Date | null; source: 'event' | 'message' | null } {
+  Message?: { Timestamp?: string | number; TimestampTicks?: string | number };
+  Patch?: { TimestampTicks?: string | number };
+}): { at: Date | null; source: EventTimeSource | null } {
   const fromEvent = diadocTimestampToDate(event.Timestamp);
   if (fromEvent) return { at: fromEvent, source: 'event' };
-  const fromMessage = diadocTimestampToDate(event.Message?.Timestamp);
+  const fromMessage =
+    diadocTimestampToDate(event.Message?.TimestampTicks) ??
+    diadocTimestampToDate(event.Message?.Timestamp);
   if (fromMessage) return { at: fromMessage, source: 'message' };
+  const fromPatch = diadocTimestampToDate(event.Patch?.TimestampTicks);
+  if (fromPatch) return { at: fromPatch, source: 'patch' };
   return { at: null, source: null };
 }
 

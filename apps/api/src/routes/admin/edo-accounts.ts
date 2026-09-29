@@ -485,7 +485,14 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
       preHandler: [app.authenticate, app.authorize('admin')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
-        body: z.object({ since: z.string().datetime().optional() }).optional(),
+        body: z
+          .object({
+            since: z.string().datetime().optional(),
+            // Скачать до сотни УПД-кандидатов в память и посчитать, какие из них —
+            // материалы. Дольше обычного осмотра, поэтому по отдельной галочке.
+            checkContent: z.boolean().optional(),
+          })
+          .optional(),
         response: { 202: EdoJobQueuedSchema, 404: ErrorResponseSchema },
       },
     },
@@ -501,6 +508,7 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
         accountId: row.id,
         mode: 'inventory',
         since: req.body?.since,
+        checkContent: req.body?.checkContent === true,
       });
       reply.code(202);
       return { queued: true as const, jobId: String(job.id) };

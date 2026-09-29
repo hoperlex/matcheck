@@ -26,6 +26,24 @@ describe('время события', () => {
     expect(r.at?.toISOString()).toBe('2026-09-24T10:00:00.000Z');
   });
 
+  it('у сообщения время лежит в TimestampTicks', () => {
+    // Именно так его отдаёт Диадок; разведка 24.09 искала `Timestamp` и не
+    // нашла времени ни у одного из двух тысяч событий.
+    const r = resolveEventTime({ Message: { TimestampTicks: TICKS } });
+    expect(r.source).toBe('message');
+    expect(r.at?.toISOString()).toBe('2026-09-24T10:00:00.000Z');
+  });
+
+  it('у патча без сообщения — время патча', () => {
+    const r = resolveEventTime({ Patch: { TimestampTicks: TICKS } });
+    expect(r.source).toBe('patch');
+    expect(r.at?.toISOString()).toBe('2026-09-24T10:00:00.000Z');
+  });
+
+  it('дробное число не роняет разбор', () => {
+    expect(diadocTimestampToDate(1.5)).toBeNull();
+  });
+
   it('событие важнее сообщения, если заполнены оба', () => {
     const later = String(BigInt(Date.parse('2026-09-25T10:00:00.000Z')) * 10_000n + 621_355_968_000_000_000n);
     const r = resolveEventTime({ Timestamp: TICKS, Message: { Timestamp: later } });

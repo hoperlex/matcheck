@@ -379,6 +379,74 @@ suite('проход по ленте Диадока: повторы и курсо
     expect(puts[0]?.contentType).toBe('application/pdf');
     expect((await account()).lastIndexKey).toBe('ik-0001');
   });
+
+  it('не материалы: квитанция с причиной, счёт-фактура не скачивается, подпись не пишется', async () => {
+    // Прежде всё, что не УПД, шло в «неформализованные» и скачивалось, а
+    // исключённое пропускалось без записи — ответа «а где документ?» не было.
+    const utdInfo = {
+      TypeNamedId: 'UniversalTransferDocument',
+      Function: 'СЧФДОП',
+      Version: 'utd970_05_03_01',
+    };
+    const feed = [
+      {
+        EventId: 'ev-1',
+        IndexKey: 'ik-0001',
+        Message: {
+          MessageId: 'msg-1',
+          FromBoxId: 'box-контрагента',
+          ToBoxId: OUR_BOX,
+          Entities: [
+            {
+              EntityId: 'inv',
+              EntityType: 'Attachment',
+              DocumentInfo: { TypeNamedId: 'Invoice', Function: 'default', Version: 'invoice_05_02_01' },
+            },
+            { EntityId: 'srv', EntityType: 'Attachment', DocumentInfo: utdInfo },
+            { EntityId: 'mat', EntityType: 'Attachment', DocumentInfo: utdInfo },
+            { EntityId: 'tst', EntityType: 'Attachment', DocumentInfo: { ...utdInfo, IsTest: true } },
+            { EntityId: 'sig', EntityType: 'Signature', ParentEntityId: 'mat' },
+          ],
+        },
+      } as DiadocBoxEvent,
+    ];
+    const services = updXml('УТ-2').replace(
+      '<СумНал><СумНал>400</СумНал></СумНал>',
+      '<СумНал><СумНал>400</СумНал></СумНал><ДопСведТов ПрТовРаб="3"/>',
+    );
+    const { client, downloads } = fakeClient(feed, {
+      srv: Buffer.from(services),
+      mat: Buffer.from(updXml('УТ-3')),
+    });
+
+    const result = await poll(client);
+
+    // Скачаны только УПД-кандидаты.
+    expect(downloads).toEqual(['srv', 'mat']);
+    expect(result.imported).toBe(1);
+    expect(await receipt('inv')).toMatchObject({
+      transportStatus: 'skipped',
+      routeStatus: 'not_applicable',
+      lastError: 'счёт-фактура (Invoice)',
+    });
+    expect(await receipt('tst')).toMatchObject({ transportStatus: 'skipped', lastError: 'тестовый документ' });
+    const srv = await receipt('srv');
+    expect(srv).toMatchObject({ transportStatus: 'stored', routeStatus: 'not_applicable' });
+    expect(srv?.lastError).toMatch(/^работы или услуги:/);
+    expect(srv?.sourceDocumentId).toBeNull();
+    expect(await receipt('mat')).toMatchObject({ routeStatus: 'imported' });
+    expect(await receipt('sig')).toBeUndefined();
+
+    // Карточка — одна, с суммой С НДС, как во всём портале.
+    const docs = await db
+      .select({ totalSum: sourceDocuments.totalSum, docNumber: sourceDocuments.docNumber })
+      .from(sourceDocuments)
+      .where(eq(sourceDocuments.edoAccountId, accountId));
+    expect(docs).toEqual([{ totalSum: '2400.00', docNumber: 'УТ-3' }]);
+
+    expect(await eventStatus('ev-1')).toBe('processed');
+    expect((await account()).lastIndexKey).toBe('ik-0001');
+  });
 });
 
 suite('выключенный импорт', () => {

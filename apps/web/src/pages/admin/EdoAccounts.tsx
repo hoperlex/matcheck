@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Descriptions,
   Drawer,
   Form,
@@ -34,6 +35,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { describeAccessCheck } from './edo-access-check';
+import { EdoDryRunView } from './EdoDryRunView';
 import {
   INVENTORY_PERIODS,
   inventorySince,
@@ -103,6 +105,63 @@ const notAnEmail = {
       : Promise.resolve(),
 };
 
+/** Метка формата: машиночитаемость по справочнику Диадока или по версии формата. */
+function FormatTag({
+  formalized,
+  source,
+}: {
+  formalized: boolean;
+  source?: 'reference' | 'version';
+}) {
+  const tag = formalized ? <Tag color="green">машиночитаемый</Tag> : <Tag>скан или файл</Tag>;
+  return source === 'version' ? (
+    <Tooltip title="Справочник Диадока не ответил или не описывает этот тип: определено по версии формата">
+      {tag}
+    </Tooltip>
+  ) : (
+    tag
+  );
+}
+
+/**
+ * Итог отбора под таблицей осмотра: что из ящика взяли бы, а что нет, и —
+ * если проверялось содержимое — сколько УПД оказались материалами.
+ */
+function InventorySelection({ report }: { report: EdoInventoryReport }) {
+  const check = report.contentCheck;
+  if (!report.decisions?.length && !check) return null;
+  return (
+    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+      {report.decisions && report.decisions.length > 0 && (
+        <Space size={[4, 4]} wrap>
+          <Typography.Text strong>Итог отбора:</Typography.Text>
+          {report.decisions.map((d) => (
+            <Tag key={d.category} color={d.category === 'utd_candidate' ? 'blue' : undefined}>
+              {d.label}: {d.count}
+            </Tag>
+          ))}
+        </Space>
+      )}
+      {check && (
+        <Space size={[4, 4]} wrap>
+          <Typography.Text strong>
+            Содержимое УПД: проверено {check.checked}
+            {check.failed ? `, не прочитано ${check.failed}` : ''} (предел {check.limit})
+          </Typography.Text>
+          {check.byContent.map((c) => (
+            <Tag key={c.category} color={c.category === 'materials' ? 'green' : undefined}>
+              {c.label}: {c.count}
+            </Tag>
+          ))}
+          {check.interrupted === 'deadline' && (
+            <Tag color="orange">прервано по времени — доли по проверенной части</Tag>
+          )}
+        </Space>
+      )}
+    </Space>
+  );
+}
+
 export default function AdminEdoAccountsPage() {
   const qc = useQueryClient();
   // Страницу можно выдать на просмотр отдельно от управления, поэтому контролы
@@ -126,6 +185,9 @@ export default function AdminEdoAccountsPage() {
   // запускала работу молча, а отчёт оставался только в базе.
   const [inventoryFor, setInventoryFor] = useState<EdoAccountDto | null>(null);
   const [inventoryPeriod, setInventoryPeriod] = useState<InventoryPeriod>('d90');
+  // Проверка содержимого скачивает до сотни УПД — дольше обычного осмотра,
+  // поэтому по отдельной галочке и выключена по умолчанию.
+  const [checkContent, setCheckContent] = useState(false);
   // Пробный разбор нигде не хранится: отчёт живёт ровно столько, сколько открыто
   // окно. Хранить в базе реквизиты чужих документов ради одной проверки незачем.
   const [dryRun, setDryRun] = useState<EdoDryRunReport | null>(null);
@@ -231,11 +293,16 @@ export default function AdminEdoAccountsPage() {
   });
 
   const inventory = useMutation({
-    mutationFn: ({ id, since }: { id: string; since?: string }) =>
-      api.post<EdoJobQueued>(`/admin/edo-accounts/${id}/inventory`, since ? { since } : {}),
-    onSuccess: () =>
+    mutationFn: ({ id, since, check }: { id: string; since?: string; check: boolean }) =>
+      api.post<EdoJobQueued>(`/admin/edo-accounts/${id}/inventory`, {
+        ...(since ? { since } : {}),
+        ...(check ? { checkContent: true } : {}),
+      }),
+    onSuccess: (_r, vars) =>
       message.success(
-        'Разведка запущена: ничего не импортируется. Отчёт появится здесь через минуту — нажмите «Обновить».',
+        vars.check
+          ? 'Осмотр с проверкой содержимого запущен: ничего не импортируется. Скачивание до ста УПД займёт несколько минут — нажимайте «Обновить».'
+          : 'Разведка запущена: ничего не импортируется. Отчёт появится здесь через минуту — нажмите «Обновить».',
       ),
     onError: (err: Error) => message.error(err.message),
   });
@@ -254,7 +321,7 @@ export default function AdminEdoAccountsPage() {
     onSuccess: (r) => {
       setDryRun(r);
       if (r.candidates === 0) {
-        message.info('За выбранный период машиночитаемых УПД не нашлось');
+        message.info('За выбранный период УПД-кандидатов не нашлось');
       }
     },
     onError: (err: Error) => {
@@ -591,7 +658,7 @@ export default function AdminEdoAccountsPage() {
         onCancel={() => setInventoryFor(null)}
         footer={null}
         title="Осмотр ящика"
-        width={760}
+        width={900}
       >
         {inventoryRow && (
           <Space direction="vertical" style={{ width: '100%' }}>
@@ -615,11 +682,17 @@ export default function AdminEdoAccountsPage() {
                   inventory.mutate({
                     id: inventoryRow.id,
                     since: inventorySince(inventoryPeriod),
+                    check: checkContent,
                   })
                 }
               >
                 Запустить осмотр
               </Button>
+              <Tooltip title="Скачать до ста УПД в память и посчитать, какие из них — материалы, а какие — работы и услуги. Ничего не сохраняется.">
+                <Checkbox checked={checkContent} onChange={(e) => setCheckContent(e.target.checked)}>
+                  Проверить содержимое
+                </Checkbox>
+              </Tooltip>
               {/* Работа идёт в очереди, поэтому отчёт приходится переспрашивать. */}
               <Button onClick={() => invalidate()} loading={list.isFetching}>
                 Обновить
@@ -700,7 +773,12 @@ export default function AdminEdoAccountsPage() {
                   items={inventoryRow.lastInventory.byType}
                   rowKey={(b) => `${b.typeNamedId}|${b.function ?? ''}|${b.version ?? ''}`}
                   columns={[
-                    { title: 'Тип документа', dataIndex: 'typeNamedId', ellipsis: true },
+                    {
+                      title: 'Тип документа',
+                      dataIndex: 'typeNamedId',
+                      ellipsis: true,
+                      render: (t: string, b) => (b.title ? `${b.title} (${t})` : t),
+                    },
                     {
                       title: 'Функция',
                       dataIndex: 'function',
@@ -717,11 +795,18 @@ export default function AdminEdoAccountsPage() {
                       title: 'Формат',
                       dataIndex: 'formalized',
                       width: 150,
-                      render: (f: boolean) =>
-                        f ? (
-                          <Tag color="green">машиночитаемый</Tag>
+                      render: (f: boolean, b) => <FormatTag formalized={f} source={b.formalizedSource} />,
+                    },
+                    {
+                      title: 'Что делаем',
+                      dataIndex: 'decisionLabel',
+                      width: 200,
+                      // Отчёты до выпуска 2 решения не содержат.
+                      render: (label: string | undefined, b) =>
+                        label ? (
+                          <Tag color={b.decision === 'utd_candidate' ? 'blue' : undefined}>{label}</Tag>
                         ) : (
-                          <Tag>скан или PDF</Tag>
+                          '—'
                         ),
                     },
                     { title: 'Сколько', dataIndex: 'count', width: 90 },
@@ -729,20 +814,26 @@ export default function AdminEdoAccountsPage() {
                   cardRender={(b) => (
                     <Card size="small" style={{ width: '100%' }}>
                       <Space direction="vertical" size={0}>
-                        <Typography.Text strong>{b.typeNamedId}</Typography.Text>
+                        <Typography.Text strong>
+                          {b.title ? `${b.title} (${b.typeNamedId})` : b.typeNamedId}
+                        </Typography.Text>
                         <Typography.Text type="secondary">
                           функция: {b.function ?? '—'} · версия: {b.version ?? '—'} · {b.count} шт.
                         </Typography.Text>
-                        {b.formalized ? (
-                          <Tag color="green">машиночитаемый</Tag>
-                        ) : (
-                          <Tag>скан или PDF</Tag>
-                        )}
+                        <Space size={4} wrap>
+                          <FormatTag formalized={b.formalized} source={b.formalizedSource} />
+                          {b.decisionLabel && (
+                            <Tag color={b.decision === 'utd_candidate' ? 'blue' : undefined}>
+                              {b.decisionLabel}
+                            </Tag>
+                          )}
+                        </Space>
                       </Space>
                     </Card>
                   )}
                   emptyText="Входящих документов за этот период нет"
                 />
+                <InventorySelection report={inventoryRow.lastInventory} />
               </>
             ) : (
               <Typography.Text type="secondary">
@@ -755,94 +846,7 @@ export default function AdminEdoAccountsPage() {
               Показывается рядом с разведкой, потому что отвечает на следующий
               вопрос — не «что лежит в ящике», а «прочитаем ли мы это».
             */}
-            {dryRun && (
-              <>
-                <Typography.Text strong>
-                  Пробный разбор: {dryRun.examined} из {dryRun.candidates} найденных УПД
-                </Typography.Text>
-                {dryRun.candidates === 0 && (
-                  <Typography.Text type="secondary">
-                    {dryRun.truncated
-                      ? `В первых ${dryRun.eventsSeen} событиях машиночитаемых УПД не встретилось — это не весь ящик.`
-                      : 'За период машиночитаемых УПД не встретилось — разбирать нечего.'}
-                  </Typography.Text>
-                )}
-                {dryRun.documents.map((d) => (
-                  <Card
-                    key={d.entityId}
-                    size="small"
-                    title={
-                      <Space>
-                        {d.accepted ? (
-                          <Tag color="green">попал бы в документы</Tag>
-                        ) : (
-                          <Tag color="red">не прошёл бы</Tag>
-                        )}
-                        <Typography.Text>
-                          {d.parsed?.docNumber || d.meta.documentNumber || '(без номера)'} от{' '}
-                          {d.parsed?.docDate || d.meta.documentDate || '—'}
-                        </Typography.Text>
-                      </Space>
-                    }
-                  >
-                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                      <Typography.Text type="secondary">
-                        {d.meta.typeNamedId} · {d.meta.function} · {d.meta.version}
-                        {d.sizeBytes !== null ? ` · ${Math.round(d.sizeBytes / 1024)} КБ` : ''}
-                      </Typography.Text>
-
-                      {d.parsed ? (
-                        <>
-                          <Typography.Text>
-                            Поставщик: {d.parsed.supplier.name} (ИНН {d.parsed.supplier.inn}
-                            {d.parsed.supplier.kpp ? `, КПП ${d.parsed.supplier.kpp}` : ''})
-                          </Typography.Text>
-                          <Typography.Text>
-                            Получатель:{' '}
-                            {d.parsed.recipient
-                              ? `${d.parsed.recipient.name} (ИНН ${d.parsed.recipient.inn})`
-                              : '—'}
-                          </Typography.Text>
-                          <Typography.Text>
-                            Позиций: {d.parsed.itemsCount} · итого:{' '}
-                            {d.parsed.totalSum ?? '—'} · НДС: {d.parsed.vatSum ?? '—'}
-                          </Typography.Text>
-                          {d.parsed.sampleItems.map((i) => (
-                            <Typography.Text key={i.lineNo} type="secondary">
-                              {i.lineNo}. {i.name} — {i.qty} {i.unit} × {i.price ?? '—'} ={' '}
-                              {i.sum ?? '—'}
-                              {i.vatRate !== null ? ` (НДС ${i.vatRate}%)` : ''}
-                            </Typography.Text>
-                          ))}
-                        </>
-                      ) : null}
-
-                      {d.reasons.length > 0 && (
-                        <Alert
-                          type="warning"
-                          showIcon
-                          message="Почему не прошёл"
-                          description={d.reasons.join('; ')}
-                        />
-                      )}
-                      {/*
-                        Расхождение с метаданными — самый ранний признак того,
-                        что парсер читает не те поля: провайдер знает номер и
-                        дату независимо от содержимого.
-                      */}
-                      {d.mismatches.length > 0 && (
-                        <Alert
-                          type="error"
-                          showIcon
-                          message="Разбор не сходится с метаданными Диадока"
-                          description={d.mismatches.join('; ')}
-                        />
-                      )}
-                    </Space>
-                  </Card>
-                ))}
-              </>
-            )}
+            {dryRun && <EdoDryRunView report={dryRun} />}
           </Space>
         )}
       </Modal>

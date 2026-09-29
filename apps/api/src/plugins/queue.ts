@@ -174,6 +174,8 @@ export type EdoPollJobData = {
   mode: 'sync' | 'check' | 'inventory';
   /** Для инвентаризации: с какой даты смотреть ленту. */
   since?: string;
+  /** Для инвентаризации: скачать УПД-кандидатов и посчитать, какие — материалы. */
+  checkContent?: boolean;
 };
 
 declare module 'fastify' {

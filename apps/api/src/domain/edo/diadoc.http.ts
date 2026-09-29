@@ -63,6 +63,8 @@ const ALLOWED_ROUTES: readonly AllowedRoute[] = [
   { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/V8/GetNewEvents' },
   { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/V6/GetMessage' },
   { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/V4/GetEntityContent' },
+  // Справочник типов документов: какие из них машиночитаемые и как называются.
+  { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/V2/GetDocumentTypes' },
   // Резервный разбор формализованного титула (за флагом EDO_PARSE_TITLE_FALLBACK).
   { method: 'POST', host: 'diadoc-api.kontur.ru', path: '/ParseTitleXml' },
 ];
@@ -111,6 +113,20 @@ export class DiadocTransient extends Error {
     this.name = 'DiadocTransient';
     this.detail = detail;
     this.endpoint = endpoint;
+  }
+}
+
+/**
+ * Запрос отменён вызывающим: истёк общий предел времени операции.
+ *
+ * Отдельный класс, а не `DiadocTransient`: повторять такой запрос нельзя — его
+ * отменили намеренно, и повтор только растянул бы ожидание, от которого
+ * операция отказалась.
+ */
+export class DiadocAborted extends Error {
+  constructor() {
+    super('Diadoc: запрос отменён — истёк предел времени операции');
+    this.name = 'DiadocAborted';
   }
 }
 
@@ -391,6 +407,11 @@ export type DiadocFetchOptions = {
   sleep?: (ms: number) => Promise<void>;
   fetchImpl?: typeof fetch;
   /**
+   * Общий сигнал отмены операции (например, предел времени пробного разбора).
+   * Складывается с таймаутом одного запроса; после отмены повторов нет.
+   */
+  signal?: AbortSignal;
+  /**
    * Вызывается перед КАЖДОЙ отправкой (включая повторы) со снимком готового
    * запроса. Нужен для диагностики отказов: снаружи виден только ответ.
    */
@@ -414,6 +435,7 @@ export async function diadocFetch(opts: DiadocFetchOptions): Promise<Response> {
   let lastTransient: string | null = null;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (opts.signal?.aborted) throw new DiadocAborted();
     let res: Response;
     try {
       // Снимаем ровно то, что сейчас уйдёт в HTTP-клиент: тело уже собрано,
@@ -423,9 +445,12 @@ export async function diadocFetch(opts: DiadocFetchOptions): Promise<Response> {
         method,
         headers,
         body,
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: opts.signal
+          ? AbortSignal.any([AbortSignal.timeout(timeoutMs), opts.signal])
+          : AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
+      if (opts.signal?.aborted) throw new DiadocAborted();
       // Сеть или таймаут: повторяем, пока есть попытки.
       lastTransient = describeNetworkFailure(err);
       if (attempt >= maxRetries) {

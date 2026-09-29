@@ -87,6 +87,38 @@ export const EdoAuthStateSchema = z.object({
 });
 export type EdoAuthState = z.infer<typeof EdoAuthStateSchema>;
 
+/**
+ * Категории отбора по метаданным (без скачивания): что это за документ и
+ * берём ли его. Перечень закрыт — у каждой категории своя подпись в интерфейсе.
+ */
+export const EdoMetaCategorySchema = z.enum([
+  'utd_candidate',
+  'utd_invoice_only',
+  'invoice',
+  'revision',
+  'correction',
+  'waybill',
+  'not_delivery',
+  'scan',
+  'excluded',
+]);
+export type EdoMetaCategory = z.infer<typeof EdoMetaCategorySchema>;
+
+/** Категории по содержимому УПД: признак предмета позиций (`ПрТовРаб`). */
+export const EdoContentCategorySchema = z.enum([
+  'materials',
+  'services',
+  'undetermined',
+  'invoice_only',
+]);
+export type EdoContentCategory = z.infer<typeof EdoContentCategorySchema>;
+
+const CategoryCountSchema = z.object({
+  category: z.string(),
+  label: z.string(),
+  count: z.number().int(),
+});
+
 /** Сводка инвентаризации: что лежит в ящике, без единого импорта. */
 export const EdoInventoryReportSchema = z.object({
   from: z.string().nullable(),
@@ -105,16 +137,45 @@ export const EdoInventoryReportSchema = z.object({
    * а ответ со списком учётных записей проверяется по этой же схеме.
    */
   timedEvents: z.number().int().optional(),
-  timeSource: z.enum(['event', 'message']).nullable().optional(),
+  timeSource: z.enum(['event', 'message', 'patch']).nullable().optional(),
   byType: z.array(
     z.object({
       typeNamedId: z.string(),
+      /** Название типа по справочнику Диадока («УПД», «Акт»…), если он ответил. */
+      title: z.string().nullable().optional(),
       function: z.string().nullable(),
       version: z.string().nullable(),
       formalized: z.boolean(),
+      /** Откуда известно «машиночитаемый»: справочник Диадока или версия формата. */
+      formalizedSource: z.enum(['reference', 'version']).optional(),
+      /** Что делаем с документами этого типа (уровень 1 отбора). */
+      decision: EdoMetaCategorySchema.optional(),
+      decisionLabel: z.string().optional(),
       count: z.number().int(),
     }),
   ),
+  /**
+   * Итог отбора по метаданным: сколько документов какой категории. Сюда же
+   * попадают исключённые (тестовые, аннулированные…), которых нет в byType.
+   * Необязательное: у отчётов до выпуска 2 его нет.
+   */
+  decisions: z.array(CategoryCountSchema).optional(),
+  /**
+   * Проверка содержимого: сколько УПД-кандидатов оказались материалами, а
+   * сколько — работами или услугами. Есть только у осмотра с галочкой
+   * «Проверить содержимое».
+   */
+  contentCheck: z
+    .object({
+      limit: z.number().int(),
+      checked: z.number().int(),
+      failed: z.number().int(),
+      byContent: z.array(CategoryCountSchema),
+      /** Проверка остановлена по времени: доли относятся к проверенной части. */
+      interrupted: z.enum(['deadline']).nullable(),
+    })
+    .nullable()
+    .optional(),
 });
 export type EdoInventoryReport = z.infer<typeof EdoInventoryReportSchema>;
 
@@ -300,8 +361,13 @@ export const EdoDryRunItemSchema = z.object({
   qty: z.number(),
   unit: z.string(),
   price: z.number().nullable(),
+  /** С НДС — как в карточке. */
   sum: z.number().nullable(),
+  sumExVat: z.number().nullable(),
   vatRate: z.number().nullable(),
+  /** ПрТовРаб: 1 — имущество, 2 — работа, 3 — услуга, 4 — права, 5 — иное. */
+  kind: z.number().int().nullable(),
+  productCode: z.string().nullable(),
 });
 
 export const EdoDryRunPartySchema = z.object({
@@ -310,29 +376,91 @@ export const EdoDryRunPartySchema = z.object({
   name: z.string(),
 });
 
+const EdoDryRunShipPartySchema = z.object({
+  inn: z.string().nullable(),
+  kpp: z.string().nullable(),
+  name: z.string().nullable(),
+  address: z.string().nullable(),
+});
+
+const EdoDryRunDocRefSchema = z.object({
+  name: z.string().nullable(),
+  number: z.string().nullable(),
+  date: z.string().nullable(),
+});
+
+/** «Путь → значение»: сырые поля ответа Диадока, без содержимого файла. */
+const EdoDryRunFieldSchema = z.object({ path: z.string(), value: z.string() });
+
+/** Что о документе знает сам Диадок, до чтения содержимого. */
+const EdoDryRunMetaSchema = z.object({
+  typeNamedId: z.string().nullable(),
+  function: z.string().nullable(),
+  version: z.string().nullable(),
+  documentNumber: z.string().nullable(),
+  documentDate: z.string().nullable(),
+  /** Номер и дата из коллекции Metadata или из устаревших прямых полей. */
+  numberSource: z.enum(['metadata', 'legacy']).nullable(),
+  totalSum: z.string().nullable(),
+  fileName: z.string().nullable(),
+  counteragentBoxId: z.string().nullable(),
+  /** Когда документ доставлен (иначе — время сообщения). */
+  receivedAt: z.string().nullable(),
+  receivedAtSource: z.enum(['delivery', 'message']).nullable(),
+  isTest: z.boolean(),
+  revocationStatus: z.string().nullable(),
+  senderSignatureStatus: z.string().nullable(),
+});
+
 export const EdoDryRunDocumentSchema = z.object({
   messageId: z.string(),
   entityId: z.string(),
-  /** Что о документе знает сам Диадок, до чтения содержимого. */
-  meta: z.object({
-    typeNamedId: z.string().nullable(),
-    function: z.string().nullable(),
-    version: z.string().nullable(),
-    documentNumber: z.string().nullable(),
-    documentDate: z.string().nullable(),
-    fileName: z.string().nullable(),
-    counteragentBoxId: z.string().nullable(),
-  }),
+  meta: EdoDryRunMetaSchema,
+  /** Итог отбора по содержимому. null — содержимое прочитать не удалось. */
+  content: z
+    .object({
+      category: EdoContentCategorySchema,
+      label: z.string(),
+      reason: z.string(),
+      kinds: z.object({
+        goods: z.number().int(),
+        work: z.number().int(),
+        service: z.number().int(),
+        rights: z.number().int(),
+        other: z.number().int(),
+        unknown: z.number().int(),
+      }),
+    })
+    .nullable(),
   /** Что вычитал наш разбор. null — разбор не состоялся, причина в reasons. */
   parsed: z
     .object({
       docNumber: z.string(),
       docDate: z.string(),
+      correction: z.object({ number: z.string().nullable(), date: z.string().nullable() }).nullable(),
       supplier: EdoDryRunPartySchema,
+      suppliers: z.array(EdoDryRunPartySchema),
       recipient: EdoDryRunPartySchema.nullable(),
+      buyers: z.array(EdoDryRunPartySchema),
+      consignorSameAsSeller: z.boolean(),
+      consignor: EdoDryRunShipPartySchema.nullable(),
+      consignee: EdoDryRunShipPartySchema.nullable(),
+      transfer: z
+        .object({
+          date: z.string().nullable(),
+          operation: z.string().nullable(),
+          basis: z.array(EdoDryRunDocRefSchema),
+        })
+        .nullable(),
+      shippingDocs: z.array(EdoDryRunDocRefSchema),
       itemsCount: z.number().int(),
+      /** С НДС — база портала. */
       totalSum: z.number().nullable(),
+      totalExVat: z.number().nullable(),
       vatSum: z.number().nullable(),
+      formatVersion: z.string().nullable(),
+      function: z.string().nullable(),
+      currencyCode: z.string().nullable(),
       /** Первые несколько позиций — чтобы увидеть, что читаются именно они. */
       sampleItems: z.array(EdoDryRunItemSchema),
     })
@@ -346,16 +474,44 @@ export const EdoDryRunDocumentSchema = z.object({
    */
   mismatches: z.array(z.string()),
   sizeBytes: z.number().int().nullable(),
+  /** «Что сообщает Диадок»: сырые поля сущности и документа. */
+  diadocFields: z.array(EdoDryRunFieldSchema),
+  /** «Структура XML»: пути атрибутов и элементов, объединённые по строкам. */
+  xmlOutline: z.array(z.string()),
+  /** «Чего не хватает до карточки»: поле и подсказка, откуда его взять. */
+  missingForCard: z.array(z.object({ field: z.string(), hint: z.string() })),
+  /** Подсказка из портала: возил ли поставщик материалы раньше. */
+  supplierHistory: z
+    .object({ deliveries: z.number().int(), lastAt: z.string().nullable() })
+    .nullable(),
+});
+
+/** Скан или файл без типа: только метаданные, содержимое не скачивается. */
+export const EdoDryRunScanSchema = z.object({
+  messageId: z.string(),
+  entityId: z.string(),
+  meta: EdoDryRunMetaSchema,
+  reason: z.string(),
+  diadocFields: z.array(EdoDryRunFieldSchema),
 });
 
 export const EdoDryRunReportSchema = z.object({
   eventsSeen: z.number().int(),
   /** Обход остановлен на пределе: «не нашли» относится к просмотренному отрезку. */
   truncated: z.boolean(),
-  /** Сколько формализованных УПД встретилось за просмотренный отрезок. */
+  /** Сколько УПД-кандидатов (СЧФДОП/ДОП) встретилось за просмотренный отрезок. */
   candidates: z.number().int(),
-  /** Сколько из них разобрано: предел намеренно небольшой. */
+  /** Сколько из них скачано и разобрано: предел намеренно небольшой. */
   examined: z.number().int(),
+  /** Прервано по общему пределу времени: показано то, что успели. */
+  interrupted: z.enum(['deadline']).nullable(),
+  /** Итог отбора: по метаданным — все документы, по содержимому — разобранные. */
+  selection: z.object({
+    byMeta: z.array(CategoryCountSchema),
+    byContent: z.array(CategoryCountSchema),
+  }),
   documents: z.array(EdoDryRunDocumentSchema),
+  scans: z.array(EdoDryRunScanSchema),
 });
 export type EdoDryRunReport = z.infer<typeof EdoDryRunReportSchema>;
+export type EdoDryRunDocument = z.infer<typeof EdoDryRunDocumentSchema>;

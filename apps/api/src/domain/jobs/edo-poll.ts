@@ -48,6 +48,7 @@ import {
   finishEvent,
   loadReceiptsForEvent,
   markReceiptFailed,
+  markReceiptSkipped,
   releaseReceiptAttempt,
   type EdoReceiptRow,
 } from '../edo/journal.js';
@@ -251,6 +252,7 @@ export async function pollEdoAccount(
         }
 
         for (const entity of classified.entities) {
+          // Подпись — не документ: записи о ней в журнале не нужно.
           if (entity.route === 'ignored') {
             result.skippedEntities += 1;
             continue;
@@ -266,7 +268,8 @@ export async function pollEdoAccount(
             documentVersion: entity.documentVersion,
             documentNumber: entity.documentNumber,
             counteragentBoxId: entity.counteragentBoxId,
-            receivedAt: eventAt,
+            // Время доставки документа, иначе сообщения, иначе события.
+            receivedAt: entity.meta.receivedAt ?? eventAt,
           });
           // Вложение уже доведено до терминала либо исчерпало попытки. Во втором
           // случае оно может так и остаться в `fetching` (процесс падал раз за
@@ -277,6 +280,20 @@ export async function pollEdoAccount(
               messageId: event.Message.MessageId,
               entityId: entity.entityId,
             });
+            continue;
+          }
+
+          // Документ, который не берём (счёт-фактура, акт, тестовый,
+          // аннулированный…), не скачивается, но и не пропадает: квитанция с
+          // причиной — это строка журнала, отвечающая «а где документ?».
+          if (entity.route === 'skip') {
+            await markReceiptSkipped(
+              deps.db,
+              receipt.id,
+              entity.reason,
+              entity.isEncrypted ? 'encrypted' : 'skipped',
+            );
+            result.skippedEntities += 1;
             continue;
           }
 

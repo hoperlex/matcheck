@@ -13,6 +13,7 @@ vi.mock('../src/lib/env.js', () => ({
 }));
 
 const {
+  DiadocAborted,
   DiadocAccessDenied,
   DiadocAuthRejected,
   DiadocGone,
@@ -39,6 +40,9 @@ describe('разрешающий список путей', () => {
     expect(isAllowedRequest('GET', new URL(`${API}/V8/GetNewEvents`))).toBe(true);
     expect(isAllowedRequest('GET', new URL(`${API}/V4/GetEntityContent`))).toBe(true);
     expect(isAllowedRequest('GET', new URL(`${API}/GetMyOrganizations`))).toBe(true);
+    // Справочник типов — тоже чтение.
+    expect(isAllowedRequest('GET', new URL(`${API}/V2/GetDocumentTypes`))).toBe(true);
+    expect(isAllowedRequest('POST', new URL(`${API}/V2/GetDocumentTypes`))).toBe(false);
   });
 
   it('не пропускает методы, которые что-то отправляют или подписывают', () => {
@@ -280,5 +284,62 @@ describe('лимит размера', () => {
   it('тело в пределах лимита читается целиком', async () => {
     const body = await readBodyWithLimit(new Response('привет'), 1024);
     expect(body.toString('utf-8')).toBe('привет');
+  });
+});
+
+describe('общий предел времени операции', () => {
+  it('после отмены запрос не повторяется: отказ сразу и своим классом', async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn(async () => {
+      controller.abort();
+      throw new TypeError('fetch failed');
+    });
+    await expect(
+      diadocFetch({
+        method: 'GET',
+        url: new URL(`${API}/V4/GetEntityContent`),
+        timeoutMs: 1000,
+        fetchImpl: fetchImpl as never,
+        sleep: noSleep,
+        signal: controller.signal,
+      }),
+    ).rejects.toBeInstanceOf(DiadocAborted);
+    // Два повтора по EDO_HTTP_MAX_RETRIES не понадобились: операцию отменили.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('уже отменённая операция не выходит в сеть', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchImpl = vi.fn();
+    await expect(
+      diadocFetch({
+        method: 'GET',
+        url: new URL(`${API}/V8/GetNewEvents`),
+        timeoutMs: 1000,
+        fetchImpl: fetchImpl as never,
+        signal: controller.signal,
+      }),
+    ).rejects.toBeInstanceOf(DiadocAborted);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('сигнал доходит до HTTP-клиента вместе с таймаутом запроса', async () => {
+    const controller = new AbortController();
+    let passed: AbortSignal | undefined;
+    const fetchImpl = vi.fn(async (_url: URL, init: RequestInit) => {
+      passed = init.signal ?? undefined;
+      return okResponse();
+    });
+    await diadocFetch({
+      method: 'GET',
+      url: new URL(`${API}/V8/GetNewEvents`),
+      timeoutMs: 1000,
+      fetchImpl: fetchImpl as never,
+      signal: controller.signal,
+    });
+    expect(passed?.aborted).toBe(false);
+    controller.abort();
+    expect(passed?.aborted).toBe(true);
   });
 });

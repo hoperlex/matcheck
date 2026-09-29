@@ -117,7 +117,9 @@ const edoWorker = new Worker<EdoPollJobData>(
   async (job: Job<EdoPollJobData>) => {
     const { accountId, mode } = job.data;
     if (mode === 'inventory') {
-      const outcome = await runEdoInventory(edoDeps, accountId, job.data.since);
+      const outcome = await runEdoInventory(edoDeps, accountId, job.data.since, {
+        checkContent: job.data.checkContent === true,
+      });
       edoLog.info({ accountId, outcome }, 'разведка ящика завершена');
       return;
     }

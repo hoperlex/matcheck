@@ -13,7 +13,7 @@ vi.mock('../src/lib/env.js', () => ({
   loadEnv: () => ({ EDO_HTTP_MAX_RETRIES: 0, EDO_XML_MAX_BYTES: 1024 }),
 }));
 
-const { DiadocClient } = await import('../src/domain/edo/diadoc.client.js');
+const { DiadocClient, parseDocumentTypes } = await import('../src/domain/edo/diadoc.client.js');
 
 /** Авторизация здесь не предмет проверки: отдаём готовый заголовок. */
 const auth = { header: async () => 'Bearer token-123', invalidate: () => {} };
@@ -123,5 +123,47 @@ describe('разбор ответа', () => {
       json({ Organizations: [{ Inn: '1', Boxes: [{ BoxId: 'b', NewField: 42 }] }], Extra: true }),
     );
     await expect(client.getMyOrganizations()).resolves.toHaveLength(1);
+  });
+});
+
+describe('справочник типов документов', () => {
+  it('берёт тип, название и машиночитаемость первого титула', () => {
+    const types = parseDocumentTypes({
+      DocumentTypes: [
+        {
+          Name: 'UniversalTransferDocument',
+          Title: 'УПД',
+          Functions: [
+            {
+              Name: 'СЧФДОП',
+              Versions: [
+                {
+                  Version: 'utd970_05_03_01',
+                  Titles: [
+                    { Index: 1, IsFormal: false },
+                    { Index: 0, IsFormal: true },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        { Name: 'Nonformalized', Functions: [{ Name: 'default', Versions: [{ Version: 'v1', Titles: [] }] }] },
+      ],
+    });
+    expect(types).toEqual([
+      {
+        name: 'UniversalTransferDocument',
+        title: 'УПД',
+        versions: [{ fn: 'СЧФДОП', version: 'utd970_05_03_01', isFormal: true }],
+      },
+      { name: 'Nonformalized', title: null, versions: [{ fn: 'default', version: 'v1', isFormal: null }] },
+    ]);
+  });
+
+  it('незнакомая форма ответа даёт пустой справочник, а не падение', () => {
+    expect(parseDocumentTypes(null)).toEqual([]);
+    expect(parseDocumentTypes({ DocumentTypes: 'нет' })).toEqual([]);
+    expect(parseDocumentTypes({ DocumentTypes: [{ Title: 'без имени' }, 5] })).toEqual([]);
   });
 });
