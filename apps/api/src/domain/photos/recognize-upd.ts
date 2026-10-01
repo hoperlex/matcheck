@@ -13,6 +13,12 @@ import {
   detectQtyRepairs,
   type QtyRepairTrace,
 } from '../edo/qty-repair.js';
+import {
+  applyQtyScale,
+  buildQtyScaleTrace,
+  detectQtyScale,
+  type QtyScaleTrace,
+} from '../edo/qty-scale.js';
 import { loadEnv } from '../../lib/env.js';
 
 /**
@@ -48,6 +54,8 @@ export type PhotoUpdRecognition = {
    * показывает. null, когда кандидатов не было или правило выключено.
    */
   qtyRepair: QtyRepairTrace | null;
+  /** След строгого правила потери десятичной запятой ×1000. */
+  qtyScale: QtyScaleTrace | null;
 };
 
 export async function recognizePhotoUpd(args: {
@@ -63,6 +71,8 @@ export async function recognizePhotoUpd(args: {
    * Проверять их надо там, где есть доступ к записи и транзакция.
    */
   allowQtyRepairApply?: boolean;
+  /** Та же защита операции для отдельного правила qty-scale. */
+  allowQtyScaleApply?: boolean;
 }): Promise<PhotoUpdRecognition> {
   const result = await parseUpdVision(
     { buffer: args.buffer, mimeType: args.mimeType, filename: args.label },
@@ -75,6 +85,28 @@ export async function recognizePhotoUpd(args: {
     result.parsed,
     loadEnv().UPD_NO_PRICING_V1,
   );
+
+  // qty-scale проверяет сырой построчный НДС как независимую улику, поэтому
+  // обязан идти до normalizeLineVatAgainstHeader. В shadow данные не меняются.
+  const qtyScaleMode = loadEnv().QTY_SCALE_REPAIR;
+  let qtyScaleTrace: QtyScaleTrace | null = null;
+  if (qtyScaleMode !== 'off') {
+    const candidates = detectQtyScale(parsed);
+    let appliedRows = new Set<number>();
+    if (qtyScaleMode === 'on' && args.allowQtyScaleApply === true) {
+      const repaired = applyQtyScale(parsed, candidates);
+      parsed = repaired.parsed;
+      appliedRows = new Set(repaired.applied.map((candidate) => candidate.row));
+    }
+    qtyScaleTrace = buildQtyScaleTrace({
+      mode: qtyScaleMode,
+      candidates,
+      appliedRows,
+      generation: null,
+      docVersion: null,
+    });
+  }
+
   // Сравнение ссылок: функция возвращает тот же объект, когда налог не
   // переписывала. После нашего пересчёта сходимость построчного НДС
   // подтверждает наш расчёт, а не чтение с документа, — qty-repair обязан это
@@ -148,6 +180,7 @@ export async function recognizePhotoUpd(args: {
     model: await modelNameOf(result.llmProviderId),
     validation,
     qtyRepair: qtyRepairTrace,
+    qtyScale: qtyScaleTrace,
   };
 }
 

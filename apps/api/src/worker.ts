@@ -36,6 +36,7 @@ import {
 } from './db/schema.js';
 import { sql as drSql } from 'drizzle-orm';
 import { matchOrCreateSupplier } from './domain/sourceDocuments/supplierMatcher.js';
+import { decideRecognizedSupplier } from './domain/sourceDocuments/recognized-supplier.js';
 import { manualRecipientSource } from './domain/sourceDocuments/resolve-contractor.js';
 import {
   consigneeOwnIdentity,
@@ -121,6 +122,13 @@ import {
   type Torg12QtyCandidate,
   type Torg12QtyTrace,
 } from './domain/edo/torg12-qty.js';
+import {
+  applyQtyScale,
+  buildQtyScaleTrace,
+  detectQtyScale,
+  type QtyScaleCandidate,
+  type QtyScaleTrace,
+} from './domain/edo/qty-scale.js';
 import { operationTrace } from './domain/sourceDocuments/operation-trace.js';
 import { verdictForDuplicate, type DuplicateVerdict } from './domain/edo/duplicate-verdict.js';
 import { normalizeUpdNoPricingTotals } from './domain/edo/upd-no-pricing-normalize.js';
@@ -1822,12 +1830,28 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // НЕ пишем — поставщики и контрагенты это разные сущности (см. миграцию
   // 0064 и supplierMatcher.ts).
   const supplier = parsed.supplier;
+  const supplierDecision = supplier
+    ? decideRecognizedSupplier(
+        { inn: supplier.inn ?? null, kpp: supplier.kpp ?? null, name: supplier.name ?? null },
+        loadEnv().PARTY_RESOLUTION_V1,
+      )
+    : null;
+  if (supplierDecision?.reason) {
+    log.warn(
+      {
+        sourceDocumentId,
+        mode: loadEnv().PARTY_RESOLUTION_V1,
+        reason: supplierDecision.reason,
+        blocked: supplierDecision.blocked,
+        supplierInn: supplier?.inn ?? null,
+        supplierName: supplier?.name ?? null,
+      },
+      'recognized supplier failed directory guard',
+    );
+  }
   const supplierMatch =
-    supplier && (supplier.inn || supplier.name)
-      ? await matchOrCreateSupplier(
-          { db },
-          { inn: supplier.inn ?? null, kpp: supplier.kpp ?? null, name: supplier.name ?? null },
-        )
+    supplierDecision?.supplier && (supplierDecision.supplier.inn || supplierDecision.supplier.name)
+      ? await matchOrCreateSupplier({ db }, supplierDecision.supplier)
       : null;
   const supplierDirectoryId = supplierMatch?.id ?? null;
 
@@ -1946,6 +1970,39 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // no-op, поэтому старые активные промпты сохраняют прежнее поведение.
   parsed = normalizeUpdNoPricingTotals(parsed, loadEnv().UPD_NO_PRICING_V1);
 
+  // ─── Потеря десятичной запятой в количестве: 74,000 → 74000 ─────────────
+  //
+  // Детектор стоит ДО нормализации НДС: если ставка/сумма строки прочитаны,
+  // они служат независимой уликой и не должны быть синтезированы нашим кодом.
+  // Применение — ДО preValidation: доказуемо исправленный первичный документ
+  // не нужно зря отправлять на повтор модели. Повторные/ручные поколения только
+  // наблюдаются и не меняются.
+  const qtyScaleMode = loadEnv().QTY_SCALE_REPAIR;
+  let qtyScaleCandidates: QtyScaleCandidate[] = [];
+  let qtyScaleApplied: QtyScaleCandidate[] = [];
+  if (qtyScaleMode !== 'off') {
+    const parsedBeforeQtyScale = parsed;
+    try {
+      qtyScaleCandidates = detectQtyScale(parsed);
+      const allowed =
+        qtyScaleMode === 'on' &&
+        QTY_REPAIR_PARSE_MODES.has(parseMode) &&
+        !secondPassJob &&
+        !segmentRepairJob &&
+        jobGeneration === 0;
+      if (allowed) {
+        const repaired = applyQtyScale(parsed, qtyScaleCandidates);
+        parsed = repaired.parsed;
+        qtyScaleApplied = repaired.applied;
+      }
+    } catch (err) {
+      parsed = parsedBeforeQtyScale;
+      qtyScaleCandidates = [];
+      qtyScaleApplied = [];
+      log.warn({ err, sourceDocumentId }, 'qty scale: сбой правила, разбор продолжен как при off');
+    }
+  }
+
   // Построчный НДС, противоречащий шапке, — выдуманная моделью ставка.
   //
   // Через УПД-поток идут не только УПД: счета и товарные чеки попадают туда же,
@@ -1972,7 +2029,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // дубль (у наших двух прод-дублей вообще нет позиций) второго шанса не
   // получит. Поэтому считаем здесь, а ставим задание вместе с записью
   // результата — в одной транзакции, в обеих ветках.
-  const preValidation = validateUpdTotals({
+  let preValidation = validateUpdTotals({
     totalSum: parsed.totalSum ?? null,
     vatSum: parsed.vatSum ?? null,
     itemsCount: parsed.itemsCount ?? null,
@@ -1987,9 +2044,8 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       vatSum: i.vatSum ?? null,
     })),
   });
-  const weakReasons = weakParseReasons(parsed, preValidation.hasMismatch);
-  const wantSecondPass =
-    !secondPassJob && weakReasons.length > 0 && SECOND_PASS_MODES.has(parseMode);
+  let weakReasons = weakParseReasons(parsed, preValidation.hasMismatch);
+  let wantSecondPass = !secondPassJob && weakReasons.length > 0 && SECOND_PASS_MODES.has(parseMode);
 
   // Автоповтор сегмента. Условие расхождения — hasMismatch, а НЕ
   // hasMoneyMismatch: второй исключает items_count, и документ, где в бланке
@@ -2001,7 +2057,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // Область — только первичный разбор сегмента: ручной повтор опубликованного
   // комплекта (segmentJob.reparse) сюда не входит, там нужен учёт приёмок и
   // отгрузок, которого у этой фазы нет.
-  const wantSegmentRepair =
+  let wantSegmentRepair =
     !segmentRepairJob &&
     segmentContext != null &&
     segmentJob?.reparse !== true &&
@@ -2391,6 +2447,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // транзакции: до проверки следа в операциях неизвестно, останутся ли
     // применённые правки применёнными.
     qtyRepair: null as QtyRepairTrace | null,
+    qtyScale: null as QtyScaleTrace | null,
     torg12Qty: null as Torg12QtyTrace | null,
     // Чем документ разобран. Читает это только повтор: он обязан пойти ТЕМ ЖЕ
     // путём, а по типу документа его не вывести — kind='transport_waybill'
@@ -2436,6 +2493,9 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             // qty может быть null для строк-услуг (доставка без количества) —
             // в БД пишем '0' (колонка NOT NULL), как в waybill-пути.
             qty: it.qty != null ? it.qty.toString() : '0',
+            qtyRead:
+              qtyScaleApplied.find((candidate) => candidate.row === idx + 1)?.qtyFrom.toString() ??
+              null,
             unit: it.unit,
             price: it.price != null ? it.price.toString() : null,
             sum: it.sum != null ? it.sum.toString() : null,
@@ -2482,10 +2542,16 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // ровно тем решением, из-за которого потом ищут, откуда в приёмке чужое
     // количество.
     const rollbackQtyRepair = (reason: string, details: Record<string, unknown>): void => {
-      // Оба правила количества откатываются вместе: у них один повод (документ
+      const qtyScaleWasApplied = qtyScaleApplied.length > 0;
+      // Все правила количества откатываются вместе: у них один повод (документ
       // уже уехал в операцию) и одна сверка, которую после возврата чисел
       // нужно пересчитать РОВНО один раз.
-      if (qtyRepairApplied.length === 0 && torg12QtyApplied.length === 0) return;
+      if (
+        qtyScaleApplied.length === 0 &&
+        qtyRepairApplied.length === 0 &&
+        torg12QtyApplied.length === 0
+      )
+        return;
       {
         // Возвращаем прочитанные моделью количества и пересчитываем сверку по
         // ним: иначе в карточке осталась бы сверка от исправленных чисел, а в
@@ -2493,6 +2559,13 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         for (const c of qtyRepairApplied) {
           const row = itemRows[c.row - 1];
           if (row) row.qty = c.qtyFrom.toString();
+        }
+        for (const c of qtyScaleApplied) {
+          const row = itemRows[c.row - 1];
+          if (row) {
+            row.qty = c.qtyFrom.toString();
+            row.qtyRead = null;
+          }
         }
         for (const c of torg12QtyApplied) {
           const row = itemRows[c.row - 1];
@@ -2504,6 +2577,8 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         const rolledBack = {
           ...parsed,
           items: parsed.items.map((item, idx) => {
+            const scale = qtyScaleApplied.find((x) => x.row === idx + 1);
+            if (scale) return { ...item, qty: scale.qtyFrom };
             const c = qtyRepairApplied.find((x) => x.row === idx + 1);
             if (c) return { ...item, qty: c.qtyFrom };
             const t = torg12QtyApplied.find((x) => x.row === idx + 1);
@@ -2534,6 +2609,59 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             detectPackPriceScale: loadEnv().UPD_SCALE_WARNINGS,
           },
         );
+        // Только новое раннее правило qty-scale успевает повлиять на outcome и
+        // маршрутизацию повторов. При выключенном QTY_SCALE_REPAIR оставляем
+        // поведение прежних qty-правил побитово тем же, что было до этой
+        // доработки.
+        if (qtyScaleWasApplied) {
+          const rolledBackOutcome = deriveUpdParseOutcome(
+            { ...rolledBack, itemsCount: rolledBack.itemsCount ?? null },
+            headerValues.validation,
+            { confidence, parsedViaVision },
+          );
+          headerValues.status = rolledBackOutcome.status;
+          headerValues.parseErrorCode = rolledBackOutcome.parseErrorCode;
+          headerValues.parseErrorDetails =
+            rolledBackOutcome.parseErrorDetails ||
+            Object.keys(detailExtras).length > 0 ||
+            duplicateCheck
+              ? {
+                  ...(rolledBackOutcome.parseErrorDetails ?? {}),
+                  ...detailExtras,
+                  ...(duplicateCheck ? { duplicateCheck } : {}),
+                }
+              : null;
+          // qty-scale участвовал в решении о повторе ДО транзакции. Если
+          // поздняя проверка следа заставила вернуть исходное число,
+          // маршрутизация тоже обязана вернуться к исходному документу.
+          preValidation = validateUpdTotals({
+            totalSum: rolledBack.totalSum ?? null,
+            vatSum: rolledBack.vatSum ?? null,
+            itemsCount: rolledBack.itemsCount ?? null,
+            items: rolledBack.items.map((i) => ({
+              rowNo: i.rowNo ?? null,
+              qty: i.qty ?? null,
+              price: i.price ?? null,
+              sum: i.sum ?? null,
+              vatRate: i.vatRate ?? null,
+              vatSum: i.vatSum ?? null,
+            })),
+          });
+          weakReasons = weakParseReasons(rolledBack, preValidation.hasMismatch);
+          wantSecondPass =
+            !secondPassJob && weakReasons.length > 0 && SECOND_PASS_MODES.has(parseMode);
+          wantSegmentRepair =
+            !segmentRepairJob &&
+            segmentContext != null &&
+            segmentJob?.reparse !== true &&
+            loadEnv().UPD_SEGMENT_REPAIR !== 'off' &&
+            preValidation.hasMismatch;
+        }
+        qtyScaleCandidates = qtyScaleCandidates.map((c) =>
+          qtyScaleApplied.some((a) => a.row === c.row)
+            ? { ...c, applicable: false, blockedBy: 'operation_trace' as const }
+            : c,
+        );
         qtyRepairCandidates = qtyRepairCandidates.map((c) =>
           qtyRepairApplied.some((a) => a.row === c.row)
             ? { ...c, applicable: false, blockedBy: 'operation_trace' as const }
@@ -2547,17 +2675,22 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         log.warn(
           {
             ...details,
-            rows: [...qtyRepairApplied, ...torg12QtyApplied].map((c) => c.row),
+            rows: [...qtyScaleApplied, ...qtyRepairApplied, ...torg12QtyApplied].map((c) => c.row),
           },
           reason,
         );
+        qtyScaleApplied = [];
         qtyRepairApplied = [];
         torg12QtyApplied = [];
       }
     };
 
     try {
-      if (qtyRepairApplied.length > 0 || torg12QtyApplied.length > 0) {
+      if (
+        qtyScaleApplied.length > 0 ||
+        qtyRepairApplied.length > 0 ||
+        torg12QtyApplied.length > 0
+      ) {
         const existingItemIds = await txDb
           .select({ id: sourceDocumentItems.id })
           .from(sourceDocumentItems)
@@ -2582,6 +2715,13 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         generation: jobGeneration,
         docVersion: headerValues.processedAt.toISOString(),
       });
+      headerValues.qtyScale = buildQtyScaleTrace({
+        mode: qtyScaleMode,
+        candidates: qtyScaleCandidates,
+        appliedRows: new Set(qtyScaleApplied.map((c) => c.row)),
+        generation: jobGeneration,
+        docVersion: headerValues.processedAt.toISOString(),
+      });
       headerValues.qtyRepair = buildQtyRepairTrace({
         mode: qtyRepairMode,
         candidates: qtyRepairCandidates,
@@ -2602,6 +2742,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       // Правка без следа необратима, поэтому ни одного следа не остаётся —
       // ни у арифметического правила, ни у правила по графам ТОРГ-12.
       headerValues.qtyRepair = null;
+      headerValues.qtyScale = null;
       headerValues.torg12Qty = null;
     }
 
@@ -2659,6 +2800,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // нет ни того, ни другого.
     if (
       (qtyRepairApplied.length > 0 && headerValues.qtyRepair) ||
+      (qtyScaleApplied.length > 0 && headerValues.qtyScale) ||
       (torg12QtyApplied.length > 0 && headerValues.torg12Qty)
     ) {
       const idByLine = new Map(insertedItems.map((r) => [r.lineNo, r.id]));
@@ -2675,6 +2817,14 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
                 qtyRepair: {
                   ...headerValues.qtyRepair,
                   entries: withItemIds(headerValues.qtyRepair.entries),
+                },
+              }
+            : {}),
+          ...(qtyScaleApplied.length > 0 && headerValues.qtyScale
+            ? {
+                qtyScale: {
+                  ...headerValues.qtyScale,
+                  entries: withItemIds(headerValues.qtyScale.entries),
                 },
               }
             : {}),
@@ -6757,14 +6907,29 @@ async function createSourceDocumentFromWaybill(args: {
   // же добавить сюда новую форму — оставить документ без поставщика вовсе.
   if (doc.form === 'tn_2116' || doc.form === 'tn_1t') {
     if (doc.shipper?.inn || doc.shipper?.name) {
-      const match = await matchOrCreateSupplier(
-        { db },
+      const supplierDecision = decideRecognizedSupplier(
         {
           inn: doc.shipper.inn ?? null,
           kpp: null,
           name: doc.shipper.name ?? null,
         },
+        loadEnv().PARTY_RESOLUTION_V1,
       );
+      if (supplierDecision.reason) {
+        logger.warn(
+          {
+            mode: loadEnv().PARTY_RESOLUTION_V1,
+            reason: supplierDecision.reason,
+            blocked: supplierDecision.blocked,
+            supplierInn: doc.shipper.inn ?? null,
+            supplierName: doc.shipper.name ?? null,
+          },
+          'recognized waybill supplier failed directory guard',
+        );
+      }
+      const match = supplierDecision.supplier
+        ? await matchOrCreateSupplier({ db }, supplierDecision.supplier)
+        : null;
       supplierDirectoryId = match?.id ?? null;
       supplierInnRaw = doc.shipper.inn ?? null;
     }

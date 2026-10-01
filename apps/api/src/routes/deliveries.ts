@@ -60,6 +60,7 @@ import {
   findDroppedOrigins,
   resolveItemOrigins,
   type ExistingItemRow,
+  type ItemOrigin,
 } from '../domain/operations/item-origin.js';
 import { decideUnitsFromDocument, type DocumentItemUnit } from '../domain/operations/item-units.js';
 import { isMobileClient } from '../lib/client-type.js';
@@ -2704,6 +2705,71 @@ function unitModeFor(
   return loadEnv().UNIT_FROM_DOCUMENT;
 }
 
+/**
+ * Проверяет ссылку строки приёмки на строку исходного документа.
+ *
+ * В схеме `source_document_id` и `source_document_item_id` — два независимых
+ * внешних ключа. Поэтому существование обоих UUID ещё не означает, что строка
+ * действительно принадлежит указанному документу. Старый/офлайн-клиент также
+ * может прислать id строки, которую переразбор документа уже заменил.
+ *
+ * Валидные строки берём под KEY SHARE до конца текущей транзакции: конкурентный
+ * переразбор либо завершится раньше и мы увидим новые данные, либо подождёт
+ * вставку приёмки. Так между SELECT и INSERT не появляется окно для 23503.
+ * Недействительный item-id отбрасываем, но сохраняем document-id — происхождение
+ * документа по-прежнему известно и не должно теряться из-за устаревшей ссылки.
+ */
+async function validateSourceDocumentItemOrigins(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tx: any,
+  origins: readonly ItemOrigin[],
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log: any,
+  deliveryId: string,
+): Promise<ItemOrigin[]> {
+  const itemIds = [
+    ...new Set(
+      origins
+        .map((origin) => origin.sourceDocumentItemId)
+        .filter((id): id is string => id !== null),
+    ),
+  ];
+  if (itemIds.length === 0) return [...origins];
+
+  const rows = await tx
+    .select({
+      id: sourceDocumentItems.id,
+      sourceDocumentId: sourceDocumentItems.sourceDocumentId,
+    })
+    .from(sourceDocumentItems)
+    .where(inArray(sourceDocumentItems.id, itemIds))
+    .for('key share');
+  const ownerByItemId = new Map(
+    rows.map((row: { id: string; sourceDocumentId: string }) => [row.id, row.sourceDocumentId]),
+  );
+
+  const rejected: { sourceDocumentId: string | null; sourceDocumentItemId: string }[] = [];
+  const validated = origins.map((origin) => {
+    const itemId = origin.sourceDocumentItemId;
+    if (itemId === null) return origin;
+    const ownerId = ownerByItemId.get(itemId);
+    if (origin.sourceDocumentId !== null && ownerId === origin.sourceDocumentId) return origin;
+    rejected.push({
+      sourceDocumentId: origin.sourceDocumentId,
+      sourceDocumentItemId: itemId,
+    });
+    return { ...origin, sourceDocumentItemId: null };
+  });
+
+  if (rejected.length > 0) {
+    log.warn(
+      { deliveryId, rejected },
+      'invalid source document item references dropped from delivery upsert',
+    );
+  }
+  return validated;
+}
+
 async function createDelivery(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   app: any,
@@ -2777,6 +2843,7 @@ async function createDelivery(
       })
       .returning();
     if (!created) throw new Error('Failed to insert delivery');
+
     if (input.items.length) {
       // При СОЗДАНИИ приёмки происхождение берётся из запроса: строк в БД ещё
       // нет, переносить нечего. Ограничение то же, что и дальше по жизни
@@ -2787,13 +2854,19 @@ async function createDelivery(
       // офлайн, впервые приезжает сюда уже как confirmed_mol — очередь мутаций
       // на планшете схлопывает upsert'ы в последний, — поэтому ветка создания
       // обязана уметь то же, что и updateDelivery.
-      const originsOnCreate = input.items.map((i) =>
+      const requestedOrigins = input.items.map((i) =>
         i.sourceDocumentId && linkedOnCreate.has(i.sourceDocumentId)
           ? {
               sourceDocumentId: i.sourceDocumentId,
               sourceDocumentItemId: i.sourceDocumentItemId ?? null,
             }
           : { sourceDocumentId: null, sourceDocumentItemId: null },
+      );
+      const originsOnCreate = await validateSourceDocumentItemOrigins(
+        tx,
+        requestedOrigins,
+        app.log,
+        created.id,
       );
       const unitDecisions = await decideUnitsFromDocument({
         mode: unitMode,
@@ -2845,6 +2918,10 @@ async function createDelivery(
       );
     }
     if (input.sourceDocumentIds.length) {
+      // Сначала helper выше удерживает KEY SHARE на валидных строках, затем
+      // блокируем документы. Это тот же порядок «строки → документ», что у
+      // воркера переразбора, поэтому конкурентная загрузка с планшета не
+      // образует взаимную блокировку. Обе блокировки живут до конца транзакции.
       await assertSourcesAvailableForDelivery(
         { db: tx },
         input.sourceDocumentIds,
@@ -3036,7 +3113,7 @@ async function updateDelivery(
       .where(eq(deliverySources.deliveryId, id));
     const linkedDocumentIds = linkedSources.map((s) => s.sourceDocumentId);
 
-    const origins = resolveItemOrigins({
+    const resolvedOrigins = resolveItemOrigins({
       existing: previousItems,
       incoming: itemsForInsert.map((i) => ({
         id: i.clientId ?? null,
@@ -3048,6 +3125,7 @@ async function updateDelivery(
       })),
       linkedDocumentIds,
     });
+    const origins = await validateSourceDocumentItemOrigins(tx, resolvedOrigins, app.log, id);
 
     // Наблюдение за промахами сопоставления: строка, у которой привязка к
     // позиции документа БЫЛА и после upsert исчезла. Валовое число позиций без

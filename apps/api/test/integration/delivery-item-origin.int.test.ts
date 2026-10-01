@@ -351,6 +351,69 @@ suite('происхождение позиций приёмки (реальны�
     expect(after[0]!.source_document_item_id).toBe(upd.itemIds[0]);
   });
 
+  it('создание с несуществующей строкой документа не падает с 23503', async () => {
+    const upd = await makeUpd('О-5д', [{ name: 'Профиль', qty: '8' }]);
+    const deliveryId = randomUUID();
+
+    const res = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [upd.id],
+      items: [
+        {
+          nameRaw: 'Профиль',
+          qtyActual: '8',
+          unit: 'шт',
+          lineNo: 1,
+          sourceDocumentId: upd.id,
+          sourceDocumentItemId: randomUUID(),
+        },
+      ],
+    });
+
+    expect(res.statusCode, res.body).toBe(200);
+    const [item] = await itemsOf(deliveryId);
+    expect(item!.source_document_id).toBe(upd.id);
+    expect(item!.source_document_item_id).toBeNull();
+  });
+
+  it('upsert с несуществующей строкой документа не падает с 23503', async () => {
+    const upd = await makeUpd('О-5е', [{ name: 'Кабель', qty: '20' }]);
+    const deliveryId = randomUUID();
+    await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [upd.id],
+      items: [{ nameRaw: 'Кабель', qtyActual: '20', unit: 'м', lineNo: 1 }],
+    });
+    const [before] = await itemsOf(deliveryId);
+
+    const res = await upsert({
+      id: deliveryId,
+      statusCode: 'filled',
+      siteId,
+      sourceDocumentIds: [upd.id],
+      items: [
+        {
+          id: before!.id,
+          nameRaw: 'Кабель',
+          qtyActual: '20',
+          unit: 'м',
+          lineNo: 1,
+          sourceDocumentId: upd.id,
+          sourceDocumentItemId: randomUUID(),
+        },
+      ],
+    });
+
+    expect(res.statusCode, res.body).toBe(200);
+    const [item] = await itemsOf(deliveryId);
+    expect(item!.source_document_id).toBe(upd.id);
+    expect(item!.source_document_item_id).toBeNull();
+  });
+
   it('строке без происхождения нельзя приписать непривязанный документ', async () => {
     const mine = await makeUpd('О-5в', [{ name: 'Сетка кладочная', qty: '15' }]);
     const foreign = await makeUpd('О-5г', [{ name: 'Сетка кладочная', qty: '15' }]);
@@ -1505,6 +1568,9 @@ suite('происхождение позиций приёмки (реальны�
 
       expect(res.statusCode, res.body).toBe(200);
       expect(await unitsOf(deliveryId)).toEqual(['шт']);
+      const [item] = await itemsOf(deliveryId);
+      expect(item!.source_document_id).toBe(mine.id);
+      expect(item!.source_document_item_id).toBeNull();
     });
 
     it('отвязанный документ единицу не отдаёт', async () => {

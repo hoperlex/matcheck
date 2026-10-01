@@ -40,13 +40,20 @@ vi.mock('bullmq', () => ({
 vi.mock('../../src/db/client.js', () => ({ db: drizzle(sql!) }));
 // loadEnv кэширует разбор process.env при первом вызове, поэтому менять
 // переменную между тестами бесполезно — подменяем сам режим.
-const mocks = vi.hoisted(() => ({ qtyRepairMode: 'off' as 'off' | 'shadow' | 'on' }));
+const mocks = vi.hoisted(() => ({
+  qtyRepairMode: 'off' as 'off' | 'shadow' | 'on',
+  qtyScaleMode: 'off' as 'off' | 'shadow' | 'on',
+}));
 vi.mock('../../src/lib/env.js', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('../../src/lib/env.js');
   const load = actual.loadEnv as () => Record<string, unknown>;
   return {
     ...actual,
-    loadEnv: () => ({ ...load(), UPD_QTY_REPAIR: mocks.qtyRepairMode }),
+    loadEnv: () => ({
+      ...load(),
+      UPD_QTY_REPAIR: mocks.qtyRepairMode,
+      QTY_SCALE_REPAIR: mocks.qtyScaleMode,
+    }),
   };
 });
 // JPEG-сигнатура: воркер обязан пойти vision-путём, иначе правило под запрет
@@ -70,6 +77,9 @@ vi.mock('../../src/domain/jobs/job-outbox.js', async () => {
   );
   return { ...actual, processJobOutbox: vi.fn().mockResolvedValue({ dispatched: 0, failed: 0 }) };
 });
+vi.mock('../../src/domain/sse/redis-bridge.js', () => ({
+  publishSseEvent: vi.fn().mockResolvedValue(undefined),
+}));
 
 // Подмена «разрешено применять» без правки боевого списка пар: детектор
 // возвращает то же, что настоящий, но помечает кандидата применимым.
@@ -142,6 +152,37 @@ function parsedUt480() {
   };
 }
 
+/** УПД RADIANT: `74,000` прочитано как 74000 при верных цене и сумме. */
+function parsedLostDecimal() {
+  return {
+    parsed: {
+      docNumber: 'T26-1315-7-TEST',
+      docDate: '2026-09-13',
+      totalSum: 11145.07,
+      vatSum: 2009.77,
+      itemsCount: 1,
+      supplier: null,
+      recipient: null,
+      consignee: null,
+      items: [
+        {
+          rowNo: 1,
+          nameRaw: 'Клапан противопожарный',
+          qty: 74000,
+          unit: 'шт',
+          price: 123.45,
+          sum: 11145.07,
+          vatRate: 22,
+          vatSum: 2009.77,
+        },
+      ],
+      confidence: 0.95,
+    },
+    textLength: 100,
+    llmProviderId: null,
+  };
+}
+
 suite('восстановление количества в воркере (реальный PostgreSQL)', () => {
   const db = sql!;
   const siteId = randomUUID();
@@ -178,6 +219,7 @@ suite('восстановление количества в воркере (ре
     throwOnDetect = false;
     throwOnOperationTrace = false;
     mocks.qtyRepairMode = 'off';
+    mocks.qtyScaleMode = 'off';
     await cleanup();
   });
 
@@ -198,8 +240,8 @@ suite('восстановление количества в воркере (ре
     }) as never;
 
   async function itemsOf(docId: string) {
-    return db<{ qty: string; line_no: number; id: string }[]>`
-      SELECT id, qty, line_no FROM source_document_items
+    return db<{ qty: string; qty_read: string | null; line_no: number; id: string }[]>`
+      SELECT id, qty, qty_read, line_no FROM source_document_items
       WHERE source_document_id = ${docId} ORDER BY line_no`;
   }
 
@@ -210,6 +252,22 @@ suite('восстановление количества в воркере (ре
       mode: string;
       generation: number | null;
       docVersion: string | null;
+      entries: Array<{
+        state: string;
+        row: number;
+        itemId?: string;
+        qtyFrom: number;
+        qtyTo: number;
+        blockedBy?: string;
+      }>;
+    } | null;
+  }
+
+  async function scaleTraceOf(docId: string) {
+    const [r] = await db<{ qty_scale: Record<string, unknown> | null }[]>`
+      SELECT qty_scale FROM source_documents WHERE id = ${docId}`;
+    return r!.qty_scale as {
+      mode: string;
       entries: Array<{
         state: string;
         row: number;
@@ -344,5 +402,71 @@ suite('восстановление количества в воркере (ре
     const [doc] = await db<{ validation: { hasMismatch: boolean } }[]>`
       SELECT validation FROM source_documents WHERE id = ${docId}`;
     expect(doc!.validation.hasMismatch).toBe(true);
+  });
+
+  it('qty-scale shadow: сохраняет исходное число и только наблюдение', async () => {
+    mocks.qtyScaleMode = 'shadow';
+    parseUpdVision.mockResolvedValue(parsedLostDecimal());
+    const docId = await seedDoc();
+
+    await handleJob(job(docId));
+
+    const [item] = await itemsOf(docId);
+    expect(Number(item!.qty)).toBe(74000);
+    expect(item!.qty_read).toBeNull();
+    expect((await scaleTraceOf(docId))?.entries[0]).toMatchObject({
+      state: 'observed',
+      qtyFrom: 74000,
+      qtyTo: 74,
+    });
+  });
+
+  it('qty-scale on: исправляет первичный разбор и хранит прочитанное число', async () => {
+    mocks.qtyScaleMode = 'on';
+    parseUpdVision.mockResolvedValue(parsedLostDecimal());
+    const docId = await seedDoc();
+
+    await handleJob(job(docId));
+
+    const [item] = await itemsOf(docId);
+    expect(Number(item!.qty)).toBe(74);
+    expect(Number(item!.qty_read)).toBe(74000);
+    const trace = await scaleTraceOf(docId);
+    expect(trace?.entries[0]).toMatchObject({
+      state: 'applied',
+      qtyFrom: 74000,
+      qtyTo: 74,
+      itemId: item!.id,
+    });
+    const [saved] = await db<{ validation: { hasMismatch: boolean } }[]>`
+      SELECT validation FROM source_documents WHERE id = ${docId}`;
+    expect(saved!.validation.hasMismatch).toBe(false);
+  });
+
+  it('qty-scale: сбой проверки операции возвращает исходное число и сверку', async () => {
+    mocks.qtyScaleMode = 'on';
+    throwOnOperationTrace = true;
+    parseUpdVision.mockResolvedValue(parsedLostDecimal());
+    const docId = await seedDoc();
+
+    await handleJob(job(docId));
+
+    const [item] = await itemsOf(docId);
+    expect(Number(item!.qty)).toBe(74000);
+    expect(item!.qty_read).toBeNull();
+    expect(await scaleTraceOf(docId)).toBeNull();
+    const [saved] = await db<
+      {
+        validation: { hasMismatch: boolean };
+        status: string;
+        parse_error_code: string | null;
+      }[]
+    >`
+      SELECT validation, status, parse_error_code FROM source_documents WHERE id = ${docId}`;
+    expect(saved!.validation.hasMismatch).toBe(true);
+    // Денежное расхождение по единственной полной строке — предупреждение, а
+    // не блокировка выдачи; это штатное правило deriveUpdParseOutcome.
+    expect(saved!.status).toBe('parsed');
+    expect(saved!.parse_error_code).toBe('validation_mismatch');
   });
 });

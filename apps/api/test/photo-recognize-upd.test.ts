@@ -9,13 +9,22 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { UpdPdfParsed } from '@matcheck/contracts';
+import type * as EnvModule from '../src/lib/env.js';
 
 const parseUpdVision = vi.fn();
+const env = vi.hoisted(() => ({ qtyScaleMode: 'off' as 'off' | 'shadow' | 'on' }));
 
 vi.mock('../src/db/client.js', () => ({ db: {} }));
 vi.mock('../src/domain/edo/upd-vision.parser.js', () => ({ parseUpdVision }));
 // Имя модели читается из БД отдельным запросом; здесь он не нужен.
 vi.mock('../src/db/schema.js', () => ({ llmProviders: {} }));
+vi.mock('../src/lib/env.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof EnvModule>();
+  return {
+    ...actual,
+    loadEnv: () => ({ ...actual.loadEnv(), QTY_SCALE_REPAIR: env.qtyScaleMode }),
+  };
+});
 
 const { recognizePhotoUpd } = await import('../src/domain/photos/recognize-upd.js');
 
@@ -55,6 +64,7 @@ function parsed(over: Partial<UpdPdfParsed> = {}): UpdPdfParsed {
 
 beforeEach(() => {
   parseUpdVision.mockReset();
+  env.qtyScaleMode = 'off';
 });
 
 describe('recognizePhotoUpd', () => {
@@ -186,5 +196,45 @@ describe('recognizePhotoUpd', () => {
 
     expect(r.items[0]?.vatRate).toBe(22);
     expect(r.validation.checks.find((c) => c.name === 'vat_total')?.ok).toBe(true);
+  });
+
+  it('qty-scale исправляет фото до нормализации НДС и сохраняет исходное число в следе', async () => {
+    env.qtyScaleMode = 'on';
+    parseUpdVision.mockResolvedValue({
+      parsed: parsed({
+        totalSum: 11145.07,
+        vatSum: 2009.77,
+        items: [
+          {
+            nameRaw: 'Клапан противопожарный',
+            rowNo: 1,
+            qty: 74000,
+            unit: 'шт',
+            price: 123.45,
+            sum: 11145.07,
+            vatRate: 22,
+            vatSum: 2009.77,
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ] as any,
+      }),
+      textLength: 0,
+      llmProviderId: null,
+    });
+
+    const r = await recognizePhotoUpd({
+      buffer: Buffer.from('x'),
+      mimeType: 'image/jpeg',
+      label: 'photo:scale',
+      allowQtyScaleApply: true,
+    });
+
+    expect(r.items[0]?.qty).toBe(74);
+    expect(r.validation.hasMismatch).toBe(false);
+    expect(r.qtyScale?.entries[0]).toMatchObject({
+      state: 'applied',
+      qtyFrom: 74000,
+      qtyTo: 74,
+    });
   });
 });

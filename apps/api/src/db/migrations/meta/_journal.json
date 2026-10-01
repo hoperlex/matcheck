@@ -897,6 +897,13 @@
       "when": 1787160009000,
       "tag": "0128_edo_receipt_file_and_import_switch",
       "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1787160010000,
+      "tag": "0129_qty_scale_trace",
+      "breakpoints": true
     }
   ]
 }

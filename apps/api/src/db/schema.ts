@@ -21,6 +21,7 @@ import {
 import type { EdoInventoryReport, UpdValidation } from '@matcheck/contracts';
 import type { QtyRepairTrace } from '../domain/edo/qty-repair.js';
 import type { Torg12QtyTrace } from '../domain/edo/torg12-qty.js';
+import type { QtyScaleTrace } from '../domain/edo/qty-scale.js';
 
 // ─── Enums ─────────────────────────────────────────────────────────────────
 
@@ -957,6 +958,8 @@ export const sourceDocuments = pgTable(
     // для отката — в нём исходное количество, версия разбора и состояние
     // записи. Служебное поле: веб его не читает, в контракты не входит.
     qtyRepair: jsonb('qty_repair').$type<QtyRepairTrace | null>(),
+    // Строгое правило потери десятичной запятой ×1000 (миграция 0129).
+    qtyScale: jsonb('qty_scale').$type<QtyScaleTrace | null>(),
     // След правила количества по графам товарной накладной ТОРГ-12 (миграция
     // 0125). Отдельно от qty_repair: у правил разные поводы срабатывания и
     // разные режимы, и смешанный след нельзя было бы ни прочитать, ни
@@ -1330,6 +1333,9 @@ export const sourceDocumentItems = pgTable('source_document_items', {
   materialId: uuid('material_id').references(() => materials.id, { onDelete: 'set null' }),
   nameRaw: text('name_raw').notNull(),
   qty: numeric('qty', { precision: 18, scale: 4 }).notNull(),
+  // Количество, прочитанное моделью до qty-scale. Заполняется только когда
+  // автоматическая правка реально применена; обычные строки остаются NULL.
+  qtyRead: numeric('qty_read', { precision: 18, scale: 4 }),
   unit: varchar('unit', { length: 16 }).notNull().default('шт'),
   price: numeric('price', { precision: 18, scale: 4 }),
   sum: numeric('sum', { precision: 18, scale: 2 }),
@@ -1925,6 +1931,7 @@ export const photoRecognizedItems = pgTable(
     // Версия разбора здесь — updated_at записи: dispatch_generation на
     // фото-кэш не распространяется.
     qtyRepair: jsonb('qty_repair').$type<QtyRepairTrace | null>(),
+    qtyScale: jsonb('qty_scale').$type<QtyScaleTrace | null>(),
     // Шапочные поля УПД-ветки.
     vatSum: numeric('vat_sum', { precision: 20, scale: 2 }),
     itemsCount: integer('items_count'),

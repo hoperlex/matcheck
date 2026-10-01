@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   recognizePhotoUpd: vi.fn(),
   classifyImageKind: vi.fn(),
   qtyRepairMode: 'on' as 'off' | 'shadow' | 'on',
+  qtyScaleMode: 'off' as 'off' | 'shadow' | 'on',
 }));
 
 vi.mock('../../src/domain/storage/s3.signer.js', () => ({
@@ -55,6 +56,7 @@ vi.mock('../../src/lib/env.js', async (importOriginal) => {
       ...actual.loadEnv(),
       PHOTO_RECOGNIZE_UPD_ROUTE: true,
       UPD_QTY_REPAIR: mocks.qtyRepairMode,
+      QTY_SCALE_REPAIR: mocks.qtyScaleMode,
     }),
   };
 });
@@ -106,6 +108,34 @@ function updResultWithRepair() {
           base: 3817.5,
           unit: 'шт',
           okeiCode: 796,
+        },
+      ],
+    },
+  };
+}
+
+function updResultWithScale() {
+  return {
+    ...updResultWithRepair(),
+    items: [{ ...updResultWithRepair().items[0]!, qty: 74 }],
+    qtyRepair: null,
+    qtyScale: {
+      ruleVersion: 1,
+      mode: 'on' as const,
+      detectedAt: '2026-10-01T10:00:00.000Z',
+      generation: null,
+      docVersion: null,
+      entries: [
+        {
+          state: 'applied' as const,
+          row: 1,
+          kind: 'lost_decimal_1000' as const,
+          qtyFrom: 74000,
+          qtyTo: 74,
+          price: 123.45,
+          sum: 11145.07,
+          base: 9135.3,
+          unit: 'шт',
         },
       ],
     },
@@ -187,6 +217,7 @@ suite('фото: применение восстановления количе�
     mocks.getObject.mockResolvedValue(Buffer.from('jpeg-bytes'));
     mocks.classifyImageKind.mockResolvedValue({ kind: 'upd', confidence: 0.95 });
     mocks.qtyRepairMode = 'on';
+    mocks.qtyScaleMode = 'off';
     mocks.recognizePhotoUpd.mockResolvedValue(updResultWithRepair());
     await sql`DELETE FROM photo_recognized_items WHERE delivery_photo_id = ${photoId}`;
     await setDeliveryStatus('filled');
@@ -203,8 +234,9 @@ suite('фото: применение восстановления количе�
       {
         items: Array<{ qty: number }>;
         qty_repair: { entries: Array<{ state: string; blockedBy?: string }> } | null;
+        qty_scale: { entries: Array<{ state: string; blockedBy?: string }> } | null;
       }[]
-    >`SELECT items, qty_repair FROM photo_recognized_items WHERE delivery_photo_id = ${photoId}`;
+    >`SELECT items, qty_repair, qty_scale FROM photo_recognized_items WHERE delivery_photo_id = ${photoId}`;
     return r!;
   }
 
@@ -270,5 +302,43 @@ suite('фото: применение восстановления количе�
     });
     expect(res.statusCode).toBe(200);
     expect(mocks.recognizePhotoUpd.mock.calls[0]![0].allowQtyRepairApply).toBe(false);
+  });
+
+  it('qty-scale: отдельный флаг разрешает применение и сохраняет след', async () => {
+    mocks.qtyRepairMode = 'off';
+    mocks.qtyScaleMode = 'on';
+    mocks.recognizePhotoUpd.mockResolvedValue(updResultWithScale());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/photos/${photoId}/recognize?force=true`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(mocks.recognizePhotoUpd.mock.calls[0]![0].allowQtyRepairApply).toBe(false);
+    expect(mocks.recognizePhotoUpd.mock.calls[0]![0].allowQtyScaleApply).toBe(true);
+    const row = await savedRow();
+    expect(row.items[0]!.qty).toBe(74);
+    expect(row.qty_scale?.entries[0]!.state).toBe('applied');
+  });
+
+  it('qty-scale: подтверждение во время модели возвращает 74000', async () => {
+    mocks.qtyRepairMode = 'off';
+    mocks.qtyScaleMode = 'on';
+    mocks.recognizePhotoUpd.mockImplementation(async () => {
+      await setDeliveryStatus('confirmed_mol');
+      return updResultWithScale();
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/photos/${photoId}/recognize?force=true`,
+    });
+    expect(res.statusCode).toBe(200);
+    const row = await savedRow();
+    expect(row.items[0]!.qty).toBe(74000);
+    expect(row.qty_scale?.entries[0]).toMatchObject({
+      state: 'observed',
+      blockedBy: 'operation_trace',
+    });
   });
 });

@@ -37,6 +37,7 @@ import { buildS3Key } from '../domain/storage/s3.path.js';
 import { recognizePhotoItems } from '../domain/photos/recognize.js';
 import { recognizePhotoUpd } from '../domain/photos/recognize-upd.js';
 import type { QtyRepairTrace } from '../domain/edo/qty-repair.js';
+import type { QtyScaleTrace } from '../domain/edo/qty-scale.js';
 import { classifyImageKind } from '../domain/edo/vision-classifier.js';
 import { MIN_DEDUP_CONFIDENCE } from '../domain/edo/upd-validation.js';
 import { loadEnv } from '../lib/env.js';
@@ -1398,12 +1399,17 @@ async function runPhotoRecognition(
         // может что-то применить. При off и shadow ответ всё равно не нужен, а
         // два запроса на каждое распознавание — работа впустую.
         const qtyRepairMode = loadEnv().UPD_QTY_REPAIR;
+        const qtyScaleMode = loadEnv().QTY_SCALE_REPAIR;
+        const quantityApplyAllowed =
+          qtyRepairMode === 'on' || qtyScaleMode === 'on'
+            ? await qtyRepairApplyAllowed(app, found.kind, photoId)
+            : false;
         const upd = await recognizePhotoUpd({
           buffer,
           mimeType,
           label,
-          allowQtyRepairApply:
-            qtyRepairMode === 'on' ? await qtyRepairApplyAllowed(app, found.kind, photoId) : false,
+          allowQtyRepairApply: qtyRepairMode === 'on' ? quantityApplyAllowed : false,
+          allowQtyScaleApply: qtyScaleMode === 'on' ? quantityApplyAllowed : false,
         });
         if (upd.items.length > 0 && (upd.confidence ?? 0) >= MIN_DEDUP_CONFIDENCE) {
           const saved = await upsertRecognition(app, found.kind, photoId, {
@@ -1421,6 +1427,7 @@ async function runPhotoRecognition(
             itemsCount: upd.itemsCount,
             validation: upd.validation,
             qtyRepair: upd.qtyRepair,
+            qtyScale: upd.qtyScale,
           });
           return { ok: true, value: saved };
         }
@@ -1465,6 +1472,7 @@ async function runPhotoRecognition(
         itemsCount: weakUpd.itemsCount,
         validation: weakUpd.validation,
         qtyRepair: weakUpd.qtyRepair,
+        qtyScale: weakUpd.qtyScale,
       });
       return { ok: true, value: savedWeak };
     }
@@ -1603,6 +1611,8 @@ async function upsertRecognition(
     validation?: z.infer<typeof PhotoRecognitionSchema>['validation'];
     /** Служебный след правила количества; в контракт ответа не входит. */
     qtyRepair?: QtyRepairTrace | null;
+    /** Служебный след строгого правила ×1000; в контракт ответа не входит. */
+    qtyScale?: QtyScaleTrace | null;
   },
 ): Promise<z.infer<typeof PhotoRecognitionSchema>> {
   const values = {
@@ -1628,34 +1638,57 @@ async function upsertRecognition(
   let qtyRepair: QtyRepairTrace | null = data.qtyRepair
     ? { ...data.qtyRepair, docVersion: values.updatedAt.toISOString() }
     : null;
+  let qtyScale: QtyScaleTrace | null = data.qtyScale
+    ? { ...data.qtyScale, docVersion: values.updatedAt.toISOString() }
+    : null;
 
   // Между проверкой перед распознаванием и этой записью прошёл вызов модели —
   // десятки секунд, за которые приёмку могли подтвердить. Проверяем ещё раз, у
   // самой записи, и при подтверждении возвращаем прочитанные моделью
   // количества: подтверждённые числа машиной не меняем.
   const appliedRows = qtyRepair?.entries.filter((e) => e.state === 'applied') ?? [];
-  if (appliedRows.length > 0 && !(await qtyRepairApplyAllowedNow(app, kind, photoId))) {
+  const appliedScaleRows = qtyScale?.entries.filter((e) => e.state === 'applied') ?? [];
+  if (
+    (appliedRows.length > 0 || appliedScaleRows.length > 0) &&
+    !(await qtyRepairApplyAllowedNow(app, kind, photoId))
+  ) {
     const items = [...(values.items as Array<Record<string, unknown>>)];
+    for (const entry of appliedScaleRows) {
+      const target = items[entry.row - 1];
+      if (target) items[entry.row - 1] = { ...target, qty: entry.qtyFrom };
+    }
     for (const entry of appliedRows) {
       const target = items[entry.row - 1];
       if (target) items[entry.row - 1] = { ...target, qty: entry.qtyFrom };
     }
     values.items = items as typeof values.items;
-    qtyRepair = {
-      ...qtyRepair!,
-      entries: qtyRepair!.entries.map((e) =>
-        e.state === 'applied'
-          ? { ...e, state: 'observed' as const, blockedBy: 'operation_trace' as const }
-          : e,
-      ),
-    };
+    if (qtyRepair) {
+      qtyRepair = {
+        ...qtyRepair,
+        entries: qtyRepair.entries.map((e) =>
+          e.state === 'applied'
+            ? { ...e, state: 'observed' as const, blockedBy: 'operation_trace' as const }
+            : e,
+        ),
+      };
+    }
+    if (qtyScale) {
+      qtyScale = {
+        ...qtyScale,
+        entries: qtyScale.entries.map((entry) =>
+          entry.state === 'applied'
+            ? { ...entry, state: 'observed' as const, blockedBy: 'operation_trace' as const }
+            : entry,
+        ),
+      };
+    }
   }
   const conflictCol = kind === 'delivery'
     ? photoRecognizedItems.deliveryPhotoId
     : photoRecognizedItems.shipmentPhotoId;
   await app.db
     .insert(photoRecognizedItems)
-    .values({ ...values, qtyRepair })
+    .values({ ...values, qtyRepair, qtyScale })
     .onConflictDoUpdate({
       target: conflictCol,
       targetWhere: kind === 'delivery'
@@ -1680,6 +1713,7 @@ async function upsertRecognition(
         // Перечисление полей здесь явное, и новое поле без этой строки просто
         // не сохранилось бы при повторном распознавании.
         qtyRepair,
+        qtyScale,
         updatedAt: values.updatedAt,
       },
     });
