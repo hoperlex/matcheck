@@ -134,3 +134,29 @@ export function buildS3Key(input: S3PathInput): string {
   );
   return `${siteCode}/${cp}/${input.entityType}/${input.entityId}/${filename}`;
 }
+
+/** Корень выгрузки УПД из ЭДО: всё под ним скачивается одним префиксом. */
+export const EDO_EXPORT_ROOT = 'edo-export';
+
+/**
+ * Ключ XML, выгруженного из Диадока без карточки в портале.
+ *
+ *   edo-export/<ИНН>/<yyyy-mm-dd|undated>_<номер|nonum>_<entityId>.xml
+ *
+ * В ключе только ИНН, без названия: название в списке поставщиков могут
+ * поправить, а ключ уже сохранённого файла от этого меняться не должен.
+ * `entityId` даёт уникальность, когда номер и дата совпали (повторная
+ * отправка). Всё ASCII — кириллица номера транслитерируется, символы, ломающие
+ * подпись запроса, не проходят через slugify/sanitizeKey в принципе.
+ */
+export function buildEdoExportKey(input: {
+  inn: string;
+  docDate: string | null;
+  docNumber: string | null;
+  entityId: string;
+}): string {
+  const inn = sanitizeKey(input.inn);
+  const date = input.docDate && /^\d{4}-\d{2}-\d{2}$/.test(input.docDate) ? input.docDate : 'undated';
+  const number = input.docNumber?.trim() ? slugify(input.docNumber) : 'nonum';
+  return `${EDO_EXPORT_ROOT}/${inn}/${date}_${number}_${sanitizeKey(input.entityId)}.xml`;
+}

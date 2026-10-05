@@ -904,6 +904,13 @@
       "when": 1787160010000,
       "tag": "0129_qty_scale_trace",
       "breakpoints": true
+    },
+    {
+      "idx": 130,
+      "version": "7",
+      "when": 1787160011000,
+      "tag": "0130_edo_export_documents",
+      "breakpoints": true
     }
   ]
 }

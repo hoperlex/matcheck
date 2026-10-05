@@ -721,6 +721,67 @@ export const edoReceipts = pgTable(
   ],
 );
 
+export type EdoExportStatus = 'stored' | 'not_in_list' | 'failed';
+
+/**
+ * Реестр выгрузки УПД из Диадока в хранилище (миграция 0130).
+ *
+ * Отдельно от edo_receipts сознательно: журнал приёма принадлежит импорту и
+ * двигает курсор ленты. Строки выгрузки в нём отрезали бы эти УПД от будущего
+ * импорта. Здесь карточек нет — только файл в хранилище и строка о нём.
+ *
+ * `not_in_list` хранится, а не отбрасывается: это ответ на «что пришло, но не
+ * взято», и по `seller_inns` повторный запуск понимает, что документ качать
+ * незачем, пока ни один его продавец не попал в список.
+ */
+export const edoExportDocuments = pgTable(
+  'edo_export_documents',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    edoAccountId: uuid('edo_account_id')
+      .notNull()
+      .references(() => edoAccounts.id, { onDelete: 'cascade' }),
+    messageId: text('message_id').notNull(),
+    entityId: text('entity_id').notNull(),
+    counteragentBoxId: text('counteragent_box_id'),
+    documentType: text('document_type').notNull(),
+    documentFunction: text('document_function'),
+    documentNumber: text('document_number'),
+    documentDate: timestamp('document_date', { withTimezone: false, mode: 'date' }),
+    correctionNumber: text('correction_number'),
+    sellerInns: text('seller_inns')
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    supplierInn: varchar('supplier_inn', { length: 12 }),
+    supplierName: text('supplier_name'),
+    totalSum: numeric('total_sum', { precision: 18, scale: 2 }),
+    vatSum: numeric('vat_sum', { precision: 18, scale: 2 }),
+    itemsCount: integer('items_count'),
+    contentCategory: text('content_category'),
+    receivedAt: timestamp('received_at', { withTimezone: true }),
+    status: text('status').$type<EdoExportStatus>().notNull(),
+    lastError: text('last_error'),
+    s3Key: text('s3_key'),
+    contentSha256: varchar('content_sha256', { length: 64 }),
+    sizeBytes: integer('size_bytes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('edo_export_documents_entity_unique').on(t.edoAccountId, t.messageId, t.entityId),
+    index('edo_export_documents_inn_idx').on(t.edoAccountId, t.supplierInn),
+    check(
+      'edo_export_documents_status_check',
+      sql`${t.status} in ('stored', 'not_in_list', 'failed')`,
+    ),
+    check(
+      'edo_export_documents_stored_has_file',
+      sql`${t.status} <> 'stored' or (${t.s3Key} is not null and ${t.contentSha256} is not null)`,
+    ),
+  ],
+);
+
 export const mailAccounts = pgTable('mail_accounts', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),

@@ -16,6 +16,12 @@ import { createDiadocAuth } from '../edo/diadoc.auth.js';
 import { DiadocClient } from '../edo/diadoc.client.js';
 import { EdoLeaseLost, inventoryBox } from '../edo/inventory.js';
 import {
+  EdoExportStopped,
+  exportUpdFromBox,
+  type ExportPut,
+  type ExportSummary,
+} from '../edo/export-upd.js';
+import {
   acquireEdoLease,
   listPollableEdoAccounts,
   releaseEdoLease,
@@ -155,6 +161,66 @@ export async function runEdoInventory(
   });
 
   return result;
+}
+
+export type EdoExportOutcome =
+  | { skipped: 'lease_taken' | 'no_box' | 'not_found' }
+  | { skipped: 'lease_lost'; summary: Readonly<ExportSummary> }
+  | { ok: true; summary: ExportSummary };
+
+/**
+ * Выгрузка УПД по списку поставщиков в хранилище (скрипт edo-export-upd.ts).
+ *
+ * Под тем же лизом, что осмотр и опрос: под ним обменивается refresh_token,
+ * поэтому выгрузка и любая другая работа по учётке не идут одновременно.
+ * Состояние учётной записи (курсор, last_error, отчёт осмотра) не трогается —
+ * выгрузка ничего не знает об импорте и не должна на него влиять.
+ *
+ * Обход, прерванный не потерей лиза, выходит наружу как EdoExportStopped со
+ * сводкой: повторный запуск продолжит, а человек видит, сколько успело.
+ */
+export async function runEdoExport(
+  deps: EdoRunnerDeps & { put: ExportPut },
+  accountId: string,
+  opts: {
+    since: Date;
+    suppliers: ReadonlyMap<string, string>;
+    onPage?: (summary: Readonly<ExportSummary>) => void;
+  },
+): Promise<EdoExportOutcome> {
+  const account = await loadAccount(deps.db, accountId);
+  if (!account) return { skipped: 'not_found' };
+  if (!account.boxId) return { skipped: 'no_box' };
+  const env = loadEnv();
+
+  return withLease(deps, accountId, false, async (lease) => {
+    const client = deps.createClient
+      ? deps.createClient(account)
+      : new DiadocClient({
+          auth: createDiadocAuth({ db: deps.db }, account),
+          environment: account.environment,
+        });
+    try {
+      const summary = await exportUpdFromBox(
+        { db: deps.db, client, log: deps.log, put: deps.put, xmlMaxBytes: env.EDO_XML_MAX_BYTES },
+        {
+          accountId: account.id,
+          boxId: account.boxId as string,
+          since: opts.since,
+          suppliers: opts.suppliers,
+          renewLease: () => renewEdoLease(deps.db, lease, env.EDO_POLL_LEASE_SEC),
+          onPage: opts.onPage,
+        },
+      );
+      return { ok: true as const, summary };
+    } catch (err) {
+      if (err instanceof EdoExportStopped && err.reason instanceof EdoLeaseLost) {
+        deps.log.warn({ accountId }, 'edo export stopped: lease lost');
+        return { skipped: 'lease_lost' as const, summary: err.summary };
+      }
+      throw err;
+    }
+  });
 }
 
 /** Ручной проход по кнопке «Синхронизировать»: работает и до включения опроса. */

@@ -71,8 +71,11 @@ const DEFAULT_RENEW_EVERY = 10;
 
 type Bucket = EdoInventoryReport['byType'][number];
 
-/** Отказы связи и доступа: осмотр по ним останавливается, а не копит «не прочитано». */
-function isTransportFailure(err: unknown): boolean {
+/**
+ * Отказы связи и доступа: осмотр по ним останавливается, а не копит «не прочитано».
+ * Тем же правилом пользуется выгрузка УПД (export-upd.ts).
+ */
+export function isTransportFailure(err: unknown): boolean {
   return (
     err instanceof DiadocRateLimited ||
     err instanceof DiadocTransient ||
