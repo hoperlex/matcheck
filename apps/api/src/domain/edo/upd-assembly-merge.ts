@@ -38,6 +38,14 @@ export type AssemblyMergeItem = {
    */
   vatRate?: string | number | null;
   vatSum?: string | number | null;
+  /**
+   * Количество, как его прочитала модель, если правило ×1000 его исправило
+   * (`source_document_items.qty_read`). Два экземпляра одной УПД правило может
+   * обработать по-разному: у одного итог прочитан и правка применена, у
+   * другого заблокирована. Без этого поля строки 74 и 74000 не сопоставились
+   * бы, и документ получил бы позицию дважды.
+   */
+  qtyRead?: string | number | null;
 };
 
 export type AssemblyMergeDocument = {
@@ -136,13 +144,58 @@ export function nameCloseEnough(a: string, b: string): boolean {
 }
 
 /** Числовой отпечаток строки: по нему ищутся кандидаты на сопоставление. */
-function numericKey(item: AssemblyMergeItem): string {
+function numericKey(item: AssemblyMergeItem, qty: string | number = item.qty): string {
   return JSON.stringify([
-    decimalKey(item.qty),
+    decimalKey(qty),
     decimalKey(item.sum),
     decimalKey(item.price ?? null),
     (item.unit ?? '').trim().toLowerCase(),
   ]);
+}
+
+/**
+ * Количество строки в обоих прочтениях: исправленное и прочитанное моделью.
+ * У строки, которую правило ×1000 не трогало, вариант один.
+ */
+function qtyVariants(item: AssemblyMergeItem): Array<string | number> {
+  const read = item.qtyRead ?? null;
+  if (read == null || decimalKey(read) === decimalKey(item.qty)) return [item.qty];
+  return [item.qty, read];
+}
+
+/** Корзины кандидатов: строка лежит под каждым вариантом своего количества. */
+export function bucketByQtyVariants(
+  items: AssemblyMergeItem[],
+  keyOf: (item: AssemblyMergeItem, qty: string | number) => string,
+): Map<string, AssemblyMergeItem[]> {
+  const buckets = new Map<string, AssemblyMergeItem[]>();
+  for (const item of items) {
+    for (const qty of qtyVariants(item)) {
+      const key = keyOf(item, qty);
+      const bucket = buckets.get(key);
+      if (bucket) bucket.push(item);
+      else buckets.set(key, [item]);
+    }
+  }
+  return buckets;
+}
+
+/** Кандидаты из корзин по всем вариантам количества строки, без повторов. */
+export function lookupByQtyVariants(
+  buckets: Map<string, AssemblyMergeItem[]>,
+  item: AssemblyMergeItem,
+  keyOf: (item: AssemblyMergeItem, qty: string | number) => string,
+): AssemblyMergeItem[] {
+  const seen = new Set<string>();
+  const out: AssemblyMergeItem[] = [];
+  for (const qty of qtyVariants(item)) {
+    for (const found of buckets.get(keyOf(item, qty)) ?? []) {
+      if (seen.has(found.id)) continue;
+      seen.add(found.id);
+      out.push(found);
+    }
+  }
+  return out;
 }
 
 function itemKey(item: AssemblyMergeItem): string {
@@ -177,20 +230,14 @@ export function pairAssemblyItems(
   keeperItems: AssemblyMergeItem[],
   otherItems: AssemblyMergeItem[],
 ): PairResult {
-  const byNumeric = new Map<string, AssemblyMergeItem[]>();
-  for (const item of keeperItems) {
-    const key = numericKey(item);
-    const bucket = byNumeric.get(key);
-    if (bucket) bucket.push(item);
-    else byNumeric.set(key, [item]);
-  }
+  const byNumeric = bucketByQtyVariants(keeperItems, numericKey);
 
   const matched = new Map<string, string>();
   const taken = new Set<string>();
   let ambiguous = false;
 
   for (const item of otherItems) {
-    const bucket = byNumeric.get(numericKey(item)) ?? [];
+    const bucket = lookupByQtyVariants(byNumeric, item, numericKey);
     const candidates = bucket.filter(
       (k) => !taken.has(k.id) && nameCloseEnough(k.nameRaw, item.nameRaw),
     );

@@ -115,9 +115,12 @@ export function detectTorg12Qty(parsed: UpdPdfParsed): Torg12QtyCandidate[] {
     if (qty != null && nearlyEqual(qty, qtyTo)) return;
 
     out.push({
-      // Номер строки берём из графы 1, когда она прочитана: по нему строка
-      // находится в бланке. Порядковый индекс — запасной вариант.
-      row: item.rowNo ?? index + 1,
+      // Порядковый индекс, а не номер из графы 1: по индексу строку адресуют
+      // сверка (scope.row), откат правки и привязка следа к позиции в воркере.
+      // Напечатанный номер с индексом расходится, когда модель пропустила или
+      // повторила строку, и тогда правка попадала бы в одну строку, а откат —
+      // в другую.
+      row: index + 1,
       kind,
       qtyFrom: qty,
       qtyTo,
@@ -146,8 +149,7 @@ export function applyTorg12Qty(
 
   const applied: Torg12QtyCandidate[] = [];
   const nextItems = items.map((item, index) => {
-    const row = item.rowNo ?? index + 1;
-    const candidate = byRow.get(row);
+    const candidate = byRow.get(index + 1);
     if (!candidate) return item;
     applied.push(candidate);
     return { ...item, qty: candidate.qtyTo };

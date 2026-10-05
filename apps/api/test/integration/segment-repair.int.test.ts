@@ -30,7 +30,10 @@ vi.setConfig({ testTimeout: 60_000 });
 
 // Режим меняется от сценария к сценарию, поэтому не константа в моке, а
 // изменяемая ячейка: off / shadow / on — три разных ожидаемых поведения.
-const envState = vi.hoisted(() => ({ repair: 'on' as 'off' | 'shadow' | 'on' }));
+const envState = vi.hoisted(() => ({
+  repair: 'on' as 'off' | 'shadow' | 'on',
+  qtyScale: 'off' as 'off' | 'shadow' | 'on',
+}));
 
 vi.mock('../../src/lib/env.js', async (importOriginal) => {
   const actual = await importOriginal<typeof EnvModule>();
@@ -40,6 +43,7 @@ vi.mock('../../src/lib/env.js', async (importOriginal) => {
       ...actual.loadEnv(),
       UPD_ASSEMBLY_V1: true,
       UPD_SEGMENT_REPAIR: envState.repair,
+      QTY_SCALE_REPAIR: envState.qtyScale,
     }),
   };
 });
@@ -210,6 +214,7 @@ suite('автоповтор сегмента (реальный PostgreSQL)', () 
   beforeEach(async () => {
     await cleanup();
     envState.repair = 'on';
+    envState.qtyScale = 'off';
     classifyFile.mockReset().mockResolvedValue({
       detectedKind: 'upd',
       confidence: 0.95,
@@ -462,6 +467,70 @@ suite('автоповтор сегмента (реальный PostgreSQL)', () 
       SELECT count(*)::text AS count FROM materials WHERE name LIKE 'ВЫДУМАННЫЙ МАТЕРИАЛ%'`;
     expect(count).toBe('0');
     expect((await docOf(docId)).status).not.toBe('queued');
+  });
+
+  describe('потеря запятой ×1000 и автоповтор', () => {
+    // «74,000» прочитано как 74000: цена в копейках и сумма строки подтверждают
+    // 74. База 74 × 1234,56 = 91 357,44, НДС 22 % = 20 098,64.
+    const SCALED = {
+      nameRaw: 'Клапан обратный',
+      qty: 74000,
+      unit: 'шт',
+      price: 1234.56,
+      sum: 111456.08,
+      vatRate: 22,
+      vatSum: 20098.64,
+      rowNo: 4,
+    };
+    const VAT_TOTAL = 481245.33;
+
+    const qtyOf = async (id: string) =>
+      db<{ name_raw: string; qty: string; qty_read: string | null }[]>`
+        SELECT name_raw, qty, qty_read FROM source_document_items
+          WHERE source_document_id = ${id} ORDER BY line_no`;
+
+    it('кандидат повтора с тем же ×1000 исправляется до арбитра и принимается', async () => {
+      envState.qtyScale = 'on';
+      // Первый разбор: строка потеряна (суммы не сходятся) и ×1000 в четвёртой.
+      // Повтор: все строки на месте, но модель снова прочла 74000.
+      extractUpdSegment
+        .mockResolvedValueOnce(
+          result([L1, MERGED, SCALED], { totalSum: 2668744.08, vatSum: VAT_TOTAL }),
+        )
+        .mockResolvedValueOnce(
+          result([L1, L2, L3, SCALED], { totalSum: 2668724.08, vatSum: VAT_TOTAL }),
+        );
+      const { segmentId, docId } = await assembledBundle();
+
+      await runFirstPass(docId, segmentId);
+      // Первичный разбор исправил количество, но строка потеряна — повтор нужен.
+      expect(await repairJobsOf(segmentId)).toHaveLength(1);
+      expect((await qtyOf(docId)).map((i) => Number(i.qty))).toEqual([1, 1, 74]);
+
+      await runRepair(docId, segmentId);
+
+      const doc = await docOf(docId);
+      expect((doc.second_pass as { outcome?: string })?.outcome).toBe('replaced');
+      const items = await qtyOf(docId);
+      // Без правки кандидата принятый повтор вернул бы 74000, которое первый
+      // разбор уже исправил.
+      expect(items.map((i) => Number(i.qty))).toEqual([1, 1, 1, 74]);
+      expect(items[3]!.qty_read).not.toBeNull();
+      expect(Number(items[3]!.qty_read)).toBe(74000);
+    });
+
+    it('off: повтор и первичный разбор количество не трогают', async () => {
+      extractUpdSegment.mockResolvedValueOnce(
+        result([L1, MERGED, SCALED], { totalSum: 2668744.08, vatSum: VAT_TOTAL }),
+      );
+      const { segmentId, docId } = await assembledBundle();
+
+      await runFirstPass(docId, segmentId);
+
+      const items = await qtyOf(docId);
+      expect(items.map((i) => Number(i.qty))).toEqual([1, 1, 74000]);
+      expect(items.every((i) => i.qty_read === null)).toBe(true);
+    });
   });
 
   it('повтор упал — сохранён первый разбор, документ не parse_failed', async () => {

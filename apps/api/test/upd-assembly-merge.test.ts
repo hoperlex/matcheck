@@ -24,7 +24,12 @@ const item = (
   nameRaw: string,
   qty: string,
   sum: string | null,
-  over: { rowNo?: number | null; price?: string | null; unit?: string | null } = {},
+  over: {
+    rowNo?: number | null;
+    price?: string | null;
+    unit?: string | null;
+    qtyRead?: string | null;
+  } = {},
 ) => ({
   id,
   nameRaw,
@@ -41,6 +46,36 @@ describe('склейка распознанных сегментов одной 
       base('c', [item('c1', 'Щебень', '1', '300')], { supplierDirectoryId: null }),
     ]);
     expect(actions).toEqual([]);
+  });
+
+  describe('правило ×1000 обработало экземпляры по-разному', () => {
+    // Экземпляр продавца: правка применена (74, прочитано 74000). Экземпляр
+    // покупателя — один из двух вариантов ниже. В обоих строка одна и та же.
+    const fixed = item('a1', 'Клапан обратный', '74', '111456.08', {
+      price: '1234.56',
+      qtyRead: '74000',
+    });
+
+    it.each([
+      ['модель прочла второй экземпляр верно', '74'],
+      ['правка у второго экземпляра заблокирована', '74000'],
+    ])('%s — строка не задваивается', (_label, otherQty) => {
+      const [action] = planAssemblyDocumentMerges([
+        base('first', [fixed]),
+        base('copy', [item('b1', 'Клапан обратный', otherQty, '111456.08', { price: '1234.56' })]),
+      ]);
+      expect(action).toMatchObject({ relation: 'copies', itemIds: ['a1'] });
+    });
+
+    it('без следа правки 74 и 74000 — разные строки, как и раньше', () => {
+      const [action] = planAssemblyDocumentMerges([
+        base('first', [item('a1', 'Клапан обратный', '74', '111456.08', { price: '1234.56' })]),
+        base('copy', [
+          item('b1', 'Клапан обратный', '74000', '111456.08', { price: '1234.56' }),
+        ]),
+      ]);
+      expect(action?.itemIds).toEqual(['a1', 'b1']);
+    });
   });
 
   it('полные копии страниц сворачиваются в первый сегмент без дубля строки', () => {

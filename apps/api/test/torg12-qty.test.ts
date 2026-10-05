@@ -61,6 +61,28 @@ describe('detectTorg12Qty', () => {
     expect(parsed.items[0]!.qty).toBe(2886);
   });
 
+  it('строка адресуется индексом, а не номером из графы 1', () => {
+    // Модель повторила номер 1 у второй строки: по rowNo правка попала бы в
+    // первую строку, а откат в воркере (по индексу) — во вторую.
+    const parsed = doc([
+      { nameRaw: 'Без правки', unit: 'м2', qty: 100, rowNo: 1 },
+      {
+        nameRaw: 'ВЕНТИ БАТТС',
+        unit: 'м2',
+        qty: 2886,
+        qtyPerPlace: 60,
+        places: 13,
+        massNetKg: 2886,
+        rowNo: 1,
+      },
+    ]);
+    const candidates = detectTorg12Qty(parsed);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]!.row).toBe(2);
+    const { parsed: next } = applyTorg12Qty(parsed, candidates);
+    expect(next.items.map((i) => i.qty)).toEqual([100, 780]);
+  });
+
   it('количество не напечатано вовсе — считаем по графам', () => {
     const parsed = doc([{ unit: 'м2', qty: null, qtyPerPlace: 60, places: 13 }]);
     expect(detectTorg12Qty(parsed)[0]).toMatchObject({ kind: 'qty_missing', qtyTo: 780 });

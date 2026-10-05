@@ -37,7 +37,13 @@ import { buildS3Key } from '../domain/storage/s3.path.js';
 import { recognizePhotoItems } from '../domain/photos/recognize.js';
 import { recognizePhotoUpd } from '../domain/photos/recognize-upd.js';
 import type { QtyRepairTrace } from '../domain/edo/qty-repair.js';
-import type { QtyScaleTrace } from '../domain/edo/qty-scale.js';
+import {
+  applyQtyScale,
+  buildQtyScaleTrace,
+  detectQtyScale,
+  type QtyScaleCandidate,
+  type QtyScaleTrace,
+} from '../domain/edo/qty-scale.js';
 import { classifyImageKind } from '../domain/edo/vision-classifier.js';
 import { MIN_DEDUP_CONFIDENCE } from '../domain/edo/upd-validation.js';
 import { loadEnv } from '../lib/env.js';
@@ -1519,16 +1525,47 @@ async function runPhotoRecognition(
     return { ok: false, status: 500, error: 'recognition_failed', message };
   }
 
+  let v1Items = llmResult.items.map((it) => ({
+    nameRaw: it.nameRaw,
+    qty: it.qty ?? null,
+    unit: it.unit ?? null,
+    invNumber: it.invNumber ?? null,
+    price: it.price ?? null,
+    sum: it.sum ?? null,
+  }));
+  // Правило ×1000 и здесь: промпт старой ветки читает те же УПД и накладные,
+  // и «74,000» теряет запятую так же. Сумма строки у этой ветки без налога, а
+  // ставки нет, поэтому сверка берёт базой саму сумму — правило работает без
+  // поправок. Ограничения на применение — те же, что у УПД-ветки выше.
+  const qtyScaleMode = loadEnv().QTY_SCALE_REPAIR;
+  let v1QtyScale: QtyScaleTrace | null = null;
+  if (qtyScaleMode !== 'off') {
+    try {
+      const input = { totalSum: llmResult.totalSum ?? null, items: v1Items };
+      const candidates = detectQtyScale(input);
+      const allowApply =
+        qtyScaleMode === 'on' && candidates.some((c) => c.applicable)
+          ? await qtyRepairApplyAllowed(app, found.kind, photoId)
+          : false;
+      const repaired = allowApply
+        ? applyQtyScale(input, candidates)
+        : { parsed: input, applied: [] as QtyScaleCandidate[] };
+      v1Items = repaired.parsed.items;
+      v1QtyScale = buildQtyScaleTrace({
+        mode: qtyScaleMode,
+        candidates,
+        appliedRows: new Set(repaired.applied.map((c) => c.row)),
+        generation: null,
+        docVersion: null,
+      });
+    } catch (err) {
+      log.warn({ err, photoId }, 'qty scale: сбой правила на фото, позиции как прочитаны');
+    }
+  }
+
   const saved = await upsertRecognition(app, found.kind, photoId, {
     status: 'done',
-    items: llmResult.items.map((it) => ({
-      nameRaw: it.nameRaw,
-      qty: it.qty ?? null,
-      unit: it.unit ?? null,
-      invNumber: it.invNumber ?? null,
-      price: it.price ?? null,
-      sum: it.sum ?? null,
-    })),
+    items: v1Items,
     docForm: llmResult.docForm,
     docNumber: llmResult.docNumber,
     docDate: llmResult.docDate,
@@ -1542,6 +1579,7 @@ async function runPhotoRecognition(
     vatSum: null,
     itemsCount: null,
     validation: null,
+    qtyScale: v1QtyScale,
   });
   return { ok: true, value: saved };
 }

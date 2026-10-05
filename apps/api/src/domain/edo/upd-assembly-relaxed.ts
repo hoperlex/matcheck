@@ -22,7 +22,9 @@
  * строк по расширенному ключу, а любая неоднозначность — отказ.
  */
 import {
+  bucketByQtyVariants,
   decimalKey,
+  lookupByQtyVariants,
   nameCloseEnough,
   type AssemblyMergeAction,
   type AssemblyMergeDocument,
@@ -92,9 +94,9 @@ function totalKey(doc: AssemblyMergeDocument): string | null {
  * К количеству, сумме, цене и единице добавлены ставка и сумма налога: без них
  * две строки с одинаковой стоимостью, но разными ставками считались бы одной.
  */
-function strictNumericKey(item: AssemblyMergeItem): string {
+function strictNumericKey(item: AssemblyMergeItem, qty: string | number = item.qty): string {
   return JSON.stringify([
-    decimalKey(item.qty),
+    decimalKey(qty),
     decimalKey(item.sum),
     decimalKey(item.price ?? null),
     (item.unit ?? '').trim().toLowerCase(),
@@ -121,19 +123,13 @@ export function relaxedSubsetOf(
   candidate: AssemblyMergeItem[],
   target: AssemblyMergeItem[],
 ): SubsetVerdict {
-  const byKey = new Map<string, AssemblyMergeItem[]>();
-  for (const item of target) {
-    const key = strictNumericKey(item);
-    const bucket = byKey.get(key);
-    if (bucket) bucket.push(item);
-    else byKey.set(key, [item]);
-  }
+  const byKey = bucketByQtyVariants(target, strictNumericKey);
 
   const taken = new Set<string>();
   let matched = 0;
   let unmatched = 0;
   for (const item of candidate) {
-    const bucket = byKey.get(strictNumericKey(item)) ?? [];
+    const bucket = lookupByQtyVariants(byKey, item, strictNumericKey);
     const candidates = bucket.filter(
       (t) => !taken.has(t.id) && nameCloseEnough(t.nameRaw, item.nameRaw),
     );

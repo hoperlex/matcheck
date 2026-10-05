@@ -341,4 +341,68 @@ suite('фото: применение восстановления количе�
       blockedBy: 'operation_trace',
     });
   });
+  describe('старая ветка photo_v1', () => {
+    // Классификатор не узнал УПД — разбирает терпимый промпт. Сумма у этой
+    // ветки без налога: 74 × 1234,56 = 91 357,44.
+    const v1Result = () => ({
+      items: [
+        {
+          nameRaw: 'Клапан обратный',
+          qty: 74000,
+          unit: 'шт',
+          invNumber: null,
+          price: 1234.56,
+          sum: 91357.44,
+        },
+      ],
+      docForm: 'other',
+      docNumber: 'V1-74',
+      docDate: '2026-10-01',
+      totalSum: 111456.08,
+      confidence: 0.9,
+      model: 'gemini-mock',
+    });
+
+    beforeEach(() => {
+      mocks.qtyRepairMode = 'off';
+      mocks.classifyImageKind.mockResolvedValue({ kind: 'waybill', confidence: 0.95 });
+      mocks.recognizePhotoItems.mockReset().mockResolvedValue(v1Result());
+    });
+
+    it('on: количество исправлено, след applied', async () => {
+      mocks.qtyScaleMode = 'on';
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/photos/${photoId}/recognize?force=true`,
+      });
+      expect(res.statusCode).toBe(200);
+      const row = await savedRow();
+      expect(row.items[0]!.qty).toBe(74);
+      expect(row.qty_scale?.entries[0]!.state).toBe('applied');
+    });
+
+    it('shadow: число как прочитано, кандидат в следе', async () => {
+      mocks.qtyScaleMode = 'shadow';
+      await app.inject({ method: 'POST', url: `/api/v1/photos/${photoId}/recognize?force=true` });
+      const row = await savedRow();
+      expect(row.items[0]!.qty).toBe(74000);
+      expect(row.qty_scale?.entries[0]!.state).toBe('observed');
+    });
+
+    it('подтверждённая приёмка: только наблюдение, как у УПД-ветки', async () => {
+      mocks.qtyScaleMode = 'on';
+      await setDeliveryStatus('confirmed_mol');
+      await app.inject({ method: 'POST', url: `/api/v1/photos/${photoId}/recognize?force=true` });
+      const row = await savedRow();
+      expect(row.items[0]!.qty).toBe(74000);
+      expect(row.qty_scale?.entries[0]!.state).toBe('observed');
+    });
+
+    it('off: следа нет', async () => {
+      await app.inject({ method: 'POST', url: `/api/v1/photos/${photoId}/recognize?force=true` });
+      const row = await savedRow();
+      expect(row.items[0]!.qty).toBe(74000);
+      expect(row.qty_scale).toBeNull();
+    });
+  });
 });

@@ -715,6 +715,25 @@ async function queueSegmentRepair(args: {
   return true;
 }
 
+/**
+ * Снимок для арбитра автоповтора, прогнанный через правило ×1000.
+ *
+ * Только для сравнения: в БД снимок не пишется. Если первичный разбор правило
+ * уже применил, кандидатов нет и возвращается тот же объект. Сбой правила не
+ * роняет повтор — сравнение идёт по исходному снимку, как при off.
+ */
+function qtyScaleBaselineForArbiter(
+  baseline: UpdPdfParsed,
+  log: Pick<typeof logger, 'warn'>,
+): UpdPdfParsed {
+  try {
+    return applyQtyScale(baseline, detectQtyScale(baseline)).parsed;
+  } catch (err) {
+    log.warn({ err }, 'qty scale: сбой правила на снимке арбитра, сравнение без него');
+    return baseline;
+  }
+}
+
 /** Снимок для арбитража автоповтора сегмента: строже, чем loadParsedBaseline. */
 export type SegmentRepairBaseline = {
   parsed: UpdPdfParsed;
@@ -1673,6 +1692,48 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     throw err;
   }
 
+  // ─── Потеря десятичной запятой в количестве: 74,000 → 74000 ─────────────
+  //
+  // Стоит СРАЗУ после ответа модели, до обоих арбитров повтора и до
+  // preValidation. Три причины:
+  //  - доказуемо исправленный первичный документ не нужно зря отправлять на
+  //    повтор модели;
+  //  - арбитр автоповтора сегмента сравнивает кандидата со снимком из БД, а
+  //    снимок уже исправлен первичным разбором. Сырой кандидат с 74000 на той
+  //    же строке проигрывал бы всегда, даже починив остальные строки;
+  //  - принятый кандидат иначе вернул бы в документ 74000, которое первичный
+  //    разбор уже исправил.
+  // Поэтому применение разрешено и в автоповторе сегмента: это продолжение
+  // первичного разбора (поколение 0), а не ручной повтор.
+  //
+  // Детектор стоит и ДО нормализации НДС: если ставка/сумма строки прочитаны,
+  // они служат независимой уликой и не должны быть синтезированы нашим кодом.
+  // Ручные поколения и второй проход только наблюдаются и не меняются.
+  const qtyScaleMode = loadEnv().QTY_SCALE_REPAIR;
+  let qtyScaleCandidates: QtyScaleCandidate[] = [];
+  let qtyScaleApplied: QtyScaleCandidate[] = [];
+  const qtyScaleApplyAllowed =
+    qtyScaleMode === 'on' &&
+    QTY_REPAIR_PARSE_MODES.has(parseMode) &&
+    !secondPassJob &&
+    jobGeneration === 0;
+  if (qtyScaleMode !== 'off') {
+    const parsedBeforeQtyScale = parsed;
+    try {
+      qtyScaleCandidates = detectQtyScale(parsed);
+      if (qtyScaleApplyAllowed) {
+        const repaired = applyQtyScale(parsed, qtyScaleCandidates);
+        parsed = repaired.parsed;
+        qtyScaleApplied = repaired.applied;
+      }
+    } catch (err) {
+      parsed = parsedBeforeQtyScale;
+      qtyScaleCandidates = [];
+      qtyScaleApplied = [];
+      log.warn({ err, sourceDocumentId }, 'qty scale: сбой правила, разбор продолжен как при off');
+    }
+  }
+
   // ─── Второй проход: принимаем результат, только если он лучше ─────────────
   //
   // Vision вызывали ради улучшения, но он умеет и ухудшать: выдумать строки,
@@ -1760,7 +1821,15 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // каждой неудачной попытке нельзя.
   if (segmentRepairJob && repairBaseline) {
     const repairMode = loadEnv().UPD_SEGMENT_REPAIR;
-    const verdict = decideSegmentRepair(repairBaseline.parsed, parsed);
+    // Снимок проходит то же правило ×1000, что и кандидат выше: если первичный
+    // разбор его не применил (режим тогда был shadow), сравнение иначе
+    // засчитало бы кандидату исправление, которого он сам не делал.
+    const verdict = decideSegmentRepair(
+      qtyScaleApplyAllowed
+        ? qtyScaleBaselineForArbiter(repairBaseline.parsed, log)
+        : repairBaseline.parsed,
+      parsed,
+    );
     // В shadow победивший кандидат НЕ применяется: решение только записывается,
     // чтобы его можно было разобрать до того, как хоть один боевой документ
     // изменится.
@@ -1969,39 +2038,6 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // причина для лишнего vision-прохода. При выключенном флаге это строгий
   // no-op, поэтому старые активные промпты сохраняют прежнее поведение.
   parsed = normalizeUpdNoPricingTotals(parsed, loadEnv().UPD_NO_PRICING_V1);
-
-  // ─── Потеря десятичной запятой в количестве: 74,000 → 74000 ─────────────
-  //
-  // Детектор стоит ДО нормализации НДС: если ставка/сумма строки прочитаны,
-  // они служат независимой уликой и не должны быть синтезированы нашим кодом.
-  // Применение — ДО preValidation: доказуемо исправленный первичный документ
-  // не нужно зря отправлять на повтор модели. Повторные/ручные поколения только
-  // наблюдаются и не меняются.
-  const qtyScaleMode = loadEnv().QTY_SCALE_REPAIR;
-  let qtyScaleCandidates: QtyScaleCandidate[] = [];
-  let qtyScaleApplied: QtyScaleCandidate[] = [];
-  if (qtyScaleMode !== 'off') {
-    const parsedBeforeQtyScale = parsed;
-    try {
-      qtyScaleCandidates = detectQtyScale(parsed);
-      const allowed =
-        qtyScaleMode === 'on' &&
-        QTY_REPAIR_PARSE_MODES.has(parseMode) &&
-        !secondPassJob &&
-        !segmentRepairJob &&
-        jobGeneration === 0;
-      if (allowed) {
-        const repaired = applyQtyScale(parsed, qtyScaleCandidates);
-        parsed = repaired.parsed;
-        qtyScaleApplied = repaired.applied;
-      }
-    } catch (err) {
-      parsed = parsedBeforeQtyScale;
-      qtyScaleCandidates = [];
-      qtyScaleApplied = [];
-      log.warn({ err, sourceDocumentId }, 'qty scale: сбой правила, разбор продолжен как при off');
-    }
-  }
 
   // Построчный НДС, противоречащий шапке, — выдуманная моделью ставка.
   //
@@ -5752,6 +5788,9 @@ async function consolidateAssemblyDocuments(
                 // эти поля не смотрит.
                 vatRate: item.vatRate,
                 vatSum: item.vatSum,
+                // Прочитанное до правила ×1000 — чтобы экземпляр с правкой
+                // нашёл свою строку у экземпляра без неё.
+                qtyRead: item.qtyRead,
               })),
           },
         ]
@@ -6857,6 +6896,49 @@ function parseLlmDocDate(s: string | null | undefined): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+/**
+ * Правило ×1000 для накладной пакетного пути.
+ *
+ * Сверки у накладных нет, поэтому правило — единственная защита от «8 000 000
+ * шт кирпича». Применяется только при создании документа (`allowApply`):
+ * повторный разбор лишь наблюдает, как и у УПД. Сбой правила не роняет
+ * разбор — позиции пишутся как прочитаны, как при off.
+ */
+function waybillQtyScale(
+  doc: WaybillDocument,
+  allowApply: boolean,
+  log: Pick<typeof logger, 'warn'>,
+): {
+  items: WaybillDocument['items'];
+  applied: QtyScaleCandidate[];
+  trace: QtyScaleTrace | null;
+} {
+  const mode = loadEnv().QTY_SCALE_REPAIR;
+  if (mode === 'off') return { items: doc.items, applied: [], trace: null };
+  try {
+    const input = { totalSum: doc.totalSum ?? null, items: doc.items };
+    const candidates = detectQtyScale(input);
+    const repaired =
+      mode === 'on' && allowApply
+        ? applyQtyScale(input, candidates)
+        : { parsed: input, applied: [] as QtyScaleCandidate[] };
+    return {
+      items: repaired.parsed.items,
+      applied: repaired.applied,
+      trace: buildQtyScaleTrace({
+        mode,
+        candidates,
+        appliedRows: new Set(repaired.applied.map((c) => c.row)),
+        generation: null,
+        docVersion: null,
+      }),
+    };
+  } catch (err) {
+    log.warn({ err, docNumber: doc.docNumber ?? null }, 'qty scale: сбой правила на накладной, позиции как прочитаны');
+    return { items: doc.items, applied: [], trace: null };
+  }
+}
+
 // Создаёт одну запись source_documents из распознанного WaybillDocument
 // (ТН или ОС-2), прикрепляет attachments пакета и items позиций.
 // Возвращает id созданного source_document.
@@ -6945,6 +7027,7 @@ async function createSourceDocumentFromWaybill(args: {
 
   const docDate = parseLlmDocDate(doc.docDate);
   const kind = doc.form === 'os2' ? 'os2_transfer' : 'transport_waybill';
+  const qtyScale = waybillQtyScale(doc, true, logger);
 
   const id = randomUUID();
   await db.transaction(async (rawTx) => {
@@ -6983,6 +7066,7 @@ async function createSourceDocumentFromWaybill(args: {
       parseMode: 'waybill_batch',
       batchIndex: args.batchIndex ?? null,
       waybillPromptKind: args.waybillPromptKind ?? null,
+      qtyScale: qtyScale.trace,
       bundleId,
       createdByUserId: bundle.createdByUserId,
     });
@@ -7003,9 +7087,9 @@ async function createSourceDocumentFromWaybill(args: {
     }
 
     // Позиции документа. Для ОС-2 — invNumber + price/sum; для ТН — без них.
-    if (doc.items.length > 0) {
+    if (qtyScale.items.length > 0) {
       const rows = await Promise.all(
-        doc.items.map(async (it, idx) => ({
+        qtyScale.items.map(async (it, idx) => ({
           sourceDocumentId: id,
           materialId:
             kind === 'transport_waybill'
@@ -7013,6 +7097,8 @@ async function createSourceDocumentFromWaybill(args: {
               : null,
           nameRaw: it.nameRaw,
           qty: it.qty != null ? it.qty.toString() : '0',
+          qtyRead:
+            qtyScale.applied.find((c) => c.row === idx + 1)?.qtyFrom.toString() ?? null,
           unit: it.unit && it.unit.trim() ? it.unit.trim() : 'шт',
           price: it.price != null ? it.price.toString() : null,
           sum: it.sum != null ? it.sum.toString() : null,
@@ -7156,6 +7242,10 @@ async function handleWaybillSingleReparseJob(
     }
 
     const kind = picked.form === 'os2' ? 'os2_transfer' : 'transport_waybill';
+    // Повтор только наблюдает. След пишется заново в любом случае: позиции
+    // заменяются целиком, и прежний след «применено» описывал бы строки,
+    // которых больше нет.
+    const qtyScale = waybillQtyScale(picked, false, log);
     const itemRows = await Promise.all(
       picked.items.map(async (it, idx) => ({
         sourceDocumentId,
@@ -7195,6 +7285,7 @@ async function handleWaybillSingleReparseJob(
           llmProviderId,
           llmConfidence: picked.confidence.toString(),
           parseMode: 'waybill_batch',
+          qtyScale: qtyScale.trace,
           processedAt: new Date(),
           reparse: drSql`jsonb_set(jsonb_set(${sourceDocuments.reparse}, '{state}', '"succeeded"'), '{finishedAt}', to_jsonb(now()::text))`,
           updatedAt: new Date(),
