@@ -33,6 +33,7 @@ import {
   presign,
   putObject,
 } from '../domain/storage/s3.signer.js';
+import { discardBody, fetchPresignedForStream } from '../domain/storage/s3.retry.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { recognizePhotoItems } from '../domain/photos/recognize.js';
 import { recognizePhotoUpd } from '../domain/photos/recognize-upd.js';
@@ -607,18 +608,18 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       const ims = req.headers['if-modified-since'];
       if (typeof ims === 'string') upstreamHeaders['if-modified-since'] = ims;
 
-      // Жёсткий таймаут 8 сек на upstream-fetch к S3. Без него зависший
-      // Cloud.ru держал бы Node-сокет и file descriptor до системного
-      // таймаута (минуты), а при многих параллельных пользователях это
-      // быстро упирается в ulimit и event-loop. 8 сек выбраны как «больше
-      // нормального p99 thumb-загрузки, но меньше человеческого терпения»:
-      // если S3 не ответил за это время — отдаём 504, клиент покажет
-      // broken-state с кнопкой «Повторить».
+      // До трёх попыток на сетевой сбой и шлюзовые 502/503/504 (06.10 узел
+      // пула Cloud.ru отвечал 502 на треть запросов, и без повтора каждая
+      // такая попытка становилась плиткой «Не загрузилось»). На попытку —
+      // 8 сек до заголовков: зависший узел не держит сокет до системных
+      // таймаутов. Тело под дедлайн не попадает. Если все попытки упали —
+      // 504 при таймауте, иначе 502, клиент покажет broken-state с «Повтор».
       let upstream: Response;
       try {
-        upstream = await fetch(signedUrl, {
+        upstream = await fetchPresignedForStream(signedUrl, {
           headers: upstreamHeaders,
-          signal: AbortSignal.timeout(8000),
+          log: req.log,
+          logContext: { proxy: 'photo', key },
         });
       } catch (err) {
         const aborted =
@@ -632,6 +633,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       const ok = upstream.ok || upstream.status === 206 || upstream.status === 304;
       if (!ok) {
         req.log.warn({ status: upstream.status, key }, 'S3 returned non-OK for photo content');
+        await discardBody(upstream);
         return reply.code(502).send({ error: 's3_unavailable' });
       }
 

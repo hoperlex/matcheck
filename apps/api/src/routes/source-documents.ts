@@ -57,6 +57,7 @@ import { vatFieldsOf } from '../domain/edo/vat-fields.js';
 import { mergePersistentUpdWarnings, validateUpdTotals } from '../domain/edo/upd-validation.js';
 import { deriveUpdParseOutcome } from '../domain/edo/upd-outcome.js';
 import { presign, putObject } from '../domain/storage/s3.signer.js';
+import { discardBody, fetchPresignedForStream } from '../domain/storage/s3.retry.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { publishEvent } from './events.js';
 import { matchOrCreateSupplier } from '../domain/sourceDocuments/supplierMatcher.js';
@@ -1713,7 +1714,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
       let upstream: Response;
       try {
-        upstream = await fetch(link.url);
+        upstream = await fetchPresignedForStream(link.url, {
+          log: req.log,
+          logContext: { proxy: 'extra', itemId: req.params.itemId },
+        });
       } catch (err) {
         req.log.warn({ err, itemId: req.params.itemId }, 'S3 fetch failed (extra)');
         return reply.code(502).send({ error: 's3_unavailable' });
@@ -1726,6 +1730,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           { status: upstream.status, itemId: req.params.itemId },
           'S3 returned non-OK for extra download',
         );
+        await discardBody(upstream);
         return reply.code(502).send({ error: 's3_unavailable' });
       }
 
@@ -1855,7 +1860,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
       let upstream: Response;
       try {
-        upstream = await fetch(signedUrl, { headers: upstreamHeaders });
+        upstream = await fetchPresignedForStream(signedUrl, {
+          headers: upstreamHeaders,
+          log: req.log,
+          logContext: { proxy: 'raw', key: att.s3Key },
+        });
       } catch (err) {
         req.log.warn({ err, key: att.s3Key }, 'S3 fetch failed');
         return reply.code(502).send({ error: 's3_unavailable' });
@@ -1867,6 +1876,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           { status: upstream.status, key: att.s3Key },
           'S3 returned non-OK for raw fetch',
         );
+        await discardBody(upstream);
         return reply.code(502).send({ error: 's3_unavailable' });
       }
 

@@ -1,5 +1,6 @@
 import { AwsClient } from 'aws4fetch';
 import { loadEnv } from '../../lib/env.js';
+import { s3FetchWithRetry } from './s3.retry.js';
 
 const env = loadEnv();
 
@@ -26,53 +27,11 @@ function endpoint(): string {
   return env.S3_ENDPOINT.replace(/\/$/, '');
 }
 
-// Ретрай транзиентных сбоев S3. Провайдер (s3.cloud.ru) резолвится в ПУЛ IP;
-// единичный «мёртвый» узел даёт ConnectTimeout, роняя операцию, хотя соседний
-// узел жив (инцидент 03.07: узел .30 не отвечал, .31 работал). Повтор = новый
-// fetch = новый DNS-резолв undici → шанс уйти на живой IP пула. Повторяем ТОЛЬКО
-// транзиентное: брошенное сетевое исключение (ConnectTimeout/ECONNRESET/EAI_AGAIN/
-// «fetch failed») и шлюзовые 502/503/504. На успехе и на прочих 4xx (включая 404)
-// не повторяем — это валидный ответ, который обрабатывает вызывающий.
-const S3_MAX_ATTEMPTS = 3;
-const S3_RETRY_BASE_MS = 200;
+// Ретрай транзиентных сбоев S3 живёт в s3.retry.ts (там же — почему он не
+// гарантирует другой узел пула). Реэкспорт — для старых импортов отсюда.
+export { s3FetchWithRetry };
+
 const S3_ATTEMPT_TIMEOUT_MS = 60_000;
-
-function isTransientS3Status(status: number): boolean {
-  return status === 502 || status === 503 || status === 504;
-}
-
-const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-/**
- * Оборачивает одну S3-операцию (`() => getClient().fetch(...)`) ретраем.
- * Экспортируется ради юнит-тестов: `attempt`/`sleep` инжектируются.
- */
-export async function s3FetchWithRetry(
-  attempt: () => Promise<Response>,
-  opts: { maxAttempts?: number; baseMs?: number; sleep?: (ms: number) => Promise<void> } = {},
-): Promise<Response> {
-  const maxAttempts = opts.maxAttempts ?? S3_MAX_ATTEMPTS;
-  const baseMs = opts.baseMs ?? S3_RETRY_BASE_MS;
-  const sleep = opts.sleep ?? defaultSleep;
-  let lastErr: unknown;
-  for (let i = 1; i <= maxAttempts; i++) {
-    try {
-      const res = await attempt();
-      // Шлюзовой 5xx — транзиентный, повторяем; на последней попытке отдаём
-      // ответ вызывающему (он бросит осмысленную «HTTP 5xx»-ошибку).
-      if (isTransientS3Status(res.status) && i < maxAttempts) {
-        lastErr = new Error(`S3 transient HTTP ${res.status}`);
-      } else {
-        return res;
-      }
-    } catch (err) {
-      lastErr = err;
-      if (i >= maxAttempts) throw err;
-    }
-    await sleep(baseMs * Math.pow(3, i - 1)); // 200мс, 600мс, …
-  }
-  throw lastErr instanceof Error ? lastErr : new Error('S3 fetch failed after retries');
-}
 
 export type SignOptions = {
   method: 'PUT' | 'GET' | 'DELETE';

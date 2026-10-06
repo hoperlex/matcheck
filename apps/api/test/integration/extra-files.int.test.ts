@@ -326,7 +326,11 @@ suite('дополнительные документы поставки (реа�
       expect(res.headers['content-disposition']).toBe(
         "attachment; filename*=UTF-8''cert.pdf",
       );
-      expect(fetchMock).toHaveBeenCalledWith('https://s3.example/signed');
+      // Второй аргумент — сигнал таймаута заголовков из fetchPresignedForStream.
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://s3.example/signed',
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
     });
 
     it('чужой itemId и чужой объект — 404, до S3 дело не доходит', async () => {
@@ -364,6 +368,40 @@ suite('дополнительные документы поставки (реа�
       expect(res.statusCode).toBe(404);
       expect(res.json()).toMatchObject({ error: 'presign_failed' });
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('502 от S3, затем 200 → файл доходит; не-2xx — тело ответа S3 освобождено', async () => {
+      const { docId, certId } = await prepareDocWithExtra();
+      const payload = pdf('3');
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response('bad gateway', { status: 502 }))
+        .mockResolvedValueOnce(new Response(payload, { status: 200 }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await app.inject({ method: 'GET', url: rawUrl(docId, certId) });
+      expect(res.statusCode).toBe(200);
+      expect(res.rawPayload.equals(payload)).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      const cancel = vi.fn();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(c) {
+                c.enqueue(new TextEncoder().encode('denied'));
+              },
+              cancel,
+            }),
+            { status: 403 },
+          ),
+        ),
+      );
+      const denied = await app.inject({ method: 'GET', url: rawUrl(docId, certId) });
+      expect(denied.statusCode).toBe(502);
+      expect(cancel).toHaveBeenCalled();
     });
 
     it('S3 недоступен, ответил не-2xx или пустым телом — 502', async () => {

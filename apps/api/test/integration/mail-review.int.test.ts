@@ -402,6 +402,47 @@ suite('разбор почты: API (реальный PostgreSQL)', () => {
     fetchSpy.mockRestore();
   });
 
+  it('вложение: 502 от S3, затем 200 → файл доходит; 403 → 502 и тело освобождено', async () => {
+    const id = await letter();
+    const detail = (await get(`/api/v1/mail/messages/${id}`)).json() as {
+      attachments: { id: string }[];
+    };
+    const attId = detail.attachments[0]!.id;
+    const url = `/api/v1/mail/messages/${id}/attachments/${attId}/raw`;
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('bad gateway', { status: 502 }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+    try {
+      const res = await get(url);
+      expect(res.statusCode).toBe(200);
+      expect([...res.rawPayload]).toEqual([1, 2, 3]);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+      // Не-2xx без повтора: тело ответа S3 отменяется, а не висит до GC.
+      const cancel = vi.fn();
+      fetchSpy.mockReset().mockResolvedValueOnce(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              c.enqueue(new TextEncoder().encode('denied'));
+            },
+            cancel,
+          }),
+          { status: 403 },
+        ),
+      );
+      const denied = await get(url);
+      expect(denied.statusCode).toBe(502);
+      expect(denied.json()).toMatchObject({ error: 's3_unavailable' });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(cancel).toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   // ─── Текст письма ────────────────────────────────────────────────────────
   // Объект подрядчики часто называют в теле, а не в теме, поэтому оператор
   // обязан видеть текст — включая html-письма, где текстовой части нет.

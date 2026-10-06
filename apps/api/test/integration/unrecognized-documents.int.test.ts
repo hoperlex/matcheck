@@ -290,6 +290,60 @@ suite('документ «не распознано» (реальный PostgreS
     }
   });
 
+  // 06.10 портал показывал в окне документа {"error":"s3_unavailable"}: узел
+  // пула Cloud.ru отвечал 502, а прокси сдавался с первой попытки.
+  it('/file/raw: 502 от S3, затем 200 → клиент получает файл', async () => {
+    const id = await document('no_waybill_found');
+    await sql`INSERT INTO source_document_attachments
+        (source_document_id, s3_key, filename, mime_type, size_bytes, role)
+      VALUES (${id}, ${`upload/${id}/upd.pdf`}, 'upd.pdf', 'application/pdf', 9, 'original')`;
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('bad gateway', { status: 502 }))
+      .mockResolvedValueOnce(new Response(Buffer.from('pdf-bytes'), { status: 200 }));
+
+    try {
+      const res = await app.inject({ method: 'GET', url: `/api/v1/source-documents/${id}/file/raw` });
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toBe('pdf-bytes');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('/file/raw: 502 на всех попытках → 502, тело каждого ответа S3 освобождено', async () => {
+    const id = await document('no_waybill_found');
+    await sql`INSERT INTO source_document_attachments
+        (source_document_id, s3_key, filename, mime_type, size_bytes, role)
+      VALUES (${id}, ${`upload/${id}/upd.pdf`}, 'upd.pdf', 'application/pdf', 9, 'original')`;
+
+    const cancels: Array<ReturnType<typeof vi.fn>> = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      const cancel = vi.fn();
+      cancels.push(cancel);
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('bad gateway'));
+        },
+        cancel,
+      });
+      return new Response(body, { status: 502 });
+    });
+
+    try {
+      const res = await app.inject({ method: 'GET', url: `/api/v1/source-documents/${id}/file/raw` });
+      expect(res.statusCode).toBe(502);
+      expect(res.json()).toEqual({ error: 's3_unavailable' });
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      expect(cancels).toHaveLength(3);
+      for (const c of cancels) expect(c).toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('вложение без mime отдаётся с типом по расширению, а не пустым заголовком', async () => {
     // mime_type в БД nullable, и у старых вложений его нет. Заголовок уходил
     // пустым — браузер не открывал ни PDF, ни скан, а просто скачивал файл.

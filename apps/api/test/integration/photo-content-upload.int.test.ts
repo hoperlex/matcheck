@@ -16,7 +16,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 import postgres from 'postgres';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthUser } from '../../src/plugins/auth.js';
 
 const mocks = vi.hoisted(() => ({
@@ -401,5 +401,125 @@ suite('POST /photos/:id/content — загрузка фото через API-п�
     expect(res.statusCode).toBe(413);
     expect(res.json()).toMatchObject({ error: 'file_too_large' });
     expect(mocks.putObject).not.toHaveBeenCalled();
+  });
+
+  // GET — портал смотрит фото через этот прокси. 06.10 узел пула Cloud.ru
+  // отвечал 502 на треть запросов, и без повтора каждый такой ответ становился
+  // плиткой «Не загрузилось». Повтор живёт в s3.retry.ts, который мок
+  // s3.signer.js не задевает: здесь проверяется настоящая обвязка маршрута.
+  describe('GET /photos/:id/content — повтор при сбое S3', () => {
+    beforeEach(() => {
+      mocks.presign.mockReset().mockResolvedValue('https://s3.example/signed');
+    });
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    /** Ответ S3 с настоящим телом-потоком и шпионом на его отмену. */
+    const s3Resp = (status: number, text = 'upstream') => {
+      const cancel = vi.fn();
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(text));
+          if (status < 400) c.close();
+        },
+        cancel,
+      });
+      return { res: new Response(body, { status }), cancel };
+    };
+
+    const get = (photoId: string) =>
+      app.inject({ method: 'GET', url: `/api/v1/photos/${photoId}/content?thumb=true` });
+
+    it('502, затем 200 → клиент получает 200 и тело; у каждой попытки свой сигнал', async () => {
+      const photo = await seedPhoto(ownDelivery, { uploaded: true, withThumb: false });
+      const bad = s3Resp(502);
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(bad.res)
+        .mockResolvedValueOnce(s3Resp(200, 'jpeg-bytes').res);
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await get(photo.id);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toBe('jpeg-bytes');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      // Миниатюры у фото с планшета нет — читаем кадр (поведение не меняли).
+      expect(mocks.presign).toHaveBeenCalledWith(expect.objectContaining({ key: photo.s3Key }));
+      const [s1, s2] = fetchMock.mock.calls.map((c) => (c[1] as RequestInit).signal);
+      expect(s1).toBeInstanceOf(AbortSignal);
+      expect(s2).toBeInstanceOf(AbortSignal);
+      expect(s1).not.toBe(s2);
+      expect(bad.cancel).toHaveBeenCalled();
+    });
+
+    it('404 от S3 → 502 без повтора, тело ответа S3 освобождено', async () => {
+      const photo = await seedPhoto(ownDelivery, { uploaded: true });
+      const missing = s3Resp(404);
+      const fetchMock = vi.fn().mockResolvedValue(missing.res);
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await get(photo.id);
+
+      expect(res.statusCode).toBe(502);
+      expect(res.json()).toEqual({ error: 's3_unavailable' });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(missing.cancel).toHaveBeenCalled();
+    });
+
+    it('403 от S3 → 502 без повтора, тело освобождено', async () => {
+      const photo = await seedPhoto(ownDelivery, { uploaded: true });
+      const denied = s3Resp(403);
+      const fetchMock = vi.fn().mockResolvedValue(denied.res);
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await get(photo.id);
+
+      expect(res.statusCode).toBe(502);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(denied.cancel).toHaveBeenCalled();
+    });
+
+    it('502 на всех трёх попытках → 502, тело КАЖДОГО ответа освобождено', async () => {
+      const photo = await seedPhoto(ownDelivery, { uploaded: true });
+      const answers = [s3Resp(502), s3Resp(502), s3Resp(502)];
+      const fetchMock = vi.fn();
+      for (const a of answers) fetchMock.mockResolvedValueOnce(a.res);
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await get(photo.id);
+
+      expect(res.statusCode).toBe(502);
+      expect(res.json()).toEqual({ error: 's3_unavailable' });
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      for (const a of answers) expect(a.cancel).toHaveBeenCalled();
+    });
+
+    it('таймаут на всех трёх попытках → 504 s3_timeout, как и до повтора', async () => {
+      const photo = await seedPhoto(ownDelivery, { uploaded: true });
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValue(new DOMException('S3 не прислал заголовки', 'TimeoutError'));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await get(photo.id);
+
+      expect(res.statusCode).toBe(504);
+      expect(res.json()).toEqual({ error: 's3_timeout' });
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('сетевой сбой на всех попытках → 502 s3_unavailable', async () => {
+      const photo = await seedPhoto(ownDelivery, { uploaded: true });
+      const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await get(photo.id);
+
+      expect(res.statusCode).toBe(502);
+      expect(res.json()).toEqual({ error: 's3_unavailable' });
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
   });
 });

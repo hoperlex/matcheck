@@ -36,6 +36,7 @@ import {
   resolveMailMessage,
 } from '../domain/mail/resolve-message.js';
 import { copyObject, getObject, presign } from '../domain/storage/s3.signer.js';
+import { discardBody, fetchPresignedForStream } from '../domain/storage/s3.retry.js';
 import { asZod } from '../lib/fastify.js';
 
 /** Статусы, ждущие человека. Остальные фильтры — для истории и разбора инцидентов. */
@@ -323,12 +324,20 @@ export async function mailReviewRoutes(rawApp: FastifyInstance): Promise<void> {
 
       let upstream: Response;
       try {
-        upstream = await fetch(signedUrl);
+        upstream = await fetchPresignedForStream(signedUrl, {
+          log: req.log,
+          logContext: { proxy: 'mail-attachment', key: att.stagingS3Key },
+        });
       } catch (err) {
         req.log.warn({ err, key: att.stagingS3Key }, 'S3 fetch failed (mail attachment)');
         return reply.code(502).send({ error: 's3_unavailable' });
       }
       if (!upstream.ok || !upstream.body) {
+        req.log.warn(
+          { status: upstream.status, key: att.stagingS3Key },
+          'S3 returned non-OK for mail attachment',
+        );
+        await discardBody(upstream);
         return reply.code(502).send({ error: 's3_unavailable' });
       }
 
