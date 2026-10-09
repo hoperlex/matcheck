@@ -77,6 +77,7 @@ import { PhotoGallery, type GalleryPhoto } from './PhotoGallery';
 import { formatStageTime } from './stageTime';
 import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
+import { LinkEdoDocumentModal } from './LinkEdoDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
 import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
 import {
@@ -125,6 +126,18 @@ type DraftItem = {
   vatSum: string | null;
   volumeConfidence: 'low' | 'medium' | 'high' | null;
   groupName: string | null;
+};
+
+type LinkedEdoDocument = {
+  id: string;
+  documentId: string;
+  source: 'import' | 'export';
+  docNumber: string | null;
+  docDate: string | null;
+  supplierName: string | null;
+  supplierInn: string | null;
+  totalSum: string | null;
+  linkedAt: string;
 };
 
 function toNum(v: string | null): number | null {
@@ -265,6 +278,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const [recipientMolId, setRecipientMolId] = useState<string | null>(null);
   const [selectedUpd, setSelectedUpd] = useState<SourceDocument | null>(null);
   const [linkUpdOpen, setLinkUpdOpen] = useState(false);
+  const [linkEdoOpen, setLinkEdoOpen] = useState(false);
   const [linkUpdError, setLinkUpdError] = useState<string | null>(null);
 
   // Эти хуки должны быть ДО любых early-return'ов ниже по компоненту
@@ -366,6 +380,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     // Запросы /deliveries/:id лёгкие; react-query сам остановит polling,
     // когда вкладка скрыта (refetchIntervalInBackground=false по умолчанию).
     refetchInterval: 5000,
+  });
+
+  const edoMatchesQuery = useQuery({
+    queryKey: ['delivery-edo-matches', deliveryId],
+    queryFn: () => api.get<{ items: LinkedEdoDocument[] }>(`/deliveries/${deliveryId}/edo-matches`),
+    enabled: !!deliveryId && !isNew && canLinkUpd,
   });
 
   // Лёгкие count-запросы для счётчиков на вкладках Ожидаемые/Принятые.
@@ -979,7 +999,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // на 1/2 этапах. IDB не трогаем: операция на портале, локальный
   // snapshot инспектора обновится при следующем pullSync.
   const linkUpd = useMutation({
-    mutationFn: async (upd: SourceDocument): Promise<Delivery> => {
+    mutationFn: async (upd: { id: string }): Promise<Delivery> => {
       if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
       return await api.post<Delivery>(`/deliveries/${loadedDelivery.id}/link-source`, {
         sourceDocumentId: upd.id,
@@ -1035,6 +1055,54 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       setLinkUpdError(err.message);
     },
   });
+
+  const linkEdo = useMutation({
+    mutationFn: async (candidate: { id: string; source: 'import' | 'export' }) => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      return api.post(`/deliveries/${loadedDelivery.id}/edo-matches`, {
+        documentId: candidate.id,
+        source: candidate.source,
+      });
+    },
+    onSuccess: () => {
+      message.success('УПД из ЭДО сопоставлена с приёмкой');
+      setLinkEdoOpen(false);
+      setLinkUpdError(null);
+      void queryClient.invalidateQueries({ queryKey: ['delivery-edo-matches', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['delivery-edo-candidates', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+    },
+    onError: (err: Error) => setLinkUpdError(err.message),
+  });
+
+  const unlinkEdo = useMutation({
+    mutationFn: async (document: LinkedEdoDocument) => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      return api.delete(`/deliveries/${loadedDelivery.id}/edo-matches/${document.id}`);
+    },
+    onSuccess: () => {
+      message.success('Связь с УПД из ЭДО удалена');
+      void queryClient.invalidateQueries({ queryKey: ['delivery-edo-matches', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['delivery-edo-candidates', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  const openEdoFile = async (document: LinkedEdoDocument) => {
+    if (!loadedDelivery) return;
+    const tab = window.open('about:blank', '_blank');
+    try {
+      const file = await api.get<{ url: string }>(
+        `/deliveries/${loadedDelivery.id}/edo-matches/${document.id}/file`,
+      );
+      if (tab) tab.location.href = file.url;
+      else window.location.assign(file.url);
+    } catch (err) {
+      tab?.close();
+      message.error(err instanceof Error ? err.message : 'Не удалось открыть файл УПД');
+    }
+  };
 
   // Отвязка документа. Позиции сервер намеренно не трогает: строка могла быть
   // уже проверена инспектором, а «откуда она взялась» — данные, а не следствие
@@ -1812,18 +1880,59 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   исчезала, как только был привязан хоть один документ, и добрать
                   второй документ поставки из карточки было нельзя. */}
               {canLinkUpd && !isNew && !loadedDelivery?.sourceShipmentId && (
-                <Button
-                  size="small"
-                  type="dashed"
-                  icon={<LinkOutlined />}
-                  onClick={() => {
-                    setLinkUpdError(null);
-                    setLinkUpdOpen(true);
-                  }}
-                >
-                  Документ
-                </Button>
+                <>
+                  <Button
+                    size="small"
+                    type="dashed"
+                    icon={<LinkOutlined />}
+                    onClick={() => {
+                      setLinkUpdError(null);
+                      setLinkUpdOpen(true);
+                    }}
+                  >
+                    Документ
+                  </Button>
+                  {!isPending && (
+                    <Button
+                      size="small"
+                      type="dashed"
+                      onClick={() => {
+                        setLinkUpdError(null);
+                        setLinkEdoOpen(true);
+                      }}
+                    >
+                      + УПД из ЭДО
+                    </Button>
+                  )}
+                </>
               )}
+              {canLinkUpd &&
+                (edoMatchesQuery.data?.items ?? []).map((document) => (
+                  <Tag key={document.id} color="green" style={{ marginInlineEnd: 0 }}>
+                    ЭДО: {document.docNumber ?? 'без номера'}
+                    {document.docDate ? ` от ${document.docDate}` : ''}
+                    {document.source === 'export' ? ' · XML' : ''}
+                    <Button
+                      type="link"
+                      size="small"
+                      style={{ paddingInline: 4 }}
+                      onClick={() => void openEdoFile(document)}
+                    >
+                      Файл
+                    </Button>
+                    <Popconfirm
+                      title="Убрать связь с УПД из ЭДО?"
+                      onConfirm={() => unlinkEdo.mutate(document)}
+                      okText="Убрать"
+                      cancelText="Отмена"
+                      disabled={unlinkEdo.isPending || isPending}
+                    >
+                      <Button type="link" size="small" style={{ paddingInline: 4 }}>
+                        ×
+                      </Button>
+                    </Popconfirm>
+                  </Tag>
+                ))}
               {/* Транзит — admin/manager могут поставить/снять прямо
                   с портала (PATCH /deliveries/:id/flags). Inspector_kpp
                   видит только цветной чип при true (как раньше), править
@@ -1888,6 +1997,17 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           }
           busy={linkUpd.isPending}
           error={linkUpdError}
+        />
+
+        <LinkEdoDocumentModal
+          open={linkEdoOpen}
+          deliveryId={loadedDelivery?.id ?? null}
+          busy={linkEdo.isPending}
+          error={linkUpdError}
+          onCancel={() => {
+            if (!linkEdo.isPending) setLinkEdoOpen(false);
+          }}
+          onPick={(candidate) => linkEdo.mutate(candidate)}
         />
 
         <SourceDocumentOriginalModal

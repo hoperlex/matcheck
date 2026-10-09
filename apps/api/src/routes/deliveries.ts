@@ -35,9 +35,11 @@ import { computeItemsTotal, computeItemsVatSum } from '../lib/operation-sums.js'
 import {
   counterparties,
   deliveries,
+  deliveryEdoMatches,
   deliveryItems,
   deliveryPhotos,
   deliverySources,
+  edoExportDocuments,
   entityDeletions,
   s3CleanupOutbox,
   shipments,
@@ -98,6 +100,7 @@ import { dateRangeConditions } from '../lib/date-range.js';
 import { parseUuidCsv } from '../lib/uuid-csv.js';
 import { escapeLike } from '../lib/like.js';
 import { MONEY_FMT, QTY_FMT, fmtDateTimeRu } from '../lib/xlsx-format.js';
+import { registerDeliveryEdoRoutes } from './delivery-edo.js';
 
 const ListQuerySchema = z.object({
   status: DeliveryStatusCodeSchema.optional(),
@@ -2355,6 +2358,8 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     },
   );
 
+  registerDeliveryEdoRoutes(rawApp, (id, role) => buildDeliveryDto(app, id, role));
+
   // Привязка УПД к существующей приёмке (приёмка остаётся в своём статусе,
   // ручные материалы из мобилы НЕ удаляются). Заменяет старый клиентский
   // путь «POST /api/v1/deliveries с items:[]» в KppPage.tsx → linkUpd,
@@ -2407,7 +2412,13 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         });
       }
       const [src] = await app.db
-        .select({ id: sourceDocuments.id })
+        .select({
+          id: sourceDocuments.id,
+          origin: sourceDocuments.origin,
+          edoAccountId: sourceDocuments.edoAccountId,
+          messageId: sourceDocuments.providerMessageId,
+          entityId: sourceDocuments.providerEntityId,
+        })
         .from(sourceDocuments)
         .where(
           and(
@@ -2448,6 +2459,36 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               )
               .limit(1);
             if (already) throw new AlreadyLinkedError();
+            const [alreadyEdoMatch] = await tx
+              .select({ deliveryId: deliveryEdoMatches.deliveryId })
+              .from(deliveryEdoMatches)
+              .where(
+                and(
+                  eq(deliveryEdoMatches.deliveryId, d.id),
+                  eq(deliveryEdoMatches.sourceDocumentId, src.id),
+                ),
+              )
+              .limit(1);
+            if (alreadyEdoMatch) throw new AlreadyLinkedError();
+            if (src.origin === 'edo_diadoc' && src.edoAccountId && src.messageId) {
+              const [alreadyExportMatch] = await tx
+                .select({ id: deliveryEdoMatches.id })
+                .from(deliveryEdoMatches)
+                .innerJoin(
+                  edoExportDocuments,
+                  eq(deliveryEdoMatches.exportDocumentId, edoExportDocuments.id),
+                )
+                .where(
+                  and(
+                    eq(deliveryEdoMatches.deliveryId, d.id),
+                    eq(edoExportDocuments.edoAccountId, src.edoAccountId),
+                    eq(edoExportDocuments.messageId, src.messageId),
+                    eq(edoExportDocuments.entityId, src.entityId),
+                  ),
+                )
+                .limit(1);
+              if (alreadyExportMatch) throw new AlreadyLinkedError();
+            }
             // Та же проверка, что и при создании приёмки: блокировка строки
             // документа плюс сверка объекта. Раньше этот маршрут вставлял связь
             // мимо неё — и мог привязать документ соседнего объекта, например

@@ -1612,6 +1612,44 @@ export const deliverySources = pgTable(
   ],
 );
 
+// Подтверждение бумажной приёмки электронным УПД. Отдельно от delivery_sources:
+// электронная копия тех же товаров не должна удваивать строки и сумму поставки.
+export const deliveryEdoMatches = pgTable(
+  'delivery_edo_matches',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    deliveryId: uuid('delivery_id')
+      .notNull()
+      .references(() => deliveries.id, { onDelete: 'cascade' }),
+    sourceDocumentId: uuid('source_document_id').references(() => sourceDocuments.id, {
+      onDelete: 'restrict',
+    }),
+    exportDocumentId: uuid('export_document_id').references(() => edoExportDocuments.id, {
+      onDelete: 'restrict',
+    }),
+    linkedByUserId: uuid('linked_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    linkedAt: timestamp('linked_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('delivery_edo_matches_source_unique')
+      .on(t.deliveryId, t.sourceDocumentId)
+      .where(sql`${t.sourceDocumentId} is not null`),
+    uniqueIndex('delivery_edo_matches_export_unique')
+      .on(t.deliveryId, t.exportDocumentId)
+      .where(sql`${t.exportDocumentId} is not null`),
+    index('delivery_edo_matches_source_idx')
+      .on(t.sourceDocumentId)
+      .where(sql`${t.sourceDocumentId} is not null`),
+    index('delivery_edo_matches_export_idx')
+      .on(t.exportDocumentId)
+      .where(sql`${t.exportDocumentId} is not null`),
+    check(
+      'delivery_edo_matches_one_document_chk',
+      sql`(${t.sourceDocumentId} is null) <> (${t.exportDocumentId} is null)`,
+    ),
+  ],
+);
+
 export const deliveryItems = pgTable(
   'delivery_items',
   {

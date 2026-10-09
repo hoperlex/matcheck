@@ -21,6 +21,7 @@ import { eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
   deliverySources,
+  deliveryEdoMatches,
   operationGroupClaims,
   shipmentSources,
   sourceBundles,
@@ -107,6 +108,10 @@ export async function transferSite(
     .select({ count: sql<number>`count(*)::int` })
     .from(deliverySources)
     .where(inArray(deliverySources.sourceDocumentId, docIds));
+  const [{ count: edoMatchesCount } = { count: 0 }] = await tx
+    .select({ count: sql<number>`count(*)::int` })
+    .from(deliveryEdoMatches)
+    .where(inArray(deliveryEdoMatches.sourceDocumentId, docIds));
   const [{ count: shipmentsCount } = { count: 0 }] = await tx
     .select({ count: sql<number>`count(*)::int` })
     .from(shipmentSources)
@@ -120,11 +125,11 @@ export async function transferSite(
         .where(eq(operationGroupClaims.groupId, lock.machineRootId))
         .limit(1)
     : [];
-  if (deliveriesCount > 0 || shipmentsCount > 0 || claims.length > 0) {
+  if (deliveriesCount > 0 || edoMatchesCount > 0 || shipmentsCount > 0 || claims.length > 0) {
     return {
       conflict: {
         error: 'machine_has_operation',
-        deliveries: deliveriesCount,
+        deliveries: deliveriesCount + edoMatchesCount,
         shipments: shipmentsCount,
       },
     };

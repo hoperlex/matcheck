@@ -35,6 +35,7 @@ import {
 } from '@matcheck/contracts';
 import {
   counterparties,
+  deliveryEdoMatches,
   deliverySources,
   entityDeletions,
   ingestEvents,
@@ -710,7 +711,7 @@ class HasReferencesError extends Error {
     public readonly shipments: number,
   ) {
     super(
-      `УПД используется в приёмках (${deliveries}) или отгрузках (${shipments}) — сначала удалите их`,
+      `УПД используется в приёмках (${deliveries}) или отгрузках (${shipments}) — сначала отвяжите её от операций`,
     );
   }
 }
@@ -773,12 +774,16 @@ async function deleteUpdWithRefsCheck(
     .select({ count: drSql<number>`count(*)::int` })
     .from(deliverySources)
     .where(eq(deliverySources.sourceDocumentId, id));
+  const [{ count: edoMatchesCount } = { count: 0 }] = await app.db
+    .select({ count: drSql<number>`count(*)::int` })
+    .from(deliveryEdoMatches)
+    .where(eq(deliveryEdoMatches.sourceDocumentId, id));
   const [{ count: shipmentsCount } = { count: 0 }] = await app.db
     .select({ count: drSql<number>`count(*)::int` })
     .from(shipmentSources)
     .where(eq(shipmentSources.sourceDocumentId, id));
-  if (deliveriesCount > 0 || shipmentsCount > 0) {
-    throw new HasReferencesError(deliveriesCount, shipmentsCount);
+  if (deliveriesCount > 0 || edoMatchesCount > 0 || shipmentsCount > 0) {
+    throw new HasReferencesError(deliveriesCount + edoMatchesCount, shipmentsCount);
   }
 
   // Забираем s3-ключи ДО hard delete (cascade удалит строки attachments)

@@ -271,15 +271,33 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
     '/api/v1/admin/edo-accounts/:id',
     {
       preHandler: [app.authenticate, app.authorize('admin')],
-      schema: { params: z.object({ id: z.string().uuid() }) },
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: {
+          200: z.object({ ok: z.literal(true) }),
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
     },
     async (req, reply) => {
-      const del = await app.db
-        .delete(edoAccounts)
-        .where(eq(edoAccounts.id, req.params.id))
-        .returning({ id: edoAccounts.id });
+      let del: { id: string }[];
+      try {
+        del = await app.db
+          .delete(edoAccounts)
+          .where(eq(edoAccounts.id, req.params.id))
+          .returning({ id: edoAccounts.id });
+      } catch (err) {
+        if ((err as { code?: string }).code === '23503') {
+          return reply.code(409).send({
+            error: 'account_in_use',
+            message: 'Учётная запись ЭДО используется документами приёмки — сначала уберите связи',
+          });
+        }
+        throw err;
+      }
       if (del.length === 0) return reply.code(404).send({ error: 'not_found' });
-      return { ok: true };
+      return { ok: true as const };
     },
   );
 
