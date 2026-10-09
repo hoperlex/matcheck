@@ -671,8 +671,10 @@ export function registerDeliveryEdoRoutes(
         references[0]?.arrivedDate ??
         delivery.createdAt.slice(0, 10);
       const anchorTime = Date.parse(`${anchor}T00:00:00Z`);
-      const lower = new Date(anchorTime - 30 * 86_400_000);
-      const upper = new Date(anchorTime + 31 * 86_400_000);
+      // postgres.js не принимает объект Date как параметр внутри drSql``.
+      // Передаём границы как даты ISO и явно приводим их к date в PostgreSQL.
+      const lower = new Date(anchorTime - 30 * 86_400_000).toISOString().slice(0, 10);
+      const upper = new Date(anchorTime + 31 * 86_400_000).toISOString().slice(0, 10);
       const numberFilters = references
         .flatMap((ref) => ref.numbers)
         .map(
@@ -682,7 +684,7 @@ export function registerDeliveryEdoRoutes(
               drSql`regexp_replace(translate(upper(coalesce(${sourceDocuments.docNumber}, '')), 'АВЕКМНОРСТУХ', 'ABEKMHOPCTYX'), '[^A-Z0-9А-ЯЁ]', '', 'g') = ${normalizeDocumentNumber(number)}`,
             )!,
         );
-      const dateFilter = drSql`${sourceDocuments.docDate} >= ${lower} and ${sourceDocuments.docDate} < ${upper}`;
+      const dateFilter = drSql`${sourceDocuments.docDate} >= ${lower}::date and ${sourceDocuments.docDate} < ${upper}::date`;
       const normalizedQ = normalizeDocumentNumber(q);
       const textFilter = q
         ? or(
@@ -787,7 +789,7 @@ export function registerDeliveryEdoRoutes(
             ilike(edoExportDocuments.entityId, `%${escapeLike(q)}%`),
           )
         : or(
-            drSql`${edoExportDocuments.documentDate} >= ${lower} and ${edoExportDocuments.documentDate} < ${upper}`,
+            drSql`${edoExportDocuments.documentDate} >= ${lower}::date and ${edoExportDocuments.documentDate} < ${upper}::date`,
             ...exportNumberFilters,
           );
       const exportedCandidates = await app.db
