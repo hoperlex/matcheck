@@ -76,6 +76,7 @@ import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { PhotoGallery, type GalleryPhoto } from '../kpp/PhotoGallery';
 import { formatStageTime } from '../kpp/stageTime';
 import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
+import { pickUpdSupplierName } from '../shared/updSupplierName';
 import { ShipmentsHistory } from './ShipmentsHistory';
 import { ExpectedOutbound } from './ExpectedOutbound';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
@@ -996,7 +997,10 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     useSupplierDisplayName(loadedShipment?.supplierId ?? null, counterparties) ??
     // Fallback на DTO-имя (нужно роли contractor: /counterparties закрыт).
     loadedShipment?.supplierName ??
-    null;
+    // Поставщик распознанного УПД — из самого документа, как в KppPage.
+    // У черновика linkedSource уже есть, а sourceDocumentIds пуст: проверка
+    // привязки не даёт редактируемому чипу показать несохранённое имя.
+    pickUpdSupplierName(linkedSource, loadedShipment?.sourceDocumentIds ?? []);
 
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];

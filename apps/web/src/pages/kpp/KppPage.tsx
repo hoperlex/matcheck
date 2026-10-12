@@ -76,6 +76,7 @@ import { ExpectedUpds } from './ExpectedUpds';
 import { PhotoGallery, type GalleryPhoto } from './PhotoGallery';
 import { formatStageTime } from './stageTime';
 import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
+import { pickUpdSupplierName } from '../shared/updSupplierName';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkEdoDocumentModal } from './LinkEdoDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
@@ -619,7 +620,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     // Подгрузка выбранного УПД идемпотентна по флагу !selectedUpd — оставляем
     // вне условия гидратации, чтобы она сработала и после первого получения данных,
     // и после смены selectedUpd.
-    if (d.sourceDocumentIds.length > 0 && !selectedUpd) {
+    // Документ, который больше не привязан (отвязали или открыли другую приёмку
+    // без закрытия карточки), тоже перечитываем: по нему чип «Поставщик»
+    // показывает имя из УПД, а сброс selectedUpd есть только при закрытии.
+    if (
+      d.sourceDocumentIds.length > 0 &&
+      (!selectedUpd || !d.sourceDocumentIds.includes(selectedUpd.id))
+    ) {
       api
         .get<SourceDocument>(`/source-documents/${d.sourceDocumentIds[0]}`)
         .then(setSelectedUpd)
@@ -1290,7 +1297,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     // Fallback на имя из DTO (сервер резолвит через JOIN) — нужно роли contractor,
     // у которой справочник /counterparties закрыт и counterparties пуст.
     loadedDelivery?.supplierName ??
-    null;
+    // У распознанного УПД поставщик живёт в самом документе, а
+    // deliveries.supplier_id остаётся NULL — тот же fallback, что в таблице.
+    pickUpdSupplierName(selectedUpd, loadedDelivery?.sourceDocumentIds ?? []);
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
     if (!siteId) reasons.push('Выберите объект');
