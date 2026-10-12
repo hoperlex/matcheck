@@ -20,7 +20,13 @@ import { findEdoCandidates } from '../domain/operations/edo-candidates.js';
 import { toIsoDate } from '../domain/edo/export-upd.js';
 import { decodeXmlBuffer } from '../domain/edo/upd-xml-decode.js';
 import { parseUpdXml, type UpdParsed } from '../domain/edo/upd.parser.js';
+import {
+  renderUpdPdf,
+  UPD_PDF_MAX_ITEMS,
+  UPD_PDF_MAX_XML_BYTES,
+} from '../domain/edo/upd-review-pdf.js';
 import { getObject, presign } from '../domain/storage/s3.signer.js';
+import { createBoundedLimiter, LimiterBusyError } from '../lib/bounded-limiter.js';
 import { publishEvent } from './events.js';
 
 const FoundBySchema = z.enum(['number', 'inn', 'name', 'date', 'search']);
@@ -70,6 +76,47 @@ const EdoPreviewSchema = z.object({
   ),
 });
 type EdoPreview = z.infer<typeof EdoPreviewSchema>;
+
+/**
+ * Документ реестра, который можно открыть из окна подбора — файлом или PDF.
+ *
+ * Условия — статус и состав, те же, что у списка кандидатов (queryExport).
+ * Правила ВЫБОРА кандидата (уже привязан к этой приёмке, привязан на другом
+ * объекте, есть импортированная копия) сюда намеренно не входят: это не права
+ * на чтение, тот же XML менеджер и так получает.
+ */
+function openableExportDocument(documentId: string) {
+  return and(
+    eq(edoExportDocuments.id, documentId),
+    eq(edoExportDocuments.status, 'stored'),
+    isNotNull(edoExportDocuments.s3Key),
+    or(
+      eq(edoExportDocuments.contentCategory, 'materials'),
+      eq(edoExportDocuments.contentCategory, 'undetermined'),
+      isNull(edoExportDocuments.contentCategory),
+    ),
+  );
+}
+
+/** Чем закончилась сборка PDF внутри слота: файл или причина отказа. */
+type ExportPdfOutcome =
+  | { kind: 'ok'; pdf: Buffer; docNumber: string }
+  | { kind: 'storage_failed' | 'too_large' | 'parse_failed' | 'render_failed' };
+
+/**
+ * Ответы об отказе. Код ошибки `apiDownload` на фронте не доносит — он
+ * показывает `message`, поэтому текст здесь и есть то, что увидит менеджер.
+ */
+const PDF_TOO_LARGE = {
+  error: 'too_large',
+  message: 'Документ слишком большой для просмотра — откройте XML',
+} as const;
+
+/** Имя файла из номера УПД: номер приходит из XML, в имя — только безопасное. */
+function pdfFilename(docNumber: string): string {
+  const safe = docNumber.trim().replace(/[^\p{L}\p{N}._-]+/gu, '_');
+  return `УПД_${safe || 'без_номера'}.pdf`;
+}
 
 function toNumber(value: string | null): number | null {
   if (value === null) return null;
@@ -330,18 +377,7 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
       const [document] = await app.db
         .select({ s3Key: edoExportDocuments.s3Key })
         .from(edoExportDocuments)
-        .where(
-          and(
-            eq(edoExportDocuments.id, req.params.documentId),
-            eq(edoExportDocuments.status, 'stored'),
-            isNotNull(edoExportDocuments.s3Key),
-            or(
-              eq(edoExportDocuments.contentCategory, 'materials'),
-              eq(edoExportDocuments.contentCategory, 'undetermined'),
-              isNull(edoExportDocuments.contentCategory),
-            ),
-          ),
-        )
+        .where(openableExportDocument(req.params.documentId))
         .limit(1);
       if (!document?.s3Key) return reply.code(404).send({ error: 'file_not_found' });
       try {
@@ -356,6 +392,145 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
           'edo candidate file presign failed',
         );
         return reply.code(404).send({ error: 'file_not_found' });
+      }
+    },
+  );
+
+  // PDF-представление УПД из реестра — сверка с бумагой глазами. Только
+  // чтение: XML из S3 → разбор → PDF в ответе, ничего не сохраняется.
+  //
+  // Весь путь (чтение S3, разбор, рендер) идёт в одном слоте ограничителя:
+  // ограничивать один рендер мало — память держат и прочитанный XML, и
+  // разобранное дерево. Сверх очереди — сразу 503, а не копить запросы.
+  const pdfSlot = createBoundedLimiter({ concurrency: 2, maxQueue: 8 });
+
+  async function buildExportPdf(
+    s3Key: string,
+    documentId: string,
+    log: FastifyBaseLogger,
+  ): Promise<ExportPdfOutcome> {
+    let buffer: Buffer;
+    try {
+      buffer = await getObject(s3Key);
+    } catch (err) {
+      log.warn({ err, documentId }, 'edo pdf: s3 read failed');
+      return { kind: 'storage_failed' };
+    }
+    // Размер уже сверен по реестру, но строка реестра могла разойтись с объектом.
+    if (buffer.length > UPD_PDF_MAX_XML_BYTES) return { kind: 'too_large' };
+    let parsed: UpdParsed;
+    try {
+      parsed = parseUpdXml(decodeXmlBuffer(buffer));
+    } catch (err) {
+      log.warn({ err, documentId }, 'edo pdf: xml parse failed');
+      return { kind: 'parse_failed' };
+    }
+    if (parsed.items.length > UPD_PDF_MAX_ITEMS) return { kind: 'too_large' };
+    try {
+      const { pdf, warnings } = await renderUpdPdf(parsed);
+      if (warnings.length) {
+        log.info({ documentId, warnings }, 'edo pdf: parse incomplete, flagged in document');
+      }
+      return { kind: 'ok', pdf, docNumber: parsed.docNumber };
+    } catch (err) {
+      log.error({ err, documentId }, 'edo pdf: render failed');
+      return { kind: 'render_failed' };
+    }
+  }
+
+  app.get(
+    '/api/v1/deliveries/:id/edo-candidates/export/:documentId/pdf',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid(), documentId: z.string().uuid() }),
+        response: {
+          // Только для типов: Buffer Fastify отдаёт как есть, мимо сериализатора.
+          200: z.custom<Buffer>((value) => Buffer.isBuffer(value)),
+          404: ErrorResponseSchema,
+          413: ErrorResponseSchema,
+          422: ErrorResponseSchema,
+          502: ErrorResponseSchema,
+          503: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [delivery] = await app.db
+        .select({ id: deliveries.id })
+        .from(deliveries)
+        .where(eq(deliveries.id, req.params.id))
+        .limit(1);
+      if (!delivery) {
+        return reply.code(404).send({ error: 'not_found', message: 'Приёмка не найдена' });
+      }
+      const [document] = await app.db
+        .select({ s3Key: edoExportDocuments.s3Key, sizeBytes: edoExportDocuments.sizeBytes })
+        .from(edoExportDocuments)
+        .where(openableExportDocument(req.params.documentId))
+        .limit(1);
+      if (!document?.s3Key) {
+        return reply
+          .code(404)
+          .send({ error: 'file_not_found', message: 'Документ не найден в реестре ЭДО' });
+      }
+      // Размер — из реестра и ДО чтения: getObject держит объект в памяти целиком.
+      // У сохранённых строк он есть всегда (export-upd.ts пишет его вместе с
+      // ключом); пустой — аномалия, читать вслепую не будем.
+      if (document.sizeBytes === null) {
+        return reply.code(413).send({
+          error: 'size_unknown',
+          message: 'Размер файла в реестре не указан — откройте XML',
+        });
+      }
+      if (document.sizeBytes > UPD_PDF_MAX_XML_BYTES) {
+        return reply.code(413).send(PDF_TOO_LARGE);
+      }
+
+      const s3Key = document.s3Key;
+      let outcome: ExportPdfOutcome;
+      try {
+        outcome = await pdfSlot(() => buildExportPdf(s3Key, req.params.documentId, req.log));
+      } catch (err) {
+        if (!(err instanceof LimiterBusyError)) throw err;
+        req.log.warn(
+          { documentId: req.params.documentId, ...pdfSlot.stats() },
+          'edo pdf: queue full',
+        );
+        reply.header('retry-after', '5');
+        return reply.code(503).send({
+          error: 'busy',
+          message: 'Сервер занят построением других PDF — повторите через несколько секунд',
+        });
+      }
+
+      switch (outcome.kind) {
+        case 'storage_failed':
+          return reply.code(502).send({
+            error: 'storage_failed',
+            message: 'Не удалось прочитать УПД из хранилища — попробуйте ещё раз',
+          });
+        case 'too_large':
+          return reply.code(413).send(PDF_TOO_LARGE);
+        case 'parse_failed':
+          return reply
+            .code(422)
+            .send({ error: 'parse_failed', message: 'Файл УПД не разобрался — откройте XML' });
+        case 'render_failed':
+          return reply
+            .code(502)
+            .send({ error: 'render_failed', message: 'Не удалось построить PDF — откройте XML' });
+        case 'ok':
+          reply
+            .code(200)
+            .header('content-type', 'application/pdf')
+            .header(
+              'content-disposition',
+              `inline; filename*=UTF-8''${encodeURIComponent(pdfFilename(outcome.docNumber))}`,
+            )
+            .header('cache-control', 'private, max-age=600')
+            .header('x-content-type-options', 'nosniff');
+          return reply.send(outcome.pdf);
       }
     },
   );

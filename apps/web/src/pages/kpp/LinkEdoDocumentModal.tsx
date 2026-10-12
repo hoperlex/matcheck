@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Alert, Button, Col, Input, Modal, Row, Space, Table, Tag, Typography, message } from 'antd';
 import type { Delivery } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
+import { EdoCompareDrawer, type ComparePhoto } from './EdoCompareDrawer';
 
 type FoundBy = 'number' | 'inn' | 'name' | 'date' | 'search';
 
@@ -163,6 +164,7 @@ export function LinkEdoDocumentModal({
   busy,
   error,
   deliveryItems,
+  deliveryPhotos,
   onCancel,
   onPick,
 }: {
@@ -171,11 +173,41 @@ export function LinkEdoDocumentModal({
   busy: boolean;
   error: string | null;
   deliveryItems: readonly DeliveryItem[];
+  /** Серверные фото приёмки — для панели сверки. */
+  deliveryPhotos: readonly ComparePhoto[];
   onCancel: () => void;
   onPick: (candidate: Candidate) => void;
 }) {
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
+  /**
+   * Панель сверки. Данные (compare) и видимость (compareOpen) разделены:
+   * afterOpenChange(false) приходит только после анимации закрытия, и
+   * очистка данных раньше размонтировала бы панель без возврата фокуса.
+   * `candidate: null` — панель только с фото.
+   */
+  const [compare, setCompare] = useState<{ candidate: Candidate | null } | null>(null);
+  const [compareOpen, setCompareOpen] = useState(false);
+  /**
+   * Узел внутри окна подбора: после закрытия панели фокус возвращается на его
+   * .ant-modal-wrap, иначе следующий ESC окно не закроет. Панель живёт в
+   * портале, поэтому найти обёртку через closest от неё нельзя.
+   */
+  const rootRef = useRef<HTMLDivElement>(null);
+  const uploadedPhotos = deliveryPhotos.filter((p) => p.uploadedAt !== null).length;
+
+  // Окно закрыли с открытой панелью: при следующем открытии её быть не должно.
+  useEffect(() => {
+    if (!open) {
+      setCompareOpen(false);
+      setCompare(null);
+    }
+  }, [open]);
+
+  const openCompare = (candidate: Candidate | null) => {
+    setCompare({ candidate });
+    setCompareOpen(true);
+  };
   const candidates = useQuery({
     queryKey: ['delivery-edo-candidates', deliveryId, query],
     queryFn: () =>
@@ -229,7 +261,8 @@ export function LinkEdoDocumentModal({
     onPick(candidate);
   };
 
-  const openFile = async (candidate: Candidate) => {
+  /** Исходный файл в новой вкладке — XML, источник правды для PDF. */
+  const openXml = async (candidate: Candidate) => {
     if (!deliveryId) return;
     const tab = window.open('about:blank', '_blank');
     try {
@@ -246,6 +279,15 @@ export function LinkEdoDocumentModal({
     }
   };
 
+  /**
+   * УПД из реестра — PDF рядом с фото приёмки. У импортированных PDF не
+   * строится (на бою их нет), для них прежний путь — XML во вкладке.
+   */
+  const openFile = (candidate: Candidate) => {
+    if (candidate.source === 'export') openCompare(candidate);
+    else void openXml(candidate);
+  };
+
   return (
     <Modal
       open={open}
@@ -255,14 +297,27 @@ export function LinkEdoDocumentModal({
       footer={null}
       destroyOnClose
     >
-      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        <Typography.Text type="secondary">
-          Сверху — УПД с тем же номером и поставщиком. «Сильное совпадение» — только когда
-          совпали полный номер, ИНН поставщика и дата. Раскройте строку, чтобы сверить позиции.
-          {diagnostics?.registryReceivedUntil
-            ? ` В реестре ЭДО есть УПД, полученные по ${formatDateRu(diagnostics.registryReceivedUntil)}; более поздние ещё не выгружены.`
-            : ''}
-        </Typography.Text>
+      <Space ref={rootRef} direction="vertical" size="middle" style={{ width: '100%' }}>
+        <div
+          style={{
+            display: 'flex',
+            gap: 12,
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+          }}
+        >
+          <Typography.Text type="secondary">
+            Сверху — УПД с тем же номером и поставщиком. «Сильное совпадение» — только когда совпали
+            полный номер, ИНН поставщика и дата. Раскройте строку, чтобы сверить позиции; «Открыть
+            файл» покажет УПД рядом с фото приёмки.
+            {diagnostics?.registryReceivedUntil
+              ? ` В реестре ЭДО есть УПД, полученные по ${formatDateRu(diagnostics.registryReceivedUntil)}; более поздние ещё не выгружены.`
+              : ''}
+          </Typography.Text>
+          <Button onClick={() => openCompare(null)} disabled={uploadedPhotos === 0}>
+            Фото приёмки ({uploadedPhotos})
+          </Button>
+        </div>
         {error && <Alert type="error" message={error} showIcon />}
         {candidates.isError && (
           <Alert type="error" message="Не удалось загрузить УПД из ЭДО" showIcon />
@@ -421,7 +476,7 @@ export function LinkEdoDocumentModal({
               width: 120,
               render: (_value, row) => (
                 <Space direction="vertical" size={0}>
-                  <Button size="small" type="link" onClick={() => void openFile(row)}>
+                  <Button size="small" type="link" onClick={() => openFile(row)}>
                     Открыть файл
                   </Button>
                   <Button size="small" disabled={busy} onClick={() => choose(row)}>
@@ -433,6 +488,21 @@ export function LinkEdoDocumentModal({
           ]}
         />
       </Space>
+      <EdoCompareDrawer
+        open={compareOpen}
+        deliveryId={deliveryId}
+        candidate={compare?.candidate ?? null}
+        photos={deliveryPhotos}
+        onClose={() => setCompareOpen(false)}
+        afterClose={() => {
+          // Порядок важен: сначала фокус во внешнее окно, потом очистка данных.
+          rootRef.current?.closest<HTMLElement>('.ant-modal-wrap')?.focus({ preventScroll: true });
+          setCompare(null);
+        }}
+        onOpenXml={() => {
+          if (compare?.candidate) void openXml(compare.candidate);
+        }}
+      />
     </Modal>
   );
 }

@@ -21,6 +21,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as schema from '../../src/db/schema.js';
 import type { Db } from '../../src/db/client.js';
 import { QUOTA, findEdoCandidates } from '../../src/domain/operations/edo-candidates.js';
+import { UPD_PDF_MAX_XML_BYTES } from '../../src/domain/edo/upd-review-pdf.js';
 import type { AuthUser } from '../../src/plugins/auth.js';
 import type * as S3Signer from '../../src/domain/storage/s3.signer.js';
 
@@ -44,9 +45,11 @@ const PREVIEW_XML = `<?xml version="1.0" encoding="UTF-8"?>
 vi.mock('../../src/domain/storage/s3.signer.js', async (importOriginal) => ({
   ...(await importOriginal<typeof S3Signer>()),
   getObject: vi.fn(async () => Buffer.from(PREVIEW_XML, 'utf8')),
+  presign: vi.fn(async ({ key }: { key: string }) => `https://s3.test/${key}?signed`),
 }));
 
 const { deliveryRoutes } = await import('../../src/routes/deliveries.js');
+const { getObject } = await import('../../src/domain/storage/s3.signer.js');
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const suite = TEST_DATABASE_URL ? describe : describe.skip;
@@ -96,6 +99,8 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
   const searchExactId = randomUUID();
 
   const manager = { id: managerId, role: 'manager', siteId: null } as unknown as AuthUser;
+  /** Кем представляется запрос к маршрутам; по умолчанию — менеджер. */
+  let currentUser: AuthUser = manager;
 
   async function exportDoc(o: {
     id?: string;
@@ -104,16 +109,22 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
     inn: string;
     name: string;
     sum: string;
+    category?: string | null;
+    sizeBytes?: number | null;
+    failed?: boolean;
   }): Promise<string> {
     const id = o.id ?? randomUUID();
+    const category = o.category === undefined ? 'materials' : o.category;
     await sql`INSERT INTO edo_export_documents
         (id, edo_account_id, message_id, entity_id, document_type, document_number, document_date,
          supplier_inn, supplier_name, total_sum, content_category, status, s3_key, content_sha256,
-         received_at)
+         size_bytes, received_at)
       VALUES (${id}, ${accountId}, ${`m-${id}`}, ${`e-${id}`}, 'UniversalTransferDocument',
-              ${o.number}, ${o.date}, ${o.inn}, ${o.name}, ${o.sum}, 'materials', 'stored',
-              ${`edo-export/test/${id}.xml`}, ${id.replace(/-/g, '').padEnd(64, '0')},
-              ${`${o.date}T09:00:00Z`})`;
+              ${o.number}, ${o.date}, ${o.inn}, ${o.name}, ${o.sum}, ${category},
+              ${o.failed ? 'failed' : 'stored'},
+              ${o.failed ? null : `edo-export/test/${id}.xml`},
+              ${o.failed ? null : id.replace(/-/g, '').padEnd(64, '0')},
+              ${o.sizeBytes ?? null}, ${`${o.date}T09:00:00Z`})`;
     return id;
   }
 
@@ -125,7 +136,7 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
     app.setSerializerCompiler(serializerCompiler);
     app.decorate('db', db as never);
     app.decorate('authenticate', async (req: { user?: AuthUser }) => {
-      req.user = manager;
+      req.user = currentUser;
     });
     app.decorate(
       'authorize',
@@ -341,5 +352,128 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
       SELECT version, (SELECT count(*)::int FROM delivery_items WHERE delivery_id = ${paperDelivery}) AS items
         FROM deliveries WHERE id = ${paperDelivery}`;
     expect(after).toEqual(before);
+  });
+
+  it('файл из реестра (/file): ссылка на XML; нехранимый, чужой состав и неизвестный — 404', async () => {
+    const fileUrl = (id: string, delivery = paperDelivery) =>
+      `/api/v1/deliveries/${delivery}/edo-candidates/export/${id}/file`;
+    const ok = await app.inject({ method: 'GET', url: fileUrl(targetId) });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toEqual({
+      url: `https://s3.test/edo-export/test/${targetId}.xml?signed`,
+      filename: `${targetId}.xml`,
+      mimeType: 'application/xml',
+    });
+
+    const doc = { date: ANCHOR, inn: FILLER_INN, name: 'ООО «Чужой»', sum: '1.00' };
+    const undetermined = await exportDoc({
+      ...doc,
+      number: `X-${RUN}-U`,
+      category: 'undetermined',
+    });
+    const uncategorized = await exportDoc({ ...doc, number: `X-${RUN}-N`, category: null });
+    for (const id of [undetermined, uncategorized]) {
+      expect((await app.inject({ method: 'GET', url: fileUrl(id) })).statusCode).toBe(200);
+    }
+
+    const failed = await exportDoc({ ...doc, number: `X-${RUN}-F`, failed: true });
+    const services = await exportDoc({ ...doc, number: `X-${RUN}-S`, category: 'services' });
+    for (const id of [failed, services, randomUUID()]) {
+      const res = await app.inject({ method: 'GET', url: fileUrl(id) });
+      expect(res.statusCode).toBe(404);
+    }
+    const noDelivery = await app.inject({ method: 'GET', url: fileUrl(targetId, randomUUID()) });
+    expect(noDelivery.statusCode).toBe(404);
+  });
+
+  it('PDF из реестра (/pdf): доступ как у /file, лимиты до чтения S3, у каждой ошибки есть текст', async () => {
+    const pdfUrl = (id: string, delivery = paperDelivery) =>
+      `/api/v1/deliveries/${delivery}/edo-candidates/export/${id}/pdf`;
+    const get = (id: string, delivery?: string) =>
+      app.inject({ method: 'GET', url: pdfUrl(id, delivery) });
+    const doc = { date: ANCHOR, inn: FILLER_INN, name: 'ООО «Чужой»', sum: '1.00' };
+    const sized = await exportDoc({ ...doc, number: `P-${RUN}-1`, sizeBytes: 2048 });
+
+    const ok = await get(sized);
+    expect(ok.statusCode).toBe(200);
+    expect(ok.headers['content-type']).toBe('application/pdf');
+    expect(ok.headers['content-disposition']).toBe(
+      `inline; filename*=UTF-8''${encodeURIComponent('УПД_Т31-PREVIEW.pdf')}`,
+    );
+    expect(ok.headers['cache-control']).toBe('private, max-age=600');
+    expect(ok.rawPayload.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+
+    // Привязана к другой приёмке: подбор её больше не покажет, но открыть можно —
+    // правила выбора кандидата не ограничивают чтение.
+    const link = await app.inject({
+      method: 'POST',
+      url: `/api/v1/deliveries/${bareDelivery}/edo-matches`,
+      payload: { documentId: sized, source: 'export' },
+    });
+    expect(link.statusCode).toBe(200);
+    expect((await get(sized)).statusCode).toBe(200);
+
+    const failed = await exportDoc({ ...doc, number: `P-${RUN}-F`, failed: true });
+    const services = await exportDoc({
+      ...doc,
+      number: `P-${RUN}-S`,
+      category: 'services',
+      sizeBytes: 2048,
+    });
+    for (const [id, delivery] of [
+      [failed, paperDelivery],
+      [services, paperDelivery],
+      [randomUUID(), paperDelivery],
+      [sized, randomUUID()],
+    ] as const) {
+      const res = await get(id, delivery);
+      expect(res.statusCode).toBe(404);
+      expect((res.json() as { message?: string }).message).toBeTruthy();
+    }
+
+    // Размер из реестра проверяется ДО чтения: S3 не трогаем вовсе.
+    vi.mocked(getObject).mockClear();
+    const unknownSize = await exportDoc({ ...doc, number: `P-${RUN}-0` });
+    const huge = await exportDoc({
+      ...doc,
+      number: `P-${RUN}-H`,
+      sizeBytes: UPD_PDF_MAX_XML_BYTES + 1,
+    });
+    const noSize = await get(unknownSize);
+    expect(noSize.statusCode).toBe(413);
+    expect(noSize.json()).toMatchObject({ error: 'size_unknown' });
+    const tooBig = await get(huge);
+    expect(tooBig.statusCode).toBe(413);
+    expect(tooBig.json()).toMatchObject({ error: 'too_large' });
+    expect(getObject).not.toHaveBeenCalled();
+
+    // Сбой S3, не разобранный XML и объект больше, чем записано в реестре.
+    vi.mocked(getObject).mockRejectedValueOnce(new Error('S3 недоступен'));
+    const storage = await get(sized);
+    expect(storage.statusCode).toBe(502);
+    expect(storage.json()).toMatchObject({ error: 'storage_failed' });
+
+    vi.mocked(getObject).mockResolvedValueOnce(
+      Buffer.from('<?xml version="1.0"?><Другое/>', 'utf8'),
+    );
+    const parse = await get(sized);
+    expect(parse.statusCode).toBe(422);
+    expect(parse.json()).toMatchObject({ error: 'parse_failed' });
+
+    vi.mocked(getObject).mockResolvedValueOnce(Buffer.alloc(UPD_PDF_MAX_XML_BYTES + 1, 0x20));
+    const grown = await get(sized);
+    expect(grown.statusCode).toBe(413);
+    expect(grown.json()).toMatchObject({ error: 'too_large' });
+
+    for (const res of [noSize, tooBig, storage, parse, grown]) {
+      expect((res.json() as { message?: string }).message).toBeTruthy();
+    }
+
+    currentUser = { ...manager, role: 'inspector_kpp' } as AuthUser;
+    try {
+      expect((await get(sized)).statusCode).toBe(403);
+    } finally {
+      currentUser = manager;
+    }
   });
 });

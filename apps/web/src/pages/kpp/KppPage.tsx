@@ -2015,6 +2015,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           busy={linkEdo.isPending}
           error={linkEdoError}
           deliveryItems={loadedDelivery?.items ?? []}
+          deliveryPhotos={loadedDelivery?.photos ?? []}
           onCancel={() => {
             if (!linkEdo.isPending) setLinkEdoOpen(false);
           }}

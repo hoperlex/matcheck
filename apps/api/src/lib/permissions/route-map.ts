@@ -332,6 +332,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/deliveries/:id/edo-matches/:matchId/file', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
   ['GET /api/v1/deliveries/:id/edo-candidates', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
   ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/file', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
+  ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/pdf', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
   ['GET /api/v1/deliveries/:id/edo-candidates/:source/:documentId/preview', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
   // Ссылки-шаринги — не часть обычного редактирования: у создания, списка,
   // отзыва и переписки РАЗНЫЕ allow-list (инспектор создаёт и видит, но не
