@@ -54,6 +54,13 @@ import { priceWithVat, priceWithoutVat } from '../../shared/utils/priceWithVat';
 import { ExtraFilesFooterButton } from './ExtraFilesBlock';
 import { LlmCallsDrawer } from './LlmCallsDrawer';
 import { CustomerCounterpartySelect } from './CustomerCounterpartySelect';
+import { DocumentPartySelect } from './DocumentPartySelect';
+import {
+  diffPatchBody,
+  finalizePartyPayloads,
+  partyPayload,
+  type DocumentPartyValue,
+} from './sourceDocumentPatchBody';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
 import { UpdValidationSummary } from '../../shared/ui/UpdValidationSummary';
 import { SiteSelect } from './SiteSelect';
@@ -109,6 +116,10 @@ type EditForm = {
   recipientMolId: string | null;
   siteId: string | null;
   totalSum: string | null;
+  // Стороны самого документа (графы 6 и 4 УПД). Правятся только у приёмки и
+  // только с правом «Редактировать»; уходят на сервер лишь после изменения.
+  buyer: DocumentPartyValue | null;
+  consignee: DocumentPartyValue | null;
   items: EditItem[];
   /**
    * Шапка НА МОМЕНТ ОТКРЫТИЯ карточки — источник ставки для строк, где своя не
@@ -221,6 +232,12 @@ function initialForm(sd: SourceDocumentDetail): EditForm {
     recipientMolId: sd.recipientMolId,
     siteId: sd.siteId,
     totalSum: sd.totalSum,
+    buyer: sd.buyerName
+      ? { name: sd.buyerName, inn: sd.buyerInn ?? null, source: 'document' }
+      : null,
+    consignee: sd.consigneeName
+      ? { name: sd.consigneeName, inn: sd.consigneeInn ?? null, source: 'document' }
+      : null,
     // Единственный гейт «только УПД» в режиме редактирования: у накладных и
     // ОС-2 источника ставки нет, и весь путь вырождается в прежнее поведение.
     vatSource: sd.kind === 'upd' ? { totalSum: sd.totalSum, vatSum: sd.vatSum } : null,
@@ -243,6 +260,9 @@ export function SourceDocumentDetailModal({
   const role = useAuthStore((s) => s.user?.role ?? null);
   const { can } = usePermissions();
   const canReparse = can('documents.list', 'reparse');
+  // Стороны документа правит тот, кому открыто сохранение карточки: админ
+  // всегда, Мониторинг и менеджер — по матрице. Без права — показ, как раньше.
+  const canEditDocument = can('documents.list', 'edit');
   const [edit, setEdit] = useState<EditForm | null>(null);
   const [llmDrawerOpen, setLlmDrawerOpen] = useState(false);
   const isWide = useIsWideViewport();
@@ -356,8 +376,7 @@ export function SourceDocumentDetailModal({
     onError: (err: Error) => message.error(err.message),
   });
 
-  function onSave() {
-    if (!edit) return;
+  function buildPatchBody(form: EditForm, isOutbound: boolean): Record<string, unknown> {
     // Получатель. У ОТГРУЗКИ он обязателен и остаётся взаимоисключающим
     // выбором: внешний контрагент (recipientId) либо наш МОЛ; «противоположное»
     // поле чистим явно, иначе PATCH не сбросит ранее сохранённое.
@@ -367,23 +386,24 @@ export function SourceDocumentDetailModal({
     // документа. contractorId в тело НЕ кладём вовсе: значение в базе живёт
     // своей жизнью (фильтр «Подрядчик», роль contractor), и затирать его
     // сохранением реквизитов нельзя.
-    const isOutbound = sd?.direction === 'outbound';
     const body: Record<string, unknown> = {
-      docNumber: edit.docNumber,
-      docDate: edit.docDate ? edit.docDate.format('YYYY-MM-DD') : null,
-      expectedDate: edit.expectedDate ? edit.expectedDate.format('YYYY-MM-DD') : null,
+      docNumber: form.docNumber,
+      docDate: form.docDate ? form.docDate.format('YYYY-MM-DD') : null,
+      expectedDate: form.expectedDate ? form.expectedDate.format('YYYY-MM-DD') : null,
       recipientMolId: isOutbound
-        ? edit.recipientKind === 'mol'
-          ? edit.recipientMolId
+        ? form.recipientKind === 'mol'
+          ? form.recipientMolId
           : null
-        : edit.recipientMolId,
-      siteId: edit.siteId,
-      totalSum: edit.totalSum,
-      items: edit.items.map((it) => ({
+        : form.recipientMolId,
+      siteId: form.siteId,
+      totalSum: form.totalSum,
+      buyer: partyPayload(form.buyer),
+      consignee: partyPayload(form.consignee),
+      items: form.items.map((it) => ({
         nameRaw: it.nameRaw,
         qty: it.qty,
         unit: it.unit,
-        price: priceForSave(it, edit.vatSource),
+        price: priceForSave(it, form.vatSource),
         sum: it.sum,
         // Ставку отправляем обратно, иначе сервер перезапишет позиции без неё:
         // PATCH заменяет строки целиком, и НДС у документа обнулялся после
@@ -394,7 +414,34 @@ export function SourceDocumentDetailModal({
     if (isOutbound) {
       // contractorId (наш отправитель) этой формой не правим — оставляем как
       // в БД, не отправляя в PATCH вовсе.
-      body.recipientId = edit.recipientKind === 'counterparty' ? edit.recipientId : null;
+      body.recipientId = form.recipientKind === 'counterparty' ? form.recipientId : null;
+    }
+    return body;
+  }
+
+  function onSave() {
+    if (!edit || !sd) return;
+    // На сервер — только изменённое (см. sourceDocumentPatchBody.ts): полная
+    // шапка с позициями пересоздавала строки документа и рвала связи строк
+    // приёмки с ними, поднимала ревизию машины и снимала «Принять как есть».
+    // «Как открыли» собирается той же функцией, поэтому нетронутое поле
+    // совпадает само с собой.
+    const isOutbound = sd.direction === 'outbound';
+    const body = diffPatchBody(
+      buildPatchBody(edit, isOutbound),
+      buildPatchBody(initialForm(sd), isOutbound),
+    );
+    const badInnSide = finalizePartyPayloads(body);
+    if (badInnSide) {
+      message.error(
+        `ИНН ${badInnSide === 'buyer' ? 'покупателя' : 'грузополучателя'} не прошёл проверку — проверьте цифры`,
+      );
+      return;
+    }
+    if (Object.keys(body).length === 0) {
+      message.info('Изменений нет');
+      onClose();
+      return;
     }
     patch.mutate(body);
   }
@@ -819,22 +866,50 @@ export function SourceDocumentDetailModal({
                             подставлял туда покупателя, у субподряда это
                             генподрядчик. */}
                         <Form.Item label="Стороны по документу">
-                          <Typography.Paragraph style={{ marginBottom: 0 }}>
-                            Грузополучатель:{' '}
-                            {sd.consigneeName ? (
-                              shortenCounterpartyName(sd.consigneeName)
-                            ) : (
-                              <Typography.Text type="secondary">не распознан</Typography.Text>
-                            )}
-                          </Typography.Paragraph>
-                          <Typography.Paragraph style={{ marginBottom: 0 }}>
-                            Покупатель:{' '}
-                            {sd.buyerName ? (
-                              shortenCounterpartyName(sd.buyerName)
-                            ) : (
-                              <Typography.Text type="secondary">не распознан</Typography.Text>
-                            )}
-                          </Typography.Paragraph>
+                          {canEditDocument ? (
+                            // Правка — когда распознавание ошиблось или не нашло
+                            // сторону. Пустые поля не трогаются: в тело PATCH
+                            // сторона попадает только после изменения.
+                            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                              <div>
+                                <Typography.Text type="secondary">Грузополучатель</Typography.Text>
+                                <DocumentPartySelect
+                                  ariaLabel="Грузополучатель"
+                                  placeholder="Не распознан — выберите или введите"
+                                  value={edit.consignee}
+                                  onChange={(v) => setEdit({ ...edit, consignee: v })}
+                                />
+                              </div>
+                              <div>
+                                <Typography.Text type="secondary">Покупатель</Typography.Text>
+                                <DocumentPartySelect
+                                  ariaLabel="Покупатель"
+                                  placeholder="Не распознан — выберите или введите"
+                                  value={edit.buyer}
+                                  onChange={(v) => setEdit({ ...edit, buyer: v })}
+                                />
+                              </div>
+                            </Space>
+                          ) : (
+                            <>
+                              <Typography.Paragraph style={{ marginBottom: 0 }}>
+                                Грузополучатель:{' '}
+                                {sd.consigneeName ? (
+                                  shortenCounterpartyName(sd.consigneeName)
+                                ) : (
+                                  <Typography.Text type="secondary">не распознан</Typography.Text>
+                                )}
+                              </Typography.Paragraph>
+                              <Typography.Paragraph style={{ marginBottom: 0 }}>
+                                Покупатель:{' '}
+                                {sd.buyerName ? (
+                                  shortenCounterpartyName(sd.buyerName)
+                                ) : (
+                                  <Typography.Text type="secondary">не распознан</Typography.Text>
+                                )}
+                              </Typography.Paragraph>
+                            </>
+                          )}
                         </Form.Item>
                         <Form.Item
                           label="МОЛ"

@@ -94,7 +94,11 @@ import {
 } from '../domain/sourceDocuments/expected-date-transfer.js';
 import { loadEnv } from '../lib/env.js';
 import { fromSupplierPortalSql } from '../domain/sourceDocuments/public-origin.js';
-import { manualRecipientSource } from '../domain/sourceDocuments/resolve-contractor.js';
+import {
+  manualRecipientSource,
+  normalizeInn,
+} from '../domain/sourceDocuments/resolve-contractor.js';
+import { findOrCreateCounterparty as findOrCreatePartyCounterparty } from '../domain/edo/counterparty.js';
 import {
   assemblyServedRowSql,
   selectExtraFiles,
@@ -312,6 +316,32 @@ async function findOrCreateCounterparty(
     .returning({ id: counterparties.id });
   if (!created) throw new Error('Failed to create counterparty');
   return created.id;
+}
+
+/**
+ * Колонки стороны документа (покупатель, грузополучатель) по ручной правке.
+ *
+ * Имя пишется в *_name_raw: это источник показа, и COALESCE отдаст ровно то,
+ * что выбрал человек, а не одно из названий контрагента по ИНН (у СУ-10 их
+ * больше десятка). *_inn_raw обнуляется — по прецеденту поставщика: колонка
+ * отвечает на вопрос «что стояло в документе», а ИНН DTO возьмёт по FK.
+ *
+ * Контрагент — общим помощником ЭДО, а не локальным findOrCreateCounterparty
+ * выше: тот не переживает гонку на частичном уникальном индексе и не добавляет
+ * найденной записи роль покупателя. Вызывать внутри транзакции PATCH: при
+ * откате контрагент и роль уходят вместе с правкой. ИНН к этому моменту уже
+ * проверен обработчиком.
+ */
+async function documentPartyColumns(
+  db: Db,
+  party: { name: string; inn?: string | null } | null,
+): Promise<{ id: string | null; nameRaw: string | null; innRaw: null }> {
+  if (party === null) return { id: null, nameRaw: null, innRaw: null };
+  const inn = normalizeInn(party.inn);
+  const id = inn
+    ? await findOrCreatePartyCounterparty(db, { inn, kpp: null, name: party.name }, 'customer')
+    : null;
+  return { id, nameRaw: party.name, innRaw: null };
 }
 
 type SdNames = {
@@ -3339,6 +3369,24 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
   // сохранения пересчитывается validation и, если расхождения исчезли —
   // статус needs_resolution/validation_mismatch автоматически переходит
   // в parsed.
+
+  // Сторона самого документа (покупатель, грузополучатель), заданная человеком
+  // в карточке. null — «стороны нет»: обнуляются имя, ИНН и FK разом, иначе
+  // COALESCE(*_name_raw, имя по FK) вернул бы прежнего контрагента. ИНН здесь
+  // только по форме — контрольную сумму проверяет обработчик, чтобы ответить
+  // понятной ошибкой с названием стороны, а не общей ошибкой схемы.
+  const DocumentPartyPatchSchema = z
+    .object({
+      name: z.string().trim().min(1).max(500),
+      inn: z
+        .string()
+        .regex(/^\d{10}(\d{2})?$/)
+        .nullable()
+        .optional(),
+    })
+    .nullable()
+    .optional();
+
   const UpdPatchSchema = z.object({
     docNumber: z.string().nullable().optional(),
     docDate: z.string().nullable().optional(),
@@ -3365,6 +3413,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       })
       .nullable()
       .optional(),
+    // Покупатель (графа 6) и грузополучатель (графа 4). Ключ отсутствует —
+    // сторона не меняется: форма шлёт её только после правки, и нетронутая
+    // карточка не перезапишет распознанный текст именем из справочника.
+    buyer: DocumentPartyPatchSchema,
+    consignee: DocumentPartyPatchSchema,
     items: z
       .array(
         z.object({
@@ -3398,6 +3451,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         body: UpdPatchSchema,
         response: {
           200: SourceDocumentDetailSchema,
+          // ИНН стороны документа не прошёл проверку контрольной суммы.
+          400: ErrorResponseSchema,
           404: ErrorResponseSchema,
           // Смена объекта у поставки, по которой уже оформлена операция, и
           // столкновение с таким же комплектом на целевом объекте.
@@ -3420,6 +3475,24 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         )
         .limit(1);
       if (!sd) return reply.code(404).send({ error: 'not_found' });
+
+      // ИНН сторон проверяем ДО любой записи и обе стороны сразу. Контрагент
+      // заводится позже, в транзакции, но отказ по одной стороне обязан
+      // отменить весь запрос: ни шапка, ни позиции, ни контрагент второй
+      // стороны его пережить не должны.
+      const invalidInnSides = (['buyer', 'consignee'] as const).filter((side) => {
+        const inn = req.body[side]?.inn;
+        return inn != null && normalizeInn(inn) == null;
+      });
+      if (invalidInnSides.length > 0) {
+        const label = invalidInnSides
+          .map((side) => (side === 'buyer' ? 'покупателя' : 'грузополучателя'))
+          .join(' и ');
+        return reply.code(400).send({
+          error: 'invalid_inn',
+          message: `ИНН ${label} не прошёл проверку контрольной суммы — проверьте цифры`,
+        });
+      }
 
       // updatedAt здесь НЕ ставится: время берётся уже в транзакции
       // (statement_timestamp при UPDATE ниже). Значение, посчитанное сейчас,
@@ -3581,80 +3654,97 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             }
           }
 
-          // Пересчёт validation. Берём актуальные значения шапки и позиций.
           const updatedItems = await tx
             .select()
             .from(sourceDocumentItems)
             .where(eq(sourceDocumentItems.sourceDocumentId, sd.id))
             .orderBy(sourceDocumentItems.lineNo);
-          const totalSumForCheck = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
-          const validation = validateUpdTotals(
-            {
-              totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
-              vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
-              items: updatedItems.map((i) => ({
-                qty: Number(i.qty),
-                price: i.price != null ? Number(i.price) : null,
-                sum: i.sum != null ? Number(i.sum) : null,
-                vatRate: i.vatRate != null ? Number(i.vatRate) : null,
-                vatSum: i.vatSum != null ? Number(i.vatSum) : null,
-              })),
-            },
-            // Тот же признак, что и в live-пересчёте: распознанный документ —
-            // эвристика уместна, XML и ручной ввод — нет.
-            { detectRecognitionWarnings: sd.llmProviderId != null },
-          );
-          // Граница записи: пересчёт стирает всё, чего валидатор не считает.
-          // Пакетные предупреждения относятся к нарезке файла, а не к числам
-          // документа, и обязаны пережить правку позиций менеджером.
-          upd.validation = mergePersistentUpdWarnings(sd.validation, validation);
 
-          // Исход после правки считает то же правило, что и разбор
-          // (domain/edo/upd-outcome.ts). Раньше здесь жила своя проверка, и она
-          // умела только одно: снять `validation_mismatch`, когда суммы сошлись.
-          // Менеджер, дописавший недостающие позиции или номер, оставался с
-          // `partial_parse` — то есть его работа не доезжала до инспектора.
+          // Пересчёт validation и исхода — только когда менялось то, из чего они
+          // считаются: позиции, итог, номер. Иначе входы прежние, уточнить
+          // пересчёту нечего, а стереть он может ручное решение: «Принять как
+          // есть» ставит parsed без кода, правило исхода о принятии не знает и
+          // вернуло бы validation_mismatch, затерев отметку. Правка стороны,
+          // МОЛ, даты или объекта — ровно такой случай.
           //
-          // Трогаем статус только у документов в работе: `archived` закрыт
-          // человеком осознанно, а заглушки разбираются ниже по явному флагу.
-          // Дубликат сюда не попадает: его снимает отдельное действие «разрешить»
-          // (resolve-duplicate), где человек решает, какой из двух документов
-          // настоящий. Пересчитав ему исход здесь, мы бы стёрли эту пометку при
-          // любой правке поля — и второй экземпляр УПД тихо уехал бы инспектору.
-          const touchable =
-            sd.kind === 'upd' &&
-            (sd.status === 'needs_resolution' || sd.status === 'parsed') &&
-            sd.parseErrorCode !== 'duplicate_upd' &&
-            !isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
-          if (touchable) {
-            const nextNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
-            const outcome = deriveUpdParseOutcome(
+          // «Разобрано вручную» — отдельное действие со своим порядком, и его
+          // поведение остаётся прежним: validation пересчитывается, как раньше
+          // (исход заглушке и так не пересчитывается — см. touchable).
+          const outcomeInputsTouched =
+            req.body.items !== undefined ||
+            req.body.totalSum !== undefined ||
+            req.body.docNumber !== undefined ||
+            req.body.resolveManually === true;
+          if (outcomeInputsTouched) {
+            const totalSumForCheck = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
+            const validation = validateUpdTotals(
               {
+                totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
+                vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
                 items: updatedItems.map((i) => ({
-                  nameRaw: i.nameRaw,
                   qty: Number(i.qty),
                   price: i.price != null ? Number(i.price) : null,
                   sum: i.sum != null ? Number(i.sum) : null,
                   vatRate: i.vatRate != null ? Number(i.vatRate) : null,
+                  vatSum: i.vatSum != null ? Number(i.vatSum) : null,
                 })),
-                docNumber: nextNumber ?? null,
-                totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
-                confidence: sd.llmConfidence != null ? Number(sd.llmConfidence) : 0,
-                itemsCount: null,
               },
-              validation,
+              // Тот же признак, что и в live-пересчёте: распознанный документ —
+              // эвристика уместна, XML и ручной ввод — нет.
+              { detectRecognitionWarnings: sd.llmProviderId != null },
             );
-            upd.status = outcome.status;
-            upd.parseErrorCode = outcome.parseErrorCode;
-            upd.parseErrorDetails = outcome.parseErrorDetails as never;
-            // Итог, посчитанный по строкам, записываем только если менеджер не
-            // задал его сам в этом же запросе.
-            if (
-              upd.totalSum === undefined &&
-              outcome.totalSumSynthesized &&
-              outcome.totalSum != null
-            ) {
-              upd.totalSum = outcome.totalSum.toString();
+            // Граница записи: пересчёт стирает всё, чего валидатор не считает.
+            // Пакетные предупреждения относятся к нарезке файла, а не к числам
+            // документа, и обязаны пережить правку позиций менеджером.
+            upd.validation = mergePersistentUpdWarnings(sd.validation, validation);
+
+            // Исход после правки считает то же правило, что и разбор
+            // (domain/edo/upd-outcome.ts). Раньше здесь жила своя проверка, и она
+            // умела только одно: снять `validation_mismatch`, когда суммы сошлись.
+            // Менеджер, дописавший недостающие позиции или номер, оставался с
+            // `partial_parse` — то есть его работа не доезжала до инспектора.
+            //
+            // Трогаем статус только у документов в работе: `archived` закрыт
+            // человеком осознанно, а заглушки разбираются ниже по явному флагу.
+            // Дубликат сюда не попадает: его снимает отдельное действие «разрешить»
+            // (resolve-duplicate), где человек решает, какой из двух документов
+            // настоящий. Пересчитав ему исход здесь, мы бы стёрли эту пометку при
+            // любой правке поля — и второй экземпляр УПД тихо уехал бы инспектору.
+            const touchable =
+              sd.kind === 'upd' &&
+              (sd.status === 'needs_resolution' || sd.status === 'parsed') &&
+              sd.parseErrorCode !== 'duplicate_upd' &&
+              !isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
+            if (touchable) {
+              const nextNumber = upd.docNumber !== undefined ? upd.docNumber : sd.docNumber;
+              const outcome = deriveUpdParseOutcome(
+                {
+                  items: updatedItems.map((i) => ({
+                    nameRaw: i.nameRaw,
+                    qty: Number(i.qty),
+                    price: i.price != null ? Number(i.price) : null,
+                    sum: i.sum != null ? Number(i.sum) : null,
+                    vatRate: i.vatRate != null ? Number(i.vatRate) : null,
+                  })),
+                  docNumber: nextNumber ?? null,
+                  totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
+                  confidence: sd.llmConfidence != null ? Number(sd.llmConfidence) : 0,
+                  itemsCount: null,
+                },
+                validation,
+              );
+              upd.status = outcome.status;
+              upd.parseErrorCode = outcome.parseErrorCode;
+              upd.parseErrorDetails = outcome.parseErrorDetails as never;
+              // Итог, посчитанный по строкам, записываем только если менеджер не
+              // задал его сам в этом же запросе.
+              if (
+                upd.totalSum === undefined &&
+                outcome.totalSumSynthesized &&
+                outcome.totalSum != null
+              ) {
+                upd.totalSum = outcome.totalSum.toString();
+              }
             }
           }
 
@@ -3695,6 +3785,24 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             // «Ожидаемые». Плюс он объясняет менеджеру, почему документ в архиве.
           }
 
+          // Стороны документа — последними перед записью шапки, и не раньше:
+          // ветка конфликта объекта выше ВОЗВРАЩАЕТ результат, то есть транзакция
+          // фиксируется, и заведённый до неё контрагент пережил бы отказ. После
+          // этой точки возможны только исключения, а они откатывают всё — и
+          // нового контрагента, и добавленную ему роль покупателя.
+          if (req.body.buyer !== undefined) {
+            const party = await documentPartyColumns(tx as unknown as Db, req.body.buyer);
+            upd.buyerId = party.id;
+            upd.buyerNameRaw = party.nameRaw;
+            upd.buyerInnRaw = party.innRaw;
+          }
+          if (req.body.consignee !== undefined) {
+            const party = await documentPartyColumns(tx as unknown as Db, req.body.consignee);
+            upd.consigneeId = party.id;
+            upd.consigneeNameRaw = party.nameRaw;
+            upd.consigneeInnRaw = party.innRaw;
+          }
+
           const [updated] = await tx
             .update(sourceDocuments)
             .set({ ...upd, updatedAt: drSql`statement_timestamp()` })
@@ -3723,17 +3831,24 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           }
 
           // Ревизию поднимаем только на то, что ВИДИТ инспектор. Правка
-          // комментария или поставщика не должна выдавать ему «состав машины
-          // изменился» на открытой форме.
+          // комментария, поставщика или сторон документа не должна выдавать ему
+          // «состав машины изменился» на открытой форме.
+          //
+          // Сравниваем со значением в базе, а не проверяем наличие ключа: старая
+          // вкладка портала шлёт в PATCH всю шапку при каждом сохранении, и
+          // правка одного грузополучателя поднимала бы ревизию всей машины.
+          const differs = (next: unknown, prev: unknown) =>
+            next !== undefined && (next ?? null) !== (prev ?? null);
           const inspectorSees =
             req.body.items !== undefined ||
             transfer.changed ||
             dateTransfer.changed ||
-            upd.docNumber !== undefined ||
-            upd.status !== undefined ||
-            upd.contractorId !== undefined ||
-            upd.recipientId !== undefined ||
-            upd.recipientMolId !== undefined;
+            differs(upd.docNumber, sd.docNumber) ||
+            differs(upd.status, sd.status) ||
+            differs(upd.parseErrorCode, sd.parseErrorCode) ||
+            differs(upd.contractorId, sd.contractorId) ||
+            differs(upd.recipientId, sd.recipientId) ||
+            differs(upd.recipientMolId, sd.recipientMolId);
           // Под рубильником по той же причине, что и при удалении: до выката
           // новой модели инспектор не должен видеть ни новых диалогов, ни
           // перезагрузки состава машины.

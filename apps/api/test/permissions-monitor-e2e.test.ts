@@ -120,6 +120,13 @@ async function buildApp(opts: {
     async () => ({ ok: 'flags' }),
   );
   instance.patch('/api/v1/deliveries/:id/review', async () => ({ ok: 'review' }));
+  // Сохранение карточки документа, в том числе сторон (грузополучатель,
+  // покупатель): allow-list как в routes/source-documents.ts.
+  instance.patch(
+    '/api/v1/source-documents/:id',
+    { preHandler: [authorize('admin', 'manager')] as never },
+    async () => ({ ok: 'document' }),
+  );
   instance.post(
     '/api/v1/deliveries/bulk-hard-delete',
     { preHandler: [authorize('admin')] as never },
@@ -251,6 +258,29 @@ describe('администратор выдал Мониторингу «Ред�
   it('создание при этом закрыто', async () => {
     app = await buildApp({ role: 'monitor', overrides: monitorGranted({ canEdit: true }) });
     expect((await post(app, '/api/v1/deliveries')).statusCode).toBe(403);
+  });
+});
+
+describe('карточка документа: стороны правят админ и Мониторинг с «Редактировать»', () => {
+  const documentsRow = (canEdit: boolean) => [
+    row('monitor', 'documents.list', { canView: true, canEdit }),
+  ];
+
+  it('выданная ячейка открывает сохранение карточки через все слои', async () => {
+    app = await buildApp({ role: 'monitor', overrides: documentsRow(true) });
+    const res = await patch(app, '/api/v1/source-documents/1');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: 'document' });
+  });
+
+  it('без ячейки — отказ: Мониторинг остаётся только на чтение', async () => {
+    app = await buildApp({ role: 'monitor', overrides: documentsRow(false) });
+    expect((await patch(app, '/api/v1/source-documents/1')).statusCode).toBe(403);
+  });
+
+  it('администратору матрица не нужна', async () => {
+    app = await buildApp({ role: 'admin' });
+    expect((await patch(app, '/api/v1/source-documents/1')).statusCode).toBe(200);
   });
 });
 

@@ -154,11 +154,14 @@ describe('дата поставки — свойство машины', () => {
   it('обычное сохранение с датой лишнего вопроса не задаёт', async () => {
     await openCard();
 
+    // Правим другое поле: дата остаётся, и в тело она не уходит вовсе —
+    // сервер переносит дату машины только когда её действительно сменили.
+    fireEvent.change(screen.getByDisplayValue('ТР-12296'), { target: { value: 'ТР-12297' } });
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
 
     await waitFor(() => expect(patch).toHaveBeenCalled());
     const [, body] = patch.mock.calls[0] as unknown as [string, Record<string, unknown>];
-    expect(body.expectedDate).toBe('2026-08-26');
+    expect(body).toEqual({ docNumber: 'ТР-12297' });
     expect(screen.queryByText(/пропадёт у инспектора на планшете/)).toBeNull();
   });
 

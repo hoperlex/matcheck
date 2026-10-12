@@ -115,14 +115,11 @@ describe('карточка приёмки — получатель', () => {
     await openHeader();
 
     expect(await screen.findByText('Стороны по документу')).toBeTruthy();
-    // Текст собран из нескольких узлов (имя сокращается отдельным элементом),
-    // поэтому сверяем содержимое абзаца целиком.
-    const hasLine = (prefix: string) =>
-      screen
-        .getAllByText((_, el) => (el?.textContent ?? '').startsWith(prefix))
-        .some((el) => (el.textContent ?? '').includes('СУ-10'));
-    expect(hasLine('Грузополучатель:')).toBe(true);
-    expect(hasLine('Покупатель:')).toBe(true);
+    // С правом «Редактировать» стороны документа — поля выбора, а не текст
+    // (показ без права и сама правка — SourceDocumentParties.test.tsx).
+    // Строки «Грузополучатель: …» здесь не проверить: их же рисуют чипы шапки.
+    expect(screen.getByRole('combobox', { name: 'Грузополучатель' })).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Покупатель' })).toBeTruthy();
     // Ни переключателя «Подрядчик/МОЛ», ни подсказки про автоподстановку.
     expect(screen.queryByText('Подрядчик')).toBeNull();
     expect(screen.queryByText(/Подставлено автоматически/)).toBeNull();
@@ -138,12 +135,15 @@ describe('карточка приёмки — получатель', () => {
 
     expect(await screen.findByText(/объект сменится у всей машины \(3 док\.\)/)).toBeTruthy();
 
+    // Правим номер. В тело уходит только он: contractorId форма не правит
+    // вовсе, а нетронутые МОЛ и объект сервер не должен ни переносить, ни
+    // считать поводом поднять ревизию машины.
+    fireEvent.change(screen.getByDisplayValue('ТР-12296'), { target: { value: 'ТР-12297' } });
     fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
 
     await waitFor(() => expect(patch).toHaveBeenCalled());
     const [, body] = patch.mock.calls[0] as unknown as [string, Record<string, unknown>];
     expect('contractorId' in body).toBe(false);
-    expect(body.recipientMolId).toBeNull();
-    expect(body.siteId).toBe(detail.siteId);
+    expect(body).toEqual({ docNumber: 'ТР-12297' });
   });
 });

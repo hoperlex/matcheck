@@ -8,10 +8,11 @@
  * сходилась: 15 × 240 против показанных 4 392. Для менеджера это выглядело
  * ошибкой распознавания, хотя оба числа прочитаны верно.
  *
- * Главное, что здесь охраняется, — второй тест: строка, которую никто не
- * трогал, обязана уйти в сохранение с ИСХОДНОЙ ценой бланка. Пересчёт
- * туда-обратно расходится примерно у одной позиции из тысячи, и прогон всего
- * списка через него означал бы тихую правку цен, которых никто не касался.
+ * Главное, что здесь охраняется: цена, которую никто не трогал, не меняется.
+ * Без правок позиции не уходят вовсе; с правкой другой графы строка уходит с
+ * ИСХОДНОЙ ценой бланка. Пересчёт туда-обратно расходится примерно у одной
+ * позиции из тысячи, и прогон всего списка через него означал бы тихую правку
+ * цен, которых никто не касался.
  */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -138,11 +139,12 @@ describe('карточка УПД — цена с НДС', () => {
     expect(screen.getByText('240,00 ₽')).toBeTruthy();
   });
 
-  it('СОХРАНЕНИЕ БЕЗ ПРАВОК не меняет цену и не теряет ставку', async () => {
+  it('СОХРАНЕНИЕ БЕЗ ПРАВОК не отправляет позиции вовсе', async () => {
     // Главная страховка правки. Пользователь открыл карточку, ничего не трогал
-    // и нажал «Сохранить» — в базу обязана уйти цена бланка (240), а не
-    // показанная на экране (292,80). Плюс ставка должна вернуться на сервер:
-    // без неё PATCH обнулял НДС у всех позиций.
+    // и нажал «Сохранить» — цены в базе не меняются. Раньше это держалось на
+    // обратном пересчёте (в тело уходила цена бланка), теперь сильнее:
+    // нетронутые позиции в тело не попадают и сервер их не пересоздаёт —
+    // иначе рвались бы связи строк приёмки с позициями документа.
     render(wrap(<SourceDocumentDetailModal id={upd.id} open onClose={() => {}} />));
 
     // Разобранный документ открывается сразу в режиме правки: в поле цены
@@ -152,15 +154,31 @@ describe('карточка УПД — цена с НДС', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Сохранить/i }));
 
+    expect(await screen.findByText('Изменений нет')).toBeTruthy();
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it('правка другой графы строки: цена уходит бланковой, ставка возвращается', async () => {
+    // Когда позиции всё же уходят (правили название), нетронутая цена обязана
+    // остаться ценой бланка (240), а не показанной на экране (292,80). Плюс
+    // ставка должна вернуться на сервер: без неё PATCH обнулял НДС у позиций.
+    render(wrap(<SourceDocumentDetailModal id={upd.id} open onClose={() => {}} />));
+    await screen.findByDisplayValue('292,8');
+
+    fireEvent.change(screen.getByDisplayValue('Вода питьевая Королевская вода 19л'), {
+      target: { value: 'Вода питьевая Королевская вода 19 л' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Сохранить/i }));
+
     await waitFor(() => expect(patch).toHaveBeenCalled());
     const body = patch.mock.calls[0]![1] as { items: Array<Record<string, unknown>> };
-    // В базу ушла цена бланка, а не показанная на экране.
+    // Ушли только позиции — шапку никто не трогал.
+    expect(Object.keys(body)).toEqual(['items']);
     expect(body.items[0]!.price).toBe('240');
-    // И ставка вернулась на сервер — иначе PATCH обнулил бы НДС у позиций.
     expect(body.items[0]!.vatRate).toBe('22');
   });
 
-  it('цена с четырьмя знаками не портится при сохранении', () => {
+  it('цена с четырьмя знаками не портится при сохранении', async () => {
     // Боевой случай: 11 позиций за месяц имеют больше двух знаков, а поле
     // показывает только два. Без защиты сохранение карточки переписывало бы
     // 66,294 на 66,3 — молча и на каждой правке.
@@ -169,12 +187,15 @@ describe('карточка УПД — цена с НДС', () => {
     // важно, что карточка отдаёт на сервер ИСХОДНОЕ значение, а не показанное.
     current = { ...upd, items: [{ ...upd.items[0]!, price: '66.294', vatRate: '22' }] };
     render(wrap(<SourceDocumentDetailModal id={upd.id} open onClose={() => {}} />));
+    await screen.findByDisplayValue(/80,88/);
 
-    return screen.findByDisplayValue(/80,88/).then(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Сохранить/i }));
-      await waitFor(() => expect(patch).toHaveBeenCalled());
-      const body = patch.mock.calls[0]![1] as { items: Array<Record<string, unknown>> };
-      expect(body.items[0]!.price).toBe('66.294');
+    // Позиции уходят только после правки — меняем название, цену не трогаем.
+    fireEvent.change(screen.getByDisplayValue('Вода питьевая Королевская вода 19л'), {
+      target: { value: 'Вода 19 л' },
     });
+    fireEvent.click(screen.getByRole('button', { name: /Сохранить/i }));
+    await waitFor(() => expect(patch).toHaveBeenCalled());
+    const body = patch.mock.calls[0]![1] as { items: Array<Record<string, unknown>> };
+    expect(body.items[0]!.price).toBe('66.294');
   });
 });
