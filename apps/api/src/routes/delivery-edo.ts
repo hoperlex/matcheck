@@ -1,24 +1,10 @@
-import type { FastifyInstance } from 'fastify';
-import {
-  and,
-  desc,
-  eq,
-  ilike,
-  inArray,
-  isNotNull,
-  isNull,
-  ne,
-  or,
-  sql as drSql,
-} from 'drizzle-orm';
+import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
+import { and, asc, desc, eq, isNotNull, isNull, ne, or, sql as drSql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
-import {
-  ErrorResponseSchema,
-  type Delivery,
-  type OperationSourceDocument,
-} from '@matcheck/contracts';
+import { ErrorResponseSchema } from '@matcheck/contracts';
+import type { Db } from '../db/client.js';
 import {
   counterparties,
   deliveries,
@@ -30,19 +16,19 @@ import {
   sourceDocuments,
   suppliers,
 } from '../db/schema.js';
-import {
-  normalizeDocumentNumber,
-  rankEdoAgainstReferences,
-} from '../domain/operations/edo-match.js';
-import { presign } from '../domain/storage/s3.signer.js';
-import { escapeLike } from '../lib/like.js';
+import { findEdoCandidates } from '../domain/operations/edo-candidates.js';
+import { toIsoDate } from '../domain/edo/export-upd.js';
+import { decodeXmlBuffer } from '../domain/edo/upd-xml-decode.js';
+import { parseUpdXml, type UpdParsed } from '../domain/edo/upd.parser.js';
+import { getObject, presign } from '../domain/storage/s3.signer.js';
 import { publishEvent } from './events.js';
+
+const FoundBySchema = z.enum(['number', 'inn', 'name', 'date', 'search']);
 
 const EdoCandidateSchema = z.object({
   id: z.string().uuid(),
   source: z.enum(['import', 'export']),
   contentCategory: z.string().nullable(),
-  paperDocNumber: z.string().nullable(),
   docNumber: z.string().nullable(),
   docDate: z.string().nullable(),
   supplierName: z.string().nullable(),
@@ -50,12 +36,106 @@ const EdoCandidateSchema = z.object({
   totalSum: z.string().nullable(),
   siteId: z.string().uuid().nullable(),
   usedElsewhere: z.number().int(),
+  foundBy: z.array(FoundBySchema),
+  reference: z.object({
+    origin: z.enum(['paper', 'photo', 'delivery']),
+    label: z.string().nullable(),
+  }),
   score: z.number().int(),
   level: z.enum(['high', 'possible', 'weak']),
   matches: z.array(z.string()),
   conflicts: z.array(z.string()),
   missing: z.array(z.string()),
 });
+
+const EdoPreviewSchema = z.object({
+  docNumber: z.string().nullable(),
+  docDate: z.string().nullable(),
+  supplierName: z.string().nullable(),
+  supplierInn: z.string().nullable(),
+  buyerName: z.string().nullable(),
+  buyerInn: z.string().nullable(),
+  totalSum: z.number().nullable(),
+  vatSum: z.number().nullable(),
+  shippedAt: z.string().nullable(),
+  items: z.array(
+    z.object({
+      lineNo: z.number().int(),
+      nameRaw: z.string(),
+      qty: z.number(),
+      unit: z.string().nullable(),
+      price: z.number().nullable(),
+      sum: z.number().nullable(),
+    }),
+  ),
+});
+type EdoPreview = z.infer<typeof EdoPreviewSchema>;
+
+function toNumber(value: string | null): number | null {
+  if (value === null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Импортированная УПД уже разобрана — позиции берём из базы, без S3. */
+async function previewImported(db: Db, documentId: string): Promise<EdoPreview | 'not_found'> {
+  const directory = alias(suppliers, 'preview_directory');
+  const supplier = alias(counterparties, 'preview_supplier');
+  const [document] = await db
+    .select({
+      docNumber: sourceDocuments.docNumber,
+      docDate: sourceDocuments.docDate,
+      supplierName: drSql<string | null>`coalesce(${directory.name}, ${supplier.name})`,
+      supplierInn: sourceDocuments.supplierInnRaw,
+      buyerName: sourceDocuments.buyerNameRaw,
+      buyerInn: sourceDocuments.buyerInnRaw,
+      totalSum: sourceDocuments.totalSum,
+      vatSum: sourceDocuments.vatSum,
+    })
+    .from(sourceDocuments)
+    .leftJoin(directory, eq(sourceDocuments.supplierDirectoryId, directory.id))
+    .leftJoin(supplier, eq(sourceDocuments.supplierId, supplier.id))
+    .where(
+      and(
+        eq(sourceDocuments.id, documentId),
+        eq(sourceDocuments.origin, 'edo_diadoc'),
+        eq(sourceDocuments.kind, 'upd'),
+      ),
+    )
+    .limit(1);
+  if (!document) return 'not_found';
+  const items = await db
+    .select({
+      lineNo: sourceDocumentItems.lineNo,
+      nameRaw: sourceDocumentItems.nameRaw,
+      qty: sourceDocumentItems.qty,
+      unit: sourceDocumentItems.unit,
+      price: sourceDocumentItems.price,
+      sum: sourceDocumentItems.sum,
+    })
+    .from(sourceDocumentItems)
+    .where(eq(sourceDocumentItems.sourceDocumentId, documentId))
+    .orderBy(asc(sourceDocumentItems.lineNo));
+  return {
+    docNumber: document.docNumber,
+    docDate: document.docDate?.toISOString().slice(0, 10) ?? null,
+    supplierName: document.supplierName,
+    supplierInn: document.supplierInn,
+    buyerName: document.buyerName,
+    buyerInn: document.buyerInn,
+    totalSum: toNumber(document.totalSum),
+    vatSum: toNumber(document.vatSum),
+    shippedAt: null,
+    items: items.map((item) => ({
+      lineNo: item.lineNo,
+      nameRaw: item.nameRaw,
+      qty: toNumber(item.qty) ?? 0,
+      unit: item.unit,
+      price: toNumber(item.price),
+      sum: toNumber(item.sum),
+    })),
+  };
+}
 
 const LinkedEdoDocumentSchema = z.object({
   id: z.string().uuid(),
@@ -69,10 +149,7 @@ const LinkedEdoDocumentSchema = z.object({
   linkedAt: z.string(),
 });
 
-export function registerDeliveryEdoRoutes(
-  rawApp: FastifyInstance,
-  getDelivery: (id: string, viewerRole?: string | null) => Promise<Delivery | null>,
-): void {
+export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
   const app = asZod(rawApp);
   app.get(
     '/api/v1/deliveries/:id/edo-matches',
@@ -566,10 +643,9 @@ export function registerDeliveryEdoRoutes(
     },
   );
 
-  // Сверка приёмки с импортированными УПД Диадока. Подбор не создаёт связь:
-  // несколько документов могут иметь одинаковую дату и сумму, поэтому выбор
-  // всегда остаётся за менеджером. Поиск идёт на сервере, а не среди первых
-  // 200 строк общего списка документов.
+  // Подбор УПД из ЭДО к приёмке. Связь не создаётся: несколько документов
+  // бывают с одинаковыми датой и суммой, выбор всегда за менеджером. Правила
+  // поиска и сверки — в domain/operations/edo-candidates.ts.
   app.get(
     '/api/v1/deliveries/:id/edo-candidates',
     {
@@ -581,360 +657,120 @@ export function registerDeliveryEdoRoutes(
           200: z.object({
             items: z.array(EdoCandidateSchema),
             referenceMissing: z.array(z.string()),
+            truncated: z.array(FoundBySchema),
+            diagnostics: z.object({
+              registryReceivedUntil: z.string().nullable(),
+              innsAbsentInRegistry: z.array(z.string()),
+              innUnreadable: z.boolean(),
+              contractorDelivery: z.boolean(),
+              dateOnly: z.boolean(),
+            }),
           }),
           404: ErrorResponseSchema,
         },
       },
     },
     async (req, reply) => {
-      const delivery = await getDelivery(req.params.id, req.user?.role);
-      if (!delivery) return reply.code(404).send({ error: 'not_found' });
-
-      const paperIds = (delivery.sourceDocuments ?? [])
-        .filter((doc: OperationSourceDocument) => doc.linked)
-        .map((doc: OperationSourceDocument) => doc.id);
-      const paperSupplier = alias(counterparties, 'paper_supplier');
-      const paperDirectory = alias(suppliers, 'paper_directory');
-      const paperRows = paperIds.length
-        ? await app.db
-            .select({
-              id: sourceDocuments.id,
-              docNumber: sourceDocuments.docNumber,
-              docDate: sourceDocuments.docDate,
-              totalSum: sourceDocuments.totalSum,
-              supplierInn: drSql<
-                string | null
-              >`coalesce(nullif(${sourceDocuments.supplierInnRaw}, ''), nullif(${paperDirectory.inn}, ''), nullif(${paperSupplier.inn}, ''))`,
-              supplierName: drSql<
-                string | null
-              >`coalesce(${paperDirectory.name}, ${paperSupplier.name})`,
-            })
-            .from(sourceDocuments)
-            .leftJoin(paperDirectory, eq(sourceDocuments.supplierDirectoryId, paperDirectory.id))
-            .leftJoin(paperSupplier, eq(sourceDocuments.supplierId, paperSupplier.id))
-            .where(
-              and(
-                inArray(sourceDocuments.id, paperIds),
-                eq(sourceDocuments.kind, 'upd'),
-                ne(sourceDocuments.origin, 'edo_diadoc'),
-              ),
-            )
-        : [];
-      const ownSupplier = delivery.supplierId
-        ? await app.db
-            .select({ name: counterparties.name, inn: counterparties.inn })
-            .from(counterparties)
-            .where(eq(counterparties.id, delivery.supplierId))
-            .limit(1)
-        : [];
-      // Одна приёмка может иметь несколько бумажных УПД. Сверяем электронную
-      // с каждой отдельно: общая сумма и материалы всей машины давали бы
-      // ложные совпадения между разными документами.
-      const references = paperRows.length
-        ? paperRows.map((paper: (typeof paperRows)[number]) => ({
-            paperDocNumber: paper.docNumber,
-            numbers: paper.docNumber ? [paper.docNumber] : [],
-            dates: paper.docDate ? [paper.docDate.toISOString().slice(0, 10)] : [],
-            supplierInn: paper.supplierInn ?? ownSupplier[0]?.inn ?? null,
-            supplierName: paper.supplierName ?? ownSupplier[0]?.name ?? null,
-            sums: paper.totalSum ? [paper.totalSum] : [],
-            itemNames: delivery.items
-              .filter((item) => item.sourceDocumentId === paper.id)
-              .map((item) => item.nameRaw),
-            arrivedDate: delivery.arrivedAt?.slice(0, 10) ?? null,
-          }))
-        : [
-            {
-              paperDocNumber: null,
-              numbers: [] as string[],
-              dates: [] as string[],
-              supplierInn: ownSupplier[0]?.inn ?? null,
-              supplierName: ownSupplier[0]?.name ?? null,
-              sums: [] as string[],
-              itemNames: delivery.items.map((item: { nameRaw: string }) => item.nameRaw),
-              arrivedDate: delivery.arrivedAt?.slice(0, 10) ?? null,
-            },
-          ];
-      const referenceMissing = [
-        references.every((ref) => !ref.numbers.length) && 'номер бумажной УПД',
-        references.every((ref) => !ref.dates.length) && 'дата бумажной УПД',
-        references.every((ref) => !ref.supplierInn && !ref.supplierName) && 'поставщик',
-        references.every((ref) => !ref.sums.length) && 'сумма бумажной УПД',
-        references.every((ref) => !ref.itemNames.length) && 'материалы приёмки',
-      ].filter((value): value is string => typeof value === 'string');
-
-      const candidateSupplier = alias(counterparties, 'candidate_supplier');
-      const candidateDirectory = alias(suppliers, 'candidate_directory');
-      const q = req.query.q?.trim() ?? '';
-      const anchor =
-        references.flatMap((ref) => ref.dates)[0] ??
-        references[0]?.arrivedDate ??
-        delivery.createdAt.slice(0, 10);
-      const anchorTime = Date.parse(`${anchor}T00:00:00Z`);
-      // postgres.js не принимает объект Date как параметр внутри drSql``.
-      // Передаём границы как даты ISO и явно приводим их к date в PostgreSQL.
-      const lower = new Date(anchorTime - 30 * 86_400_000).toISOString().slice(0, 10);
-      const upper = new Date(anchorTime + 31 * 86_400_000).toISOString().slice(0, 10);
-      const numberFilters = references
-        .flatMap((ref) => ref.numbers)
-        .map(
-          (number: string) =>
-            or(
-              ilike(sourceDocuments.docNumber, `%${escapeLike(number)}%`),
-              drSql`regexp_replace(translate(upper(coalesce(${sourceDocuments.docNumber}, '')), 'АВЕКМНОРСТУХ', 'ABEKMHOPCTYX'), '[^A-Z0-9А-ЯЁ]', '', 'g') = ${normalizeDocumentNumber(number)}`,
-            )!,
-        );
-      const dateFilter = drSql`${sourceDocuments.docDate} >= ${lower}::date and ${sourceDocuments.docDate} < ${upper}::date`;
-      const normalizedQ = normalizeDocumentNumber(q);
-      const textFilter = q
-        ? or(
-            ilike(sourceDocuments.docNumber, `%${escapeLike(q)}%`),
-            normalizedQ.length >= 3
-              ? drSql`regexp_replace(translate(upper(coalesce(${sourceDocuments.docNumber}, '')), 'АВЕКМНОРСТУХ', 'ABEKMHOPCTYX'), '[^A-Z0-9А-ЯЁ]', '', 'g') like ${`%${normalizedQ}%`}`
-              : undefined,
-            ilike(sourceDocuments.originalFilename, `%${escapeLike(q)}%`),
-            ilike(sourceDocuments.providerMessageId, `%${escapeLike(q)}%`),
-            ilike(sourceDocuments.providerEntityId, `%${escapeLike(q)}%`),
-            ilike(candidateSupplier.name, `%${escapeLike(q)}%`),
-            ilike(candidateDirectory.name, `%${escapeLike(q)}%`),
-            ilike(candidateSupplier.inn, `%${escapeLike(q)}%`),
-            ilike(candidateDirectory.inn, `%${escapeLike(q)}%`),
-            ilike(sourceDocuments.supplierInnRaw, `%${escapeLike(q)}%`),
-          )
-        : or(dateFilter, ...numberFilters);
-      const candidates = await app.db
-        .select({
-          id: sourceDocuments.id,
-          docNumber: sourceDocuments.docNumber,
-          docDate: sourceDocuments.docDate,
-          supplierName: drSql<
-            string | null
-          >`coalesce(${candidateDirectory.name}, ${candidateSupplier.name})`,
-          supplierInn: drSql<
-            string | null
-          >`coalesce(nullif(${sourceDocuments.supplierInnRaw}, ''), nullif(${candidateDirectory.inn}, ''), nullif(${candidateSupplier.inn}, ''))`,
-          totalSum: sourceDocuments.totalSum,
-          siteId: sourceDocuments.siteId,
-        })
-        .from(sourceDocuments)
-        .leftJoin(
-          candidateDirectory,
-          eq(sourceDocuments.supplierDirectoryId, candidateDirectory.id),
-        )
-        .leftJoin(candidateSupplier, eq(sourceDocuments.supplierId, candidateSupplier.id))
-        .where(
-          and(
-            eq(sourceDocuments.kind, 'upd'),
-            eq(sourceDocuments.direction, 'inbound'),
-            eq(sourceDocuments.origin, 'edo_diadoc'),
-            eq(sourceDocuments.status, 'parsed'),
-            eq(sourceDocuments.isTechnical, false),
-            or(eq(sourceDocuments.siteId, delivery.siteId), isNull(sourceDocuments.siteId)),
-            drSql`not exists (select 1 from delivery_edo_matches dem where dem.delivery_id = ${delivery.id} and dem.source_document_id = ${sourceDocuments.id})`,
-            drSql`not exists (
-              select 1 from delivery_edo_matches dem join edo_export_documents exported on exported.id = dem.export_document_id
-              where dem.delivery_id = ${delivery.id}
-                and exported.edo_account_id = ${sourceDocuments.edoAccountId}
-                and exported.message_id = ${sourceDocuments.providerMessageId}
-                and exported.entity_id = ${sourceDocuments.providerEntityId}
-            )`,
-            drSql`not exists (
-              select 1 from delivery_edo_matches dem
-              join edo_export_documents exported on exported.id = dem.export_document_id
-              join deliveries other_delivery on other_delivery.id = dem.delivery_id
-              where exported.edo_account_id = ${sourceDocuments.edoAccountId}
-                and exported.message_id = ${sourceDocuments.providerMessageId}
-                and exported.entity_id = ${sourceDocuments.providerEntityId}
-                and other_delivery.site_id <> ${delivery.siteId}
-            )`,
-            drSql`not exists (select 1 from delivery_sources ds where ds.delivery_id = ${delivery.id} and ds.source_document_id = ${sourceDocuments.id})`,
-            drSql`not exists (
-              select 1 from delivery_edo_matches dem join deliveries other_delivery on other_delivery.id = dem.delivery_id
-              where dem.source_document_id = ${sourceDocuments.id} and other_delivery.site_id <> ${delivery.siteId}
-            )`,
-            drSql`not exists (
-              select 1 from delivery_sources ds join deliveries other_delivery on other_delivery.id = ds.delivery_id
-              where ds.source_document_id = ${sourceDocuments.id} and other_delivery.site_id <> ${delivery.siteId}
-            )`,
-            textFilter,
-          ),
-        )
-        .orderBy(
-          numberFilters.length
-            ? drSql`case when ${or(...numberFilters)} then 0 else 1 end`
-            : drSql`1`,
-          desc(sourceDocuments.docDate),
-          desc(sourceDocuments.createdAt),
-        )
-        .limit(500);
-      const exportNumberFilters = references
-        .flatMap((ref) => ref.numbers)
-        .map(
-          (number) =>
-            or(
-              ilike(edoExportDocuments.documentNumber, `%${escapeLike(number)}%`),
-              drSql`regexp_replace(translate(upper(coalesce(${edoExportDocuments.documentNumber}, '')), 'АВЕКМНОРСТУХ', 'ABEKMHOPCTYX'), '[^A-Z0-9А-ЯЁ]', '', 'g') = ${normalizeDocumentNumber(number)}`,
-            )!,
-        );
-      const exportTextFilter = q
-        ? or(
-            ilike(edoExportDocuments.documentNumber, `%${escapeLike(q)}%`),
-            normalizedQ.length >= 3
-              ? drSql`regexp_replace(translate(upper(coalesce(${edoExportDocuments.documentNumber}, '')), 'АВЕКМНОРСТУХ', 'ABEKMHOPCTYX'), '[^A-Z0-9А-ЯЁ]', '', 'g') like ${`%${normalizedQ}%`}`
-              : undefined,
-            ilike(edoExportDocuments.supplierName, `%${escapeLike(q)}%`),
-            ilike(edoExportDocuments.supplierInn, `%${escapeLike(q)}%`),
-            ilike(edoExportDocuments.s3Key, `%${escapeLike(q)}%`),
-            ilike(edoExportDocuments.messageId, `%${escapeLike(q)}%`),
-            ilike(edoExportDocuments.entityId, `%${escapeLike(q)}%`),
-          )
-        : or(
-            drSql`${edoExportDocuments.documentDate} >= ${lower}::date and ${edoExportDocuments.documentDate} < ${upper}::date`,
-            ...exportNumberFilters,
-          );
-      const exportedCandidates = await app.db
-        .select({
-          id: edoExportDocuments.id,
-          docNumber: edoExportDocuments.documentNumber,
-          docDate: edoExportDocuments.documentDate,
-          supplierName: edoExportDocuments.supplierName,
-          supplierInn: edoExportDocuments.supplierInn,
-          totalSum: edoExportDocuments.totalSum,
-          contentCategory: edoExportDocuments.contentCategory,
-        })
-        .from(edoExportDocuments)
-        .where(
-          and(
-            eq(edoExportDocuments.status, 'stored'),
-            isNotNull(edoExportDocuments.s3Key),
-            or(
-              eq(edoExportDocuments.contentCategory, 'materials'),
-              eq(edoExportDocuments.contentCategory, 'undetermined'),
-              isNull(edoExportDocuments.contentCategory),
-            ),
-            drSql`not exists (select 1 from delivery_edo_matches dem where dem.delivery_id = ${delivery.id} and dem.export_document_id = ${edoExportDocuments.id})`,
-            drSql`not exists (
-          select 1 from delivery_edo_matches dem join deliveries other_delivery on other_delivery.id = dem.delivery_id
-          where dem.export_document_id = ${edoExportDocuments.id} and other_delivery.site_id <> ${delivery.siteId}
-        )`,
-            drSql`not exists (
-          select 1 from source_documents imported
-          where imported.edo_account_id = ${edoExportDocuments.edoAccountId}
-            and imported.provider_message_id = ${edoExportDocuments.messageId}
-            and imported.provider_entity_id = ${edoExportDocuments.entityId}
-            and imported.origin = 'edo_diadoc' and imported.status = 'parsed'
-            and imported.is_technical = false
-        )`,
-            exportTextFilter,
-          ),
-        )
-        .orderBy(
-          exportNumberFilters.length
-            ? drSql`case when ${or(...exportNumberFilters)} then 0 else 1 end`
-            : drSql`1`,
-          desc(edoExportDocuments.documentDate),
-          desc(edoExportDocuments.createdAt),
-        )
-        .limit(500);
-      const candidateIds = candidates.map((doc: { id: string }) => doc.id);
-      const candidateItems = candidateIds.length
-        ? await app.db
-            .select({
-              sourceDocumentId: sourceDocumentItems.sourceDocumentId,
-              nameRaw: sourceDocumentItems.nameRaw,
-            })
-            .from(sourceDocumentItems)
-            .where(inArray(sourceDocumentItems.sourceDocumentId, candidateIds))
-        : [];
-      const links = candidateIds.length
-        ? await app.db
-            .select({
-              sourceDocumentId: deliveryEdoMatches.sourceDocumentId,
-              count: drSql<number>`count(*)::int`,
-            })
-            .from(deliveryEdoMatches)
-            .where(inArray(deliveryEdoMatches.sourceDocumentId, candidateIds))
-            .groupBy(deliveryEdoMatches.sourceDocumentId)
-        : [];
-      const sourceLinks = candidateIds.length
-        ? await app.db
-            .select({
-              sourceDocumentId: deliverySources.sourceDocumentId,
-              count: drSql<number>`count(*)::int`,
-            })
-            .from(deliverySources)
-            .where(inArray(deliverySources.sourceDocumentId, candidateIds))
-            .groupBy(deliverySources.sourceDocumentId)
-        : [];
-      const exportIds = exportedCandidates.map((doc) => doc.id);
-      const exportLinks = exportIds.length
-        ? await app.db
-            .select({
-              exportDocumentId: deliveryEdoMatches.exportDocumentId,
-              count: drSql<number>`count(*)::int`,
-            })
-            .from(deliveryEdoMatches)
-            .where(inArray(deliveryEdoMatches.exportDocumentId, exportIds))
-            .groupBy(deliveryEdoMatches.exportDocumentId)
-        : [];
-      const namesById = new Map<string, string[]>();
-      for (const item of candidateItems) {
-        const names = namesById.get(item.sourceDocumentId) ?? [];
-        names.push(item.nameRaw);
-        namesById.set(item.sourceDocumentId, names);
-      }
-      const linkCount = new Map<string, number>();
-      for (const link of links) {
-        if (link.sourceDocumentId) linkCount.set(link.sourceDocumentId, link.count);
-      }
-      for (const link of sourceLinks) {
-        linkCount.set(
-          link.sourceDocumentId,
-          (linkCount.get(link.sourceDocumentId) ?? 0) + link.count,
-        );
-      }
-      const exportLinkCount = new Map<string, number>();
-      for (const link of exportLinks) {
-        if (link.exportDocumentId) exportLinkCount.set(link.exportDocumentId, link.count);
-      }
-      const importedItems = candidates.map((doc: (typeof candidates)[number]) => {
-        const docDate = doc.docDate?.toISOString().slice(0, 10) ?? null;
-        return {
-          ...doc,
-          source: 'import' as const,
-          contentCategory: null,
-          docDate,
-          usedElsewhere: linkCount.get(doc.id) ?? 0,
-          ...rankEdoAgainstReferences(references, {
-            ...doc,
-            docDate,
-            itemNames: namesById.get(doc.id) ?? [],
-          }),
-        };
-      });
-      const exportedItems = exportedCandidates.map((doc) => {
-        const docDate = doc.docDate?.toISOString().slice(0, 10) ?? null;
-        const match = rankEdoAgainstReferences(references, { ...doc, docDate, itemNames: [] });
-        return {
-          ...doc,
-          source: 'export' as const,
-          siteId: null,
-          docDate,
-          usedElsewhere: exportLinkCount.get(doc.id) ?? 0,
-          ...match,
-          missing:
-            doc.contentCategory === 'materials'
-              ? match.missing
-              : [...match.missing, 'тип содержимого УПД'],
-        };
-      });
-      const items = [...importedItems, ...exportedItems].sort(
-        (
-          a: { score: number; docDate: string | null },
-          b: { score: number; docDate: string | null },
-        ) => b.score - a.score || (b.docDate ?? '').localeCompare(a.docDate ?? ''),
-      );
-      return { items, referenceMissing };
+      const result = await findEdoCandidates(app.db, req.params.id, { q: req.query.q });
+      if (!result) return reply.code(404).send({ error: 'not_found' });
+      return result;
     },
   );
+
+  // Просмотр УПД перед привязкой: шапка и позиции вместо сырого XML.
+  app.get(
+    '/api/v1/deliveries/:id/edo-candidates/:source/:documentId/preview',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({
+          id: z.string().uuid(),
+          source: z.enum(['import', 'export']),
+          documentId: z.string().uuid(),
+        }),
+        response: {
+          200: EdoPreviewSchema,
+          404: ErrorResponseSchema,
+          502: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [delivery] = await app.db
+        .select({ id: deliveries.id })
+        .from(deliveries)
+        .where(eq(deliveries.id, req.params.id))
+        .limit(1);
+      if (!delivery) return reply.code(404).send({ error: 'not_found' });
+      const result =
+        req.params.source === 'export'
+          ? await previewExported(req.params.documentId, req.log)
+          : await previewImported(app.db, req.params.documentId);
+      if (result === 'not_found') return reply.code(404).send({ error: 'not_found' });
+      if (result === 'storage_failed') {
+        return reply.code(502).send({
+          error: 'storage_failed',
+          message: 'Не удалось прочитать УПД из хранилища — попробуйте ещё раз',
+        });
+      }
+      if (result === 'parse_failed') {
+        return reply.code(502).send({
+          error: 'parse_failed',
+          message: 'Файл УПД не разобрался — откройте его кнопкой «Открыть файл»',
+        });
+      }
+      return result;
+    },
+  );
+
+  async function previewExported(
+    documentId: string,
+    log: FastifyBaseLogger,
+  ): Promise<EdoPreview | 'not_found' | 'storage_failed' | 'parse_failed'> {
+    const [document] = await app.db
+      .select({ s3Key: edoExportDocuments.s3Key })
+      .from(edoExportDocuments)
+      .where(
+        and(
+          eq(edoExportDocuments.id, documentId),
+          eq(edoExportDocuments.status, 'stored'),
+          isNotNull(edoExportDocuments.s3Key),
+        ),
+      )
+      .limit(1);
+    if (!document?.s3Key) return 'not_found';
+    let buffer: Buffer;
+    try {
+      buffer = await getObject(document.s3Key);
+    } catch (err) {
+      log.warn({ err, documentId }, 'edo preview: s3 read failed');
+      return 'storage_failed';
+    }
+    let parsed: UpdParsed;
+    try {
+      parsed = parseUpdXml(decodeXmlBuffer(buffer));
+    } catch (err) {
+      log.warn({ err, documentId }, 'edo preview: xml parse failed');
+      return 'parse_failed';
+    }
+    return {
+      docNumber: parsed.docNumber || null,
+      docDate: toIsoDate(parsed.docDate),
+      supplierName: parsed.supplier.name || null,
+      supplierInn: parsed.supplier.inn || null,
+      buyerName: parsed.recipient?.name || null,
+      buyerInn: parsed.recipient?.inn || null,
+      totalSum: parsed.totalSum,
+      vatSum: parsed.vatSum,
+      shippedAt: toIsoDate(parsed.transfer?.date ?? null),
+      items: parsed.items.map((item) => ({
+        lineNo: item.lineNo,
+        nameRaw: item.nameRaw,
+        qty: item.qty,
+        unit: item.unit || null,
+        price: item.price,
+        sum: item.sum,
+      })),
+    };
+  }
 }

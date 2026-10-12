@@ -2358,7 +2358,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     },
   );
 
-  registerDeliveryEdoRoutes(rawApp, (id, role) => buildDeliveryDto(app, id, role));
+  registerDeliveryEdoRoutes(rawApp);
 
   // Привязка УПД к существующей приёмке (приёмка остаётся в своём статусе,
   // ручные материалы из мобилы НЕ удаляются). Заменяет старый клиентский

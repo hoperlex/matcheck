@@ -1,14 +1,16 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Button, Input, Modal, Space, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Col, Input, Modal, Row, Space, Table, Tag, Typography, message } from 'antd';
+import type { Delivery } from '@matcheck/contracts';
 import { api } from '../../services/api';
-import { formatMoneyRu } from '../../shared/utils/formatRu';
+import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
+
+type FoundBy = 'number' | 'inn' | 'name' | 'date' | 'search';
 
 type Candidate = {
   id: string;
   source: 'import' | 'export';
   contentCategory: string | null;
-  paperDocNumber: string | null;
   docNumber: string | null;
   docDate: string | null;
   supplierName: string | null;
@@ -16,6 +18,8 @@ type Candidate = {
   totalSum: string | null;
   siteId: string | null;
   usedElsewhere: number;
+  foundBy: FoundBy[];
+  reference: { origin: 'paper' | 'photo' | 'delivery'; label: string | null };
   score: number;
   level: 'high' | 'possible' | 'weak';
   matches: string[];
@@ -23,13 +27,142 @@ type Candidate = {
   missing: string[];
 };
 
-type Response = { items: Candidate[]; referenceMissing: string[] };
+type Response = {
+  items: Candidate[];
+  referenceMissing: string[];
+  truncated: FoundBy[];
+  diagnostics: {
+    registryReceivedUntil: string | null;
+    innsAbsentInRegistry: string[];
+    innUnreadable: boolean;
+    contractorDelivery: boolean;
+    dateOnly: boolean;
+  };
+};
+
+type Preview = {
+  docNumber: string | null;
+  docDate: string | null;
+  supplierName: string | null;
+  supplierInn: string | null;
+  buyerName: string | null;
+  buyerInn: string | null;
+  totalSum: number | null;
+  vatSum: number | null;
+  shippedAt: string | null;
+  items: {
+    lineNo: number;
+    nameRaw: string;
+    qty: number;
+    unit: string | null;
+    price: number | null;
+    sum: number | null;
+  }[];
+};
+
+type DeliveryItem = Delivery['items'][number];
+
+function referenceText(reference: Candidate['reference']): string {
+  if (reference.origin === 'paper') return `Сверено с бумажной УПД № ${reference.label ?? '—'}`;
+  if (reference.origin === 'photo') return `Сверено с фото УПД № ${reference.label ?? '—'}`;
+  return 'Сверено с данными приёмки';
+}
+
+/** Позиции УПД рядом с позициями приёмки — сверка глазами до привязки. */
+function CandidatePreview({
+  deliveryId,
+  candidate,
+  deliveryItems,
+}: {
+  deliveryId: string;
+  candidate: Candidate;
+  deliveryItems: readonly DeliveryItem[];
+}) {
+  const preview = useQuery({
+    queryKey: ['delivery-edo-preview', deliveryId, candidate.source, candidate.id],
+    queryFn: () =>
+      api.get<Preview>(
+        `/deliveries/${deliveryId}/edo-candidates/${candidate.source}/${candidate.id}/preview`,
+      ),
+    staleTime: 5 * 60_000,
+  });
+  if (preview.isLoading) return <Typography.Text type="secondary">Читаем УПД…</Typography.Text>;
+  if (preview.isError || !preview.data) {
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message={
+          preview.error instanceof Error ? preview.error.message : 'Не удалось прочитать УПД'
+        }
+      />
+    );
+  }
+  const doc = preview.data;
+  return (
+    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+      <Typography.Text type="secondary">
+        Продавец: {doc.supplierName ?? '—'} ({doc.supplierInn ?? 'ИНН не указан'}) · Покупатель:{' '}
+        {doc.buyerName ?? '—'} ({doc.buyerInn ?? 'ИНН не указан'})
+        {doc.shippedAt ? ` · Отгрузка ${formatDateRu(doc.shippedAt)}` : ''} · Итого{' '}
+        {formatMoneyRu(doc.totalSum)}
+      </Typography.Text>
+      <Row gutter={16}>
+        <Col span={14}>
+          <Typography.Text strong>УПД из ЭДО</Typography.Text>
+          <Table
+            rowKey="lineNo"
+            size="small"
+            pagination={false}
+            dataSource={doc.items}
+            columns={[
+              { title: '№', dataIndex: 'lineNo', width: 44 },
+              { title: 'Наименование', dataIndex: 'nameRaw' },
+              {
+                title: 'Кол-во',
+                key: 'qty',
+                width: 110,
+                render: (_v, item) => `${item.qty} ${item.unit ?? ''}`,
+              },
+              {
+                title: 'Сумма',
+                key: 'sum',
+                width: 120,
+                render: (_v, item) => formatMoneyRu(item.sum),
+              },
+            ]}
+          />
+        </Col>
+        <Col span={10}>
+          <Typography.Text strong>Приёмка</Typography.Text>
+          <Table
+            rowKey="id"
+            size="small"
+            pagination={false}
+            dataSource={[...deliveryItems]}
+            locale={{ emptyText: 'В приёмке нет позиций' }}
+            columns={[
+              { title: 'Наименование', dataIndex: 'nameRaw' },
+              {
+                title: 'Кол-во',
+                key: 'qty',
+                width: 110,
+                render: (_v, item) => `${item.qtyActual ?? item.qtyPlanned ?? '—'} ${item.unit}`,
+              },
+            ]}
+          />
+        </Col>
+      </Row>
+    </Space>
+  );
+}
 
 export function LinkEdoDocumentModal({
   open,
   deliveryId,
   busy,
   error,
+  deliveryItems,
   onCancel,
   onPick,
 }: {
@@ -37,6 +170,7 @@ export function LinkEdoDocumentModal({
   deliveryId: string | null;
   busy: boolean;
   error: string | null;
+  deliveryItems: readonly DeliveryItem[];
   onCancel: () => void;
   onPick: (candidate: Candidate) => void;
 }) {
@@ -50,6 +184,8 @@ export function LinkEdoDocumentModal({
       ),
     enabled: open && !!deliveryId,
   });
+  const data = candidates.data;
+  const diagnostics = data?.diagnostics;
 
   const choose = (candidate: Candidate) => {
     if (
@@ -62,6 +198,11 @@ export function LinkEdoDocumentModal({
         title: `Привязать УПД ${candidate.docNumber ?? 'без номера'}?`,
         content: (
           <Space direction="vertical">
+            {candidate.level !== 'high' && (
+              <Typography.Text>
+                Это не сильное совпадение — сверьте позиции и реквизиты по файлу.
+              </Typography.Text>
+            )}
             {candidate.conflicts.length > 0 && (
               <Typography.Text type="danger">
                 Расхождения: {candidate.conflicts.join(', ')}.
@@ -116,20 +257,56 @@ export function LinkEdoDocumentModal({
     >
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Typography.Text type="secondary">
-          Кандидаты отсортированы по совпадению реквизитов и материалов. Выбор УПД подтвердит связь
-          с приёмкой.
+          Сверху — УПД с тем же номером и поставщиком. «Сильное совпадение» — только когда
+          совпали полный номер, ИНН поставщика и дата. Раскройте строку, чтобы сверить позиции.
+          {diagnostics?.registryReceivedUntil
+            ? ` В реестре ЭДО есть УПД, полученные по ${formatDateRu(diagnostics.registryReceivedUntil)}; более поздние ещё не выгружены.`
+            : ''}
         </Typography.Text>
         {error && <Alert type="error" message={error} showIcon />}
         {candidates.isError && (
           <Alert type="error" message="Не удалось загрузить УПД из ЭДО" showIcon />
         )}
-        {!!candidates.data?.referenceMissing.length && (
+        {diagnostics?.innUnreadable && (
           <Alert
             type="warning"
             showIcon
-            message={`Для точной сверки не хватает данных: ${candidates.data.referenceMissing.join(', ')}.`}
-            description="Добавьте или исправьте бумажную УПД в разделе «Документы», если её реквизиты не распознаны."
+            message="ИНН поставщика в документе приёмки не проходит проверку — подбор идёт по номеру и названию."
           />
+        )}
+        {!!diagnostics?.innsAbsentInRegistry.length && (
+          <Alert
+            type="warning"
+            showIcon
+            message={`В текущем реестре ЭДО нет ни одной УПД с ИНН ${diagnostics.innsAbsentInRegistry.join(', ')}.`}
+            description="Проверьте ИНН поставщика в приёмке или найдите УПД поиском по номеру или названию."
+          />
+        )}
+        {diagnostics?.contractorDelivery && (
+          <Alert
+            type="info"
+            showIcon
+            message="Приёмка подрядчика: его УПД обычно приходят не в ящик ЭДО СУ-10."
+          />
+        )}
+        {diagnostics?.dateOnly && !query && (
+          <Alert
+            type="warning"
+            showIcon
+            message="Нет ни номера УПД, ни поставщика — показаны УПД по дате приезда."
+            description="Сверяйте по позициям или найдите нужную УПД поиском."
+          />
+        )}
+        {!!data?.referenceMissing.length && (
+          <Alert
+            type="info"
+            showIcon
+            message={`Для точной сверки не хватает данных: ${data.referenceMissing.join(', ')}.`}
+            description="Добавьте или исправьте УПД в разделе «Документы», если её реквизиты не распознаны."
+          />
+        )}
+        {!!data?.truncated.length && (
+          <Alert type="info" showIcon message="Показаны не все найденные УПД — уточните поиском." />
         )}
         <Input.Search
           placeholder="Номер УПД, поставщик, ИНН или имя файла"
@@ -140,16 +317,26 @@ export function LinkEdoDocumentModal({
           enterButton="Найти"
         />
         <Table<Candidate>
-          rowKey="id"
-          dataSource={candidates.data?.items ?? []}
+          rowKey={(row) => `${row.source}:${row.id}`}
+          dataSource={data?.items ?? []}
           loading={candidates.isLoading || busy}
           size="small"
           scroll={{ x: 950, y: '50vh' }}
           pagination={{ pageSize: 20, showSizeChanger: false }}
+          expandable={{
+            expandedRowRender: (row) =>
+              deliveryId ? (
+                <CandidatePreview
+                  deliveryId={deliveryId}
+                  candidate={row}
+                  deliveryItems={deliveryItems}
+                />
+              ) : null,
+          }}
           locale={{
             emptyText: query
               ? 'По запросу УПД не найдены'
-              : 'Поблизости по дате УПД не найдены. Введите номер или поставщика.',
+              : 'Подходящих УПД в реестре ЭДО не найдено. Попробуйте поиск по номеру или поставщику.',
           }}
           columns={[
             {
@@ -159,7 +346,9 @@ export function LinkEdoDocumentModal({
               render: (_value, row) => (
                 <Space direction="vertical" size={0}>
                   <Typography.Text strong>{row.docNumber ?? 'Без номера'}</Typography.Text>
-                  <Typography.Text type="secondary">{row.docDate ?? 'Без даты'}</Typography.Text>
+                  <Typography.Text type="secondary">
+                    {row.docDate ? formatDateRu(row.docDate) : 'Без даты'}
+                  </Typography.Text>
                   <Typography.Text type="secondary">
                     {row.source === 'export' ? 'XML из реестра ЭДО' : 'Импорт ЭДО'}
                   </Typography.Text>
@@ -204,11 +393,7 @@ export function LinkEdoDocumentModal({
                         ? 'Проверьте'
                         : 'Мало совпадений'}
                   </Tag>
-                  {row.paperDocNumber && (
-                    <Typography.Text type="secondary">
-                      С бумажной УПД № {row.paperDocNumber}
-                    </Typography.Text>
-                  )}
+                  <Typography.Text type="secondary">{referenceText(row.reference)}</Typography.Text>
                   {row.matches.length > 0 && (
                     <Typography.Text type="secondary">
                       Совпало: {row.matches.join(', ')}

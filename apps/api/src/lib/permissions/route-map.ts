@@ -193,6 +193,8 @@ const MOBILE_CHANNEL =
   'привязка к одной странице некорректна. Скоуп по роли и siteId остаётся в хендлере.';
 const SHARE_LINKS =
   'Ссылка-шаринг общая для приёмок и отгрузок — правило «одна страница» неприменимо.';
+const EDO_MATCH =
+  'Окно подбора УПД из ЭДО: открывается только кнопкой привязки, доступ — по её возможности.';
 /** Переписка по share-ссылке: третья возможность share, открыта admin/manager. */
 const MSG: RuleMeta = { capability: 'operations.share.messages' };
 
@@ -307,6 +309,30 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
       expandableBy: UNSCOPED,
     }),
   ],
+  // Сверка с УПД из ЭДО — та же пара «привязать/отвязать», что у документов
+  // выше: связь не меняет позиций и сумм, но решение принимает тот же человек.
+  [
+    'POST /api/v1/deliveries/:id/edo-matches',
+    st('operations.deliveries', 'edit', {
+      capability: 'operations.edit.link_source',
+      expandableBy: UNSCOPED,
+    }),
+  ],
+  [
+    'DELETE /api/v1/deliveries/:id/edo-matches/:matchId',
+    st('operations.deliveries', 'edit', {
+      capability: 'operations.edit.unlink_source',
+      expandableBy: UNSCOPED,
+    }),
+  ],
+  // Чтение для окна подбора и метки в шапке. Запрашивается только там, где
+  // показана кнопка привязки (canLinkUpd), — это часть функции привязки, а не
+  // просмотра операций, поэтому выданный «Просмотр» её не открывает.
+  ['GET /api/v1/deliveries/:id/edo-matches', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
+  ['GET /api/v1/deliveries/:id/edo-matches/:matchId/file', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
+  ['GET /api/v1/deliveries/:id/edo-candidates', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
+  ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/file', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
+  ['GET /api/v1/deliveries/:id/edo-candidates/:source/:documentId/preview', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
   // Ссылки-шаринги — не часть обычного редактирования: у создания, списка,
   // отзыва и переписки РАЗНЫЕ allow-list (инспектор создаёт и видит, но не
   // отзывает). Выдача edit их не открывает, интерфейс скрывает по capability.

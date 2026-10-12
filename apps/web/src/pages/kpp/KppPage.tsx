@@ -280,6 +280,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const [linkUpdOpen, setLinkUpdOpen] = useState(false);
   const [linkEdoOpen, setLinkEdoOpen] = useState(false);
   const [linkUpdError, setLinkUpdError] = useState<string | null>(null);
+  const [linkEdoError, setLinkEdoError] = useState<string | null>(null);
 
   // Эти хуки должны быть ДО любых early-return'ов ниже по компоненту
   // (см. строки `if (deliveryId && !loadedDelivery) return …` и
@@ -1067,12 +1068,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onSuccess: () => {
       message.success('УПД из ЭДО сопоставлена с приёмкой');
       setLinkEdoOpen(false);
-      setLinkUpdError(null);
+      setLinkEdoError(null);
       void queryClient.invalidateQueries({ queryKey: ['delivery-edo-matches', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['delivery-edo-candidates', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
     },
-    onError: (err: Error) => setLinkUpdError(err.message),
+    onError: (err: Error) => setLinkEdoError(err.message),
   });
 
   const unlinkEdo = useMutation({
@@ -1897,7 +1898,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       size="small"
                       type="dashed"
                       onClick={() => {
-                        setLinkUpdError(null);
+                        setLinkEdoError(null);
                         setLinkEdoOpen(true);
                       }}
                     >
@@ -2003,7 +2004,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           open={linkEdoOpen}
           deliveryId={loadedDelivery?.id ?? null}
           busy={linkEdo.isPending}
-          error={linkUpdError}
+          error={linkEdoError}
+          deliveryItems={loadedDelivery?.items ?? []}
           onCancel={() => {
             if (!linkEdo.isPending) setLinkEdoOpen(false);
           }}
