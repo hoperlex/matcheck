@@ -76,7 +76,7 @@ import { ExpectedUpds } from './ExpectedUpds';
 import { PhotoGallery, type GalleryPhoto } from './PhotoGallery';
 import { formatStageTime } from './stageTime';
 import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
-import { pickUpdSupplierName } from '../shared/updSupplierName';
+import { pickUpdSupplierName, updSupplierEditTarget } from '../shared/updSupplierName';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkEdoDocumentModal } from './LinkEdoDocumentModal';
 import { LinkOutlined } from '@ant-design/icons';
@@ -231,6 +231,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const canLinkUpd = canEditDelivery && hasCapability('operations.edit.link_source');
   const canUnlinkUpd = canEditDelivery && hasCapability('operations.edit.unlink_source');
   const canPickSupplier = canEditDelivery && hasCapability('operations.edit.supplier_directory');
+  // Поставщик привязанного УПД правится в самом документе — правом карточки
+  // документа, как стороны (PATCH /source-documents/:id, documents.list:edit):
+  // админ и Мониторинг с выданной ячейкой.
+  const canEditUpdSupplier = can('documents.list', 'edit') && !isContractor;
   const canUploadPhoto =
     can('operations.deliveries', 'create') && hasCapability('operations.photo.upload');
 
@@ -1300,6 +1304,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     // У распознанного УПД поставщик живёт в самом документе, а
     // deliveries.supplier_id остаётся NULL — тот же fallback, что в таблице.
     pickUpdSupplierName(selectedUpd, loadedDelivery?.sourceDocumentIds ?? []);
+  // Какой документ правит чип «Поставщик» при привязанном УПД (null — никакой).
+  const updSupplierEdit = updSupplierEditTarget({
+    sourceDocumentIds: loadedDelivery?.sourceDocumentIds ?? [],
+    ownSupplierId: loadedDelivery?.supplierId,
+    selectedUpd,
+    canEdit: canEditUpdSupplier,
+  });
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
     if (!siteId) reasons.push('Выберите объект');
@@ -1797,9 +1808,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               </InlineEditChip>
 
               {/* Чип «Поставщик»: симметрично с отгрузкой. Если у приёмки
-                  привязана УПД (sourceDocumentIds.length > 0), чип
-                  read-only — имя поставщика приходит из УПД (приоритет
-                  УПД, см. бэк endpoint /supplier-from-directory).
+                  привязана УПД (sourceDocumentIds.length > 0), имя
+                  поставщика приходит из УПД (приоритет УПД, см. бэк endpoint
+                  /supplier-from-directory), и поправить его можно только в
+                  самом основном документе — с правом карточки документа.
                   Иначе менеджер выбирает из Справочника → Поставщики. */}
               {loadedDelivery && deliveryId && (
                 <SupplierChip
@@ -1809,6 +1821,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   displayName={supplierDisplayName}
                   invalidateQueryKey={['deliveries', deliveryId]}
                   disabled={!canPickSupplier}
+                  updEdit={
+                    updSupplierEdit ? { ...updSupplierEdit, onSaved: setSelectedUpd } : undefined
+                  }
                 />
               )}
 

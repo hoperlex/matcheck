@@ -3413,6 +3413,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       })
       .nullable()
       .optional(),
+    // Поставщик, выбранный человеком из справочника `suppliers` — по id, а не
+    // по ИНН: у справочника ИНН не уникален и бывает пустым, и повторный поиск
+    // (как в ветке `supplier`) мог бы выбрать соседнюю запись. Очистки нет:
+    // УПД без поставщика не бывает.
+    supplierDirectoryId: z.string().uuid().optional(),
     // Покупатель (графа 6) и грузополучатель (графа 4). Ключ отсутствует —
     // сторона не меняется: форма шлёт её только после правки, и нетронутая
     // карточка не перезапишет распознанный текст именем из справочника.
@@ -3451,7 +3456,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         body: UpdPatchSchema,
         response: {
           200: SourceDocumentDetailSchema,
-          // ИНН стороны документа не прошёл проверку контрольной суммы.
+          // ИНН стороны документа не прошёл проверку контрольной суммы,
+          // поставщика нет в справочнике или он задан двумя способами сразу.
           400: ErrorResponseSchema,
           404: ErrorResponseSchema,
           // Смена объекта у поставки, по которой уже оформлена операция, и
@@ -3492,6 +3498,34 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           error: 'invalid_inn',
           message: `ИНН ${label} не прошёл проверку контрольной суммы — проверьте цифры`,
         });
+      }
+
+      // Поставщик из справочника — тоже до любой записи: ветка `supplier` ниже
+      // заводит запись справочника своей транзакцией, и отказ после неё её бы
+      // не откатил. Тот же id — не правка: распознанный ИНН остаётся на месте.
+      if (req.body.supplier && req.body.supplierDirectoryId !== undefined) {
+        return reply.code(400).send({
+          error: 'supplier_conflict',
+          message: 'Поставщик задан двумя способами сразу',
+        });
+      }
+      const nextSupplierDirectoryId =
+        req.body.supplierDirectoryId !== undefined &&
+        req.body.supplierDirectoryId !== sd.supplierDirectoryId
+          ? req.body.supplierDirectoryId
+          : null;
+      if (nextSupplierDirectoryId) {
+        const [dir] = await app.db
+          .select({ id: suppliers.id })
+          .from(suppliers)
+          .where(eq(suppliers.id, nextSupplierDirectoryId))
+          .limit(1);
+        if (!dir) {
+          return reply.code(400).send({
+            error: 'supplier_not_found',
+            message: 'Поставщик не найден в справочнике',
+          });
+        }
       }
 
       // updatedAt здесь НЕ ставится: время берётся уже в транзакции
@@ -3558,6 +3592,15 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         // отвечает на вопрос «что стояло в документе», и подмена сделала бы её
         // непригодной для сверки. DTO после этого возьмёт ИНН из справочной
         // записи, то есть ровно тот, который человек и выбрал.
+        upd.supplierInnRaw = null;
+      }
+      if (nextSupplierDirectoryId) {
+        // Те же три колонки и по той же причине, что в ветке выше. ИНН в
+        // особенности: список приёмок и подбор ЭДО берут
+        // coalesce(supplier_inn_raw, ИНН справочника), и оставленный
+        // распознанный ИНН продолжал бы описывать прежнего поставщика.
+        upd.supplierId = null;
+        upd.supplierDirectoryId = nextSupplierDirectoryId;
         upd.supplierInnRaw = null;
       }
 

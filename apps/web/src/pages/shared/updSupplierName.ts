@@ -22,3 +22,50 @@ export function pickUpdSupplierName(
   const name = doc.supplierName?.trim();
   return name ? name : null;
 }
+
+/** Документ, поставщика которого можно поправить из чипа операции. */
+export type UpdSupplierEditTarget = {
+  docId: string;
+  docNumber: string | null;
+  docDate: string | null;
+  /** Сколько документов привязано к операции — для предупреждения в окне. */
+  linkedCount: number;
+};
+
+/**
+ * Какой документ правит чип «Поставщик», если к операции привязан УПД, — или
+ * null, если править нечего.
+ *
+ * Только основной документ (sourceDocumentIds[0]): поставщика именно его
+ * показывают и чип, и строка списка (primarySourceDocument). Правка любого
+ * другого не была бы видна нигде, поэтому выбора документа нет.
+ *
+ * Собственный поставщик операции стоит в цепочке имени чипа выше документа:
+ * правка документа его не сменила бы, и чип показал бы прежнее имя.
+ *
+ * Документ из local state должен быть текущим основным: после отвязки или
+ * смены основного карточка ещё держит прежний, и правка ушла бы не туда.
+ */
+export function updSupplierEditTarget({
+  sourceDocumentIds,
+  ownSupplierId,
+  selectedUpd,
+  canEdit,
+}: {
+  sourceDocumentIds: readonly string[];
+  ownSupplierId: string | null | undefined;
+  selectedUpd:
+    | { id: string; docNumber?: string | null; docDate?: string | null }
+    | null
+    | undefined;
+  canEdit: boolean;
+}): UpdSupplierEditTarget | null {
+  if (!canEdit || ownSupplierId) return null;
+  if (!selectedUpd || sourceDocumentIds[0] !== selectedUpd.id) return null;
+  return {
+    docId: selectedUpd.id,
+    docNumber: selectedUpd.docNumber ?? null,
+    docDate: selectedUpd.docDate ?? null,
+    linkedCount: sourceDocumentIds.length,
+  };
+}

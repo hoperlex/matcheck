@@ -16,7 +16,12 @@
  *     уникальном индексе;
  *   * правка одной стороны не поднимает ревизию машины, не пересчитывает статус
  *     (иначе слетало бы «Принять как есть») и не трогает позиции — у строк
- *     приёмки на них ссылка ON DELETE SET NULL.
+ *     приёмки на них ссылка ON DELETE SET NULL;
+ *   * поставщик выбирается по id справочника, и вместе с FK сбрасывается
+ *     распознанный ИНН: список приёмок и подбор ЭДО берут
+ *     coalesce(supplier_inn_raw, ИНН справочника). Правка видна во всех
+ *     приёмках, к которым привязан документ, но в строке списка — только если
+ *     документ у приёмки основной.
  *
  * Запуск: TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5444/matcheck_test
  * Без переменной набор пропускается.
@@ -77,6 +82,7 @@ suite('правка сторон документа (реальный PostgreSQL
     process.env.GROUPS_ROLLOUT = '1';
     vi.resetModules();
     const { sourceDocumentRoutes } = await import('../../src/routes/source-documents.js');
+    const { deliveryRoutes } = await import('../../src/routes/deliveries.js');
     const instance = Fastify({ logger: false });
     instance.setValidatorCompiler(validatorCompiler);
     instance.setSerializerCompiler(serializerCompiler);
@@ -99,6 +105,9 @@ suite('правка сторон документа (реальный PostgreSQL
         },
     );
     await instance.register(sourceDocumentRoutes);
+    // Список приёмок — ради primarySourceDocument: он собирается своими
+    // запросами, и «в DTO документа поставщик новый» ничего о нём не говорит.
+    await instance.register(deliveryRoutes);
     await instance.ready();
     return instance;
   }
@@ -131,15 +140,21 @@ suite('правка сторон документа (реальный PostgreSQL
     bundleId?: string | null;
     totalSum?: number;
     parseErrorDetails?: unknown;
+    supplierDirectoryId?: string;
+    supplierInnRaw?: string;
+    supplierId?: string;
   }): Promise<void> {
     await sql`INSERT INTO source_documents
         (id, kind, is_technical, direction, origin, status, site_id, parsed_at,
          doc_number, doc_date, total_sum, bundle_id, expected_date,
-         buyer_name_raw, consignee_name_raw, parse_error_details)
+         buyer_name_raw, consignee_name_raw, parse_error_details,
+         supplier_directory_id, supplier_inn_raw, supplier_id)
       VALUES (${opts.id}, 'upd', false, 'inbound', 'manual_pdf', 'parsed', ${opts.siteId},
               now(), ${`DP-${opts.id.slice(0, 6)}`}, now(), ${opts.totalSum ?? 100},
               ${opts.bundleId ?? null}, '2026-08-26', 'ООО «Распознанный»', NULL,
-              ${opts.parseErrorDetails ? JSON.stringify(opts.parseErrorDetails) : null}::jsonb)`;
+              ${opts.parseErrorDetails ? JSON.stringify(opts.parseErrorDetails) : null}::jsonb,
+              ${opts.supplierDirectoryId ?? null}, ${opts.supplierInnRaw ?? null},
+              ${opts.supplierId ?? null})`;
     await sql`INSERT INTO source_document_items
         (source_document_id, name_raw, qty, unit, price, sum, line_no)
       VALUES (${opts.id}, 'Труба', 1, 'шт', 100, 100, 1)`;
@@ -159,10 +174,14 @@ suite('правка сторон документа (реальный PostgreSQL
         consignee_id: string | null;
         consignee_name_raw: string | null;
         consignee_inn_raw: string | null;
+        supplier_id: string | null;
+        supplier_directory_id: string | null;
+        supplier_inn_raw: string | null;
       }[]
     >`SELECT version, status, parse_error_code, parse_error_details, doc_number,
              buyer_id, buyer_name_raw, buyer_inn_raw,
-             consignee_id, consignee_name_raw, consignee_inn_raw
+             consignee_id, consignee_name_raw, consignee_inn_raw,
+             supplier_id, supplier_directory_id, supplier_inn_raw
         FROM source_documents WHERE id = ${id}`;
     return r!;
   }
@@ -191,6 +210,49 @@ suite('правка сторон документа (реальный PostgreSQL
     return app.inject({ method: 'PATCH', url: `/api/v1/source-documents/${docId}`, payload });
   }
 
+  /** Записи справочника поставщиков, заведённые набором, — для уборки. */
+  const seededSuppliers: string[] = [];
+
+  async function seedSupplier(name: string): Promise<{ id: string; inn: string }> {
+    const id = randomUUID();
+    const inn = validInn();
+    await sql`INSERT INTO suppliers (id, inn, name) VALUES (${id}, ${inn}, ${name})`;
+    seededSuppliers.push(id);
+    return { id, inn };
+  }
+
+  async function seedDelivery(siteId: string, docIds: string[]): Promise<string> {
+    const deliveryId = randomUUID();
+    await sql`INSERT INTO deliveries (id, site_id, status_id)
+              VALUES (${deliveryId}, ${siteId},
+                      (SELECT id FROM statuses WHERE entity_type='delivery' AND code='not_filled'))`;
+    for (const docId of docIds) {
+      await sql`INSERT INTO delivery_sources (delivery_id, source_document_id)
+                VALUES (${deliveryId}, ${docId})`;
+    }
+    return deliveryId;
+  }
+
+  /** Строка списка приёмок — то, что видит таблица на портале. */
+  async function listedSupplier(
+    deliveryId: string,
+  ): Promise<{ supplierName: string | null; supplierInn: string | null }> {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/deliveries?siteId=${siteA}&limit=100`,
+    });
+    expect(res.statusCode).toBe(200);
+    const row = (res.json() as { items: Record<string, unknown>[] }).items.find(
+      (i) => i.id === deliveryId,
+    );
+    expect(row, `приёмка ${deliveryId} не найдена в списке`).toBeTruthy();
+    const primary = row!.primarySourceDocument as {
+      supplierName: string | null;
+      supplierInn: string | null;
+    };
+    return { supplierName: primary.supplierName, supplierInn: primary.supplierInn };
+  }
+
   async function cleanup(): Promise<void> {
     for (const site of [siteA, siteB]) {
       await sql`DELETE FROM delivery_sources WHERE source_document_id IN (
@@ -206,6 +268,10 @@ suite('правка сторон документа (реальный PostgreSQL
     }
     if (usedInns.length > 0) {
       await sql`DELETE FROM counterparties WHERE inn = ANY(${usedInns})`;
+    }
+    if (seededSuppliers.length > 0) {
+      await sql`DELETE FROM suppliers WHERE id = ANY(${seededSuppliers})`;
+      seededSuppliers.length = 0;
     }
   }
 
@@ -484,5 +550,189 @@ suite('правка сторон документа (реальный PostgreSQL
     expect((await docRow(m.docIds[0]!)).version).toBeGreaterThan(before.version);
     const [newItem] = await itemIds(m.docIds[0]!);
     expect(newItem).not.toBe(oldItem);
+  });
+
+  // ─── Поставщик из справочника ─────────────────────────────────────────────
+
+  it('поставщик по id справочника: FK сменён, распознанный ИНН и старый FK сброшены', async () => {
+    const wrong = await seedSupplier('ООО «Ошибочный»');
+    const right = await seedSupplier('ООО «Королевская вода»');
+    const cpInn = freshInn();
+    const [cp] = await sql<{ id: string }[]>`
+      INSERT INTO counterparties (inn, kpp, name, is_supplier)
+      VALUES (${cpInn}, NULL, 'ООО «Старый путь»', true) RETURNING id`;
+    const docId = randomUUID();
+    await seedDoc({
+      id: docId,
+      siteId: siteA,
+      supplierDirectoryId: wrong.id,
+      supplierInnRaw: wrong.inn,
+      supplierId: cp!.id,
+    });
+
+    const res = await patch(docId, { supplierDirectoryId: right.id });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      supplierName: 'ООО «Королевская вода»',
+      supplierInn: right.inn,
+    });
+
+    const row = await docRow(docId);
+    expect(row.supplier_directory_id).toBe(right.id);
+    // Оставленный распознанный ИНН перебил бы справочник во всех coalesce.
+    expect(row.supplier_inn_raw).toBeNull();
+    expect(row.supplier_id).toBeNull();
+
+    const detail = await app.inject({ method: 'GET', url: `/api/v1/source-documents/${docId}` });
+    expect(detail.json()).toMatchObject({
+      supplierName: 'ООО «Королевская вода»',
+      supplierInn: right.inn,
+    });
+  });
+
+  it('тот же поставщик — не правка: распознанный ИНН остаётся', async () => {
+    const current = await seedSupplier('ООО «Как распознано»');
+    const docId = randomUUID();
+    await seedDoc({
+      id: docId,
+      siteId: siteA,
+      supplierDirectoryId: current.id,
+      supplierInnRaw: current.inn,
+    });
+
+    expect((await patch(docId, { supplierDirectoryId: current.id })).statusCode).toBe(200);
+    const row = await docRow(docId);
+    expect(row.supplier_directory_id).toBe(current.id);
+    expect(row.supplier_inn_raw).toBe(current.inn);
+  });
+
+  it('неизвестный поставщик — 400, документ не изменён', async () => {
+    const current = await seedSupplier('ООО «Как распознано»');
+    const docId = randomUUID();
+    await seedDoc({
+      id: docId,
+      siteId: siteA,
+      supplierDirectoryId: current.id,
+      supplierInnRaw: current.inn,
+    });
+
+    const res = await patch(docId, { supplierDirectoryId: randomUUID(), docNumber: 'DP-X' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: 'supplier_not_found' });
+    const row = await docRow(docId);
+    expect(row.supplier_directory_id).toBe(current.id);
+    expect(row.supplier_inn_raw).toBe(current.inn);
+    expect(row.doc_number).not.toBe('DP-X');
+  });
+
+  it('поставщик двумя способами сразу — 400, справочник не растёт', async () => {
+    const right = await seedSupplier('ООО «Королевская вода»');
+    const docId = randomUUID();
+    await seedDoc({ id: docId, siteId: siteA });
+    const inn = validInn();
+
+    const res = await patch(docId, {
+      supplierDirectoryId: right.id,
+      supplier: { inn, name: 'ООО «Через поиск»' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: 'supplier_conflict' });
+    const created = await sql`SELECT id FROM suppliers WHERE inn = ${inn}`;
+    expect(created).toHaveLength(0);
+    expect((await docRow(docId)).supplier_directory_id).toBeNull();
+  });
+
+  it('правка поставщика не поднимает ревизию машины и не пишет событий видимости', async () => {
+    const right = await seedSupplier('ООО «Королевская вода»');
+    const m = await seedMachine(siteA);
+    const before = await Promise.all(m.docIds.map(docRow));
+    const eventsBefore = await visibilityEvents(m.docIds[0]!);
+
+    expect((await patch(m.docIds[0]!, { supplierDirectoryId: right.id })).statusCode).toBe(200);
+
+    const after = await Promise.all(m.docIds.map(docRow));
+    expect(after.map((r) => r.version)).toEqual(before.map((r) => r.version));
+    expect(await visibilityEvents(m.docIds[0]!)).toBe(eventsBefore);
+  });
+
+  it('правка поставщика не снимает «Принять как есть» и не трогает позиции', async () => {
+    const right = await seedSupplier('ООО «Королевская вода»');
+    const docId = randomUUID();
+    const acknowledgement = { reason: 'так в бумаге', userId: null, at: '2026-10-01T00:00:00Z' };
+    await seedDoc({
+      id: docId,
+      siteId: siteA,
+      totalSum: 500,
+      parseErrorDetails: { acknowledgement },
+    });
+    const [itemId] = await itemIds(docId);
+    const deliveryId = await seedDelivery(siteA, [docId]);
+    const [line] = await sql<{ id: string }[]>`
+      INSERT INTO delivery_items
+        (delivery_id, source_document_id, source_document_item_id, name_raw, line_no)
+      VALUES (${deliveryId}, ${docId}, ${itemId!}, 'Труба', 1) RETURNING id`;
+
+    expect((await patch(docId, { supplierDirectoryId: right.id })).statusCode).toBe(200);
+
+    const row = await docRow(docId);
+    expect(row.status).toBe('parsed');
+    expect(row.parse_error_code).toBeNull();
+    expect(row.parse_error_details).toMatchObject({ acknowledgement });
+    expect(await itemIds(docId)).toEqual([itemId]);
+    const [link] = await sql<{ source_document_item_id: string | null }[]>`
+      SELECT source_document_item_id FROM delivery_items WHERE id = ${line!.id}`;
+    expect(link!.source_document_item_id).toBe(itemId);
+  });
+
+  it('один УПД в двух приёмках: обе строки списка показывают нового поставщика', async () => {
+    const wrong = await seedSupplier('ООО «Ошибочный»');
+    const right = await seedSupplier('ООО «Королевская вода»');
+    const docId = randomUUID();
+    await seedDoc({
+      id: docId,
+      siteId: siteA,
+      supplierDirectoryId: wrong.id,
+      supplierInnRaw: wrong.inn,
+    });
+    // «Несколько поставок» (миграция 0063): один УПД — несколько рейсов.
+    const first = await seedDelivery(siteA, [docId]);
+    const second = await seedDelivery(siteA, [docId]);
+
+    expect((await patch(docId, { supplierDirectoryId: right.id })).statusCode).toBe(200);
+
+    for (const deliveryId of [first, second]) {
+      expect(await listedSupplier(deliveryId)).toEqual({
+        supplierName: 'ООО «Королевская вода»',
+        supplierInn: right.inn,
+      });
+    }
+  });
+
+  it('многодокументная приёмка: строку списка меняет только правка основного документа', async () => {
+    const wrong = await seedSupplier('ООО «Ошибочный»');
+    const right = await seedSupplier('ООО «Королевская вода»');
+    const docIds = [randomUUID(), randomUUID()];
+    for (const id of docIds) {
+      await seedDoc({
+        id,
+        siteId: siteA,
+        supplierDirectoryId: wrong.id,
+        supplierInnRaw: wrong.inn,
+      });
+    }
+    // Основной — первый по sourceDocumentId: так его выбирают и список, и
+    // карточка приёмки (sourceDocumentIds[0]).
+    const [primary, secondary] = [...docIds].sort();
+    const deliveryId = await seedDelivery(siteA, docIds);
+
+    // Почему карточка правит только основной: правка второго нигде не видна.
+    expect((await patch(secondary!, { supplierDirectoryId: right.id })).statusCode).toBe(200);
+    expect((await listedSupplier(deliveryId)).supplierName).toBe('ООО «Ошибочный»');
+
+    expect((await patch(primary!, { supplierDirectoryId: right.id })).statusCode).toBe(200);
+    expect(await listedSupplier(deliveryId)).toEqual({
+      supplierName: 'ООО «Королевская вода»',
+      supplierInn: right.inn,
+    });
   });
 });
