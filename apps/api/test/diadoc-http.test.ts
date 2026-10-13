@@ -43,6 +43,9 @@ describe('разрешающий список путей', () => {
     // Справочник типов — тоже чтение.
     expect(isAllowedRequest('GET', new URL(`${API}/V2/GetDocumentTypes`))).toBe(true);
     expect(isAllowedRequest('POST', new URL(`${API}/V2/GetDocumentTypes`))).toBe(false);
+    // Список документов — чтение; другим методом тот же путь закрыт.
+    expect(isAllowedRequest('GET', new URL(`${API}/V3/GetDocuments`))).toBe(true);
+    expect(isAllowedRequest('POST', new URL(`${API}/V3/GetDocuments`))).toBe(false);
   });
 
   it('не пропускает методы, которые что-то отправляют или подписывают', () => {

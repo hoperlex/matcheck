@@ -127,6 +127,50 @@ export const DiadocBoxEventListSchema = z
   })
   .passthrough();
 
+/**
+ * Значение перечисления. В JSON Диадок отдаёт его строкой, но число тоже не
+ * должно ронять разбор страницы — для сверки важно увидеть, что пришло.
+ */
+const LooseEnum = z.union([z.string(), z.number()]).optional().catch(undefined);
+
+/**
+ * Документ из списка GetDocuments (V3).
+ *
+ * Та же структура Document, что и DocumentInfo в ленте, плюс то, что нужно
+ * списку: ключ страницы, ответ получателя и связи с другими документами.
+ * MessageId и EntityId обязательны — без них документ нельзя сопоставить с
+ * реестром, и такую страницу честнее отвергнуть целиком.
+ */
+export const DiadocListedDocumentSchema = DiadocDocumentInfoSchema.extend({
+  MessageId: z.string(),
+  EntityId: z.string(),
+  IndexKey: z.string().optional(),
+  RecipientResponseStatus: LooseEnum,
+  RevocationStatus: LooseEnum,
+  DepartmentId: LooseString,
+  PacketId: LooseString,
+  InitialDocumentIds: z.unknown().optional(),
+  SubordinateDocumentIds: z.unknown().optional(),
+}).passthrough();
+export type DiadocListedDocument = z.infer<typeof DiadocListedDocumentSchema>;
+
+/**
+ * Ответ GetDocuments (V3).
+ *
+ * ВНИМАНИЕ: `HasMoreResults` — не «есть следующая страница», а «найдено больше
+ * 1000», и тогда `TotalCount` равен 1000, а не настоящему числу (DocumentList в
+ * документации Диадока). Поэтому полнота окна проверяется только на окнах, где
+ * HasMoreResults = false и TotalCount < 1000, — см. list-windows.ts.
+ */
+export const DiadocDocumentListSchema = z
+  .object({
+    Documents: z.array(DiadocListedDocumentSchema).default([]),
+    TotalCount: z.number().optional(),
+    HasMoreResults: z.boolean().optional(),
+  })
+  .passthrough();
+export type DiadocDocumentList = z.infer<typeof DiadocDocumentListSchema>;
+
 export const DiadocOrganizationSchema = z
   .object({
     OrgId: z.string().optional(),

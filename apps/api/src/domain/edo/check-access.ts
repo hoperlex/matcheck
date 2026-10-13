@@ -41,7 +41,7 @@ import {
 import { acquireEdoLease, releaseEdoLease } from './poll-lease.js';
 
 /** Уровень доступа, при котором интеграция работает без оговорок. */
-const REQUIRED_ACCESS_LEVEL = 'AllDocuments';
+export const REQUIRED_ACCESS_LEVEL = 'AllDocuments';
 
 export type CheckFailure = {
   error: string;

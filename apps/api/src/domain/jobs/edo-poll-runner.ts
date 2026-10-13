@@ -223,6 +223,47 @@ export async function runEdoExport(
   });
 }
 
+export type EdoClientSession = {
+  account: typeof edoAccounts.$inferSelect;
+  boxId: string;
+  client: DiadocClient;
+  /** Продлевает лиз; потерян — бросает EdoLeaseLost. Звать перед каждым запросом. */
+  ensureLease: () => Promise<void>;
+};
+
+/**
+ * Клиент Диадока под лизом учётки — для скриптов, которым нужен только он
+ * (проба списка документов). Лиз обязателен и здесь: под ним обменивается
+ * refresh_token, а параллельный обмен оставил бы кого-то с отозванным токеном.
+ */
+export async function runWithEdoClient<T>(
+  deps: EdoRunnerDeps,
+  accountId: string,
+  fn: (session: EdoClientSession) => Promise<T>,
+): Promise<T | { skipped: 'lease_taken' | 'no_box' | 'not_found' }> {
+  const account = await loadAccount(deps.db, accountId);
+  if (!account) return { skipped: 'not_found' };
+  if (!account.boxId) return { skipped: 'no_box' };
+  const ttlSeconds = loadEnv().EDO_POLL_LEASE_SEC;
+
+  return withLease(deps, accountId, false, async (lease) => {
+    const client = deps.createClient
+      ? deps.createClient(account)
+      : new DiadocClient({
+          auth: createDiadocAuth({ db: deps.db }, account),
+          environment: account.environment,
+        });
+    return fn({
+      account,
+      boxId: account.boxId as string,
+      client,
+      ensureLease: async () => {
+        if (!(await renewEdoLease(deps.db, lease, ttlSeconds))) throw new EdoLeaseLost();
+      },
+    });
+  });
+}
+
 /** Ручной проход по кнопке «Синхронизировать»: работает и до включения опроса. */
 export async function pollEdoAccountById(
   deps: EdoRunnerDeps,

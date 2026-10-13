@@ -18,11 +18,13 @@ import {
 } from './diadoc.http.js';
 import {
   DiadocBoxEventListSchema,
+  DiadocDocumentListSchema,
   DiadocEmployeeSchema,
   DiadocMessageSchema,
   DiadocOrganizationListSchema,
   dateToDiadocTicks,
   type DiadocBoxEvent,
+  type DiadocDocumentList,
   type DiadocEmployee,
   type DiadocMessage,
 } from './diadoc.types.js';
@@ -46,6 +48,20 @@ export type GetNewEventsParams = {
    * историю ящика: на давно живущем ящике это десятки тысяч лишних событий.
    */
   fromTimestamp?: Date | null;
+  signal?: AbortSignal;
+};
+
+export type GetDocumentsParams = {
+  boxId: string;
+  /** `<Тип>.<Класс><Статус>`, например `UniversalTransferDocument.Inbound`. */
+  filterCategory: string;
+  /** Границы по времени в тиках .NET, ОБЕ включительные. */
+  fromTicks?: bigint | null;
+  toTicks?: bigint | null;
+  afterIndexKey?: string | null;
+  /** Размер страницы, 0–100. */
+  count?: number;
+  sortDirection?: 'Ascending' | 'Descending';
   signal?: AbortSignal;
 };
 
@@ -180,6 +196,30 @@ export class DiadocClient {
     const res = await this.request(url, 'GET', { signal: params.signal });
     const parsed = DiadocBoxEventListSchema.parse(await readJson(res, url));
     return { events: parsed.Events };
+  }
+
+  /**
+   * Страница списка документов (V3).
+   *
+   * Как и у ленты, набор фильтров между страницами менять нельзя: ключ
+   * `afterIndexKey` действителен только для того же запроса. Ключ кодирует
+   * URLSearchParams — документация требует передавать его закодированным.
+   */
+  async getDocuments(params: GetDocumentsParams): Promise<DiadocDocumentList> {
+    const url = new URL('/V3/GetDocuments', this.api);
+    url.searchParams.set('boxId', params.boxId);
+    url.searchParams.set('filterCategory', params.filterCategory);
+    if (params.fromTicks !== undefined && params.fromTicks !== null) {
+      url.searchParams.set('timestampFromTicks', params.fromTicks.toString());
+    }
+    if (params.toTicks !== undefined && params.toTicks !== null) {
+      url.searchParams.set('timestampToTicks', params.toTicks.toString());
+    }
+    if (params.sortDirection) url.searchParams.set('sortDirection', params.sortDirection);
+    if (params.afterIndexKey) url.searchParams.set('afterIndexKey', params.afterIndexKey);
+    url.searchParams.set('count', String(params.count ?? 100));
+    const res = await this.request(url, 'GET', { signal: params.signal });
+    return DiadocDocumentListSchema.parse(await readJson(res, url));
   }
 
   /**

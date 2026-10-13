@@ -167,3 +167,57 @@ describe('справочник типов документов', () => {
     expect(parseDocumentTypes({ DocumentTypes: [{ Title: 'без имени' }, 5] })).toEqual([]);
   });
 });
+
+describe('список документов (V3)', () => {
+  it('фильтры, границы в тиках, размер страницы и закодированный ключ', async () => {
+    const { client, calls } = clientWith(() =>
+      json({ Documents: [{ MessageId: 'm-1', EntityId: 'e-1', IndexKey: 'k+1/=' }], TotalCount: 1, HasMoreResults: false }),
+    );
+    const list = await client.getDocuments({
+      boxId: 'box-1',
+      filterCategory: 'UniversalTransferDocument.Inbound',
+      fromTicks: 639_000_000_000_000_000n,
+      toTicks: 639_000_000_000_000_999n,
+      afterIndexKey: 'ключ+со/знаками=',
+      count: 100,
+    });
+    const url = new URL(calls[0]!.url);
+    expect(url.pathname).toBe('/V3/GetDocuments');
+    expect(url.searchParams.get('filterCategory')).toBe('UniversalTransferDocument.Inbound');
+    expect(url.searchParams.get('timestampFromTicks')).toBe('639000000000000000');
+    expect(url.searchParams.get('timestampToTicks')).toBe('639000000000000999');
+    expect(url.searchParams.get('count')).toBe('100');
+    // Ключ уходит закодированным и возвращается на сервере ровно таким, каким был.
+    expect(calls[0]!.url).not.toContain('ключ+со/знаками=');
+    expect(url.searchParams.get('afterIndexKey')).toBe('ключ+со/знаками=');
+    expect(calls[0]!.headers.Accept).toBe('application/json');
+    expect(list.Documents[0]?.IndexKey).toBe('k+1/=');
+    expect(list.TotalCount).toBe(1);
+  });
+
+  it('без границ и ключа лишних параметров нет; направление сортировки передаётся', async () => {
+    const { client, calls } = clientWith(() => json({ Documents: [] }));
+    await client.getDocuments({ boxId: 'box-1', filterCategory: 'Any.Deleted', count: 1, sortDirection: 'Descending' });
+    const url = new URL(calls[0]!.url);
+    expect([...url.searchParams.keys()].sort()).toEqual(['boxId', 'count', 'filterCategory', 'sortDirection']);
+    expect(url.searchParams.get('sortDirection')).toBe('Descending');
+  });
+
+  it('документ без MessageId ломает страницу целиком: сверять его не с чем', async () => {
+    const { client } = clientWith(() => json({ Documents: [{ EntityId: 'e-1' }] }));
+    await expect(client.getDocuments({ boxId: 'b', filterCategory: 'Any.Inbound' })).rejects.toThrow();
+  });
+
+  it('статусы-числа и незнакомые поля не роняют разбор', async () => {
+    const { client } = clientWith(() =>
+      json({
+        Documents: [{ MessageId: 'm', EntityId: 'e', RevocationStatus: 4, SomethingNew: { a: 1 } }],
+        TotalCount: 1000,
+        HasMoreResults: true,
+      }),
+    );
+    const list = await client.getDocuments({ boxId: 'b', filterCategory: 'Any.Inbound' });
+    expect(list.Documents[0]?.RevocationStatus).toBe(4);
+    expect(list.HasMoreResults).toBe(true);
+  });
+});

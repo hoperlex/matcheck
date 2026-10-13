@@ -63,6 +63,9 @@ const ALLOWED_ROUTES: readonly AllowedRoute[] = [
   { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/V8/GetNewEvents' },
   { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/V6/GetMessage' },
   { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/V4/GetEntityContent' },
+  // Список документов ящика — то же, что показывает веб-интерфейс: по нему
+  // реестр выгрузки сверяется с Диадоком документ в документ.
+  { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/V3/GetDocuments' },
   // Справочник типов документов: какие из них машиночитаемые и как называются.
   { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/V2/GetDocumentTypes' },
   // Резервный разбор формализованного титула (за флагом EDO_PARSE_TITLE_FALLBACK).
