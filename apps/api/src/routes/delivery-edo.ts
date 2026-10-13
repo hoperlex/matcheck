@@ -52,6 +52,12 @@ const EdoCandidateSchema = z.object({
   matches: z.array(z.string()),
   conflicts: z.array(z.string()),
   missing: z.array(z.string()),
+  otherSupplier: z.boolean(),
+  supplierCheck: z.object({
+    documentInns: z.array(z.string()),
+    referenceInns: z.array(z.string()),
+    matchedInn: z.string().nullable(),
+  }),
 });
 
 const EdoPreviewSchema = z.object({
@@ -835,6 +841,9 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
             truncated: z.array(FoundBySchema),
             diagnostics: z.object({
               registryReceivedUntil: z.string().nullable(),
+              referencesAfterRegistry: z.array(
+                z.object({ label: z.string().nullable(), date: z.string() }),
+              ),
               innsAbsentInRegistry: z.array(z.string()),
               innUnreadable: z.boolean(),
               contractorDelivery: z.boolean(),

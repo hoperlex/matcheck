@@ -48,6 +48,24 @@ const base = {
   matches: ['номер УПД'],
   conflicts: [],
   missing: [],
+  otherSupplier: false,
+  supplierCheck: { documentInns: ['7712345678'], referenceInns: ['7712345678'], matchedInn: '7712345678' },
+};
+
+/** Приёмка 19507: у чужого поставщика совпали только цифры номера. */
+const stranger = {
+  ...base,
+  id: 'exp-stranger',
+  source: 'export',
+  docNumber: 'УТ-4862',
+  docDate: '2026-09-03',
+  supplierName: 'ООО "ЛЕНИНЕРТ"',
+  supplierInn: '7816583913',
+  level: 'weak',
+  matches: ['номер совпал по цифрам'],
+  conflicts: ['ИНН поставщика отличается'],
+  otherSupplier: true,
+  supplierCheck: { documentInns: ['7816583913'], referenceInns: ['7714333304'], matchedInn: null },
 };
 
 const candidates = {
@@ -59,6 +77,7 @@ const candidates = {
   truncated: [],
   diagnostics: {
     registryReceivedUntil: null,
+    referencesAfterRegistry: [],
     innsAbsentInRegistry: [],
     innUnreadable: false,
     contractorDelivery: false,
@@ -194,6 +213,82 @@ describe('фото приёмки', () => {
     expect(
       (screen.getByRole('button', { name: 'Фото приёмки (0)' }) as HTMLButtonElement).disabled,
     ).toBe(true);
+  });
+});
+
+describe('чужой поставщик', () => {
+  const withStranger = { ...candidates, items: [...candidates.items, stranger] };
+
+  function mockCandidates(byPath: Record<string, unknown>) {
+    apiGet.mockImplementation((path: string) =>
+      path in byPath
+        ? Promise.resolve(byPath[path])
+        : Promise.reject(new Error(`unexpected ${path}`)),
+    );
+  }
+
+  it('без поиска свёрнут в отдельный блок и раскрывается по клику', async () => {
+    mockCandidates({ '/deliveries/d1/edo-candidates': withStranger });
+    show();
+    await screen.findByText('EXP-1');
+    expect(screen.queryByText('УТ-4862')).toBeNull();
+
+    fireEvent.click(screen.getByText('Похожие номера у других поставщиков (1)'));
+    expect(await screen.findByText('УТ-4862')).toBeTruthy();
+    expect(screen.getByText('Другой поставщик')).toBeTruthy();
+  });
+
+  it('в ручном поиске не сворачивается и помечен', async () => {
+    mockCandidates({
+      '/deliveries/d1/edo-candidates': candidates,
+      '/deliveries/d1/edo-candidates?q=4862': { ...candidates, items: [stranger] },
+    });
+    show();
+    await screen.findByText('EXP-1');
+    const search = screen.getByPlaceholderText('Номер УПД, поставщик, ИНН или имя файла');
+    fireEvent.change(search, { target: { value: '4862' } });
+    fireEvent.click(screen.getByRole('button', { name: /Найти/ }));
+
+    expect(await screen.findByText('УТ-4862')).toBeTruthy();
+    expect(screen.getByText('Другой поставщик')).toBeTruthy();
+    expect(screen.queryByText(/Похожие номера у других поставщиков/)).toBeNull();
+  });
+
+  it('подтверждение привязки называет оба ИНН', async () => {
+    mockCandidates({ '/deliveries/d1/edo-candidates': withStranger });
+    const { props } = show();
+    await screen.findByText('EXP-1');
+    fireEvent.click(screen.getByText('Похожие номера у других поставщиков (1)'));
+    const row = (await screen.findByText('УТ-4862')).closest('tr')!;
+    fireEvent.click(within(row).getByRole('button', { name: 'Привязать' }));
+
+    const text = await screen.findByText(/ИНН в УПД: 7816583913; в документах приёмки: 7714333304/);
+    expect(props.onPick).not.toHaveBeenCalled();
+    // Modal.confirm живёт вне дерева React — cleanup() его не уберёт, и
+    // оставшийся диалог перехватил бы фокус в следующих тестах.
+    const dialog = text.closest<HTMLElement>('.ant-modal-confirm')!;
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Отмена' }));
+    await waitFor(() => expect(screen.queryByText(/ИНН в УПД:/)).toBeNull());
+  });
+});
+
+describe('свежесть реестра', () => {
+  it('документы приёмки позже реестра — плашка с номерами, без «быть не может»', async () => {
+    apiGet.mockImplementation((path: string) =>
+      path === '/deliveries/d1/edo-candidates'
+        ? Promise.resolve({
+            ...candidates,
+            diagnostics: {
+              ...candidates.diagnostics,
+              registryReceivedUntil: '2026-10-05T13:40:59.928Z',
+              referencesAfterRegistry: [{ label: 'TK-04861', date: '2026-10-12' }],
+            },
+          })
+        : Promise.reject(new Error(`unexpected ${path}`)),
+    );
+    show();
+    expect(await screen.findByText(/№ TK-04861 от 12\.10\.2026/)).toBeTruthy();
+    expect(screen.getByText(/Скорее всего, их ещё не выгрузили/)).toBeTruthy();
   });
 });
 

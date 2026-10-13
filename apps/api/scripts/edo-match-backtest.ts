@@ -17,7 +17,12 @@
  *   - ложные «сильные»: УПД со «сильным» совпадением, которая не размеченная пара
  *     (должно быть 0), с классом: то же ядро номера у другого поставщика, соседний
  *     номер той же серии, прочее;
- *   - приёмки с несколькими УПД: сверено ли с той бумажной УПД, чья это пара.
+ *   - приёмки с несколькими УПД: сверено ли с той бумажной УПД, чья это пара;
+ *   - чужие поставщики: правильные пары, скрытые в свёрнутом блоке окна
+ *     («другой поставщик» + «мало совпадений»; критерий выпуска — 0), правильные
+ *     пары с меткой «другой поставщик» в основном списке, и сколько чужих УПД
+ *     ушло из «проверьте» в «мало совпадений». Место считается по видимому
+ *     списку — без свёрнутого блока, как его видит менеджер.
  *
  * Только чтение: соединение открывается в режиме read only, скрипт ничего не пишет
  * в базу. Отчёт — CSV в --out и сводка в stdout.
@@ -297,7 +302,7 @@ async function main(): Promise<void> {
     [
       'приёмка', 'эталон', 'номер эталона', 'УПД в паре', 'дата', 'ИНН', 'новый: место', 'новый: уровень',
       'новый: найдена запросом', 'старый: место', '1-я новая: номер', '1-я новая: уровень', 'ложное сильное',
-      'сверено с', 'почему не найдена',
+      'сверено с', 'почему не найдена', 'новый: другой поставщик',
     ].join(','),
   ];
   const tally = {
@@ -306,7 +311,15 @@ async function main(): Promise<void> {
     expectedHigh: 0,
     falseStrong: new Map<string, number>(),
     multi: { total: 0, wrongReference: 0 },
+    /** Правильная пара в свёрнутом блоке — менеджер её не увидит. Критерий: 0. */
+    expectedHidden: 0,
+    /** Правильная пара в основном списке, но с меткой «другой поставщик». */
+    expectedOtherSupplier: 0,
+    /** Чужие УПД, которые по прежним правилам были бы «проверьте» за цифры номера. */
+    strangersDemoted: 0,
   };
+  const hidden = (c: EdoCandidate) => c.otherSupplier && c.level === 'weak';
+  const hiddenLines: string[] = [];
 
   // Подбор — один раз на приёмку: у приёмки с несколькими УПД каждая
   // бумажная УПД даёт свою пару, и «сильное» у соседней УПД той же приёмки —
@@ -327,19 +340,39 @@ async function main(): Promise<void> {
     // «Сильное» без размеченной пары у своего эталона — не ошибка и не
     // подтверждение: такие строки идут в отчёт на ручную проверку.
     for (const c of allItems) {
+      // До правки чужой документ получал «проверьте» за одно совпадение номера.
+      if (
+        !pairedIds.has(c.id) &&
+        hidden(c) &&
+        (c.matches.includes('номер совпал по цифрам') || c.matches.includes('номер УПД'))
+      ) {
+        tally.strangersDemoted += 1;
+      }
       if (c.level !== 'high' || pairedIds.has(c.id)) continue;
       if (!labelByReference.has(c.reference.label ?? '')) unverifiedStrong += 1;
     }
 
     for (const label of group) {
-      // Место — среди кандидатов без соседних пар этой же приёмки.
+      // Место — среди видимых кандидатов без соседних пар этой же приёмки.
       const others = new Set([...pairedIds].filter((id) => id !== label.expectedId));
-      const items = allItems.filter((c) => !others.has(c.id));
+      const items = allItems.filter((c) => !others.has(c.id) && !hidden(c));
       const index = items.findIndex((c) => c.source === 'export' && c.id === label.expectedId);
       const place = placeOf(index);
       tally.new[place] += 1;
       const expected = index >= 0 ? items[index]! : null;
       if (expected?.level === 'high') tally.expectedHigh += 1;
+      if (expected?.otherSupplier) tally.expectedOtherSupplier += 1;
+      const hiddenExpected = allItems.find(
+        (c) => c.source === 'export' && c.id === label.expectedId && hidden(c),
+      );
+      if (hiddenExpected) {
+        tally.expectedHidden += 1;
+        hiddenLines.push(
+          `  ${label.displayId}: ${label.referenceNumber ?? '—'} → ${hiddenExpected.docNumber ?? '—'}; ` +
+            `ИНН УПД ${hiddenExpected.supplierCheck.documentInns.join('/') || '—'}, ` +
+            `приёмки ${hiddenExpected.supplierCheck.referenceInns.join('/') || '—'}`,
+        );
+      }
 
       // Ложное «сильное» — другая УПД, сверенная с ТЕМ ЖЕ эталоном, что и пара.
       const falseStrong = items.filter(
@@ -378,7 +411,8 @@ async function main(): Promise<void> {
           top?.level ?? '',
           falseStrong.map((c) => `${c.docNumber} (${falseStrongClass(c, label)})`).join(' | '),
           expected ? `${expected.reference.origin} ${expected.reference.label ?? ''}` : '',
-          place === 'missing' ? missReason(label) : '',
+          place === 'missing' ? (hiddenExpected ? 'скрыта в «других поставщиках»' : missReason(label)) : '',
+          expected?.otherSupplier || hiddenExpected ? 'да' : '',
         ]
           .map(csv)
           .join(','),
@@ -404,6 +438,10 @@ async function main(): Promise<void> {
     `Приёмки с несколькими УПД: ${tally.multi.total}, сверено не с той бумажной УПД: ${tally.multi.wrongReference}`,
   );
   console.log(`«Сильных» у эталонов без размеченной пары (проверить вручную): ${unverifiedStrong}`);
+  console.log(`\nПравильных пар в свёрнутом блоке «другие поставщики» (критерий 0): ${tally.expectedHidden}`);
+  for (const line of hiddenLines) console.log(line);
+  console.log(`Правильных пар с меткой «другой поставщик» в основном списке: ${tally.expectedOtherSupplier}`);
+  console.log(`Чужих УПД, ушедших из «проверьте» в «мало совпадений»: ${tally.strangersDemoted}`);
   console.log(`\nОтчёт: ${args.out}`);
 }
 

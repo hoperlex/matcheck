@@ -29,6 +29,7 @@ import {
   deliveryEdoMatches,
   deliveryPhotos,
   deliverySources,
+  edoAccounts,
   edoExportDocuments,
   photoRecognizedItems,
   sourceDocuments,
@@ -44,6 +45,7 @@ import {
   rankEdoAgainstReferences,
   supplierNameTokens,
   validInns,
+  type DocumentMatch,
   type MatchLevel,
   type MatchReference,
   type ReferenceOrigin,
@@ -71,6 +73,8 @@ export type EdoCandidate = {
   matches: string[];
   conflicts: string[];
   missing: string[];
+  otherSupplier: DocumentMatch['otherSupplier'];
+  supplierCheck: DocumentMatch['supplierCheck'];
 };
 
 export type EdoCandidatesResult = {
@@ -82,6 +86,12 @@ export type EdoCandidatesResult = {
   diagnostics: {
     /** Самое позднее время получения УПД, сохранённой в реестре. Не дата завершённого обхода. */
     registryReceivedUntil: string | null;
+    /**
+     * Эталоны, датированные позже дня `registryReceivedUntil` (по Москве). Их УПД,
+     * скорее всего, ещё не выгружена — но не наверняка: дата эталона могла быть
+     * прочитана с ошибкой, а УПД — прийти раньше своей даты.
+     */
+    referencesAfterRegistry: { label: string | null; date: string }[];
     /** Проверенные ИНН эталонов, по которым в реестре нет ни одной УПД. */
     innsAbsentInRegistry: string[];
     /** ИНН у документов приёмки есть, но ни один не прошёл проверку. */
@@ -133,10 +143,21 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 type Row = Omit<
   EdoCandidate,
-  'usedElsewhere' | 'foundBy' | 'reference' | 'score' | 'level' | 'matches' | 'conflicts' | 'missing'
+  | 'usedElsewhere'
+  | 'foundBy'
+  | 'reference'
+  | 'score'
+  | 'level'
+  | 'matches'
+  | 'conflicts'
+  | 'missing'
+  | 'otherSupplier'
+  | 'supplierCheck'
 > & {
   /** Ранг ручного поиска (0 — точное попадание); у остальных запросов 0. */
   rank: number;
+  /** Все продавцы из XML реестра; у импортированных — пусто. Только для сверки. */
+  sellerInns: string[];
 };
 
 /** Колонки источника, над которыми строятся условия поиска. */
@@ -173,6 +194,7 @@ async function queryExport(db: Db, ctx: Context, build: (c: Columns) => Plan): P
       docDate: t.documentDate,
       supplierName: t.supplierName,
       supplierInn: t.supplierInn,
+      sellerInns: t.sellerInns,
       totalSum: t.totalSum,
       contentCategory: t.contentCategory,
       rank: drSql<number>`${plan.rank ?? drSql`0`}`.mapWith(Number),
@@ -296,6 +318,7 @@ async function queryImport(db: Db, ctx: Context, build: (c: Columns) => Plan): P
     ...row,
     source: 'import' as const,
     contentCategory: null,
+    sellerInns: [],
     docDate: isoDate(row.docDate),
   }));
 }
@@ -395,14 +418,29 @@ async function loadReferences(db: Db, deliveryId: string): Promise<LoadedReferen
       and(eq(deliveryPhotos.deliveryId, deliveryId), isNotNull(photoRecognizedItems.docNumber)),
     );
 
+  // ИНН самой организации (владельца ящика ЭДО) в графе поставщика — это
+  // распознанный ИНН покупателя. Эталоном он сделал бы правильную УПД «чужой».
+  const orgRows = await db.select({ inn: edoAccounts.orgInn }).from(edoAccounts);
+  const orgInns = new Set(validInns(orgRows.map((row) => row.inn)).inns);
+  const supplierInnsOf = (values: readonly (string | null | undefined)[]) => {
+    const checked = validInns(values);
+    const inns = checked.inns.filter((inn) => !orgInns.has(inn));
+    return { inns, unreadable: checked.unreadable || (checked.inns.length > 0 && !inns.length) };
+  };
+
   const arrivedDate = mskDate(delivery.arrivedAt);
-  const own = validInns([ownSupplier?.inn]);
+  const own = supplierInnsOf([ownSupplier?.inn]);
   const ownNames = ownSupplier?.name ? [ownSupplier.name] : [];
 
   const references: MatchReference[] = paperRows.map((paper) => {
     // Каждый ИНН проверяется отдельно: битый `supplier_inn_raw` не должен
     // перекрывать верный ИНН справочника, как это делал coalesce.
-    const checked = validInns([paper.innRaw, paper.directoryInn, paper.supplierInn, ownSupplier?.inn]);
+    const checked = supplierInnsOf([
+      paper.innRaw,
+      paper.directoryInn,
+      paper.supplierInn,
+      ownSupplier?.inn,
+    ]);
     return {
       origin: 'paper',
       label: paper.docNumber,
@@ -641,8 +679,12 @@ export async function findEdoCandidates(
   // Ручной поиск упорядочен запросом человека: точный номер — первым, даже
   // если с приёмкой он сходится хуже соседей. Остальные — сверкой.
   if (q.length >= 2) entries.sort((a, b) => a.row.rank - b.row.rank || distance(a.row) - distance(b.row));
-  const items: EdoCandidate[] = entries.map(({ row: { rank: _rank, ...row }, foundBy }) => {
-    const match = rankEdoAgainstReferences(references, row);
+  const items: EdoCandidate[] = entries.map(({ row: { rank: _rank, sellerInns, ...row }, foundBy }) => {
+    const {
+      innConflict: _innConflict,
+      matchedInn: _matchedInn,
+      ...match
+    } = rankEdoAgainstReferences(references, { ...row, supplierInns: sellerInns });
     return {
       ...row,
       usedElsewhere: usage.get(`${row.source}:${row.id}`) ?? 0,
@@ -664,12 +706,23 @@ export async function findEdoCandidates(
     references.every((ref) => !ref.sums.length) && 'сумма УПД',
   ].filter((value): value is string => typeof value === 'string');
 
+  const receivedUntil = await registryReceivedUntil(db);
+  // Сравнение по дню: УПД, датированная днём последней выгрузки, могла успеть
+  // в реестр, поэтому «позже» — только строго следующий день и дальше.
+  const receivedDay = receivedUntil ? mskDate(new Date(receivedUntil)) : null;
+  const referencesAfterRegistry = receivedDay
+    ? references
+        .filter((ref): ref is MatchReference & { date: string } => !!ref.date && ref.date > receivedDay)
+        .map((ref) => ({ label: ref.label, date: ref.date }))
+    : [];
+
   return {
     items,
     referenceMissing,
     truncated: [...truncated],
     diagnostics: {
-      registryReceivedUntil: await registryReceivedUntil(db),
+      registryReceivedUntil: receivedUntil,
+      referencesAfterRegistry,
       innsAbsentInRegistry: await innsAbsentInRegistry(db, inns),
       innUnreadable,
       contractorDelivery: delivery.contractorId !== null,

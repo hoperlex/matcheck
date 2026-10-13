@@ -1,9 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Button, Col, Input, Modal, Row, Space, Table, Tag, Typography, message } from 'antd';
+import {
+  Alert,
+  Button,
+  Col,
+  Collapse,
+  Input,
+  Modal,
+  Row,
+  Space,
+  Table,
+  Tag,
+  Typography,
+  message,
+} from 'antd';
+import type { TableProps } from 'antd';
 import type { Delivery } from '@matcheck/contracts';
 import { api } from '../../services/api';
-import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
+import { formatDateRu, formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { EdoCompareDrawer, type ComparePhoto } from './EdoCompareDrawer';
 
 type FoundBy = 'number' | 'inn' | 'name' | 'date' | 'search';
@@ -26,6 +40,13 @@ type Candidate = {
   matches: string[];
   conflicts: string[];
   missing: string[];
+  /** ИНН не совпал ни с одним документом приёмки. */
+  otherSupplier: boolean;
+  supplierCheck: {
+    documentInns: string[];
+    referenceInns: string[];
+    matchedInn: string | null;
+  };
 };
 
 type Response = {
@@ -34,6 +55,7 @@ type Response = {
   truncated: FoundBy[];
   diagnostics: {
     registryReceivedUntil: string | null;
+    referencesAfterRegistry: { label: string | null; date: string }[];
     innsAbsentInRegistry: string[];
     innUnreadable: boolean;
     contractorDelivery: boolean;
@@ -62,6 +84,14 @@ type Preview = {
 };
 
 type DeliveryItem = Delivery['items'][number];
+
+/**
+ * Чужой поставщик, совпавший лишь цифрами номера. Без поиска такие строки
+ * свёрнуты: в общем списке они снова выглядели бы кандидатами.
+ */
+function isStranger(candidate: Candidate): boolean {
+  return candidate.otherSupplier && candidate.level === 'weak';
+}
 
 function referenceText(reference: Candidate['reference']): string {
   if (reference.origin === 'paper') return `Сверено с бумажной УПД № ${reference.label ?? '—'}`;
@@ -235,6 +265,21 @@ export function LinkEdoDocumentModal({
                 Это не сильное совпадение — сверьте позиции и реквизиты по файлу.
               </Typography.Text>
             )}
+            {candidate.otherSupplier && (
+              <Typography.Text type="danger">
+                Поставщик другой. ИНН в УПД:{' '}
+                {candidate.supplierCheck.documentInns.join(', ') || '—'}; в документах приёмки:{' '}
+                {candidate.supplierCheck.referenceInns.join(', ') || '—'}.
+              </Typography.Text>
+            )}
+            {!candidate.otherSupplier &&
+              candidate.supplierCheck.matchedInn &&
+              candidate.supplierCheck.documentInns.length > 1 && (
+                <Typography.Text>
+                  В УПД несколько продавцов; с приёмкой совпал ИНН{' '}
+                  {candidate.supplierCheck.matchedInn}.
+                </Typography.Text>
+              )}
             {candidate.conflicts.length > 0 && (
               <Typography.Text type="danger">
                 Расхождения: {candidate.conflicts.join(', ')}.
@@ -288,6 +333,111 @@ export function LinkEdoDocumentModal({
     else void openXml(candidate);
   };
 
+  const items = data?.items ?? [];
+  // В ручном поиске человек ищет конкретную УПД — там ничего не сворачиваем.
+  const mainItems = query ? items : items.filter((candidate) => !isStranger(candidate));
+  const strangers = query ? [] : items.filter(isStranger);
+
+  /** Общее у основной таблицы и свёрнутого блока чужих поставщиков. */
+  const tableProps: TableProps<Candidate> = {
+    rowKey: (row) => `${row.source}:${row.id}`,
+    size: 'small',
+    expandable: {
+      expandedRowRender: (row) =>
+        deliveryId ? (
+          <CandidatePreview deliveryId={deliveryId} candidate={row} deliveryItems={deliveryItems} />
+        ) : null,
+    },
+    columns: [
+      {
+        title: 'УПД',
+        key: 'document',
+        width: 155,
+        render: (_value, row) => (
+          <Space direction="vertical" size={0}>
+            <Typography.Text strong>{row.docNumber ?? 'Без номера'}</Typography.Text>
+            <Typography.Text type="secondary">
+              {row.docDate ? formatDateRu(row.docDate) : 'Без даты'}
+            </Typography.Text>
+            <Typography.Text type="secondary">
+              {row.source === 'export' ? 'XML из реестра ЭДО' : 'Импорт ЭДО'}
+            </Typography.Text>
+            {row.source === 'export' && row.contentCategory !== 'materials' && (
+              <Typography.Text type="warning">Состав требует проверки</Typography.Text>
+            )}
+          </Space>
+        ),
+      },
+      {
+        title: 'Поставщик',
+        key: 'supplier',
+        width: 200,
+        render: (_value, row) => (
+          <Space direction="vertical" size={0}>
+            <span>{row.supplierName ?? '—'}</span>
+            <Typography.Text type="secondary">{row.supplierInn ?? 'ИНН не указан'}</Typography.Text>
+          </Space>
+        ),
+      },
+      {
+        title: 'Сумма',
+        key: 'sum',
+        width: 120,
+        render: (_value, row) => (row.totalSum ? formatMoneyRu(Number(row.totalSum)) : '—'),
+      },
+      {
+        title: 'Сверка',
+        key: 'match',
+        render: (_value, row) => (
+          <Space direction="vertical" size={2}>
+            <Space size={4} wrap>
+              <Tag
+                color={
+                  row.level === 'high' ? 'green' : row.level === 'possible' ? 'gold' : 'default'
+                }
+              >
+                {row.level === 'high'
+                  ? 'Сильное совпадение'
+                  : row.level === 'possible'
+                    ? 'Проверьте'
+                    : 'Мало совпадений'}
+              </Tag>
+              {row.otherSupplier && <Tag color="volcano">Другой поставщик</Tag>}
+            </Space>
+            <Typography.Text type="secondary">{referenceText(row.reference)}</Typography.Text>
+            {row.matches.length > 0 && (
+              <Typography.Text type="secondary">Совпало: {row.matches.join(', ')}</Typography.Text>
+            )}
+            {row.conflicts.length > 0 && (
+              <Typography.Text type="danger">{row.conflicts.join(', ')}</Typography.Text>
+            )}
+            {row.missing.length > 0 && (
+              <Typography.Text type="secondary">Нет данных: {row.missing.join(', ')}</Typography.Text>
+            )}
+            {row.usedElsewhere > 0 && (
+              <Typography.Text type="warning">Уже в {row.usedElsewhere} приёмках</Typography.Text>
+            )}
+          </Space>
+        ),
+      },
+      {
+        title: '',
+        key: 'pick',
+        width: 120,
+        render: (_value, row) => (
+          <Space direction="vertical" size={0}>
+            <Button size="small" type="link" onClick={() => openFile(row)}>
+              Открыть файл
+            </Button>
+            <Button size="small" disabled={busy} onClick={() => choose(row)}>
+              Привязать
+            </Button>
+          </Space>
+        ),
+      },
+    ],
+  };
+
   return (
     <Modal
       open={open}
@@ -311,7 +461,7 @@ export function LinkEdoDocumentModal({
             полный номер, ИНН поставщика и дата. Раскройте строку, чтобы сверить позиции; «Открыть
             файл» покажет УПД рядом с фото приёмки.
             {diagnostics?.registryReceivedUntil
-              ? ` В реестре ЭДО есть УПД, полученные по ${formatDateRu(diagnostics.registryReceivedUntil)}; более поздние ещё не выгружены.`
+              ? ` В реестре ЭДО есть УПД, полученные по ${formatDateTimeRu(diagnostics.registryReceivedUntil)}; более поздние ещё не выгружены.`
               : ''}
           </Typography.Text>
           <Button onClick={() => openCompare(null)} disabled={uploadedPhotos === 0}>
@@ -322,19 +472,29 @@ export function LinkEdoDocumentModal({
         {candidates.isError && (
           <Alert type="error" message="Не удалось загрузить УПД из ЭДО" showIcon />
         )}
+        {!!diagnostics?.referencesAfterRegistry.length && diagnostics.registryReceivedUntil && (
+          <Alert
+            type="warning"
+            showIcon
+            message={`Документы приёмки датированы позже последней УПД в реестре ЭДО (${formatDateTimeRu(diagnostics.registryReceivedUntil)}): ${diagnostics.referencesAfterRegistry
+              .map((ref) => `№ ${ref.label ?? 'без номера'} от ${formatDateRu(ref.date)}`)
+              .join(', ')}.`}
+            description="Скорее всего, их ещё не выгрузили — тогда в списке ниже их нет."
+          />
+        )}
         {diagnostics?.innUnreadable && (
           <Alert
             type="warning"
             showIcon
-            message="ИНН поставщика в документе приёмки не проходит проверку — подбор идёт по номеру и названию."
+            message="ИНН поставщика в документе приёмки не прочитан или не проходит проверку — подбор идёт по номеру и названию."
           />
         )}
         {!!diagnostics?.innsAbsentInRegistry.length && (
           <Alert
             type="warning"
             showIcon
-            message={`В текущем реестре ЭДО нет ни одной УПД с ИНН ${diagnostics.innsAbsentInRegistry.join(', ')}.`}
-            description="Проверьте ИНН поставщика в приёмке или найдите УПД поиском по номеру или названию."
+            message={`В реестре ЭДО нет ни одной УПД с ИНН ${diagnostics.innsAbsentInRegistry.join(', ')}.`}
+            description="В реестр попадают только формализованные УПД из ящика ЭДО СУ-10. Если ИНН в приёмке прочитан неверно — найдите УПД поиском по номеру или названию."
           />
         )}
         {diagnostics?.contractorDelivery && (
@@ -372,121 +532,36 @@ export function LinkEdoDocumentModal({
           enterButton="Найти"
         />
         <Table<Candidate>
-          rowKey={(row) => `${row.source}:${row.id}`}
-          dataSource={data?.items ?? []}
+          {...tableProps}
+          dataSource={mainItems}
           loading={candidates.isLoading || busy}
-          size="small"
           scroll={{ x: 950, y: '50vh' }}
           pagination={{ pageSize: 20, showSizeChanger: false }}
-          expandable={{
-            expandedRowRender: (row) =>
-              deliveryId ? (
-                <CandidatePreview
-                  deliveryId={deliveryId}
-                  candidate={row}
-                  deliveryItems={deliveryItems}
-                />
-              ) : null,
-          }}
           locale={{
             emptyText: query
               ? 'По запросу УПД не найдены'
               : 'Подходящих УПД в реестре ЭДО не найдено. Попробуйте поиск по номеру или поставщику.',
           }}
-          columns={[
-            {
-              title: 'УПД',
-              key: 'document',
-              width: 155,
-              render: (_value, row) => (
-                <Space direction="vertical" size={0}>
-                  <Typography.Text strong>{row.docNumber ?? 'Без номера'}</Typography.Text>
-                  <Typography.Text type="secondary">
-                    {row.docDate ? formatDateRu(row.docDate) : 'Без даты'}
-                  </Typography.Text>
-                  <Typography.Text type="secondary">
-                    {row.source === 'export' ? 'XML из реестра ЭДО' : 'Импорт ЭДО'}
-                  </Typography.Text>
-                  {row.source === 'export' && row.contentCategory !== 'materials' && (
-                    <Typography.Text type="warning">Состав требует проверки</Typography.Text>
-                  )}
-                </Space>
-              ),
-            },
-            {
-              title: 'Поставщик',
-              key: 'supplier',
-              width: 200,
-              render: (_value, row) => (
-                <Space direction="vertical" size={0}>
-                  <span>{row.supplierName ?? '—'}</span>
-                  <Typography.Text type="secondary">
-                    {row.supplierInn ?? 'ИНН не указан'}
-                  </Typography.Text>
-                </Space>
-              ),
-            },
-            {
-              title: 'Сумма',
-              key: 'sum',
-              width: 120,
-              render: (_value, row) => (row.totalSum ? formatMoneyRu(Number(row.totalSum)) : '—'),
-            },
-            {
-              title: 'Сверка',
-              key: 'match',
-              render: (_value, row) => (
-                <Space direction="vertical" size={2}>
-                  <Tag
-                    color={
-                      row.level === 'high' ? 'green' : row.level === 'possible' ? 'gold' : 'default'
-                    }
-                  >
-                    {row.level === 'high'
-                      ? 'Сильное совпадение'
-                      : row.level === 'possible'
-                        ? 'Проверьте'
-                        : 'Мало совпадений'}
-                  </Tag>
-                  <Typography.Text type="secondary">{referenceText(row.reference)}</Typography.Text>
-                  {row.matches.length > 0 && (
-                    <Typography.Text type="secondary">
-                      Совпало: {row.matches.join(', ')}
-                    </Typography.Text>
-                  )}
-                  {row.conflicts.length > 0 && (
-                    <Typography.Text type="danger">{row.conflicts.join(', ')}</Typography.Text>
-                  )}
-                  {row.missing.length > 0 && (
-                    <Typography.Text type="secondary">
-                      Нет данных: {row.missing.join(', ')}
-                    </Typography.Text>
-                  )}
-                  {row.usedElsewhere > 0 && (
-                    <Typography.Text type="warning">
-                      Уже в {row.usedElsewhere} приёмках
-                    </Typography.Text>
-                  )}
-                </Space>
-              ),
-            },
-            {
-              title: '',
-              key: 'pick',
-              width: 120,
-              render: (_value, row) => (
-                <Space direction="vertical" size={0}>
-                  <Button size="small" type="link" onClick={() => openFile(row)}>
-                    Открыть файл
-                  </Button>
-                  <Button size="small" disabled={busy} onClick={() => choose(row)}>
-                    Привязать
-                  </Button>
-                </Space>
-              ),
-            },
-          ]}
         />
+        {strangers.length > 0 && (
+          <Collapse
+            size="small"
+            items={[
+              {
+                key: 'strangers',
+                label: `Похожие номера у других поставщиков (${strangers.length})`,
+                children: (
+                  <Table<Candidate>
+                    {...tableProps}
+                    dataSource={strangers}
+                    scroll={{ x: 950 }}
+                    pagination={{ pageSize: 20, showSizeChanger: false, hideOnSinglePage: true }}
+                  />
+                ),
+              },
+            ]}
+          />
+        )}
       </Space>
       <EdoCompareDrawer
         open={compareOpen}

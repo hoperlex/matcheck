@@ -41,6 +41,8 @@ export type MatchDocument = {
   docNumber: string | null;
   docDate: string | null;
   supplierInn: string | null;
+  /** Все продавцы из XML: формат допускает нескольких. */
+  supplierInns?: readonly string[];
   supplierName: string | null;
   totalSum: string | null;
 };
@@ -53,6 +55,29 @@ export type MatchResult = {
   matches: string[];
   conflicts: string[];
   missing: string[];
+  /** Проверенные ИНН есть у обеих сторон и не пересекаются. */
+  innConflict: boolean;
+  /** Какой ИНН документа совпал с эталоном — у УПД с несколькими продавцами важно, какой. */
+  matchedInn: string | null;
+};
+
+/** Сверка документа со всеми эталонами приёмки. */
+export type DocumentMatch = MatchResult & {
+  reference: { origin: ReferenceOrigin; label: string | null };
+  /**
+   * Документ другого поставщика: ИНН не совпал ни с одним эталоном, хотя бы с
+   * одним разошёлся, и ни один эталон без ИНН не подтвердил его полным номером
+   * или названием. Признак всего документа, а не одной сверки: при нескольких
+   * УПД в приёмке «лучшая» сверка могла бы быть как раз с чужим эталоном.
+   */
+  otherSupplier: boolean;
+  supplierCheck: {
+    /** Проверенные ИНН документа. */
+    documentInns: string[];
+    /** Проверенные ИНН всех эталонов приёмки. */
+    referenceInns: string[];
+    matchedInn: string | null;
+  };
 };
 
 const LOOKALIKES: Record<string, string> = {
@@ -140,6 +165,17 @@ export function validInns(values: readonly (string | null | undefined)[]): {
 }
 
 export function rankEdoDocument(reference: MatchReference, doc: MatchDocument): MatchResult {
+  const { evidence: _evidence, ...result } = rankWithEvidence(reference, doc);
+  return result;
+}
+
+/** Улики, по которым эталон без ИНН может подтвердить документ. Наружу не отдаются. */
+type Evidence = { numberFull: boolean; nameMatch: boolean };
+
+function rankWithEvidence(
+  reference: MatchReference,
+  doc: MatchDocument,
+): MatchResult & { evidence: Evidence } {
   let score = 0;
   const matches: string[] = [];
   const conflicts: string[] = [];
@@ -187,14 +223,18 @@ export function rankEdoDocument(reference: MatchReference, doc: MatchDocument): 
   }
 
   let innMatch = false;
+  let innConflict = false;
+  let matchedInn: string | null = null;
   let nameMatch = false;
-  const docInn = normalizeInn(doc.supplierInn);
-  if (reference.inns.length && docInn) {
-    if (reference.inns.includes(docInn)) {
+  const docInns = documentInns(doc);
+  if (reference.inns.length && docInns.length) {
+    matchedInn = docInns.find((inn) => reference.inns.includes(inn)) ?? null;
+    if (matchedInn) {
       innMatch = true;
       score += 30;
       matches.push('ИНН поставщика');
     } else {
+      innConflict = true;
       conflicts.push('ИНН поставщика отличается');
     }
   } else {
@@ -236,23 +276,37 @@ export function rankEdoDocument(reference: MatchReference, doc: MatchDocument): 
 
   return {
     score,
-    level: levelOf({ numberFull, numberCore, dateEqual, innMatch, nameMatch, conflicts }),
+    level: levelOf({ numberFull, numberCore, dateEqual, innMatch, innConflict, nameMatch, conflicts }),
     matches,
     conflicts,
     missing,
+    innConflict,
+    matchedInn,
+    evidence: { numberFull, nameMatch },
   };
+}
+
+/** Проверенные ИНН документа: продавец реестра и все продавцы из XML. */
+function documentInns(doc: MatchDocument): string[] {
+  return validInns([doc.supplierInn, ...(doc.supplierInns ?? [])]).inns;
 }
 
 /**
  * «Сильное» — только полный номер, проверенный ИНН и та же дата без единого
  * расхождения. Ни цифры номера, ни название, ни сумма с фото до него не
  * поднимают: это улики для «проверьте», а не подтверждение.
+ *
+ * При разных проверенных ИНН цифры номера ничего не значат: у разных
+ * поставщиков номера «УТ-4862» и «ТК-04862» совпадают по цифрам законно.
+ * «Проверьте» тогда — только за полный номер и ту же дату: ИНН мог быть
+ * прочитан с ошибкой, которая прошла контрольную цифру.
  */
 function levelOf(evidence: {
   numberFull: boolean;
   numberCore: boolean;
   dateEqual: boolean;
   innMatch: boolean;
+  innConflict: boolean;
   nameMatch: boolean;
   conflicts: readonly string[];
 }): MatchLevel {
@@ -264,6 +318,9 @@ function levelOf(evidence: {
   ) {
     return 'high';
   }
+  if (evidence.innConflict) {
+    return evidence.numberFull && evidence.dateEqual ? 'possible' : 'weak';
+  }
   if (evidence.numberFull || evidence.numberCore || evidence.innMatch || evidence.nameMatch) {
     return 'possible';
   }
@@ -272,7 +329,26 @@ function levelOf(evidence: {
 
 const LEVEL_RANK: Record<MatchLevel, number> = { high: 2, possible: 1, weak: 0 };
 
-export function compareMatches(a: MatchResult, b: MatchResult): number {
+type Ordered = Pick<MatchResult, 'level' | 'score' | 'conflicts'> & { otherSupplier?: boolean };
+
+/** Порядок кандидатов: уровень, затем свои поставщики выше чужих, затем очки. */
+export function compareMatches(a: Ordered, b: Ordered): number {
+  return (
+    LEVEL_RANK[b.level] - LEVEL_RANK[a.level] ||
+    Number(a.otherSupplier ?? false) - Number(b.otherSupplier ?? false) ||
+    b.score - a.score ||
+    a.conflicts.length - b.conflicts.length
+  );
+}
+
+/**
+ * Выбор эталона для одного документа — по уровню и очкам, без предпочтения
+ * «эталона без расхождения ИНН». Бэктест сентября: такое предпочтение отдавало
+ * сверку соседней УПД той же приёмки, совпавшей одним ИНН или названием, и
+ * правильная пара уходила с 1-го места (16515 — на 2-е, 17688 — на 9-е).
+ * Совпавший ИНН другого эталона всё равно виден в `supplierCheck.matchedInn`.
+ */
+function compareReferences(a: MatchResult, b: MatchResult): number {
   return (
     LEVEL_RANK[b.level] - LEVEL_RANK[a.level] ||
     b.score - a.score ||
@@ -284,15 +360,35 @@ export function compareMatches(a: MatchResult, b: MatchResult): number {
  * Одна приёмка может иметь несколько УПД. Электронную сверяем с каждым
  * эталоном отдельно и берём лучший: общая сумма и реквизиты всей машины
  * давали бы ложные совпадения между разными документами.
+ *
+ * Чужой ли поставщик — решают все эталоны вместе (см. `otherSupplier`). У
+ * чужого документа уровень берётся только из сверок с расхождением ИНН:
+ * эталон без ИНН, совпавший лишь цифрами номера, не должен поднимать его до
+ * «проверьте».
  */
 export function rankEdoAgainstReferences(
   references: readonly MatchReference[],
   doc: MatchDocument,
-): MatchResult & { reference: { origin: ReferenceOrigin; label: string | null } } {
-  return references
-    .map((reference) => ({
-      reference: { origin: reference.origin, label: reference.label },
-      ...rankEdoDocument(reference, doc),
-    }))
-    .sort(compareMatches)[0]!;
+): DocumentMatch {
+  const results = references.map((reference) => ({
+    reference: { origin: reference.origin, label: reference.label },
+    ...rankWithEvidence(reference, doc),
+  }));
+  const docInns = documentInns(doc);
+  const vouches = (r: (typeof results)[number]) =>
+    r.matchedInn !== null || (!r.innConflict && (r.evidence.numberFull || r.evidence.nameMatch));
+  const otherSupplier =
+    docInns.length > 0 && results.some((r) => r.innConflict) && !results.some(vouches);
+  const pool = otherSupplier ? results.filter((r) => r.innConflict) : results;
+  const { evidence: _evidence, ...best } = [...pool].sort(compareReferences)[0]!;
+  const matchedInn = best.matchedInn ?? results.find((r) => r.matchedInn)?.matchedInn ?? null;
+  return {
+    ...best,
+    otherSupplier,
+    supplierCheck: {
+      documentInns: docInns,
+      referenceInns: [...new Set(references.flatMap((reference) => reference.inns))],
+      matchedInn,
+    },
+  };
 }

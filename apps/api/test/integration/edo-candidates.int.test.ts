@@ -69,6 +69,17 @@ const ABSENT_INN = inn10(`31${RUN}4`);
 const FILLER_INN = inn10(`31${RUN}5`);
 /** Тот же ИНН с ошибкой в цифре — как у бумажной УПД 19134. */
 const BROKEN_INN = `${TERMA_INN.slice(0, 9)}${(Number(TERMA_INN[9]) + 1) % 10}`;
+/** Приёмка 19507: свой поставщик и чужой с теми же цифрами номера. */
+const OWN_INN = inn10(`31${RUN}6`);
+const STRANGER_INN = inn10(`31${RUN}7`);
+/** ИНН владельца ящика ЭДО — в графе поставщика это прочитанный ИНН покупателя. */
+const ORG_INN = inn10(`31${RUN}8`);
+const REAL_INN = inn10(`31${RUN}9`);
+// Ноль после RUN: ядро таких номеров не совпадёт с наполнителями «F-RUN-g».
+const OWN_NUMBER = `ТК-${RUN}0055`;
+const ORG_NUMBER = `Р-${RUN}0066`;
+const LATE_NUMBER = `Л-${RUN}0077`;
+const LATE_DATE = '2032-01-15';
 
 const NUMBER = `Т31-${RUN}-11`;
 const ANCHOR = '2031-03-10';
@@ -92,8 +103,17 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
   const bulkDelivery = randomUUID(); // ИНН без номера, документов больше квоты
   const absentDelivery = randomUUID(); // ИНН, которого нет в реестре
   const bareDelivery = randomUUID(); // ни номера, ни поставщика
+  const strangerDelivery = randomUUID(); // в реестре — чужой поставщик с теми же цифрами
+  const orgDelivery = randomUUID(); // в графе поставщика ИНН владельца ящика
+  const lateDelivery = randomUUID(); // УПД датирована позже реестра
+  const ownDocId = randomUUID();
+  const orgDocId = randomUUID();
+  const lateDocId = randomUUID();
 
   const targetId = randomUUID();
+  const ownExactId = randomUUID();
+  const strangerId = randomUUID();
+  const orgTargetId = randomUUID();
   const photoExactId = randomUUID();
   const photoCoreId = randomUUID();
   const searchExactId = randomUUID();
@@ -156,8 +176,8 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
     await sql`INSERT INTO sites (id, code, name) VALUES (${siteId}, ${`EDO${RUN}`}, 'Подбор ЭДО')`;
     await sql`INSERT INTO users (id, email, password_hash, role, site_id)
               VALUES (${managerId}, ${`edo-${managerId}@test`}, 'x', 'manager', NULL)`;
-    await sql`INSERT INTO edo_accounts (id, name, credentials_encrypted, box_id)
-              VALUES (${accountId}, ${`ЭДО ${RUN}`}, '{}', ${`box-${RUN}`})`;
+    await sql`INSERT INTO edo_accounts (id, name, credentials_encrypted, box_id, org_inn)
+              VALUES (${accountId}, ${`ЭДО ${RUN}`}, '{}', ${`box-${RUN}`}, ${ORG_INN})`;
     await sql`INSERT INTO suppliers (id, inn, name) VALUES (${brokenDirectoryId}, ${BROKEN_INN}, 'Терма Альянс')`;
     for (const [id, inn, name] of [
       [photoSupplierId, PHOTO_INN, 'ООО «Фото-поставщик»'],
@@ -243,6 +263,26 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
              'edo-export/test/q-' || g, lpad(g::text, 64, '0'), now()
         FROM generate_series(1, 210) g`;
     await exportDoc({ id: searchExactId, number: `Q${RUN}`, date: '2030-06-01', inn: FILLER_INN, name: 'ООО «Чужой»', sum: '1.00' });
+
+    // Бумажные УПД для проверки «чужого поставщика», ИНН владельца ящика и даты позже реестра.
+    await seed(strangerDelivery, null);
+    await seed(orgDelivery, null);
+    await seed(lateDelivery, null);
+    for (const [docId, deliveryId, number, date, inn] of [
+      [ownDocId, strangerDelivery, OWN_NUMBER, ANCHOR, OWN_INN],
+      [orgDocId, orgDelivery, ORG_NUMBER, ANCHOR, ORG_INN],
+      [lateDocId, lateDelivery, LATE_NUMBER, LATE_DATE, OWN_INN],
+    ] as const) {
+      await sql`INSERT INTO source_documents
+                  (id, kind, direction, status, origin, site_id, doc_number, doc_date, total_sum, supplier_inn_raw)
+                VALUES (${docId}, 'upd', 'inbound', 'parsed', 'manual_pdf', ${siteId},
+                        ${number}, ${date}, 500.00, ${inn})`;
+      await sql`INSERT INTO delivery_sources (delivery_id, source_document_id)
+                VALUES (${deliveryId}, ${docId})`;
+    }
+    await exportDoc({ id: ownExactId, number: OWN_NUMBER, date: ANCHOR, inn: OWN_INN, name: 'ООО «Свой»', sum: '500.00' });
+    await exportDoc({ id: strangerId, number: `УТ-${RUN}0055`, date: '2031-03-01', inn: STRANGER_INN, name: 'ООО «Чужой с тем же номером»', sum: '77.00' });
+    await exportDoc({ id: orgTargetId, number: ORG_NUMBER, date: ANCHOR, inn: REAL_INN, name: 'ООО «Настоящий»', sum: '500.00' });
   });
 
   afterAll(async () => {
@@ -250,9 +290,10 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
     await app.close();
     await sql`DELETE FROM delivery_edo_matches WHERE delivery_id IN (SELECT id FROM deliveries WHERE site_id = ${siteId})`;
     await sql`DELETE FROM edo_export_documents WHERE edo_account_id = ${accountId}`;
-    await sql`DELETE FROM delivery_sources WHERE source_document_id = ${paperDocId}`;
+    const docIds = [paperDocId, ownDocId, orgDocId, lateDocId];
+    await sql`DELETE FROM delivery_sources WHERE source_document_id IN ${sql(docIds)}`;
     await sql`DELETE FROM deliveries WHERE site_id = ${siteId}`;
-    await sql`DELETE FROM source_documents WHERE id = ${paperDocId}`;
+    await sql`DELETE FROM source_documents WHERE id IN ${sql(docIds)}`;
     await sql`DELETE FROM counterparties WHERE id IN (${photoSupplierId}, ${bulkSupplierId}, ${absentSupplierId})`;
     await sql`DELETE FROM suppliers WHERE id = ${brokenDirectoryId}`;
     await sql`DELETE FROM edo_accounts WHERE id = ${accountId}`;
@@ -299,6 +340,41 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
     expect(result.items[0]?.id).toBe(searchExactId);
     expect(result.items).toHaveLength(QUOTA.search);
     expect(result.truncated).toContain('search');
+  });
+
+  it('чужой поставщик с теми же цифрами номера — «мало совпадений» и признак в ответе', async () => {
+    const result = (await findEdoCandidates(db, strangerDelivery))!;
+    const own = result.items.find((item) => item.id === ownExactId);
+    const stranger = result.items.find((item) => item.id === strangerId);
+    expect(result.items[0]?.id).toBe(ownExactId);
+    expect(own).toMatchObject({ level: 'high', otherSupplier: false });
+    expect(own?.supplierCheck.matchedInn).toBe(OWN_INN);
+    expect(stranger).toMatchObject({ level: 'weak', otherSupplier: true });
+    expect(stranger?.supplierCheck).toEqual({
+      documentInns: [STRANGER_INN],
+      referenceInns: [OWN_INN],
+      matchedInn: null,
+    });
+  });
+
+  it('ИНН владельца ящика в графе поставщика — не ИНН поставщика', async () => {
+    const result = (await findEdoCandidates(db, orgDelivery))!;
+    const target = result.items.find((item) => item.id === orgTargetId);
+    // С ИНН владельца в эталоне правильная УПД стала бы «чужой».
+    expect(target).toMatchObject({ otherSupplier: false, level: 'possible' });
+    expect(target?.supplierCheck.referenceInns).toEqual([]);
+    expect(result.diagnostics.innUnreadable).toBe(true);
+    expect(result.diagnostics.innsAbsentInRegistry).toEqual([]);
+  });
+
+  it('эталон позже последнего получения в реестре — в диагностике, ровесники — нет', async () => {
+    const late = (await findEdoCandidates(db, lateDelivery))!;
+    expect(late.diagnostics.referencesAfterRegistry).toEqual([
+      { label: LATE_NUMBER, date: LATE_DATE },
+    ]);
+    // УПД реестра получены 10.03.2031 — бумажная того же дня могла успеть.
+    const sameDay = (await findEdoCandidates(db, paperDelivery))!;
+    expect(sameDay.diagnostics.referencesAfterRegistry).toEqual([]);
   });
 
   it('диагностика: ИНН, которого нет в реестре, и подбор только по дате', async () => {
