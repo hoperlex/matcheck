@@ -169,14 +169,24 @@ export type MailPollJobData = { accountId: string };
  * синхронным HTTP-запросом нельзя (нынешняя кнопка /sync именно этим и плоха:
  * браузер ждёт её десять минут).
  */
-export type EdoPollJobData = {
-  accountId: string;
-  mode: 'sync' | 'check' | 'inventory';
-  /** Для инвентаризации: с какой даты смотреть ленту. */
-  since?: string;
-  /** Для инвентаризации: скачать УПД-кандидатов и посчитать, какие — материалы. */
-  checkContent?: boolean;
-};
+export type EdoPollJobData =
+  | {
+      accountId: string;
+      mode: 'sync' | 'check' | 'inventory';
+      /** Для инвентаризации: с какой даты смотреть ленту. */
+      since?: string;
+      /** Для инвентаризации: скачать УПД-кандидатов и посчитать, какие — материалы. */
+      checkContent?: boolean;
+    }
+  /**
+   * Автопроход выгрузки реестра УПД по всем учёткам. Ставит таймер mail-worker'а
+   * в ту же очередь, что ручные работы: concurrency = 1 разводит их по времени,
+   * и ни одна не получает «учётка занята» от другой.
+   */
+  | { mode: 'export' };
+
+/** Постоянный id задачи автопрохода: пока она в очереди, вторая не ставится. */
+export const EDO_EXPORT_AUTO_JOB_ID = 'edo-export-auto';
 
 declare module 'fastify' {
   interface FastifyInstance {

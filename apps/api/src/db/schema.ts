@@ -16,6 +16,7 @@ import {
   check,
   bigint,
   bigserial,
+  date,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import type { EdoInventoryReport, UpdValidation } from '@matcheck/contracts';
@@ -765,12 +766,23 @@ export const edoExportDocuments = pgTable(
     s3Key: text('s3_key'),
     contentSha256: varchar('content_sha256', { length: 64 }),
     sizeBytes: integer('size_bytes'),
+    /** Сколько раз выгрузка документа не удалась (миграция 0132). */
+    attempts: integer('attempts').notNull().default(0),
+    /** Когда повторить; null у `failed` — окончательно, повтор только сбросом. */
+    nextRetryAt: timestamp('next_retry_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('edo_export_documents_entity_unique').on(t.edoAccountId, t.messageId, t.entityId),
     index('edo_export_documents_inn_idx').on(t.edoAccountId, t.supplierInn),
+    index('edo_export_documents_retry_idx')
+      .on(t.edoAccountId, t.nextRetryAt)
+      .where(sql`${t.status} = 'failed'`),
+    index('edo_export_documents_seller_inns_idx').using('gin', t.sellerInns),
+    index('edo_export_documents_box_idx')
+      .on(t.counteragentBoxId)
+      .where(sql`${t.counteragentBoxId} is not null`),
     check(
       'edo_export_documents_status_check',
       sql`${t.status} in ('stored', 'not_in_list', 'failed')`,
@@ -779,6 +791,111 @@ export const edoExportDocuments = pgTable(
       'edo_export_documents_stored_has_file',
       sql`${t.status} <> 'stored' or (${t.s3Key} is not null and ${t.contentSha256} is not null)`,
     ),
+  ],
+);
+
+/**
+ * Постоянный курсор автопрохода выгрузки (миграция 0132).
+ *
+ * IndexKey Диадока действителен только для того же запроса ленты, поэтому
+ * рядом хранится вся его идентичность: ящик, фильтры и отсечка по времени. При
+ * расхождении проход ленту не читает — курсор сбрасывают удалением строки.
+ */
+export const edoExportCursors = pgTable('edo_export_cursors', {
+  edoAccountId: uuid('edo_account_id')
+    .primaryKey()
+    .references(() => edoAccounts.id, { onDelete: 'cascade' }),
+  boxId: text('box_id').notNull(),
+  feedQuery: text('feed_query').notNull(),
+  since: timestamp('since', { withTimezone: true }).notNull(),
+  indexKey: text('index_key'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type EdoExportRunScope = 'all' | 'list' | 'census';
+export type EdoExportRunOutcome = 'running' | 'completed' | 'truncated' | 'stopped' | 'error';
+
+/**
+ * Журнал проходов выгрузки (миграция 0132). «Реестр проверен» — только
+ * `scope = 'all'` с `feed_completed_at`: выгрузка по списку и перепись читают
+ * ленту не ради полноты реестра.
+ */
+export const edoExportRuns = pgTable(
+  'edo_export_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    edoAccountId: uuid('edo_account_id')
+      .notNull()
+      .references(() => edoAccounts.id, { onDelete: 'cascade' }),
+    scope: text('scope').$type<EdoExportRunScope>().notNull(),
+    trigger: text('trigger').$type<'auto' | 'script'>().notNull(),
+    outcome: text('outcome').$type<EdoExportRunOutcome>().notNull().default('running'),
+    truncateReason: text('truncate_reason').$type<'limit' | 'no_index_key'>(),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Лента дошла до пустой страницы — всё полученное к этому моменту прочитано. */
+    feedCompletedAt: timestamp('feed_completed_at', { withTimezone: true }),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+    indexKeyBefore: text('index_key_before'),
+    indexKeyAfter: text('index_key_after'),
+    eventsSeen: integer('events_seen').notNull().default(0),
+    stored: integer('stored').notNull().default(0),
+    failed: integer('failed').notNull().default(0),
+    retried: integer('retried').notNull().default(0),
+    census: integer('census').notNull().default(0),
+    error: text('error'),
+  },
+  (t) => [
+    index('edo_export_runs_account_idx').on(t.edoAccountId, t.startedAt),
+    check('edo_export_runs_scope_check', sql`${t.scope} in ('all', 'list', 'census')`),
+    check('edo_export_runs_trigger_check', sql`${t.trigger} in ('auto', 'script')`),
+    check(
+      'edo_export_runs_outcome_check',
+      sql`${t.outcome} in ('running', 'completed', 'truncated', 'stopped', 'error')`,
+    ),
+    check(
+      'edo_export_runs_truncate_reason_check',
+      sql`${t.truncateReason} is null or ${t.truncateReason} in ('limit', 'no_index_key')`,
+    ),
+  ],
+);
+
+export type EdoCensusCategory = 'scan' | 'invoice' | 'waybill';
+
+/**
+ * Перепись документов, которые выгрузка не берёт (миграция 0132): сканы,
+ * счета-фактуры, накладные. Только метаданные, без скачивания — ответ на
+ * «шлёт ли поставщик что-то вместо УПД». Все поля, кроме ключей, — как
+ * прислал отправитель, поэтому текстом: перепись не должна падать на данных.
+ */
+export const edoExportCensus = pgTable(
+  'edo_export_census',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    edoAccountId: uuid('edo_account_id')
+      .notNull()
+      .references(() => edoAccounts.id, { onDelete: 'cascade' }),
+    messageId: text('message_id').notNull(),
+    entityId: text('entity_id').notNull(),
+    documentType: text('document_type'),
+    category: text('category').$type<EdoCensusCategory>().notNull(),
+    documentNumber: text('document_number'),
+    documentDate: date('document_date', { mode: 'string' }),
+    numberSource: text('number_source'),
+    fileName: text('file_name'),
+    contentSize: bigint('content_size', { mode: 'number' }),
+    counteragentBoxId: text('counteragent_box_id'),
+    fromTitle: text('from_title'),
+    totalSum: text('total_sum'),
+    /** В том же сообщении есть выгружаемая УПД — тогда скан скорее приложение к ней. */
+    messageHasUtd: boolean('message_has_utd').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('edo_export_census_entity_unique').on(t.edoAccountId, t.messageId, t.entityId),
+    index('edo_export_census_received_idx').on(t.receivedAt),
+    check('edo_export_census_category_check', sql`${t.category} in ('scan', 'invoice', 'waybill')`),
   ],
 );
 

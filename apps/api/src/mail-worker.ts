@@ -27,7 +27,7 @@
 import './instrument.js'; // ПЕРВЫМ — Sentry.init до bullmq/postgres/undici
 import { randomUUID } from 'node:crypto';
 import * as Sentry from '@sentry/node';
-import { Worker, type Job } from 'bullmq';
+import { Queue, Worker, type Job } from 'bullmq';
 import { simpleParser } from 'mailparser';
 import { db } from './db/client.js';
 import {
@@ -44,11 +44,17 @@ import { loadEnv } from './lib/env.js';
 import { logger } from './lib/logger.js';
 import {
   buildQueueConnection,
+  EDO_EXPORT_AUTO_JOB_ID,
   EDO_POLL_QUEUE,
   MAIL_POLL_QUEUE,
   type EdoPollJobData,
   type MailPollJobData,
 } from './plugins/queue.js';
+import {
+  isExportStuck,
+  listExportAccounts,
+  runEdoExportPass,
+} from './domain/jobs/edo-export-runner.js';
 import {
   pollAllEdoAccounts,
   pollEdoAccountById,
@@ -112,9 +118,61 @@ worker.on('failed', (job, err) => {
 const edoLog = logger.child({ service: 'edo-worker' });
 const edoDeps: EdoRunnerDeps = { db, log: edoLog, owner: WORKER_ID };
 
+/**
+ * Остановка процесса прерывает выгрузку между запросами к Диадоку: проход
+ * записывается как `stopped`, лиз освобождается, а не висит до истечения.
+ */
+const edoShutdown = new AbortController();
+
+/** Автопроход выгрузки реестра УПД по всем учёткам — см. domain/jobs/edo-export-runner.ts. */
+async function runEdoExportAuto(): Promise<void> {
+  for (const account of await listExportAccounts(db)) {
+    const result = await runEdoExportPass(
+      { ...edoDeps, put: putObject, signal: edoShutdown.signal },
+      account.id,
+      {
+        scope: 'all',
+        trigger: 'auto',
+        maxEvents: env.EDO_EXPORT_MAX_EVENTS,
+        maxDownloads: env.EDO_EXPORT_MAX_DOWNLOADS,
+      },
+    );
+    if ('skipped' in result) {
+      // Учётка занята другой работой — обычное дело, следующий проход через интервал.
+      edoLog.info({ accountId: account.id, skipped: result.skipped }, 'выгрузка реестра ЭДО пропущена');
+      continue;
+    }
+    edoLog.info(
+      { accountId: account.id, runId: result.runId, outcome: result.outcome, summary: result.summary, retry: result.retry },
+      'выгрузка реестра ЭДО завершена',
+    );
+    if (result.outcome === 'error') {
+      Sentry.captureException(result.cause ?? new Error(result.error ?? 'выгрузка реестра ЭДО'), {
+        tags: { service: 'edo-export', account: account.id },
+        // Одна и та же причина каждые полчаса — одно событие, а не поток.
+        fingerprint: [
+          'edo-export',
+          result.cursorMismatch ? 'cursor-mismatch' : result.cause instanceof Error ? result.cause.name : 'unknown',
+        ],
+      });
+    }
+    if (await isExportStuck(db, account.id)) {
+      Sentry.captureMessage('Выгрузка реестра ЭДО три прохода подряд не сдвинула курсор', {
+        level: 'warning',
+        tags: { service: 'edo-export', account: account.id },
+        fingerprint: ['edo-export', 'stuck', account.id],
+      });
+    }
+  }
+}
+
 const edoWorker = new Worker<EdoPollJobData>(
   EDO_POLL_QUEUE,
   async (job: Job<EdoPollJobData>) => {
+    if (job.data.mode === 'export') {
+      await runEdoExportAuto();
+      return;
+    }
     const { accountId, mode } = job.data;
     if (mode === 'inventory') {
       const outcome = await runEdoInventory(edoDeps, accountId, job.data.since, {
@@ -158,6 +216,35 @@ if (env.EDO_POLL_ENABLED) {
   edoLog.info({ intervalSec: env.EDO_POLL_INTERVAL_SEC }, 'автоопрос ЭДО включён');
 } else {
   edoLog.info('автоопрос ЭДО выключен (EDO_POLL_ENABLED=0); доступен только ручной запуск');
+}
+
+// Автообновление реестра УПД из ЭДО. Таймер работу не делает — только ставит
+// задачу в очередь ЭДО: её выполняет тот же edoWorker, по очереди с ручными
+// осмотром и проверкой доступа, поэтому они не отнимают друг у друга учётку.
+// Постоянный jobId: пока задача в очереди или идёт, вторая не ставится.
+// Проход дешёвый: лента читается с курсора, то есть только новое за интервал.
+let edoExportTimer: NodeJS.Timeout | null = null;
+let edoExportQueue: Queue<EdoPollJobData> | null = null;
+if (env.EDO_EXPORT_AUTO_ENABLED) {
+  const queue = new Queue<EdoPollJobData>(EDO_POLL_QUEUE, { connection: buildQueueConnection() });
+  edoExportQueue = queue;
+  const enqueue = () =>
+    void queue
+      .add(
+        'export',
+        { mode: 'export' },
+        { jobId: EDO_EXPORT_AUTO_JOB_ID, attempts: 1, removeOnComplete: true, removeOnFail: true },
+      )
+      .catch((err) => edoLog.error({ err }, 'не удалось поставить выгрузку реестра ЭДО'));
+  // Минута после старта: деплой перезапускает контейнеры, пусть поднимутся.
+  setTimeout(() => {
+    enqueue();
+    edoExportTimer = setInterval(enqueue, env.EDO_EXPORT_INTERVAL_SEC * 1000);
+    edoExportTimer.unref();
+  }, 60_000).unref();
+  edoLog.info({ intervalSec: env.EDO_EXPORT_INTERVAL_SEC }, 'автообновление реестра ЭДО включено');
+} else {
+  edoLog.info('автообновление реестра ЭДО выключено (EDO_EXPORT_AUTO_ENABLED=0)');
 }
 
 let timer: NodeJS.Timeout | null = null;
@@ -214,9 +301,14 @@ async function shutdown(signal: string): Promise<void> {
   log.info({ signal }, 'mail-worker: завершение');
   if (timer) clearInterval(timer);
   if (edoTimer) clearInterval(edoTimer);
+  if (edoExportTimer) clearInterval(edoExportTimer);
   if (retentionTimer) clearInterval(retentionTimer);
+  // Сначала прервать выгрузку: close() ждёт активную задачу, а проход без
+  // сигнала мог бы идти минутами и быть убит SIGKILL'ом с висящим лизом.
+  edoShutdown.abort();
   await worker.close().catch(() => undefined);
   await edoWorker.close().catch(() => undefined);
+  await edoExportQueue?.close().catch(() => undefined);
   process.exit(0);
 }
 

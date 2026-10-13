@@ -77,7 +77,10 @@ const candidates = {
   truncated: [],
   diagnostics: {
     registryReceivedUntil: null,
+    registryAsOf: null,
     referencesAfterRegistry: [],
+    registry: [],
+    census: null,
     innsAbsentInRegistry: [],
     innUnreadable: false,
     contractorDelivery: false,
@@ -273,22 +276,82 @@ describe('чужой поставщик', () => {
 });
 
 describe('свежесть реестра', () => {
-  it('документы приёмки позже реестра — плашка с номерами, без «быть не может»', async () => {
+  /** Поля диагностики поверх фикстуры; тип свободный — фикстура выведена из литералов. */
+  function withDiagnostics(diagnostics: Record<string, unknown>) {
     apiGet.mockImplementation((path: string) =>
       path === '/deliveries/d1/edo-candidates'
-        ? Promise.resolve({
-            ...candidates,
-            diagnostics: {
-              ...candidates.diagnostics,
-              registryReceivedUntil: '2026-10-05T13:40:59.928Z',
-              referencesAfterRegistry: [{ label: 'TK-04861', date: '2026-10-12' }],
-            },
-          })
+        ? Promise.resolve({ ...candidates, diagnostics: { ...candidates.diagnostics, ...diagnostics } })
         : Promise.reject(new Error(`unexpected ${path}`)),
     );
+  }
+
+  const account = {
+    accountId: 'a1',
+    name: 'Диадок_СУ10',
+    state: 'ok',
+    checkedAt: '2026-10-13T12:30:00.000Z',
+    failedPending: 0,
+    nextRetryAt: null,
+    failedFinal: 0,
+  };
+
+  it('документы приёмки позже реестра — плашка с номерами, без «быть не может»', async () => {
+    withDiagnostics({
+      registryReceivedUntil: '2026-10-05T13:40:59.928Z',
+      registryAsOf: { at: '2026-10-05T13:40:59.928Z', basis: 'received' },
+      referencesAfterRegistry: [{ label: 'TK-04861', date: '2026-10-12' }],
+    });
     show();
-    expect(await screen.findByText(/№ TK-04861 от 12\.10\.2026/)).toBeTruthy();
+    expect(await screen.findByText(/последней УПД в реестре ЭДО.*№ TK-04861 от 12\.10\.2026/)).toBeTruthy();
     expect(screen.getByText(/Скорее всего, их ещё не выгрузили/)).toBeTruthy();
+  });
+
+  it('после полной проверки — «реестр проверен», плашка опирается на проверку', async () => {
+    withDiagnostics({
+      registryReceivedUntil: '2026-10-13T12:10:00.000Z',
+      registryAsOf: { at: '2026-10-13T12:30:00.000Z', basis: 'checked' },
+      referencesAfterRegistry: [{ label: 'TK-1', date: '2026-10-14' }],
+      registry: [account],
+    });
+    show();
+    expect(await screen.findByText(/Реестр ЭДО проверен/)).toBeTruthy();
+    expect(screen.getByText(/позже последней проверки реестра ЭДО/)).toBeTruthy();
+    expect(screen.queryByText(/Автообновление реестра ЭДО/)).toBeNull();
+  });
+
+  it('у каждого состояния автообновления — своё сообщение, сбои — отдельно', async () => {
+    for (const [state, text] of [
+      ['never', /ещё ни разу не дочитало ленту/],
+      ['catching_up', /догоняет ленту/],
+      ['stale', /не работает: последняя полная проверка/],
+    ] as const) {
+      withDiagnostics({ registry: [{ ...account, state, checkedAt: state === 'never' ? null : account.checkedAt }] });
+      show();
+      expect(await screen.findByText(text)).toBeTruthy();
+      cleanup();
+    }
+    withDiagnostics({
+      registry: [{ ...account, failedPending: 2, nextRetryAt: '2026-10-13T13:30:00.000Z', failedFinal: 1 }],
+    });
+    show();
+    expect(await screen.findByText(/2 УПД не удалось выгрузить — повтор с .*; 1 УПД не выгружены окончательно/)).toBeTruthy();
+  });
+
+  it('сканы поставщика из переписи — плашка с числом и видами документов', async () => {
+    withDiagnostics({
+      census: {
+        count: 3,
+        withoutUtd: 2,
+        lastReceivedAt: '2026-10-12T09:00:00.000Z',
+        categories: ['scan', 'invoice'],
+        fromTitle: 'ООО «ТПК ПромАэроТехника»',
+      },
+    });
+    show();
+    expect(
+      await screen.findByText(/не в формате УПД от «ООО «ТПК ПромАэроТехника»»: 3 \(сканы, счета-фактуры\)/),
+    ).toBeTruthy();
+    expect(screen.getByText(/Без УПД в том же сообщении: 2/)).toBeTruthy();
   });
 });
 

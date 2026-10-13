@@ -44,6 +44,8 @@ export type ClassifiedEntity = {
   documentNumber: string | null;
   documentDate: string | null;
   fileName: string | null;
+  /** Размер содержимого по метаданным Диадока, байт; для переписи без скачивания. */
+  contentSize: number | null;
   counteragentBoxId: string | null;
   /** Зашифрованное содержимое расшифровать нечем — забирать бессмысленно. */
   isEncrypted: boolean;
@@ -93,6 +95,10 @@ export function classifyMessageEntities(
       documentNumber: meta.number,
       documentDate: meta.date,
       fileName: entity.FileName ?? info?.FileName ?? null,
+      contentSize:
+        typeof entity.Content?.Size === 'number' && Number.isFinite(entity.Content.Size)
+          ? Math.trunc(entity.Content.Size)
+          : null,
       counteragentBoxId: info?.CounteragentBoxId ?? null,
       isEncrypted: Boolean(info?.IsEncryptedContent),
       meta,

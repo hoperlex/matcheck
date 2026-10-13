@@ -22,6 +22,17 @@
  * сдвинулась, прочитано не всё) — повторный запуск продолжит; 2 — учётная
  * запись занята другой работой по ЭДО или лиз потерян.
  *
+ * Другие режимы (все пишут в журнал edo_export_runs):
+ *   --auto — один полный проход, как у автообновления mail-worker'а: все УПД
+ *     ящика по постоянному курсору, перепись сканов, повтор сбоев. Список не
+ *     нужен. Так проверяют выгрузку перед включением EDO_EXPORT_AUTO_ENABLED.
+ *   --census-only --since ГГГГ-ММ-ДД [--max-events N] — только перепись сканов,
+ *     счетов-фактур и накладных за период, без скачиваний; курсор не трогает.
+ *     Предел по умолчанию 100 000 событий; при усечении печатает, с какой даты
+ *     продолжить. Повтор безопасен.
+ *   --retry-failed — сбросить счётчики попыток у всех сбоев учётки: следующий
+ *     полный проход (или этот же, вместе с --auto) повторит их заново.
+ *
  * Запуск на бою (контейнер работает под пользователем node, каталог /data
  * должен быть ему доступен на запись):
  *   docker compose -f infra/docker-compose.prod.yml run --rm --no-deps -T \
@@ -35,20 +46,26 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { and, asc, eq, isNotNull } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, sql as drSql } from 'drizzle-orm';
 import XLSX from 'xlsx';
 import { db, sql } from '../src/db/client.js';
 import { edoAccounts, edoExportDocuments } from '../src/db/schema.js';
 import { CONTENT_CATEGORY_LABELS, type EdoContentCategory } from '../src/domain/edo/document-kind.js';
-import { EdoExportStopped, type ExportSummary } from '../src/domain/edo/export-upd.js';
+import type { ExportSummary } from '../src/domain/edo/export-upd.js';
 import {
   SUPPLIER_ISSUE_LABELS,
   parseSupplierRows,
   type SupplierList,
 } from '../src/domain/edo/export-suppliers.js';
-import { runEdoExport } from '../src/domain/jobs/edo-poll-runner.js';
+import {
+  parseSince,
+  runEdoExportPass,
+  type ExportRunMode,
+  type ExportRunResult,
+} from '../src/domain/jobs/edo-export-runner.js';
 import { slugify } from '../src/domain/storage/s3.path.js';
 import { getObject, putObject } from '../src/domain/storage/s3.signer.js';
+import { loadEnv } from '../src/lib/env.js';
 import { logger } from '../src/lib/logger.js';
 import { MONEY_FMT, fmtDateTimeRu, numOrNull } from '../src/lib/xlsx-format.js';
 
@@ -61,16 +78,30 @@ const suppliersPath = argValue('--suppliers');
 const sinceArg = argValue('--since');
 const accountArg = argValue('--account');
 const outDir = argValue('--out-dir');
+const maxEventsArg = argValue('--max-events');
 const noDownload = process.argv.includes('--no-download');
+const auto = process.argv.includes('--auto');
+const censusOnly = process.argv.includes('--census-only');
+const retryFailed = process.argv.includes('--retry-failed');
+
+/** Предел переписи по умолчанию: с 01.08 ожидается около 40 тысяч событий. */
+const CENSUS_MAX_EVENTS = 100_000;
 
 type Account = typeof edoAccounts.$inferSelect;
 
-/** Дата YYYY-MM-DD → начало суток по Москве (UTC+3 круглый год). */
-function parseSince(raw: string): Date {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) throw new Error(`--since ждёт дату ГГГГ-ММ-ДД, получено «${raw}»`);
-  const date = new Date(`${raw}T00:00:00+03:00`);
-  if (Number.isNaN(date.getTime())) throw new Error(`--since: неверная дата «${raw}»`);
-  return date;
+function since(raw: string): Date {
+  try {
+    return parseSince(raw);
+  } catch (err) {
+    throw new Error(`--since: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function maxEvents(fallback: number): number {
+  if (!maxEventsArg) return fallback;
+  const n = Number(maxEventsArg);
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`--max-events ждёт целое > 0, получено «${maxEventsArg}»`);
+  return n;
 }
 
 function readSupplierList(path: string): SupplierList {
@@ -119,7 +150,13 @@ function printSummary(s: Readonly<ExportSummary>) {
       `  не из списка:           ${s.notInList}`,
       `  не из списка (известно): ${s.notInListKnown}`,
       `  сбоев:                  ${s.failed}`,
-      s.truncated ? 'ВНИМАНИЕ: лента прочитана не до конца — запустите ещё раз.' : '',
+      `  сбои прошлых проходов (ждут повтора): ${s.failedKnown}`,
+      `Переписано сканов, счетов-фактур и накладных: ${s.census}`,
+      s.truncated
+        ? s.truncateReason === 'no_index_key'
+          ? 'ВНИМАНИЕ: Диадок вернул страницу без ключа продолжения — лента прочитана не до конца.'
+          : 'ВНИМАНИЕ: достигнут предел прохода — лента прочитана не до конца.'
+        : '',
     ]
       .filter(Boolean)
       .join('\n'),
@@ -153,8 +190,12 @@ async function writeOutDir(account: Account, list: SupplierList, dir: string) {
       asc(edoExportDocuments.documentDate),
       asc(edoExportDocuments.createdAt),
     );
-  const stored = docs.filter((d) => d.status === 'stored');
   const listName = (inn: string | null) => (inn ? (list.byInn.get(inn) ?? null) : null);
+  // С автообновлением в хранилище лежат УПД всех продавцов: в папку — только из
+  // списка, по тому продавцу документа, который в списке есть.
+  const listedInn = (d: (typeof docs)[number]) =>
+    [d.supplierInn, ...d.sellerInns].find((inn): inn is string => !!inn && list.byInn.has(inn)) ?? null;
+  const stored = docs.filter((d) => d.status === 'stored' && listedInn(d) !== null);
 
   await mkdir(dir, { recursive: true });
   const fileOf = new Map<string, string>();
@@ -164,7 +205,7 @@ async function writeOutDir(account: Account, list: SupplierList, dir: string) {
   for (const doc of stored) {
     // Имена только ASCII: при копировании на Windows кириллица в путях
     // бывает искажена, а номер УПД может содержать «/».
-    const folder = `${doc.supplierInn}_${slugify(listName(doc.supplierInn) ?? doc.supplierName ?? '')}`;
+    const folder = `${listedInn(doc)}_${slugify(listName(listedInn(doc)) ?? doc.supplierName ?? '')}`;
     const rel = `${folder}/${doc.s3Key!.split('/').pop()!}`;
     try {
       const body = await getObject(doc.s3Key!);
@@ -207,8 +248,8 @@ async function writeOutDir(account: Account, list: SupplierList, dir: string) {
   ];
   for (const doc of stored) {
     const row = upd.addRow({
-      inn: doc.supplierInn,
-      listName: listName(doc.supplierInn),
+      inn: listedInn(doc),
+      listName: listName(listedInn(doc)),
       seller: doc.supplierName,
       number: doc.documentNumber,
       date: doc.documentDate,
@@ -232,10 +273,11 @@ async function writeOutDir(account: Account, list: SupplierList, dir: string) {
   // Все поставщики списка, включая тех, от кого в ЭДО ничего не пришло.
   const byInn = new Map<string, { count: number; sum: number }>();
   for (const doc of stored) {
-    const acc = byInn.get(doc.supplierInn!) ?? { count: 0, sum: 0 };
+    const inn = listedInn(doc)!;
+    const acc = byInn.get(inn) ?? { count: 0, sum: 0 };
     acc.count += 1;
     acc.sum += numOrNull(doc.totalSum) ?? 0;
-    byInn.set(doc.supplierInn!, acc);
+    byInn.set(inn, acc);
   }
   const suppliers = wb.addWorksheet('Поставщики', frozen);
   suppliers.columns = [
@@ -253,7 +295,8 @@ async function writeOutDir(account: Account, list: SupplierList, dir: string) {
   // Продавцы, приславшие УПД, но не попавшие в список: кого может не хватать.
   const others = new Map<string, { name: string | null; count: number; sum: number }>();
   for (const doc of docs) {
-    if (doc.status !== 'not_in_list') continue;
+    // «Не из списка» — и отсеянные списком, и выгруженные автообновлением.
+    if (doc.status === 'failed' || (doc.status === 'stored' && listedInn(doc) !== null)) continue;
     const key = doc.supplierInn ?? '';
     const acc = others.get(key) ?? { name: doc.supplierName, count: 0, sum: 0 };
     acc.count += 1;
@@ -308,56 +351,131 @@ async function writeOutDir(account: Account, list: SupplierList, dir: string) {
   return { failed: missing + mismatched };
 }
 
-async function main(): Promise<number> {
-  if (!suppliersPath) throw new Error('укажите --suppliers <файл xlsx со списком поставщиков>');
-  if (noDownload && !outDir) throw new Error('--no-download имеет смысл только вместе с --out-dir');
-  if (!noDownload && !sinceArg) throw new Error('укажите --since ГГГГ-ММ-ДД');
+const SKIPPED_TEXT: Record<'lease_taken' | 'no_box' | 'not_found' | 'inactive', string> = {
+  lease_taken: 'Учётная запись занята другой работой по ЭДО (осмотр, автообновление, опрос). Запустите позже.',
+  no_box: 'Выгрузка невозможна: у учётной записи не выбран ящик.',
+  not_found: 'Выгрузка невозможна: учётная запись не найдена.',
+  inactive: 'Выгрузка невозможна: учётная запись выключена.',
+};
 
-  const list = readSupplierList(suppliersPath);
-  printSupplierList(list);
-  if (list.byInn.size === 0) throw new Error('в списке нет ни одного валидного ИНН');
+/** Печать результата прохода и код выхода: 0 — дочитано, 1 — не до конца, 2 — учётка занята. */
+function report(result: ExportRunResult): number {
+  if ('skipped' in result) {
+    console.error(SKIPPED_TEXT[result.skipped]);
+    return result.skipped === 'lease_taken' ? 2 : 1;
+  }
+  if (result.summary) printSummary(result.summary);
+  if (result.retry?.picked) {
+    const r = result.retry;
+    console.info(
+      `Повтор сбоев: взято ${r.picked}, выгружено ${r.stored}, не из списка ${r.notInList}, ` +
+        `снова сбой ${r.failed}, закрыто ${r.closed}`,
+    );
+  }
+  console.info(`Журнал: edo_export_runs ${result.runId}, исход ${result.outcome}`);
+  if (result.outcome === 'completed') return 0;
+  if (result.outcome === 'stopped') {
+    console.error(`Остановлено: ${result.error}. Всё сделанное сохранено; запустите позже.`);
+    return 2;
+  }
+  if (result.error) console.error(`Остановлено: ${result.error}. Всё сделанное сохранено; повторный запуск продолжит.`);
+  return 1;
+}
+
+const progress = (s: Readonly<ExportSummary>) =>
+  console.info(
+    `  страница ${s.pages}: событий ${s.eventsSeen}, УПД ${s.candidates}, новых ${s.stored}, ` +
+      `уже было ${s.alreadyStored}, не из списка ${s.notInList + s.notInListKnown}, сбоев ${s.failed}, ` +
+      `перепись ${s.census}`,
+  );
+
+async function main(): Promise<number> {
+  const modes = [auto, censusOnly, !!suppliersPath].filter(Boolean).length;
+  if (modes > 1) throw new Error('--auto, --census-only и --suppliers взаимоисключающие');
+  if (modes === 0 && !retryFailed) {
+    throw new Error('укажите режим: --suppliers <xlsx> --since …, --auto, --census-only --since … или --retry-failed');
+  }
+  if (noDownload && !outDir) throw new Error('--no-download имеет смысл только вместе с --out-dir');
+  if ((censusOnly || (suppliersPath && !noDownload)) && !sinceArg) throw new Error('укажите --since ГГГГ-ММ-ДД');
 
   const account = await resolveAccount();
   console.info(`Учётная запись: ${account.name} (${account.id}), ящик ${account.boxId ?? '—'}`);
+  // Ctrl+C или остановка контейнера: проход завершается между запросами к
+  // Диадоку, пишет в журнал «stopped» и освобождает учётку.
+  const abort = new AbortController();
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      console.error(`Получен ${signal}: останавливаю после текущего запроса…`);
+      abort.abort();
+    });
+  }
+  const deps = {
+    db,
+    log: logger.child({ service: 'edo-export' }),
+    owner: randomUUID(),
+    put: putObject,
+    onPage: progress,
+    signal: abort.signal,
+  };
+
+  if (retryFailed) {
+    const reset = await db
+      .update(edoExportDocuments)
+      .set({ attempts: 0, nextRetryAt: drSql`now()`, updatedAt: new Date() })
+      .where(and(eq(edoExportDocuments.edoAccountId, account.id), eq(edoExportDocuments.status, 'failed')))
+      .returning({ id: edoExportDocuments.id });
+    console.info(`Сброшены счётчики попыток у ${reset.length} сбоев: их повторит ближайший полный проход.`);
+    if (modes === 0) return 0;
+  }
+
+  if (auto) {
+    const env = loadEnv();
+    const mode: ExportRunMode = {
+      scope: 'all',
+      trigger: 'script',
+      maxEvents: maxEvents(env.EDO_EXPORT_MAX_EVENTS),
+      maxDownloads: env.EDO_EXPORT_MAX_DOWNLOADS,
+    };
+    console.info('Полный проход по курсору (как автообновление)…');
+    return report(await runEdoExportPass(deps, account.id, mode));
+  }
+
+  if (censusOnly) {
+    const from = since(sinceArg!);
+    console.info(`Перепись с ${fmtMsk(from)} (Москва), без скачиваний…`);
+    const result = await runEdoExportPass(deps, account.id, {
+      scope: 'census',
+      trigger: 'script',
+      since: from,
+      maxEvents: maxEvents(CENSUS_MAX_EVENTS),
+    });
+    const code = report(result);
+    if (!('skipped' in result) && result.summary?.truncated && result.summary.to) {
+      // Повтор с того же дня идемпотентен: уже переписанное не задвоится.
+      const day = new Date(Date.parse(result.summary.to) + 3 * 3600_000).toISOString().slice(0, 10);
+      console.info(`Продолжить: --census-only --since ${day}${maxEventsArg ? ` --max-events ${maxEventsArg}` : ''}`);
+    }
+    return code;
+  }
+
+  const list = readSupplierList(suppliersPath!);
+  printSupplierList(list);
+  if (list.byInn.size === 0) throw new Error('в списке нет ни одного валидного ИНН');
 
   let exitCode = 0;
   if (!noDownload) {
-    const since = parseSince(sinceArg!);
-    console.info(`Выгрузка с ${fmtMsk(since)} (Москва)…`);
-    try {
-      const outcome = await runEdoExport(
-        { db, log: logger.child({ service: 'edo-export' }), owner: randomUUID(), put: putObject },
-        account.id,
-        {
-          since,
-          suppliers: list.byInn,
-          onPage: (s) =>
-            console.info(
-              `  страница ${s.pages}: событий ${s.eventsSeen}, УПД ${s.candidates}, новых ${s.stored}, ` +
-                `уже было ${s.alreadyStored}, не из списка ${s.notInList + s.notInListKnown}, сбоев ${s.failed}`,
-            ),
-        },
-      );
-      if ('ok' in outcome) {
-        printSummary(outcome.summary);
-        if (outcome.summary.truncated) exitCode = 1;
-      } else if (outcome.skipped === 'lease_lost') {
-        printSummary(outcome.summary);
-        console.error('Остановлено: учётную запись забрала другая работа по ЭДО. Запустите позже.');
-        exitCode = 2;
-      } else if (outcome.skipped === 'lease_taken') {
-        console.error('Учётная запись занята другой работой по ЭДО (осмотр, пробный разбор, опрос). Запустите позже.');
-        return 2;
-      } else {
-        console.error(`Выгрузка невозможна: ${outcome.skipped === 'no_box' ? 'у учётной записи не выбран ящик' : 'учётная запись не найдена'}`);
-        return 1;
-      }
-    } catch (err) {
-      if (!(err instanceof EdoExportStopped)) throw err;
-      printSummary(err.summary);
-      console.error(`Остановлено: ${err.message}. Всё выгруженное сохранено; повторный запуск продолжит.`);
-      exitCode = 1;
-    }
+    const from = since(sinceArg!);
+    console.info(`Выгрузка с ${fmtMsk(from)} (Москва)…`);
+    exitCode = report(
+      await runEdoExportPass(deps, account.id, {
+        scope: 'list',
+        trigger: 'script',
+        since: from,
+        suppliers: list.byInn,
+        maxEvents: maxEventsArg ? maxEvents(0) : undefined,
+      }),
+    );
+    if (exitCode === 2) return 2;
   }
 
   if (outDir) {

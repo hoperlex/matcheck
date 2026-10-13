@@ -377,6 +377,85 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
     expect(sameDay.diagnostics.referencesAfterRegistry).toEqual([]);
   });
 
+  it('состояние реестра: проверен только полным проходом; список, давность, догон и сбои', async () => {
+    const stateOf = async () =>
+      (await findEdoCandidates(db, strangerDelivery))!.diagnostics.registry.find(
+        (account) => account.accountId === accountId,
+      )!;
+    try {
+      expect(await stateOf()).toMatchObject({ state: 'never', checkedAt: null });
+
+      // Выгрузка по списку ленту читает, но за полноту реестра не отвечает.
+      await sql`INSERT INTO edo_export_runs (edo_account_id, scope, trigger, outcome, feed_completed_at, finished_at)
+                VALUES (${accountId}, 'list', 'script', 'completed', now(), now())`;
+      expect(await stateOf()).toMatchObject({ state: 'never' });
+
+      const [full] = await sql<{ id: string }[]>`
+        INSERT INTO edo_export_runs (edo_account_id, scope, trigger, outcome, started_at, feed_completed_at, finished_at)
+        VALUES (${accountId}, 'all', 'auto', 'completed', now() - interval '1 minute', now(), now())
+        RETURNING id`;
+      const ok = await stateOf();
+      expect(ok.state).toBe('ok');
+      expect(ok.checkedAt).not.toBeNull();
+
+      await sql`UPDATE edo_export_runs SET feed_completed_at = now() - interval '2 days' WHERE id = ${full!.id}`;
+      expect(await stateOf()).toMatchObject({ state: 'stale' });
+
+      // Последний полный проход упёрся в предел — реестр догоняет ленту, а не сломан.
+      await sql`INSERT INTO edo_export_runs (edo_account_id, scope, trigger, outcome, truncate_reason, finished_at)
+                VALUES (${accountId}, 'all', 'auto', 'truncated', 'limit', now())`;
+      expect(await stateOf()).toMatchObject({ state: 'catching_up' });
+
+      const before = await stateOf();
+      const failedId = await exportDoc({ number: `FAIL-${RUN}`, date: ANCHOR, inn: OWN_INN, name: 'ООО «Свой»', sum: '1.00', failed: true });
+      await sql`UPDATE edo_export_documents SET next_retry_at = now() + interval '1 hour' WHERE id = ${failedId}`;
+      const after = await stateOf();
+      expect(after.failedPending).toBe(before.failedPending + 1);
+      expect(after.nextRetryAt).not.toBeNull();
+      await sql`DELETE FROM edo_export_documents WHERE id = ${failedId}`;
+    } finally {
+      await sql`DELETE FROM edo_export_runs WHERE edo_account_id = ${accountId}`;
+    }
+  });
+
+  it('перепись: сканы поставщика по его ящику и по названию; общий ящик и даты вне окна — нет', async () => {
+    const box = `cbox-${RUN}`;
+    const shared = `cbox-shared-${RUN}`;
+    // Ящик, через который в реестре приходил только свой ИНН, и общий ящик двух ИНН.
+    await sql`UPDATE edo_export_documents SET counteragent_box_id = ${box} WHERE id = ${ownExactId}`;
+    const sharedIds = [
+      await exportDoc({ number: `SH-1-${RUN}`, date: '2030-01-01', inn: OWN_INN, name: 'ООО «Свой»', sum: '1.00' }),
+      await exportDoc({ number: `SH-2-${RUN}`, date: '2030-01-01', inn: FILLER_INN, name: 'ООО «Чужой»', sum: '1.00' }),
+    ];
+    await sql`UPDATE edo_export_documents SET counteragent_box_id = ${shared} WHERE id IN ${sql(sharedIds)}`;
+    const census = async (o: { box: string; title: string; at: string; hasUtd?: boolean; category?: string }) =>
+      sql`INSERT INTO edo_export_census
+            (edo_account_id, message_id, entity_id, document_type, category, counteragent_box_id, from_title,
+             message_has_utd, received_at)
+          VALUES (${accountId}, ${randomUUID()}, ${randomUUID()}, 'Nonformalized', ${o.category ?? 'scan'},
+                  ${o.box}, ${o.title}, ${o.hasUtd ?? false}, ${o.at})`;
+    await census({ box, title: 'ООО «Название ящика»', at: '2031-03-09T10:00:00Z' });
+    await census({ box, title: 'ООО «Название ящика»', at: '2031-03-08T10:00:00Z', hasUtd: true, category: 'invoice' });
+    await census({ box, title: 'ООО «Название ящика»', at: '2031-07-01T10:00:00Z' }); // вне ±30 дней
+    await census({ box: shared, title: 'ООО «Общий»', at: '2031-03-09T10:00:00Z' }); // общий ящик — не наш
+    // По названию: у фото-приёмки ИНН поставщика есть, но ящик в реестре неизвестен.
+    await census({ box: `cbox-other-${RUN}`, title: 'ФОТО-ПОСТАВЩИК', at: '2031-03-09T11:00:00Z' });
+
+    const byBox = (await findEdoCandidates(db, strangerDelivery))!.diagnostics.census;
+    expect(byBox).toMatchObject({
+      count: 2,
+      withoutUtd: 1,
+      categories: expect.arrayContaining(['scan', 'invoice']),
+      lastReceivedAt: '2031-03-09T10:00:00.000Z',
+    });
+
+    const byName = (await findEdoCandidates(db, photoDelivery))!.diagnostics.census;
+    expect(byName).toMatchObject({ count: 1, fromTitle: 'ФОТО-ПОСТАВЩИК' });
+
+    // Без поставщика сопоставлять не с чем.
+    expect((await findEdoCandidates(db, bareDelivery))!.diagnostics.census).toBeNull();
+  });
+
   it('диагностика: ИНН, которого нет в реестре, и подбор только по дате', async () => {
     const absent = (await findEdoCandidates(db, absentDelivery))!;
     expect(absent.diagnostics.innsAbsentInRegistry).toEqual([ABSENT_INN]);

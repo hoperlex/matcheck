@@ -142,6 +142,10 @@ services:
         condition: service_healthy
     mem_limit: 384m
     cpus: 0.5
+    # Выгрузка реестра ЭДО по SIGTERM прерывается между запросами к Диадоку и
+    # освобождает лиз учётки. Дефолтных 10 секунд мало: запрос с ретраями идёт
+    # дольше, и SIGKILL оставил бы лиз висеть до истечения (15 минут).
+    stop_grace_period: 2m
     command: ["node_modules/.bin/tsx", "src/mail-worker.ts"]
     logging:
       driver: json-file

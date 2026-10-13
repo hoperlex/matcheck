@@ -35,7 +35,14 @@ import {
   sourceDocuments,
   suppliers,
 } from '../../db/schema.js';
+import { loadEnv } from '../../lib/env.js';
 import { escapeLike } from '../../lib/like.js';
+import {
+  censusForSupplier,
+  exportRegistryStatus,
+  type CensusMatch,
+  type RegistryAccountState,
+} from '../jobs/edo-export-runner.js';
 import {
   compareMatches,
   daysBetween,
@@ -87,11 +94,20 @@ export type EdoCandidatesResult = {
     /** Самое позднее время получения УПД, сохранённой в реестре. Не дата завершённого обхода. */
     registryReceivedUntil: string | null;
     /**
-     * Эталоны, датированные позже дня `registryReceivedUntil` (по Москве). Их УПД,
+     * На какой момент реестр полон: последняя полная проверка ленты (по худшей
+     * из учёток), а пока проверок не было — время последней полученной УПД.
+     */
+    registryAsOf: { at: string; basis: 'checked' | 'received' } | null;
+    /**
+     * Эталоны, датированные позже дня `registryAsOf` (по Москве). Их УПД,
      * скорее всего, ещё не выгружена — но не наверняка: дата эталона могла быть
      * прочитана с ошибкой, а УПД — прийти раньше своей даты.
      */
     referencesAfterRegistry: { label: string | null; date: string }[];
+    /** Состояние автообновления по каждой активной учётке. */
+    registry: RegistryAccountState[];
+    /** Сканы, счета-фактуры и накладные поставщика из переписи — их выгрузка не берёт. */
+    census: CensusMatch | null;
     /** Проверенные ИНН эталонов, по которым в реестре нет ни одной УПД. */
     innsAbsentInRegistry: string[];
     /** ИНН у документов приёмки есть, но ни один не прошёл проверку. */
@@ -707,14 +723,30 @@ export async function findEdoCandidates(
   ].filter((value): value is string => typeof value === 'string');
 
   const receivedUntil = await registryReceivedUntil(db);
-  // Сравнение по дню: УПД, датированная днём последней выгрузки, могла успеть
-  // в реестр, поэтому «позже» — только строго следующий день и дальше.
-  const receivedDay = receivedUntil ? mskDate(new Date(receivedUntil)) : null;
-  const referencesAfterRegistry = receivedDay
+  const registry = await exportRegistryStatus(db, { intervalSec: loadEnv().EDO_EXPORT_INTERVAL_SEC });
+  // Полнота — по худшей учётке: если хоть одна ни разу не дочитала ленту,
+  // опираться можно только на последнюю полученную УПД.
+  const checked = registry.map((account) => account.checkedAt);
+  const registryAsOf: EdoCandidatesResult['diagnostics']['registryAsOf'] =
+    checked.length && checked.every((at): at is string => !!at)
+      ? { at: checked.sort()[0]!, basis: 'checked' }
+      : receivedUntil
+        ? { at: receivedUntil, basis: 'received' }
+        : null;
+  // Сравнение по дню: УПД, датированная днём проверки, могла успеть в реестр,
+  // поэтому «позже» — только строго следующий день и дальше.
+  const asOfDay = registryAsOf ? mskDate(new Date(registryAsOf.at)) : null;
+  const referencesAfterRegistry = asOfDay
     ? references
-        .filter((ref): ref is MatchReference & { date: string } => !!ref.date && ref.date > receivedDay)
+        .filter((ref): ref is MatchReference & { date: string } => !!ref.date && ref.date > asOfDay)
         .map((ref) => ({ label: ref.label, date: ref.date }))
     : [];
+  const census = await censusForSupplier(db, {
+    inns,
+    names: rawNames,
+    from: shiftDate(anchor, -30),
+    to: shiftDate(anchor, 30),
+  });
 
   return {
     items,
@@ -722,7 +754,10 @@ export async function findEdoCandidates(
     truncated: [...truncated],
     diagnostics: {
       registryReceivedUntil: receivedUntil,
+      registryAsOf,
       referencesAfterRegistry,
+      registry,
+      census,
       innsAbsentInRegistry: await innsAbsentInRegistry(db, inns),
       innUnreadable,
       contractorDelivery: delivery.contractorId !== null,

@@ -20,7 +20,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import type { Db } from '../../src/db/client.js';
 import { edoAccounts, edoExportDocuments } from '../../src/db/schema.js';
 import type { DiadocClient } from '../../src/domain/edo/diadoc.client.js';
-import { DiadocGone, DiadocPayloadTooLarge, DiadocTransient } from '../../src/domain/edo/diadoc.http.js';
+import {
+  DiadocAborted,
+  DiadocAuthRejected,
+  DiadocGone,
+  DiadocPayloadTooLarge,
+  DiadocTransient,
+} from '../../src/domain/edo/diadoc.http.js';
 import {
   dateToDiadocTicks,
   resolveEventTime,
@@ -171,7 +177,7 @@ suite('выгрузка УПД по списку поставщиков', () => 
 
   function exportDomain(
     client: DiadocClient,
-    suppliers: Map<string, string>,
+    suppliers: Map<string, string> | null,
     opts: { since?: Date; put?: ExportPut; renewLease?: () => Promise<boolean> } = {},
   ) {
     return exportUpdFromBox(
@@ -244,7 +250,7 @@ suite('выгрузка УПД по списку поставщиков', () => 
     expect(calls.getEntityContent.mock.calls.map((c) => c[2])).toEqual(['ent-1', 'ent-2', 'ent-7']);
     expect(put).toHaveBeenCalledTimes(2);
     expect(put.mock.calls[0]).toEqual([
-      'edo-export/7712345678/2026-08-26_tsb-1_ent-1.xml',
+      `edo-export/7712345678/2026-08-26_tsb-1_${accountId}_msg-1_ent-1.xml`,
       xml1,
       'application/xml',
       { sha256: sha(xml1) },
@@ -267,7 +273,7 @@ suite('выгрузка УПД по списку поставщиков', () => 
       itemsCount: 1,
       contentCategory: 'materials',
       counteragentBoxId: THEIR_BOX,
-      s3Key: 'edo-export/7712345678/2026-08-26_tsb-1_ent-1.xml',
+      s3Key: `edo-export/7712345678/2026-08-26_tsb-1_${accountId}_msg-1_ent-1.xml`,
       contentSha256: sha(xml1),
       sizeBytes: xml1.length,
       lastError: null,
@@ -323,7 +329,7 @@ suite('выгрузка УПД по списку поставщиков', () => 
 
     expect(summary).toMatchObject({ stored: 1, alreadyStored: 1, notInListKnown: 0 });
     expect(calls.getEntityContent.mock.calls.map((c) => c[2])).toEqual(['ent-1']);
-    expect(put.mock.calls[0]![0]).toBe(`edo-export/${LATER}/2026-08-26_1_ent-1.xml`);
+    expect(put.mock.calls[0]![0]).toBe(`edo-export/${LATER}/2026-08-26_1_${accountId}_msg-1_ent-1.xml`);
     expect((await rows()).find((r) => r.entityId === 'ent-1')).toMatchObject({
       status: 'stored',
       supplierInn: LATER,
@@ -454,6 +460,129 @@ suite('выгрузка УПД по списку поставщиков', () => 
     expect((stopped as EdoExportStopped).reason).toBeInstanceOf(EdoFeedStuck);
     expect(calls.getNewEvents).toHaveBeenCalledTimes(2);
     expect(calls.getEntityContent).toHaveBeenCalledTimes(2);
+  });
+
+  it('известный сбой лента не перекачивает — ни окончательный, ни ждущий повтора', async () => {
+    const feed = [ev(1), ev(2)];
+    const broken: Record<string, Error> = {
+      'ent-1': new DiadocGone(404),
+      'ent-2': new Error('HTTP 500 от хранилища Диадока'),
+    };
+    expect(await exportDomain(fakeClient(feed, (id) => broken[id]!).client, list(LISTED))).toMatchObject({
+      failed: 2,
+    });
+    const byEntity = Object.fromEntries((await rows()).map((r) => [r.entityId, r]));
+    // «Исчез» — окончательно; сбой скачивания — повтор через час.
+    expect(byEntity['ent-1']).toMatchObject({ status: 'failed', attempts: 1, nextRetryAt: null });
+    expect(byEntity['ent-2']).toMatchObject({ status: 'failed', attempts: 1 });
+    const inHours = (byEntity['ent-2']!.nextRetryAt!.getTime() - Date.now()) / 3_600_000;
+    expect(inHours).toBeGreaterThan(0.9);
+    expect(inHours).toBeLessThan(1.1);
+
+    const healthy = fakeClient(feed, () => updXml({ number: 'N', sellers: [LISTED] }));
+    const summary = await exportDomain(healthy.client, list(LISTED));
+    expect(summary).toMatchObject({ failedKnown: 2, failed: 0, stored: 0 });
+    expect(healthy.calls.getEntityContent).not.toHaveBeenCalled();
+    expect((await rows()).map((r) => r.attempts)).toEqual([1, 1]);
+  });
+
+  it('все УПД ящика: отсеянный списком сохраняется, ИНН длиннее 12 цифр — под unknown', async () => {
+    const feed = [ev(1), ev(2)];
+    const contents: Record<string, Buffer> = {
+      'ent-1': updXml({ number: '1', sellers: [OTHER] }),
+      'ent-2': updXml({ number: '2', sellers: ['77123456789012'] }),
+    };
+    await exportDomain(fakeClient(feed, (id) => contents[id]!).client, list(LISTED));
+    expect((await rows()).map((r) => r.status)).toEqual(['not_in_list', 'not_in_list']);
+
+    const put = vi.fn<ExportPut>(async () => {});
+    const { client, calls } = fakeClient(feed, (id) => contents[id]!);
+    const summary = await exportDomain(client, null, { put });
+
+    expect(summary).toMatchObject({ stored: 2, notInListKnown: 0 });
+    expect(calls.getEntityContent).toHaveBeenCalledTimes(2);
+    expect(put.mock.calls.map((c) => c[0])).toEqual([
+      `edo-export/${OTHER}/2026-08-26_1_${accountId}_msg-1_ent-1.xml`,
+      `edo-export/unknown/2026-08-26_2_${accountId}_msg-2_ent-2.xml`,
+    ]);
+    const byEntity = Object.fromEntries((await rows()).map((r) => [r.entityId, r]));
+    expect(byEntity['ent-1']).toMatchObject({ status: 'stored', supplierInn: OTHER });
+    expect(byEntity['ent-2']).toMatchObject({
+      status: 'stored',
+      supplierInn: null,
+      sellerInns: ['77123456789012'],
+    });
+  });
+
+  it('данные не поместились в реестр (класс 22) — сбой с причиной, обход идёт дальше', async () => {
+    const trigger = `test_edo_reject_${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+    await sql.unsafe(`
+      create function ${trigger}() returns trigger language plpgsql as $$
+      begin
+        if new.document_number = 'BAD-22' then
+          raise exception 'значение не помещается' using errcode = '22001';
+        end if;
+        return new;
+      end $$;
+      create trigger ${trigger} before insert or update on edo_export_documents
+        for each row execute function ${trigger}();
+    `);
+    try {
+      const feed = [ev(1), ev(2)];
+      const contents: Record<string, Buffer> = {
+        'ent-1': updXml({ number: 'BAD-22', sellers: [LISTED] }),
+        'ent-2': updXml({ number: 'OK-2', sellers: [LISTED] }),
+      };
+      const summary = await exportDomain(fakeClient(feed, (id) => contents[id]!).client, list(LISTED));
+      expect(summary).toMatchObject({ failed: 1, stored: 1 });
+      const byEntity = Object.fromEntries((await rows()).map((r) => [r.entityId, r]));
+      expect(byEntity['ent-1']).toMatchObject({ status: 'failed', nextRetryAt: null });
+      expect(byEntity['ent-1']!.lastError).toMatch(/^запись в реестр: /);
+      expect(byEntity['ent-2']).toMatchObject({ status: 'stored' });
+    } finally {
+      await sql.unsafe(`drop trigger ${trigger} on edo_export_documents; drop function ${trigger}();`);
+    }
+  });
+
+  it('нарушение целостности (CHECK, 23514) — стоп обхода, а не «сбой документа»', async () => {
+    const trigger = `test_edo_reject_${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+    await sql.unsafe(`
+      create function ${trigger}() returns trigger language plpgsql as $$
+      begin
+        if new.document_number = 'BAD-23' then
+          raise exception 'нарушена проверка' using errcode = '23514';
+        end if;
+        return new;
+      end $$;
+      create trigger ${trigger} before insert or update on edo_export_documents
+        for each row execute function ${trigger}();
+    `);
+    try {
+      const feed = [ev(1), ev(2), ev(3)];
+      const contents: Record<string, Buffer> = {
+        'ent-1': updXml({ number: 'OK-1', sellers: [LISTED] }),
+        'ent-2': updXml({ number: 'BAD-23', sellers: [LISTED] }),
+        'ent-3': updXml({ number: 'OK-3', sellers: [LISTED] }),
+      };
+      const { client, calls } = fakeClient(feed, (id) => contents[id]!);
+      const stopped = await exportDomain(client, list(LISTED)).catch((err: unknown) => err);
+      expect(stopped).toBeInstanceOf(EdoExportStopped);
+      expect(calls.getEntityContent).toHaveBeenCalledTimes(2);
+      expect((await rows()).map((r) => [r.entityId, r.status])).toEqual([['ent-1', 'stored']]);
+    } finally {
+      await sql.unsafe(`drop trigger ${trigger} on edo_export_documents; drop function ${trigger}();`);
+    }
+  });
+
+  it('отказ обмена токена и отмена останавливают обход без строки «сбой»', async () => {
+    for (const reason of [new DiadocAuthRejected('invalid_grant', null), new DiadocAborted()]) {
+      const feed = [ev(1)];
+      const stopped = await exportDomain(fakeClient(feed, () => reason).client, list(LISTED)).catch(
+        (err: unknown) => err,
+      );
+      expect((stopped as EdoExportStopped).reason).toBe(reason);
+      expect(await rows()).toEqual([]);
+    }
   });
 
   it('база не принимает «выгружено» без файла', async () => {

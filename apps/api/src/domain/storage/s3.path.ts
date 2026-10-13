@@ -141,22 +141,29 @@ export const EDO_EXPORT_ROOT = 'edo-export';
 /**
  * Ключ XML, выгруженного из Диадока без карточки в портале.
  *
- *   edo-export/<ИНН>/<yyyy-mm-dd|undated>_<номер|nonum>_<entityId>.xml
+ *   edo-export/<ИНН|unknown>/<yyyy-mm-dd|undated>_<номер|nonum>_<учётка>_<сообщение>_<сущность>.xml
  *
  * В ключе только ИНН, без названия: название в списке поставщиков могут
  * поправить, а ключ уже сохранённого файла от этого меняться не должен.
- * `entityId` даёт уникальность, когда номер и дата совпали (повторная
- * отправка). Всё ASCII — кириллица номера транслитерируется, символы, ломающие
- * подпись запроса, не проходят через slugify/sanitizeKey в принципе.
+ * Уникальность — та же тройка, что у строки реестра (учётка, сообщение,
+ * сущность), а не один `entityId`: ключ не должен держаться на том, что Диадок
+ * не повторяет id сущностей между сообщениями. Ключ уже сохранённых файлов
+ * (до 0132 — только `entityId`) не меняется: реестр хранит его в `s3_key`.
+ * Всё ASCII — кириллица номера транслитерируется, символы, ломающие подпись
+ * запроса, не проходят через slugify/sanitizeKey в принципе.
  */
 export function buildEdoExportKey(input: {
-  inn: string;
+  /** ИНН продавца; `null` — в XML нет ИНН, пригодного для реестра. */
+  inn: string | null;
   docDate: string | null;
   docNumber: string | null;
+  accountId: string;
+  messageId: string;
   entityId: string;
 }): string {
   const inn = sanitizeKey(input.inn);
   const date = input.docDate && /^\d{4}-\d{2}-\d{2}$/.test(input.docDate) ? input.docDate : 'undated';
   const number = input.docNumber?.trim() ? slugify(input.docNumber) : 'nonum';
-  return `${EDO_EXPORT_ROOT}/${inn}/${date}_${number}_${sanitizeKey(input.entityId)}.xml`;
+  const ids = [input.accountId, input.messageId, input.entityId].map(sanitizeKey).join('_');
+  return `${EDO_EXPORT_ROOT}/${inn}/${date}_${number}_${ids}.xml`;
 }

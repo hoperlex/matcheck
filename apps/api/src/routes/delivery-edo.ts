@@ -841,9 +841,32 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
             truncated: z.array(FoundBySchema),
             diagnostics: z.object({
               registryReceivedUntil: z.string().nullable(),
+              registryAsOf: z
+                .object({ at: z.string(), basis: z.enum(['checked', 'received']) })
+                .nullable(),
               referencesAfterRegistry: z.array(
                 z.object({ label: z.string().nullable(), date: z.string() }),
               ),
+              registry: z.array(
+                z.object({
+                  accountId: z.string().uuid(),
+                  name: z.string(),
+                  state: z.enum(['never', 'catching_up', 'stale', 'ok']),
+                  checkedAt: z.string().nullable(),
+                  failedPending: z.number().int(),
+                  nextRetryAt: z.string().nullable(),
+                  failedFinal: z.number().int(),
+                }),
+              ),
+              census: z
+                .object({
+                  count: z.number().int(),
+                  withoutUtd: z.number().int(),
+                  lastReceivedAt: z.string().nullable(),
+                  categories: z.array(z.string()),
+                  fromTitle: z.string().nullable(),
+                })
+                .nullable(),
               innsAbsentInRegistry: z.array(z.string()),
               innUnreadable: z.boolean(),
               contractorDelivery: z.boolean(),

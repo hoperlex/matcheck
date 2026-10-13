@@ -49,13 +49,71 @@ type Candidate = {
   };
 };
 
+/** Автообновление реестра по учётке ЭДО. */
+type RegistryAccount = {
+  accountId: string;
+  name: string;
+  state: 'never' | 'catching_up' | 'stale' | 'ok';
+  checkedAt: string | null;
+  failedPending: number;
+  nextRetryAt: string | null;
+  failedFinal: number;
+};
+
+const CENSUS_LABELS: Record<string, string> = {
+  scan: 'сканы',
+  invoice: 'счета-фактуры',
+  waybill: 'накладные',
+};
+
+/** Что сказать о реестре учётки, если не всё в порядке; `null` — молчать. */
+function registryNotice(
+  account: RegistryAccount,
+  receivedUntil: string | null,
+  prefix: string,
+): { type: 'warning' | 'info'; message: string } | null {
+  const checked = account.checkedAt ? formatDateTimeRu(account.checkedAt) : null;
+  if (account.state === 'never') {
+    return {
+      type: 'warning',
+      message: `${prefix}Автообновление реестра ЭДО ещё ни разу не дочитало ленту Диадока${
+        receivedUntil ? ` — в реестре УПД, полученные по ${formatDateTimeRu(receivedUntil)}` : ''
+      }.`,
+    };
+  }
+  if (account.state === 'catching_up') {
+    return {
+      type: 'info',
+      message: `${prefix}Реестр ЭДО догоняет ленту Диадока${
+        checked ? ` (последняя полная проверка — ${checked})` : ''
+      }: свежие УПД появятся в течение ближайших проходов.`,
+    };
+  }
+  if (account.state === 'stale') {
+    return {
+      type: 'warning',
+      message: `${prefix}Автообновление реестра ЭДО не работает: последняя полная проверка ${checked ?? '—'}.`,
+    };
+  }
+  return null;
+}
+
 type Response = {
   items: Candidate[];
   referenceMissing: string[];
   truncated: FoundBy[];
   diagnostics: {
     registryReceivedUntil: string | null;
+    registryAsOf: { at: string; basis: 'checked' | 'received' } | null;
     referencesAfterRegistry: { label: string | null; date: string }[];
+    registry: RegistryAccount[];
+    census: {
+      count: number;
+      withoutUtd: number;
+      lastReceivedAt: string | null;
+      categories: string[];
+      fromTitle: string | null;
+    } | null;
     innsAbsentInRegistry: string[];
     innUnreadable: boolean;
     contractorDelivery: boolean;
@@ -460,9 +518,11 @@ export function LinkEdoDocumentModal({
             Сверху — УПД с тем же номером и поставщиком. «Сильное совпадение» — только когда совпали
             полный номер, ИНН поставщика и дата. Раскройте строку, чтобы сверить позиции; «Открыть
             файл» покажет УПД рядом с фото приёмки.
-            {diagnostics?.registryReceivedUntil
-              ? ` В реестре ЭДО есть УПД, полученные по ${formatDateTimeRu(diagnostics.registryReceivedUntil)}; более поздние ещё не выгружены.`
-              : ''}
+            {diagnostics?.registryAsOf?.basis === 'checked'
+              ? ` Реестр ЭДО проверен ${formatDateTimeRu(diagnostics.registryAsOf.at)}.`
+              : diagnostics?.registryReceivedUntil
+                ? ` В реестре ЭДО есть УПД, полученные по ${formatDateTimeRu(diagnostics.registryReceivedUntil)}; более поздние ещё не выгружены.`
+                : ''}
           </Typography.Text>
           <Button onClick={() => openCompare(null)} disabled={uploadedPhotos === 0}>
             Фото приёмки ({uploadedPhotos})
@@ -472,14 +532,57 @@ export function LinkEdoDocumentModal({
         {candidates.isError && (
           <Alert type="error" message="Не удалось загрузить УПД из ЭДО" showIcon />
         )}
-        {!!diagnostics?.referencesAfterRegistry.length && diagnostics.registryReceivedUntil && (
+        {!!diagnostics?.referencesAfterRegistry.length && diagnostics.registryAsOf && (
           <Alert
             type="warning"
             showIcon
-            message={`Документы приёмки датированы позже последней УПД в реестре ЭДО (${formatDateTimeRu(diagnostics.registryReceivedUntil)}): ${diagnostics.referencesAfterRegistry
+            message={`Документы приёмки датированы позже ${
+              diagnostics.registryAsOf.basis === 'checked'
+                ? 'последней проверки реестра ЭДО'
+                : 'последней УПД в реестре ЭДО'
+            } (${formatDateTimeRu(diagnostics.registryAsOf.at)}): ${diagnostics.referencesAfterRegistry
               .map((ref) => `№ ${ref.label ?? 'без номера'} от ${formatDateRu(ref.date)}`)
               .join(', ')}.`}
             description="Скорее всего, их ещё не выгрузили — тогда в списке ниже их нет."
+          />
+        )}
+        {diagnostics?.registry.map((account) => {
+          const prefix = diagnostics.registry.length > 1 ? `${account.name}: ` : '';
+          const notice = registryNotice(account, diagnostics.registryReceivedUntil, prefix);
+          const failed = [
+            account.failedPending > 0 &&
+              `${account.failedPending} УПД не удалось выгрузить — повтор${
+                account.nextRetryAt ? ` с ${formatDateTimeRu(account.nextRetryAt)}` : ''
+              }`,
+            account.failedFinal > 0 && `${account.failedFinal} УПД не выгружены окончательно`,
+          ].filter((v): v is string => typeof v === 'string');
+          return (
+            <Space key={account.accountId} direction="vertical" style={{ width: '100%' }}>
+              {notice && <Alert type={notice.type} showIcon message={notice.message} />}
+              {failed.length > 0 && (
+                <Alert type="info" showIcon message={`${prefix}${failed.join('; ')}.`} />
+              )}
+            </Space>
+          );
+        })}
+        {diagnostics?.census && (
+          <Alert
+            type="info"
+            showIcon
+            message={`В ящике ЭДО есть документы не в формате УПД от «${
+              diagnostics.census.fromTitle ?? 'поставщика'
+            }»: ${diagnostics.census.count} (${diagnostics.census.categories
+              .map((category) => CENSUS_LABELS[category] ?? category)
+              .join(', ')})${
+              diagnostics.census.lastReceivedAt
+                ? `, последний получен ${formatDateTimeRu(diagnostics.census.lastReceivedAt)}`
+                : ''
+            }.`}
+            description={`Такие документы пока не выгружаются — сверяйте с бумагой.${
+              diagnostics.census.withoutUtd > 0
+                ? ` Без УПД в том же сообщении: ${diagnostics.census.withoutUtd}.`
+                : ''
+            }`}
           />
         )}
         {diagnostics?.innUnreadable && (

@@ -650,6 +650,27 @@ const envSchema = z.object({
   EDO_FETCH_PRINTFORM: z
     .preprocess((v) => (v === '' ? undefined : v), z.enum(['0', '1']).default('0'))
     .transform((v) => v === '1'),
+  // Реестр УПД из ЭДО (edo_export_documents) обновляется сам: mail-worker раз в
+  // EDO_EXPORT_INTERVAL_SEC ставит в очередь ЭДО полный проход по постоянному
+  // курсору. Выключено по умолчанию: включают после деплоя и ручного прохода
+  // `scripts/edo-export-upd.ts --auto`. От импорта (EDO_POLL_ENABLED /
+  // EDO_IMPORT_ENABLED) не зависит — карточек выгрузка не создаёт.
+  EDO_EXPORT_AUTO_ENABLED: z
+    .preprocess((v) => (v === '' ? undefined : v), z.enum(['0', '1']).default('0'))
+    .transform((v) => v === '1'),
+  EDO_EXPORT_INTERVAL_SEC: z.coerce.number().int().min(60).default(1800),
+  // С какого дня (по Москве) читать ленту, когда курсора ещё нет. Курсор
+  // создаётся один раз; потом значение не действует — сброс только удалением
+  // строки edo_export_cursors.
+  EDO_EXPORT_SINCE: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .default('2026-10-05'),
+  // Пределы одного автопрохода. Лента ящика — около 570 событий в сутки, так
+  // что в обычный день проход их не достигает; они держат первый проход и
+  // догон после простоя от того, чтобы надолго занять учётку.
+  EDO_EXPORT_MAX_EVENTS: z.coerce.number().int().positive().default(5000),
+  EDO_EXPORT_MAX_DOWNLOADS: z.coerce.number().int().positive().default(500),
 
   // Публичная форма /uploads — потолки приёма.
   //
