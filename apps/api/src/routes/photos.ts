@@ -277,6 +277,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
             and(
               eq(deliveryPhotos.deliveryId, operationId),
               eq(deliveryPhotos.contentHash, body.contentHash),
+              eq(deliveryPhotos.stage, body.stage ?? 'before'),
             ),
           )
           .limit(1);

@@ -258,6 +258,31 @@ suite('taken_at фото приходит с планшета (реальный 
     expect(takenAt.toISOString()).toBe(SHOT_AT);
   });
 
+  it('один файл можно добавить в оба этапа приёмки', async () => {
+    const contentHash = hash();
+    const first = await presignDelivery({ contentHash, stage: 'after' });
+    const second = await presignDelivery({ contentHash, stage: 'before' });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    const afterId = (first.json() as { photoId: string }).photoId;
+    const beforeId = (second.json() as { photoId: string }).photoId;
+    expect(beforeId).not.toBe(afterId);
+
+    const repeated = await presignDelivery({ contentHash, stage: 'before' });
+    expect((repeated.json() as { photoId: string }).photoId).toBe(beforeId);
+    const rows = await sql<{ id: string; stage: string }[]>`
+      SELECT id, stage FROM delivery_photos
+      WHERE delivery_id = ${deliveryId} AND content_hash = ${contentHash}`;
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: beforeId, stage: 'before' }),
+        expect.objectContaining({ id: afterId, stage: 'after' }),
+      ]),
+    );
+  });
+
   // ── orphan-очистка: по created_at, а не taken_at ─────────────────────
 
   it('старое офлайн-фото не считается сиротой сразу после presign', async () => {

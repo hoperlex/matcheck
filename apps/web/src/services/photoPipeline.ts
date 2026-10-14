@@ -124,14 +124,21 @@ export async function capturePhoto(
   // Внутрь withDb попадает ТОЛЬКО работа с базой: повтор не должен ни сжимать
   // картинку заново, ни переотправлять файл на сервер.
   const existing = await withDb(async (dbi) => {
-    // De-dup locally если такой же hash уже есть для этой операции
-    // (поле deliveryId хранит operationId — для приёмки и отгрузки).
-    const found = await dbi
+    // Один и тот же файл может быть нужен на обоих этапах приёмки.
+    // Индекс не уникален: get() возвращал фото другого этапа и UI сообщал
+    // об успехе, хотя в выбранном этапе ничего не появлялось.
+    const candidates = await dbi
       .transaction('photos')
       .objectStore('photos')
       .index('byHash')
-      .get(contentHash);
-    if (found && found.deliveryId === operationId && found.operationKind === operationKind) {
+      .getAll(contentHash);
+    const found = candidates.find(
+      (p) =>
+        p.deliveryId === operationId &&
+        p.operationKind === operationKind &&
+        (operationKind !== 'delivery' || p.stage === stage),
+    );
+    if (found) {
       return found;
     }
     await dbi.put('photos', {

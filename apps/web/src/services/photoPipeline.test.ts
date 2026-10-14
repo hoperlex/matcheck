@@ -27,9 +27,8 @@ vi.mock('./api', () => ({
   apiUploadPhoto: mocks.apiUploadPhoto,
 }));
 
-const { uploadPhoto, onPhotoUploadSettled, pruneUploadedPhotoBlobs } = await import(
-  './photoPipeline'
-);
+const { capturePhoto, sha256Hex, uploadPhoto, onPhotoUploadSettled, pruneUploadedPhotoBlobs } =
+  await import('./photoPipeline');
 const { db } = await import('../lib/db');
 
 const LOCAL_ID = 'local-uuid';
@@ -197,6 +196,54 @@ describe('uploadPhoto — отправка через API-прокси', () => {
     expect(mocks.apiDelete).not.toHaveBeenCalled();
     expect(await readPhoto(SERVER_ID)).toMatchObject({ uploaded: true });
     expect(await readPhoto(LOCAL_ID)).toBeUndefined();
+  });
+});
+
+describe('capturePhoto — этап приёмки', () => {
+  it('тот же файл добавляется в другой этап, а внутри этапа не дублируется', async () => {
+    vi.stubGlobal(
+      'Worker',
+      class {
+        private listeners = new Set<(event: MessageEvent) => void>();
+
+        addEventListener(_type: string, listener: (event: MessageEvent) => void) {
+          this.listeners.add(listener);
+        }
+
+        removeEventListener(_type: string, listener: (event: MessageEvent) => void) {
+          this.listeners.delete(listener);
+        }
+
+        postMessage(data: { id: number; blob: Blob }) {
+          queueMicrotask(() => {
+            for (const listener of this.listeners) {
+              listener({ data: { id: data.id, ok: true, blob: data.blob } } as MessageEvent);
+            }
+          });
+        }
+      },
+    );
+
+    const dbi = await db();
+    await dbi.clear('photos');
+    const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'image/jpeg' });
+    await putPhoto({
+      id: 'after-photo',
+      stage: 'after',
+      contentHash: await sha256Hex(blob),
+      uploaded: true,
+      blob: undefined,
+    });
+
+    const firstStage = await capturePhoto('delivery', 'delivery-1', blob, 'cargo', 'before');
+    expect(firstStage.id).not.toBe('after-photo');
+    expect(await firstStage.uploadPromise).toEqual({ ok: true });
+    expect(await readPhoto('after-photo')).toMatchObject({ stage: 'after' });
+    expect(await readPhoto(SERVER_ID)).toMatchObject({ stage: 'before', uploaded: true });
+
+    const sameStageAgain = await capturePhoto('delivery', 'delivery-1', blob, 'cargo', 'before');
+    expect(sameStageAgain.id).toBe(SERVER_ID);
+    expect(mocks.apiPost).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -925,6 +925,13 @@
       "when": 1791590400000,
       "tag": "0132_edo_export_auto",
       "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1791936000000,
+      "tag": "0133_delivery_photo_hash_per_stage",
+      "breakpoints": true
     }
   ]
 }
