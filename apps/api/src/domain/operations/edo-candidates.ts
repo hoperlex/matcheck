@@ -115,6 +115,8 @@ export type EdoCandidatesResult = {
     contractorDelivery: boolean;
     /** Ни номера, ни поставщика — кандидаты только по дате приезда. */
     dateOnly: boolean;
+    /** Сильные ключи ничего не нашли — показаны УПД рядом с датой приёмки. */
+    dateFallback: boolean;
   };
 };
 
@@ -182,8 +184,10 @@ type Columns = {
   date: SQL;
   name: SQL;
   innIn: (inns: readonly string[]) => SQL;
-  /** Поля ручного поиска, кроме номера: ИНН, поставщик, файл, id в ЭДО. */
-  searchable: SQL[];
+  /** Имя поставщика и имя файла, без технического пути хранения. */
+  searchableText: SQL[];
+  /** Короткий номер УПД не должен совпадать с частью чужого ИНН. */
+  searchableInns: SQL[];
   /** Точное совпадение идентификатора: id записи, сообщения или документа. */
   exactId: (q: string) => SQL;
 };
@@ -199,7 +203,8 @@ async function queryExport(db: Db, ctx: Context, build: (c: Columns) => Plan): P
     date: drSql`${t.documentDate}`,
     name: drSql`${t.supplierName}`,
     innIn: (inns) => drSql`(${inArray(t.supplierInn, [...inns])} or ${t.sellerInns} && ${textArray(inns)})`,
-    searchable: [drSql`${t.supplierName}`, drSql`${t.supplierInn}`, drSql`${t.s3Key}`],
+    searchableText: [drSql`${t.supplierName}`],
+    searchableInns: [drSql`${t.supplierInn}`],
     exactId: (q) =>
       drSql`(${t.messageId} = ${q} or ${t.entityId} = ${q}${UUID_RE.test(q) ? drSql` or ${t.id} = ${q}::uuid` : drSql``})`,
   });
@@ -262,13 +267,15 @@ async function queryImport(db: Db, ctx: Context, build: (c: Columns) => Plan): P
     name: drSql`coalesce(${directory.name}, ${supplier.name})`,
     innIn: (inns) =>
       drSql`(${inArray(t.supplierInnRaw, [...inns])} or ${inArray(directory.inn, [...inns])} or ${inArray(supplier.inn, [...inns])})`,
-    searchable: [
+    searchableText: [
       drSql`${directory.name}`,
       drSql`${supplier.name}`,
+      drSql`${t.originalFilename}`,
+    ],
+    searchableInns: [
       drSql`${directory.inn}`,
       drSql`${supplier.inn}`,
       drSql`${t.supplierInnRaw}`,
-      drSql`${t.originalFilename}`,
     ],
     exactId: (q) =>
       drSql`(${t.providerMessageId} = ${q} or ${t.providerEntityId} = ${q}${UUID_RE.test(q) ? drSql` or ${t.id} = ${q}::uuid` : drSql``})`,
@@ -559,23 +566,31 @@ export async function findEdoCandidates(
 
   const q = (opts.q ?? '').trim();
   let dateOnly = false;
+  let dateFallback = false;
   if (q.length >= 2) {
     const like = `%${escapeLike(q)}%`;
+    const shortNumber = /^\d+$/.test(q) && q.length < 10;
     const normalizedQ = normalizeDocumentNumber(q);
     const qCore = documentNumberCore(q);
+    // Для короткого номера «233» нужен именно документ № 233 (в том числе
+    // «УТ-233»), а не сотни чужих УПД с этими цифрами в ИНН, пути или серии.
+    const exactNumberSearch = shortNumber && qCore.length > 0;
     const searchRankSql = (c: Columns): SQL => drSql`case
           when ${normalizedQ ? drSql`${numberFullSql(c.number)} = ${normalizedQ}` : drSql`false`} or ${c.exactId(q)} then 0
           when ${qCore ? drSql`${numberCoreSql(c.number)} = ${qCore}` : drSql`false`} then 1
           when ${inns.length ? c.innIn(inns) : drSql`false`} then 2
           else 3 end`;
     const result = await queryBoth(db, ctx, QUOTA.search, (c) => ({
-      where: or(
-        ilike(c.number, like),
-        normalizedQ.length >= 3 ? drSql`${numberFullSql(c.number)} like ${`%${normalizedQ}%`}` : undefined,
-        qCore ? drSql`${numberCoreSql(c.number)} = ${qCore}` : undefined,
-        ...c.searchable.map((column) => ilike(column, like)),
-        c.exactId(q),
-      )!,
+      where: exactNumberSearch
+        ? or(drSql`${numberFullSql(c.number)} = ${normalizedQ}`, drSql`${numberCoreSql(c.number)} = ${qCore}`)!
+        : or(
+            ilike(c.number, like),
+            normalizedQ.length >= 3 ? drSql`${numberFullSql(c.number)} like ${`%${normalizedQ}%`}` : undefined,
+            qCore ? drSql`${numberCoreSql(c.number)} = ${qCore}` : undefined,
+            ...c.searchableText.map((column) => ilike(column, like)),
+            ...(shortNumber ? [] : c.searchableInns.map((column) => ilike(column, like))),
+            c.exactId(q),
+          )!,
       // Точное попадание не должно потеряться за двумястами близкими по дате.
       rank: searchRankSql(c),
       orderBy: [searchRankSql(c), distanceSql(c, anchor)],
@@ -621,10 +636,10 @@ export async function findEdoCandidates(
           if (result.truncated) truncated.add('inn');
         }),
       );
-    } else if (names.length) {
-      // Название — запасной ключ, когда проверенного ИНН нет. В SQL отбираем
-      // по самому длинному слову, целиком сравниваем уже здесь: правила
-      // нормализации названия — одни, в edo-match.ts.
+    }
+    if (names.length) {
+      // Название проверяем и при наличии ИНН: в бумажной УПД он может быть
+      // ошибочным. SQL берёт длинное слово, полное имя сверяем уже здесь.
       const words = [
         ...new Set(rawNames.flatMap(supplierNameTokens).filter((word) => word.length >= 3)),
       ].sort((a, b) => b.length - a.length);
@@ -658,6 +673,20 @@ export async function findEdoCandidates(
       );
     }
     await Promise.all(tasks);
+
+    // Если реквизиты приёмки не дали ни одного кандидата, человек всё равно
+    // должен получить список УПД рядом с датой документа для ручной сверки.
+    // Это запасной список, а не совпадение поставщика: UI показывает его целиком
+    // с явным предупреждением о расхождениях.
+    if (found.size === 0 && !dateOnly) {
+      const result = await queryBoth(db, ctx, QUOTA.date, (c) => ({
+        where: windowSql(c, shiftDate(anchor, -7), shiftDate(anchor, 8)),
+        orderBy: [distanceSql(c, anchor)],
+      }));
+      add(result.rows, 'date');
+      dateFallback = result.rows.length > 0;
+      if (result.truncated) truncated.add('date');
+    }
   }
 
   const entries = [...found.values()];
@@ -762,6 +791,7 @@ export async function findEdoCandidates(
       innUnreadable,
       contractorDelivery: delivery.contractorId !== null,
       dateOnly,
+      dateFallback,
     },
   };
 }

@@ -460,9 +460,51 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
     const absent = (await findEdoCandidates(db, absentDelivery))!;
     expect(absent.diagnostics.innsAbsentInRegistry).toEqual([ABSENT_INN]);
     expect(absent.diagnostics.registryReceivedUntil).not.toBeNull();
+    expect(absent.diagnostics.dateFallback).toBe(true);
+    expect(absent.items.length).toBeGreaterThan(0);
+    expect(absent.items.every((item) => item.foundBy.includes('date'))).toBe(true);
     const bare = (await findEdoCandidates(db, bareDelivery))!;
     expect(bare.diagnostics.dateOnly).toBe(true);
+    expect(bare.diagnostics.dateFallback).toBe(false);
     expect(bare.items.length).toBeLessThanOrEqual(QUOTA.date);
+  });
+
+  it('бумажная УПД с номером и ИНН без совпадений всё равно даёт список для выбора', async () => {
+    const paperId = randomUUID();
+    await sql`INSERT INTO source_documents
+                (id, kind, direction, status, origin, site_id, doc_number, doc_date, supplier_inn_raw)
+              VALUES (${paperId}, 'upd', 'inbound', 'parsed', 'manual_pdf', ${siteId},
+                      '1589', ${ANCHOR}, ${ABSENT_INN})`;
+    await sql`INSERT INTO delivery_sources (delivery_id, source_document_id)
+              VALUES (${absentDelivery}, ${paperId})`;
+    try {
+      const result = (await findEdoCandidates(db, absentDelivery))!;
+      expect(result.diagnostics.dateOnly).toBe(false);
+      expect(result.diagnostics.dateFallback).toBe(true);
+      expect(result.items.length).toBeGreaterThan(0);
+      expect(result.items.every((item) => item.foundBy.includes('date'))).toBe(true);
+    } finally {
+      await sql`DELETE FROM delivery_sources WHERE source_document_id = ${paperId}`;
+      await sql`DELETE FROM source_documents WHERE id = ${paperId}`;
+    }
+  });
+
+  it('короткий номер в ручном поиске находит только этот номер, в том числе с префиксом', async () => {
+    const unrelated = await exportDoc({
+      number: '3420', date: ANCHOR, inn: '5047158987', name: 'ООО «ДЕЛАЙТ»', sum: '1.00',
+    });
+    const partial = await exportDoc({
+      number: '31589', date: ANCHOR, inn: FILLER_INN, name: 'ООО «Чужой»', sum: '1.00',
+    });
+    const exact = await exportDoc({
+      number: 'УТ-1589', date: ANCHOR, inn: ABSENT_INN, name: 'ООО «Без ЭДО»', sum: '1.00',
+    });
+    try {
+      const result = (await findEdoCandidates(db, absentDelivery, { q: '1589' }))!;
+      expect(result.items.map((item) => item.id)).toEqual([exact]);
+    } finally {
+      await sql`DELETE FROM edo_export_documents WHERE id IN (${unrelated}, ${partial}, ${exact})`;
+    }
   });
 
   it('маршрут: подбор, просмотр, привязка и отвязка не трогают приёмку', async () => {

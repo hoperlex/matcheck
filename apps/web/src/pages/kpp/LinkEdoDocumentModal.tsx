@@ -118,6 +118,7 @@ type Response = {
     innUnreadable: boolean;
     contractorDelivery: boolean;
     dateOnly: boolean;
+    dateFallback: boolean;
   };
 };
 
@@ -393,8 +394,11 @@ export function LinkEdoDocumentModal({
 
   const items = data?.items ?? [];
   // В ручном поиске человек ищет конкретную УПД — там ничего не сворачиваем.
-  const mainItems = query ? items : items.filter((candidate) => !isStranger(candidate));
-  const strangers = query ? [] : items.filter(isStranger);
+  // Если других результатов нет, сворачивать весь список было бы равносильно
+  // пустому окну: такие строки показываем сразу, с отметкой «Другой поставщик».
+  const collapseStrangers = !query && !diagnostics?.dateFallback && items.some((item) => !isStranger(item));
+  const mainItems = collapseStrangers ? items.filter((candidate) => !isStranger(candidate)) : items;
+  const strangers = collapseStrangers ? items.filter(isStranger) : [];
 
   /** Общее у основной таблицы и свёрнутого блока чужих поставщиков. */
   const tableProps: TableProps<Candidate> = {
@@ -615,6 +619,14 @@ export function LinkEdoDocumentModal({
             description="Сверяйте по позициям или найдите нужную УПД поиском."
           />
         )}
+        {diagnostics?.dateFallback && !query && (
+          <Alert
+            type="info"
+            showIcon
+            message="Совпадений по реквизитам нет — показаны УПД с близкой датой."
+            description="Это список для ручной проверки. Перед привязкой сверьте номер, ИНН поставщика, сумму и позиции документа."
+          />
+        )}
         {!!data?.referenceMissing.length && (
           <Alert
             type="info"
@@ -642,8 +654,10 @@ export function LinkEdoDocumentModal({
           pagination={{ pageSize: 20, showSizeChanger: false }}
           locale={{
             emptyText: query
-              ? 'По запросу УПД не найдены'
-              : 'Подходящих УПД в реестре ЭДО не найдено. Попробуйте поиск по номеру или поставщику.',
+              ? /^\d{3,9}$/.test(query)
+                ? `УПД с номером ${query} среди доступных документов ЭДО не найдена.`
+                : 'По запросу УПД не найдены'
+              : 'УПД рядом с датой приёмки в реестре ЭДО не найдены. Попробуйте поиск по номеру или поставщику.',
           }}
         />
         {strangers.length > 0 && (

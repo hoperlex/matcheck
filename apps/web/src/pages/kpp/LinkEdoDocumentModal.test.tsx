@@ -85,6 +85,7 @@ const candidates = {
     innUnreadable: false,
     contractorDelivery: false,
     dateOnly: false,
+    dateFallback: false,
   },
 };
 
@@ -255,6 +256,34 @@ describe('чужой поставщик', () => {
     expect(await screen.findByText('УТ-4862')).toBeTruthy();
     expect(screen.getByText('Другой поставщик')).toBeTruthy();
     expect(screen.queryByText(/Похожие номера у других поставщиков/)).toBeNull();
+  });
+
+  it('без совпадений показывает список по дате сразу, даже если поставщик другой', async () => {
+    mockCandidates({
+      '/deliveries/d1/edo-candidates': {
+        ...candidates,
+        items: [stranger],
+        diagnostics: { ...candidates.diagnostics, dateFallback: true },
+      },
+    });
+    show();
+    expect(await screen.findByText('УТ-4862')).toBeTruthy();
+    expect(screen.getByText(/Совпадений по реквизитам нет/)).toBeTruthy();
+    expect(screen.queryByText(/Похожие номера у других поставщиков/)).toBeNull();
+  });
+
+  it('пустой поиск по короткому номеру прямо сообщает, что такой УПД нет', async () => {
+    mockCandidates({
+      '/deliveries/d1/edo-candidates': candidates,
+      '/deliveries/d1/edo-candidates?q=233': { ...candidates, items: [] },
+    });
+    show();
+    await screen.findByText('EXP-1');
+    fireEvent.change(screen.getByPlaceholderText('Номер УПД, поставщик, ИНН или имя файла'), {
+      target: { value: '233' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Найти/ }));
+    expect(await screen.findByText(/УПД с номером 233 среди доступных документов ЭДО не найдена/)).toBeTruthy();
   });
 
   it('подтверждение привязки называет оба ИНН', async () => {
