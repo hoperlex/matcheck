@@ -9,6 +9,7 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
+import { DELIVERY_PURPOSE_LABELS } from '../../shared/utils/deliveryPurpose';
 
 type Row = z.infer<typeof DeliveryListResponseSchema>['items'][number];
 type Item = Row['items'][number];
@@ -150,6 +151,11 @@ export function DeliveryViewModal({
             {d.isAssets ? (
               <Tag style={{ marginInlineEnd: 0 }} color="purple">
                 📦 ОС
+              </Tag>
+            ) : null}
+            {d.purpose ? (
+              <Tag style={{ marginInlineEnd: 0 }}>
+                Признак: {DELIVERY_PURPOSE_LABELS[d.purpose]}
               </Tag>
             ) : null}
             <PendingDeletionTag

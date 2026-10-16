@@ -21,6 +21,7 @@ import {
   ConflictResponseSchema,
   DeliveryListResponseSchema,
   DeliveryMarkDeletionSchema,
+  DeliveryPurposeSchema,
   DeliverySchema,
   DeliveryStatusCodeSchema,
   DeliveryUpsertSchema,
@@ -405,6 +406,7 @@ function assembleDeliveryDto(
     comment: d.comment,
     inTransit: d.inTransit,
     isAssets: d.isAssets,
+    purpose: DeliveryPurposeSchema.nullable().parse(d.purpose),
     confirmedByMolUserId: d.confirmedByMolUserId,
     confirmedByMolUserEmail: r.molEmail,
     confirmedByMolAt: d.confirmedByMolAt?.toISOString() ?? null,
@@ -1121,6 +1123,62 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           reviewedByUserId: req.user?.id ?? null,
           reviewedAt: new Date(),
         })
+        .where(eq(deliveries.id, d.id));
+      publishEvent(app, {
+        type: 'delivery_updated',
+        entityId: d.id,
+        siteId: d.siteId,
+        ts: new Date().toISOString(),
+      });
+      const dto = await buildDeliveryDto(app, d.id, req.user?.role);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
+      return dto;
+    },
+  );
+
+  // Признак приёмки — отдельная правка, доступная проверяющим, включая
+  // Мониторинг. Полный upsert здесь затронул бы материалы и статус.
+  app.patch(
+    '/api/v1/deliveries/:id/purpose',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'monitor')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: z.object({ purpose: DeliveryPurposeSchema }),
+        response: {
+          200: DeliverySchema,
+          403: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      // Матрица может расширять право review, но признак по требованию
+      // остаётся доступен только этим трём ролям.
+      if (!['admin', 'manager', 'monitor'].includes(req.user?.role ?? '')) {
+        return reply.code(403).send({ error: 'forbidden' });
+      }
+      const [d] = await app.db
+        .select({
+          id: deliveries.id,
+          siteId: deliveries.siteId,
+          pendingDeletionAt: deliveries.pendingDeletionAt,
+        })
+        .from(deliveries)
+        .where(eq(deliveries.id, req.params.id))
+        .limit(1);
+      if (!d) return reply.code(404).send({ error: 'not_found' });
+      if (d.pendingDeletionAt !== null) {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — признак изменить нельзя',
+        });
+      }
+
+      await app.db
+        .update(deliveries)
+        .set({ purpose: req.body.purpose, updatedAt: new Date() })
         .where(eq(deliveries.id, d.id));
       publishEvent(app, {
         type: 'delivery_updated',

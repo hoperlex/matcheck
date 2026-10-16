@@ -275,6 +275,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // allow-list (admin/manager), и совмещение делало право монитора базовым,
   // то есть неспособным быть расширенным до настоящей правки.
   ['PATCH /api/v1/deliveries/:id/review', st('operations.deliveries', 'review')],
+  ['PATCH /api/v1/deliveries/:id/purpose', st('operations.deliveries', 'review')],
   // Три маршрута ниже открыты только admin/manager, хотя базовый edit есть и у
   // inspector_kpp: для него это остаётся закрытым (его записи ограничены
   // объектом, а сверки siteId на этих путях нет). Монитору же выданный edit

@@ -77,6 +77,10 @@ export const DeliveryPhotoSchema = z.object({
 });
 export type DeliveryPhoto = z.infer<typeof DeliveryPhotoSchema>;
 
+/** Назначение приёмки, выбираемое в веб-карточке. */
+export const DeliveryPurposeSchema = z.enum(['own_forces', 'realization', 'tolling_act']);
+export type DeliveryPurpose = z.infer<typeof DeliveryPurposeSchema>;
+
 export const DeliverySchema = z.object({
   id: z.string().uuid(),
   // Короткий человекочитаемый id для столбца «id» в Принятых и
@@ -110,6 +114,9 @@ export const DeliverySchema = z.object({
    * false. Веб-портал показывает бейдж рядом с «Транзит». См. миграцию 0065.
    */
   isAssets: z.boolean(),
+  // null у существующих приёмок, которым признак ещё не назначен.
+  // optional сохраняет совместимость старых офлайн-снимков мобильного клиента.
+  purpose: DeliveryPurposeSchema.nullable().optional(),
   confirmedByMolUserId: z.string().uuid().nullable(),
   confirmedByMolUserEmail: z.string().nullable(),
   confirmedByMolAt: z.string().nullable(),

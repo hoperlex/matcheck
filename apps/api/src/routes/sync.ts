@@ -3,6 +3,7 @@ import { desc, eq, getTableColumns, gte, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
+  DeliveryPurposeSchema,
   SyncDeltaResponseSchema,
   ReconcileRequestSchema,
   ReconcileResponseSchema,
@@ -957,6 +958,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           comment: d.comment,
           inTransit: d.inTransit,
           isAssets: d.isAssets,
+          purpose: DeliveryPurposeSchema.nullable().parse(d.purpose),
           confirmedByMolUserId: d.confirmedByMolUserId,
           confirmedByMolUserEmail: d._molEmail,
           confirmedByMolAt: d.confirmedByMolAt?.toISOString() ?? null,

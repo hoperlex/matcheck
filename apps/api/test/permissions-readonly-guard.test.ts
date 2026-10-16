@@ -79,6 +79,7 @@ async function buildApp(opts: {
 
   // Маршруты с боевыми шаблонами: гард смотрит именно на routeOptions.url.
   instance.patch('/api/v1/deliveries/:id/review', async () => ({ ok: 'review' }));
+  instance.patch('/api/v1/deliveries/:id/purpose', async () => ({ ok: 'purpose' }));
   instance.patch('/api/v1/deliveries/:id/flags', async () => ({ ok: 'flags' }));
   instance.post('/api/v1/deliveries', async () => ({ ok: 'upsert' }));
   instance.post('/api/v1/sites', async () => ({ ok: 'site' }));
@@ -107,9 +108,10 @@ const send = (instance: FastifyInstance, method: 'POST' | 'PATCH' | 'GET', url: 
   instance.inject({ method, url, payload: method === 'GET' ? undefined : {} });
 
 describe('при выключенном флаге гард ведёт себя ровно как прежде', () => {
-  it('монитору разрешена только отметка проверки', async () => {
+  it('монитору разрешены проверка и признак приёмки', async () => {
     app = await buildApp({ role: 'monitor', enforce: '0' });
     expect((await send(app, 'PATCH', '/api/v1/deliveries/1/review')).statusCode).toBe(200);
+    expect((await send(app, 'PATCH', '/api/v1/deliveries/1/purpose')).statusCode).toBe(200);
     expect((await send(app, 'PATCH', '/api/v1/deliveries/1/flags')).statusCode).toBe(403);
     expect((await send(app, 'POST', '/api/v1/deliveries')).statusCode).toBe(403);
   });

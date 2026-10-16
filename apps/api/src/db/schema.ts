@@ -1628,6 +1628,7 @@ export const deliveries = pgTable(
     // Ортогонален статусу и kind; используется веб-порталом для бейджа и
     // будущей отчётности.
     isAssets: boolean('is_assets').notNull().default(false),
+    purpose: varchar('purpose', { length: 24 }),
     confirmedByMolUserId: uuid('confirmed_by_mol_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),

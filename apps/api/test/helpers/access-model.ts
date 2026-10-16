@@ -25,12 +25,14 @@ export const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 export const WEB_ONLY_ROLES: ManagedRole[] = ['contractor', 'monitor', 'observer'];
 
 /**
- * Единственные мутации, оставленные монитору ДО матрицы — отметка проверки.
+ * Единственные мутации, оставленные монитору ДО матрицы — отметка проверки
+ * и признак приёмки.
  * Это baseline-поведение: ровно так гард работает и сейчас при
  * PERMISSIONS_ENFORCE=0.
  */
 export const MONITOR_WRITE_ROUTES = new Set([
   '/api/v1/deliveries/:id/review',
+  '/api/v1/deliveries/:id/purpose',
   '/api/v1/shipments/:id/review',
 ]);
 

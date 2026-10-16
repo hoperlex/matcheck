@@ -33,6 +33,7 @@ const data = {
     sourceDocumentIds: [],
     pendingDeletionAt: null,
     reviewState: null,
+    purpose: 'tolling_act',
     reviewNote: null,
     reviewedByUserEmail: null,
     reviewedAt: null,
@@ -57,6 +58,7 @@ describe('DeliveryViewModal: вход в редактор', () => {
     renderModal();
     expect(screen.getByRole('button', { name: /Открыть в редакторе/i })).toBeDefined();
     expect(can).toHaveBeenCalledWith('operations.deliveries', 'edit');
+    expect(screen.getByText('Признак: Давальческий акт')).toBeDefined();
   });
 
   it('права нет — кнопки нет, остаётся только «Закрыть»', () => {

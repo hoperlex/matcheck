@@ -5,6 +5,7 @@ import {
   Button,
   Col,
   Collapse,
+  Dropdown,
   Input,
   InputNumber,
   Popconfirm,
@@ -25,6 +26,7 @@ import {
   ArrowLeftOutlined,
   CameraOutlined,
   DeleteOutlined,
+  DownOutlined,
   DownloadOutlined,
   PlusOutlined,
   UndoOutlined,
@@ -34,6 +36,7 @@ import type {
   Counterparty,
   ResponsiblePerson,
   Delivery,
+  DeliveryPurpose,
   DeliveryStatusCode,
   OperationSourceDocument,
   Site,
@@ -92,6 +95,10 @@ import { operationsListQuery, readOperationsFilters } from '../operations/operat
 import { OperationItemsSections } from '../shared/OperationItemsSections';
 import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
 import { OperationDocumentsChips } from '../shared/OperationDocumentsChips';
+import {
+  DELIVERY_PURPOSE_LABELS,
+  DELIVERY_PURPOSE_OPTIONS,
+} from '../../shared/utils/deliveryPurpose';
 
 type DraftItem = {
   clientKey: string;
@@ -227,6 +234,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // edit — загрузку фото; часть кнопок отвечала бы 403.
   const { can, hasCapability } = usePermissions();
   const canEditDelivery = can('operations.deliveries', 'edit');
+  const canChoosePurpose =
+    ['admin', 'manager', 'monitor'].includes(authUser?.role ?? '') &&
+    can('operations.deliveries', 'review');
   const canEditFlags = canEditDelivery && hasCapability('operations.edit.flags');
   const canLinkUpd = canEditDelivery && hasCapability('operations.edit.link_source');
   const canUnlinkUpd = canEditDelivery && hasCapability('operations.edit.unlink_source');
@@ -1156,6 +1166,19 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onError: (err: Error) => message.error(err.message),
   });
 
+  const patchPurpose = useMutation({
+    mutationFn: async (purpose: DeliveryPurpose) => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      return api.patch<Delivery>(`/deliveries/${loadedDelivery.id}/purpose`, { purpose });
+    },
+    onSuccess: () => {
+      message.success('Признак сохранён');
+      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
   const markDel = useMutation({
     mutationFn: async (reason: string | null) => {
       if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
@@ -1987,6 +2010,28 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   loading={patchFlags.isPending}
                   onChange={(next) => patchFlags.mutate({ isAssets: next })}
                 />
+              )}
+              {!isNew && canChoosePurpose && (
+                <Dropdown
+                  menu={{
+                    items: DELIVERY_PURPOSE_OPTIONS,
+                    selectedKeys: loadedDelivery.purpose ? [loadedDelivery.purpose] : [],
+                    onClick: ({ key }) => patchPurpose.mutate(key as DeliveryPurpose),
+                  }}
+                  disabled={isPending || patchPurpose.isPending}
+                  trigger={['click']}
+                >
+                  <Button size="small" loading={patchPurpose.isPending}>
+                    Признак:{' '}
+                    {loadedDelivery.purpose ? DELIVERY_PURPOSE_LABELS[loadedDelivery.purpose] : '—'}{' '}
+                    <DownOutlined />
+                  </Button>
+                </Dropdown>
+              )}
+              {!canChoosePurpose && loadedDelivery.purpose && (
+                <Tag style={{ marginInlineEnd: 0 }}>
+                  Признак: {DELIVERY_PURPOSE_LABELS[loadedDelivery.purpose]}
+                </Tag>
               )}
             </Space>
           );
