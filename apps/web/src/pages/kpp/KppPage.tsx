@@ -82,6 +82,7 @@ import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
 import { pickUpdSupplierName, updSupplierEditTarget } from '../shared/updSupplierName';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkEdoDocumentModal } from './LinkEdoDocumentModal';
+import { LinkedEdoChips, type LinkedEdoDocument } from './LinkedEdoChips';
 import { LinkOutlined } from '@ant-design/icons';
 import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
 import {
@@ -134,18 +135,6 @@ type DraftItem = {
   vatSum: string | null;
   volumeConfidence: 'low' | 'medium' | 'high' | null;
   groupName: string | null;
-};
-
-type LinkedEdoDocument = {
-  id: string;
-  documentId: string;
-  source: 'import' | 'export';
-  docNumber: string | null;
-  docDate: string | null;
-  supplierName: string | null;
-  supplierInn: string | null;
-  totalSum: string | null;
-  linkedAt: string;
 };
 
 function toNum(v: string | null): number | null {
@@ -1954,33 +1943,16 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   )}
                 </>
               )}
-              {canLinkUpd &&
-                (edoMatchesQuery.data?.items ?? []).map((document) => (
-                  <Tag key={document.id} color="green" style={{ marginInlineEnd: 0 }}>
-                    ЭДО: {document.docNumber ?? 'без номера'}
-                    {document.docDate ? ` от ${document.docDate}` : ''}
-                    {document.source === 'export' ? ' · XML' : ''}
-                    <Button
-                      type="link"
-                      size="small"
-                      style={{ paddingInline: 4 }}
-                      onClick={() => void openEdoFile(document)}
-                    >
-                      Файл
-                    </Button>
-                    <Popconfirm
-                      title="Убрать связь с УПД из ЭДО?"
-                      onConfirm={() => unlinkEdo.mutate(document)}
-                      okText="Убрать"
-                      cancelText="Отмена"
-                      disabled={unlinkEdo.isPending || isPending}
-                    >
-                      <Button type="link" size="small" style={{ paddingInline: 4 }}>
-                        ×
-                      </Button>
-                    </Popconfirm>
-                  </Tag>
-                ))}
+              {canLinkUpd && (
+                <LinkedEdoChips
+                  deliveryId={loadedDelivery?.id ?? null}
+                  documents={edoMatchesQuery.data?.items ?? []}
+                  photos={loadedDelivery?.photos ?? []}
+                  unlinkDisabled={unlinkEdo.isPending || isPending}
+                  onUnlink={(document) => unlinkEdo.mutate(document)}
+                  onOpenOriginal={(document) => void openEdoFile(document)}
+                />
+              )}
               {/* Транзит — admin/manager могут поставить/снять прямо
                   с портала (PATCH /deliveries/:id/flags). Inspector_kpp
                   видит только цветной чип при true (как раньше), править
