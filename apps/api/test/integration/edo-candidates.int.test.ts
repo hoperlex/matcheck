@@ -463,6 +463,12 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
     expect(absent.diagnostics.dateFallback).toBe(true);
     expect(absent.items.length).toBeGreaterThan(0);
     expect(absent.items.every((item) => item.foundBy.includes('date'))).toBe(true);
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/deliveries/${absentDelivery}/edo-candidates`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().diagnostics.dateFallback).toBe(true);
     const bare = (await findEdoCandidates(db, bareDelivery))!;
     expect(bare.diagnostics.dateOnly).toBe(true);
     expect(bare.diagnostics.dateFallback).toBe(false);

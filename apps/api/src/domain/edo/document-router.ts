@@ -70,6 +70,8 @@ const SUPPLEMENTARY_RE =
 // окажутся мёртвыми альтернативами.
 const TORG12_RE = /форма\s+(?:по\s+окуд\s+)?№?\s*торг\s*-?\s*12|товарн[а-яё]*\s+накладн[а-яё]*/i;
 const TRANSPORT_WAYBILL_TITLE_RE = /транспортн[а-яё]*\s+накладн[а-яё]*/i;
+/** Маркер УПД в тексте PDF: решает приоритет УПД над остальными формами. */
+const UPD_MARKER_RE = /сч[её]т-фактур|универсальный передаточн/i;
 const TRANSPORT_WAYBILL_FORM_RE =
   /постановлен[а-яё]*[^.]{0,160}№?\s*2116|товарно\s*-?\s*транспортн[а-яё]*\s+накладн[а-яё]*|(?:^|\s)ттн(?:\s|№|$)|типов[а-яё]*\s+(?:межотраслев[а-яё]*\s+)?форм[а-яё]*\s+№?\s*1\s*-\s*т/i;
 
@@ -112,6 +114,24 @@ function isTransportWaybillForm(text: string): boolean {
   const sections = new Set<string>();
   for (const match of text.matchAll(re)) sections.add(match[1]!);
   return sections.size >= 2;
+}
+
+/** Для спорного PDF бланк ТН должен начинать файл, а не быть приложением к УПД. */
+function isTransportWaybillLeadPage(text: string): boolean {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  const title = TRANSPORT_WAYBILL_TITLE_RE.exec(normalized);
+  return title !== null && title.index < 500 && isTransportWaybillForm(normalized);
+}
+
+/**
+ * Страница — бланк ТН, где УПД лишь упомянут: заголовок ТН стоит раньше
+ * первого маркера УПД. У страницы самого УПД первой идёт его шапка.
+ */
+function isTransportWaybillLedPage(text: string): boolean {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  const title = normalized.search(TRANSPORT_WAYBILL_TITLE_RE);
+  const upd = normalized.search(UPD_MARKER_RE);
+  return title >= 0 && (upd < 0 || title < upd) && isTransportWaybillForm(normalized);
 }
 
 function m15ByName(signals: string[]): FileClassification {
@@ -305,7 +325,7 @@ export async function classifyFile(
     // УПД-маркер проверяем ДО порога: он решает приоритет и ниже, и в ветке
     // короткого текста — сертификат не должен перехватить документ, в котором
     // есть «счёт-фактура».
-    const hasUpd = /сч[её]т-фактур|универсальный передаточн/i.test(full);
+    const hasUpd = UPD_MARKER_RE.test(full);
 
     if (full.length < MIN_TEXT) {
       // скан без текста — vision
@@ -331,11 +351,30 @@ export async function classifyFile(
         signals: ['pdf:scan', `textLen:${full.length}`],
       };
     }
-    // УПД имеет ПРИОРИТЕТ: «Счёт-фактура»/«Универсальный передаточный» — даже
-    // если в теле упоминается транспортная накладная (раздел «Данные о
-    // транспортировке»). Иначе УПД-пачки ложно ушли бы в накладные.
+    // УПД имеет приоритет, если в нём лишь упомянута транспортная накладная.
+    // Но в самом бланке ТН тоже бывает ссылка на счёт-фактуру: одно слово без
+    // номера УПД не должно перехватывать бланк с заголовком и разделами на
+    // первой странице. Смотрим именно первую страницу, чтобы не принять за ТН
+    // УПД, к которому приложена накладная на следующих страницах.
+    //
+    // И каждую страницу с маркером УПД: в файле «ТН + УПД, номер которого не
+    // прочитался» страница УПД начинается с его шапки. Без этой проверки такой
+    // файл целиком ушёл бы в накладные, и позиции УПД пропали бы из разбора.
     if (hasUpd) {
       const uniq = countUniqueUpdInvoices(pages);
+      if (
+        uniq === 0 &&
+        isTransportWaybillLeadPage(pages[0]?.text ?? '') &&
+        pages.every((p) => !UPD_MARKER_RE.test(p.text) || isTransportWaybillLedPage(p.text))
+      ) {
+        return {
+          detectedKind: 'transport_waybill',
+          confidence: 0.8,
+          needsVision: false,
+          parserUsed: 'parseWaybillBatch',
+          signals: ['text:tn', 'text:upd-reference'],
+        };
+      }
       return {
         detectedKind: 'upd',
         confidence: 0.95,

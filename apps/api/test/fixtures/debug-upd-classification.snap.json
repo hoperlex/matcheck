@@ -460,15 +460,14 @@
     ],
   },
   "Транспортная накладная-1.PDF": {
-    "confidence": 0.95,
-    "detectedKind": "upd",
+    "confidence": 0.8,
+    "detectedKind": "transport_waybill",
     "needsVision": false,
-    "parserUsed": "parseUpdPdf",
+    "parserUsed": "parseWaybillBatch",
     "signals": [
-      "text:upd",
-      "invoices:0",
+      "text:tn",
+      "text:upd-reference",
     ],
-    "updInvoiceCount": 0,
   },
   "ТранспортнаяНакладнаяУПД Реализация товаров и услуг №ТН0006251866.pdf": {
     "confidence": 0.8,

@@ -77,7 +77,7 @@ function registryNotice(
     return {
       type: 'warning',
       message: `${prefix}Автообновление реестра ЭДО ещё ни разу не дочитало ленту Диадока${
-        receivedUntil ? ` — в реестре УПД, полученные по ${formatDateTimeRu(receivedUntil)}` : ''
+        receivedUntil ? ` — самая поздняя полученная УПД в реестре: ${formatDateTimeRu(receivedUntil)}` : ''
       }.`,
     };
   }
@@ -525,7 +525,7 @@ export function LinkEdoDocumentModal({
             {diagnostics?.registryAsOf?.basis === 'checked'
               ? ` Реестр ЭДО проверен ${formatDateTimeRu(diagnostics.registryAsOf.at)}.`
               : diagnostics?.registryReceivedUntil
-                ? ` В реестре ЭДО есть УПД, полученные по ${formatDateTimeRu(diagnostics.registryReceivedUntil)}; более поздние ещё не выгружены.`
+                ? ` Самая поздняя полученная УПД в реестре — ${formatDateTimeRu(diagnostics.registryReceivedUntil)}; полнота загрузки не подтверждена.`
                 : ''}
           </Typography.Text>
           <Button onClick={() => openCompare(null)} disabled={uploadedPhotos === 0}>

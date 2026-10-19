@@ -871,6 +871,7 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
               innUnreadable: z.boolean(),
               contractorDelivery: z.boolean(),
               dateOnly: z.boolean(),
+              dateFallback: z.boolean(),
             }),
           }),
           404: ErrorResponseSchema,

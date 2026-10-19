@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import ExcelJS from 'exceljs';
 import { classifyFile } from '../src/domain/edo/document-router.js';
-import { makeTextPdf } from './helpers/make-pdf.js';
+import { makeTextPdf, makeTextPdfPages } from './helpers/make-pdf.js';
 
 /**
  * Детерминированный классификатор единого входа — офлайн, без LLM.
@@ -76,6 +76,111 @@ describe('document-router classifyFile — детерминированная м
     ]);
     const c = await classifyFile(pdf, 'application/pdf', 'tn-sections.pdf');
     expect(c.detectedKind).toBe('transport_waybill');
+  });
+
+  it('бланк ТН со ссылкой на счёт-фактуру не уходит в УПД-парсер', async () => {
+    const pdf = makeTextPdf([
+      'Транспортная накладная (форма) № 10426036352 от 07.10.2026.',
+      '1. Грузоотправитель ООО «РОКВУЛ», адрес и телефон организации.',
+      '2. Грузополучатель ООО «СУ-10», адрес места доставки груза.',
+      '3. Груз: строительные материалы, 13 поддонов.',
+      '4. Сопроводительные документы на груз: счёт-фактура прилагается.',
+    ]);
+    const c = await classifyFile(pdf, 'application/pdf', 'ТН № 10426036352.pdf');
+    expect(c).toMatchObject({
+      detectedKind: 'transport_waybill',
+      parserUsed: 'parseWaybillBatch',
+      signals: ['text:tn', 'text:upd-reference'],
+    });
+  });
+
+  it('УПД с приложенной ТН остаётся в УПД-пути', async () => {
+    const pdf = makeTextPdf([
+      'Универсальный передаточный документ. Счёт-фактура № 55 от 07.10.2026.',
+      'Поставщик ООО «РОКВУЛ», покупатель ООО «СУ-10».',
+      'Наименование товара, количество, цена, сумма и НДС.',
+      'Транспортная накладная № 55 от 07.10.2026 прилагается.',
+      '1. Грузоотправитель ООО «РОКВУЛ». 2. Грузополучатель ООО «СУ-10».',
+    ]);
+    const c = await classifyFile(pdf, 'application/pdf', 'upd-with-tn.pdf');
+    expect(c.detectedKind).toBe('upd');
+    expect(c.updInvoiceCount).toBe(1);
+  });
+
+  it('УПД без номера с бланком ТН в конце первой страницы остаётся УПД', async () => {
+    const pdf = makeTextPdf([
+      'Универсальный передаточный документ. Счёт-фактура без указанного номера.',
+      ...Array.from({ length: 18 }, (_, i) =>
+        `Строка УПД ${i + 1}: товар, количество, цена, сумма, ставка и сумма НДС.`,
+      ),
+      'Транспортная накладная (форма) прилагается.',
+      '1. Грузоотправитель ООО «РОКВУЛ».',
+      '2. Грузополучатель ООО «СУ-10».',
+    ]);
+    const c = await classifyFile(pdf, 'application/pdf', 'upd-with-tn-on-first-page.pdf');
+    expect(c.detectedKind).toBe('upd');
+    expect(c.updInvoiceCount).toBe(0);
+  });
+
+  it('ТН первой страницей и УПД без номера дальше — файл остаётся в УПД-пути', async () => {
+    // Номер у УПД не прочитался, поэтому одного «номеров нет» мало: страница
+    // УПД начинается с его шапки, и весь файл в накладные уходить не должен —
+    // иначе позиции УПД пропали бы из разбора.
+    const pdf = makeTextPdfPages([
+      [
+        'Транспортная накладная (форма) № 10426036352 от 07.10.2026.',
+        '1. Грузоотправитель ООО «РОКВУЛ».',
+        '2. Грузополучатель ООО «СУ-10».',
+        '3. Груз: материалы, 13 поддонов.',
+        '4. Сопроводительные документы на груз: счёт-фактура прилагается.',
+      ],
+      [
+        'Универсальный передаточный документ. Счёт-фактура без номера.',
+        'Поставщик ООО «РОКВУЛ», покупатель ООО «СУ-10».',
+        'Товар, количество, цена, сумма.',
+      ],
+    ]);
+    const c = await classifyFile(pdf, 'application/pdf', 'tn-then-upd.pdf');
+    expect(c.detectedKind).toBe('upd');
+    expect(c.updInvoiceCount).toBe(0);
+  });
+
+  it('страница УПД с бланком ТН после шапки не считается бланком ТН', async () => {
+    // На второй странице есть и заголовок, и разделы ТН, но первой стоит шапка
+    // УПД: это УПД с приложенной накладной, а не ещё один экземпляр ТН.
+    const pdf = makeTextPdfPages([
+      [
+        'Транспортная накладная (форма) № 10426036352.',
+        '1. Грузоотправитель ООО «РОКВУЛ».',
+        '2. Грузополучатель ООО «СУ-10».',
+        '4. Сопроводительные документы: счёт-фактура прилагается.',
+      ],
+      [
+        'Универсальный передаточный документ. Счёт-фактура без номера.',
+        'Товар, количество, цена, сумма.',
+        'Транспортная накладная прилагается.',
+        '1. Грузоотправитель ООО «РОКВУЛ».',
+        '2. Грузополучатель ООО «СУ-10».',
+      ],
+    ]);
+    const c = await classifyFile(pdf, 'application/pdf', 'tn-then-upd-with-tn.pdf');
+    expect(c.detectedKind).toBe('upd');
+  });
+
+  it('ТН в двух экземплярах со ссылкой на УПД в каждом — накладная', async () => {
+    const copy = (n: number) => [
+      `Транспортная накладная (форма) № 10426036352. Экземпляр № ${n}.`,
+      '1. Грузоотправитель ООО «РОКВУЛ».',
+      '2. Грузополучатель ООО «СУ-10».',
+      '4. Сопроводительные документы: универсальный передаточный документ (УПД) №2770/07.',
+    ];
+    const pdf = makeTextPdfPages([copy(1), copy(2)]);
+    const c = await classifyFile(pdf, 'application/pdf', 'tn-two-copies.pdf');
+    expect(c).toMatchObject({
+      detectedKind: 'transport_waybill',
+      parserUsed: 'parseWaybillBatch',
+      signals: ['text:tn', 'text:upd-reference'],
+    });
   });
 
   it('одно упоминание ТН и слово «Грузоотправитель» не перехватывают документ', async () => {
