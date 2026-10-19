@@ -3,25 +3,34 @@
 #
 # Использование (на mosgate, под пользователем matcheck):
 #   cd /srv/matcheck/app
-#   ./scripts/deploy.sh
+#   ./scripts/deploy.sh            # обычный деплой
+#   ./scripts/deploy.sh --plan     # git pull и показать, что будет сделано; ничего не собирать
+#   ./scripts/deploy.sh --force    # собрать обе стороны и пересоздать все контейнеры
+#                                  # (с обычным кэшем сборки — это НЕ сброс кэша)
+#   ./scripts/deploy.sh --no-pull  # деплой текущего HEAD без git pull (откат через checkout)
 #
 # Делает:
 #   1. git pull
-#   2. docker compose build matcheck-api matcheck-web matcheck-worker
-#   3. migrations-status.ts  (read-only, точка отсчёта)
-#   4. migrate.ts            (применяет pending-миграции)
-#   5. migrations-status.ts  (контрольный замер)
-#   6. docker compose up -d --force-recreate matcheck-api matcheck-web matcheck-worker
+#   2. scripts/build-env.sh — стоп на грязном дереве, ревизии сторон, настройки Sentry
+#   3. решает, что собирать: сторону (API или портал) собираем, только если её
+#      ревизия отличается от той, на которой запущены её контейнеры
+#   4. docker compose build — только нужные образы, по очереди
+#   5. migrations-status.ts  (read-only, точка отсчёта)
+#   6. migrate.ts            (применяет pending-миграции; запускается всегда)
+#   7. migrations-status.ts  (контрольный замер)
+#   8. если воркер будет пересоздан — ждёт его текущее задание (до 10 минут),
+#      затем docker compose up -d --wait: compose сам пересоздаёт контейнеры, у
+#      которых сменился образ или конфигурация (в том числе api.env), и ждёт healthcheck
 #
-# Печатает в конце таблицу-сводку: коммит, статус сборки, сколько миграций
-# применено (X из Y) и список их тегов, статус контейнеров.
+# Печатает в конце таблицу-сводку: коммит, что собрано, сколько миграций
+# применено (X из Y) и их теги, ждали ли воркер, какие контейнеры пересозданы.
 #
 # НЕ делает (остаётся ручным):
 #   - снэпшот PG в YC Console перед миграциями;
 #   - nginx -t && systemctl reload nginx (под root);
 #   - проверку соседних сайтов через baseline;
-#   - финальные smoke-curl-ы.
-# См. docs/DEPLOY.md, раздел «Обновление кода (универсальная команда)».
+#   - финальные smoke-curl-ы (--wait проверяет только healthcheck контейнеров).
+# См. docs/DEPLOY.md, раздел «Обновление кода скриптом».
 
 set -euo pipefail
 
@@ -45,6 +54,19 @@ main() {
     printf '%s%*s' "$label" "$n" ''
   }
 
+  local FORCE=0 PLAN=0 PULL=1 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --force)   FORCE=1 ;;
+      --plan)    PLAN=1 ;;
+      --no-pull) PULL=0 ;;
+      *)
+        echo "Неизвестный аргумент: $arg (допустимо: --plan, --force, --no-pull)" >&2
+        return 2
+        ;;
+    esac
+  done
+
   cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   COMPOSE=(docker compose -f infra/docker-compose.prod.yml)
 
@@ -54,10 +76,11 @@ main() {
   # только его подняли, он ОБЯЗАН обновляться вместе с остальными: иначе приём
   # писем молча остался бы на коде того дня, когда контейнер запустили, и
   # расхождение обнаружилось бы через недели.
-  SERVICES=(matcheck-api matcheck-web matcheck-worker)
+  API_FAMILY=(matcheck-api matcheck-worker)
   if [ -n "$("${COMPOSE[@]}" ps -aq matcheck-mail-worker 2>/dev/null)" ]; then
-    SERVICES+=(matcheck-mail-worker)
+    API_FAMILY+=(matcheck-mail-worker)
   fi
+  SERVICES=("${API_FAMILY[@]}" matcheck-web)
 
   STATUS_BEFORE=""
   STATUS_AFTER=""
@@ -65,29 +88,130 @@ main() {
 
   step() { echo; echo "${BOLD}${CYAN}━━ $* ━━${NC}"; }
 
-  # ─── 1/6 · git pull ───
-  step "1/6 · git pull"
+  REV_LABEL=org.opencontainers.image.revision
+  CFG_LABEL=matcheck.build-config
+
+  # Метка контейнера; пусто, если нет контейнера или метки.
+  container_label() {
+    local v
+    v=$(docker container inspect -f "{{index .Config.Labels \"$2\"}}" "$1" 2>/dev/null) || return 0
+    [[ "$v" == '<no value>' ]] && v=''
+    printf '%s' "$v"
+  }
+  container_exists() { docker container inspect "$1" >/dev/null 2>&1; }
+  short() { if [[ -n "$1" ]]; then printf '%s' "${1:0:12}"; else printf 'нет метки'; fi; }
+
+  # ─── 1/8 · git pull ───
+  step "1/8 · git pull"
   COMMIT_BEFORE=$(git rev-parse --short HEAD)
-  git pull --ff-only
+  if (( PULL )); then
+    git pull --ff-only
+  else
+    echo "  пропущен (--no-pull): деплоится текущий HEAD"
+  fi
   COMMIT_AFTER=$(git rev-parse --short HEAD)
   git log --oneline -1
 
-  # ─── 2/6 · build ───
-  step "2/6 · build образов (${SERVICES[*]})"
-  # Sentry (веб): публичный DSN + org/project идут build-arg'ами в бандл; auth-token —
-  # секретом для загрузки source maps. Всё опционально: без файла плагин отключён и
-  # сборка не меняется. Файл вне репозитория (режим 600).
-  SENTRY_WEB_ENV="/srv/matcheck/secrets/sentry.web.env"
-  if [ -f "$SENTRY_WEB_ENV" ]; then set -a; . "$SENTRY_WEB_ENV"; set +a; fi
-  export VITE_SENTRY_DSN="${VITE_SENTRY_DSN:-}"
-  export VITE_SENTRY_RELEASE="${VITE_SENTRY_RELEASE:-$COMMIT_AFTER}"
-  export SENTRY_ORG="${SENTRY_ORG:-}"
-  export SENTRY_PROJECT="${SENTRY_PROJECT:-}"
-  export SENTRY_AUTH_TOKEN="${SENTRY_AUTH_TOKEN:-}"
-  "${COMPOSE[@]}" build "${SERVICES[@]}"
+  # ─── 2/8 · окружение сборки ───
+  step "2/8 · окружение сборки"
+  # shellcheck source=scripts/build-env.sh
+  . scripts/build-env.sh || exit 1
+  echo "  ревизия API:    $(short "$MATCHECK_API_REV")"
+  echo "  ревизия портала: $(short "$MATCHECK_WEB_REV")  (настройки сборки $MATCHECK_WEB_CFG)"
 
-  # ─── 3/6 · миграции ДО ───
-  step "3/6 · миграции — статус ДО"
+  # ─── 3/8 · что менять ───
+  #
+  # Сравниваем с тем, что ЗАПУЩЕНО, а не с HEAD до pull: если прошлый деплой упал
+  # после pull, повтор увидит старые метки на контейнерах и доделает работу.
+  # Решение влияет только на сборку и на явное ожидание воркера. Пересоздаёт
+  # контейнеры compose по своим правилам (новый образ под тегом, изменённая
+  # конфигурация), а миграции идут на каждом деплое — поэтому даже ошибка
+  # здесь не оставит прод на старом коде.
+  step "3/8 · что менять"
+  local c cur cfg BUILD_API=$FORCE BUILD_WEB=$FORCE
+  for c in "${API_FAMILY[@]}"; do
+    if ! container_exists "$c"; then
+      printf '  %s нет контейнера\n' "$(pad "$c" 22)"; BUILD_API=1; continue
+    fi
+    cur=$(container_label "$c" "$REV_LABEL")
+    if [[ "$cur" == "$MATCHECK_API_REV" ]]; then
+      printf '  %s %s — актуальна\n' "$(pad "$c" 22)" "$(short "$cur")"
+    else
+      printf '  %s %s → %s\n' "$(pad "$c" 22)" "$(short "$cur")" "$(short "$MATCHECK_API_REV")"
+      BUILD_API=1
+    fi
+  done
+  if ! container_exists matcheck-web; then
+    printf '  %s нет контейнера\n' "$(pad matcheck-web 22)"; BUILD_WEB=1
+  else
+    cur=$(container_label matcheck-web "$REV_LABEL")
+    cfg=$(container_label matcheck-web "$CFG_LABEL")
+    if [[ "$cur" == "$MATCHECK_WEB_REV" && "$cfg" == "$MATCHECK_WEB_CFG" ]]; then
+      printf '  %s %s — актуальна\n' "$(pad matcheck-web 22)" "$(short "$cur")"
+    else
+      printf '  %s %s → %s' "$(pad matcheck-web 22)" "$(short "$cur")" "$(short "$MATCHECK_WEB_REV")"
+      [[ "$cfg" != "$MATCHECK_WEB_CFG" ]] && printf ' (настройки сборки %s → %s)' "${cfg:-нет}" "$MATCHECK_WEB_CFG"
+      printf '\n'
+      BUILD_WEB=1
+    fi
+  fi
+
+  # Будет ли пересоздан воркер — по тем же признакам, по которым это решает
+  # compose: другой образ под тегом или другая конфигурация (compose-файл,
+  # содержимое api.env — оно входит в config-hash). Если признак не удалось
+  # получить, считаем, что будет: лишнее ожидание лучше SIGKILL посреди задания.
+  local WORKER_WAIT=0 WORKER_WHY='' api_image tag_id worker_img want_hash have_hash
+  if (( FORCE )); then
+    WORKER_WAIT=1; WORKER_WHY='--force'
+  elif (( BUILD_API )); then
+    WORKER_WAIT=1; WORKER_WHY='новый образ API'
+  elif container_exists matcheck-worker; then
+    # Имя образа — то, из которого создан сам контейнер. Не `config --images`:
+    # он печатает и образы зависимостей (redis). Если имя в compose сменят,
+    # это поймает config-hash ниже — image входит в него.
+    api_image=$(docker container inspect -f '{{.Config.Image}}' matcheck-worker 2>/dev/null || true)
+    tag_id=$(docker image inspect -f '{{.Id}}' "$api_image" 2>/dev/null || true)
+    worker_img=$(docker container inspect -f '{{.Image}}' matcheck-worker 2>/dev/null || true)
+    if [[ -z "$tag_id" || "$worker_img" != "$tag_id" ]]; then
+      WORKER_WAIT=1; WORKER_WHY='контейнер не на текущем образе'
+    fi
+    want_hash=$("${COMPOSE[@]}" config --hash matcheck-worker 2>/dev/null \
+                | awk '$1 == "matcheck-worker" { print $2 }' || true)
+    have_hash=$(container_label matcheck-worker com.docker.compose.config-hash)
+    if [[ -z "$want_hash" || "$want_hash" != "$have_hash" ]]; then
+      WORKER_WAIT=1; WORKER_WHY="${WORKER_WHY:+$WORKER_WHY; }изменилась конфигурация (compose или api.env)"
+    fi
+  fi
+
+  echo
+  printf '  %s %s\n' "$(pad 'API' 10)"    "$( (( BUILD_API )) && echo собрать || echo 'без изменений')"
+  printf '  %s %s\n' "$(pad 'Портал' 10)" "$( (( BUILD_WEB )) && echo собрать || echo 'без изменений')"
+  printf '  %s %s\n' "$(pad 'Воркер' 10)" "$( (( WORKER_WAIT )) && echo "будет пересоздан: $WORKER_WHY" || echo 'не трогаем')"
+  (( FORCE )) && echo "  --force: собираем обе стороны и пересоздаём все контейнеры"
+
+  if (( PLAN )); then
+    echo
+    echo "  --plan: ничего не собрано и не пересоздано. Миграции при деплое проверяются всегда."
+    return 0
+  fi
+
+  # ─── 4/8 · сборка ───
+  #
+  # По очереди, а не параллельно: на VPS 2 ядра и мало свободной памяти, tsc и
+  # vite одновременно уводят его в swap. worker и mail-worker не собираем — у них
+  # тот же образ, его собирает matcheck-api.
+  step "4/8 · сборка"
+  local BUILT=()
+  if (( BUILD_API )); then "${COMPOSE[@]}" build matcheck-api; BUILT+=(API); fi
+  if (( BUILD_WEB )); then "${COMPOSE[@]}" build matcheck-web; BUILT+=(портал); fi
+  (( ${#BUILT[@]} )) || echo "  не требуется"
+
+  # ─── 5/8 · миграции ДО ───
+  #
+  # Миграции — на каждом деплое, даже если API не собирали: они идемпотентны и
+  # стоят секунды, а пропуск по признаку «образ не менялся» оставил бы БД без
+  # миграции, если контейнеры после упавшего migrate пересоздали руками.
+  step "5/8 · миграции — статус ДО"
   STATUS_BEFORE=$(mktemp)
   "${COMPOSE[@]}" run --rm matcheck-api node_modules/.bin/tsx scripts/migrations-status.ts \
     | tee "$STATUS_BEFORE"
@@ -96,12 +220,12 @@ main() {
   PENDING_TAGS=$(  grep    '^\[migrations\] pending tags:'                 "$STATUS_BEFORE" \
                  | sed 's/^\[migrations\] pending tags: //' || true)
 
-  # ─── 4/6 · migrate ───
-  step "4/6 · применение миграций"
+  # ─── 6/8 · migrate ───
+  step "6/8 · применение миграций"
   "${COMPOSE[@]}" run --rm matcheck-api node_modules/.bin/tsx scripts/migrate.ts
 
-  # ─── 5/6 · миграции ПОСЛЕ ───
-  step "5/6 · миграции — статус ПОСЛЕ"
+  # ─── 7/8 · миграции ПОСЛЕ ───
+  step "7/8 · миграции — статус ПОСЛЕ"
   STATUS_AFTER=$(mktemp)
   "${COMPOSE[@]}" run --rm matcheck-api node_modules/.bin/tsx scripts/migrations-status.ts \
     | tee "$STATUS_AFTER"
@@ -109,20 +233,57 @@ main() {
   PENDING_AFTER=$(grep -oP 'applied: \d+ / journal: \d+ / pending: \K\d+' "$STATUS_AFTER" || echo 0)
   APPLIED_NOW=$(( APPLIED_AFTER - APPLIED_BEFORE ))
 
-  # ─── 6/6 · up -d ───
+  # ─── 8/8 · контейнеры ───
   #
-  # Воркер останавливаем ОТДЕЛЬНО и с большим таймаутом. `up -d --force-recreate`
-  # шлёт SIGTERM и ждёт stop_grace_period, но распознавание одного тяжёлого
-  # пакета идёт минутами: без явного ожидания Docker добивал процесс SIGKILL'ом
-  # посреди задания, и документ оставался висеть в processing до окна
+  # Воркер останавливаем ОТДЕЛЬНО и с большим таймаутом. Распознавание одного
+  # тяжёлого пакета идёт минутами: без явного ожидания Docker добивал процесс
+  # SIGKILL'ом посреди задания, и документ оставался висеть в processing до окна
   # восстановления. Так воркер успевает доработать текущее задание и снять
-  # блокировку BullMQ сам.
-  step "6/6 · пересоздание контейнеров"
-  if "${COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx 'matcheck-worker'; then
+  # блокировку BullMQ сам. stop_grace_period в compose — второй рубеж.
+  step "8/8 · контейнеры"
+  local WAITED=0
+  if (( WORKER_WAIT )) && \
+     "${COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx 'matcheck-worker'; then
     echo "  ожидание завершения активного задания воркера (до 10 минут)…"
     "${COMPOSE[@]}" stop -t 600 matcheck-worker
+    WAITED=1
   fi
-  "${COMPOSE[@]}" up -d --force-recreate "${SERVICES[@]}"
+
+  local -A ID_BEFORE=()
+  for c in "${SERVICES[@]}"; do
+    ID_BEFORE[$c]=$(docker container inspect -f '{{.Id}}' "$c" 2>/dev/null || true)
+  done
+
+  # Без --force-recreate compose трогает только то, что изменилось: новый образ
+  # под тегом, другая конфигурация, остановленный контейнер. --wait ждёт
+  # healthcheck у api и web; у воркеров его нет — для них только «запущен».
+  local UP=(up -d --no-build --wait --wait-timeout 300)
+  (( FORCE )) && UP+=(--force-recreate)
+  if ! "${COMPOSE[@]}" "${UP[@]}" "${SERVICES[@]}"; then
+    echo >&2
+    echo "${YELLOW}Контейнеры подняты, но не все прошли healthcheck за 5 минут (или не стартовали).${NC}" >&2
+    echo "Смотрите: ${COMPOSE[*]} ps; docker logs --tail 100 <контейнер>" >&2
+    exit 1
+  fi
+
+  local RECREATED=() id
+  for c in "${SERVICES[@]}"; do
+    id=$(docker container inspect -f '{{.Id}}' "$c" 2>/dev/null || true)
+    [[ "$id" != "${ID_BEFORE[$c]}" ]] && RECREATED+=("$c")
+  done
+
+  # Постусловие: все контейнеры на тех ревизиях, которые посчитал build-env.sh.
+  local BAD=()
+  for c in "${API_FAMILY[@]}"; do
+    [[ "$(container_label "$c" "$REV_LABEL")" == "$MATCHECK_API_REV" ]] || BAD+=("$c")
+  done
+  [[ "$(container_label matcheck-web "$REV_LABEL")" == "$MATCHECK_WEB_REV" \
+     && "$(container_label matcheck-web "$CFG_LABEL")" == "$MATCHECK_WEB_CFG" ]] || BAD+=(matcheck-web)
+  if (( ${#BAD[@]} )); then
+    echo "${YELLOW}Контейнеры не на ожидаемой ревизии: ${BAD[*]}${NC}" >&2
+    echo "Повторите ./scripts/deploy.sh; если не поможет — ./scripts/deploy.sh --force" >&2
+    exit 1
+  fi
 
   # ─── Сводка ───
   echo
@@ -130,13 +291,20 @@ main() {
   echo "${BOLD}║                    Сводка деплоя                         ║${NC}"
   echo "${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
 
-  if [[ "$COMMIT_BEFORE" == "$COMMIT_AFTER" ]]; then
+  if (( ! PULL )); then
+    printf "  %s ${GREEN}✓${NC} %s (без pull)\n"      "$(pad 'Git pull')"       "$COMMIT_AFTER"
+  elif [[ "$COMMIT_BEFORE" == "$COMMIT_AFTER" ]]; then
     printf "  %s ${GREEN}✓${NC} %s (без изменений)\n" "$(pad 'Git pull')"       "$COMMIT_AFTER"
   else
     printf "  %s ${GREEN}✓${NC} %s → %s\n"            "$(pad 'Git pull')"       "$COMMIT_BEFORE" "$COMMIT_AFTER"
   fi
 
-  printf "  %s ${GREEN}✓${NC} %s\n"                   "$(pad 'Сборка образов')" "${SERVICES[*]}"
+  if (( ${#BUILT[@]} )); then
+    printf "  %s ${GREEN}✓${NC} %s\n"                 "$(pad 'Сборка образов')" "${BUILT[*]}"
+  else
+    printf "  %s ${GREEN}✓${NC} не требовалась\n"     "$(pad 'Сборка образов')"
+  fi
+  printf "  %s   API %s, портал %s\n" "$(pad '')" "$(short "$MATCHECK_API_REV")" "$(short "$MATCHECK_WEB_REV")"
 
   if (( PENDING_BEFORE == 0 )); then
     printf "  %s ${GREEN}✓${NC} нет новых (всего в БД: %d)\n" "$(pad 'Миграции')" "$APPLIED_AFTER"
@@ -150,7 +318,18 @@ main() {
       "$(pad 'Миграции')" "$PENDING_BEFORE" "$APPLIED_NOW" "$PENDING_AFTER"
   fi
 
-  printf "  %s ${GREEN}✓${NC} %s up\n" "$(pad 'Контейнеры')" "${SERVICES[*]}"
+  if (( WAITED )); then
+    printf "  %s ${GREEN}✓${NC} дождались задания (%s)\n" "$(pad 'Воркер')" "$WORKER_WHY"
+  else
+    printf "  %s ${GREEN}✓${NC} не останавливали\n"        "$(pad 'Воркер')"
+  fi
+
+  if (( ${#RECREATED[@]} )); then
+    printf "  %s ${GREEN}✓${NC} пересозданы: %s\n" "$(pad 'Контейнеры')" "${RECREATED[*]}"
+  else
+    printf "  %s ${GREEN}✓${NC} пересоздавать не понадобилось\n" "$(pad 'Контейнеры')"
+  fi
+  printf "  %s   все up, healthcheck пройден\n" "$(pad '')"
   echo
   echo "${BOLD}${GREEN}  Деплой завершён успешно${NC}"
   echo

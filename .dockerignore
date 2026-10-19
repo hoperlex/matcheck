@@ -1,0 +1,43 @@
+# Контекст сборки образов matcheck (apps/api/Dockerfile, apps/web/Dockerfile).
+#
+# Цель — чтобы в контекст попадало ровно то, что лежит в git. Проверку грязного
+# дерева делает scripts/build-env.sh, но `git status --porcelain` не видит
+# игнорируемые файлы — а без этого списка `COPY apps/api` увёз бы с хоста
+# apps/api/.env (секреты — прямо в рантайм-образ) и хостовые node_modules
+# поверх установленных в deps-стадии.
+#
+# При правке .gitignore сверить: всё игнорируемое внутри apps/ и packages/
+# должно быть исключено и здесь.
+
+# Отпечаток кода теперь передаёт deploy.sh (build-arg BUILD_SHA), .git не нужен.
+.git
+.claude
+.vscode
+.agents
+.idea
+temp
+infra/secrets
+
+# Зеркало .gitignore.
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+**/coverage
+**/.vite
+**/.cache
+**/*.pem
+**/*.crt
+**/*.key
+**/retry-reports
+**/ab-reports
+apps/web/dev-dist
+apps/web/public/sw.js
+apps/web/public/workbox-*.js
+apps/web/public/pwa-*.png
+apps/web/public/apple-touch-icon-*.png
+apps/web/public/maskable-icon-*.png
+apps/web/public/favicon.ico

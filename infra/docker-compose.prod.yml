@@ -7,6 +7,11 @@ networks:
 volumes:
   matcheck-redis-data:
 
+# Один образ на api, worker и mail-worker. Имя задано в одном месте, чтобы три
+# сервиса не могли разойтись по разным тегам: deploy.sh сравнивает ревизию у
+# всех трёх и пересоздаёт их вместе. Собирает его только matcheck-api.
+x-api-image: &api-image matcheck-matcheck-api
+
 services:
   matcheck-redis:
     image: redis:7-alpine
@@ -30,9 +35,15 @@ services:
         max-file: "3"
 
   matcheck-api:
+    image: *api-image
     build:
       context: ..
       dockerfile: apps/api/Dockerfile
+      # Отпечаток кода для /app/BUILD_SHA и метки образа. Значение экспортит
+      # scripts/build-env.sh; `:-`, а не `:?`, потому что compose читает этот
+      # файл и для ps/logs. Без значения упадёт только сборка API.
+      args:
+        BUILD_SHA: "${MATCHECK_API_REV:-}"
     container_name: matcheck-api
     restart: unless-stopped
     env_file:
@@ -64,10 +75,12 @@ services:
     # образ, что и API, но запускает src/worker.ts (BullMQ Worker). Изоляция
     # нужна, чтобы 5–10-минутные LLM-вызовы не блокировали event-loop API
     # и его HTTP healthcheck.
-    build:
-      context: ..
-      dockerfile: apps/api/Dockerfile
-    image: matcheck-matcheck-api
+    #
+    # Своего build: нет намеренно: образ собирает matcheck-api, а сборка того
+    # же тега из второго сервиса перевесила бы его мимо ревизии. never — чтобы
+    # при отсутствии тега compose упал, а не пошёл искать образ в реестре.
+    image: *api-image
+    pull_policy: never
     container_name: matcheck-worker
     restart: unless-stopped
     env_file:
@@ -116,10 +129,10 @@ services:
     # Сам по себе ничего не опрашивает: нужен MAIL_POLL_ENABLED=true в api.env И
     # ящик с включённым poll_enabled. Без них процесс лишь обслуживает ручной
     # запуск «проверить сейчас» из админки.
-    build:
-      context: ..
-      dockerfile: apps/api/Dockerfile
-    image: matcheck-matcheck-api
+    #
+    # Своего build: нет — по той же причине, что у matcheck-worker.
+    image: *api-image
+    pull_policy: never
     container_name: matcheck-mail-worker
     restart: unless-stopped
     env_file:
@@ -154,16 +167,21 @@ services:
         max-file: "5"
 
   matcheck-web:
+    image: matcheck-matcheck-web
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
       # Sentry (опционально): пусто → бандл без Sentry, source maps не грузятся.
-      # Значения экспортит scripts/deploy.sh из /srv/matcheck/secrets/sentry.web.env.
+      # Значения экспортит scripts/build-env.sh из /srv/matcheck/secrets/sentry.web.env.
+      # MATCHECK_REV / MATCHECK_WEB_CFG — ревизия и отпечаток настроек для меток
+      # образа (по ним deploy.sh решает, пересобирать ли портал).
       args:
         VITE_SENTRY_DSN: "${VITE_SENTRY_DSN:-}"
         VITE_SENTRY_RELEASE: "${VITE_SENTRY_RELEASE:-}"
         SENTRY_ORG: "${SENTRY_ORG:-}"
         SENTRY_PROJECT: "${SENTRY_PROJECT:-}"
+        MATCHECK_REV: "${MATCHECK_WEB_REV:-}"
+        MATCHECK_WEB_CFG: "${MATCHECK_WEB_CFG:-}"
       secrets:
         - sentry_auth_token
     container_name: matcheck-web
@@ -185,7 +203,7 @@ services:
         max-file: "3"
 
 # Sentry auth-token для загрузки source maps веба (build-time). Источник —
-# переменная окружения SENTRY_AUTH_TOKEN (экспортит deploy.sh). Пусто → плагин
+# переменная окружения SENTRY_AUTH_TOKEN (экспортит scripts/build-env.sh). Пусто → плагин
 # отключён, секрет в образ не попадает.
 secrets:
   sentry_auth_token:

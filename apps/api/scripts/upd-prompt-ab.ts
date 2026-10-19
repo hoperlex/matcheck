@@ -168,7 +168,8 @@ function sha256(value: string | Buffer): string {
 }
 
 /**
- * Отпечаток кода, вшитый в образ на сборке (см. Dockerfile, build-стадия).
+ * Отпечаток кода, вшитый в образ на сборке (см. apps/api/Dockerfile, конец
+ * runtime-стадии; значение даёт scripts/build-env.sh).
  *
  * Путь считается от самого файла, а не от cwd: скрипт запускают и из корня
  * репозитория, и из /app/apps/api внутри контейнера.
@@ -197,18 +198,30 @@ function imageBuildSha(): string | null {
  * отсутствует вовсе, поэтому `git rev-parse` там всегда падал и отчёт получал
  * `sha: null`. Части, снятые на РАЗНЫХ деплоях, выглядели одинаково
  * «неизвестными» — то есть совместимыми, — и сводились молча. Отпечаток из
- * образа (`BUILD_SHA`) закрывает эту дыру: сборка кладёт его файлом и падает,
- * если дерево грязное.
+ * образа (`BUILD_SHA`) закрывает эту дыру: сборка кладёт его файлом, а
+ * scripts/build-env.sh не даёт собрать грязное дерево.
+ *
+ * Отпечаток — не HEAD, а последний коммит, менявший что-либо вне apps/web:
+ * то же правило, по которому scripts/build-env.sh считает BUILD_SHA образа.
+ * Коммиты в портал код API не меняют, поэтому образ API на них не
+ * пересобирается и хранит прежнюю ревизию. Здесь считаем так же — иначе один и
+ * тот же код дал бы в рабочей копии HEAD, а в образе другой SHA, и части
+ * отчёта ложно не свелись бы. ':/' и ':(top,…)' — пути от корня репозитория,
+ * поэтому результат не зависит от каталога, из которого запущен скрипт.
  */
 function gitRevision(): { sha: string | null; dirty: boolean | null; source: string } {
   try {
-    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const sha = execFileSync(
+      'git',
+      ['log', '-1', '--format=%H', '--', ':/', ':(top,exclude)apps/web'],
+      { encoding: 'utf8' },
+    ).trim();
     const status = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
-    return { sha, dirty: status.length > 0, source: 'git' };
+    return { sha: sha || null, dirty: status.length > 0, source: 'git' };
   } catch {
     // Не рабочая копия — значит контейнер. Отпечаток должен лежать файлом.
     const sha = imageBuildSha();
-    // dirty здесь заведомо false: сборка не даёт собрать грязное дерево.
+    // dirty здесь заведомо false: build-env.sh не даёт собрать грязное дерево.
     return { sha, dirty: sha ? false : null, source: sha ? 'image' : 'нет' };
   }
 }

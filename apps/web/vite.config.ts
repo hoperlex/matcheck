@@ -66,11 +66,16 @@ export default defineConfig({
     // окружении сборки (BuildKit secret), НЕ в бандл и НЕ в репозиторий. Плагин
     // идёт последним. filesToDeleteAfterUpload чистит .map из dist после аплоада,
     // чтобы карты не раздавались nginx (в паре с sourcemap:'hidden').
+    //
+    // Имя релиза задаём явно — тем же значением, что и SDK в браузере
+    // (src/instrument.ts). Сам плагин ищет его через `git rev-parse HEAD`, а git
+    // в образе сборки нет: релиз в Sentry не создавался вовсе.
     sentryVitePlugin({
       org: process.env.SENTRY_ORG,
       project: process.env.SENTRY_PROJECT,
       authToken: process.env.SENTRY_AUTH_TOKEN,
       disable: !process.env.SENTRY_AUTH_TOKEN,
+      release: { name: process.env.VITE_SENTRY_RELEASE || undefined },
       sourcemaps: { filesToDeleteAfterUpload: ['./dist/**/*.map'] },
     }),
   ],

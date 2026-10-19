@@ -175,7 +175,9 @@ chmod 700 /srv/matcheck/secrets
 ```bash
 # [matcheck]
 cd /srv/matcheck/app
-docker compose -f infra/docker-compose.prod.yml build
+# build-env.sh: проверка чистого дерева и ревизии сторон — без них сборка API
+# остановится (см. «Обновление кода скриптом»)
+. scripts/build-env.sh && docker compose -f infra/docker-compose.prod.yml build
 docker compose -f infra/docker-compose.prod.yml up -d
 docker ps --filter 'name=matcheck-' --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 ```
@@ -437,13 +439,33 @@ tail -f /var/log/nginx/matcheck.error.log
 
 ## Обновление кода скриптом
 
-Скрипт `scripts/deploy.sh` — обёртка над универсальной командой ниже. Выполняет те же шаги (`git pull` → `build` → миграции → `up -d --force-recreate`) одной командой и печатает в конце таблицу-сводку: коммит, сборка, сколько миграций применено (`X из Y`) с их тегами, статус контейнеров. Любая ошибка валит деплой и сводка не печатается — точку слома видно сразу.
+Скрипт `scripts/deploy.sh` — обёртка над универсальной командой ниже, но собирает и пересоздаёт только то, что изменилось. Шаги: `git pull` → `scripts/build-env.sh` → решение, что собирать → `build` нужных образов по очереди → миграции (всегда) → ожидание задания воркера, если он будет пересоздан → `up -d --wait`. В конце — таблица-сводка: коммит, что собрано, сколько миграций применено (`X из Y`) с их тегами, ждали ли воркер, какие контейнеры пересозданы. Любая ошибка валит деплой, и сводка не печатается — точку слома видно сразу.
 
 ```bash
 # [matcheck]
 cd /srv/matcheck/app
-./scripts/deploy.sh
+./scripts/deploy.sh            # обычный деплой
+./scripts/deploy.sh --plan     # git pull и показать решение; ничего не собирать и не трогать
+./scripts/deploy.sh --force    # собрать обе стороны и пересоздать все контейнеры
+./scripts/deploy.sh --no-pull  # деплой текущего HEAD без git pull (откат через checkout, применить api.env)
 ```
+
+**Как скрипт решает, что собирать.** У каждой стороны есть ревизия — последний коммит, менявший что-либо, *кроме* другого приложения (`scripts/build-env.sh`). Она вшита в образ меткой `org.opencontainers.image.revision` (у API — ещё и файлом `/app/BUILD_SHA`). Сторону собираем, если метка хоть одного её контейнера отличается от ревизии или контейнера нет. Сравнение идёт с *запущенным*, поэтому повтор после упавшего деплоя доделывает работу сам. Правило исключающее: любая правка вне `apps/*` меняет обе ревизии, и ошибиться оно может только в сторону лишней сборки.
+
+Пересоздаёт контейнеры compose — только те, у которых сменился образ под тегом или конфигурация (compose-файл, **содержимое `api.env`**), и остановленные. Миграции идут на каждом деплое. Поэтому даже ошибка в решении «что собирать» не оставит прод на старом коде.
+
+| В pull пришло / что изменилось | Сборка | Воркер | Пересоздаются |
+|---|---|---|---|
+| только `apps/web/**` | портал | не трогаем | `matcheck-web` |
+| только `apps/api/**` | API | ждём задание (до 10 мин) | api, worker, mail-worker |
+| `packages/contracts`, lockfile, корневые манифесты, compose, docs, scripts | обе стороны | ждём | все |
+| ничего (повтор) | нет | не трогаем | ничего |
+| правка `/srv/matcheck/secrets/api.env` | нет | ждём | api, worker, mail-worker |
+| правка или удаление `/srv/matcheck/secrets/sentry.web.env` | портал | не трогаем | `matcheck-web` |
+
+`--force` пересобирает с обычным кэшем сборки — это **не** `build --no-cache`. `--wait` ждёт healthcheck у `matcheck-api` и `matcheck-web`; у воркеров healthcheck нет, для них проверяется только «запущен». Smoke-curl остаются ручными.
+
+Если в pull приходит правка самого `deploy.sh` или `build-env.sh`, выполняется **старая** версия: bash уже прочитал скрипт. Для таких коммитов: `git pull --ff-only && ./scripts/deploy.sh`.
 
 Скрипт **не делает** действия, которые остаются ручными: снэпшот PG в YC Console перед миграциями, `nginx -t && systemctl reload nginx` под root, проверку соседних сайтов по baseline, финальные smoke-curl-ы. Они выполняются как и раньше — см. блоки ниже.
 
@@ -462,8 +484,9 @@ git log --oneline -1   # фиксируем коммит для журнала �
 # (Опционально, рекомендуется перед миграциями)
 # Снэпшот PG: YC Console → Managed PostgreSQL → кластер → Резервные копии → Создать копию
 
-# Сборка образов (deps кэшируются; пересобирается build-стадия + слой COPY apps/api)
-docker compose -f infra/docker-compose.prod.yml build matcheck-api matcheck-web
+# Сборка образов (кэшируется всё, чьи входы не менялись). build-env.sh проверяет
+# чистое дерево и экспортирует ревизии — без них сборка API остановится.
+. scripts/build-env.sh && docker compose -f infra/docker-compose.prod.yml build matcheck-api matcheck-web
 
 # Журнал миграций ДО — фиксируем точку отсчёта (read-only, в БД ничего не меняет)
 docker compose -f infra/docker-compose.prod.yml \
@@ -478,8 +501,13 @@ docker compose -f infra/docker-compose.prod.yml \
 docker compose -f infra/docker-compose.prod.yml \
   run --rm matcheck-api node_modules/.bin/tsx scripts/migrations-status.ts
 
-# Пересоздание контейнеров — подхватывает новый образ, compose и api.env
-docker compose -f infra/docker-compose.prod.yml up -d --force-recreate matcheck-api matcheck-web
+# Воркер — отдельно, с ожиданием текущего задания распознавания (до 10 минут)
+docker compose -f infra/docker-compose.prod.yml stop -t 600 matcheck-worker
+
+# Пересоздание контейнеров — подхватывает новый образ, compose и api.env.
+# matcheck-mail-worker добавить в список, если он создан.
+docker compose -f infra/docker-compose.prod.yml up -d --force-recreate \
+  matcheck-api matcheck-worker matcheck-web
 ```
 
 Шаг `migrations-status.ts` — read-only: печатает таблицу `id | tag | applied_at` из `drizzle.__drizzle_migrations` с тегами из `apps/api/src/db/migrations/meta/_journal.json`. Сравните выводы «ДО» и «ПОСЛЕ» — добавленные строки в конце второй таблицы это миграции, применённые этим деплоем; совпали — новых миграций не было. В конце каждой таблицы — итог `[migrations] applied: N / journal: M / pending: K`; если `pending > 0`, рядом строка `[migrations] pending tags: …`.
@@ -512,9 +540,9 @@ curl -fsSI https://matcheck.fvds.ru/ | head -3
 
 | Изменение в коммите | Подхватывается чем |
 |---|---|
-| `apps/api/**`, `apps/web/**`, `packages/contracts/**` | `build` + `up -d --force-recreate matcheck-api matcheck-web` |
+| `apps/api/**`, `apps/web/**`, `packages/contracts/**` | `build` + `up -d --force-recreate matcheck-api matcheck-worker matcheck-web` |
 | Миграции в `apps/api/src/db/migrations/**` | шаг `scripts/migrate.ts` |
-| `infra/docker-compose.prod.yml` (для api/web) | `up -d --force-recreate matcheck-api matcheck-web` |
+| `infra/docker-compose.prod.yml` (для api/worker/web) | `up -d --force-recreate matcheck-api matcheck-worker matcheck-web` |
 | `infra/nginx/matcheck.fvds.ru.conf` | симлинк `sites-available` → репо + `nginx -t && systemctl reload nginx` |
 
 Что **НЕ** покрывает (требует отдельных шагов):
@@ -530,10 +558,10 @@ curl -fsSI https://matcheck.fvds.ru/ | head -3
 ```bash
 # [matcheck]
 nano /srv/matcheck/secrets/api.env
-docker compose -f /srv/matcheck/app/infra/docker-compose.prod.yml up -d --force-recreate matcheck-api
+cd /srv/matcheck/app && ./scripts/deploy.sh --no-pull
 ```
 
-`--force-recreate` гарантирует, что контейнер перечитает env при старте (без него compose оставил бы старый).
+`api.env` читают все три контейнера образа API — `matcheck-api`, `matcheck-worker` и `matcheck-mail-worker`. Содержимое `env_file` входит в config-hash compose, поэтому `deploy.sh` видит правку сам: ничего не собирает, дожидается текущего задания воркера и пересоздаёт эти три контейнера (проверено на compose 5.5.1 на adm1; на проде сверить версию). Раньше здесь стоял `up -d --force-recreate matcheck-api`, и воркеры оставались на старых значениях.
 
 ### При обновлении только `infra/docker-compose.prod.yml`
 
@@ -544,7 +572,7 @@ git pull
 docker compose -f infra/docker-compose.prod.yml up -d   # автоматически применяет изменения compose
 ```
 
-Если изменения касаются только api/web — проще запустить полную универсальную команду выше, она и так делает `--force-recreate matcheck-api matcheck-web`.
+Проще и безопаснее — `./scripts/deploy.sh`: он дождётся задания воркера, если compose будет его пересоздавать. Голый `up -d` пересоздаёт воркер с `stop_grace_period: 10m`, то есть тоже дожидается задания, но молча.
 
 ### Ручная перевыдача TLS-сертификата
 
@@ -560,14 +588,42 @@ certbot renew --force-renewal --cert-name matcheck.fvds.ru
 
 ### Откат кода
 
+**Предпочтительно — `git revert`** плохого коммита на main и пуш, затем на хосте:
+
 ```bash
 # [matcheck]
 cd /srv/matcheck/app
-git log --oneline -10                                       # найти предыдущий рабочий коммит
-git checkout <prev-sha>                                     # или: git reset --hard <prev-sha>
-docker compose -f infra/docker-compose.prod.yml build matcheck-api
-docker compose -f infra/docker-compose.prod.yml up -d --force-recreate matcheck-api
+git pull --ff-only && ./scripts/deploy.sh
 ```
+
+Именно в таком порядке: сначала pull, потом скрипт. Тогда выполняется версия `deploy.sh` из откатного коммита, согласованная с его Dockerfile.
+
+**Быстрый откат через checkout** (без коммита) — на коммит, где `deploy.sh` уже знает `--no-pull`:
+
+```bash
+# [matcheck]
+cd /srv/matcheck/app
+git log --oneline -10                     # найти предыдущий рабочий коммит
+git checkout <prev-sha>
+./scripts/deploy.sh --no-pull             # api, worker, mail-worker и web — на <prev-sha>
+# вернуться на main, когда починят:
+git checkout main && ./scripts/deploy.sh
+```
+
+Если `<prev-sha>` старше перехода на сборку по ревизиям (в его `scripts/` нет `build-env.sh`), старый `deploy.sh` в detached HEAD упадёт на `git pull`. Тогда вручную, командами того коммита:
+
+```bash
+# [matcheck]
+git checkout <prev-sha>
+docker compose -f infra/docker-compose.prod.yml build matcheck-api matcheck-web
+docker compose -f infra/docker-compose.prod.yml run --rm matcheck-api node_modules/.bin/tsx scripts/migrations-status.ts
+docker compose -f infra/docker-compose.prod.yml run --rm matcheck-api node_modules/.bin/tsx scripts/migrate.ts
+docker compose -f infra/docker-compose.prod.yml stop -t 600 matcheck-worker
+docker compose -f infra/docker-compose.prod.yml up -d --force-recreate matcheck-api matcheck-worker matcheck-web
+# + matcheck-mail-worker, если он создан
+```
+
+Миграции при откате кода не откатываются — схема БД остаётся новой (см. «Откат БД»).
 
 ### Откат БД (после плохой миграции)
 
@@ -598,7 +654,7 @@ nginx -t && systemctl reload nginx
 
 ### `Cannot find module '/app/dist/index.js'` или `Cannot find package 'fastify'` в docker logs
 
-Старая болезнь runtime-образа без tsx. Текущий Dockerfile запускает api **через `tsx`** напрямую из TypeScript-источников (`apps/api/src/index.ts`), и `dist/` не используется. Если образ старый — `docker compose build --no-cache matcheck-api`.
+Старая болезнь runtime-образа без tsx. Текущий Dockerfile запускает api **через `tsx`** напрямую из TypeScript-источников (`apps/api/src/index.ts`), и `dist/` не используется. Если образ старый — `./scripts/deploy.sh --force` (пересборка с обычным кэшем и пересоздание всех контейнеров). Это **не** сброс кэша: `build --no-cache` — только при подозрении на испорченный кэш и осознанно, он заново ставит слой с LibreOffice (около часа).
 
 ### `self-signed certificate in certificate chain` при подключении к PG
 
@@ -688,6 +744,8 @@ diff /root/nginx-checksums-pre-matcheck.txt \
 - Регистрация `matcheck.fvds.ru` в UI ISPmanager (ISP начнёт генерить свой vhost и конфликтовать).
 - Публикация портов matcheck на `0.0.0.0` или `185.200.179.0` (только `127.0.0.1`).
 - `docker {network,volume,system} prune` без жёстких `--filter`.
+- `docker builder prune`, `docker compose build --no-cache` без крайней нужды, `build --pull`, `docker pull node:22-alpine`, правка строки `apk add` в `apps/api/Dockerfile`: всё это сбрасывает кэшированный слой с LibreOffice, и следующая сборка API ставит его с Alpine CDN около часа (`system prune` тоже чистит build-кэш).
+- Ручная сборка без `. scripts/build-env.sh` — сборка API остановится сама; подставлять `BUILD_SHA` руками нельзя: образ получит отпечаток мимо проверки чистого дерева.
 - Активация UFW / правка iptables.
 - `systemctl restart nginx` — только `reload`.
 

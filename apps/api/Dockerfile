@@ -15,33 +15,16 @@ COPY --from=deps /repo/node_modules ./node_modules
 COPY --from=deps /repo/apps/api/node_modules ./apps/api/node_modules
 COPY --from=deps /repo/apps/web/node_modules ./apps/web/node_modules
 COPY --from=deps /repo/packages/contracts/node_modules ./packages/contracts/node_modules
-COPY . .
-# Отпечаток кода, вшитый в образ.
+# Копируем только входы API, а не весь репозиторий.
 #
-# Зачем. Скрипты сверки промптов (scripts/upd-prompt-ab.ts) пишут в отчёт
-# ревизию, на которой он снят, и отказываются сводить части, снятые на разном
-# коде. В runtime-стадию `.git` не попадает — она копирует только apps/api и
-# packages/contracts, — поэтому `git rev-parse` там возвращает null, и все
-# прод-отчёты выглядели одинаково «неизвестными», то есть совместимыми между
-# собой. Фиксируем SHA здесь, файлом.
-#
-# Сборка ПАДАЕТ на грязном рабочем дереве. Образ с незакоммиченными правками,
-# помеченный SHA чистого коммита, хуже отсутствия отпечатка: отчёт уверенно
-# назовёт не тот код, и расхождение будут искать в промпте.
-#
-# git ставится только в build-стадии и в финальный образ не уезжает.
-RUN apk add --no-cache git \
- && git config --global --add safe.directory /repo \
- && if [ ! -d .git ]; then \
-      echo 'СБОРКА ОСТАНОВЛЕНА: в контексте нет .git, отпечаток кода взять неоткуда' >&2; \
-      exit 1; \
-    fi \
- && if [ -n "$(git status --porcelain)" ]; then \
-      echo 'СБОРКА ОСТАНОВЛЕНА: рабочее дерево грязное, отпечаток был бы неверным:' >&2; \
-      git status --porcelain >&2; \
-      exit 1; \
-    fi \
- && git rev-parse HEAD > /repo/BUILD_SHA
+# Тогда коммит в портал не меняет ни один слой этого образа, и сборка API на
+# нём целиком берётся из кэша. На этом же держится правило ревизии в
+# scripts/build-env.sh: «API_REV — последний коммит вне apps/web». Поэтому из
+# apps/web сюда ничего копировать нельзя (кроме package.json в deps-стадии —
+# он нужен install'у workspace, а зависимости и так фиксирует lockfile).
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json .npmrc ./
+COPY packages/contracts ./packages/contracts
+COPY apps/api ./apps/api
 RUN pnpm --filter @matcheck/contracts typecheck \
  && pnpm --filter @matcheck/api typecheck
 
@@ -71,6 +54,12 @@ ENV NODE_ENV=production
 # фотография в webp разворачивала пакет обратно в «файл = документ». Формат
 # приходит с телефонов и мессенджеров сам собой, поэтому это не экзотика.
 # Вызов — domain/edo/page-render.ts, imageToPng.
+#
+# Эту строку НЕ ПРАВИТЬ. Слой весит больше гигабайта и на промахе кэша
+# ставится с Alpine CDN около часа. Его ключ — базовый образ плюс текст
+# команды, так что любая правка здесь (даже порядка пакетов), `--no-cache`,
+# `--pull` или `docker pull node:22-alpine` означают этот час. Новый пакет —
+# отдельным `RUN apk add` ниже.
 RUN apk add --no-cache tini poppler-utils libreoffice font-noto tesseract-ocr tesseract-ocr-data-osd libwebp-tools libheif-tools && corepack enable && corepack prepare pnpm@9.12.0 --activate
 # Сохраняем pnpm-структуру монорепо, чтобы workspace-symlinks (@matcheck/contracts) и
 # .pnpm-symlinks (fastify, drizzle и пр.) корректно резолвились в runtime.
@@ -78,8 +67,34 @@ COPY --from=build /repo/package.json /repo/pnpm-workspace.yaml /repo/tsconfig.ba
 COPY --from=build /repo/node_modules ./node_modules
 COPY --from=build /repo/apps/api ./apps/api
 COPY --from=build /repo/packages/contracts ./packages/contracts
-# Отпечаток кода для скриптов сверки промптов (см. build-стадию выше).
-COPY --from=build /repo/BUILD_SHA ./BUILD_SHA
+# Отпечаток кода, вшитый в образ.
+#
+# Зачем. Скрипты сверки промптов (scripts/upd-prompt-ab.ts) пишут в отчёт
+# ревизию, на которой он снят, и отказываются сводить части, снятые на разном
+# коде. В образе `.git` нет, поэтому `git rev-parse` там возвращает null, и все
+# прод-отчёты выглядели одинаково «неизвестными», то есть совместимыми между
+# собой. Фиксируем ревизию здесь, файлом.
+#
+# Значение даёт scripts/build-env.sh: последний коммит, менявший что-либо вне
+# apps/web. Содержимое всех входов этого образа в нём совпадает с HEAD, поэтому
+# отпечаток честный — и не меняется от коммитов в портал, так что этот слой не
+# ломает кэш. Тот же скрипт не начинает сборку на грязном дереве: образ с
+# незакоммиченными правками, помеченный SHA чистого коммита, хуже отсутствия
+# отпечатка.
+#
+# Метка с тем же значением нужна deploy.sh: по ней он видит, на какой ревизии
+# запущен контейнер, и не собирает API, если она не изменилась.
+#
+# Слой стоит последним и обязан оставаться ПОСЛЕ apk add: ARG выше попал бы в
+# ключ кэша слоя с LibreOffice.
+ARG BUILD_SHA
+LABEL org.opencontainers.image.revision=$BUILD_SHA
+RUN if ! printf '%s' "$BUILD_SHA" | grep -qxE '[0-9a-f]{40}'; then \
+      echo 'СБОРКА ОСТАНОВЛЕНА: не передан BUILD_SHA (40 hex) — собирайте через scripts/deploy.sh' >&2; \
+      echo 'или вручную после `. scripts/build-env.sh` (см. docs/DEPLOY.md).' >&2; \
+      exit 1; \
+    fi \
+ && printf '%s\n' "$BUILD_SHA" > /app/BUILD_SHA
 # tsx запускает TypeScript-источники напрямую: tsc-сборка не делается, потому что
 # @matcheck/contracts имеет main: ./src/index.ts (без отдельного dist).
 WORKDIR /app/apps/api
