@@ -13,11 +13,16 @@
  * документ получал 4 позиции вместо 2 и удвоенный итог. На боевых данных так
  * раздулись 11 документов из 28 склеек.
  *
- * Поэтому строки сопоставляются один-к-одному: сначала по напечатанному в
- * бланке номеру позиции, затем по (количество, сумма, цена, единица) с
- * нормализованным наименованием, а на расхождениях OCR — по сходству имени при
- * совпавших до копейки числах. Там, где сопоставление неоднозначно, строки НЕ
- * схлопываются: лишняя строка видна менеджеру, потерянная — нет.
+ * Поэтому строки сопоставляются один-к-одному: по (количество, сумма, цена,
+ * единица) с нормализованным наименованием, а на расхождениях OCR — по сходству
+ * имени при совпавших до копейки числах. Там, где сопоставление неоднозначно,
+ * строки НЕ схлопываются: лишняя строка видна менеджеру, потерянная — нет.
+ *
+ * У экземпляров, где у каждой строки есть свой напечатанный номер позиции,
+ * первым идёт номер (`copyByRowNo`, рубильник UPD_ASSEMBLY_COPY_BY_ROW_NO).
+ * Без него на УПД без цен с десятками почти одинаковых строк («Окно … \1»,
+ * «Окно … \2») у каждой строки находилось по десятку кандидатов, все считались
+ * неоднозначными и все дописывались: 66 позиций превращались в 130.
  */
 import { levenshteinDistance } from '../sourceDocuments/supplierMatcher.js';
 
@@ -76,7 +81,7 @@ export type AssemblyMergeAction = {
   /** true — все сегменты содержат один и тот же набор строк (копии страниц). */
   identicalItems: boolean;
   relation: AssemblyMergeRelation;
-  /** Человекочитаемые причины решения — уходят в лог worker'а. */
+  /** Человекочитаемые причины решения по каждому экземпляру группы. */
   reasons: string[];
   /**
    * Документы, присоединённые relaxed-проходом (совпали поставщик, номер и
@@ -303,6 +308,16 @@ function hasAllRowNos(items: AssemblyMergeItem[]): boolean {
 }
 
 /**
+ * Годятся ли номера позиций как ключ сопоставления: есть у всех строк и не
+ * повторяются. Повтор номера внутри одного экземпляра значит, что модель
+ * нумеровала по-своему (подпозиции «1а», сбой чтения графы), и опираться на
+ * такой номер нельзя.
+ */
+function rowNosUsable(items: AssemblyMergeItem[]): boolean {
+  return hasAllRowNos(items) && new Set(items.map((i) => i.rowNo!)).size === items.length;
+}
+
+/**
  * Копии это или части.
  *
  * Порядок признаков — по убыванию надёжности:
@@ -397,9 +412,15 @@ export function planAssemblyDocumentMergesLegacy(
  * Группирует только документы с полной и строго совпавшей тройкой
  * (supplier_directory_id, doc_number, doc_date). Входной порядок каноничен:
  * первым должен идти самый ранний segment_index — он и становится keeper.
+ *
+ * `copyByRowNo` — экземпляр, признанный копией по напечатанным номерам, отдаёт
+ * только строки с номерами, которых в документе ещё нет. Действует, лишь когда
+ * номера годятся как ключ и у keeper, и у экземпляра (`rowNosUsable`); иначе —
+ * прежнее сопоставление по числам и наименованию. Без опции поведение прежнее.
  */
 export function planAssemblyDocumentMerges(
   documents: AssemblyMergeDocument[],
+  options: { copyByRowNo?: boolean } = {},
 ): AssemblyMergeAction[] {
   const groups = new Map<string, AssemblyMergeDocument[]>();
   for (const doc of documents) {
@@ -418,16 +439,35 @@ export function planAssemblyDocumentMerges(
     // Строки keeper остаются всегда: это первый сегмент по порядку страниц.
     const itemIds = keeper.items.map((i) => i.id);
     const relations: AssemblyMergeRelation[] = [];
+    const byRowNo = options.copyByRowNo === true && rowNosUsable(keeper.items);
+    // Номера, которые в документе уже есть: у keeper и дописанные из
+    // предыдущих экземпляров. Без второго слагаемого третий экземпляр
+    // повторил бы строки, которыми второй дополнил обрезанный keeper.
+    const coveredRowNos = new Set<number>(byRowNo ? keeper.items.map((i) => i.rowNo!) : []);
 
     for (const other of group.slice(1)) {
       const pairs = pairAssemblyItems(keeper.items, other.items);
       const { relation, reason } = classifyAssemblyPair(keeper, other, pairs);
       relations.push(relation);
+      if (byRowNo && relation === 'copies' && rowNosUsable(other.items)) {
+        // Копия той же УПД: строка с уже известным номером — та же позиция,
+        // как бы по-разному ни прочитались её числа и наименование. Дописываем
+        // только номера, которых нет: их потерял обрезанный экземпляр.
+        reasons.push(`${other.id}: ${relation} — ${reason}; строки по номеру позиции`);
+        for (const item of other.items) {
+          if (coveredRowNos.has(item.rowNo!)) continue;
+          coveredRowNos.add(item.rowNo!);
+          itemIds.push(item.id);
+        }
+        continue;
+      }
       reasons.push(`${other.id}: ${relation} — ${reason}`);
       // Дописываем только то, чему не нашлось пары. Так уходит задвоение
       // второго экземпляра и остаётся строка, которую один из сканов потерял.
       for (const item of other.items) {
-        if (!pairs.matched.has(item.id)) itemIds.push(item.id);
+        if (pairs.matched.has(item.id)) continue;
+        itemIds.push(item.id);
+        if (byRowNo && item.rowNo != null) coveredRowNos.add(item.rowNo);
       }
     }
 
@@ -452,4 +492,65 @@ export function planAssemblyDocumentMerges(
     });
   }
   return actions;
+}
+
+/** Итог склейки одной группы по прежнему правилу и по номеру позиции. */
+export type CopyByRowNoGroup = {
+  keeperId: string;
+  droppedDocumentIds: string[];
+  relation: AssemblyMergeRelation;
+  /** Строк в документе после склейки. */
+  itemsBefore: number;
+  itemsAfter: number;
+  /**
+   * Строк, чей номер позиции в документе уже встречался, — признак того, что
+   * экземпляр дописал позицию второй раз.
+   */
+  repeatedRowNosBefore: number;
+  repeatedRowNosAfter: number;
+  reasons: string[];
+};
+
+function repeatedRowNos(itemIds: string[], rowNoById: Map<string, number | null>): number {
+  const seen = new Set<number>();
+  let repeated = 0;
+  for (const id of itemIds) {
+    const rowNo = rowNoById.get(id);
+    if (rowNo == null) continue;
+    if (seen.has(rowNo)) repeated++;
+    else seen.add(rowNo);
+  }
+  return repeated;
+}
+
+/**
+ * Сравнение для улики `assembly_copy_merge`: что дала склейка по прежнему
+ * правилу и что дала бы по номеру позиции. В shadow это единственный результат
+ * нового правила; по нему решается, включать ли его.
+ *
+ * Группы сопоставляются по keeper: группировка от правила не зависит.
+ */
+export function compareCopyByRowNo(
+  documents: AssemblyMergeDocument[],
+  before: AssemblyMergeAction[],
+  after: AssemblyMergeAction[],
+): CopyByRowNoGroup[] {
+  const rowNoById = new Map<string, number | null>();
+  for (const doc of documents) {
+    for (const item of doc.items) rowNoById.set(item.id, item.rowNo ?? null);
+  }
+  const afterByKeeper = new Map(after.map((action) => [action.keeperId, action]));
+  return before.map((action) => {
+    const next = afterByKeeper.get(action.keeperId) ?? action;
+    return {
+      keeperId: action.keeperId,
+      droppedDocumentIds: action.droppedDocumentIds,
+      relation: action.relation,
+      itemsBefore: action.itemIds.length,
+      itemsAfter: next.itemIds.length,
+      repeatedRowNosBefore: repeatedRowNos(action.itemIds, rowNoById),
+      repeatedRowNosAfter: repeatedRowNos(next.itemIds, rowNoById),
+      reasons: next.reasons,
+    };
+  });
 }

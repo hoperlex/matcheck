@@ -36,7 +36,10 @@ const sql = TEST_DATABASE_URL ? postgres(TEST_DATABASE_URL, { max: 4 }) : null;
 // Режим relaxed-прохода меняется внутри теста: только так «off» и «on»
 // сравниваются на одном и том же входе. vi.hoisted — потому что vi.mock
 // поднимается выше объявлений.
-const flags = vi.hoisted(() => ({ relaxed: 'off' as 'off' | 'shadow' | 'on' }));
+const flags = vi.hoisted(() => ({
+  relaxed: 'off' as 'off' | 'shadow' | 'on',
+  copyByRowNo: 'off' as 'off' | 'shadow' | 'on',
+}));
 
 vi.mock('../../src/lib/env.js', async (importOriginal) => {
   const actual = await importOriginal<typeof EnvModule>();
@@ -49,6 +52,7 @@ vi.mock('../../src/lib/env.js', async (importOriginal) => {
       // описывает поведение, ради которого рубильник и заводился.
       UPD_ASSEMBLY_COPY_DEDUP_V1: true,
       UPD_ASSEMBLY_RELAXED_COPY: flags.relaxed,
+      UPD_ASSEMBLY_COPY_BY_ROW_NO: flags.copyByRowNo,
     }),
   };
 });
@@ -201,6 +205,7 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
     classifyPages.mockReset();
     extractUpdSegment.mockReset();
     flags.relaxed = 'off';
+    flags.copyByRowNo = 'off';
   });
 
   /**
@@ -962,5 +967,106 @@ suite('сборка логических УПД (реальный PostgreSQL)', 
 
     const published = (await docsOf()).filter((doc) => !doc.is_technical);
     expect(published).toHaveLength(2);
+  });
+
+  /**
+   * Экземпляр боевой УПД № 5146 (19.10): без цен, строки «Окно …» отличаются
+   * только хвостом номера заказа. `rows` строк, номера 1..rows.
+   */
+  function windowsCopy(rows: number) {
+    return {
+      parsed: {
+        docNumber: '5146',
+        docDate: '2026-10-17',
+        totalSum: null,
+        vatSum: null,
+        supplier: { name: 'ООО Поставщик', inn: '7743429410' },
+        recipient: { name: 'ООО СУ-10', inn: '7736255508' },
+        items: Array.from({ length: rows }, (_, i) => ({
+          rowNo: i + 1,
+          nameRaw: `Окно Rehau Original Intelio (Фурнитура Рехау Dynamics Basic) (WDW02194800\\${i + 1})`,
+          qty: 1,
+          unit: 'шт',
+          price: null,
+          sum: null,
+        })),
+        confidence: 0.9,
+      },
+      llmProviderId: null as string | null,
+    };
+  }
+
+  /** Пакет из двух экземпляров одной УПД без цен; id корневого пакета. */
+  async function twoWindowCopies(): Promise<string> {
+    const bundleId = await publicBundle(['1.jpg', '2.jpg']);
+    pagesAre('upd_main', 'upd_main');
+    extractUpdSegment
+      .mockResolvedValueOnce(windowsCopy(20))
+      .mockResolvedValueOnce(windowsCopy(20));
+    await handleDocumentRouterJob(bundleId, log);
+    const [sub] = await db<{ id: string }[]>`
+      SELECT id FROM source_bundles WHERE parent_bundle_id = ${bundleId}`;
+    await handleUpdAssemblyJob(sub!.id, 0, log);
+    await runSegmentJobs(bundleId);
+    return bundleId;
+  }
+
+  const rowNosOf = async (docId: string) =>
+    (
+      await db<{ row_no: number | null }[]>`
+        SELECT row_no FROM source_document_items
+         WHERE source_document_id = ${docId} ORDER BY line_no`
+    ).map((r) => r.row_no);
+
+  const copyMergeEvidence = (bundleId: string) => db<{ payload: Record<string, unknown> }[]>`
+    SELECT payload FROM recognition_evidence_events
+     WHERE bundle_id = ${bundleId} AND evidence_type = 'assembly_copy_merge'`;
+
+  it('копии без цен, off — экземпляр дописывается целиком (сегодняшнее поведение)', async () => {
+    // Характеризационный тест: фиксирует дефект № 5146 и обещание «выключенный
+    // рубильник ничего не меняет». Улики при off нет.
+    flags.copyByRowNo = 'off';
+    const bundleId = await twoWindowCopies();
+
+    const published = (await docsOf()).filter((doc) => !doc.is_technical);
+    expect(published).toHaveLength(1);
+    expect(await rowNosOf(published[0]!.id)).toHaveLength(40);
+    expect(await copyMergeEvidence(bundleId)).toHaveLength(0);
+  });
+
+  it('копии без цен, on — одна строка на номер позиции, нумерация сходится', async () => {
+    flags.copyByRowNo = 'on';
+    const bundleId = await twoWindowCopies();
+
+    const published = (await docsOf()).filter((doc) => !doc.is_technical);
+    expect(published).toHaveLength(1);
+    expect(await rowNosOf(published[0]!.id)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+
+    const [header] = await db<{ status: string; validation: { checks: Array<{ name: string; ok: boolean }> } }[]>`
+      SELECT status, validation FROM source_documents WHERE id = ${published[0]!.id}`;
+    expect(header!.status).toBe('parsed');
+    expect(header!.validation.checks.find((c) => c.name === 'items_sequence')?.ok).toBe(true);
+
+    const [evidence] = await copyMergeEvidence(bundleId);
+    expect(evidence!.payload).toMatchObject({
+      mode: 'on',
+      applied: true,
+      groups: [{ itemsBefore: 40, itemsAfter: 20, repeatedRowNosBefore: 20, repeatedRowNosAfter: 0 }],
+    });
+  });
+
+  it('копии без цен, shadow — состав прежний, разница записана в улику', async () => {
+    flags.copyByRowNo = 'shadow';
+    const bundleId = await twoWindowCopies();
+
+    const published = (await docsOf()).filter((doc) => !doc.is_technical);
+    expect(await rowNosOf(published[0]!.id)).toHaveLength(40);
+
+    const [evidence] = await copyMergeEvidence(bundleId);
+    expect(evidence!.payload).toMatchObject({
+      mode: 'shadow',
+      applied: false,
+      groups: [{ relation: 'copies', itemsBefore: 40, itemsAfter: 20, repeatedRowNosAfter: 0 }],
+    });
   });
 });

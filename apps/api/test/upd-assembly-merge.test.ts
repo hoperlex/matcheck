@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  compareCopyByRowNo,
   dedupeAssemblyItems,
   planAssemblyDocumentMerges,
   planAssemblyDocumentMergesLegacy,
@@ -251,5 +252,131 @@ describe('схлопывание задвоенных строк внутри д
     ]);
     expect(keep.map((i) => i.id)).toEqual(['a1', 'a2']);
     expect(drop).toEqual([]);
+  });
+});
+
+describe('копии по номеру позиции (copyByRowNo)', () => {
+  // Форма № 5146 (19.10): УПД без цен, 66 строк. 64 из них — «Окно Rehau …»,
+  // различаются только хвостом номера заказа; строки 62 и 63 — единственные
+  // непохожие. Оба экземпляра (с печатью и без) прочитаны полностью.
+  const windows = (prefix: string): AssemblyMergeDocument['items'] =>
+    Array.from({ length: 66 }, (_, i) => {
+      const rowNo = i + 1;
+      if (rowNo === 62) return item(`${prefix}${rowNo}`, 'Соединительный профиль Н-образный', '24', null, { rowNo, unit: 'шт' });
+      if (rowNo === 63) return item(`${prefix}${rowNo}`, 'Упаковка (WDW02194800\\66)', '1', null, { rowNo, unit: 'шт' });
+      return item(
+        `${prefix}${rowNo}`,
+        `Окно Rehau Original Intelio (Фурнитура Рехау Dynamics Basic) (WDW02194800\\${rowNo})`,
+        '1',
+        null,
+        { rowNo, unit: 'шт' },
+      );
+    });
+  const pair = () => [base('stamp', windows('a')), base('plain', windows('b'))];
+
+  it('без рубильника экземпляр дописывается целиком — характеризация дефекта', () => {
+    const [action] = planAssemblyDocumentMerges(pair());
+    expect(action?.relation).toBe('copies');
+    expect(action?.itemIds).toHaveLength(130);
+  });
+
+  it('с рубильником остаётся одна строка на номер позиции', () => {
+    const [action] = planAssemblyDocumentMerges(pair(), { copyByRowNo: true });
+    expect(action?.relation).toBe('copies');
+    expect(action?.itemIds).toEqual(windows('a').map((i) => i.id));
+    expect(action?.reasons[0]).toMatch(/строки по номеру позиции/);
+  });
+
+  it('расхождение OCR в числах при том же номере не даёт второй строки', () => {
+    const docs = () => [
+      base('stamp', [
+        item('a1', 'Кабель ВВГнг 3х1,5', '100', '5000.00', { rowNo: 1, price: '50.00' }),
+        item('a2', 'Лоток 100х50', '10', '3000.00', { rowNo: 2, price: '300.00' }),
+      ]),
+      base('plain', [
+        item('b1', 'Кабель ВВГнг 3х1,5', '100', '5000.00', { rowNo: 1, price: '50.00' }),
+        item('b2', 'Лоток 100х50', '10', '3800.00', { rowNo: 2, price: '380.00' }),
+      ]),
+    ];
+    expect(planAssemblyDocumentMerges(docs())[0]?.itemIds).toEqual(['a1', 'a2', 'b2']);
+    expect(planAssemblyDocumentMerges(docs(), { copyByRowNo: true })[0]?.itemIds).toEqual([
+      'a1',
+      'a2',
+    ]);
+  });
+
+  it('обрезанный экземпляр дополняется недостающими номерами без повторов', () => {
+    // Первый ответ модели по одному экземпляру: строки 1, 62, 63.
+    const full = windows('b');
+    const truncated = windows('a').filter((i) => [1, 62, 63].includes(i.rowNo!));
+    const [action] = planAssemblyDocumentMerges([base('stamp', truncated), base('plain', full)], {
+      copyByRowNo: true,
+    });
+    expect(action?.itemIds).toHaveLength(66);
+    expect(action?.itemIds.slice(0, 3)).toEqual(['a1', 'a62', 'a63']);
+    expect(action?.itemIds).not.toContain('b1');
+    expect(action?.itemIds).toContain('b2');
+  });
+
+  it('третий экземпляр не повторяет то, чем второй дополнил keeper', () => {
+    const rows = (prefix: string, nos: number[]) =>
+      nos.map((n) => item(`${prefix}${n}`, `Позиция ${n}`, '1', null, { rowNo: n }));
+    const [action] = planAssemblyDocumentMerges(
+      [base('k', rows('a', [1, 2])), base('c1', rows('b', [1, 2, 3, 4])), base('c2', rows('c', [1, 2, 3, 4]))],
+      { copyByRowNo: true },
+    );
+    expect(action?.itemIds).toEqual(['a1', 'a2', 'b3', 'b4']);
+  });
+
+  it.each([
+    [
+      'части с продолжающимися номерами',
+      [
+        base('first', [item('a1', 'Кабель', '10', '1000', { rowNo: 1 }), item('a2', 'Лоток', '3', '300', { rowNo: 2 })]),
+        base('tail', [item('b1', 'Труба', '5', '500', { rowNo: 3 }), item('b2', 'Муфта', '7', '70', { rowNo: 4 })]),
+      ],
+    ],
+    [
+      'номер есть не у всех строк',
+      [
+        base('first', [item('a1', 'Кабель', '10', '1000', { rowNo: 1 }), item('a2', 'Лоток', '3', '300', { rowNo: null })]),
+        base('copy', [item('b1', 'Кабель', '10', '1000', { rowNo: 1 }), item('b2', 'Лоток', '3', '310', { rowNo: 2 })]),
+      ],
+    ],
+    [
+      'номер повторяется внутри экземпляра',
+      [
+        base('first', [item('a1', 'Кабель', '10', '1000', { rowNo: 1 }), item('a2', 'Лоток', '3', '300', { rowNo: 2 })]),
+        base('copy', [item('b1', 'Кабель', '10', '1000', { rowNo: 1 }), item('b2', 'Лоток', '3', '310', { rowNo: 1 })]),
+      ],
+    ],
+    [
+      'номеров нет вовсе (неоднозначное сопоставление)',
+      [
+        base('first', [item('a1', 'Труба 20х2', '5', '500.00'), item('a2', 'Труба 20х2 ', '5', '500.00')]),
+        base('copy', [item('b1', 'Труба 20х2', '5', '500.00')]),
+      ],
+    ],
+  ])('%s — результат прежний', (_name, documents) => {
+    expect(planAssemblyDocumentMerges(documents, { copyByRowNo: true })).toEqual(
+      planAssemblyDocumentMerges(documents),
+    );
+  });
+
+  it('сравнение для улики: строки и повторы номера по обоим правилам', () => {
+    const documents = pair();
+    const before = planAssemblyDocumentMerges(documents);
+    const after = planAssemblyDocumentMerges(documents, { copyByRowNo: true });
+    expect(compareCopyByRowNo(documents, before, after)).toEqual([
+      expect.objectContaining({
+        keeperId: 'stamp',
+        droppedDocumentIds: ['plain'],
+        relation: 'copies',
+        itemsBefore: 130,
+        itemsAfter: 66,
+        repeatedRowNosBefore: 64,
+        repeatedRowNosAfter: 0,
+      }),
+    ]);
   });
 });

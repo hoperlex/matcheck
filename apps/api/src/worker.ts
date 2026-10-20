@@ -188,8 +188,11 @@ import {
 } from './domain/edo/upd-assembly.js';
 import { extractUpdSegment } from './domain/edo/upd-segment-extract.js';
 import {
+  compareCopyByRowNo,
   planAssemblyDocumentMerges,
   planAssemblyDocumentMergesLegacy,
+  type AssemblyMergeAction,
+  type CopyByRowNoGroup,
 } from './domain/edo/upd-assembly-merge.js';
 import {
   applyRelaxedJoins,
@@ -3713,6 +3716,7 @@ async function recordRecognitionEvidence(args: {
     | 'page_classification'
     | 'assembly_rollback'
     | 'assembly_relaxed_copy'
+    | 'assembly_copy_merge'
     | 'waybill_batch_result';
   payload: Record<string, unknown>;
 }): Promise<void> {
@@ -5740,12 +5744,18 @@ async function consolidateAssemblyDocuments(
     validation: unknown;
     llmConfidence: string | null;
   }>,
-): Promise<{ publishedIds: string[]; relaxed: RelaxedReport | null }> {
+): Promise<{
+  publishedIds: string[];
+  relaxed: RelaxedReport | null;
+  copyByRowNo: { mode: 'shadow' | 'on'; groups: CopyByRowNoGroup[] } | null;
+}> {
   const orderedSegments = [...segments].sort((a, b) => a.segmentIndex - b.segmentIndex);
   const initialDocIds = orderedSegments
     .map((segment) => segment.docId)
     .filter((id): id is string => id != null);
-  if (initialDocIds.length < 2) return { publishedIds: initialDocIds, relaxed: null };
+  if (initialDocIds.length < 2) {
+    return { publishedIds: initialDocIds, relaxed: null, copyByRowNo: null };
+  }
 
   const [items, attachments] = await Promise.all([
     tx
@@ -5763,7 +5773,7 @@ async function consolidateAssemblyDocuments(
   // сейчас на бою. UPD_ASSEMBLY_V1 для этого не годится, он включает сборку
   // страниц целиком.
   const copyDedup = loadEnv().UPD_ASSEMBLY_COPY_DEDUP_V1;
-  const plan = copyDedup ? planAssemblyDocumentMerges : planAssemblyDocumentMergesLegacy;
+  const copyByRowNoMode = loadEnv().UPD_ASSEMBLY_COPY_BY_ROW_NO;
   const planDocuments = initialDocIds.flatMap((id) => {
     const doc = docById.get(id);
     return doc
@@ -5796,7 +5806,23 @@ async function consolidateAssemblyDocuments(
         ]
       : [];
   });
-  const strictActions = plan(planDocuments);
+  let strictActions: AssemblyMergeAction[];
+  let copyByRowNo: { mode: 'shadow' | 'on'; groups: CopyByRowNoGroup[] } | null = null;
+  if (!copyDedup) {
+    strictActions = planAssemblyDocumentMergesLegacy(planDocuments);
+  } else if (copyByRowNoMode === 'off') {
+    strictActions = planAssemblyDocumentMerges(planDocuments);
+  } else {
+    // Оба правила считаются в обоих режимах: улика показывает разницу и в
+    // shadow (решение о включении), и в `on` (что именно правило не дописало).
+    const before = planAssemblyDocumentMerges(planDocuments);
+    const after = planAssemblyDocumentMerges(planDocuments, { copyByRowNo: true });
+    strictActions = copyByRowNoMode === 'on' ? after : before;
+    copyByRowNo = {
+      mode: copyByRowNoMode,
+      groups: compareCopyByRowNo(planDocuments, before, after),
+    };
+  }
   // Relaxed-проход — только поверх нового правила склейки: он опирается на
   // прогнозируемый набор строк строгого действия, а legacy-план такого набора
   // не строит. При выключенном рубильнике считать нечего.
@@ -5807,7 +5833,7 @@ async function consolidateAssemblyDocuments(
       : null;
   const actions = relaxed ? applyRelaxedJoins(strictActions, relaxed) : strictActions;
   if (relaxed) assertDisjointActions(actions);
-  if (actions.length === 0) return { publishedIds: initialDocIds, relaxed };
+  if (actions.length === 0) return { publishedIds: initialDocIds, relaxed, copyByRowNo };
 
   const publishedIds = new Set(initialDocIds);
   for (const action of actions) {
@@ -6004,7 +6030,11 @@ async function consolidateAssemblyDocuments(
       for (const id of action.droppedDocumentIds) publishedIds.delete(id);
     }
   }
-  return { publishedIds: initialDocIds.filter((id) => publishedIds.has(id)), relaxed };
+  return {
+    publishedIds: initialDocIds.filter((id) => publishedIds.has(id)),
+    relaxed,
+    copyByRowNo,
+  };
 }
 
 /**
@@ -6331,6 +6361,22 @@ export async function tryFinalizeUpdAssembly(
           // разбору перед тем, как расширять правило.
           singletonPairs: relaxedReport.singletonPairs,
           documentsWouldJoin: relaxedReport.documentsWouldJoin,
+        },
+      });
+    }
+    // Улика склейки по номеру позиции: по каждой группе — сколько строк и
+    // повторов номера дало прежнее правило и сколько даёт новое. В shadow по
+    // ней решается включение, в `on` она объясняет, почему строк меньше.
+    const copyReport = consolidation.copyByRowNo;
+    if (copyReport && copyReport.groups.length > 0) {
+      await recordRecognitionEvidence({
+        bundleId: rootId,
+        generation,
+        evidenceType: 'assembly_copy_merge',
+        payload: {
+          mode: copyReport.mode,
+          applied: copyReport.mode === 'on',
+          groups: copyReport.groups,
         },
       });
     }
