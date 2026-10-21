@@ -172,6 +172,9 @@ export default function ResponsiblePersonsPage() {
         numbered
         rowSelection={canDelete ? bulk.selection : undefined}
         onRowClick={canEdit ? openEdit : undefined}
+        // Сортировка и фильтр в каждой колонке, если сервер отдал весь список
+        // (иначе — подсказка уточнить поиском, см. ResponsiveTable).
+        autoColumnTools={{ total: list.data?.total ?? 0 }}
         columns={[
           {
             title: 'ФИО',
@@ -193,6 +196,7 @@ export default function ResponsiblePersonsPage() {
             key: 'status',
             sorter: (a: ResponsiblePerson, b: ResponsiblePerson) =>
               Number(b.isActive) - Number(a.isActive),
+            tools: { text: (r) => (r.isActive ? 'Активный' : 'В архиве') },
             render: (_: unknown, r: ResponsiblePerson) =>
               r.isActive ? <Tag color="green">Активный</Tag> : <Tag color="default">В архиве</Tag>,
           },

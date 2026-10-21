@@ -7,6 +7,7 @@ import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { ClampText } from '../../shared/ui/ResponsiveTable';
+import { useColumnTools, type ToolColumn } from '../../shared/ui/columnTools';
 import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
@@ -52,8 +53,19 @@ export function DeliveryViewModal({
   // Колонки read-only таблицы материалов. План/Факт — десятичные количества
   // (formatDecimal сохраняет запятую и трейлинг-нули как в БД); Цена/НДС/Сумма —
   // деньги в русском формате (formatMoneyRu даёт «1 234,56 ₽»).
-  const itemColumns = [
-    { title: '№', dataIndex: 'lineNo', width: 50 },
+  // Σ строки = qtyActual (или qtyPlanned, если факта нет) × price; null —
+  // посчитать нельзя. Одна функция и для ячейки, и для сортировки.
+  const rowTotal = (r: Item): number | null => {
+    const qtyRaw = r.qtyActual ?? r.qtyPlanned;
+    const qty = qtyRaw !== null && qtyRaw !== '' ? Number(qtyRaw) : null;
+    const price = r.price !== null && r.price !== '' ? Number(r.price) : null;
+    if (qty === null || price === null || !Number.isFinite(qty) || !Number.isFinite(price))
+      return null;
+    return qty * price;
+  };
+  const itemColumns: ToolColumn<Item>[] = [
+    // Номер позиции — только сортировка: фильтр по номерам строк не нужен.
+    { title: '№', dataIndex: 'lineNo', width: 50, tools: { filter: false } },
     {
       title: 'Название',
       dataIndex: 'nameRaw',
@@ -61,6 +73,7 @@ export function DeliveryViewModal({
       // tableLayout="fixed" ниже: длинное название не растягивает её (модалка
       // 97vw, но позиции с описанием на абзац легко выходят за рамки).
       render: (v: string | null) => (v ? <ClampText text={v} /> : null),
+      tools: { text: (r) => r.nameRaw },
     },
     {
       title: 'План',
@@ -74,7 +87,8 @@ export function DeliveryViewModal({
       width: 90,
       render: (v: string | null) => formatDecimal(v),
     },
-    { title: 'Ед.', dataIndex: 'unit', width: 60 },
+    // 80, а не 60: рядом с подписью теперь стрелка и воронка.
+    { title: 'Ед.', dataIndex: 'unit', width: 80 },
     {
       title: 'Цена',
       dataIndex: 'price',
@@ -91,17 +105,12 @@ export function DeliveryViewModal({
       title: 'Сумма',
       key: 'rowTotal',
       width: 140,
-      render: (_: unknown, r: Item) => {
-        // Σ = qtyActual (или qtyPlanned, если факта нет) × price.
-        const qtyRaw = r.qtyActual ?? r.qtyPlanned;
-        const qty = qtyRaw !== null && qtyRaw !== '' ? Number(qtyRaw) : null;
-        const price = r.price !== null && r.price !== '' ? Number(r.price) : null;
-        if (qty === null || price === null || !Number.isFinite(qty) || !Number.isFinite(price))
-          return formatMoneyRu(null);
-        return formatMoneyRu(qty * price);
-      },
+      render: (_: unknown, r: Item) => formatMoneyRu(rowTotal(r)),
+      tools: { sortValue: rowTotal },
     },
   ];
+  // Сортировка и фильтр в колонках: позиции приходят все, без лимита.
+  const itemTools = useColumnTools<Item>({ columns: itemColumns, items, enabled: true });
 
   return (
     <Modal
@@ -325,7 +334,8 @@ export function DeliveryViewModal({
                 rowKey="id"
                 size="small"
                 pagination={false}
-                columns={itemColumns}
+                columns={itemTools.columns}
+                onChange={itemTools.onChange}
                 showSorterTooltip={false}
                 // scroll={x:'max-content'} убран — заставлял таблицу
                 // растягиваться по самому длинному названию и плодил

@@ -167,6 +167,9 @@ export default function SitesPage() {
         numbered
         rowSelection={canDelete ? bulk.selection : undefined}
         onRowClick={(r) => canEdit && r.id !== SYSTEM_SITE_ID && openEdit(r)}
+        // Сортировка и фильтр в каждой колонке, если сервер отдал весь список
+        // (иначе — подсказка уточнить поиском, см. ResponsiveTable).
+        autoColumnTools={{ total: list.data?.total ?? 0 }}
         columns={[
           {
             title: 'Код',
@@ -194,8 +197,10 @@ export default function SitesPage() {
           {
             title: 'Активен',
             dataIndex: 'isActive',
-            width: 110,
+            // Ширина под подпись со стрелкой и воронкой в одну строку.
+            width: 130,
             sorter: (a: Site, b: Site) => Number(b.isActive) - Number(a.isActive),
+            tools: { text: (r) => (r.isActive ? 'Да' : 'Нет') },
             render: (v: boolean) => (v ? <Tag color="green">Да</Tag> : <Tag>Нет</Tag>),
           },
           ...(canDelete

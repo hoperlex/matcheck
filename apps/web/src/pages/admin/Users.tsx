@@ -240,6 +240,9 @@ export default function AdminUsersPage() {
         // Колонок десять; на 1024-1366px без минимальной ширины они сжимаются
         // до нечитаемых 60px. Скроллим саму таблицу, а не страницу.
         scrollX={1240}
+        // Список пользователей приходит целиком, поиск — на клиенте.
+        // В ячейках контролы, поэтому значения фильтров заданы явно (tools).
+        autoColumnTools={{ total: filteredItems.length }}
         columns={[
           { title: 'Email', dataIndex: 'email' },
           {
@@ -254,21 +257,36 @@ export default function AdminUsersPage() {
                 options={roles.map((rl) => ({ value: rl, label: roleLabel(rl) }))}
               />
             ),
+            tools: { text: (row) => roleLabel(row.role) },
           },
           {
             title: 'Объект',
             dataIndex: 'siteId',
             render: (_: unknown, row: UserDto) => renderSiteCell(row),
+            tools: {
+              text: (row) => {
+                if (row.role !== 'inspector_kpp' || !row.siteId) return null;
+                const s = sites.find((x) => x.id === row.siteId);
+                return s ? `${s.code} · ${s.name}` : null;
+              },
+            },
           },
           {
             title: 'Подрядчик',
             dataIndex: 'contractorCustomerId',
             render: (_: unknown, row: UserDto) => renderContractorCell(row),
+            tools: {
+              text: (row) =>
+                row.role === 'contractor'
+                  ? (customerCps.find((c) => c.id === row.contractorCustomerId)?.name ?? null)
+                  : null,
+            },
           },
           {
             title: 'Активен',
             dataIndex: 'isActive',
-            width: 80,
+            // Ширина под подпись со стрелкой и воронкой в одну строку.
+            width: 130,
             render: (a: boolean, row: UserDto) => (
               <Switch
                 checked={a}
@@ -276,6 +294,7 @@ export default function AdminUsersPage() {
                 onChange={(v) => patch.mutate({ id: row.id, body: { isActive: v } })}
               />
             ),
+            tools: { text: (row) => (row.isActive ? 'Да' : 'Нет') },
           },
           {
             // Без render в ячейку попадала сырая ISO-строка вида
@@ -291,6 +310,7 @@ export default function AdminUsersPage() {
             title: 'Контакт',
             key: 'phone',
             render: (_: unknown, row: UserDto) => <PhoneCell row={row} />,
+            tools: { text: (row) => row.phone },
           },
           {
             title: 'ФИО',

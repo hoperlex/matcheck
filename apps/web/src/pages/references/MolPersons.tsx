@@ -73,6 +73,8 @@ export default function MolPersons() {
         loading={list.isLoading}
         rowKey="employeeId"
         numbered
+        // Список МОЛ приходит целиком (без limit), поиск — на клиенте.
+        autoColumnTools={{ total: items.length }}
         columns={[
           {
             title: 'ФИО',
@@ -96,6 +98,7 @@ export default function MolPersons() {
             dataIndex: 'employeeId',
             width: 120,
             render: (v: number) => <Tag style={{ marginInlineEnd: 0 }}>{v}</Tag>,
+            tools: { text: (r) => String(r.employeeId), sortValue: (r) => r.employeeId },
           },
         ]}
         // На узком экране ResponsiveTable рисует карточки, а не таблицу, и без

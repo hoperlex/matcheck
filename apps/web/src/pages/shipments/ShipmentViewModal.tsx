@@ -8,6 +8,7 @@ import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { ClampText } from '../../shared/ui/ResponsiveTable';
+import { useColumnTools, type ToolColumn } from '../../shared/ui/columnTools';
 import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 
@@ -56,13 +57,25 @@ export function ShipmentViewModal({
   const s = data?.shipment;
   const items = s?.items ?? [];
 
-  const itemColumns = [
-    { title: '№', dataIndex: 'lineNo', width: 50 },
+  // Σ строки = qtyActual (или qtyPlanned, если факта нет) × price; null —
+  // посчитать нельзя. Одна функция и для ячейки, и для сортировки.
+  const rowTotal = (r: Item): number | null => {
+    const qtyRaw = r.qtyActual ?? r.qtyPlanned;
+    const qty = qtyRaw !== null && qtyRaw !== '' ? Number(qtyRaw) : null;
+    const price = r.price !== null && r.price !== '' ? Number(r.price) : null;
+    if (qty === null || price === null || !Number.isFinite(qty) || !Number.isFinite(price))
+      return null;
+    return qty * price;
+  };
+  const itemColumns: ToolColumn<Item>[] = [
+    // Номер позиции — только сортировка: фильтр по номерам строк не нужен.
+    { title: '№', dataIndex: 'lineNo', width: 50, tools: { filter: false } },
     {
       title: 'Название',
       dataIndex: 'nameRaw',
       // До двух строк, дальше «…» с подсказкой; ширину держит fixed-раскладка.
       render: (v: string | null) => (v ? <ClampText text={v} /> : null),
+      tools: { text: (r) => r.nameRaw },
     },
     {
       title: 'План',
@@ -76,7 +89,8 @@ export function ShipmentViewModal({
       width: 90,
       render: (v: string | null) => formatDecimal(v),
     },
-    { title: 'Ед.', dataIndex: 'unit', width: 60 },
+    // 80, а не 60: рядом с подписью теперь стрелка и воронка.
+    { title: 'Ед.', dataIndex: 'unit', width: 80 },
     {
       title: 'Цена',
       dataIndex: 'price',
@@ -93,16 +107,12 @@ export function ShipmentViewModal({
       title: 'Сумма',
       key: 'rowTotal',
       width: 140,
-      render: (_: unknown, r: Item) => {
-        const qtyRaw = r.qtyActual ?? r.qtyPlanned;
-        const qty = qtyRaw !== null && qtyRaw !== '' ? Number(qtyRaw) : null;
-        const price = r.price !== null && r.price !== '' ? Number(r.price) : null;
-        if (qty === null || price === null || !Number.isFinite(qty) || !Number.isFinite(price))
-          return formatMoneyRu(null);
-        return formatMoneyRu(qty * price);
-      },
+      render: (_: unknown, r: Item) => formatMoneyRu(rowTotal(r)),
+      tools: { sortValue: rowTotal },
     },
   ];
+  // Сортировка и фильтр в колонках: позиции приходят все, без лимита.
+  const itemTools = useColumnTools<Item>({ columns: itemColumns, items, enabled: true });
 
   return (
     <Modal
@@ -341,7 +351,8 @@ export function ShipmentViewModal({
                 rowKey="id"
                 size="small"
                 pagination={false}
-                columns={itemColumns}
+                columns={itemTools.columns}
+                onChange={itemTools.onChange}
                 showSorterTooltip={false}
                 // fixed — явно: раньше её включал ellipsis колонки «Название»,
                 // без неё длинное название растянуло бы таблицу шире модалки.

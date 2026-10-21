@@ -7,9 +7,9 @@
  * и без явного tableLayout таблицы без scroll.y (Роли, позиции приёмки) перешли
  * бы на auto — колонки растянулись бы по тексту.
  */
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Tag } from 'antd';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ResponsiveTable } from './ResponsiveTable';
 
 type Row = { id: string; name: string; note: string; status: string };
@@ -122,5 +122,97 @@ describe('ResponsiveTable: вид FOT', () => {
     fireEvent.click(numTh);
     const firstRow = container.querySelector('.ant-table-tbody > tr.ant-table-row');
     expect(firstRow?.textContent).toContain('Склад');
+  });
+});
+
+type City = { id: string; name: string; city: string };
+const CITIES: City[] = [
+  { id: '1', name: 'Бета', city: 'Москва' },
+  { id: '2', name: 'Альфа', city: 'Казань' },
+  { id: '3', name: 'Гамма', city: 'Москва' },
+];
+
+function cityTable(props: Partial<Parameters<typeof ResponsiveTable<City>>[0]> = {}) {
+  return render(
+    <ResponsiveTable<City>
+      items={CITIES}
+      rowKey="id"
+      cardRender={(r) => r.name}
+      // Страница из двух строк: сортировка и фильтр обязаны работать по всему
+      // списку, а не по видимой странице.
+      pagination={{ pageSize: 2 }}
+      autoColumnTools={{ total: CITIES.length }}
+      columns={[
+        { title: 'Название', dataIndex: 'name' },
+        { title: 'Город', dataIndex: 'city' },
+      ]}
+      {...props}
+    />,
+  );
+}
+
+function th(container: HTMLElement, title: string): HTMLElement {
+  return Array.from(container.querySelectorAll<HTMLElement>('.ant-table-thead th')).find(
+    (el) => el.textContent?.trim() === title,
+  )!;
+}
+const shownNames = (container: HTMLElement) =>
+  Array.from(container.querySelectorAll('.ant-table-tbody > tr.ant-table-row')).map(
+    (tr) => tr.querySelectorAll('td')[0]?.textContent,
+  );
+
+describe('ResponsiveTable: сортировка и фильтр в колонках (autoColumnTools)', () => {
+  it('сортировка — по всему списку, а не по странице', () => {
+    const { container } = cityTable();
+    expect(shownNames(container)).toEqual(['Бета', 'Альфа']);
+    fireEvent.click(th(container, 'Название'));
+    // «Альфа» и «Бета» — первые по алфавиту из ВСЕХ трёх, «Гамма» уехала на 2-ю.
+    expect(shownNames(container)).toEqual(['Альфа', 'Бета']);
+    fireEvent.click(th(container, 'Название'));
+    expect(shownNames(container)).toEqual(['Гамма', 'Бета']);
+  });
+
+  it('фильтр по значениям — по всему списку, со счётчиками', async () => {
+    const { container } = cityTable();
+    fireEvent.click(th(container, 'Город').querySelector('.ant-table-filter-trigger')!);
+    const dialog = await screen.findByRole('dialog');
+    const moscow = within(dialog).getByText('Москва').closest('label')!;
+    expect(moscow.textContent).toContain('2');
+    fireEvent.click(moscow.querySelector('input')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Применить' }));
+    await waitFor(() => expect(shownNames(container)).toEqual(['Бета', 'Гамма']));
+  });
+
+  it('применение фильтра снимает массовый выбор', async () => {
+    const onSelect = vi.fn();
+    const { container } = cityTable({
+      rowSelection: { selectedRowKeys: ['2'], onChange: onSelect },
+    });
+    fireEvent.click(th(container, 'Город').querySelector('.ant-table-filter-trigger')!);
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByText('Москва').closest('label')!.querySelector('input')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Применить' }));
+    await waitFor(() => expect(onSelect).toHaveBeenCalledWith([], [], { type: 'none' }));
+  });
+
+  it('неполный список — без стрелок и воронок, с подсказкой', () => {
+    const { container } = cityTable({ autoColumnTools: { total: 501 } });
+    expect(container.querySelector('.ant-table-filter-trigger')).toBeNull();
+    expect(th(container, 'Название').classList.contains('ant-table-column-has-sorters')).toBe(
+      false,
+    );
+    expect(container.textContent).toContain('Показаны первые 3 из 501');
+  });
+
+  it('серверная пагинация — инструменты не включаются', () => {
+    const { container } = cityTable({ pagination: { pageSize: 2, total: 3 } });
+    expect(container.querySelector('.ant-table-filter-trigger')).toBeNull();
+    expect(container.textContent).not.toContain('Показаны первые');
+  });
+
+  it('без autoColumnTools — как раньше', () => {
+    const { container } = cityTable({ autoColumnTools: undefined });
+    expect(container.querySelector('.ant-table-filter-trigger')).toBeNull();
+    expect(th(container, 'Город').classList.contains('ant-table-column-has-sorters')).toBe(false);
   });
 });

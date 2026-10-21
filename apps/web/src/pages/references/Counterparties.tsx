@@ -193,6 +193,9 @@ export default function CounterpartiesPage() {
         numbered
         rowSelection={canDelete ? bulk.selection : undefined}
         onRowClick={canEdit ? openEdit : undefined}
+        // Сортировка и фильтр в каждой колонке, если сервер отдал весь список
+        // (иначе — подсказка уточнить поиском, см. ResponsiveTable).
+        autoColumnTools={{ total: list.data?.total ?? 0 }}
         columns={[
           {
             title: 'ИНН',
@@ -213,6 +216,10 @@ export default function CounterpartiesPage() {
           {
             title: 'Альтернативные названия',
             dataIndex: 'aliases',
+            // Подпись длинная: уже ~260px она с иконками уходит в две строки.
+            width: 280,
+            // На экране — теги; в фильтре каждое название отдельным значением.
+            tools: { text: (r) => r.aliases ?? [] },
             render: (v: string[] | null | undefined) =>
               v && v.length > 0 ? (
                 <Space size={[4, 4]} wrap>
@@ -238,6 +245,15 @@ export default function CounterpartiesPage() {
                 Number(r.isCustomer) +
                 Number(r.isContractor);
               return w(b) - w(a);
+            },
+            tools: {
+              text: (r) =>
+                [
+                  r.isSelf && 'Наш',
+                  r.isSupplier && 'Поставщик',
+                  r.isCustomer && 'Заказчик',
+                  r.isContractor && 'Подрядчик',
+                ].filter((x): x is string => Boolean(x)),
             },
             render: (_: unknown, r: Counterparty) => (
               <Space wrap>

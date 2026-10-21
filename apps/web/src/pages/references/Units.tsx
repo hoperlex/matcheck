@@ -148,6 +148,9 @@ export default function UnitsPage(): JSX.Element {
         numbered
         rowSelection={canDelete ? bulk.selection : undefined}
         onRowClick={canEdit ? openEdit : undefined}
+        // Сортировка и фильтр в каждой колонке, если сервер отдал весь список
+        // (иначе — подсказка уточнить поиском, см. ResponsiveTable).
+        autoColumnTools={{ total: list.data?.total ?? 0 }}
         cardRender={(u) => (
           <Space direction="vertical" size={2} style={{ width: '100%' }}>
             <Typography.Text strong>{u.code}</Typography.Text>
@@ -180,7 +183,8 @@ export default function UnitsPage(): JSX.Element {
           {
             title: 'Активна',
             dataIndex: 'isActive',
-            width: 100,
+            // Ширина под подпись со стрелкой и воронкой в одну строку.
+            width: 130,
             render: (v: boolean) => (v ? 'да' : 'нет'),
           },
           ...(canDelete

@@ -1,6 +1,7 @@
 import { Typography } from 'antd';
 import { isPlaceholderInn } from '@matcheck/contracts';
 import { stringSorter } from './tableSorters';
+import type { ColumnTools } from './columnTools';
 import { shortenCounterpartyName } from '../utils/companyShortName';
 
 // Колонки сторон документа — один набор для всех таблиц, где показывается УПД:
@@ -47,6 +48,11 @@ type PartyColumn<T> = {
   sorter: ReturnType<typeof stringSorter<T>> | true;
   sortOrder?: 'ascend' | 'descend' | null;
   render: (_: unknown, r: T) => React.ReactNode;
+  /**
+   * Значение для фильтра по колонке (columnTools) — имя так, как оно видно в
+   * ячейке. Ячейка рисует JSX, сам вывести его columnTools не может.
+   */
+  tools?: ColumnTools<T>;
 };
 
 /** Ширина колонки стороны: под «ИНН 7712345678» второй строкой плюс отступы. */
@@ -120,6 +126,12 @@ export function documentPartyColumns<T>(
     ellipsis: false,
     sorter: stringSorter<T>((r) => (get(r)[nameField] as string | null | undefined) ?? null),
     ...(opts?.sortProps ? opts.sortProps(key) : {}),
+    tools: {
+      text: (r: T) => {
+        const name = get(r)[nameField] as string | null | undefined;
+        return name ? shortenCounterpartyName(name) : null;
+      },
+    },
     // partyCell сам отдаёт «—» на пустом имени (через shortenCounterpartyName).
     render: (_: unknown, r: T) =>
       partyCell(

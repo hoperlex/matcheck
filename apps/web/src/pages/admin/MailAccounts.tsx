@@ -136,6 +136,7 @@ export default function AdminMailAccountsPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        autoColumnTools={{ total: list.data?.length ?? 0 }}
         columns={[
           { title: 'Имя', dataIndex: 'name' },
           {
@@ -143,6 +144,7 @@ export default function AdminMailAccountsPage() {
             key: 'purpose',
             render: (_: unknown, r: MailAccountDto) =>
               isDocs(r) ? <Tag color="blue">Документы</Tag> : <Tag>Заявки</Tag>,
+            tools: { text: (r) => (isDocs(r) ? 'Документы' : 'Заявки') },
           },
           { title: 'Host', dataIndex: 'host' },
           { title: 'Пользователь', dataIndex: 'username' },
@@ -158,6 +160,9 @@ export default function AdminMailAccountsPage() {
               ) : (
                 <Tag>выключен</Tag>
               ),
+            tools: {
+              text: (r) => (!isDocs(r) ? null : r.pollEnabled ? 'включён' : 'выключен'),
+            },
           },
           {
             title: 'Действия',

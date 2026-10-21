@@ -9,6 +9,7 @@ import type {
 import type { z } from 'zod';
 import { api } from '../../services/api';
 import { documentPartyColumns } from '../../shared/ui/documentPartyColumns';
+import { useColumnTools, type ToolColumn } from '../../shared/ui/columnTools';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { useAuthStore } from '../../stores/auth';
 
@@ -89,6 +90,42 @@ export function LinkSourceDocumentModal({
     return result;
   }, [items, siteId, allSites, onlyMine, currentUserId]);
 
+  const columns: ToolColumn<SourceDocument>[] = [
+    {
+      title: 'Номер',
+      dataIndex: 'docNumber',
+      render: (v: string | null) => <Tag color="blue">{v ?? '— без номера —'}</Tag>,
+      tools: { text: (r) => r.docNumber },
+    },
+    {
+      title: 'Дата',
+      dataIndex: 'docDate',
+      render: (v: string | null) => v ?? '—',
+    },
+    // Единый набор сторон — как в «Документах» и «Ожидаемых».
+    ...documentPartyColumns<SourceDocument>((r) => r),
+    {
+      title: 'Объект',
+      key: 'site',
+      render: (_: unknown, r: SourceDocument) => r.siteName ?? '—',
+    },
+    {
+      title: 'Сумма',
+      key: 'total',
+      render: (_: unknown, r: SourceDocument) => (r.totalSum ? `${r.totalSum} ₽` : '—'),
+      tools: { sortValue: (r) => (r.totalSum ? Number(r.totalSum) : null) },
+    },
+  ];
+  // Сортировка и фильтр в колонках — только если сервер отдал все документы
+  // (limit 200; в режиме «Несколько поставок» их обычно больше) и не на
+  // телефоне, где модалку открывают ради одного тапа по строке.
+  const listComplete = (list.data?.total ?? 0) <= items.length;
+  const tools = useColumnTools<SourceDocument>({
+    columns,
+    items: filtered,
+    enabled: bp === 'desktop' && listComplete,
+  });
+
   return (
     <Modal
       open={open}
@@ -162,35 +199,16 @@ export function LinkSourceDocumentModal({
                 ? 'Загрузка…'
                 : 'Нет свободных УПД для привязки',
             }}
-            columns={[
-              {
-                title: 'Номер',
-                dataIndex: 'docNumber',
-                render: (v: string | null) => (
-                  <Tag color="blue">{v ?? '— без номера —'}</Tag>
-                ),
-              },
-              {
-                title: 'Дата',
-                dataIndex: 'docDate',
-                render: (v: string | null) => v ?? '—',
-              },
-              // Единый набор сторон — как в «Документах» и «Ожидаемых».
-              ...documentPartyColumns<SourceDocument>((r) => r),
-              {
-                title: 'Объект',
-                key: 'site',
-                render: (_: unknown, r: SourceDocument) => r.siteName ?? '—',
-              },
-              {
-                title: 'Сумма',
-                key: 'total',
-                render: (_: unknown, r: SourceDocument) =>
-                  r.totalSum ? `${r.totalSum} ₽` : '—',
-              },
-            ]}
+            onChange={tools.onChange}
+            columns={tools.columns}
           />
         </ConfigProvider>
+        {bp === 'desktop' && !listComplete && (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            Показаны первые {items.length} из {list.data?.total} — сортировка и фильтры в
+            заголовках отключены
+          </Typography.Text>
+        )}
       </Space>
     </Modal>
   );

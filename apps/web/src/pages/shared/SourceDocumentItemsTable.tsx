@@ -1,9 +1,9 @@
-import type { ComponentProps } from 'react';
 import { Table } from 'antd';
 import type { SourceDocumentDetail } from '@matcheck/contracts';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { priceWithVat } from '../../shared/utils/priceWithVat';
+import { useColumnTools, type ToolColumn } from '../../shared/ui/columnTools';
 
 type Item = SourceDocumentDetail['items'][number];
 
@@ -34,8 +34,9 @@ export function SourceDocumentItemsTable({
 }) {
   // Колонка «Инв.№» отображается только для ОС-2 (kind='os2_transfer') —
   // у ТН и УПД она была бы пустой.
-  const columns: NonNullable<ComponentProps<typeof Table<Item>>['columns']> = [
-    { title: '№', dataIndex: 'lineNo', width: 50 },
+  const columns: ToolColumn<Item>[] = [
+    // Номер позиции — только сортировка: фильтр по номерам строк не нужен.
+    { title: '№', dataIndex: 'lineNo', width: 50, tools: { filter: false } },
     { title: 'Наименование', dataIndex: 'nameRaw' },
   ];
   if (showInvNumber) {
@@ -50,18 +51,26 @@ export function SourceDocumentItemsTable({
     {
       title: 'Кол-во',
       dataIndex: 'qty',
-      width: 90,
+      // Ширины Кол-во / Ед. / Цена — под подпись со стрелкой и воронкой в одну строку.
+      width: 110,
       render: (v: string | null) => formatDecimal(v),
     },
-    { title: 'Ед.', dataIndex: 'unit', width: 60 },
+    { title: 'Ед.', dataIndex: 'unit', width: 80 },
     {
       // Заголовок называет величину прямо: в приёмке цена остаётся без налога,
       // и одинаковое имя над разными числами читалось бы как расхождение.
       title: withVat ? 'Цена с НДС' : 'Цена',
       dataIndex: 'price',
-      width: 130,
+      width: 150,
       render: (v: string | null, r: Item) =>
         formatMoneyRu(withVat ? priceWithVat(v, r.vatRate, docTotalSum, docVatSum) : v),
+      // Сортируем по той цене, что видна (с налогом у УПД), а не по сырой.
+      tools: {
+        sortValue: (r) => {
+          const v = withVat ? priceWithVat(r.price, r.vatRate, docTotalSum, docVatSum) : r.price;
+          return v == null || v === '' ? null : Number(v);
+        },
+      },
     },
     {
       title: 'Сумма',
@@ -70,6 +79,8 @@ export function SourceDocumentItemsTable({
       render: (v: string | null) => formatMoneyRu(v),
     },
   );
+  // Позиции документа приходят все — сортировка и фильтр в колонках.
+  const tools = useColumnTools<Item>({ columns, items, enabled: true });
   return (
     <Table<Item>
       dataSource={items}
@@ -80,7 +91,8 @@ export function SourceDocumentItemsTable({
       // scroll={y} убран — давал внутренний tbody-скролл поверх скролла
       // Splitter.Panel. Тaблица растягивается по содержимому, скроллит
       // только внешняя панель.
-      columns={columns}
+      columns={tools.columns}
+      onChange={tools.onChange}
     />
   );
 }

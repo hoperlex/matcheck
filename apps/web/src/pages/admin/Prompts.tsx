@@ -153,6 +153,7 @@ export default function AdminPromptsPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        autoColumnTools={{ total: list.data?.length ?? 0 }}
         columns={[
           {
             title: 'Тип',
@@ -169,6 +170,7 @@ export default function AdminPromptsPage() {
                 {r.isActive && <Tag color="green">активен</Tag>}
               </Space>
             ),
+            tools: { text: (r) => r.name },
           },
           {
             title: 'Обновлён',

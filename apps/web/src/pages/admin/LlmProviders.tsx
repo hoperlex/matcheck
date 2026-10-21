@@ -195,6 +195,7 @@ export default function AdminLlmProvidersPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        autoColumnTools={{ total: list.data?.length ?? 0 }}
         columns={[
           {
             title: 'Имя',
@@ -207,6 +208,7 @@ export default function AdminLlmProvidersPage() {
                 {!credsByKind.has(r.kind) && <Tag color="red">нет ключа</Tag>}
               </Space>
             ),
+            tools: { text: (r) => r.name },
           },
           { title: 'Kind', dataIndex: 'kind' },
           { title: 'Модель', dataIndex: 'model' },

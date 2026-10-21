@@ -5,6 +5,7 @@ import dayjs from 'dayjs';
 import type { MailReceiptDto } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import type { ApiError } from '../../services/api';
+import { useColumnTools, type ToolColumn } from '../../shared/ui/columnTools';
 
 type List = { items: MailReceiptDto[]; total: number };
 
@@ -55,6 +56,61 @@ export function MailFetchProblems() {
   });
 
   const items = list.data?.items ?? [];
+
+  const columns: ToolColumn<MailReceiptDto>[] = [
+    {
+      title: 'Когда',
+      dataIndex: 'updatedAt',
+      width: 130,
+      render: (v: string) => dayjs(v).format('DD.MM.YYYY HH:mm'),
+    },
+    { title: 'Ящик', dataIndex: 'accountName', width: 160 },
+    {
+      title: 'Причина',
+      dataIndex: 'status',
+      width: 180,
+      render: (_: unknown, r) => (
+        <Tooltip title={r.lastError ?? ''}>
+          <Tag color={r.status === 'skipped_by_size' ? 'gold' : 'orange'}>{reasonOf(r)}</Tag>
+        </Tooltip>
+      ),
+      tools: { text: reasonOf },
+    },
+    {
+      title: 'Размер',
+      dataIndex: 'sizeBytes',
+      width: 90,
+      render: (v: number | null) => sizeMb(v),
+    },
+    { title: 'Попыток', dataIndex: 'attempts', width: 80 },
+    {
+      title: '',
+      key: 'actions',
+      width: 150,
+      render: (_: unknown, r) =>
+        r.replayRequested ? (
+          <Tag color="blue">повтор запрошен</Tag>
+        ) : (
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            loading={replay.isPending}
+            disabled={!r.canReplay}
+            onClick={() => replay.mutate(r.id)}
+          >
+            Забрать снова
+          </Button>
+        ),
+    },
+  ];
+  // Сортировка и фильтр в колонках — только если сервер отдал все письма
+  // (срез по умолчанию 200).
+  const tools = useColumnTools<MailReceiptDto>({
+    columns,
+    items,
+    enabled: (list.data?.total ?? 0) <= items.length,
+  });
+
   if (items.length === 0) return null;
 
   return (
@@ -77,53 +133,8 @@ export function MailFetchProblems() {
             pagination={false}
             rowKey="id"
             dataSource={items}
-            columns={[
-              {
-                title: 'Когда',
-                dataIndex: 'updatedAt',
-                width: 130,
-                render: (v: string) => dayjs(v).format('DD.MM.YYYY HH:mm'),
-              },
-              { title: 'Ящик', dataIndex: 'accountName', width: 160 },
-              {
-                title: 'Причина',
-                dataIndex: 'status',
-                width: 180,
-                render: (_: unknown, r) => (
-                  <Tooltip title={r.lastError ?? ''}>
-                    <Tag color={r.status === 'skipped_by_size' ? 'gold' : 'orange'}>
-                      {reasonOf(r)}
-                    </Tag>
-                  </Tooltip>
-                ),
-              },
-              {
-                title: 'Размер',
-                dataIndex: 'sizeBytes',
-                width: 90,
-                render: (v: number | null) => sizeMb(v),
-              },
-              { title: 'Попыток', dataIndex: 'attempts', width: 80 },
-              {
-                title: '',
-                key: 'actions',
-                width: 150,
-                render: (_: unknown, r) =>
-                  r.replayRequested ? (
-                    <Tag color="blue">повтор запрошен</Tag>
-                  ) : (
-                    <Button
-                      size="small"
-                      icon={<ReloadOutlined />}
-                      loading={replay.isPending}
-                      disabled={!r.canReplay}
-                      onClick={() => replay.mutate(r.id)}
-                    >
-                      Забрать снова
-                    </Button>
-                  ),
-              },
-            ]}
+            columns={tools.columns}
+            onChange={tools.onChange}
           />
         </Space>
       }

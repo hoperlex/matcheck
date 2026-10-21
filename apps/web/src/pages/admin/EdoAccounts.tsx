@@ -452,17 +452,20 @@ export default function AdminEdoAccountsPage() {
         loading={list.isLoading}
         rowKey="id"
         numbered
+        autoColumnTools={{ total: list.data?.length ?? 0 }}
         columns={[
           { title: 'Имя', dataIndex: 'name', width: 180 },
           {
             title: 'Площадка',
             dataIndex: 'environment',
-            width: 96,
+            // Ширины колонок ниже — под подпись со стрелкой и воронкой в одну строку.
+            width: 130,
             render: (e: EdoAccountDto['environment']) => (
               <Tag color={e === 'production' ? 'blue' : 'orange'}>
                 {e === 'production' ? 'боевая' : 'тестовая'}
               </Tag>
             ),
+            tools: { text: (r) => (r.environment === 'production' ? 'боевая' : 'тестовая') },
           },
           {
             // Отказ `invalid_client` выглядит одинаково и при неверном ключе, и
@@ -510,7 +513,7 @@ export default function AdminEdoAccountsPage() {
           {
             title: 'Опрос',
             key: 'poll',
-            width: 72,
+            width: 110,
             // Без импорта опрос включить нельзя (сервер откажет). Выключить —
             // можно всегда: оставшееся с прошлого `true` не должно висеть.
             render: (_: unknown, r: EdoAccountDto) => (
@@ -527,17 +530,22 @@ export default function AdminEdoAccountsPage() {
                 </span>
               </Tooltip>
             ),
+            tools: { text: (r) => (r.pollEnabled ? 'включён' : 'выключен') },
           },
           {
             title: 'Токен',
             key: 'token',
-            width: 84,
+            width: 110,
             render: (_: unknown, r: EdoAccountDto) => <TokenAge days={r.refreshTokenAgeDays} />,
+            tools: {
+              text: (r) => (r.refreshTokenAgeDays === null ? null : `${r.refreshTokenAgeDays} дн.`),
+              sortValue: (r) => r.refreshTokenAgeDays,
+            },
           },
           {
             title: 'Состояние',
             key: 'state',
-            width: 116,
+            width: 150,
             render: (_: unknown, r: EdoAccountDto) =>
               r.lastError ? (
                 <Tooltip title={r.lastError}>
@@ -548,6 +556,9 @@ export default function AdminEdoAccountsPage() {
               ) : (
                 <Tag>не проверялась</Tag>
               ),
+            tools: {
+              text: (r) => (r.lastError ? 'ошибка' : r.lastOkAt ? 'в порядке' : 'не проверялась'),
+            },
           },
           {
             title: 'Действия',
@@ -772,6 +783,8 @@ export default function AdminEdoAccountsPage() {
                 <ResponsiveTable<EdoInventoryReport['byType'][number]>
                   items={inventoryRow.lastInventory.byType}
                   rowKey={(b) => `${b.typeNamedId}|${b.function ?? ''}|${b.version ?? ''}`}
+                  // Опись — весь отчёт целиком, без лимита.
+                  autoColumnTools={{ total: inventoryRow.lastInventory.byType.length }}
                   columns={[
                     {
                       title: 'Тип документа',
@@ -795,6 +808,7 @@ export default function AdminEdoAccountsPage() {
                       dataIndex: 'formalized',
                       width: 150,
                       render: (f: boolean, b) => <FormatTag formalized={f} source={b.formalizedSource} />,
+                      tools: { text: (b) => (b.formalized ? 'машиночитаемый' : 'скан или файл') },
                     },
                     {
                       title: 'Что делаем',
@@ -807,6 +821,7 @@ export default function AdminEdoAccountsPage() {
                         ) : (
                           '—'
                         ),
+                      tools: { text: (b) => b.decisionLabel ?? null },
                     },
                     { title: 'Сколько', dataIndex: 'count', width: 90 },
                   ]}

@@ -190,6 +190,9 @@ export default function SuppliersPage() {
         numbered
         rowSelection={canDelete ? bulk.selection : undefined}
         onRowClick={canEdit ? openEdit : undefined}
+        // Сортировка и фильтр в каждой колонке, если сервер отдал весь список
+        // (иначе — подсказка уточнить поиском, см. ResponsiveTable).
+        autoColumnTools={{ total: list.data?.total ?? 0 }}
         columns={[
           {
             title: 'ИНН',
@@ -205,6 +208,10 @@ export default function SuppliersPage() {
           {
             title: 'Альтернативные названия',
             dataIndex: 'aliases',
+            // Подпись длинная: уже ~260px она с иконками уходит в две строки.
+            width: 280,
+            // На экране — теги; в фильтре каждое название отдельным значением.
+            tools: { text: (r) => r.aliases ?? [] },
             render: (v: string[] | null | undefined) =>
               v && v.length > 0 ? (
                 <Space size={[4, 4]} wrap>

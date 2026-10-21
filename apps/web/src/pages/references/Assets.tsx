@@ -125,6 +125,9 @@ export default function AssetsPage() {
         rowKey="id"
         numbered
         onRowClick={canEdit ? openEdit : undefined}
+        // Сортировка и фильтр в каждой колонке, если сервер отдал весь список
+        // (иначе — подсказка уточнить поиском, см. ResponsiveTable).
+        autoColumnTools={{ total: list.data?.total ?? 0 }}
         columns={[
           { title: 'Код', dataIndex: 'code', sorter: stringSorter<Asset>((r) => r.code) },
           { title: 'Название', dataIndex: 'name', sorter: stringSorter<Asset>((r) => r.name) },
@@ -133,6 +136,7 @@ export default function AssetsPage() {
             title: 'Статус',
             key: 'status',
             sorter: (a: Asset, b: Asset) => Number(b.isActive) - Number(a.isActive),
+            tools: { text: (r) => (r.isActive ? 'Активный' : 'В архиве') },
             render: (_: unknown, r: Asset) =>
               r.isActive ? <Tag color="green">Активный</Tag> : <Tag color="default">В архиве</Tag>,
           },

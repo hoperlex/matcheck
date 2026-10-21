@@ -3,6 +3,7 @@ import type { TableRef } from 'antd/es/table';
 import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { useStickyHeaderHeight } from './StickyPageHeader';
+import { useColumnTools, type ToolColumn } from './columnTools';
 
 type Column<T> = NonNullable<TableProps<T>['columns']>[number];
 
@@ -111,9 +112,10 @@ export function ResponsiveTable<T extends object>({
   onChange,
   scrollY,
   scrollX,
+  autoColumnTools,
 }: {
   items: T[];
-  columns: Column<T>[];
+  columns: ToolColumn<T>[];
   rowKey: keyof T | ((row: T) => string);
   cardRender: (row: T) => ReactNode;
   loading?: boolean;
@@ -169,8 +171,27 @@ export function ResponsiveTable<T extends object>({
    * Заданный scrollX включает внутренний горизонтальный скролл вместо сжатия.
    */
   scrollX?: number | string;
+  /**
+   * Сортировка и фильтр по значениям у каждой колонки, как в FOT (см.
+   * columnTools). `total` — сколько записей всего по ответу сервера (для
+   * массива без лимита — его длина). Инструменты включаются, только если на
+   * клиенте весь список: при `total > items.length` (запрос упёрся в limit)
+   * их нет, а под таблицей — подсказка уточнить поиском. При серверной
+   * пагинации (`pagination.total`) проп игнорируется: сортировать страницу
+   * значило бы врать.
+   */
+  autoColumnTools?: { total: number };
 }) {
   const bp = useBreakpoint();
+  const serverPaged =
+    typeof pagination === 'object' && pagination !== null && pagination.total !== undefined;
+  const toolsWanted = autoColumnTools !== undefined && !serverPaged && bp === 'desktop';
+  const listIncomplete = toolsWanted && autoColumnTools.total > items.length;
+  const tools = useColumnTools<T>({
+    columns,
+    items,
+    enabled: toolsWanted && !listIncomplete,
+  });
   // Сумма высот всех родительских StickyPageHeader. 0 — sticky-обёртки нет,
   // прилипания заголовка таблицы не нужно. > 0 — заголовок таблицы прилипает
   // прямо под нижний край шапки, чтобы при скролле колонки оставались видны.
@@ -238,9 +259,18 @@ export function ResponsiveTable<T extends object>({
           render: (_: unknown, record: T) =>
             (numberedOffset ?? 0) + (originalIndex.get(getRowKey(record)) ?? -1) + 1,
         },
-        ...columns.map(decorate),
+        ...tools.columns.map(decorate),
       ]
-    : columns.map(decorate);
+    : tools.columns.map(decorate);
+
+  const handleChange: TableProps<T>['onChange'] = (p, f, s, extra) => {
+    tools.onChange(p, f, s, extra);
+    // Фильтр по колонке прячет строки, а массовый выбор (preserveSelectedRowKeys)
+    // помнит и спрятанные: «Удалить выбранные» ушло бы в строки, которых
+    // пользователь уже не видит. Снимаем выбор — как при смене поиска.
+    if (extra.action === 'filter') rowSelection?.onChange?.([], [], { type: 'none' });
+    onChange?.(p, f, s, extra);
+  };
 
   // Высота шапки таблицы. Подписи заглавные и переносятся по словам, так что
   // шапка бывает в одну строку (~34px) и в две (~47px), и зависит от ширины
@@ -306,7 +336,7 @@ export function ResponsiveTable<T extends object>({
               ? false
               : { pageSize: 100, showSizeChanger: false, ...(pagination ?? {}) }
           }
-          onChange={onChange}
+          onChange={handleChange}
           locale={{ emptyText: emptyText ?? 'Нет данных' }}
           scroll={tableScroll}
           rowClassName={rowClassName}
@@ -319,6 +349,12 @@ export function ResponsiveTable<T extends object>({
               : undefined
           }
         />
+        {listIncomplete && (
+          <div style={{ marginTop: 8, fontSize: 12, color: '#71717a' }}>
+            Показаны первые {items.length} из {autoColumnTools.total} — сортировка и фильтры в
+            заголовках отключены, уточните поиском
+          </div>
+        )}
       </ConfigProvider>
     );
   }
