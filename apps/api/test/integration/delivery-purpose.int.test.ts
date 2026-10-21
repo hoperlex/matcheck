@@ -79,6 +79,7 @@ suite('признак приёмки', () => {
       ['manager', 'own_forces'],
       ['monitor', 'realization'],
       ['admin', 'tolling_act'],
+      ['manager', 'contractor_materials'],
     ] as const) {
       currentUser = asRole(role);
       const res = await patch(purpose);
@@ -95,10 +96,10 @@ suite('признак приёмки', () => {
     }
     const [row] = await sql<{ purpose: string }[]>`
       SELECT purpose FROM deliveries WHERE id = ${deliveryId}`;
-    expect(row!.purpose).toBe('tolling_act');
+    expect(row!.purpose).toBe('contractor_materials');
   });
 
-  it('принимает только три значения', async () => {
+  it('принимает только четыре значения', async () => {
     currentUser = asRole('manager');
     expect((await patch('unknown')).statusCode).toBe(400);
   });

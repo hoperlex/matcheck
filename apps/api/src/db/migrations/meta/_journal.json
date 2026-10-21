@@ -939,6 +939,13 @@
       "when": 1791936001000,
       "tag": "0134_delivery_purpose",
       "breakpoints": true
+    },
+    {
+      "idx": 135,
+      "version": "7",
+      "when": 1792540800000,
+      "tag": "0135_delivery_purpose_contractor_materials",
+      "breakpoints": true
     }
   ]
 }

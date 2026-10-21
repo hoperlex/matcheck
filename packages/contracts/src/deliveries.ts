@@ -78,7 +78,12 @@ export const DeliveryPhotoSchema = z.object({
 export type DeliveryPhoto = z.infer<typeof DeliveryPhotoSchema>;
 
 /** Назначение приёмки, выбираемое в веб-карточке. */
-export const DeliveryPurposeSchema = z.enum(['own_forces', 'realization', 'tolling_act']);
+export const DeliveryPurposeSchema = z.enum([
+  'own_forces',
+  'realization',
+  'tolling_act',
+  'contractor_materials',
+]);
 export type DeliveryPurpose = z.infer<typeof DeliveryPurposeSchema>;
 
 export const DeliverySchema = z.object({
