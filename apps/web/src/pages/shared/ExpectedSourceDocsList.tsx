@@ -20,7 +20,7 @@ import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { parseDateRangeKey, serverDateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
-import { antdColumnFilter } from '../../shared/ui/ColumnFilterWindow';
+import { antdColumnFilter, externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { documentPartyColumns } from '../../shared/ui/documentPartyColumns';
@@ -287,6 +287,12 @@ export function ExpectedSourceDocsList({
       })),
     [suppliersQuery.data],
   );
+  // Варианты воронки «Объект» — те же, что в поле панели (код · название).
+  const siteOptions = useMemo(
+    () =>
+      (sitesQuery.data?.items ?? []).map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` })),
+    [sitesQuery.data],
+  );
 
   const filteredItems = list.data?.items ?? [];
 
@@ -458,6 +464,17 @@ export function ExpectedSourceDocsList({
             title: 'Номер',
             dataIndex: 'docNumber',
             ...sortProps('docNumber'),
+            // Воронки в шапке — те же фильтры, что в панели над таблицей
+            // (адрес + updateFilters), поэтому они всегда показывают одно и то же.
+            // Номер — поиск из панели; сервер ищет и по имени файла.
+            ...externalColumnFilter<SourceDocument>({
+              kind: 'text',
+              title: 'Номер или имя файла',
+              hint: 'Ищет по номеру документа и по имени файла',
+              placeholder: 'Содержит…',
+              value: filters.q,
+              onApply: (q) => updateFilters({ q }),
+            }),
             render: (v: string | null) => v ?? '— без номера —',
           },
           {
@@ -489,13 +506,37 @@ export function ExpectedSourceDocsList({
           // Тот же набор сторон, что в «Документах»: раньше здесь была пара
           // «Поставщик / Подрядчик», и один документ выглядел на двух экранах
           // по-разному. См. shared/ui/documentPartyColumns.
-          ...documentPartyColumns<SourceDocument>((r) => r, { sortProps }),
+          ...documentPartyColumns<SourceDocument>((r) => r, { sortProps }).map((c) =>
+            c.key === 'supplier' && !isContractor
+              ? {
+                  ...c,
+                  ...externalColumnFilter<SourceDocument>({
+                    kind: 'values',
+                    title: 'Поставщик',
+                    options: supplierOptions,
+                    loading: suppliersQuery.isLoading,
+                    value: filters.supplierIds,
+                    onApply: (supplierIds) => updateFilters({ supplierIds }),
+                  }),
+                }
+              : c,
+          ),
           {
             title: 'Объект',
             // Длинные имена («АЛ13 · ЖК АЛИЯ, БЛОКИ 13А, 13В») переносятся до
             // двух строк, дальше «…» с подсказкой (ClampText в ResponsiveTable) —
             // как во всех таблицах раздела «Операции».
             ...sortProps('siteName'),
+            ...(isContractor
+              ? {}
+              : externalColumnFilter<SourceDocument>({
+                  kind: 'values',
+                  title: 'Объект',
+                  options: siteOptions,
+                  loading: sitesQuery.isLoading,
+                  value: filters.siteIds,
+                  onApply: (siteIds) => updateFilters({ siteIds }),
+                })),
             render: (_: unknown, r: SourceDocument) => r.siteName ?? '—',
           },
           {

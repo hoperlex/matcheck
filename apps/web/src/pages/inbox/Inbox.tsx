@@ -54,6 +54,13 @@ import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { parseDateRangeKey, serverDateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
+import { externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
+import {
+  KIND_FILTER_OPTIONS,
+  filterValuesToKindParam,
+  kindsToFilterValues,
+  parseKindParam,
+} from '../../shared/utils/sourceKindFilter';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { ActiveFilterChips, type ActiveFilterChip } from '../../shared/ui/ActiveFilterChips';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
@@ -91,8 +98,6 @@ function isUnfinished(row: Pick<Row, 'status' | 'parseErrorCode'>): boolean {
   if (isStubDocument(row)) return false;
   return UNFINISHED_STATUSES.includes(row.status);
 }
-
-type KindFilter = 'all' | 'upd' | 'request';
 
 /**
  * Цвет/подпись типа документа. Накладные двух форм (ТН-2116 и ОС-2)
@@ -454,11 +459,10 @@ export default function InboxPage() {
   // переживали F5 и поддерживали share-able ссылки.
   const direction: SourceDirection =
     params.get('direction') === 'outbound' ? 'outbound' : 'inbound';
-  const kind: KindFilter = (() => {
-    const k = params.get('kind');
-    if (k === 'upd' || k === 'request') return k;
-    return 'all';
-  })();
+  // Тип — серверные типы через запятую (воронка «Тип»: «Накладная» = ТН + ОС-2);
+  // 'all' в запрос не уходит. Старые ссылки `kind=upd` / `kind=request` валидны.
+  const kindValues = parseKindParam(params.get('kind'));
+  const kind = kindValues.length > 0 ? kindValues.join(',') : 'all';
 
   const filters: ListFiltersValue = {
     contractorIds: parseCsvIds(params.get('contractor')),
@@ -666,6 +670,12 @@ export default function InboxPage() {
   const supplierOptions = useMemo(
     () => (suppliersQuery.data?.items ?? []).map((s) => ({ value: s.id, label: s.name })),
     [suppliersQuery.data],
+  );
+  // Варианты воронки «Объект» — те же, что в поле панели (код · название).
+  const siteOptions = useMemo(
+    () =>
+      (sitesQuery.data?.items ?? []).map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` })),
+    [sitesQuery.data],
   );
 
   // Лёгкие count-запросы для вкладок «Приёмка / Отгрузка». limit=1 — серверу
@@ -1110,6 +1120,10 @@ export default function InboxPage() {
     </Card>
   );
 
+  // Воронки в шапке — те же фильтры, что в панели над таблицей: значение живёт в
+  // адресе и меняется тем же апдейтером, поэтому воронка и поле панели всегда
+  // показывают одно и то же. Подрядчику справочные воронки не нужны — у него
+  // и в панели есть только поиск.
   const documentColumns: TableProps<Row>['columns'] = [
     {
       title: 'Тип',
@@ -1118,6 +1132,13 @@ export default function InboxPage() {
       // По частоте использования: УПД сверху, заявки в середине,
       // накладные (ТН + ОС-2) вместе внизу.
       ...sortProps('kind'),
+      ...externalColumnFilter<Row>({
+        kind: 'values',
+        title: 'Тип',
+        options: KIND_FILTER_OPTIONS,
+        value: kindsToFilterValues(kindValues),
+        onApply: (values) => updateParams({ kind: filterValuesToKindParam(values), page: null }),
+      }),
       // Кнопка ± рядом с тегом — раскрывает/сворачивает позиции
       // под строкой. stopPropagation чтобы не сработал onRowClick.
       render: (_: unknown, r: Row) => {
@@ -1192,6 +1213,15 @@ export default function InboxPage() {
       title: '№',
       dataIndex: 'docNumber',
       ...sortProps('docNumber'),
+      // Это поиск «Номер документа» из панели; сервер ищет и по имени файла.
+      ...externalColumnFilter<Row>({
+        kind: 'text',
+        title: 'Номер или имя файла',
+        hint: 'Ищет по номеру документа и по имени файла',
+        placeholder: 'Содержит…',
+        value: filters.q,
+        onApply: (q) => updateFilters({ q }),
+      }),
       render: renderDocNumber,
     },
     {
@@ -1220,11 +1250,36 @@ export default function InboxPage() {
       title: 'Объект',
       dataIndex: 'siteName',
       ...sortProps('siteName'),
+      ...(isContractor
+        ? {}
+        : externalColumnFilter<Row>({
+            kind: 'values',
+            title: 'Объект',
+            options: siteOptions,
+            loading: sitesQuery.isLoading,
+            value: filters.siteIds,
+            onApply: (siteIds) => updateFilters({ siteIds }),
+          })),
       render: (v: string | null | undefined) => v ?? '—',
     },
     // Стороны документа — общий набор для всех таблиц с УПД,
-    // см. shared/ui/documentPartyColumns.
-    ...documentPartyColumns<Row>((r) => r, { sortProps }),
+    // см. shared/ui/documentPartyColumns. Воронка — только у «Поставщика»:
+    // серверный фильтр «Подрядчик» ищет по contractor_id, а не по покупателю.
+    ...documentPartyColumns<Row>((r) => r, { sortProps }).map((c) =>
+      c.key === 'supplier' && !isContractor
+        ? {
+            ...c,
+            ...externalColumnFilter<Row>({
+              kind: 'values',
+              title: 'Поставщик',
+              options: supplierOptions,
+              loading: suppliersQuery.isLoading,
+              value: filters.supplierIds,
+              onApply: (supplierIds) => updateFilters({ supplierIds }),
+            }),
+          }
+        : c,
+    ),
     {
       title: 'Сумма НДС',
       dataIndex: 'vatSum',

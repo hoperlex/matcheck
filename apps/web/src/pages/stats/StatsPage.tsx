@@ -11,6 +11,7 @@ import type {
 } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
+import { externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
 import { FilterSelect } from '../../shared/ui/FilterSelect';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 
@@ -183,6 +184,12 @@ export default function StatsPage() {
       })),
     [inspectors.data],
   );
+  // Воронки в шапке меняют то же состояние, что и поля панели (период, объекты,
+  // инспекторы), поэтому поле и воронка всегда показывают одно и то же.
+  const siteOptions = useMemo(
+    () => (sites.data?.items ?? []).map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` })),
+    [sites.data],
+  );
 
   return (
     <StickyPageHeader
@@ -198,6 +205,9 @@ export default function StatsPage() {
             <DatePicker.RangePicker
               value={range as [Dayjs, Dayjs] | null}
               onChange={(v) => setRange(v as [Dayjs | null, Dayjs | null] | null)}
+              // Период с одной границей приходит из воронки «Дата» («с 01.10»):
+              // без allowEmpty поле панели не смогло бы его показать.
+              allowEmpty={[true, true]}
               format="DD.MM.YYYY"
               presets={[
                 { label: 'Сегодня', value: [dayjs().startOf('day'), dayjs().endOf('day')] },
@@ -317,16 +327,40 @@ export default function StatsPage() {
               dataIndex: 'date',
               width: 130,
               ...sortProps('date'),
+              ...externalColumnFilter<InspectorStatsRow>({
+                kind: 'dates',
+                title: 'Дата',
+                from: range?.[0] ? range[0].format('YYYY-MM-DD') : null,
+                to: range?.[1] ? range[1].format('YYYY-MM-DD') : null,
+                onApply: ({ from, to }) =>
+                  setRange(from || to ? [from ? dayjs(from) : null, to ? dayjs(to) : null] : null),
+              }),
               render: (v: string) => formatDate(v),
             },
             {
               title: 'Инспектор',
               ...sortProps('inspector'),
+              ...externalColumnFilter<InspectorStatsRow>({
+                kind: 'values',
+                title: 'Инспектор',
+                options: inspectorOptions,
+                loading: inspectors.isLoading,
+                value: inspectorIds,
+                onApply: setInspectorIds,
+              }),
               render: (_: unknown, r: InspectorStatsRow) => inspectorName(r),
             },
             {
               title: 'Объект',
               ...sortProps('site'),
+              ...externalColumnFilter<InspectorStatsRow>({
+                kind: 'values',
+                title: 'Объект',
+                options: siteOptions,
+                loading: sites.isLoading,
+                value: siteIds,
+                onApply: setSiteIds,
+              }),
               render: (_: unknown, r: InspectorStatsRow) => `${r.siteCode} · ${r.siteName}`,
             },
             {

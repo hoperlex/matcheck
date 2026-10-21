@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button, Space, Tag, Tooltip, Typography, type TableProps } from 'antd';
 import { PictureOutlined } from '@ant-design/icons';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
@@ -16,7 +16,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { FilterSelect } from '../../shared/ui/FilterSelect';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { parseDateRangeKey, serverDateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
-import { antdColumnFilter } from '../../shared/ui/ColumnFilterWindow';
+import { antdColumnFilter, externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { useSyncGlobalFiltersSiteContractor } from '../../shared/hooks/useSyncGlobalFilters';
 
@@ -151,6 +151,18 @@ export default function MaterialsPage() {
   });
 
   const rows = movementsQuery.data?.items ?? [];
+
+  // Варианты воронок «Объект» и «Подрядчик» — те же, что у полей панели. Воронка
+  // меняет то же состояние (setSiteIds / setContractorIds), поэтому поле панели
+  // и воронка всегда показывают одно и то же.
+  const siteOptions = useMemo(
+    () => (sites.data?.items ?? []).map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` })),
+    [sites.data],
+  );
+  const contractorOptions = useMemo(
+    () => (customerCounterparties.data?.items ?? []).map((c) => ({ value: c.id, label: c.name })),
+    [customerCounterparties.data],
+  );
 
   // Сортировка серверная — колонке достаточно знать, активна ли она сейчас.
   // key — то самое поле сервера: antd отдаёт в onChange `columnKey = column.key`,
@@ -337,6 +349,14 @@ export default function MaterialsPage() {
               title: 'Объект',
               width: 200,
               ...sortProps('siteName'),
+              ...externalColumnFilter<UnifiedRow>({
+                kind: 'values',
+                title: 'Объект',
+                options: siteOptions,
+                loading: sites.isLoading,
+                value: siteIds,
+                onApply: setSiteIds,
+              }),
               render: (_: unknown, r: UnifiedRow) => `${r.siteCode} · ${r.siteName}`,
             },
             {
@@ -367,6 +387,14 @@ export default function MaterialsPage() {
               title: 'Подрядчик',
               dataIndex: 'contractorName',
               width: 180,
+              ...externalColumnFilter<UnifiedRow>({
+                kind: 'values',
+                title: 'Подрядчик',
+                options: contractorOptions,
+                loading: customerCounterparties.isLoading,
+                value: contractorIds,
+                onApply: setContractorIds,
+              }),
               render: (v: string | null) => v ?? '—',
             },
             {

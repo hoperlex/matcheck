@@ -51,22 +51,32 @@ describe('ResponsiveTable: вид FOT', () => {
     const tag = screen.getByText('ok');
     expect(tag.closest('.ant-tag')).toBeTruthy();
     expect(tag.closest('.mc-clamp2')).toBeNull();
-    expect(container.querySelectorAll('.mc-clamp2')).toHaveLength(2);
+    // «Склад» — одно слово: переносить нечего, идёт одной строкой.
+    expect(container.querySelectorAll('.mc-clamp2')).toHaveLength(1);
+    expect(screen.getByText('Склад').classList.contains('mc-clamp2')).toBe(false);
   });
 
-  it('суммы, даты и номера из цифр не переносятся — одна строка с подсказкой', () => {
+  it('суммы, даты, номера и коды без пробелов не переносятся — одна строка с подсказкой', () => {
     // formatMoneyRu разделяет разряды узким неразрывным пробелом (U+202F): для
     // браузера «1 564 512,34» — одно слово, и перенос до двух строк резал его
-    // по цифрам («1 564 5» / «₽»).
+    // по цифрам («1 564 5» / «₽»). Так же резался номер с буквами без пробелов:
+    // «МО/25347/2017» → «МО/25347/201» / «7».
     type Cell = { id: string; value: string };
     const money = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2 }).format(1564512.34);
-    const values = [`${money} ₽`, '04.09.2026', '20.10.2026 07:58', '201/2112732', '1 234,5'];
+    const values = [
+      `${money} ₽`,
+      '04.09.2026',
+      '20.10.2026 07:58',
+      '201/2112732',
+      '1 234,5',
+      'МО/25347/2017',
+      'АМА5-021457/4',
+    ];
     const { container } = render(
       <ResponsiveTable<Cell>
         items={[
           ...values.map((value, i) => ({ id: String(i), value })),
           { id: 'text', value: 'ЖК МАРК (ЛОТ №33)' },
-          { id: 'code', value: 'АМА5-021457/4' },
         ]}
         rowKey="id"
         cardRender={(r) => r.value}
@@ -81,9 +91,8 @@ describe('ResponsiveTable: вид FOT', () => {
       expect(cell, v).toBeTruthy();
       expect(cell!.classList.contains('mc-clamp2'), v).toBe(false);
     }
-    // Текст с буквами по-прежнему переносится до двух строк.
+    // Текст из нескольких слов по-прежнему переносится до двух строк.
     expect(screen.getByText('ЖК МАРК (ЛОТ №33)').classList.contains('mc-clamp2')).toBe(true);
-    expect(screen.getByText('АМА5-021457/4').classList.contains('mc-clamp2')).toBe(true);
   });
 
   it('колонка с явным ellipsis остаётся однострочной', () => {

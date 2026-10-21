@@ -56,6 +56,8 @@ import {
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { partyCell } from '../../shared/ui/documentPartyColumns';
+import { externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
+import { useStatusFilterOptions } from '../../shared/hooks/useStatusFilterOptions';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 import { operationsListQuery } from '../operations/operationsQuery';
 import {
@@ -459,6 +461,13 @@ export function ShipmentsHistory({
       })),
     [suppliersQuery.data],
   );
+  // Варианты воронки «Объект» — те же, что в поле панели (код · название).
+  const siteOptions = useMemo(
+    () =>
+      (sitesQuery.data?.items ?? []).map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` })),
+    [sitesQuery.data],
+  );
+  const statusFilter = useStatusFilterOptions('shipment');
   // Раньше тут было buildInnMatchMap клиента — теперь ИНН-маппинг
   // делает сервер в /shipments (см. expandCustomerCounterpartyToOpIds
   // в apps/api/src/routes/shipments.ts). На клиенте остался только
@@ -958,8 +967,10 @@ export function ShipmentsHistory({
             rowKey="id"
             // 14 колонок, из них три стороны документа — фиксированные 170px под
             // ИНН второй строкой. Без явной минимальной ширины остальные ужимались
-            // бы на 1024-1366px в нечитаемую кашу.
-            scrollX={1700}
+            // бы на 1024-1366px в нечитаемую кашу. «Отгружено» и «Получатель»
+            // со стрелкой и воронкой шире прочих — им заданы свои ширины, а
+            // запас +60px сохраняет остальным колонкам прежние ~106px.
+            scrollX={1760}
             // Массовые действия — по праву удаления; в корзине только у админа.
             rowSelection={(isAdmin || !isTrash) && canDelete ? bulk.selection : undefined}
             // Без права правки клик по строке ведёт в просмотр (там же — отметка
@@ -995,19 +1006,54 @@ export function ShipmentsHistory({
                 key: 'displayId',
                 width: 80,
                 dataIndex: 'displayId',
+                // Воронки в шапке — те же фильтры, что в панели и чипах над
+                // таблицей: значение живёт в адресе и меняется тем же
+                // updateFilters, поэтому воронка и панель показывают одно и то же.
+                ...externalColumnFilter<Row>({
+                  kind: 'text',
+                  title: 'id отгрузки',
+                  placeholder: 'Точный id',
+                  sanitize: (v) => v.replace(/\D/g, '').slice(0, 15),
+                  value: filters.displayId,
+                  onApply: (displayId) => updateFilters({ displayId }),
+                }),
               },
               {
                 title: 'Статус',
                 key: 'status',
+                ...externalColumnFilter<Row>({
+                  kind: 'values',
+                  title: 'Статус',
+                  single: true,
+                  options: statusFilter.options,
+                  loading: statusFilter.loading,
+                  value: filters.status ? [filters.status] : [],
+                  onApply: (values) => updateFilters({ status: values[0] ?? null }),
+                }),
                 render: (_: unknown, r: Row) => renderStatusCell(r),
               },
               {
                 title: 'Авто',
                 dataIndex: 'vehiclePlate',
+                ...externalColumnFilter<Row>({
+                  kind: 'text',
+                  title: 'Номер авто',
+                  value: filters.plate,
+                  onApply: (plate) => updateFilters({ plate }),
+                }),
               },
               {
                 title: 'Отгружено',
                 dataIndex: 'shippedAt',
+                width: 124,
+                ...externalColumnFilter<Row>({
+                  kind: 'dates',
+                  title: 'Отгружено',
+                  from: filters.dateFrom || null,
+                  to: filters.dateTo || null,
+                  onApply: ({ from, to }) =>
+                    updateFilters({ dateFrom: from ?? '', dateTo: to ?? '' }),
+                }),
                 render: (v: string | null) => formatDateTimeRu(v),
               },
               {
@@ -1016,6 +1062,21 @@ export function ShipmentsHistory({
                 // показываем объект-приёмник через destinationLabel.
                 title: 'Получатель',
                 key: 'receiver',
+                width: 132,
+                // Серверный «Подрядчик» у отгрузки — это получатель
+                // (receiver_counterparty_id): то же, что видно в колонке.
+                // «Поставщику» воронку не даём: колонка показывает поставщика
+                // документа, а серверный фильтр — поставщика самой отгрузки.
+                ...(isContractor
+                  ? {}
+                  : externalColumnFilter<Row>({
+                      kind: 'values',
+                      title: 'Получатель (подрядчик)',
+                      options: contractorOptions,
+                      loading: customerCounterpartiesQuery.isLoading,
+                      value: filters.contractorIds,
+                      onApply: (contractorIds) => updateFilters({ contractorIds }),
+                    })),
                 render: (_: unknown, r: Row) => renderCounterpartyCol(r),
               },
               // Стороны из шапки привязанного УПД — тот же набор, что в «Документах»
@@ -1062,6 +1123,16 @@ export function ShipmentsHistory({
                 // Длинные имена («АЛ13 · ЖК АЛИЯ, БЛОКИ 13А, 13В») переносятся
                 // до двух строк, дальше «…» с подсказкой (ClampText в
                 // ResponsiveTable) — как во всех таблицах раздела «Операции».
+                ...(isContractor
+                  ? {}
+                  : externalColumnFilter<Row>({
+                      kind: 'values',
+                      title: 'Объект',
+                      options: siteOptions,
+                      loading: sitesQuery.isLoading,
+                      value: filters.siteIds,
+                      onApply: (siteIds) => updateFilters({ siteIds }),
+                    })),
                 render: (_: unknown, r: Row) => r.siteName ?? sitesMap.get(r.siteId) ?? '—',
               },
               {
@@ -1070,6 +1141,20 @@ export function ShipmentsHistory({
                 width: 80,
                 // Суммарное количество фото обоих этапов (stage='before' + 'after')
                 // — поле stage у shipment_photos добавлено миграцией 0048.
+                // «Без фото» — тот же фильтр, что дип-линк из «Статистики» и чип.
+                ...externalColumnFilter<Row>({
+                  kind: 'values',
+                  title: 'Фото',
+                  single: true,
+                  options: [{ value: 'nophoto', label: 'Без фото' }],
+                  value: filters.nophoto ? ['nophoto'] : [],
+                  onApply: (values) =>
+                    updateFilters(
+                      values.includes('nophoto')
+                        ? { nophoto: true }
+                        : { nophoto: false, nophotoOlderHours: null },
+                    ),
+                }),
                 render: (_: unknown, r: Row) => r.photos?.length ?? 0,
               },
               {

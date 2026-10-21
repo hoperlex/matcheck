@@ -49,6 +49,14 @@ export function ClampText({ text }: { text: string }): ReactElement {
  */
 const NUMERIC_LIKE = /^[\d\s.,:;+−–—/\\₽%$€()№#-]+$/;
 
+/**
+ * Обычный пробел — значит, в тексте несколько слов и его можно переносить по
+ * словам. Номер или код без пробелов («МО/25347/2017», «АМА5-021457/4») —
+ * одно «слово»: перенос до двух строк резал его в произвольном месте
+ * («МО/25347/201» / «7»), поэтому такой текст идёт одной строкой.
+ */
+const HAS_WORD_BREAK = /[ \t\n]/;
+
 /** Одна строка с «…» (её даёт CSS ячейки) и подсказкой с полным значением. */
 function OneLineText({ text }: { text: string }): ReactElement {
   return (
@@ -59,8 +67,9 @@ function OneLineText({ text }: { text: string }): ReactElement {
 }
 
 /**
- * Текст ячейки — в ClampText (до двух строк), числовое значение — в одну
- * строку; JSX (теги, кнопки, контролы) — как есть.
+ * Текст из нескольких слов — в ClampText (до двух строк); числовое значение и
+ * текст без пробелов (номера, коды) — в одну строку; JSX (теги, кнопки,
+ * контролы) — как есть.
  */
 function clampRender<T>(origRender: Column<T>['render']): Column<T>['render'] {
   return (value: unknown, record: T, idx: number): ReactNode => {
@@ -70,7 +79,11 @@ function clampRender<T>(origRender: Column<T>['render']): Column<T>['render'] {
     if (typeof out === 'string' || typeof out === 'number') {
       const s = String(out);
       if (s.length === 0 || s === '—' || s === '-') return out;
-      return NUMERIC_LIKE.test(s) ? <OneLineText text={s} /> : <ClampText text={s} />;
+      return NUMERIC_LIKE.test(s) || !HAS_WORD_BREAK.test(s) ? (
+        <OneLineText text={s} />
+      ) : (
+        <ClampText text={s} />
+      );
     }
     return out;
   };

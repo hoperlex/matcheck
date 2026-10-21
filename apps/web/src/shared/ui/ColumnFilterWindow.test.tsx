@@ -13,7 +13,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { Table, type TableProps } from 'antd';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { antdColumnFilter, ColumnFilterWindow, type FilterOption } from './ColumnFilterWindow';
+import {
+  antdColumnFilter,
+  ColumnFilterWindow,
+  externalColumnFilter,
+  type FilterOption,
+} from './ColumnFilterWindow';
 
 const OPTIONS: FilterOption[] = [
   { value: 'a', label: 'Альфа', count: 3 },
@@ -258,5 +263,76 @@ describe('antdColumnFilter в таблице', () => {
     await waitFor(() => expect(checkbox('Альфа').checked).toBe(false));
     expect(checkbox('Бета').checked).toBe(false);
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+/** Таблица серверного списка: фильтр живёт в «адресе» страницы, как у панели. */
+function ExternalTable({
+  onApplySpy,
+  onTableChange,
+  initial = [],
+}: {
+  onApplySpy: (v: string[]) => void;
+  onTableChange: NonNullable<TableProps<Row>['onChange']>;
+  initial?: string[];
+}) {
+  const [value, setValue] = useState<string[]>(initial);
+  return (
+    <Table<Row>
+      rowKey="id"
+      dataSource={ROWS}
+      pagination={false}
+      onChange={onTableChange}
+      columns={[
+        {
+          title: 'Тип',
+          key: 'kind',
+          dataIndex: 'kind',
+          ...externalColumnFilter<Row>({
+            kind: 'values',
+            title: 'Тип',
+            options: OPTIONS,
+            value,
+            onApply: (v) => {
+              onApplySpy(v);
+              setValue(v);
+            },
+          }),
+        },
+      ]}
+    />
+  );
+}
+
+describe('externalColumnFilter (серверные списки)', () => {
+  it('«Применить» — ровно один вызов апдейтера страницы, Table.onChange не зовётся', async () => {
+    const onApply = vi.fn();
+    const onTableChange = vi.fn();
+    const { container } = render(
+      <ExternalTable onApplySpy={onApply} onTableChange={onTableChange} />,
+    );
+    openFunnel(container);
+    fireEvent.click(checkbox('Бета'));
+    fireEvent.click(screen.getByRole('button', { name: 'Применить' }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+    expect(onApply).toHaveBeenCalledWith(['b']);
+    expect(onTableChange).not.toHaveBeenCalled();
+    expect(container.querySelector('.ant-table-filter-trigger.active')).toBeTruthy();
+  });
+
+  it('«Сбросить» — апдейтер с пустым списком; Esc — ничего', async () => {
+    const onApply = vi.fn();
+    const { container } = render(
+      <ExternalTable onApplySpy={onApply} onTableChange={vi.fn()} initial={['a']} />,
+    );
+    openFunnel(container);
+    fireEvent.click(checkbox('Бета'));
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    expect(onApply).not.toHaveBeenCalled();
+    openFunnel(container);
+    await waitFor(() => expect(checkbox('Бета').checked).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Сбросить' }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledWith([]));
+    expect(onApply).toHaveBeenCalledTimes(1);
   });
 });

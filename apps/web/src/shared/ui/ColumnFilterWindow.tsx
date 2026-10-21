@@ -428,3 +428,130 @@ export function antdColumnFilter<T>(
     filterDropdownProps: FILTER_DROPDOWN_PROPS,
   };
 }
+
+// ─── Внешнее состояние (серверные списки) ──────────────────────────────────
+
+export type ExternalColumnFilterConfig =
+  | {
+      kind: 'values';
+      title: string;
+      hint?: string;
+      options: readonly FilterOption[];
+      value: readonly string[];
+      /** Пустой массив — снять фильтр. */
+      onApply: (values: string[]) => void;
+      single?: boolean;
+      loading?: boolean;
+    }
+  | {
+      kind: 'dates';
+      title: string;
+      hint?: string;
+      from: string | null;
+      to: string | null;
+      onApply: (range: DateRange) => void;
+    }
+  | {
+      kind: 'text';
+      title: string;
+      hint?: string;
+      value: string;
+      placeholder?: string;
+      sanitize?: (raw: string) => string;
+      /** Пустая строка — снять фильтр. */
+      onApply: (value: string) => void;
+    };
+
+function ExternalFilterContent({
+  cfg,
+  p,
+}: {
+  cfg: ExternalColumnFilterConfig;
+  p: FilterDropdownProps;
+}): ReactElement | null {
+  if (!p.visible) return null;
+  // Путь применения ровно один: апдейтер страницы (тот же, что у панели над
+  // таблицей), затем закрыть окно. confirm/clearFilters здесь не зовём — они
+  // вызвали бы ещё и Table.onChange, а страница пишет адрес от одного снимка
+  // параметров: второе обновление за клик затёрло бы первое.
+  const done = (): void => p.close();
+  if (cfg.kind === 'values') {
+    return (
+      <ColumnFilterWindow
+        kind="values"
+        title={cfg.title}
+        hint={cfg.hint}
+        options={cfg.options}
+        selected={cfg.value}
+        single={cfg.single}
+        loading={cfg.loading}
+        onClose={done}
+        onApply={(values) => {
+          cfg.onApply(values ?? []);
+          done();
+        }}
+      />
+    );
+  }
+  if (cfg.kind === 'dates') {
+    return (
+      <ColumnFilterWindow
+        kind="dates"
+        title={cfg.title}
+        hint={cfg.hint}
+        from={cfg.from}
+        to={cfg.to}
+        onClose={done}
+        onApply={(range) => {
+          cfg.onApply(range ?? { from: null, to: null });
+          done();
+        }}
+      />
+    );
+  }
+  return (
+    <ColumnFilterWindow
+      kind="text"
+      title={cfg.title}
+      hint={cfg.hint}
+      value={cfg.value}
+      placeholder={cfg.placeholder}
+      sanitize={cfg.sanitize}
+      onClose={done}
+      onApply={(value) => {
+        cfg.onApply(value ?? '');
+        done();
+      }}
+    />
+  );
+}
+
+/**
+ * Фильтр колонки серверного списка, у которого есть поле в панели над таблицей:
+ * значение живёт там же, где у панели (адрес или state страницы), и меняется
+ * тем же апдейтером — воронка и панель показывают одно и то же. Через
+ * Table.onChange изменение не идёт.
+ */
+export function externalColumnFilter<T>(
+  cfg: ExternalColumnFilterConfig,
+): Pick<ColumnType<T>, 'filterDropdown' | 'filterIcon' | 'filterDropdownProps' | 'filteredValue'> {
+  const filteredValue =
+    cfg.kind === 'values'
+      ? cfg.value.length > 0
+        ? [...cfg.value]
+        : null
+      : cfg.kind === 'dates'
+        ? (() => {
+            const key = dateRangeKey({ from: cfg.from, to: cfg.to });
+            return key ? [key] : null;
+          })()
+        : cfg.value
+          ? [cfg.value]
+          : null;
+  return {
+    filterDropdown: (p) => <ExternalFilterContent cfg={cfg} p={p} />,
+    filterIcon: () => <FunnelIcon />,
+    filterDropdownProps: FILTER_DROPDOWN_PROPS,
+    filteredValue,
+  };
+}

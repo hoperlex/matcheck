@@ -8,11 +8,11 @@
  * снятыми. Тест держит именно это: адрес после ввода номера сохраняет объект,
  * подрядчика и поставщика.
  */
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ReactElement } from 'react';
+import { useEffect, type ReactElement } from 'react';
 
 vi.mock('../../shared/hooks/usePermissions', () => ({
   usePermissions: () => ({
@@ -47,6 +47,13 @@ vi.mock('../../services/api', () => ({
   api: {
     get: async (url: string) => {
       apiState.urls.push(url);
+      // Справочники для полей панели и воронок в шапке.
+      if (url.startsWith('/sites')) {
+        return { items: [{ id: SITE_ID, code: 'АЛ13', name: 'ЖК АЛИЯ' }], total: 1 };
+      }
+      if (url.startsWith('/suppliers')) {
+        return { items: [{ id: SUPPLIER_ID, name: 'ООО «Лютик»' }], total: 1 };
+      }
       return apiState.response;
     },
     post: async () => ({ ok: true }),
@@ -58,11 +65,18 @@ vi.mock('../../services/api', () => ({
 }));
 
 const { default: InboxPage } = await import('./Inbox');
+const { useGlobalFiltersStore } = await import('../../stores/globalFilters');
 
 let search = '';
+/** Сколько раз менялся адрес: одно «Применить» обязано дать ровно одно изменение. */
+let urlChanges = 0;
 
 function UrlSpy(): null {
-  search = useLocation().search;
+  const location = useLocation();
+  search = location.search;
+  useEffect(() => {
+    urlChanges += 1;
+  }, [location.key]);
   return null;
 }
 
@@ -95,6 +109,9 @@ afterEach(async () => {
   lastClient = null;
   apiState.response = { items: [], total: 0 };
   apiState.urls = [];
+  // «Липкие» фильтры раздела живут в общем хранилище: без сброса объект из
+  // соседнего кейса подставлялся бы в пустой адрес следующего.
+  useGlobalFiltersStore.getState().reset();
 });
 
 /** Ячейка шапки таблицы по подписи: те же слова встречаются в панели и чипах. */
@@ -369,5 +386,82 @@ describe('Документы: принятые файлы в общем спис
     expect(screen.getByText('ждёт-разбора.pdf')).toBeTruthy();
     expect(container.querySelectorAll('.ant-table-thead')).toHaveLength(1);
     expect(container.querySelectorAll('.ant-table-tbody > tr.ant-table-row')).toHaveLength(50);
+  });
+});
+
+async function applyFunnel(column: string, option: string): Promise<void> {
+  fireEvent.click(headerCell(column).querySelector('.ant-table-filter-trigger')!);
+  const dialog = await screen.findByRole('dialog');
+  fireEvent.click(within(dialog).getByText(option).closest('label')!.querySelector('input')!);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Применить' }));
+}
+
+describe('Документы: воронки в шапке — те же фильтры, что в панели', () => {
+  it('«Объект» в воронке → объект в адресе и в запросе; сортировка и даты на месте', async () => {
+    renderPage('/documents?direction=inbound&sort=totalSum&order=desc&docFrom=2026-08-01&page=3');
+    await expectListRequest({ sort: 'totalSum', docDateFrom: '2026-08-01' });
+    await waitFor(() => expect(headerCell('Объект').querySelector('.ant-table-filter-trigger')).toBeTruthy());
+    const before = urlChanges;
+
+    await applyFunnel('Объект', 'АЛ13 · ЖК АЛИЯ');
+
+    await waitFor(() => expect(search).toContain(`site=${SITE_ID}`));
+    // Ровно одно изменение адреса: второе (через Table.onChange) затёрло бы первое.
+    expect(urlChanges - before).toBe(1);
+    expect(search).toContain('sort=totalSum');
+    expect(search).toContain('order=desc');
+    expect(search).toContain('docFrom=2026-08-01');
+    expect(search).not.toContain('page=');
+    await expectListRequest({ siteIds: SITE_ID, sort: 'totalSum', docDateFrom: '2026-08-01' });
+
+    // Смена сортировки не снимает объект.
+    fireEvent.click(headerCell('Дата'));
+    await waitFor(() => expect(search).toContain('sort=docDate'));
+    expect(search).toContain(`site=${SITE_ID}`);
+  });
+
+  it('объект из адреса — воронка подсвечена, «Сбросить» снимает только его', async () => {
+    renderPage(`/documents?direction=inbound&site=${SITE_ID}&supplier=${SUPPLIER_ID}`);
+    await expectListRequest({ siteIds: SITE_ID });
+    const trigger = () => headerCell('Объект').querySelector('.ant-table-filter-trigger')!;
+    await waitFor(() => expect(trigger().classList.contains('active')).toBe(true));
+    fireEvent.click(trigger());
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Сбросить' }));
+    await waitFor(() => expect(search).not.toContain('site='));
+    expect(search).toContain(`supplier=${SUPPLIER_ID}`);
+  });
+
+  it('«Накладная» в воронке «Тип» — ТН и ОС-2 на сервер', async () => {
+    renderPage('/documents?direction=inbound');
+    await expectListRequest({ direction: 'inbound' });
+    await applyFunnel('Тип', 'Накладная');
+    await waitFor(() => expect(search).toContain('kind=transport_waybill%2Cos2_transfer'));
+    await expectListRequest({ kind: 'transport_waybill,os2_transfer' });
+  });
+
+  it('старая ссылка kind=upd по-прежнему работает', async () => {
+    renderPage('/documents?direction=inbound&kind=upd');
+    await expectListRequest({ kind: 'upd' });
+    await waitFor(() =>
+      expect(headerCell('Тип').querySelector('.ant-table-filter-trigger')!.classList).toContain('active'),
+    );
+  });
+
+  it('воронка «№» — это поиск по номеру и имени файла из панели', async () => {
+    renderPage('/documents?direction=inbound');
+    await expectListRequest({ direction: 'inbound' });
+    // «№» в шапке два: номер строки и номер документа — нужен тот, где воронка.
+    const numberTh = Array.from(document.querySelectorAll<HTMLElement>('.ant-table-thead th')).find(
+      (th) => th.textContent?.trim() === '№' && th.querySelector('.ant-table-filter-trigger'),
+    )!;
+    fireEvent.click(numberTh.querySelector('.ant-table-filter-trigger')!);
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Ищет по номеру документа и по имени файла')).toBeTruthy();
+    const input = within(dialog).getByPlaceholderText('Содержит…');
+    fireEvent.change(input, { target: { value: 'УТ-43' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Применить' }));
+    await waitFor(() => expect(search).toContain('q=%D0%A3%D0%A2-43'));
+    await expectListRequest({ q: 'УТ-43' });
   });
 });

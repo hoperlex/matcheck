@@ -58,6 +58,8 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { partyCell } from '../../shared/ui/documentPartyColumns';
+import { externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
+import { useStatusFilterOptions } from '../../shared/hooks/useStatusFilterOptions';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 // directoryFilterMap (ИНН-маппинг customer_counterparties → operational
 // counterparties) больше не нужен — фильтрация переехала на сервер.
@@ -538,6 +540,13 @@ export function DeliveriesHistory({
       })),
     [suppliersQuery.data],
   );
+  // Варианты воронки «Объект» — те же, что в поле панели (код · название).
+  const siteOptions = useMemo(
+    () =>
+      (sitesQuery.data?.items ?? []).map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` })),
+    [sitesQuery.data],
+  );
+  const statusFilter = useStatusFilterOptions('delivery');
   // Раньше тут было buildInnMatchMap клиента — теперь ИНН-маппинг
   // делает сервер в /deliveries (см. expandCustomerCounterpartyToOpIds
   // в apps/api/src/routes/deliveries.ts). На клиенте остался только
@@ -1126,19 +1135,53 @@ export function DeliveriesHistory({
                 key: 'displayId',
                 width: 80,
                 dataIndex: 'displayId',
+                // Воронки в шапке — те же фильтры, что в панели и чипах над
+                // таблицей: значение живёт в адресе и меняется тем же
+                // updateFilters, поэтому воронка и панель показывают одно и то же.
+                ...externalColumnFilter<Row>({
+                  kind: 'text',
+                  title: 'id приёмки',
+                  placeholder: 'Точный id',
+                  sanitize: (v) => v.replace(/\D/g, '').slice(0, 15),
+                  value: filters.displayId,
+                  onApply: (displayId) => updateFilters({ displayId }),
+                }),
               },
               {
                 title: 'Статус',
                 key: 'status',
+                ...externalColumnFilter<Row>({
+                  kind: 'values',
+                  title: 'Статус',
+                  single: true,
+                  options: statusFilter.options,
+                  loading: statusFilter.loading,
+                  value: filters.status ? [filters.status] : [],
+                  onApply: (values) => updateFilters({ status: values[0] ?? null }),
+                }),
                 render: (_: unknown, r: Row) => renderStatusCell(r),
               },
               {
                 title: 'Авто',
                 dataIndex: 'vehiclePlate',
+                ...externalColumnFilter<Row>({
+                  kind: 'text',
+                  title: 'Номер авто',
+                  value: filters.plate,
+                  onApply: (plate) => updateFilters({ plate }),
+                }),
               },
               {
                 title: 'Прибытие',
                 dataIndex: 'arrivedAt',
+                ...externalColumnFilter<Row>({
+                  kind: 'dates',
+                  title: 'Прибытие',
+                  from: filters.dateFrom || null,
+                  to: filters.dateTo || null,
+                  onApply: ({ from, to }) =>
+                    updateFilters({ dateFrom: from ?? '', dateTo: to ?? '' }),
+                }),
                 render: (v: string | null) => formatArrival(v),
               },
               // Стороны из шапки привязанного УПД — тот же набор, что в «Документах»
@@ -1174,6 +1217,16 @@ export function DeliveriesHistory({
                 key: 'supplier',
                 width: 170,
                 ellipsis: false,
+                ...(isContractor
+                  ? {}
+                  : externalColumnFilter<Row>({
+                      kind: 'values',
+                      title: 'Поставщик',
+                      options: supplierOptions,
+                      loading: suppliersQuery.isLoading,
+                      value: filters.supplierIds,
+                      onApply: (supplierIds) => updateFilters({ supplierIds }),
+                    })),
                 render: (_: unknown, r: Row) => renderSupplierCell(r),
               },
               {
@@ -1182,6 +1235,16 @@ export function DeliveriesHistory({
                 // Длинные имена переносятся до двух строк, дальше «…» с
                 // подсказкой (ClampText в ResponsiveTable) — как во всех
                 // таблицах раздела «Операции».
+                ...(isContractor
+                  ? {}
+                  : externalColumnFilter<Row>({
+                      kind: 'values',
+                      title: 'Объект',
+                      options: siteOptions,
+                      loading: sitesQuery.isLoading,
+                      value: filters.siteIds,
+                      onApply: (siteIds) => updateFilters({ siteIds }),
+                    })),
                 render: (_: unknown, r: Row) => siteName(r),
               },
               {
@@ -1190,6 +1253,20 @@ export function DeliveriesHistory({
                 width: 80,
                 // Суммарное количество фото обоих этапов (stage='before' + 'after').
                 // r.photos уже агрегирован сервером — отдельно по stage не считаем.
+                // «Без фото» — тот же фильтр, что дип-линк из «Статистики» и чип.
+                ...externalColumnFilter<Row>({
+                  kind: 'values',
+                  title: 'Фото',
+                  single: true,
+                  options: [{ value: 'nophoto', label: 'Без фото' }],
+                  value: filters.nophoto ? ['nophoto'] : [],
+                  onApply: (values) =>
+                    updateFilters(
+                      values.includes('nophoto')
+                        ? { nophoto: true }
+                        : { nophoto: false, nophotoOlderHours: null },
+                    ),
+                }),
                 render: (_: unknown, r: Row) => r.photos?.length ?? 0,
               },
               {
