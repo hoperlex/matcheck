@@ -64,8 +64,11 @@ export function App() {
         theme={{
           token: { colorPrimary: '#1677ff', borderRadius: 8, colorBgLayout: '#f5f5f5' },
           components: {
-            // Таблицы в стиле FOT («Управление кадрами»): ячейки 4px × 12px
-            // при высоте строки 40px, шапка #f1f3f4, линии #dadce0. Остальное —
+            // Таблицы в стиле FOT («Управление кадрами»): ячейки 4px × 8px
+            // при высоте строки 40px, шапка #f1f3f4, линии #dadce0. Отступ
+            // по бокам — прежние 8px, а не 12px, как в FOT: под него подобраны
+            // ширины колонок портала, и на 12px в «Тип» Документов кнопки
+            // переставали помещаться (появлялось «…»). Остальное —
             // заглавные подписи, стрелка и воронка вплотную, зебра — в
             // TableLookStyle. Шрифт ячеек 13px против базовых 14; size="small"
             // сам по себе шрифт НЕ уменьшает, только отступы.
@@ -76,9 +79,9 @@ export function App() {
               cellPaddingBlock: 4,
               cellPaddingBlockMD: 4,
               cellPaddingBlockSM: 4,
-              cellPaddingInline: 12,
-              cellPaddingInlineMD: 12,
-              cellPaddingInlineSM: 12,
+              cellPaddingInline: 8,
+              cellPaddingInlineMD: 8,
+              cellPaddingInlineSM: 8,
               headerBg: '#f1f3f4',
               headerColor: '#52525b',
               headerSplitColor: 'transparent',

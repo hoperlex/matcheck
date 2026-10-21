@@ -39,7 +39,28 @@ export function ClampText({ text }: { text: string }): ReactElement {
   );
 }
 
-/** Строка/число из ячейки — в ClampText; JSX (теги, кнопки, контролы) — как есть. */
+/**
+ * «Числовое» значение: суммы, даты, время, количества, номера из цифр и
+ * разделителей. Его не переносим: разряды суммы разделены неразрывным
+ * пробелом (formatMoneyRu), и для браузера «1 564 512,34» — одно слово —
+ * перенос до двух строк резал его прямо по цифрам («1 564 5» / «₽»).
+ * `\s` в JS покрывает и U+00A0, и узкий U+202F.
+ */
+const NUMERIC_LIKE = /^[\d\s.,:;+−–—/\\₽%$€()№#-]+$/;
+
+/** Одна строка с «…» (её даёт CSS ячейки) и подсказкой с полным значением. */
+function OneLineText({ text }: { text: string }): ReactElement {
+  return (
+    <Tooltip title={text} placement="topLeft" mouseEnterDelay={0.4}>
+      <span>{text}</span>
+    </Tooltip>
+  );
+}
+
+/**
+ * Текст ячейки — в ClampText (до двух строк), числовое значение — в одну
+ * строку; JSX (теги, кнопки, контролы) — как есть.
+ */
 function clampRender<T>(origRender: Column<T>['render']): Column<T>['render'] {
   return (value: unknown, record: T, idx: number): ReactNode => {
     const out: ReactNode = origRender
@@ -48,7 +69,7 @@ function clampRender<T>(origRender: Column<T>['render']): Column<T>['render'] {
     if (typeof out === 'string' || typeof out === 'number') {
       const s = String(out);
       if (s.length === 0 || s === '—' || s === '-') return out;
-      return <ClampText text={s} />;
+      return NUMERIC_LIKE.test(s) ? <OneLineText text={s} /> : <ClampText text={s} />;
     }
     return out;
   };
@@ -66,11 +87,7 @@ function wrapRender<T>(origRender: Column<T>['render']): Column<T>['render'] {
     if (typeof out === 'string' || typeof out === 'number') {
       const s = String(out);
       if (s.length === 0 || s === '—' || s === '-') return out;
-      return (
-        <Tooltip title={s} placement="topLeft" mouseEnterDelay={0.4}>
-          <span>{s}</span>
-        </Tooltip>
-      );
+      return <OneLineText text={s} />;
     }
     return out;
   };

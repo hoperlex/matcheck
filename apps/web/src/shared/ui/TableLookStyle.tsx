@@ -57,20 +57,35 @@ ${T} .ant-table-thead > tr > th.ant-table-cell {
 }
 ${T} .ant-table-thead > tr > th[aria-sort] { color: ${TEXT}; }
 
-/* Подпись, стрелка и воронка — одной строкой текста, вплотную, как в FOT.
-   У antd это flex-ряд «подпись ←→ иконки»: в узкой колонке он сжимал
-   подпись и рвал слово («ПОСТАВК / И»). В потоке текста подпись переносится
-   по словам, а иконки идут за последним словом или целиком на новую строку. */
-${T} .ant-table-filter-column { display: block; }
-${T} .ant-table-column-sorters,
-${T} .ant-table-column-sorters > .ant-table-column-title,
-${T} .ant-table-filter-column > .ant-table-column-title { display: inline; }
+/* Подпись, стрелка и воронка — как в FOT: подпись в одну-две строки, иконки
+   справа от неё в один ряд, по центру. У antd этот ряд растянут на всю
+   ширину (подпись слева, иконки у правого края) — прижимаем вплотную.
+   inline-flex, а не flex: так шапка колонки с align right/center остаётся
+   выровненной по text-align ячейки. Подпись переносится по словам; слово
+   длиннее колонки рвётся только в крайнем случае — ширины колонок с
+   иконками подбираются так, чтобы самое длинное слово подписи помещалось
+   рядом с ними (как в FOT: слово + 34px иконок + отступы). */
+${T} .ant-table-thead .ant-table-filter-column,
+${T} .ant-table-thead .ant-table-column-sorters {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  max-width: 100%;
+  vertical-align: middle;
+}
+${T} .ant-table-thead .ant-table-filter-column { gap: 2px; }
+${T} .ant-table-thead .ant-table-column-sorters { gap: 4px; }
+${T} .ant-table-thead .ant-table-filter-column > .ant-table-column-title,
+${T} .ant-table-thead .ant-table-column-sorters > .ant-table-column-title {
+  flex: 0 1 auto;
+  min-width: 0;
+}
 
 /* стрелка: вместо двух кареток antd — иконка lucide по состоянию th[aria-sort] */
 ${T} .ant-table-column-sorter {
   display: inline-flex;
-  vertical-align: -1px;
-  margin: 0 0 0 4px;
+  flex: 0 0 auto;
+  margin: 0;
   color: inherit;
   opacity: 0.35;
   transition: opacity 0.15s ease-out;
@@ -100,10 +115,10 @@ ${T} th[aria-sort] .ant-table-column-sorter { opacity: 1; }
 /* воронка */
 ${T} .ant-table-thead .ant-table-filter-trigger {
   display: inline-flex;
-  vertical-align: middle;
+  flex: 0 0 auto;
   width: 16px;
   height: 20px;
-  margin: 0 0 0 2px;
+  margin: 0;
   padding: 0;
   justify-content: center;
   border-radius: 3px;

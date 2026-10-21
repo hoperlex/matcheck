@@ -261,6 +261,11 @@ export default function MaterialsPage() {
           onChange={handleTableChange}
           rowKey="rowKey"
           emptyText="Нет данных"
+          // У десяти из тринадцати колонок жёсткая ширина, и без своей
+          // минимальной ширины таблица отдавала «Объекту», «Поставщику» и
+          // «Подрядчику» по ~40px — подпись «ОБЪЕКТ» рвалась на пять строк.
+          // Теперь у них свои ширины, а на узком экране таблица скроллится.
+          scrollX={2070}
           numbered
           // «№» — номер строки страницы, а не поле сервера: клик по нему слал
           // sort=__num__, и сервер отвечал 400.
@@ -330,6 +335,7 @@ export default function MaterialsPage() {
             },
             {
               title: 'Объект',
+              width: 200,
               ...sortProps('siteName'),
               render: (_: unknown, r: UnifiedRow) => `${r.siteCode} · ${r.siteName}`,
             },
@@ -354,13 +360,13 @@ export default function MaterialsPage() {
             {
               title: 'Поставщик',
               dataIndex: 'supplierName',
-
+              width: 180,
               render: (v: string | null) => v ?? '—',
             },
             {
               title: 'Подрядчик',
               dataIndex: 'contractorName',
-
+              width: 180,
               render: (v: string | null) => v ?? '—',
             },
             {
@@ -373,7 +379,8 @@ export default function MaterialsPage() {
             {
               title: 'Дата УПД',
               dataIndex: 'docDate',
-              width: 110,
+              // «ДАТА УПД» со стрелкой и воронкой в одну строку — от ~118px.
+              width: 124,
               ...sortProps('docDate'),
               ...serverDateRangeColumnFilter<UnifiedRow>(docDateRange, 'Дата УПД'),
               render: (v: string | null) => formatDocDate(v),

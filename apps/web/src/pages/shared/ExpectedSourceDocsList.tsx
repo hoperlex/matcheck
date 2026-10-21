@@ -476,6 +476,9 @@ export function ExpectedSourceDocsList({
           {
             title: 'Дата поставки',
             dataIndex: 'expectedDate',
+            // Подпись, стрелка и воронка в одну строку (как в FOT): «ДАТА
+            // ПОСТАВКИ» с иконками занимает ~150px.
+            width: 164,
             ...sortProps('expectedDate'),
             ...serverDateRangeColumnFilter<SourceDocument>(
               { from: expectedFrom, to: expectedTo },
