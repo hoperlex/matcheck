@@ -561,7 +561,7 @@ nano /srv/matcheck/secrets/api.env
 cd /srv/matcheck/app && ./scripts/deploy.sh --no-pull
 ```
 
-`api.env` читают все три контейнера образа API — `matcheck-api`, `matcheck-worker` и `matcheck-mail-worker`. Содержимое `env_file` входит в config-hash compose, поэтому `deploy.sh` видит правку сам: ничего не собирает, дожидается текущего задания воркера и пересоздаёт эти три контейнера (проверено на compose 5.5.1 на adm1; на проде сверить версию). Раньше здесь стоял `up -d --force-recreate matcheck-api`, и воркеры оставались на старых значениях.
+`api.env` читают все три контейнера образа API — `matcheck-api`, `matcheck-worker` и `matcheck-mail-worker`. Правку `deploy.sh` видит сам: спрашивает compose через `--dry-run up`, пересоздаст ли тот воркер (содержимое `env_file` compose сравнивает при каждом `up`), и если да — ничего не собирает, дожидается текущего задания воркера и пересоздаёт эти три контейнера. Проверено на compose 2.40.3 (как на hub) и 5.5.1. Свой хеш `docker compose config --hash` для этого не годится: на 2.40.3 он расходится с меткой, которую пишет `up`, даже без изменений. Раньше здесь стоял `up -d --force-recreate matcheck-api`, и воркеры оставались на старых значениях.
 
 ### При обновлении только `infra/docker-compose.prod.yml`
 

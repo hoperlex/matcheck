@@ -156,30 +156,28 @@ main() {
     fi
   fi
 
-  # Будет ли пересоздан воркер — по тем же признакам, по которым это решает
-  # compose: другой образ под тегом или другая конфигурация (compose-файл,
-  # содержимое api.env — оно входит в config-hash). Если признак не удалось
-  # получить, считаем, что будет: лишнее ожидание лучше SIGKILL посреди задания.
-  local WORKER_WAIT=0 WORKER_WHY='' api_image tag_id worker_img want_hash have_hash
+  # Будет ли пересоздан воркер. Без новой сборки спрашиваем сам compose:
+  # dry-run проходит тот же путь, что настоящий `up`, и видит и новый образ под
+  # тегом, и изменённую конфигурацию (compose-файл, содержимое api.env).
+  #
+  # Не `config --hash`: на compose 2.40.3 (hub) он считает хеш иначе, чем `up`
+  # при создании контейнера, и расходится с меткой com.docker.compose.config-hash
+  # без всяких изменений — воркер ждали на каждом деплое. И спрашивать надо тот
+  # же compose, что выполнит `up`: хеши разных версий не совпадают.
+  #
+  # Если ответ не распознан, считаем, что пересоздание будет: лишнее ожидание
+  # лучше SIGKILL посреди задания.
+  local WORKER_WAIT=0 WORKER_WHY='' dry
   if (( FORCE )); then
     WORKER_WAIT=1; WORKER_WHY='--force'
   elif (( BUILD_API )); then
     WORKER_WAIT=1; WORKER_WHY='новый образ API'
   elif container_exists matcheck-worker; then
-    # Имя образа — то, из которого создан сам контейнер. Не `config --images`:
-    # он печатает и образы зависимостей (redis). Если имя в compose сменят,
-    # это поймает config-hash ниже — image входит в него.
-    api_image=$(docker container inspect -f '{{.Config.Image}}' matcheck-worker 2>/dev/null || true)
-    tag_id=$(docker image inspect -f '{{.Id}}' "$api_image" 2>/dev/null || true)
-    worker_img=$(docker container inspect -f '{{.Image}}' matcheck-worker 2>/dev/null || true)
-    if [[ -z "$tag_id" || "$worker_img" != "$tag_id" ]]; then
-      WORKER_WAIT=1; WORKER_WHY='контейнер не на текущем образе'
-    fi
-    want_hash=$("${COMPOSE[@]}" config --hash matcheck-worker 2>/dev/null \
-                | awk '$1 == "matcheck-worker" { print $2 }' || true)
-    have_hash=$(container_label matcheck-worker com.docker.compose.config-hash)
-    if [[ -z "$want_hash" || "$want_hash" != "$have_hash" ]]; then
-      WORKER_WAIT=1; WORKER_WHY="${WORKER_WHY:+$WORKER_WHY; }изменилась конфигурация (compose или api.env)"
+    dry=$("${COMPOSE[@]}" --progress plain --dry-run up -d --no-build matcheck-worker 2>&1) || dry=''
+    if grep -qE 'Container[[:space:]]+matcheck-worker[[:space:]]+Recreate' <<<"$dry"; then
+      WORKER_WAIT=1; WORKER_WHY='compose пересоздаст его (новый образ под тегом или изменилась конфигурация — compose, api.env)'
+    elif ! grep -qE 'Container[[:space:]]+matcheck-worker[[:space:]]+(Running|Starting|Started)' <<<"$dry"; then
+      WORKER_WAIT=1; WORKER_WHY='compose не ответил, ждём на всякий случай'
     fi
   fi
 
