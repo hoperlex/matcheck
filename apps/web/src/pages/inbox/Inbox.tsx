@@ -1005,7 +1005,11 @@ export default function InboxPage() {
   };
 
   // Сортировка — серверная: колонке достаточно знать, активна ли она сейчас.
+  // key ставится здесь же: antd отдаёт в onChange `columnKey = column.key`, и
+  // у колонки с одним dataIndex клик приходил с пустым ключом — вместо
+  // сортировки обработчик её снимал.
   const sortProps = (columnKey: string) => ({
+    key: columnKey,
     // Литерал, а не boolean: колонки сторон документа (PartyColumn) принимают
     // `sorter: true`, и расширение до boolean ломало их типизацию.
     sorter: true as const,
@@ -1024,7 +1028,7 @@ export default function InboxPage() {
     tableSorter,
   ) => {
     const single = Array.isArray(tableSorter) ? tableSorter[0] : tableSorter;
-    const columnKey = single && single.order ? String(single.columnKey ?? '') : '';
+    const columnKey = single && single.order ? String(single.columnKey ?? single.field ?? '') : '';
     const field = COLUMN_TO_SORT_FIELD[columnKey];
     const doc = parseDateRangeKey(tableFilters['docDate']?.[0] as string | undefined);
     const exp = parseDateRangeKey(tableFilters['expectedDate']?.[0] as string | undefined);
@@ -1198,14 +1202,14 @@ export default function InboxPage() {
       // возвращалась принудительно. Сервер уже отдаёт документы по
       // parsed_at desc — свежие сверху без явной сортировки.
       ...sortProps('docDate'),
-      ...serverDateRangeColumnFilter<Row>({ from: docDateFrom, to: docDateTo }),
+      ...serverDateRangeColumnFilter<Row>({ from: docDateFrom, to: docDateTo }, 'Дата'),
       render: (v: string | null) => formatDateRu(v),
     },
     {
       title: 'Дата поставки',
       dataIndex: 'expectedDate',
       ...sortProps('expectedDate'),
-      ...serverDateRangeColumnFilter<Row>({ from: expectedFrom, to: expectedTo }),
+      ...serverDateRangeColumnFilter<Row>({ from: expectedFrom, to: expectedTo }, 'Дата поставки'),
       render: (v: string | null) => formatDateRu(v),
     },
     {

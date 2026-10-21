@@ -1059,19 +1059,10 @@ export function ShipmentsHistory({
               {
                 title: 'Объект',
                 key: 'site',
-                // Длинные имена («АЛ13 · ЖК АЛИЯ, БЛОКИ 13А, 13В») обрезаются
-                // многоточием в одну строку (высота строки таблицы не растёт),
-                // полный текст видно в Tooltip при наведении. Единое поведение
-                // во всех 4 таблицах раздела «Операции» — best practice antd.
-                ellipsis: { showTitle: false },
-                render: (_: unknown, r: Row) => {
-                  const name = r.siteName ?? sitesMap.get(r.siteId) ?? '—';
-                  return (
-                    <Tooltip title={name} placement="topLeft">
-                      <span>{name}</span>
-                    </Tooltip>
-                  );
-                },
+                // Длинные имена («АЛ13 · ЖК АЛИЯ, БЛОКИ 13А, 13В») переносятся
+                // до двух строк, дальше «…» с подсказкой (ClampText в
+                // ResponsiveTable) — как во всех таблицах раздела «Операции».
+                render: (_: unknown, r: Row) => r.siteName ?? sitesMap.get(r.siteId) ?? '—',
               },
               {
                 title: 'Фото',

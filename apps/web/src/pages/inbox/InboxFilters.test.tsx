@@ -97,6 +97,14 @@ afterEach(async () => {
   apiState.urls = [];
 });
 
+/** Ячейка шапки таблицы по подписи: те же слова встречаются в панели и чипах. */
+function headerCell(title: string): HTMLElement {
+  const cells = Array.from(document.querySelectorAll<HTMLElement>('.ant-table-thead th'));
+  const cell = cells.find((th) => th.textContent?.trim() === title);
+  if (!cell) throw new Error(`нет колонки «${title}»`);
+  return cell;
+}
+
 /** Запросы списка документов (без счётчиков вкладок и очереди). */
 function listUrls(): URLSearchParams[] {
   return apiState.urls
@@ -209,6 +217,43 @@ describe('Документы: фильтры доходят до сервера'
     renderPage('/documents?direction=inbound&sort=totalSum&order=asc');
 
     await expectListRequest({ sort: 'totalSum', order: 'asc' });
+  });
+
+  it('клик по заголовку колонки включает серверную сортировку', async () => {
+    // antd отдаёт в onChange `columnKey = column.key`, а не dataIndex. Пока у
+    // колонок был только dataIndex, клик приходил с пустым ключом, и обработчик
+    // вместо сортировки по «Сумме» снимал её вовсе.
+    renderPage('/documents?direction=inbound');
+    await expectListRequest({ direction: 'inbound' });
+
+    fireEvent.click(headerCell('Сумма'));
+
+    await waitFor(() => expect(search).toContain('sort=totalSum'));
+    expect(search).toContain('order=asc');
+    await expectListRequest({ sort: 'totalSum', order: 'asc' });
+  });
+
+  it('фильтр дат не снимает сортировку, пришедшую из адреса', async () => {
+    // Та же причина: при применении фильтра antd передаёт в onChange текущую
+    // сортировку, и без ключа колонки обработчик её терял.
+    renderPage(
+      '/documents?direction=inbound&sort=totalSum&order=desc&docFrom=2026-08-01&expFrom=2026-08-05',
+    );
+    await expectListRequest({ sort: 'totalSum', order: 'desc', expectedDateFrom: '2026-08-05' });
+
+    fireEvent.click(headerCell('Дата поставки').querySelector('.ant-table-filter-trigger')!);
+    fireEvent.click(await screen.findByRole('button', { name: 'Сбросить' }));
+
+    // Снят только фильтр этой колонки: сортировка и вторая дата на месте.
+    await waitFor(() => expect(search).not.toContain('expFrom'));
+    expect(search).toContain('sort=totalSum');
+    expect(search).toContain('order=desc');
+    expect(search).toContain('docFrom=2026-08-01');
+
+    // Смена сортировки, в свою очередь, не трогает фильтр дат.
+    fireEvent.click(headerCell('Дата'));
+    await waitFor(() => expect(search).toContain('sort=docDate'));
+    expect(search).toContain('docFrom=2026-08-01');
   });
 
   it('дип-линк «Расхождение сумм» сужает выборку, а не только рисует чип', async () => {

@@ -1,17 +1,62 @@
 import { ConfigProvider, List, Space, Table, Tooltip, Typography, type TableProps } from 'antd';
-import { useMemo, type ReactNode } from 'react';
+import type { TableRef } from 'antd/es/table';
+import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { useStickyHeaderHeight } from './StickyPageHeader';
 
 type Column<T> = NonNullable<TableProps<T>['columns']>[number];
 
+/** Ключи колонок с кнопками действий — им достаются кнопки-иконки в стиле FOT. */
+const ACTION_COLUMN_KEYS = new Set(['actions', 'a']);
+
+/** Высота шапки таблицы, пока её не измерили (одна строка подписей). */
+const DEFAULT_HEADER_HEIGHT = 34;
+
+function isClipped(el: HTMLElement): boolean {
+  return el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1;
+}
+
 /**
- * Оборачиваем оригинальный column.render так, чтобы строковые/числовые
- * значения автоматически получали antd Tooltip с полным содержимым.
- * JSX-результаты (Tag, Space, Button) пропускаем как есть — для них tooltip
- * либо не нужен, либо уже навешан внутри ячейки. В паре с column.ellipsis
- * это даёт «обрезанный текст с подсказкой на hover», все строки одной
- * высоты, без 2-3-строчных «пляшущих» ячеек.
+ * Текст ячейки в две строки, дальше «…» — как ФИО и отделы у таблиц FOT.
+ * Подсказка с полным текстом появляется только у реально обрезанного: на
+ * коротком значении она лишь мешала бы.
+ */
+export function ClampText({ text }: { text: string }): ReactElement {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  return (
+    <Tooltip
+      title={text}
+      placement="topLeft"
+      mouseEnterDelay={0.4}
+      open={open}
+      onOpenChange={(next) => setOpen(next && !!ref.current && isClipped(ref.current))}
+    >
+      <span ref={ref} className="mc-clamp2">
+        {text}
+      </span>
+    </Tooltip>
+  );
+}
+
+/** Строка/число из ячейки — в ClampText; JSX (теги, кнопки, контролы) — как есть. */
+function clampRender<T>(origRender: Column<T>['render']): Column<T>['render'] {
+  return (value: unknown, record: T, idx: number): ReactNode => {
+    const out: ReactNode = origRender
+      ? (origRender(value, record, idx) as ReactNode)
+      : (value as ReactNode);
+    if (typeof out === 'string' || typeof out === 'number') {
+      const s = String(out);
+      if (s.length === 0 || s === '—' || s === '-') return out;
+      return <ClampText text={s} />;
+    }
+    return out;
+  };
+}
+
+/**
+ * Прежний путь для колонок с явным `ellipsis`: одна строка, Tooltip на
+ * строковых значениях. Такие колонки сами выбрали однострочный вид.
  */
 function wrapRender<T>(origRender: Column<T>['render']): Column<T>['render'] {
   return (value: unknown, record: T, idx: number): ReactNode => {
@@ -114,15 +159,23 @@ export function ResponsiveTable<T extends object>({
   // прямо под нижний край шапки, чтобы при скролле колонки оставались видны.
   const stickyOffset = useStickyHeaderHeight();
 
-  // Все колонки получают ellipsis (одна строка + обрезка с «…»), значит все
-  // строки таблицы одной высоты. Native title отключаем (showTitle: false),
-  // подсказку даёт antd Tooltip из wrapRender — он же дублирует подсказку
-  // для render-функций, которые возвращают string/number.
-  const decorate = (col: Column<T>): Column<T> => ({
-    ellipsis: { showTitle: false },
-    ...col,
-    render: wrapRender<T>(col.render),
-  });
+  // Текст ячеек — до двух строк, как в FOT (ClampText). JSX-ячейки остаются
+  // в одну строку с «…»: это задаёт CSS таблицы `.mc-rt` (TableLookStyle).
+  // Колонка с явным ellipsis идёт прежним однострочным путём, а с
+  // ellipsis:false (стороны документа — название и ИНН) переносится целиком.
+  const decorate = (col: Column<T>): Column<T> => {
+    const extraClass = [
+      col.ellipsis === false ? 'mc-wrap' : null,
+      col.key != null && ACTION_COLUMN_KEYS.has(String(col.key)) ? 'mc-col-actions' : null,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    return {
+      ...col,
+      className: [col.className, extraClass].filter(Boolean).join(' ') || undefined,
+      render: col.ellipsis ? wrapRender<T>(col.render) : clampRender<T>(col.render),
+    };
+  };
 
   // Map ключей строк на их исходную позицию — comparator колонки «№» лезет
   // сюда O(1), без него indexOf давал бы O(n²·log n) при сортировке.
@@ -141,10 +194,12 @@ export function ResponsiveTable<T extends object>({
 
   const finalColumns: Column<T>[] = numbered
     ? [
-        decorate({
+        {
           title: '№',
           key: '__num__',
           width: 56,
+          align: 'center',
+          className: 'mc-col-num',
           // Сортировка по «№» = по исходной позиции в items. Первый клик —
           // ASC (как пришли с бэка), второй — DESC (инверсия), третий —
           // снимает сортировку. Нужен, чтобы юзер мог одним кликом
@@ -165,21 +220,39 @@ export function ResponsiveTable<T extends object>({
           // — тогда на странице 2 первая строка получит номер 51, не 1.
           render: (_: unknown, record: T) =>
             (numberedOffset ?? 0) + (originalIndex.get(getRowKey(record)) ?? -1) + 1,
-        }),
+        },
         ...columns.map(decorate),
       ]
     : columns.map(decorate);
 
+  // Высота шапки таблицы. Подписи заглавные и переносятся по словам, так что
+  // шапка бывает в одну строку (~34px) и в две (~47px), и зависит от ширины
+  // окна. Её меряем, а не закладываем числом: иначе на двухстрочной шапке
+  // таблица переполняла бы Content и появлялся второй, внешний скролл.
+  const tableRef = useRef<TableRef>(null);
+  const [headerHeight, setHeaderHeight] = useState(DEFAULT_HEADER_HEIGHT);
+  const measureHeader = bp === 'desktop' && scrollY === undefined;
+  useEffect(() => {
+    if (!measureHeader || typeof ResizeObserver === 'undefined') return;
+    const header = tableRef.current?.nativeElement?.querySelector<HTMLElement>('.ant-table-header');
+    if (!header) return;
+    const observer = new ResizeObserver(() => {
+      const h = header.offsetHeight;
+      if (h > 0) setHeaderHeight(h);
+    });
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, [measureHeader]);
+
   if (bp === 'desktop') {
     // Внутренний tbody-скролл: tbody вписывается в окно, пагинация всегда
     // видна внизу страницы. Высота = vh минус sticky-шапка страницы минус
-    // ~114px (шапка таблицы ~34 + пагинация ~48 + Content top+bottom
-    // paddings 20 + buffer 12). Было 134 при size="middle" — с компактной
-    // плотностью (отступы ячеек 6px) шапка таблицы стала ниже на ~13px, а
-    // пагинация внутри componentSize="small" — на ~8px, место отдаём строкам.
-    // Так таблица помещается в Content (который сам скролл-контейнер, см.
-    // DesktopLayout) и НЕ переполняет его — внешнего скролла не остаётся.
-    const tableScrollY = scrollY === undefined ? `calc(100vh - ${stickyOffset + 114}px)` : scrollY;
+    // шапка таблицы (измеренная, см. выше) минус ~80px: пагинация ~48 +
+    // Content top+bottom paddings 20 + buffer 12. Так таблица помещается в
+    // Content (который сам скролл-контейнер, см. DesktopLayout) и НЕ
+    // переполняет его — внешнего скролла не остаётся.
+    const tableScrollY =
+      scrollY === undefined ? `calc(100vh - ${stickyOffset + 80 + headerHeight}px)` : scrollY;
     // Собираем scroll явно: при scrollY === false в объект нельзя класть
     // y: false — таблицы «Ролей» (шесть подряд на одной странице) получили бы
     // некорректную высоту вместо скролла страницей.
@@ -197,6 +270,12 @@ export function ResponsiveTable<T extends object>({
       // крупные тапабельные зоны. Явный size в конкретной ячейке побеждает.
       <ConfigProvider componentSize="small">
         <Table<T>
+          ref={tableRef}
+          className="mc-rt"
+          // Ширины колонок держит fixed-раскладка. Раньше её включал общий
+          // ellipsis колонок; без него таблицы без scroll.y (Роли, позиции
+          // приёмки) перешли бы на auto, и колонки растянулись бы по тексту.
+          tableLayout="fixed"
           dataSource={items}
           columns={finalColumns}
           rowKey={rowKey as TableProps<T>['rowKey']}

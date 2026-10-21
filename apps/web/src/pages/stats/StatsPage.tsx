@@ -19,15 +19,22 @@ import { KpiStrip } from './widgets/KpiStrip';
 import { DailyBarChart } from './widgets/DailyBarChart';
 import { AttentionCounters } from './widgets/AttentionCounters';
 
-// Поля серверной сортировки отчёта по инспекторам.
-type StatsSort =
-  | 'date'
-  | 'inspector'
-  | 'site'
-  | 'deliveries'
-  | 'shipments'
-  | 'vehicles'
-  | 'sumNoVat';
+// Поля серверной сортировки отчёта по инспекторам — ровно enum `sort` в
+// /reports/inspector-stats: значение вне списка сервер отклоняет с 400.
+const STATS_SORTS = [
+  'date',
+  'inspector',
+  'site',
+  'deliveries',
+  'shipments',
+  'vehicles',
+  'sumNoVat',
+] as const;
+type StatsSort = (typeof STATS_SORTS)[number];
+
+function asStatsSort(key: unknown): StatsSort | null {
+  return (STATS_SORTS as readonly unknown[]).includes(key) ? (key as StatsSort) : null;
+}
 
 const SUMMARY_OPEN_KEY = 'matcheck:stats:summary-open';
 
@@ -141,8 +148,11 @@ export default function StatsPage() {
     queryFn: () => api.get<InspectorOptionsResponse>('/reports/inspectors'),
     staleTime: 5 * 60_000,
   });
-  // Сортировка серверная — колонке достаточно знать, активна ли она.
+  // Сортировка серверная — колонке достаточно знать, активна ли она. key — то
+  // самое поле сервера: antd отдаёт в onChange `columnKey = column.key`, и без
+  // него клик по колонке с одним dataIndex снимал сортировку вместо неё.
   const sortProps = (columnKey: StatsSort) => ({
+    key: columnKey,
     sorter: true as const,
     sortOrder:
       sort === columnKey
@@ -156,7 +166,8 @@ export default function StatsPage() {
     tableSorter,
   ) => {
     const single = Array.isArray(tableSorter) ? tableSorter[0] : tableSorter;
-    const nextSort = single?.order ? ((single.columnKey as StatsSort) ?? null) : null;
+    // Белый список: ключ, которого нет в enum сервера, превратился бы в 400.
+    const nextSort = single?.order ? asStatsSort(single.columnKey ?? single.field) : null;
     const nextOrder: 'asc' | 'desc' = single?.order === 'ascend' ? 'asc' : 'desc';
     const changed = nextSort !== sort || nextOrder !== order;
     setSort(nextSort);
@@ -288,6 +299,9 @@ export default function StatsPage() {
           rowKey={(r) => `${r.date}:${r.inspectorId}:${r.siteId}`}
           emptyText="Нет данных за выбранный период"
           numbered
+          // «№» — номер строки страницы, а не поле сервера: клик по нему слал
+          // sort=__num__, и сервер отвечал 400.
+          numberedSortable={false}
           numberedOffset={(page - 1) * PAGE_SIZE}
           pagination={{
             current: page,
@@ -307,13 +321,11 @@ export default function StatsPage() {
             },
             {
               title: 'Инспектор',
-              key: 'inspector',
               ...sortProps('inspector'),
               render: (_: unknown, r: InspectorStatsRow) => inspectorName(r),
             },
             {
               title: 'Объект',
-              key: 'site',
               ...sortProps('site'),
               render: (_: unknown, r: InspectorStatsRow) => `${r.siteCode} · ${r.siteName}`,
             },

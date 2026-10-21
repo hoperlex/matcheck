@@ -27,6 +27,7 @@ import type {
 import { ApiError } from '../../services/api';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
+import { ClampText } from '../../shared/ui/ResponsiveTable';
 
 const SENDER_LS_KEY = 'matcheck.shareMsg.sender';
 // SavedSender — раньше был {name, email}. После запроса убрать email из
@@ -172,10 +173,10 @@ export default function PublicSharePage() {
     {
       title: 'Наименование',
       dataIndex: 'nameRaw',
-      // ellipsis с native-title — длинное название не растягивает таблицу
-      // в ширину (вместе с убранным scroll={{x:'max-content'}} это убирает
-      // горизонтальный скролл у материалов).
-      ellipsis: { showTitle: true } as const,
+      // До двух строк, дальше «…» с подсказкой. Ширину таблицы держит
+      // tableLayout="fixed" (вместе с убранным scroll={{x:'max-content'}} это
+      // убирает горизонтальный скролл у материалов).
+      render: (v: string | null) => (v ? <ClampText text={v} /> : null),
     },
     {
       title: isDelivery ? 'План' : 'Кол-во',
@@ -355,8 +356,10 @@ export default function PublicSharePage() {
                 pagination={false}
                 showSorterTooltip={false}
                 // scroll={x:'max-content'} убран — давал горизонтальный
-                // скролл на длинных названиях. Колонка «Наименование»
-                // теперь ellipsis, влезает в ширину страницы (95vw).
+                // скролл на длинных названиях. fixed — явно: раньше её
+                // включал ellipsis «Наименования», без неё раскладка стала бы
+                // auto и таблица снова вылезла бы за 95vw.
+                tableLayout="fixed"
               />
             )}
           </div>

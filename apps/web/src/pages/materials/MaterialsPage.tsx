@@ -16,19 +16,27 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { FilterSelect } from '../../shared/ui/FilterSelect';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { parseDateRangeKey, serverDateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
+import { antdColumnFilter } from '../../shared/ui/ColumnFilterWindow';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { useSyncGlobalFiltersSiteContractor } from '../../shared/hooks/useSyncGlobalFilters';
 
-// Поля серверной сортировки объединённого журнала (см. /reports/movements).
-type MovementSort =
-  | 'date'
-  | 'siteName'
-  | 'materialName'
-  | 'qty'
-  | 'docNumber'
-  | 'docDate'
-  | 'sum'
-  | 'status';
+// Поля серверной сортировки объединённого журнала — ровно enum `sort` в
+// /reports/movements: значение вне списка сервер отклоняет с 400.
+const MOVEMENT_SORTS = [
+  'date',
+  'siteName',
+  'materialName',
+  'qty',
+  'docNumber',
+  'docDate',
+  'sum',
+  'status',
+] as const;
+type MovementSort = (typeof MOVEMENT_SORTS)[number];
+
+function asMovementSort(key: unknown): MovementSort | null {
+  return (MOVEMENT_SORTS as readonly unknown[]).includes(key) ? (key as MovementSort) : null;
+}
 
 const STATUS_COLOR: Record<string, string> = {
   filled: 'green',
@@ -145,7 +153,10 @@ export default function MaterialsPage() {
   const rows = movementsQuery.data?.items ?? [];
 
   // Сортировка серверная — колонке достаточно знать, активна ли она сейчас.
+  // key — то самое поле сервера: antd отдаёт в onChange `columnKey = column.key`,
+  // и без него клик по колонке снимал сортировку (или слал чужой ключ).
   const sortProps = (columnKey: MovementSort) => ({
+    key: columnKey,
     sorter: true as const,
     sortOrder:
       sort === columnKey
@@ -159,7 +170,8 @@ export default function MaterialsPage() {
     tableSorter,
   ) => {
     const single = Array.isArray(tableSorter) ? tableSorter[0] : tableSorter;
-    const nextSort = single?.order ? ((single.columnKey as MovementSort) ?? null) : null;
+    // Белый список: ключ, которого нет в enum сервера, превратился бы в 400.
+    const nextSort = single?.order ? asMovementSort(single.columnKey ?? single.field) : null;
     const nextOrder: 'asc' | 'desc' = single?.order === 'ascend' ? 'asc' : 'desc';
     const nextTypes = ((tableFilters['type'] as Array<'intake' | 'shipment'> | null) ?? []).filter(
       Boolean,
@@ -250,6 +262,9 @@ export default function MaterialsPage() {
           rowKey="rowKey"
           emptyText="Нет данных"
           numbered
+          // «№» — номер строки страницы, а не поле сервера: клик по нему слал
+          // sort=__num__, и сервер отвечал 400.
+          numberedSortable={false}
           onRowClick={(r) => {
             // from=materials — флажок «после закрытия модалки вернуть
             // пользователя в Историю поступлений, а не оставить в Операциях».
@@ -268,10 +283,14 @@ export default function MaterialsPage() {
               // По умолчанию открыт только «Поступление» — раздел исторически
               // называется «История поступлений». Пользователь снимает галочку
               // или ставит «Отгрузка», чтобы посмотреть исходящее движение.
-              filters: [
-                { text: TYPE_LABELS.intake.label, value: 'intake' },
-                { text: TYPE_LABELS.shipment.label, value: 'shipment' },
-              ],
+              ...antdColumnFilter<UnifiedRow>({
+                kind: 'values',
+                title: 'Тип',
+                options: [
+                  { value: 'intake', label: TYPE_LABELS.intake.label },
+                  { value: 'shipment', label: TYPE_LABELS.shipment.label },
+                ],
+              }),
               filteredValue: types.length ? types : null,
               render: (_: unknown, r: UnifiedRow) => {
                 // Иконка 📷 — открывает модалку с фото этой приёмки/отгрузки.
@@ -306,12 +325,11 @@ export default function MaterialsPage() {
               dataIndex: 'date',
               width: 110,
               ...sortProps('date'),
-              ...serverDateRangeColumnFilter<UnifiedRow>(dateRange),
+              ...serverDateRangeColumnFilter<UnifiedRow>(dateRange, 'Дата'),
               render: (v: string | null) => (v ? new Date(v).toLocaleDateString('ru-RU') : '—'),
             },
             {
               title: 'Объект',
-              key: 'site',
               ...sortProps('siteName'),
               render: (_: unknown, r: UnifiedRow) => `${r.siteCode} · ${r.siteName}`,
             },
@@ -357,7 +375,7 @@ export default function MaterialsPage() {
               dataIndex: 'docDate',
               width: 110,
               ...sortProps('docDate'),
-              ...serverDateRangeColumnFilter<UnifiedRow>(docDateRange),
+              ...serverDateRangeColumnFilter<UnifiedRow>(docDateRange, 'Дата УПД'),
               render: (v: string | null) => formatDocDate(v),
             },
             {
@@ -376,7 +394,6 @@ export default function MaterialsPage() {
             },
             {
               title: 'Статус',
-              key: 'status',
               width: 160,
               ...sortProps('status'),
               render: (_: unknown, r: UnifiedRow) => (

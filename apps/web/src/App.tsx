@@ -15,6 +15,7 @@ import { useAuthStore } from './stores/auth';
 import { UpdateBanner } from './shared/ui/UpdateBanner';
 import { MismatchRowStyle } from './shared/ui/MismatchRowStyle';
 import { EditableCellStyle } from './shared/ui/EditableCellStyle';
+import { TableLookStyle } from './shared/ui/TableLookStyle';
 
 dayjs.locale('ru');
 
@@ -57,26 +58,38 @@ export function App() {
     <>
       <MismatchRowStyle />
       <EditableCellStyle />
+      <TableLookStyle />
       <ConfigProvider
         locale={ruRU}
         theme={{
           token: { colorPrimary: '#1677ff', borderRadius: 8, colorBgLayout: '#f5f5f5' },
           components: {
-            // Плотные таблицы: на 1080p помещается ~24 строки вместо 17.
-            // Шрифт ячеек 13px против базовых 14 — плотнее, но всё ещё крупнее
-            // тегов (12px), так что иерархия «текст ячейки > тег» сохраняется.
-            // Дефолты antd, которые здесь перекрываются: cellPaddingBlock = 16,
-            // …MD = 12, …SM = 8; все три cellFontSize* равны 14 — size="small"
+            // Таблицы в стиле FOT («Управление кадрами»): ячейки 4px × 12px
+            // при высоте строки 40px, шапка #f1f3f4, линии #dadce0. Остальное —
+            // заглавные подписи, стрелка и воронка вплотную, зебра — в
+            // TableLookStyle. Шрифт ячеек 13px против базовых 14; size="small"
             // сам по себе шрифт НЕ уменьшает, только отступы.
             Table: {
               cellFontSize: 13,
               cellFontSizeMD: 13,
               cellFontSizeSM: 13,
-              cellPaddingBlock: 6,
-              cellPaddingBlockMD: 6,
-              cellPaddingBlockSM: 6,
-              cellPaddingInlineMD: 8,
-              cellPaddingInlineSM: 8,
+              cellPaddingBlock: 4,
+              cellPaddingBlockMD: 4,
+              cellPaddingBlockSM: 4,
+              cellPaddingInline: 12,
+              cellPaddingInlineMD: 12,
+              cellPaddingInlineSM: 12,
+              headerBg: '#f1f3f4',
+              headerColor: '#52525b',
+              headerSplitColor: 'transparent',
+              headerSortActiveBg: '#f1f3f4',
+              headerSortHoverBg: '#f1f3f4',
+              fixedHeaderSortActiveBg: '#f1f3f4',
+              headerFilterHoverBg: 'transparent',
+              bodySortBg: 'transparent',
+              borderColor: '#dadce0',
+              rowHoverBg: '#f1f3f4',
+              colorText: '#09090b',
             },
           },
         }}

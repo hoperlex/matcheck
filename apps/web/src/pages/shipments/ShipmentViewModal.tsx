@@ -7,6 +7,7 @@ import { formatStageTime } from '../kpp/stageTime';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
+import { ClampText } from '../../shared/ui/ResponsiveTable';
 import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 
@@ -60,7 +61,8 @@ export function ShipmentViewModal({
     {
       title: 'Название',
       dataIndex: 'nameRaw',
-      ellipsis: { showTitle: true } as const,
+      // До двух строк, дальше «…» с подсказкой; ширину держит fixed-раскладка.
+      render: (v: string | null) => (v ? <ClampText text={v} /> : null),
     },
     {
       title: 'План',
@@ -341,6 +343,9 @@ export function ShipmentViewModal({
                 pagination={false}
                 columns={itemColumns}
                 showSorterTooltip={false}
+                // fixed — явно: раньше её включал ellipsis колонки «Название»,
+                // без неё длинное название растянуло бы таблицу шире модалки.
+                tableLayout="fixed"
               />
             )}
           </div>

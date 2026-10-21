@@ -6,6 +6,7 @@ import type { PhotoRecognition, PhotoRecognitionItem } from '@matcheck/contracts
 import { suspectQtyPriceSwap } from '@matcheck/contracts';
 import { api, apiDownload, ApiError } from '../../services/api';
 import { UpdValidationSummary } from '../../shared/ui/UpdValidationSummary';
+import { ClampText } from '../../shared/ui/ResponsiveTable';
 import { enqueueFullLoad } from '../../lib/thumbQueue';
 
 /**
@@ -425,6 +426,9 @@ function RecognitionPanel({
           dataSource={data.items}
           pagination={false}
           showSorterTooltip={false}
+          // fixed — явно: раньше её включал ellipsis «Названия», без неё
+          // длинное название растягивало бы колонки по тексту.
+          tableLayout="fixed"
           // Данные фото через серверную сверку не проходят — подозрение на
           // перестановку количества и цены считаем здесь же, на клиенте.
           onRow={(record) =>
@@ -444,7 +448,9 @@ function RecognitionPanel({
             {
               title: 'Название',
               dataIndex: 'nameRaw',
-              ellipsis: { showTitle: true },
+              // До двух строк, дальше «…» с подсказкой; ширину держит
+              // tableLayout="fixed" таблицы.
+              render: (v: string | null) => (v ? <ClampText text={v} /> : null),
             },
             {
               title: 'Кол-во',

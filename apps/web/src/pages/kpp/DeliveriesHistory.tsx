@@ -855,12 +855,14 @@ export function DeliveriesHistory({
   // renderContractor убран вместе с колонкой «Подрядчик»: в списке это поле
   // почти всегда повторяло покупателя документа. resolveContractor остаётся —
   // он нужен не для показа, а для подбора подрядчика (см. вызовы ниже).
-  const renderSite = (r: Row) => {
+  const siteName = (r: Row): string => {
     const { id } = resolveSite(r);
-    const name = r.siteName ?? (id ? sitesMap.get(id) : null) ?? '—';
-    // Truncate в одну строку через antd column ellipsis (колонка-уровень);
-    // здесь оборачиваем в Tooltip, чтобы при наведении был виден полный
-    // текст. Высота строки таблицы остаётся одинаковой для всех записей.
+    return r.siteName ?? (id ? sitesMap.get(id) : null) ?? '—';
+  };
+  // Карточка (узкий экран): одна строка с подсказкой. В таблице колонка
+  // отдаёт строку, и ResponsiveTable переносит её до двух строк сам.
+  const renderSite = (r: Row) => {
+    const name = siteName(r);
     return (
       <Tooltip title={name} placement="topLeft">
         <span>{name}</span>
@@ -1177,12 +1179,10 @@ export function DeliveriesHistory({
               {
                 title: 'Объект',
                 key: 'site',
-                // Длинные имена обрезаются многоточием в одну строку (высота
-                // строки таблицы не растёт), полный текст видно в Tooltip при
-                // наведении — см. renderSite. Единое поведение во всех 4
+                // Длинные имена переносятся до двух строк, дальше «…» с
+                // подсказкой (ClampText в ResponsiveTable) — как во всех
                 // таблицах раздела «Операции».
-                ellipsis: { showTitle: false },
-                render: (_: unknown, r: Row) => renderSite(r),
+                render: (_: unknown, r: Row) => siteName(r),
               },
               {
                 title: 'Фото',

@@ -453,7 +453,7 @@ export default function AdminEdoAccountsPage() {
         rowKey="id"
         numbered
         columns={[
-          { title: 'Имя', dataIndex: 'name', width: 180, ellipsis: true },
+          { title: 'Имя', dataIndex: 'name', width: 180 },
           {
             title: 'Площадка',
             dataIndex: 'environment',
@@ -776,7 +776,6 @@ export default function AdminEdoAccountsPage() {
                     {
                       title: 'Тип документа',
                       dataIndex: 'typeNamedId',
-                      ellipsis: true,
                       render: (t: string, b) => (b.title ? `${b.title} (${t})` : t),
                     },
                     {

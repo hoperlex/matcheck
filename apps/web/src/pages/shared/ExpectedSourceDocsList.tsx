@@ -20,6 +20,7 @@ import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { parseDateRangeKey, serverDateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
+import { antdColumnFilter } from '../../shared/ui/ColumnFilterWindow';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { documentPartyColumns } from '../../shared/ui/documentPartyColumns';
@@ -293,8 +294,11 @@ export function ExpectedSourceDocsList({
   // react-query, без обращения к сети (см. usePrefetchSourceDocumentDetails).
   usePrefetchSourceDocumentDetails(useMemo(() => filteredItems.map((r) => r.id), [filteredItems]));
 
-  // Сортировка серверная — колонке достаточно знать, активна ли она.
+  // Сортировка серверная — колонке достаточно знать, активна ли она. key
+  // ставится здесь же: antd отдаёт в onChange `columnKey = column.key`, и без
+  // него клик по колонке с одним dataIndex снимал сортировку вместо неё.
   const sortProps = (columnKey: string) => ({
+    key: columnKey,
     sorter: true as const,
     sortOrder:
       sortField && COLUMN_TO_SORT_FIELD[columnKey] === sortField
@@ -309,7 +313,7 @@ export function ExpectedSourceDocsList({
     tableSorter,
   ) => {
     const single = Array.isArray(tableSorter) ? tableSorter[0] : tableSorter;
-    const columnKey = single && single.order ? String(single.columnKey ?? '') : '';
+    const columnKey = single && single.order ? String(single.columnKey ?? single.field ?? '') : '';
     const field = COLUMN_TO_SORT_FIELD[columnKey];
     const doc = parseDateRangeKey(tableFilters['docDate']?.[0] as string | undefined);
     const exp = parseDateRangeKey(tableFilters['expectedDate']?.[0] as string | undefined);
@@ -387,6 +391,9 @@ export function ExpectedSourceDocsList({
         }}
         onChange={handleTableChange}
         numbered
+        // «№» — номер строки страницы, а не поле сервера: сортировать по нему
+        // нечего, и клик сбрасывал бы серверную сортировку.
+        numberedSortable={false}
         // Три стороны документа получили фиксированные 170px под ИНН второй
         // строкой, и без явной минимальной ширины на 1024-1366px ужимались бы
         // соседние колонки. 13 колонок: 3×170 фиксированных, остальным от ~110.
@@ -401,16 +408,19 @@ export function ExpectedSourceDocsList({
         columns={[
           {
             title: 'Тип',
-            key: 'kind',
             width: 150,
             ...sortProps('kind'),
             // Фильтр по типу применяет сервер: на экране одна страница, и
             // отсев по ней отвечал бы «сколько УПД на этой странице».
-            filters: [
-              { text: 'УПД', value: 'upd' },
-              { text: 'Накладная', value: 'waybill' },
-              { text: 'Заявка', value: 'request' },
-            ],
+            ...antdColumnFilter<SourceDocument>({
+              kind: 'values',
+              title: 'Тип',
+              options: [
+                { value: 'upd', label: 'УПД' },
+                { value: 'waybill', label: 'Накладная' },
+                { value: 'request', label: 'Заявка' },
+              ],
+            }),
             filteredValue: kindFilter
               ? Object.entries(KIND_FILTER_TO_PARAM)
                   .filter(([, param]) =>
@@ -457,17 +467,20 @@ export function ExpectedSourceDocsList({
             // перемонтировке (refresh / переход) сортировка возвращалась
             // принудительно. Сервер уже отдаёт документы по parsed_at desc.
             ...sortProps('docDate'),
-            ...serverDateRangeColumnFilter<SourceDocument>({ from: docDateFrom, to: docDateTo }),
+            ...serverDateRangeColumnFilter<SourceDocument>(
+              { from: docDateFrom, to: docDateTo },
+              'Дата',
+            ),
             render: (v: string | null) => formatDateRu(v),
           },
           {
             title: 'Дата поставки',
             dataIndex: 'expectedDate',
             ...sortProps('expectedDate'),
-            ...serverDateRangeColumnFilter<SourceDocument>({
-              from: expectedFrom,
-              to: expectedTo,
-            }),
+            ...serverDateRangeColumnFilter<SourceDocument>(
+              { from: expectedFrom, to: expectedTo },
+              'Дата поставки',
+            ),
             render: (v: string | null) => formatDateRu(v),
           },
           // Тот же набор сторон, что в «Документах»: раньше здесь была пара
@@ -476,31 +489,19 @@ export function ExpectedSourceDocsList({
           ...documentPartyColumns<SourceDocument>((r) => r, { sortProps }),
           {
             title: 'Объект',
-            key: 'site',
-            // Truncate длинных имён («АЛ13 · ЖК АЛИЯ, БЛОКИ 13А, 13В») в
-            // одну строку: высота строки таблицы не растёт, полный текст
-            // виден в Tooltip при наведении. Единое поведение во всех 4
-            // таблицах раздела «Операции».
-            ellipsis: { showTitle: false },
+            // Длинные имена («АЛ13 · ЖК АЛИЯ, БЛОКИ 13А, 13В») переносятся до
+            // двух строк, дальше «…» с подсказкой (ClampText в ResponsiveTable) —
+            // как во всех таблицах раздела «Операции».
             ...sortProps('siteName'),
-            render: (_: unknown, r: SourceDocument) => {
-              const name = r.siteName ?? '—';
-              return (
-                <Tooltip title={name} placement="topLeft">
-                  <span>{name}</span>
-                </Tooltip>
-              );
-            },
+            render: (_: unknown, r: SourceDocument) => r.siteName ?? '—',
           },
           {
             title: 'Сумма НДС',
-            key: 'vat',
             ...sortProps('vatSum'),
             render: (_: unknown, r: SourceDocument) => formatMoneyRu(r.vatSum),
           },
           {
             title: 'Сумма',
-            key: 'total',
             ...sortProps('totalSum'),
             render: (_: unknown, r: SourceDocument) => (
               <span>

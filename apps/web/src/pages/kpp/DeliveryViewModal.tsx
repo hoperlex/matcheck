@@ -6,6 +6,7 @@ import { PhotoGallery } from './PhotoGallery';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
+import { ClampText } from '../../shared/ui/ResponsiveTable';
 import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
@@ -56,10 +57,10 @@ export function DeliveryViewModal({
     {
       title: 'Название',
       dataIndex: 'nameRaw',
-      // ellipsis с native-title — длинное название не растягивает таблицу
-      // в ширину (модалка 97vw, но позиции с описанием на абзац легко
-      // выходят за рамки). Полный текст видно при hover.
-      ellipsis: { showTitle: true } as const,
+      // До двух строк, дальше «…» с подсказкой. Ширину таблицы держит
+      // tableLayout="fixed" ниже: длинное название не растягивает её (модалка
+      // 97vw, но позиции с описанием на абзац легко выходят за рамки).
+      render: (v: string | null) => (v ? <ClampText text={v} /> : null),
     },
     {
       title: 'План',
@@ -329,8 +330,9 @@ export function DeliveryViewModal({
                 // scroll={x:'max-content'} убран — заставлял таблицу
                 // растягиваться по самому длинному названию и плодил
                 // горизонтальный скролл даже на широкой 97vw-модалке.
-                // Колонка «Название» теперь ellipsis: гибко влезает в
-                // оставшуюся ширину, длинное название обрезается с title.
+                // fixed — явно: раньше её включал ellipsis колонки «Название»,
+                // а без неё раскладка стала бы auto и вернула растягивание.
+                tableLayout="fixed"
               />
             )}
           </div>
