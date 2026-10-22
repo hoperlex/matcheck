@@ -218,4 +218,26 @@ describe('инварианты реестра', () => {
 
     expect(undecided).toEqual([]);
   });
+
+  it('возможность, которую открывает расширение, не держит маршрутов вне матрицы', () => {
+    // `always` расширением не открывается никогда: ячеек у него нет, и
+    // allow-list не снимается. Если рядом стоит расширяемый маршрут той же
+    // возможности, выданное право рисует кнопку, а соседний маршрут отвечает
+    // 403. Так Мониторинг видел «+ УПД из ЭДО», но окно подбора не загружалось.
+    const expandable = new Set<string>();
+    for (const rule of ROUTE_PERMISSIONS.values()) {
+      if (!rule.capability || rule.kind === 'always') continue;
+      if (rule.expandableBy === undefined || rule.expandableBy.length > 0) {
+        expandable.add(rule.capability);
+      }
+    }
+
+    const offenders: string[] = [];
+    for (const [key, rule] of ROUTE_PERMISSIONS) {
+      if (rule.kind !== 'always' || !rule.capability) continue;
+      if (expandable.has(rule.capability)) offenders.push(`${key} → ${rule.capability}`);
+    }
+
+    expect(offenders).toEqual([]);
+  });
 });

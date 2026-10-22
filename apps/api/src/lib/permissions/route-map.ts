@@ -168,6 +168,15 @@ const UNSCOPED: ManagedRole[] = ['monitor', 'observer'];
  * «Ожидаемые» и карточка операции работают на тех же маршрутах.
  */
 const SD_OPEN: MatrixOnlyPolicy = { mode: 'cells', openedBy: [{ page: 'documents.list', action: 'view' }, ...bothOps('view')] };
+/**
+ * Чтение окна подбора УПД из ЭДО: открывается той же ячейкой и тем же
+ * расширением, что и привязка (`POST …/edo-matches`), — иначе возможность
+ * link_source рисует кнопку, а окно за ней отвечает 403.
+ */
+const EDO_READ: RouteRule = st('operations.deliveries', 'edit', {
+  capability: 'operations.edit.link_source',
+  expandableBy: UNSCOPED,
+});
 const legacy = (
   page: PageId,
   action: PageAction,
@@ -193,8 +202,6 @@ const MOBILE_CHANNEL =
   'привязка к одной странице некорректна. Скоуп по роли и siteId остаётся в хендлере.';
 const SHARE_LINKS =
   'Ссылка-шаринг общая для приёмок и отгрузок — правило «одна страница» неприменимо.';
-const EDO_MATCH =
-  'Окно подбора УПД из ЭДО: открывается только кнопкой привязки, доступ — по её возможности.';
 /** Переписка по share-ссылке: третья возможность share, открыта admin/manager. */
 const MSG: RuleMeta = { capability: 'operations.share.messages' };
 
@@ -329,12 +336,16 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // Чтение для окна подбора и метки в шапке. Запрашивается только там, где
   // показана кнопка привязки (canLinkUpd), — это часть функции привязки, а не
   // просмотра операций, поэтому выданный «Просмотр» её не открывает.
-  ['GET /api/v1/deliveries/:id/edo-matches', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
-  ['GET /api/v1/deliveries/:id/edo-matches/:matchId/file', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
-  ['GET /api/v1/deliveries/:id/edo-candidates', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
-  ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/file', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
-  ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/pdf', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
-  ['GET /api/v1/deliveries/:id/edo-candidates/:source/:documentId/preview', always(EDO_MATCH, { capability: 'operations.edit.link_source', matrixOnly: NO })],
+  //
+  // Правило — то же, что у самой привязки, а не `always`: `always` расширением
+  // не открывается, и Мониторинг с выданным «Редактировать» видел кнопку, а
+  // окно отвечало 403 (allow-list маршрута не снимался).
+  ['GET /api/v1/deliveries/:id/edo-matches', EDO_READ],
+  ['GET /api/v1/deliveries/:id/edo-matches/:matchId/file', EDO_READ],
+  ['GET /api/v1/deliveries/:id/edo-candidates', EDO_READ],
+  ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/file', EDO_READ],
+  ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/pdf', EDO_READ],
+  ['GET /api/v1/deliveries/:id/edo-candidates/:source/:documentId/preview', EDO_READ],
   // Ссылки-шаринги — не часть обычного редактирования: у создания, списка,
   // отзыва и переписки РАЗНЫЕ allow-list (инспектор создаёт и видит, но не
   // отзывает). Выдача edit их не открывает, интерфейс скрывает по capability.

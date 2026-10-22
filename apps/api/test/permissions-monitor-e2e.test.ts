@@ -120,6 +120,13 @@ async function buildApp(opts: {
     async () => ({ ok: 'flags' }),
   );
   instance.patch('/api/v1/deliveries/:id/review', async () => ({ ok: 'review' }));
+  // Окно подбора УПД из ЭДО: чтение для кнопки привязки, allow-list как в
+  // routes/delivery-edo.ts.
+  instance.get(
+    '/api/v1/deliveries/:id/edo-candidates',
+    { preHandler: [authorize('admin', 'manager')] as never },
+    async () => ({ ok: 'edo-candidates' }),
+  );
   // Сохранение карточки документа, в том числе сторон (грузополучатель,
   // покупатель): allow-list как в routes/source-documents.ts.
   instance.patch(
@@ -173,6 +180,7 @@ afterEach(async () => {
 const post = (i: FastifyInstance, url: string, payload?: unknown) =>
   i.inject({ method: 'POST', url, payload: payload ?? {} });
 const patch = (i: FastifyInstance, url: string) => i.inject({ method: 'PATCH', url, payload: {} });
+const get = (i: FastifyInstance, url: string) => i.inject({ method: 'GET', url });
 
 /** Права монитора на Приёмки: то, что администратор проставил бы галочками. */
 const monitorGranted = (patchRow: Partial<Omit<OverrideRow, 'role' | 'pageId'>>) => [
@@ -189,6 +197,8 @@ describe('Мониторинг без выданных прав', () => {
       .toBe(403);
     // Второй маршрут веб-загрузки закрыт на том же первом слое.
     expect((await post(app, '/api/v1/photos/photo-1/content')).statusCode).toBe(403);
+    // Окно подбора УПД из ЭДО — часть привязки, без «Редактировать» закрыто.
+    expect((await get(app, '/api/v1/deliveries/1/edo-candidates')).statusCode).toBe(403);
   });
 });
 
@@ -259,6 +269,14 @@ describe('администратор выдал Мониторингу «Ред�
     app = await buildApp({ role: 'monitor', overrides: monitorGranted({ canEdit: true }) });
     expect((await post(app, '/api/v1/deliveries')).statusCode).toBe(403);
   });
+
+  it('окно подбора УПД из ЭДО открывается тем же правом, что и привязка', async () => {
+    // Кнопку «+ УПД из ЭДО» рисует возможность link_source, которую даёт это
+    // право. Раньше чтение окна было вне матрицы, allow-list не снимался, и
+    // кнопка вела в 403 «Не удалось загрузить УПД из ЭДО».
+    app = await buildApp({ role: 'monitor', overrides: monitorGranted({ canEdit: true }) });
+    expect((await get(app, '/api/v1/deliveries/1/edo-candidates')).statusCode).toBe(200);
+  });
 });
 
 describe('карточка документа: стороны правят админ и Мониторинг с «Редактировать»', () => {
@@ -304,6 +322,13 @@ describe('границы выдачи', () => {
     app = await buildApp({ role: 'monitor', overrides: monitorGranted({ canCreate: true }) });
     const res = await post(app, '/api/v1/photos/presign', { operationKind: 'shipment' });
     expect(res.statusCode).toBe(403);
+  });
+
+  it('инспектору окно подбора УПД из ЭДО закрыто, хотя «Редактировать» у него базовое', async () => {
+    // Расширение снимает allow-list только ролям без скоупа по объекту
+    // (UNSCOPED), а у инспектора записи ограничены объектом.
+    app = await buildApp({ role: 'inspector_kpp' });
+    expect((await get(app, '/api/v1/deliveries/1/edo-candidates')).statusCode).toBe(403);
   });
 
   it('подрядчику выданная строка не помогает: гард держит его первым слоем', async () => {
