@@ -3,6 +3,7 @@ import {
   normalizeSupplierName,
   levenshteinDistance,
   nameSimilarity,
+  supplierCreateLockKey,
 } from '../src/domain/sourceDocuments/supplierMatcher.js';
 
 describe('supplierMatcher — нормализация имени', () => {
@@ -71,5 +72,15 @@ describe('supplierMatcher — сходство имён', () => {
   it('0 если одна пустая', () => {
     expect(nameSimilarity('', 'что-то')).toBe(0);
     expect(nameSimilarity('что-то', '')).toBe(0);
+  });
+});
+
+describe('supplierMatcher — ключ блокировки на создание', () => {
+  // Импорт справочников берёт тот же ключ, чтобы дождаться воркера на INSERT.
+  it('ИНН как есть, без ИНН — нормализованное имя', () => {
+    expect(supplierCreateLockKey('7722466153', 'ООО «Ёлка»')).toBe('7722466153');
+    expect(supplierCreateLockKey('7722466153,', null)).toBe('7722466153,');
+    expect(supplierCreateLockKey(null, 'ООО «Ёлка»')).toBe('ооо елка');
+    expect(supplierCreateLockKey(null, null)).toBe('');
   });
 });

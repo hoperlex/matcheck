@@ -105,6 +105,15 @@ export function nameSimilarity(a: string, b: string): number {
   return 1 - dist / Math.max(na.length, nb.length);
 }
 
+/**
+ * Ключ advisory-lock на создание поставщика: ИНН как есть (после trim), без
+ * ИНН — нормализованное имя. Импорт справочников (domain/directories/apply.ts)
+ * берёт тот же ключ, чтобы дождаться воркера, стоящего на INSERT.
+ */
+export function supplierCreateLockKey(inn: string | null, name: string | null): string {
+  return inn ? inn : normalizeSupplierName(name ?? '');
+}
+
 // ─── DB-функция ────────────────────────────────────────────────────────────
 
 /**
@@ -180,7 +189,7 @@ export async function matchOrCreateSupplier(
     // hashtext(inn). Если inn пустой — по hashtext(нормализованное имя).
     // Lock держится до конца транзакции, что гарантирует: две параллельные
     // загрузки одного нового поставщика не создадут дубль.
-    const lockKey = inn ? inn : normalizeSupplierName(name ?? '');
+    const lockKey = supplierCreateLockKey(inn, name);
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`);
 
     // Перепроверка после lock — другая транзакция могла создать запись,

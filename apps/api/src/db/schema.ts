@@ -434,10 +434,19 @@ export const suppliers = pgTable(
     // Статус проверки службой безопасности заказчика: approved | rejected | null.
     lastSecurityStatus: varchar('last_security_status', { length: 32 }),
     foundingDocumentsComment: text('founding_documents_comment'),
+    // ID строки в BillHub (миграция 0137). Заполняет импорт справочников
+    // (scripts/import-directories.ts); NULL — строка создана распознаванием
+    // или вручную. Строки с billhub_id склейка дублей не удаляет.
+    billhubId: uuid('billhub_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('supplier_name_idx').on(t.name)],
+  (t) => [
+    index('supplier_name_idx').on(t.name),
+    uniqueIndex('suppliers_billhub_id_uq')
+      .on(t.billhubId)
+      .where(sql`${t.billhubId} is not null`),
+  ],
 );
 
 export const customerCounterparties = pgTable(
