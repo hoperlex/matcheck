@@ -21,7 +21,7 @@ vi.mock('../../services/api', () => ({
   ApiError: class extends Error {},
 }));
 
-const { LinkedEdoChips } = await import('./LinkedEdoChips');
+const { LinkedEdoChips, deliveryNumbersText } = await import('./LinkedEdoChips');
 type Props = ComponentProps<typeof LinkedEdoChips>;
 type LinkedDoc = Props['documents'][number];
 
@@ -37,6 +37,9 @@ const exported: LinkedDoc = {
   supplierInn: '5029153320',
   totalSum: '14040.00',
   linkedAt: '2026-10-19T10:34:00Z',
+  sectionDocumentId: null,
+  alsoIn: [],
+  alsoInCount: 0,
 };
 
 const imported: LinkedDoc = {
@@ -161,5 +164,36 @@ describe('«×»', () => {
     fireEvent.click(screen.getAllByRole('button', { name: '×' })[0]!);
     expect(screen.queryByRole('button', { name: 'Убрать' })).toBeNull();
     expect(props.onUnlink).not.toHaveBeenCalled();
+  });
+});
+
+describe('другие приёмки с той же УПД', () => {
+  it('без других приёмок дописки нет', () => {
+    show({ documents: [exported] });
+    expect(screen.queryByText(/ещё в/)).toBeNull();
+  });
+
+  it('номера других приёмок прямо в чипе, длинный список — числом', () => {
+    show({
+      documents: [
+        {
+          ...exported,
+          alsoIn: [
+            { deliveryId: 'x1', displayId: 21041 },
+            { deliveryId: 'x2', displayId: 21070 },
+            { deliveryId: 'x3', displayId: 21071 },
+          ],
+          alsoInCount: 4,
+        },
+      ],
+    });
+    expect(screen.getByText(/ещё в 21041, 21070 и ещё 2/)).toBeTruthy();
+  });
+
+  it('текст номеров: остаток считается от общего числа, а не от показанных', () => {
+    const two = [{ displayId: 1 }, { displayId: 2 }];
+    expect(deliveryNumbersText(two, 2)).toBe('1, 2');
+    expect(deliveryNumbersText(two, 12)).toBe('1, 2 и ещё 10');
+    expect(deliveryNumbersText(two, 12, 1)).toBe('1 и ещё 11');
   });
 });

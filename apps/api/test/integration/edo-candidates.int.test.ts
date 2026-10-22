@@ -7,7 +7,10 @@
  *   - фото-эталон работает без бумажной УПД, «сильное» — только с ИНН и полным номером;
  *   - квоты не молчат: упёрлись — в ответе `truncated`;
  *   - ручной поиск ставит точный номер выше близости даты;
- *   - привязка не меняет ни версии, ни позиций приёмки.
+ *   - привязка не меняет ни версии, ни позиций приёмки;
+ *   - подбор к блоку материалов сверяет только с его документом (и с накладной);
+ *   - привязка к блоку и отвязка документа не мешают друг другу и не теряют связь;
+ *   - «ещё в приёмках» считает одну УПД в любом представлении один раз.
  *
  * Запуск: TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5444/matcheck_test
  * Без переменной набор пропускается.
@@ -21,6 +24,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as schema from '../../src/db/schema.js';
 import type { Db } from '../../src/db/client.js';
 import { QUOTA, findEdoCandidates } from '../../src/domain/operations/edo-candidates.js';
+import { edoDocumentUsage, edoUsageKey } from '../../src/domain/operations/edo-usage.js';
 import { UPD_PDF_MAX_XML_BYTES } from '../../src/domain/edo/upd-review-pdf.js';
 import type { AuthUser } from '../../src/plugins/auth.js';
 import type * as S3Signer from '../../src/domain/storage/s3.signer.js';
@@ -678,5 +682,262 @@ suite('подбор УПД из ЭДО к приёмке (реальный Postg
     } finally {
       currentUser = manager;
     }
+  });
+  describe('блоки материалов и другие приёмки', () => {
+    // Приёмка 21072: бумажная УПД с ошибкой в номере (557 вместо 057) и
+    // накладная со своим ИНН; в реестре — четыре УПД поставщика за тот же день.
+    const RS_INN = inn10(`32${RUN}1`);
+    const WAYBILL_INN = inn10(`32${RUN}2`);
+    const DAY = '2031-04-21';
+    const MISREAD_NUMBER = `557/${RUN}26`;
+    const WAYBILL_NUMBER = `057/${RUN}25`;
+    const rsSupplierId = randomUUID();
+    const site2Id = randomUUID();
+    const blockDelivery = randomUUID();
+    const neighbourDelivery = randomUUID(); // тот же объект, та же УПД
+    const thirdDelivery = randomUUID(); // привязка из реестра до импорта
+    const foreignDelivery = randomUUID(); // другой объект
+    const misreadDocId = randomUUID();
+    const waybillDocId = randomUUID();
+    const raceDocId = randomUUID();
+    const importedDocId = randomUUID();
+    const edo: Record<string, string> = {};
+    const blockDocs = [misreadDocId, waybillDocId, raceDocId, importedDocId];
+    const blockDeliveries = [blockDelivery, neighbourDelivery, thirdDelivery, foreignDelivery];
+
+    type Linked = {
+      id: string;
+      documentId: string;
+      sectionDocumentId: string | null;
+      alsoIn: { deliveryId: string; displayId: number }[];
+      alsoInCount: number;
+    };
+    const matchesOf = async (deliveryId: string): Promise<Linked[]> => {
+      const res = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}/edo-matches` });
+      expect(res.statusCode).toBe(200);
+      return (res.json() as { items: Linked[] }).items;
+    };
+    const link = (deliveryId: string, documentId: string, sectionDocumentId?: string | null) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/v1/deliveries/${deliveryId}/edo-matches`,
+        payload: { documentId, source: 'export', sectionDocumentId },
+      });
+    const displayIdOf = async (deliveryId: string) =>
+      Number((await sql<{ d: string }[]>`SELECT display_id AS d FROM deliveries WHERE id = ${deliveryId}`)[0]!.d);
+
+    beforeAll(async () => {
+      const statusId = (
+        await sql<{ id: string }[]>`
+          SELECT id FROM statuses WHERE entity_type = 'delivery' AND code = 'filled' LIMIT 1`
+      )[0]!.id;
+      await sql`INSERT INTO sites (id, code, name) VALUES (${site2Id}, ${`EDO2${RUN}`}, 'Подбор ЭДО, другой объект')`;
+      await sql`INSERT INTO counterparties (id, inn, name, is_supplier)
+                VALUES (${rsSupplierId}, ${RS_INN}, 'ООО «РС»', true)`;
+      for (const [id, site] of [
+        [blockDelivery, siteId],
+        [neighbourDelivery, siteId],
+        [thirdDelivery, siteId],
+        [foreignDelivery, site2Id],
+      ] as const) {
+        await sql`INSERT INTO deliveries (id, site_id, inspector_id, status_id, supplier_id, arrived_at, version)
+                  VALUES (${id}, ${site}, ${managerId}, ${statusId}, ${rsSupplierId}, ${`${DAY}T07:00:00Z`}, 1)`;
+      }
+      for (const [id, kind, number, sum, inn] of [
+        [misreadDocId, 'upd', MISREAD_NUMBER, '140158.16', RS_INN],
+        [waybillDocId, 'transport_waybill', WAYBILL_NUMBER, '58325.76', WAYBILL_INN],
+        [raceDocId, 'transport_waybill', `057/${RUN}99`, '1.00', RS_INN],
+      ] as const) {
+        await sql`INSERT INTO source_documents
+                    (id, kind, direction, status, origin, site_id, doc_number, doc_date, total_sum, supplier_inn_raw)
+                  VALUES (${id}, ${kind}, 'inbound', 'parsed', 'manual_pdf', ${siteId},
+                          ${number}, ${DAY}, ${sum}, ${inn})`;
+        await sql`INSERT INTO delivery_sources (delivery_id, source_document_id) VALUES (${blockDelivery}, ${id})`;
+      }
+      // Фото с номером другого документа: в подборе к блоку его быть не должно.
+      const photoId = randomUUID();
+      await sql`INSERT INTO delivery_photos (id, delivery_id, kind, stage, s3_key, content_hash)
+                VALUES (${photoId}, ${blockDelivery}, 'document', 'before', ${`test/${photoId}.jpg`},
+                        ${randomUUID().replace(/-/g, '')})`;
+      await sql`INSERT INTO photo_recognized_items (id, delivery_photo_id, parser, doc_number, doc_date, total_sum)
+                VALUES (${randomUUID()}, ${photoId}, 'upd_vision', ${`ФОТО-${RUN}`}, ${DAY}, '5.00')`;
+      await exportDoc({ number: `ФОТО-${RUN}`, date: DAY, inn: RS_INN, name: 'ООО «РС»', sum: '5.00' });
+
+      for (const [key, sum] of [
+        ['23', '1000.00'],
+        ['24', '2000.00'],
+        ['25', '58325.76'],
+        ['26', '263224.31'],
+      ] as const) {
+        edo[key] = await exportDoc({ number: `057/${RUN}${key}`, date: DAY, inn: RS_INN, name: 'ООО «РС»', sum });
+      }
+    });
+
+    afterAll(async () => {
+      await sql`DELETE FROM delivery_edo_matches WHERE delivery_id IN ${sql(blockDeliveries)}`;
+      await sql`DELETE FROM delivery_sources WHERE delivery_id IN ${sql(blockDeliveries)}`;
+      await sql`DELETE FROM deliveries WHERE id IN ${sql(blockDeliveries)}`;
+      await sql`DELETE FROM source_documents WHERE id IN ${sql(blockDocs)}`;
+      await sql`DELETE FROM counterparties WHERE id = ${rsSupplierId}`;
+      await sql`DELETE FROM sites WHERE id = ${site2Id}`;
+    });
+
+    it('блок накладной: эталон — только её документ, свой ИНН накладной не мешает', async () => {
+      const result = (await findEdoCandidates(db, blockDelivery, { sectionDocumentId: waybillDocId }))!;
+      expect(result.items[0]).toMatchObject({
+        id: edo['25'],
+        level: 'high',
+        otherSupplier: false,
+        reference: { origin: 'paper', label: WAYBILL_NUMBER },
+      });
+      expect(result.items[0]!.supplierCheck.matchedInn).toBe(RS_INN);
+      // Ни фото, ни бумажная УПД соседнего блока эталонами не стали.
+      expect(result.items.every((item) => item.reference.label === WAYBILL_NUMBER)).toBe(true);
+
+      // Без блока накладная эталоном не служит — общий подбор прежний.
+      const whole = (await findEdoCandidates(db, blockDelivery))!;
+      expect(whole.items.some((item) => item.reference.label === WAYBILL_NUMBER)).toBe(false);
+      expect(whole.items.some((item) => item.reference.origin === 'photo')).toBe(true);
+    });
+
+    it('блок УПД с ошибкой в номере: нужная УПД в списке по ИНН, но не «сильное»', async () => {
+      // 557/…26 против 057/…26: ни полный номер, ни цифровое ядро не совпадают,
+      // суммы тоже. Первое место здесь не обещается — только присутствие.
+      const result = (await findEdoCandidates(db, blockDelivery, { sectionDocumentId: misreadDocId }))!;
+      const target = result.items.find((item) => item.id === edo['26']);
+      expect(target).toBeDefined();
+      expect(target!.foundBy).toContain('inn');
+      expect(target!.level).not.toBe('high');
+      expect(result.items.every((item) => item.reference.label === MISREAD_NUMBER)).toBe(true);
+    });
+
+    it('маршруты: документ не из этой приёмки — 409; блок в ответе; отвязка документа переносит УПД в шапку', async () => {
+      const foreignSection = await app.inject({
+        method: 'GET',
+        url: `/api/v1/deliveries/${blockDelivery}/edo-candidates?sectionDocumentId=${paperDocId}`,
+      });
+      expect(foreignSection.statusCode).toBe(409);
+      expect(foreignSection.json()).toMatchObject({ error: 'section_not_linked' });
+      const wrongLink = await link(blockDelivery, edo['25']!, paperDocId);
+      expect(wrongLink.statusCode).toBe(409);
+      expect(wrongLink.json()).toMatchObject({ error: 'section_not_linked' });
+
+      const ok = await app.inject({
+        method: 'GET',
+        url: `/api/v1/deliveries/${blockDelivery}/edo-candidates?sectionDocumentId=${waybillDocId}`,
+      });
+      expect(ok.statusCode).toBe(200);
+      expect((ok.json() as { items: { id: string }[] }).items[0]?.id).toBe(edo['25']);
+
+      expect((await link(blockDelivery, edo['25']!, waybillDocId)).statusCode).toBe(200);
+      expect(await matchesOf(blockDelivery)).toEqual([
+        expect.objectContaining({ documentId: edo['25'], sectionDocumentId: waybillDocId }),
+      ]);
+
+      const unlink = await app.inject({
+        method: 'POST',
+        url: `/api/v1/deliveries/${blockDelivery}/unlink-source`,
+        payload: { sourceDocumentId: waybillDocId },
+      });
+      expect(unlink.statusCode).toBe(200);
+      expect(await matchesOf(blockDelivery)).toEqual([
+        expect.objectContaining({ documentId: edo['25'], sectionDocumentId: null }),
+      ]);
+
+      // Отвязанный документ больше не блок: привязать к нему нельзя.
+      expect((await link(blockDelivery, edo['24']!, waybillDocId)).statusCode).toBe(409);
+      await sql`DELETE FROM delivery_edo_matches WHERE delivery_id = ${blockDelivery}`;
+      await sql`INSERT INTO delivery_sources (delivery_id, source_document_id) VALUES (${blockDelivery}, ${waybillDocId})`;
+    });
+
+    it('привязка к блоку и отвязка его документа одновременно: без 500 и без висящего блока', async () => {
+      for (let round = 0; round < 20; round += 1) {
+        await sql`INSERT INTO delivery_sources (delivery_id, source_document_id)
+                  VALUES (${blockDelivery}, ${raceDocId}) ON CONFLICT DO NOTHING`;
+        const [linked, unlinked] = await Promise.all([
+          link(blockDelivery, edo['23']!, raceDocId),
+          app.inject({
+            method: 'POST',
+            url: `/api/v1/deliveries/${blockDelivery}/unlink-source`,
+            payload: { sourceDocumentId: raceDocId },
+          }),
+        ]);
+        expect(unlinked.statusCode).toBe(200);
+        expect([200, 409]).toContain(linked.statusCode);
+        const rows = await sql<{ section: string | null }[]>`
+          SELECT section_document_id AS section FROM delivery_edo_matches
+           WHERE delivery_id = ${blockDelivery} AND export_document_id = ${edo['23']!}`;
+        if (linked.statusCode === 200) expect(rows).toEqual([{ section: null }]);
+        else {
+          expect(linked.json()).toMatchObject({ error: 'section_not_linked' });
+          expect(rows).toEqual([]);
+        }
+        await sql`DELETE FROM delivery_edo_matches WHERE delivery_id = ${blockDelivery}`;
+      }
+    });
+
+    it('одна УПД в двух приёмках: номера другой приёмки, без своей и без повторов', async () => {
+      const neighbourNo = await displayIdOf(neighbourDelivery);
+      const blockNo = await displayIdOf(blockDelivery);
+      expect((await link(neighbourDelivery, edo['26']!)).statusCode).toBe(200);
+
+      const result = (await findEdoCandidates(db, blockDelivery, { sectionDocumentId: misreadDocId }))!;
+      expect(result.items.find((item) => item.id === edo['26'])).toMatchObject({
+        usedElsewhere: 1,
+        usedIn: [{ deliveryId: neighbourDelivery, displayId: neighbourNo }],
+      });
+
+      expect((await link(blockDelivery, edo['26']!, misreadDocId)).statusCode).toBe(200);
+      expect(await matchesOf(blockDelivery)).toEqual([
+        expect.objectContaining({
+          documentId: edo['26'],
+          sectionDocumentId: misreadDocId,
+          alsoIn: [{ deliveryId: neighbourDelivery, displayId: neighbourNo }],
+          alsoInCount: 1,
+        }),
+      ]);
+      expect(await matchesOf(neighbourDelivery)).toEqual([
+        expect.objectContaining({
+          sectionDocumentId: null,
+          alsoIn: [{ deliveryId: blockDelivery, displayId: blockNo }],
+          alsoInCount: 1,
+        }),
+      ]);
+    });
+
+    it('УПД привязана из реестра, потом импортирована: импортная копия видит ту приёмку один раз', async () => {
+      const thirdNo = await displayIdOf(thirdDelivery);
+      expect((await link(thirdDelivery, edo['24']!)).statusCode).toBe(200);
+      await sql`INSERT INTO source_documents
+                  (id, kind, direction, status, origin, site_id, doc_number, doc_date, total_sum,
+                   edo_account_id, provider_message_id, provider_entity_id)
+                VALUES (${importedDocId}, 'upd', 'inbound', 'parsed', 'edo_diadoc', ${siteId},
+                        ${`057/${RUN}24`}, ${DAY}, 2000.00, ${accountId},
+                        ${`m-${edo['24']}`}, ${`e-${edo['24']}`})`;
+      // Второй путь к той же приёмке — сама импортная копия как документ.
+      await sql`INSERT INTO delivery_sources (delivery_id, source_document_id) VALUES (${thirdDelivery}, ${importedDocId})`;
+
+      const usage = await edoDocumentUsage(
+        db,
+        [
+          { source: 'import', id: importedDocId },
+          { source: 'export', id: edo['24']! },
+        ],
+        blockDelivery,
+      );
+      const expected = { count: 1, deliveries: [{ deliveryId: thirdDelivery, displayId: thirdNo }] };
+      expect(usage.get(edoUsageKey({ source: 'import', id: importedDocId }))).toEqual(expected);
+      expect(usage.get(edoUsageKey({ source: 'export', id: edo['24']! }))).toEqual(expected);
+      // Своя приёмка исключается.
+      const own = await edoDocumentUsage(db, [{ source: 'import', id: importedDocId }], thirdDelivery);
+      expect(own.size).toBe(0);
+    });
+
+    it('УПД, привязанная на другом объекте, — 409 foreign_site', async () => {
+      expect((await link(foreignDelivery, edo['23']!)).statusCode).toBe(200);
+      const res = await link(blockDelivery, edo['23']!, misreadDocId);
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: 'foreign_site' });
+    });
   });
 });

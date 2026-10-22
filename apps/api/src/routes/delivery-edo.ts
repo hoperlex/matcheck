@@ -17,6 +17,7 @@ import {
   suppliers,
 } from '../db/schema.js';
 import { findEdoCandidates } from '../domain/operations/edo-candidates.js';
+import { edoDocumentUsage, edoUsageKey } from '../domain/operations/edo-usage.js';
 import { toIsoDate } from '../domain/edo/export-upd.js';
 import { decodeXmlBuffer } from '../domain/edo/upd-xml-decode.js';
 import { parseUpdXml, type UpdParsed } from '../domain/edo/upd.parser.js';
@@ -31,6 +32,9 @@ import { publishEvent } from './events.js';
 
 const FoundBySchema = z.enum(['number', 'inn', 'name', 'date', 'search']);
 
+/** Другая приёмка, где уже стоит та же УПД — номер для показа менеджеру. */
+const UsedInSchema = z.object({ deliveryId: z.string().uuid(), displayId: z.number().int() });
+
 const EdoCandidateSchema = z.object({
   id: z.string().uuid(),
   source: z.enum(['import', 'export']),
@@ -42,6 +46,7 @@ const EdoCandidateSchema = z.object({
   totalSum: z.string().nullable(),
   siteId: z.string().uuid().nullable(),
   usedElsewhere: z.number().int(),
+  usedIn: z.array(UsedInSchema),
   foundBy: z.array(FoundBySchema),
   reference: z.object({
     origin: z.enum(['paper', 'photo', 'delivery']),
@@ -200,7 +205,40 @@ const LinkedEdoDocumentSchema = z.object({
   supplierInn: z.string().nullable(),
   totalSum: z.string().nullable(),
   linkedAt: z.string(),
+  /** Документ приёмки, к блоку материалов которого привязана УПД; null — к приёмке целиком. */
+  sectionDocumentId: z.string().uuid().nullable(),
+  /** Другие приёмки с той же УПД: первые по номеру и общее число. */
+  alsoIn: z.array(UsedInSchema),
+  alsoInCount: z.number().int(),
 });
+
+/**
+ * Документ блока должен быть связан с приёмкой сейчас: в блок отвязанного
+ * документа «+ Материал» тоже не добавляет. Вызывать под блокировкой строки
+ * приёмки — её же берёт unlink-source до удаления связи.
+ */
+async function sectionLinked(
+  db: Pick<Db, 'select'>,
+  deliveryId: string,
+  sectionDocumentId: string,
+): Promise<boolean> {
+  const [link] = await db
+    .select({ id: deliverySources.sourceDocumentId })
+    .from(deliverySources)
+    .where(
+      and(
+        eq(deliverySources.deliveryId, deliveryId),
+        eq(deliverySources.sourceDocumentId, sectionDocumentId),
+      ),
+    )
+    .limit(1);
+  return !!link;
+}
+
+const SECTION_NOT_LINKED = {
+  error: 'section_not_linked',
+  message: 'Документ блока отвязан от приёмки — обновите карточку',
+} as const;
 
 export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
   const app = asZod(rawApp);
@@ -237,6 +275,7 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
           >`coalesce(nullif(${sourceDocuments.supplierInnRaw}, ''), nullif(${directory.inn}, ''), nullif(${supplier.inn}, ''))`,
           totalSum: sourceDocuments.totalSum,
           linkedAt: deliveryEdoMatches.linkedAt,
+          sectionDocumentId: deliveryEdoMatches.sectionDocumentId,
         })
         .from(deliveryEdoMatches)
         .innerJoin(sourceDocuments, eq(deliveryEdoMatches.sourceDocumentId, sourceDocuments.id))
@@ -254,6 +293,7 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
           supplierInn: edoExportDocuments.supplierInn,
           totalSum: edoExportDocuments.totalSum,
           linkedAt: deliveryEdoMatches.linkedAt,
+          sectionDocumentId: deliveryEdoMatches.sectionDocumentId,
         })
         .from(deliveryEdoMatches)
         .innerJoin(
@@ -261,19 +301,30 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
           eq(deliveryEdoMatches.exportDocumentId, edoExportDocuments.id),
         )
         .where(eq(deliveryEdoMatches.deliveryId, delivery.id));
+      const linked = [
+        ...rows.map((row: (typeof rows)[number]) => ({ ...row, source: 'import' as const })),
+        ...exportedRows.map((row: (typeof exportedRows)[number]) => ({
+          ...row,
+          source: 'export' as const,
+        })),
+      ];
+      const usage = await edoDocumentUsage(
+        app.db,
+        linked.map((row) => ({ source: row.source, id: row.documentId })),
+        delivery.id,
+      );
       return {
-        items: [
-          ...rows.map((row: (typeof rows)[number]) => ({ ...row, source: 'import' as const })),
-          ...exportedRows.map((row: (typeof exportedRows)[number]) => ({
-            ...row,
-            source: 'export' as const,
-          })),
-        ]
-          .map((row) => ({
-            ...row,
-            docDate: row.docDate?.toISOString().slice(0, 10) ?? null,
-            linkedAt: row.linkedAt.toISOString(),
-          }))
+        items: linked
+          .map((row) => {
+            const used = usage.get(edoUsageKey({ source: row.source, id: row.documentId }));
+            return {
+              ...row,
+              docDate: row.docDate?.toISOString().slice(0, 10) ?? null,
+              linkedAt: row.linkedAt.toISOString(),
+              alsoIn: used?.deliveries ?? [],
+              alsoInCount: used?.count ?? 0,
+            };
+          })
           .sort((a, b) => a.linkedAt.localeCompare(b.linkedAt)),
       };
     },
@@ -547,7 +598,12 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
-        body: z.object({ documentId: z.string().uuid(), source: z.enum(['import', 'export']) }),
+        body: z.object({
+          documentId: z.string().uuid(),
+          source: z.enum(['import', 'export']),
+          /** Блок материалов: документ приёмки. Нет или null — связь с приёмкой целиком. */
+          sectionDocumentId: z.string().uuid().nullish(),
+        }),
         response: {
           200: z.object({ success: z.literal(true) }),
           404: ErrorResponseSchema,
@@ -563,7 +619,9 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
         | 'invalid_document'
         | 'foreign_site'
         | 'already_linked'
-        | 'imported_available';
+        | 'imported_available'
+        | 'section_not_linked'
+        | 'invalid_section';
       const result: Result = await app.db.transaction(async (tx) => {
         const [delivery] = await tx
           .select({
@@ -579,6 +637,14 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
         if (delivery.pendingDeletionAt) return 'pending_deletion';
         const documentId = req.body.documentId;
         const isImport = req.body.source === 'import';
+        const sectionDocumentId = req.body.sectionDocumentId ?? null;
+        if (sectionDocumentId) {
+          // Без своей блокировки: связь удаляет только unlink-source, а он
+          // сначала берёт ту же строку приёмки. Порядок «приёмка → связь» один.
+          if (!(await sectionLinked(tx, delivery.id, sectionDocumentId)))
+            return 'section_not_linked';
+          if (isImport && sectionDocumentId === documentId) return 'invalid_section';
+        }
         if (isImport) {
           const [document] = await tx
             .select({
@@ -733,6 +799,7 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
             deliveryId: delivery.id,
             sourceDocumentId: isImport ? documentId : null,
             exportDocumentId: isImport ? null : documentId,
+            sectionDocumentId,
             linkedByUserId: req.user?.id ?? null,
           })
           .onConflictDoNothing()
@@ -748,6 +815,8 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
           imported_available: 'УПД уже импортирована в портал — обновите список кандидатов',
           foreign_site: 'УПД относится к другому объекту',
           already_linked: 'УПД уже привязана к этой приёмке',
+          section_not_linked: SECTION_NOT_LINKED.message,
+          invalid_section: 'УПД нельзя привязать к её собственному блоку',
         }[result];
         return reply
           .code(result === 'not_found' || result === 'invalid_document' ? 404 : 409)
@@ -833,7 +902,11 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
-        querystring: z.object({ q: z.string().trim().max(100).optional() }),
+        querystring: z.object({
+          q: z.string().trim().max(100).optional(),
+          /** Подбор к блоку материалов: эталон — только этот документ приёмки. */
+          sectionDocumentId: z.string().uuid().optional(),
+        }),
         response: {
           200: z.object({
             items: z.array(EdoCandidateSchema),
@@ -875,11 +948,16 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
             }),
           }),
           404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
         },
       },
     },
     async (req, reply) => {
-      const result = await findEdoCandidates(app.db, req.params.id, { q: req.query.q });
+      const { q, sectionDocumentId } = req.query;
+      if (sectionDocumentId && !(await sectionLinked(app.db, req.params.id, sectionDocumentId))) {
+        return reply.code(409).send(SECTION_NOT_LINKED);
+      }
+      const result = await findEdoCandidates(app.db, req.params.id, { q, sectionDocumentId });
       if (!result) return reply.code(404).send({ error: 'not_found' });
       return result;
     },

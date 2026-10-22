@@ -2743,7 +2743,18 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
 
       const removed = await app.db.transaction(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        async (tx: any) => {
+        async (tx: any): Promise<'ok' | 'not_linked' | 'pending_deletion'> => {
+          // Сначала строка приёмки, потом связь — тот же порядок, что у
+          // привязки УПД из ЭДО к блоку (delivery-edo.ts). Встречный порядок
+          // дал бы взаимную блокировку.
+          const [locked] = await tx
+            .select({ pendingDeletionAt: deliveries.pendingDeletionAt })
+            .from(deliveries)
+            .where(eq(deliveries.id, d.id))
+            .for('update');
+          if (!locked) return 'not_linked';
+          if (locked.pendingDeletionAt !== null) return 'pending_deletion';
+
           const deleted = await tx
             .delete(deliverySources)
             .where(
@@ -2753,17 +2764,35 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               ),
             )
             .returning({ sourceDocumentId: deliverySources.sourceDocumentId });
-          if (deleted.length === 0) return false;
+          if (deleted.length === 0) return 'not_linked';
+
+          // УПД из ЭДО, привязанная к блоку этого документа, остаётся при
+          // приёмке: без блока её чип переезжает в шапку, а не пропадает.
+          await tx
+            .update(deliveryEdoMatches)
+            .set({ sectionDocumentId: null })
+            .where(
+              and(
+                eq(deliveryEdoMatches.deliveryId, d.id),
+                eq(deliveryEdoMatches.sectionDocumentId, req.body.sourceDocumentId),
+              ),
+            );
 
           await tx
             .update(deliveries)
             .set({ version: drSql`${deliveries.version} + 1`, updatedAt: new Date() })
             .where(eq(deliveries.id, d.id));
-          return true;
+          return 'ok';
         },
       );
 
-      if (!removed) {
+      if (removed === 'pending_deletion') {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — мутации запрещены',
+        });
+      }
+      if (removed === 'not_linked') {
         return reply.code(404).send({
           error: 'not_linked',
           message: 'Этот документ не привязан к приёмке',

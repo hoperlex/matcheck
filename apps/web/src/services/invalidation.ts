@@ -39,6 +39,9 @@ const SHIPMENT_REPORTS: string[][] = [
 // Ключи для fallback-рефетча, когда SSE молча оборвался (см. ниже).
 const FALLBACK_KEYS: string[][] = [
   ['deliveries'],
+  // УПД из ЭДО в карточке приёмки — отдельный запрос, префиксом
+  // ['deliveries'] не накрывается.
+  ['delivery-edo-matches'],
   ['shipments'],
   ['source-documents'],
   ['reports'],
@@ -143,7 +146,9 @@ export function setupInvalidation(qc: QueryClient): () => void {
       // source-documents: вкладка «Ожидаемые» зависит от привязок в
       // delivery_sources — после создания/удаления приёмки список
       // ожидаемых УПД должен перечитаться.
-      keys = [['deliveries'], ['source-documents'], ...DELIVERY_REPORTS];
+      // delivery-edo-matches: чипы УПД из ЭДО — привязку мог сделать другой
+      // менеджер, а «ещё в приёмке N» меняется от привязки к соседней приёмке.
+      keys = [['deliveries'], ['source-documents'], ['delivery-edo-matches'], ...DELIVERY_REPORTS];
     } else if (type === 'shipment_updated' || type === 'shipment_deleted') {
       keys = [['shipments'], ['source-documents'], ...SHIPMENT_REPORTS];
     } else if (type === 'source_document_updated') {

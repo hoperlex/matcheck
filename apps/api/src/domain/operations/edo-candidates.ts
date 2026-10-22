@@ -26,7 +26,6 @@ import type { Db } from '../../db/client.js';
 import {
   counterparties,
   deliveries,
-  deliveryEdoMatches,
   deliveryPhotos,
   deliverySources,
   edoAccounts,
@@ -37,6 +36,7 @@ import {
 } from '../../db/schema.js';
 import { loadEnv } from '../../lib/env.js';
 import { escapeLike } from '../../lib/like.js';
+import { edoDocumentUsage, edoUsageKey, type EdoUsage } from './edo-usage.js';
 import {
   censusForSupplier,
   exportRegistryStatus,
@@ -72,7 +72,10 @@ export type EdoCandidate = {
   supplierInn: string | null;
   totalSum: string | null;
   siteId: string | null;
+  /** В скольких других приёмках уже стоит эта УПД (любым представлением). */
   usedElsewhere: number;
+  /** Номера этих приёмок, первые `USAGE_SHOWN`. */
+  usedIn: EdoUsage['deliveries'];
   foundBy: FoundBy[];
   reference: { origin: ReferenceOrigin; label: string | null };
   score: number;
@@ -162,6 +165,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 type Row = Omit<
   EdoCandidate,
   | 'usedElsewhere'
+  | 'usedIn'
   | 'foundBy'
   | 'reference'
   | 'score'
@@ -382,7 +386,16 @@ type LoadedReferences = {
   references: MatchReference[];
 };
 
-async function loadReferences(db: Db, deliveryId: string): Promise<LoadedReferences | null> {
+/**
+ * Эталоны подбора. С `sectionDocumentId` — только документ этого блока
+ * материалов, любого вида (накладная тоже), без фото: номера с фото относятся
+ * к другим документам приёмки. Что документ связан с приёмкой, проверяет маршрут.
+ */
+async function loadReferences(
+  db: Db,
+  deliveryId: string,
+  sectionDocumentId?: string,
+): Promise<LoadedReferences | null> {
   const [delivery] = await db
     .select({
       siteId: deliveries.siteId,
@@ -422,24 +435,31 @@ async function loadReferences(db: Db, deliveryId: string): Promise<LoadedReferen
     .leftJoin(paperDirectory, eq(sourceDocuments.supplierDirectoryId, paperDirectory.id))
     .leftJoin(paperSupplier, eq(sourceDocuments.supplierId, paperSupplier.id))
     .where(
-      and(
-        eq(deliverySources.deliveryId, deliveryId),
-        eq(sourceDocuments.kind, 'upd'),
-        ne(sourceDocuments.origin, 'edo_diadoc'),
-      ),
+      sectionDocumentId
+        ? and(eq(deliverySources.deliveryId, deliveryId), eq(sourceDocuments.id, sectionDocumentId))
+        : and(
+            eq(deliverySources.deliveryId, deliveryId),
+            eq(sourceDocuments.kind, 'upd'),
+            ne(sourceDocuments.origin, 'edo_diadoc'),
+          ),
     );
 
-  const photoRows = await db
-    .select({
-      docNumber: photoRecognizedItems.docNumber,
-      docDate: photoRecognizedItems.docDate,
-      totalSum: photoRecognizedItems.totalSum,
-    })
-    .from(deliveryPhotos)
-    .innerJoin(photoRecognizedItems, eq(photoRecognizedItems.deliveryPhotoId, deliveryPhotos.id))
-    .where(
-      and(eq(deliveryPhotos.deliveryId, deliveryId), isNotNull(photoRecognizedItems.docNumber)),
-    );
+  const photoRows = sectionDocumentId
+    ? []
+    : await db
+        .select({
+          docNumber: photoRecognizedItems.docNumber,
+          docDate: photoRecognizedItems.docDate,
+          totalSum: photoRecognizedItems.totalSum,
+        })
+        .from(deliveryPhotos)
+        .innerJoin(
+          photoRecognizedItems,
+          eq(photoRecognizedItems.deliveryPhotoId, deliveryPhotos.id),
+        )
+        .where(
+          and(eq(deliveryPhotos.deliveryId, deliveryId), isNotNull(photoRecognizedItems.docNumber)),
+        );
 
   // ИНН самой организации (владельца ящика ЭДО) в графе поставщика — это
   // распознанный ИНН покупателя. Эталоном он сделал бы правильную УПД «чужой».
@@ -537,9 +557,9 @@ async function loadReferences(db: Db, deliveryId: string): Promise<LoadedReferen
 export async function findEdoCandidates(
   db: Db,
   deliveryId: string,
-  opts: { q?: string } = {},
+  opts: { q?: string; sectionDocumentId?: string } = {},
 ): Promise<EdoCandidatesResult | null> {
-  const loaded = await loadReferences(db, deliveryId);
+  const loaded = await loadReferences(db, deliveryId, opts.sectionDocumentId);
   if (!loaded) return null;
   const { delivery, references } = loaded;
   const ctx: Context = { deliveryId, siteId: delivery.siteId };
@@ -690,34 +710,13 @@ export async function findEdoCandidates(
   }
 
   const entries = [...found.values()];
-  const importIds = entries.filter((e) => e.row.source === 'import').map((e) => e.row.id);
-  const exportIds = entries.filter((e) => e.row.source === 'export').map((e) => e.row.id);
-  const usage = new Map<string, number>();
-  if (importIds.length) {
-    const [edoLinks, sourceLinks] = await Promise.all([
-      db
-        .select({ id: deliveryEdoMatches.sourceDocumentId, count: drSql<number>`count(*)::int` })
-        .from(deliveryEdoMatches)
-        .where(inArray(deliveryEdoMatches.sourceDocumentId, importIds))
-        .groupBy(deliveryEdoMatches.sourceDocumentId),
-      db
-        .select({ id: deliverySources.sourceDocumentId, count: drSql<number>`count(*)::int` })
-        .from(deliverySources)
-        .where(inArray(deliverySources.sourceDocumentId, importIds))
-        .groupBy(deliverySources.sourceDocumentId),
-    ]);
-    for (const link of [...edoLinks, ...sourceLinks]) {
-      if (link.id) usage.set(`import:${link.id}`, (usage.get(`import:${link.id}`) ?? 0) + link.count);
-    }
-  }
-  if (exportIds.length) {
-    const links = await db
-      .select({ id: deliveryEdoMatches.exportDocumentId, count: drSql<number>`count(*)::int` })
-      .from(deliveryEdoMatches)
-      .where(inArray(deliveryEdoMatches.exportDocumentId, exportIds))
-      .groupBy(deliveryEdoMatches.exportDocumentId);
-    for (const link of links) if (link.id) usage.set(`export:${link.id}`, link.count);
-  }
+  // Кандидат уже связанный с этой приёмкой в список не попадает, так что
+  // исключение текущей приёмки — страховка, а не фильтр.
+  const usage = await edoDocumentUsage(
+    db,
+    entries.map((e) => ({ source: e.row.source, id: e.row.id })),
+    deliveryId,
+  );
 
   const distance = (item: { docDate: string | null }) =>
     Math.abs(item.docDate ? daysBetween(anchor, item.docDate) : 1e6);
@@ -732,7 +731,8 @@ export async function findEdoCandidates(
     } = rankEdoAgainstReferences(references, { ...row, supplierInns: sellerInns });
     return {
       ...row,
-      usedElsewhere: usage.get(`${row.source}:${row.id}`) ?? 0,
+      usedElsewhere: usage.get(edoUsageKey(row))?.count ?? 0,
+      usedIn: usage.get(edoUsageKey(row))?.deliveries ?? [],
       foundBy: [...foundBy],
       ...match,
       missing:

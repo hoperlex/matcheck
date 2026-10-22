@@ -1745,10 +1745,19 @@ export const deliveryEdoMatches = pgTable(
     exportDocumentId: uuid('export_document_id').references(() => edoExportDocuments.id, {
       onDelete: 'restrict',
     }),
+    // Блок материалов, к которому привязана УПД: документ приёмки (бумажная
+    // УПД или накладная). NULL — связь с приёмкой целиком. unlink-source
+    // обнуляет поле, иначе чип исчез бы вместе с блоком (миграция 0136).
+    sectionDocumentId: uuid('section_document_id').references(() => sourceDocuments.id, {
+      onDelete: 'set null',
+    }),
     linkedByUserId: uuid('linked_by_user_id').references(() => users.id, { onDelete: 'set null' }),
     linkedAt: timestamp('linked_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    index('delivery_edo_matches_section_idx')
+      .on(t.sectionDocumentId)
+      .where(sql`${t.sectionDocumentId} is not null`),
     uniqueIndex('delivery_edo_matches_source_unique')
       .on(t.deliveryId, t.sourceDocumentId)
       .where(sql`${t.sourceDocumentId} is not null`),

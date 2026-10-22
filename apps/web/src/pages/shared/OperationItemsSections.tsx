@@ -1,4 +1,4 @@
-import { Button, Collapse, Typography, type TableProps } from 'antd';
+import { Button, Collapse, Space, Typography, type TableProps } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
 import { useMemo, useState, type ReactNode } from 'react';
 import type { OperationSourceDocument } from '@matcheck/contracts';
@@ -64,6 +64,7 @@ export function OperationItemsSections<T extends RowBase>({
   onAddItem,
   emptyHint,
   problemItemIds,
+  sectionExtra,
 }: {
   items: T[];
   /** Сводка документов операции: связанные и оставшиеся в происхождении строк. */
@@ -84,6 +85,11 @@ export function OperationItemsSections<T extends RowBase>({
    * чей `sourceDocumentItemId` попал в набор; пустой набор — подсветки нет.
    */
   problemItemIds?: ReadonlySet<string>;
+  /**
+   * Дополнительное содержимое заголовка блока, перед «Материал» — например,
+   * привязанная к блоку УПД из ЭДО. Клики внутри блок не сворачивают.
+   */
+  sectionExtra?: (section: ItemSection<T>) => ReactNode;
 }) {
   const sections = useMemo(() => buildItemSections<T>({ items, documents }), [items, documents]);
 
@@ -108,24 +114,36 @@ export function OperationItemsSections<T extends RowBase>({
           onAddItem !== undefined &&
           (section.document?.linked === true || section.key === NO_DOCUMENT_SECTION_KEY);
         const displayNoByKey = new Map(section.items.map((row, idx) => [row.clientKey, idx + 1]));
+        const addButton = canAdd ? (
+          <Button
+            size="small"
+            icon={<PlusOutlined />}
+            onClick={(e) => {
+              // Иначе клик по кнопке заодно свернёт/развернёт блок.
+              e.stopPropagation();
+              const target = section.document?.id ?? null;
+              onAddItem(target);
+              setOpenKeys((prev) => (prev.includes(section.key) ? prev : [...prev, section.key]));
+            }}
+          >
+            Материал
+          </Button>
+        ) : null;
+        const extraContent = sectionExtra?.(section);
         return {
           key: section.key,
           label: sectionTitle(section, hasDocuments),
-          extra: canAdd ? (
-            <Button
-              size="small"
-              icon={<PlusOutlined />}
-              onClick={(e) => {
-                // Иначе клик по кнопке заодно свернёт/развернёт блок.
-                e.stopPropagation();
-                const target = section.document?.id ?? null;
-                onAddItem(target);
-                setOpenKeys((prev) => (prev.includes(section.key) ? prev : [...prev, section.key]));
-              }}
-            >
-              Материал
-            </Button>
-          ) : undefined,
+          extra:
+            extraContent || addButton ? (
+              // Клик в заголовке переключает блок, а всплывающие подтверждения
+              // живут в портале, но их события всё равно всплывают сюда.
+              <span onClick={(e) => e.stopPropagation()}>
+                <Space size={4} wrap>
+                  {extraContent}
+                  {addButton}
+                </Space>
+              </span>
+            ) : undefined,
           children:
             section.items.length === 0 ? (
               <Typography.Text type="secondary">

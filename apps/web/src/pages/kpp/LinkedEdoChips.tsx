@@ -1,5 +1,5 @@
 import { useRef, useState, type MouseEvent } from 'react';
-import { Button, Popconfirm, Tag } from 'antd';
+import { Button, Popconfirm, Tag, Tooltip } from 'antd';
 import { EdoCompareDrawer, type ComparePhoto } from './EdoCompareDrawer';
 
 /** УПД из ЭДО, привязанная к приёмке (`GET /deliveries/:id/edo-matches`). */
@@ -13,7 +13,26 @@ export type LinkedEdoDocument = {
   supplierInn: string | null;
   totalSum: string | null;
   linkedAt: string;
+  /** Документ приёмки, к блоку которого привязана УПД; null — к приёмке целиком. */
+  sectionDocumentId: string | null;
+  /** Другие приёмки с той же УПД: первые по номеру и общее число. */
+  alsoIn: { deliveryId: string; displayId: number }[];
+  alsoInCount: number;
 };
+
+/** Сколько номеров других приёмок писать прямо в чипе; остальные — в подсказке. */
+const ALSO_IN_INLINE = 2;
+
+/** «21041, 21070 и ещё 3» — номера других приёмок с той же УПД. */
+export function deliveryNumbersText(
+  deliveries: readonly { displayId: number }[],
+  total: number,
+  inline: number = deliveries.length,
+): string {
+  const shown = deliveries.slice(0, inline).map((d) => d.displayId);
+  const rest = total - shown.length;
+  return `${shown.join(', ')}${rest > 0 ? ` и ещё ${rest}` : ''}`;
+}
 
 /**
  * Чипы привязанных УПД из ЭДО в шапке приёмки.
@@ -63,6 +82,16 @@ export function LinkedEdoChips({
           ЭДО: {document.docNumber ?? 'без номера'}
           {document.docDate ? ` от ${document.docDate}` : ''}
           {document.source === 'export' ? ' · XML' : ''}
+          {document.alsoInCount > 0 && (
+            <Tooltip
+              title={`Та же УПД в приёмках: ${deliveryNumbersText(document.alsoIn, document.alsoInCount)}`}
+            >
+              <span>
+                {' · ещё в '}
+                {deliveryNumbersText(document.alsoIn, document.alsoInCount, ALSO_IN_INLINE)}
+              </span>
+            </Tooltip>
+          )}
           <Button
             type="link"
             size="small"

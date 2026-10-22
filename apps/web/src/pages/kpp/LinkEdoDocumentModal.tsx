@@ -19,6 +19,7 @@ import type { Delivery } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { formatDateRu, formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { EdoCompareDrawer, type ComparePhoto } from './EdoCompareDrawer';
+import { deliveryNumbersText } from './LinkedEdoChips';
 
 type FoundBy = 'number' | 'inn' | 'name' | 'date' | 'search';
 
@@ -32,7 +33,10 @@ type Candidate = {
   supplierInn: string | null;
   totalSum: string | null;
   siteId: string | null;
+  /** В скольких других приёмках уже стоит эта УПД. */
   usedElsewhere: number;
+  /** Номера этих приёмок (первые из них). */
+  usedIn: { deliveryId: string; displayId: number }[];
   foundBy: FoundBy[];
   reference: { origin: 'paper' | 'photo' | 'delivery'; label: string | null };
   score: number;
@@ -152,21 +156,49 @@ function isStranger(candidate: Candidate): boolean {
   return candidate.otherSupplier && candidate.level === 'weak';
 }
 
-function referenceText(reference: Candidate['reference']): string {
+/** «Уже в приёмке 21041» / «Уже в приёмках 21041, 21070 и ещё 3». */
+function usedElsewhereLabel(candidate: Candidate): string {
+  if (!candidate.usedIn.length) return `Уже в ${candidate.usedElsewhere} приёмках`;
+  const many = candidate.usedElsewhere > 1;
+  return `Уже в ${many ? 'приёмках' : 'приёмке'} ${deliveryNumbersText(candidate.usedIn, candidate.usedElsewhere)}`;
+}
+
+function usedElsewhereConfirm(candidate: Candidate): string {
+  if (!candidate.usedIn.length) return `УПД уже привязана к ${candidate.usedElsewhere} приёмкам.`;
+  const many = candidate.usedElsewhere > 1;
+  return `УПД уже привязана к ${many ? 'приёмкам' : 'приёмке'} ${deliveryNumbersText(
+    candidate.usedIn,
+    candidate.usedElsewhere,
+  )}. Привязать и к этой?`;
+}
+
+/** Блок материалов приёмки, к которому подбирается УПД. */
+export type EdoSection = { id: string; label: string };
+
+function referenceText(reference: Candidate['reference'], section: EdoSection | null): string {
+  // В блоке эталон — его документ, и это может быть накладная, а не УПД.
+  if (reference.origin === 'paper' && section)
+    return `Сверено с документом блока: ${section.label}`;
   if (reference.origin === 'paper') return `Сверено с бумажной УПД № ${reference.label ?? '—'}`;
   if (reference.origin === 'photo') return `Сверено с фото УПД № ${reference.label ?? '—'}`;
   return 'Сверено с данными приёмки';
 }
 
-/** Позиции УПД рядом с позициями приёмки — сверка глазами до привязки. */
+/**
+ * Позиции УПД рядом с позициями приёмки (или блока) — ручная сверка до
+ * привязки. Строки не сопоставляются автоматически: подбор позиции не
+ * оценивает намеренно (edo-match.ts).
+ */
 function CandidatePreview({
   deliveryId,
   candidate,
   deliveryItems,
+  itemsTitle,
 }: {
   deliveryId: string;
   candidate: Candidate;
   deliveryItems: readonly DeliveryItem[];
+  itemsTitle: string;
 }) {
   const preview = useQuery({
     queryKey: ['delivery-edo-preview', deliveryId, candidate.source, candidate.id],
@@ -224,13 +256,13 @@ function CandidatePreview({
           />
         </Col>
         <Col span={10}>
-          <Typography.Text strong>Приёмка</Typography.Text>
+          <Typography.Text strong>{itemsTitle}</Typography.Text>
           <Table
             rowKey="id"
             size="small"
             pagination={false}
             dataSource={[...deliveryItems]}
-            locale={{ emptyText: 'В приёмке нет позиций' }}
+            locale={{ emptyText: `${itemsTitle}: нет позиций` }}
             columns={[
               { title: 'Наименование', dataIndex: 'nameRaw' },
               {
@@ -254,6 +286,7 @@ export function LinkEdoDocumentModal({
   error,
   deliveryItems,
   deliveryPhotos,
+  section = null,
   onCancel,
   onPick,
 }: {
@@ -261,9 +294,12 @@ export function LinkEdoDocumentModal({
   deliveryId: string | null;
   busy: boolean;
   error: string | null;
+  /** Позиции для ручной сверки: всей приёмки или только блока `section`. */
   deliveryItems: readonly DeliveryItem[];
   /** Серверные фото приёмки — для панели сверки. */
   deliveryPhotos: readonly ComparePhoto[];
+  /** Подбор к блоку материалов: эталон — его документ. null — к приёмке целиком. */
+  section?: EdoSection | null;
   onCancel: () => void;
   onPick: (candidate: Candidate) => void;
 }) {
@@ -297,12 +333,16 @@ export function LinkEdoDocumentModal({
     setCompare({ candidate });
     setCompareOpen(true);
   };
+  const sectionId = section?.id ?? null;
   const candidates = useQuery({
-    queryKey: ['delivery-edo-candidates', deliveryId, query],
-    queryFn: () =>
-      api.get<Response>(
-        `/deliveries/${deliveryId}/edo-candidates${query ? `?q=${encodeURIComponent(query)}` : ''}`,
-      ),
+    queryKey: ['delivery-edo-candidates', deliveryId, query, sectionId],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (query) params.set('q', query);
+      if (sectionId) params.set('sectionDocumentId', sectionId);
+      const qs = params.toString();
+      return api.get<Response>(`/deliveries/${deliveryId}/edo-candidates${qs ? `?${qs}` : ''}`);
+    },
     enabled: open && !!deliveryId,
   });
   const data = candidates.data;
@@ -350,9 +390,7 @@ export function LinkEdoDocumentModal({
               </Typography.Text>
             )}
             {candidate.usedElsewhere > 0 && (
-              <Typography.Text>
-                УПД уже привязана к {candidate.usedElsewhere} приёмкам.
-              </Typography.Text>
+              <Typography.Text>{usedElsewhereConfirm(candidate)}</Typography.Text>
             )}
           </Space>
         ),
@@ -407,7 +445,12 @@ export function LinkEdoDocumentModal({
     expandable: {
       expandedRowRender: (row) =>
         deliveryId ? (
-          <CandidatePreview deliveryId={deliveryId} candidate={row} deliveryItems={deliveryItems} />
+          <CandidatePreview
+            deliveryId={deliveryId}
+            candidate={row}
+            deliveryItems={deliveryItems}
+            itemsTitle={section ? 'Строки блока' : 'Приёмка'}
+          />
         ) : null,
     },
     columns: [
@@ -466,7 +509,9 @@ export function LinkEdoDocumentModal({
               </Tag>
               {row.otherSupplier && <Tag color="volcano">Другой поставщик</Tag>}
             </Space>
-            <Typography.Text type="secondary">{referenceText(row.reference)}</Typography.Text>
+            <Typography.Text type="secondary">
+              {referenceText(row.reference, section)}
+            </Typography.Text>
             {row.matches.length > 0 && (
               <Typography.Text type="secondary">Совпало: {row.matches.join(', ')}</Typography.Text>
             )}
@@ -477,7 +522,7 @@ export function LinkEdoDocumentModal({
               <Typography.Text type="secondary">Нет данных: {row.missing.join(', ')}</Typography.Text>
             )}
             {row.usedElsewhere > 0 && (
-              <Typography.Text type="warning">Уже в {row.usedElsewhere} приёмках</Typography.Text>
+              <Typography.Text type="warning">{usedElsewhereLabel(row)}</Typography.Text>
             )}
           </Space>
         ),
@@ -504,7 +549,7 @@ export function LinkEdoDocumentModal({
     <Modal
       open={open}
       onCancel={onCancel}
-      title="Подобрать УПД из ЭДО"
+      title={section ? `Подобрать УПД из ЭДО к блоку «${section.label}»` : 'Подобрать УПД из ЭДО'}
       width="min(1200px, 96vw)"
       footer={null}
       destroyOnClose

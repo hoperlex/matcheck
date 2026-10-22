@@ -63,6 +63,7 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { runSync } from '../../services/sync';
 import { flushMutation, type MutationResult } from '../../services/mutationQueue';
 import { describeEmptyNames } from '../../shared/utils/emptyItemNames';
+import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
 import { EditableItemName } from '../shared/EditableItemName';
 import { itemNameLock } from '../shared/itemNameLock';
 import { shouldReplaceItems } from '../shared/itemsHydration';
@@ -81,7 +82,7 @@ import { formatStageTime } from './stageTime';
 import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
 import { pickUpdSupplierName, updSupplierEditTarget } from '../shared/updSupplierName';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
-import { LinkEdoDocumentModal } from './LinkEdoDocumentModal';
+import { LinkEdoDocumentModal, type EdoSection } from './LinkEdoDocumentModal';
 import { LinkedEdoChips, type LinkedEdoDocument } from './LinkedEdoChips';
 import { LinkOutlined } from '@ant-design/icons';
 import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
@@ -283,6 +284,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const [selectedUpd, setSelectedUpd] = useState<SourceDocument | null>(null);
   const [linkUpdOpen, setLinkUpdOpen] = useState(false);
   const [linkEdoOpen, setLinkEdoOpen] = useState(false);
+  // Блок материалов, к которому подбирается УПД из ЭДО; null — к приёмке
+  // целиком. При закрытии не сбрасывается, чтобы заголовок окна не менялся
+  // во время анимации — следующее открытие всё равно его задаёт.
+  const [linkEdoSection, setLinkEdoSection] = useState<EdoSection | null>(null);
   const [linkUpdError, setLinkUpdError] = useState<string | null>(null);
   const [linkEdoError, setLinkEdoError] = useState<string | null>(null);
 
@@ -1068,11 +1073,18 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   });
 
   const linkEdo = useMutation({
-    mutationFn: async (candidate: { id: string; source: 'import' | 'export' }) => {
+    mutationFn: async ({
+      candidate,
+      sectionDocumentId,
+    }: {
+      candidate: { id: string; source: 'import' | 'export' };
+      sectionDocumentId: string | null;
+    }) => {
       if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
       return api.post(`/deliveries/${loadedDelivery.id}/edo-matches`, {
         documentId: candidate.id,
         source: candidate.source,
+        sectionDocumentId,
       });
     },
     onSuccess: () => {
@@ -1099,6 +1111,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     },
     onError: (err: Error) => message.error(err.message),
   });
+
+  const openLinkEdo = (section: EdoSection | null) => {
+    setLinkEdoError(null);
+    setLinkEdoSection(section);
+    setLinkEdoOpen(true);
+  };
 
   const openEdoFile = async (document: LinkedEdoDocument) => {
     if (!loadedDelivery) return;
@@ -1609,6 +1627,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     if (!loadedDelivery) return null;
     const pendingAt = loadedDelivery?.pendingDeletionAt ?? null;
     const isPending = pendingAt !== null;
+    // УПД из ЭДО: привязанные к блоку показываются в его заголовке, остальные —
+    // в шапке. Блок, которого нет среди связанных документов, тоже шапка:
+    // чип не должен пропасть ни при каком составе блоков.
+    const edoMatches = edoMatchesQuery.data?.items ?? [];
+    const edoSectionIds = new Set(linkedDocuments.map((d) => d.id));
+    const headerEdoMatches = edoMatches.filter(
+      (m) => !m.sectionDocumentId || !edoSectionIds.has(m.sectionDocumentId),
+    );
     const isAdmin = authUser?.role === 'admin';
     const canUnmark = isAdmin || authUser?.id === (loadedDelivery?.pendingDeletionByUserId ?? null);
     return (
@@ -1930,14 +1956,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     Документ
                   </Button>
                   {!isPending && (
-                    <Button
-                      size="small"
-                      type="dashed"
-                      onClick={() => {
-                        setLinkEdoError(null);
-                        setLinkEdoOpen(true);
-                      }}
-                    >
+                    <Button size="small" type="dashed" onClick={() => openLinkEdo(null)}>
                       + УПД из ЭДО
                     </Button>
                   )}
@@ -1946,7 +1965,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               {canLinkUpd && (
                 <LinkedEdoChips
                   deliveryId={loadedDelivery?.id ?? null}
-                  documents={edoMatchesQuery.data?.items ?? []}
+                  documents={headerEdoMatches}
                   photos={loadedDelivery?.photos ?? []}
                   unlinkDisabled={unlinkEdo.isPending || isPending}
                   onUnlink={(document) => unlinkEdo.mutate(document)}
@@ -2046,12 +2065,21 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           deliveryId={loadedDelivery?.id ?? null}
           busy={linkEdo.isPending}
           error={linkEdoError}
-          deliveryItems={loadedDelivery?.items ?? []}
+          deliveryItems={
+            linkEdoSection
+              ? (loadedDelivery?.items ?? []).filter(
+                  (item) => item.sourceDocumentId === linkEdoSection.id,
+                )
+              : (loadedDelivery?.items ?? [])
+          }
           deliveryPhotos={loadedDelivery?.photos ?? []}
+          section={linkEdoSection}
           onCancel={() => {
             if (!linkEdo.isPending) setLinkEdoOpen(false);
           }}
-          onPick={(candidate) => linkEdo.mutate(candidate)}
+          onPick={(candidate) =>
+            linkEdo.mutate({ candidate, sectionDocumentId: linkEdoSection?.id ?? null })
+          }
         />
 
         <SourceDocumentOriginalModal
@@ -2202,6 +2230,45 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           columns={columns}
           cardRender={cardRender}
           onAddItem={isContractor ? undefined : addItem}
+          sectionExtra={
+            canLinkUpd
+              ? (section) => {
+                  const doc = section.document;
+                  // Только блок связанного документа: отвязанный сервер не примет.
+                  if (!doc?.linked) return null;
+                  const own = edoMatches.filter((m) => m.sectionDocumentId === doc.id);
+                  const canPick = !isNew && !isPending && !loadedDelivery.sourceShipmentId;
+                  return (
+                    <>
+                      {own.length > 0 && (
+                        <LinkedEdoChips
+                          deliveryId={loadedDelivery.id}
+                          documents={own}
+                          photos={loadedDelivery.photos ?? []}
+                          unlinkDisabled={unlinkEdo.isPending || isPending}
+                          onUnlink={(document) => unlinkEdo.mutate(document)}
+                          onOpenOriginal={(document) => void openEdoFile(document)}
+                        />
+                      )}
+                      {canPick && (
+                        <Button
+                          size="small"
+                          type="dashed"
+                          onClick={() =>
+                            openLinkEdo({
+                              id: doc.id,
+                              label: `${sourceKindLabel(doc.kind)} № ${doc.docNumber ?? 'без номера'}`,
+                            })
+                          }
+                        >
+                          + ЭДО
+                        </Button>
+                      )}
+                    </>
+                  );
+                }
+              : undefined
+          }
           emptyHint="Материалы можно не добавлять — приёмка сохранится со статусом «Не оформлена». Чтобы оформить, добавьте строки вручную или выберите УПД."
         />
 

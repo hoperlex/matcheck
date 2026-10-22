@@ -122,4 +122,30 @@ describe('OperationItemsSections', () => {
     fireEvent.click(screen.getByText('Материалы · УПД № 0000-0082604 (0)'));
     expect(screen.getByText('В этом документе не распознано ни одной позиции.')).toBeTruthy();
   });
+
+  it('содержимое заголовка блока: своё у каждого документа, клик не переключает блок', () => {
+    const onPick = vi.fn();
+    renderSections({
+      sectionExtra: (section) =>
+        section.document ? (
+          <button type="button" onClick={() => onPick(section.document!.id)}>
+            ЭДО {section.document.docNumber}
+          </button>
+        ) : null,
+    });
+
+    fireEvent.click(screen.getByText('ЭДО 0000-0082604'));
+    expect(onPick).toHaveBeenCalledWith('d2');
+    // Блок не раскрылся: строки документа по-прежнему не видны.
+    expect(screen.queryByText('Хомут CON-PIPE')).toBeNull();
+    expect(screen.getByText('ЭДО 0000-0082603')).toBeTruthy();
+  });
+
+  it('содержимое заголовка стоит рядом с «Материал», а не вместо неё', () => {
+    const onAddItem = vi.fn();
+    renderSections({ onAddItem, sectionExtra: () => <span>чип</span> });
+
+    expect(screen.getAllByText('чип')).toHaveLength(2);
+    expect(screen.getAllByText('Материал')).toHaveLength(2);
+  });
 });

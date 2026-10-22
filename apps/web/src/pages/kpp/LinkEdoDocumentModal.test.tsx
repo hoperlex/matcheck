@@ -41,6 +41,7 @@ const base = {
   totalSum: '1200.00',
   siteId: null,
   usedElsewhere: 0,
+  usedIn: [],
   foundBy: ['number'],
   reference: { origin: 'paper', label: 'EXP-1' },
   score: 10,
@@ -301,6 +302,110 @@ describe('чужой поставщик', () => {
     const dialog = text.closest<HTMLElement>('.ant-modal-confirm')!;
     fireEvent.click(within(dialog).getByRole('button', { name: 'Отмена' }));
     await waitFor(() => expect(screen.queryByText(/ИНН в УПД:/)).toBeNull());
+  });
+});
+
+describe('блок материалов и другие приёмки', () => {
+  const section = { id: 's1', label: 'Накладная № 057/50125' };
+  const sectionPath = '/deliveries/d1/edo-candidates?sectionDocumentId=s1';
+
+  function mockPaths(byPath: Record<string, unknown>) {
+    apiGet.mockImplementation((path: string) =>
+      path in byPath
+        ? Promise.resolve(byPath[path])
+        : Promise.reject(new Error(`unexpected ${path}`)),
+    );
+  }
+
+  it('подбор к блоку: эталон — документ блока, рядом с УПД строки блока', async () => {
+    mockPaths({
+      [sectionPath]: { ...candidates, items: [candidates.items[0]] },
+      '/deliveries/d1/edo-candidates/export/exp-1/preview': {
+        docNumber: 'EXP-1',
+        docDate: '2026-10-05',
+        supplierName: 'ООО «Поставщик»',
+        supplierInn: '7712345678',
+        buyerName: null,
+        buyerInn: null,
+        totalSum: 1200,
+        vatSum: 200,
+        shippedAt: null,
+        items: [],
+      },
+    });
+    show({ section });
+
+    expect(await screen.findByText('EXP-1')).toBeTruthy();
+    expect(screen.getByText('Подобрать УПД из ЭДО к блоку «Накладная № 057/50125»')).toBeTruthy();
+    expect(screen.getByText('Сверено с документом блока: Накладная № 057/50125')).toBeTruthy();
+
+    fireEvent.click(document.querySelector<HTMLElement>('.ant-table-row-expand-icon')!);
+    expect(await screen.findByText('Строки блока')).toBeTruthy();
+  });
+
+  it('поиск в блоке не теряет блок', async () => {
+    mockPaths({
+      [sectionPath]: candidates,
+      '/deliveries/d1/edo-candidates?q=EXP&sectionDocumentId=s1': candidates,
+    });
+    show({ section });
+    await screen.findByText('EXP-1');
+    fireEvent.change(screen.getByPlaceholderText('Номер УПД, поставщик, ИНН или имя файла'), {
+      target: { value: 'EXP' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Найти/ }));
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenCalledWith(
+        '/deliveries/d1/edo-candidates?q=EXP&sectionDocumentId=s1',
+      ),
+    );
+  });
+
+  it('УПД в другой приёмке — её номер в строке', async () => {
+    mockPaths({
+      '/deliveries/d1/edo-candidates': {
+        ...candidates,
+        items: [
+          {
+            ...candidates.items[0],
+            usedElsewhere: 1,
+            usedIn: [{ deliveryId: 'x1', displayId: 21041 }],
+          },
+        ],
+      },
+    });
+    show();
+    expect(await screen.findByText('Уже в приёмке 21041')).toBeTruthy();
+  });
+
+  it('подтверждение называет приёмки, остаток — числом', async () => {
+    mockPaths({
+      '/deliveries/d1/edo-candidates': {
+        ...candidates,
+        items: [
+          {
+            ...candidates.items[0],
+            usedElsewhere: 3,
+            usedIn: [
+              { deliveryId: 'x1', displayId: 21041 },
+              { deliveryId: 'x2', displayId: 21070 },
+            ],
+          },
+        ],
+      },
+    });
+    const { props } = show();
+    expect(await screen.findByText('Уже в приёмках 21041, 21070 и ещё 1')).toBeTruthy();
+    const row = screen.getByText('EXP-1').closest('tr')!;
+    fireEvent.click(within(row).getByRole('button', { name: 'Привязать' }));
+
+    const text = await screen.findByText(
+      'УПД уже привязана к приёмкам 21041, 21070 и ещё 1. Привязать и к этой?',
+    );
+    const dialog = text.closest<HTMLElement>('.ant-modal-confirm')!;
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Привязать' }));
+    await waitFor(() => expect(props.onPick).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByText(/Привязать и к этой/)).toBeNull());
   });
 });
 
