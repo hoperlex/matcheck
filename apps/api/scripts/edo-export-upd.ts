@@ -63,6 +63,7 @@ import {
   type ExportRunMode,
   type ExportRunResult,
 } from '../src/domain/jobs/edo-export-runner.js';
+import { DIADOC_PROVIDER, isDiadocAccount } from '../src/domain/edo/provider.js';
 import { slugify } from '../src/domain/storage/s3.path.js';
 import { getObject, putObject } from '../src/domain/storage/s3.signer.js';
 import { loadEnv } from '../src/lib/env.js';
@@ -128,15 +129,18 @@ async function resolveAccount(): Promise<Account> {
   if (accountArg) {
     const [row] = await db.select().from(edoAccounts).where(eq(edoAccounts.id, accountArg)).limit(1);
     if (!row) throw new Error(`учётная запись ЭДО ${accountArg} не найдена`);
+    if (!isDiadocAccount(row)) throw new Error(`учётная запись ${accountArg} — не Диадок (${row.provider}); скрипт только для Диадока`);
     return row;
   }
   const rows = await db
     .select()
     .from(edoAccounts)
-    .where(and(eq(edoAccounts.isActive, true), isNotNull(edoAccounts.boxId)));
+    .where(
+      and(eq(edoAccounts.isActive, true), isNotNull(edoAccounts.boxId), eq(edoAccounts.provider, DIADOC_PROVIDER)),
+    );
   if (rows.length === 1) return rows[0]!;
   const names = rows.map((r) => `${r.id} (${r.name})`).join(', ') || 'нет ни одной';
-  throw new Error(`выберите учётную запись через --account; активных с ящиком: ${names}`);
+  throw new Error(`выберите учётную запись через --account; активных учёток Диадока с ящиком: ${names}`);
 }
 
 function printSummary(s: Readonly<ExportSummary>) {

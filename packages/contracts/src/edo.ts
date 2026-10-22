@@ -197,7 +197,13 @@ export const EdoAccountDtoSchema = z.object({
    * включение опроса, а интерфейс гасит эти кнопки заранее.
    */
   importEnabled: z.boolean(),
-  authMode: EdoAuthModeSchema,
+  /**
+   * Строка, а не перечисление: у учёток других операторов (СБИС) свой режим
+   * входа. Строгое перечисление в ответе уронило бы список учёток целиком,
+   * если в базе окажется значение, которого текущий код ещё не знает
+   * (например, после отката кода).
+   */
+  authMode: z.string(),
   environment: EdoEnvironmentSchema,
   boxId: z.string().nullable(),
   orgInn: z.string().nullable(),

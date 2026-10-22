@@ -50,11 +50,7 @@ import {
   type EdoPollJobData,
   type MailPollJobData,
 } from './plugins/queue.js';
-import {
-  isExportStuck,
-  listExportAccounts,
-  runEdoExportPass,
-} from './domain/jobs/edo-export-runner.js';
+import { runExportForAllAccounts } from './domain/jobs/edo-export-runner.js';
 import {
   pollAllEdoAccounts,
   pollEdoAccountById,
@@ -126,44 +122,32 @@ const edoShutdown = new AbortController();
 
 /** Автопроход выгрузки реестра УПД по всем учёткам — см. domain/jobs/edo-export-runner.ts. */
 async function runEdoExportAuto(): Promise<void> {
-  for (const account of await listExportAccounts(db)) {
-    const result = await runEdoExportPass(
-      { ...edoDeps, put: putObject, signal: edoShutdown.signal },
-      account.id,
-      {
-        scope: 'all',
-        trigger: 'auto',
-        maxEvents: env.EDO_EXPORT_MAX_EVENTS,
-        maxDownloads: env.EDO_EXPORT_MAX_DOWNLOADS,
-      },
-    );
-    if ('skipped' in result) {
-      // Учётка занята другой работой — обычное дело, следующий проход через интервал.
-      edoLog.info({ accountId: account.id, skipped: result.skipped }, 'выгрузка реестра ЭДО пропущена');
-      continue;
-    }
-    edoLog.info(
-      { accountId: account.id, runId: result.runId, outcome: result.outcome, summary: result.summary, retry: result.retry },
-      'выгрузка реестра ЭДО завершена',
-    );
-    if (result.outcome === 'error') {
-      Sentry.captureException(result.cause ?? new Error(result.error ?? 'выгрузка реестра ЭДО'), {
-        tags: { service: 'edo-export', account: account.id },
-        // Одна и та же причина каждые полчаса — одно событие, а не поток.
-        fingerprint: [
-          'edo-export',
-          result.cursorMismatch ? 'cursor-mismatch' : result.cause instanceof Error ? result.cause.name : 'unknown',
-        ],
-      });
-    }
-    if (await isExportStuck(db, account.id)) {
-      Sentry.captureMessage('Выгрузка реестра ЭДО три прохода подряд не сдвинула курсор', {
-        level: 'warning',
-        tags: { service: 'edo-export', account: account.id },
-        fingerprint: ['edo-export', 'stuck', account.id],
-      });
-    }
-  }
+  await runExportForAllAccounts(
+    { ...edoDeps, put: putObject, signal: edoShutdown.signal },
+    { maxEvents: env.EDO_EXPORT_MAX_EVENTS, maxDownloads: env.EDO_EXPORT_MAX_DOWNLOADS },
+    {
+      onError: (accountId, result) =>
+        Sentry.captureException(result.cause ?? new Error(result.error ?? 'выгрузка реестра ЭДО'), {
+          tags: { service: 'edo-export', account: accountId },
+          // Одна и та же причина каждые полчаса — одно событие, а не поток.
+          fingerprint: [
+            'edo-export',
+            result.cursorMismatch ? 'cursor-mismatch' : result.cause instanceof Error ? result.cause.name : 'unknown',
+          ],
+        }),
+      onStuck: (accountId) =>
+        Sentry.captureMessage('Выгрузка реестра ЭДО три прохода подряд не сдвинула курсор', {
+          level: 'warning',
+          tags: { service: 'edo-export', account: accountId },
+          fingerprint: ['edo-export', 'stuck', accountId],
+        }),
+      onCrash: (accountId, err) =>
+        Sentry.captureException(err, {
+          tags: { service: 'edo-export', account: accountId },
+          fingerprint: ['edo-export', 'crash', err instanceof Error ? err.name : 'unknown'],
+        }),
+    },
+  );
 }
 
 const edoWorker = new Worker<EdoPollJobData>(

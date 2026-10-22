@@ -51,6 +51,7 @@ import {
   renewEdoLease,
   type LeaseHandle,
 } from '../edo/poll-lease.js';
+import { DIADOC_PROVIDER, isDiadocAccount } from '../edo/provider.js';
 import type { EdoRunnerDeps } from './edo-poll-runner.js';
 
 /** Фильтры ленты выгрузки — те, что передаёт `getNewEvents`. Часть идентичности курсора. */
@@ -84,7 +85,7 @@ export type ExportRunMode =
   | { scope: 'census'; trigger: 'script'; since: Date; maxEvents: number };
 
 export type ExportRunResult =
-  | { skipped: 'lease_taken' | 'no_box' | 'not_found' | 'inactive' }
+  | { skipped: 'lease_taken' | 'no_box' | 'not_found' | 'inactive' | 'provider' }
   | {
       runId: string;
       outcome: Exclude<EdoExportRunOutcome, 'running'>;
@@ -144,6 +145,9 @@ export async function runEdoExportPass(
 ): Promise<ExportRunResult> {
   const [account] = await deps.db.select().from(edoAccounts).where(eq(edoAccounts.id, accountId)).limit(1);
   if (!account) return { skipped: 'not_found' };
+  // Этот проход читает ленту Диадока: учётку другого оператора отсекаем до
+  // лиза, курсора и журнала — иначе курсор и `running` остались бы от чужого запроса.
+  if (!isDiadocAccount(account)) return { skipped: 'provider' };
   if (!account.isActive) return { skipped: 'inactive' };
   if (!account.boxId) return { skipped: 'no_box' };
   const boxId = account.boxId;
@@ -220,20 +224,6 @@ export async function runEdoExportPass(
       })
       .returning({ id: edoExportRuns.id });
     const runId = run!.id;
-
-    const client = deps.createClient
-      ? deps.createClient(account)
-      : new DiadocClient({
-          auth: createDiadocAuth({ db: deps.db }, account),
-          environment: account.environment,
-        });
-    const exportDeps = {
-      db: deps.db,
-      client,
-      log: deps.log,
-      put: deps.put,
-      xmlMaxBytes: env.EDO_XML_MAX_BYTES,
-    };
     const renewLease = () => renewEdoLease(deps.db, lease, ttlSeconds);
 
     let summary: ExportSummary | null = null;
@@ -242,6 +232,22 @@ export async function runEdoExportPass(
     let error: string | null = null;
     let cause: unknown;
     try {
+      // Клиент создаётся внутри: если сломаны реквизиты (createDiadocAuth
+      // бросает), проход закрывается в журнале как `error`, а не оставляет
+      // `running` до следующего прохода.
+      const client = deps.createClient
+        ? deps.createClient(account)
+        : new DiadocClient({
+            auth: createDiadocAuth({ db: deps.db }, account),
+            environment: account.environment,
+          });
+      const exportDeps = {
+        db: deps.db,
+        client,
+        log: deps.log,
+        put: deps.put,
+        xmlMaxBytes: env.EDO_XML_MAX_BYTES,
+      };
       summary = await exportUpdFromBox(exportDeps, {
         accountId,
         boxId,
@@ -336,12 +342,65 @@ export async function isExportStuck(db: Db, accountId: string): Promise<boolean>
   );
 }
 
-/** Учётки, по которым идёт выгрузка: активные и с выбранным ящиком. */
+/** Учётки Диадока, по которым идёт выгрузка: активные и с выбранным ящиком. */
 export async function listExportAccounts(db: Db): Promise<{ id: string; name: string }[]> {
   return db
     .select({ id: edoAccounts.id, name: edoAccounts.name })
     .from(edoAccounts)
-    .where(and(eq(edoAccounts.isActive, true), drSql`${edoAccounts.boxId} is not null`));
+    .where(
+      and(
+        eq(edoAccounts.isActive, true),
+        drSql`${edoAccounts.boxId} is not null`,
+        eq(edoAccounts.provider, DIADOC_PROVIDER),
+      ),
+    )
+    // Постоянный порядок: проход по учёткам не зависит от плана запроса.
+    .orderBy(edoAccounts.name, edoAccounts.id);
+}
+
+export type ExportAutoReport = {
+  /** Проход закончился `error` — для Sentry. */
+  onError: (accountId: string, result: Extract<ExportRunResult, { runId: string }>) => void;
+  /** Три прохода подряд не сдвинули курсор. */
+  onStuck: (accountId: string) => void;
+  /** Проход бросил исключение мимо журнала (сбой БД и т.п.). */
+  onCrash: (accountId: string, err: unknown) => void;
+};
+
+/**
+ * Автопроход выгрузки по всем учёткам Диадока — по очереди, одна за другой.
+ * Сбой одной учётки не срывает остальные: прежде исключение на первой учётке
+ * выходило из цикла, и до следующих в этом интервале дело не доходило.
+ */
+export async function runExportForAllAccounts(
+  deps: ExportRunnerDeps,
+  limits: { maxEvents: number; maxDownloads: number },
+  report: ExportAutoReport,
+): Promise<void> {
+  for (const account of await listExportAccounts(deps.db)) {
+    try {
+      const result = await runEdoExportPass(deps, account.id, {
+        scope: 'all',
+        trigger: 'auto',
+        maxEvents: limits.maxEvents,
+        maxDownloads: limits.maxDownloads,
+      });
+      if ('skipped' in result) {
+        // Учётка занята другой работой — обычное дело, следующий проход через интервал.
+        deps.log.info({ accountId: account.id, skipped: result.skipped }, 'выгрузка реестра ЭДО пропущена');
+        continue;
+      }
+      deps.log.info(
+        { accountId: account.id, runId: result.runId, outcome: result.outcome, summary: result.summary, retry: result.retry },
+        'выгрузка реестра ЭДО завершена',
+      );
+      if (result.outcome === 'error') report.onError(account.id, result);
+      if (await isExportStuck(deps.db, account.id)) report.onStuck(account.id);
+    } catch (err) {
+      deps.log.error({ accountId: account.id, err }, 'выгрузка реестра ЭДО упала');
+      report.onCrash(account.id, err);
+    }
+  }
 }
 
 // ── Состояние реестра для окна подбора ──────────────────────────────────────
@@ -403,7 +462,7 @@ export async function exportRegistryStatus(
          order by r.started_at desc
          limit 1
       ) last on true
-     where a.is_active and a.box_id is not null
+     where a.is_active and a.box_id is not null and a.provider = ${DIADOC_PROVIDER}
      order by a.name
   `);
 

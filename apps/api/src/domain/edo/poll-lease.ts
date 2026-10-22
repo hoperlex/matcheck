@@ -18,6 +18,7 @@ import {
   renewPollLease as renewShared,
   type LeaseHandle,
 } from '../shared/poll-lease.js';
+import { DIADOC_PROVIDER } from './provider.js';
 
 export type { LeaseHandle } from '../shared/poll-lease.js';
 
@@ -46,12 +47,18 @@ export async function releaseEdoLease(db: Db, lease: LeaseHandle): Promise<boole
   return releaseShared(db, edoAccounts, lease);
 }
 
-/** Учётные записи, подлежащие автоматическому опросу. Лиз не берёт. */
+/** Учётные записи Диадока, подлежащие автоматическому опросу. Лиз не берёт. */
 export async function listPollableEdoAccounts(
   db: Db,
 ): Promise<(typeof edoAccounts.$inferSelect)[]> {
   return db
     .select()
     .from(edoAccounts)
-    .where(and(eq(edoAccounts.isActive, true), eq(edoAccounts.pollEnabled, true)));
+    .where(
+      and(
+        eq(edoAccounts.isActive, true),
+        eq(edoAccounts.pollEnabled, true),
+        eq(edoAccounts.provider, DIADOC_PROVIDER),
+      ),
+    );
 }

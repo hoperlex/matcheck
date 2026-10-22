@@ -47,6 +47,7 @@ import {
 import { flattenForDisplay } from './document-meta.js';
 import { decodeXmlBuffer } from './upd-xml-decode.js';
 import { assessUpdParse, parseUpdXml, xmlOutline, type UpdParsed } from './upd.parser.js';
+import { isDiadocAccount, PROVIDER_NOT_SUPPORTED } from './provider.js';
 
 export type SupplierHistory = { deliveries: number; lastAt: string | null };
 
@@ -466,6 +467,8 @@ export async function runEdoDryRun(
     createClient?: (account: typeof edoAccounts.$inferSelect) => DiadocClient;
   } = {},
 ): Promise<{ value: EdoDryRunReport } | CheckFailure> {
+  // Разбор ходит в Диадок: для учётки другого оператора — отказ до лиза.
+  if (!isDiadocAccount(account)) return { ...PROVIDER_NOT_SUPPORTED };
   if (!account.boxId) {
     return {
       error: 'box_not_selected',

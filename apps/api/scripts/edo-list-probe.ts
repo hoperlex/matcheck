@@ -20,6 +20,7 @@ import { and, eq, isNotNull } from 'drizzle-orm';
 import { db, sql } from '../src/db/client.js';
 import { edoAccounts } from '../src/db/schema.js';
 import { EdoLeaseLost } from '../src/domain/edo/inventory.js';
+import { DIADOC_PROVIDER, isDiadocAccount } from '../src/domain/edo/provider.js';
 import {
   runListProbe,
   type ProbeRegistryRow,
@@ -49,15 +50,18 @@ async function resolveAccount(accountId: string | undefined): Promise<Account> {
   if (accountId) {
     const [row] = await db.select().from(edoAccounts).where(eq(edoAccounts.id, accountId)).limit(1);
     if (!row) throw new Error(`учётная запись ЭДО ${accountId} не найдена`);
+    if (!isDiadocAccount(row)) throw new Error(`учётная запись ${accountId} — не Диадок (${row.provider}); проба только для Диадока`);
     return row;
   }
   const rows = await db
     .select()
     .from(edoAccounts)
-    .where(and(eq(edoAccounts.isActive, true), isNotNull(edoAccounts.boxId)));
+    .where(
+      and(eq(edoAccounts.isActive, true), isNotNull(edoAccounts.boxId), eq(edoAccounts.provider, DIADOC_PROVIDER)),
+    );
   if (rows.length === 1) return rows[0]!;
   const names = rows.map((r) => `${r.id} (${r.name})`).join(', ') || 'нет ни одной';
-  throw new Error(`выберите учётную запись через --account; активных с ящиком: ${names}`);
+  throw new Error(`выберите учётную запись через --account; активных учёток Диадока с ящиком: ${names}`);
 }
 
 async function loadRegistry(accountId: string): Promise<ProbeRegistryRow[]> {

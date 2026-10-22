@@ -39,6 +39,7 @@ import {
   DiadocTransient,
 } from './diadoc.http.js';
 import { acquireEdoLease, releaseEdoLease } from './poll-lease.js';
+import { isDiadocAccount, PROVIDER_NOT_SUPPORTED } from './provider.js';
 
 /** Уровень доступа, при котором интеграция работает без оговорок. */
 export const REQUIRED_ACCESS_LEVEL = 'AllDocuments';
@@ -227,6 +228,8 @@ export async function checkEdoAccess(
   account: typeof edoAccounts.$inferSelect,
   log: FastifyBaseLogger,
 ): Promise<CheckOutcome> {
+  // Проверка ходит в Диадок: для учётки другого оператора — отказ до лиза.
+  if (!isDiadocAccount(account)) return { ...PROVIDER_NOT_SUPPORTED };
   const env = loadEnv();
   // requirePollEnabled: false — смысл проверки в том, чтобы убедиться в
   // доступах ДО включения опроса.

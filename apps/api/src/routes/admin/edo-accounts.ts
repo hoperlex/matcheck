@@ -19,6 +19,7 @@ import { buildAad, encryptToString, decryptField, sha256Hex } from '../../domain
 import { loadEnv } from '../../lib/env.js';
 import { checkEdoAccess } from '../../domain/edo/check-access.js';
 import { runEdoDryRun } from '../../domain/edo/dry-run.js';
+import { isDiadocAccount, PROVIDER_NOT_SUPPORTED } from '../../domain/edo/provider.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -175,6 +176,13 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
         .where(eq(edoAccounts.id, req.params.id))
         .limit(1);
       if (!row) return reply.code(404).send({ error: 'not_found' });
+
+      // Опрос ленты — путь Диадока; учётке другого оператора его не включить.
+      if (req.body.pollEnabled === true && !isDiadocAccount(row)) {
+        return reply
+          .code(409)
+          .send({ error: PROVIDER_NOT_SUPPORTED.error, message: PROVIDER_NOT_SUPPORTED.message });
+      }
 
       // Опрос без импорта бессмыслен, а сохранённое `true` сработало бы само в
       // момент будущего включения импорта — то есть опрос начался бы
@@ -400,11 +408,16 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const [row] = await app.db
-        .select({ id: edoAccounts.id })
+        .select({ id: edoAccounts.id, provider: edoAccounts.provider })
         .from(edoAccounts)
         .where(eq(edoAccounts.id, req.params.id))
         .limit(1);
       if (!row) return reply.code(404).send({ error: 'not_found' });
+      if (!isDiadocAccount(row)) {
+        return reply
+          .code(409)
+          .send({ error: PROVIDER_NOT_SUPPORTED.error, message: PROVIDER_NOT_SUPPORTED.message });
+      }
 
       // Задание всё равно ничего бы не сделало — проход проверяет тот же флаг.
       // Отказываем сразу, чтобы человек увидел причину, а не «запущено».
@@ -511,16 +524,22 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
             checkContent: z.boolean().optional(),
           })
           .optional(),
-        response: { 202: EdoJobQueuedSchema, 404: ErrorResponseSchema },
+        response: { 202: EdoJobQueuedSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema },
       },
     },
     async (req, reply) => {
       const [row] = await app.db
-        .select({ id: edoAccounts.id })
+        .select({ id: edoAccounts.id, provider: edoAccounts.provider })
         .from(edoAccounts)
         .where(eq(edoAccounts.id, req.params.id))
         .limit(1);
       if (!row) return reply.code(404).send({ error: 'not_found' });
+      // Осмотр читает ленту Диадока — для учётки другого оператора отказ сразу.
+      if (!isDiadocAccount(row)) {
+        return reply
+          .code(409)
+          .send({ error: PROVIDER_NOT_SUPPORTED.error, message: PROVIDER_NOT_SUPPORTED.message });
+      }
 
       const job = await app.queues.edoPoll.add('inventory', {
         accountId: row.id,

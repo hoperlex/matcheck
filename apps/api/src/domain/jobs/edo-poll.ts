@@ -58,6 +58,7 @@ import {
   ingestEdoEntity,
 } from '../edo/ingest-document.js';
 import { acquireEdoLease, releaseEdoLease, renewEdoLease } from '../edo/poll-lease.js';
+import { isDiadocAccount } from '../edo/provider.js';
 import type { putObject } from '../storage/s3.signer.js';
 
 export type EdoPollDeps = {
@@ -173,7 +174,8 @@ export async function pollEdoAccount(
     .from(edoAccounts)
     .where(eq(edoAccounts.id, accountId))
     .limit(1);
-  if (!account) return { ...empty, skipped: 'not_found' };
+  // Опрос ленты — путь Диадока: учётка другого оператора для него не существует.
+  if (!account || !isDiadocAccount(account)) return { ...empty, skipped: 'not_found' };
   if (!account.boxId) return { ...empty, skipped: 'no_box' };
 
   // Главный выключатель — здесь, в единственной точке, через которую идёт

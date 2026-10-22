@@ -28,6 +28,7 @@ import {
   renewEdoLease,
   type LeaseHandle,
 } from '../edo/poll-lease.js';
+import { isDiadocAccount } from '../edo/provider.js';
 import { pollEdoAccount, type EdoPollResult } from './edo-poll.js';
 
 export type EdoRunnerDeps = {
@@ -58,7 +59,8 @@ const CONTENT_CHECK_DEADLINE_MS = 10 * 60_000;
  */
 async function loadAccount(db: Db, accountId: string) {
   const [row] = await db.select().from(edoAccounts).where(eq(edoAccounts.id, accountId)).limit(1);
-  return row ?? null;
+  // Здесь только пути Диадока: учётки другого оператора для них не существуют.
+  return row && isDiadocAccount(row) ? row : null;
 }
 
 async function withLease<T>(
