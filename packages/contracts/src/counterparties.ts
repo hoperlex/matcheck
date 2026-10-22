@@ -70,9 +70,14 @@ export const CounterpartyListResponseSchema = z.object({
  * aliases. При наличии помечает isContractor=true; при отсутствии
  * создаёт новую запись (с placeholder-ИНН, если в справочнике ИНН
  * отсутствует/«грязный»).
+ *
+ * `context` — из какой формы выбирают: от него зависит право на маршрут
+ * (см. route-map). Получатель приёмки/отгрузки открывается правкой самой
+ * операции; без контекста — прежняя ячейка операционного справочника.
  */
 export const CounterpartyFromDirectoryRequestSchema = z.object({
   customerCounterpartyId: z.string().uuid(),
+  context: z.enum(['delivery', 'shipment']).optional(),
 });
 export type CounterpartyFromDirectoryRequest = z.infer<
   typeof CounterpartyFromDirectoryRequestSchema

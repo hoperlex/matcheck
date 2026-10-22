@@ -712,7 +712,30 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
 
   // Операционный справочник контрагентов (вкладка скрыта, роут живёт).
   ['POST /api/v1/counterparties', st('references.counterparties_legacy', 'create')],
-  ['POST /api/v1/counterparties/from-directory', st('references.counterparties_legacy', 'create')],
+  // Выбор подрядчика из справочника заказчика. Для пользователя это выбор
+  // получателя в форме, а не заведение контрагента: операционная запись лишь
+  // зеркалит справочник ради FK. Поэтому в приёмке и отгрузке право берётся
+  // из правки самой операции (на бою у менеджера ячейка legacy:create снята,
+  // и выбор отвечал бы 403). Без context — прежняя ячейка: окна загрузки и
+  // карточка документа работают как раньше.
+  [
+    'POST /api/v1/counterparties/from-directory',
+    {
+      kind: 'dynamic',
+      cells: [
+        { page: 'references.counterparties_legacy', action: 'create' },
+        { page: 'operations.deliveries', action: 'edit' },
+        { page: 'operations.shipments', action: 'edit' },
+      ],
+      capability: 'operations.edit.contractor_directory',
+      resolve: (req) => {
+        const body = (req.body ?? {}) as { context?: string };
+        if (body.context === 'delivery') return { page: 'operations.deliveries', action: 'edit' };
+        if (body.context === 'shipment') return { page: 'operations.shipments', action: 'edit' };
+        return { page: 'references.counterparties_legacy', action: 'create' };
+      },
+    },
+  ],
   ['PATCH /api/v1/counterparties/:id', st('references.counterparties_legacy', 'edit')],
   ['DELETE /api/v1/counterparties/:id', st('references.counterparties_legacy', 'delete')],
   ['POST /api/v1/counterparties/bulk-delete', st('references.counterparties_legacy', 'delete')],

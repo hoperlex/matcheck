@@ -78,6 +78,18 @@ describe('capabilities: фактический доступ, а не перес�
     const caps = capabilitiesFor(EMPTY, 'monitor', await roleMap());
     expect(caps).not.toContain('operations.edit.flags');
     expect(caps).not.toContain('operations.share.manage');
+    expect(caps).not.toContain('operations.edit.contractor_directory');
+  });
+
+  it('подрядчик из справочника: менеджеру да, инспектору нет', async () => {
+    // У инспектора правка операций базовая, но from-directory — admin/manager:
+    // селект в чипе «Получатель» обязан быть выключен, а не отвечать 403.
+    expect(capabilitiesFor(EMPTY, 'manager', await roleMap())).toContain(
+      'operations.edit.contractor_directory',
+    );
+    expect(capabilitiesFor(EMPTY, 'inspector_kpp', await roleMap())).not.toContain(
+      'operations.edit.contractor_directory',
+    );
   });
 });
 
@@ -150,6 +162,7 @@ describe('политика расширения: выданное право о�
     );
     expect(caps).toContain('operations.edit.flags');
     expect(caps).toContain('operations.edit.link_source');
+    expect(caps).toContain('operations.edit.contractor_directory');
   });
 
   it('выданный монитору edit НЕ открывает ссылки-шаринги', async () => {

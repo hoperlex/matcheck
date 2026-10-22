@@ -97,6 +97,7 @@ import { operationsListQuery, readOperationsFilters } from '../operations/operat
 import { OperationItemsSections } from '../shared/OperationItemsSections';
 import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
 import { OperationDocumentsChips } from '../shared/OperationDocumentsChips';
+import { CustomerCounterpartySelect } from '../inbox/CustomerCounterpartySelect';
 import {
   DELIVERY_PURPOSE_LABELS,
   DELIVERY_PURPOSE_OPTIONS,
@@ -231,6 +232,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const canLinkUpd = canEditDelivery && hasCapability('operations.edit.link_source');
   const canUnlinkUpd = canEditDelivery && hasCapability('operations.edit.unlink_source');
   const canPickSupplier = canEditDelivery && hasCapability('operations.edit.supplier_directory');
+  // Подрядчик выбирается из справочника заказчика через from-directory —
+  // у маршрута свой allow-list (admin/manager + расширение правки).
+  const canPickContractor = hasCapability('operations.edit.contractor_directory');
   // Поставщик привязанного УПД правится в самом документе — правом карточки
   // документа, как стороны (PATCH /source-documents/:id, documents.list:edit):
   // админ и Мониторинг с выданной ячейкой.
@@ -280,6 +284,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // не позволяет заполнить оба одновременно. Переключатель — Segmented в карточке.
   const [recipientKind, setRecipientKind] = useState<'counterparty' | 'mol'>('counterparty');
   const [contractorId, setContractorId] = useState<string | null>(null);
+  // Имя подрядчика, только что выбранного из справочника: операционный список
+  // перезапрашивается после резолюции, и до ответа чип показал бы старое имя.
+  // Привязано к id — устаревшее значение ни с чем не совпадёт, сброс не нужен.
+  const [pickedContractor, setPickedContractor] = useState<{ id: string; name: string } | null>(
+    null,
+  );
   const [recipientMolId, setRecipientMolId] = useState<string | null>(null);
   const [selectedUpd, setSelectedUpd] = useState<SourceDocument | null>(null);
   const [linkUpdOpen, setLinkUpdOpen] = useState(false);
@@ -1733,13 +1743,19 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             // Fallback на DTO-имя (справочник /sites закрыт для contractor).
             return loadedDelivery?.siteName ?? null;
           })();
+          // Имя из DTO — только пока выбран тот же подрядчик, что сохранён:
+          // иначе после очистки или замены чип показывал бы прежнего.
+          const contractorName = contractorId
+            ? ((pickedContractor?.id === contractorId ? pickedContractor.name : null) ??
+              counterparties.find((x) => x.id === contractorId)?.name ??
+              (loadedDelivery?.contractorId === contractorId
+                ? loadedDelivery.contractorName
+                : null) ??
+              null)
+            : null;
           const recipientLabel = (() => {
             if (recipientKind === 'counterparty') {
-              const c = counterparties.find((x) => x.id === contractorId);
-              if (c) return `Подрядчик: ${c.name}`;
-              return loadedDelivery?.contractorName
-                ? `Подрядчик: ${loadedDelivery.contractorName}`
-                : null;
+              return contractorName ? `Подрядчик: ${contractorName}` : null;
             }
             const m = responsiblePersons.find((x) => x.id === recipientMolId);
             return m ? `МОЛ: ${m.fullName}` : null;
@@ -1803,23 +1819,22 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       }}
                     />
                     {recipientKind === 'counterparty' ? (
-                      <Select<string>
+                      // Справочник заказчика (Справочники → Контрагенты), а не
+                      // операционная таблица: в ней лишь те, кого когда-то
+                      // отметили подрядчиком, вперемешку с тестовыми записями.
+                      // Наружу — операционный id, его ждёт FK приёмки.
+                      <CustomerCounterpartySelect
                         autoFocus
-                        style={{ width: '100%' }}
+                        context="delivery"
                         placeholder="— не указан —"
-                        value={contractorId ?? undefined}
-                        onChange={(v) => {
-                          setContractorId(v ?? null);
+                        value={contractorId}
+                        displayName={contractorName}
+                        disabled={!canPickContractor}
+                        onChange={(id, cp) => {
+                          if (id && cp) setPickedContractor({ id, name: cp.name });
+                          setContractorId(id);
                           close();
                         }}
-                        allowClear
-                        showSearch
-                        optionFilterProp="label"
-                        loading={counterpartiesQuery.isLoading}
-                        options={counterparties.map((c) => ({
-                          value: c.id,
-                          label: c.name,
-                        }))}
                       />
                     ) : (
                       <Select<string>

@@ -126,6 +126,12 @@ async function buildApp(opts: {
     { preHandler: [authorize('admin', 'manager')] as never },
     async () => ({ ok: 'settings' }),
   );
+  // dynamic: ячейка выбирается по context из тела (routes/counterparties.ts).
+  instance.post(
+    '/api/v1/counterparties/from-directory',
+    { preHandler: [authorize('admin', 'manager')] as never },
+    async () => ({ ok: 'resolved' }),
+  );
 
   await instance.ready();
   return instance;
@@ -321,6 +327,45 @@ describe('legacy-маршруты', () => {
     expect((await app.inject({ method: 'GET', url: '/api/v1/admin/settings' })).statusCode).toBe(
       200,
     );
+  });
+});
+
+describe('подрядчик из справочника: право по форме, из которой выбирают', () => {
+  const pick = (instance: FastifyInstance, context?: 'delivery' | 'shipment') =>
+    instance.inject({
+      method: 'POST',
+      url: '/api/v1/counterparties/from-directory',
+      payload: { customerCounterpartyId: '22222222-2222-2222-2222-222222222222', context },
+    });
+  // Как на бою с 14.08: у менеджера снят весь операционный справочник.
+  const managerWithoutLegacy = [row('manager', 'references.counterparties_legacy', {})];
+
+  it('менеджер без legacy:create выбирает получателя приёмки и отгрузки', async () => {
+    app = await buildApp({ role: 'manager', overrides: managerWithoutLegacy });
+    expect((await pick(app, 'delivery')).statusCode).toBe(200);
+    expect((await pick(app, 'shipment')).statusCode).toBe(200);
+  });
+
+  it('без context проверяется прежняя ячейка операционного справочника', async () => {
+    app = await buildApp({ role: 'manager', overrides: managerWithoutLegacy });
+    expect((await pick(app)).statusCode).toBe(403);
+  });
+
+  it('монитору выбор открывает выданная правка именно этой операции', async () => {
+    app = await buildApp({
+      role: 'monitor',
+      overrides: [row('monitor', 'operations.deliveries', { canView: true, canEdit: true })],
+    });
+    expect((await pick(app, 'delivery')).statusCode).toBe(200);
+    // Правка отгрузок не выдана — и выбор в отгрузке закрыт.
+    expect((await pick(app, 'shipment')).statusCode).toBe(403);
+    expect((await pick(app)).statusCode).toBe(403);
+  });
+
+  it('инспектору базовая правка allow-list не снимает', async () => {
+    app = await buildApp({ role: 'inspector_kpp' });
+    expect((await pick(app, 'delivery')).statusCode).toBe(403);
+    expect((await pick(app, 'shipment')).statusCode).toBe(403);
   });
 });
 

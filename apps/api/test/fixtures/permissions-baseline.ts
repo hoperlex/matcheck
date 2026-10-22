@@ -267,6 +267,13 @@ export const RUNTIME_RULE_COVERAGE: Record<string, { page: PageId; action: PageA
     { page: 'operations.deliveries', action: 'view' },
     { page: 'operations.shipments', action: 'view' },
   ],
+  // Подрядчик из справочника: ячейка по context из тела — правка приёмки или
+  // отгрузки, без него прежняя ячейка операционного справочника.
+  'POST /api/v1/counterparties/from-directory': [
+    { page: 'references.counterparties_legacy', action: 'create' },
+    { page: 'operations.deliveries', action: 'edit' },
+    { page: 'operations.shipments', action: 'edit' },
+  ],
 };
 
 /**

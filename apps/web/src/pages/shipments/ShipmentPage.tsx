@@ -82,6 +82,7 @@ import { ExpectedOutbound } from './ExpectedOutbound';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
+import { CustomerCounterpartySelect } from '../inbox/CustomerCounterpartySelect';
 
 type DraftItem = {
   clientKey: string;
@@ -202,6 +203,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const canEditShipment = can('operations.shipments', 'edit');
   const canPickSupplier = canEditShipment && hasCapability('operations.edit.supplier_directory');
   const canUnlinkUpd = canEditShipment && hasCapability('operations.edit.unlink_source');
+  // Подрядчик-получатель — из справочника заказчика через from-directory.
+  const canPickContractor = hasCapability('operations.edit.contractor_directory');
   const canUploadPhoto =
     can('operations.shipments', 'create') && hasCapability('operations.photo.upload');
 
@@ -216,6 +219,10 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   // (возврат — только поставщику). receiverId хранит выбранный id выбранного типа.
   const [receiverKind, setReceiverKind] = useState<'counterparty' | 'mol'>('counterparty');
   const [receiverId, setReceiverId] = useState<string | null>(null);
+  // Имя подрядчика, только что выбранного из справочника: операционный список
+  // ограничен limit и перезапрашивается после резолюции, и до ответа (или
+  // вовсе) чип показал бы старое имя. Привязано к id — сброс не нужен.
+  const [pickedReceiver, setPickedReceiver] = useState<{ id: string; name: string } | null>(null);
   const [plate, setPlate] = useState('');
   const [driverName, setDriverName] = useState('');
   const [comment, setComment] = useState('');
@@ -257,11 +264,13 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     queryFn: () => api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
     enabled: !isContractor,
   });
+  // source=fot — те же МОЛ, что в Справочники → МОЛ и в чипе приёмки;
+  // ручной локальный справочник в выпадающий список не попадает.
   const responsiblePersonsQuery = useQuery({
-    queryKey: ['responsible-persons', 'active'],
+    queryKey: ['responsible-persons', 'active', 'fot'],
     queryFn: () =>
       api.get<{ items: ResponsiblePerson[]; total: number }>(
-        '/responsible-persons?activeOnly=true&limit=500',
+        '/responsible-persons?activeOnly=true&source=fot&limit=500',
       ),
     enabled: !isContractor,
   });
@@ -1402,13 +1411,21 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
             const s = sites.find((x) => x.id === destSiteId);
             return s ? `${s.code} · ${s.name}` : null;
           })();
+          // DTO-имя — только пока выбран тот же получатель, что сохранён: иначе
+          // после очистки или замены чип показывал бы прежнего.
+          const receiverCounterpartyName = receiverId
+            ? ((pickedReceiver?.id === receiverId ? pickedReceiver.name : null) ??
+              counterpartyReceiverOptions.find((x) => x.id === receiverId)?.name ??
+              // Fallback на DTO-имя получателя (справочник /counterparties закрыт).
+              (loadedShipment?.receiverCounterpartyId === receiverId
+                ? loadedShipment.receiverName
+                : null) ??
+              null)
+            : null;
           const receiverLabel = (() => {
             if (receiverKind === 'counterparty') {
-              const c = counterpartyReceiverOptions.find((x) => x.id === receiverId);
-              if (c) return `${kind === 'return' ? 'Поставщик' : 'Подрядчик'}: ${c.name}`;
-              // Fallback на DTO-имя получателя (справочник /counterparties закрыт).
-              return loadedShipment?.receiverName
-                ? `${kind === 'return' ? 'Поставщик' : 'Подрядчик'}: ${loadedShipment.receiverName}`
+              return receiverCounterpartyName
+                ? `${kind === 'return' ? 'Поставщик' : 'Подрядчик'}: ${receiverCounterpartyName}`
                 : null;
             }
             const m = responsiblePersons.find((x) => x.id === receiverId);
@@ -1501,11 +1518,27 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                           }}
                         />
                       )}
-                      {receiverKind === 'counterparty' ? (
+                      {receiverKind === 'counterparty' && kind !== 'return' ? (
+                        // Справочник заказчика (Справочники → Контрагенты), как
+                        // в приёмке; наружу — операционный id для FK отгрузки.
+                        <CustomerCounterpartySelect
+                          autoFocus
+                          context="shipment"
+                          placeholder="Контрагент"
+                          value={receiverId}
+                          displayName={receiverCounterpartyName}
+                          disabled={!canPickContractor}
+                          onChange={(id, cp) => {
+                            if (id && cp) setPickedReceiver({ id, name: cp.name });
+                            setReceiverId(id);
+                            close();
+                          }}
+                        />
+                      ) : receiverKind === 'counterparty' ? (
                         <Select<string>
                           autoFocus
                           style={{ width: '100%' }}
-                          placeholder={kind === 'return' ? 'Поставщик' : 'Контрагент'}
+                          placeholder="Поставщик"
                           value={receiverId ?? undefined}
                           onChange={(v) => {
                             setReceiverId(v);
