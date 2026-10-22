@@ -960,6 +960,13 @@
       "when": 1793750400000,
       "tag": "0137_suppliers_billhub_id",
       "breakpoints": true
+    },
+    {
+      "idx": 138,
+      "version": "7",
+      "when": 1794355200000,
+      "tag": "0138_supplier_inn_check",
+      "breakpoints": true
     }
   ]
 }

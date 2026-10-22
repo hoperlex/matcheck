@@ -590,6 +590,42 @@ suite('правка сторон документа (реальный PostgreSQL
     });
   });
 
+  it('выбор поставщика снимает предупреждение о непроверенном ИНН, пакетное остаётся', async () => {
+    const right = await seedSupplier('ООО «Проверенный»');
+    const docId = randomUUID();
+    await seedDoc({ id: docId, siteId: siteA, supplierInnRaw: '770201001' });
+    const validation = {
+      hasMismatch: false,
+      checkedAt: '2026-10-22T00:00:00.000Z',
+      checks: [],
+      warnings: [
+        { name: 'dropped_pages_not_parsed', scope: 'document', details: { pages: [3] } },
+        { name: 'supplier_inn_unverified', scope: 'document' },
+      ],
+    };
+    const check = { mode: 'on', decision: 'unverified', raw: '770201001', inn: null, reason: 'length' };
+    await sql`UPDATE source_documents
+                 SET validation = ${JSON.stringify(validation)}::jsonb,
+                     supplier_inn_check = ${JSON.stringify(check)}::jsonb
+               WHERE id = ${docId}`;
+
+    const before = await app.inject({ method: 'GET', url: `/api/v1/source-documents/${docId}` });
+    expect(before.json().supplierInnCheck).toMatchObject({ decision: 'unverified' });
+    expect(before.json().validation.warnings.map((w: { name: string }) => w.name)).toContain(
+      'supplier_inn_unverified',
+    );
+
+    expect((await patch(docId, { supplierDirectoryId: right.id })).statusCode).toBe(200);
+
+    const [row] = await sql<{ validation: { warnings: Array<{ name: string }> } }[]>`
+      SELECT validation FROM source_documents WHERE id = ${docId}`;
+    expect(row!.validation.warnings.map((w) => w.name)).toEqual(['dropped_pages_not_parsed']);
+    const after = await app.inject({ method: 'GET', url: `/api/v1/source-documents/${docId}` });
+    expect(after.json().validation.warnings.map((w: { name: string }) => w.name)).not.toContain(
+      'supplier_inn_unverified',
+    );
+  });
+
   it('тот же поставщик — не правка: распознанный ИНН остаётся', async () => {
     const current = await seedSupplier('ООО «Как распознано»');
     const docId = randomUUID();

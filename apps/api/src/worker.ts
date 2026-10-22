@@ -37,6 +37,14 @@ import {
 import { sql as drSql } from 'drizzle-orm';
 import { matchOrCreateSupplier } from './domain/sourceDocuments/supplierMatcher.js';
 import { decideRecognizedSupplier } from './domain/sourceDocuments/recognized-supplier.js';
+import {
+  checkSupplierInn,
+  matchSupplierByInnCheck,
+  supplierInnForDocument,
+  supplierInnValidation,
+  withSupplierInnWarning,
+  type SupplierInnCheckTrace,
+} from './domain/sourceDocuments/supplier-inn-check.js';
 import { manualRecipientSource } from './domain/sourceDocuments/resolve-contractor.js';
 import {
   consigneeOwnIdentity,
@@ -1902,30 +1910,57 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // НЕ пишем — поставщики и контрагенты это разные сущности (см. миграцию
   // 0064 и supplierMatcher.ts).
   const supplier = parsed.supplier;
-  const supplierDecision = supplier
-    ? decideRecognizedSupplier(
-        { inn: supplier.inn ?? null, kpp: supplier.kpp ?? null, name: supplier.name ?? null },
-        loadEnv().PARTY_RESOLUTION_V1,
-      )
-    : null;
-  if (supplierDecision?.reason) {
-    log.warn(
-      {
-        sourceDocumentId,
-        mode: loadEnv().PARTY_RESOLUTION_V1,
-        reason: supplierDecision.reason,
-        blocked: supplierDecision.blocked,
-        supplierInn: supplier?.inn ?? null,
-        supplierName: supplier?.name ?? null,
-      },
-      'recognized supplier failed directory guard',
-    );
-  }
-  const supplierMatch =
-    supplierDecision?.supplier && (supplierDecision.supplier.inn || supplierDecision.supplier.name)
-      ? await matchOrCreateSupplier({ db }, supplierDecision.supplier)
+  // Проверка ИНН поставщика (SUPPLIER_INN_CHECK): off — путь ниже побитово
+  // прежний; shadow — он же плюс след решения; on — привязка по решению.
+  // Сбой проверки не роняет разбор: документ идёт прежним путём.
+  const supplierInnMode = loadEnv().SUPPLIER_INN_CHECK;
+  const supplierInnCheck =
+    supplier && supplierInnMode !== 'off'
+      ? await checkSupplierInn(
+          db,
+          { inn: supplier.inn ?? null, kpp: supplier.kpp ?? null, name: supplier.name ?? null },
+          { docNumber: parsed.docNumber ?? null, docDate: parsed.docDate ?? null, totalSum: parsed.totalSum ?? null },
+        ).catch((err: unknown) => {
+          log.warn({ err, sourceDocumentId }, 'supplier inn check failed — legacy path');
+          return null;
+        })
       : null;
+  const supplierInnApplied = supplierInnMode === 'on' && supplier && supplierInnCheck ? supplierInnCheck : null;
+  let supplierMatch: Awaited<ReturnType<typeof matchOrCreateSupplier>>;
+  if (supplier && supplierInnApplied) {
+    supplierMatch = await matchSupplierByInnCheck(
+      { db },
+      { inn: supplier.inn ?? null, kpp: supplier.kpp ?? null, name: supplier.name ?? null },
+      supplierInnApplied,
+    );
+  } else {
+    const supplierDecision = supplier
+      ? decideRecognizedSupplier(
+          { inn: supplier.inn ?? null, kpp: supplier.kpp ?? null, name: supplier.name ?? null },
+          loadEnv().PARTY_RESOLUTION_V1,
+        )
+      : null;
+    if (supplierDecision?.reason) {
+      log.warn(
+        {
+          sourceDocumentId,
+          mode: loadEnv().PARTY_RESOLUTION_V1,
+          reason: supplierDecision.reason,
+          blocked: supplierDecision.blocked,
+          supplierInn: supplier?.inn ?? null,
+          supplierName: supplier?.name ?? null,
+        },
+        'recognized supplier failed directory guard',
+      );
+    }
+    supplierMatch =
+      supplierDecision?.supplier && (supplierDecision.supplier.inn || supplierDecision.supplier.name)
+        ? await matchOrCreateSupplier({ db }, supplierDecision.supplier)
+        : null;
+  }
   const supplierDirectoryId = supplierMatch?.id ?? null;
+  const supplierInnTrace: SupplierInnCheckTrace | null =
+    supplierInnCheck && supplierInnMode !== 'off' ? { ...supplierInnCheck, mode: supplierInnMode } : null;
 
   // Получатель (покупатель) — операционная сущность, остаётся в counterparties.
   const recipient = parsed.recipient;
@@ -1994,7 +2029,11 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // Исключение — грузополучатель: если его реквизиты скопированы у
     // покупателя, «сырое» значение перестаёт отвечать на этот вопрос (в графе 4
     // ИНН не печатают вовсе), поэтому пишем то, что осталось после проверки.
-    supplierInnRaw: supplier?.inn ?? null,
+    // При SUPPLIER_INN_CHECK=on исправленный ИНН: список и приёмки показывают
+    // supplier_inn_raw раньше справочного. Прочитанный моделью — в следе.
+    supplierInnRaw: supplierInnApplied
+      ? supplierInnForDocument(supplierInnApplied, supplier?.inn ?? null)
+      : (supplier?.inn ?? null),
     buyerInnRaw: recipient?.inn ?? null,
     consigneeInnRaw: consigneeIdentity.inn,
   };
@@ -2463,6 +2502,9 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // снимок. Пакетные предупреждения относятся к нарезке файла, а не к числам
   // документа, — валидатор их не вычисляет, поэтому переносим руками.
   validation = mergePersistentUpdWarnings(proc.validation, validation);
+  // Предупреждение о ИНН поставщика устойчивое — снимаем прежнее и ставим
+  // актуальное: повторный разбор с уже верным ИНН не должен его тащить.
+  validation = withSupplierInnWarning(validation, supplierInnApplied);
 
   // Запись шапки. Для новых распознанных УПД поставщик живёт в
   // supplier_directory_id (FK на suppliers), supplier_id (FK на counterparties)
@@ -2488,6 +2530,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     qtyRepair: null as QtyRepairTrace | null,
     qtyScale: null as QtyScaleTrace | null,
     torg12Qty: null as Torg12QtyTrace | null,
+    supplierInnCheck: supplierInnTrace,
     // Чем документ разобран. Читает это только повтор: он обязан пойти ТЕМ ЖЕ
     // путём, а по типу документа его не вывести — kind='transport_waybill'
     // одинаков и у М-15, и у ТН из пакетного разбора.
@@ -7028,6 +7071,10 @@ async function createSourceDocumentFromWaybill(args: {
   // остаются null и заполняются лишь в ветках внешних форм.
   let supplierInnRaw: string | null = null;
   let consigneeInnRaw: string | null = null;
+  // Проверка ИНН грузоотправителя (SUPPLIER_INN_CHECK) — как у УПД, но без
+  // реестра ЭДО: номер и дата накладной с УПД из Диадока не сходятся.
+  let supplierInnTrace: SupplierInnCheckTrace | null = null;
+  let supplierInnApplied: Awaited<ReturnType<typeof checkSupplierInn>> | null = null;
   // 1-Т идёт здесь же, а не отдельной веткой: у неё те же внешние стороны —
   // грузоотправитель и грузополучатель с ИНН, только напечатаны они в шапке
   // товарного раздела, а не в нумерованных разделах формы 2116. Разделять
@@ -7035,31 +7082,43 @@ async function createSourceDocumentFromWaybill(args: {
   // же добавить сюда новую форму — оставить документ без поставщика вовсе.
   if (doc.form === 'tn_2116' || doc.form === 'tn_1t') {
     if (doc.shipper?.inn || doc.shipper?.name) {
-      const supplierDecision = decideRecognizedSupplier(
-        {
-          inn: doc.shipper.inn ?? null,
-          kpp: null,
-          name: doc.shipper.name ?? null,
-        },
-        loadEnv().PARTY_RESOLUTION_V1,
-      );
-      if (supplierDecision.reason) {
-        logger.warn(
-          {
-            mode: loadEnv().PARTY_RESOLUTION_V1,
-            reason: supplierDecision.reason,
-            blocked: supplierDecision.blocked,
-            supplierInn: doc.shipper.inn ?? null,
-            supplierName: doc.shipper.name ?? null,
-          },
-          'recognized waybill supplier failed directory guard',
-        );
+      const shipper = { inn: doc.shipper.inn ?? null, kpp: null, name: doc.shipper.name ?? null };
+      const innMode = loadEnv().SUPPLIER_INN_CHECK;
+      const innCheck =
+        innMode !== 'off'
+          ? await checkSupplierInn(db, shipper, { docNumber: null, docDate: null, totalSum: null }).catch(
+              (err: unknown) => {
+                logger.warn({ err, bundleId }, 'waybill supplier inn check failed — legacy path');
+                return null;
+              },
+            )
+          : null;
+      if (innCheck && innMode !== 'off') supplierInnTrace = { ...innCheck, mode: innMode };
+      supplierInnApplied = innMode === 'on' ? innCheck : null;
+      if (supplierInnApplied) {
+        const match = await matchSupplierByInnCheck({ db }, shipper, supplierInnApplied);
+        supplierDirectoryId = match?.id ?? null;
+        supplierInnRaw = supplierInnForDocument(supplierInnApplied, doc.shipper.inn ?? null);
+      } else {
+        const supplierDecision = decideRecognizedSupplier(shipper, loadEnv().PARTY_RESOLUTION_V1);
+        if (supplierDecision.reason) {
+          logger.warn(
+            {
+              mode: loadEnv().PARTY_RESOLUTION_V1,
+              reason: supplierDecision.reason,
+              blocked: supplierDecision.blocked,
+              supplierInn: doc.shipper.inn ?? null,
+              supplierName: doc.shipper.name ?? null,
+            },
+            'recognized waybill supplier failed directory guard',
+          );
+        }
+        const match = supplierDecision.supplier
+          ? await matchOrCreateSupplier({ db }, supplierDecision.supplier)
+          : null;
+        supplierDirectoryId = match?.id ?? null;
+        supplierInnRaw = doc.shipper.inn ?? null;
       }
-      const match = supplierDecision.supplier
-        ? await matchOrCreateSupplier({ db }, supplierDecision.supplier)
-        : null;
-      supplierDirectoryId = match?.id ?? null;
-      supplierInnRaw = doc.shipper.inn ?? null;
     }
     consigneeNameRaw = doc.consignee?.name ?? null;
     consigneeInnRaw = doc.consignee?.inn ?? null;
@@ -7090,6 +7149,10 @@ async function createSourceDocumentFromWaybill(args: {
       supplierId: null,
       supplierDirectoryId,
       supplierInnRaw,
+      supplierInnCheck: supplierInnTrace,
+      // Сверки у накладной нет; validation появляется только ради
+      // предупреждения о непроверенном ИНН (SUPPLIER_INN_CHECK=on).
+      validation: supplierInnValidation(null, supplierInnApplied),
       consigneeId,
       consigneeNameRaw,
       consigneeInnRaw,

@@ -63,6 +63,7 @@ import {
 } from './sourceDocumentPatchBody';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
 import { UpdValidationSummary } from '../../shared/ui/UpdValidationSummary';
+import { supplierInnCorrectionNote } from '../../shared/utils/supplierInnCheck';
 import { SiteSelect } from './SiteSelect';
 import { ResponsiblePersonSelect } from '../../components/ResponsiblePersonSelect';
 import { DocumentOriginalViewer } from '../shared/DocumentOriginalViewer';
@@ -535,6 +536,18 @@ export function SourceDocumentDetailModal({
                   Поставщик: {shortenCounterpartyName(sd.supplierName)}
                 </Tag>
               ) : null}
+              {/* ИНН поставщика исправлен при распознавании — справкой, не
+                  тревогой: в «Требует внимания» такой документ не попадает. */}
+              {(() => {
+                const note = supplierInnCorrectionNote(sd.supplierInnCheck);
+                return note ? (
+                  <Tooltip title={note.full}>
+                    <Tag color="green" style={{ marginInlineEnd: 0 }}>
+                      {note.short}
+                    </Tag>
+                  </Tooltip>
+                ) : null;
+              })()}
               {/* Комментарий поставщика к поставке — приходит с публичной
                   страницы загрузки. Длинный текст обрезаем тегом, целиком
                   показываем в подсказке. */}

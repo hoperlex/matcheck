@@ -23,6 +23,7 @@ import type { EdoInventoryReport, UpdValidation } from '@matcheck/contracts';
 import type { QtyRepairTrace } from '../domain/edo/qty-repair.js';
 import type { Torg12QtyTrace } from '../domain/edo/torg12-qty.js';
 import type { QtyScaleTrace } from '../domain/edo/qty-scale.js';
+import type { SupplierInnCheckTrace } from '../domain/sourceDocuments/supplier-inn-check.js';
 
 // ─── Enums ─────────────────────────────────────────────────────────────────
 
@@ -789,6 +790,10 @@ export const edoExportDocuments = pgTable(
       .on(t.edoAccountId, t.nextRetryAt)
       .where(sql`${t.status} = 'failed'`),
     index('edo_export_documents_seller_inns_idx').using('gin', t.sellerInns),
+    // Проверка ИНН поставщика ищет ту же УПД по дате (миграция 0138).
+    index('edo_export_documents_document_date_idx')
+      .on(sql`(${t.documentDate}::date)`)
+      .where(sql`${t.documentDate} is not null`),
     index('edo_export_documents_box_idx')
       .on(t.counteragentBoxId)
       .where(sql`${t.counteragentBoxId} is not null`),
@@ -1152,6 +1157,10 @@ export const sourceDocuments = pgTable(
     // разные режимы, и смешанный след нельзя было бы ни прочитать, ни
     // откатить. Служебное поле: веб его не читает, в контракты не входит.
     torg12Qty: jsonb('torg12_qty').$type<Torg12QtyTrace | null>(),
+    // След проверки ИНН поставщика (миграция 0138, SUPPLIER_INN_CHECK): что
+    // прочитала модель, что стало итогом и откуда исправлено. В режиме on
+    // исправленный ИНН ложится и в supplier_inn_raw — исходный живёт здесь.
+    supplierInnCheck: jsonb('supplier_inn_check').$type<SupplierInnCheckTrace | null>(),
     // Пользователь, загрузивший УПД через /upload-upd или /upload-upd-pdf.
     // Для EDO/mail-полученных документов — NULL (poller, не юзер).
     // Используется мобильным клиентом для отображения контакта менеджера

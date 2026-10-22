@@ -817,6 +817,23 @@ const envSchema = z.object({
     z.enum(['off', 'shadow', 'on']).default('off'),
   ),
 
+  // Проверка и исправление ИНН поставщика из ответа модели
+  // (domain/sourceDocuments/supplier-inn-check.ts). В отличие от
+  // PARTY_RESOLUTION_V1 не блокирует, а исправляет: по реестру ЭДО (та же УПД)
+  // и по справочнику (то же имя, корректный ИНН в одной-двух цифрах).
+  // Неисправимый ИНН в справочник не попадает: поставщик выбирается по имени,
+  // документ получает предупреждение supplier_inn_unverified.
+  //
+  //   off    — побитово как раньше (с PARTY_RESOLUTION_V1);
+  //   shadow — решение пишется в source_documents.supplier_inn_check, данные
+  //            и справочник — как при off;
+  //   on     — исправленный ИНН идёт в справочник и в supplier_inn_raw,
+  //            PARTY_RESOLUTION_V1 для поставщика не используется.
+  SUPPLIER_INN_CHECK: z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    z.enum(['off', 'shadow', 'on']).default('off'),
+  ),
+
   // Единица измерения позиции: брать из документа, если планшет прислал «шт».
   //
   // Планшет теряет единицу на финализации 2 Этапа — Stage2FormViewModel собирает

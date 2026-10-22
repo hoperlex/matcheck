@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { suppliers } from '../../db/schema.js';
 
 // Поиск поставщика в справочнике (suppliers, 982+ записей, импорт из JSON
@@ -32,6 +32,16 @@ export type SupplierMatch = {
   id: string;
   name: string;
   source: 'inn' | 'name' | 'created';
+};
+
+export type SupplierMatchOptions = {
+  /**
+   * Среди каких записей искать по имени. `any` — все (прежнее поведение).
+   * `empty_inn` — только записи без ИНН: так ищет проверка ИНН, когда
+   * распознанный ИНН битый и исправить его нечем (supplier-inn-check.ts), —
+   * иначе нечёткий поиск выбрал бы одну из одноимённых организаций наугад.
+   */
+  candidates?: 'any' | 'empty_inn';
 };
 
 // ─── Чистые функции (нормализация, similarity) — экспортируем для тестов ───
@@ -126,10 +136,12 @@ export async function matchOrCreateSupplier(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   app: { db: any },
   parsed: ParsedSupplier,
+  options: SupplierMatchOptions = {},
 ): Promise<SupplierMatch | null> {
   const inn = parsed.inn?.trim() || null;
   const name = parsed.name?.trim() || null;
   if (!inn && !name) return null;
+  const onlyEmptyInn = options.candidates === 'empty_inn';
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return app.db.transaction(async (tx: any): Promise<SupplierMatch | null> => {
@@ -163,6 +175,7 @@ export async function matchOrCreateSupplier(
         // Если у кандидата ИНН непустой и не совпадает с нашим — это другая
         // компания с похожим именем, пропускаем.
         if (inn && c.inn && c.inn !== inn) continue;
+        if (onlyEmptyInn && c.inn) continue;
         // Сравниваем с основным именем И с aliases — берём максимум.
         let sim = nameSimilarity(name, c.name);
         for (const alias of c.aliases ?? []) {
@@ -202,6 +215,18 @@ export async function matchOrCreateSupplier(
         .limit(1);
       if (recheck[0]) {
         return { id: recheck[0].id, name: recheck[0].name, source: 'inn' };
+      }
+    }
+    // Без ИНН ключ блокировки — имя; перепроверяем его среди записей без ИНН,
+    // чтобы два документа одного неопознанного поставщика не завели две записи.
+    if (onlyEmptyInn && name) {
+      const recheck = await tx
+        .select({ id: suppliers.id, name: suppliers.name })
+        .from(suppliers)
+        .where(and(eq(suppliers.name, name), eq(suppliers.inn, '')))
+        .limit(1);
+      if (recheck[0]) {
+        return { id: recheck[0].id, name: recheck[0].name, source: 'name' };
       }
     }
 

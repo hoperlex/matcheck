@@ -330,6 +330,12 @@ export const UpdWarningNameSchema = z.enum([
   // разных поставщиков встречается постоянно. Но так же выглядит и разрез не
   // по границе документа, поэтому пакет стоит посмотреть глазами.
   'sibling_number_duplicate',
+  // ИНН поставщика из ответа модели не прошёл проверку (длина, контрольная
+  // сумма, ИНН своей организации) и не исправился ни по реестру ЭДО, ни по
+  // справочнику. Поставщик выбран по имени — его надо подтвердить. Ставит
+  // воркер при SUPPLIER_INN_CHECK=on; снимает повторный разбор с верным ИНН
+  // или ручной выбор поставщика. Устойчивое: валидатор вычислить его не может.
+  'supplier_inn_unverified',
 ]);
 export type UpdWarningName = z.infer<typeof UpdWarningNameSchema>;
 
@@ -343,6 +349,7 @@ export const PERSISTENT_UPD_WARNING_NAMES = [
   'sibling_number_gap',
   'page_doc_number_unaccounted',
   'sibling_number_duplicate',
+  'supplier_inn_unverified',
 ] as const satisfies readonly UpdWarningName[];
 
 export function isPersistentUpdWarning(name: UpdWarningName): boolean {
@@ -664,6 +671,24 @@ export const SourceWorkHealthSchema = z.enum([
 ]);
 export type SourceWorkHealth = z.infer<typeof SourceWorkHealthSchema>;
 
+/**
+ * След проверки ИНН поставщика (apps/api/src/domain/sourceDocuments/
+ * supplier-inn-check.ts). `raw` — как прочитала модель, `inn` — итоговый;
+ * `linkInn` — запись справочника, к которой документ привязан по имени, когда
+ * ИНН исправить не удалось.
+ */
+export const SupplierInnCheckSchema = z.object({
+  mode: z.enum(['shadow', 'on']),
+  decision: z.enum(['valid', 'normalized', 'corrected', 'unverified', 'absent']),
+  raw: z.string().nullable(),
+  inn: z.string().nullable(),
+  source: z.enum(['edo', 'directory', 'directory_name']).optional(),
+  linkInn: z.string().optional(),
+  reason: z.enum(['checksum', 'length', 'own_inn']).optional(),
+  candidates: z.array(z.string()).optional(),
+});
+export type SupplierInnCheckTraceDto = z.infer<typeof SupplierInnCheckSchema>;
+
 export const SourceDocumentSchema = z.object({
   id: z.string().uuid(),
   kind: SourceKindSchema,
@@ -707,6 +732,9 @@ export const SourceDocumentSchema = z.object({
   supplierInn: z.string().nullable().optional(),
   buyerInn: z.string().nullable().optional(),
   consigneeInn: z.string().nullable().optional(),
+  // Проверка ИНН поставщика при распознавании (миграция 0138): исправлен ли
+  // он и откуда. Только для карточки портала; /sync поле не отдаёт.
+  supplierInnCheck: SupplierInnCheckSchema.nullable().optional(),
   // Пользователь, загрузивший УПД через /upload-upd или /upload-upd-pdf.
   // Для EDO/mail-полученных — NULL (нет конкретного юзера). Мобильный
   // клиент использует createdByUserPhone для кнопки звонка из шапки

@@ -56,6 +56,7 @@ import {
 import { parseUpdXml } from '../domain/edo/upd.parser.js';
 import { vatFieldsOf } from '../domain/edo/vat-fields.js';
 import { mergePersistentUpdWarnings, validateUpdTotals } from '../domain/edo/upd-validation.js';
+import { withSupplierInnWarning } from '../domain/sourceDocuments/supplier-inn-check.js';
 import { deriveUpdParseOutcome } from '../domain/edo/upd-outcome.js';
 import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { discardBody, fetchPresignedForStream } from '../domain/storage/s3.retry.js';
@@ -458,6 +459,7 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     createdAt: sd.createdAt.toISOString(),
     updatedAt: sd.updatedAt.toISOString(),
     validation: sd.validation ?? null,
+    supplierInnCheck: sd.supplierInnCheck ?? null,
     fromSupplierPortal: names.fromSupplierPortal ?? false,
     // Через detail-роут планшет дотягивает документы, которых не хватает после
     // дельты (reconcile и backfill привязанных УПД). Пропустить здесь поля
@@ -3844,6 +3846,14 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             upd.consigneeId = party.id;
             upd.consigneeNameRaw = party.nameRaw;
             upd.consigneeInnRaw = party.innRaw;
+          }
+          // Поставщика выбрал человек — предупреждение о непроверенном ИНН
+          // снято. Последним: пересчёт позиций выше переносит устойчивые
+          // предупреждения из прежнего снимка и вернул бы его.
+          if (upd.supplierDirectoryId !== undefined) {
+            const base = upd.validation ?? sd.validation;
+            const next = base ? withSupplierInnWarning(base, null) : base;
+            if (next !== base) upd.validation = next;
           }
 
           const [updated] = await tx

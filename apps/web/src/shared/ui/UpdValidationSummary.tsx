@@ -118,6 +118,8 @@ export function updWarningLabel(name: UpdWarning['name']): string {
       page_doc_number_unaccounted:
         'на страницах файла есть номер документа, которому не нашлось карточки',
       sibling_number_duplicate: 'в пакете два документа с одним номером — сверьте с оригиналом',
+      supplier_inn_unverified:
+        'ИНН поставщика не прошёл проверку — поставщик выбран по названию, проверьте его',
     }[name] || name
   );
 }
