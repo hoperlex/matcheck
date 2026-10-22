@@ -94,6 +94,7 @@ import {
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
 import { operationsListQuery, readOperationsFilters } from '../operations/operationsQuery';
+import { closedOperationListUrl, savedOperationListUrl } from '../operations/savedOperationListUrl';
 import { OperationItemsSections } from '../shared/OperationItemsSections';
 import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
 import { OperationDocumentsChips } from '../shared/OperationDocumentsChips';
@@ -202,6 +203,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const deliveryId = params.get('delivery');
   const fromAccepted = params.get('from') === 'accepted';
   const tab: ListTab = params.get('tab') === 'accepted' ? 'accepted' : 'expected';
+  const closeDelivery = () => navigate(closedOperationListUrl(params, 'delivery'));
   // Режим «новой несохранённой формы»: запись в IDB/БД ещё не создана.
   // UUID лежит в deliveryId, а флаг new=1 отключает deliveryQuery и активирует
   // ветку creation в save-mutation (первый «Сохранить» создаёт документ filled).
@@ -970,7 +972,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       message.success(successText);
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
-      navigate('/operations?type=delivery&tab=accepted');
+      navigate(savedOperationListUrl(params, 'delivery'));
       return;
     }
     if (result.outcome === 'queued') {
@@ -1657,11 +1659,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         {!embedded && (
           <Space style={{ width: '100%' }} align="center">
             {fromAccepted && (
-              <Button
-                type="text"
-                icon={<ArrowLeftOutlined />}
-                onClick={() => navigate('/operations?type=delivery&tab=accepted')}
-              />
+              <Button type="text" icon={<ArrowLeftOutlined />} onClick={closeDelivery} />
             )}
             <Typography.Title level={3} style={{ margin: 0 }}>
               {isNew ? 'Новая приёмка' : 'Приёмка'}
@@ -2435,17 +2433,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   ⚠ {verifyReason}
                 </Typography.Text>
               )}
-              <Button
-                onClick={() =>
-                  navigate(
-                    fromAccepted
-                      ? '/operations?type=delivery&tab=accepted'
-                      : '/operations?type=delivery',
-                  )
-                }
-              >
-                Отмена
-              </Button>
+              <Button onClick={closeDelivery}>Отмена</Button>
               {markBlock}
               {!isContractor && (
                 <>
@@ -2490,17 +2478,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 gap: 8,
               }}
             >
-              <Button
-                size="large"
-                style={{ flex: 1 }}
-                onClick={() =>
-                  navigate(
-                    fromAccepted
-                      ? '/operations?type=delivery&tab=accepted'
-                      : '/operations?type=delivery',
-                  )
-                }
-              >
+              <Button size="large" style={{ flex: 1 }} onClick={closeDelivery}>
                 Отмена
               </Button>
               {markBlock && <span style={{ flex: 1, display: 'inline-flex' }}>{markBlock}</span>}

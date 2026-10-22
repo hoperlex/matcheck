@@ -128,6 +128,17 @@ export default function OperationsPage() {
     });
   };
 
+  // В режиме отдельной страницы редактору тоже нужен URL текущего списка:
+  // после сохранения он вернёт пользователя на тот же page с теми же фильтрами.
+  const legacyEditorUrl = (path: '/kpp' | '/shipments', patch: Record<string, string | null>) => {
+    const next = new URLSearchParams(params);
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null) next.delete(key);
+      else next.set(key, value);
+    }
+    return `${path}?${next.toString()}`;
+  };
+
   const trashOn = params.get('trash') === '1';
   const isAdminUser = authUser?.role === 'admin';
   const trashSwitchVisible = tab === 'accepted' && isAdminUser;
@@ -174,8 +185,8 @@ export default function OperationsPage() {
       else updateUrl({ shipment: id, new: '1' });
       return;
     }
-    if (type === 'delivery') navigate(`/kpp?delivery=${id}&new=1`);
-    else navigate(`/shipments?shipment=${id}&new=1`);
+    if (type === 'delivery') navigate(legacyEditorUrl('/kpp', { delivery: id, new: '1' }));
+    else navigate(legacyEditorUrl('/shipments', { shipment: id, new: '1' }));
   };
   const createFromUpd = (upd: SourceDocument) => {
     if (!canCreate) {
@@ -192,8 +203,12 @@ export default function OperationsPage() {
       else updateUrl({ shipment: id, new: '1', upd: upd.id, from: 'list' });
       return;
     }
-    if (type === 'delivery') navigate(`/kpp?delivery=${id}&new=1&upd=${upd.id}`);
-    else navigate(`/shipments?shipment=${id}&new=1&upd=${upd.id}&from=list`);
+    if (type === 'delivery')
+      navigate(legacyEditorUrl('/kpp', { delivery: id, new: '1', upd: upd.id }));
+    else
+      navigate(
+        legacyEditorUrl('/shipments', { shipment: id, new: '1', upd: upd.id, from: 'list' }),
+      );
   };
   const onOpenExisting = (id: string) => {
     if (!MODAL_DISABLED) {
@@ -201,8 +216,8 @@ export default function OperationsPage() {
       else updateUrl({ shipment: id, from: 'list' });
       return;
     }
-    if (type === 'delivery') navigate(`/kpp?delivery=${id}&from=accepted`);
-    else navigate(`/shipments?shipment=${id}&from=list`);
+    if (type === 'delivery') navigate(legacyEditorUrl('/kpp', { delivery: id, from: 'accepted' }));
+    else navigate(legacyEditorUrl('/shipments', { shipment: id, from: 'list' }));
   };
 
   // Modal'ы открываются по edit-параметрам в URL. После save/cancel

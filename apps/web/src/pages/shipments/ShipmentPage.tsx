@@ -83,6 +83,7 @@ import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
 import { CustomerCounterpartySelect } from '../inbox/CustomerCounterpartySelect';
+import { savedOperationListUrl } from '../operations/savedOperationListUrl';
 
 type DraftItem = {
   clientKey: string;
@@ -798,7 +799,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       // Вкладка «Принятые» — там сохранённая отгрузка и появится. Без
       // tab=accepted попадаем на «Ожидаемые» (default) и ищем запись там, где
       // её нет.
-      navigate('/operations?type=shipment&tab=accepted');
+      navigate(savedOperationListUrl(params, 'shipment'));
       return;
     }
     if (result.outcome === 'queued') {
