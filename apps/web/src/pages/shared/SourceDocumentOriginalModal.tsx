@@ -56,14 +56,15 @@ export function SourceDocumentOriginalModal({
       afterClose={afterClose}
       title={title}
       width="92vw"
-      style={{ top: 16, paddingBottom: 0, maxWidth: 'none' }}
+      style={{ maxWidth: 'none' }}
+      // Высота задаётся окну (mc-modal-fill, ModalLookStyle), а не
+      // содержимым: просмотрщик в режиме compact тянется на height:100% и без
+      // родителя с высотой схлопнулся бы к минимуму, а длинная таблица позиций
+      // растянула бы окно. Тело заполняет всё, что осталось под заголовком.
+      rootClassName="mc-modal-fill"
       styles={{
-        // Высота задаётся здесь, а не содержимым: просмотрщик в режиме
-        // compact тянется на height:100% и без родителя с высотой схлопнулся
-        // бы к минимуму, а длинная таблица позиций растянула бы окно.
         body: {
           padding: '12px 16px',
-          height: 'calc(100vh - 120px)',
           overflow: 'hidden',
         },
       }}

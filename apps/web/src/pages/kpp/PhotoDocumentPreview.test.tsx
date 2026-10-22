@@ -57,6 +57,12 @@ vi.mock('../../lib/thumbQueue', () => ({
   enqueueFullLoad: <T,>(fn: () => Promise<T>) => fn(),
 }));
 
+let breakpoint: 'mobile' | 'desktop' = 'desktop';
+
+vi.mock('../../shared/hooks/useBreakpoint', () => ({
+  useBreakpoint: () => breakpoint,
+}));
+
 const { PhotoDocumentPreview } = await import('./PhotoDocumentPreview');
 
 function wrap(node: ReactElement): ReactElement {
@@ -64,7 +70,10 @@ function wrap(node: ReactElement): ReactElement {
   return <QueryClientProvider client={qc}>{node}</QueryClientProvider>;
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  breakpoint = 'desktop';
+});
 
 describe('PhotoDocumentPreview — подозрительная строка', () => {
   it('цена показывается со всеми знаками, а обычная строка — как раньше', async () => {
@@ -141,5 +150,44 @@ describe('PhotoDocumentPreview — зум скана', () => {
     expect(onClose).not.toHaveBeenCalled();
     // Сама split-view на месте: таблица позиций никуда не делась.
     expect(screen.getByText(/451,68/)).toBeTruthy();
+  });
+});
+
+describe('PhotoDocumentPreview — телефон', () => {
+  // Таблица распознавания не уже 360px, и рядом с ней фото на телефоне
+  // схлопывалось до нулевой ширины. Ниже порога портала — стопка.
+  it('фото и таблица идут стопкой, таблица прокручивается вбок', async () => {
+    breakpoint = 'mobile';
+    render(
+      wrap(
+        <PhotoDocumentPreview
+          open
+          onClose={() => {}}
+          photoId="11111111-1111-1111-1111-111111111111"
+          imageSrc="blob:thumb"
+        />,
+      ),
+    );
+    const cell = await screen.findByText(/451,68/);
+    const body = cell.closest<HTMLElement>('.ant-modal-body')!;
+    expect(body.style.flexDirection).toBe('column');
+    expect(body.style.overflow).toBe('auto');
+    expect(cell.closest<HTMLElement>('table')!.style.width).toBe('528px');
+  });
+
+  it('на десктопе — рядом, ширина таблицы по панели', async () => {
+    render(
+      wrap(
+        <PhotoDocumentPreview
+          open
+          onClose={() => {}}
+          photoId="11111111-1111-1111-1111-111111111111"
+          imageSrc="blob:thumb"
+        />,
+      ),
+    );
+    const cell = await screen.findByText(/451,68/);
+    expect(cell.closest<HTMLElement>('.ant-modal-body')!.style.flexDirection).toBe('row');
+    expect(cell.closest<HTMLElement>('table')!.style.width).toBe('');
   });
 });

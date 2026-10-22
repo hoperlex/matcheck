@@ -562,20 +562,23 @@ export function SourceDocumentDetailModal({
           )
         }
         width="97vw"
-        style={{ top: 4, paddingBottom: 0 }}
+        // Окно во весь экран (mc-modal-fill, ModalLookStyle): высота задана
+        // окну, body заполняет то, что осталось от шапки с wrap-чипами и
+        // footer с «Сохранить», — footer виден всегда, сколько бы строк ни
+        // заняли чипы. Раньше высоту body считали числом (100vh − 150px), и
+        // при чипах в 2–3 строки footer уходил за нижний край.
+        rootClassName="mc-modal-fill"
         styles={{
           header: { padding: '8px 16px', marginBottom: 0 },
-          // Высота body ограничена так, чтобы footer с «Сохранить» всегда
-          // оставался виден без скролла страницы. 150px = top(4) + header
-          // с wrap-чипами (~80) + footer (~50) + paddings и буфер. Внутри
-          // body — flex column: Alert-сообщения сверху статично, DetailBody
-          // растягивается на оставшееся (flex:1) и скроллит внутри себя.
+          // Внутри body — flex column: Alert-сообщения сверху статично,
+          // DetailBody растягивается на оставшееся (flex:1) и скроллит внутри
+          // себя. Это широкий экран; на узком DetailBody — вкладки без
+          // своего скролла, и прокручивается сам body.
           body: {
             padding: '6px 12px',
-            height: 'calc(100vh - 150px)',
             display: 'flex',
             flexDirection: 'column',
-            overflow: 'hidden',
+            overflow: isWide ? 'hidden' : 'auto',
           },
           footer: { padding: '6px 12px' },
           // См. DeliveryViewModal: убираем «вспышку таблицы» при закрытии
@@ -1178,6 +1181,9 @@ function DetailBody({
               ref={topPaneRef}
               style={{
                 height: '100%',
+                // border-box: иначе padding добавлялся к 100% высоты, и нижние
+                // 16px области прокрутки уходили под край панели.
+                boxSizing: 'border-box',
                 overflow: 'auto',
                 padding: 8,
               }}
@@ -1195,6 +1201,7 @@ function DetailBody({
             <div
               style={{
                 height: '100%',
+                boxSizing: 'border-box',
                 display: 'flex',
                 flexDirection: 'column',
                 padding: 8,
@@ -1204,11 +1211,14 @@ function DetailBody({
               <Typography.Text type="secondary" style={{ fontSize: 12, marginBottom: 4 }}>
                 Оригинал{attachmentsCount > 1 ? ` (${attachmentsCount})` : ''}
               </Typography.Text>
-              {/* overflow:hidden у обёртки + DocumentOriginalViewer сам занимает
-                  100% (lightbox с iframe/Image имеет внутренний скролл).
-                  Раньше тут был overflow:auto — давало лишний правый скролл
-                  поверх iframe PDF-viewer'а. */}
-              <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>{originalNode}</div>
+              {/* DocumentOriginalViewer сам занимает 100% (lightbox с
+                  iframe/Image имеет внутренний скролл), и обычно обёртке
+                  прокручивать нечего. Но у просмотрщика минимум 320px, а на
+                  экране 768px панель ниже — тогда она прокручивается, а не
+                  срезает скан и миниатюры. Лишний правый скролл поверх PDF,
+                  из-за которого тут когда-то ставили hidden, давал padding
+                  внешнего div без border-box (+16px к 100%) — он исправлен. */}
+              <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>{originalNode}</div>
             </div>
           </Splitter.Panel>
         </Splitter>
@@ -1325,6 +1335,9 @@ function EditableTable({
           // видно. Теперь Table растягивается по содержимому, скроллит
           // внешний контейнер Splitter.Panel — и при auto-scroll к низу
           // (см. DetailBody) кнопка остаётся в видимой части.
+          // x: true — по ширине панели, а на узком экране, где поля ввода не
+          // помещаются, прокрутка вбок вместо обрезки рамкой (TableLookStyle).
+          scroll={{ x: true }}
           rowClassName={(r) => (failedRows.has(r.idx + 1) ? 'matcheck-row-mismatch' : '')}
           columns={[
             { title: '№', dataIndex: 'idx', width: 50, render: (idx: number) => idx + 1 },

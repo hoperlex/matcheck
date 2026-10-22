@@ -8,6 +8,7 @@ import { api, apiDownload, ApiError } from '../../services/api';
 import { UpdValidationSummary } from '../../shared/ui/UpdValidationSummary';
 import { ClampText } from '../../shared/ui/ResponsiveTable';
 import { enqueueFullLoad } from '../../lib/thumbQueue';
+import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 
 /**
  * Пороги качества снимка по длинной стороне. Те же числа использует
@@ -45,6 +46,10 @@ export function PhotoDocumentPreview({
   imageSrc: string;
 }): JSX.Element {
   const qc = useQueryClient();
+  // На телефоне фото и таблица рядом не помещаются: у таблицы минимум 360px, и
+  // фото схлопывалось до нулевой ширины. Ниже порога портала (1024px) они идут
+  // стопкой, а прокручивается всё тело окна.
+  const stacked = useBreakpoint() === 'mobile';
 
   // Оригинал документа. imageSrc, переданный из PhotoGallery, — это миниатюра
   // (320px): фото-документ открывается по клику при previewOpen=false, поэтому
@@ -153,12 +158,14 @@ export function PhotoDocumentPreview({
       afterClose={afterClose}
       footer={null}
       width="97vw"
-      style={{ top: 24 }}
+      // Окно во весь экран: высоту держит само окно (ModalLookStyle), тело
+      // заполняет остаток — фото с height:100% растягивается по нему.
+      rootClassName="mc-modal-fill"
       bodyStyle={{
         padding: 0,
-        height: 'calc(100vh - 80px)',
         display: 'flex',
-        overflow: 'hidden',
+        flexDirection: stacked ? 'column' : 'row',
+        overflow: stacked ? 'auto' : 'hidden',
       }}
       destroyOnClose
     >
@@ -169,7 +176,8 @@ export function PhotoDocumentPreview({
           с ним. */}
       <div
         style={{
-          flex: '1 1 60%',
+          flex: stacked ? 'none' : '1 1 60%',
+          height: stacked ? '60vh' : undefined,
           // Нейтральный светлый фон: на чёрном не видно границы листа, а мелкий кадр
           // читался как «фото в чёрной рамке», хотя рамка — это фон панели.
           background: '#f5f5f5',
@@ -273,13 +281,14 @@ export function PhotoDocumentPreview({
       {/* Справа: таблица материалов или статус. */}
       <div
         style={{
-          flex: '1 1 40%',
-          minWidth: 360,
-          maxWidth: 560,
+          flex: stacked ? 'none' : '1 1 40%',
+          minWidth: stacked ? 0 : 360,
+          maxWidth: stacked ? 'none' : 560,
           background: '#fff',
-          borderInlineStart: '1px solid #f0f0f0',
+          borderInlineStart: stacked ? undefined : '1px solid #f0f0f0',
+          borderTop: stacked ? '1px solid #f0f0f0' : undefined,
           padding: 16,
-          overflow: 'auto',
+          overflow: stacked ? 'visible' : 'auto',
         }}
       >
         <RecognitionPanel
@@ -287,6 +296,7 @@ export function PhotoDocumentPreview({
           data={recognition.data ?? null}
           error={recognize.error ?? null}
           onRetry={() => recognize.mutate({ force: true })}
+          stacked={stacked}
         />
       </div>
     </Modal>
@@ -298,11 +308,14 @@ function RecognitionPanel({
   data,
   error,
   onRetry,
+  stacked,
 }: {
   isLoading: boolean;
   data: PhotoRecognition | null;
   error: Error | null;
   onRetry: () => void;
+  /** Окно на телефоне: панель уже, чем таблица с фиксированными колонками. */
+  stacked: boolean;
 }): JSX.Element {
   if (isLoading) {
     return (
@@ -429,6 +442,11 @@ function RecognitionPanel({
           // fixed — явно: раньше её включал ellipsis «Названия», без неё
           // длинное название растягивало бы колонки по тексту.
           tableLayout="fixed"
+          // На телефоне фиксированные колонки шире панели, и «Название»
+          // сжималось в ноль, а «Сумму» резала рамка таблицы. Даём ту же
+          // ширину, что в самой широкой панели десктопа (560 − 2×16), и
+          // прокрутку вбок.
+          scroll={stacked ? { x: 528 } : undefined}
           // Данные фото через серверную сверку не проходят — подозрение на
           // перестановку количества и цены считаем здесь же, на клиенте.
           onRow={(record) =>

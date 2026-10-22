@@ -624,6 +624,9 @@ export default function AdminEdoAccountsPage() {
             <ResponsiveTable<EdoJournalSummary['entries'][number]>
               items={journal.entries}
               rowKey="id"
+              // В окне прокручивается его тело; своя высота «во весь экран»
+              // дала бы второй скролл внутри.
+              scrollY={false}
               columns={[
                 { title: 'Документ', dataIndex: 'documentNumber', render: (n: string | null) => n ?? '—' },
                 { title: 'Тип', dataIndex: 'documentType', render: (t: string | null) => t ?? '—' },
@@ -782,6 +785,7 @@ export default function AdminEdoAccountsPage() {
                 <Typography.Text strong>Что лежит в ящике</Typography.Text>
                 <ResponsiveTable<EdoInventoryReport['byType'][number]>
                   items={inventoryRow.lastInventory.byType}
+                  scrollY={false}
                   rowKey={(b) => `${b.typeNamedId}|${b.function ?? ''}|${b.version ?? ''}`}
                   // Опись — весь отчёт целиком, без лимита.
                   autoColumnTools={{ total: inventoryRow.lastInventory.byType.length }}

@@ -117,7 +117,6 @@ export function DeliveryViewModal({
       open={open}
       onCancel={onClose}
       width="97vw"
-      style={{ top: 4, paddingBottom: 0 }}
       title={
         d && data ? (
           <Space size={4} wrap style={{ fontSize: 12 }}>

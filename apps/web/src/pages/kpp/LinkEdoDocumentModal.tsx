@@ -356,6 +356,9 @@ export function LinkEdoDocumentModal({
       candidate.usedElsewhere
     ) {
       Modal.confirm({
+        // Статический метод не видит ConfigProvider — центрируем сами, как
+        // все окна портала.
+        centered: true,
         title: `Привязать УПД ${candidate.docNumber ?? 'без номера'}?`,
         content: (
           <Space direction="vertical">
@@ -695,7 +698,9 @@ export function LinkEdoDocumentModal({
           {...tableProps}
           dataSource={mainItems}
           loading={candidates.isLoading || busy}
-          scroll={{ x: 950, y: '50vh' }}
+          // Без своего вертикального скролла: прокручивается тело окна
+          // (ModalLookStyle), иначе под подсказками выходил скролл в скролле.
+          scroll={{ x: 950 }}
           pagination={{ pageSize: 20, showSizeChanger: false }}
           locale={{
             emptyText: query

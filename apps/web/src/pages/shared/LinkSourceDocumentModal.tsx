@@ -132,16 +132,18 @@ export function LinkSourceDocumentModal({
       onCancel={onCancel}
       title="Привязать УПД"
       width="95vw"
-      style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
+      style={{ maxWidth: 'none' }}
       styles={{
         // Body высоты 95vh минус заголовок (~50) — скролл идёт ВНУТРИ
         // таблицы (scroll.y ниже), а не на уровне body или страницы.
         // Раньше при длинном списке УПД таблица выходила за нижний край
-        // экрана и приходилось скроллить всю страницу.
+        // экрана и приходилось скроллить всю страницу. overflow не прячем:
+        // на невысоком экране окно упирается в потолок (ModalLookStyle) и
+        // тело чуть сжимается — пусть лучше появится его скролл, чем
+        // срежется пагинация.
         body: {
           padding: '12px 16px',
           maxHeight: 'calc(95vh - 56px)',
-          overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
         },

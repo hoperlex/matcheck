@@ -515,7 +515,7 @@ export default function OperationsPage() {
                 : 'Приёмка'
           }
           width="95vw"
-          style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
+          style={{ maxWidth: 'none' }}
           styles={{
             // Body высоты 95vh минус заголовок (~50) и небольшие отступы.
             // Скролл идёт внутри body — фиксированный header и footer (если
@@ -570,7 +570,7 @@ export default function OperationsPage() {
                 : 'Отгрузка'
           }
           width="95vw"
-          style={{ top: 12, paddingBottom: 0, maxWidth: 'none' }}
+          style={{ maxWidth: 'none' }}
           styles={{
             // Body высоты 95vh минус заголовок (~50) и небольшие отступы.
             // Скролл идёт внутри body — фиксированный header и footer (если

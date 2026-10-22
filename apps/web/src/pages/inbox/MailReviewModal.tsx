@@ -26,6 +26,7 @@ import { api, apiDownload } from '../../services/api';
 import type { ApiError } from '../../services/api';
 import { pickActiveAttachment, splitAttachments } from './attachmentGroups';
 import { SiteSelect } from './SiteSelect';
+import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 
 // Расширение — запасной путь: главный признак картинки это mime-тип, который
 // сервер определяет по сигнатуре файла, а не по имени. Иначе .jfif (обычный
@@ -67,6 +68,10 @@ export function MailReviewModal({
   onClose: () => void;
 }) {
   const qc = useQueryClient();
+  // На телефоне две колонки не помещаются (левая — 380px). Порог — общий для
+  // портала (1024px, как у карточного режима таблиц): ниже него решение и
+  // документ идут стопкой, а прокручивается всё тело окна.
+  const stacked = useBreakpoint() === 'mobile';
   const [siteId, setSiteId] = useState<string | null>(null);
   const [direction, setDirection] = useState<'inbound' | 'outbound'>('inbound');
   const [expectedDate, setExpectedDate] = useState<dayjs.Dayjs | null>(null);
@@ -234,13 +239,20 @@ export function MailReviewModal({
       title="Разбор письма"
       // Почти во весь экран: оператор сверяет скан документа с выбором объекта,
       // и в маленьком окне предпросмотр бесполезен — приходилось бы скачивать
-      // файл. Тело со своим скроллом, чтобы шапка и кнопки оставались на месте.
-      width="85vw"
-      style={{ top: '7.5vh', maxWidth: '85vw', paddingBottom: 0 }}
-      styles={{ body: { height: 'calc(85vh - 108px)', overflow: 'hidden', paddingTop: 12 } }}
+      // файл. Высота задана окну, а не телу: тело заполняет то, что осталось
+      // от шапки и кнопок, и колонки с height:100% растягиваются по нему
+      // (см. ModalLookStyle). В стопке высота — по содержимому, до потолка.
+      width={stacked ? '100vw' : '85vw'}
+      style={{ maxWidth: stacked ? 'calc(100vw - 16px)' : '85vw' }}
+      styles={{
+        content: stacked ? undefined : { height: '85vh' },
+        body: { overflow: stacked ? 'auto' : 'hidden', paddingTop: 12 },
+      }}
       destroyOnClose
       footer={
-        <Space>
+        // wrap: на телефоне три кнопки в строку не помещаются, и «Создать
+        // документы» уезжала за правый край окна.
+        <Space wrap style={{ justifyContent: 'flex-end' }}>
           <Popconfirm
             title="Отклонить письмо?"
             description="Документы созданы не будут. Письмо останется в истории."
@@ -267,15 +279,23 @@ export function MailReviewModal({
     >
       {data && (
         <div
-          style={{ display: 'flex', flexDirection: 'column', gap: 10, height: '100%', minHeight: 0 }}
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+            height: stacked ? 'auto' : '100%',
+            minHeight: 0,
+          }}
         >
-          <Descriptions size="small" column={3} bordered>
+          {/* В стопке — одна колонка: три колонки на телефоне рвали адрес и
+              дату по букве в строку. */}
+          <Descriptions size="small" column={stacked ? 1 : 3} bordered>
             <Descriptions.Item label="От кого">{data.fromAddress ?? '—'}</Descriptions.Item>
             <Descriptions.Item label="Получено">
               {data.receivedAt ? dayjs(data.receivedAt).format('DD.MM.YYYY HH:mm') : '—'}
             </Descriptions.Item>
             <Descriptions.Item label="Ящик">{data.accountName}</Descriptions.Item>
-            <Descriptions.Item label="Тема" span={3}>
+            <Descriptions.Item label="Тема" span={stacked ? 1 : 3}>
               {data.subject ?? '—'}
             </Descriptions.Item>
           </Descriptions>
@@ -310,17 +330,29 @@ export function MailReviewModal({
           {/* Две колонки на всю оставшуюся высоту: слева решение оператора,
               справа документ. Скроллится каждая отдельно — список вложений не
               уводит предпросмотр за край экрана. */}
-          <div style={{ display: 'flex', gap: 16, flex: 1, minHeight: 0 }}>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: stacked ? 'column' : 'row',
+              gap: 16,
+              flex: stacked ? 'none' : 1,
+              minHeight: 0,
+            }}
+          >
             {/* Колонка не скроллится целиком: у каждой зоны своя прокрутка,
-                иначе список вложений «съезжает» вместе с выбором объекта. */}
+                иначе список вложений «съезжает» вместе с выбором объекта.
+                Исключение — невысокий экран, где зоны не помещаются даже в
+                минимуме: тогда колонка прокручивается, а не обрезает выбор
+                объекта снизу. */}
             <div
               style={{
-                width: 380,
+                width: stacked ? '100%' : 380,
                 flexShrink: 0,
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 12,
                 minHeight: 0,
+                overflowY: stacked ? undefined : 'auto',
               }}
             >
               {/* Текст письма: объект подрядчики часто называют именно в теле,
@@ -333,8 +365,10 @@ export function MailReviewModal({
                 style={{
                   // Забирает всё свободное место и НЕ сжимается: без явного
                   // минимума список вложений выдавливал текст в одну строку.
-                  flex: '1 1 auto',
+                  // В стопке свободного места нет — текст ограничен сам.
+                  flex: stacked ? 'none' : '1 1 auto',
                   minHeight: 150,
+                  maxHeight: stacked ? '30vh' : undefined,
                   border: '1px solid #f0f0f0',
                   borderRadius: 6,
                   background: '#fafafa',
@@ -379,7 +413,7 @@ export function MailReviewModal({
               <div
                 style={{
                   flexShrink: 0,
-                  maxHeight: '40%',
+                  maxHeight: stacked ? '40vh' : '40%',
                   overflowY: 'auto',
                   display: 'flex',
                   flexDirection: 'column',
@@ -444,7 +478,10 @@ export function MailReviewModal({
                 сверяет объект по самому документу, а не по имени файла. */}
             <div
               style={{
-                flex: 1,
+                // В стопке у колонки нет высоты, от которой растянуться, —
+                // предпросмотру (iframe/фото на height:100%) задаём свою.
+                flex: stacked ? 'none' : 1,
+                height: stacked ? '60vh' : undefined,
                 minWidth: 0,
                 border: '1px solid #f0f0f0',
                 borderRadius: 6,
@@ -471,7 +508,9 @@ export function MailReviewModal({
                     key={active.id}
                     src={activeUrl}
                     title={active.filename ?? 'Вложение'}
-                    style={{ width: '100%', height: '100%', border: 0 }}
+                    // block: строчный iframe оставлял под собой зазор строки, и
+                    // 6px панели уходили под её обрезку.
+                    style={{ display: 'block', width: '100%', height: '100%', border: 0 }}
                   />
                 ) : (
                   <div style={{ padding: 16 }}>

@@ -119,7 +119,6 @@ export function ShipmentViewModal({
       open={open}
       onCancel={onClose}
       width="97vw"
-      style={{ top: 4, paddingBottom: 0 }}
       title={
         s && data ? (
           <Space size={4} wrap style={{ fontSize: 12 }}>

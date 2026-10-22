@@ -91,6 +91,11 @@ export function SourceDocumentItemsTable({
       // scroll={y} убран — давал внутренний tbody-скролл поверх скролла
       // Splitter.Panel. Тaблица растягивается по содержимому, скроллит
       // только внешняя панель.
+      // x: true — таблица по ширине панели с переносом текста, а если уже не
+      // сжимается (узкая панель окна «Оригинал», телефон), то прокрутка вбок.
+      // Без него широкую таблицу резал overflow:hidden рамки (TableLookStyle),
+      // и колонка «Сумма» пропадала за краем.
+      scroll={{ x: true }}
       columns={tools.columns}
       onChange={tools.onChange}
     />

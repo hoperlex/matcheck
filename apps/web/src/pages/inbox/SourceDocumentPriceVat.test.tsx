@@ -14,7 +14,7 @@
  * позиции из тысячи, и прогон всего списка через него означал бы тихую правку
  * цен, которых никто не касался.
  */
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PageAction, PageId } from '@matcheck/contracts';
@@ -115,6 +115,15 @@ afterEach(() => {
   current = upd;
 });
 
+/**
+ * Шапка таблицы позиций. Подписи ищем в ней, а не по всей странице: у таблицы
+ * с прокруткой вбок rc-table держит в теле скрытую строку замера ширины с теми
+ * же подписями.
+ */
+function tableHead(): HTMLElement {
+  return document.querySelector<HTMLElement>('.ant-table-thead')!;
+}
+
 describe('карточка УПД — цена с НДС', () => {
   it('показывает цену с налогом, и она сходится с суммой строки', async () => {
     current = processing;
@@ -124,7 +133,7 @@ describe('карточка УПД — цена с НДС', () => {
     expect(await screen.findByText(/292,80/)).toBeTruthy();
     // Заголовок называет величину прямо: в приёмке цена остаётся без налога,
     // и одинаковое имя над разными числами читалось бы как расхождение.
-    expect(screen.getByText('Цена с НДС')).toBeTruthy();
+    expect(within(tableHead()).getByText('Цена с НДС')).toBeTruthy();
     // Исходной цены бланка в таблице позиций быть не должно — иначе непонятно,
     // какое из двух чисел настоящее.
     expect(screen.queryByText('240,00 ₽')).toBeNull();
@@ -134,7 +143,8 @@ describe('карточка УПД — цена с НДС', () => {
     current = { ...waybill, status: 'processing' };
     render(wrap(<SourceDocumentDetailModal id={waybill.id} open onClose={() => {}} />));
 
-    expect(await screen.findByText('Цена')).toBeTruthy();
+    await screen.findByText('240,00 ₽');
+    expect(within(tableHead()).getByText('Цена')).toBeTruthy();
     expect(screen.queryByText('Цена с НДС')).toBeNull();
     expect(screen.getByText('240,00 ₽')).toBeTruthy();
   });

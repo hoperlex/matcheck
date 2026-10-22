@@ -16,6 +16,7 @@ import { UpdateBanner } from './shared/ui/UpdateBanner';
 import { MismatchRowStyle } from './shared/ui/MismatchRowStyle';
 import { EditableCellStyle } from './shared/ui/EditableCellStyle';
 import { TableLookStyle } from './shared/ui/TableLookStyle';
+import { ModalLookStyle } from './shared/ui/ModalLookStyle';
 
 dayjs.locale('ru');
 
@@ -59,8 +60,11 @@ export function App() {
       <MismatchRowStyle />
       <EditableCellStyle />
       <TableLookStyle />
+      <ModalLookStyle />
       <ConfigProvider
         locale={ruRU}
+        // Окна по центру экрана, как в FOT; высоту держит ModalLookStyle.
+        modal={{ centered: true }}
         theme={{
           token: { colorPrimary: '#1677ff', borderRadius: 8, colorBgLayout: '#f5f5f5' },
           components: {
