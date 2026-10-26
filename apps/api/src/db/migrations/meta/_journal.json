@@ -974,6 +974,13 @@
       "when": 1794960000000,
       "tag": "0139_edo_sbis",
       "breakpoints": true
+    },
+    {
+      "idx": 140,
+      "version": "7",
+      "when": 1795564800000,
+      "tag": "0140_shipment_photo_hash_per_stage",
+      "breakpoints": true
     }
   ]
 }

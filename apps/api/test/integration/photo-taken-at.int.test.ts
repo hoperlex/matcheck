@@ -283,6 +283,65 @@ suite('taken_at фото приходит с планшета (реальный 
     );
   });
 
+  it('один файл можно добавить в оба этапа отгрузки', async () => {
+    const contentHash = hash();
+    const first = await presignShipment({ contentHash, stage: 'before' });
+    const second = await presignShipment({ contentHash, stage: 'after' });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    const beforeId = (first.json() as { photoId: string }).photoId;
+    const afterId = (second.json() as { photoId: string }).photoId;
+    expect(afterId).not.toBe(beforeId);
+
+    const repeated = await presignShipment({ contentHash, stage: 'after' });
+    expect((repeated.json() as { photoId: string }).photoId).toBe(afterId);
+    const rows = await sql<{ id: string; stage: string }[]>`
+      SELECT id, stage FROM shipment_photos
+      WHERE shipment_id = ${shipmentId} AND content_hash = ${contentHash}`;
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: beforeId, stage: 'before' }),
+        expect.objectContaining({ id: afterId, stage: 'after' }),
+      ]),
+    );
+  });
+
+  it('повтор снимка отгрузки с этапом, которого старый веб не слал, возвращает прежнее фото', async () => {
+    // Старый веб не передавал этап отгрузки: строка легла в 'before'. Повтор
+    // того же снимка (тот же ключ и файл) после правки приходит с 'after' —
+    // и раньше упирался в уникальный ключ повтора с 500.
+    const contentHash = hash();
+    const idempotencyKey = randomUUID();
+    const first = await presignShipment({ contentHash, idempotencyKey });
+    const retried = await presignShipment({ contentHash, idempotencyKey, stage: 'after' });
+
+    expect(first.statusCode).toBe(200);
+    expect(retried.statusCode).toBe(200);
+    const photoId = (first.json() as { photoId: string }).photoId;
+    expect((retried.json() as { photoId: string }).photoId).toBe(photoId);
+    const rows = await sql<{ id: string; stage: string }[]>`
+      SELECT id, stage FROM shipment_photos
+      WHERE shipment_id = ${shipmentId} AND content_hash = ${contentHash}`;
+    expect(rows).toEqual([{ id: photoId, stage: 'before' }]);
+  });
+
+  it('тот же ключ повтора с другим файлом отгрузки — конфликт, а не чужое фото', async () => {
+    const idempotencyKey = randomUUID();
+    const original = hash();
+    const first = await presignShipment({ contentHash: original, idempotencyKey });
+    const other = await presignShipment({ contentHash: hash(), idempotencyKey, stage: 'after' });
+
+    expect(first.statusCode).toBe(200);
+    expect(other.statusCode).toBe(409);
+    expect(other.json()).toMatchObject({ error: 'idempotency_key_conflict' });
+    const rows = await sql<{ content_hash: string }[]>`
+      SELECT content_hash FROM shipment_photos
+      WHERE shipment_id = ${shipmentId} AND idempotency_key = ${idempotencyKey}`;
+    expect(rows).toEqual([{ content_hash: original }]);
+  });
+
   // ── orphan-очистка: по created_at, а не taken_at ─────────────────────
 
   it('старое офлайн-фото не считается сиротой сразу после presign', async () => {

@@ -149,6 +149,20 @@ describe('uploadPhoto — отправка через API-прокси', () => {
     ]);
   });
 
+  it('этап отгрузки уходит на сервер — иначе фото «2 этапа» ложилось в 1-й', async () => {
+    await putPhoto({ operationKind: 'shipment', deliveryId: 'shipment-1', stage: 'after' });
+    await uploadPhoto(LOCAL_ID);
+
+    expect(mocks.apiPost).toHaveBeenCalledWith(
+      '/photos/presign',
+      expect.objectContaining({
+        operationKind: 'shipment',
+        operationId: 'shipment-1',
+        stage: 'after',
+      }),
+    );
+  });
+
   it('уже загруженное фото не трогает сеть', async () => {
     await putPhoto({ uploaded: true });
     await uploadPhoto(LOCAL_ID);
@@ -199,52 +213,73 @@ describe('uploadPhoto — отправка через API-прокси', () => {
   });
 });
 
-describe('capturePhoto — этап приёмки', () => {
-  it('тот же файл добавляется в другой этап, а внутри этапа не дублируется', async () => {
-    vi.stubGlobal(
-      'Worker',
-      class {
-        private listeners = new Set<(event: MessageEvent) => void>();
+describe('capturePhoto — этап операции', () => {
+  // Заранее сохранённая запись обязана принадлежать ТОЙ ЖЕ операции: с
+  // умолчаниями photoRecord() (приёмка delivery-1) кейс отгрузки не нашёл бы
+  // совпадения по хешу и прошёл бы вхолостую.
+  it.each([
+    ['delivery', 'delivery-1'],
+    ['shipment', 'shipment-1'],
+  ] as const)(
+    '%s: тот же файл добавляется в другой этап, а внутри этапа не дублируется',
+    async (operationKind, operationId) => {
+      vi.stubGlobal(
+        'Worker',
+        class {
+          private listeners = new Set<(event: MessageEvent) => void>();
 
-        addEventListener(_type: string, listener: (event: MessageEvent) => void) {
-          this.listeners.add(listener);
-        }
+          addEventListener(_type: string, listener: (event: MessageEvent) => void) {
+            this.listeners.add(listener);
+          }
 
-        removeEventListener(_type: string, listener: (event: MessageEvent) => void) {
-          this.listeners.delete(listener);
-        }
+          removeEventListener(_type: string, listener: (event: MessageEvent) => void) {
+            this.listeners.delete(listener);
+          }
 
-        postMessage(data: { id: number; blob: Blob }) {
-          queueMicrotask(() => {
-            for (const listener of this.listeners) {
-              listener({ data: { id: data.id, ok: true, blob: data.blob } } as MessageEvent);
-            }
-          });
-        }
-      },
-    );
+          postMessage(data: { id: number; blob: Blob }) {
+            queueMicrotask(() => {
+              for (const listener of this.listeners) {
+                listener({ data: { id: data.id, ok: true, blob: data.blob } } as MessageEvent);
+              }
+            });
+          }
+        },
+      );
 
-    const dbi = await db();
-    await dbi.clear('photos');
-    const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'image/jpeg' });
-    await putPhoto({
-      id: 'after-photo',
-      stage: 'after',
-      contentHash: await sha256Hex(blob),
-      uploaded: true,
-      blob: undefined,
-    });
+      const dbi = await db();
+      await dbi.clear('photos');
+      const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'image/jpeg' });
+      await putPhoto({
+        id: 'after-photo',
+        operationKind,
+        deliveryId: operationId,
+        stage: 'after',
+        contentHash: await sha256Hex(blob),
+        uploaded: true,
+        blob: undefined,
+      });
 
-    const firstStage = await capturePhoto('delivery', 'delivery-1', blob, 'cargo', 'before');
-    expect(firstStage.id).not.toBe('after-photo');
-    expect(await firstStage.uploadPromise).toEqual({ ok: true });
-    expect(await readPhoto('after-photo')).toMatchObject({ stage: 'after' });
-    expect(await readPhoto(SERVER_ID)).toMatchObject({ stage: 'before', uploaded: true });
+      const firstStage = await capturePhoto(operationKind, operationId, blob, 'cargo', 'before');
+      expect(firstStage.id).not.toBe('after-photo');
+      expect(await firstStage.uploadPromise).toEqual({ ok: true });
+      expect(mocks.apiPost).toHaveBeenCalledWith(
+        '/photos/presign',
+        expect.objectContaining({ operationKind, stage: 'before' }),
+      );
+      expect(await readPhoto('after-photo')).toMatchObject({ stage: 'after' });
+      expect(await readPhoto(SERVER_ID)).toMatchObject({ stage: 'before', uploaded: true });
 
-    const sameStageAgain = await capturePhoto('delivery', 'delivery-1', blob, 'cargo', 'before');
-    expect(sameStageAgain.id).toBe(SERVER_ID);
-    expect(mocks.apiPost).toHaveBeenCalledTimes(1);
-  });
+      const sameStageAgain = await capturePhoto(
+        operationKind,
+        operationId,
+        blob,
+        'cargo',
+        'before',
+      );
+      expect(sameStageAgain.id).toBe(SERVER_ID);
+      expect(mocks.apiPost).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 describe('pruneUploadedPhotoBlobs', () => {

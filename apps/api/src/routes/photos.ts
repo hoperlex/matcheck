@@ -401,11 +401,40 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
           and(
             eq(shipmentPhotos.shipmentId, operationId),
             eq(shipmentPhotos.contentHash, body.contentHash),
+            eq(shipmentPhotos.stage, body.stage ?? 'before'),
           ),
         )
         .limit(1);
       if (existing) {
         return buildExistingPhotoPresign(existing, URL_TTL, (s3Key, thumbS3Key) =>
+          presignBoth(app, s3Key, thumbS3Key, body.contentType),
+        );
+      }
+
+      // Веб до правки не слал этап отгрузки, и строка снимка могла лечь в
+      // 'before'. Повтор того же снимка теперь приходит с 'after': по хешу и
+      // этапу он строку не находит, а вставка упиралась в уникальный ключ
+      // повтора — 500, и браузер повторял бесконечно. Тот же ключ и тот же
+      // файл — это тот же снимок, возвращаем его. Тот же ключ с другим файлом —
+      // ошибка клиента, а не повтор.
+      const [sameKey] = await app.db
+        .select()
+        .from(shipmentPhotos)
+        .where(
+          and(
+            eq(shipmentPhotos.shipmentId, operationId),
+            eq(shipmentPhotos.idempotencyKey, body.idempotencyKey),
+          ),
+        )
+        .limit(1);
+      if (sameKey) {
+        if (sameKey.contentHash !== body.contentHash) {
+          return reply.code(409).send({
+            error: 'idempotency_key_conflict',
+            message: 'Ключ повтора уже использован для другого файла',
+          });
+        }
+        return buildExistingPhotoPresign(sameKey, URL_TTL, (s3Key, thumbS3Key) =>
           presignBoth(app, s3Key, thumbS3Key, body.contentType),
         );
       }

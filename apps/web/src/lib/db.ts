@@ -58,8 +58,8 @@ export type PhotoRecord = {
   operationKind: OperationKind;
   origin: 'local' | 'remote';
   kind: 'document' | 'cargo' | 'vehicle' | 'other';
-  // Этап приёмки: 'before' (1-й этап) или 'after' (2-й этап, после
-  // подтверждения МОЛ). Для shipment поле всегда 'before' и не используется.
+  // Этап приёмки или отгрузки: 'before' (1-й этап) или 'after' (2-й этап,
+  // после подтверждения МОЛ). Уходит на сервер в presign для обеих операций.
   stage: DeliveryPhotoStage;
   contentHash: string;
   idempotencyKey: string;

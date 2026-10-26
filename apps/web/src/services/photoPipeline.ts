@@ -124,7 +124,7 @@ export async function capturePhoto(
   // Внутрь withDb попадает ТОЛЬКО работа с базой: повтор не должен ни сжимать
   // картинку заново, ни переотправлять файл на сервер.
   const existing = await withDb(async (dbi) => {
-    // Один и тот же файл может быть нужен на обоих этапах приёмки.
+    // Один и тот же файл может быть нужен на обоих этапах операции.
     // Индекс не уникален: get() возвращал фото другого этапа и UI сообщал
     // об успехе, хотя в выбранном этапе ничего не появлялось.
     const candidates = await dbi
@@ -133,10 +133,7 @@ export async function capturePhoto(
       .index('byHash')
       .getAll(contentHash);
     const found = candidates.find(
-      (p) =>
-        p.deliveryId === operationId &&
-        p.operationKind === operationKind &&
-        (operationKind !== 'delivery' || p.stage === stage),
+      (p) => p.deliveryId === operationId && p.operationKind === operationKind && p.stage === stage,
     );
     if (found) {
       return found;
@@ -193,8 +190,9 @@ export async function uploadPhoto(photoId: string): Promise<void> {
       idempotencyKey: p.idempotencyKey,
       contentType: 'image/jpeg',
       thumbContentHash: p.thumbBlob ? await sha256Hex(p.thumbBlob) : undefined,
-      // Этап актуален только для приёмок; для отгрузок сервер поле игнорирует.
-      stage: p.operationKind === 'delivery' ? p.stage : undefined,
+      // Этап нужен и приёмке, и отгрузке. Без поля сервер пишет 'before', и
+      // фото «2 этапа» отгрузки уходили в 1-й.
+      stage: p.stage,
     });
 
     // Байты уходят на НАШ домен, а в S3 их кладёт сервер. Прямой PUT по

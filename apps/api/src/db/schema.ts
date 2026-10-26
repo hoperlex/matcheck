@@ -2138,7 +2138,7 @@ export const shipmentPhotos = pgTable(
   },
   (t) => [
     uniqueIndex('shipment_photo_content_unique')
-      .on(t.shipmentId, t.contentHash)
+      .on(t.shipmentId, t.stage, t.contentHash)
       .where(sql`${t.contentHash} is not null`),
     uniqueIndex('shipment_photo_idempotency_unique')
       .on(t.shipmentId, t.idempotencyKey)
