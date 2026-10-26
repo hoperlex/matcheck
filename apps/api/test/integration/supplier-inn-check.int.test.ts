@@ -21,7 +21,7 @@ const suite = TEST_DATABASE_URL ? describe : describe.skip;
 
 const sql = TEST_DATABASE_URL ? postgres(TEST_DATABASE_URL, { max: 4 }) : null;
 
-const envState = vi.hoisted(() => ({ mode: 'on' as 'off' | 'shadow' | 'on' }));
+const envState = vi.hoisted(() => ({ mode: 'on' as 'off' | 'shadow' | 'on', sbis: false }));
 vi.mock('../../src/lib/env.js', async (importOriginal) => {
   const actual = await importOriginal<typeof EnvModule>();
   return {
@@ -30,6 +30,7 @@ vi.mock('../../src/lib/env.js', async (importOriginal) => {
       ...actual.loadEnv(),
       SUPPLIER_INN_CHECK: envState.mode,
       PARTY_RESOLUTION_V1: 'off',
+      EDO_SBIS_ENABLED: envState.sbis,
     }),
   };
 });
@@ -94,18 +95,21 @@ suite('проверка ИНН поставщика: что записывает
   const name = (base: string) => `ООО «${base} ${run}»`;
   const supplierIds: string[] = [];
   const edoAccountId = randomUUID();
+  const sbisAccountId = randomUUID();
 
   beforeAll(async () => {
     await db`INSERT INTO sites (id, code, name) VALUES (${siteId}, ${`SIC${run.slice(-4)}`}, 'Проверка ИНН')`;
     await db`INSERT INTO edo_accounts (id, name, credentials_encrypted)
              VALUES (${edoAccountId}, ${`Проверка ИНН ${run}`}, ${Buffer.from('x')})`;
+    await db`INSERT INTO edo_accounts (id, name, provider, auth_mode, credentials_encrypted)
+             VALUES (${sbisAccountId}, ${`Проверка ИНН СБИС ${run}`}, 'sbis', 'sbis_service_key', ${Buffer.from('x')})`;
   });
 
   afterAll(async () => {
     if (!db) return;
     await cleanup();
-    await db`DELETE FROM edo_export_documents WHERE edo_account_id = ${edoAccountId}`;
-    await db`DELETE FROM edo_accounts WHERE id = ${edoAccountId}`;
+    await db`DELETE FROM edo_export_documents WHERE edo_account_id IN (${edoAccountId}, ${sbisAccountId})`;
+    await db`DELETE FROM edo_accounts WHERE id IN (${edoAccountId}, ${sbisAccountId})`;
     await db`DELETE FROM sites WHERE id = ${siteId}`;
     await db.end({ timeout: 5 });
   });
@@ -127,6 +131,7 @@ suite('проверка ИНН поставщика: что записывает
     parseWaybillBatch.mockReset();
     resetSupplierInnCheckCache();
     envState.mode = 'on';
+    envState.sbis = false;
     await cleanup();
   });
 
@@ -288,6 +293,28 @@ suite('проверка ИНН поставщика: что записывает
       { inn: string }[]
     >`SELECT inn FROM suppliers WHERE id = ${r.supplier_directory_id!}`;
     expect(s!.inn).toBe(truth);
+  });
+
+  it('on: строка реестра из СБИС исправляет ИНН только при включённом EDO_SBIS_ENABLED', async () => {
+    const truth = validInn(`51${run}3`);
+    const misread = validInn(`51${run.slice(0, 5)}${(Number(run[5]) + 1) % 10}3`);
+    for (const suffix of ['1', '2']) {
+      await db`INSERT INTO edo_export_documents
+                 (edo_account_id, message_id, entity_id, document_type, status, document_number,
+                  document_date, supplier_inn, seller_inns, total_sum)
+               VALUES (${sbisAccountId}, ${randomUUID()}, ${randomUUID()}, 'УпдСчфДоп',
+                       'not_in_list', ${`СБ-${run}${suffix}`}, '2026-10-15', ${truth}, ${[truth]}, 1200)`;
+    }
+    // Выключен — распознавание строк СБИС не видит, ИНН остаётся прочитанным.
+    const off = await doc(await runUpd({ inn: misread, name: name('СБИС выкл') }, { docNumber: `СБ-${run}1` }));
+    expect(off.supplier_inn_raw).toBe(misread);
+    expect(off.supplier_inn_check).not.toMatchObject({ decision: 'corrected' });
+
+    envState.sbis = true;
+    resetSupplierInnCheckCache();
+    const on = await doc(await runUpd({ inn: misread, name: name('СБИС вкл') }, { docNumber: `СБ-${run}2` }));
+    expect(on.supplier_inn_raw).toBe(truth);
+    expect(on.supplier_inn_check).toMatchObject({ decision: 'corrected', source: 'edo', raw: misread, inn: truth });
   });
 
   it('shadow: данные как при off, след решения записан', async () => {

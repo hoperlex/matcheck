@@ -43,6 +43,7 @@ import { resolveEventTime, type DiadocMessage } from './diadoc.types.js';
 import { classifyUtdContent, type EdoMetaCategory } from './document-kind.js';
 import { detectEdoFile } from './edo-file-kind.js';
 import { EdoLeaseLost, isTransportFailure } from './inventory.js';
+import { contentKeyOf, fileIdOf } from './export-identity.js';
 import { decodeXmlBuffer } from './upd-xml-decode.js';
 import { parseUpdXml, type UpdParsed } from './upd.parser.js';
 
@@ -285,17 +286,58 @@ type Existing = { status: string; sellerInns: string[] };
 
 const rowKey = (messageId: string, entityId: string) => `${messageId}\u0000${entityId}`;
 
-/** Строка реестра из метаданных — основа и для сбоя, и для разобранного XML. */
-function baseRow(accountId: string, messageId: string, entity: ClassifiedEntity): Row {
-  const metaDate = storableDate(entity.documentDate);
+/**
+ * Что запись реестра знает о документе до разбора XML — из метаданных оператора.
+ *
+ * Описание нейтрально к оператору: Диадок строит его из сущности ленты
+ * (`exportRefFromDiadoc`), СБИС — из вложения ленты. Дальше — общий путь
+ * `storeExportXml`: разбор, продавец, строка реестра, файл в хранилище.
+ */
+export type ExportRef = {
+  accountId: string;
+  messageId: string;
+  entityId: string;
+  /** Тип документа у оператора ('UniversalTransferDocument', 'УпдСчфДоп' …). */
+  documentType: string;
+  documentFunction: string | null;
+  /** Номер и дата из метаданных — запасные, если XML их не дал. */
+  documentNumber: string | null;
+  documentDate: string | null;
+  fileName: string | null;
+  /** Ящик отправителя (только Диадок: по нему перепись узнаёт поставщика). */
+  counteragentBoxId: string | null;
+  receivedAt: Date | null;
+  /** Редакция документа у оператора (СБИС) — по ней повторяется скачивание. */
+  providerRevisionId: string | null;
+};
+
+export function exportRefFromDiadoc(accountId: string, messageId: string, entity: ClassifiedEntity): ExportRef {
   return {
-    edoAccountId: accountId,
+    accountId,
     messageId,
     entityId: entity.entityId,
-    counteragentBoxId: entity.counteragentBoxId,
     documentType: entity.typeNamedId ?? 'unknown',
     documentFunction: entity.documentFunction,
     documentNumber: entity.documentNumber,
+    documentDate: entity.documentDate,
+    fileName: entity.fileName,
+    counteragentBoxId: entity.counteragentBoxId,
+    receivedAt: entity.meta.receivedAt,
+    providerRevisionId: null,
+  };
+}
+
+/** Строка реестра из метаданных — основа и для сбоя, и для разобранного XML. */
+function baseRow(ref: ExportRef): Row {
+  const metaDate = storableDate(ref.documentDate);
+  return {
+    edoAccountId: ref.accountId,
+    messageId: ref.messageId,
+    entityId: ref.entityId,
+    counteragentBoxId: ref.counteragentBoxId,
+    documentType: ref.documentType,
+    documentFunction: ref.documentFunction,
+    documentNumber: ref.documentNumber,
     documentDate: metaDate ? new Date(`${metaDate}T00:00:00Z`) : null,
     correctionNumber: null,
     sellerInns: [],
@@ -305,12 +347,15 @@ function baseRow(accountId: string, messageId: string, entity: ClassifiedEntity)
     vatSum: null,
     itemsCount: null,
     contentCategory: null,
-    receivedAt: entity.meta.receivedAt,
+    receivedAt: ref.receivedAt,
     status: 'failed',
     lastError: null,
     s3Key: null,
     contentSha256: null,
     sizeBytes: null,
+    providerRevisionId: ref.providerRevisionId,
+    fileId: null,
+    contentKey: null,
   };
 }
 
@@ -366,33 +411,37 @@ async function loadExisting(
   return out;
 }
 
-type EntityOutcome = 'stored' | 'not_in_list' | 'failed';
+export type EntityOutcome = 'stored' | 'not_in_list' | 'failed';
 
 type ExportEntityParams = Pick<ExportParams, 'accountId' | 'boxId' | 'suppliers' | 'signal'>;
 
-/** Один документ: скачать, опознать продавца, сохранить или отметить. */
+/** Зависимости общей записи — без клиента оператора. */
+export type StoreDeps = Pick<ExportDeps, 'db' | 'log' | 'put'>;
+
+/**
+ * Отметить документ невыгруженным. `retryable` — повтор по расписанию
+ * (временная причина: скачивание), иначе сбой окончательный.
+ */
+export async function recordExportFailure(
+  deps: Pick<StoreDeps, 'db' | 'log'>,
+  ref: ExportRef,
+  reason: string,
+  retryable = false,
+): Promise<EntityOutcome> {
+  await saveRow(deps.db, { ...baseRow(ref), status: 'failed', lastError: reason }, { retryable });
+  deps.log.warn({ messageId: ref.messageId, entityId: ref.entityId, reason }, 'edo export: документ не выгружен');
+  return 'failed';
+}
+
+/** Один документ Диадока: скачать, опознать продавца, сохранить или отметить. */
 async function exportEntity(
   deps: ExportDeps,
   params: ExportEntityParams,
   messageId: string,
   entity: ClassifiedEntity,
 ): Promise<EntityOutcome> {
-  const row = baseRow(params.accountId, messageId, entity);
-  const fail = async (reason: string, retryable = false): Promise<EntityOutcome> => {
-    await saveRow(deps.db, { ...row, status: 'failed', lastError: reason }, { retryable });
-    deps.log.warn({ messageId, entityId: entity.entityId, reason }, 'edo export: документ не выгружен');
-    return 'failed';
-  };
-  /** Запись разобранной строки; данные, которые реестр не принял, — сбой без повтора. */
-  const write = async (parsedRow: Row): Promise<EntityOutcome | null> => {
-    try {
-      await saveRow(deps.db, parsedRow);
-      return null;
-    } catch (err) {
-      if (!isDataError(err)) throw err;
-      return fail(`запись в реестр: ${errorText(err)}`);
-    }
-  };
+  const ref = exportRefFromDiadoc(params.accountId, messageId, entity);
+  const fail = (reason: string, retryable = false) => recordExportFailure(deps, ref, reason, retryable);
 
   let buffer: Buffer;
   try {
@@ -422,7 +471,37 @@ async function exportEntity(
     return fail(`скачивание: ${errorText(err)}`, true);
   }
 
-  const kind = detectEdoFile(buffer, entity.fileName);
+  return storeExportXml(deps, ref, buffer, params.suppliers);
+}
+
+/**
+ * Общая часть выгрузки для любого оператора: байты XML → разбор → продавец →
+ * строка реестра → файл в хранилище.
+ *
+ * Правила ошибок: не XML и неразбираемый XML — окончательный сбой документа;
+ * данные, которые реестр не принял (класс 22), — тоже; нарушение целостности
+ * (класс 23) и отказ хранилища останавливают проход — они не про документ.
+ */
+export async function storeExportXml(
+  deps: StoreDeps,
+  ref: ExportRef,
+  buffer: Buffer,
+  suppliers: ReadonlyMap<string, string> | null,
+): Promise<EntityOutcome> {
+  const row = baseRow(ref);
+  const fail = (reason: string, retryable = false) => recordExportFailure(deps, ref, reason, retryable);
+  /** Запись разобранной строки; данные, которые реестр не принял, — сбой без повтора. */
+  const write = async (parsedRow: Row): Promise<EntityOutcome | null> => {
+    try {
+      await saveRow(deps.db, parsedRow);
+      return null;
+    } catch (err) {
+      if (!isDataError(err)) throw err;
+      return fail(`запись в реестр: ${errorText(err)}`);
+    }
+  };
+
+  const kind = detectEdoFile(buffer, ref.fileName);
   if (kind.ext !== 'xml') return fail(`вложение не XML (${kind.mimeType})`);
 
   let parsed: UpdParsed;
@@ -432,12 +511,12 @@ async function exportEntity(
     return fail(`разбор: ${errorText(err)}`);
   }
 
-  const { sellerInns, listed } = matchSupplier(parsed, params.suppliers);
+  const { sellerInns, listed } = matchSupplier(parsed, suppliers);
   const supplierInn = listed?.inn ?? sellerInns.find(fitsInn) ?? null;
   const seller =
     parsed.suppliers.find((s) => s.inn.replace(/\D/g, '') === supplierInn) ?? parsed.supplier;
   const docDate = storableDate(parsed.docDate);
-  const docNumber = parsed.docNumber.trim() || entity.documentNumber;
+  const docNumber = parsed.docNumber.trim() || ref.documentNumber;
   const totalSum = money(parsed.totalSum);
   const vatSum = money(parsed.vatSum);
   // Что не поместилось в реестр, хранится пустым — с пометкой, а не молча.
@@ -449,7 +528,7 @@ async function exportEntity(
 
   const parsedRow: Row = {
     ...row,
-    documentFunction: parsed.function ?? entity.documentFunction,
+    documentFunction: parsed.function ?? ref.documentFunction,
     documentNumber: docNumber,
     documentDate: docDate ? new Date(`${docDate}T00:00:00Z`) : row.documentDate,
     correctionNumber: parsed.correction?.number ?? null,
@@ -460,21 +539,23 @@ async function exportEntity(
     vatSum,
     itemsCount: parsed.items.length,
     contentCategory: classifyUtdContent(parsed).category,
+    fileId: fileIdOf(parsed),
+    contentKey: contentKeyOf(parsed),
     lastError: dropped.length ? `не записано (вне диапазона реестра): ${dropped.join(', ')}` : null,
   };
 
   // Без списка берётся всё, в том числе УПД без пригодного ИНН продавца (ключ `unknown`).
-  if (params.suppliers !== null && !listed) {
+  if (suppliers !== null && !listed) {
     return (await write({ ...parsedRow, status: 'not_in_list' })) ?? 'not_in_list';
   }
 
   const key = buildEdoExportKey({
     inn: supplierInn,
-    docDate: docDate ?? storableDate(entity.documentDate),
+    docDate: docDate ?? storableDate(ref.documentDate),
     docNumber,
-    accountId: params.accountId,
-    messageId,
-    entityId: entity.entityId,
+    accountId: ref.accountId,
+    messageId: ref.messageId,
+    entityId: ref.entityId,
   });
   const sha256 = fileHashOf(buffer);
   // Байты как пришли, в исходной кодировке: это подписанный оригинал.

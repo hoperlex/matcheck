@@ -11,9 +11,13 @@
  * Путей связи три: сверка из реестра, сверка импортом и обычная привязка
  * импортированной УПД как документа приёмки. Приёмка считается один раз,
  * сколькими бы путями она ни была связана.
+ *
+ * Копия той же УПД у другого оператора (Диадок ↔ СБИС) — тоже этот документ:
+ * правило двойника общее с привязкой (domain/edo/export-twins.ts).
  */
 import { sql as drSql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
+import { twinCondition } from '../edo/export-twins.js';
 
 export type EdoDocumentRef = { source: 'import' | 'export'; id: string };
 
@@ -69,7 +73,7 @@ export async function edoDocumentUsage(
         from source_documents s
        where s.id = any(${uuidArray(importIds)})
     ),
-    twins as (
+    own as (
       select r.source, r.id, 'export'::text as kind, r.id as doc_id
         from requested r where r.source = 'export'
       union
@@ -87,6 +91,30 @@ export async function edoDocumentUsage(
         join source_documents s
           on s.edo_account_id = r.account and s.provider_message_id = r.message and s.provider_entity_id = r.entity
        where r.account is not null and r.message is not null and s.origin = 'edo_diadoc'
+    ),
+    -- Копия той же УПД у другого оператора и её карточка (export-twins.ts).
+    cross_export as (
+      select o.source, o.id, 'export'::text as kind, tw.id as doc_id
+        from own o
+        join edo_export_documents s on s.id = o.doc_id
+        join edo_accounts sa on sa.id = s.edo_account_id
+        join edo_export_documents tw
+          on tw.content_sha256 = s.content_sha256 or tw.file_id = s.file_id or tw.content_key = s.content_key
+        join edo_accounts ta on ta.id = tw.edo_account_id
+       where o.kind = 'export' and ${twinCondition('tw', 'ta', 's', 'sa')}
+    ),
+    twins as (
+      select * from own
+      union
+      select * from cross_export
+      union
+      select c.source, c.id, 'import', sd.id
+        from cross_export c
+        join edo_export_documents e on e.id = c.doc_id
+        join source_documents sd
+          on sd.edo_account_id = e.edo_account_id and sd.provider_message_id = e.message_id
+         and sd.provider_entity_id = e.entity_id
+       where sd.origin = 'edo_diadoc'
     ),
     links as (
       select t.source, t.id, dem.delivery_id

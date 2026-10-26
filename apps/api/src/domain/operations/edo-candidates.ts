@@ -36,6 +36,7 @@ import {
 } from '../../db/schema.js';
 import { loadEnv } from '../../lib/env.js';
 import { escapeLike } from '../../lib/like.js';
+import { twinCondition } from '../edo/export-twins.js';
 import { edoDocumentUsage, edoUsageKey, type EdoUsage } from './edo-usage.js';
 import {
   censusForSupplier,
@@ -72,6 +73,10 @@ export type EdoCandidate = {
   supplierInn: string | null;
   totalSum: string | null;
   siteId: string | null;
+  /** Оператор ЭДО строки: 'diadoc' или 'sbis' (импорт — всегда Диадок). */
+  operator: string;
+  /** У каких ещё операторов лежит копия той же УПД (показана одна строка). */
+  alsoInOperators: string[];
   /** В скольких других приёмках уже стоит эта УПД (любым представлением). */
   usedElsewhere: number;
   /** Номера этих приёмок, первые `USAGE_SHOWN`. */
@@ -212,6 +217,11 @@ async function queryExport(db: Db, ctx: Context, build: (c: Columns) => Plan): P
     exactId: (q) =>
       drSql`(${t.messageId} = ${q} or ${t.entityId} = ${q}${UUID_RE.test(q) ? drSql` or ${t.id} = ${q}::uuid` : drSql``})`,
   });
+  // Строка «группы» этой строки реестра: она сама или её копия у другого
+  // оператора (export-twins.ts). Внешние таблицы — без алиасов, внутренние — с ними.
+  const inGroup = (alias: string, accountAlias: string) =>
+    drSql`(${drSql.raw(alias)}.id = ${t.id} or ${twinCondition(alias, accountAlias, 'edo_export_documents', 'edo_accounts')})`;
+  const sbisEnabled = loadEnv().EDO_SBIS_ENABLED;
   const rows = await db
     .select({
       id: t.id,
@@ -222,9 +232,18 @@ async function queryExport(db: Db, ctx: Context, build: (c: Columns) => Plan): P
       sellerInns: t.sellerInns,
       totalSum: t.totalSum,
       contentCategory: t.contentCategory,
+      operator: edoAccounts.provider,
+      // Операторы, у которых есть копия той же УПД (показывается одна строка).
+      alsoInOperators: drSql<string[]>`coalesce((
+        select array_agg(distinct twa.provider order by twa.provider)
+          from edo_export_documents tw join edo_accounts twa on twa.id = tw.edo_account_id
+         where ${twinCondition('tw', 'twa', 'edo_export_documents', 'edo_accounts')}
+           and (twa.provider <> 'sbis' or ${sbisEnabled})
+      ), '{}')`,
       rank: drSql<number>`${plan.rank ?? drSql`0`}`.mapWith(Number),
     })
     .from(t)
+    .innerJoin(edoAccounts, eq(edoAccounts.id, t.edoAccountId))
     .where(
       and(
         eq(t.status, 'stored'),
@@ -234,19 +253,38 @@ async function queryExport(db: Db, ctx: Context, build: (c: Columns) => Plan): P
           eq(t.contentCategory, 'undetermined'),
           isNull(t.contentCategory),
         ),
-        drSql`not exists (select 1 from delivery_edo_matches dem where dem.delivery_id = ${ctx.deliveryId} and dem.export_document_id = ${t.id})`,
+        // Выключатель СБИС: строк СБИС в подборе нет, пока он выключен.
+        sbisEnabled ? undefined : ne(edoAccounts.provider, 'sbis'),
+        // Копия СБИС не показывается, если та же УПД есть в Диадоке (решение 22.10:
+        // одна строка). Строка Диадока несёт пометку alsoInOperators.
+        drSql`not (${edoAccounts.provider} = 'sbis' and exists (
+          select 1 from edo_export_documents tw join edo_accounts twa on twa.id = tw.edo_account_id
+           where twa.provider = 'diadoc' and ${twinCondition('tw', 'twa', 'edo_export_documents', 'edo_accounts')}
+        ))`,
+        // Исключения — по всей группе: привязанная копия Диадока не должна
+        // вернуть в список свою копию из СБИС.
         drSql`not exists (
-          select 1 from delivery_edo_matches dem join deliveries other_delivery on other_delivery.id = dem.delivery_id
-          where dem.export_document_id = ${t.id} and other_delivery.site_id <> ${ctx.siteId}
+          select 1 from delivery_edo_matches dem
+            join edo_export_documents tw on tw.id = dem.export_document_id
+            join edo_accounts twa on twa.id = tw.edo_account_id
+           where dem.delivery_id = ${ctx.deliveryId} and ${inGroup('tw', 'twa')}
         )`,
-        // Уже импортированная копия того же документа ищется как import.
+        drSql`not exists (
+          select 1 from delivery_edo_matches dem
+            join deliveries other_delivery on other_delivery.id = dem.delivery_id
+            join edo_export_documents tw on tw.id = dem.export_document_id
+            join edo_accounts twa on twa.id = tw.edo_account_id
+           where other_delivery.site_id <> ${ctx.siteId} and ${inGroup('tw', 'twa')}
+        )`,
+        // Уже импортированная копия того же документа (любой копии группы) ищется как import.
         drSql`not exists (
           select 1 from source_documents imported
-          where imported.edo_account_id = ${t.edoAccountId}
-            and imported.provider_message_id = ${t.messageId}
-            and imported.provider_entity_id = ${t.entityId}
-            and imported.origin = 'edo_diadoc' and imported.status = 'parsed'
-            and imported.is_technical = false
+            join edo_export_documents tw
+              on tw.edo_account_id = imported.edo_account_id and tw.message_id = imported.provider_message_id
+             and tw.entity_id = imported.provider_entity_id
+            join edo_accounts twa on twa.id = tw.edo_account_id
+           where imported.origin = 'edo_diadoc' and imported.status = 'parsed'
+             and imported.is_technical = false and ${inGroup('tw', 'twa')}
         )`,
         plan.where,
       ),
@@ -346,6 +384,8 @@ async function queryImport(db: Db, ctx: Context, build: (c: Columns) => Plan): P
     source: 'import' as const,
     contentCategory: null,
     sellerInns: [],
+    operator: 'diadoc',
+    alsoInOperators: [],
     docDate: isoDate(row.docDate),
   }));
 }
@@ -751,8 +791,12 @@ export async function findEdoCandidates(
     references.every((ref) => !ref.sums.length) && 'сумма УПД',
   ].filter((value): value is string => typeof value === 'string');
 
-  const receivedUntil = await registryReceivedUntil(db);
-  const registry = await exportRegistryStatus(db, { intervalSec: loadEnv().EDO_EXPORT_INTERVAL_SEC });
+  const sbisEnabled = loadEnv().EDO_SBIS_ENABLED;
+  const receivedUntil = await registryReceivedUntil(db, sbisEnabled);
+  const registry = await exportRegistryStatus(db, {
+    intervalSec: loadEnv().EDO_EXPORT_INTERVAL_SEC,
+    includeSbis: sbisEnabled,
+  });
   // Полнота — по худшей учётке: если хоть одна ни разу не дочитала ленту,
   // опираться можно только на последнюю полученную УПД.
   const checked = registry.map((account) => account.checkedAt);
@@ -787,7 +831,7 @@ export async function findEdoCandidates(
       referencesAfterRegistry,
       registry,
       census,
-      innsAbsentInRegistry: await innsAbsentInRegistry(db, inns),
+      innsAbsentInRegistry: await innsAbsentInRegistry(db, inns, sbisEnabled),
       innUnreadable,
       contractorDelivery: delivery.contractorId !== null,
       dateOnly,
@@ -796,17 +840,21 @@ export async function findEdoCandidates(
   };
 }
 
-async function registryReceivedUntil(db: Db): Promise<string | null> {
+/** Самая поздняя полученная УПД — по учёткам, которые сейчас показываются (СБИС — при включённом). */
+async function registryReceivedUntil(db: Db, includeSbis: boolean): Promise<string | null> {
   const [row] = await db
     .select({ at: drSql<Date | string | null>`max(${edoExportDocuments.receivedAt})` })
     .from(edoExportDocuments)
-    .where(eq(edoExportDocuments.status, 'stored'));
+    .innerJoin(edoAccounts, eq(edoAccounts.id, edoExportDocuments.edoAccountId))
+    .where(
+      and(eq(edoExportDocuments.status, 'stored'), includeSbis ? undefined : ne(edoAccounts.provider, 'sbis')),
+    );
   if (!row?.at) return null;
   return row.at instanceof Date ? row.at.toISOString() : new Date(row.at).toISOString();
 }
 
 /** ИНН, под которыми в реестре нет ни одной строки — ни выгруженной, ни отсеянной списком. */
-async function innsAbsentInRegistry(db: Db, inns: readonly string[]): Promise<string[]> {
+async function innsAbsentInRegistry(db: Db, inns: readonly string[], includeSbis: boolean): Promise<string[]> {
   if (!inns.length) return [];
   // Существование по каждому ИНН, а не выборка строк: у крупного поставщика
   // строк сотни, и любой лимит выборки ложно пометил бы остальные ИНН.
@@ -815,7 +863,9 @@ async function innsAbsentInRegistry(db: Db, inns: readonly string[]): Promise<st
       from unnest(${textArray(inns)}) as requested(inn)
      where not exists (
        select 1 from ${edoExportDocuments} e
-        where e.supplier_inn = requested.inn or requested.inn = any(e.seller_inns)
+         join ${edoAccounts} a on a.id = e.edo_account_id
+        where (e.supplier_inn = requested.inn or requested.inn = any(e.seller_inns))
+          and (a.provider <> 'sbis' or ${includeSbis})
      )
   `);
   return rows.map((row) => row.inn);

@@ -115,7 +115,7 @@ function errorText(err: unknown): string {
  * блокируется до конца оператора, поэтому перехватить лиз между проверкой и
  * записью нельзя; истёкший лиз тоже не считается своим.
  */
-async function saveCursorKey(db: Db, lease: LeaseHandle, ttlSeconds: number, key: string): Promise<void> {
+export async function saveCursorKey(db: Db, lease: LeaseHandle, ttlSeconds: number, key: string): Promise<void> {
   const rows = await db.execute<{ edo_account_id: string }>(drSql`
     with renewed as (
       update ${edoAccounts}
@@ -408,6 +408,8 @@ export async function runExportForAllAccounts(
 export type RegistryAccountState = {
   accountId: string;
   name: string;
+  /** Оператор учётки: 'diadoc' или 'sbis'. */
+  provider: string;
   /** Нет ни одного полного прохода / догоняет ленту / давно не проверялся / в порядке. */
   state: 'never' | 'catching_up' | 'stale' | 'ok';
   /** Когда полный проход последний раз дочитал ленту до конца. */
@@ -426,7 +428,7 @@ export type RegistryAccountState = {
  */
 export async function exportRegistryStatus(
   db: Db,
-  opts: { intervalSec: number; now?: Date },
+  opts: { intervalSec: number; now?: Date; includeSbis?: boolean },
 ): Promise<RegistryAccountState[]> {
   const now = opts.now ?? new Date();
   // Одним запросом: окно подбора открывают часто, а учёток может быть несколько.
@@ -435,6 +437,7 @@ export async function exportRegistryStatus(
   const rows = await db.execute<{
     id: string;
     name: string;
+    provider: string;
     checked_at: Date | string | null;
     last_outcome: string | null;
     last_truncate: string | null;
@@ -442,7 +445,7 @@ export async function exportRegistryStatus(
     final: number | string;
     next_retry_at: Date | string | null;
   }>(drSql`
-    select a.id, a.name,
+    select a.id, a.name, a.provider,
            (select r.feed_completed_at from ${edoExportRuns} r
              where r.edo_account_id = a.id and r.scope = 'all' and r.feed_completed_at is not null
              order by r.started_at desc
@@ -462,7 +465,8 @@ export async function exportRegistryStatus(
          order by r.started_at desc
          limit 1
       ) last on true
-     where a.is_active and a.box_id is not null and a.provider = ${DIADOC_PROVIDER}
+     where a.is_active and a.box_id is not null
+       and (a.provider = ${DIADOC_PROVIDER} or (a.provider = 'sbis' and ${opts.includeSbis === true}))
      order by a.name
   `);
 
@@ -478,6 +482,7 @@ export async function exportRegistryStatus(
     return {
       accountId: row.id,
       name: row.name,
+      provider: row.provider,
       state,
       checkedAt: checkedAt?.toISOString() ?? null,
       failedPending: Number(row.pending),

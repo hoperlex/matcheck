@@ -688,6 +688,18 @@ const envSchema = z.object({
   // догон после простоя от того, чтобы надолго занять учётку.
   EDO_EXPORT_MAX_EVENTS: z.coerce.number().int().positive().default(5000),
   EDO_EXPORT_MAX_DOWNLOADS: z.coerce.number().int().positive().default(500),
+  // СБИС (Saby) — второй оператор реестра УПД. Один выключатель на запись и
+  // показ: при 0 проходы СБИС не ставятся, а строки СБИС не попадают в кандидаты
+  // «+ УПД из ЭДО». Уже привязанное к приёмкам остаётся видно. Ручной
+  // scripts/sbis-export.ts работает и при 0 — им делают первую загрузку.
+  EDO_SBIS_ENABLED: z
+    .preprocess((v) => (v === '' ? undefined : v), z.enum(['0', '1']).default('0'))
+    .transform((v) => v === '1'),
+  // С какого дня (по Москве) читать ленту СБИС, когда курсора ещё нет.
+  EDO_SBIS_SINCE: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .default('2026-09-01'),
 
   // Публичная форма /uploads — потолки приёма.
   //

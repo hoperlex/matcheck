@@ -47,10 +47,20 @@ import {
   EDO_EXPORT_AUTO_JOB_ID,
   EDO_POLL_QUEUE,
   MAIL_POLL_QUEUE,
+  SBIS_EXPORT_AUTO_JOB_ID,
+  SBIS_EXPORT_QUEUE,
   type EdoPollJobData,
   type MailPollJobData,
+  type SbisExportJobData,
 } from './plugins/queue.js';
 import { runExportForAllAccounts } from './domain/jobs/edo-export-runner.js';
+import {
+  runSbisExportForAllAccounts,
+  runSbisExportPass,
+  SBIS_CONFIRM_DELAY_MS,
+  type SbisAutoReport,
+  type SbisExportDeps,
+} from './domain/jobs/sbis-export-runner.js';
 import {
   pollAllEdoAccounts,
   pollEdoAccountById,
@@ -231,6 +241,87 @@ if (env.EDO_EXPORT_AUTO_ENABLED) {
   edoLog.info('автообновление реестра ЭДО выключено (EDO_EXPORT_AUTO_ENABLED=0)');
 }
 
+// Выгрузка реестра УПД из СБИС — своя очередь и свой воркер (concurrency 1).
+// Таймер ставит проход по всем учёткам СБИС; пустая страница ленты ставит
+// подтверждающий проход учётки через 2 минуты (справка СБИС: выждать и повторить
+// тот же запрос). Выключатель EDO_SBIS_ENABLED: при 0 ни таймера, ни воркера —
+// оставшиеся в очереди задачи не выполнятся.
+let sbisExportTimer: NodeJS.Timeout | null = null;
+let sbisExportQueue: Queue<SbisExportJobData> | null = null;
+let sbisWorker: Worker<SbisExportJobData> | null = null;
+if (env.EDO_SBIS_ENABLED) {
+  const sbisLog = logger.child({ service: 'sbis-export' });
+  const queue = new Queue<SbisExportJobData>(SBIS_EXPORT_QUEUE, { connection: buildQueueConnection() });
+  sbisExportQueue = queue;
+  const sbisDeps: SbisExportDeps = {
+    db,
+    log: sbisLog,
+    owner: WORKER_ID,
+    put: putObject,
+    signal: edoShutdown.signal,
+    scheduleConfirm: async (accountId) => {
+      await queue.add(
+        'confirm',
+        { mode: 'confirm', accountId },
+        {
+          delay: SBIS_CONFIRM_DELAY_MS,
+          jobId: `sbis-confirm-${accountId}`,
+          attempts: 1,
+          removeOnComplete: true,
+          removeOnFail: true,
+        },
+      );
+    },
+  };
+  const limits = { maxEvents: env.EDO_EXPORT_MAX_EVENTS, maxDownloads: env.EDO_EXPORT_MAX_DOWNLOADS };
+  const report: SbisAutoReport = {
+    onError: (accountId, result) =>
+      Sentry.captureException(result.cause ?? new Error(result.error ?? 'выгрузка СБИС'), {
+        tags: { service: 'sbis-export', account: accountId },
+        fingerprint: [
+          'sbis-export',
+          result.cursorMismatch ? 'cursor-mismatch' : result.cause instanceof Error ? result.cause.name : 'unknown',
+        ],
+      }),
+    onCrash: (accountId, err) =>
+      Sentry.captureException(err, {
+        tags: { service: 'sbis-export', account: accountId },
+        fingerprint: ['sbis-export', 'crash', err instanceof Error ? err.name : 'unknown'],
+      }),
+  };
+  sbisWorker = new Worker<SbisExportJobData>(
+    SBIS_EXPORT_QUEUE,
+    async (job: Job<SbisExportJobData>) => {
+      if (job.data.mode === 'auto') {
+        await runSbisExportForAllAccounts(sbisDeps, limits, report);
+        return;
+      }
+      // Подтверждение пустой страницы — обычный проход учётки: любой проход
+      // начинает с незакрытого подтверждения.
+      const result = await runSbisExportPass(sbisDeps, job.data.accountId, { trigger: 'auto', ...limits });
+      if (!('skipped' in result) && result.outcome === 'error') report.onError(job.data.accountId, result);
+    },
+    { connection: buildQueueConnection(), concurrency: 1 },
+  );
+  sbisWorker.on('failed', (job, err) => {
+    sbisLog.error({ jobId: job?.id, err: err.message }, 'выгрузка СБИС упала');
+    Sentry.captureException(err, { tags: { queue: SBIS_EXPORT_QUEUE } });
+  });
+  const enqueue = () =>
+    void queue
+      .add('auto', { mode: 'auto' }, { jobId: SBIS_EXPORT_AUTO_JOB_ID, attempts: 1, removeOnComplete: true, removeOnFail: true })
+      .catch((err) => sbisLog.error({ err }, 'не удалось поставить выгрузку СБИС'));
+  // Полторы минуты после старта — со сдвигом от прохода Диадока.
+  setTimeout(() => {
+    enqueue();
+    sbisExportTimer = setInterval(enqueue, env.EDO_EXPORT_INTERVAL_SEC * 1000);
+    sbisExportTimer.unref();
+  }, 90_000).unref();
+  sbisLog.info({ intervalSec: env.EDO_EXPORT_INTERVAL_SEC }, 'выгрузка реестра из СБИС включена');
+} else {
+  edoLog.info('выгрузка реестра из СБИС выключена (EDO_SBIS_ENABLED=0)');
+}
+
 let timer: NodeJS.Timeout | null = null;
 if (env.MAIL_POLL_ENABLED) {
   const sweep = () =>
@@ -286,13 +377,16 @@ async function shutdown(signal: string): Promise<void> {
   if (timer) clearInterval(timer);
   if (edoTimer) clearInterval(edoTimer);
   if (edoExportTimer) clearInterval(edoExportTimer);
+  if (sbisExportTimer) clearInterval(sbisExportTimer);
   if (retentionTimer) clearInterval(retentionTimer);
   // Сначала прервать выгрузку: close() ждёт активную задачу, а проход без
   // сигнала мог бы идти минутами и быть убит SIGKILL'ом с висящим лизом.
   edoShutdown.abort();
   await worker.close().catch(() => undefined);
   await edoWorker.close().catch(() => undefined);
+  await sbisWorker?.close().catch(() => undefined);
   await edoExportQueue?.close().catch(() => undefined);
+  await sbisExportQueue?.close().catch(() => undefined);
   process.exit(0);
 }
 

@@ -144,6 +144,17 @@ export class SbisRpcError extends Error {
   }
 }
 
+/**
+ * Запрос отменён вызывающим (остановка воркера). Не повторяется: проход
+ * закрывается как `stopped`, лиз отпускается, курсор остаётся на прежней странице.
+ */
+export class SbisAborted extends Error {
+  constructor() {
+    super('СБИС: запрос отменён — процесс останавливается');
+    this.name = 'SbisAborted';
+  }
+}
+
 /** Прочий отказ HTTP: дефект запроса. */
 export class SbisHttpError extends Error {
   constructor(
@@ -214,6 +225,8 @@ export type SbisTransportOptions = {
   fetchImpl?: typeof fetch;
   /** Значения, которые нельзя показать в тексте ошибок. */
   secrets?: readonly (string | null | undefined)[];
+  /** Отмена извне (остановка воркера): складывается с таймаутом запроса, повторов нет. */
+  signal?: AbortSignal;
 };
 
 export type SbisFetchOptions = SbisTransportOptions & {
@@ -225,13 +238,21 @@ export type SbisFetchOptions = SbisTransportOptions & {
 
 /** Одна отправка: разрешающий список, таймаут, отказ от редиректов. */
 async function sendOnce(opts: SbisFetchOptions): Promise<Response> {
-  const res = await (opts.fetchImpl ?? fetch)(opts.url, {
-    method: opts.method,
-    headers: opts.headers,
-    body: opts.body,
-    redirect: 'manual',
-    signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-  });
+  if (opts.signal?.aborted) throw new SbisAborted();
+  const timeout = AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await (opts.fetchImpl ?? fetch)(opts.url, {
+      method: opts.method,
+      headers: opts.headers,
+      body: opts.body,
+      redirect: 'manual',
+      signal: opts.signal ? AbortSignal.any([timeout, opts.signal]) : timeout,
+    });
+  } catch (err) {
+    if (opts.signal?.aborted) throw new SbisAborted();
+    throw err;
+  }
   // Редирект увёл бы запрос мимо разрешающего списка: хост проверен только у
   // исходного адреса.
   if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
@@ -279,7 +300,7 @@ export async function sbisFetch(opts: SbisFetchOptions): Promise<Response> {
     try {
       res = await sendOnce(opts);
     } catch (err) {
-      if (err instanceof SbisRequestNotAllowed) throw err;
+      if (err instanceof SbisRequestNotAllowed || err instanceof SbisAborted) throw err;
       if (attempt >= maxRetries) {
         throw new SbisTransient(describeNetworkFailure(err), endpoint, { cause: err });
       }
@@ -427,7 +448,7 @@ export async function sbisRpc(opts: SbisRpcOptions): Promise<unknown> {
     try {
       res = await sendOnce(fetchOpts);
     } catch (err) {
-      if (err instanceof SbisRequestNotAllowed) throw err;
+      if (err instanceof SbisRequestNotAllowed || err instanceof SbisAborted) throw err;
       if (attempt >= maxRetries) {
         throw new SbisTransient(describeNetworkFailure(err), endpoint, { cause: err });
       }

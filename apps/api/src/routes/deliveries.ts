@@ -40,7 +40,6 @@ import {
   deliveryItems,
   deliveryPhotos,
   deliverySources,
-  edoExportDocuments,
   entityDeletions,
   s3CleanupOutbox,
   shipments,
@@ -102,6 +101,7 @@ import { parseUuidCsv } from '../lib/uuid-csv.js';
 import { escapeLike } from '../lib/like.js';
 import { MONEY_FMT, QTY_FMT, fmtDateTimeRu } from '../lib/xlsx-format.js';
 import { registerDeliveryEdoRoutes } from './delivery-edo.js';
+import { edoGroupLinks, lockEdoDocGroup } from '../domain/edo/export-twins.js';
 
 const ListQuerySchema = z.object({
   status: DeliveryStatusCodeSchema.optional(),
@@ -205,11 +205,27 @@ async function assertSourcesAvailableForDelivery(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   app: any,
   sourceDocumentIds: string[],
-  _excludeDeliveryId: string | null,
+  excludeDeliveryId: string | null,
   /** Объект операции: документ чужого объекта в неё попасть не может. */
   operationSiteId: string | null,
 ) {
   if (sourceDocumentIds.length === 0) return;
+  // УПД из ЭДО — один документ со своей строкой реестра и копией у другого
+  // оператора (domain/edo/export-twins.ts), и те могли уже уйти в приёмку
+  // другого объекта. Блокировки по ключам тождества — до строк документов,
+  // по всем документам операции сразу (ключи отсортированы).
+  const edoIds: string[] = (
+    await app.db
+      .select({ id: sourceDocuments.id })
+      .from(sourceDocuments)
+      .where(
+        and(
+          inArray(sourceDocuments.id, sourceDocumentIds),
+          eq(sourceDocuments.origin, 'edo_diadoc'),
+        ),
+      )
+  ).map((r: { id: string }) => r.id);
+  const edoGroup = edoIds.length ? await lockEdoDocGroup(app.db, { sourceIds: edoIds }) : null;
   // FOR UPDATE, а не обычный select. Строки документов — тот самый ресурс, за
   // который эта проверка спорит с переносом объекта (domain/sourceDocuments/
   // site-transfer.ts): он держит их до конца своей транзакции, поэтому привязка
@@ -237,6 +253,13 @@ async function assertSourcesAvailableForDelivery(
       .filter((r: { siteId: string | null }) => (r.siteId ?? null) !== operationSiteId)
       .map((r: { id: string }) => r.id);
     if (foreign.length > 0) throw new ForeignSiteSourceDocumentError(foreign);
+    if (
+      edoGroup &&
+      (await edoGroupLinks(app.db, edoGroup, { id: excludeDeliveryId, siteId: operationSiteId }))
+        .foreignSite
+    ) {
+      throw new ForeignSiteSourceDocumentError(edoIds);
+    }
   }
 }
 
@@ -2470,13 +2493,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         });
       }
       const [src] = await app.db
-        .select({
-          id: sourceDocuments.id,
-          origin: sourceDocuments.origin,
-          edoAccountId: sourceDocuments.edoAccountId,
-          messageId: sourceDocuments.providerMessageId,
-          entityId: sourceDocuments.providerEntityId,
-        })
+        .select({ id: sourceDocuments.id, origin: sourceDocuments.origin })
         .from(sourceDocuments)
         .where(
           and(
@@ -2506,6 +2523,19 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             tx: any,
           ) => {
+            // УПД из ЭДО: тот же порядок, что у привязки из окна ЭДО
+            // (delivery-edo.ts) — приёмка → ключи тождества → строки, иначе
+            // встречные привязки одной УПД ждали бы друг друга. NO KEY UPDATE:
+            // с KEY SHARE на приёмку от вставки позиций конкурентами не спорит.
+            let edoGroup: Awaited<ReturnType<typeof lockEdoDocGroup>> | null = null;
+            if (src.origin === 'edo_diadoc') {
+              await tx
+                .select({ id: deliveries.id })
+                .from(deliveries)
+                .where(eq(deliveries.id, d.id))
+                .for('no key update');
+              edoGroup = await lockEdoDocGroup(tx, { sourceIds: [src.id] });
+            }
             const [already] = await tx
               .select({ deliveryId: deliverySources.deliveryId })
               .from(deliverySources)
@@ -2528,24 +2558,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               )
               .limit(1);
             if (alreadyEdoMatch) throw new AlreadyLinkedError();
-            if (src.origin === 'edo_diadoc' && src.edoAccountId && src.messageId) {
-              const [alreadyExportMatch] = await tx
-                .select({ id: deliveryEdoMatches.id })
-                .from(deliveryEdoMatches)
-                .innerJoin(
-                  edoExportDocuments,
-                  eq(deliveryEdoMatches.exportDocumentId, edoExportDocuments.id),
-                )
-                .where(
-                  and(
-                    eq(deliveryEdoMatches.deliveryId, d.id),
-                    eq(edoExportDocuments.edoAccountId, src.edoAccountId),
-                    eq(edoExportDocuments.messageId, src.messageId),
-                    eq(edoExportDocuments.entityId, src.entityId),
-                  ),
-                )
-                .limit(1);
-              if (alreadyExportMatch) throw new AlreadyLinkedError();
+            // Та же УПД строкой реестра или копией у другого оператора.
+            if (edoGroup && (await edoGroupLinks(tx, edoGroup, d)).linkedHere) {
+              throw new AlreadyLinkedError();
             }
             // Та же проверка, что и при создании приёмки: блокировка строки
             // документа плюс сверка объекта. Раньше этот маршрут вставлял связь

@@ -601,7 +601,12 @@ export const edoAccounts = pgTable('edo_accounts', {
   pollLeaseOwner: uuid('poll_lease_owner'),
   pollLeaseToken: uuid('poll_lease_token'),
   pollLeaseUntil: timestamp('poll_lease_until', { withTimezone: true }),
-  authMode: text('auth_mode').$type<'oidc_refresh' | 'developer_key'>().notNull().default('oidc_refresh'),
+  // sbis_service_key — учётка СБИС (три ключа приложения); пара provider/auth_mode
+  // проверяется CHECK (миграция 0139).
+  authMode: text('auth_mode')
+    .$type<'oidc_refresh' | 'developer_key' | 'sbis_service_key'>()
+    .notNull()
+    .default('oidc_refresh'),
   // Ротируемое состояние авторизации. ОТДЕЛЬНО от credentialsEncrypted: иначе
   // правка названия учётной записи затирала бы живой refresh_token, а вернуть
   // его можно только руками через браузер.
@@ -776,6 +781,15 @@ export const edoExportDocuments = pgTable(
     s3Key: text('s3_key'),
     contentSha256: varchar('content_sha256', { length: 64 }),
     sizeBytes: integer('size_bytes'),
+    /** Редакция документа СБИС, по которой повторяется скачивание (миграция 0139). */
+    providerRevisionId: text('provider_revision_id'),
+    /**
+     * ИдФайл из XML и отпечаток состава (миграция 0139) — вместе с content_sha256
+     * признаки «та же УПД» между операторами (Диадок и СБИС), см.
+     * domain/edo/export-identity.ts.
+     */
+    fileId: text('file_id'),
+    contentKey: varchar('content_key', { length: 64 }),
     /** Сколько раз выгрузка документа не удалась (миграция 0132). */
     attempts: integer('attempts').notNull().default(0),
     /** Когда повторить; null у `failed` — окончательно, повтор только сбросом. */
@@ -797,6 +811,14 @@ export const edoExportDocuments = pgTable(
     index('edo_export_documents_box_idx')
       .on(t.counteragentBoxId)
       .where(sql`${t.counteragentBoxId} is not null`),
+    // Поиск копий той же УПД у другого оператора (миграция 0139).
+    index('edo_export_documents_sha_idx').on(t.contentSha256).where(sql`${t.status} = 'stored'`),
+    index('edo_export_documents_file_id_idx')
+      .on(t.fileId)
+      .where(sql`${t.status} = 'stored' and ${t.fileId} is not null`),
+    index('edo_export_documents_content_key_idx')
+      .on(t.contentKey)
+      .where(sql`${t.status} = 'stored' and ${t.contentKey} is not null`),
     check(
       'edo_export_documents_status_check',
       sql`${t.status} in ('stored', 'not_in_list', 'failed')`,

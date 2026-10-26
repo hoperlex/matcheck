@@ -8,9 +8,9 @@
  * не видна ни одной выборке Диадока, а прямой вызов по её id отказывает ДО
  * лиза, курсора, журнала и клиента.
  *
- * Фикстура: `provider='sbis'` с `auth_mode='developer_key'` — сочетание, которое
- * проходит сегодняшние CHECK. Когда миграция свяжет СБИС с собственным режимом
- * входа, фикстура меняется осознанно (план этапа Р, выпуск Р2).
+ * Фикстура: `provider='sbis'` с `auth_mode='sbis_service_key'` — с миграции 0139
+ * база требует именно эту пару (до неё стояло `developer_key`, единственное, что
+ * пропускал прежний CHECK).
  *
  * Запуск: см. заголовок test/integration/mail-requests.int.test.ts.
  * Без TEST_DATABASE_URL набор пропускается.
@@ -116,7 +116,7 @@ suite('пути Диадока закрыты от учёток другого �
         id: sbisId,
         name: `0-сбис-${sbisId.slice(0, 8)}`,
         provider: 'sbis',
-        authMode: 'developer_key',
+        authMode: 'sbis_service_key',
         credentialsEncrypted: '{}',
         boxId: 'org-сбис',
         pollEnabled: true,
@@ -181,11 +181,11 @@ suite('пути Диадока закрыты от учёток другого �
       expect(res.statusCode, url).toBe(409);
       expect(res.json()).toMatchObject({ error: 'provider_not_supported' });
     }
-    for (const action of ['check', 'dry-run']) {
-      const res = await app.inject({ method: 'POST', url: `/api/v1/admin/edo-accounts/${sbisId}/${action}`, payload: {} });
-      expect(res.statusCode, action).toBe(409);
-      expect(res.json()).toMatchObject({ error: 'provider_not_supported' });
-    }
+    // `/check` с Р2 у СБИС свой (вход по ключу, список организаций) — он в
+    // наборе админки СБИС; пробный разбор остаётся только у Диадока.
+    const dryRun = await app.inject({ method: 'POST', url: `/api/v1/admin/edo-accounts/${sbisId}/dry-run`, payload: {} });
+    expect(dryRun.statusCode).toBe(409);
+    expect(dryRun.json()).toMatchObject({ error: 'provider_not_supported' });
     const patch = await app.inject({
       method: 'PATCH',
       url: `/api/v1/admin/edo-accounts/${sbisId}`,

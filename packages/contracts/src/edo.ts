@@ -58,6 +58,20 @@ export const EdoCredentialsSchema = z.discriminatedUnion('authMode', [
 export type EdoCredentials = z.infer<typeof EdoCredentialsSchema>;
 
 /**
+ * Ключи приложения СБИС (Saby) — три значения из карточки приложения
+ * (Настройки → Безопасность → Подключения к Saby): «ID подключения»,
+ * «Защищённый ключ» и «Сервисный ключ» (скачивается файлом у строки «с
+ * авторизацией по сервисному ключу»). Вход по ключу требует все три.
+ */
+export const EdoSbisCredentialsSchema = z.object({
+  authMode: z.literal('sbis_service_key'),
+  appClientId: secret(),
+  appSecret: secret(),
+  secretKey: secret(),
+});
+export type EdoSbisCredentials = z.infer<typeof EdoSbisCredentialsSchema>;
+
+/**
  * Чтение того, что уже лежит в БД.
  *
  * Записи, созданные до перехода на OIDC, не содержат `authMode` — без
@@ -65,12 +79,21 @@ export type EdoCredentials = z.infer<typeof EdoCredentialsSchema>;
  * нечитаемой. Поле boxId в старом формате лежало внутри credentials; теперь у
  * него отдельная колонка, поэтому при чтении оно просто игнорируется.
  */
-export const StoredEdoCredentialsSchema = z.preprocess((v) => {
-  if (v && typeof v === 'object' && !('authMode' in v)) {
-    return { ...(v as Record<string, unknown>), authMode: 'developer_key' };
-  }
-  return v;
-}, EdoCredentialsSchema);
+export const StoredEdoCredentialsSchema = z.preprocess(
+  (v) => {
+    if (v && typeof v === 'object' && !('authMode' in v)) {
+      return { ...(v as Record<string, unknown>), authMode: 'developer_key' };
+    }
+    return v;
+  },
+  // Ключи СБИС всегда записаны с `authMode`, подстановка выше их не касается.
+  z.discriminatedUnion('authMode', [
+    EdoOidcCredentialsSchema,
+    EdoDeveloperKeyCredentialsSchema,
+    EdoSbisCredentialsSchema,
+  ]),
+);
+export type StoredEdoCredentials = z.infer<typeof StoredEdoCredentialsSchema>;
 
 /**
  * Состояние авторизации: то, что система обновляет сама.
@@ -231,6 +254,15 @@ export const EdoAccountDtoSchema = z.object({
   clientSecretFingerprint: z.string().nullable(),
   refreshTokenFingerprint: z.string().nullable(),
   refreshTokenAgeDays: z.number().int().nullable(),
+  /**
+   * Учётка СБИС: «ID подключения» (не секрет — как логин) и признаки ключей —
+   * длины и отпечатки, не значения. У учёток Диадока — null.
+   */
+  sbisAppClientId: z.string().nullable().optional(),
+  sbisAppSecretLength: z.number().int().nullable().optional(),
+  sbisAppSecretFingerprint: z.string().nullable().optional(),
+  sbisSecretKeyLength: z.number().int().nullable().optional(),
+  sbisSecretKeyFingerprint: z.string().nullable().optional(),
   lastEventAt: z.string().nullable(),
   lastSyncAt: z.string().nullable(),
   lastOkAt: z.string().nullable(),
@@ -304,6 +336,58 @@ export const EdoCheckResultSchema = z.object({
   ),
 });
 export type EdoCheckResult = z.infer<typeof EdoCheckResultSchema>;
+
+// ── СБИС (Saby): только добавления — схемы Диадока выше не меняются ─────────
+
+/** Заведение учётки СБИС. Организация выбирается после «Проверить доступ». */
+export const EdoSbisAccountCreateSchema = z
+  .object({
+    provider: z.literal('sbis'),
+    name: z.string().min(1).max(100),
+    credentials: EdoSbisCredentialsSchema,
+    defaultSiteId: z.string().uuid().nullable().optional(),
+    isActive: z.boolean().default(true),
+  })
+  .strict();
+export type EdoSbisAccountCreate = z.infer<typeof EdoSbisAccountCreateSchema>;
+
+/**
+ * Смена ключей СБИС. Пустое поле — «оставить прежнее» (форма ключи не
+ * показывает); хотя бы одно значение обязательно.
+ */
+export const EdoSbisCredentialsPatchSchema = z
+  .object({
+    appClientId: secret().optional(),
+    appSecret: secret().optional(),
+    secretKey: secret().optional(),
+  })
+  .strict()
+  .refine((v) => Boolean(v.appClientId || v.appSecret || v.secretKey), {
+    message: 'укажите хотя бы один ключ',
+  });
+export type EdoSbisCredentialsPatch = z.infer<typeof EdoSbisCredentialsPatchSchema>;
+
+/** Организация кабинета СБИС. `ref` — значение для boxId при выборе. */
+export const EdoSbisOrganizationSchema = z.object({
+  ref: z.string(),
+  kind: z.enum(['legal', 'person']),
+  inn: z.string(),
+  kpp: z.string().nullable(),
+  branch: z.string().nullable(),
+  name: z.string().nullable(),
+  /** Подключён ли документооборот (ДокументооборотПодключен). */
+  edo: z.boolean(),
+});
+export type EdoSbisOrganization = z.infer<typeof EdoSbisOrganizationSchema>;
+
+/** «Проверить доступ» для учётки СБИС: вход прошёл, видны организации. */
+export const EdoSbisCheckResultSchema = z.object({
+  provider: z.literal('sbis'),
+  organizations: z.array(EdoSbisOrganizationSchema),
+  /** Список организаций дочитан до конца (иначе — упор в предел страниц). */
+  complete: z.boolean(),
+});
+export type EdoSbisCheckResult = z.infer<typeof EdoSbisCheckResultSchema>;
 
 /** Постановка фоновой работы: обход ленты синхронным ответом держать нельзя. */
 export const EdoJobQueuedSchema = z.object({

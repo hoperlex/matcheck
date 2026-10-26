@@ -105,7 +105,11 @@ export class DiadocAuthMisconfigured extends Error {
 
 export type EdoAccountAuthRow = {
   id: string;
-  authMode: 'oidc_refresh' | 'developer_key';
+  /**
+   * Строка, а не перечисление Диадока: строку учётки передают целиком, а у учётки
+   * СБИС свой режим. Решает то, что лежит в реквизитах: не-OIDC здесь отвергается.
+   */
+  authMode: string;
   environment: DiadocEnvironment;
   credentialsEncrypted: string;
   authStateEncrypted: string | null;
@@ -162,12 +166,18 @@ function credentialsProblem(err: unknown): string {
  * ответов), то есть отправляла разбираться не в ту сторону.
  */
 function readCredentials(row: EdoAccountAuthRow): EdoCredentials {
+  let creds;
   try {
     const raw = decryptField(row.credentialsEncrypted, buildAad('edo_accounts', row.id));
-    return StoredEdoCredentialsSchema.parse(JSON.parse(raw));
+    creds = StoredEdoCredentialsSchema.parse(JSON.parse(raw));
   } catch (err) {
     throw new DiadocAuthMisconfigured(credentialsProblem(err));
   }
+  // Пути Диадока отсекают учётки СБИС раньше (provider.ts); это последний рубеж.
+  if (creds.authMode === 'sbis_service_key') {
+    throw new DiadocAuthMisconfigured('у учётки ключи СБИС, а не Диадока');
+  }
+  return creds;
 }
 
 function readAuthState(row: EdoAccountAuthRow): EdoAuthState | null {

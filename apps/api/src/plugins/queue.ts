@@ -188,6 +188,15 @@ export type EdoPollJobData =
 /** Постоянный id задачи автопрохода: пока она в очереди, вторая не ставится. */
 export const EDO_EXPORT_AUTO_JOB_ID = 'edo-export-auto';
 
+/**
+ * Выгрузка реестра УПД из СБИС — своя очередь, не общая с Диадоком: подтверждение
+ * пустой страницы ставится отдельной отложенной задачей, и ручные работы Диадока
+ * (осмотр, синхронизация) не должны ждать проходов СБИС.
+ */
+export const SBIS_EXPORT_QUEUE = 'sbis-export';
+export type SbisExportJobData = { mode: 'auto' } | { mode: 'confirm'; accountId: string };
+export const SBIS_EXPORT_AUTO_JOB_ID = 'sbis-export-auto';
+
 declare module 'fastify' {
   interface FastifyInstance {
     queues: {

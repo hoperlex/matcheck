@@ -967,6 +967,13 @@
       "when": 1794355200000,
       "tag": "0138_supplier_inn_check",
       "breakpoints": true
+    },
+    {
+      "idx": 139,
+      "version": "7",
+      "when": 1794960000000,
+      "tag": "0139_edo_sbis",
+      "breakpoints": true
     }
   ]
 }

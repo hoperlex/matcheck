@@ -1,5 +1,5 @@
 import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
-import { and, asc, desc, eq, isNotNull, isNull, ne, or, sql as drSql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, or, sql as drSql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
@@ -10,6 +10,7 @@ import {
   deliveries,
   deliveryEdoMatches,
   deliverySources,
+  edoAccounts,
   edoExportDocuments,
   sourceDocumentAttachments,
   sourceDocumentItems,
@@ -19,6 +20,7 @@ import {
 import { findEdoCandidates } from '../domain/operations/edo-candidates.js';
 import { edoDocumentUsage, edoUsageKey } from '../domain/operations/edo-usage.js';
 import { toIsoDate } from '../domain/edo/export-upd.js';
+import { edoGroupHasImported, edoGroupLinks, lockEdoDocGroup } from '../domain/edo/export-twins.js';
 import { decodeXmlBuffer } from '../domain/edo/upd-xml-decode.js';
 import { parseUpdXml, type UpdParsed } from '../domain/edo/upd.parser.js';
 import {
@@ -52,6 +54,9 @@ const EdoCandidateSchema = z.object({
     origin: z.enum(['paper', 'photo', 'delivery']),
     label: z.string().nullable(),
   }),
+  /** Оператор ЭДО строки; у копии, которая есть и у другого оператора, — список других. */
+  operator: z.string(),
+  alsoInOperators: z.array(z.string()),
   score: z.number().int(),
   level: z.enum(['high', 'possible', 'weak']),
   matches: z.array(z.string()),
@@ -199,6 +204,8 @@ const LinkedEdoDocumentSchema = z.object({
   id: z.string().uuid(),
   documentId: z.string().uuid(),
   source: z.enum(['import', 'export']),
+  /** Оператор ЭДО: 'diadoc' | 'sbis'. */
+  operator: z.string(),
   docNumber: z.string().nullable(),
   docDate: z.string().nullable(),
   supplierName: z.string().nullable(),
@@ -294,15 +301,21 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
           totalSum: edoExportDocuments.totalSum,
           linkedAt: deliveryEdoMatches.linkedAt,
           sectionDocumentId: deliveryEdoMatches.sectionDocumentId,
+          operator: edoAccounts.provider,
         })
         .from(deliveryEdoMatches)
         .innerJoin(
           edoExportDocuments,
           eq(deliveryEdoMatches.exportDocumentId, edoExportDocuments.id),
         )
+        .innerJoin(edoAccounts, eq(edoAccounts.id, edoExportDocuments.edoAccountId))
         .where(eq(deliveryEdoMatches.deliveryId, delivery.id));
       const linked = [
-        ...rows.map((row: (typeof rows)[number]) => ({ ...row, source: 'import' as const })),
+        ...rows.map((row: (typeof rows)[number]) => ({
+          ...row,
+          source: 'import' as const,
+          operator: 'diadoc',
+        })),
         ...exportedRows.map((row: (typeof exportedRows)[number]) => ({
           ...row,
           source: 'export' as const,
@@ -645,15 +658,16 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
             return 'section_not_linked';
           if (isImport && sectionDocumentId === documentId) return 'invalid_section';
         }
+        // Одна УПД — один документ во всех представлениях (export-twins.ts):
+        // блокировки по её ключам тождества — после приёмки и до строк
+        // документов, тот же порядок на всех путях привязки.
+        const group = await lockEdoDocGroup(
+          tx,
+          isImport ? { sourceIds: [documentId] } : { exportIds: [documentId] },
+        );
         if (isImport) {
           const [document] = await tx
-            .select({
-              id: sourceDocuments.id,
-              siteId: sourceDocuments.siteId,
-              edoAccountId: sourceDocuments.edoAccountId,
-              messageId: sourceDocuments.providerMessageId,
-              entityId: sourceDocuments.providerEntityId,
-            })
+            .select({ id: sourceDocuments.id })
             .from(sourceDocuments)
             .where(
               and(
@@ -668,87 +682,9 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
             .for('update')
             .limit(1);
           if (!document) return 'invalid_document';
-          if (document.siteId && document.siteId !== delivery.siteId) return 'foreign_site';
-          const [foreignReference] = await tx
-            .select({ id: deliveries.id })
-            .from(deliveryEdoMatches)
-            .innerJoin(deliveries, eq(deliveryEdoMatches.deliveryId, deliveries.id))
-            .where(
-              and(
-                eq(deliveryEdoMatches.sourceDocumentId, documentId),
-                ne(deliveries.siteId, delivery.siteId),
-              ),
-            )
-            .limit(1);
-          const [foreignSource] = await tx
-            .select({ id: deliveries.id })
-            .from(deliverySources)
-            .innerJoin(deliveries, eq(deliverySources.deliveryId, deliveries.id))
-            .where(
-              and(
-                eq(deliverySources.sourceDocumentId, documentId),
-                ne(deliveries.siteId, delivery.siteId),
-              ),
-            )
-            .limit(1);
-          if (foreignReference || foreignSource) return 'foreign_site';
-          const [alreadySource] = await tx
-            .select({ id: deliverySources.sourceDocumentId })
-            .from(deliverySources)
-            .where(
-              and(
-                eq(deliverySources.deliveryId, delivery.id),
-                eq(deliverySources.sourceDocumentId, documentId),
-              ),
-            )
-            .limit(1);
-          if (alreadySource) return 'already_linked';
-          if (document.edoAccountId && document.messageId) {
-            const [foreignExport] = await tx
-              .select({ id: deliveries.id })
-              .from(deliveryEdoMatches)
-              .innerJoin(
-                edoExportDocuments,
-                eq(deliveryEdoMatches.exportDocumentId, edoExportDocuments.id),
-              )
-              .innerJoin(deliveries, eq(deliveryEdoMatches.deliveryId, deliveries.id))
-              .where(
-                and(
-                  eq(edoExportDocuments.edoAccountId, document.edoAccountId),
-                  eq(edoExportDocuments.messageId, document.messageId),
-                  eq(edoExportDocuments.entityId, document.entityId),
-                  ne(deliveries.siteId, delivery.siteId),
-                ),
-              )
-              .limit(1);
-            if (foreignExport) return 'foreign_site';
-            const [alreadyExport] = await tx
-              .select({ id: deliveryEdoMatches.id })
-              .from(deliveryEdoMatches)
-              .innerJoin(
-                edoExportDocuments,
-                eq(deliveryEdoMatches.exportDocumentId, edoExportDocuments.id),
-              )
-              .where(
-                and(
-                  eq(deliveryEdoMatches.deliveryId, delivery.id),
-                  eq(edoExportDocuments.edoAccountId, document.edoAccountId),
-                  eq(edoExportDocuments.messageId, document.messageId),
-                  eq(edoExportDocuments.entityId, document.entityId),
-                ),
-              )
-              .limit(1);
-            if (alreadyExport) return 'already_linked';
-          }
         } else {
           const [document] = await tx
-            .select({
-              id: edoExportDocuments.id,
-              edoAccountId: edoExportDocuments.edoAccountId,
-              messageId: edoExportDocuments.messageId,
-              entityId: edoExportDocuments.entityId,
-              contentCategory: edoExportDocuments.contentCategory,
-            })
+            .select({ id: edoExportDocuments.id })
             .from(edoExportDocuments)
             .where(
               and(
@@ -765,34 +701,13 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
             .for('update')
             .limit(1);
           if (!document) return 'invalid_document';
-          const [foreignReference] = await tx
-            .select({ id: deliveries.id })
-            .from(deliveryEdoMatches)
-            .innerJoin(deliveries, eq(deliveryEdoMatches.deliveryId, deliveries.id))
-            .where(
-              and(
-                eq(deliveryEdoMatches.exportDocumentId, documentId),
-                ne(deliveries.siteId, delivery.siteId),
-              ),
-            )
-            .limit(1);
-          if (foreignReference) return 'foreign_site';
-          const [imported] = await tx
-            .select({ id: sourceDocuments.id })
-            .from(sourceDocuments)
-            .where(
-              and(
-                eq(sourceDocuments.edoAccountId, document.edoAccountId),
-                eq(sourceDocuments.providerMessageId, document.messageId),
-                eq(sourceDocuments.providerEntityId, document.entityId),
-                eq(sourceDocuments.origin, 'edo_diadoc'),
-                eq(sourceDocuments.status, 'parsed'),
-                eq(sourceDocuments.isTechnical, false),
-              ),
-            )
-            .limit(1);
-          if (imported) return 'imported_available';
         }
+        // Проверки — по всей группе: копия у другого оператора и карточка
+        // импорта — тот же документ, что и выбранная строка.
+        const links = await edoGroupLinks(tx, group, delivery);
+        if (links.foreignSite) return 'foreign_site';
+        if (!isImport && (await edoGroupHasImported(tx, group))) return 'imported_available';
+        if (links.linkedHere) return 'already_linked';
         const [inserted] = await tx
           .insert(deliveryEdoMatches)
           .values({
@@ -924,6 +839,7 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
                 z.object({
                   accountId: z.string().uuid(),
                   name: z.string(),
+                  provider: z.string(),
                   state: z.enum(['never', 'catching_up', 'stale', 'ok']),
                   checkedAt: z.string().nullable(),
                   failedPending: z.number().int(),

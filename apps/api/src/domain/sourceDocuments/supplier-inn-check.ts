@@ -17,9 +17,10 @@
 // Решатель — чистая функция; ветки перечислены в тестах
 // (test/supplier-inn-check.test.ts) на реальных парах с боя.
 
-import { eq, isNotNull, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, ne, sql } from 'drizzle-orm';
 import type { UpdValidation, UpdWarning } from '@matcheck/contracts';
 import type { Db } from '../../db/client.js';
+import { loadEnv } from '../../lib/env.js';
 import { edoAccounts, edoExportDocuments, suppliers } from '../../db/schema.js';
 import { companyKey, editDistance, formsCompatible } from '../directories/names.js';
 import { normalizeDocumentNumber } from '../operations/edo-match.js';
@@ -201,6 +202,11 @@ export async function loadDirectoryInns(db: Db): Promise<DirectoryInn[]> {
 }
 
 async function loadEdoForDate(db: Db, docDate: string): Promise<EdoRegistryEntry[]> {
+  // Строки СБИС — только при включённом EDO_SBIS_ENABLED: первая загрузка
+  // истории идёт вручную до включения, и до него распознавание их не видит.
+  // Копии одной УПД у двух операторов несут один ИНН — «ровно один продавец»
+  // ниже от них не ломается.
+  const sbisEnabled = loadEnv().EDO_SBIS_ENABLED;
   const rows = await db
     .select({
       number: edoExportDocuments.documentNumber,
@@ -210,7 +216,13 @@ async function loadEdoForDate(db: Db, docDate: string): Promise<EdoRegistryEntry
       totalSum: edoExportDocuments.totalSum,
     })
     .from(edoExportDocuments)
-    .where(eq(sql`${edoExportDocuments.documentDate}::date`, sql`${docDate}::date`));
+    .innerJoin(edoAccounts, eq(edoAccounts.id, edoExportDocuments.edoAccountId))
+    .where(
+      and(
+        eq(sql`${edoExportDocuments.documentDate}::date`, sql`${docDate}::date`),
+        sbisEnabled ? undefined : ne(edoAccounts.provider, 'sbis'),
+      ),
+    );
   return rows.map((r) => ({
     number: r.number,
     supplierInn: r.supplierInn,

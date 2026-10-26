@@ -97,6 +97,12 @@ export const SbisDocumentSchema = z
     Событие: list(SbisEventSchema),
     /** У `ПрочитатьДокумент` вложения лежат прямо в документе. */
     Вложение: list(SbisAttachmentSchema),
+    /**
+     * «Да» — СБИС урезал ответ (слишком много вложений, событий, подписей).
+     * Справка: недостающее — через `СписокИзменений` с фильтром по документу и
+     * дополнительным полем «СписокПоДокументу».
+     */
+    ЧастичныеДанные: str,
   })
   .passthrough();
 export type SbisDocument = z.infer<typeof SbisDocumentSchema>;

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { and, count, desc, eq } from 'drizzle-orm';
+import { and, count, desc, eq, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../../lib/fastify.js';
 import {
@@ -10,16 +10,28 @@ import {
   EdoDryRunReportSchema,
   EdoJobQueuedSchema,
   EdoJournalSummarySchema,
+  EdoSbisAccountCreateSchema,
+  EdoSbisCheckResultSchema,
+  EdoSbisCredentialsPatchSchema,
   ErrorResponseSchema,
   StoredEdoCredentialsSchema,
   type EdoCredentials,
 } from '@matcheck/contracts';
-import { edoAccounts, edoEvents, edoReceipts } from '../../db/schema.js';
+import { edoAccounts, edoEvents, edoExportCursors, edoExportDocuments, edoReceipts } from '../../db/schema.js';
 import { buildAad, encryptToString, decryptField, sha256Hex } from '../../domain/auth/crypto.js';
 import { loadEnv } from '../../lib/env.js';
 import { checkEdoAccess } from '../../domain/edo/check-access.js';
 import { runEdoDryRun } from '../../domain/edo/dry-run.js';
 import { isDiadocAccount, PROVIDER_NOT_SUPPORTED } from '../../domain/edo/provider.js';
+import { checkSbisAccess, isSbisAccount, readSbisCredentials } from '../../domain/edo/sbis/sbis-account.js';
+import { parseOrgRef } from '../../domain/edo/sbis/sbis.org-ref.js';
+
+/** Правка учётки: поля Диадока из контракта и, отдельным полем, ключи СБИС. */
+const AccountPatchSchema = EdoAccountPatchSchema.extend({
+  sbisCredentials: EdoSbisCredentialsPatchSchema.optional(),
+});
+
+const fingerprint = (value: string) => sha256Hex(value).slice(0, 8);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -42,11 +54,23 @@ function dto(a: typeof edoAccounts.$inferSelect) {
   let refreshTokenLength: number | null = null;
   let clientSecretFingerprint: string | null = null;
   let refreshTokenFingerprint: string | null = null;
+  let sbisAppClientId: string | null = null;
+  let sbisAppSecretLength: number | null = null;
+  let sbisAppSecretFingerprint: string | null = null;
+  let sbisSecretKeyLength: number | null = null;
+  let sbisSecretKeyFingerprint: string | null = null;
   try {
     const creds = StoredEdoCredentialsSchema.parse(
       JSON.parse(decryptField(a.credentialsEncrypted, buildAad('edo_accounts', a.id))),
-    ) as EdoCredentials;
-    if (creds.authMode === 'oidc_refresh') {
+    );
+    if (creds.authMode === 'sbis_service_key') {
+      // «ID подключения» — не секрет, как логин; ключи — длина и отпечаток.
+      sbisAppClientId = creds.appClientId;
+      sbisAppSecretLength = creds.appSecret.length;
+      sbisAppSecretFingerprint = fingerprint(creds.appSecret);
+      sbisSecretKeyLength = creds.secretKey.length;
+      sbisSecretKeyFingerprint = fingerprint(creds.secretKey);
+    } else if (creds.authMode === 'oidc_refresh') {
       hasClientSecret = Boolean(creds.clientSecret);
       hasRefreshToken = hasRefreshToken || Boolean(creds.refreshToken);
       // Наружу уходит идентификатор приложения и ДЛИНЫ секретов, но не они
@@ -92,6 +116,11 @@ function dto(a: typeof edoAccounts.$inferSelect) {
     clientSecretFingerprint,
     refreshTokenFingerprint,
     refreshTokenAgeDays: usedAt ? Math.floor((Date.now() - usedAt.getTime()) / DAY_MS) : null,
+    sbisAppClientId,
+    sbisAppSecretLength,
+    sbisAppSecretFingerprint,
+    sbisSecretKeyLength,
+    sbisSecretKeyFingerprint,
     lastEventAt: a.lastEventAt?.toISOString() ?? null,
     lastSyncAt: a.lastSyncAt?.toISOString() ?? null,
     lastOkAt: a.lastOkAt?.toISOString() ?? null,
@@ -124,12 +153,35 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
     '/api/v1/admin/edo-accounts',
     {
       preHandler: [app.authenticate, app.authorize('admin')],
-      schema: { body: EdoAccountCreateSchema, response: { 201: EdoAccountDtoSchema } },
+      schema: {
+        body: z.union([EdoAccountCreateSchema, EdoSbisAccountCreateSchema]),
+        response: { 201: EdoAccountDtoSchema },
+      },
     },
     async (req, reply) => {
       const id = crypto.randomUUID();
+      const body = req.body;
+      if (body.provider === 'sbis') {
+        // Учётка СБИС: ключи шифруются так же, как у Диадока (AAD по id).
+        // Организация выбирается после «Проверить доступ» — до неё выгрузки нет.
+        const [created] = await app.db
+          .insert(edoAccounts)
+          .values({
+            id,
+            provider: 'sbis',
+            name: body.name,
+            authMode: 'sbis_service_key',
+            credentialsEncrypted: encryptToString(JSON.stringify(body.credentials), buildAad('edo_accounts', id)),
+            defaultSiteId: body.defaultSiteId ?? null,
+            isActive: body.isActive,
+          })
+          .returning();
+        if (!created) throw new Error('Failed to insert edo_account');
+        reply.code(201);
+        return dto(created);
+      }
       const encrypted = encryptToString(
-        JSON.stringify(req.body.credentials),
+        JSON.stringify(body.credentials),
         buildAad('edo_accounts', id),
       );
       // Отсечка первичной загрузки фиксируется ОДИН раз, при заведении: она
@@ -141,16 +193,16 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
         .insert(edoAccounts)
         .values({
           id,
-          provider: req.body.provider,
-          name: req.body.name,
-          environment: req.body.environment,
-          authMode: req.body.credentials.authMode,
+          provider: body.provider,
+          name: body.name,
+          environment: body.environment,
+          authMode: body.credentials.authMode,
           credentialsEncrypted: encrypted,
-          boxId: req.body.boxId ?? null,
-          orgInn: req.body.orgInn ?? null,
-          defaultSiteId: req.body.defaultSiteId ?? null,
+          boxId: body.boxId ?? null,
+          orgInn: body.orgInn ?? null,
+          defaultSiteId: body.defaultSiteId ?? null,
           backfillSince,
-          isActive: req.body.isActive,
+          isActive: body.isActive,
         })
         .returning();
       if (!created) throw new Error('Failed to insert edo_account');
@@ -165,7 +217,7 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
       preHandler: [app.authenticate, app.authorize('admin')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
-        body: EdoAccountPatchSchema,
+        body: AccountPatchSchema,
         response: { 200: EdoAccountDtoSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema },
       },
     },
@@ -194,6 +246,19 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
         });
       }
 
+      // Ключи и площадка — свои у каждого оператора: чужие поля — отказ, а не
+      // молчаливое игнорирование (иначе форма «сохранила бы» то, чего нет).
+      const sbis = isSbisAccount(row);
+      if (sbis && (req.body.credentials || (req.body.environment !== undefined && req.body.environment !== row.environment))) {
+        return reply.code(409).send({
+          error: 'provider_mismatch',
+          message: 'Ключи и площадка Диадока к учётке СБИС не относятся.',
+        });
+      }
+      if (!sbis && req.body.sbisCredentials) {
+        return reply.code(409).send({ error: 'provider_mismatch', message: 'Ключи СБИС — только для учётки СБИС.' });
+      }
+
       const patch: Partial<typeof edoAccounts.$inferInsert> = { updatedAt: new Date() };
       if (req.body.name !== undefined) patch.name = req.body.name;
       if (req.body.isActive !== undefined) patch.isActive = req.body.isActive;
@@ -205,7 +270,22 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
       // ленте ДРУГОГО ящика. Молча его сбросить тоже нельзя — это тихая
       // перезагрузка всей истории, поэтому после первого успешного опроса ящик
       // меняться не может, нужна новая учётная запись.
-      if (req.body.boxId !== undefined && req.body.boxId !== row.boxId) {
+      // У СБИС «ящик» — организация, и она входит в идентичность курсора
+      // выгрузки. Сменить её можно только пока выгрузка ни разу не шла: проверка
+      // курсора — в том же UPDATE (ниже), без гонки «проверил — обновил».
+      let sbisOrgChange = false;
+      if (sbis && req.body.boxId !== undefined && req.body.boxId !== row.boxId) {
+        const org = parseOrgRef(req.body.boxId);
+        if (!org) {
+          return reply.code(409).send({
+            error: 'invalid_organization',
+            message: 'Организация СБИС указана неверно — выберите её в «Проверить доступ».',
+          });
+        }
+        patch.boxId = req.body.boxId;
+        patch.orgInn = org.inn;
+        sbisOrgChange = true;
+      } else if (req.body.boxId !== undefined && req.body.boxId !== row.boxId) {
         if (row.lastIndexKey) {
           return reply.code(409).send({
             error: 'box_change_forbidden',
@@ -259,6 +339,26 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
         );
       }
 
+      if (req.body.sbisCredentials) {
+        // Пустое поле — «не менял», как у Диадока: ключи наружу не отдаются.
+        let current;
+        try {
+          current = readSbisCredentials(row);
+        } catch {
+          return reply.code(409).send({
+            error: 'credentials_unreadable',
+            message: 'Прежние ключи не читаются — удалите учётку и заведите заново.',
+          });
+        }
+        const next = {
+          ...current,
+          ...(req.body.sbisCredentials.appClientId ? { appClientId: req.body.sbisCredentials.appClientId } : {}),
+          ...(req.body.sbisCredentials.appSecret ? { appSecret: req.body.sbisCredentials.appSecret } : {}),
+          ...(req.body.sbisCredentials.secretKey ? { secretKey: req.body.sbisCredentials.secretKey } : {}),
+        };
+        patch.credentialsEncrypted = encryptToString(JSON.stringify(next), buildAad('edo_accounts', row.id));
+      }
+
       if (resetAuthState) {
         patch.authStateEncrypted = null;
         patch.authStateVersion = row.authStateVersion + 1;
@@ -268,8 +368,21 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
       const [updated] = await app.db
         .update(edoAccounts)
         .set(patch)
-        .where(eq(edoAccounts.id, row.id))
+        .where(
+          sbisOrgChange
+            ? and(
+                eq(edoAccounts.id, row.id),
+                drSql`not exists (select 1 from ${edoExportCursors} c where c.edo_account_id = ${row.id})`,
+              )
+            : eq(edoAccounts.id, row.id),
+        )
         .returning();
+      if (!updated && sbisOrgChange) {
+        return reply.code(409).send({
+          error: 'box_change_forbidden',
+          message: 'Выгрузка по этой организации уже шла: смена организации обесценит курсор. Заведите отдельную учётку.',
+        });
+      }
       if (!updated) return reply.code(404).send({ error: 'not_found' });
       return dto(updated);
     },
@@ -291,9 +404,18 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req, reply) => {
       let del: { id: string }[];
       try {
+        // Учётку СБИС с выгруженными УПД не удаляем: каскад снёс бы строки реестра,
+        // а их файлы остались бы в хранилище без хозяина. Условие — в самом
+        // DELETE: проход выгрузки не успеет добавить строку между проверкой и удалением.
         del = await app.db
           .delete(edoAccounts)
-          .where(eq(edoAccounts.id, req.params.id))
+          .where(
+            and(
+              eq(edoAccounts.id, req.params.id),
+              drSql`(${edoAccounts.provider} <> 'sbis' or not exists (
+                select 1 from ${edoExportDocuments} d where d.edo_account_id = ${req.params.id}))`,
+            ),
+          )
           .returning({ id: edoAccounts.id });
       } catch (err) {
         if ((err as { code?: string }).code === '23503') {
@@ -304,7 +426,18 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
         }
         throw err;
       }
-      if (del.length === 0) return reply.code(404).send({ error: 'not_found' });
+      if (del.length === 0) {
+        const [exists] = await app.db
+          .select({ id: edoAccounts.id })
+          .from(edoAccounts)
+          .where(eq(edoAccounts.id, req.params.id))
+          .limit(1);
+        if (!exists) return reply.code(404).send({ error: 'not_found' });
+        return reply.code(409).send({
+          error: 'account_has_registry',
+          message: 'У учётки СБИС есть выгруженные УПД — отключите её вместо удаления.',
+        });
+      }
       return { ok: true as const };
     },
   );
@@ -322,7 +455,7 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: {
         params: z.object({ id: z.string().uuid() }),
         response: {
-          200: EdoCheckResultSchema,
+          200: z.union([EdoCheckResultSchema, EdoSbisCheckResultSchema]),
           404: ErrorResponseSchema,
           409: ErrorResponseSchema,
           502: ErrorResponseSchema,
@@ -337,7 +470,10 @@ export async function edoAccountRoutes(rawApp: FastifyInstance): Promise<void> {
         .limit(1);
       if (!row) return reply.code(404).send({ error: 'not_found' });
 
-      const result = await checkEdoAccess(app.db, row, app.log);
+      // СБИС: вход по ключам и список организаций; Диадок — ящики и права.
+      const result = isSbisAccount(row)
+        ? await checkSbisAccess(app.db, row, app.log)
+        : await checkEdoAccess(app.db, row, app.log);
       if ('error' in result) {
         return reply.code(result.status).send({ error: result.error, message: result.message });
       }

@@ -108,6 +108,12 @@ export type SbisClient = {
     pageSize?: number;
   }): Promise<SbisChangesPage>;
   readDocument(q: { documentId: string; revisionId?: string | null }): Promise<SbisDocument>;
+  /**
+   * Вся лента одного документа — для частичного ответа `ПрочитатьДокумент`.
+   * Проверено живым запросом 22.10: параметр — `Фильтр.ДопПоля`, вместе с
+   * `Фильтр.ИдентификаторДокумента`; без реквизитов документа СБИС отвечает 1FA.
+   */
+  listDocumentChanges(q: { org: SbisOrgRef; documentId: string; since: Date; until: Date }): Promise<SbisDocument[]>;
   downloadFile(link: string, maxBytes: number): Promise<{ bytes: Buffer; zip: boolean }>;
 };
 
@@ -196,6 +202,21 @@ export function createSbisClient(deps: SbisClientDeps): SbisClient {
         hasMore: flag == null ? null : isYes(flag),
         receivedAt,
       };
+    },
+
+    async listDocumentChanges({ org, documentId, since, until }) {
+      const raw = await rpc('СБИС.СписокИзменений', {
+        Фильтр: {
+          ДатаВремяС: formatSbisDateTime(since),
+          ДатаВремяПо: formatSbisDateTime(until),
+          ИдентификаторДокумента: documentId,
+          НашаОрганизация: orgFilter(org),
+          ДопПоля: 'СписокПоДокументу',
+          ПолныйСертификатЭП: 'Нет',
+          Навигация: { РазмерСтраницы: '50' },
+        },
+      });
+      return SbisChangesSchema.parse(raw ?? {}).Документ.filter((d) => d.Идентификатор === documentId);
     },
 
     async readDocument({ documentId, revisionId }) {

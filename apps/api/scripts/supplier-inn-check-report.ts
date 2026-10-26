@@ -17,6 +17,7 @@
  */
 import { sql as drSql } from 'drizzle-orm';
 import { db, sql } from '../src/db/client.js';
+import { loadEnv } from '../src/lib/env.js';
 import { normalizeInn } from '../src/domain/sourceDocuments/resolve-contractor.js';
 import {
   loadDirectoryInns,
@@ -116,11 +117,15 @@ async function runBacktest() {
     day: string | null;
     total: number | null;
   }>;
+  // Строки СБИС — как в рабочем коде (loadEdoForDate): только при EDO_SBIS_ENABLED.
+  const sbisEnabled = loadEnv().EDO_SBIS_ENABLED;
   const edoRows = (await db.execute(drSql`
-    select to_char(document_date, 'YYYY-MM-DD') as day, document_number as number,
-           supplier_inn, seller_inns, supplier_name, total_sum::float8 as total
-      from edo_export_documents
-     where document_date >= now() - make_interval(days => ${days + 30})`)) as unknown as Array<{
+    select to_char(e.document_date, 'YYYY-MM-DD') as day, e.document_number as number,
+           e.supplier_inn, e.seller_inns, e.supplier_name, e.total_sum::float8 as total
+      from edo_export_documents e
+      join edo_accounts a on a.id = e.edo_account_id
+     where e.document_date >= now() - make_interval(days => ${days + 30})
+       and (a.provider <> 'sbis' or ${sbisEnabled})`)) as unknown as Array<{
     day: string;
     number: string | null;
     supplier_inn: string | null;

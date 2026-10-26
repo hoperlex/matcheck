@@ -123,6 +123,10 @@ function fakeClient(cfg: FakeCfg = {}) {
       if (next instanceof Error) throw next;
       return next;
     },
+    // Проба догрузку частичного ответа не делает (это выгрузка, Р2).
+    listDocumentChanges: async () => {
+      throw new Error('СписокПоДокументу в пробе не используется');
+    },
     readDocument: async (q) => {
       calls.readDocument.push(q);
       if (!cfg.read) throw new Error('ПрочитатьДокумент не настроен');
