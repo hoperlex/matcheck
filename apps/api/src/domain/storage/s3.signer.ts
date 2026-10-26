@@ -56,10 +56,22 @@ export async function presign({
   return signed.url;
 }
 
-export async function getObject(key: string): Promise<Buffer> {
+/**
+ * @param opts.signal срок вызывающего на всё чтение: попытки, паузы между ними
+ *   и тело ответа. Без него — прежние 3 попытки по 60 с.
+ */
+export async function getObject(key: string, opts?: { signal?: AbortSignal }): Promise<Buffer> {
   const url = new URL(`${endpoint()}/${env.S3_BUCKET}/${key}`);
-  const res = await s3FetchWithRetry(() =>
-    getClient().fetch(url, { method: 'GET', signal: AbortSignal.timeout(S3_ATTEMPT_TIMEOUT_MS) }),
+  const signal = opts?.signal;
+  const res = await s3FetchWithRetry(
+    () =>
+      getClient().fetch(url, {
+        method: 'GET',
+        signal: signal
+          ? AbortSignal.any([AbortSignal.timeout(S3_ATTEMPT_TIMEOUT_MS), signal])
+          : AbortSignal.timeout(S3_ATTEMPT_TIMEOUT_MS),
+      }),
+    { signal },
   );
   if (!res.ok) {
     const text = await res.text().catch(() => '');

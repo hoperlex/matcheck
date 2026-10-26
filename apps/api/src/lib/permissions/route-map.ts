@@ -353,6 +353,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // окно отвечало 403 (allow-list маршрута не снимался).
   ['GET /api/v1/deliveries/:id/edo-matches', EDO_READ],
   ['GET /api/v1/deliveries/:id/edo-matches/:matchId/file', EDO_READ],
+  ['GET /api/v1/deliveries/:id/edo-matches/:matchId/items', EDO_READ],
   ['GET /api/v1/deliveries/:id/edo-candidates', EDO_READ],
   ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/file', EDO_READ],
   ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/pdf', EDO_READ],

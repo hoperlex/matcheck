@@ -31,7 +31,27 @@ function isTransientS3Status(status: number): boolean {
   return status === 502 || status === 503 || status === 504;
 }
 
-const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/**
+ * Пауза между попытками. С сигналом она прерывается сразу: срок вызывающего
+ * (например, 15 с на строки УПД в карточке приёмки) не должен ждать конца паузы.
+ */
+export function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 /**
  * Освобождает тело ответа, которое не будем читать. Undici требует прочитать
@@ -66,31 +86,39 @@ function notify<T>(hook: ((info: T) => void) | undefined, info: T): void {
 /**
  * Оборачивает одну S3-операцию (`() => getClient().fetch(...)`) ретраем.
  * Экспортируется ради юнит-тестов: `attempt`/`sleep` инжектируются.
+ *
+ * `signal` — срок вызывающего на всю операцию, вместе с повторами и паузами.
+ * Отменённый сигнал новых попыток не начинает и паузу прерывает; бросается его
+ * причина. Без сигнала поведение прежнее.
  */
 export async function s3FetchWithRetry(
   attempt: () => Promise<Response>,
   opts: {
     maxAttempts?: number;
     baseMs?: number;
-    sleep?: (ms: number) => Promise<void>;
+    sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+    signal?: AbortSignal;
   } & S3RetryHooks = {},
 ): Promise<Response> {
   const maxAttempts = opts.maxAttempts ?? S3_MAX_ATTEMPTS;
   const baseMs = opts.baseMs ?? S3_RETRY_BASE_MS;
   const sleep = opts.sleep ?? defaultSleep;
+  const signal = opts.signal;
   let lastErr: unknown;
   for (let i = 1; i <= maxAttempts; i++) {
+    signal?.throwIfAborted();
     let res: Response;
     try {
       res = await attempt();
     } catch (err) {
       lastErr = err;
-      if (i >= maxAttempts) {
+      // Попытку оборвал срок вызывающего — это не сбой узла, повторять нечего.
+      if (i >= maxAttempts || signal?.aborted) {
         notify(opts.onFinish, { attempts: i, err });
         throw err;
       }
       notify(opts.onRetry, { attempt: i, err });
-      await sleep(baseMs * Math.pow(3, i - 1)); // 200мс, 600мс, …
+      await sleep(baseMs * Math.pow(3, i - 1), signal); // 200мс, 600мс, …
       continue;
     }
     // Шлюзовой 5xx — транзиентный, повторяем; на последней попытке отдаём
@@ -99,7 +127,7 @@ export async function s3FetchWithRetry(
       lastErr = new Error(`S3 transient HTTP ${res.status}`);
       await discardBody(res);
       notify(opts.onRetry, { attempt: i, status: res.status });
-      await sleep(baseMs * Math.pow(3, i - 1));
+      await sleep(baseMs * Math.pow(3, i - 1), signal);
       continue;
     }
     notify(opts.onFinish, { attempts: i, status: res.status });

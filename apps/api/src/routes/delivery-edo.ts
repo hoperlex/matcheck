@@ -21,6 +21,7 @@ import { findEdoCandidates } from '../domain/operations/edo-candidates.js';
 import { edoDocumentUsage, edoUsageKey } from '../domain/operations/edo-usage.js';
 import { toIsoDate } from '../domain/edo/export-upd.js';
 import { edoGroupHasImported, edoGroupLinks, lockEdoDocGroup } from '../domain/edo/export-twins.js';
+import { readExportItems, readImportedItems } from '../domain/edo/linked-edo-items.js';
 import { decodeXmlBuffer } from '../domain/edo/upd-xml-decode.js';
 import { parseUpdXml, type UpdParsed } from '../domain/edo/upd.parser.js';
 import {
@@ -217,6 +218,46 @@ const LinkedEdoDocumentSchema = z.object({
   /** Другие приёмки с той же УПД: первые по номеру и общее число. */
   alsoIn: z.array(UsedInSchema),
   alsoInCount: z.number().int(),
+});
+
+const nullableNumber = z.number().nullable();
+
+/**
+ * Строки привязанной УПД для блока материалов (domain/edo/linked-edo-items.ts).
+ * Подпись — из реестра или карточки и есть всегда; итоги и строки — из разбора
+ * файла и при сбое пусты. null у числа — «неизвестно», не ноль.
+ */
+const LinkedEdoItemsSchema = z.object({
+  matchId: z.string().uuid(),
+  source: z.enum(['import', 'export']),
+  label: z.object({
+    operator: z.string(),
+    docNumber: z.string().nullable(),
+    docDate: z.string().nullable(),
+    correctionNumber: z.string().nullable(),
+  }),
+  state: z.enum(['ready', 'incomplete', 'storage_failed', 'parse_failed', 'too_large']),
+  totals: z
+    .object({ totalSum: nullableNumber, totalExVat: nullableNumber, vatSum: nullableNumber })
+    .nullable(),
+  reasons: z.array(z.string()),
+  items: z.array(
+    z.object({
+      position: z.number().int(),
+      lineNo: nullableNumber,
+      nameRaw: z.string(),
+      qty: z.number(),
+      unit: z.string().nullable(),
+      unitCode: z.string().nullable(),
+      price: nullableNumber,
+      sumExVat: nullableNumber,
+      vatRate: nullableNumber,
+      vatSum: nullableNumber,
+      sum: nullableNumber,
+      itemKind: z.number().int().nullable(),
+      productCode: z.string().nullable(),
+    }),
+  ),
 });
 
 /**
@@ -422,6 +463,96 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
         req.log.warn({ err, matchId: req.params.matchId }, 'edo match file presign failed');
         return reply.code(404).send({ error: 'file_not_found' });
       }
+    },
+  );
+
+  // Строки привязанной УПД — основной список блока материалов в карточке.
+  // По одной УПД на запрос: медленная или сбойная не задерживает соседние.
+  // Только чтение; позиции приёмки (факт инспектора) не трогаются.
+  app.get(
+    '/api/v1/deliveries/:id/edo-matches/:matchId/items',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid(), matchId: z.string().uuid() }),
+        response: {
+          200: LinkedEdoItemsSchema,
+          404: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [match] = await app.db
+        .select({
+          id: deliveryEdoMatches.id,
+          sourceDocumentId: deliveryEdoMatches.sourceDocumentId,
+          exportDocumentId: deliveryEdoMatches.exportDocumentId,
+        })
+        .from(deliveryEdoMatches)
+        .where(
+          and(
+            eq(deliveryEdoMatches.id, req.params.matchId),
+            eq(deliveryEdoMatches.deliveryId, req.params.id),
+          ),
+        )
+        .limit(1);
+      if (!match) return reply.code(404).send({ error: 'not_found' });
+
+      if (match.exportDocumentId) {
+        const [document] = await app.db
+          .select({
+            id: edoExportDocuments.id,
+            status: edoExportDocuments.status,
+            s3Key: edoExportDocuments.s3Key,
+            sizeBytes: edoExportDocuments.sizeBytes,
+            docNumber: edoExportDocuments.documentNumber,
+            docDate: edoExportDocuments.documentDate,
+            correctionNumber: edoExportDocuments.correctionNumber,
+            operator: edoAccounts.provider,
+          })
+          .from(edoExportDocuments)
+          .innerJoin(edoAccounts, eq(edoAccounts.id, edoExportDocuments.edoAccountId))
+          .where(eq(edoExportDocuments.id, match.exportDocumentId))
+          .limit(1);
+        if (!document) return reply.code(404).send({ error: 'not_found' });
+        const result = await readExportItems(document, { log: req.log });
+        return {
+          matchId: match.id,
+          source: 'export' as const,
+          label: {
+            operator: document.operator,
+            docNumber: document.docNumber,
+            docDate: document.docDate?.toISOString().slice(0, 10) ?? null,
+            correctionNumber: document.correctionNumber,
+          },
+          ...result,
+        };
+      }
+
+      if (!match.sourceDocumentId) return reply.code(404).send({ error: 'not_found' });
+      const [card] = await app.db
+        .select({
+          docNumber: sourceDocuments.docNumber,
+          docDate: sourceDocuments.docDate,
+          totalSum: sourceDocuments.totalSum,
+          vatSum: sourceDocuments.vatSum,
+        })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, match.sourceDocumentId))
+        .limit(1);
+      if (!card) return reply.code(404).send({ error: 'not_found' });
+      const result = await readImportedItems(app.db, match.sourceDocumentId, card);
+      return {
+        matchId: match.id,
+        source: 'import' as const,
+        label: {
+          operator: 'diadoc',
+          docNumber: card.docNumber,
+          docDate: card.docDate?.toISOString().slice(0, 10) ?? null,
+          correctionNumber: null,
+        },
+        ...result,
+      };
     },
   );
 

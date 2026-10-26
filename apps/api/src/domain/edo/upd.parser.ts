@@ -525,14 +525,24 @@ export function assessUpdParse(parsed: UpdParsed): UpdParseAssessment {
   if (!parsed.docNumber.trim()) reasons.push('не прочитан номер документа');
   if (!parsed.docDate.trim()) reasons.push('не прочитана дата документа');
   if (!parsed.supplier.inn.trim()) reasons.push('не прочитан ИНН поставщика');
-  if (parsed.items.length === 0) reasons.push('не прочитана ни одна позиция');
+  reasons.push(...assessUpdItems(parsed));
 
+  return reasons.length === 0 ? { ok: true } : { ok: false, reasons };
+}
+
+/**
+ * Прочитаны ли позиции — та часть `assessUpdParse`, что касается строк.
+ *
+ * Нужна отдельно там, где реквизиты шапки уже известны из реестра, а показать
+ * надо именно строки (материалы УПД в карточке приёмки): пустой разбор нельзя
+ * выдавать за пустой список. Пустой массив — позиции годны.
+ */
+export function assessUpdItems(parsed: {
+  items: ReadonlyArray<{ qty: number; sum: number | null }>;
+}): string[] {
+  if (parsed.items.length === 0) return ['не прочитана ни одна позиция'];
   // Строка без количества и без суммы — признак того, что читались не те имена
   // полей: по такому документу нечего принимать.
   const emptyRows = parsed.items.filter((i) => !i.qty && i.sum === null).length;
-  if (parsed.items.length > 0 && emptyRows === parsed.items.length) {
-    reasons.push('во всех позициях пусты и количество, и сумма');
-  }
-
-  return reasons.length === 0 ? { ok: true } : { ok: false, reasons };
+  return emptyRows === parsed.items.length ? ['во всех позициях пусты и количество, и сумма'] : [];
 }

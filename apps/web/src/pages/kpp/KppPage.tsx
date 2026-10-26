@@ -85,6 +85,15 @@ import { pickUpdSupplierName, updSupplierEditTarget } from '../shared/updSupplie
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkEdoDocumentModal, type EdoSection } from './LinkEdoDocumentModal';
 import { LinkedEdoChips, type LinkedEdoDocument } from './LinkedEdoChips';
+import { computeVatSum, toNum } from './itemMoney';
+import { useDeliveryEdoItems, type EdoItemsEntry } from './useDeliveryEdoItems';
+import { edoMatchesForSection, edoMatchesWithoutSection } from './edoSectionMatches';
+import {
+  DeliveryEdoOnlyBlocks,
+  DeliveryEdoSectionBody,
+  edoCountLabel,
+  useFactPanels,
+} from './DeliveryEdoSectionBody';
 import { LinkOutlined } from '@ant-design/icons';
 import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
 import {
@@ -140,25 +149,6 @@ type DraftItem = {
   volumeConfidence: 'low' | 'medium' | 'high' | null;
   groupName: string | null;
 };
-
-function toNum(v: string | null): number | null {
-  if (v === null || v === '') return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-function computeVatSum(it: {
-  qtyActual: string | null;
-  qtyPlanned: string | null;
-  price: string | null;
-  vatRate: string | null;
-}): number | null {
-  const qty = toNum(it.qtyActual) ?? toNum(it.qtyPlanned);
-  const price = toNum(it.price);
-  const rate = toNum(it.vatRate);
-  if (qty === null || price === null || rate === null) return null;
-  return (qty * price * rate) / 100;
-}
 
 type ListTab = 'expected' | 'accepted';
 
@@ -410,6 +400,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     queryFn: () => api.get<{ items: LinkedEdoDocument[] }>(`/deliveries/${deliveryId}/edo-matches`),
     enabled: !!deliveryId && !isNew && canLinkUpd,
   });
+  // Строки УПД из ЭДО — основной список блока материалов (DeliveryEdoSectionBody).
+  // Запрос на каждую привязку; без привязок (и без права на них) — ни одного.
+  const edoItemsByMatch = useDeliveryEdoItems(deliveryId, edoMatchesQuery.data?.items ?? []);
+  // Подблок «Факт приёмки» в блоке с ЭДО: раскрыт или нет (см. useFactPanels).
+  const factPanels = useFactPanels();
 
   // Лёгкие count-запросы для счётчиков на вкладках Ожидаемые/Принятые.
   // ОБЯЗАТЕЛЬНО объявляются вместе с остальными хуками — выше любых early
@@ -1164,6 +1159,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
+      // Сервер обнуляет блок у УПД из ЭДО этого документа: без перечитки её
+      // строки остались бы в отвязанном блоке, а не ушли в отдельный.
+      void queryClient.invalidateQueries({ queryKey: ['delivery-edo-matches', deliveryId] });
     },
     onError: (err: Error) => {
       message.error(err.message);
@@ -1644,10 +1642,18 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     // в шапке. Блок, которого нет среди связанных документов, тоже шапка:
     // чип не должен пропасть ни при каком составе блоков.
     const edoMatches = edoMatchesQuery.data?.items ?? [];
-    const edoSectionIds = new Set(linkedDocuments.map((d) => d.id));
-    const headerEdoMatches = edoMatches.filter(
-      (m) => !m.sectionDocumentId || !edoSectionIds.has(m.sectionDocumentId),
-    );
+    const headerEdoMatches = edoMatchesWithoutSection(edoMatches, linkedDocuments);
+    const edoEntries = (matches: readonly LinkedEdoDocument[]): EdoItemsEntry[] =>
+      matches.flatMap((m) => {
+        const entry = edoItemsByMatch.get(m.id);
+        return entry ? [entry] : [];
+      });
+    // УПД из ЭДО блока — ровно обратное headerEdoMatches (edoSectionMatches.ts).
+    const sectionEdoEntries = (doc: OperationSourceDocument | null): EdoItemsEntry[] =>
+      edoEntries(edoMatchesForSection(doc, edoMatches));
+    const edoSectionKeys = linkedDocuments
+      .filter((d) => edoMatchesForSection(d, edoMatches).length > 0)
+      .map((d) => d.id);
     const isAdmin = authUser?.role === 'admin';
     const canUnmark = isAdmin || authUser?.id === (loadedDelivery?.pendingDeletionByUserId ?? null);
     return (
@@ -2266,14 +2272,57 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           problemItemIds={problemItemIds}
           columns={columns}
           cardRender={cardRender}
-          onAddItem={isContractor ? undefined : addItem}
+          onAddItem={
+            isContractor
+              ? undefined
+              : (docId) => {
+                  addItem(docId);
+                  // Новая строка ложится в факт: в блоке с ЭДО он мог быть
+                  // свёрнут, и строка оказалась бы невидимой.
+                  if (docId) factPanels.rowAdded(docId);
+                }
+          }
+          autoOpenKeys={edoSectionKeys}
+          sectionLabel={(section, defaultLabel) => {
+            const doc = section.document;
+            const entries = sectionEdoEntries(doc);
+            if (!doc || entries.length === 0) return defaultLabel;
+            return `Материалы · ${sourceKindLabel(doc.kind)} № ${doc.docNumber ?? 'без номера'} · ЭДО${edoCountLabel(entries)}`;
+          }}
+          renderSectionBody={(section, table) => {
+            const doc = section.document;
+            const entries = sectionEdoEntries(doc);
+            if (!doc || entries.length === 0) return table;
+            // Недобор позиций («N из M») и замечания сверки — подписью факта:
+            // заголовок блока теперь считает строки ЭДО.
+            const total = doc.itemsCount;
+            const covered = doc.coveredItemsCount;
+            const short = total != null && covered != null && covered < total;
+            const problems = section.items.filter(
+              (r) => r.sourceDocumentItemId && problemItemIds.has(r.sourceDocumentItemId),
+            ).length;
+            const caption = `Факт приёмки — распознано со скана (${short ? `${covered} из ${total}` : section.items.length})${problems ? ` · ⚠ строк с замечаниями сверки: ${problems}` : ''}`;
+            return (
+              <DeliveryEdoSectionBody
+                deliveryId={loadedDelivery.id}
+                entries={entries}
+                factTable={table}
+                factRows={section.items}
+                factCaption={caption}
+                factOpen={factPanels.isOpen(doc.id, entries)}
+                onFactOpenChange={(open) => factPanels.setOpen(doc.id, open)}
+                photos={loadedDelivery.photos ?? []}
+                onOpenXml={(match) => void openEdoFile(match)}
+              />
+            );
+          }}
           sectionExtra={
             canLinkUpd
               ? (section) => {
                   const doc = section.document;
                   // Только блок связанного документа: отвязанный сервер не примет.
                   if (!doc?.linked) return null;
-                  const own = edoMatches.filter((m) => m.sectionDocumentId === doc.id);
+                  const own = edoMatchesForSection(doc, edoMatches);
                   const canPick = !isNew && !isPending && !loadedDelivery.sourceShipmentId;
                   return (
                     <>
@@ -2308,6 +2357,16 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           }
           emptyHint="Материалы можно не добавлять — приёмка сохранится со статусом «Не оформлена». Чтобы оформить, добавьте строки вручную или выберите УПД."
         />
+
+        {/* УПД из ЭДО без блока бумажного документа — свои блоки строк ЭДО. */}
+        {canLinkUpd && (
+          <DeliveryEdoOnlyBlocks
+            deliveryId={loadedDelivery.id}
+            entries={edoEntries(headerEdoMatches)}
+            photos={loadedDelivery.photos ?? []}
+            onOpenXml={(match) => void openEdoFile(match)}
+          />
+        )}
 
         {(() => {
           // Мобильный пишет comment как multiline с маркерами «1 Этап: "…"»,

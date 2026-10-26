@@ -79,6 +79,70 @@ describe('s3FetchWithRetry — ретрай транзиентных сбоев 
   });
 });
 
+// ── Срок вызывающего (signal) ────────────────────────────────────────────────
+
+describe('s3FetchWithRetry — срок вызывающего', () => {
+  it('сигнал отменён до старта → ни одной попытки, бросается причина', async () => {
+    const attempt = vi.fn().mockResolvedValue(resp(200));
+    const reason = new Error('срок вышел');
+    await expect(
+      s3FetchWithRetry(attempt, { sleep: noSleep, signal: AbortSignal.abort(reason) }),
+    ).rejects.toBe(reason);
+    expect(attempt).not.toHaveBeenCalled();
+  });
+
+  it('отмена во время паузы прерывает её сразу, следующей попытки нет', async () => {
+    // Пауза — настоящая и длинная (60 с): без прерывания тест упрётся в таймаут.
+    const attempt = vi.fn().mockRejectedValue(new Error('ECONNRESET'));
+    const controller = new AbortController();
+    const reason = new Error('срок вышел');
+    const started = Date.now();
+    const pending = s3FetchWithRetry(attempt, { baseMs: 60_000, signal: controller.signal });
+    setTimeout(() => controller.abort(reason), 20);
+    await expect(pending).rejects.toBe(reason);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(attempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('попытку оборвал срок → без повтора, даже если попытки остались', async () => {
+    const controller = new AbortController();
+    const attempt = vi.fn(async () => {
+      controller.abort(new Error('срок вышел'));
+      throw new DOMException('This operation was aborted', 'AbortError');
+    });
+    await expect(
+      s3FetchWithRetry(attempt, { sleep: noSleep, signal: controller.signal }),
+    ).rejects.toThrow('aborted');
+    expect(attempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('подменённая пауза получает сигнал', async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const sleep = (_ms: number, signal?: AbortSignal) => {
+      seen.push(signal);
+      return Promise.resolve();
+    };
+    const controller = new AbortController();
+    const attempt = vi.fn().mockResolvedValueOnce(resp(502)).mockResolvedValueOnce(resp(200));
+    const res = await s3FetchWithRetry(attempt, { sleep, signal: controller.signal });
+    expect(res.status).toBe(200);
+    expect(seen).toEqual([controller.signal]);
+  });
+});
+
+describe('defaultSleep', () => {
+  it('без сигнала — обычная пауза', async () => {
+    const { defaultSleep } = await import('../src/domain/storage/s3.retry.js');
+    await expect(defaultSleep(1)).resolves.toBeUndefined();
+  });
+
+  it('уже отменённый сигнал → сразу отказ с причиной', async () => {
+    const { defaultSleep } = await import('../src/domain/storage/s3.retry.js');
+    const reason = new Error('срок вышел');
+    await expect(defaultSleep(60_000, AbortSignal.abort(reason))).rejects.toBe(reason);
+  });
+});
+
 // ── Хуки, освобождение тела и обвязка стрим-прокси (s3.retry.ts) ─────────────
 
 /** Ответ с настоящим потоком-телом и шпионом на его отмену. */

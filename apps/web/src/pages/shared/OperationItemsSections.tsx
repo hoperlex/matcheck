@@ -1,7 +1,8 @@
 import { Button, Collapse, Space, Typography, type TableProps } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import type { OperationSourceDocument } from '@matcheck/contracts';
+import { useAutoOpenKeys } from '../../shared/hooks/useAutoOpenKeys';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import {
   buildItemSections,
@@ -65,6 +66,9 @@ export function OperationItemsSections<T extends RowBase>({
   emptyHint,
   problemItemIds,
   sectionExtra,
+  renderSectionBody,
+  sectionLabel,
+  autoOpenKeys,
 }: {
   items: T[];
   /** Сводка документов операции: связанные и оставшиеся в происхождении строк. */
@@ -90,6 +94,19 @@ export function OperationItemsSections<T extends RowBase>({
    * привязанная к блоку УПД из ЭДО. Клики внутри блок не сворачивают.
    */
   sectionExtra?: (section: ItemSection<T>) => ReactNode;
+  /**
+   * Обёртка тела блока: получает готовую таблицу позиций (или подсказку, если
+   * позиций нет) и может поставить что-то над ней — например, строки УПД из
+   * ЭДО, а таблицу убрать в подблок. Без пропа тело — сама таблица.
+   */
+  renderSectionBody?: (section: ItemSection<T>, table: ReactNode) => ReactNode;
+  /** Свой заголовок блока; второй аргумент — заголовок по умолчанию. */
+  sectionLabel?: (section: ItemSection<T>, defaultLabel: string) => ReactNode;
+  /**
+   * Блоки, которые раскрываются сами — один раз, когда ключ впервые появился;
+   * дальше блоком управляет человек. Без пропа все блоки свёрнуты.
+   */
+  autoOpenKeys?: readonly string[];
 }) {
   const sections = useMemo(() => buildItemSections<T>({ items, documents }), [items, documents]);
 
@@ -97,7 +114,7 @@ export function OperationItemsSections<T extends RowBase>({
   // поллинг карточки перегидратирует форму (у confirmed_mol — на каждый новый
   // updatedAt) и генерирует новые clientKey, а привязка документа меняет состав
   // блоков. По ключу-документу состояние это переживает.
-  const [openKeys, setOpenKeys] = useState<string[]>([]);
+  const [openKeys, setOpenKeys] = useAutoOpenKeys(autoOpenKeys);
 
   const hasDocuments = documents.length > 0;
 
@@ -130,9 +147,35 @@ export function OperationItemsSections<T extends RowBase>({
           </Button>
         ) : null;
         const extraContent = sectionExtra?.(section);
+        const defaultLabel = sectionTitle(section, hasDocuments);
+        const table =
+          section.items.length === 0 ? (
+            <Typography.Text type="secondary">
+              {section.document ? 'В этом документе не распознано ни одной позиции.' : emptyHint}
+            </Typography.Text>
+          ) : (
+            <ResponsiveTable<T>
+              items={section.items}
+              columns={columns}
+              rowKey="clientKey"
+              // Один и тот же класс, что у карточки документа: подсветка
+              // «этой строке не верь» должна выглядеть одинаково в обоих
+              // местах, иначе она читается как два разных сигнала.
+              rowClassName={(row) =>
+                row.sourceDocumentItemId && problemItemIds?.has(row.sourceDocumentItemId)
+                  ? 'matcheck-row-mismatch'
+                  : ''
+              }
+              cardRender={(row) => cardRender(row, displayNoByKey.get(row.clientKey) ?? 1)}
+              // Блоков на экране несколько, и собственный «во весь экран»
+              // скролл у каждого превратил бы карточку в набор окон.
+              scrollY={false}
+              pagination={{ pageSize: 100, showSizeChanger: false, hideOnSinglePage: true }}
+            />
+          );
         return {
           key: section.key,
-          label: sectionTitle(section, hasDocuments),
+          label: sectionLabel ? sectionLabel(section, defaultLabel) : defaultLabel,
           extra:
             extraContent || addButton ? (
               // Клик в заголовке переключает блок, а всплывающие подтверждения
@@ -144,31 +187,7 @@ export function OperationItemsSections<T extends RowBase>({
                 </Space>
               </span>
             ) : undefined,
-          children:
-            section.items.length === 0 ? (
-              <Typography.Text type="secondary">
-                {section.document ? 'В этом документе не распознано ни одной позиции.' : emptyHint}
-              </Typography.Text>
-            ) : (
-              <ResponsiveTable<T>
-                items={section.items}
-                columns={columns}
-                rowKey="clientKey"
-                // Один и тот же класс, что у карточки документа: подсветка
-                // «этой строке не верь» должна выглядеть одинаково в обоих
-                // местах, иначе она читается как два разных сигнала.
-                rowClassName={(row) =>
-                  row.sourceDocumentItemId && problemItemIds?.has(row.sourceDocumentItemId)
-                    ? 'matcheck-row-mismatch'
-                    : ''
-                }
-                cardRender={(row) => cardRender(row, displayNoByKey.get(row.clientKey) ?? 1)}
-                // Блоков на экране несколько, и собственный «во весь экран»
-                // скролл у каждого превратил бы карточку в набор окон.
-                scrollY={false}
-                pagination={{ pageSize: 100, showSizeChanger: false, hideOnSinglePage: true }}
-              />
-            ),
+          children: renderSectionBody ? renderSectionBody(section, table) : table,
         };
       })}
     />

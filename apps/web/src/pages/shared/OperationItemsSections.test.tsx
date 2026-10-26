@@ -149,3 +149,92 @@ describe('OperationItemsSections', () => {
     expect(screen.getAllByText('Материал')).toHaveLength(2);
   });
 });
+
+// Пропы для блока с УПД из ЭДО: строки ЭДО сверху, таблица факта — в подблок.
+// Без пропов разметка прежняя — это проверяют кейсы выше без правок.
+describe('OperationItemsSections — тело, заголовок и автораскрытие', () => {
+  const isOpen = (title: string) =>
+    screen
+      .getByText(title)
+      .closest('.ant-collapse-item')!
+      .classList.contains('ant-collapse-item-active');
+
+  it('обёртка тела получает ту же таблицу своего блока', () => {
+    renderSections({
+      autoOpenKeys: ['d1'],
+      renderSectionBody: (section, table) =>
+        section.key === 'd1' ? (
+          <div>
+            <span>строки ЭДО</span>
+            {table}
+          </div>
+        ) : (
+          table
+        ),
+    });
+    expect(screen.getByText('строки ЭДО')).toBeTruthy();
+    // Таблица в обёртке — та же: строка своего документа на месте, чужой нет.
+    expect(screen.getByText('Труба SML DN 80')).toBeTruthy();
+    expect(screen.queryByText('Хомут CON-PIPE')).toBeNull();
+  });
+
+  it('пустой блок отдаёт обёртке подсказку вместо таблицы', () => {
+    const bodies: string[] = [];
+    renderSections({
+      items: [],
+      documents: [doc()],
+      autoOpenKeys: ['d1'],
+      renderSectionBody: (_section, table) => (
+        <div ref={(el) => el && bodies.push(el.textContent ?? '')}>{table}</div>
+      ),
+    });
+    expect(bodies.at(-1)).toBe('В этом документе не распознано ни одной позиции.');
+  });
+
+  it('свой заголовок блока; по умолчанию — прежний; кнопки заголовка на месте', () => {
+    const onAddItem = vi.fn();
+    renderSections({
+      onAddItem,
+      sectionExtra: () => <span>чип</span>,
+      sectionLabel: (section, defaultLabel) =>
+        section.key === 'd1' ? 'Материалы · УПД № 0000-0082603 · ЭДО (5)' : defaultLabel,
+    });
+    expect(screen.getByText('Материалы · УПД № 0000-0082603 · ЭДО (5)')).toBeTruthy();
+    expect(screen.getByText('Материалы · УПД № 0000-0082604 (1)')).toBeTruthy();
+    expect(screen.getAllByText('чип')).toHaveLength(2);
+    expect(screen.getAllByText('Материал')).toHaveLength(2);
+  });
+
+  it('автораскрытие — один раз; свёрнутый человеком не раскрывается снова, новый ключ — раскрывается', () => {
+    const first = 'Материалы · УПД № 0000-0082603 (1)';
+    const second = 'Материалы · УПД № 0000-0082604 (1)';
+    const view = renderSections({ autoOpenKeys: ['d1'] });
+    expect(isOpen(first)).toBe(true);
+    expect(isOpen(second)).toBe(false);
+
+    fireEvent.click(screen.getByText(first));
+    expect(isOpen(first)).toBe(false);
+
+    const rerender = (autoOpenKeys: string[]) =>
+      view.rerender(
+        <OperationItemsSections<Row>
+          items={[
+            { clientKey: 'k1', sourceDocumentId: 'd1', nameRaw: 'Труба SML DN 80' },
+            { clientKey: 'k2', sourceDocumentId: 'd2', nameRaw: 'Хомут CON-PIPE' },
+          ]}
+          documents={[doc(), doc({ id: 'd2', docNumber: '0000-0082604' })]}
+          columns={columns}
+          cardRender={(row) => <span>{row.nameRaw}</span>}
+          emptyHint="Материалы можно не добавлять"
+          autoOpenKeys={autoOpenKeys}
+        />,
+      );
+    // Опрос карточки: тот же состав — новым массивом.
+    rerender(['d1']);
+    expect(isOpen(first)).toBe(false);
+    // Привязали УПД ко второму блоку.
+    rerender(['d1', 'd2']);
+    expect(isOpen(first)).toBe(false);
+    expect(isOpen(second)).toBe(true);
+  });
+});

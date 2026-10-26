@@ -11,7 +11,12 @@
  * живой, и менять его поведение этой правкой нельзя.
  */
 import { describe, it, expect } from 'vitest';
-import { parseUpdXml, assessUpdParse, xmlOutline } from '../src/domain/edo/upd.parser.js';
+import {
+  parseUpdXml,
+  assessUpdParse,
+  assessUpdItems,
+  xmlOutline,
+} from '../src/domain/edo/upd.parser.js';
 import { decodeXmlBuffer, detectXmlEncoding } from '../src/domain/edo/upd-xml-decode.js';
 
 /** УПД по формату: номер и дата в СвСчФакт, стороны через ИдСв → СвЮЛУч. */
@@ -362,5 +367,32 @@ describe('оценка полноты разбора', () => {
     const xml = UTD_MODERN.replace(/<СведТов[\s\S]*?<\/СведТов>/g, '');
     const verdict = assessUpdParse(parseUpdXml(xml));
     expect(verdict.ok === false && verdict.reasons).toContain('не прочитана ни одна позиция');
+  });
+});
+
+// Та же проверка строк — отдельно от шапки: в карточке приёмки реквизиты УПД
+// берутся из реестра, а пустой разбор нельзя показать пустым списком материалов.
+describe('оценка полноты позиций', () => {
+  it('полный документ — причин нет', () => {
+    expect(assessUpdItems(parseUpdXml(UTD_MODERN))).toEqual([]);
+  });
+
+  it('документ без номера — позиции всё равно годны', () => {
+    const xml = UTD_MODERN.replace('НомерСчФ="УТ-4308"', 'НомерСчФ=""');
+    expect(assessUpdItems(parseUpdXml(xml))).toEqual([]);
+  });
+
+  it('без позиций — одна причина', () => {
+    const xml = UTD_MODERN.replace(/<СведТов[\s\S]*?<\/СведТов>/g, '');
+    expect(assessUpdItems(parseUpdXml(xml))).toEqual(['не прочитана ни одна позиция']);
+  });
+
+  it('все строки без количества и суммы — одна причина', () => {
+    const xml = UTD_MODERN.replace(/КолТов="[\d.]+"/g, 'КолТов=""')
+      .replace(/СтТовБезНДС="\d+"/g, 'СтТовБезНДС=""')
+      .replace(/СтТовУчНал="\d+"/g, 'СтТовУчНал=""');
+    expect(assessUpdItems(parseUpdXml(xml))).toEqual([
+      'во всех позициях пусты и количество, и сумма',
+    ]);
   });
 });
