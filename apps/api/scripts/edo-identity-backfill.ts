@@ -40,8 +40,12 @@ function positiveInt(name: string, value: string | undefined): number | undefine
   return n;
 }
 
+/** Ход в stderr не чаще, чем раз в столько строк: 11 тыс. чтений идут ~20 минут. */
+const PROGRESS_EVERY = 500;
+
 async function main(): Promise<number> {
   const controller = new AbortController();
+  let printedAt = 0;
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => controller.abort());
   const report = await backfillExportIdentity({
     db,
@@ -51,6 +55,11 @@ async function main(): Promise<number> {
     limit: positiveInt('limit', args.limit),
     concurrency: positiveInt('concurrency', args.concurrency),
     signal: controller.signal,
+    onProgress: (r) => {
+      if (r.scanned - printedAt < PROGRESS_EVERY) return;
+      printedAt = r.scanned;
+      console.error(`… взято ${r.scanned}, признаки у ${r.filled}, без признаков ${r.noKeys}, сбоев ${r.failures.length}`);
+    },
   });
   const verb = args.apply ? 'записано' : 'получили бы (пробный подсчёт, без записи)';
   console.info(

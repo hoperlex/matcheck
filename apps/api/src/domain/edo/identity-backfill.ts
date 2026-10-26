@@ -32,6 +32,8 @@ export type IdentityBackfillDeps = {
   /** Сколько файлов читать одновременно. */
   concurrency?: number;
   signal?: AbortSignal;
+  /** После каждой пачки строк — ход работы (итог печатается только в конце). */
+  onProgress?: (report: IdentityBackfillReport) => void;
 };
 
 export type IdentityBackfillFailure = { id: string; reason: string };
@@ -141,6 +143,7 @@ export async function backfillExportIdentity(deps: IdentityBackfillDeps): Promis
     for (let i = 0; i < rows.length; i += concurrency) {
       await Promise.all(rows.slice(i, i + concurrency).map(one));
     }
+    deps.onProgress?.(report);
   }
   return report;
 }

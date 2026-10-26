@@ -18,7 +18,9 @@ import type { TableProps } from 'antd';
 import type { Delivery } from '@matcheck/contracts';
 import { api } from '../../services/api';
 import { formatDateRu, formatDateTimeRu, formatMoneyRu } from '../../shared/utils/formatRu';
+import { edoOperatorGenitive, edoOperatorLabel } from '../shared/edoOperator';
 import { EdoCompareDrawer, type ComparePhoto } from './EdoCompareDrawer';
+import { candidateKey, possibleTwins } from './edoPossibleTwins';
 import { deliveryNumbersText } from './LinkedEdoChips';
 
 type FoundBy = 'number' | 'inn' | 'name' | 'date' | 'search';
@@ -51,12 +53,18 @@ type Candidate = {
     referenceInns: string[];
     matchedInn: string | null;
   };
+  /** Оператор ЭДО строки ('diadoc' | 'sbis'). */
+  operator?: string;
+  /** Операторы, у которых есть копия той же УПД, — сервер показывает одну строку. */
+  alsoInOperators?: string[];
 };
 
 /** Автообновление реестра по учётке ЭДО. */
 type RegistryAccount = {
   accountId: string;
   name: string;
+  /** Оператор учётки; у прежнего ответа поля нет — значит, Диадок. */
+  provider?: string;
   state: 'never' | 'catching_up' | 'stale' | 'ok';
   checkedAt: string | null;
   failedPending: number;
@@ -70,6 +78,11 @@ const CENSUS_LABELS: Record<string, string> = {
   waybill: 'накладные',
 };
 
+/** «Диадока» / «СБИС» — чью ленту читает учётка. */
+function feedOf(account: RegistryAccount): string {
+  return edoOperatorGenitive(account.provider ?? 'diadoc');
+}
+
 /** Что сказать о реестре учётки, если не всё в порядке; `null` — молчать. */
 function registryNotice(
   account: RegistryAccount,
@@ -80,7 +93,7 @@ function registryNotice(
   if (account.state === 'never') {
     return {
       type: 'warning',
-      message: `${prefix}Автообновление реестра ЭДО ещё ни разу не дочитало ленту Диадока${
+      message: `${prefix}Автообновление реестра ЭДО ещё ни разу не дочитало ленту ${feedOf(account)}${
         receivedUntil ? ` — самая поздняя полученная УПД в реестре: ${formatDateTimeRu(receivedUntil)}` : ''
       }.`,
     };
@@ -88,7 +101,7 @@ function registryNotice(
   if (account.state === 'catching_up') {
     return {
       type: 'info',
-      message: `${prefix}Реестр ЭДО догоняет ленту Диадока${
+      message: `${prefix}Реестр ЭДО догоняет ленту ${feedOf(account)}${
         checked ? ` (последняя полная проверка — ${checked})` : ''
       }: свежие УПД появятся в течение ближайших проходов.`,
     };
@@ -441,6 +454,9 @@ export function LinkEdoDocumentModal({
   const mainItems = collapseStrangers ? items.filter((candidate) => !isStranger(candidate)) : items;
   const strangers = collapseStrangers ? items.filter(isStranger) : [];
 
+  // Шапка совпала у строк разных операторов, а копией сервер их не признал.
+  const twins = possibleTwins(items);
+
   /** Общее у основной таблицы и свёрнутого блока чужих поставщиков. */
   const tableProps: TableProps<Candidate> = {
     rowKey: (row) => `${row.source}:${row.id}`,
@@ -470,6 +486,18 @@ export function LinkEdoDocumentModal({
             <Typography.Text type="secondary">
               {row.source === 'export' ? 'XML из реестра ЭДО' : 'Импорт ЭДО'}
             </Typography.Text>
+            {row.operator && (
+              <Space size={4} wrap>
+                <Tag color={row.operator === 'sbis' ? 'purple' : 'geekblue'} style={{ marginInlineEnd: 0 }}>
+                  {edoOperatorLabel(row.operator)}
+                </Tag>
+                {(row.alsoInOperators ?? []).map((op) => (
+                  <Tag key={op} style={{ marginInlineEnd: 0 }}>
+                    есть и в {edoOperatorLabel(op)}
+                  </Tag>
+                ))}
+              </Space>
+            )}
             {row.source === 'export' && row.contentCategory !== 'materials' && (
               <Typography.Text type="warning">Состав требует проверки</Typography.Text>
             )}
@@ -526,6 +554,14 @@ export function LinkEdoDocumentModal({
             )}
             {row.usedElsewhere > 0 && (
               <Typography.Text type="warning">{usedElsewhereLabel(row)}</Typography.Text>
+            )}
+            {twins.has(candidateKey(row)) && (
+              <Typography.Text type="warning">
+                {`Возможно, та же УПД, что из ${twins
+                  .get(candidateKey(row))!
+                  .map((op) => edoOperatorGenitive(op))
+                  .join(', ')}, — сверьте позиции`}
+              </Typography.Text>
             )}
           </Space>
         ),
@@ -599,7 +635,10 @@ export function LinkEdoDocumentModal({
           />
         )}
         {diagnostics?.registry.map((account) => {
-          const prefix = diagnostics.registry.length > 1 ? `${account.name}: ` : '';
+          const prefix =
+            diagnostics.registry.length > 1
+              ? `${account.name}${account.provider ? ` (${edoOperatorLabel(account.provider)})` : ''}: `
+              : '';
           const notice = registryNotice(account, diagnostics.registryReceivedUntil, prefix);
           const failed = [
             account.failedPending > 0 &&
@@ -649,7 +688,11 @@ export function LinkEdoDocumentModal({
             type="warning"
             showIcon
             message={`В реестре ЭДО нет ни одной УПД с ИНН ${diagnostics.innsAbsentInRegistry.join(', ')}.`}
-            description="В реестр попадают только формализованные УПД из ящика ЭДО СУ-10. Если ИНН в приёмке прочитан неверно — найдите УПД поиском по номеру или названию."
+            description={`В реестр попадают только формализованные УПД из ${
+              diagnostics.registry.some((account) => account.provider === 'sbis')
+                ? 'ЭДО СУ-10 (Диадок и СБИС)'
+                : 'ящика ЭДО СУ-10'
+            }. Если ИНН в приёмке прочитан неверно — найдите УПД поиском по номеру или названию.`}
           />
         )}
         {diagnostics?.contractorDelivery && (

@@ -10,6 +10,7 @@ import {
   Input,
   Modal,
   Popconfirm,
+  Segmented,
   Select,
   Space,
   Switch,
@@ -29,12 +30,16 @@ import type {
   EdoInventoryReport,
   EdoJobQueued,
   EdoJournalSummary,
+  EdoSbisCheckResult,
 } from '@matcheck/contracts';
 import { api, ApiError } from '../../services/api';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { usePermissions } from '../../shared/hooks/usePermissions';
+import { edoOperatorLabel } from '../shared/edoOperator';
 import { describeAccessCheck } from './edo-access-check';
+import { isSbisAccount, parseSbisOrgRef, sbisOrgLabel } from './edo-sbis';
+import { SbisAccessModal, SbisCreateForm, SbisEditDrawer } from './EdoSbisAccount';
 import { EdoDryRunView } from './EdoDryRunView';
 import {
   INVENTORY_PERIODS,
@@ -162,6 +167,52 @@ function InventorySelection({ report }: { report: EdoInventoryReport }) {
   );
 }
 
+function OperatorTag({ provider }: { provider: string }) {
+  return <Tag color={provider === 'sbis' ? 'purple' : 'geekblue'}>{edoOperatorLabel(provider)}</Tag>;
+}
+
+/**
+ * «Приложение» у СБИС: «ID подключения» (не секрет — как логин) и признаки
+ * ключей. Отказ входа одинаков и при неверном ключе, и при лишнем пробеле, —
+ * длина и отпечаток позволяют сверить сохранённое, не раскрывая его.
+ */
+function SbisAppCell({ account: r }: { account: EdoAccountDto }) {
+  if (!r.sbisAppClientId) return <Typography.Text type="secondary">—</Typography.Text>;
+  return (
+    <Tooltip
+      title={
+        <span>
+          Защищённый ключ: {r.sbisAppSecretLength ?? 0} симв., отпечаток{' '}
+          <b>{r.sbisAppSecretFingerprint ?? '—'}</b>
+          <br />
+          Сервисный ключ: {r.sbisSecretKeyLength ?? 0} симв., отпечаток{' '}
+          <b>{r.sbisSecretKeyFingerprint ?? '—'}</b>
+          <br />
+          Сверить у себя: printf %s &apos;ЗНАЧЕНИЕ&apos; | sha256sum | cut -c1-8
+        </span>
+      }
+    >
+      <Typography.Text code copyable={{ text: r.sbisAppClientId }}>
+        {r.sbisAppClientId.length > 8 ? `${r.sbisAppClientId.slice(0, 8)}…` : r.sbisAppClientId}
+      </Typography.Text>
+    </Tooltip>
+  );
+}
+
+/** Организация СБИС в узкой колонке «Ящик»: ИНН и КПП строками, целиком — в подсказке. */
+function SbisOrgCell({ boxId }: { boxId: string | null }) {
+  const org = parseSbisOrgRef(boxId);
+  if (!org) return <Tag>организация не выбрана</Tag>;
+  return (
+    <Tooltip title={sbisOrgLabel(boxId)}>
+      <Space direction="vertical" size={0}>
+        <Typography.Text>{org.inn}</Typography.Text>
+        {org.kpp && <Typography.Text type="secondary">{org.kpp}</Typography.Text>}
+      </Space>
+    </Tooltip>
+  );
+}
+
 export default function AdminEdoAccountsPage() {
   const qc = useQueryClient();
   // Страницу можно выдать на просмотр отдельно от управления, поэтому контролы
@@ -193,6 +244,13 @@ export default function AdminEdoAccountsPage() {
   const [dryRun, setDryRun] = useState<EdoDryRunReport | null>(null);
   const [editing, setEditing] = useState<EdoAccountDto | null>(null);
   const [editForm] = Form.useForm<EdoAccountPatch>();
+  // СБИС: свои формы и своя проверка доступа (EdoSbisAccount.tsx). Состояние
+  // отдельное, чтобы ветка Диадока работала ровно как раньше.
+  const [createProvider, setCreateProvider] = useState<'diadoc' | 'sbis'>('diadoc');
+  const [editingSbis, setEditingSbis] = useState<EdoAccountDto | null>(null);
+  const [sbisCheck, setSbisCheck] = useState<{ account: EdoAccountDto; result: EdoSbisCheckResult } | null>(
+    null,
+  );
   const [form] = Form.useForm<EdoAccountCreate>();
 
   const list = useQuery({
@@ -235,6 +293,20 @@ export default function AdminEdoAccountsPage() {
       invalidate();
     },
     onError: (err: Error) => message.error(err.message),
+  });
+
+  const checkSbis = useMutation({
+    mutationFn: (account: EdoAccountDto) =>
+      api.post<EdoSbisCheckResult>(`/admin/edo-accounts/${account.id}/check`),
+    onSuccess: (result, account) => {
+      setSbisCheck({ account, result });
+      invalidate();
+    },
+    // Отказ ключей сервер записывает в учётку — колонка «Состояние» должна его показать.
+    onError: (err: Error) => {
+      message.error(err.message);
+      invalidate();
+    },
   });
 
   // Ящик выбирается прямо из результата проверки: переписывать GUID руками —
@@ -348,7 +420,38 @@ export default function AdminEdoAccountsPage() {
    * ширину и переносить нечего, но эти же кнопки показываются в карточке на
    * узком экране — без переноса они вылезли бы за её край.
    */
-  const actions = (r: EdoAccountDto) => (
+  const actions = (r: EdoAccountDto) => (isSbisAccount(r) ? sbisActions(r) : diadocActions(r));
+
+  const deleteButton = (r: EdoAccountDto) => (
+    <Popconfirm
+      title="Удалить учётную запись?"
+      description="Настройки и журнал приёма будут удалены. Документы, уже попавшие в портал, останутся."
+      okText="Удалить"
+      cancelText="Отмена"
+      okButtonProps={{ danger: true }}
+      onConfirm={() => remove.mutate(r.id)}
+    >
+      <Tooltip title="Удалить">
+        <Button size="small" type="text" danger icon={<DeleteOutlined />} loading={remove.isPending} />
+      </Tooltip>
+    </Popconfirm>
+  );
+
+  // У СБИС нет ящика, опроса, импорта и пробного разбора — только проверка
+  // доступа с выбором организации, правка ключей и удаление.
+  const sbisActions = (r: EdoAccountDto) => (
+    <Space size={4} wrap>
+      <Button size="small" onClick={() => checkSbis.mutate(r)} loading={checkSbis.isPending}>
+        Проверить доступ
+      </Button>
+      <Tooltip title="Изменить">
+        <Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditingSbis(r)} />
+      </Tooltip>
+      {deleteButton(r)}
+    </Space>
+  );
+
+  const diadocActions = (r: EdoAccountDto) => (
     <Space size={4} wrap>
       <Button size="small" onClick={() => check.mutate(r.id)} loading={check.isPending}>
         Проверить доступ
@@ -404,18 +507,7 @@ export default function AdminEdoAccountsPage() {
           }}
         />
       </Tooltip>
-      <Popconfirm
-        title="Удалить учётную запись?"
-        description="Настройки и журнал приёма будут удалены. Документы, уже попавшие в портал, останутся."
-        okText="Удалить"
-        cancelText="Отмена"
-        okButtonProps={{ danger: true }}
-        onConfirm={() => remove.mutate(r.id)}
-      >
-        <Tooltip title="Удалить">
-          <Button size="small" type="text" danger icon={<DeleteOutlined />} loading={remove.isPending} />
-        </Tooltip>
-      </Popconfirm>
+      {deleteButton(r)}
     </Space>
   );
 
@@ -424,7 +516,7 @@ export default function AdminEdoAccountsPage() {
       header={
         <Space style={{ width: '100%', justifyContent: 'space-between' }}>
           <Typography.Title level={3} style={{ margin: 0 }}>
-            ЭДО учётки (Диадок)
+            ЭДО учётки
           </Typography.Title>
           {canCreate && (
             <Button type="primary" onClick={() => setOpen(true)}>
@@ -456,16 +548,29 @@ export default function AdminEdoAccountsPage() {
         columns={[
           { title: 'Имя', dataIndex: 'name', width: 180 },
           {
+            title: 'Оператор',
+            dataIndex: 'provider',
+            width: 120,
+            render: (p: string) => <OperatorTag provider={p} />,
+            tools: { text: (r) => edoOperatorLabel(r.provider) },
+          },
+          {
             title: 'Площадка',
             dataIndex: 'environment',
             // Ширины колонок ниже — под подпись со стрелкой и воронкой в одну строку.
             width: 130,
-            render: (e: EdoAccountDto['environment']) => (
-              <Tag color={e === 'production' ? 'blue' : 'orange'}>
-                {e === 'production' ? 'боевая' : 'тестовая'}
-              </Tag>
-            ),
-            tools: { text: (r) => (r.environment === 'production' ? 'боевая' : 'тестовая') },
+            // У СБИС площадки нет: вход один, по ключам приложения.
+            render: (e: EdoAccountDto['environment'], r: EdoAccountDto) =>
+              isSbisAccount(r) ? (
+                <Typography.Text type="secondary">—</Typography.Text>
+              ) : (
+                <Tag color={e === 'production' ? 'blue' : 'orange'}>
+                  {e === 'production' ? 'боевая' : 'тестовая'}
+                </Tag>
+              ),
+            tools: {
+              text: (r) => (isSbisAccount(r) ? null : r.environment === 'production' ? 'боевая' : 'тестовая'),
+            },
           },
           {
             // Отказ `invalid_client` выглядит одинаково и при неверном ключе, и
@@ -477,7 +582,9 @@ export default function AdminEdoAccountsPage() {
             key: 'app',
             width: 140,
             render: (_: unknown, r: EdoAccountDto) =>
-              r.clientId ? (
+              isSbisAccount(r) ? (
+                <SbisAppCell account={r} />
+              ) : r.clientId ? (
                 <Tooltip
                   title={
                     <span>
@@ -500,11 +607,14 @@ export default function AdminEdoAccountsPage() {
               ),
           },
           {
+            // У СБИС вместо ящика — организация (ИНН/КПП из ссылки в boxId).
             title: 'Ящик',
             dataIndex: 'boxId',
             width: 104,
-            render: (b: string | null) =>
-              b ? (
+            render: (b: string | null, r: EdoAccountDto) =>
+              isSbisAccount(r) ? (
+                <SbisOrgCell boxId={b} />
+              ) : b ? (
                 <Typography.Text code>{b.slice(0, 8)}…</Typography.Text>
               ) : (
                 <Tag>не выбран</Tag>
@@ -516,21 +626,25 @@ export default function AdminEdoAccountsPage() {
             width: 110,
             // Без импорта опрос включить нельзя (сервер откажет). Выключить —
             // можно всегда: оставшееся с прошлого `true` не должно висеть.
-            render: (_: unknown, r: EdoAccountDto) => (
-              <Tooltip title={r.importEnabled ? undefined : IMPORT_DISABLED_HINT}>
-                <span>
-                  <Switch
-                    size="small"
-                    checked={r.pollEnabled}
-                    disabled={
-                      !canManage || togglePoll.isPending || (!r.importEnabled && !r.pollEnabled)
-                    }
-                    onChange={(v) => togglePoll.mutate({ id: r.id, pollEnabled: v })}
-                  />
-                </span>
-              </Tooltip>
-            ),
-            tools: { text: (r) => (r.pollEnabled ? 'включён' : 'выключен') },
+            // У СБИС опроса нет: УПД приходят выгрузкой реестра.
+            render: (_: unknown, r: EdoAccountDto) =>
+              isSbisAccount(r) ? (
+                <Typography.Text type="secondary">—</Typography.Text>
+              ) : (
+                <Tooltip title={r.importEnabled ? undefined : IMPORT_DISABLED_HINT}>
+                  <span>
+                    <Switch
+                      size="small"
+                      checked={r.pollEnabled}
+                      disabled={
+                        !canManage || togglePoll.isPending || (!r.importEnabled && !r.pollEnabled)
+                      }
+                      onChange={(v) => togglePoll.mutate({ id: r.id, pollEnabled: v })}
+                    />
+                  </span>
+                </Tooltip>
+              ),
+            tools: { text: (r) => (isSbisAccount(r) ? null : r.pollEnabled ? 'включён' : 'выключен') },
           },
           {
             title: 'Токен',
@@ -572,10 +686,13 @@ export default function AdminEdoAccountsPage() {
             <Space direction="vertical" style={{ width: '100%' }}>
               <Space>
                 <Typography.Text strong>{r.name}</Typography.Text>
-                <Tag color={r.environment === 'production' ? 'blue' : 'orange'}>
-                  {r.environment === 'production' ? 'боевая' : 'тестовая'}
-                </Tag>
-                <TokenAge days={r.refreshTokenAgeDays} />
+                <OperatorTag provider={r.provider} />
+                {!isSbisAccount(r) && (
+                  <Tag color={r.environment === 'production' ? 'blue' : 'orange'}>
+                    {r.environment === 'production' ? 'боевая' : 'тестовая'}
+                  </Tag>
+                )}
+                {!isSbisAccount(r) && <TokenAge days={r.refreshTokenAgeDays} />}
               </Space>
               {r.lastError && <Typography.Text type="danger">{r.lastError}</Typography.Text>}
               {canManage && actions(r)}
@@ -1074,97 +1191,140 @@ export default function AdminEdoAccountsPage() {
 
       <Drawer
         open={open}
-        onClose={() => setOpen(false)}
+        onClose={() => {
+          setOpen(false);
+          setCreateProvider('diadoc');
+        }}
         title="Новая учётная запись ЭДО"
         width={520}
         destroyOnClose
         maskClosable={false}
         keyboard={false}
       >
-        <Form<EdoAccountCreate>
-          form={form}
-          layout="vertical"
-          onFinish={(v) => create.mutate(v)}
-          initialValues={{
-            provider: 'diadoc',
-            isActive: true,
-            environment: 'production',
-            credentials: { authMode: 'oidc_refresh' },
-          }}
-        >
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message="Где взять доступы"
-            description={
-              <>
-                client_id выдаёт менеджер Диадока, ключ приложения и первичный refresh-токен
-                выпускаются в Кабинете интегратора. Используйте сервисную учётную запись, а не
-                личную: при увольнении сотрудника интеграция не должна падать.
-              </>
-            }
+        <Segmented<'diadoc' | 'sbis'>
+          block
+          style={{ marginBottom: 16 }}
+          value={createProvider}
+          onChange={setCreateProvider}
+          options={[
+            { value: 'diadoc', label: 'Диадок' },
+            { value: 'sbis', label: 'СБИС' },
+          ]}
+        />
+        {createProvider === 'sbis' ? (
+          <SbisCreateForm
+            onCreated={() => {
+              setOpen(false);
+              setCreateProvider('diadoc');
+              invalidate();
+            }}
           />
-          <Form.Item name="name" label="Название" rules={[{ required: true }]}>
-            <Input placeholder="Например: Диадок СУ-10" />
-          </Form.Item>
-          <Form.Item
-            name="environment"
-            label="Площадка"
-            rules={[{ required: true }]}
-            extra="Ящик, выданный на одной площадке, на другой не работает."
+        ) : (
+          <Form<EdoAccountCreate>
+            form={form}
+            layout="vertical"
+            onFinish={(v) => create.mutate(v)}
+            initialValues={{
+              provider: 'diadoc',
+              isActive: true,
+              environment: 'production',
+              credentials: { authMode: 'oidc_refresh' },
+            }}
           >
-            <Select
-              options={[
-                { value: 'production', label: 'Боевая' },
-                { value: 'staging', label: 'Тестовая' },
-              ]}
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="Где взять доступы"
+              description={
+                <>
+                  client_id выдаёт менеджер Диадока, ключ приложения и первичный refresh-токен
+                  выпускаются в Кабинете интегратора. Используйте сервисную учётную запись, а не
+                  личную: при увольнении сотрудника интеграция не должна падать.
+                </>
+              }
             />
-          </Form.Item>
-          <Form.Item name={['credentials', 'authMode']} hidden initialValue="oidc_refresh">
-            <Input />
-          </Form.Item>
-          <Form.Item
-            name={['credentials', 'clientId']}
-            label="client_id"
-            rules={[{ required: true }, noParamPrefix, notAnEmail]}
-            extra="Только значение: ci_… , без «clientId=»."
-          >
-            {/* Браузер принимает это поле за адрес почты и подставляет туда
-                сохранённый логин — именно так в client_id однажды попал
-                esenov.m.n@su10.ru вместо ci_su-10. */}
-            <Input autoComplete="off" />
-          </Form.Item>
-          <Form.Item
-            name={['credentials', 'clientSecret']}
-            label="Ключ приложения (client_secret)"
-            rules={[{ required: true }, noParamPrefix]}
-          >
-            <Input.Password autoComplete="new-password" />
-          </Form.Item>
-          <Form.Item
-            name={['credentials', 'refreshToken']}
-            label="Первичный refresh-токен"
-            rules={[{ required: true }, noParamPrefix]}
-            extra="Действует 30 дней с момента последнего использования."
-          >
-            <Input.Password autoComplete="new-password" />
-          </Form.Item>
-          <Form.Item
-            name="boxId"
-            label="Box ID"
-            extra="Можно не заполнять: подставится после «Проверить доступ»."
-          >
-            <Input />
-          </Form.Item>
-          <Form.Item name="orgInn" label="ИНН нашей организации">
-            <Input />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" block size="large" loading={create.isPending}>
-            Сохранить
-          </Button>
-        </Form>
+            <Form.Item name="name" label="Название" rules={[{ required: true }]}>
+              <Input placeholder="Например: Диадок СУ-10" />
+            </Form.Item>
+            <Form.Item
+              name="environment"
+              label="Площадка"
+              rules={[{ required: true }]}
+              extra="Ящик, выданный на одной площадке, на другой не работает."
+            >
+              <Select
+                options={[
+                  { value: 'production', label: 'Боевая' },
+                  { value: 'staging', label: 'Тестовая' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name={['credentials', 'authMode']} hidden initialValue="oidc_refresh">
+              <Input />
+            </Form.Item>
+            <Form.Item
+              name={['credentials', 'clientId']}
+              label="client_id"
+              rules={[{ required: true }, noParamPrefix, notAnEmail]}
+              extra="Только значение: ci_… , без «clientId=»."
+            >
+              {/* Браузер принимает это поле за адрес почты и подставляет туда
+                  сохранённый логин — именно так в client_id однажды попал
+                  esenov.m.n@su10.ru вместо ci_su-10. */}
+              <Input autoComplete="off" />
+            </Form.Item>
+            <Form.Item
+              name={['credentials', 'clientSecret']}
+              label="Ключ приложения (client_secret)"
+              rules={[{ required: true }, noParamPrefix]}
+            >
+              <Input.Password autoComplete="new-password" />
+            </Form.Item>
+            <Form.Item
+              name={['credentials', 'refreshToken']}
+              label="Первичный refresh-токен"
+              rules={[{ required: true }, noParamPrefix]}
+              extra="Действует 30 дней с момента последнего использования."
+            >
+              <Input.Password autoComplete="new-password" />
+            </Form.Item>
+            <Form.Item
+              name="boxId"
+              label="Box ID"
+              extra="Можно не заполнять: подставится после «Проверить доступ»."
+            >
+              <Input />
+            </Form.Item>
+            <Form.Item name="orgInn" label="ИНН нашей организации">
+              <Input />
+            </Form.Item>
+            <Button type="primary" htmlType="submit" block size="large" loading={create.isPending}>
+              Сохранить
+            </Button>
+          </Form>
+        )}
       </Drawer>
+
+      <SbisEditDrawer
+        account={editingSbis}
+        onClose={() => setEditingSbis(null)}
+        onSaved={() => {
+          setEditingSbis(null);
+          invalidate();
+        }}
+      />
+      <SbisAccessModal
+        account={
+          sbisCheck ? ((list.data ?? []).find((a) => a.id === sbisCheck.account.id) ?? sbisCheck.account) : null
+        }
+        result={sbisCheck?.result ?? null}
+        onClose={() => setSbisCheck(null)}
+        onChosen={() => {
+          setSbisCheck(null);
+          invalidate();
+        }}
+      />
     </StickyPageHeader>
   );
 }

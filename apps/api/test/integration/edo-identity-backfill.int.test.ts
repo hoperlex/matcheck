@@ -111,8 +111,16 @@ suite('признаки тождества для старых строк рее
     await sql.end({ timeout: 5 });
   });
 
-  it('пробный подсчёт: отчёт полный, в базе ничего не меняется', async () => {
-    const report = await backfillExportIdentity({ db, getObject, apply: false, accountId });
+  it('пробный подсчёт: отчёт полный, в базе ничего не меняется; ход виден после пачки', async () => {
+    const progress: number[] = [];
+    const report = await backfillExportIdentity({
+      db,
+      getObject,
+      apply: false,
+      accountId,
+      onProgress: (r) => progress.push(r.scanned),
+    });
+    expect(progress).toEqual([5]);
     expect(report).toMatchObject({ scanned: 5, filled: 2, withFileId: 2, withContentKey: 2, noKeys: 0, changed: 0 });
     expect(new Set(report.failures.map((f) => f.id))).toEqual(new Set([mismatch, s3Down, broken]));
     expect(report.failures.find((f) => f.id === mismatch)?.reason).toContain('sha256');

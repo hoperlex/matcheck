@@ -515,3 +515,104 @@ describe('закрытие панели', () => {
     await waitFor(() => expect(screen.queryByTitle('УПД EXP-1')).toBeNull());
   });
 });
+
+describe('операторы ЭДО (Диадок и СБИС)', () => {
+  function respond(over: { items?: unknown[]; diagnostics?: Record<string, unknown> }) {
+    apiGet.mockImplementation((path: string) =>
+      path === '/deliveries/d1/edo-candidates'
+        ? Promise.resolve({
+            ...candidates,
+            ...(over.items ? { items: over.items } : {}),
+            diagnostics: { ...candidates.diagnostics, ...over.diagnostics },
+          })
+        : Promise.reject(new Error(`unexpected ${path}`)),
+    );
+  }
+
+  const diadocAccount = {
+    accountId: 'a1',
+    name: 'Диадок_СУ10',
+    provider: 'diadoc',
+    state: 'ok',
+    checkedAt: '2026-10-13T12:30:00.000Z',
+    failedPending: 0,
+    nextRetryAt: null,
+    failedFinal: 0,
+  };
+  const sbisAccount = { ...diadocAccount, accountId: 'a2', name: 'СБИС_СУ10', provider: 'sbis' };
+
+  /** Строка таблицы, в которой стоит номер УПД. */
+  const rowOf = (number: string) => screen.getByText(number).closest<HTMLElement>('tr')!;
+
+  it('у строки — метка оператора; копия, которую сервер свернул, помечена «есть и в СБИС»', async () => {
+    respond({
+      items: [
+        { ...base, id: 'd-1', source: 'export', docNumber: 'D-1', docDate: '2026-10-05', operator: 'diadoc', alsoInOperators: ['sbis'] },
+        { ...base, id: 's-2', source: 'export', docNumber: 'S-2', docDate: '2026-10-06', operator: 'sbis', alsoInOperators: [] },
+      ],
+    });
+    show();
+    await screen.findByText('D-1');
+    expect(within(rowOf('D-1')).getByText('Диадок')).toBeTruthy();
+    expect(within(rowOf('D-1')).getByText('есть и в СБИС')).toBeTruthy();
+    expect(within(rowOf('S-2')).getByText('СБИС')).toBeTruthy();
+    expect(within(rowOf('S-2')).queryByText(/есть и в/)).toBeNull();
+  });
+
+  it('прежний ответ без оператора — меток нет, строка как раньше', async () => {
+    respond({});
+    show();
+    await screen.findByText('EXP-1');
+    expect(screen.queryByText('Диадок')).toBeNull();
+    expect(screen.queryByText('СБИС')).toBeNull();
+  });
+
+  it('одна шапка у разных операторов — подсказка сверить позиции у обеих строк, строки не склеены', async () => {
+    const header = { ...base, source: 'export', docNumber: '671', docDate: '2026-08-31', totalSum: '8378000.00' };
+    respond({
+      items: [
+        { ...header, id: 'd-671', operator: 'diadoc', alsoInOperators: [] },
+        { ...header, id: 's-671', operator: 'sbis', alsoInOperators: [], totalSum: '8378000' },
+      ],
+    });
+    show();
+    expect(await screen.findAllByText('671')).toHaveLength(2);
+    expect(screen.getByText(/Возможно, та же УПД, что из СБИС, — сверьте позиции/)).toBeTruthy();
+    expect(screen.getByText(/Возможно, та же УПД, что из Диадока, — сверьте позиции/)).toBeTruthy();
+  });
+
+  it('одна шапка у одного оператора — подсказки нет (повторы внутри Диадока)', async () => {
+    const header = { ...base, source: 'export', docNumber: '45', docDate: '2026-08-31', operator: 'diadoc', alsoInOperators: [] };
+    respond({ items: [{ ...header, id: 'd-45a' }, { ...header, id: 'd-45b' }] });
+    show();
+    expect(await screen.findAllByText('45')).toHaveLength(2);
+    expect(screen.queryByText(/Возможно, та же УПД/)).toBeNull();
+  });
+
+  it('свежесть: у учётки СБИС — «ленту СБИС», у Диадока прежний текст; при двух учётках — имя и оператор', async () => {
+    respond({
+      diagnostics: {
+        registry: [
+          { ...diadocAccount, state: 'never', checkedAt: null },
+          { ...sbisAccount, state: 'catching_up' },
+        ],
+      },
+    });
+    show();
+    expect(
+      await screen.findByText(/^Диадок_СУ10 \(Диадок\): Автообновление реестра ЭДО ещё ни разу не дочитало ленту Диадока/),
+    ).toBeTruthy();
+    expect(screen.getByText(/^СБИС_СУ10 \(СБИС\): Реестр ЭДО догоняет ленту СБИС/)).toBeTruthy();
+  });
+
+  it('«нет в реестре»: с учёткой СБИС — «из ЭДО СУ-10 (Диадок и СБИС)», без неё — прежний текст', async () => {
+    respond({ diagnostics: { innsAbsentInRegistry: ['7700000000'], registry: [diadocAccount, sbisAccount] } });
+    show();
+    expect(await screen.findByText(/из ЭДО СУ-10 \(Диадок и СБИС\)/)).toBeTruthy();
+    cleanup();
+
+    respond({ diagnostics: { innsAbsentInRegistry: ['7700000000'], registry: [diadocAccount] } });
+    show();
+    expect(await screen.findByText(/только формализованные УПД из ящика ЭДО СУ-10\./)).toBeTruthy();
+  });
+});

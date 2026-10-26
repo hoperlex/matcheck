@@ -1,5 +1,6 @@
 import { useRef, useState, type MouseEvent } from 'react';
 import { Button, Popconfirm, Tag, Tooltip } from 'antd';
+import { edoOperatorLabel } from '../shared/edoOperator';
 import { EdoCompareDrawer, type ComparePhoto } from './EdoCompareDrawer';
 
 /** УПД из ЭДО, привязанная к приёмке (`GET /deliveries/:id/edo-matches`). */
@@ -18,6 +19,8 @@ export type LinkedEdoDocument = {
   /** Другие приёмки с той же УПД: первые по номеру и общее число. */
   alsoIn: { deliveryId: string; displayId: number }[];
   alsoInCount: number;
+  /** Оператор ЭДО ('diadoc' | 'sbis'); у прежнего ответа поля нет. */
+  operator?: string;
 };
 
 /** Сколько номеров других приёмок писать прямо в чипе; остальные — в подсказке. */
@@ -79,7 +82,8 @@ export function LinkedEdoChips({
     <>
       {documents.map((document) => (
         <Tag key={document.id} color="green" style={{ marginInlineEnd: 0 }}>
-          ЭДО: {document.docNumber ?? 'без номера'}
+          ЭДО{document.operator ? ` · ${edoOperatorLabel(document.operator)}` : ''}:{' '}
+          {document.docNumber ?? 'без номера'}
           {document.docDate ? ` от ${document.docDate}` : ''}
           {document.source === 'export' ? ' · XML' : ''}
           {document.alsoInCount > 0 && (

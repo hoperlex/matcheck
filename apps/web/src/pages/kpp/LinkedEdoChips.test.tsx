@@ -197,3 +197,18 @@ describe('другие приёмки с той же УПД', () => {
     expect(deliveryNumbersText(two, 12, 1)).toBe('1 и ещё 11');
   });
 });
+
+describe('оператор ЭДО в чипе', () => {
+  it('у привязанной УПД виден оператор; прежний ответ без оператора — чип как раньше', () => {
+    show({
+      documents: [
+        { ...exported, operator: 'sbis' },
+        { ...imported, operator: 'diadoc' },
+        { ...exported, id: 'm-old', docNumber: '5555' },
+      ],
+    });
+    expect(screen.getByText(/ЭДО · СБИС:/).textContent).toContain('3180');
+    expect(screen.getByText(/ЭДО · Диадок:/).textContent).toContain('77');
+    expect(screen.getByText(/^ЭДО:/).textContent).toContain('5555');
+  });
+});
