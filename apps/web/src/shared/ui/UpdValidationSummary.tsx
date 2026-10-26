@@ -120,6 +120,8 @@ export function updWarningLabel(name: UpdWarning['name']): string {
       sibling_number_duplicate: 'в пакете два документа с одним номером — сверьте с оригиналом',
       supplier_inn_unverified:
         'ИНН поставщика не прошёл проверку — поставщик выбран по названию, проверьте его',
+      buyer_same_as_supplier:
+        'покупатель и поставщик — одна организация: одна из сторон определена неверно, сверьте с документом',
     }[name] || name
   );
 }

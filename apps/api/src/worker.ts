@@ -45,6 +45,14 @@ import {
   withSupplierInnWarning,
   type SupplierInnCheckTrace,
 } from './domain/sourceDocuments/supplier-inn-check.js';
+import {
+  decideSameParty,
+  loadPartyRoleStats,
+  sameParty,
+  withPartyRolesWarning,
+  type PartyRoleStats,
+  type SamePartyDecision,
+} from './domain/sourceDocuments/party-roles.js';
 import { manualRecipientSource } from './domain/sourceDocuments/resolve-contractor.js';
 import {
   consigneeOwnIdentity,
@@ -1904,6 +1912,55 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     );
   }
 
+  // Покупатель совпал с поставщиком (PARTY_ROLES_CHECK, domain/sourceDocuments/
+  // party-roles.ts). Здесь разбор уже окончательный: второй проход, повтор
+  // сегмента и дозаполнение сторон позади.
+  //
+  // parsed НЕ меняем: consigneeOwnIdentity и валидатор видят исходного
+  // покупателя, поэтому грузополучатель и прочие пометки считаются ровно как
+  // раньше. В on сбрасываются только поля покупателя (buyerDropped) либо
+  // ставится пометка (partyRolesFlag). off — ни одного запроса.
+  const partyRolesMode = loadEnv().PARTY_ROLES_CHECK;
+  let buyerDropped = false;
+  let partyRolesFlag = false;
+  if (
+    partyRolesMode !== 'off' &&
+    parsed.supplier &&
+    parsed.recipient &&
+    sameParty(parsed.supplier, parsed.recipient)
+  ) {
+    try {
+      const supplierParty = { inn: parsed.supplier.inn ?? null, name: parsed.supplier.name ?? null };
+      const buyerParty = { inn: parsed.recipient.inn ?? null, name: parsed.recipient.name ?? null };
+      const stats = await loadPartyRoleStats(db, supplierParty, buyerParty, sourceDocumentId);
+      const decision = decideSameParty(stats);
+      // След — до применения: в нём прочитанный покупатель, и сброс обратим,
+      // только если след записан. Не записался — в on вместо сброса пометка.
+      const traced = await recordPartyRolesEvidence({
+        sourceDocumentId,
+        generation: jobGeneration,
+        mode: partyRolesMode,
+        decision,
+        supplier: supplierParty,
+        buyer: buyerParty,
+        stats,
+        log,
+      });
+      if (partyRolesMode === 'on') {
+        buyerDropped = decision.kind === 'drop_buyer' && traced;
+        partyRolesFlag = !buyerDropped;
+      }
+      log.info(
+        { sourceDocumentId, mode: partyRolesMode, decision, stats, traced, buyerDropped },
+        'party roles: покупатель совпал с поставщиком',
+      );
+    } catch (err) {
+      log.warn({ err, sourceDocumentId }, 'party roles failed — legacy path');
+      buyerDropped = false;
+      partyRolesFlag = false;
+    }
+  }
+
   // Поставщик — сравниваем со справочником `suppliers` (CRUD в Справочниках).
   // Если нашли по ИНН/fuzzy name — возвращается id найденной записи; не нашли
   // — INSERT в справочник (счётчик «Поставщики» вырастает). В counterparties
@@ -1963,11 +2020,14 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     supplierInnCheck && supplierInnMode !== 'off' ? { ...supplierInnCheck, mode: supplierInnMode } : null;
 
   // Получатель (покупатель) — операционная сущность, остаётся в counterparties.
+  // recipient — как прочитан (по нему проверяется грузополучатель), buyer — что
+  // пишется о покупателе: при buyerDropped (PARTY_ROLES_CHECK=on) пусто.
   const recipient = parsed.recipient;
+  const buyer = buyerDropped ? null : recipient;
   const recipientId =
-    recipient && recipient.inn && recipient.name
+    buyer && buyer.inn && buyer.name
       ? await findOrCreateCounterparty(
-          { inn: recipient.inn, kpp: recipient.kpp ?? null, name: recipient.name },
+          { inn: buyer.inn, kpp: buyer.kpp ?? null, name: buyer.name },
           'customer',
         )
       : null;
@@ -2018,7 +2078,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
       : null;
   const documentParties = {
     buyerId: recipientId,
-    buyerNameRaw: recipient?.name ?? null,
+    buyerNameRaw: buyer?.name ?? null,
     consigneeId,
     consigneeNameRaw: consigneeName,
     // ИНН пишем сырым, как распознали, — ровно по той же причине, что и имя:
@@ -2034,7 +2094,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     supplierInnRaw: supplierInnApplied
       ? supplierInnForDocument(supplierInnApplied, supplier?.inn ?? null)
       : (supplier?.inn ?? null),
-    buyerInnRaw: recipient?.inn ?? null,
+    buyerInnRaw: buyer?.inn ?? null,
     consigneeInnRaw: consigneeIdentity.inn,
   };
 
@@ -2488,23 +2548,34 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // Документ остаётся обычным и доезжает до планшета, однако рядом с ним в
   // списке окажется похожий. Без пометки это выглядит сбоем; с ней видно, что
   // система совпадение заметила и сознательно не стала прятать документ.
-  if (duplicate && duplicateVerdict && duplicateVerdict.kind !== 'confirmed') {
-    validation = {
-      ...validation,
-      warnings: [
-        ...(validation.warnings ?? []),
-        { name: 'duplicate_unconfirmed' as const, scope: 'document' as const },
-      ],
-    };
-  }
-
-  // Граница записи: дальше validation уходит в базу и перетирает прежний
-  // снимок. Пакетные предупреждения относятся к нарезке файла, а не к числам
-  // документа, — валидатор их не вычисляет, поэтому переносим руками.
-  validation = mergePersistentUpdWarnings(proc.validation, validation);
-  // Предупреждение о ИНН поставщика устойчивое — снимаем прежнее и ставим
-  // актуальное: повторный разбор с уже верным ИНН не должен его тащить.
-  validation = withSupplierInnWarning(validation, supplierInnApplied);
+  //
+  // Всё, что валидатор не вычисляет, собирается одной функцией: её же зовёт
+  // поздний откат правил количества (rollbackQtyRepair), который пересобирает
+  // validation с нуля и без неё терял все устойчивые пометки.
+  const finalizeValidation = (v: UpdValidation): UpdValidation => {
+    let out = v;
+    if (duplicate && duplicateVerdict && duplicateVerdict.kind !== 'confirmed') {
+      out = {
+        ...out,
+        warnings: [
+          ...(out.warnings ?? []),
+          { name: 'duplicate_unconfirmed' as const, scope: 'document' as const },
+        ],
+      };
+    }
+    // Граница записи: дальше validation уходит в базу и перетирает прежний
+    // снимок. Пакетные предупреждения относятся к нарезке файла, а не к числам
+    // документа, — валидатор их не вычисляет, поэтому переносим руками.
+    out = mergePersistentUpdWarnings(proc.validation, out);
+    // Предупреждение о ИНН поставщика устойчивое — снимаем прежнее и ставим
+    // актуальное: повторный разбор с уже верным ИНН не должен его тащить.
+    out = withSupplierInnWarning(out, supplierInnApplied);
+    // Пометка «покупатель = поставщик» снимается в любом режиме (перенос выше
+    // от флага не зависит), ставится только в on.
+    out = withPartyRolesWarning(out, partyRolesFlag);
+    return out;
+  };
+  validation = finalizeValidation(validation);
 
   // Запись шапки. Для новых распознанных УПД поставщик живёт в
   // supplier_directory_id (FK на suppliers), supplier_id (FK на counterparties)
@@ -2691,6 +2762,9 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             detectPackPriceScale: loadEnv().UPD_SCALE_WARNINGS,
           },
         );
+        // Пересчёт выше — с нуля: без финала пропали бы устойчивые пометки
+        // (пакетные, ИНН поставщика, «покупатель = поставщик») и дубль.
+        headerValues.validation = finalizeValidation(headerValues.validation);
         // Только новое раннее правило qty-scale успевает повлиять на outcome и
         // маршрутизацию повторов. При выключенном QTY_SCALE_REPAIR оставляем
         // поведение прежних qty-правил побитово тем же, что было до этой
@@ -3760,7 +3834,8 @@ async function recordRecognitionEvidence(args: {
     | 'assembly_rollback'
     | 'assembly_relaxed_copy'
     | 'assembly_copy_merge'
-    | 'waybill_batch_result';
+    | 'waybill_batch_result'
+    | 'party_roles';
   payload: Record<string, unknown>;
 }): Promise<void> {
   await db.insert(recognitionEvidenceEvents).values({
@@ -3770,6 +3845,54 @@ async function recordRecognitionEvidence(args: {
     evidenceType: args.evidenceType,
     payload: args.payload,
   });
+}
+
+/**
+ * След правила «покупатель = поставщик»: стороны как их прочла модель,
+ * история ролей и решение. Возвращает, записан ли он: сброс покупателя
+ * разрешён только со следом — иначе прочитанного покупателя не вернуть.
+ *
+ * bundle_id читается здесь, а не в общем UPDATE документа: правило
+ * срабатывает на единицах документов в день, и общий путь от него не меняется.
+ */
+async function recordPartyRolesEvidence(args: {
+  sourceDocumentId: string;
+  generation: number;
+  mode: 'shadow' | 'on';
+  decision: SamePartyDecision;
+  supplier: { inn: string | null; name: string | null };
+  buyer: { inn: string | null; name: string | null };
+  stats: PartyRoleStats;
+  log: WorkerLog;
+}): Promise<boolean> {
+  try {
+    const [doc] = await db
+      .select({ bundleId: sourceDocuments.bundleId })
+      .from(sourceDocuments)
+      .where(eq(sourceDocuments.id, args.sourceDocumentId))
+      .limit(1);
+    if (!doc?.bundleId) return false;
+    await recordRecognitionEvidence({
+      bundleId: doc.bundleId,
+      sourceDocumentId: args.sourceDocumentId,
+      generation: args.generation,
+      evidenceType: 'party_roles',
+      payload: {
+        mode: args.mode,
+        decision: args.decision,
+        supplier: args.supplier,
+        buyer: args.buyer,
+        stats: args.stats,
+      },
+    });
+    return true;
+  } catch (err) {
+    args.log.warn(
+      { err: err instanceof Error ? err.message : String(err), sourceDocumentId: args.sourceDocumentId },
+      'party roles: след не записан',
+    );
+    return false;
+  }
 }
 
 /**

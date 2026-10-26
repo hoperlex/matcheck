@@ -1,3 +1,5 @@
+import { normalizeInn } from '../../shared/utils/inn';
+
 /**
  * Имя поставщика из привязанного документа — для чипа «Поставщик» в шапке
  * приёмки и отгрузки.
@@ -30,7 +32,39 @@ export type UpdSupplierEditTarget = {
   docDate: string | null;
   /** Сколько документов привязано к операции — для предупреждения в окне. */
   linkedCount: number;
+  /**
+   * Проверенный ИНН поставщика из самого документа или null, если он неизвестен.
+   * По нему окно ставит первой запись «ИНН как в документе» и переспрашивает,
+   * когда выбирают запись с другим ИНН. См. documentSupplierInn.
+   */
+  docInn: string | null;
 };
+
+/** След проверки ИНН поставщика — те поля, что нужны окну. */
+type SupplierInnTrace = { decision: string; inn: string | null };
+
+/**
+ * ИНН поставщика, напечатанный в документе, — только из следа проверки ИНН.
+ *
+ * Не из supplierInn документа: ручная правка поставщика обнуляет
+ * supplier_inn_raw, и API подставляет ИНН выбранной записи. После ошибочной
+ * перепривязки (приёмка 21713: дубль с ИНН 5028024698 вместо 5028021698) такой
+ * «документный» ИНН подтверждал бы ошибку. След правкой не стирается.
+ *
+ * Нет следа (документы до 22.10, SUPPLIER_INN_CHECK=off) или ИНН не прошёл
+ * проверку — null: окно ведёт себя как раньше, без догадок.
+ */
+export function documentSupplierInn(trace: SupplierInnTrace | null | undefined): string | null {
+  if (!trace) return null;
+  if (
+    trace.decision !== 'valid' &&
+    trace.decision !== 'normalized' &&
+    trace.decision !== 'corrected'
+  ) {
+    return null;
+  }
+  return normalizeInn(trace.inn);
+}
 
 /**
  * Какой документ правит чип «Поставщик», если к операции привязан УПД, — или
@@ -55,7 +89,12 @@ export function updSupplierEditTarget({
   sourceDocumentIds: readonly string[];
   ownSupplierId: string | null | undefined;
   selectedUpd:
-    | { id: string; docNumber?: string | null; docDate?: string | null }
+    | {
+        id: string;
+        docNumber?: string | null;
+        docDate?: string | null;
+        supplierInnCheck?: SupplierInnTrace | null;
+      }
     | null
     | undefined;
   canEdit: boolean;
@@ -67,5 +106,6 @@ export function updSupplierEditTarget({
     docNumber: selectedUpd.docNumber ?? null,
     docDate: selectedUpd.docDate ?? null,
     linkedCount: sourceDocumentIds.length,
+    docInn: documentSupplierInn(selectedUpd.supplierInnCheck),
   };
 }

@@ -336,6 +336,14 @@ export const UpdWarningNameSchema = z.enum([
   // воркер при SUPPLIER_INN_CHECK=on; снимает повторный разбор с верным ИНН
   // или ручной выбор поставщика. Устойчивое: валидатор вычислить его не может.
   'supplier_inn_unverified',
+  // Покупатель и поставщик документа — одна организация, и по спискам и
+  // истории ролей нельзя сказать, какая сторона ошибочна (подрядчик, своя
+  // организация, двойная роль). Данные не меняются — сторону правит человек.
+  // Ставит воркер при PARTY_ROLES_CHECK=on (domain/sourceDocuments/
+  // party-roles.ts); снимает повторный разбор без совпадения, ручная правка
+  // поставщика или покупателя и любой разбор при выключенном флаге.
+  // Устойчивое: валидатор вычислить его не может.
+  'buyer_same_as_supplier',
 ]);
 export type UpdWarningName = z.infer<typeof UpdWarningNameSchema>;
 
@@ -350,6 +358,7 @@ export const PERSISTENT_UPD_WARNING_NAMES = [
   'page_doc_number_unaccounted',
   'sibling_number_duplicate',
   'supplier_inn_unverified',
+  'buyer_same_as_supplier',
 ] as const satisfies readonly UpdWarningName[];
 
 export function isPersistentUpdWarning(name: UpdWarningName): boolean {

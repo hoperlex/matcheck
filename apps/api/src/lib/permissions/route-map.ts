@@ -301,6 +301,17 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
       expandableBy: UNSCOPED,
     }),
   ],
+  // Подсказка «Получатель» по сторонам документов. Её применяют выбором
+  // подрядчика (from-directory с context='delivery' → правка приёмок), поэтому
+  // и видна она тем же: admin/manager и расширение правки приёмок. Без
+  // capability: общая с from-directory возможность изменила бы расчёт
+  // operations.edit.contractor_directory, от которого зависит рабочий чип.
+  // Инспектору (базовая правка, свой объект) закрыта, как и сам выбор
+  // подрядчика; монитору с выданной правкой — открыта, как и from-directory.
+  [
+    'GET /api/v1/deliveries/:id/recipient-suggestion',
+    st('operations.deliveries', 'edit', { expandableBy: UNSCOPED }),
+  ],
   [
     'POST /api/v1/deliveries/:id/link-source',
     st('operations.deliveries', 'edit', {

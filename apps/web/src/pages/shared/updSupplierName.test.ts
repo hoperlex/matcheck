@@ -6,7 +6,7 @@
  * в чип не попадает.
  */
 import { describe, expect, it } from 'vitest';
-import { pickUpdSupplierName, updSupplierEditTarget } from './updSupplierName';
+import { documentSupplierInn, pickUpdSupplierName, updSupplierEditTarget } from './updSupplierName';
 
 const DOC = '11111111-1111-4111-8111-111111111111';
 const OTHER = '22222222-2222-4222-8222-222222222222';
@@ -53,7 +53,13 @@ describe('updSupplierEditTarget', () => {
         selectedUpd: upd,
         canEdit: true,
       }),
-    ).toEqual({ docId: DOC, docNumber: '240627', docDate: '2026-10-13', linkedCount: 1 });
+    ).toEqual({
+      docId: DOC,
+      docNumber: '240627',
+      docDate: '2026-10-13',
+      linkedCount: 1,
+      docInn: null,
+    });
   });
 
   it('несколько документов — правится основной, число документов передаётся', () => {
@@ -117,6 +123,54 @@ describe('updSupplierEditTarget', () => {
         selectedUpd: upd,
         canEdit: false,
       }),
+    ).toBeNull();
+  });
+});
+
+describe('documentSupplierInn — ИНН из бумаги, а не из текущей привязки', () => {
+  it('проверенный ИНН из следа', () => {
+    expect(documentSupplierInn({ decision: 'valid', inn: '5028021698' })).toBe('5028021698');
+    expect(documentSupplierInn({ decision: 'normalized', inn: '50 28-021698' })).toBe('5028021698');
+    expect(documentSupplierInn({ decision: 'corrected', inn: '5028021698' })).toBe('5028021698');
+  });
+
+  it('ИНН не проверен или отсутствует — неизвестен', () => {
+    expect(documentSupplierInn({ decision: 'unverified', inn: null })).toBeNull();
+    expect(documentSupplierInn({ decision: 'absent', inn: null })).toBeNull();
+    expect(documentSupplierInn(null)).toBeNull();
+    expect(documentSupplierInn(undefined)).toBeNull();
+  });
+
+  it('после ручной перепривязки (21713) ИНН берётся из следа, а не из supplierInn', () => {
+    // supplierInn документа после правки — ИНН выбранного дубля; окно на него не смотрит.
+    const doc = {
+      id: DOC,
+      docNumber: '00EP-005791',
+      docDate: '2026-10-23',
+      supplierInn: '5028024698',
+      supplierInnCheck: { decision: 'valid', inn: '5028021698' },
+    };
+    expect(
+      updSupplierEditTarget({
+        sourceDocumentIds: [DOC],
+        ownSupplierId: null,
+        selectedUpd: doc,
+        canEdit: true,
+      })?.docInn,
+    ).toBe('5028021698');
+  });
+
+  it('следа нет — ИНН документа неизвестен, даже если supplierInn заполнен', () => {
+    expect(
+      updSupplierEditTarget({
+        sourceDocumentIds: [DOC],
+        ownSupplierId: null,
+        selectedUpd: { id: DOC, supplierInn: '5028024698' } as {
+          id: string;
+          supplierInn: string;
+        },
+        canEdit: true,
+      })?.docInn,
     ).toBeNull();
   });
 });

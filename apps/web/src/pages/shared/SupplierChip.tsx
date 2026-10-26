@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
+import { useMemo, useState, type ReactNode } from 'react';
+import { Button, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Delivery, Shipment, SourceDocumentDetail, Supplier } from '@matcheck/contracts';
 import { api, ApiError } from '../../services/api';
@@ -7,6 +7,7 @@ import { InlineEditChip } from '../../shared/ui/InlineEditChip';
 import { upsertServerSnapshot as upsertDeliverySnapshot } from '../../services/deliveries';
 import { upsertServerSnapshot as upsertShipmentSnapshot } from '../../services/shipments';
 import type { UpdSupplierEditTarget } from './updSupplierName';
+import { pickSupplierOptions, supplierInnMatchesDocument, supplierOptionLabel } from './supplierSearch';
 
 type ListResp = { items: Supplier[]; total: number };
 
@@ -116,21 +117,21 @@ export function SupplierChip({
     },
   });
 
-  const trimmed = search.trim().toLowerCase();
-  const filtered = useMemo(() => {
-    if (!trimmed) return items.slice(0, 200);
-    return items
-      .filter(
-        (s) =>
-          s.name.toLowerCase().includes(trimmed) ||
-          (s.inn ?? '').toLowerCase().includes(trimmed),
-      )
-      .slice(0, 200);
-  }, [items, trimmed]);
+  // Отбор, порядок и подписи — в supplierSearch. Фильтр один: у Select ниже
+  // filterOption={false}, иначе antd вторично отфильтровал бы по подписи и
+  // спрятал `АО "ИСТКУЛЬТ…` по запросу «АО И».
+  const docInn = hasUpd ? (updEdit?.docInn ?? null) : null;
+  const picked = useMemo(
+    () => pickSupplierOptions(items, search, docInn),
+    [items, search, docInn],
+  );
 
-  const supplierOptions = filtered.map((s) => ({
+  const supplierOptions = picked.map(({ supplier: s, group }) => ({
     value: s.id,
-    label: s.inn ? `${s.name} · ИНН ${s.inn}` : s.name,
+    label: supplierOptionLabel(s, group),
+    // Битый ИНН не блокируем — только приглушаем: выбрать его можно, но он
+    // не должен выглядеть равным настоящему.
+    ...(group === 'invalid' ? { style: { opacity: 0.55 } } : {}),
   }));
   const notFound = list.isLoading ? <Spin size="small" /> : 'Ничего не найдено';
 
@@ -158,22 +159,22 @@ export function SupplierChip({
                 поставщик показан в чипе и в таблице.
               </Typography.Text>
             )}
-            <Select<string>
-              autoFocus
-              aria-label="Поставщик в документе"
-              style={{ width: '100%' }}
-              placeholder="Выберите поставщика"
-              value={undefined}
-              onChange={(v) => {
-                setDocumentSupplier.mutate({ docId: updEdit.docId, supplierDirectoryId: v });
+            {updEdit.docInn && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                ИНН поставщика в документе: {updEdit.docInn}
+              </Typography.Text>
+            )}
+            <DocumentSupplierSelect
+              docInn={updEdit.docInn}
+              items={items}
+              options={supplierOptions}
+              loading={list.isLoading}
+              notFound={notFound}
+              onSearch={setSearch}
+              onPick={(supplierDirectoryId) => {
+                setDocumentSupplier.mutate({ docId: updEdit.docId, supplierDirectoryId });
                 close();
               }}
-              onSearch={setSearch}
-              showSearch
-              loading={list.isLoading}
-              optionFilterProp="label"
-              options={supplierOptions}
-              notFoundContent={notFound}
             />
           </Space>
         )}
@@ -217,13 +218,94 @@ export function SupplierChip({
             close();
           }}
           showSearch
+          filterOption={false}
           loading={list.isLoading}
-          optionFilterProp="label"
           options={supplierOptions}
           notFoundContent={notFound}
         />
       )}
     </InlineEditChip>
+  );
+}
+
+/**
+ * Выбор поставщика документа с переспросом при чужом ИНН.
+ *
+ * Если ИНН документа известен, а у выбранной записи он другой, PATCH не
+ * уходит сразу: выбор откладывается до «Выбрать всё равно». Так 26.10
+ * документ приёмки 21713 молча ушёл на дубль с битым ИНН. Отложенный выбор
+ * живёт здесь, а не в чипе: окно уничтожает содержимое при закрытии
+ * (destroyTooltipOnHide), и закрытие само его сбрасывает. Вложенная модалка
+ * не годится — карточка открывается и внутри модалки «Операций», а вложенная
+ * antd-модалка ломает ESC внешней.
+ */
+function DocumentSupplierSelect({
+  docInn,
+  items,
+  options,
+  loading,
+  notFound,
+  onSearch,
+  onPick,
+}: {
+  docInn: string | null;
+  items: Supplier[];
+  options: { value: string; label: string }[];
+  loading: boolean;
+  notFound: ReactNode;
+  onSearch: (value: string) => void;
+  onPick: (supplierDirectoryId: string) => void;
+}): JSX.Element {
+  const [pending, setPending] = useState<Supplier | null>(null);
+
+  return (
+    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+      <Select<string>
+        autoFocus
+        aria-label="Поставщик в документе"
+        style={{ width: '100%' }}
+        placeholder="Выберите поставщика"
+        value={undefined}
+        onChange={(v) => {
+          const chosen = items.find((s) => s.id === v);
+          if (docInn && chosen && !supplierInnMatchesDocument(chosen.inn, docInn)) {
+            setPending(chosen);
+            return;
+          }
+          onPick(v);
+        }}
+        onSearch={onSearch}
+        showSearch
+        filterOption={false}
+        loading={loading}
+        options={options}
+        notFoundContent={notFound}
+      />
+      {pending && docInn && (
+        <Space direction="vertical" size={4} style={{ width: '100%' }}>
+          <Typography.Text type="warning" style={{ fontSize: 12 }}>
+            У записи «{pending.name}» ИНН {pending.inn || 'не указан'} — не совпадает с ИНН в
+            документе {docInn}.
+          </Typography.Text>
+          <Space size={8}>
+            <Button
+              size="small"
+              danger
+              onClick={() => {
+                const id = pending.id;
+                setPending(null);
+                onPick(id);
+              }}
+            >
+              Выбрать всё равно
+            </Button>
+            <Button size="small" onClick={() => setPending(null)}>
+              Отмена
+            </Button>
+          </Space>
+        </Space>
+      )}
+    </Space>
   );
 }
 

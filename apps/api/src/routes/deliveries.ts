@@ -101,6 +101,7 @@ import { parseUuidCsv } from '../lib/uuid-csv.js';
 import { escapeLike } from '../lib/like.js';
 import { MONEY_FMT, QTY_FMT, fmtDateTimeRu } from '../lib/xlsx-format.js';
 import { registerDeliveryEdoRoutes } from './delivery-edo.js';
+import { registerDeliveryRecipientRoutes } from './delivery-recipient.js';
 import { edoGroupLinks, lockEdoDocGroup } from '../domain/edo/export-twins.js';
 
 const ListQuerySchema = z.object({
@@ -2440,6 +2441,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
   );
 
   registerDeliveryEdoRoutes(rawApp);
+  registerDeliveryRecipientRoutes(rawApp);
 
   // Привязка УПД к существующей приёмке (приёмка остаётся в своём статусе,
   // ручные материалы из мобилы НЕ удаляются). Заменяет старый клиентский

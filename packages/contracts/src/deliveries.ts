@@ -267,3 +267,23 @@ export const ConflictResponseSchema = z.object({
   serverVersion: z.number(),
   server: DeliverySchema,
 });
+
+/**
+ * Подсказка для чипа «Получатель» карточки приёмки: подрядчик из справочника
+ * «Контрагенты», которого называют стороны привязанных документов (по ИНН).
+ * Только подсказка — подставляет и сохраняет человек.
+ * GET /api/v1/deliveries/:id/recipient-suggestion.
+ */
+export const RecipientSuggestionSchema = z.object({
+  customerCounterpartyId: z.string().uuid(),
+  name: z.string(),
+  inn: z.string(),
+  from: z.enum(['buyer', 'consignee']),
+  sourceDocumentId: z.string().uuid(),
+});
+export type RecipientSuggestion = z.infer<typeof RecipientSuggestionSchema>;
+
+export const RecipientSuggestionResponseSchema = z.object({
+  suggestion: RecipientSuggestionSchema.nullable(),
+});
+export type RecipientSuggestionResponse = z.infer<typeof RecipientSuggestionResponseSchema>;

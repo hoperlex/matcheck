@@ -57,6 +57,7 @@ import { parseUpdXml } from '../domain/edo/upd.parser.js';
 import { vatFieldsOf } from '../domain/edo/vat-fields.js';
 import { mergePersistentUpdWarnings, validateUpdTotals } from '../domain/edo/upd-validation.js';
 import { withSupplierInnWarning } from '../domain/sourceDocuments/supplier-inn-check.js';
+import { withPartyRolesWarning } from '../domain/sourceDocuments/party-roles.js';
 import { deriveUpdParseOutcome } from '../domain/edo/upd-outcome.js';
 import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { discardBody, fetchPresignedForStream } from '../domain/storage/s3.retry.js';
@@ -3853,6 +3854,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           if (upd.supplierDirectoryId !== undefined) {
             const base = upd.validation ?? sd.validation;
             const next = base ? withSupplierInnWarning(base, null) : base;
+            if (next !== base) upd.validation = next;
+          }
+          // Поставщика или покупателя назвал человек — пометка «покупатель =
+          // поставщик» снята: стороны он сверил с документом. Тоже последним.
+          if (upd.supplierDirectoryId !== undefined || req.body.buyer !== undefined) {
+            const base = upd.validation ?? sd.validation;
+            const next = base ? withPartyRolesWarning(base, false) : base;
             if (next !== base) upd.validation = next;
           }
 

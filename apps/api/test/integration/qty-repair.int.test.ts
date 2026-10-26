@@ -370,6 +370,32 @@ suite('восстановление количества в воркере (ре
     expect(doc!.validation.hasMismatch).toBe(true);
   });
 
+  it('откат правки сохраняет устойчивые пометки прошлого снимка', async () => {
+    // Откат пересобирает validation с нуля. Пакетную пометку валидатор не
+    // вычисляет — без общего финала (finalizeValidation) она бы пропала.
+    mocks.qtyRepairMode = 'on';
+    forceApplicable = true;
+    throwOnOperationTrace = true;
+    const docId = await seedDoc();
+    const previous = JSON.stringify({
+      hasMismatch: false,
+      checkedAt: '2026-10-26T00:00:00.000Z',
+      checks: [],
+      warnings: [{ name: 'dropped_pages_not_parsed', scope: 'document', details: { pages: [2] } }],
+    });
+    await db`UPDATE source_documents SET validation = ${previous}::jsonb WHERE id = ${docId}`;
+
+    await handleJob(job(docId));
+
+    const items = await itemsOf(docId);
+    expect(Number(items[0]!.qty)).toBe(16);
+    const [doc] = await db<{ validation: { warnings?: Array<{ name: string }> } }[]>`
+      SELECT validation FROM source_documents WHERE id = ${docId}`;
+    expect((doc!.validation.warnings ?? []).map((w) => w.name)).toContain(
+      'dropped_pages_not_parsed',
+    );
+  });
+
   it('документ уже в приёмке: правка отменяется, сверка считается по исходным', async () => {
     mocks.qtyRepairMode = 'on';
     forceApplicable = true;

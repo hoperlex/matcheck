@@ -80,6 +80,7 @@ import { ExpectedUpds } from './ExpectedUpds';
 import { PhotoGallery, type GalleryPhoto } from './PhotoGallery';
 import { formatStageTime } from './stageTime';
 import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
+import { RecipientSuggestionHint } from './RecipientSuggestionHint';
 import { pickUpdSupplierName, updSupplierEditTarget } from '../shared/updSupplierName';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkEdoDocumentModal, type EdoSection } from './LinkEdoDocumentModal';
@@ -1857,6 +1858,29 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   </Space>
                 )}
               </InlineEditChip>
+
+              {/* Подсказка получателя по сторонам документов (приёмка 21514).
+                  Только у существующей приёмки с документами и только пока
+                  получатель пуст: подставляет человек, сохраняет обычной
+                  кнопкой — тем же путём, что ручной выбор в чипе выше. */}
+              {loadedDelivery &&
+                deliveryId &&
+                !isNew &&
+                canPickContractor &&
+                !isContractor &&
+                recipientKind === 'counterparty' &&
+                !contractorId &&
+                !recipientMolId &&
+                (loadedDelivery.sourceDocumentIds?.length ?? 0) > 0 && (
+                  <RecipientSuggestionHint
+                    deliveryId={deliveryId}
+                    sourceDocumentIds={loadedDelivery.sourceDocumentIds}
+                    onApply={(cp) => {
+                      setPickedContractor({ id: cp.id, name: cp.name });
+                      setContractorId(cp.id);
+                    }}
+                  />
+                )}
 
               {/* Чип «Поставщик»: симметрично с отгрузкой. Если у приёмки
                   привязана УПД (sourceDocumentIds.length > 0), имя
