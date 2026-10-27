@@ -647,6 +647,9 @@ export function LinkEdoDocumentModal({
               }`,
             account.failedFinal > 0 && `${account.failedFinal} УПД не выгружены окончательно`,
           ].filter((v): v is string => typeof v === 'string');
+          // Учётка в порядке — ничего: пустой блок всё равно получал отступ
+          // окна, и с двумя учётками над поиском зияла пустая полоса.
+          if (!notice && failed.length === 0) return null;
           return (
             <Space key={account.accountId} direction="vertical" style={{ width: '100%' }}>
               {notice && <Alert type={notice.type} showIcon message={notice.message} />}

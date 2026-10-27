@@ -125,7 +125,7 @@ describe('таблица учёток', () => {
 
     const sbisRow = within(rowOf('СБИС СУ-10'));
     expect(sbisRow.getByText('СБИС')).toBeTruthy();
-    expect(sbisRow.getByText('организация не выбрана')).toBeTruthy();
+    expect(sbisRow.getByText('не выбрана')).toBeTruthy();
     expect(sbisRow.getByRole('button', { name: 'Проверить доступ' })).toBeTruthy();
     expect(sbisRow.queryByRole('button', { name: 'Осмотреть ящик' })).toBeNull();
     expect(sbisRow.queryByRole('button', { name: 'Синхронизировать' })).toBeNull();
@@ -144,7 +144,7 @@ describe('таблица учёток', () => {
     const row = within(rowOf('СБИС СУ-10'));
     expect(row.getByText('7736255508')).toBeTruthy();
     expect(row.getByText('774550001')).toBeTruthy();
-    expect(row.queryByText('организация не выбрана')).toBeNull();
+    expect(row.queryByText('не выбрана')).toBeNull();
   });
 });
 

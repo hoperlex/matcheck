@@ -21,6 +21,7 @@
  */
 import { parseArgs } from 'node:util';
 import { db, sql } from '../src/db/client.js';
+import { errorChain } from '../src/lib/error-chain.js';
 import { backfillExportIdentity } from '../src/domain/edo/identity-backfill.js';
 import { getObject } from '../src/domain/storage/s3.signer.js';
 
@@ -81,7 +82,7 @@ main()
     process.exitCode = code;
   })
   .catch((err) => {
-    console.error(err instanceof Error ? err.message : err);
+    console.error(errorChain(err));
     process.exitCode = 1;
   })
   .finally(() => sql.end({ timeout: 5 }));

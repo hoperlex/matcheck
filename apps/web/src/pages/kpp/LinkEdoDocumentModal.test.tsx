@@ -616,3 +616,40 @@ describe('операторы ЭДО (Диадок и СБИС)', () => {
     expect(await screen.findByText(/только формализованные УПД из ящика ЭДО СУ-10\./)).toBeTruthy();
   });
 });
+
+describe('учётки реестра без замечаний', () => {
+  const ok = (accountId: string, name: string, provider: string) => ({
+    accountId,
+    name,
+    provider,
+    state: 'ok',
+    checkedAt: '2026-10-26T12:03:00.000Z',
+    failedPending: 0,
+    nextRetryAt: null,
+    failedFinal: 0,
+  });
+
+  function withRegistry(registry: unknown[]) {
+    apiGet.mockImplementation((path: string) =>
+      path === '/deliveries/d1/edo-candidates'
+        ? Promise.resolve({ ...candidates, diagnostics: { ...candidates.diagnostics, registry } })
+        : Promise.reject(new Error(`unexpected ${path}`)),
+    );
+  }
+
+  it('две учётки в порядке — пустых блоков над поиском нет; замечание у одной — только её плашка', async () => {
+    withRegistry([ok('a1', 'Диадок_СУ10', 'diadoc'), ok('a2', 'СБИС', 'sbis')]);
+    show();
+    await screen.findByText('EXP-1');
+    const body = document.querySelector('.ant-modal-body')!;
+    expect(body.querySelectorAll('.ant-space:empty')).toHaveLength(0);
+    expect(within(body as HTMLElement).queryByRole('alert')).toBeNull();
+    cleanup();
+
+    withRegistry([ok('a1', 'Диадок_СУ10', 'diadoc'), { ...ok('a2', 'СБИС', 'sbis'), state: 'catching_up' }]);
+    show();
+    expect(await screen.findByText(/^СБИС \(СБИС\): Реестр ЭДО догоняет ленту СБИС/)).toBeTruthy();
+    expect(document.querySelectorAll('.ant-modal-body .ant-space:empty')).toHaveLength(0);
+    expect(screen.queryByText(/Диадок_СУ10/)).toBeNull();
+  });
+});

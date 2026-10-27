@@ -29,6 +29,7 @@ import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { and, eq, isNotNull } from 'drizzle-orm';
 import { db, sql } from '../src/db/client.js';
+import { errorChain } from '../src/lib/error-chain.js';
 import { edoAccounts } from '../src/db/schema.js';
 import { SBIS_PROVIDER } from '../src/domain/edo/sbis/sbis-account.js';
 import { runSbisExportPass, type SbisExportResult } from '../src/domain/jobs/sbis-export-runner.js';
@@ -121,7 +122,7 @@ main()
     process.exitCode = code;
   })
   .catch((err) => {
-    console.error(err instanceof Error ? err.message : err);
+    console.error(errorChain(err));
     process.exitCode = 1;
   })
   .finally(() => sql.end({ timeout: 5 }));

@@ -202,7 +202,14 @@ function SbisAppCell({ account: r }: { account: EdoAccountDto }) {
 /** Организация СБИС в узкой колонке «Ящик»: ИНН и КПП строками, целиком — в подсказке. */
 function SbisOrgCell({ boxId }: { boxId: string | null }) {
   const org = parseSbisOrgRef(boxId);
-  if (!org) return <Tag>организация не выбрана</Tag>;
+  // Колонка узкая: коротко, как у Диадока «не выбран», а что делать — в подсказке.
+  if (!org) {
+    return (
+      <Tooltip title="Организация не выбрана: «Проверить доступ» → «Использовать эту организацию»">
+        <Tag>не выбрана</Tag>
+      </Tooltip>
+    );
+  }
   return (
     <Tooltip title={sbisOrgLabel(boxId)}>
       <Space direction="vertical" size={0}>

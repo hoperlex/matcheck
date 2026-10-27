@@ -54,6 +54,7 @@ import { parseOrgRef } from '../edo/sbis/sbis.org-ref.js';
 import { formatSbisDateTime, isYes, parseSbisDateTime, sbisDateToIso, type SbisAttachment, type SbisDocument } from '../edo/sbis/sbis.types.js';
 import { extractSingleXml, ZipRejected } from '../edo/zip-single-xml.js';
 import { parseSince, RUN_RETENTION_DAYS, saveCursorKey } from './edo-export-runner.js';
+import { errorChain } from '../../lib/error-chain.js';
 
 /** Идентичность запроса ленты СБИС в edo_export_cursors (вместе с организацией в box_id). */
 export const SBIS_FEED_QUERY = 'sbis:changes:v1';
@@ -212,8 +213,9 @@ function emptySummary(): SbisExportSummary {
   };
 }
 
+/** С причинами: у сбоя запроса drizzle текст Postgres — в `cause` (error-chain.ts). */
 function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return errorChain(err);
 }
 
 /** Где взять файл вложения: ссылка или причина, почему её нет. */
