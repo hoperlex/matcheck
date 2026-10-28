@@ -3,6 +3,7 @@
 // «ООО "СТРОЙСЕРВИС"» с ИНН СТРОЙПАРТНЕРа).
 import { describe, expect, it } from 'vitest';
 import {
+  operationalNameMatches,
   pickOperationalCounterparty,
   type OperationalRow,
 } from '../src/domain/directories/operational-pick.js';
@@ -58,5 +59,41 @@ describe('pickOperationalCounterparty', () => {
     const rows = [row('b', 'Y', null, 1), row('a', 'X', null, 1)];
     expect(pickOperationalCounterparty(rows, dir, new Map())?.id).toBe('a');
     expect(pickOperationalCounterparty([...rows].reverse(), dir, new Map())?.id).toBe('a');
+  });
+});
+
+describe('operationalNameMatches', () => {
+  // 22204: под ИНН 7722753969 пять покупателей, первым попадался «ЭСКАЛИФТ».
+  const vi = { name: 'ООО "ВСЕИНСТРУМЕНТЫ.РУ"', aliases: [] };
+
+  it('форма, кавычки, регистр и точка в имени не мешают совпадению', () => {
+    expect(operationalNameMatches('ООО «Всеинструменты.ру»', vi)).toBe(true);
+    expect(operationalNameMatches('ВсеИнструменты.ру', vi)).toBe(true);
+  });
+
+  it('чужое имя под тем же ИНН не совпадает', () => {
+    expect(operationalNameMatches('ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ЭСКАЛИФТ"', vi)).toBe(
+      false,
+    );
+    expect(operationalNameMatches('', vi)).toBe(false);
+  });
+
+  it('совпадение по алиасу', () => {
+    expect(
+      operationalNameMatches('ООО "СП"', { name: 'ООО "СТРОЙПАРТНЕР"', aliases: ['СП'] }),
+    ).toBe(true);
+  });
+
+  it('выбор среди пяти строк 22204 даёт строку с именем справочника', () => {
+    const rows = [
+      row('esk', 'ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ЭСКАЛИФТ"', '997750001', 1),
+      row('est', 'СТРОИТЕЛЬНАЯ КОМПАНИЯ ЭСТ', '502701001', 2),
+      row('vi1', 'ООО «Всеинструменты.ру»', '775101001', 9),
+      row('vi2', 'ВсеИнструменты.ру', '771965904', 17),
+      row('mt', 'ООО «МТ-СТРОЙГРУПП»', '772001001', 3),
+    ];
+    const picked = pickOperationalCounterparty(rows, vi, new Map());
+    expect(picked?.id).toBe('vi1');
+    expect(operationalNameMatches(picked!.name, vi)).toBe(true);
   });
 });

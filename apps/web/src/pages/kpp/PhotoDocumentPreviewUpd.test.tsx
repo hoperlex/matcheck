@@ -78,6 +78,7 @@ vi.mock('../../lib/thumbQueue', () => ({
 }));
 
 const { PhotoDocumentPreview } = await import('./PhotoDocumentPreview');
+const { api } = await import('../../services/api');
 
 function wrap(node: ReactElement): ReactElement {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -123,5 +124,72 @@ describe('PhotoDocumentPreview — фото, разобранное УПД-ве�
     renderPreview();
 
     expect(await screen.findByText('УПД')).toBeTruthy();
+  });
+});
+
+/** Приёмка 22246, фото 1 этапа: «1б» прочитано как 16, УПД № 1820 — 204 пог.м. */
+const stage1Recognition: PhotoRecognition = {
+  ...updRecognition,
+  docNumber: '1820',
+  items: [
+    {
+      nameRaw: 'Швеллер 10П',
+      qty: 16,
+      unit: 'пог. м',
+      price: 632.79,
+      sum: 123508.52,
+      rowNo: 1,
+      vatRate: 22,
+      vatSum: 22299.48,
+    },
+    {
+      nameRaw: 'Швеллер 8П',
+      qty: 300,
+      unit: 'пог. м',
+      price: 552.46,
+      sum: 202200,
+      rowNo: 2,
+      vatRate: 22,
+      vatSum: 36462.3,
+    },
+  ],
+  validation: {
+    hasMismatch: true,
+    checkedAt: '2026-10-28T06:27:54.000Z',
+    checks: [
+      {
+        name: 'row_vat_rate',
+        scope: { row: 1 },
+        expected: 22299.48,
+        actual: 22272.03,
+        diff: 27.45,
+        tolerance: 22.27,
+        ok: false,
+      },
+    ],
+  },
+  linkedDocument: {
+    id: '469ac4ba-9b48-48a8-9201-8a32781868f0',
+    docNumber: '1820',
+    matchedBy: 'number',
+    items: [
+      { rowNo: 1, nameRaw: 'Швеллер 10П', qty: 204, unit: 'пог.м' },
+      { rowNo: 2, nameRaw: 'Швеллер 8П', qty: 300, unit: 'пог.м' },
+    ],
+  },
+};
+
+describe('PhotoDocumentPreview — сверка с УПД операции', () => {
+  it('строка, расходящаяся с УПД, красная и показывает значение из УПД', async () => {
+    vi.mocked(api.get).mockResolvedValueOnce(stage1Recognition);
+    renderPreview();
+
+    const hint = await screen.findByText('в УПД: 204 пог.м');
+    expect(hint.closest('tr')?.getAttribute('style')).toContain('background: rgb(255, 241, 240)');
+    expect(
+      screen.getByText('Сверено с УПД №1820 этой приёмки: строк 2, расходится 1'),
+    ).toBeTruthy();
+    // Вторая строка совпала с УПД («пог. м» = «пог.м») — без пометки.
+    expect(screen.queryByText('в УПД: 300 пог.м')).toBeNull();
   });
 });

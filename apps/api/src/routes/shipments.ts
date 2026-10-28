@@ -84,6 +84,7 @@ import {
 import { canSeeReviewInMatrix } from '../lib/review.js';
 import { assertPermission } from '../lib/permissions/assert.js';
 import { syncPairedTransferDelivery } from '../domain/transfers/pair.js';
+import { resolveSupplierCounterparty } from '../domain/directories/supplier-counterparty.js';
 import {
   expandCustomerCounterpartyToOpIds,
   resolveContractorOpIds,
@@ -1948,7 +1949,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       }
 
       const [src] = await app.db
-        .select({ inn: suppliers.inn, name: suppliers.name })
+        .select({ inn: suppliers.inn, name: suppliers.name, aliases: suppliers.aliases })
         .from(suppliers)
         .where(eq(suppliers.id, req.body.supplierDirectoryId))
         .limit(1);
@@ -1958,41 +1959,19 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           message: 'Поставщик из справочника не найден',
         });
       }
-      const innDigits = (src.inn ?? '').replace(/\D+/g, '');
-      const nameTrim = src.name.trim();
 
-      let counterpartyId: string | null = null;
-      if (innDigits.length > 0) {
-        const [existing] = await app.db
-          .select({ id: counterparties.id })
-          .from(counterparties)
-          .where(eq(counterparties.inn, innDigits))
-          .limit(1);
-        if (existing) counterpartyId = existing.id;
-      }
-      if (!counterpartyId) {
-        const [created] = await app.db
-          .insert(counterparties)
-          .values({
-            inn: innDigits || '0',
-            kpp: null,
-            name: nameTrim,
-            isSupplier: true,
-            isCustomer: false,
-          })
-          .returning({ id: counterparties.id });
-        if (!created) {
-          return reply.code(404).send({
-            error: 'counterparty_create_failed',
-            message: 'Не удалось создать запись о поставщике',
-          });
-        }
-        counterpartyId = created.id;
+      // Та же строка, что у приёмки, — см. supplier-counterparty.ts.
+      const counterparty = await resolveSupplierCounterparty(app.db, src, req.log);
+      if (!counterparty) {
+        return reply.code(404).send({
+          error: 'counterparty_create_failed',
+          message: 'Не удалось создать запись о поставщике',
+        });
       }
 
       await app.db
         .update(shipments)
-        .set({ supplierId: counterpartyId, updatedAt: new Date() })
+        .set({ supplierId: counterparty.id, updatedAt: new Date() })
         .where(eq(shipments.id, s.id));
 
       publishEvent(app, {

@@ -1,5 +1,6 @@
 // Какую операционную строку `counterparties` вернуть, когда человек выбрал
-// подрядчика из «Контрагентов» (POST /counterparties/from-directory).
+// подрядчика из «Контрагентов» (POST /counterparties/from-directory) или
+// поставщика из «Поставщиков» (supplier-counterparty.ts).
 //
 // По одному ИНН в операционной таблице бывает несколько строк: обособленные
 // подразделения с разными КПП и мусор распознавания. Например, у ИНН
@@ -24,15 +25,26 @@ export type OperationalRow = {
   createdAt: Date;
 };
 
+export type DirectoryName = { name: string; aliases?: readonly string[] | null };
+
+function directoryKeys(directory: DirectoryName): Set<string> {
+  return new Set(
+    [directory.name, ...(directory.aliases ?? [])].map(companyKey).filter((k) => k !== ''),
+  );
+}
+
+/** Имя операционной строки совпадает с записью справочника или её алиасом. */
+export function operationalNameMatches(name: string, directory: DirectoryName): boolean {
+  return directoryKeys(directory).has(companyKey(name));
+}
+
 export function pickOperationalCounterparty<T extends OperationalRow>(
   rows: readonly T[],
-  directory: { name: string; aliases?: readonly string[] | null },
+  directory: DirectoryName,
   usage: ReadonlyMap<string, number>,
 ): T | undefined {
   if (rows.length <= 1) return rows[0];
-  const keys = new Set(
-    [directory.name, ...(directory.aliases ?? [])].map(companyKey).filter((k) => k !== ''),
-  );
+  const keys = directoryKeys(directory);
   const rank = (r: T) => ({
     nameMatch: keys.has(companyKey(r.name)) ? 0 : 1,
     noKpp: r.kpp?.trim() ? 1 : 0,

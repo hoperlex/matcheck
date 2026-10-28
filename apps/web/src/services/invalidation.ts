@@ -151,17 +151,21 @@ export function setupInvalidation(qc: QueryClient): () => void {
       // delivery-edo-matches: чипы УПД из ЭДО — привязку мог сделать другой
       // менеджер, а «ещё в приёмке N» меняется от привязки к соседней приёмке.
       // delivery-supplier-orders: заказы EstiMat, привязанные к приёмке.
+      // photo-recognition: таблица фото сверяется с УПД операции
+      // (linkedDocument) — привязка, отвязка или правка УПД меняют сверку
+      // уже открытого фото. Перечитывается только открытое окно.
       keys = [
         ['deliveries'],
         ['source-documents'],
         ['delivery-edo-matches'],
         ['delivery-supplier-orders'],
+        ['photo-recognition'],
         ...DELIVERY_REPORTS,
       ];
     } else if (type === 'shipment_updated' || type === 'shipment_deleted') {
-      keys = [['shipments'], ['source-documents'], ...SHIPMENT_REPORTS];
+      keys = [['shipments'], ['source-documents'], ['photo-recognition'], ...SHIPMENT_REPORTS];
     } else if (type === 'source_document_updated') {
-      keys = [['source-documents']];
+      keys = [['source-documents'], ['photo-recognition']];
     }
     schedule(keys);
     void evt;

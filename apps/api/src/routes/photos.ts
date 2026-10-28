@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import { assertPermission } from '../lib/permissions/assert.js';
@@ -20,10 +20,14 @@ import {
   counterparties,
   deliveries,
   deliveryPhotos,
+  deliverySources,
   photoRecognizedItems,
   shipments,
   shipmentPhotos,
+  shipmentSources,
   sites,
+  sourceDocumentItems,
+  sourceDocuments,
   statuses,
 } from '../db/schema.js';
 import {
@@ -37,6 +41,7 @@ import { discardBody, fetchPresignedForStream } from '../domain/storage/s3.retry
 import { buildS3Key } from '../domain/storage/s3.path.js';
 import { recognizePhotoItems } from '../domain/photos/recognize.js';
 import { recognizePhotoUpd } from '../domain/photos/recognize-upd.js';
+import { pickLinkedDocument, type LinkedDocumentCandidate } from '../domain/photos/linked-document.js';
 import type { QtyRepairTrace } from '../domain/edo/qty-repair.js';
 import {
   applyQtyScale,
@@ -1198,7 +1203,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       await assertPermission(req, pageOfKind(found.kind), 'view');
       const cached = await loadRecognition(app, found.kind, req.params.id);
       if (!cached) return reply.code(404).send({ error: 'not_found' });
-      return cached;
+      return attachLinkedDocument(app, found, cached, req.user?.role);
     },
   );
 
@@ -1230,7 +1235,9 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       // Кэш-хит без force и без error_message — отдаём без LLM-вызова.
       if (!req.query.force) {
         const cached = await loadRecognition(app, found.kind, req.params.id);
-        if (cached && cached.status === 'done') return cached;
+        if (cached && cached.status === 'done') {
+          return attachLinkedDocument(app, found, cached, req.user?.role);
+        }
       }
 
       // Проверка типа фото: распознаём только документы.
@@ -1272,7 +1279,7 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!outcome.ok) {
         return reply.code(outcome.status).send({ error: outcome.error, message: outcome.message });
       }
-      return outcome.value;
+      return attachLinkedDocument(app, found, outcome.value, req.user?.role);
     },
   );
 }
@@ -1622,6 +1629,81 @@ const PHOTO_RECOGNIZE_BUDGET_MS = 540_000;
 const PHOTO_CLASSIFY_TIMEOUT_MS = 45_000;
 /** Меньше этого остатка фолбэк не начинаем: не успеет и оборвёт запрос. */
 const PHOTO_FALLBACK_MIN_MS = 60_000;
+
+// УПД операции, с которым портал сверяет таблицу фото (linked-document.ts).
+// Считается при каждом чтении: привязка документа к операции меняется после
+// распознавания, и в кэше фото его не держим.
+//
+// Подрядчику и инспектору позиции документа в этом окне не показываем —
+// поле пустое.
+async function attachLinkedDocument(
+  app: ReturnType<typeof asZod>,
+  found: { kind: OperationKind; operationId: string },
+  value: z.infer<typeof PhotoRecognitionSchema>,
+  role: AuthUser['role'] | undefined,
+): Promise<z.infer<typeof PhotoRecognitionSchema>> {
+  if (role === 'contractor' || role === 'inspector_kpp') return { ...value, linkedDocument: null };
+  if (value.status !== 'done' || value.parser !== 'upd_vision' || value.items.length === 0) {
+    return { ...value, linkedDocument: null };
+  }
+
+  const docs =
+    found.kind === 'delivery'
+      ? await app.db
+          .select({ id: sourceDocuments.id, docNumber: sourceDocuments.docNumber })
+          .from(deliverySources)
+          .innerJoin(sourceDocuments, eq(sourceDocuments.id, deliverySources.sourceDocumentId))
+          .where(
+            and(
+              eq(deliverySources.deliveryId, found.operationId),
+              eq(sourceDocuments.kind, 'upd'),
+              eq(sourceDocuments.status, 'parsed'),
+            ),
+          )
+      : await app.db
+          .select({ id: sourceDocuments.id, docNumber: sourceDocuments.docNumber })
+          .from(shipmentSources)
+          .innerJoin(sourceDocuments, eq(sourceDocuments.id, shipmentSources.sourceDocumentId))
+          .where(
+            and(
+              eq(shipmentSources.shipmentId, found.operationId),
+              eq(sourceDocuments.kind, 'upd'),
+              eq(sourceDocuments.status, 'parsed'),
+            ),
+          );
+  if (docs.length === 0) return { ...value, linkedDocument: null };
+
+  const items = await app.db
+    .select({
+      sourceDocumentId: sourceDocumentItems.sourceDocumentId,
+      rowNo: sourceDocumentItems.rowNo,
+      nameRaw: sourceDocumentItems.nameRaw,
+      qty: sourceDocumentItems.qty,
+      unit: sourceDocumentItems.unit,
+    })
+    .from(sourceDocumentItems)
+    .where(
+      inArray(
+        sourceDocumentItems.sourceDocumentId,
+        docs.map((d) => d.id),
+      ),
+    )
+    .orderBy(asc(sourceDocumentItems.lineNo));
+
+  const candidates: LinkedDocumentCandidate[] = docs.map((d) => ({
+    id: d.id,
+    docNumber: d.docNumber,
+    items: items
+      .filter((it) => it.sourceDocumentId === d.id)
+      .map((it) => ({
+        rowNo: it.rowNo,
+        nameRaw: it.nameRaw,
+        qty: it.qty !== null ? Number(it.qty) : null,
+        unit: it.unit,
+      })),
+  }));
+  return { ...value, linkedDocument: pickLinkedDocument(value, candidates) };
+}
 
 // Читает кэш распознавания фото. Возвращает null, если кэша нет.
 async function loadRecognition(

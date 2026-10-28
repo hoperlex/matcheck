@@ -188,6 +188,8 @@ suite('фото документа: развилка УПД / прежний п�
     await app?.close();
     await sql`DELETE FROM photo_recognized_items WHERE delivery_photo_id = ${photoId}`;
     await sql`DELETE FROM delivery_photos WHERE delivery_id = ${deliveryId}`;
+    await sql`DELETE FROM delivery_sources WHERE delivery_id = ${deliveryId}`;
+    await sql`DELETE FROM source_documents WHERE site_id = ${siteId}`;
     await sql`DELETE FROM deliveries WHERE site_id = ${siteId}`;
     await sql`DELETE FROM users WHERE id = ${userId}`;
     await sql`DELETE FROM sites WHERE id = ${siteId}`;
@@ -443,5 +445,78 @@ suite('фото документа: развилка УПД / прежний п�
     expect(body.validation).toBeNull();
     expect(body.vatSum).toBeNull();
     expect(body.items[0].nameRaw).toBe('Труба');
+  });
+
+  describe('сверка с УПД приёмки (linkedDocument)', () => {
+    const docId = randomUUID();
+
+    beforeAll(async () => {
+      // Тот же УПД № 2788, что на фото, но с верным количеством: модель на фото
+      // прочла 249, в документе — 250.
+      await sql`INSERT INTO source_documents
+          (id, kind, direction, status, origin, site_id, doc_number, doc_date, total_sum)
+        VALUES (${docId}, 'upd', 'inbound', 'parsed', 'manual_pdf', ${siteId}, '2788',
+                '2026-08-31', 93375.00)`;
+      await sql`INSERT INTO source_document_items
+          (source_document_id, name_raw, qty, unit, line_no, row_no)
+        VALUES (${docId}, 'Пена монтажная Империал 65 UNIVERSAL', 250, 'шт', 1, 1)`;
+      await sql`INSERT INTO delivery_sources (delivery_id, source_document_id)
+        VALUES (${deliveryId}, ${docId})`;
+    });
+
+    afterEach(async () => {
+      await sql`UPDATE source_documents SET status = 'parsed' WHERE id = ${docId}`;
+    });
+
+    const recognizeUpd = async () => {
+      mocks.updRoute = true;
+      mocks.classifyImageKind.mockResolvedValue({ kind: 'upd', confidence: 0.95 });
+      mocks.recognizePhotoUpd.mockResolvedValue(UPD_RESULT);
+      return recognize();
+    };
+    const read = () => app.inject({ method: 'GET', url: `/api/v1/photos/${photoId}/recognition` });
+
+    it('свежий разбор и чтение кэша отдают УПД того же номера с его строками', async () => {
+      const fresh = await recognizeUpd();
+      expect(fresh.statusCode).toBe(200);
+      expect(fresh.json().linkedDocument).toEqual({
+        id: docId,
+        docNumber: '2788',
+        matchedBy: 'number',
+        items: [
+          { rowNo: 1, nameRaw: 'Пена монтажная Империал 65 UNIVERSAL', qty: 250, unit: 'шт' },
+        ],
+      });
+
+      const cached = await read();
+      expect(cached.json().linkedDocument?.id).toBe(docId);
+      const noForce = await recognizeNoForce();
+      expect(noForce.json().linkedDocument?.id).toBe(docId);
+    });
+
+    it('неразобранный документ не сверяется', async () => {
+      await recognizeUpd();
+      await sql`UPDATE source_documents SET status = 'parse_failed' WHERE id = ${docId}`;
+      expect((await read()).json().linkedDocument).toBeNull();
+    });
+
+    it('у прежнего пути сверки нет', async () => {
+      const res = await recognize();
+      expect(res.json().parser).toBe('photo_v1');
+      expect(res.json().linkedDocument).toBeNull();
+    });
+
+    it('инспектору позиции документа не отдаются', async () => {
+      await recognizeUpd();
+      const manager = currentUser;
+      currentUser = { ...manager, role: 'inspector_kpp', siteId };
+      try {
+        const res = await read();
+        expect(res.statusCode).toBe(200);
+        expect(res.json().linkedDocument).toBeNull();
+      } finally {
+        currentUser = manager;
+      }
+    });
   });
 });

@@ -9,6 +9,8 @@ import { UpdValidationSummary } from '../../shared/ui/UpdValidationSummary';
 import { ClampText } from '../../shared/ui/ResponsiveTable';
 import { enqueueFullLoad } from '../../lib/thumbQueue';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
+import type { OperationKind } from '../../lib/db';
+import { photoRowHints, rowCheckText, type PhotoRowHint } from './photoRowHints';
 
 /**
  * Пороги качества снимка по длинной стороне. Те же числа использует
@@ -36,6 +38,7 @@ export function PhotoDocumentPreview({
   afterClose,
   photoId,
   imageSrc,
+  operationKind = 'delivery',
 }: {
   open: boolean;
   onClose: () => void;
@@ -44,6 +47,8 @@ export function PhotoDocumentPreview({
   afterClose?: () => void;
   photoId: string;
   imageSrc: string;
+  /** Чья это фотография — для подписи сверки «с УПД этой приёмки/отгрузки». */
+  operationKind?: OperationKind;
 }): JSX.Element {
   const qc = useQueryClient();
   // На телефоне фото и таблица рядом не помещаются: у таблицы минимум 360px, и
@@ -297,6 +302,7 @@ export function PhotoDocumentPreview({
           error={recognize.error ?? null}
           onRetry={() => recognize.mutate({ force: true })}
           stacked={stacked}
+          operationKind={operationKind}
         />
       </div>
     </Modal>
@@ -309,6 +315,7 @@ function RecognitionPanel({
   error,
   onRetry,
   stacked,
+  operationKind,
 }: {
   isLoading: boolean;
   data: PhotoRecognition | null;
@@ -316,6 +323,7 @@ function RecognitionPanel({
   onRetry: () => void;
   /** Окно на телефоне: панель уже, чем таблица с фиксированными колонками. */
   stacked: boolean;
+  operationKind: OperationKind;
 }): JSX.Element {
   if (isLoading) {
     return (
@@ -374,6 +382,7 @@ function RecognitionPanel({
   // items.sum — стоимость С налогом (графа 9), у 'photo_v1' — без него
   // (графа 5), и НДС там не извлекается вовсе.
   const isUpdParser = data.parser === 'upd_vision';
+  const hints = photoRowHints(data.items, data.validation, data.linkedDocument);
 
   return (
     <div>
@@ -425,6 +434,17 @@ function RecognitionPanel({
         </div>
       )}
 
+      {data.linkedDocument && (
+        <div style={{ marginBottom: 12 }}>
+          <LinkedDocumentTag
+            docNumber={data.linkedDocument.docNumber}
+            compared={hints.compared}
+            mismatched={hints.mismatched}
+            operationKind={operationKind}
+          />
+        </div>
+      )}
+
       {data.items.length === 0 ? (
         <Alert
           type="warning"
@@ -447,11 +467,17 @@ function RecognitionPanel({
           // ширину, что в самой широкой панели десктопа (560 − 2×16), и
           // прокрутку вбок.
           scroll={stacked ? { x: 528 } : undefined}
-          // Данные фото через серверную сверку не проходят — подозрение на
-          // перестановку количества и цены считаем здесь же, на клиенте.
-          onRow={(record) =>
-            suspectQtyPriceSwap(record) ? { style: { background: '#fffbe6' } } : {}
-          }
+          // Красная строка — доказанное расхождение: строка не прошла сверку
+          // сумм или расходится со строкой УПД операции. Жёлтая — только
+          // подозрение на перестановку количества и цены, которое арифметика
+          // не ловит (см. suspectQtyPriceSwap); красное важнее.
+          onRow={(record, index) => {
+            const hint = index === undefined ? undefined : hints.rows[index];
+            if (hint && (hint.failed.length > 0 || hint.doc)) {
+              return { style: { background: '#fff1f0' } };
+            }
+            return suspectQtyPriceSwap(record) ? { style: { background: '#fffbe6' } } : {};
+          }}
           columns={[
             {
               // У УПД-ветки — номер, НАПЕЧАТАННЫЙ в графе 1: по нему видно
@@ -475,7 +501,9 @@ function RecognitionPanel({
               dataIndex: 'qty',
               width: 70,
               align: 'right' as const,
-              render: (v: number | null | undefined) => (v == null ? '—' : formatNumber(v)),
+              render: (v: number | null | undefined, _: PhotoRecognitionItem, idx: number) => (
+                <QtyCell value={v} hint={hints.rows[idx]} />
+              ),
             },
             {
               title: 'Ед.',
@@ -530,6 +558,72 @@ function RecognitionPanel({
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Количество строки фото с пометками: подсказка по проваленной проверке и
+ * значение из УПД операции под ним, если они расходятся.
+ */
+function QtyCell({
+  value,
+  hint,
+}: {
+  value: number | null | undefined;
+  hint: PhotoRowHint | undefined;
+}): JSX.Element {
+  const text = value == null ? '—' : formatNumber(value);
+  const reasons = [...new Set((hint?.failed ?? []).map(rowCheckText))];
+  const shown =
+    reasons.length > 0 ? (
+      <Tooltip
+        title={reasons.map((r) => (
+          <div key={r}>{r}</div>
+        ))}
+      >
+        <span style={{ borderBottom: '1px dashed #cf1322' }}>{text}</span>
+      </Tooltip>
+    ) : (
+      text
+    );
+  if (!hint?.doc) return <>{shown}</>;
+  const { qty, unit } = hint.doc;
+  return (
+    <>
+      {shown}
+      <div>
+        <Typography.Text type="danger" style={{ fontSize: 11 }}>
+          в УПД: {qty == null ? '—' : formatNumber(qty)}
+          {unit ? ` ${unit}` : ''}
+        </Typography.Text>
+      </div>
+    </>
+  );
+}
+
+/**
+ * С каким УПД операции сверена таблица. «Найден» и «сверен» различаются:
+ * документ опознан по номеру, но ни одна строка могла не сопоставиться.
+ */
+function LinkedDocumentTag({
+  docNumber,
+  compared,
+  mismatched,
+  operationKind,
+}: {
+  docNumber: string | null;
+  compared: number;
+  mismatched: number;
+  operationKind: OperationKind;
+}): JSX.Element {
+  const doc = `УПД №${docNumber ?? '—'} этой ${operationKind === 'shipment' ? 'отгрузки' : 'приёмки'}`;
+  if (compared === 0) {
+    return <Tag>{doc} найден, строки сопоставить не удалось</Tag>;
+  }
+  return (
+    <Tag color={mismatched > 0 ? 'red' : 'green'}>
+      Сверено с {doc}: строк {compared}, расходится {mismatched}
+    </Tag>
   );
 }
 

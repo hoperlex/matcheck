@@ -21,6 +21,7 @@ export * from './review.js';
 export * from './group-operations.js';
 export * from './deliveries.js';
 export * from './photos.js';
+export * from './photo-document-match.js';
 export * from './llm.js';
 export * from './edo.js';
 export * from './mail.js';

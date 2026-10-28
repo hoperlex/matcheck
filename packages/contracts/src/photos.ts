@@ -166,5 +166,35 @@ export const PhotoRecognitionSchema = z.object({
    * позиций, и посчитанная по её данным сверка была бы неверной.
    */
   validation: UpdValidationSchema.nullable(),
+  /**
+   * УПД этой же операции, с которым сверяется таблица фото
+   * (photo-document-match.ts). Считается при каждом чтении, в кэше
+   * распознавания не хранится.
+   *
+   * `matchedBy`: `number` — номер на фото совпал с номером ровно одного УПД
+   * операции; `rows` — номер не совпал (на 2 этапе приёмки 22246 прочитан как
+   * 00000001682), но у ровно одного УПД сошлись строки.
+   *
+   * `null` или нет поля — сверять не с чем: у операции нет разобранного УПД,
+   * документ не опознан, разбор `photo_v1` (без номеров позиций) или роль не
+   * видит позиций документа.
+   */
+  linkedDocument: z
+    .object({
+      id: z.string().uuid(),
+      docNumber: z.string().nullable(),
+      matchedBy: z.enum(['number', 'rows']),
+      items: z.array(
+        z.object({
+          rowNo: z.number().int().nullable(),
+          nameRaw: z.string(),
+          qty: z.number().nullable(),
+          unit: z.string().nullable(),
+        }),
+      ),
+    })
+    .nullable()
+    .optional(),
 });
 export type PhotoRecognition = z.infer<typeof PhotoRecognitionSchema>;
+export type PhotoLinkedDocument = NonNullable<PhotoRecognition['linkedDocument']>;

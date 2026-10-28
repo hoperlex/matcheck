@@ -316,6 +316,7 @@ export function PhotoGallery({
           afterClose={handleDocPreviewAfterClose}
           photoId={docPreview.id}
           imageSrc={docPreview.src}
+          operationKind={operationKind}
         />
       )}
     </div>
