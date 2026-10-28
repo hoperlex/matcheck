@@ -15,11 +15,15 @@
 //     ИНН — только отчёт.
 //   - имя и алиасы источника должны поместиться в алиасы цели, иначе склейка
 //     потеряла бы данные — тоже на ручную проверку.
+//
+// Сверх этого по явным флагам — plan-near-inn.ts: битый ИНН в одной правке от
+// единственной корректной записи при близком имени и ручные пары из отчёта.
 
 import { companyKey, editDistance, formsCompatible, mergeAliases, validInn } from './names.js';
+import { planExtraMerges, type ManualPair, type PairIssue } from './plan-near-inn.js';
 import { applySupplierChanges, type SupplierPatch, type SupplierRow } from './plan-suppliers.js';
 
-export type MergeSourceClass = 'same_inn' | 'one_edit';
+export type MergeSourceClass = 'same_inn' | 'one_edit' | 'near_inn_name' | 'manual';
 
 export type DoubtfulReason =
   | 'several_valid_inn'
@@ -31,7 +35,11 @@ export type DoubtfulReason =
   | 'two_edits'
   | 'far_inn'
   | 'aliases_overflow'
-  | 'dirty_inn_conflict';
+  | 'dirty_inn_conflict'
+  | 'near_inn_ambiguous'
+  | 'near_inn_name_far'
+  | 'near_inn_several_valid'
+  | 'near_inn_target_contractor';
 
 export const DOUBTFUL_LABELS: Record<DoubtfulReason, string> = {
   several_valid_inn: 'в группе несколько корректных ИНН',
@@ -44,6 +52,11 @@ export const DOUBTFUL_LABELS: Record<DoubtfulReason, string> = {
   far_inn: 'ИНН отличается сильнее',
   aliases_overflow: 'имена не помещаются в 20 алиасов цели',
   dirty_inn_conflict: 'грязный ИНН не очищен: такие цифры есть у другой строки',
+  near_inn_ambiguous: 'битый ИНН в одной цифре от нескольких записей',
+  near_inn_name_far: 'битый ИНН в одной цифре от записи, но имя другое',
+  near_inn_several_valid:
+    'битый ИНН в одной цифре от записи не из BillHub, а у имени есть другие корректные ИНН',
+  near_inn_target_contractor: 'битый ИНН в одной цифре от записи с ИНН подрядчика или СУ-10',
 };
 
 export type SupplierMerge = {
@@ -66,6 +79,8 @@ export type MergePlan = {
   merges: SupplierMerge[];
   doubtful: DoubtfulDuplicate[];
   innCleanups: InnCleanup[];
+  /** Ручные пары, которые не выполняются, и почему. */
+  pairIssues: PairIssue[];
   /** Алиасы целей и очищенные ИНН. */
   updates: Map<string, SupplierPatch>;
   deleteIds: string[];
@@ -83,6 +98,11 @@ function hasData(r: SupplierRow): boolean {
 export function planSupplierMerges(
   rows: readonly SupplierRow[],
   docCounts: ReadonlyMap<string, number>,
+  extra: {
+    nearInn?: boolean;
+    pairs?: readonly ManualPair[];
+    contractorInns?: ReadonlySet<string>;
+  } = {},
 ): MergePlan {
   const groups = new Map<string, SupplierRow[]>();
   for (const r of rows) {
@@ -94,7 +114,7 @@ export function planSupplierMerges(
   }
 
   const merges: SupplierMerge[] = [];
-  const doubtful: DoubtfulDuplicate[] = [];
+  let doubtful: DoubtfulDuplicate[] = [];
   const updates = new Map<string, SupplierPatch>();
   const deleteIds: string[] = [];
 
@@ -176,10 +196,29 @@ export function planSupplierMerges(
     updates.set(r.id, { ...updates.get(r.id), inn: clean });
   }
 
+  // Новые классы — на строках после склейки 22.10, только по флагам. Без них
+  // planExtraMerges ничего не возвращает, и план прежний.
+  const more = planExtraMerges(applySupplierChanges(rows, updates, [], deleteIds), {
+    nearInn: extra.nearInn ?? false,
+    pairs: extra.pairs ?? [],
+    contractorInns: extra.contractorInns,
+  });
+  if (more.deleteIds.length > 0) {
+    const mergedNow = new Set(more.deleteIds);
+    doubtful = doubtful
+      .map((d) => ({ ...d, ids: d.ids.filter((id) => !mergedNow.has(id)) }))
+      .filter((d) => d.ids.length > 0);
+  }
+  merges.push(...more.merges);
+  doubtful.push(...more.doubtful);
+  for (const [id, patch] of more.updates) updates.set(id, { ...updates.get(id), ...patch });
+  deleteIds.push(...more.deleteIds);
+
   return {
     merges,
     doubtful,
     innCleanups,
+    pairIssues: more.pairIssues,
     updates,
     deleteIds,
     rowsAfter: applySupplierChanges(rows, updates, [], deleteIds),
@@ -190,7 +229,7 @@ function sourceVerdict(
   r: SupplierRow,
   target: SupplierRow,
   targetInn: string,
-): DoubtfulReason | MergeSourceClass {
+): DoubtfulReason | 'same_inn' | 'one_edit' {
   if (r.billhubId !== null) return 'billhub_row';
   if (!formsCompatible(r.name, target.name)) return 'form_conflict';
   if (hasData(r)) return 'has_data';

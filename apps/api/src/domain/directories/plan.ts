@@ -6,7 +6,9 @@
 import { createHash } from 'node:crypto';
 import type { BillhubSupplier, OneCContractor } from './parse.js';
 import { planContractors, type CcRow, type ContractorPlan } from './plan-contractors.js';
+import { validInn } from './names.js';
 import { planSupplierMerges, type MergePlan } from './plan-merges.js';
+import type { ManualPair } from './plan-near-inn.js';
 import {
   planSuppliers,
   type SupplierImportPlan,
@@ -17,6 +19,15 @@ import {
 export type DirectoriesInput = {
   suppliers?: BillhubSupplier[];
   contractors?: OneCContractor[];
+  /**
+   * Склейка дублей по текущей таблице без файла BillHub. С файлом склейка
+   * всегда идёт по строкам после импорта, флаг не нужен.
+   */
+  mergesOnly?: boolean;
+  /** Класс near_inn_name: битый ИНН в одной правке от единственной записи. */
+  nearInn?: boolean;
+  /** Ручные пары «источник → цель», подтверждённые человеком по отчёту. */
+  pairs?: ManualPair[];
 };
 
 export type DirectoriesState = {
@@ -44,8 +55,19 @@ export function buildDirectoriesPlan(
   state: DirectoriesState,
 ): DirectoriesPlan {
   const suppliersPlan = input.suppliers ? planSuppliers(input.suppliers, state.suppliers) : null;
-  const merges = suppliersPlan
-    ? planSupplierMerges(suppliersPlan.rowsAfter, state.docCounts)
+  const mergeBase = suppliersPlan
+    ? suppliersPlan.rowsAfter
+    : input.mergesOnly
+      ? state.suppliers
+      : null;
+  const merges = mergeBase
+    ? planSupplierMerges(mergeBase, state.docCounts, {
+        nearInn: input.nearInn,
+        pairs: input.pairs,
+        contractorInns: new Set(
+          state.contractors.map((c) => validInn(c.inn)).filter((v): v is string => v !== null),
+        ),
+      })
     : null;
   const contractors = input.contractors
     ? planContractors(input.contractors, state.contractors)

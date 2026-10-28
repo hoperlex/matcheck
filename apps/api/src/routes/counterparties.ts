@@ -16,7 +16,8 @@ import {
   PLACEHOLDER_INN_PREFIX,
   isPlaceholderInn,
 } from '@matcheck/contracts';
-import { counterparties, customerCounterparties } from '../db/schema.js';
+import { counterparties, customerCounterparties, deliveries } from '../db/schema.js';
+import { pickOperationalCounterparty } from '../domain/directories/operational-pick.js';
 
 /**
  * Генератор placeholder-ИНН для контрагентов, созданных «на лету» без ИНН.
@@ -258,13 +259,29 @@ export async function counterpartyRoutes(rawApp: FastifyInstance): Promise<void>
       const name = src.name.trim();
       const aliases = src.aliases ?? [];
 
-      // 1) Дедуп по ИНН.
+      // 1) Дедуп по ИНН. Строк с этим ИНН бывает несколько (подразделения с
+      // разными КПП, мусор распознавания с чужим именем) — берём ту, чьё имя
+      // как в «Контрагентах», а не первую попавшуюся (operational-pick.ts).
       if (inn) {
-        const [existing] = await app.db
+        const sameInn = await app.db
           .select()
           .from(counterparties)
-          .where(eq(counterparties.inn, inn))
-          .limit(1);
+          .where(eq(counterparties.inn, inn));
+        const usage = new Map<string, number>();
+        if (sameInn.length > 1) {
+          const counts = await app.db
+            .select({ id: deliveries.contractorId, n: drSql<number>`count(*)::int` })
+            .from(deliveries)
+            .where(
+              inArray(
+                deliveries.contractorId,
+                sameInn.map((r) => r.id),
+              ),
+            )
+            .groupBy(deliveries.contractorId);
+          for (const c of counts) if (c.id) usage.set(c.id, Number(c.n));
+        }
+        const existing = pickOperationalCounterparty(sameInn, { name, aliases }, usage);
         if (existing) {
           if (!existing.isContractor) {
             const [upd] = await app.db

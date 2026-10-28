@@ -26,6 +26,15 @@
  * Локально:
  *   pnpm --filter @matcheck/api exec tsx scripts/import-directories.ts --suppliers … --out-dir …
  *
+ * Склейка накопленных дублей поставщиков без файлов (27.10):
+ *   --merges-only          правила 22.10 по текущей таблице, без файла BillHub;
+ *   --near-inn             плюс битый ИНН в одной цифре от единственной записи
+ *                          с корректным ИНН при близком имени (plan-near-inn.ts);
+ *   --pairs <файл.csv>     плюс пары «id источника;id цели», подтверждённые
+ *                          человеком по отчёту. Алиасы по парам не добавляются.
+ *   Порядок тот же: dry-run → отчёт → --apply --confirm при остановленном
+ *   воркере → повторный dry-run с теми же флагами показывает 0 → откат --revert.
+ *
  * Файл 1С читается только SheetJS: часть книги называется xl/SharedStrings.xml
  * (с заглавной), ExcelJS её не находит и отдаёт пустые строки.
  *
@@ -52,6 +61,7 @@ import {
   type ParseIssue,
 } from '../src/domain/directories/parse.js';
 import { FINGERPRINT_SHOWN } from '../src/domain/directories/plan.js';
+import { parseManualPairs, type ManualPair } from '../src/domain/directories/plan-near-inn.js';
 import { buildImportReportXlsx, collectReportExtras } from '../src/domain/directories/report.js';
 import { revertDirectoriesImport } from '../src/domain/directories/revert.js';
 
@@ -66,7 +76,10 @@ const outDir = argValue('--out-dir');
 const confirm = argValue('--confirm');
 const revertPath = argValue('--revert');
 const lockTimeoutArg = argValue('--lock-timeout-ms');
+const pairsPath = argValue('--pairs');
 const apply = process.argv.includes('--apply');
+const mergesOnly = process.argv.includes('--merges-only');
+const nearInn = process.argv.includes('--near-inn');
 
 class ExitError extends Error {
   constructor(
@@ -127,6 +140,13 @@ function printSummary(r: ImportResult) {
       `Склейка: групп ${mp.merges.length}, удаляется дублей ${r.plan.supplierDeletes.length}, ` +
         `документов перепривязать ${docs}; сомнительных ${mp.doubtful.length}; грязный ИНН очищается у ${mp.innCleanups.length}`,
     );
+    const byClass = new Map<string, number>();
+    for (const m of mp.merges)
+      for (const s of m.sources) byClass.set(s.class, (byClass.get(s.class) ?? 0) + 1);
+    if (byClass.size > 0)
+      console.info(`  по основаниям: ${[...byClass].map(([k, n]) => `${k} ${n}`).join(', ')}`);
+    for (const p of mp.pairIssues)
+      console.info(`  пара ${p.sourceId} → ${p.targetId} не выполняется: ${p.problem}`);
   }
   if (cp) {
     console.info(
@@ -151,8 +171,18 @@ function printSummary(r: ImportResult) {
 
 async function runImport(): Promise<void> {
   if (!outDir) throw new ExitError(3, 'нужен --out-dir (каталог для отчёта и снимка)');
-  if (!suppliersPath && !contractorsPath)
-    throw new ExitError(3, 'нужен хотя бы один файл: --suppliers и/или --contractors');
+  if (mergesOnly && (suppliersPath || contractorsPath))
+    throw new ExitError(3, '--merges-only — склейка по текущей таблице, без файлов');
+  if (!suppliersPath && !contractorsPath && !mergesOnly)
+    throw new ExitError(
+      3,
+      'нужен хотя бы один файл: --suppliers и/или --contractors (или --merges-only)',
+    );
+  if ((nearInn || pairsPath) && !suppliersPath && !mergesOnly)
+    throw new ExitError(
+      3,
+      '--near-inn и --pairs работают со склейкой: --suppliers или --merges-only',
+    );
 
   const issues: ParseIssue[] = [];
   const files: Array<{ label: string; path: string; sha256: string }> = [];
@@ -182,6 +212,16 @@ async function runImport(): Promise<void> {
     });
     console.info(`1С: уникальных подрядчиков ${parsed.contractors.length}`);
   }
+  let pairs: ManualPair[] = [];
+  if (pairsPath) {
+    const parsed = parseManualPairs(await readFile(pairsPath, 'utf8'));
+    for (const e of parsed.errors) console.error(`Пары: ${e}`);
+    if (parsed.errors.length > 0)
+      throw new ExitError(3, 'файл пар не прошёл проверку — в базу ничего не записано');
+    pairs = parsed.pairs;
+    files.push({ label: 'ручные пары', path: pairsPath, sha256: await sha256(pairsPath) });
+    console.info(`Ручных пар: ${pairs.length}`);
+  }
   if (issues.some((i) => i.fatal))
     throw new ExitError(3, 'файл не прошёл проверку — в базу ничего не записано');
 
@@ -190,7 +230,7 @@ async function runImport(): Promise<void> {
   const ts = stamp();
   const result = await runDirectoriesImport(
     db,
-    { suppliers: billhub, contractors },
+    { suppliers: billhub, contractors, mergesOnly, nearInn, pairs },
     {
       apply,
       confirm: confirm ?? undefined,

@@ -9,7 +9,9 @@
  *   - документ, привязываемый к дублю в момент импорта, попадает и в
  *     перепривязку, и в снимок отката;
  *   - чужая блокировка → понятная ошибка, ничего не записано;
- *   - откат по снимку возвращает как было.
+ *   - откат по снимку возвращает как было;
+ *   - склейка без файлов (--merges-only, --near-inn, --pairs): тот же путь
+ *     записи и отката, повтор пуст.
  *
  * Склейка работает по всей таблице suppliers, поэтому набор НЕ трогает общую
  * тестовую базу: на сервере TEST_DATABASE_URL создаётся своя база, на неё
@@ -428,6 +430,69 @@ suite('импорт справочников на PostgreSQL', () => {
     const after = await snapshotTables();
     expect(strip(after.suppliers)).toEqual(strip(before.suppliers));
     expect(strip(after.cc)).toEqual(strip(before.cc));
+    expect(after.docs.map((d) => [d.id, d.supplier_directory_id])).toEqual(
+      before.docs.map((d) => [d.id, d.supplier_directory_id]),
+    );
+  });
+
+  it('склейка без файлов: near_inn и ручная пара — запись, повтор пуст, откат', async () => {
+    // Цель с корректным ИНН и дубль с одной неверной цифрой и опечаткой в
+    // имени: правила 22.10 их не связывают — ключи имён разные.
+    const target = await supplier({ name: 'ООО "СТД ПЕТРОВИЧ"', inn: INN.race });
+    const near = await supplier({ name: 'ООО СТД ПЕТРОВИЧЬ', inn: '7716203629' });
+    // «ООО «МОЖАЙСК»» → «АО "ИСТКУЛЬТ МОЖАЙСК"»: имя другое, только ручная пара.
+    const istkult = await supplier({ name: 'АО "ИСТКУЛЬТ МОЖАЙСК"', inn: '5028021698' });
+    const mozhaisk = await supplier({ name: 'ООО «МОЖАЙСК»', inn: '5028024698' });
+    const untouched = await supplier({ name: 'ООО "ГРАНИТ"', inn: INN.vist });
+    const dNear = await doc(near);
+    const dMozhaisk = await doc(mozhaisk);
+    const dOther = await doc(untouched);
+    const before = await snapshotTables();
+
+    const input: DirectoriesInput = {
+      mergesOnly: true,
+      nearInn: true,
+      pairs: [{ sourceId: mozhaisk, targetId: istkult }],
+    };
+    // Без флагов склейка по текущей таблице этих дублей не видит.
+    const plain = await runDirectoriesImport(db, { mergesOnly: true }, { apply: false });
+    expect(plain.plan.supplierDeletes).toEqual([]);
+
+    let snapshot: ImportSnapshot | null = null;
+    const r = await applyWithConfirm(input, {
+      apply: true,
+      beforeWrite: async (s) => {
+        snapshot = s;
+      },
+    });
+    expect(r.applied).toBe(true);
+    expect([...r.plan.supplierDeletes].sort()).toEqual([near, mozhaisk].sort());
+
+    const rows = await sql<{ id: string; aliases: string[] }[]>`
+      select id, aliases from suppliers where id in (${target}, ${istkult})`;
+    const aliases = Object.fromEntries(rows.map((x) => [x.id, x.aliases]));
+    // near_inn: имя дубля в алиасах; ручная пара: алиас не добавляется.
+    expect(aliases[target]).toEqual(['ООО СТД ПЕТРОВИЧЬ']);
+    expect(aliases[istkult]).toEqual([]);
+    const docs = await sql<{ id: string; supplier_directory_id: string }[]>`
+      select id, supplier_directory_id from source_documents order by id`;
+    expect(Object.fromEntries(docs.map((d) => [d.id, d.supplier_directory_id]))).toEqual({
+      [dNear]: target,
+      [dMozhaisk]: istkult,
+      [dOther]: untouched,
+    });
+
+    // Повтор с теми же флагами — ноль операций, пара помечена «уже склеен».
+    const again = await runDirectoriesImport(db, input, { apply: false });
+    expect(again.plan.opCount).toBe(0);
+    expect(again.plan.merges!.pairIssues.map((i) => i.problem)).toEqual([
+      'источника нет — уже склеен или удалён',
+    ]);
+
+    await revertDirectoriesImport(db, snapshot!, { apply: true });
+    const strip = (rows: postgres.Row[]) => rows.map(({ updated_at: _u, ...rest }) => rest);
+    const after = await snapshotTables();
+    expect(strip(after.suppliers)).toEqual(strip(before.suppliers));
     expect(after.docs.map((d) => [d.id, d.supplier_directory_id])).toEqual(
       before.docs.map((d) => [d.id, d.supplier_directory_id]),
     );

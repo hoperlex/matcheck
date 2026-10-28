@@ -95,4 +95,32 @@ describe('CustomerCounterpartySelect', () => {
     expect(await screen.findByTitle('ООО «СУ - 90»')).toBeTruthy();
     expect(screen.queryByText(OP)).toBeNull();
   });
+
+  it('поиск без кавычек и с «е» вместо «ё»; прежние совпадения остаются', async () => {
+    const wide = [
+      ...directory,
+      { id: 'cc-sp', inn: '7722680372', name: 'ООО "СТРОЙПАРТНЕР"', aliases: [] },
+      { id: 'cc-hg', inn: '', name: 'ООО "ХЁГЕР КОНСТРАКШН"', aliases: [] },
+    ];
+    get.mockImplementationOnce(() => Promise.resolve({ items: wide, total: wide.length }));
+    render(wrap(<CustomerCounterpartySelect value={null} onChange={vi.fn()} context="delivery" />));
+    const box = await screen.findByRole('combobox');
+    fireEvent.mouseDown(box);
+
+    // Человек кавычки не набирает — раньше это давало «Ничего не найдено».
+    fireEvent.change(box, { target: { value: 'ооо стройпартнер' } });
+    expect(await screen.findByTitle('ООО "СТРОЙПАРТНЕР" (ИНН 7722680372)')).toBeTruthy();
+    fireEvent.change(box, { target: { value: 'хегер констр' } });
+    expect(await screen.findByTitle('ООО "ХЁГЕР КОНСТРАКШН"')).toBeTruthy();
+    fireEvent.change(box, { target: { value: '7722 680' } });
+    expect(await screen.findByTitle('ООО "СТРОЙПАРТНЕР" (ИНН 7722680372)')).toBeTruthy();
+
+    // Прежнее вхождение через границу «имя ИНН» по-прежнему находит запись.
+    fireEvent.change(box, { target: { value: '90» 7714' } });
+    expect(await screen.findByTitle('ООО «СУ - 90» (ИНН 7714468005)')).toBeTruthy();
+    expect(screen.queryByTitle('ООО "СТРОЙПАРТНЕР" (ИНН 7722680372)')).toBeNull();
+
+    fireEvent.change(box, { target: { value: 'нет такого' } });
+    expect(await screen.findByText('Ничего не найдено')).toBeTruthy();
+  });
 });

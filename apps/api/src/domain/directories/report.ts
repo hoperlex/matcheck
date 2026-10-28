@@ -7,7 +7,7 @@ import { fmtDateTimeRu } from '../../lib/xlsx-format.js';
 import type { Executor, ImportResult } from './apply.js';
 import { companyKey, validInn } from './names.js';
 import type { ParseIssue } from './parse.js';
-import { DOUBTFUL_LABELS } from './plan-merges.js';
+import { DOUBTFUL_LABELS, type MergeSourceClass } from './plan-merges.js';
 import { CONTRACTOR_LEVEL_LABELS } from './plan-contractors.js';
 import { FINGERPRINT_SHOWN } from './plan.js';
 
@@ -27,6 +27,13 @@ const MATCH_LABELS: Record<string, string> = {
 };
 
 const STATUS_LABELS: Record<string, string> = { approved: 'Согласован', rejected: 'Отклонён' };
+
+const MERGE_CLASS_LABELS: Record<MergeSourceClass, string> = {
+  same_inn: 'те же цифры ИНН',
+  one_edit: 'ИНН с одной ошибкой',
+  near_inn_name: 'ИНН с одной ошибкой, имя с опечаткой',
+  manual: 'ручная пара',
+};
 
 const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
 
@@ -124,6 +131,7 @@ export async function buildImportReportXlsx(
       `${mp?.merges.length ?? 0} / ${r.plan.supplierDeletes.length} / ${mergedDocs}`,
     ],
     ['Склейка: сомнительных записей (не тронуты)', mp?.doubtful.length ?? 0],
+    ['Ручные пары: не выполнено', mp?.pairIssues.length ?? 0],
     ['Грязный ИНН очищается у строк BillHub', mp?.innCleanups.length ?? 0],
     [
       'Поставщиков в базе после',
@@ -219,7 +227,8 @@ export async function buildImportReportXlsx(
     { header: 'Основание', key: 'cls', width: 22 },
     { header: 'Документов', key: 'docs', width: 11 },
   ];
-  const rowsAfterImport = new Map((sp?.rowsAfter ?? []).map((s) => [s.id, s]));
+  // Без файла BillHub (--merges-only) склейка идёт по строкам базы как есть.
+  const rowsAfterImport = new Map((sp?.rowsAfter ?? r.state.suppliers).map((s) => [s.id, s]));
   for (const m of mp?.merges ?? []) {
     const t = rowsAfterImport.get(m.targetId);
     for (const s of m.sources) {
@@ -231,7 +240,7 @@ export async function buildImportReportXlsx(
         sid: s.id,
         sname: s.name,
         sinn: show(s.inn),
-        cls: s.class === 'same_inn' ? 'те же цифры ИНН' : 'ИНН с одной ошибкой',
+        cls: MERGE_CLASS_LABELS[s.class],
         docs: r.docs.bySource.get(s.id)?.length ?? 0,
       });
     }
@@ -267,6 +276,26 @@ export async function buildImportReportXlsx(
     }
   }
   bold(doubtful);
+
+  // ─── Ручные пары, которые не выполняются ───
+  const pairIssues = wb.addWorksheet('Поставщики — ручные пары', frozen);
+  pairIssues.columns = [
+    { header: 'Источник: id', key: 'sid', width: 38 },
+    { header: 'Источник: название', key: 'sname', width: 40 },
+    { header: 'Цель: id', key: 'tid', width: 38 },
+    { header: 'Цель: название', key: 'tname', width: 40 },
+    { header: 'Почему не выполнена', key: 'problem', width: 48 },
+  ];
+  for (const p of mp?.pairIssues ?? []) {
+    pairIssues.addRow({
+      sid: p.sourceId,
+      sname: (rowsAfterImport.get(p.sourceId) ?? supById.get(p.sourceId))?.name,
+      tid: p.targetId,
+      tname: (rowsAfterImport.get(p.targetId) ?? supById.get(p.targetId))?.name,
+      problem: p.problem,
+    });
+  }
+  bold(pairIssues);
 
   // ─── Находки импорта ───
   const findings = wb.addWorksheet('Поставщики — находки', frozen);
