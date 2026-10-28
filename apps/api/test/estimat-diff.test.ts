@@ -4,7 +4,10 @@
  */
 import { describe, expect, it } from 'vitest';
 import { SYSTEM_SITE_ID } from '../src/db/schema.js';
+import type { EstimatClient } from '../src/domain/estimat/estimat.http.js';
+import type { OrderPage } from '../src/domain/estimat/estimat.types.js';
 import { diffOrder, matchSite, type OrderPrevState } from '../src/domain/estimat/order-diff.js';
+import { estimatDryRun } from '../src/domain/estimat/supplier-orders-sync.js';
 
 const A = new Date('2026-10-22T12:40:11.000Z');
 const B = new Date('2026-10-25T08:00:00.000Z');
@@ -98,5 +101,65 @@ describe('matchSite', () => {
     expect(matchSite('   ', sites)).toEqual({ siteId: null, status: 'no_code' });
     expect(matchSite('НЕТ', sites)).toEqual({ siteId: null, status: 'not_found' });
     expect(matchSite('NA', sites)).toEqual({ siteId: null, status: 'not_found' });
+    expect(matchSite('N.A', sites)).toEqual({ siteId: null, status: 'not_found' });
+  });
+
+  it('без точек, пробелов и дефисов — только если кандидат один, с отдельной пометкой', () => {
+    // В EstiMat «СОБ6.2», в портале «СОБ62».
+    expect(matchSite('СОБ6.2', sites)).toEqual({ siteId: 's2', status: 'matched_compact' });
+    expect(matchSite('соб 6-2', sites)).toEqual({ siteId: 's2', status: 'matched_compact' });
+    // От кода остались одни разделители — сравнивать нечего.
+    expect(matchSite('.', sites)).toEqual({ siteId: null, status: 'not_found' });
+  });
+
+  it('сжатое сравнение не перебивает точное и не выбирает наугад', () => {
+    const me = [
+      { id: 'm1', code: 'МЕ1.1' },
+      { id: 'm2', code: 'МЕ11' },
+    ];
+    expect(matchSite('МЕ1.1', me)).toEqual({ siteId: 'm1', status: 'matched' });
+    expect(matchSite('ме11', me)).toEqual({ siteId: 'm2', status: 'matched' });
+    expect(matchSite('МЕ 1.1', me)).toEqual({ siteId: null, status: 'ambiguous' });
+  });
+});
+
+describe('estimatDryRun: отчёт о сопоставлении объектов', () => {
+  const orderRow = (id: string, projectCode: string | null) => ({
+    id,
+    orderNo: 1,
+    subNo: 0,
+    projectId: null,
+    projectCode,
+    projectName: null,
+    contractors: [],
+    sourcingStatus: 'awarded',
+    supplierName: null,
+    supplierInn: null,
+    amount: null,
+    supplyApprovedAt: null,
+    createdAt: '2026-10-15T07:02:44.000Z',
+    updatedAt: '2026-10-15T07:02:44.000Z',
+  });
+
+  it('сжатые совпадения видны парой «код EstiMat → код портала», ненайденные — отдельно', async () => {
+    const client = {
+      listSupplierOrders: async (): Promise<OrderPage> => ({
+        data: [
+          orderRow('3f6c2a1e-0000-4000-8000-000000000001', 'СОБ6.1'),
+          orderRow('3f6c2a1e-0000-4000-8000-000000000002', 'СОБ6.1'),
+          orderRow('3f6c2a1e-0000-4000-8000-000000000003', 'СОБ62'),
+          orderRow('3f6c2a1e-0000-4000-8000-000000000004', 'ЗИЛ31'),
+        ],
+        meta: { nextCursor: null },
+      }),
+    } as unknown as EstimatClient;
+    const report = await estimatDryRun(client, [
+      { id: 's61', code: 'СОБ61' },
+      { id: 's62', code: 'СОБ62' },
+    ]);
+    expect(report.orders).toBe(4);
+    expect(report.compactMatches).toEqual({ 'СОБ6.1 → СОБ61': 2 });
+    expect(report.unmatchedCodes).toEqual({ ЗИЛ31: 1 });
+    expect(report.ambiguousCodes).toEqual({});
   });
 });

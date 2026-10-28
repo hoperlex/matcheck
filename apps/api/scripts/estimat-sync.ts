@@ -108,6 +108,7 @@ async function main(): Promise<number> {
         `Без кода объекта: ${r.noCode}`,
         `Код объекта не найден в портале: ${top(r.unmatchedCodes)}`,
         `Код объекта неоднозначен: ${top(r.ambiguousCodes)}`,
+        `Сопоставлено без точек и пробелов: ${top(r.compactMatches)}`,
       ].join('\n'),
     );
     return 0;

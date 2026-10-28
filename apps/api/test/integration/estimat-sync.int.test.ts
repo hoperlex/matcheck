@@ -177,6 +177,16 @@ suite('обход заказов EstiMat', () => {
     expect(row!.contractors).toEqual(o.contractors);
   });
 
+  it('объект по коду с точкой: «СОБ6.1» в EstiMat находит «СОБ61» портала', async () => {
+    const o = order({ projectCode: `${siteCode.slice(0, 3)}.${siteCode.slice(3)}` });
+    fake.orders = [o];
+    const result = finished(await run());
+    expect(result.counters.unmatchedSites).toBe(0);
+    const [row] = await sql<{ site_id: string }[]>`
+      SELECT site_id FROM estimat_supplier_orders WHERE id = ${o.id}`;
+    expect(row!.site_id).toBe(siteId);
+  });
+
   it('виза: согласован → снят → согласован повторно', async () => {
     const o = order();
     fake.orders = [o];

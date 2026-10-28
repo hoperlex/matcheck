@@ -686,6 +686,8 @@ export type EstimatDryRunReport = {
   invalidRows: number;
   unmatchedCodes: Record<string, number>;
   ambiguousCodes: Record<string, number>;
+  /** «СОБ6.1 → СОБ61»: совпало только без точек и пробелов — проверить глазами. */
+  compactMatches: Record<string, number>;
   noCode: number;
 };
 
@@ -699,8 +701,10 @@ export async function estimatDryRun(client: EstimatClient, siteRows: readonly Si
     invalidRows: 0,
     unmatchedCodes: {},
     ambiguousCodes: {},
+    compactMatches: {},
     noCode: 0,
   };
+  const codeById = new Map(siteRows.map((s) => [s.id, s.code]));
   let cursor: string | null = null;
   const seen = new Set<string>();
   for (;;) {
@@ -721,6 +725,10 @@ export async function estimatDryRun(client: EstimatClient, siteRows: readonly Si
       if (m.status === 'no_code') report.noCode++;
       else if (m.status === 'not_found') report.unmatchedCodes[key] = (report.unmatchedCodes[key] ?? 0) + 1;
       else if (m.status === 'ambiguous') report.ambiguousCodes[key] = (report.ambiguousCodes[key] ?? 0) + 1;
+      else if (m.status === 'matched_compact') {
+        const pair = `${key} → ${codeById.get(m.siteId) ?? m.siteId}`;
+        report.compactMatches[pair] = (report.compactMatches[pair] ?? 0) + 1;
+      }
     }
     const next = page.meta.nextCursor;
     if (next === null) return report;

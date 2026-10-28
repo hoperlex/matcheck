@@ -89,14 +89,21 @@ export function diffOrder(
 export type SiteRef = { id: string; code: string };
 
 export type SiteMatch =
-  | { siteId: string; status: 'matched' }
+  | { siteId: string; status: 'matched' | 'matched_compact' }
   | { siteId: null; status: 'no_code' | 'not_found' | 'ambiguous' };
+
+/** Код без разделителей: «СОБ6.1» в EstiMat и «СОБ61» в портале — один объект. */
+function compactCode(code: string): string {
+  return code.replace(/[\s._\-‑–—]/gu, '').toUpperCase();
+}
 
 /**
  * Объект портала по коду объекта EstiMat. Точное совпадение `sites.code`
- * единственно (уникальный индекс). Без учёта регистра — только если кандидат
- * ровно один: индекс уникальности регистр различает, и два таких кандидата дали
- * бы выбор наугад. Неоднозначный код — не сопоставлен, а не «первый попавшийся».
+ * единственно (уникальный индекс). Без учёта регистра, а затем и без пробелов,
+ * точек, дефисов и `_` — только если кандидат ровно один: два таких кандидата
+ * дали бы выбор наугад. Неоднозначный код — не сопоставлен, а не «первый
+ * попавшийся». Сжатое сравнение помечено отдельно, чтобы отчёт показал, что
+ * совпало не буква в букву.
  */
 export function matchSite(projectCode: string | null, sites: readonly SiteRef[]): SiteMatch {
   const code = projectCode?.trim() ?? '';
@@ -107,5 +114,10 @@ export function matchSite(projectCode: string | null, sites: readonly SiteRef[])
   const upper = code.toUpperCase();
   const loose = candidates.filter((s) => s.code.trim().toUpperCase() === upper);
   if (loose.length === 1) return { siteId: loose[0]!.id, status: 'matched' };
-  return { siteId: null, status: loose.length === 0 ? 'not_found' : 'ambiguous' };
+  if (loose.length > 1) return { siteId: null, status: 'ambiguous' };
+  const compact = compactCode(code);
+  if (!compact) return { siteId: null, status: 'not_found' };
+  const similar = candidates.filter((s) => compactCode(s.code) === compact);
+  if (similar.length === 1) return { siteId: similar[0]!.id, status: 'matched_compact' };
+  return { siteId: null, status: similar.length === 0 ? 'not_found' : 'ambiguous' };
 }
