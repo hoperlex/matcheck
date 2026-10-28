@@ -177,6 +177,41 @@ const EDO_READ: RouteRule = st('operations.deliveries', 'edit', {
   capability: 'operations.edit.link_source',
   expandableBy: UNSCOPED,
 });
+/**
+ * Заказы поставщикам из EstiMat (вкладка «Заказы»). Список отдаёт заказы ВСЕХ
+ * объектов и подрядчиков, поэтому расширение — только ролям без скоупа строк:
+ * подрядчик или инспектор с выданной галочкой иначе увидели бы чужие заказы.
+ * Вкладка в вебе видна по capability, чтобы не было видимой вкладки с 403.
+ */
+const ORDERS_VIEW: RouteRule = st('references.supplier_orders', 'view', {
+  capability: 'references.supplier_orders.view',
+  expandableBy: UNSCOPED,
+});
+/**
+ * «Обновить» — мутация, поэтому ячейка edit, а не view: под view read-only-гард
+ * пропустил бы POST любой web-only роли с выданным просмотром.
+ */
+const ORDERS_SYNC: RouteRule = st('references.supplier_orders', 'edit', {
+  capability: 'references.supplier_orders.sync',
+  expandableBy: UNSCOPED,
+});
+/**
+ * Привязанные к приёмке заказы и их состав — просмотр операции. Подрядчику
+ * закрыто (суммы и поставщики заказа — не для него); инспектору — свой объект,
+ * сверка siteId в хендлере. Веб спрашивает данные по capability.
+ */
+const ORDER_VIEW_IN_DELIVERY: RouteRule = st('operations.deliveries', 'view', {
+  capability: 'operations.view.supplier_orders',
+  expandableBy: UNSCOPED,
+});
+/**
+ * Привязка заказа к приёмке и окно подбора — одно правило, как у ЭДО: иначе
+ * кнопка «+ Заказ» есть, а окно за ней отвечает 403.
+ */
+const ORDER_LINK: RouteRule = st('operations.deliveries', 'edit', {
+  capability: 'operations.edit.supplier_order',
+  expandableBy: UNSCOPED,
+});
 const legacy = (
   page: PageId,
   action: PageAction,
@@ -358,6 +393,12 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/file', EDO_READ],
   ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/pdf', EDO_READ],
   ['GET /api/v1/deliveries/:id/edo-candidates/:source/:documentId/preview', EDO_READ],
+  // Заказы поставщикам из EstiMat в приёмке (миграция 0141).
+  ['GET /api/v1/deliveries/:id/supplier-orders', ORDER_VIEW_IN_DELIVERY],
+  ['GET /api/v1/deliveries/:id/supplier-orders/:orderId/items', ORDER_VIEW_IN_DELIVERY],
+  ['GET /api/v1/deliveries/:id/supplier-order-candidates', ORDER_LINK],
+  ['POST /api/v1/deliveries/:id/supplier-orders', ORDER_LINK],
+  ['DELETE /api/v1/deliveries/:id/supplier-orders/:orderId', ORDER_LINK],
   // Ссылки-шаринги — не часть обычного редактирования: у создания, списка,
   // отзыва и переписки РАЗНЫЕ allow-list (инспектор создаёт и видит, но не
   // отзывает). Выдача edit их не открывает, интерфейс скрывает по capability.
@@ -695,6 +736,11 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/responsible-persons', always(LOOKUP, { affects: [v('references.responsible_persons')], matrixOnly: openedBy(v('references.responsible_persons'), ...OPS_VIEW, v('documents.list')) })],
   ['GET /api/v1/assets', always(LOOKUP, { affects: [v('references.assets')], matrixOnly: openedBy(v('references.assets')) })],
   ['GET /api/v1/mol', always(LOOKUP, { affects: [v('references.mol')], matrixOnly: openedBy(v('references.mol')) })],
+  ['GET /api/v1/estimat/supplier-orders', ORDERS_VIEW],
+  ['GET /api/v1/estimat/supplier-orders/:id', ORDERS_VIEW],
+  ['GET /api/v1/estimat/supplier-orders/:id/items', ORDERS_VIEW],
+  ['GET /api/v1/estimat/sync-status', ORDERS_VIEW],
+  ['POST /api/v1/estimat/sync', ORDERS_SYNC],
 
   ['POST /api/v1/sites', st('references.sites', 'create')],
   ['PATCH /api/v1/sites/:id', st('references.sites', 'edit')],

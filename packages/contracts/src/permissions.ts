@@ -82,6 +82,7 @@ export const PAGE_IDS = [
   'references.suppliers',
   'references.units',
   'references.mol',
+  'references.supplier_orders',
   'references.counterparties_legacy',
   'references.responsible_persons',
   'references.materials',
@@ -303,6 +304,16 @@ export const PAGE_CATALOG: PageCatalogEntry[] = [
     // Внешняя read-only БД ФОТ — писать туда нечем.
     actions: ['view'],
     base: { view: ['manager'] },
+  },
+  {
+    id: 'references.supplier_orders',
+    group: 'references',
+    label: 'Заказы',
+    // Заказы поставщикам из EstiMat — внешний read-only источник. «Редактировать»
+    // здесь — запуск обхода кнопкой «Обновить»: это мутация, и под «Просмотром»
+    // read-only-гард пропустил бы её любой роли с выданной галочкой.
+    actions: ['view', 'edit'],
+    base: { view: ['manager'], edit: ['manager'] },
   },
   {
     id: 'references.counterparties_legacy',

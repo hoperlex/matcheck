@@ -701,6 +701,20 @@ const envSchema = z.object({
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .default('2026-09-01'),
 
+  // EstiMat — заказы поставщикам (внешний read-only API сметного портала).
+  // Токен и адрес здесь НЕ проверяются: loadEnv бросает на любой ошибке, а файл
+  // общий для api/worker/mail-worker — лишний пробел в токене уронил бы все три
+  // процесса. Формат проверяет domain/estimat/config.ts и выключает только
+  // интеграцию. Токен в лог не пишется — только «set, len=N».
+  ESTIMAT_API_TOKEN: z.string().optional(),
+  ESTIMAT_API_BASE_URL: z.string().optional(),
+  // Выключатель обхода по расписанию и кнопки «Обновить». При 0 ни таймера, ни
+  // воркера; уже загруженные заказы и привязки остаются видны.
+  ESTIMAT_SYNC_ENABLED: z
+    .preprocess((v) => (v === '' ? undefined : v), z.enum(['0', '1']).default('0'))
+    .transform((v) => v === '1'),
+  ESTIMAT_SYNC_INTERVAL_SEC: z.coerce.number().int().min(300).default(1800),
+
   // Публичная форма /uploads — потолки приёма.
   //
   // Значения по умолчанию согласованы с мощностью воркера: при CONCURRENCY=1

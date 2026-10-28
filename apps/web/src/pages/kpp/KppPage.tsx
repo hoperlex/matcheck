@@ -38,6 +38,8 @@ import type {
   Delivery,
   DeliveryPurpose,
   DeliveryStatusCode,
+  DeliverySupplierOrder,
+  DeliverySupplierOrdersResponse,
   OperationSourceDocument,
   Site,
   SourceDocument,
@@ -84,6 +86,10 @@ import { RecipientSuggestionHint } from './RecipientSuggestionHint';
 import { pickUpdSupplierName, updSupplierEditTarget } from '../shared/updSupplierName';
 import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { LinkEdoDocumentModal, type EdoSection } from './LinkEdoDocumentModal';
+import { LinkSupplierOrderModal } from './LinkSupplierOrderModal';
+import { SupplierOrderChip } from './SupplierOrderChip';
+import { DeliverySupplierOrdersBlock } from './DeliverySupplierOrdersBlock';
+import { useDeliverySupplierOrders } from './useDeliverySupplierOrders';
 import { LinkedEdoChips, type LinkedEdoDocument } from './LinkedEdoChips';
 import { computeVatSum, toNum } from './itemMoney';
 import { useDeliveryEdoItems, type EdoItemsEntry } from './useDeliveryEdoItems';
@@ -228,6 +234,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // Подрядчик выбирается из справочника заказчика через from-directory —
   // у маршрута свой allow-list (admin/manager + расширение правки).
   const canPickContractor = hasCapability('operations.edit.contractor_directory');
+  // Заказы поставщикам из EstiMat: видны всем, кто видит карточку, кроме
+  // подрядчика (суммы и поставщики заказа — не для него); привязывают те, кому
+  // открыт маршрут привязки (admin/manager и расширение правки).
+  const canViewSupplierOrders = !isContractor && hasCapability('operations.view.supplier_orders');
+  const canLinkSupplierOrder =
+    canEditDelivery && !isContractor && hasCapability('operations.edit.supplier_order');
   // Поставщик привязанного УПД правится в самом документе — правом карточки
   // документа, как стороны (PATCH /source-documents/:id, documents.list:edit):
   // админ и Мониторинг с выданной ячейкой.
@@ -287,6 +299,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const [selectedUpd, setSelectedUpd] = useState<SourceDocument | null>(null);
   const [linkUpdOpen, setLinkUpdOpen] = useState(false);
   const [linkEdoOpen, setLinkEdoOpen] = useState(false);
+  const [linkOrderOpen, setLinkOrderOpen] = useState(false);
   // Блок материалов, к которому подбирается УПД из ЭДО; null — к приёмке
   // целиком. При закрытии не сбрасывается, чтобы заголовок окна не менялся
   // во время анимации — следующее открытие всё равно его задаёт.
@@ -400,6 +413,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     queryFn: () => api.get<{ items: LinkedEdoDocument[] }>(`/deliveries/${deliveryId}/edo-matches`),
     enabled: !!deliveryId && !isNew && canLinkUpd,
   });
+  // Заказы EstiMat — свой запрос с опросом раз в 30 с (см. хук).
+  const supplierOrdersQuery = useDeliverySupplierOrders(deliveryId, !isNew && canViewSupplierOrders);
   // Строки УПД из ЭДО — основной список блока материалов (DeliveryEdoSectionBody).
   // Запрос на каждую привязку; без привязок (и без права на них) — ни одного.
   const edoItemsByMatch = useDeliveryEdoItems(deliveryId, edoMatchesQuery.data?.items ?? []);
@@ -1120,6 +1135,21 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onError: (err: Error) => message.error(err.message),
   });
 
+  const unlinkSupplierOrder = useMutation({
+    mutationFn: (order: DeliverySupplierOrder) =>
+      api.delete<DeliverySupplierOrdersResponse>(
+        `/deliveries/${deliveryId}/supplier-orders/${order.id}`,
+      ),
+    onSuccess: (data) => {
+      message.success('Заказ отвязан');
+      queryClient.setQueryData(['delivery-supplier-orders', deliveryId], data);
+      void queryClient.invalidateQueries({
+        queryKey: ['delivery-supplier-order-candidates', deliveryId],
+      });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
   const openLinkEdo = (section: EdoSection | null) => {
     setLinkEdoError(null);
     setLinkEdoSection(section);
@@ -1638,6 +1668,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     if (!loadedDelivery) return null;
     const pendingAt = loadedDelivery?.pendingDeletionAt ?? null;
     const isPending = pendingAt !== null;
+    const supplierOrders = supplierOrdersQuery.data?.items ?? [];
     // УПД из ЭДО: привязанные к блоку показываются в его заголовке, остальные —
     // в шапке. Блок, которого нет среди связанных документов, тоже шапка:
     // чип не должен пропасть ни при каком составе блоков.
@@ -2015,6 +2046,27 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   onOpenOriginal={(document) => void openEdoFile(document)}
                 />
               )}
+              {/* Заказы поставщикам из EstiMat. Чип — привязанные заказы (цвет по
+                  худшему состоянию визы), «+ Заказ» — окно подбора. Кнопки нет,
+                  пока синхронизация не включена: пустое окно ничего не даст. */}
+              <SupplierOrderChip
+                orders={supplierOrders}
+                onUnlink={
+                  canLinkSupplierOrder && !isPending
+                    ? (order) => unlinkSupplierOrder.mutate(order)
+                    : undefined
+                }
+                unlinkPending={unlinkSupplierOrder.isPending}
+              />
+              {canLinkSupplierOrder &&
+                !isNew &&
+                !isPending &&
+                !loadedDelivery?.sourceShipmentId &&
+                supplierOrdersQuery.data?.sync.enabled && (
+                  <Button size="small" type="dashed" onClick={() => setLinkOrderOpen(true)}>
+                    + Заказ
+                  </Button>
+                )}
               {/* Транзит — admin/manager могут поставить/снять прямо
                   с портала (PATCH /deliveries/:id/flags). Inspector_kpp
                   видит только цветной чип при true (как раньше), править
@@ -2101,6 +2153,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           }
           busy={linkUpd.isPending}
           error={linkUpdError}
+        />
+
+        <LinkSupplierOrderModal
+          open={linkOrderOpen}
+          deliveryId={loadedDelivery?.id ?? null}
+          onClose={() => setLinkOrderOpen(false)}
         />
 
         <LinkEdoDocumentModal
@@ -2367,6 +2425,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             onOpenXml={(match) => void openEdoFile(match)}
           />
         )}
+
+        {/* Заказ EstiMat: что заказано, у кого, для кого и согласован ли. */}
+        <DeliverySupplierOrdersBlock deliveryId={loadedDelivery.id} orders={supplierOrders} />
 
         {(() => {
           // Мобильный пишет comment как multiline с маркерами «1 Этап: "…"»,

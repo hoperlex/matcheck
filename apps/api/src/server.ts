@@ -29,6 +29,7 @@ import { unitRoutes } from './routes/units.js';
 import { materialRoutes } from './routes/materials.js';
 import { responsiblePersonRoutes } from './routes/responsiblePersons.js';
 import { molRoutes, warmUpFotMolCache } from './routes/mol.js';
+import { estimatRoutes } from './routes/estimat.js';
 import { assetRoutes } from './routes/assets.js';
 import { sourceDocumentRoutes } from './routes/source-documents.js';
 import { deliveryRoutes } from './routes/deliveries.js';
@@ -128,6 +129,7 @@ export async function buildServer() {
   await app.register(materialRoutes);
   await app.register(responsiblePersonRoutes);
   await app.register(molRoutes);
+  await app.register(estimatRoutes);
   await app.register(assetRoutes);
   await app.register(sourceDocumentRoutes);
   await app.register(deliveryRoutes);

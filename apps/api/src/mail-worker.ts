@@ -46,13 +46,19 @@ import {
   buildQueueConnection,
   EDO_EXPORT_AUTO_JOB_ID,
   EDO_POLL_QUEUE,
+  ESTIMAT_SYNC_AUTO_JOB_ID,
+  ESTIMAT_SYNC_JOB_OPTIONS,
+  ESTIMAT_SYNC_QUEUE,
   MAIL_POLL_QUEUE,
   SBIS_EXPORT_AUTO_JOB_ID,
   SBIS_EXPORT_QUEUE,
   type EdoPollJobData,
+  type EstimatSyncJobData,
   type MailPollJobData,
   type SbisExportJobData,
 } from './plugins/queue.js';
+import { describeTokenForLog, readEstimatConfig } from './domain/estimat/config.js';
+import { runEstimatSync, type EstimatSyncReport } from './domain/estimat/supplier-orders-sync.js';
 import { runExportForAllAccounts } from './domain/jobs/edo-export-runner.js';
 import {
   runSbisExportForAllAccounts,
@@ -322,6 +328,79 @@ if (env.EDO_SBIS_ENABLED) {
   edoLog.info('выгрузка реестра из СБИС выключена (EDO_SBIS_ENABLED=0)');
 }
 
+// Заказы поставщикам из EstiMat — полный обход по расписанию и по кнопке
+// «Обновить» (POST /api/v1/estimat/sync ставит задачу в эту же очередь). Своя
+// очередь и воркер с concurrency 1; при выключенном флаге или неверном токене —
+// ни таймера, ни воркера, и маршрут кнопки отвечает «обработчик не запущен».
+let estimatTimer: NodeJS.Timeout | null = null;
+let estimatQueue: Queue<EstimatSyncJobData> | null = null;
+let estimatWorker: Worker<EstimatSyncJobData> | null = null;
+{
+  const estimatLog = logger.child({ service: 'estimat-sync' });
+  // Только длина и состояние — значение токена в лог не попадает никогда.
+  estimatLog.info(describeTokenForLog(env));
+  const estimatConfig = readEstimatConfig(env);
+  if (env.ESTIMAT_SYNC_ENABLED && estimatConfig.ok) {
+    const queue = new Queue<EstimatSyncJobData>(ESTIMAT_SYNC_QUEUE, {
+      connection: buildQueueConnection(),
+      defaultJobOptions: ESTIMAT_SYNC_JOB_OPTIONS,
+    });
+    estimatQueue = queue;
+    const report: EstimatSyncReport = {
+      onError: (result) =>
+        Sentry.captureException(result.cause ?? new Error(result.errorMessage ?? 'обход EstiMat'), {
+          level: 'error',
+          tags: { service: 'estimat-sync', code: result.errorCode ?? 'unknown' },
+          extra: { requestId: result.requestId, runId: result.runId },
+          // Одна причина каждые полчаса — одно событие, а не поток.
+          fingerprint: ['estimat-sync', result.errorCode ?? 'unknown'],
+        }),
+      onWarning: (code, message, extra) =>
+        Sentry.captureMessage(message, {
+          level: 'warning',
+          tags: { service: 'estimat-sync', code },
+          extra,
+          fingerprint: ['estimat-sync', 'warning', code],
+        }),
+    };
+    estimatWorker = new Worker<EstimatSyncJobData>(
+      ESTIMAT_SYNC_QUEUE,
+      async (job: Job<EstimatSyncJobData>) => {
+        const result = await runEstimatSync(
+          { db, log: estimatLog, config: estimatConfig, signal: edoShutdown.signal, report },
+          { trigger: job.data.trigger, userId: job.data.userId ?? null },
+        );
+        if ('skipped' in result) estimatLog.info({ trigger: job.data.trigger, ...result }, 'обход EstiMat пропущен');
+      },
+      { connection: buildQueueConnection(), concurrency: 1 },
+    );
+    estimatWorker.on('failed', (job, err) => {
+      estimatLog.error({ jobId: job?.id, err: err.message }, 'обход EstiMat упал');
+      Sentry.captureException(err, { tags: { queue: ESTIMAT_SYNC_QUEUE } });
+    });
+    const enqueue = () =>
+      void queue
+        .add(
+          'auto',
+          { trigger: 'auto', requestId: randomUUID() },
+          { ...ESTIMAT_SYNC_JOB_OPTIONS, jobId: ESTIMAT_SYNC_AUTO_JOB_ID },
+        )
+        .catch((err) => estimatLog.error({ err }, 'не удалось поставить обход EstiMat'));
+    // Две минуты после старта — со сдвигом от проходов ЭДО и СБИС.
+    setTimeout(() => {
+      enqueue();
+      estimatTimer = setInterval(enqueue, env.ESTIMAT_SYNC_INTERVAL_SEC * 1000);
+      estimatTimer.unref();
+    }, 120_000).unref();
+    estimatLog.info({ intervalSec: env.ESTIMAT_SYNC_INTERVAL_SEC }, 'синхронизация заказов EstiMat включена');
+  } else {
+    estimatLog.info(
+      { reason: estimatConfig.ok ? 'ESTIMAT_SYNC_ENABLED=0' : estimatConfig.reason },
+      'синхронизация заказов EstiMat выключена',
+    );
+  }
+}
+
 let timer: NodeJS.Timeout | null = null;
 if (env.MAIL_POLL_ENABLED) {
   const sweep = () =>
@@ -378,6 +457,7 @@ async function shutdown(signal: string): Promise<void> {
   if (edoTimer) clearInterval(edoTimer);
   if (edoExportTimer) clearInterval(edoExportTimer);
   if (sbisExportTimer) clearInterval(sbisExportTimer);
+  if (estimatTimer) clearInterval(estimatTimer);
   if (retentionTimer) clearInterval(retentionTimer);
   // Сначала прервать выгрузку: close() ждёт активную задачу, а проход без
   // сигнала мог бы идти минутами и быть убит SIGKILL'ом с висящим лизом.
@@ -385,6 +465,10 @@ async function shutdown(signal: string): Promise<void> {
   await worker.close().catch(() => undefined);
   await edoWorker.close().catch(() => undefined);
   await sbisWorker?.close().catch(() => undefined);
+  // Обход получил сигнал abort выше и закрывает свою строку как stopped — ждём,
+  // иначе process.exit обогнал бы запись и строка осталась бы running.
+  await estimatWorker?.close().catch(() => undefined);
+  await estimatQueue?.close().catch(() => undefined);
   await edoExportQueue?.close().catch(() => undefined);
   await sbisExportQueue?.close().catch(() => undefined);
   process.exit(0);

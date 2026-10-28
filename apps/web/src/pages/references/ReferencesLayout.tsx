@@ -23,7 +23,17 @@ interface CountResp {
 // «МОЛ» — read-only список из внешней БД ФОТ. Старые справочники
 // «Ответственные лица»/«Материалы» и операционный «Контрагенты (legacy)»
 // убраны из навигации — роуты сохранены в router.tsx, но в UI скрыты.
-export const TAB_DEFS: { key: string; label: string; countUrl: string; page: PageId }[] = [
+export const TAB_DEFS: {
+  key: string;
+  label: string;
+  countUrl: string;
+  page: PageId;
+  /**
+   * Возможность маршрута, без которой вкладка не рисуется: галочка «Просмотр»
+   * у роли со скоупом строк маршрут не открывает, и вкладка отвечала бы 403.
+   */
+  capability?: string;
+}[] = [
   { key: DEFAULT_TAB, label: 'Объекты', countUrl: '/sites?limit=1', page: 'references.sites' },
   {
     key: '/references/counterparties',
@@ -38,6 +48,14 @@ export const TAB_DEFS: { key: string; label: string; countUrl: string; page: Pag
     page: 'references.suppliers',
   },
   { key: '/references/mol', label: 'МОЛ', countUrl: '/mol', page: 'references.mol' },
+  // «Заказы» — заказы поставщикам из EstiMat (внешний источник, только чтение).
+  {
+    key: '/references/supplier-orders',
+    label: 'Заказы',
+    countUrl: '/estimat/supplier-orders?limit=1',
+    page: 'references.supplier_orders',
+    capability: 'references.supplier_orders.view',
+  },
   {
     key: '/references/units',
     label: 'Ед-ы изм.',
@@ -49,11 +67,13 @@ export const TAB_DEFS: { key: string; label: string; countUrl: string; page: Pag
 export default function ReferencesLayout() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { canView } = usePermissions();
+  const { canView, hasCapability } = usePermissions();
 
   // Закрытая вкладка не должна ни рисоваться, ни считаться: count-запрос по
   // ней всё равно вернул бы 403, а человек увидел бы вкладку, ведущую в отказ.
-  const visibleTabs = TAB_DEFS.filter((t) => canView(t.page));
+  const visibleTabs = TAB_DEFS.filter(
+    (t) => canView(t.page) && (!t.capability || hasCapability(t.capability)),
+  );
 
   const active = visibleTabs.find((t) => location.pathname.startsWith(t.key))?.key ?? DEFAULT_TAB;
 

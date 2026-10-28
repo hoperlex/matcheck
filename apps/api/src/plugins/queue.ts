@@ -197,6 +197,31 @@ export const SBIS_EXPORT_QUEUE = 'sbis-export';
 export type SbisExportJobData = { mode: 'auto' } | { mode: 'confirm'; accountId: string };
 export const SBIS_EXPORT_AUTO_JOB_ID = 'sbis-export-auto';
 
+/**
+ * Обход заказов поставщикам EstiMat. Две задачи с постоянными id: автопроход по
+ * таймеру mail-worker'а и ручной «Обновить» с портала. Раздельные id — чтобы
+ * стоящий в очереди автопроход не съедал ручной запуск (а ручной должен идти и
+ * после отказа токена, когда автопроход пропускается). Друг от друга их
+ * разводят concurrency = 1 и частичный уникальный индекс estimat_sync_runs.
+ *
+ * Задачи удаляются сразу по завершении: с «хранить сутки», как у соседних
+ * очередей, постоянный id не дал бы поставить задачу повторно целые сутки.
+ */
+export const ESTIMAT_SYNC_QUEUE = 'estimat-sync';
+export const ESTIMAT_SYNC_AUTO_JOB_ID = 'estimat-sync-auto';
+export const ESTIMAT_SYNC_MANUAL_JOB_ID = 'estimat-sync-manual';
+export type EstimatSyncJobData = {
+  trigger: 'auto' | 'manual';
+  userId?: string | null;
+  /** Кто поставил задачу: по нему «Обновить» отличает свою постановку от чужой. */
+  requestId: string;
+};
+export const ESTIMAT_SYNC_JOB_OPTIONS = {
+  attempts: 1,
+  removeOnComplete: true,
+  removeOnFail: true,
+} as const;
+
 declare module 'fastify' {
   interface FastifyInstance {
     queues: {
@@ -204,6 +229,7 @@ declare module 'fastify' {
       s3Cleanup: Queue<S3CleanupJobData>;
       mailPoll: Queue<MailPollJobData>;
       edoPoll: Queue<EdoPollJobData>;
+      estimatSync: Queue<EstimatSyncJobData>;
     };
   }
 }
@@ -284,9 +310,17 @@ export default fp(async (app) => {
   watch(updParse, UPD_PARSE_QUEUE);
   watch(s3Cleanup, S3_CLEANUP_QUEUE);
   watch(mailPoll, MAIL_POLL_QUEUE);
-  watch(edoPoll, EDO_POLL_QUEUE);
+  // Кнопка «Обновить» вкладки «Заказы». Выполняет mail-worker — и только при
+  // включённой синхронизации; маршрут сам проверяет, что воркер есть.
+  const estimatSync = new Queue<EstimatSyncJobData>(ESTIMAT_SYNC_QUEUE, {
+    connection: buildQueueConnection(),
+    defaultJobOptions: ESTIMAT_SYNC_JOB_OPTIONS,
+  });
 
-  app.decorate('queues', { updParse, s3Cleanup, mailPoll, edoPoll });
+  watch(edoPoll, EDO_POLL_QUEUE);
+  watch(estimatSync, ESTIMAT_SYNC_QUEUE);
+
+  app.decorate('queues', { updParse, s3Cleanup, mailPoll, edoPoll, estimatSync });
   app.addHook('onClose', async () => {
     try {
       await updParse.close();
@@ -308,10 +342,15 @@ export default fp(async (app) => {
     } catch {
       /* ignore */
     }
+    try {
+      await estimatSync.close();
+    } catch {
+      /* ignore */
+    }
   });
 
   app.log.info(
-    { queues: [UPD_PARSE_QUEUE, S3_CLEANUP_QUEUE, MAIL_POLL_QUEUE, EDO_POLL_QUEUE] },
+    { queues: [UPD_PARSE_QUEUE, S3_CLEANUP_QUEUE, MAIL_POLL_QUEUE, EDO_POLL_QUEUE, ESTIMAT_SYNC_QUEUE] },
     'queues ready',
   );
 });

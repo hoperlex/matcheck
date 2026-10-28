@@ -124,7 +124,7 @@ suite('матрица прав: админское API (реальный Postgre
       catalog: unknown[];
       lockedCells: string[];
     };
-    expect(body.catalog).toHaveLength(23);
+    expect(body.catalog).toHaveLength(24);
     expect(body.lockedCells).toHaveLength(8);
     expect(body.matrix.manager!['references.sites']).toEqual(
       DEFAULT_MATRIX.manager['references.sites'],

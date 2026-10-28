@@ -2773,3 +2773,168 @@ export const syncLog = pgTable('sync_log', {
   itemsOut: integer('items_out').notNull().default(0),
   errorText: text('error_text'),
 });
+
+// ─── EstiMat: заказы поставщикам (миграция 0141) ─────────────────────────────
+
+/** Подрядчик заказа в том виде, как его отдаёт EstiMat. */
+export type EstimatOrderContractor = {
+  id: string;
+  name: string;
+  inn: string | null;
+  type: string | null;
+};
+
+/**
+ * Зеркало заказа поставщику из EstiMat. Ключ — id заказа в EstiMat. Строки не
+ * удаляются: пропавший из полного обхода заказ получает deleted_at.
+ * site_id пересчитывается каждым обходом по коду объекта (matchSite).
+ */
+export const estimatSupplierOrders = pgTable(
+  'estimat_supplier_orders',
+  {
+    id: uuid('id').primaryKey(),
+    orderNo: integer('order_no'),
+    subNo: integer('sub_no'),
+    estimatProjectId: uuid('estimat_project_id'),
+    projectCode: text('project_code'),
+    projectName: text('project_name'),
+    siteId: uuid('site_id').references(() => sites.id, { onDelete: 'set null' }),
+    contractors: jsonb('contractors').$type<EstimatOrderContractor[]>().notNull().default([]),
+    supplierName: text('supplier_name'),
+    supplierInn: text('supplier_inn'),
+    amount: numeric('amount', { precision: 18, scale: 2 }),
+    sourcingStatus: text('sourcing_status').notNull(),
+    procurementMethod: text('procurement_method'),
+    acquisitionType: text('acquisition_type'),
+    contractNumber: text('contract_number'),
+    contractDate: text('contract_date'),
+    awardedAt: timestamp('awarded_at', { withTimezone: true }),
+    supplyApprovedAt: timestamp('supply_approved_at', { withTimezone: true }),
+    estimatCreatedAt: timestamp('estimat_created_at', { withTimezone: true }),
+    estimatUpdatedAt: timestamp('estimat_updated_at', { withTimezone: true }),
+    raw: jsonb('raw').$type<Record<string, unknown>>().notNull(),
+    firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Попытка обхода, в которой заказ видели последним (без FK — см. миграцию). */
+    lastSeenPassId: uuid('last_seen_pass_id').notNull(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  },
+  (t) => [
+    index('estimat_supplier_orders_site_idx').on(t.siteId),
+    index('estimat_supplier_orders_status_idx').on(t.sourcingStatus),
+    index('estimat_supplier_orders_supplier_inn_idx').on(t.supplierInn),
+    index('estimat_supplier_orders_number_idx').on(t.orderNo, t.subNo),
+    index('estimat_supplier_orders_contractors_idx').using('gin', sql`${t.contractors} jsonb_path_ops`),
+    index('estimat_supplier_orders_live_idx')
+      .on(t.estimatProjectId)
+      .where(sql`${t.deletedAt} is null`),
+  ],
+);
+
+export type EstimatOrderEventKind =
+  | 'first_seen'
+  | 'approved'
+  | 'approval_revoked'
+  | 'reapproved'
+  | 'status_changed'
+  | 'deleted'
+  | 'restored'
+  | 'delivery_linked'
+  | 'delivery_unlinked';
+
+/** Журнал заказа: виза, стадия, удаление, привязки. run_id и delivery_id без FK. */
+export const estimatSupplierOrderEvents = pgTable(
+  'estimat_supplier_order_events',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    orderId: uuid('order_id')
+      .notNull()
+      .references(() => estimatSupplierOrders.id, { onDelete: 'cascade' }),
+    kind: text('kind').$type<EstimatOrderEventKind>().notNull(),
+    fromValue: text('from_value'),
+    toValue: text('to_value'),
+    details: jsonb('details').$type<Record<string, unknown>>(),
+    runId: uuid('run_id'),
+    deliveryId: uuid('delivery_id'),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('estimat_supplier_order_events_order_idx').on(t.orderId, t.id),
+    check(
+      'estimat_supplier_order_events_kind_check',
+      sql`${t.kind} in ('first_seen', 'approved', 'approval_revoked', 'reapproved', 'status_changed', 'deleted', 'restored', 'delivery_linked', 'delivery_unlinked')`,
+    ),
+  ],
+);
+
+export type EstimatSyncTrigger = 'auto' | 'manual' | 'script';
+export type EstimatSyncOutcome = 'running' | 'completed' | 'error' | 'stopped' | 'skipped';
+
+/** Журнал обходов EstiMat. Один running одновременно — частичный уникальный индекс. */
+export const estimatSyncRuns = pgTable(
+  'estimat_sync_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    trigger: text('trigger').$type<EstimatSyncTrigger>().notNull(),
+    triggeredByUserId: uuid('triggered_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    outcome: text('outcome').$type<EstimatSyncOutcome>().notNull().default('running'),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    heartbeatAt: timestamp('heartbeat_at', { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+    currentPassId: uuid('current_pass_id').notNull().defaultRandom(),
+    pages: integer('pages').notNull().default(0),
+    ordersSeen: integer('orders_seen').notNull().default(0),
+    inserted: integer('inserted').notNull().default(0),
+    updated: integer('updated').notNull().default(0),
+    approvalChanges: integer('approval_changes').notNull().default(0),
+    statusChanges: integer('status_changes').notNull().default(0),
+    markedDeleted: integer('marked_deleted').notNull().default(0),
+    restored: integer('restored').notNull().default(0),
+    invalidRows: integer('invalid_rows').notNull().default(0),
+    invalidRowsNoId: integer('invalid_rows_no_id').notNull().default(0),
+    restarts: integer('restarts').notNull().default(0),
+    unmatchedSites: integer('unmatched_sites').notNull().default(0),
+    tokenProjectId: uuid('token_project_id'),
+    scopeConfirmed: boolean('scope_confirmed').notNull().default(false),
+    deletionSkippedReason: text('deletion_skipped_reason'),
+    errorCode: text('error_code'),
+    errorMessage: text('error_message'),
+    requestId: text('request_id'),
+    tokenFingerprint: text('token_fingerprint'),
+  },
+  (t) => [
+    uniqueIndex('estimat_sync_runs_one_running_idx')
+      .on(t.outcome)
+      .where(sql`${t.outcome} = 'running'`),
+    index('estimat_sync_runs_started_idx').on(t.startedAt),
+    check('estimat_sync_runs_trigger_check', sql`${t.trigger} in ('auto', 'manual', 'script')`),
+    check(
+      'estimat_sync_runs_outcome_check',
+      sql`${t.outcome} in ('running', 'completed', 'error', 'stopped', 'skipped')`,
+    ),
+  ],
+);
+
+/** Связь приёмки с заказами EstiMat (несколько к нескольким). deliveries не меняется. */
+export const deliverySupplierOrders = pgTable(
+  'delivery_supplier_orders',
+  {
+    deliveryId: uuid('delivery_id')
+      .notNull()
+      .references(() => deliveries.id, { onDelete: 'cascade' }),
+    orderId: uuid('order_id')
+      .notNull()
+      .references(() => estimatSupplierOrders.id, { onDelete: 'restrict' }),
+    linkedByUserId: uuid('linked_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    linkedAt: timestamp('linked_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Объект заказа отличался от объекта приёмки, привязку подтвердили явно. */
+    siteMismatch: boolean('site_mismatch').notNull().default(false),
+  },
+  (t) => [
+    primaryKey({ name: 'delivery_supplier_orders_pkey', columns: [t.deliveryId, t.orderId] }),
+    index('delivery_supplier_orders_order_idx').on(t.orderId),
+  ],
+);

@@ -42,6 +42,8 @@ const FALLBACK_KEYS: string[][] = [
   // УПД из ЭДО в карточке приёмки — отдельный запрос, префиксом
   // ['deliveries'] не накрывается.
   ['delivery-edo-matches'],
+  // Заказы EstiMat в карточке приёмки — тоже отдельный запрос.
+  ['delivery-supplier-orders'],
   ['shipments'],
   ['source-documents'],
   ['reports'],
@@ -148,7 +150,14 @@ export function setupInvalidation(qc: QueryClient): () => void {
       // ожидаемых УПД должен перечитаться.
       // delivery-edo-matches: чипы УПД из ЭДО — привязку мог сделать другой
       // менеджер, а «ещё в приёмке N» меняется от привязки к соседней приёмке.
-      keys = [['deliveries'], ['source-documents'], ['delivery-edo-matches'], ...DELIVERY_REPORTS];
+      // delivery-supplier-orders: заказы EstiMat, привязанные к приёмке.
+      keys = [
+        ['deliveries'],
+        ['source-documents'],
+        ['delivery-edo-matches'],
+        ['delivery-supplier-orders'],
+        ...DELIVERY_REPORTS,
+      ];
     } else if (type === 'shipment_updated' || type === 'shipment_deleted') {
       keys = [['shipments'], ['source-documents'], ...SHIPMENT_REPORTS];
     } else if (type === 'source_document_updated') {
