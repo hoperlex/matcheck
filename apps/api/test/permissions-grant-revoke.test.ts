@@ -206,3 +206,23 @@ describe('выдача и снятие права меняют ответ мар
     ).toEqual([]);
   }, 120_000);
 });
+
+describe('подробности заказа в окне подбора — правом привязки, а не справочника', () => {
+  const candidate = '/api/v1/deliveries/42/supplier-order-candidates/42';
+  const get = async (url: string) => (await app!.inject({ method: 'GET', url })).statusCode;
+
+  it('без «Справочники → Заказы» менеджер видит подробности, но не вкладку', async () => {
+    app = await buildApp('manager', [overrideRow('manager', 'references.supplier_orders', 'view', false)]);
+    expect(await get(candidate)).toBe(200);
+    expect(await get(`${candidate}/items`)).toBe(200);
+    // Снятая ячейка действует — значит, 200 выше не случайность стенда.
+    expect(await get('/api/v1/estimat/supplier-orders/42')).toBe(403);
+  });
+
+  it('без «Приёмки → Редактировать» подробностей нет, как и самого подбора', async () => {
+    app = await buildApp('manager', [overrideRow('manager', 'operations.deliveries', 'edit', false)]);
+    expect(await get(candidate)).toBe(403);
+    expect(await get(`${candidate}/items`)).toBe(403);
+    expect(await get('/api/v1/deliveries/42/supplier-order-candidates')).toBe(403);
+  });
+});

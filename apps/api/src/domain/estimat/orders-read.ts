@@ -5,11 +5,13 @@ import {
   formatOrderNo,
   type EstimatApprovalState,
   type EstimatOrderDetail,
+  type EstimatOrderLinkedDelivery,
   type EstimatOrderListItem,
   type EstimatOrderSummary,
   type EstimatSyncInfo,
   type EstimatSyncRun,
   type EstimatSyncStatus,
+  type SupplierOrderCandidateDetail,
 } from '@matcheck/contracts';
 import type { Db } from '../../db/client.js';
 import {
@@ -189,18 +191,85 @@ export async function listOrders(
   };
 }
 
-/** Карточка заказа: поля, журнал, привязанные приёмки. */
-export async function getOrderDetail(db: Db, id: string): Promise<EstimatOrderDetail | null> {
+/** Приёмки, к которым привязан заказ, — свежие сверху. */
+async function loadLinkedDeliveries(db: Db, orderId: string): Promise<EstimatOrderLinkedDelivery[]> {
+  const links = await db
+    .select({
+      deliveryId: deliverySupplierOrders.deliveryId,
+      linkedAt: deliverySupplierOrders.linkedAt,
+      siteMismatch: deliverySupplierOrders.siteMismatch,
+      displayId: deliveries.displayId,
+      arrivedAt: deliveries.arrivedAt,
+      pendingDeletionAt: deliveries.pendingDeletionAt,
+      siteCode: sites.code,
+    })
+    .from(deliverySupplierOrders)
+    .innerJoin(deliveries, eq(deliveries.id, deliverySupplierOrders.deliveryId))
+    .leftJoin(sites, eq(sites.id, deliveries.siteId))
+    .where(eq(deliverySupplierOrders.orderId, orderId))
+    .orderBy(desc(deliverySupplierOrders.linkedAt));
+  return links.map((l) => ({
+    deliveryId: l.deliveryId,
+    displayId: l.displayId === null ? null : Number(l.displayId),
+    siteCode: l.siteCode,
+    arrivedAt: iso(l.arrivedAt),
+    pendingDeletion: l.pendingDeletionAt !== null,
+    siteMismatch: l.siteMismatch,
+    linkedAt: l.linkedAt.toISOString(),
+  }));
+}
+
+async function loadOrderRow(db: Db, id: string, opts: { liveOnly: boolean }) {
   const o = estimatSupplierOrders;
   const [row] = await db
     .select({ order: o, siteCode: sites.code })
     .from(o)
     .leftJoin(sites, eq(sites.id, o.siteId))
-    .where(eq(o.id, id))
+    .where(opts.liveOnly ? and(eq(o.id, id), isNull(o.deletedAt)) : eq(o.id, id))
     .limit(1);
+  return row ?? null;
+}
+
+function detailFields(r: OrderRow) {
+  return {
+    procurementMethod: r.procurementMethod,
+    acquisitionType: r.acquisitionType,
+    contractNumber: r.contractNumber,
+    contractDate: r.contractDate,
+  };
+}
+
+/**
+ * Подробности заказа для окна подбора: поля и привязанные приёмки, без журнала.
+ * Удалённый в EstiMat заказ — null: подбор его не показывает, привязать нельзя.
+ */
+export async function getCandidateDetail(db: Db, id: string): Promise<SupplierOrderCandidateDetail | null> {
+  const row = await loadOrderRow(db, id, { liveOnly: true });
+  if (!row) return null;
+  const [revoked, linked] = await Promise.all([loadLastRevokedAt(db, [id]), loadLinkedDeliveries(db, id)]);
+  return {
+    ...toSummary(row.order, { siteCode: row.siteCode, lastApprovalRevokedAt: revoked.get(id) ?? null }),
+    ...detailFields(row.order),
+    deliveries: linked,
+  };
+}
+
+/** Есть ли заказ и не удалён ли он в EstiMat — до похода за составом. */
+export async function isOrderLive(db: Db, id: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: estimatSupplierOrders.id })
+    .from(estimatSupplierOrders)
+    .where(and(eq(estimatSupplierOrders.id, id), isNull(estimatSupplierOrders.deletedAt)))
+    .limit(1);
+  return !!row;
+}
+
+/** Карточка заказа: поля, журнал, привязанные приёмки. */
+export async function getOrderDetail(db: Db, id: string): Promise<EstimatOrderDetail | null> {
+  const row = await loadOrderRow(db, id, { liveOnly: false });
   if (!row) return null;
   const e = estimatSupplierOrderEvents;
-  const [events, links] = await Promise.all([
+  const [events, linked] = await Promise.all([
     db
       .select({ event: e, userEmail: users.email })
       .from(e)
@@ -208,30 +277,13 @@ export async function getOrderDetail(db: Db, id: string): Promise<EstimatOrderDe
       .where(eq(e.orderId, id))
       .orderBy(desc(e.id))
       .limit(500),
-    db
-      .select({
-        deliveryId: deliverySupplierOrders.deliveryId,
-        linkedAt: deliverySupplierOrders.linkedAt,
-        siteMismatch: deliverySupplierOrders.siteMismatch,
-        displayId: deliveries.displayId,
-        arrivedAt: deliveries.arrivedAt,
-        pendingDeletionAt: deliveries.pendingDeletionAt,
-        siteCode: sites.code,
-      })
-      .from(deliverySupplierOrders)
-      .innerJoin(deliveries, eq(deliveries.id, deliverySupplierOrders.deliveryId))
-      .leftJoin(sites, eq(sites.id, deliveries.siteId))
-      .where(eq(deliverySupplierOrders.orderId, id))
-      .orderBy(desc(deliverySupplierOrders.linkedAt)),
+    loadLinkedDeliveries(db, id),
   ]);
   const lastRevoked = events.find((x) => x.event.kind === 'approval_revoked')?.event.createdAt ?? null;
   const r = row.order;
   return {
     ...toSummary(r, { siteCode: row.siteCode, lastApprovalRevokedAt: lastRevoked }),
-    procurementMethod: r.procurementMethod,
-    acquisitionType: r.acquisitionType,
-    contractNumber: r.contractNumber,
-    contractDate: r.contractDate,
+    ...detailFields(r),
     firstSeenAt: r.firstSeenAt.toISOString(),
     events: events.map(({ event: ev, userEmail }) => ({
       id: ev.id,
@@ -243,15 +295,7 @@ export async function getOrderDetail(db: Db, id: string): Promise<EstimatOrderDe
       userEmail: userEmail ?? null,
       createdAt: ev.createdAt.toISOString(),
     })),
-    deliveries: links.map((l) => ({
-      deliveryId: l.deliveryId,
-      displayId: l.displayId === null ? null : Number(l.displayId),
-      siteCode: l.siteCode,
-      arrivedAt: iso(l.arrivedAt),
-      pendingDeletion: l.pendingDeletionAt !== null,
-      siteMismatch: l.siteMismatch,
-      linkedAt: l.linkedAt.toISOString(),
-    })),
+    deliveries: linked,
   };
 }
 

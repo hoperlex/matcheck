@@ -137,4 +137,55 @@ describe('вкладка «Заказы»', () => {
     renderLayout();
     expect(await screen.findByText(/^Заказы/)).toBeTruthy();
   });
+
+  it('карточка заказа: сбой состава виден, поля и журнал на месте', async () => {
+    const order = {
+      id: 'o-1',
+      number: 'З-034',
+      orderNo: 34,
+      subNo: 0,
+      sourcingStatus: 'awarded',
+      approvalState: 'approved',
+      projectCode: 'ЗИЛ33',
+      projectName: null,
+      siteId: 'site-1',
+      siteCode: 'ЗИЛ33',
+      contractors: [{ id: 'c1', name: 'ИП Муртазин', inn: null, type: null }],
+      supplierName: 'ООО «АЛЬФА ГЛОБАЛ»',
+      supplierInn: '9717098067',
+      amount: '129050.00',
+      awardedAt: null,
+      supplyApprovedAt: '2026-10-21T13:37:00.000Z',
+      lastApprovalRevokedAt: null,
+      deletedAt: null,
+      lastSeenAt: '2026-10-29T05:58:00.000Z',
+      estimatCreatedAt: null,
+    };
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/estimat/supplier-orders/o-1/items') return Promise.reject(new Error('502'));
+      if (url === '/estimat/supplier-orders/o-1') {
+        return Promise.resolve({
+          ...order,
+          procurementMethod: null,
+          acquisitionType: null,
+          contractNumber: null,
+          contractDate: null,
+          firstSeenAt: '2026-10-28T10:00:00.000Z',
+          deliveries: [],
+          events: [
+            { id: 1, kind: 'first_seen', fromValue: null, toValue: null, details: null, deliveryId: null, userEmail: null, createdAt: '2026-10-28T10:00:00.000Z' },
+          ],
+        });
+      }
+      if (url.startsWith('/estimat/supplier-orders?')) {
+        return Promise.resolve({ items: [{ ...order, linkedDeliveriesCount: 0 }], total: 1 });
+      }
+      return route(url);
+    });
+    renderPage();
+    fireEvent.click((await screen.findAllByText('З-034'))[0]!);
+    expect(await screen.findByText('Состав не загрузился')).toBeTruthy();
+    expect(screen.getByText('Журнал')).toBeTruthy();
+    expect(screen.getAllByText(/ИП Муртазин/).length).toBeGreaterThan(0);
+  });
 });

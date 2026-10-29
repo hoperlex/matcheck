@@ -252,6 +252,40 @@ suite('заказы EstiMat в приёмке', () => {
     expect((await linked(d)).statusCode).toBe(200);
   });
 
+  it('подробности строки подбора: поля и приёмки без журнала, удалённый заказ — 404', async () => {
+    const d = await delivery();
+    const other = await delivery();
+    const o = await order({ supply_approved_at: new Date('2026-10-22T12:40:11Z') });
+    await link(other, o);
+    const detail = (orderId: string, deliveryId = d) =>
+      app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}/supplier-order-candidates/${orderId}` });
+    const items = (orderId: string, deliveryId = d) =>
+      app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}/supplier-order-candidates/${orderId}/items` });
+
+    const res = await detail(o);
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body).toMatchObject({ id: o, approvalState: 'approved', siteCode: codeS });
+    expect(body.deliveries.map((x: { deliveryId: string }) => x.deliveryId)).toEqual([other]);
+    // Журнал с email сотрудников — только во вкладке «Заказы».
+    expect(body).not.toHaveProperty('events');
+    expect(JSON.stringify(body)).not.toContain('@t.local');
+    // Интеграция в тестах не настроена: состав честно «недоступен», в EstiMat не ходим.
+    expect((await items(o)).json()).toMatchObject({ state: 'disabled', items: [] });
+
+    const gone = await order({ deleted_at: new Date('2026-10-28T10:00:00Z') });
+    expect((await detail(gone)).statusCode).toBe(404);
+    // 404, а не disabled: удалённый заказ отсекается до похода за составом.
+    expect((await items(gone)).statusCode).toBe(404);
+    expect((await detail(randomUUID())).statusCode).toBe(404);
+    expect((await detail(o, randomUUID())).statusCode).toBe(404);
+    expect((await items(o, randomUUID())).statusCode).toBe(404);
+
+    currentUser = as('inspector_kpp', inspectorS, siteS);
+    expect((await detail(o)).statusCode).toBe(403);
+    expect((await items(o)).statusCode).toBe(403);
+  });
+
   it('удаление приёмки каскадом убирает связь, журнал заказа остаётся', async () => {
     const d = await delivery();
     const o = await order();

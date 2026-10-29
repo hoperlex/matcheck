@@ -397,6 +397,8 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/deliveries/:id/supplier-orders', ORDER_VIEW_IN_DELIVERY],
   ['GET /api/v1/deliveries/:id/supplier-orders/:orderId/items', ORDER_VIEW_IN_DELIVERY],
   ['GET /api/v1/deliveries/:id/supplier-order-candidates', ORDER_LINK],
+  ['GET /api/v1/deliveries/:id/supplier-order-candidates/:orderId', ORDER_LINK],
+  ['GET /api/v1/deliveries/:id/supplier-order-candidates/:orderId/items', ORDER_LINK],
   ['POST /api/v1/deliveries/:id/supplier-orders', ORDER_LINK],
   ['DELETE /api/v1/deliveries/:id/supplier-orders/:orderId', ORDER_LINK],
   // Ссылки-шаринги — не часть обычного редактирования: у создания, списка,

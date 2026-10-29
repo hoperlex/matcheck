@@ -1,16 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import {
   Alert,
   App,
   Button,
   Card,
-  Descriptions,
   Drawer,
   Select,
   Space,
   Switch,
-  Table,
   Tag,
   Tooltip,
   Typography,
@@ -37,6 +35,7 @@ import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
+import { SupplierOrderDetails } from '../shared/SupplierOrderDetails';
 import {
   APPROVAL_STATE_COLORS,
   APPROVAL_STATE_LABELS,
@@ -177,92 +176,7 @@ function OrderDrawer({ orderId, onClose }: { orderId: string | null; onClose: ()
       {detail.isError && <Alert type="error" showIcon message="Не удалось загрузить заказ" />}
       {o && (
         <Space direction="vertical" size="large" style={{ width: '100%' }}>
-          <Descriptions size="small" column={1} bordered>
-            <Descriptions.Item label="Стадия">
-              <Tag color={APPROVAL_STATE_COLORS[o.approvalState]}>{stageLabel(o.sourcingStatus)}</Tag>
-            </Descriptions.Item>
-            <Descriptions.Item label="Виза">{approvalText(o)}</Descriptions.Item>
-            <Descriptions.Item label="Объект">
-              {o.siteCode ?? `EstiMat: ${o.projectCode ?? '—'} — не найден в портале`}
-              {o.projectName ? ` · ${o.projectName}` : ''}
-            </Descriptions.Item>
-            <Descriptions.Item label="Подрядчик">
-              {o.contractors.length === 0
-                ? '—'
-                : o.contractors.map((c) => (
-                    <div key={c.id}>
-                      {c.name}
-                      {c.type === 'mol' ? ' (МОЛ)' : ''}
-                      {c.inn ? `, ИНН ${c.inn}` : ''}
-                    </div>
-                  ))}
-            </Descriptions.Item>
-            <Descriptions.Item label="Поставщик">
-              {o.supplierName ?? '— не выбран —'}
-              {o.supplierInn ? `, ИНН ${o.supplierInn}` : ''}
-            </Descriptions.Item>
-            <Descriptions.Item label="Сумма">{formatMoneyRu(o.amount)}</Descriptions.Item>
-            {o.contractNumber && (
-              <Descriptions.Item label="Договор">
-                {o.contractNumber}
-                {o.contractDate ? ` от ${o.contractDate}` : ''}
-              </Descriptions.Item>
-            )}
-            <Descriptions.Item label="Обновлено из EstiMat">{formatMsk(o.lastSeenAt)}</Descriptions.Item>
-          </Descriptions>
-          <div>
-            <Typography.Title level={5}>Приёмки</Typography.Title>
-            {o.deliveries.length === 0 ? (
-              <Typography.Text type="secondary">Не привязан ни к одной приёмке</Typography.Text>
-            ) : (
-              <Space direction="vertical" size={2}>
-                {o.deliveries.map((d) => (
-                  <Space key={d.deliveryId} size={6} wrap>
-                    <Link to={`/operations?type=delivery&delivery=${d.deliveryId}`}>Приёмка {d.displayId ?? '—'}</Link>
-                    <Typography.Text type="secondary">
-                      {d.siteCode ?? '—'} · {formatMsk(d.arrivedAt)}
-                    </Typography.Text>
-                    {d.pendingDeletion && <Tag>помечена на удаление</Tag>}
-                    {d.siteMismatch && <Tag color="orange">другой объект</Tag>}
-                  </Space>
-                ))}
-              </Space>
-            )}
-          </div>
-          <div>
-            <Typography.Title level={5}>Состав</Typography.Title>
-            {items.data && items.data.state !== 'ready' ? (
-              <Typography.Text type="secondary">
-                Состав сейчас недоступен{items.data.message ? `: ${items.data.message}` : ''}
-              </Typography.Text>
-            ) : (
-              <Table
-                rowKey="id"
-                size="small"
-                loading={items.isLoading}
-                dataSource={items.data?.items ?? []}
-                pagination={{ pageSize: 50, hideOnSinglePage: true, showSizeChanger: false }}
-                scroll={{ x: 640 }}
-                columns={[
-                  { title: 'Материал', dataIndex: 'materialName', ellipsis: { showTitle: true } },
-                  { title: 'Ед.', dataIndex: 'unit', width: 70 },
-                  {
-                    title: 'Кол-во',
-                    dataIndex: 'quantity',
-                    width: 100,
-                    align: 'right',
-                    render: (v: number) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 3 }).format(v),
-                  },
-                  {
-                    title: 'Дата поставки',
-                    dataIndex: 'deliveryDate',
-                    width: 130,
-                    render: (v: string | null) => (v ? formatMsk(v, false) : '—'),
-                  },
-                ]}
-              />
-            )}
-          </div>
+          <SupplierOrderDetails order={o} items={items} />
           <div>
             <Typography.Title level={5}>Журнал</Typography.Title>
             <Space direction="vertical" size={2}>

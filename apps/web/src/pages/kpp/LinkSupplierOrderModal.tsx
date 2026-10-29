@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
-import { Alert, Button, Input, Modal, Space, Switch, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Input, Modal, Skeleton, Space, Switch, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   DeliverySupplierOrdersResponse,
+  EstimatOrderItemsResponse,
   EstimatSyncInfo,
   SupplierOrderCandidate,
+  SupplierOrderCandidateDetail,
   SupplierOrderCandidatesResponse,
   SupplierOrderSiteMismatch,
 } from '@matcheck/contracts';
@@ -18,8 +20,11 @@ import {
   formatMsk,
   stageLabel,
 } from '../../shared/utils/estimatOrder';
+import { SupplierOrderDetails } from '../shared/SupplierOrderDetails';
 
 const PAGE_SIZE = 20;
+/** Колонка раскрытия строки: ширина явная, иначе сумма разойдётся со scroll.x. */
+const EXPAND_COLUMN_WIDTH = 40;
 
 /** Свежесть данных EstiMat одной строкой. */
 export function syncInfoText(info: EstimatSyncInfo | undefined): string | null {
@@ -35,6 +40,47 @@ function matchTag(match: boolean | null, label: string) {
   if (match === true) return <Tag color="green">{label} совпадает</Tag>;
   if (match === false) return <Tag>{label} другой</Tag>;
   return null;
+}
+
+/**
+ * Раскрытая строка подбора: подробности и состав заказа — двумя запросами, у
+ * каждого свои загрузка и ошибка, чтобы сбой состава не прятал поля и наоборот.
+ */
+function CandidateDetails({ deliveryId, orderId }: { deliveryId: string; orderId: string }) {
+  const detail = useQuery({
+    queryKey: ['supplier-order-candidate', deliveryId, orderId],
+    queryFn: () =>
+      api.get<SupplierOrderCandidateDetail>(`/deliveries/${deliveryId}/supplier-order-candidates/${orderId}`),
+    retry: false,
+  });
+  const items = useQuery({
+    queryKey: ['supplier-order-candidate-items', deliveryId, orderId],
+    queryFn: () =>
+      api.get<EstimatOrderItemsResponse>(`/deliveries/${deliveryId}/supplier-order-candidates/${orderId}/items`),
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  if (detail.isLoading) return <Skeleton active paragraph={{ rows: 4 }} />;
+  if (detail.isError) {
+    if (detail.error instanceof ApiError && detail.error.status === 404) {
+      return <Alert type="warning" showIcon message="Заказ удалён в EstiMat или не найден — привязать его нельзя" />;
+    }
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message="Не удалось загрузить заказ"
+        action={
+          <Button size="small" onClick={() => void detail.refetch()}>
+            Повторить
+          </Button>
+        }
+      />
+    );
+  }
+  if (!detail.data) return null;
+  return <SupplierOrderDetails order={detail.data} items={items} descriptionColumns={2} deliveryLinkTarget="_blank" />;
 }
 
 /**
@@ -58,6 +104,7 @@ export function LinkSupplierOrderModal({
   const [allStages, setAllStages] = useState(false);
   const [page, setPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // Окно открыли заново — с начальными отборами.
   useEffect(() => {
@@ -68,7 +115,13 @@ export function LinkSupplierOrderModal({
     setAllStages(false);
     setPage(1);
     setError(null);
+    setExpandedId(null);
   }, [open]);
+
+  // Другой отбор или страница — другие строки: раскрытая могла исчезнуть.
+  useEffect(() => {
+    setExpandedId(null);
+  }, [query, allSites, allStages, page]);
 
   const offset = (page - 1) * PAGE_SIZE;
   const candidates = useQuery({
@@ -133,17 +186,19 @@ export function LinkSupplierOrderModal({
   };
 
   // Ширины явные, раскладка fixed: длинное название поставщика обрезается
-  // многоточием с подсказкой, а метки совпадения под ним — никогда.
+  // многоточием с подсказкой, а метки совпадения под ним — никогда. Сумма с
+  // колонкой раскрытия — 1248 px при «Все объекты»: столько вмещает окно на
+  // экране 1390 px; уже — прокрутка, «Привязать» закреплена справа.
   const columns: ColumnsType<SupplierOrderCandidate> = [
     {
       title: '№',
       dataIndex: 'number',
-      width: 96,
+      width: 84,
       render: (_v, r) => <Typography.Text strong>{r.number}</Typography.Text>,
     },
     {
       title: 'Стадия и виза',
-      width: 210,
+      width: 190,
       render: (_v, r) => (
         <Space direction="vertical" size={2}>
           <Tag color={APPROVAL_STATE_COLORS[r.approvalState]} style={{ marginInlineEnd: 0 }}>
@@ -157,7 +212,7 @@ export function LinkSupplierOrderModal({
     },
     {
       title: 'Поставщик',
-      width: 260,
+      width: 250,
       render: (_v, r) => (
         <Space direction="vertical" size={2} style={{ width: '100%' }}>
           <Typography.Text ellipsis={{ tooltip: r.supplierName ?? undefined }} style={{ display: 'block' }}>
@@ -176,7 +231,7 @@ export function LinkSupplierOrderModal({
     },
     {
       title: 'Подрядчик',
-      width: 220,
+      width: 240,
       render: (_v, r) => (
         <Space direction="vertical" size={2} style={{ width: '100%' }}>
           <Typography.Text ellipsis={{ tooltip: contractorsText(r) }} style={{ display: 'block' }}>
@@ -188,7 +243,7 @@ export function LinkSupplierOrderModal({
     },
     {
       title: 'Сумма',
-      width: 130,
+      width: 124,
       align: 'right',
       render: (_v, r) => formatMoneyRu(r.amount),
     },
@@ -196,14 +251,19 @@ export function LinkSupplierOrderModal({
       ? [
           {
             title: 'Объект',
-            width: 180,
+            width: 190,
+            // Метка переносится, а не режется: код объекта в ней — главное.
             render: (_v: unknown, r: SupplierOrderCandidate) =>
               r.siteMatch ? (
                 (r.siteCode ?? '—')
               ) : r.siteCode ? (
-                <Tag color="orange">другой объект: {r.siteCode}</Tag>
+                <Tag color="orange" style={{ whiteSpace: 'normal', marginInlineEnd: 0 }}>
+                  другой объект: {r.siteCode}
+                </Tag>
               ) : (
-                <Tag color="orange">объект EstiMat не найден{r.projectCode ? `: ${r.projectCode}` : ''}</Tag>
+                <Tag color="orange" style={{ whiteSpace: 'normal', marginInlineEnd: 0 }}>
+                  объект EstiMat не найден{r.projectCode ? `: ${r.projectCode}` : ''}
+                </Tag>
               ),
           },
         ]
@@ -218,7 +278,16 @@ export function LinkSupplierOrderModal({
           <Tag style={{ marginInlineEnd: 0 }}>Уже привязан</Tag>
         ) : (
           <Space direction="vertical" size={2}>
-            <Button size="small" type="primary" onClick={() => choose(r)} loading={link.isPending}>
+            <Button
+              size="small"
+              type="primary"
+              onClick={(e) => {
+                // Клик по строке раскрывает подробности — кнопка его не наследует.
+                e.stopPropagation();
+                choose(r);
+              }}
+              loading={link.isPending}
+            >
               Привязать
             </Button>
             {r.linkedDeliveriesCount > 0 && (
@@ -239,13 +308,14 @@ export function LinkSupplierOrderModal({
         if (!link.isPending) onClose();
       }}
       title="Подобрать заказ EstiMat"
-      width="min(1200px, 96vw)"
+      width="min(1440px, 96vw)"
       footer={null}
       destroyOnHidden
     >
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Typography.Text type="secondary">
-          Сверху — заказы, где совпал ИНН поставщика или подрядчика приёмки. {syncInfoText(data?.syncInfo)}
+          Сверху — заказы, где совпал ИНН поставщика или подрядчика приёмки. Нажмите на строку, чтобы увидеть
+          состав и подробности. {syncInfoText(data?.syncInfo)}
         </Typography.Text>
         {error && <Alert type="error" showIcon message={error} />}
         {candidates.isError && <Alert type="error" showIcon message="Не удалось загрузить заказы EstiMat" />}
@@ -292,7 +362,16 @@ export function LinkSupplierOrderModal({
           dataSource={data?.items ?? []}
           loading={candidates.isLoading}
           tableLayout="fixed"
-          scroll={{ x: allSites ? 1226 : 1046 }}
+          scroll={{ x: allSites ? 1248 : 1058 }}
+          onRow={() => ({ style: { cursor: 'pointer' } })}
+          expandable={{
+            columnWidth: EXPAND_COLUMN_WIDTH,
+            expandRowByClick: true,
+            expandedRowKeys: expandedId ? [expandedId] : [],
+            onExpand: (expanded, r) => setExpandedId(expanded ? r.id : null),
+            expandedRowRender: (r) =>
+              deliveryId ? <CandidateDetails deliveryId={deliveryId} orderId={r.id} /> : null,
+          }}
           pagination={{
             current: page,
             pageSize: PAGE_SIZE,

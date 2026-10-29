@@ -209,14 +209,23 @@ export const EstimatOrderLinkedDeliverySchema = z.object({
 });
 export type EstimatOrderLinkedDelivery = z.infer<typeof EstimatOrderLinkedDeliverySchema>;
 
-export const EstimatOrderDetailSchema = EstimatOrderSummarySchema.extend({
+/**
+ * Подробности заказа в окне подбора к приёмке: чтобы выбрать заказ, хватает
+ * полей и привязанных приёмок. Журнала с email сотрудников здесь нет — он
+ * открыт только вкладке «Заказы».
+ */
+export const SupplierOrderCandidateDetailSchema = EstimatOrderSummarySchema.extend({
   procurementMethod: z.string().nullable(),
   acquisitionType: z.string().nullable(),
   contractNumber: z.string().nullable(),
   contractDate: z.string().nullable(),
+  deliveries: z.array(EstimatOrderLinkedDeliverySchema),
+});
+export type SupplierOrderCandidateDetail = z.infer<typeof SupplierOrderCandidateDetailSchema>;
+
+export const EstimatOrderDetailSchema = SupplierOrderCandidateDetailSchema.extend({
   firstSeenAt: z.string(),
   events: z.array(EstimatOrderEventSchema),
-  deliveries: z.array(EstimatOrderLinkedDeliverySchema),
 });
 export type EstimatOrderDetail = z.infer<typeof EstimatOrderDetailSchema>;
 

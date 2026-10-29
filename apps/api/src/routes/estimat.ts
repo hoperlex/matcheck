@@ -12,6 +12,7 @@ import {
   EstimatSyncStatusSchema,
   EstimatSyncTriggerResponseSchema,
   LinkSupplierOrderBodySchema,
+  SupplierOrderCandidateDetailSchema,
   SupplierOrderCandidatesResponseSchema,
   SupplierOrderSiteMismatchSchema,
 } from '@matcheck/contracts';
@@ -28,7 +29,9 @@ import {
 } from '../domain/estimat/delivery-orders.js';
 import { loadOrderItems } from '../domain/estimat/order-items.js';
 import {
+  getCandidateDetail,
   getOrderDetail,
+  isOrderLive,
   listOrders,
   loadSyncInfo,
   loadSyncStatus,
@@ -288,6 +291,48 @@ export async function estimatRoutes(rawApp: FastifyInstance): Promise<void> {
         loadSyncInfo(app.db, settings()),
       ]);
       return { ...found, syncInfo };
+    },
+  );
+
+  // Подробности и состав строки окна подбора — тем же правом, что и сам подбор:
+  // маршруты вкладки «Заказы» требуют права справочника, которого у
+  // привязывающего может не быть. Удалённый в EstiMat заказ — 404, как в подборе.
+  const CandidateParams = z.object({ id: z.string().uuid(), orderId: z.string().uuid() });
+
+  app.get(
+    '/api/v1/deliveries/:id/supplier-order-candidates/:orderId',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: CandidateParams,
+        response: { 200: SupplierOrderCandidateDetailSchema, 404: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      const delivery = await visibleDelivery(req.params.id, req.user);
+      const detail = delivery ? await getCandidateDetail(app.db, req.params.orderId) : null;
+      if (!detail) return reply.code(404).send({ error: 'not_found' });
+      return detail;
+    },
+  );
+
+  app.get(
+    '/api/v1/deliveries/:id/supplier-order-candidates/:orderId/items',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: CandidateParams,
+        response: { 200: EstimatOrderItemsResponseSchema, 404: ErrorResponseSchema },
+      },
+    },
+    async (req, reply) => {
+      const delivery = await visibleDelivery(req.params.id, req.user);
+      if (!delivery || !(await isOrderLive(app.db, req.params.orderId))) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      const items = await loadOrderItems({ db: app.db, config: settings().config }, req.params.orderId);
+      if (!items) return reply.code(404).send({ error: 'not_found' });
+      return items;
     },
   );
 
