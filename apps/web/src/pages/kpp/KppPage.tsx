@@ -45,8 +45,9 @@ import type {
   SourceDocument,
   SourceDocumentDetail,
   Status,
+  UnlinkSourceBody,
 } from '@matcheck/contracts';
-import { api, apiDownload } from '../../services/api';
+import { api, apiDownload, ConflictError } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { SYSTEM_SITE_ID } from '../../lib/db';
@@ -114,6 +115,7 @@ import { closedOperationListUrl, savedOperationListUrl } from '../operations/sav
 import { OperationItemsSections } from '../shared/OperationItemsSections';
 import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
 import { OperationDocumentsChips } from '../shared/OperationDocumentsChips';
+import { advanceItemsVersion, countItemsByDocument } from '../shared/itemsVersion';
 import { CustomerCounterpartySelect } from '../inbox/CustomerCounterpartySelect';
 import {
   DELIVERY_PURPOSE_LABELS,
@@ -277,6 +279,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
    * поллинг вернул бы прежний текст.
    */
   const itemsDirtyRef = useRef(false);
+  // Версия приёмки, которой соответствуют строки формы (см. shared/itemsVersion.ts).
+  // Её, а не версию поллинга, отправляют «Сохранить» и отвязка с удалением.
+  const itemsVersionRef = useRef<number | null>(null);
   // Inline-edit названия материала: clientKey строки в режиме правки. Само
   // правило «можно ли править» — в pages/shared/itemNameLock.ts, общее для
   // таблицы, карточного режима и отгрузки. Держать состояние здесь, а не внутри
@@ -336,6 +341,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   useEffect(() => {
     if (!deliveryId) {
       itemsDirtyRef.current = false;
+      itemsVersionRef.current = null;
       setItems([]);
       setPlate('');
       setComment('');
@@ -621,7 +627,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           hasNewServerSnapshot,
           hasUnsavedItemEdits: itemsDirtyRef.current,
         })
-      )
+      ) {
+        itemsVersionRef.current = d.version;
         setItems(
           d.items.map((it, idx) => ({
             clientKey: newKey(),
@@ -647,6 +654,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             groupName: it.groupName ?? null,
           })),
         );
+      }
     }
     // Подгрузка выбранного УПД идемпотентна по флагу !selectedUpd — оставляем
     // вне условия гидратации, чтобы она сработала и после первого получения данных,
@@ -823,6 +831,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     setItems((prev) => prev.filter((it) => it.clientKey !== key));
   };
 
+  // «Удалить материалы» в блоке отвязанного документа: строки, оставленные при
+  // отвязке, уходят разом. Применяется так же, как корзина у строки, —
+  // следующим «Сохранить».
+  const removeSectionItems = (sourceDocumentId: string) => {
+    itemsDirtyRef.current = true;
+    setItems((prev) => prev.filter((it) => it.sourceDocumentId !== sourceDocumentId));
+  };
+
   /**
    * Новая строка материала. `sourceDocumentId` — блок, в который её добавили:
    * кнопка живёт в заголовке блока документа, и позиция, которой не хватило в
@@ -959,7 +975,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       id: mutationId,
       kind: 'delivery_upsert',
       entityId: loadedDelivery.id,
-      baseVersion: loadedDelivery.version,
+      // Версия строк формы, а не поллинга (см. shared/itemsVersion.ts). У нового
+      // черновика её нет — сервер для создания версию не сверяет.
+      baseVersion: itemsVersionRef.current ?? loadedDelivery.version,
       payload: null,
     });
     const result = await flushMutation(mutationId);
@@ -1044,7 +1062,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         sourceDocumentId: upd.id,
       });
     },
-    onSuccess: async (dto) => {
+    onSuccess: async (dto, upd) => {
       await upsertServerSnapshot([dto]);
       message.success('УПД привязана');
       setLinkUpdOpen(false);
@@ -1056,10 +1074,15 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       // затирал бы несохранённые «Факт»/цены. Поэтому домерживаем: link-source
       // вставляет строки строго в конец, поэтому достаточно добавить те, чьих
       // serverId ещё нет в форме.
+      //
+      // Только строки привязанного документа: чужие (сохранение планшета или
+      // другой вкладки) молча влились бы в форму, а удалённые в ней, но ещё не
+      // сохранённые строки вернулись бы. С этим ограничением форма при ответе
+      // на «версия + 1» в точности повторяет сервер, и версию можно сдвинуть.
       setItems((prev) => {
         const known = new Set(prev.map((it) => it.serverId).filter((id): id is string => !!id));
         const added = dto.items
-          .filter((it) => !known.has(it.id))
+          .filter((it) => it.sourceDocumentId === upd.id && !known.has(it.id))
           .map((it, idx) => ({
             clientKey: newKey(),
             serverId: it.id,
@@ -1085,6 +1108,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           }));
         return added.length > 0 ? [...prev, ...added] : prev;
       });
+      itemsVersionRef.current = advanceItemsVersion(itemsVersionRef.current, dto.version);
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
@@ -1171,20 +1195,35 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     }
   };
 
-  // Отвязка документа. Позиции сервер намеренно не трогает: строка могла быть
-  // уже проверена инспектором, а «откуда она взялась» — данные, а не следствие
-  // связи. Поэтому и перегидратация items тут не нужна — меняется только состав
-  // связей, то есть шапка.
+  // Отвязка документа. С галочкой «удалить строки» сервер удаляет весь блок
+  // документа, и те же строки убираются из формы — без перегидратации, чтобы не
+  // затереть несохранённые правки в других строках. Без фильтра «Сохранить»
+  // вернул бы удалённые строки в «без привязки». Без галочки позиции остаются:
+  // строка могла быть уже проверена инспектором, а «откуда она взялась» — данные.
+  //
+  // Удаление идёт с версией строк формы: счётчик в окне посчитан по ней, и
+  // сервер ответит 409, если с тех пор приёмку меняли.
   const unlinkUpd = useMutation({
-    mutationFn: async (doc: OperationSourceDocument): Promise<Delivery> => {
+    mutationFn: async ({
+      doc,
+      deleteItems,
+    }: {
+      doc: OperationSourceDocument;
+      deleteItems: boolean;
+    }): Promise<Delivery> => {
       if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
-      return await api.post<Delivery>(`/deliveries/${loadedDelivery.id}/unlink-source`, {
-        sourceDocumentId: doc.id,
-      });
+      const body: UnlinkSourceBody = { sourceDocumentId: doc.id };
+      if (deleteItems) {
+        body.deleteItems = true;
+        body.baseVersion = itemsVersionRef.current ?? loadedDelivery.version;
+      }
+      return await api.post<Delivery>(`/deliveries/${loadedDelivery.id}/unlink-source`, body);
     },
-    onSuccess: async (dto) => {
+    onSuccess: async (dto, { doc, deleteItems }) => {
       await upsertServerSnapshot([dto]);
-      message.success('Документ отвязан');
+      if (deleteItems) setItems((prev) => prev.filter((it) => it.sourceDocumentId !== doc.id));
+      itemsVersionRef.current = advanceItemsVersion(itemsVersionRef.current, dto.version);
+      message.success(deleteItems ? 'Документ отвязан, его материалы удалены' : 'Документ отвязан');
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
@@ -1194,7 +1233,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       void queryClient.invalidateQueries({ queryKey: ['delivery-edo-matches', deliveryId] });
     },
     onError: (err: Error) => {
-      message.error(err.message);
+      message.error(
+        err instanceof ConflictError
+          ? 'Приёмку изменили на другом устройстве. Откройте карточку заново'
+          : err.message,
+      );
     },
   });
 
@@ -1338,6 +1381,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     () => sectionDocuments.filter((d) => d.linked),
     [sectionDocuments],
   );
+
+  /** Строки формы по документам — счётчик галочки «удалить» в окне отвязки. */
+  const itemCountByDocumentId = useMemo(() => countItemsByDocument(items), [items]);
 
   const mergedPhotos: GalleryPhoto[] = useMemo(() => {
     const server = loadedDelivery?.photos ?? [];
@@ -1986,7 +2032,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       кнопкой «Отвязать» открывается кликом по чипу. */}
                   <OperationDocumentsChips
                     documents={linkedDocuments}
-                    onUnlink={canUnlinkUpd ? (doc) => unlinkUpd.mutate(doc) : undefined}
+                    onUnlink={
+                      canUnlinkUpd
+                        ? (doc, { deleteItems }) => unlinkUpd.mutate({ doc, deleteItems })
+                        : undefined
+                    }
+                    itemCountByDocumentId={itemCountByDocumentId}
                     onOpenOriginal={
                       embedded
                         ? (doc) => {
@@ -2340,6 +2391,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   if (docId) factPanels.rowAdded(docId);
                 }
           }
+          // Права — как у корзины строки: подрядчику удаление недоступно.
+          onRemoveSection={isContractor ? undefined : removeSectionItems}
           autoOpenKeys={edoSectionKeys}
           sectionLabel={(section, defaultLabel) => {
             const doc = section.document;

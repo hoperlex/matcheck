@@ -1,5 +1,5 @@
-import { Button, Collapse, Space, Typography, type TableProps } from 'antd';
-import { PlusOutlined } from '@ant-design/icons';
+import { Button, Collapse, Popconfirm, Space, Typography, type TableProps } from 'antd';
+import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import { useMemo, type ReactNode } from 'react';
 import type { OperationSourceDocument } from '@matcheck/contracts';
 import { useAutoOpenKeys } from '../../shared/hooks/useAutoOpenKeys';
@@ -38,8 +38,8 @@ function sectionTitle<T extends RowBase>(section: ItemSection<T>, hasDocuments: 
   if (section.document) {
     const kind = sourceKindLabel(section.document.kind);
     const number = section.document.docNumber ? `№ ${section.document.docNumber}` : 'без номера';
-    // Отвязанный документ остаётся подписью блока: unlink-source намеренно не
-    // трогает позиции, и без подписи было бы непонятно, откуда эти строки.
+    // Отвязанный документ остаётся подписью блока, если строки оставили при
+    // отвязке: без подписи было бы непонятно, откуда они.
     const prefix = section.document.linked ? '' : 'отвязан ';
     // Недобор позиций виден прямо в заголовке. На приёмке 13157 в УПД было три
     // позиции, а доехали две — и счётчик «(2)» выглядел так, будто столько и
@@ -63,6 +63,7 @@ export function OperationItemsSections<T extends RowBase>({
   columns,
   cardRender,
   onAddItem,
+  onRemoveSection,
   emptyHint,
   problemItemIds,
   sectionExtra,
@@ -82,6 +83,12 @@ export function OperationItemsSections<T extends RowBase>({
    * связанного документа, поэтому у отвязанных и неизвестных кнопки нет.
    */
   onAddItem?: (sourceDocumentId: string | null) => void;
+  /**
+   * Убрать из формы все строки блока отвязанного документа — для строк,
+   * оставленных при отвязке. Применяется обычным «Сохранить», как удаление
+   * строки корзиной. undefined — прав на правку нет, кнопки не будет.
+   */
+  onRemoveSection?: (sourceDocumentId: string) => void;
   /** Подсказка в блоке, когда позиций нет вовсе. */
   emptyHint: ReactNode;
   /**
@@ -146,6 +153,25 @@ export function OperationItemsSections<T extends RowBase>({
             Материал
           </Button>
         ) : null;
+        const unlinkedDocId =
+          section.document && !section.document.linked && section.items.length > 0
+            ? section.document.id
+            : null;
+        const removeButton =
+          onRemoveSection && unlinkedDocId ? (
+            <Popconfirm
+              title={`Удалить все строки блока (${section.items.length})?`}
+              description="Изменение применится после сохранения."
+              okText="Удалить"
+              cancelText="Отмена"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => onRemoveSection(unlinkedDocId)}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />}>
+                Удалить материалы
+              </Button>
+            </Popconfirm>
+          ) : null;
         const extraContent = sectionExtra?.(section);
         const defaultLabel = sectionTitle(section, hasDocuments);
         const table =
@@ -177,13 +203,14 @@ export function OperationItemsSections<T extends RowBase>({
           key: section.key,
           label: sectionLabel ? sectionLabel(section, defaultLabel) : defaultLabel,
           extra:
-            extraContent || addButton ? (
+            extraContent || addButton || removeButton ? (
               // Клик в заголовке переключает блок, а всплывающие подтверждения
               // живут в портале, но их события всё равно всплывают сюда.
               <span onClick={(e) => e.stopPropagation()}>
                 <Space size={4} wrap>
                   {extraContent}
                   {addButton}
+                  {removeButton}
                 </Space>
               </span>
             ) : undefined,

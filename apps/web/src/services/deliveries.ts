@@ -130,7 +130,15 @@ export function hardDeleteDelivery(id: string): Promise<{ ok: true }> {
   return api.delete<{ ok: true }>(`/deliveries/${id}`);
 }
 
-export function buildUpsertPayload(r: DeliveryRecord): DeliveryUpsert {
+/**
+ * `baseVersion` — версия, с которой форма взяла строки (её кладёт в мутацию
+ * карточка), а не `r.version`: ту поллинг карточки переписывает каждые 5 с через
+ * `upsertServerSnapshot`, а строки формы при этом не перечитываются. С версией
+ * записи устаревшая форма проходила проверку на сервере и молча возвращала
+ * удалённые строки — например, после отвязки документа с удалением в другой
+ * вкладке.
+ */
+export function buildUpsertPayload(r: DeliveryRecord, baseVersion: number): DeliveryUpsert {
   const effective = effectiveState(r);
   if (!effective) {
     throw new Error('Cannot build payload for empty delivery');
@@ -184,6 +192,6 @@ export function buildUpsertPayload(r: DeliveryRecord): DeliveryUpsert {
       volumeConfidence: it.volumeConfidence,
       groupName: it.groupName,
     })),
-    baseVersion: r.version,
+    baseVersion,
   };
 }

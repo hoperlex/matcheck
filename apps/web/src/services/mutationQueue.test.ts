@@ -22,6 +22,7 @@ type ApiModule = typeof ApiModuleNs;
 const mocks = vi.hoisted(() => ({
   apiPost: vi.fn(),
   apiDelete: vi.fn(),
+  buildDeliveryPayload: vi.fn(() => ({ id: 'delivery-1' })),
   token: { value: 'token' as string | null },
 }));
 
@@ -33,7 +34,7 @@ vi.mock('./api', async () => {
   };
 });
 
-vi.mock('./deliveries', () => ({ buildUpsertPayload: () => ({ id: 'delivery-1' }) }));
+vi.mock('./deliveries', () => ({ buildUpsertPayload: mocks.buildDeliveryPayload }));
 vi.mock('./shipments', () => ({ buildUpsertPayload: () => ({ id: 'shipment-1' }) }));
 
 vi.mock('../stores/auth', () => ({
@@ -130,6 +131,24 @@ describe('flushMutation', () => {
     expect(result.outcome).toBe('server_acked');
     expect(mocks.apiPost).toHaveBeenCalledWith('/deliveries', { id: 'delivery-1' });
     expect(await readMutation()).toBeUndefined();
+  });
+
+  it('версия в запросе — из мутации, а не из записи, которую двигает поллинг', async () => {
+    // Карточка кладёт в мутацию версию, с которой взяты строки формы. Поллинг
+    // тем временем переписал версию записи — с ней устаревшая форма прошла бы
+    // проверку на сервере и вернула удалённые в другой вкладке строки.
+    await seed(mutation({ baseVersion: 3 }));
+    const dbi = await db();
+    const rec = await dbi.get('deliveries', 'delivery-1');
+    await dbi.put('deliveries', { ...rec!, version: 7 });
+    mocks.apiPost.mockResolvedValue({});
+
+    await flushMutation(MUTATION_ID);
+
+    expect(mocks.buildDeliveryPayload).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'delivery-1', version: 7 }),
+      3,
+    );
   });
 
   it('409 — conflict, а не успех; мутация остаётся с пометкой', async () => {

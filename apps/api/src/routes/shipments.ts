@@ -27,6 +27,7 @@ import {
   ShipmentStatusCodeSchema,
   ShipmentUpsertSchema,
   ReviewRequestSchema,
+  UnlinkSourceBodySchema,
   SHIPMENT_HARD_DELETE_STATUSES,
   SHIPMENT_SOFT_DELETE_STATUSES,
   type PrimarySourceDocument,
@@ -56,6 +57,7 @@ import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isShipmentDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
+import { VersionConflictError } from '../domain/operations/version-conflict.js';
 import {
   findDroppedOrigins,
   resolveItemOrigins,
@@ -1368,6 +1370,16 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         if (err instanceof ForeignSiteError) {
           return reply.code(403).send(FOREIGN_SITE_RESPONSE);
         }
+        // Версия сменилась между ранней проверкой и UPDATE — ответ тот же, что
+        // у ранней проверки, клиенты их не различают.
+        if (err instanceof VersionConflictError) {
+          const server = await buildShipmentDto(app, err.entityId, req.user?.role);
+          return reply.code(409).send({
+            error: 'conflict' as const,
+            serverVersion: err.serverVersion,
+            server: server!,
+          });
+        }
         throw err;
       }
     },
@@ -2269,18 +2281,21 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
   // Понадобилась вместе с правилом «upsert не меняет привязки»: без явной
   // отвязки ошибочную привязку стало бы нечем откатить.
   //
-  // Позиции НЕ удаляются и происхождение НЕ обнуляется: строка могла быть уже
-  // проверена и исправлена, а знание «откуда она взялась» — данные, а не
-  // следствие связи. В карточке такая группа показывается блоком «Материалы ·
-  // отвязан УПД № …», а повторная привязка находит свои строки по сохранённому
-  // sourceDocumentItemId и не задваивает их.
+  // По умолчанию позиции НЕ удаляются и происхождение НЕ обнуляется: строка
+  // могла быть уже проверена и исправлена, а знание «откуда она взялась» —
+  // данные, а не следствие связи. В карточке такая группа показывается блоком
+  // «Материалы · отвязан УПД № …», а повторная привязка находит свои строки по
+  // сохранённому sourceDocumentItemId и не задваивает их.
+  //
+  // deleteItems удаляет все строки блока документа и требует baseVersion —
+  // правила те же, что у приёмки (см. /deliveries/:id/unlink-source).
   app.post(
     '/api/v1/shipments/:id/unlink-source',
     {
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
-        body: z.object({ sourceDocumentId: z.string().uuid() }),
+        body: UnlinkSourceBodySchema,
         response: {
           200: ShipmentSchema,
           404: ErrorResponseSchema,
@@ -2307,29 +2322,68 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         });
       }
 
+      const { sourceDocumentId, deleteItems, baseVersion } = req.body;
       const removed = await app.db.transaction(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        async (tx: any) => {
+        async (tx: any): Promise<'ok' | 'not_linked' | 'pending_deletion' | 'conflict'> => {
+          // Сначала строка отгрузки, потом связь и позиции — тот же порядок,
+          // что у upsert (UPDATE shipments → DELETE shipment_items). Пока
+          // отвязка позиций не трогала, блокировка была не нужна; с удалением
+          // встречный порядок дал бы взаимную блокировку.
+          const [locked] = await tx
+            .select({ pendingDeletionAt: shipments.pendingDeletionAt, version: shipments.version })
+            .from(shipments)
+            .where(eq(shipments.id, s.id))
+            .for('update');
+          if (!locked) return 'not_linked';
+          if (locked.pendingDeletionAt !== null) return 'pending_deletion';
+          if (deleteItems && locked.version !== baseVersion) return 'conflict';
+
           const deleted = await tx
             .delete(shipmentSources)
             .where(
               and(
                 eq(shipmentSources.shipmentId, s.id),
-                eq(shipmentSources.sourceDocumentId, req.body.sourceDocumentId),
+                eq(shipmentSources.sourceDocumentId, sourceDocumentId),
               ),
             )
             .returning({ sourceDocumentId: shipmentSources.sourceDocumentId });
-          if (deleted.length === 0) return false;
+          if (deleted.length === 0) return 'not_linked';
+
+          // Только после того, как связь действительно снята: строки документа,
+          // отвязанного раньше без удаления, этот вызов не трогает.
+          if (deleteItems) {
+            await tx
+              .delete(shipmentItems)
+              .where(
+                and(
+                  eq(shipmentItems.shipmentId, s.id),
+                  eq(shipmentItems.sourceDocumentId, sourceDocumentId),
+                ),
+              );
+          }
 
           await tx
             .update(shipments)
             .set({ version: drSql`${shipments.version} + 1`, updatedAt: new Date() })
             .where(eq(shipments.id, s.id));
-          return true;
+          return 'ok';
         },
       );
 
-      if (!removed) {
+      if (removed === 'conflict') {
+        return reply.code(409).send({
+          error: 'conflict',
+          message: 'Отгрузку изменили на другом устройстве. Откройте карточку заново',
+        });
+      }
+      if (removed === 'pending_deletion') {
+        return reply.code(409).send({
+          error: 'pending_deletion',
+          message: 'Документ помечен на удаление — мутации запрещены',
+        });
+      }
+      if (removed === 'not_linked') {
         return reply.code(404).send({
           error: 'not_linked',
           message: 'Этот документ не привязан к отгрузке',
@@ -2337,7 +2391,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       }
 
       // Документ снова свободен — мобильный Inbox должен его увидеть.
-      await touchSourceDocuments(app, [req.body.sourceDocumentId]);
+      await touchSourceDocuments(app, [sourceDocumentId]);
       publishEvent(app, {
         type: 'shipment_updated',
         entityId: s.id,
@@ -2710,14 +2764,32 @@ async function updateShipment(
         updatedAt: new Date(),
       })
       .where(
-        expectedSiteId
-          ? and(eq(shipments.id, id), eq(shipments.siteId, expectedSiteId))
-          : eq(shipments.id, id),
+        and(
+          eq(shipments.id, id),
+          expectedSiteId ? eq(shipments.siteId, expectedSiteId) : undefined,
+          // Версия сверяется и здесь, а не только в маршруте: там `existing`
+          // прочитан вне транзакции, и конкурент мог зафиксироваться между
+          // проверкой и этим UPDATE (см. domain/operations/version-conflict.ts).
+          input.baseVersion !== undefined ? eq(shipments.version, input.baseVersion) : undefined,
+        ),
       )
       .returning({ id: shipments.id });
-    // Объект отгрузки изменился после чтения existing — прерываем транзакцию,
-    // маршрут отдаст 403 foreign_site (см. domain/operations/foreign-site.ts).
-    if (updatedRows.length === 0) throw new ForeignSiteError();
+    if (updatedRows.length === 0) {
+      // Ноль строк — либо сменилась версия, либо объект записи. Различаем
+      // перечиткой в той же транзакции: в READ COMMITTED она видит то, что
+      // зафиксировал конкурент.
+      const [current] = await tx
+        .select({ version: shipments.version })
+        .from(shipments)
+        .where(eq(shipments.id, id))
+        .limit(1);
+      if (current && input.baseVersion !== undefined && current.version !== input.baseVersion) {
+        throw new VersionConflictError(current.version, id);
+      }
+      // Объект отгрузки изменился после чтения existing — маршрут отдаст 403
+      // foreign_site (см. domain/operations/foreign-site.ts).
+      throw new ForeignSiteError();
+    }
 
     // Происхождение позиций переносится ЯВНО — как в updateDelivery. Строки
     // удаляются и вставляются заново, а source_document_id это данные, которых

@@ -125,10 +125,14 @@ async function processMutation(m: MutationRecord): Promise<MutationResult> {
         error: new Error('Черновик не найден в локальном хранилище'),
       };
     }
+    // Версия — из мутации, а не из записи: см. комментарий к buildUpsertPayload.
     payload =
       m.kind === 'delivery_upsert'
-        ? buildUpsertPayload(rec as Parameters<typeof buildUpsertPayload>[0])
-        : buildShipmentUpsertPayload(rec as Parameters<typeof buildShipmentUpsertPayload>[0]);
+        ? buildUpsertPayload(rec as Parameters<typeof buildUpsertPayload>[0], m.baseVersion)
+        : buildShipmentUpsertPayload(
+            rec as Parameters<typeof buildShipmentUpsertPayload>[0],
+            m.baseVersion,
+          );
   }
 
   // ── Фаза 2. Ровно один сетевой вызов, и под catch — только он.

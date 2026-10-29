@@ -27,6 +27,7 @@ import {
   DeliveryUpsertSchema,
   ErrorResponseSchema,
   ReviewRequestSchema,
+  UnlinkSourceBodySchema,
   DELIVERY_HARD_DELETE_STATUSES,
   DELIVERY_SOFT_DELETE_STATUSES,
   type PrimarySourceDocument,
@@ -55,6 +56,7 @@ import {
   resolveStatusId as resolveStatusIdShared,
 } from '../domain/statuses/lookup.js';
 import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
+import { VersionConflictError } from '../domain/operations/version-conflict.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
@@ -1383,6 +1385,16 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         if (err instanceof ForeignSiteError) {
           return reply.code(403).send(FOREIGN_SITE_RESPONSE);
         }
+        // Версия сменилась между ранней проверкой и UPDATE — ответ тот же, что
+        // у ранней проверки, клиенты их не различают.
+        if (err instanceof VersionConflictError) {
+          const server = await buildDeliveryDto(app, err.entityId, req.user?.role);
+          return reply.code(409).send({
+            error: 'conflict' as const,
+            serverVersion: err.serverVersion,
+            server: server!,
+          });
+        }
         throw err;
       }
     },
@@ -2693,18 +2705,28 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
   // upsert с урезанным sourceDocumentIds, и он же был дырой — планшет стирал
   // привязки менеджера.
   //
-  // Позиции НЕ удаляются и происхождение НЕ обнуляется: строка могла быть уже
-  // проверена и исправлена инспектором, а знание «откуда она взялась» — данные,
-  // а не следствие связи. В интерфейсе такая группа показывается как
-  // «Отвязанный УПД № …», а повторная привязка находит свои строки по
-  // сохранённому sourceDocumentItemId и не задваивает их.
+  // По умолчанию позиции НЕ удаляются и происхождение НЕ обнуляется: строка
+  // могла быть уже проверена и исправлена инспектором, а знание «откуда она
+  // взялась» — данные, а не следствие связи. В интерфейсе такая группа
+  // показывается как «отвязан УПД № …», а повторная привязка находит свои
+  // строки по сохранённому sourceDocumentItemId и не задваивает их.
+  //
+  // С deleteItems удаляются ВСЕ строки блока документа — и добавленные в него
+  // вручную: у них тот же source_document_id, а отличить их по пустому
+  // source_document_item_id нельзя (он обнуляется и переразбором). Без флага
+  // поведение прежнее: старый бандл портала держит строки в форме и вернул бы
+  // удалённые сервером следующим «Сохранить».
+  //
+  // Удаление требует baseVersion — версию, с которой форма взяла строки.
+  // Счётчик в окне подтверждения посчитан по ней, и без сверки удалились бы и
+  // строки, появившиеся позже (сохранение планшета, другая вкладка).
   app.post(
     '/api/v1/deliveries/:id/unlink-source',
     {
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
-        body: z.object({ sourceDocumentId: z.string().uuid() }),
+        body: UnlinkSourceBodySchema,
         response: {
           200: DeliverySchema,
           404: ErrorResponseSchema,
@@ -2731,30 +2753,49 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         });
       }
 
+      const { sourceDocumentId, deleteItems, baseVersion } = req.body;
       const removed = await app.db.transaction(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        async (tx: any): Promise<'ok' | 'not_linked' | 'pending_deletion'> => {
-          // Сначала строка приёмки, потом связь — тот же порядок, что у
-          // привязки УПД из ЭДО к блоку (delivery-edo.ts). Встречный порядок
-          // дал бы взаимную блокировку.
+        async (tx: any): Promise<'ok' | 'not_linked' | 'pending_deletion' | 'conflict'> => {
+          // Сначала строка приёмки, потом связь и позиции — тот же порядок, что
+          // у upsert (UPDATE deliveries → DELETE delivery_items) и у привязки
+          // УПД из ЭДО к блоку (delivery-edo.ts). Встречный порядок дал бы
+          // взаимную блокировку.
           const [locked] = await tx
-            .select({ pendingDeletionAt: deliveries.pendingDeletionAt })
+            .select({
+              pendingDeletionAt: deliveries.pendingDeletionAt,
+              version: deliveries.version,
+            })
             .from(deliveries)
             .where(eq(deliveries.id, d.id))
             .for('update');
           if (!locked) return 'not_linked';
           if (locked.pendingDeletionAt !== null) return 'pending_deletion';
+          if (deleteItems && locked.version !== baseVersion) return 'conflict';
 
           const deleted = await tx
             .delete(deliverySources)
             .where(
               and(
                 eq(deliverySources.deliveryId, d.id),
-                eq(deliverySources.sourceDocumentId, req.body.sourceDocumentId),
+                eq(deliverySources.sourceDocumentId, sourceDocumentId),
               ),
             )
             .returning({ sourceDocumentId: deliverySources.sourceDocumentId });
           if (deleted.length === 0) return 'not_linked';
+
+          // Только после того, как связь действительно снята: строки документа,
+          // отвязанного раньше без удаления, этот вызов не трогает.
+          if (deleteItems) {
+            await tx
+              .delete(deliveryItems)
+              .where(
+                and(
+                  eq(deliveryItems.deliveryId, d.id),
+                  eq(deliveryItems.sourceDocumentId, sourceDocumentId),
+                ),
+              );
+          }
 
           // УПД из ЭДО, привязанная к блоку этого документа, остаётся при
           // приёмке: без блока её чип переезжает в шапку, а не пропадает.
@@ -2764,7 +2805,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             .where(
               and(
                 eq(deliveryEdoMatches.deliveryId, d.id),
-                eq(deliveryEdoMatches.sectionDocumentId, req.body.sourceDocumentId),
+                eq(deliveryEdoMatches.sectionDocumentId, sourceDocumentId),
               ),
             );
 
@@ -2776,6 +2817,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         },
       );
 
+      if (removed === 'conflict') {
+        return reply.code(409).send({
+          error: 'conflict',
+          message: 'Приёмку изменили на другом устройстве. Откройте карточку заново',
+        });
+      }
       if (removed === 'pending_deletion') {
         return reply.code(409).send({
           error: 'pending_deletion',
@@ -2790,7 +2837,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       }
 
       // Документ снова свободен — мобильный Inbox должен его увидеть.
-      await touchSourceDocuments(app, [req.body.sourceDocumentId]);
+      await touchSourceDocuments(app, [sourceDocumentId]);
       publishEvent(app, {
         type: 'delivery_updated',
         entityId: d.id,
@@ -3197,14 +3244,32 @@ async function updateDelivery(
         updatedAt: new Date(),
       })
       .where(
-        expectedSiteId
-          ? and(eq(deliveries.id, id), eq(deliveries.siteId, expectedSiteId))
-          : eq(deliveries.id, id),
+        and(
+          eq(deliveries.id, id),
+          expectedSiteId ? eq(deliveries.siteId, expectedSiteId) : undefined,
+          // Версия сверяется и здесь, а не только в маршруте: там `existing`
+          // прочитан вне транзакции, и конкурент мог зафиксироваться между
+          // проверкой и этим UPDATE (см. domain/operations/version-conflict.ts).
+          input.baseVersion !== undefined ? eq(deliveries.version, input.baseVersion) : undefined,
+        ),
       )
       .returning({ id: deliveries.id });
-    // Объект записи изменился после чтения existing — прерываем транзакцию,
-    // маршрут отдаст 403 foreign_site (см. domain/operations/foreign-site.ts).
-    if (updatedRows.length === 0) throw new ForeignSiteError();
+    if (updatedRows.length === 0) {
+      // Ноль строк — либо сменилась версия, либо объект записи. Различаем
+      // перечиткой в той же транзакции: в READ COMMITTED она видит то, что
+      // зафиксировал конкурент.
+      const [current] = await tx
+        .select({ version: deliveries.version })
+        .from(deliveries)
+        .where(eq(deliveries.id, id))
+        .limit(1);
+      if (current && input.baseVersion !== undefined && current.version !== input.baseVersion) {
+        throw new VersionConflictError(current.version, id);
+      }
+      // Объект записи изменился после чтения existing — маршрут отдаст 403
+      // foreign_site (см. domain/operations/foreign-site.ts).
+      throw new ForeignSiteError();
+    }
 
     // Происхождение позиций переносится ЯВНО: строки удаляются и вставляются
     // заново, а `source_document_id` — данные, которых в запросе может не быть

@@ -41,12 +41,14 @@ import type {
   SourceDocument,
   SourceDocumentDetail,
   Status,
+  UnlinkSourceBody,
 } from '@matcheck/contracts';
-import { api } from '../../services/api';
+import { api, ConflictError } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { OperationItemsSections } from '../shared/OperationItemsSections';
 import { OperationDocumentsChips } from '../shared/OperationDocumentsChips';
+import { advanceItemsVersion, countItemsByDocument } from '../shared/itemsVersion';
 import { capturePhoto, onPhotoUploadSettled } from '../../services/photoPipeline';
 import {
   applyLocalEdit,
@@ -238,9 +240,13 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   // Защищает локальные правки (plate/driverName/comment/items) от затирания при рефетче
   // ['shipments', id] — рефетч происходит, например, после загрузки/удаления фото.
   const hydratedIdRef = useRef<string | null>(null);
+  // Версия отгрузки, которой соответствуют строки формы (см. shared/itemsVersion.ts).
+  // Её, а не версию поллинга, отправляют «Сохранить» и отвязка с удалением.
+  const itemsVersionRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!shipmentId) {
+      itemsVersionRef.current = null;
       setItems([]);
       setKind('contractor');
       setSiteId(inspectorSiteId);
@@ -407,6 +413,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       setDriverName(s.driverName ?? '');
       setComment(s.comment ?? '');
       setPurpose(s.purpose ?? null);
+      itemsVersionRef.current = s.version;
       setItems(
         s.items.map((it, idx) => ({
           clientKey: newKey(),
@@ -576,6 +583,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     [sectionDocuments],
   );
 
+  /** Строки формы по документам — счётчик галочки «удалить» в окне отвязки. */
+  const itemCountByDocumentId = useMemo(() => countItemsByDocument(items), [items]);
+
   /** Офлайн-снимок от /sync сводки не несёт — показываем хотя бы число связей. */
   const offlineDocumentCount = loadedShipment?.sourceDocumentIds.length ?? 0;
 
@@ -700,6 +710,12 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     setItems((prev) => prev.filter((it) => it.clientKey !== key));
   };
 
+  // «Удалить материалы» в блоке отвязанного документа — как в приёмке: строки,
+  // оставленные при отвязке, уходят разом и применяются следующим «Сохранить».
+  const removeSectionItems = (sourceDocumentId: string) => {
+    setItems((prev) => prev.filter((it) => it.sourceDocumentId !== sourceDocumentId));
+  };
+
   const buildPatch = (nextCode: ShipmentStatusCode): Partial<Shipment> => {
     if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
     const nextStatus: Status = { ...loadedShipment.status, code: nextCode };
@@ -777,7 +793,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       id: mutationId,
       kind: 'shipment_upsert',
       entityId: loadedShipment.id,
-      baseVersion: loadedShipment.version,
+      // Версия строк формы, а не поллинга (см. shared/itemsVersion.ts). У нового
+      // черновика её нет — сервер для создания версию не сверяет.
+      baseVersion: itemsVersionRef.current ?? loadedShipment.version,
       payload: null,
     });
     const result = await flushMutation(mutationId);
@@ -846,7 +864,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
         sourceDocumentId: upd.id,
       });
     },
-    onSuccess: async (dto) => {
+    onSuccess: async (dto, upd) => {
       await upsertServerSnapshot([dto]);
       message.success('УПД привязана');
       setLinkUpdOpen(false);
@@ -857,10 +875,13 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       // документ можно добавить к заполненной отгрузке, и сброс затирал бы
       // несохранённые правки. Домерживаем: link-source вставляет строки строго
       // в конец, поэтому достаточно добавить те, чьих serverId ещё нет.
+      //
+      // Только строки привязанного документа — как в приёмке (KppPage.linkUpd):
+      // тогда при ответе на «версия + 1» форма повторяет сервер.
       setItems((prev) => {
         const known = new Set(prev.map((it) => it.serverId).filter((id): id is string => !!id));
         const added = dto.items
-          .filter((it) => !known.has(it.id))
+          .filter((it) => it.sourceDocumentId === upd.id && !known.has(it.id))
           .map((it, idx) => ({
             clientKey: newKey(),
             serverId: it.id,
@@ -882,6 +903,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           }));
         return added.length > 0 ? [...prev, ...added] : prev;
       });
+      itemsVersionRef.current = advanceItemsVersion(itemsVersionRef.current, dto.version);
       void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
@@ -892,25 +914,41 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     },
   });
 
-  // Отвязка документа. Позиции сервер намеренно не трогает — меняется только
-  // состав связей, то есть шапка.
+  // Отвязка документа — правила те же, что в приёмке (KppPage.unlinkUpd): с
+  // галочкой сервер удаляет весь блок документа, и те же строки убираются из
+  // формы, иначе «Сохранить» вернул бы их; удаление — с версией строк формы.
   const unlinkUpd = useMutation({
-    mutationFn: async (doc: OperationSourceDocument): Promise<Shipment> => {
+    mutationFn: async ({
+      doc,
+      deleteItems,
+    }: {
+      doc: OperationSourceDocument;
+      deleteItems: boolean;
+    }): Promise<Shipment> => {
       if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
-      return await api.post<Shipment>(`/shipments/${loadedShipment.id}/unlink-source`, {
-        sourceDocumentId: doc.id,
-      });
+      const body: UnlinkSourceBody = { sourceDocumentId: doc.id };
+      if (deleteItems) {
+        body.deleteItems = true;
+        body.baseVersion = itemsVersionRef.current ?? loadedShipment.version;
+      }
+      return await api.post<Shipment>(`/shipments/${loadedShipment.id}/unlink-source`, body);
     },
-    onSuccess: async (dto) => {
+    onSuccess: async (dto, { doc, deleteItems }) => {
       await upsertServerSnapshot([dto]);
-      message.success('Документ отвязан');
+      if (deleteItems) setItems((prev) => prev.filter((it) => it.sourceDocumentId !== doc.id));
+      itemsVersionRef.current = advanceItemsVersion(itemsVersionRef.current, dto.version);
+      message.success(deleteItems ? 'Документ отвязан, его материалы удалены' : 'Документ отвязан');
       void queryClient.invalidateQueries({ queryKey: ['shipments', shipmentId] });
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
     },
     onError: (err: Error) => {
-      message.error(err.message);
+      message.error(
+        err instanceof ConflictError
+          ? 'Отгрузку изменили на другом устройстве. Откройте карточку заново'
+          : err.message,
+      );
     },
   });
 
@@ -1696,7 +1734,12 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               {linkedDocuments.length > 0 ? (
                 <OperationDocumentsChips
                   documents={linkedDocuments}
-                  onUnlink={canUnlinkUpd ? (doc) => unlinkUpd.mutate(doc) : undefined}
+                  onUnlink={
+                    canUnlinkUpd
+                      ? (doc, { deleteItems }) => unlinkUpd.mutate({ doc, deleteItems })
+                      : undefined
+                  }
+                  itemCountByDocumentId={itemCountByDocumentId}
                   unlinkPending={unlinkUpd.isPending}
                 />
               ) : offlineDocumentCount > 0 ? (
@@ -1862,6 +1905,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           columns={columns}
           cardRender={cardRender}
           onAddItem={isContractor ? undefined : addItem}
+          // Права — как у корзины строки: подрядчику удаление недоступно.
+          onRemoveSection={isContractor ? undefined : removeSectionItems}
           emptyHint="Добавьте позиции вручную или сохраните без них (статус «Не оформлена»)."
         />
 

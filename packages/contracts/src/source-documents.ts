@@ -1038,7 +1038,7 @@ export const OperationSourceDocumentSchema = z.object({
   totalSum: z.string().nullable(),
   vatSum: z.string().nullable(),
   // true — документ привязан к операции сейчас; false — связь снята, а позиции с
-  // этим происхождением остались (unlink-source их намеренно не трогает).
+  // этим происхождением остались (unlink-source без deleteItems их не трогает).
   linked: z.boolean(),
   /**
    * Сверка документа — только когда есть что показать.
@@ -1067,6 +1067,30 @@ export const OperationSourceDocumentSchema = z.object({
   coveredItemsCount: z.number().int().nonnegative().optional(),
 });
 export type OperationSourceDocument = z.infer<typeof OperationSourceDocumentSchema>;
+
+/**
+ * Тело `POST /deliveries/:id/unlink-source` и `/shipments/:id/unlink-source`.
+ *
+ * `deleteItems` — удалить вместе со связью все строки блока документа (и
+ * добавленные в него вручную). По умолчанию выключен: так работает старый
+ * бандл портала, который держит строки в форме и вернул бы удалённые сервером
+ * следующим «Сохранить».
+ *
+ * `baseVersion` — версия операции, с которой форма взяла строки. Для удаления
+ * обязательна: сервер сверяет её под блокировкой и отвечает 409, если с тех
+ * пор операцию меняли, — иначе удалились бы и строки, которых человек не видел.
+ */
+export const UnlinkSourceBodySchema = z
+  .object({
+    sourceDocumentId: z.string().uuid(),
+    deleteItems: z.boolean().optional(),
+    baseVersion: z.number().int().nonnegative().optional(),
+  })
+  .refine((b) => !b.deleteItems || b.baseVersion !== undefined, {
+    message: 'baseVersion обязателен при deleteItems',
+    path: ['baseVersion'],
+  });
+export type UnlinkSourceBody = z.infer<typeof UnlinkSourceBodySchema>;
 
 export const ManualUpdUploadRequestSchema = z.object({
   xml: z.string().min(1).max(10_000_000),

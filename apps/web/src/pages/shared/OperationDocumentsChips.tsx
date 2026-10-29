@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Button, Popconfirm, Popover, Space, Tag, Typography } from 'antd';
+import { Button, Checkbox, Popconfirm, Popover, Space, Tag, Typography } from 'antd';
 import { DisconnectOutlined, EyeOutlined } from '@ant-design/icons';
 import type { OperationSourceDocument } from '@matcheck/contracts';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
@@ -13,9 +13,10 @@ import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
 /**
  * Чипы документов в шапке операции.
  *
- * Показываются ТОЛЬКО связанные документы: позиции после отвязки сохраняют
- * происхождение (их блок в материалах остаётся), но в шапке отвязанного
- * документа быть не должно — иначе «Отвязать» выглядит не сработавшим.
+ * Показываются ТОЛЬКО связанные документы: позиции, оставленные при отвязке,
+ * сохраняют происхождение (их блок в материалах остаётся), но в шапке
+ * отвязанного документа быть не должно — иначе «Отвязать» выглядит не
+ * сработавшим.
  *
  * Раньше здесь стоял один документ — `sourceDocumentIds[0]`, и у приёмки из
  * четырёх УПД в шапке был номер одной бумаги, а «Сумма» показывала её итог
@@ -29,16 +30,28 @@ function docLabel(doc: OperationSourceDocument): string {
   return doc.docNumber ?? '— без номера —';
 }
 
+/** Выбор человека в окне «Отвязать документ?». */
+export type UnlinkOptions = {
+  /** Удалить вместе со связью все строки блока документа. */
+  deleteItems: boolean;
+};
+
 export function OperationDocumentsChips({
   documents,
   onUnlink,
+  itemCountByDocumentId,
   onOpenOriginal,
   unlinkPending = false,
 }: {
   /** Связанные документы операции. */
   documents: OperationSourceDocument[];
   /** undefined — прав на отвязку нет, кнопки не будет. */
-  onUnlink?: (document: OperationSourceDocument) => void;
+  onUnlink?: (document: OperationSourceDocument, options: UnlinkOptions) => void;
+  /**
+   * Сколько строк в блоке каждого документа — по форме карточки, то есть ровно
+   * то, что человек видит. Без строк галочки «удалить» в окне отвязки нет.
+   */
+  itemCountByDocumentId?: ReadonlyMap<string, number>;
   /**
    * Открыть оригинал документа. undefined — номер остаётся обычным текстом
    * (карточки в режиме просмотра и отгрузка пока без этой возможности).
@@ -54,8 +67,24 @@ export function OperationDocumentsChips({
   // меняло бы число хуков между рендерами («Rendered more hooks than during
   // the previous render»).
   const [openGroup, setOpenGroup] = useState<string | null>(null);
+  // Галочка «удалить строки блока». Одна на компонент: окно подтверждения
+  // открыто всегда одно, и при каждом открытии она снова включена — выбор
+  // прошлой отвязки на следующую не переносится.
+  const [deleteItems, setDeleteItems] = useState(true);
 
   if (documents.length === 0) return null;
+
+  const unlinkDescription = (count: number) =>
+    count > 0 ? (
+      <Space direction="vertical" size={4} style={{ maxWidth: 300 }}>
+        <span>Документ вернётся в список свободных.</span>
+        <Checkbox checked={deleteItems} onChange={(e) => setDeleteItems(e.target.checked)}>
+          Удалить все строки его блока ({count}), в том числе добавленные вручную
+        </Checkbox>
+      </Space>
+    ) : (
+      'Документ вернётся в список свободных.'
+    );
 
   const docDate = summarizeDates(documents, 'docDate');
   const expectedDate = summarizeDates(documents, 'expectedDate');
@@ -102,10 +131,17 @@ export function OperationDocumentsChips({
           {onUnlink && (
             <Popconfirm
               title="Отвязать документ?"
-              description="Материалы останутся в приёмке, документ вернётся в список свободных."
+              description={unlinkDescription(itemCountByDocumentId?.get(doc.id) ?? 0)}
               okText="Отвязать"
               cancelText="Отмена"
-              onConfirm={() => onUnlink(doc)}
+              onOpenChange={(open) => {
+                if (open) setDeleteItems(true);
+              }}
+              onConfirm={() =>
+                onUnlink(doc, {
+                  deleteItems: deleteItems && (itemCountByDocumentId?.get(doc.id) ?? 0) > 0,
+                })
+              }
             >
               <Button
                 type="link"

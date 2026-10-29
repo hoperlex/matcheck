@@ -224,6 +224,24 @@ suite('происхождение позиций приёмки (реальны�
     return rows.map((r) => r.source_document_id).sort();
   }
 
+  /**
+   * Ждёт, пока запрос с текстом `queryPrefix` встанет в ожидание блокировки —
+   * так тест пересечения убеждается, что upsert уже прошёл раннюю проверку и
+   * упёрся в строку, которую держит конкурент.
+   */
+  async function waitForLockWaiter(queryPrefix: string): Promise<void> {
+    for (let i = 0; i < 250; i++) {
+      const rows = await sql`
+        SELECT 1 FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND wait_event_type = 'Lock'
+           AND query ILIKE ${queryPrefix + '%'}`;
+      if (rows.length > 0) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error(`запрос «${queryPrefix}…» не встал в ожидание блокировки`);
+  }
+
   /** Пустая приёмка без документов — отправная точка большинства сценариев. */
   async function makeDelivery(): Promise<string> {
     const id = randomUUID();
@@ -617,6 +635,246 @@ suite('происхождение позиций приёмки (реальны�
 
     expect(res.statusCode).toBe(404);
     expect(await itemsOf(deliveryId)).toHaveLength(0);
+  });
+
+  // ── Отвязка с удалением строк блока (deleteItems) ───────────────────────
+  //
+  // Главный риск — не само удаление, а возврат удалённых строк устаревшей
+  // формой: upsert переписывает позиции целиком, и старый список со строками
+  // отвязанного документа вставил бы их обратно «без привязки». Поэтому кроме
+  // удаления здесь закреплены сверка версии в отвязке, 409 второй вкладке и
+  // пересечение отвязки с upsert, прошедшим раннюю проверку версии.
+  describe('отвязка с удалением строк блока', () => {
+    const unlinkDeleting = (deliveryId: string, sourceDocumentId: string, baseVersion?: number) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/v1/deliveries/${deliveryId}/unlink-source`,
+        payload: {
+          sourceDocumentId,
+          deleteItems: true,
+          ...(baseVersion !== undefined ? { baseVersion } : {}),
+        },
+      });
+
+    async function versionOf(deliveryId: string): Promise<number> {
+      const [row] = await sql<{ version: number }[]>`
+        SELECT version FROM deliveries WHERE id = ${deliveryId}`;
+      return row!.version;
+    }
+
+    /** Строки из БД в форме, в которой их шлёт форма портала. */
+    const asUpsertItems = (rows: Awaited<ReturnType<typeof itemsOf>>) =>
+      rows.map((r) => ({
+        id: r.id,
+        nameRaw: r.name_raw,
+        qtyActual: '1',
+        unit: 'шт',
+        lineNo: r.line_no,
+        sourceDocumentId: r.source_document_id,
+        sourceDocumentItemId: r.source_document_item_id,
+      }));
+
+    const save = (deliveryId: string, baseVersion: number, items: unknown[]) =>
+      upsert({
+        id: deliveryId,
+        statusCode: 'filled',
+        siteId,
+        baseVersion,
+        sourceDocumentIds: [],
+        items,
+      });
+
+    /** Приёмка с двумя УПД: у первой две строки, у второй одна. */
+    async function twoDocDelivery(tag: string) {
+      const first = await makeUpd(`${tag}-1`, [
+        { name: `${tag} Арматура 12`, qty: '2' },
+        { name: `${tag} Арматура 16`, qty: '3' },
+      ]);
+      const second = await makeUpd(`${tag}-2`, [{ name: `${tag} Цемент`, qty: '10' }]);
+      const deliveryId = await makeDelivery();
+      expect((await link(deliveryId, first.id)).statusCode).toBe(200);
+      expect((await link(deliveryId, second.id)).statusCode).toBe(200);
+      return { first, second, deliveryId };
+    }
+
+    it('удаляет весь блок документа, включая строку, добавленную в него вручную', async () => {
+      const { first, second, deliveryId } = await twoDocDelivery('УД-1');
+      // «+ Материал» в блоке первой УПД: строка получает её source_document_id,
+      // а позиции документа у неё нет. Плюс строка без привязки.
+      const saved = await save(deliveryId, await versionOf(deliveryId), [
+        ...asUpsertItems(await itemsOf(deliveryId)),
+        {
+          nameRaw: 'Ручная в блоке',
+          qtyActual: '1',
+          unit: 'шт',
+          lineNo: 10,
+          sourceDocumentId: first.id,
+        },
+        { nameRaw: 'Без привязки', qtyActual: '1', unit: 'шт', lineNo: 11, sourceDocumentId: null },
+      ]);
+      expect(saved.statusCode, saved.body).toBe(200);
+      expect(
+        (await itemsOf(deliveryId)).filter((i) => i.source_document_id === first.id),
+      ).toHaveLength(3);
+
+      const res = await unlinkDeleting(deliveryId, first.id, await versionOf(deliveryId));
+
+      expect(res.statusCode, res.body).toBe(200);
+      const after = await itemsOf(deliveryId);
+      expect(after.map((i) => i.name_raw).sort()).toEqual(['Без привязки', 'УД-1 Цемент']);
+      expect(after.find((i) => i.name_raw === 'УД-1 Цемент')!.source_document_id).toBe(second.id);
+      expect(await sourcesOf(deliveryId)).toEqual([second.id]);
+      // Блоку отвязанного документа держаться не на чем — в сводке его нет.
+      const dto = res.json() as { sourceDocuments: { id: string }[]; items: unknown[] };
+      expect(dto.sourceDocuments.map((d) => d.id)).toEqual([second.id]);
+      expect(dto.items).toHaveLength(2);
+    });
+
+    it('устаревшая версия — 409, связь и все строки на месте', async () => {
+      const upd = await makeUpd('УД-2', [{ name: 'УД-2 Кирпич', qty: '100' }]);
+      const deliveryId = await makeDelivery();
+      await link(deliveryId, upd.id);
+      const seen = await versionOf(deliveryId);
+      // Пока окно подтверждения открыто, планшет добавил строку в тот же блок.
+      const fromTablet = await save(deliveryId, seen, [
+        ...asUpsertItems(await itemsOf(deliveryId)),
+        {
+          nameRaw: 'УД-2 Кирпич облицовочный',
+          qtyActual: '5',
+          unit: 'шт',
+          lineNo: 2,
+          sourceDocumentId: upd.id,
+        },
+      ]);
+      expect(fromTablet.statusCode, fromTablet.body).toBe(200);
+
+      const res = await unlinkDeleting(deliveryId, upd.id, seen);
+
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json()).toMatchObject({ error: 'conflict' });
+      expect(await sourcesOf(deliveryId)).toEqual([upd.id]);
+      expect(await itemsOf(deliveryId)).toHaveLength(2);
+    });
+
+    it('без baseVersion удаление не принимается (400)', async () => {
+      const upd = await makeUpd('УД-3', [{ name: 'УД-3 Песок', qty: '7' }]);
+      const deliveryId = await makeDelivery();
+      await link(deliveryId, upd.id);
+
+      const res = await unlinkDeleting(deliveryId, upd.id);
+
+      expect(res.statusCode).toBe(400);
+      expect(await sourcesOf(deliveryId)).toEqual([upd.id]);
+      expect(await itemsOf(deliveryId)).toHaveLength(1);
+    });
+
+    it('документ, отвязанный раньше без удаления, — 404, его строки целы', async () => {
+      const upd = await makeUpd('УД-4', [{ name: 'УД-4 Щебень', qty: '9' }]);
+      const deliveryId = await makeDelivery();
+      await link(deliveryId, upd.id);
+      await unlink(deliveryId, upd.id);
+
+      const res = await unlinkDeleting(deliveryId, upd.id, await versionOf(deliveryId));
+
+      expect(res.statusCode).toBe(404);
+      expect(await itemsOf(deliveryId)).toHaveLength(1);
+    });
+
+    it('повторная привязка после удаления возвращает строки документа', async () => {
+      const upd = await makeUpd('УД-5', [{ name: 'УД-5 Брус', qty: '4' }]);
+      const deliveryId = await makeDelivery();
+      await link(deliveryId, upd.id);
+      expect(
+        (await unlinkDeleting(deliveryId, upd.id, await versionOf(deliveryId))).statusCode,
+      ).toBe(200);
+      expect(await itemsOf(deliveryId)).toHaveLength(0);
+
+      expect((await link(deliveryId, upd.id)).statusCode).toBe(200);
+
+      const items = await itemsOf(deliveryId);
+      expect(items).toHaveLength(1);
+      expect(items[0]!.source_document_item_id).toBe(upd.itemIds[0]);
+    });
+
+    it('полный путь одной вкладки: отвязка, сохранение остальных правок, перечитка', async () => {
+      const { first, second, deliveryId } = await twoDocDelivery('УД-6');
+      const v = await versionOf(deliveryId);
+      const snapshot = await itemsOf(deliveryId);
+
+      expect((await unlinkDeleting(deliveryId, first.id, v)).statusCode).toBe(200);
+
+      // Форма убрала строки первой УПД и сохраняет правку факта во второй — с
+      // версией, на которую ответила отвязка.
+      const kept = asUpsertItems(snapshot.filter((i) => i.source_document_id !== first.id)).map(
+        (i) => ({ ...i, qtyActual: '9' }),
+      );
+      const res = await save(deliveryId, v + 1, kept);
+      expect(res.statusCode, res.body).toBe(200);
+
+      const reread = await app.inject({ method: 'GET', url: `/api/v1/deliveries/${deliveryId}` });
+      const dto = reread.json() as {
+        items: { nameRaw: string; qtyActual: string | null; sourceDocumentId: string | null }[];
+      };
+      expect(dto.items).toHaveLength(1);
+      expect(dto.items[0]).toMatchObject({ sourceDocumentId: second.id });
+      expect(Number(dto.items[0]!.qtyActual)).toBe(9);
+    });
+
+    it('вторая вкладка со старым списком получает 409, строки не возвращаются', async () => {
+      const { first, deliveryId } = await twoDocDelivery('УД-7');
+      const v = await versionOf(deliveryId);
+      const staleForm = asUpsertItems(await itemsOf(deliveryId));
+
+      expect((await unlinkDeleting(deliveryId, first.id, v)).statusCode).toBe(200);
+      // Вторая вкладка открыта до отвязки: её форма помнит строки первой УПД.
+      const res = await save(deliveryId, v, staleForm);
+
+      expect(res.statusCode, res.body).toBe(409);
+      const after = await itemsOf(deliveryId);
+      expect(after).toHaveLength(1);
+      expect(
+        after.some((i) => i.source_document_id === first.id || i.source_document_id === null),
+      ).toBe(false);
+    });
+
+    it('отвязка между ранней проверкой версии и UPDATE: upsert получает 409, строки не возвращаются', async () => {
+      // Детерминированное пересечение: T0 держит строку приёмки, upsert проходит
+      // раннюю проверку (existing читается вне транзакции) и встаёт в очередь
+      // на UPDATE; T0 делает ровно то, что делает отвязка с удалением, и
+      // фиксируется. Без условия версии в UPDATE upsert записал бы старый
+      // список, и строки первой УПД вернулись бы «без привязки».
+      const { first, deliveryId } = await twoDocDelivery('УД-8');
+      const v = await versionOf(deliveryId);
+      const staleForm = asUpsertItems(await itemsOf(deliveryId));
+
+      let locked!: () => void;
+      let proceed!: () => void;
+      const lockedP = new Promise<void>((r) => (locked = r));
+      const proceedP = new Promise<void>((r) => (proceed = r));
+      const t0 = sql.begin(async (tx) => {
+        await tx`SELECT id FROM deliveries WHERE id = ${deliveryId} FOR UPDATE`;
+        locked();
+        await proceedP;
+        await tx`DELETE FROM delivery_sources WHERE delivery_id = ${deliveryId} AND source_document_id = ${first.id}`;
+        await tx`DELETE FROM delivery_items WHERE delivery_id = ${deliveryId} AND source_document_id = ${first.id}`;
+        await tx`UPDATE deliveries SET version = version + 1 WHERE id = ${deliveryId}`;
+      });
+      await lockedP;
+
+      const upsertP = save(deliveryId, v, staleForm);
+      await waitForLockWaiter('update "deliveries"');
+      proceed();
+      await t0;
+      const res = await upsertP;
+
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json()).toMatchObject({ error: 'conflict', serverVersion: v + 1 });
+      const after = await itemsOf(deliveryId);
+      expect(after).toHaveLength(1);
+      expect(
+        after.some((i) => i.source_document_id === first.id || i.source_document_id === null),
+      ).toBe(false);
+    });
   });
 
   it('ручная приёмка без документов работает как прежде', async () => {

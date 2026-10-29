@@ -90,7 +90,94 @@ describe('OperationDocumentsChips', () => {
     // Popconfirm: подтверждение обязательно — отвязка меняет смысл всех строк.
     fireEvent.click(screen.getAllByText('Отвязать').slice(-1)[0]!);
 
-    expect(onUnlink).toHaveBeenCalledWith(expect.objectContaining({ id: 'd1' }));
+    // Строк у документа нет — удалять нечего, галочки нет.
+    expect(onUnlink).toHaveBeenCalledWith(expect.objectContaining({ id: 'd1' }), {
+      deleteItems: false,
+    });
+  });
+
+  /** Открывает окно «Отвязать документ?» у единственного документа. */
+  function openUnlinkConfirm() {
+    fireEvent.click(screen.getByText('0000-0082603'));
+    fireEvent.click(screen.getByText('Отвязать'));
+  }
+  const confirmUnlink = () => fireEvent.click(screen.getAllByText('Отвязать').slice(-1)[0]!);
+  const deleteCheckbox = () =>
+    screen.getByRole('checkbox', {
+      name: /Удалить все строки его блока \(3\)/,
+    }) as HTMLInputElement;
+
+  it('со строками в блоке галочка удаления включена, и отвязка уходит с удалением', () => {
+    const onUnlink = vi.fn();
+    render(
+      <OperationDocumentsChips
+        documents={[doc()]}
+        onUnlink={onUnlink}
+        itemCountByDocumentId={new Map([['d1', 3]])}
+      />,
+    );
+
+    openUnlinkConfirm();
+    // Подпись честно говорит, что уйдут и строки, добавленные в блок вручную.
+    expect(screen.getByText(/в том числе добавленные вручную/)).toBeTruthy();
+    expect(deleteCheckbox().checked).toBe(true);
+    confirmUnlink();
+
+    expect(onUnlink).toHaveBeenCalledWith(expect.objectContaining({ id: 'd1' }), {
+      deleteItems: true,
+    });
+  });
+
+  it('снятая галочка оставляет строки', () => {
+    const onUnlink = vi.fn();
+    render(
+      <OperationDocumentsChips
+        documents={[doc()]}
+        onUnlink={onUnlink}
+        itemCountByDocumentId={new Map([['d1', 3]])}
+      />,
+    );
+
+    openUnlinkConfirm();
+    fireEvent.click(deleteCheckbox());
+    confirmUnlink();
+
+    expect(onUnlink).toHaveBeenCalledWith(expect.objectContaining({ id: 'd1' }), {
+      deleteItems: false,
+    });
+  });
+
+  it('при новом открытии галочка снова включена', () => {
+    render(
+      <OperationDocumentsChips
+        documents={[doc()]}
+        onUnlink={vi.fn()}
+        itemCountByDocumentId={new Map([['d1', 3]])}
+      />,
+    );
+
+    openUnlinkConfirm();
+    fireEvent.click(deleteCheckbox());
+    expect(deleteCheckbox().checked).toBe(false);
+    fireEvent.click(screen.getByText('Отмена'));
+    fireEvent.click(screen.getAllByText('Отвязать')[0]!);
+
+    expect(deleteCheckbox().checked).toBe(true);
+  });
+
+  it('без строк в блоке галочки нет', () => {
+    render(
+      <OperationDocumentsChips
+        documents={[doc()]}
+        onUnlink={vi.fn()}
+        itemCountByDocumentId={new Map([['d1', 0]])}
+      />,
+    );
+
+    openUnlinkConfirm();
+
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.getByText('Документ вернётся в список свободных.')).toBeTruthy();
   });
 
   it('без права отвязки кнопки нет', () => {

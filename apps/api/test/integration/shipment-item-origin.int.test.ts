@@ -164,6 +164,20 @@ suite('происхождение позиций отгрузки (реальн�
     return rows.map((r) => r.source_document_id).sort();
   }
 
+  /** См. одноимённый помощник в delivery-item-origin.int.test.ts. */
+  async function waitForLockWaiter(queryPrefix: string): Promise<void> {
+    for (let i = 0; i < 250; i++) {
+      const rows = await sql`
+        SELECT 1 FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND wait_event_type = 'Lock'
+           AND query ILIKE ${queryPrefix + '%'}`;
+      if (rows.length > 0) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error(`запрос «${queryPrefix}…» не встал в ожидание блокировки`);
+  }
+
   const shipmentBody = (id: string, extra: Record<string, unknown> = {}) => ({
     id,
     statusCode: 'shipped',
@@ -319,6 +333,176 @@ suite('происхождение позиций отгрузки (реальн�
 
     // Повторная отвязка — 404 not_linked, а не молчаливый успех.
     expect((await unlink(shipmentId, upd.id)).statusCode).toBe(404);
+  });
+
+  // Зеркало приёмки (delivery-item-origin.int.test.ts, «отвязка с удалением
+  // строк блока»): удаление всего блока, сверка версии, вторая вкладка и
+  // пересечение отвязки с upsert. У отгрузки отвязка раньше не брала строку
+  // операции первой — теперь берёт, иначе с upsert возможна взаимная блокировка.
+  describe('отвязка с удалением строк блока', () => {
+    const unlinkDeleting = (shipmentId: string, sourceDocumentId: string, baseVersion?: number) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/v1/shipments/${shipmentId}/unlink-source`,
+        payload: {
+          sourceDocumentId,
+          deleteItems: true,
+          ...(baseVersion !== undefined ? { baseVersion } : {}),
+        },
+      });
+
+    async function versionOf(shipmentId: string): Promise<number> {
+      const [row] = await sql<{ version: number }[]>`
+        SELECT version FROM shipments WHERE id = ${shipmentId}`;
+      return row!.version;
+    }
+
+    const asUpsertItems = (rows: Awaited<ReturnType<typeof itemsOf>>) =>
+      rows.map((r) => ({
+        id: r.id,
+        nameRaw: r.name_raw,
+        qtyPlanned: '1',
+        unit: 'шт',
+        lineNo: r.line_no,
+        sourceDocumentId: r.source_document_id,
+        sourceDocumentItemId: r.source_document_item_id,
+      }));
+
+    const save = (shipmentId: string, baseVersion: number, items: unknown[]) =>
+      upsert(shipmentBody(shipmentId, { baseVersion, items }));
+
+    async function twoDocShipment(tag: string) {
+      const first = await makeUpd(`${tag}-1`, [
+        { name: `${tag} Швеллер`, qty: '2' },
+        { name: `${tag} Уголок`, qty: '3' },
+      ]);
+      const second = await makeUpd(`${tag}-2`, [{ name: `${tag} Лист`, qty: '1' }]);
+      const shipmentId = await makeShipment();
+      expect((await link(shipmentId, first.id)).statusCode).toBe(200);
+      expect((await link(shipmentId, second.id)).statusCode).toBe(200);
+      return { first, second, shipmentId };
+    }
+
+    it('удаляет весь блок документа, включая строку, добавленную в него вручную', async () => {
+      const { first, second, shipmentId } = await twoDocShipment('ОУ-1');
+      const saved = await save(shipmentId, await versionOf(shipmentId), [
+        ...asUpsertItems(await itemsOf(shipmentId)),
+        {
+          nameRaw: 'Ручная в блоке',
+          qtyPlanned: '1',
+          unit: 'шт',
+          lineNo: 10,
+          sourceDocumentId: first.id,
+        },
+        {
+          nameRaw: 'Без привязки',
+          qtyPlanned: '1',
+          unit: 'шт',
+          lineNo: 11,
+          sourceDocumentId: null,
+        },
+      ]);
+      expect(saved.statusCode, saved.body).toBe(200);
+      expect(
+        (await itemsOf(shipmentId)).filter((i) => i.source_document_id === first.id),
+      ).toHaveLength(3);
+
+      const res = await unlinkDeleting(shipmentId, first.id, await versionOf(shipmentId));
+
+      expect(res.statusCode, res.body).toBe(200);
+      const after = await itemsOf(shipmentId);
+      expect(after.map((i) => i.name_raw).sort()).toEqual(['Без привязки', 'ОУ-1 Лист']);
+      expect(await sourcesOf(shipmentId)).toEqual([second.id]);
+    });
+
+    it('устаревшая версия — 409, без baseVersion — 400, связь и строки на месте', async () => {
+      const upd = await makeUpd('ОУ-2', [{ name: 'ОУ-2 Труба', qty: '4' }]);
+      const shipmentId = await makeShipment();
+      await link(shipmentId, upd.id);
+      const seen = await versionOf(shipmentId);
+      const bumped = await save(shipmentId, seen, asUpsertItems(await itemsOf(shipmentId)));
+      expect(bumped.statusCode, bumped.body).toBe(200);
+
+      const stale = await unlinkDeleting(shipmentId, upd.id, seen);
+      expect(stale.statusCode, stale.body).toBe(409);
+      expect((await unlinkDeleting(shipmentId, upd.id)).statusCode).toBe(400);
+
+      expect(await sourcesOf(shipmentId)).toEqual([upd.id]);
+      expect(await itemsOf(shipmentId)).toHaveLength(1);
+    });
+
+    it('документ, отвязанный раньше без удаления, — 404, его строки целы', async () => {
+      const upd = await makeUpd('ОУ-3', [{ name: 'ОУ-3 Балка', qty: '2' }]);
+      const shipmentId = await makeShipment();
+      await link(shipmentId, upd.id);
+      await unlink(shipmentId, upd.id);
+
+      const res = await unlinkDeleting(shipmentId, upd.id, await versionOf(shipmentId));
+
+      expect(res.statusCode).toBe(404);
+      expect(await itemsOf(shipmentId)).toHaveLength(1);
+    });
+
+    it('полный путь одной вкладки и вторая вкладка со старым списком', async () => {
+      const { first, second, shipmentId } = await twoDocShipment('ОУ-4');
+      const v = await versionOf(shipmentId);
+      const snapshot = await itemsOf(shipmentId);
+
+      expect((await unlinkDeleting(shipmentId, first.id, v)).statusCode).toBe(200);
+
+      // Вторая вкладка открыта до отвязки и шлёт старый список — 409.
+      const stale = await save(shipmentId, v, asUpsertItems(snapshot));
+      expect(stale.statusCode, stale.body).toBe(409);
+
+      // Эта вкладка сохраняет оставшиеся строки с версией ответа отвязки.
+      const kept = asUpsertItems(snapshot.filter((i) => i.source_document_id !== first.id)).map(
+        (i) => ({ ...i, qtyPlanned: '7' }),
+      );
+      const res = await save(shipmentId, v + 1, kept);
+      expect(res.statusCode, res.body).toBe(200);
+
+      const reread = await app.inject({ method: 'GET', url: `/api/v1/shipments/${shipmentId}` });
+      const dto = reread.json() as {
+        items: { qtyPlanned: string | null; sourceDocumentId: string | null }[];
+      };
+      expect(dto.items).toHaveLength(1);
+      expect(dto.items[0]).toMatchObject({ sourceDocumentId: second.id });
+      expect(Number(dto.items[0]!.qtyPlanned)).toBe(7);
+    });
+
+    it('отвязка между ранней проверкой версии и UPDATE: upsert получает 409, строки не возвращаются', async () => {
+      const { first, shipmentId } = await twoDocShipment('ОУ-5');
+      const v = await versionOf(shipmentId);
+      const staleForm = asUpsertItems(await itemsOf(shipmentId));
+
+      let locked!: () => void;
+      let proceed!: () => void;
+      const lockedP = new Promise<void>((r) => (locked = r));
+      const proceedP = new Promise<void>((r) => (proceed = r));
+      const t0 = sql.begin(async (tx) => {
+        await tx`SELECT id FROM shipments WHERE id = ${shipmentId} FOR UPDATE`;
+        locked();
+        await proceedP;
+        await tx`DELETE FROM shipment_sources WHERE shipment_id = ${shipmentId} AND source_document_id = ${first.id}`;
+        await tx`DELETE FROM shipment_items WHERE shipment_id = ${shipmentId} AND source_document_id = ${first.id}`;
+        await tx`UPDATE shipments SET version = version + 1 WHERE id = ${shipmentId}`;
+      });
+      await lockedP;
+
+      const upsertP = save(shipmentId, v, staleForm);
+      await waitForLockWaiter('update "shipments"');
+      proceed();
+      await t0;
+      const res = await upsertP;
+
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json()).toMatchObject({ error: 'conflict', serverVersion: v + 1 });
+      const after = await itemsOf(shipmentId);
+      expect(after).toHaveLength(1);
+      expect(
+        after.some((i) => i.source_document_id === first.id || i.source_document_id === null),
+      ).toBe(false);
+    });
   });
 
   it('переименование строки отвязанного документа не теряет привязку', async () => {

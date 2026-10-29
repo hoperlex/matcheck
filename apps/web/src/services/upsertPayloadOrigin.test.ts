@@ -81,7 +81,7 @@ describe('buildUpsertPayload проводит происхождение поз�
       lastSyncedAt: Date.now(),
     } as DeliveryRecord;
 
-    const payload = buildUpsertPayload(record);
+    const payload = buildUpsertPayload(record, 3);
 
     expect(payload.items).toHaveLength(1);
     expect(payload.items[0]).toMatchObject({
@@ -107,7 +107,7 @@ describe('buildUpsertPayload проводит происхождение поз�
       lastSyncedAt: Date.now(),
     } as DeliveryRecord;
 
-    const payload = buildUpsertPayload(record);
+    const payload = buildUpsertPayload(record, 3);
 
     expect(payload.items).toHaveLength(2);
     expect(payload.items[1]).toMatchObject({ sourceDocumentId: null, sourceDocumentItemId: null });
@@ -125,7 +125,7 @@ describe('buildUpsertPayload проводит происхождение поз�
       lastSyncedAt: Date.now(),
     } as DeliveryRecord;
 
-    const payload = buildUpsertPayload(record);
+    const payload = buildUpsertPayload(record, 3);
 
     expect(payload.items[0]).toMatchObject({
       qtyActual: '250',
@@ -154,11 +154,53 @@ describe('buildUpsertPayload проводит происхождение поз�
       lastSyncedAt: Date.now(),
     } as ShipmentRecord;
 
-    const payload = buildShipmentUpsertPayload(record);
+    const payload = buildShipmentUpsertPayload(record, 3);
 
     expect(payload.items[0]).toMatchObject({
       sourceDocumentId: DOC_ID,
       sourceDocumentItemId: DOC_ITEM_ID,
     });
+  });
+});
+
+describe('buildUpsertPayload отправляет версию строк формы, а не версию записи', () => {
+  // Поллинг карточки переписывает record.version каждые 5 с, а строки формы
+  // остаются прежними. С версией записи устаревшая форма проходила проверку на
+  // сервере и возвращала строки, удалённые в другой вкладке.
+  it('приёмка: baseVersion — из аргумента, даже если запись новее', () => {
+    const record = {
+      id: baseOperation.id,
+      server: { ...baseOperation, version: 5, items: [item] } as unknown as Delivery,
+      local: { items: [item] } as unknown as Partial<Delivery>,
+      tombstone: false,
+      version: 5,
+      lastSyncedAt: Date.now(),
+    } as DeliveryRecord;
+
+    expect(buildUpsertPayload(record, 3).baseVersion).toBe(3);
+  });
+
+  it('отгрузка: то же самое', () => {
+    const record = {
+      id: baseOperation.id,
+      server: {
+        ...baseOperation,
+        version: 5,
+        kind: 'contractor',
+        status: { ...baseOperation.status, entityType: 'shipment' },
+        receiverCounterpartyId: null,
+        receiverMolId: null,
+        destSiteId: null,
+        shippedAt: null,
+        purpose: null,
+        items: [item],
+      } as unknown as Shipment,
+      local: null,
+      tombstone: false,
+      version: 5,
+      lastSyncedAt: Date.now(),
+    } as ShipmentRecord;
+
+    expect(buildShipmentUpsertPayload(record, 3).baseVersion).toBe(3);
   });
 });

@@ -39,6 +39,18 @@ describe('buildItemSections', () => {
     expect(sections[1]!.items).toEqual([]);
   });
 
+  it('отвязанный документ без строк блока не даёт, связанный — даёт', () => {
+    // Строки отвязанного документа убрали кнопкой «Удалить материалы»; до
+    // сохранения сервер ещё держит документ в сводке, и пустой блок «отвязан …
+    // (0)» с текстом «не распознано ни одной позиции» вводил бы в заблуждение.
+    const sections = buildItemSections({
+      items: [row('a', 'd1')],
+      documents: [doc('d1'), doc('d2'), doc('d3', { linked: false })],
+    });
+
+    expect(sections.map((s) => s.key)).toEqual(['d1', 'd2']);
+  });
+
   it('строка с документом вне сводки попадает в свой блок, а не пропадает', () => {
     // Так выглядит офлайн-снимок от /sync: поля sourceDocuments в нём нет.
     const sections = buildItemSections({

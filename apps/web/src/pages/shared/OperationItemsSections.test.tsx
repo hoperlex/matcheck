@@ -94,6 +94,34 @@ describe('OperationItemsSections', () => {
     expect(screen.queryByText('Материал')).toBeNull();
   });
 
+  describe('«Удалить материалы» в блоке отвязанного документа', () => {
+    const unlinked = () => [doc(), doc({ id: 'd2', docNumber: '0000-0082604', linked: false })];
+
+    it('есть только у отвязанного блока со строками и убирает весь блок', () => {
+      const onRemoveSection = vi.fn();
+      renderSections({ documents: unlinked(), onRemoveSection });
+
+      // Одна кнопка — у отвязанного d2; у связанного d1 её нет.
+      const buttons = screen.getAllByText('Удалить материалы');
+      expect(buttons).toHaveLength(1);
+      fireEvent.click(buttons[0]!);
+      // Подтверждение говорит, сколько строк уйдёт и что нужно сохранить.
+      expect(screen.getByText('Удалить все строки блока (1)?')).toBeTruthy();
+      expect(screen.getByText('Изменение применится после сохранения.')).toBeTruthy();
+      fireEvent.click(screen.getByText('Удалить'));
+
+      expect(onRemoveSection).toHaveBeenCalledWith('d2');
+      // Клик в заголовке не раскрыл блок.
+      expect(screen.queryByText('Хомут CON-PIPE')).toBeNull();
+    });
+
+    it('без права на правку кнопки нет', () => {
+      renderSections({ documents: unlinked() });
+
+      expect(screen.queryByText('Удалить материалы')).toBeNull();
+    });
+  });
+
   it('строки без происхождения живут в своём блоке', () => {
     renderSections({
       items: [

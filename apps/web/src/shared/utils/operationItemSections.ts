@@ -8,7 +8,9 @@ import type { OperationSourceDocument } from '@matcheck/contracts';
  *
  *  1. пустые блоки по всем документам операции — связанный документ без
  *     распознанных позиций обязан быть виден («(0)»), иначе он исчезает из
- *     карточки целиком;
+ *     карточки целиком. Отвязанный документ без строк блока не получает: он в
+ *     сводке только ради своих строк, а их убрали кнопкой «Удалить материалы»
+ *     (до сохранения сервер ещё держит документ в сводке);
  *  2. по ним раскладываются позиции;
  *  3. блоки для документов, на которые ссылаются строки, но которых нет в
  *     сводке (офлайн-снимок от /sync поля sourceDocuments не содержит);
@@ -77,5 +79,6 @@ export function buildItemSections<T extends { sourceDocumentId: string | null }>
   // документов нет вовсе: приёмка без УПД должна остаться с одним блоком
   // «Материалы», в который добавляются ручные строки.
   const tail = noDocument.items.length > 0 || documents.length === 0 ? [noDocument] : [];
-  return [...sections, ...unknown, ...tail];
+  const visible = sections.filter((s) => s.document?.linked !== false || s.items.length > 0);
+  return [...visible, ...unknown, ...tail];
 }
