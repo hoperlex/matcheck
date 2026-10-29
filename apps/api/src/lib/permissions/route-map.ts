@@ -318,6 +318,9 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // то есть неспособным быть расширенным до настоящей правки.
   ['PATCH /api/v1/deliveries/:id/review', st('operations.deliveries', 'review')],
   ['PATCH /api/v1/deliveries/:id/purpose', st('operations.deliveries', 'review')],
+  ['PATCH /api/v1/deliveries/:id/recipient-mode', st('operations.deliveries', 'edit')],
+  ['PATCH /api/v1/deliveries/:id/sources/:docId/recipient', st('operations.deliveries', 'edit')],
+  ['PATCH /api/v1/deliveries/:id/sources/:docId/purpose', st('operations.deliveries', 'review')],
   ['PATCH /api/v1/deliveries/:id/dispatcher-check', st('operations.deliveries', 'review')],
   // Три маршрута ниже открыты только admin/manager, хотя базовый edit есть и у
   // inspector_kpp: для него это остаётся закрытым (его записи ограничены

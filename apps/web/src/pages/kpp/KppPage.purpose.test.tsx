@@ -14,6 +14,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Delivery } from '@matcheck/contracts';
 import type * as ApiModuleNs from '../../services/api';
+import { api } from '../../services/api';
 import type * as DeliveriesModuleNs from '../../services/deliveries';
 
 const mocks = vi.hoisted(() => ({
@@ -179,7 +180,9 @@ function route(url: string): unknown {
 
 function renderCard() {
   render(
-    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <QueryClientProvider
+      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+    >
       <MemoryRouter initialEntries={[`/operations?type=delivery&delivery=${ID}`]}>
         <KppPage />
       </MemoryRouter>
@@ -211,6 +214,25 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  authUser.role = 'monitor';
+});
+
+describe('режим получателей по УПД', () => {
+  it('менеджер включает его при двух связанных документах', async () => {
+    authUser.role = 'manager';
+    current = delivery(3, []);
+    vi.mocked(api.patch).mockResolvedValue({ ...current, recipientsPerDocument: true });
+    renderCard();
+    const label = await screen.findByText('Разные получатели по документам');
+    const control = label.parentElement?.querySelector('[role="switch"]');
+    expect(control).toBeTruthy();
+    fireEvent.click(control!);
+    await waitFor(() =>
+      expect(api.patch).toHaveBeenCalledWith(`/deliveries/${ID}/recipient-mode`, {
+        perDocument: true,
+      }),
+    );
+  });
 });
 
 describe('карточка приёмки: признак зависит от получателя', () => {

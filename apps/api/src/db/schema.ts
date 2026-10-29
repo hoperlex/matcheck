@@ -615,7 +615,10 @@ export const edoAccounts = pgTable('edo_accounts', {
   authStateVersion: integer('auth_state_version').notNull().default(0),
   refreshTokenUsedAt: timestamp('refresh_token_used_at', { withTimezone: true }),
   // Площадка именем, а не адресом: URL и scope живут в коде (diadoc.http.ts).
-  environment: text('environment').$type<'production' | 'staging'>().notNull().default('production'),
+  environment: text('environment')
+    .$type<'production' | 'staging'>()
+    .notNull()
+    .default('production'),
   boxId: text('box_id'),
   orgInn: varchar('org_inn', { length: 12 }),
   // Курсор ленты GetNewEvents. Именно IndexKey: afterEventId в V8 устарел.
@@ -729,11 +732,7 @@ export const edoReceipts = pgTable(
   },
   (t) => [
     uniqueIndex('edo_receipts_entity_unique').on(t.edoAccountId, t.messageId, t.entityId),
-    index('edo_receipts_account_transport_idx').on(
-      t.edoAccountId,
-      t.transportStatus,
-      t.createdAt,
-    ),
+    index('edo_receipts_account_transport_idx').on(t.edoAccountId, t.transportStatus, t.createdAt),
   ],
 );
 
@@ -812,7 +811,9 @@ export const edoExportDocuments = pgTable(
       .on(t.counteragentBoxId)
       .where(sql`${t.counteragentBoxId} is not null`),
     // Поиск копий той же УПД у другого оператора (миграция 0139).
-    index('edo_export_documents_sha_idx').on(t.contentSha256).where(sql`${t.status} = 'stored'`),
+    index('edo_export_documents_sha_idx')
+      .on(t.contentSha256)
+      .where(sql`${t.status} = 'stored'`),
     index('edo_export_documents_file_id_idx')
       .on(t.fileId)
       .where(sql`${t.status} = 'stored' and ${t.fileId} is not null`),
@@ -1669,6 +1670,7 @@ export const deliveries = pgTable(
     // будущей отчётности.
     isAssets: boolean('is_assets').notNull().default(false),
     purpose: varchar('purpose', { length: 24 }),
+    recipientsPerDocument: boolean('recipients_per_document').notNull().default(false),
     confirmedByMolUserId: uuid('confirmed_by_mol_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),
@@ -1769,6 +1771,15 @@ export const deliverySources = pgTable(
     sourceDocumentId: uuid('source_document_id')
       .notNull()
       .references(() => sourceDocuments.id, { onDelete: 'restrict' }),
+    ownRecipient: boolean('own_recipient').notNull().default(false),
+    contractorId: uuid('contractor_id').references(() => counterparties.id, {
+      onDelete: 'set null',
+    }),
+    recipientMolId: uuid('recipient_mol_id').references(() => responsiblePersons.id, {
+      onDelete: 'set null',
+    }),
+    ownPurpose: boolean('own_purpose').notNull().default(false),
+    purpose: varchar('purpose', { length: 24 }),
   },
   (t) => [
     // PK не даёт дубль одной и той же пары (delivery, source_document).
@@ -1778,6 +1789,23 @@ export const deliverySources = pgTable(
     // своя приёмка). В UI это режим «Несколько поставок» в
     // LinkSourceDocumentModal — явный тумблер у менеджера.
     primaryKey({ columns: [t.deliveryId, t.sourceDocumentId] }),
+    check(
+      'delivery_sources_own_recipient_chk',
+      sql`${t.ownRecipient} OR (${t.contractorId} IS NULL AND ${t.recipientMolId} IS NULL)`,
+    ),
+    check('delivery_sources_own_purpose_chk', sql`${t.ownPurpose} OR ${t.purpose} IS NULL`),
+    check(
+      'delivery_sources_recipient_chk',
+      sql`NOT (${t.contractorId} IS NOT NULL AND ${t.recipientMolId} IS NOT NULL)`,
+    ),
+    check(
+      'delivery_sources_purpose_chk',
+      sql`${t.purpose} IN ('own_forces', 'realization', 'tolling_act', 'contractor_materials', 'realization_tolling')`,
+    ),
+    check(
+      'delivery_sources_contractor_purpose_chk',
+      sql`NOT (${t.ownRecipient} AND ${t.contractorId} IS NOT NULL AND ${t.ownPurpose} AND ${t.purpose} = 'own_forces')`,
+    ),
   ],
 );
 
@@ -2837,7 +2865,10 @@ export const estimatSupplierOrders = pgTable(
     index('estimat_supplier_orders_status_idx').on(t.sourcingStatus),
     index('estimat_supplier_orders_supplier_inn_idx').on(t.supplierInn),
     index('estimat_supplier_orders_number_idx').on(t.orderNo, t.subNo),
-    index('estimat_supplier_orders_contractors_idx').using('gin', sql`${t.contractors} jsonb_path_ops`),
+    index('estimat_supplier_orders_contractors_idx').using(
+      'gin',
+      sql`${t.contractors} jsonb_path_ops`,
+    ),
     index('estimat_supplier_orders_live_idx')
       .on(t.estimatProjectId)
       .where(sql`${t.deletedAt} is null`),

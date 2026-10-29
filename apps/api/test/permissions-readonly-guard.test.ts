@@ -80,6 +80,9 @@ async function buildApp(opts: {
   // Маршруты с боевыми шаблонами: гард смотрит именно на routeOptions.url.
   instance.patch('/api/v1/deliveries/:id/review', async () => ({ ok: 'review' }));
   instance.patch('/api/v1/deliveries/:id/purpose', async () => ({ ok: 'purpose' }));
+  instance.patch('/api/v1/deliveries/:id/sources/:docId/purpose', async () => ({
+    ok: 'document-purpose',
+  }));
   instance.patch('/api/v1/deliveries/:id/dispatcher-check', async () => ({ ok: 'dispatcher' }));
   instance.patch('/api/v1/deliveries/:id/flags', async () => ({ ok: 'flags' }));
   instance.post('/api/v1/deliveries', async () => ({ ok: 'upsert' }));
@@ -113,6 +116,9 @@ describe('при выключенном флаге гард ведёт себя 
     app = await buildApp({ role: 'monitor', enforce: '0' });
     expect((await send(app, 'PATCH', '/api/v1/deliveries/1/review')).statusCode).toBe(200);
     expect((await send(app, 'PATCH', '/api/v1/deliveries/1/purpose')).statusCode).toBe(200);
+    expect((await send(app, 'PATCH', '/api/v1/deliveries/1/sources/2/purpose')).statusCode).toBe(
+      200,
+    );
     expect((await send(app, 'PATCH', '/api/v1/deliveries/1/dispatcher-check')).statusCode).toBe(
       200,
     );

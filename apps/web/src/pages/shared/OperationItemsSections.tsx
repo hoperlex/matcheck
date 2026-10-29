@@ -67,6 +67,7 @@ export function OperationItemsSections<T extends RowBase>({
   emptyHint,
   problemItemIds,
   sectionExtra,
+  constrainExtra,
   renderSectionBody,
   sectionLabel,
   autoOpenKeys,
@@ -101,6 +102,8 @@ export function OperationItemsSections<T extends RowBase>({
    * привязанная к блоку УПД из ЭДО. Клики внутри блок не сворачивают.
    */
   sectionExtra?: (section: ItemSection<T>) => ReactNode;
+  /** Ограничить ширину дополнительных чипов в заголовке многодокументной приёмки. */
+  constrainExtra?: boolean;
   /**
    * Обёртка тела блока: получает готовую таблицу позиций (или подсказку, если
    * позиций нет) и может поставить что-то над ней — например, строки УПД из
@@ -206,8 +209,21 @@ export function OperationItemsSections<T extends RowBase>({
             extraContent || addButton || removeButton ? (
               // Клик в заголовке переключает блок, а всплывающие подтверждения
               // живут в портале, но их события всё равно всплывают сюда.
-              <span onClick={(e) => e.stopPropagation()}>
-                <Space size={4} wrap>
+              <span
+                onClick={(e) => e.stopPropagation()}
+                style={
+                  constrainExtra
+                    ? { display: 'inline-flex', minWidth: 0, maxWidth: 'min(65vw, 720px)' }
+                    : undefined
+                }
+              >
+                <Space
+                  size={4}
+                  wrap
+                  style={
+                    constrainExtra ? { maxWidth: '100%', justifyContent: 'flex-end' } : undefined
+                  }
+                >
                   {extraContent}
                   {addButton}
                   {removeButton}

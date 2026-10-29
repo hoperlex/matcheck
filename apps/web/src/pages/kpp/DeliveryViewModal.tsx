@@ -13,6 +13,8 @@ import { DispatcherCheckControl } from '../../shared/ui/DispatcherCheckControl';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
 import { DELIVERY_PURPOSE_LABELS } from '../../shared/utils/deliveryPurpose';
+import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
+import { DocumentRecipientChips } from './DocumentRecipientChips';
 
 type Row = z.infer<typeof DeliveryListResponseSchema>['items'][number];
 type Item = Row['items'][number];
@@ -112,6 +114,25 @@ export function DeliveryViewModal({
   ];
   // Сортировка и фильтр в колонках: позиции приходят все, без лимита.
   const itemTools = useColumnTools<Item>({ columns: itemColumns, items, enabled: true });
+  const renderItemsTable = (rows: Item[]) =>
+    rows.length === 0 ? (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description="Нет материалов"
+        style={{ margin: '12px 0' }}
+      />
+    ) : (
+      <Table<Item>
+        dataSource={rows}
+        rowKey="id"
+        size="small"
+        pagination={false}
+        columns={itemTools.columns}
+        onChange={itemTools.onChange}
+        showSorterTooltip={false}
+        tableLayout="fixed"
+      />
+    );
 
   return (
     <Modal
@@ -149,9 +170,7 @@ export function DeliveryViewModal({
               <Tag style={{ marginInlineEnd: 0 }}>Авто: {d.vehiclePlate}</Tag>
             ) : null}
             {data.docTotalSum != null ? (
-              <Tag style={{ marginInlineEnd: 0 }}>
-                Сумма: {formatMoneyRu(data.docTotalSum)}
-              </Tag>
+              <Tag style={{ marginInlineEnd: 0 }}>Сумма: {formatMoneyRu(data.docTotalSum)}</Tag>
             ) : null}
             {d.inTransit ? (
               <Tag style={{ marginInlineEnd: 0 }} color="orange">
@@ -165,7 +184,8 @@ export function DeliveryViewModal({
             ) : null}
             {d.purpose ? (
               <Tag style={{ marginInlineEnd: 0 }}>
-                Признак: {DELIVERY_PURPOSE_LABELS[d.purpose]}
+                Признак{d.recipientsPerDocument ? ' (общий)' : ''}:{' '}
+                {DELIVERY_PURPOSE_LABELS[d.purpose]}
               </Tag>
             ) : null}
             <PendingDeletionTag
@@ -222,9 +242,7 @@ export function DeliveryViewModal({
             <Typography.Text>
               <b>Прибытие:</b>{' '}
               {d.arrivedAt
-                ? `${formatDateRu(d.arrivedAt)} ${new Date(d.arrivedAt)
-                    .toTimeString()
-                    .slice(0, 5)}`
+                ? `${formatDateRu(d.arrivedAt)} ${new Date(d.arrivedAt).toTimeString().slice(0, 5)}`
                 : '—'}
             </Typography.Text>
             {d.driverName ? (
@@ -280,49 +298,46 @@ export function DeliveryViewModal({
             items={[
               {
                 key: 'photos',
-                label: (
-                  <Typography.Text strong>
-                    Фото ({d.photos.length})
-                  </Typography.Text>
-                ),
-                children: d.photos.length === 0 ? (
-                  <Empty
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description="Нет фото"
-                    style={{ margin: '12px 0' }}
-                  />
-                ) : (
-                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                    {before.length > 0 && (
-                      <div>
-                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                          1 Этап ({before.length})
-                        </Typography.Text>
-                        <div style={{ marginTop: 4 }}>
-                          <PhotoGallery
-                            deliveryId={d.id}
-                            photos={before}
-                            operationKind="delivery"
-                          />
+                label: <Typography.Text strong>Фото ({d.photos.length})</Typography.Text>,
+                children:
+                  d.photos.length === 0 ? (
+                    <Empty
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description="Нет фото"
+                      style={{ margin: '12px 0' }}
+                    />
+                  ) : (
+                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                      {before.length > 0 && (
+                        <div>
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            1 Этап ({before.length})
+                          </Typography.Text>
+                          <div style={{ marginTop: 4 }}>
+                            <PhotoGallery
+                              deliveryId={d.id}
+                              photos={before}
+                              operationKind="delivery"
+                            />
+                          </div>
                         </div>
-                      </div>
-                    )}
-                    {after.length > 0 && (
-                      <div>
-                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                          2 Этап ({after.length})
-                        </Typography.Text>
-                        <div style={{ marginTop: 4 }}>
-                          <PhotoGallery
-                            deliveryId={d.id}
-                            photos={after}
-                            operationKind="delivery"
-                          />
+                      )}
+                      {after.length > 0 && (
+                        <div>
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            2 Этап ({after.length})
+                          </Typography.Text>
+                          <div style={{ marginTop: 4 }}>
+                            <PhotoGallery
+                              deliveryId={d.id}
+                              photos={after}
+                              operationKind="delivery"
+                            />
+                          </div>
                         </div>
-                      </div>
-                    )}
-                  </Space>
-                ),
+                      )}
+                    </Space>
+                  ),
               },
             ]}
           />
@@ -331,28 +346,55 @@ export function DeliveryViewModal({
             <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 8 }}>
               Материалы ({items.length})
             </Typography.Title>
-            {items.length === 0 ? (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="Нет материалов"
-                style={{ margin: '12px 0' }}
+            {d.recipientsPerDocument && (d.sourceDocuments?.length ?? 0) > 0 ? (
+              <Collapse
+                size="small"
+                items={[
+                  ...(d.sourceDocuments ?? []).map((doc) => ({
+                    key: doc.id,
+                    label: `Материалы · ${sourceKindLabel(doc.kind)} № ${doc.docNumber ?? 'без номера'}`,
+                    extra: doc.linked ? (
+                      <DocumentRecipientChips
+                        delivery={d}
+                        docId={doc.id}
+                        canEditRecipient={false}
+                        canPickContractor={false}
+                        canEditPurpose={false}
+                        mols={[]}
+                        molsLoading={false}
+                        onRecipient={() => {}}
+                        onPurpose={() => {}}
+                      />
+                    ) : null,
+                    children: renderItemsTable(
+                      items.filter((item) => item.sourceDocumentId === doc.id),
+                    ),
+                  })),
+                  ...(items.some(
+                    (item) =>
+                      !item.sourceDocumentId ||
+                      !(d.sourceDocuments ?? []).some((doc) => doc.id === item.sourceDocumentId),
+                  )
+                    ? [
+                        {
+                          key: 'no-document',
+                          label: 'Материалы · без документа',
+                          children: renderItemsTable(
+                            items.filter(
+                              (item) =>
+                                !item.sourceDocumentId ||
+                                !(d.sourceDocuments ?? []).some(
+                                  (doc) => doc.id === item.sourceDocumentId,
+                                ),
+                            ),
+                          ),
+                        },
+                      ]
+                    : []),
+                ]}
               />
             ) : (
-              <Table<Item>
-                dataSource={items}
-                rowKey="id"
-                size="small"
-                pagination={false}
-                columns={itemTools.columns}
-                onChange={itemTools.onChange}
-                showSorterTooltip={false}
-                // scroll={x:'max-content'} убран — заставлял таблицу
-                // растягиваться по самому длинному названию и плодил
-                // горизонтальный скролл даже на широкой 97vw-модалке.
-                // fixed — явно: раньше её включал ellipsis колонки «Название»,
-                // а без неё раскладка стала бы auto и вернула растягивание.
-                tableLayout="fixed"
-              />
+              renderItemsTable(items)
             )}
           </div>
         </Space>

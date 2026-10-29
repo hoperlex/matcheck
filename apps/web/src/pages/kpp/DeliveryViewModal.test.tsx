@@ -40,11 +40,11 @@ const data = {
   },
 } as never;
 
-function renderModal() {
+function renderModal(payload: unknown = data) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <DeliveryViewModal data={data} open onClose={() => {}} onEdit={() => {}} />
+      <DeliveryViewModal data={payload as never} open onClose={() => {}} onEdit={() => {}} />
     </QueryClientProvider>,
   );
 }
@@ -66,5 +66,52 @@ describe('DeliveryViewModal: вход в редактор', () => {
     renderModal();
     expect(screen.queryByRole('button', { name: /Открыть в редакторе/i })).toBeNull();
     expect(screen.getByRole('button', { name: /Закрыть/i })).toBeDefined();
+  });
+
+  it('показывает отдельные значения связанного УПД в заголовке материалов', () => {
+    can.mockReturnValue(false);
+    renderModal({
+      delivery: {
+        id: '11111111-1111-4111-8111-111111111111',
+        status: { code: 'filled', name: 'Оформлена' },
+        arrivedAt: null,
+        updatedAt: '2026-10-29T10:00:00Z',
+        photos: [],
+        items: [],
+        sourceDocumentIds: ['22222222-2222-4222-8222-222222222222'],
+        sourceDocuments: [
+          {
+            id: '22222222-2222-4222-8222-222222222222',
+            kind: 'upd',
+            docNumber: '77',
+            linked: true,
+          },
+        ],
+        recipientsPerDocument: true,
+        recipientMolId: null,
+        contractorId: null,
+        purpose: 'realization',
+        documentRecipients: [
+          {
+            sourceDocumentId: '22222222-2222-4222-8222-222222222222',
+            ownRecipient: true,
+            contractorId: null,
+            contractorName: null,
+            recipientMolId: null,
+            recipientMolName: null,
+            ownPurpose: true,
+            purpose: null,
+          },
+        ],
+        pendingDeletionAt: null,
+        reviewState: null,
+        reviewNote: null,
+        reviewedByUserEmail: null,
+        reviewedAt: null,
+      },
+    });
+    expect(screen.getByText(/Материалы · УПД № 77/)).toBeTruthy();
+    expect(screen.getByText(/Получатель: — не указан/)).toBeTruthy();
+    expect(screen.getByText(/Признак: — не выбран/)).toBeTruthy();
   });
 });

@@ -10,16 +10,61 @@
 // CHECK в базе на эту пару намеренно нет: путь записи получателя, который
 // здесь не учтён, отдал бы планшету 500 на upsert и встал бы в его очереди.
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import {
   DeliveryPurposeSchema,
   deliveryRecipientKind,
+  reconcileDocumentPurpose,
   reconcileDeliveryPurpose,
+  type DocumentRecipientState,
   type DeliveryPurpose,
 } from '@matcheck/contracts';
-import { deliveries } from '../../db/schema.js';
+import { deliveries, deliverySources } from '../../db/schema.js';
 
 export type RecipientPair = { contractorId: string | null; recipientMolId: string | null };
+export type GeneralRecipient = RecipientPair & { purpose: DeliveryPurpose | null };
+
+/** Зовётся только после блокировки deliveries: порядок блокировок всегда одинаков. */
+export async function reconcileLinkedDocumentPurposes(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tx: any,
+  deliveryId: string,
+  previous: GeneralRecipient,
+  next: GeneralRecipient,
+): Promise<void> {
+  if (
+    deliveryRecipientKind(previous) === deliveryRecipientKind(next) &&
+    previous.purpose === next.purpose
+  )
+    return;
+  const rows: (typeof deliverySources.$inferSelect)[] = await tx
+    .select()
+    .from(deliverySources)
+    .where(eq(deliverySources.deliveryId, deliveryId))
+    .orderBy(deliverySources.sourceDocumentId)
+    .for('update');
+  for (const row of rows) {
+    const before: DocumentRecipientState = {
+      ownRecipient: row.ownRecipient,
+      contractorId: row.contractorId,
+      recipientMolId: row.recipientMolId,
+      ownPurpose: row.ownPurpose,
+      purpose: DeliveryPurposeSchema.nullable().parse(row.purpose),
+    };
+    const after = reconcileDocumentPurpose(previous, next, before, before);
+    if (after.ownPurpose !== before.ownPurpose || after.purpose !== before.purpose) {
+      await tx
+        .update(deliverySources)
+        .set({ ownPurpose: after.ownPurpose, purpose: after.purpose })
+        .where(
+          and(
+            eq(deliverySources.deliveryId, deliveryId),
+            eq(deliverySources.sourceDocumentId, row.sourceDocumentId),
+          ),
+        );
+    }
+  }
+}
 
 /** Признак новой приёмки: до неё получателя не было. */
 export function purposeOnInsert(next: RecipientPair): DeliveryPurpose | null {
@@ -52,6 +97,7 @@ export async function lockPurposeForRecipientWrite(
       contractorId: deliveries.contractorId,
       recipientMolId: deliveries.recipientMolId,
       purpose: deliveries.purpose,
+      recipientsPerDocument: deliveries.recipientsPerDocument,
     })
     .from(deliveries)
     .where(eq(deliveries.id, deliveryId))
@@ -59,11 +105,20 @@ export async function lockPurposeForRecipientWrite(
   if (!row) return undefined;
   const cur = currentPurpose(row.purpose);
   if ('raw' in cur) return { purpose: cur.raw };
+  const nextPurpose = reconcileDeliveryPurpose(
+    deliveryRecipientKind(row),
+    deliveryRecipientKind(next),
+    cur.known,
+  );
+  if (row.recipientsPerDocument) {
+    await reconcileLinkedDocumentPurposes(
+      tx,
+      deliveryId,
+      { contractorId: row.contractorId, recipientMolId: row.recipientMolId, purpose: cur.known },
+      { ...next, purpose: nextPurpose },
+    );
+  }
   return {
-    purpose: reconcileDeliveryPurpose(
-      deliveryRecipientKind(row),
-      deliveryRecipientKind(next),
-      cur.known,
-    ),
+    purpose: nextPurpose,
   };
 }

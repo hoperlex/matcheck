@@ -10,7 +10,6 @@ import {
   InputNumber,
   Popconfirm,
   Row,
-  Segmented,
   Select,
   Space,
   Spin,
@@ -122,7 +121,12 @@ import { OperationItemsSections } from '../shared/OperationItemsSections';
 import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
 import { OperationDocumentsChips } from '../shared/OperationDocumentsChips';
 import { advanceItemsVersion, countItemsByDocument } from '../shared/itemsVersion';
-import { CustomerCounterpartySelect } from '../inbox/CustomerCounterpartySelect';
+import { RecipientPicker } from './RecipientPicker';
+import {
+  DocumentRecipientChips,
+  type DocumentPurposePatch,
+  type DocumentRecipientPatch,
+} from './DocumentRecipientChips';
 import {
   DELIVERY_PURPOSE_LABELS,
   DELIVERY_PURPOSE_OPTIONS,
@@ -426,7 +430,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     enabled: !!deliveryId && !isNew && canLinkUpd,
   });
   // Заказы EstiMat — свой запрос с опросом раз в 30 с (см. хук).
-  const supplierOrdersQuery = useDeliverySupplierOrders(deliveryId, !isNew && canViewSupplierOrders);
+  const supplierOrdersQuery = useDeliverySupplierOrders(
+    deliveryId,
+    !isNew && canViewSupplierOrders,
+  );
   // Строки УПД из ЭДО — основной список блока материалов (DeliveryEdoSectionBody).
   // Запрос на каждую привязку; без привязок (и без права на них) — ни одного.
   const edoItemsByMatch = useDeliveryEdoItems(deliveryId, edoMatchesQuery.data?.items ?? []);
@@ -1276,6 +1283,50 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onError: (err: Error) => message.error(err.message),
   });
 
+  const patchRecipientMode = useMutation({
+    mutationFn: async (perDocument: boolean) => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      return api.patch<Delivery>(`/deliveries/${loadedDelivery.id}/recipient-mode`, {
+        perDocument,
+      });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  const patchDocumentRecipient = useMutation({
+    mutationFn: async ({ docId, patch }: { docId: string; patch: DocumentRecipientPatch }) => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      return api.patch<Delivery>(
+        `/deliveries/${loadedDelivery.id}/sources/${docId}/recipient`,
+        patch,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  const patchDocumentPurpose = useMutation({
+    mutationFn: async ({ docId, patch }: { docId: string; patch: DocumentPurposePatch }) => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      return api.patch<Delivery>(
+        `/deliveries/${loadedDelivery.id}/sources/${docId}/purpose`,
+        patch,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+
   const markDel = useMutation({
     mutationFn: async (reason: string | null) => {
       if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
@@ -1720,6 +1771,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     if (!loadedDelivery) return null;
     const pendingAt = loadedDelivery?.pendingDeletionAt ?? null;
     const isPending = pendingAt !== null;
+    const recipientDirty =
+      (recipientKind === 'counterparty' ? contractorId : null) !== loadedDelivery.contractorId ||
+      (recipientKind === 'mol' ? recipientMolId : null) !== loadedDelivery.recipientMolId;
+    const canEditDocumentRecipient =
+      ['admin', 'manager'].includes(authUser?.role ?? '') && canEditDelivery;
+    const ownDocumentPurposeExists = (loadedDelivery.documentRecipients ?? []).some(
+      (x) => x.ownPurpose,
+    );
     const supplierOrders = supplierOrdersQuery.data?.items ?? [];
     // УПД из ЭДО: привязанные к блоку показываются в его заголовке, остальные —
     // в шапке. Блок, которого нет среди связанных документов, тоже шапка:
@@ -1884,69 +1943,85 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               </InlineEditChip>
 
               <InlineEditChip
-                label="Получатель"
+                label={loadedDelivery?.recipientsPerDocument ? 'Получатель (общий)' : 'Получатель'}
                 value={recipientLabel}
                 disabled={isContractor}
                 width={320}
               >
                 {(close) => (
-                  <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                    <Segmented
-                      block
-                      size="small"
-                      options={[
-                        { label: 'Подрядчик', value: 'counterparty' },
-                        { label: 'МОЛ', value: 'mol' },
-                      ]}
-                      value={recipientKind}
-                      onChange={(v) => {
-                        const next = v as 'counterparty' | 'mol';
-                        setRecipientKind(next);
-                        if (next === 'counterparty') setRecipientMolId(null);
-                        else setContractorId(null);
-                      }}
-                    />
-                    {recipientKind === 'counterparty' ? (
-                      // Справочник заказчика (Справочники → Контрагенты), а не
-                      // операционная таблица: в ней лишь те, кого когда-то
-                      // отметили подрядчиком, вперемешку с тестовыми записями.
-                      // Наружу — операционный id, его ждёт FK приёмки.
-                      <CustomerCounterpartySelect
-                        autoFocus
-                        context="delivery"
-                        placeholder="— не указан —"
-                        value={contractorId}
-                        displayName={contractorName}
-                        disabled={!canPickContractor}
-                        onChange={(id, cp) => {
-                          if (id && cp) setPickedContractor({ id, name: cp.name });
-                          setContractorId(id);
-                          close();
-                        }}
-                      />
-                    ) : (
-                      <Select<string>
-                        autoFocus
-                        style={{ width: '100%' }}
-                        placeholder="— не указан —"
-                        value={recipientMolId ?? undefined}
-                        onChange={(v) => {
-                          setRecipientMolId(v ?? null);
-                          close();
-                        }}
-                        allowClear
-                        showSearch
-                        optionFilterProp="label"
-                        loading={responsiblePersonsQuery.isLoading}
-                        options={responsiblePersons.map((m) => ({
-                          value: m.id,
-                          label: m.fullName,
-                        }))}
-                      />
-                    )}
-                  </Space>
+                  <RecipientPicker
+                    kind={recipientKind}
+                    onKindChange={(next) => {
+                      setRecipientKind(next);
+                      if (next === 'counterparty') setRecipientMolId(null);
+                      else setContractorId(null);
+                    }}
+                    contractorId={contractorId}
+                    contractorName={contractorName}
+                    recipientMolId={recipientMolId}
+                    canPickContractor={canPickContractor}
+                    mols={responsiblePersons}
+                    molsLoading={responsiblePersonsQuery.isLoading}
+                    onContractorChange={(id, name) => {
+                      if (id && name) setPickedContractor({ id, name });
+                      setContractorId(id);
+                      close();
+                    }}
+                    onMolChange={(id) => {
+                      setRecipientMolId(id);
+                      close();
+                    }}
+                  />
                 )}
               </InlineEditChip>
+
+              {(loadedDelivery.recipientsPerDocument ||
+                loadedDelivery.sourceDocumentIds.length >= 2) && (
+                <Tooltip
+                  title={
+                    loadedDelivery.recipientsPerDocument &&
+                    ownDocumentPurposeExists &&
+                    !canChoosePurpose
+                      ? 'Для сброса собственных признаков нужно право проверки'
+                      : undefined
+                  }
+                >
+                  <span onClick={(event) => event.stopPropagation()}>
+                    {loadedDelivery.recipientsPerDocument ? (
+                      <Popconfirm
+                        title="Выключить разные получатели?"
+                        description={`У ${loadedDelivery.documentRecipients?.length ?? 0} документов свой получатель или признак — сбросить?`}
+                        okText="Сбросить"
+                        cancelText="Отмена"
+                        onConfirm={() => patchRecipientMode.mutate(false)}
+                      >
+                        <Switch
+                          size="small"
+                          checked
+                          disabled={
+                            !canEditDocumentRecipient ||
+                            isPending ||
+                            patchRecipientMode.isPending ||
+                            (ownDocumentPurposeExists && !canChoosePurpose)
+                          }
+                        />
+                      </Popconfirm>
+                    ) : (
+                      <Switch
+                        size="small"
+                        checked={false}
+                        disabled={
+                          !canEditDocumentRecipient || isPending || patchRecipientMode.isPending
+                        }
+                        onChange={() => patchRecipientMode.mutate(true)}
+                      />
+                    )}
+                    <Typography.Text style={{ marginInlineStart: 5 }}>
+                      Разные получатели по документам
+                    </Typography.Text>
+                  </span>
+                </Tooltip>
+              )}
 
               {/* Подсказка получателя по сторонам документов (приёмка 21514).
                   Только у существующей приёмки с документами и только пока
@@ -2183,7 +2258,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       loading={patchPurpose.isPending}
                       disabled={recipientDirty || isPending || patchPurpose.isPending}
                     >
-                      Признак: {shown ? DELIVERY_PURPOSE_LABELS[shown] : '—'} <DownOutlined />
+                      Признак{loadedDelivery.recipientsPerDocument ? ' (общий)' : ''}:{' '}
+                      {shown ? DELIVERY_PURPOSE_LABELS[shown] : '—'} <DownOutlined />
                     </Button>
                   );
                   if (recipientDirty) {
@@ -2209,7 +2285,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 })()}
               {!canChoosePurpose && loadedDelivery.purpose && (
                 <Tag style={{ marginInlineEnd: 0 }}>
-                  Признак: {DELIVERY_PURPOSE_LABELS[loadedDelivery.purpose]}
+                  Признак{loadedDelivery.recipientsPerDocument ? ' (общий)' : ''}:{' '}
+                  {DELIVERY_PURPOSE_LABELS[loadedDelivery.purpose]}
                 </Tag>
               )}
             </Space>
@@ -2427,6 +2504,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             (см. OperationItemsSections). Раньше здесь был один плоский список,
             и при нескольких УПД было не понять, чьи это строки. */}
         <OperationItemsSections<DraftItem>
+          constrainExtra={!!loadedDelivery.recipientsPerDocument}
           items={items}
           documents={sectionDocuments}
           problemItemIds={problemItemIds}
@@ -2478,45 +2556,60 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               />
             );
           }}
-          sectionExtra={
-            canLinkUpd
-              ? (section) => {
-                  const doc = section.document;
-                  // Только блок связанного документа: отвязанный сервер не примет.
-                  if (!doc?.linked) return null;
-                  const own = edoMatchesForSection(doc, edoMatches);
-                  const canPick = !isNew && !isPending && !loadedDelivery.sourceShipmentId;
-                  return (
-                    <>
-                      {own.length > 0 && (
-                        <LinkedEdoChips
-                          deliveryId={loadedDelivery.id}
-                          documents={own}
-                          photos={loadedDelivery.photos ?? []}
-                          unlinkDisabled={unlinkEdo.isPending || isPending}
-                          onUnlink={(document) => unlinkEdo.mutate(document)}
-                          onOpenOriginal={(document) => void openEdoFile(document)}
-                        />
-                      )}
-                      {canPick && (
-                        <Button
-                          size="small"
-                          type="dashed"
-                          onClick={() =>
-                            openLinkEdo({
-                              id: doc.id,
-                              label: `${sourceKindLabel(doc.kind)} № ${doc.docNumber ?? 'без номера'}`,
-                            })
-                          }
-                        >
-                          + ЭДО
-                        </Button>
-                      )}
-                    </>
-                  );
-                }
-              : undefined
-          }
+          sectionExtra={(section) => {
+            const doc = section.document;
+            // Только блок связанного документа: отвязанный сервер не примет.
+            if (!doc?.linked) return null;
+            const own = edoMatchesForSection(doc, edoMatches);
+            const canPick = canLinkUpd && !isNew && !isPending && !loadedDelivery.sourceShipmentId;
+            return (
+              <>
+                {loadedDelivery.recipientsPerDocument && (
+                  <DocumentRecipientChips
+                    delivery={loadedDelivery}
+                    docId={doc.id}
+                    canEditRecipient={canEditDocumentRecipient}
+                    canPickContractor={canPickContractor}
+                    canEditPurpose={canChoosePurpose}
+                    disabled={
+                      recipientDirty ||
+                      isPending ||
+                      patchDocumentRecipient.isPending ||
+                      patchDocumentPurpose.isPending
+                    }
+                    mols={responsiblePersons}
+                    molsLoading={responsiblePersonsQuery.isLoading}
+                    onRecipient={(patch) => patchDocumentRecipient.mutate({ docId: doc.id, patch })}
+                    onPurpose={(patch) => patchDocumentPurpose.mutate({ docId: doc.id, patch })}
+                  />
+                )}
+                {canLinkUpd && own.length > 0 && (
+                  <LinkedEdoChips
+                    deliveryId={loadedDelivery.id}
+                    documents={own}
+                    photos={loadedDelivery.photos ?? []}
+                    unlinkDisabled={unlinkEdo.isPending || isPending}
+                    onUnlink={(document) => unlinkEdo.mutate(document)}
+                    onOpenOriginal={(document) => void openEdoFile(document)}
+                  />
+                )}
+                {canPick && (
+                  <Button
+                    size="small"
+                    type="dashed"
+                    onClick={() =>
+                      openLinkEdo({
+                        id: doc.id,
+                        label: `${sourceKindLabel(doc.kind)} № ${doc.docNumber ?? 'без номера'}`,
+                      })
+                    }
+                  >
+                    + ЭДО
+                  </Button>
+                )}
+              </>
+            );
+          }}
           emptyHint="Материалы можно не добавлять — приёмка сохранится со статусом «Не оформлена». Чтобы оформить, добавьте строки вручную или выберите УПД."
         />
 

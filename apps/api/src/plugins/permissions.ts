@@ -94,6 +94,7 @@ export default fp(async (app) => {
   const MONITOR_WRITE_ROUTES = new Set([
     '/api/v1/deliveries/:id/review',
     '/api/v1/deliveries/:id/purpose',
+    '/api/v1/deliveries/:id/sources/:docId/purpose',
     '/api/v1/deliveries/:id/dispatcher-check',
     '/api/v1/shipments/:id/review',
   ]);

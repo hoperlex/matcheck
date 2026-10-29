@@ -35,6 +35,7 @@ import {
   DELIVERY_HARD_DELETE_STATUSES,
   DELIVERY_SOFT_DELETE_STATUSES,
   type DeliveryPurpose,
+  type DocumentRecipient,
   type PrimarySourceDocument,
   type OperationSourceDocument,
 } from '@matcheck/contracts';
@@ -46,6 +47,7 @@ import {
   deliveryItems,
   deliveryPhotos,
   deliverySources,
+  responsiblePersons,
   entityDeletions,
   s3CleanupOutbox,
   shipments,
@@ -65,6 +67,7 @@ import { VersionConflictError } from '../domain/operations/version-conflict.js';
 import {
   lockPurposeForRecipientWrite,
   purposeOnInsert,
+  reconcileLinkedDocumentPurposes,
 } from '../domain/operations/delivery-purpose.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
@@ -114,6 +117,7 @@ import { docNumberMatchSql } from '../lib/doc-number-search.js';
 import { MONEY_FMT, QTY_FMT, fmtDateTimeRu } from '../lib/xlsx-format.js';
 import { registerDeliveryEdoRoutes } from './delivery-edo.js';
 import { registerDeliveryRecipientRoutes } from './delivery-recipient.js';
+import { registerDeliveryDocumentRecipientRoutes } from './delivery-document-recipients.js';
 import { resolveSupplierCounterparty } from '../domain/directories/supplier-counterparty.js';
 import { edoGroupLinks, lockEdoDocGroup } from '../domain/edo/export-twins.js';
 
@@ -322,6 +326,7 @@ function selectDeliveryHeaders(app: any) {
   const deliverySite = alias(sites, 'delivery_site');
   const supplierCp = alias(counterparties, 'supplier_cp');
   const contractorCp = alias(counterparties, 'contractor_cp');
+  const recipientMol = alias(responsiblePersons, 'delivery_mol');
   return app.db
     .select({
       d: deliveries,
@@ -336,6 +341,7 @@ function selectDeliveryHeaders(app: any) {
       siteName: deliverySite.name,
       supplierName: supplierCp.name,
       contractorName: contractorCp.name,
+      recipientMolName: recipientMol.fullName,
       // Признак «нужна проверка» считается ЗДЕСЬ, в общем для одиночного и
       // батч-пути селекте: так значок, колонка выгрузки и фильтр не могут
       // разойтись — раньше каждый считал своё, и приёмка с сигналом только от
@@ -358,7 +364,8 @@ function selectDeliveryHeaders(app: any) {
     .leftJoin(sites, eq(shipments.siteId, sites.id))
     .leftJoin(deliverySite, eq(deliveries.siteId, deliverySite.id))
     .leftJoin(supplierCp, eq(deliveries.supplierId, supplierCp.id))
-    .leftJoin(contractorCp, eq(deliveries.contractorId, contractorCp.id));
+    .leftJoin(contractorCp, eq(deliveries.contractorId, contractorCp.id))
+    .leftJoin(recipientMol, eq(deliveries.recipientMolId, recipientMol.id));
 }
 
 type DeliveryHeaderRow = {
@@ -374,8 +381,56 @@ type DeliveryHeaderRow = {
   siteName: string | null;
   supplierName: string | null;
   contractorName: string | null;
+  recipientMolName: string | null;
   docAttention: boolean;
 };
+
+/** Один загрузчик собственных значений документов для одиночного и пакетного DTO. */
+async function loadDocumentRecipients(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: any,
+  ids: string[],
+): Promise<Map<string, DocumentRecipient[]>> {
+  const byDelivery = new Map<string, DocumentRecipient[]>();
+  if (!ids.length) return byDelivery;
+  const rows = await app.db
+    .select({
+      deliveryId: deliverySources.deliveryId,
+      sourceDocumentId: deliverySources.sourceDocumentId,
+      ownRecipient: deliverySources.ownRecipient,
+      contractorId: deliverySources.contractorId,
+      contractorName: counterparties.name,
+      recipientMolId: deliverySources.recipientMolId,
+      recipientMolName: responsiblePersons.fullName,
+      ownPurpose: deliverySources.ownPurpose,
+      purpose: deliverySources.purpose,
+    })
+    .from(deliverySources)
+    .leftJoin(counterparties, eq(deliverySources.contractorId, counterparties.id))
+    .leftJoin(responsiblePersons, eq(deliverySources.recipientMolId, responsiblePersons.id))
+    .where(
+      and(
+        inArray(deliverySources.deliveryId, ids),
+        or(eq(deliverySources.ownRecipient, true), eq(deliverySources.ownPurpose, true)),
+      ),
+    )
+    .orderBy(deliverySources.deliveryId, deliverySources.sourceDocumentId);
+  for (const row of rows) {
+    const list = byDelivery.get(row.deliveryId) ?? [];
+    list.push({
+      sourceDocumentId: row.sourceDocumentId,
+      ownRecipient: row.ownRecipient,
+      contractorId: row.contractorId,
+      contractorName: row.contractorName,
+      recipientMolId: row.recipientMolId,
+      recipientMolName: row.recipientMolName,
+      ownPurpose: row.ownPurpose,
+      purpose: DeliveryPurposeSchema.nullable().parse(row.purpose),
+    });
+    byDelivery.set(row.deliveryId, list);
+  }
+  return byDelivery;
+}
 
 // Чистая сборка DTO из уже полученных данных — ЕДИНСТВЕННЫЙ источник формы
 // ответа (общий для одиночного и батч-пути). Форму DTO менять только здесь.
@@ -391,6 +446,7 @@ function assembleDeliveryDto(
   // (например, у продюсера, который их не считает) выражается пустым массивом
   // тоже — форма ответа обязана совпадать у одиночного и батч-пути.
   sourceDocumentSummaries: OperationSourceDocument[] = [],
+  documentRecipients: DocumentRecipient[] = [],
 ) {
   const d = r.d;
   const s = r.s;
@@ -445,6 +501,7 @@ function assembleDeliveryDto(
     siteName: r.siteName,
     supplierName: r.supplierName,
     contractorName: r.contractorName,
+    recipientMolName: r.recipientMolName,
     vehiclePlate: d.vehiclePlate,
     driverName: d.driverName,
     arrivedAt: d.arrivedAt?.toISOString() ?? null,
@@ -453,6 +510,8 @@ function assembleDeliveryDto(
     inTransit: d.inTransit,
     isAssets: d.isAssets,
     purpose: DeliveryPurposeSchema.nullable().parse(d.purpose),
+    recipientsPerDocument: d.recipientsPerDocument,
+    documentRecipients,
     confirmedByMolUserId: d.confirmedByMolUserId,
     confirmedByMolUserEmail: r.molEmail,
     confirmedByMolAt: d.confirmedByMolAt?.toISOString() ?? null,
@@ -545,6 +604,7 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
   // позиции операции с этим происхождением.
   const itemCounts = await loadDocumentItemCounts(app.db, mentionedIds);
   const coveredCounts = countCoveredDocumentItems(items);
+  const documentRecipients = await loadDocumentRecipients(app, [id]);
 
   return assembleDeliveryDto(
     r,
@@ -562,6 +622,7 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
       coveredCounts,
       operationClosed: r.s.code === 'confirmed_mol',
     }),
+    documentRecipients.get(id) ?? [],
   );
 }
 
@@ -595,6 +656,7 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
     .from(deliverySources)
     .where(inArray(deliverySources.deliveryId, ids))
     .orderBy(deliverySources.deliveryId, deliverySources.sourceDocumentId);
+  const documentRecipients = await loadDocumentRecipients(app, ids);
 
   const headerById = new Map<string, DeliveryHeaderRow>();
   for (const r of headerRows) headerById.set(r.d.id, r);
@@ -769,6 +831,7 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
           coveredCounts: countCoveredDocumentItems(itemsById.get(id) ?? []),
           operationClosed: r.s.code === 'confirmed_mol',
         }),
+        documentRecipients.get(id) ?? [],
       ),
     );
   }
@@ -847,10 +910,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       );
     }
     // «Диспетчер» — то же правило видимости, что у отметки проверки.
-    if (
-      dispatcherCheck &&
-      (await canSeeReviewInMatrix(app, user?.role, 'operations.deliveries'))
-    ) {
+    if (dispatcherCheck && (await canSeeReviewInMatrix(app, user?.role, 'operations.deliveries'))) {
       filters.push(
         dispatcherCheck === 'none'
           ? isNull(deliveries.dispatcherCheckedAt)
@@ -1232,7 +1292,10 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       },
     },
     async (req, reply) => {
-      const mature = [await resolveStatusId(app, 'filled'), await resolveStatusId(app, 'confirmed_mol')];
+      const mature = [
+        await resolveStatusId(app, 'filled'),
+        await resolveStatusId(app, 'confirmed_mol'),
+      ];
       const checked = req.body.checked;
       // Проверка и запись — одним условным UPDATE: между отдельными чтением и
       // записью приёмку могли бы пометить на удаление.
@@ -1254,7 +1317,10 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!d) {
         // Ноль строк — разбираем причину перечиткой.
         const [cur] = await app.db
-          .select({ statusId: deliveries.statusId, pendingDeletionAt: deliveries.pendingDeletionAt })
+          .select({
+            statusId: deliveries.statusId,
+            pendingDeletionAt: deliveries.pendingDeletionAt,
+          })
           .from(deliveries)
           .where(eq(deliveries.id, req.params.id))
           .limit(1);
@@ -1317,6 +1383,8 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             pendingDeletionAt: deliveries.pendingDeletionAt,
             contractorId: deliveries.contractorId,
             recipientMolId: deliveries.recipientMolId,
+            purpose: deliveries.purpose,
+            recipientsPerDocument: deliveries.recipientsPerDocument,
           })
           .from(deliveries)
           .where(eq(deliveries.id, req.params.id))
@@ -1325,6 +1393,22 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         if (d.pendingDeletionAt !== null) return { error: 'pending_deletion' as const };
         if (!allowedDeliveryPurposes(deliveryRecipientKind(d)).includes(req.body.purpose)) {
           return { error: 'purpose_conflicts_recipient' as const };
+        }
+        if (d.recipientsPerDocument) {
+          await reconcileLinkedDocumentPurposes(
+            tx,
+            d.id,
+            {
+              contractorId: d.contractorId,
+              recipientMolId: d.recipientMolId,
+              purpose: DeliveryPurposeSchema.nullable().parse(d.purpose),
+            },
+            {
+              contractorId: d.contractorId,
+              recipientMolId: d.recipientMolId,
+              purpose: req.body.purpose,
+            },
+          );
         }
         await tx
           .update(deliveries)
@@ -2088,6 +2172,8 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
 
         const supplier = alias(counterparties, 'supplier');
         const contractor = alias(counterparties, 'contractor');
+        const docContractor = alias(counterparties, 'doc_contractor');
+        const docMol = alias(responsiblePersons, 'doc_mol');
         const dispatcherUser = alias(users, 'dispatcher_user');
         // «Диспетчер» в выгрузке — тем же, кому он виден в DTO; остальным
         // колонка пустая, но на месте (формулы по выгрузке не сдвигаются).
@@ -2113,6 +2199,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             statusLabel: statuses.label,
             supplierName: supplier.name,
             contractorName: contractor.name,
+            recipientMolName: responsiblePersons.fullName,
             siteCode: sites.code,
             siteName: sites.name,
           })
@@ -2120,6 +2207,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           .innerJoin(statuses, eq(deliveries.statusId, statuses.id))
           .leftJoin(supplier, eq(deliveries.supplierId, supplier.id))
           .leftJoin(contractor, eq(deliveries.contractorId, contractor.id))
+          .leftJoin(responsiblePersons, eq(deliveries.recipientMolId, responsiblePersons.id))
           .leftJoin(sites, eq(deliveries.siteId, sites.id))
           .leftJoin(dispatcherUser, eq(deliveries.dispatcherCheckedByUserId, dispatcherUser.id))
           .where(and(...conds))
@@ -2128,7 +2216,17 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           .orderBy(desc(deliveries.displayId));
 
         const deliveryIds = rows.map((r) => r.d.id);
-        type SrcLink = { deliveryId: string; sourceDocumentId: string };
+        type SrcLink = {
+          deliveryId: string;
+          sourceDocumentId: string;
+          ownRecipient: boolean;
+          ownPurpose: boolean;
+          contractorId: string | null;
+          contractorName: string | null;
+          recipientMolId: string | null;
+          recipientMolName: string | null;
+          purpose: string | null;
+        };
         type SrcDoc = {
           id: string;
           docNumber: string | null;
@@ -2141,8 +2239,17 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               .select({
                 deliveryId: deliverySources.deliveryId,
                 sourceDocumentId: deliverySources.sourceDocumentId,
+                ownRecipient: deliverySources.ownRecipient,
+                ownPurpose: deliverySources.ownPurpose,
+                contractorId: deliverySources.contractorId,
+                contractorName: docContractor.name,
+                recipientMolId: deliverySources.recipientMolId,
+                recipientMolName: docMol.fullName,
+                purpose: deliverySources.purpose,
               })
               .from(deliverySources)
+              .leftJoin(docContractor, eq(deliverySources.contractorId, docContractor.id))
+              .leftJoin(docMol, eq(deliverySources.recipientMolId, docMol.id))
               .where(inArray(deliverySources.deliveryId, deliveryIds))
           : [];
         const sdIds = Array.from(new Set(srcLinks.map((l) => l.sourceDocumentId)));
@@ -2266,6 +2373,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           { header: 'Требует проверки', key: 'docAttention', width: 22 },
           { header: 'Признак', key: 'purpose', width: 24 },
           { header: 'Диспетчер', key: 'dispatcher', width: 30 },
+          { header: 'Получатель (по документу)', key: 'documentRecipient', width: 32 },
         ];
         const headerRow = ws.getRow(1);
         headerRow.font = { bold: true };
@@ -2281,6 +2389,19 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           idx++;
           const d = r.d;
           const items = itemsByDelivery.get(d.id) ?? [];
+          const linkedByDocument = new Map(
+            (linksByDelivery.get(d.id) ?? []).map((link) => [link.sourceDocumentId, link]),
+          );
+          const recipientFor = (link: SrcLink | undefined) => {
+            const own = d.recipientsPerDocument && link?.ownRecipient;
+            const contractorName = own ? link?.contractorName : r.contractorName;
+            const molName = own ? link?.recipientMolName : r.recipientMolName;
+            return contractorName ?? (molName ? `МОЛ: ${molName}` : '');
+          };
+          const purposeFor = (link: SrcLink | undefined) => {
+            const value = d.recipientsPerDocument && link?.ownPurpose ? link.purpose : d.purpose;
+            return value ? (DELIVERY_PURPOSE_LABELS[value as DeliveryPurpose] ?? value) : '';
+          };
           // Сумма документа: Σ qty × price по позициям (то же, что в UI).
           let docSum: number | null = null;
           let docVatSum: number | null = null;
@@ -2312,13 +2433,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             // подозрение. Одно определение на список, выгрузку и плашку —
             // иначе «отфильтровал и выгрузил» дало бы разные наборы строк.
             docAttention: r.docAttention,
-            purpose: d.purpose
-              ? (DELIVERY_PURPOSE_LABELS[d.purpose as DeliveryPurpose] ?? d.purpose)
-              : '',
+            purpose: purposeFor(undefined),
             dispatcher:
               showDispatcher && d.dispatcherCheckedAt
                 ? `${fmtDateTimeRu(d.dispatcherCheckedAt)}${r.dispatcherEmail ? ` · ${r.dispatcherEmail}` : ''}`
                 : '',
+            documentRecipient: recipientFor(undefined),
             nameRaw: '',
             qtyPlanned: null,
             qtyActual: null,
@@ -2367,6 +2487,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               price,
               vatSum: it.vatSum != null && it.vatSum !== '' ? Number(it.vatSum) : null,
               sum: rowSum,
+              purpose: purposeFor(
+                it.sourceDocumentId ? linkedByDocument.get(it.sourceDocumentId) : undefined,
+              ),
+              documentRecipient: recipientFor(
+                it.sourceDocumentId ? linkedByDocument.get(it.sourceDocumentId) : undefined,
+              ),
             });
             itemRow.outlineLevel = 1;
             itemRow.getCell('qtyPlanned').numFmt = QTY_FMT;
@@ -2585,6 +2711,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
 
   registerDeliveryEdoRoutes(rawApp);
   registerDeliveryRecipientRoutes(rawApp);
+  registerDeliveryDocumentRecipientRoutes(rawApp, buildDeliveryDto);
 
   // Привязка УПД к существующей приёмке (приёмка остаётся в своём статусе,
   // ручные материалы из мобилы НЕ удаляются). Заменяет старый клиентский

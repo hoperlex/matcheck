@@ -677,6 +677,12 @@
               "null"
             ]
           },
+          "recipientMolName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "vehiclePlate": {
             "type": [
               "string",
@@ -713,6 +719,89 @@
           },
           "isAssets": {
             "type": "boolean"
+          },
+          "purpose": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "own_forces",
+              "realization",
+              "tolling_act",
+              "contractor_materials",
+              "realization_tolling"
+            ]
+          },
+          "recipientsPerDocument": {
+            "type": "boolean"
+          },
+          "documentRecipients": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "sourceDocumentId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "ownRecipient": {
+                  "type": "boolean"
+                },
+                "contractorId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "contractorName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "recipientMolId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "recipientMolName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ownPurpose": {
+                  "type": "boolean"
+                },
+                "purpose": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "own_forces",
+                    "realization",
+                    "tolling_act",
+                    "contractor_materials",
+                    "realization_tolling"
+                  ]
+                }
+              },
+              "required": [
+                "sourceDocumentId",
+                "ownRecipient",
+                "contractorId",
+                "contractorName",
+                "recipientMolId",
+                "recipientMolName",
+                "ownPurpose",
+                "purpose"
+              ]
+            }
           },
           "confirmedByMolUserId": {
             "type": [
@@ -763,6 +852,18 @@
             ]
           },
           "reviewedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dispatcherCheckedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dispatcherCheckedByUserEmail": {
             "type": [
               "string",
               "null"
@@ -1329,7 +1430,9 @@
                               "dropped_pages_not_parsed",
                               "sibling_number_gap",
                               "page_doc_number_unaccounted",
-                              "sibling_number_duplicate"
+                              "sibling_number_duplicate",
+                              "supplier_inn_unverified",
+                              "buyer_same_as_supplier"
                             ]
                           },
                           "scope": {
@@ -1815,6 +1918,12 @@
                     "null"
                   ]
                 },
+                "recipientMolName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "vehiclePlate": {
                   "type": [
                     "string",
@@ -1851,6 +1960,89 @@
                 },
                 "isAssets": {
                   "type": "boolean"
+                },
+                "purpose": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "own_forces",
+                    "realization",
+                    "tolling_act",
+                    "contractor_materials",
+                    "realization_tolling"
+                  ]
+                },
+                "recipientsPerDocument": {
+                  "type": "boolean"
+                },
+                "documentRecipients": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "sourceDocumentId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "ownRecipient": {
+                        "type": "boolean"
+                      },
+                      "contractorId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "contractorName": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "recipientMolId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "recipientMolName": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "ownPurpose": {
+                        "type": "boolean"
+                      },
+                      "purpose": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "enum": [
+                          "own_forces",
+                          "realization",
+                          "tolling_act",
+                          "contractor_materials",
+                          "realization_tolling"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "sourceDocumentId",
+                      "ownRecipient",
+                      "contractorId",
+                      "contractorName",
+                      "recipientMolId",
+                      "recipientMolName",
+                      "ownPurpose",
+                      "purpose"
+                    ]
+                  }
                 },
                 "confirmedByMolUserId": {
                   "type": [
@@ -1901,6 +2093,18 @@
                   ]
                 },
                 "reviewedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "dispatcherCheckedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "dispatcherCheckedByUserEmail": {
                   "type": [
                     "string",
                     "null"
@@ -2467,7 +2671,9 @@
                                     "dropped_pages_not_parsed",
                                     "sibling_number_gap",
                                     "page_doc_number_unaccounted",
-                                    "sibling_number_duplicate"
+                                    "sibling_number_duplicate",
+                                    "supplier_inn_unverified",
+                                    "buyer_same_as_supplier"
                                   ]
                                 },
                                 "scope": {
@@ -2727,6 +2933,12 @@
                   "null"
                 ]
               },
+              "recipientMolName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "vehiclePlate": {
                 "type": [
                   "string",
@@ -2763,6 +2975,89 @@
               },
               "isAssets": {
                 "type": "boolean"
+              },
+              "purpose": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "own_forces",
+                  "realization",
+                  "tolling_act",
+                  "contractor_materials",
+                  "realization_tolling"
+                ]
+              },
+              "recipientsPerDocument": {
+                "type": "boolean"
+              },
+              "documentRecipients": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "sourceDocumentId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "ownRecipient": {
+                      "type": "boolean"
+                    },
+                    "contractorId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "contractorName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "recipientMolId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "recipientMolName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "ownPurpose": {
+                      "type": "boolean"
+                    },
+                    "purpose": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "own_forces",
+                        "realization",
+                        "tolling_act",
+                        "contractor_materials",
+                        "realization_tolling"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "sourceDocumentId",
+                    "ownRecipient",
+                    "contractorId",
+                    "contractorName",
+                    "recipientMolId",
+                    "recipientMolName",
+                    "ownPurpose",
+                    "purpose"
+                  ]
+                }
               },
               "confirmedByMolUserId": {
                 "type": [
@@ -2813,6 +3108,18 @@
                 ]
               },
               "reviewedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "dispatcherCheckedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "dispatcherCheckedByUserEmail": {
                 "type": [
                   "string",
                   "null"
@@ -3379,7 +3686,9 @@
                                   "dropped_pages_not_parsed",
                                   "sibling_number_gap",
                                   "page_doc_number_unaccounted",
-                                  "sibling_number_duplicate"
+                                  "sibling_number_duplicate",
+                                  "supplier_inn_unverified",
+                                  "buyer_same_as_supplier"
                                 ]
                               },
                               "scope": {
@@ -4479,7 +4788,9 @@
                               "dropped_pages_not_parsed",
                               "sibling_number_gap",
                               "page_doc_number_unaccounted",
-                              "sibling_number_duplicate"
+                              "sibling_number_duplicate",
+                              "supplier_inn_unverified",
+                              "buyer_same_as_supplier"
                             ]
                           },
                           "scope": {
@@ -5636,7 +5947,9 @@
                                     "dropped_pages_not_parsed",
                                     "sibling_number_gap",
                                     "page_doc_number_unaccounted",
-                                    "sibling_number_duplicate"
+                                    "sibling_number_duplicate",
+                                    "supplier_inn_unverified",
+                                    "buyer_same_as_supplier"
                                   ]
                                 },
                                 "scope": {
@@ -6543,7 +6856,9 @@
                                   "dropped_pages_not_parsed",
                                   "sibling_number_gap",
                                   "page_doc_number_unaccounted",
-                                  "sibling_number_duplicate"
+                                  "sibling_number_duplicate",
+                                  "supplier_inn_unverified",
+                                  "buyer_same_as_supplier"
                                 ]
                               },
                               "scope": {
@@ -7021,6 +7336,74 @@
               "null"
             ]
           },
+          "supplierInnCheck": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "shadow",
+                  "on"
+                ]
+              },
+              "decision": {
+                "type": "string",
+                "enum": [
+                  "valid",
+                  "normalized",
+                  "corrected",
+                  "unverified",
+                  "absent"
+                ]
+              },
+              "raw": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "inn": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "edo",
+                  "directory",
+                  "directory_name"
+                ]
+              },
+              "linkInn": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "checksum",
+                  "length",
+                  "own_inn"
+                ]
+              },
+              "candidates": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "mode",
+              "decision",
+              "raw",
+              "inn"
+            ]
+          },
           "createdByUserId": {
             "type": [
               "string",
@@ -7280,7 +7663,9 @@
                         "dropped_pages_not_parsed",
                         "sibling_number_gap",
                         "page_doc_number_unaccounted",
-                        "sibling_number_duplicate"
+                        "sibling_number_duplicate",
+                        "supplier_inn_unverified",
+                        "buyer_same_as_supplier"
                       ]
                     },
                     "scope": {
@@ -7558,6 +7943,74 @@
               "null"
             ]
           },
+          "supplierInnCheck": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "shadow",
+                  "on"
+                ]
+              },
+              "decision": {
+                "type": "string",
+                "enum": [
+                  "valid",
+                  "normalized",
+                  "corrected",
+                  "unverified",
+                  "absent"
+                ]
+              },
+              "raw": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "inn": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "edo",
+                  "directory",
+                  "directory_name"
+                ]
+              },
+              "linkInn": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "checksum",
+                  "length",
+                  "own_inn"
+                ]
+              },
+              "candidates": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "mode",
+              "decision",
+              "raw",
+              "inn"
+            ]
+          },
           "createdByUserId": {
             "type": [
               "string",
@@ -7817,7 +8270,9 @@
                         "dropped_pages_not_parsed",
                         "sibling_number_gap",
                         "page_doc_number_unaccounted",
-                        "sibling_number_duplicate"
+                        "sibling_number_duplicate",
+                        "supplier_inn_unverified",
+                        "buyer_same_as_supplier"
                       ]
                     },
                     "scope": {
@@ -8369,6 +8824,74 @@
                     "null"
                   ]
                 },
+                "supplierInnCheck": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "shadow",
+                        "on"
+                      ]
+                    },
+                    "decision": {
+                      "type": "string",
+                      "enum": [
+                        "valid",
+                        "normalized",
+                        "corrected",
+                        "unverified",
+                        "absent"
+                      ]
+                    },
+                    "raw": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "inn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "edo",
+                        "directory",
+                        "directory_name"
+                      ]
+                    },
+                    "linkInn": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "checksum",
+                        "length",
+                        "own_inn"
+                      ]
+                    },
+                    "candidates": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "decision",
+                    "raw",
+                    "inn"
+                  ]
+                },
                 "createdByUserId": {
                   "type": [
                     "string",
@@ -8628,7 +9151,9 @@
                               "dropped_pages_not_parsed",
                               "sibling_number_gap",
                               "page_doc_number_unaccounted",
-                              "sibling_number_duplicate"
+                              "sibling_number_duplicate",
+                              "supplier_inn_unverified",
+                              "buyer_same_as_supplier"
                             ]
                           },
                           "scope": {
@@ -9705,6 +10230,12 @@
                     "null"
                   ]
                 },
+                "recipientMolName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "vehiclePlate": {
                   "type": [
                     "string",
@@ -9741,6 +10272,89 @@
                 },
                 "isAssets": {
                   "type": "boolean"
+                },
+                "purpose": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "own_forces",
+                    "realization",
+                    "tolling_act",
+                    "contractor_materials",
+                    "realization_tolling"
+                  ]
+                },
+                "recipientsPerDocument": {
+                  "type": "boolean"
+                },
+                "documentRecipients": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "sourceDocumentId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "ownRecipient": {
+                        "type": "boolean"
+                      },
+                      "contractorId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "contractorName": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "recipientMolId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "recipientMolName": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "ownPurpose": {
+                        "type": "boolean"
+                      },
+                      "purpose": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "enum": [
+                          "own_forces",
+                          "realization",
+                          "tolling_act",
+                          "contractor_materials",
+                          "realization_tolling"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "sourceDocumentId",
+                      "ownRecipient",
+                      "contractorId",
+                      "contractorName",
+                      "recipientMolId",
+                      "recipientMolName",
+                      "ownPurpose",
+                      "purpose"
+                    ]
+                  }
                 },
                 "confirmedByMolUserId": {
                   "type": [
@@ -9791,6 +10405,18 @@
                   ]
                 },
                 "reviewedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "dispatcherCheckedAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "dispatcherCheckedByUserEmail": {
                   "type": [
                     "string",
                     "null"
@@ -10357,7 +10983,9 @@
                                     "dropped_pages_not_parsed",
                                     "sibling_number_gap",
                                     "page_doc_number_unaccounted",
-                                    "sibling_number_duplicate"
+                                    "sibling_number_duplicate",
+                                    "supplier_inn_unverified",
+                                    "buyer_same_as_supplier"
                                   ]
                                 },
                                 "scope": {
@@ -11234,7 +11862,9 @@
                                     "dropped_pages_not_parsed",
                                     "sibling_number_gap",
                                     "page_doc_number_unaccounted",
-                                    "sibling_number_duplicate"
+                                    "sibling_number_duplicate",
+                                    "supplier_inn_unverified",
+                                    "buyer_same_as_supplier"
                                   ]
                                 },
                                 "scope": {
@@ -11526,6 +12156,74 @@
                     "null"
                   ]
                 },
+                "supplierInnCheck": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "shadow",
+                        "on"
+                      ]
+                    },
+                    "decision": {
+                      "type": "string",
+                      "enum": [
+                        "valid",
+                        "normalized",
+                        "corrected",
+                        "unverified",
+                        "absent"
+                      ]
+                    },
+                    "raw": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "inn": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "edo",
+                        "directory",
+                        "directory_name"
+                      ]
+                    },
+                    "linkInn": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "checksum",
+                        "length",
+                        "own_inn"
+                      ]
+                    },
+                    "candidates": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "decision",
+                    "raw",
+                    "inn"
+                  ]
+                },
                 "createdByUserId": {
                   "type": [
                     "string",
@@ -11785,7 +12483,9 @@
                               "dropped_pages_not_parsed",
                               "sibling_number_gap",
                               "page_doc_number_unaccounted",
-                              "sibling_number_duplicate"
+                              "sibling_number_duplicate",
+                              "supplier_inn_unverified",
+                              "buyer_same_as_supplier"
                             ]
                           },
                           "scope": {

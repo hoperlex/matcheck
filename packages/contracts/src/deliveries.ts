@@ -136,6 +136,74 @@ export function reconcileDeliveryPurpose(
   return purpose;
 }
 
+/** Независимое наследование получателя и признака у связанного документа. */
+export type DocumentRecipientState = {
+  ownRecipient: boolean;
+  contractorId: string | null;
+  recipientMolId: string | null;
+  ownPurpose: boolean;
+  purpose: DeliveryPurpose | null;
+};
+
+export function effectiveDocumentRecipient(
+  general: {
+    contractorId: string | null;
+    recipientMolId: string | null;
+    purpose: DeliveryPurpose | null;
+  },
+  doc: DocumentRecipientState,
+) {
+  return {
+    contractorId: doc.ownRecipient ? doc.contractorId : general.contractorId,
+    recipientMolId: doc.ownRecipient ? doc.recipientMolId : general.recipientMolId,
+    purpose: doc.ownPurpose ? doc.purpose : general.purpose,
+  };
+}
+
+/**
+ * Исправляет только вынужденный конфликт после смены получателя или общего
+ * признака. Явный NULL собственного признака остаётся собственным NULL.
+ */
+export function reconcileDocumentPurpose(
+  previousGeneral: {
+    contractorId: string | null;
+    recipientMolId: string | null;
+    purpose: DeliveryPurpose | null;
+  },
+  nextGeneral: {
+    contractorId: string | null;
+    recipientMolId: string | null;
+    purpose: DeliveryPurpose | null;
+  },
+  previousDoc: DocumentRecipientState,
+  nextDoc: DocumentRecipientState,
+): DocumentRecipientState {
+  const previousKind = deliveryRecipientKind(
+    effectiveDocumentRecipient(previousGeneral, previousDoc),
+  );
+  const effective = effectiveDocumentRecipient(nextGeneral, nextDoc);
+  const nextKind = deliveryRecipientKind(effective);
+  if (nextKind === 'mol' && previousKind !== 'mol' && effective.purpose !== 'own_forces') {
+    return { ...nextDoc, ownPurpose: true, purpose: 'own_forces' };
+  }
+  if (nextKind === 'contractor' && effective.purpose === 'own_forces') {
+    return { ...nextDoc, ownPurpose: true, purpose: null };
+  }
+  return nextDoc;
+}
+
+export const DocumentRecipientSchema = z.object({
+  sourceDocumentId: z.string().uuid(),
+  ownRecipient: z.boolean(),
+  contractorId: z.string().uuid().nullable(),
+  contractorName: z.string().nullable(),
+  recipientMolId: z.string().uuid().nullable(),
+  recipientMolName: z.string().nullable(),
+  ownPurpose: z.boolean(),
+  purpose: DeliveryPurposeSchema.nullable(),
+});
+export type DocumentRecipient = z.infer<typeof DocumentRecipientSchema>;
+
 export const DeliverySchema = z.object({
   id: z.string().uuid(),
   // Короткий человекочитаемый id для столбца «id» в Принятых и
@@ -152,6 +220,7 @@ export const DeliverySchema = z.object({
   siteName: z.string().nullable().optional(),
   supplierName: z.string().nullable().optional(),
   contractorName: z.string().nullable().optional(),
+  recipientMolName: z.string().nullable().optional(),
   vehiclePlate: z.string().nullable(),
   driverName: z.string().nullable(),
   arrivedAt: z.string().nullable(),
@@ -172,6 +241,8 @@ export const DeliverySchema = z.object({
   // null у существующих приёмок, которым признак ещё не назначен.
   // optional сохраняет совместимость старых офлайн-снимков мобильного клиента.
   purpose: DeliveryPurposeSchema.nullable().optional(),
+  recipientsPerDocument: z.boolean().optional(),
+  documentRecipients: z.array(DocumentRecipientSchema).optional(),
   confirmedByMolUserId: z.string().uuid().nullable(),
   confirmedByMolUserEmail: z.string().nullable(),
   confirmedByMolAt: z.string().nullable(),
