@@ -32,6 +32,11 @@ import {
   UndoOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  allowedDeliveryPurposes,
+  deliveryRecipientKind,
+  reconcileDeliveryPurpose,
+} from '@matcheck/contracts';
 import type {
   Counterparty,
   ResponsiblePerson,
@@ -76,6 +81,7 @@ import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
 import { FlagChip } from '../../shared/ui/FlagChip';
 import { ReviewControls } from '../../shared/ui/ReviewControls';
+import { DispatcherCheckControl } from '../../shared/ui/DispatcherCheckControl';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { DeliveriesHistory } from './DeliveriesHistory';
 import { SourceDocumentOriginalModal } from '../shared/SourceDocumentOriginalModal';
@@ -2148,23 +2154,59 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   onChange={(next) => patchFlags.mutate({ isAssets: next })}
                 />
               )}
-              {!isNew && canChoosePurpose && (
-                <Dropdown
-                  menu={{
-                    items: DELIVERY_PURPOSE_OPTIONS,
-                    selectedKeys: loadedDelivery.purpose ? [loadedDelivery.purpose] : [],
-                    onClick: ({ key }) => patchPurpose.mutate(key as DeliveryPurpose),
-                  }}
-                  disabled={isPending || patchPurpose.isPending}
-                  trigger={['click']}
-                >
-                  <Button size="small" loading={patchPurpose.isPending}>
-                    Признак:{' '}
-                    {loadedDelivery.purpose ? DELIVERY_PURPOSE_LABELS[loadedDelivery.purpose] : '—'}{' '}
-                    <DownOutlined />
-                  </Button>
-                </Dropdown>
-              )}
+              {!isNew &&
+                canChoosePurpose &&
+                (() => {
+                  // Признак зависит от получателя (у подрядчика «Свои силы» нет, МОЛ
+                  // подставляет «Свои силы»), а сервер сверяет его с СОХРАНЁННЫМ
+                  // получателем. Пока новый получатель в форме не сохранён, выбор
+                  // закрыт: кнопка показывает, каким признак станет после «Сохранить».
+                  const savedKind = deliveryRecipientKind(loadedDelivery);
+                  const formRecipient = {
+                    contractorId: recipientKind === 'counterparty' ? contractorId : null,
+                    recipientMolId: recipientKind === 'mol' ? recipientMolId : null,
+                  };
+                  const recipientDirty =
+                    (formRecipient.contractorId ?? null) !== loadedDelivery.contractorId ||
+                    (formRecipient.recipientMolId ?? null) !== loadedDelivery.recipientMolId;
+                  const shown = recipientDirty
+                    ? reconcileDeliveryPurpose(
+                        savedKind,
+                        deliveryRecipientKind(formRecipient),
+                        loadedDelivery.purpose ?? null,
+                      )
+                    : (loadedDelivery.purpose ?? null);
+                  const allowed = allowedDeliveryPurposes(savedKind);
+                  const button = (
+                    <Button
+                      size="small"
+                      loading={patchPurpose.isPending}
+                      disabled={recipientDirty || isPending || patchPurpose.isPending}
+                    >
+                      Признак: {shown ? DELIVERY_PURPOSE_LABELS[shown] : '—'} <DownOutlined />
+                    </Button>
+                  );
+                  if (recipientDirty) {
+                    return (
+                      <Tooltip title="Признак обновится после сохранения получателя">
+                        <span>{button}</span>
+                      </Tooltip>
+                    );
+                  }
+                  return (
+                    <Dropdown
+                      menu={{
+                        items: DELIVERY_PURPOSE_OPTIONS.filter((o) => allowed.includes(o.key)),
+                        selectedKeys: loadedDelivery.purpose ? [loadedDelivery.purpose] : [],
+                        onClick: ({ key }) => patchPurpose.mutate(key as DeliveryPurpose),
+                      }}
+                      disabled={isPending || patchPurpose.isPending}
+                      trigger={['click']}
+                    >
+                      {button}
+                    </Dropdown>
+                  );
+                })()}
               {!canChoosePurpose && loadedDelivery.purpose && (
                 <Tag style={{ marginInlineEnd: 0 }}>
                   Признак: {DELIVERY_PURPOSE_LABELS[loadedDelivery.purpose]}
@@ -2179,17 +2221,26 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             null. В режиме isNew не показываем: записи ещё нет на сервере,
             PATCH /deliveries/:id/review дал бы 404. */}
         {!isNew && loadedDelivery && (
-          <ReviewControls
-            entityType="delivery"
-            id={loadedDelivery.id}
-            statusCode={loadedDelivery.status.code}
-            reviewState={loadedDelivery.reviewState}
-            reviewNote={loadedDelivery.reviewNote}
-            reviewedByUserEmail={loadedDelivery.reviewedByUserEmail}
-            reviewedAt={loadedDelivery.reviewedAt}
-            updatedAt={loadedDelivery.updatedAt}
-            pendingDeletion={isPending}
-          />
+          <Space wrap size={[16, 4]} align="start">
+            <ReviewControls
+              entityType="delivery"
+              id={loadedDelivery.id}
+              statusCode={loadedDelivery.status.code}
+              reviewState={loadedDelivery.reviewState}
+              reviewNote={loadedDelivery.reviewNote}
+              reviewedByUserEmail={loadedDelivery.reviewedByUserEmail}
+              reviewedAt={loadedDelivery.reviewedAt}
+              updatedAt={loadedDelivery.updatedAt}
+              pendingDeletion={isPending}
+            />
+            <DispatcherCheckControl
+              id={loadedDelivery.id}
+              statusCode={loadedDelivery.status.code}
+              checkedAt={loadedDelivery.dispatcherCheckedAt}
+              checkedByUserEmail={loadedDelivery.dispatcherCheckedByUserEmail}
+              pendingDeletion={isPending}
+            />
+          </Space>
         )}
 
         <LinkSourceDocumentModal

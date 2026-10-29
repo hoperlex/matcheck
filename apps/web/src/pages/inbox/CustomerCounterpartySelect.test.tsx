@@ -96,6 +96,29 @@ describe('CustomerCounterpartySelect', () => {
     expect(screen.queryByText(OP)).toBeNull();
   });
 
+  it('выбранный не дублирует запись справочника в раскрытом списке', async () => {
+    // Операционное имя пишется иначе, чем в справочнике: раньше обе строки
+    // стояли в списке рядом и выглядели как две разные организации.
+    const opName = 'Общество с ограниченной ответственностью «СУ - 90»';
+    render(
+      wrap(
+        <CustomerCounterpartySelect
+          value={OP}
+          displayName={opName}
+          onChange={vi.fn()}
+          context="delivery"
+        />,
+      ),
+    );
+    expect(await screen.findByTitle(opName)).toBeTruthy();
+    fireEvent.mouseDown(await screen.findByRole('combobox'));
+    await screen.findByTitle('ООО «СУ - 90» (ИНН 7714468005)');
+    const rendered = Array.from(document.querySelectorAll('.ant-select-item-option'));
+    expect(rendered.map((n) => n.getAttribute('title'))).toEqual([
+      'ООО «СУ - 90» (ИНН 7714468005)',
+    ]);
+  });
+
   it('поиск без кавычек и с «е» вместо «ё»; прежние совпадения остаются', async () => {
     const wide = [
       ...directory,

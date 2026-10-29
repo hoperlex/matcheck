@@ -65,6 +65,7 @@ import {
   sumDocumentTotals,
 } from '../../shared/utils/operationDocumentsSummary';
 import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
+import { contractorFilterOptions } from '../shared/contractorFilterOptions';
 // directoryFilterMap (ИНН-маппинг customer_counterparties → operational
 // counterparties) больше не нужен — фильтрация переехала на сервер.
 
@@ -446,11 +447,7 @@ export function ShipmentsHistory({
   // (то, что видно во вкладках Справочников). buildInnMatchMap нормализует
   // ИНН и пропускает плейсхолдеры — см. shared/utils/directoryFilterMap.
   const contractorOptions = useMemo(
-    () =>
-      (customerCounterpartiesQuery.data?.items ?? []).map((c) => ({
-        value: c.id,
-        label: c.name,
-      })),
+    () => contractorFilterOptions(customerCounterpartiesQuery.data?.items ?? []),
     [customerCounterpartiesQuery.data],
   );
   const supplierOptions = useMemo(

@@ -1684,6 +1684,13 @@ export const deliveries = pgTable(
       onDelete: 'set null',
     }),
     reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+    // Отметка «Диспетчер» (миграция 0142): те же роли, что у отметки проверки,
+    // но независима от неё и снимается обратно в NULL. Как и review_*, не
+    // двигает version/updated_at и не уходит в /sync.
+    dispatcherCheckedAt: timestamp('dispatcher_checked_at', { withTimezone: true }),
+    dispatcherCheckedByUserId: uuid('dispatcher_checked_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
     // МОЛ-получатель приёмки (физлицо собственной бригады). Альтернатива
     // contractor_id. CHECK не позволяет заполнить оба одновременно (миграция 0030).
     recipientMolId: uuid('recipient_mol_id').references(() => responsiblePersons.id, {
@@ -1745,6 +1752,10 @@ export const deliveries = pgTable(
     check(
       'deliveries_recipient_chk',
       sql`NOT (${t.contractorId} is not null AND ${t.recipientMolId} is not null)`,
+    ),
+    check(
+      'deliveries_dispatcher_check_chk',
+      sql`${t.dispatcherCheckedByUserId} is null OR ${t.dispatcherCheckedAt} is not null`,
     ),
   ],
 );

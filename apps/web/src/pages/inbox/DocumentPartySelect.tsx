@@ -15,7 +15,7 @@ const MANUAL = '__manual__';
 type Option = {
   value: string;
   label: string;
-  kind: 'current' | 'manual' | 'directory';
+  kind: 'manual' | 'directory';
   searchKey: string;
 };
 
@@ -64,19 +64,6 @@ export function DocumentPartySelect({
         searchKey: '',
       });
     }
-    if (value) {
-      // Текущее значение — отдельной опцией: у распознанной или введённой
-      // вручную стороны записи в справочнике нет, а Select без опции показал
-      // бы служебный value вместо названия.
-      out.push({
-        value: CURRENT,
-        label: value.inn
-          ? `${shortenCounterpartyName(value.name)} (ИНН ${value.inn})`
-          : shortenCounterpartyName(value.name),
-        kind: 'current',
-        searchKey: '',
-      });
-    }
     for (const c of directory ?? []) {
       out.push({
         value: c.id,
@@ -86,7 +73,17 @@ export function DocumentPartySelect({
       });
     }
     return out;
-  }, [typed, value, directory]);
+  }, [typed, directory]);
+
+  // У распознанной или введённой вручную стороны записи в справочнике нет,
+  // поэтому выбранное значение — служебный CURRENT, а подпись рисует
+  // labelRender. Отдельной опцией его больше не держим: при раскрытии без
+  // поиска она стояла первой рядом с той же организацией из справочника.
+  const currentLabel = value
+    ? value.inn
+      ? `${shortenCounterpartyName(value.name)} (ИНН ${value.inn})`
+      : shortenCounterpartyName(value.name)
+    : null;
 
   const innInvalid = value?.source === 'manual' && !!value.inn && normalizeInn(value.inn) == null;
 
@@ -102,17 +99,17 @@ export function DocumentPartySelect({
         onSearch={setSearch}
         loading={list.isLoading}
         options={options}
+        labelRender={(item) =>
+          item.value === CURRENT ? (currentLabel ?? '') : (item.label ?? item.value)
+        }
         filterOption={(input, opt) => {
           if (!opt) return false;
-          // Ручной ввод всегда виден, пока есть текст; текущее значение при
-          // поиске прячем — оно не ответ на запрос.
+          // Ручной ввод всегда виден, пока есть текст.
           if (opt.kind === 'manual') return true;
-          if (opt.kind === 'current') return false;
           return opt.searchKey.includes(input.trim().toLowerCase());
         }}
         onSelect={(picked) => {
           setSearch('');
-          if (picked === CURRENT) return;
           if (picked === MANUAL) {
             onChange({ name: typed, inn: null, source: 'manual' });
             return;

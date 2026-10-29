@@ -44,3 +44,17 @@ export const ReviewFieldsShape = {
   reviewedByUserEmail: z.string().nullable().optional(),
   reviewedAt: z.string().nullable().optional(),
 };
+
+/**
+ * Отметка «Диспетчер» у приёмки: ставят и видят те же роли, что «Проверено»
+ * (действие `review`). Независима от reviewState. В отличие от «Проверено»,
+ * снимается: PATCH /api/v1/deliveries/:id/dispatcher-check { checked: false }.
+ * optional — по той же причине, что ReviewFieldsShape: в /sync не уходит.
+ */
+export const DispatcherCheckRequestSchema = z.object({ checked: z.boolean() });
+export type DispatcherCheckRequest = z.infer<typeof DispatcherCheckRequestSchema>;
+
+export const DispatcherCheckFieldsShape = {
+  dispatcherCheckedAt: z.string().nullable().optional(),
+  dispatcherCheckedByUserEmail: z.string().nullable().optional(),
+};

@@ -840,9 +840,11 @@ suite('происхождение позиций приёмки (реальны�
     it('отвязка между ранней проверкой версии и UPDATE: upsert получает 409, строки не возвращаются', async () => {
       // Детерминированное пересечение: T0 держит строку приёмки, upsert проходит
       // раннюю проверку (existing читается вне транзакции) и встаёт в очередь
-      // на UPDATE; T0 делает ровно то, что делает отвязка с удалением, и
-      // фиксируется. Без условия версии в UPDATE upsert записал бы старый
-      // список, и строки первой УПД вернулись бы «без привязки».
+      // на блокировку строки — первым оператором своей транзакции он берёт её
+      // FOR UPDATE ради признака (domain/operations/delivery-purpose.ts); T0
+      // делает ровно то, что делает отвязка с удалением, и фиксируется. Без
+      // условия версии в UPDATE upsert записал бы старый список, и строки
+      // первой УПД вернулись бы «без привязки».
       const { first, deliveryId } = await twoDocDelivery('УД-8');
       const v = await versionOf(deliveryId);
       const staleForm = asUpsertItems(await itemsOf(deliveryId));
@@ -862,7 +864,7 @@ suite('происхождение позиций приёмки (реальны�
       await lockedP;
 
       const upsertP = save(deliveryId, v, staleForm);
-      await waitForLockWaiter('update "deliveries"');
+      await waitForLockWaiter('%from "deliveries"%for update');
       proceed();
       await t0;
       const res = await upsertP;

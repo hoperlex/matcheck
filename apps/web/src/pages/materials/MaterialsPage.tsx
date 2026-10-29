@@ -19,6 +19,7 @@ import { parseDateRangeKey, serverDateRangeColumnFilter } from '../../shared/ui/
 import { antdColumnFilter, externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { useSyncGlobalFiltersSiteContractor } from '../../shared/hooks/useSyncGlobalFilters';
+import { contractorFilterOptions } from '../shared/contractorFilterOptions';
 
 // Поля серверной сортировки объединённого журнала — ровно enum `sort` в
 // /reports/movements: значение вне списка сервер отклоняет с 400.
@@ -160,7 +161,7 @@ export default function MaterialsPage() {
     [sites.data],
   );
   const contractorOptions = useMemo(
-    () => (customerCounterparties.data?.items ?? []).map((c) => ({ value: c.id, label: c.name })),
+    () => contractorFilterOptions(customerCounterparties.data?.items ?? []),
     [customerCounterparties.data],
   );
 
@@ -245,10 +246,8 @@ export default function MaterialsPage() {
               value={contractorIds}
               onChange={setContractorIds}
               loading={customerCounterparties.isLoading}
-              options={(customerCounterparties.data?.items ?? []).map((c) => ({
-                value: c.id,
-                label: c.name,
-              }))}
+              options={contractorOptions}
+              popupWidth={360}
             />
             <DebouncedSearch
               placeholder="Материал или контрагент"

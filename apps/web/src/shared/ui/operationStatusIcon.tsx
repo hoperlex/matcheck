@@ -8,6 +8,7 @@ import {
   FileExclamationOutlined,
   TagOutlined,
   SafetyCertificateOutlined,
+  CheckSquareOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
 
@@ -32,6 +33,9 @@ export const NO_DOC_COLOR = '#faad14';
 // красный «Есть замечания». Совпадают с текстовым ReviewBadge в модалках.
 export const REVIEW_APPROVED_COLOR = '#52c41a';
 export const REVIEW_ISSUES_COLOR = '#ff4d4f';
+// Отметка «Диспетчер» — фиолетовая: синий занят «Подтверждено МОЛ», зелёный и
+// красный — отметкой проверки.
+export const DISPATCHER_COLOR = '#722ed1';
 const ICON_SIZE = 18;
 
 /**
@@ -60,6 +64,20 @@ export function ReviewStatusIcon({
     );
   }
   return null;
+}
+
+/** Значок отметки «Диспетчер» в столбце «Статус»; нет отметки — ничего. */
+export function DispatcherStatusIcon({
+  checkedAt,
+}: {
+  checkedAt: string | null | undefined;
+}): JSX.Element | null {
+  if (!checkedAt) return null;
+  return (
+    <Tooltip title="Диспетчер отметил">
+      <CheckSquareOutlined style={{ color: DISPATCHER_COLOR, fontSize: ICON_SIZE }} />
+    </Tooltip>
+  );
 }
 
 /**
@@ -114,11 +132,14 @@ export function StatusIconsCell({
 export function StatusLegend({
   statuses,
   showReview = false,
+  showDispatcher = false,
 }: {
   statuses: { code: string; label: string; color: string | null }[];
   // Показать пункты отметки проверки (Проверено / Есть замечания) — только
   // менеджменту (admin/manager/monitor), т.к. только он видит эти значки.
   showReview?: boolean;
+  // «Диспетчер» есть только у приёмок; показывается вместе с отметкой проверки.
+  showDispatcher?: boolean;
 }): JSX.Element | null {
   if (statuses.length === 0) return null;
   return (
@@ -158,6 +179,14 @@ export function StatusLegend({
               Есть замечания
             </Typography.Text>
           </Space>
+          {showDispatcher && (
+            <Space size={4}>
+              <CheckSquareOutlined style={{ color: DISPATCHER_COLOR, fontSize: 15 }} />
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                Диспетчер
+              </Typography.Text>
+            </Space>
+          )}
         </>
       )}
     </Space>

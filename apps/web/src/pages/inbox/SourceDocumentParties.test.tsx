@@ -209,6 +209,22 @@ describe('карточка приёмки — стороны документа'
     expect(patch).not.toHaveBeenCalled();
   });
 
+  it('распознанная сторона видна в поле, но не дублируется в раскрытом списке', async () => {
+    detail = { ...base, consigneeName: 'ООО "СУ-10"', consigneeInn: '7736255508' };
+    await openCard();
+    const box = screen.getByRole('combobox', { name: 'Грузополучатель' });
+    const select = box.closest('.ant-select');
+    expect(select?.querySelector('.ant-select-selection-item')?.textContent).toBe(
+      'ООО "СУ-10" (ИНН 7736255508)',
+    );
+    fireEvent.mouseDown(box);
+    await screen.findByTitle('СУ-10 (ИНН 77 36-255508)');
+    const titles = Array.from(document.querySelectorAll('.ant-select-item-option')).map((n) =>
+      n.getAttribute('title'),
+    );
+    expect(titles).toEqual(['СУ-10 (ИНН 77 36-255508)', 'Стройуправление-10 (ИНН 7736255087)']);
+  });
+
   it('очистка распознанной стороны уходит как null', async () => {
     detail = { ...base, consigneeName: 'ООО "СУ-10"', consigneeInn: '7736255508' };
     await openCard();

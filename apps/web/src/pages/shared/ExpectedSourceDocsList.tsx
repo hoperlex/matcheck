@@ -29,6 +29,7 @@ import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocumentItems';
 import { usePrefetchSourceDocumentDetails } from '../../shared/hooks/usePrefetchSourceDocumentDetails';
 import { useAuthStore } from '../../stores/auth';
+import { contractorFilterOptions } from './contractorFilterOptions';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 
@@ -272,11 +273,7 @@ export function ExpectedSourceDocsList({
   });
 
   const contractorOptions = useMemo(
-    () =>
-      (customerCounterpartiesQuery.data?.items ?? []).map((c) => ({
-        value: c.id,
-        label: c.name,
-      })),
+    () => contractorFilterOptions(customerCounterpartiesQuery.data?.items ?? []),
     [customerCounterpartiesQuery.data],
   );
   const supplierOptions = useMemo(

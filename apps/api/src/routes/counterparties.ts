@@ -18,6 +18,7 @@ import {
 } from '@matcheck/contracts';
 import { counterparties, customerCounterparties, deliveries } from '../db/schema.js';
 import { pickOperationalCounterparty } from '../domain/directories/operational-pick.js';
+import { validInn } from '../domain/directories/names.js';
 
 /**
  * Генератор placeholder-ИНН для контрагентов, созданных «на лету» без ИНН.
@@ -230,6 +231,27 @@ export async function counterpartyRoutes(rawApp: FastifyInstance): Promise<void>
   // справочник, FK от source_documents.contractor_id живёт на counterparties.
   // Сервер находит/создаёт операционного контрагента (с isContractor=true)
   // и возвращает его. См. CounterpartyFromDirectoryRequestSchema.
+  // Сколько приёмок ссылается на строку как на получателя — третий ключ
+  // выбора в pickOperationalCounterparty. Одна строка — выбирать не из чего.
+  async function deliveryUsage(
+    rows: readonly { id: string }[],
+  ): Promise<Map<string, number>> {
+    const usage = new Map<string, number>();
+    if (rows.length <= 1) return usage;
+    const counts = await app.db
+      .select({ id: deliveries.contractorId, n: drSql<number>`count(*)::int` })
+      .from(deliveries)
+      .where(
+        inArray(
+          deliveries.contractorId,
+          rows.map((r) => r.id),
+        ),
+      )
+      .groupBy(deliveries.contractorId);
+    for (const c of counts) if (c.id) usage.set(c.id, Number(c.n));
+    return usage;
+  }
+
   app.post(
     '/api/v1/counterparties/from-directory',
     {
@@ -267,21 +289,11 @@ export async function counterpartyRoutes(rawApp: FastifyInstance): Promise<void>
           .select()
           .from(counterparties)
           .where(eq(counterparties.inn, inn));
-        const usage = new Map<string, number>();
-        if (sameInn.length > 1) {
-          const counts = await app.db
-            .select({ id: deliveries.contractorId, n: drSql<number>`count(*)::int` })
-            .from(deliveries)
-            .where(
-              inArray(
-                deliveries.contractorId,
-                sameInn.map((r) => r.id),
-              ),
-            )
-            .groupBy(deliveries.contractorId);
-          for (const c of counts) if (c.id) usage.set(c.id, Number(c.n));
-        }
-        const existing = pickOperationalCounterparty(sameInn, { name, aliases }, usage);
+        const existing = pickOperationalCounterparty(
+          sameInn,
+          { name, aliases },
+          await deliveryUsage(sameInn),
+        );
         if (existing) {
           if (!existing.isContractor) {
             const [upd] = await app.db
@@ -295,11 +307,15 @@ export async function counterpartyRoutes(rawApp: FastifyInstance): Promise<void>
         }
       }
 
-      // 2) Дедуп по имени / alias (case-insensitive). Если нашёлся
-      // operational counterparty с placeholder-ИНН — апгрейдим его на
-      // настоящий ИНН справочника.
+      // 2) По имени / alias (без учёта регистра). Сначала ОТБОР, потом выбор:
+      // если у записи «Контрагентов» корректный ИНН (с контрольной суммой),
+      // одноимённая строка с другим ИНН — это тёзка, а не она (у ООО "МАСТЕР"
+      // в справочнике три разных ИНН). Годится только строка с ИНН-заглушкой —
+      // её апгрейдим на ИНН справочника. Отбирать до выбора: иначе тёзка с
+      // бо́льшим числом приёмок выиграл бы сортировку и заслонил заглушку.
+      // Без корректного ИНН сверять нечего — годится любая одноимённая.
       const lname = name.toLowerCase();
-      const [byName] = await app.db
+      const byNameRows = await app.db
         .select()
         .from(counterparties)
         .where(
@@ -307,8 +323,15 @@ export async function counterpartyRoutes(rawApp: FastifyInstance): Promise<void>
             drSql`lower(${counterparties.name}) = ${lname}`,
             drSql`exists (select 1 from unnest(${counterparties.aliases}) as a(v) where lower(a.v) = ${lname})`,
           ),
-        )
-        .limit(1);
+        );
+      const admissible = validInn(src.inn)
+        ? byNameRows.filter((r: typeof counterparties.$inferSelect) => isPlaceholderInn(r.inn))
+        : byNameRows;
+      const byName = pickOperationalCounterparty(
+        admissible,
+        { name, aliases },
+        await deliveryUsage(admissible),
+      );
       if (byName) {
         const patch: Partial<typeof counterparties.$inferInsert> = {};
         if (!byName.isContractor) patch.isContractor = true;

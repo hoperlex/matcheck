@@ -77,6 +77,7 @@ import { WaybillUploadModal } from './WaybillUploadModal';
 import { UploadDocumentsModal } from './UploadDocumentsModal';
 import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
 import { UpdResolveDuplicateModal } from './UpdResolveDuplicateModal';
+import { contractorFilterOptions } from '../shared/contractorFilterOptions';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 type Row = List['items'][number];
@@ -663,8 +664,7 @@ export default function InboxPage() {
     enabled: !isContractor,
   });
   const contractorOptions = useMemo(
-    () =>
-      (customerCounterpartiesQuery.data?.items ?? []).map((c) => ({ value: c.id, label: c.name })),
+    () => contractorFilterOptions(customerCounterpartiesQuery.data?.items ?? []),
     [customerCounterpartiesQuery.data],
   );
   const supplierOptions = useMemo(

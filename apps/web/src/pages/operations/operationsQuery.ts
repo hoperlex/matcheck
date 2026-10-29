@@ -26,6 +26,8 @@ export type OperationsFilters = {
   nophotoOlderHours: string | null;
   status: string | null;
   reviewState: string | null;
+  /** Только у приёмок: отметка «Диспетчер» — checked | none (в URL — ?dispatcher=). */
+  dispatcherCheck?: string | null;
   /** Дни YYYY-MM-DD; пустая строка — граница не задана. */
   dateFrom: string;
   dateTo: string;
@@ -46,6 +48,7 @@ export function readOperationsFilters(params: URLSearchParams): OperationsFilter
     nophoto: params.get('nophoto') === '1',
     nophotoOlderHours: params.get('nophotoHours'),
     reviewState: params.get('review'),
+    dispatcherCheck: params.get('dispatcher'),
     dateFrom: params.get('dfrom') ?? '',
     dateTo: params.get('dto') ?? '',
   };
@@ -87,6 +90,9 @@ export function operationsListQuery(
   if (filters.status === 'no_document') qs.set('noDocument', 'true');
   else if (filters.status) qs.set('status', filters.status);
   if (filters.reviewState) qs.set('reviewState', filters.reviewState);
+  if (opts.kind === 'delivery' && filters.dispatcherCheck) {
+    qs.set('dispatcherCheck', filters.dispatcherCheck);
+  }
   // Дни → ISO-границы. Сервер сравнивает поле >= from AND поле < to, поэтому
   // верхняя граница — начало СЛЕДУЮЩЕГО дня: иначе записи выбранного
   // конечного дня выпали бы из выдачи.

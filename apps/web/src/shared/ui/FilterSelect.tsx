@@ -35,9 +35,16 @@ export function FilterSelect({
   allowClear = true,
   size,
   style,
+  popupWidth,
 }: {
   mode?: 'multiple';
   width: number;
+  /**
+   * Ширина выпадающего списка, если подписи длиннее поля: например, тёзкам в
+   * «Подрядчике» дописан ИНН, и в ширину поля он не помещается. Поле и панель
+   * от этого не меняются — шире становится только раскрытый список.
+   */
+  popupWidth?: number;
   placeholder?: string;
   value: string[] | string | undefined;
   onChange: (v: never) => void;
@@ -64,6 +71,7 @@ export function FilterSelect({
       loading={loading}
       disabled={disabled}
       size={size}
+      popupMatchSelectWidth={popupWidth ?? true}
       maxTagCount={mode === 'multiple' ? 1 : undefined}
       // Стабильный «+N» вместо антдшного «+ N ...»: число не меняет ширину.
       maxTagPlaceholder={mode === 'multiple' ? (omitted) => `+${omitted.length}` : undefined}

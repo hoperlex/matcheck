@@ -43,6 +43,7 @@ import {
   StatusIconsCell,
   StatusLegend,
   ReviewStatusIcon,
+  DispatcherStatusIcon,
 } from '../../shared/ui/operationStatusIcon';
 import { operationsRowClass } from '../../shared/utils/operationsRowHighlight';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
@@ -78,6 +79,7 @@ import {
   sumDocumentTotals,
 } from '../../shared/utils/operationDocumentsSummary';
 import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
+import { contractorFilterOptions } from '../shared/contractorFilterOptions';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
@@ -221,6 +223,8 @@ export function DeliveriesHistory({
     nophotoOlderHours: string | null;
     // Фильтр по отметке проверки (менеджмент): approved|issues|none.
     reviewState: string | null;
+    // Фильтр по отметке «Диспетчер» (те же роли): checked|none.
+    dispatcherCheck: string | null;
     // Диапазон даты прибытия — дни (YYYY-MM-DD), пустая строка = граница не
     // задана. В URL это ?dfrom=/?dto= — короче и читаемее ISO; конверсия в
     // ISO-границы для сервера живёт в queryFn (см. arrivedFrom/arrivedTo).
@@ -241,6 +245,7 @@ export function DeliveriesHistory({
     nophoto: params.get('nophoto') === '1',
     nophotoOlderHours: params.get('nophotoHours'),
     reviewState: params.get('review'),
+    dispatcherCheck: params.get('dispatcher'),
     dateFrom: params.get('dfrom') ?? '',
     dateTo: params.get('dto') ?? '',
   };
@@ -267,6 +272,7 @@ export function DeliveriesHistory({
     if ('nophoto' in patch) apply('nophoto', patch.nophoto ? '1' : null);
     if ('nophotoOlderHours' in patch) apply('nophotoHours', patch.nophotoOlderHours);
     if ('reviewState' in patch) apply('review', patch.reviewState);
+    if ('dispatcherCheck' in patch) apply('dispatcher', patch.dispatcherCheck);
     if ('dateFrom' in patch) apply('dfrom', patch.dateFrom);
     if ('dateTo' in patch) apply('dto', patch.dateTo);
     setParams(next, { replace: true });
@@ -329,6 +335,7 @@ export function DeliveriesHistory({
       nophoto: filters.nophoto,
       nophotoHours: filters.nophotoOlderHours,
       review: filters.reviewState,
+      dispatcher: filters.dispatcherCheck,
       dateFrom: filters.dateFrom,
       dateTo: filters.dateTo,
     },
@@ -525,11 +532,7 @@ export function DeliveriesHistory({
   // справочников (того, что видно во вкладках Справочники → Контрагенты /
   // Поставщики). id в URL фильтра — это id записи справочника, не FK операций.
   const contractorOptions = useMemo(
-    () =>
-      (customerCounterpartiesQuery.data?.items ?? []).map((c) => ({
-        value: c.id,
-        label: c.name,
-      })),
+    () => contractorFilterOptions(customerCounterpartiesQuery.data?.items ?? []),
     [customerCounterpartiesQuery.data],
   );
   const supplierOptions = useMemo(
@@ -653,7 +656,7 @@ export function DeliveriesHistory({
   // пользователь может «удалить выбранные строки» на странице 7,
   // забыв что они с прошлой выборки). useEffect ниже отслеживает
   // комбинированный ключ фильтров.
-  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dispatcherCheck ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
    
   // Сброс страницы и выбора — только на РЕАЛЬНУЮ смену фильтра. Эффект с
   // массивом зависимостей срабатывает и на монтировании, и ссылка вида
@@ -833,6 +836,7 @@ export function DeliveriesHistory({
           {/* Значок проверки — приходит в DTO только менеджменту (иначе null →
               значка нет). Расшифровка — в легенде сверху (showReview). */}
           <ReviewStatusIcon state={r.reviewState} />
+          <DispatcherStatusIcon checkedAt={r.dispatcherCheckedAt} />
           {isTrash ? (
             <PendingDeletionTag
               at={r.pendingDeletionAt}
@@ -924,7 +928,7 @@ export function DeliveriesHistory({
                 suppliersQuery.isLoading ||
                 sitesQuery.isLoading
               }
-              searchPlaceholder="Номер документа"
+              searchPlaceholder="№ УПД или накладной"
               displayId={filters.displayId}
               onDisplayIdChange={(v) => updateFilters({ displayId: v })}
               plate={filters.plate}
@@ -970,6 +974,23 @@ export function DeliveriesHistory({
                         { value: 'issues', label: 'С замечаниями' },
                         { value: 'approved', label: 'Проверено' },
                         { value: 'none', label: 'Не проверено' },
+                      ]}
+                    />
+                  )}
+                  {/* «Диспетчер» — те же роли, что у отметки проверки. */}
+                  {canReview && (
+                    <FilterSelect
+                      size="small"
+                      width={190}
+                      allowClear={false}
+                      value={filters.dispatcherCheck ?? 'all'}
+                      onChange={(v: string) =>
+                        updateFilters({ dispatcherCheck: v === 'all' ? null : v })
+                      }
+                      options={[
+                        { value: 'all', label: 'Диспетчер: все' },
+                        { value: 'checked', label: 'Диспетчер отметил' },
+                        { value: 'none', label: 'Диспетчер не отметил' },
                       ]}
                     />
                   )}
@@ -1060,7 +1081,7 @@ export function DeliveriesHistory({
                 <div style={{ display: 'flex', justifyContent: 'flex-end' }}>{actions}</div>
               ) : null;
             })()}
-            <StatusLegend statuses={legendStatuses} showReview={canReview} />
+            <StatusLegend statuses={legendStatuses} showReview={canReview} showDispatcher />
           </Space>
         }
       >

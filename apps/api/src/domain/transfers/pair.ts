@@ -21,6 +21,7 @@ import {
   shipmentItems,
 } from '../../db/schema.js';
 import { resolveStatusId } from '../statuses/lookup.js';
+import { lockPurposeForRecipientWrite, purposeOnInsert } from '../operations/delivery-purpose.js';
 
 /**
  * Синхронизирует парный delivery для shipment.kind='transfer'.
@@ -57,6 +58,10 @@ export async function syncPairedTransferDelivery(
         supplierId: null,
         contractorId: sh.receiverCounterpartyId,
         recipientMolId: sh.receiverMolId,
+        purpose: purposeOnInsert({
+          contractorId: sh.receiverCounterpartyId,
+          recipientMolId: sh.receiverMolId,
+        }),
         sourceShipmentId: sh.id,
         vehiclePlate: sh.vehiclePlate,
         driverName: sh.driverName,
@@ -103,14 +108,24 @@ export async function syncPairedTransferDelivery(
   // Парный delivery уже есть — обновляем только верхний уровень.
   // Позиции и arrived_at не перетираем, чтобы не сбрасывать прогресс
   // инспектора destSiteId.
-  await app.db
-    .update(deliveries)
-    .set({
+  // Получатель меняется — признак пересчитывается под блокировкой строки, как
+  // в upsert приёмки (domain/operations/delivery-purpose.ts).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await app.db.transaction(async (tx: any) => {
+    const next = {
       contractorId: sh.receiverCounterpartyId,
       recipientMolId: sh.receiverMolId,
-      vehiclePlate: sh.vehiclePlate,
-      driverName: sh.driverName,
-      updatedAt: new Date(),
-    })
-    .where(eq(deliveries.id, existing.id));
+    };
+    const reconciled = await lockPurposeForRecipientWrite(tx, existing.id, next);
+    await tx
+      .update(deliveries)
+      .set({
+        ...next,
+        ...(reconciled && { purpose: reconciled.purpose }),
+        vehiclePlate: sh.vehiclePlate,
+        driverName: sh.driverName,
+        updatedAt: new Date(),
+      })
+      .where(eq(deliveries.id, existing.id));
+  });
 }

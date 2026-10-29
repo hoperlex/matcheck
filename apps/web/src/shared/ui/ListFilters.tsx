@@ -176,6 +176,9 @@ export function ListFilters({
           onChange={(v) => onChange({ contractorIds: v })}
           loading={loading}
           options={effectiveContractorOptions}
+          // Тёзкам в подписи дописан ИНН (contractorFilterOptions) — в ширину
+          // поля он не помещается, а без него строки снова неотличимы.
+          popupWidth={360}
         />
       )}
       {showSupplier && (

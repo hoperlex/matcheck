@@ -9,6 +9,7 @@ import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { ClampText } from '../../shared/ui/ResponsiveTable';
 import { useColumnTools, type ToolColumn } from '../../shared/ui/columnTools';
 import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
+import { DispatcherCheckControl } from '../../shared/ui/DispatcherCheckControl';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
 import { DELIVERY_PURPOSE_LABELS } from '../../shared/utils/deliveryPurpose';
@@ -242,17 +243,26 @@ export function DeliveryViewModal({
             ) : null}
           </Space>
 
-          <ReviewControls
-            entityType="delivery"
-            id={d.id}
-            statusCode={d.status.code}
-            reviewState={d.reviewState}
-            reviewNote={d.reviewNote}
-            reviewedByUserEmail={d.reviewedByUserEmail}
-            reviewedAt={d.reviewedAt}
-            updatedAt={d.updatedAt}
-            pendingDeletion={d.pendingDeletionAt != null}
-          />
+          <Space wrap size={[16, 4]} align="start">
+            <ReviewControls
+              entityType="delivery"
+              id={d.id}
+              statusCode={d.status.code}
+              reviewState={d.reviewState}
+              reviewNote={d.reviewNote}
+              reviewedByUserEmail={d.reviewedByUserEmail}
+              reviewedAt={d.reviewedAt}
+              updatedAt={d.updatedAt}
+              pendingDeletion={d.pendingDeletionAt != null}
+            />
+            <DispatcherCheckControl
+              id={d.id}
+              statusCode={d.status.code}
+              checkedAt={d.dispatcherCheckedAt}
+              checkedByUserEmail={d.dispatcherCheckedByUserEmail}
+              pendingDeletion={d.pendingDeletionAt != null}
+            />
+          </Space>
 
           {/* Сверка документа — здесь же, а не только в полной карточке:
               мониторинг чаще всего открывает именно просмотр, а раздела

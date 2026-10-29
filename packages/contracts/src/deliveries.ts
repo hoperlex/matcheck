@@ -6,7 +6,7 @@ import {
   PrimarySourceDocumentSchema,
   OperationSourceDocumentSchema,
 } from './source-documents.js';
-import { ReviewFieldsShape } from './review.js';
+import { DispatcherCheckFieldsShape, ReviewFieldsShape } from './review.js';
 import { GroupOperationFields } from './group-operations.js';
 
 export const ItemKindSchema = z.enum(['material', 'asset']);
@@ -83,8 +83,58 @@ export const DeliveryPurposeSchema = z.enum([
   'realization',
   'tolling_act',
   'contractor_materials',
+  'realization_tolling',
 ]);
 export type DeliveryPurpose = z.infer<typeof DeliveryPurposeSchema>;
+
+/** Подписи признака — общие для карточки, списка и выгрузки Excel. */
+export const DELIVERY_PURPOSE_LABELS: Record<DeliveryPurpose, string> = {
+  own_forces: 'Свои силы',
+  realization: 'Реализация',
+  tolling_act: 'Давальческий акт',
+  contractor_materials: 'Материалы подрядчика',
+  realization_tolling: 'Реализация + давальческий',
+};
+
+/** Вид получателя приёмки: подрядчик (contractor_id), МОЛ (recipient_mol_id) или никто. */
+export type DeliveryRecipientKind = 'contractor' | 'mol' | null;
+
+export function deliveryRecipientKind(r: {
+  contractorId: string | null;
+  recipientMolId: string | null;
+}): DeliveryRecipientKind {
+  if (r.recipientMolId) return 'mol';
+  if (r.contractorId) return 'contractor';
+  return null;
+}
+
+/**
+ * Какие признаки допустимы при данном получателе. «Свои силы» — работа своей
+ * бригады, у подрядчика его не бывает; при МОЛ и без получателя доступно всё.
+ */
+export function allowedDeliveryPurposes(kind: DeliveryRecipientKind): DeliveryPurpose[] {
+  const all = DeliveryPurposeSchema.options;
+  return kind === 'contractor' ? all.filter((p) => p !== 'own_forces') : [...all];
+}
+
+/**
+ * Признак после записи получателя. Единственная реализация правила: её зовут
+ * и сервер (под блокировкой строки приёмки), и карточка — для подсказки, каким
+ * признак станет после «Сохранить».
+ *   - получатель стал МОЛ, а до этого МОЛ не был → «Свои силы» (дальше
+ *     человек может сменить; смена одного МОЛ на другого выбор не сбрасывает);
+ *   - получатель — подрядчик, а признак «Свои силы» → признак не выбран;
+ *   - иначе признак прежний.
+ */
+export function reconcileDeliveryPurpose(
+  prevKind: DeliveryRecipientKind,
+  nextKind: DeliveryRecipientKind,
+  purpose: DeliveryPurpose | null,
+): DeliveryPurpose | null {
+  if (nextKind === 'mol' && prevKind !== 'mol') return 'own_forces';
+  if (nextKind === 'contractor' && purpose === 'own_forces') return null;
+  return purpose;
+}
 
 export const DeliverySchema = z.object({
   id: z.string().uuid(),
@@ -128,6 +178,8 @@ export const DeliverySchema = z.object({
   // Отметка проверки (роль «Мониторинг»). Ортогональна статусу. Видна только
   // admin/manager/monitor — для прочих ролей сервер отдаёт их null (см. buildDeliveryDto).
   ...ReviewFieldsShape,
+  // Отметка «Диспетчер» — видна тем же ролям, что отметка проверки.
+  ...DispatcherCheckFieldsShape,
   pendingDeletionAt: z.string().nullable(),
   pendingDeletionByUserId: z.string().uuid().nullable(),
   pendingDeletionByUserEmail: z.string().nullable(),

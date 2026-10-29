@@ -202,4 +202,14 @@ describe('Принятые (приёмка): воронки в шапке', () =
       if (!hit) throw new Error('объект и даты не ушли одним запросом');
     });
   });
+
+  it('«Диспетчер» из панели — ?dispatcher в адресе и dispatcherCheck на сервер', async () => {
+    await renderHistory();
+    const select = (await screen.findByText('Диспетчер: все')).closest('.ant-select')!;
+    fireEvent.mouseDown(select.querySelector('.ant-select-selector')!);
+    fireEvent.click(await screen.findByTitle('Диспетчер не отметил'));
+
+    await waitFor(() => expect(search).toContain('dispatcher=none'));
+    await expectListRequest({ dispatcherCheck: 'none' });
+  });
 });

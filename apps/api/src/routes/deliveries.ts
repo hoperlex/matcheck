@@ -16,20 +16,25 @@ import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import {
+  allowedDeliveryPurposes,
   BulkDeleteRequestSchema,
+  DELIVERY_PURPOSE_LABELS,
   BulkDeleteResponseSchema,
   ConflictResponseSchema,
   DeliveryListResponseSchema,
+  deliveryRecipientKind,
   DeliveryMarkDeletionSchema,
   DeliveryPurposeSchema,
   DeliverySchema,
   DeliveryStatusCodeSchema,
   DeliveryUpsertSchema,
+  DispatcherCheckRequestSchema,
   ErrorResponseSchema,
   ReviewRequestSchema,
   UnlinkSourceBodySchema,
   DELIVERY_HARD_DELETE_STATUSES,
   DELIVERY_SOFT_DELETE_STATUSES,
+  type DeliveryPurpose,
   type PrimarySourceDocument,
   type OperationSourceDocument,
 } from '@matcheck/contracts';
@@ -57,6 +62,10 @@ import {
 } from '../domain/statuses/lookup.js';
 import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
 import { VersionConflictError } from '../domain/operations/version-conflict.js';
+import {
+  lockPurposeForRecipientWrite,
+  purposeOnInsert,
+} from '../domain/operations/delivery-purpose.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
@@ -101,6 +110,7 @@ import { publishEvent } from './events.js';
 import { dateRangeConditions } from '../lib/date-range.js';
 import { parseUuidCsv } from '../lib/uuid-csv.js';
 import { escapeLike } from '../lib/like.js';
+import { docNumberMatchSql } from '../lib/doc-number-search.js';
 import { MONEY_FMT, QTY_FMT, fmtDateTimeRu } from '../lib/xlsx-format.js';
 import { registerDeliveryEdoRoutes } from './delivery-edo.js';
 import { registerDeliveryRecipientRoutes } from './delivery-recipient.js';
@@ -125,7 +135,9 @@ const ListQuerySchema = z.object({
   contractorIds: z.string().optional(),
   supplierIds: z.string().optional(),
   siteIds: z.string().optional(),
-  // Поиск по номеру привязанного документа (УПД/ТН) — ILIKE.
+  // Поиск по номеру документа приёмки (УПД/ТН): привязанного, оставшегося только
+  // в происхождении строк, и УПД из ЭДО. ILIKE плюс сравнение без разделителей
+  // (lib/doc-number-search.ts).
   q: z.string().optional(),
   // Точный поиск по короткому id приёмки (колонка «id» в Принятых).
   // Отдельный параметр, а не часть q: у трети документов doc_number
@@ -151,6 +163,9 @@ const ListQuerySchema = z.object({
   // «Проверено», issues — «С замечаниями», none — «Не проверено». На фронте
   // показывается только менеджменту; на бэке — просто предикат по review_state.
   reviewState: z.enum(['approved', 'issues', 'none']).optional(),
+  // Отметка «Диспетчер»: checked — отмечено, none — нет. Видимость — как у
+  // reviewState: без права на отметку параметр игнорируется.
+  dispatcherCheck: z.enum(['checked', 'none']).optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
@@ -303,6 +318,7 @@ const resolveStatusId = (app: any, code: string) => resolveStatusIdShared(app, '
 function selectDeliveryHeaders(app: any) {
   const pendingUser = alias(users, 'pending_user');
   const reviewUser = alias(users, 'review_user');
+  const dispatcherUser = alias(users, 'dispatcher_user');
   const deliverySite = alias(sites, 'delivery_site');
   const supplierCp = alias(counterparties, 'supplier_cp');
   const contractorCp = alias(counterparties, 'contractor_cp');
@@ -313,6 +329,7 @@ function selectDeliveryHeaders(app: any) {
       molEmail: users.email,
       pendingEmail: pendingUser.email,
       reviewEmail: reviewUser.email,
+      dispatcherEmail: dispatcherUser.email,
       srcShippedAt: shipments.shippedAt,
       srcSiteId: shipments.siteId,
       srcSiteCode: sites.code,
@@ -336,6 +353,7 @@ function selectDeliveryHeaders(app: any) {
     .leftJoin(users, eq(deliveries.confirmedByMolUserId, users.id))
     .leftJoin(pendingUser, eq(deliveries.pendingDeletionByUserId, pendingUser.id))
     .leftJoin(reviewUser, eq(deliveries.reviewedByUserId, reviewUser.id))
+    .leftJoin(dispatcherUser, eq(deliveries.dispatcherCheckedByUserId, dispatcherUser.id))
     .leftJoin(shipments, eq(deliveries.sourceShipmentId, shipments.id))
     .leftJoin(sites, eq(shipments.siteId, sites.id))
     .leftJoin(deliverySite, eq(deliveries.siteId, deliverySite.id))
@@ -349,6 +367,7 @@ type DeliveryHeaderRow = {
   molEmail: string | null;
   pendingEmail: string | null;
   reviewEmail: string | null;
+  dispatcherEmail: string | null;
   srcShippedAt: Date | null;
   srcSiteId: string | null;
   srcSiteCode: string | null;
@@ -443,6 +462,9 @@ function assembleDeliveryDto(
     reviewedByUserId: showReview ? d.reviewedByUserId : null,
     reviewedByUserEmail: showReview ? r.reviewEmail : null,
     reviewedAt: showReview ? (d.reviewedAt?.toISOString() ?? null) : null,
+    // «Диспетчер» — то же условие видимости, что у отметки проверки.
+    dispatcherCheckedAt: showReview ? (d.dispatcherCheckedAt?.toISOString() ?? null) : null,
+    dispatcherCheckedByUserEmail: showReview ? r.dispatcherEmail : null,
     pendingDeletionAt: d.pendingDeletionAt?.toISOString() ?? null,
     pendingDeletionByUserId: d.pendingDeletionByUserId,
     pendingDeletionByUserEmail: r.pendingEmail,
@@ -787,6 +809,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       nophoto,
       nophotoOlderHours,
       reviewState,
+      dispatcherCheck,
     } = query;
 
     // CSV → массивы. Для UUID-полей фильтруем регексом — невалидное
@@ -821,6 +844,17 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         reviewState === 'none'
           ? isNull(deliveries.reviewState)
           : eq(deliveries.reviewState, reviewState),
+      );
+    }
+    // «Диспетчер» — то же правило видимости, что у отметки проверки.
+    if (
+      dispatcherCheck &&
+      (await canSeeReviewInMatrix(app, user?.role, 'operations.deliveries'))
+    ) {
+      filters.push(
+        dispatcherCheck === 'none'
+          ? isNull(deliveries.dispatcherCheckedAt)
+          : isNotNull(deliveries.dispatcherCheckedAt),
       );
     }
     // inspector_kpp видит приёмки своего объекта (включая созданные другими).
@@ -908,15 +942,30 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     ))`);
     }
 
-    // q: поиск по номеру привязанного source_document (УПД/ТН).
+    // q: поиск по номеру документа приёмки. Документ бывает в трёх местах:
+    // в связях, только в происхождении строк (отвязан, строки остались) и в
+    // подтверждении ЭДО (своя копия УПД или запись реестра выгрузки). Сначала
+    // находим совпавшие документы, потом их приёмки: стоимость растёт с числом
+    // документов, а не «приёмки × строки».
     if (q?.trim()) {
-      // escapeLike: «100%» должен искаться как «100%», а не как «100<что угодно>».
-      const needle = `%${escapeLike(q.trim())}%`;
-      filters.push(drSql`EXISTS (
-      SELECT 1 FROM delivery_sources ds_q
-      JOIN source_documents sd_q ON sd_q.id = ds_q.source_document_id
-      WHERE ds_q.delivery_id = ${deliveries.id}
-        AND sd_q.doc_number ILIKE ${needle}
+      const docMatch = (column: ReturnType<typeof drSql>) => docNumberMatchSql(column, q);
+      filters.push(drSql`${deliveries.id} IN (
+      WITH q_docs AS (
+        SELECT sd_q.id FROM source_documents sd_q WHERE ${docMatch(drSql`sd_q.doc_number`)}
+      )
+      SELECT ds_q.delivery_id FROM delivery_sources ds_q
+        WHERE ds_q.source_document_id IN (SELECT id FROM q_docs)
+      UNION
+      SELECT di_q.delivery_id FROM delivery_items di_q
+        WHERE di_q.source_document_id IN (SELECT id FROM q_docs)
+      UNION
+      SELECT dem_q.delivery_id FROM delivery_edo_matches dem_q
+        WHERE dem_q.source_document_id IN (SELECT id FROM q_docs)
+          OR EXISTS (
+            SELECT 1 FROM edo_export_documents ed_q
+            WHERE ed_q.id = dem_q.export_document_id
+              AND ${docMatch(drSql`ed_q.document_number`)}
+          )
     )`);
     }
 
@@ -1163,6 +1212,76 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     },
   );
 
+  // Отметка «Диспетчер». Права и гейт зрелости — как у /review, но отметка
+  // независима от неё и снимается ({ checked: false }): кнопка одна, и
+  // случайное нажатие должно быть обратимым. version/updated_at не трогаем —
+  // планшетам эта отметка не нужна (в /sync её нет).
+  app.patch(
+    '/api/v1/deliveries/:id/dispatcher-check',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'monitor')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: DispatcherCheckRequestSchema,
+        response: {
+          200: DeliverySchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+          422: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const mature = [await resolveStatusId(app, 'filled'), await resolveStatusId(app, 'confirmed_mol')];
+      const checked = req.body.checked;
+      // Проверка и запись — одним условным UPDATE: между отдельными чтением и
+      // записью приёмку могли бы пометить на удаление.
+      const updated = await app.db
+        .update(deliveries)
+        .set({
+          dispatcherCheckedAt: checked ? new Date() : null,
+          dispatcherCheckedByUserId: checked ? (req.user?.id ?? null) : null,
+        })
+        .where(
+          and(
+            eq(deliveries.id, req.params.id),
+            isNull(deliveries.pendingDeletionAt),
+            inArray(deliveries.statusId, mature),
+          ),
+        )
+        .returning({ id: deliveries.id, siteId: deliveries.siteId });
+      const [d] = updated;
+      if (!d) {
+        // Ноль строк — разбираем причину перечиткой.
+        const [cur] = await app.db
+          .select({ statusId: deliveries.statusId, pendingDeletionAt: deliveries.pendingDeletionAt })
+          .from(deliveries)
+          .where(eq(deliveries.id, req.params.id))
+          .limit(1);
+        if (!cur) return reply.code(404).send({ error: 'not_found' });
+        if (cur.pendingDeletionAt !== null) {
+          return reply.code(409).send({
+            error: 'pending_deletion',
+            message: 'Документ помечен на удаление — отметка недоступна',
+          });
+        }
+        return reply.code(422).send({
+          error: 'not_reviewable',
+          message: 'Приёмка ещё не оформлена — отметка диспетчера недоступна',
+        });
+      }
+      publishEvent(app, {
+        type: 'delivery_updated',
+        entityId: d.id,
+        siteId: d.siteId,
+        ts: new Date().toISOString(),
+      });
+      const dto = await buildDeliveryDto(app, d.id, req.user?.role);
+      if (!dto) return reply.code(404).send({ error: 'not_found' });
+      return dto;
+    },
+  );
+
   // Признак приёмки — отдельная правка, доступная проверяющим, включая
   // Мониторинг. Полный upsert здесь затронул бы материалы и статус.
   app.patch(
@@ -1177,6 +1296,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           403: ErrorResponseSchema,
           404: ErrorResponseSchema,
           409: ErrorResponseSchema,
+          422: ErrorResponseSchema,
         },
       },
     },
@@ -1186,27 +1306,46 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!['admin', 'manager', 'monitor'].includes(req.user?.role ?? '')) {
         return reply.code(403).send({ error: 'forbidden' });
       }
-      const [d] = await app.db
-        .select({
-          id: deliveries.id,
-          siteId: deliveries.siteId,
-          pendingDeletionAt: deliveries.pendingDeletionAt,
-        })
-        .from(deliveries)
-        .where(eq(deliveries.id, req.params.id))
-        .limit(1);
-      if (!d) return reply.code(404).send({ error: 'not_found' });
-      if (d.pendingDeletionAt !== null) {
+      // Проверка получателя и запись признака — под одной блокировкой строки:
+      // иначе upsert мог бы между ними сменить получателя на подрядчика, и
+      // «Свои силы» легли бы ему (см. domain/operations/delivery-purpose.ts).
+      const outcome = await app.db.transaction(async (tx) => {
+        const [d] = await tx
+          .select({
+            id: deliveries.id,
+            siteId: deliveries.siteId,
+            pendingDeletionAt: deliveries.pendingDeletionAt,
+            contractorId: deliveries.contractorId,
+            recipientMolId: deliveries.recipientMolId,
+          })
+          .from(deliveries)
+          .where(eq(deliveries.id, req.params.id))
+          .for('update');
+        if (!d) return { error: 'not_found' as const };
+        if (d.pendingDeletionAt !== null) return { error: 'pending_deletion' as const };
+        if (!allowedDeliveryPurposes(deliveryRecipientKind(d)).includes(req.body.purpose)) {
+          return { error: 'purpose_conflicts_recipient' as const };
+        }
+        await tx
+          .update(deliveries)
+          .set({ purpose: req.body.purpose, updatedAt: new Date() })
+          .where(eq(deliveries.id, d.id));
+        return { error: null, d };
+      });
+      if (outcome.error === 'not_found') return reply.code(404).send({ error: 'not_found' });
+      if (outcome.error === 'pending_deletion') {
         return reply.code(409).send({
           error: 'pending_deletion',
           message: 'Документ помечен на удаление — признак изменить нельзя',
         });
       }
-
-      await app.db
-        .update(deliveries)
-        .set({ purpose: req.body.purpose, updatedAt: new Date() })
-        .where(eq(deliveries.id, d.id));
+      if (outcome.error === 'purpose_conflicts_recipient') {
+        return reply.code(422).send({
+          error: 'purpose_conflicts_recipient',
+          message: 'У подрядчика не бывает признака «Свои силы»',
+        });
+      }
+      const d = outcome.d;
       publishEvent(app, {
         type: 'delivery_updated',
         entityId: d.id,
@@ -1949,10 +2088,19 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
 
         const supplier = alias(counterparties, 'supplier');
         const contractor = alias(counterparties, 'contractor');
+        const dispatcherUser = alias(users, 'dispatcher_user');
+        // «Диспетчер» в выгрузке — тем же, кому он виден в DTO; остальным
+        // колонка пустая, но на месте (формулы по выгрузке не сдвигаются).
+        const showDispatcher = await canSeeReviewInMatrix(
+          app,
+          req.user?.role,
+          'operations.deliveries',
+        );
         const rows = await app.db
           .select({
             d: deliveries,
             statusCode: statuses.code,
+            dispatcherEmail: dispatcherUser.email,
             // Тот же признак, что у фильтра и значка: выгрузка обязана помечать
             // ровно те строки, которые фильтр отобрал.
             docAttentionFlag: loadEnv().OPERATION_DOC_VALIDATION
@@ -1973,6 +2121,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           .leftJoin(supplier, eq(deliveries.supplierId, supplier.id))
           .leftJoin(contractor, eq(deliveries.contractorId, contractor.id))
           .leftJoin(sites, eq(deliveries.siteId, sites.id))
+          .leftJoin(dispatcherUser, eq(deliveries.dispatcherCheckedByUserId, dispatcherUser.id))
           .where(and(...conds))
           // Симметрия с list-роутом: displayId DESC даёт стабильный
           // порядок в Excel-выгрузке (не зависит от свежести правок).
@@ -2115,6 +2264,8 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           // В КОНЕЦ намеренно: на выгрузке строят свои формулы, и вставка
           // колонки в середину сдвинула бы все ссылки.
           { header: 'Требует проверки', key: 'docAttention', width: 22 },
+          { header: 'Признак', key: 'purpose', width: 24 },
+          { header: 'Диспетчер', key: 'dispatcher', width: 30 },
         ];
         const headerRow = ws.getRow(1);
         headerRow.font = { bold: true };
@@ -2161,6 +2312,13 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             // подозрение. Одно определение на список, выгрузку и плашку —
             // иначе «отфильтровал и выгрузил» дало бы разные наборы строк.
             docAttention: r.docAttention,
+            purpose: d.purpose
+              ? (DELIVERY_PURPOSE_LABELS[d.purpose as DeliveryPurpose] ?? d.purpose)
+              : '',
+            dispatcher:
+              showDispatcher && d.dispatcherCheckedAt
+                ? `${fmtDateTimeRu(d.dispatcherCheckedAt)}${r.dispatcherEmail ? ` · ${r.dispatcherEmail}` : ''}`
+                : '',
             nameRaw: '',
             qtyPlanned: null,
             qtyActual: null,
@@ -2992,6 +3150,11 @@ async function createDelivery(
         supplierId: input.supplierId ?? null,
         contractorId: input.contractorId ?? null,
         recipientMolId: input.recipientMolId ?? null,
+        // Получатель — МОЛ → «Свои силы» (domain/operations/delivery-purpose.ts).
+        purpose: purposeOnInsert({
+          contractorId: input.contractorId ?? null,
+          recipientMolId: input.recipientMolId ?? null,
+        }),
         vehiclePlate: input.vehiclePlate ?? null,
         driverName: input.driverName ?? null,
         arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,
@@ -3219,14 +3382,23 @@ async function updateDelivery(
   // одна транзакция (см. createDelivery). Раньше delete items проходил, а
   // insert падал → приёмка теряла все позиции.
   return await app.db.transaction(async (tx: typeof app.db) => {
+    const nextRecipient = {
+      contractorId: input.contractorId ?? null,
+      recipientMolId: input.recipientMolId ?? null,
+    };
+    // Первым оператором — блокировка строки и признак по её получателю: правка
+    // признака (PATCH /:id/purpose) берёт ту же блокировку и не впишет «Свои
+    // силы» подрядчику между чтением и записью. Нет строки — UPDATE ниже
+    // вернёт ноль строк и разберёт причину сам.
+    const reconciled = await lockPurposeForRecipientWrite(tx, id, nextRecipient);
     const updatedRows = await tx
       .update(deliveries)
       .set({
         statusId: effectiveStatusId,
         siteId: input.siteId,
         supplierId: input.supplierId ?? null,
-        contractorId: input.contractorId ?? null,
-        recipientMolId: input.recipientMolId ?? null,
+        ...nextRecipient,
+        ...(reconciled && { purpose: reconciled.purpose }),
         vehiclePlate: input.vehiclePlate ?? null,
         driverName: input.driverName ?? null,
         arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,
