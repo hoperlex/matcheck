@@ -154,6 +154,9 @@ export function buildUpsertPayload(r: DeliveryRecord, baseVersion: number): Deli
     // обновляет, но buildPatch → IDB → buildUpsertPayload терял по пути
     // к серверу.
     recipientMolId: effective.recipientMolId,
+    // Только явная правка из локального overlay: обычный upsert планшета и
+    // сохранение других полей не должны перезаписывать серверный признак.
+    ...(r.local?.purpose != null && { purpose: r.local.purpose }),
     vehiclePlate: effective.vehiclePlate,
     driverName: effective.driverName,
     arrivedAt: effective.arrivedAt,

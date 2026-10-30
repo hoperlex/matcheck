@@ -91,6 +91,7 @@ export async function lockPurposeForRecipientWrite(
   tx: any,
   deliveryId: string,
   next: RecipientPair,
+  chosenPurpose?: DeliveryPurpose,
 ): Promise<{ purpose: string | null } | undefined> {
   const [row] = await tx
     .select({
@@ -104,17 +105,24 @@ export async function lockPurposeForRecipientWrite(
     .for('update');
   if (!row) return undefined;
   const cur = currentPurpose(row.purpose);
-  if ('raw' in cur) return { purpose: cur.raw };
-  const nextPurpose = reconcileDeliveryPurpose(
-    deliveryRecipientKind(row),
-    deliveryRecipientKind(next),
-    cur.known,
-  );
+  if ('raw' in cur && chosenPurpose === undefined) return { purpose: cur.raw };
+  const previousPurpose = 'raw' in cur ? null : cur.known;
+  const nextPurpose =
+    chosenPurpose ??
+    reconcileDeliveryPurpose(
+      deliveryRecipientKind(row),
+      deliveryRecipientKind(next),
+      previousPurpose,
+    );
   if (row.recipientsPerDocument) {
     await reconcileLinkedDocumentPurposes(
       tx,
       deliveryId,
-      { contractorId: row.contractorId, recipientMolId: row.recipientMolId, purpose: cur.known },
+      {
+        contractorId: row.contractorId,
+        recipientMolId: row.recipientMolId,
+        purpose: previousPurpose,
+      },
       { ...next, purpose: nextPurpose },
     );
   }

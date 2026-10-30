@@ -310,6 +310,23 @@ suite('получатели документов приёмки (PostgreSQL)', {
       (await patch(id, `${link(docs[0]!)}/purpose`, { purpose: 'realization' })).statusCode,
     ).toBe(403);
     expect((await patch(id, `${link(docs[0]!)}/purpose`, { inherit: true })).statusCode).toBe(403);
+    const combined = await app.inject({
+      method: 'POST',
+      url: '/api/v1/deliveries',
+      payload: {
+        id,
+        siteId,
+        statusCode: 'filled',
+        sourceDocumentIds: docs,
+        items: [],
+        contractorId,
+        purpose: 'realization',
+      },
+    });
+    expect(combined.statusCode).toBe(403);
+    const [row] = await sql<{ contractor_id: string | null; purpose: string | null }[]>`
+      SELECT contractor_id, purpose FROM deliveries WHERE id=${id}`;
+    expect(row).toEqual({ contractor_id: null, purpose: null });
     reviewAllowed = true;
   });
 

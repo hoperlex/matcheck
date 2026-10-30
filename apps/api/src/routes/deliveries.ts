@@ -1459,12 +1459,30 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           // 409 — либо OCC-конфликт (Conflict), либо pending_deletion (Error).
           409: z.union([ConflictResponseSchema, ErrorResponseSchema]),
           400: ErrorResponseSchema,
+          422: ErrorResponseSchema,
         },
       },
     },
     async (req, reply) => {
       const input = req.body;
       const inspectorId = req.user?.role === 'inspector_kpp' ? req.user.id : (req.user?.id ?? null);
+
+      if (input.purpose !== undefined) {
+        if (!['admin', 'manager', 'monitor'].includes(req.user?.role ?? '')) {
+          return reply.code(403).send({ error: 'forbidden' });
+        }
+        await assertPermission(req, 'operations.deliveries', 'review');
+        if (
+          !allowedDeliveryPurposes(
+            deliveryRecipientKind({
+              contractorId: input.contractorId ?? null,
+              recipientMolId: input.recipientMolId ?? null,
+            }),
+          ).includes(input.purpose)
+        ) {
+          return reply.code(422).send({ error: 'purpose_conflicts_recipient' });
+        }
+      }
 
       // inspector_kpp работает строго в рамках своего объекта. Раньше здесь
       // была ТИХАЯ подмена input.siteId, и приёмка, созданная офлайн на объекте
@@ -3278,10 +3296,12 @@ async function createDelivery(
         contractorId: input.contractorId ?? null,
         recipientMolId: input.recipientMolId ?? null,
         // Получатель — МОЛ → «Свои силы» (domain/operations/delivery-purpose.ts).
-        purpose: purposeOnInsert({
-          contractorId: input.contractorId ?? null,
-          recipientMolId: input.recipientMolId ?? null,
-        }),
+        purpose:
+          input.purpose ??
+          purposeOnInsert({
+            contractorId: input.contractorId ?? null,
+            recipientMolId: input.recipientMolId ?? null,
+          }),
         vehiclePlate: input.vehiclePlate ?? null,
         driverName: input.driverName ?? null,
         arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,
@@ -3517,7 +3537,7 @@ async function updateDelivery(
     // признака (PATCH /:id/purpose) берёт ту же блокировку и не впишет «Свои
     // силы» подрядчику между чтением и записью. Нет строки — UPDATE ниже
     // вернёт ноль строк и разберёт причину сам.
-    const reconciled = await lockPurposeForRecipientWrite(tx, id, nextRecipient);
+    const reconciled = await lockPurposeForRecipientWrite(tx, id, nextRecipient, input.purpose);
     const updatedRows = await tx
       .update(deliveries)
       .set({

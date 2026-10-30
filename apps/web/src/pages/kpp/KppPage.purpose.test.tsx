@@ -2,10 +2,8 @@
 /**
  * Признак приёмки в карточке зависит от получателя.
  *
- * У подрядчика «Свои силы» не бывает — пункта нет в меню. Сервер сверяет
- * признак с СОХРАНЁННЫМ получателем, поэтому, пока новый получатель в форме не
- * сохранён, выбор закрыт, а кнопка показывает, каким признак станет после
- * «Сохранить» (МОЛ подставляет «Свои силы»).
+ * У подрядчика «Свои силы» не бывает. При выборе нового получателя признак
+ * доступен сразу; оба значения сохраняются вместе.
  */
 import 'fake-indexeddb/auto';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -167,6 +165,12 @@ let current: Delivery;
 
 function route(url: string): unknown {
   if (url === `/deliveries/${ID}`) return current;
+  if (url.startsWith('/customer-counterparties')) {
+    return {
+      items: [{ id: FIRST, name: 'ООО «Альфа»', inn: '1234567890', aliases: [] }],
+      total: 1,
+    };
+  }
   if (url.startsWith('/responsible-persons')) {
     return { items: [{ id: MOL, fullName: 'Иванов Иван Иванович', isActive: true }], total: 1 };
   }
@@ -251,6 +255,12 @@ describe('карточка приёмки: признак зависит от п
       '4 Материалы подрядчика',
       '5 Реализация + давальческий',
     ]);
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Давальческий акт/ }));
+    await waitFor(() =>
+      expect(api.patch).toHaveBeenCalledWith(`/deliveries/${ID}/purpose`, {
+        purpose: 'tolling_act',
+      }),
+    );
   });
 
   it('без получателя доступны все пять пунктов', async () => {
@@ -262,8 +272,10 @@ describe('карточка приёмки: признак зависит от п
     expect(items).toHaveLength(5);
   });
 
-  it('МОЛ выбран, но не сохранён — кнопка закрыта и показывает «Свои силы»', async () => {
+  it('МОЛ выбран, но не сохранён — признак можно выбрать до сохранения', async () => {
+    authUser.role = 'manager';
     current = { ...delivery(3, []), purpose: 'realization' } as Delivery;
+    mocks.flushMutation.mockResolvedValue({ outcome: 'queued' });
     renderCard();
     expect((await readyPurposeButton()).textContent).toContain('Реализация');
 
@@ -276,8 +288,62 @@ describe('карточка приёмки: признак зависит от п
 
     await waitFor(async () => {
       const btn = (await purposeButton()) as HTMLButtonElement;
-      expect(btn.disabled).toBe(true);
+      expect(btn.disabled).toBe(false);
       expect(btn.textContent).toContain('Свои силы');
     });
+    fireEvent.click(await purposeButton());
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Давальческий акт/ }));
+    expect((await purposeButton()).textContent).toContain('Давальческий акт');
+    expect(api.patch).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
+    await waitFor(() =>
+      expect(mocks.applyLocalEdit).toHaveBeenCalledWith(
+        ID,
+        expect.objectContaining({
+          recipientMolId: MOL,
+          contractorId: null,
+          purpose: 'tolling_act',
+        }),
+      ),
+    );
+  });
+
+  it('после выбора подрядчика признак доступен сразу и сохраняется вместе с ним', async () => {
+    authUser.role = 'manager';
+    current = { ...delivery(3, []), purpose: 'own_forces' } as Delivery;
+    mocks.apiPost.mockResolvedValue({ id: CONTRACTOR, name: 'ООО «Альфа»' });
+    mocks.flushMutation.mockResolvedValue({ outcome: 'queued' });
+    renderCard();
+    await readyPurposeButton();
+
+    fireEvent.click(await screen.findByText('Получатель:'));
+    const popover = (await screen.findByText('Подрядчик')).closest('.ant-popover') as HTMLElement;
+    const box = await within(popover).findByRole('combobox');
+    fireEvent.mouseDown(box);
+    fireEvent.click(await screen.findByTitle(/ООО «Альфа»/));
+    await waitFor(async () => expect((await purposeButton()).textContent).toContain('—'));
+
+    const btn = (await purposeButton()) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent).toContain('—');
+    fireEvent.click(btn);
+    const options = (await screen.findAllByRole('menuitem')).map((n) => n.textContent);
+    expect(options).not.toContain('1 Свои силы');
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Реализация \+ давальческий/ }));
+    expect((await purposeButton()).textContent).toContain('Реализация + давальческий');
+    expect(api.patch).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
+    await waitFor(() =>
+      expect(mocks.applyLocalEdit).toHaveBeenCalledWith(
+        ID,
+        expect.objectContaining({
+          contractorId: CONTRACTOR,
+          recipientMolId: null,
+          purpose: 'realization_tolling',
+        }),
+      ),
+    );
   });
 });

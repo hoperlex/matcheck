@@ -204,3 +204,28 @@ describe('buildUpsertPayload отправляет версию строк фор
     expect(buildShipmentUpsertPayload(record, 3).baseVersion).toBe(3);
   });
 });
+
+describe('buildUpsertPayload передаёт только явно выбранный признак', () => {
+  it('выбор признака после получателя уходит вместе с ним', () => {
+    const record: DeliveryRecord = {
+      id: baseOperation.id,
+      server: { ...baseOperation, purpose: 'own_forces', items: [] } as unknown as Delivery,
+      local: {
+        contractorId: DOC_ID,
+        recipientMolId: null,
+        purpose: 'realization',
+      },
+      tombstone: false,
+      version: 3,
+      lastSyncedAt: Date.now(),
+    };
+    expect(buildUpsertPayload(record, 3)).toMatchObject({
+      contractorId: DOC_ID,
+      recipientMolId: null,
+      purpose: 'realization',
+    });
+    expect(
+      buildUpsertPayload({ ...record, local: { contractorId: DOC_ID } }, 3),
+    ).not.toHaveProperty('purpose');
+  });
+});

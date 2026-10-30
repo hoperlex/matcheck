@@ -358,6 +358,8 @@ export const DeliveryUpsertSchema = z.object({
   supplierId: z.string().uuid().nullable().optional(),
   contractorId: z.string().uuid().nullable().optional(),
   recipientMolId: z.string().uuid().nullable().optional(),
+  /** Явный выбор проверяющего вместе с получателем; старые клиенты поле не шлют. */
+  purpose: DeliveryPurposeSchema.optional(),
   vehiclePlate: z.string().max(16).nullable().optional(),
   driverName: z.string().max(200).nullable().optional(),
   arrivedAt: z.string().nullable().optional(),

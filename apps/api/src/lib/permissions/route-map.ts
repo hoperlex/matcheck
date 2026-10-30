@@ -310,6 +310,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
       [
         { page: 'operations.deliveries', action: 'create' },
         { page: 'operations.deliveries', action: 'edit' },
+        { page: 'operations.deliveries', action: 'review' },
       ],
     ),
   ],

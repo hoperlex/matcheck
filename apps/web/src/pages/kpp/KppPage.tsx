@@ -311,6 +311,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     null,
   );
   const [recipientMolId, setRecipientMolId] = useState<string | null>(null);
+  // Выбор признака до сохранения нового получателя. Обычная правка уже
+  // сохранённого получателя по-прежнему идёт точечным PATCH.
+  const [pendingPurpose, setPendingPurpose] = useState<DeliveryPurpose | null>(null);
   const [selectedUpd, setSelectedUpd] = useState<SourceDocument | null>(null);
   const [linkUpdOpen, setLinkUpdOpen] = useState(false);
   const [linkEdoOpen, setLinkEdoOpen] = useState(false);
@@ -611,6 +614,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       if (isFirstHydration) itemsDirtyRef.current = false;
       hydratedIdRef.current = d.id;
       lastSyncedUpdatedAtRef.current = d.updatedAt;
+      if (isFirstHydration) setPendingPurpose(null);
       setPlate(d.vehiclePlate ?? '');
       setComment(d.comment ?? '');
       // siteId/contractorId подхватываются один раз — последующее редактирование
@@ -696,6 +700,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     if (!detail) return;
     if (hydratedIdRef.current === deliveryId) return;
     hydratedIdRef.current = deliveryId;
+    setPendingPurpose(null);
     setSelectedUpd(detail);
     if (!isInspector) {
       setSiteId((prev) => prev ?? (detail.siteId === SYSTEM_SITE_ID ? null : detail.siteId));
@@ -753,6 +758,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       return;
     }
     const id = crypto.randomUUID();
+    setPendingPurpose(null);
     navigate(`/operations?type=delivery&delivery=${id}&new=1`);
   };
 
@@ -767,6 +773,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       return;
     }
     const id = crypto.randomUUID();
+    setPendingPurpose(null);
     navigate(`/operations?type=delivery&delivery=${id}&new=1&upd=${upd.id}`);
   };
 
@@ -914,6 +921,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       supplierId: (isNew ? selectedUpd?.supplierId : null) ?? loadedDelivery.supplierId ?? null,
       contractorId: recipientKind === 'counterparty' ? contractorId : null,
       recipientMolId: recipientKind === 'mol' ? recipientMolId : null,
+      ...(pendingPurpose !== null && canChoosePurpose && { purpose: pendingPurpose }),
       vehiclePlate: plate || null,
       arrivedAt: loadedDelivery.arrivedAt ?? new Date().toISOString(),
       comment: effectiveComment,
@@ -1945,13 +1953,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               <InlineEditChip
                 label={loadedDelivery?.recipientsPerDocument ? 'Получатель (общий)' : 'Получатель'}
                 value={recipientLabel}
-                disabled={isContractor}
+                disabled={isContractor || !canEditDelivery}
                 width={320}
               >
                 {(close) => (
                   <RecipientPicker
                     kind={recipientKind}
                     onKindChange={(next) => {
+                      setPendingPurpose(null);
                       setRecipientKind(next);
                       if (next === 'counterparty') setRecipientMolId(null);
                       else setContractorId(null);
@@ -1963,11 +1972,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     mols={responsiblePersons}
                     molsLoading={responsiblePersonsQuery.isLoading}
                     onContractorChange={(id, name) => {
+                      setPendingPurpose(null);
                       if (id && name) setPickedContractor({ id, name });
                       setContractorId(id);
                       close();
                     }}
                     onMolChange={(id) => {
+                      setPendingPurpose(null);
                       setRecipientMolId(id);
                       close();
                     }}
@@ -2040,6 +2051,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     deliveryId={deliveryId}
                     sourceDocumentIds={loadedDelivery.sourceDocumentIds}
                     onApply={(cp) => {
+                      setPendingPurpose(null);
                       setPickedContractor({ id: cp.id, name: cp.name });
                       setContractorId(cp.id);
                     }}
@@ -2229,13 +2241,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   onChange={(next) => patchFlags.mutate({ isAssets: next })}
                 />
               )}
-              {!isNew &&
-                canChoosePurpose &&
+              {canChoosePurpose &&
                 (() => {
-                  // Признак зависит от получателя (у подрядчика «Свои силы» нет, МОЛ
-                  // подставляет «Свои силы»), а сервер сверяет его с СОХРАНЁННЫМ
-                  // получателем. Пока новый получатель в форме не сохранён, выбор
-                  // закрыт: кнопка показывает, каким признак станет после «Сохранить».
+                  // При несохранённом получателе выбор остаётся в форме и уйдёт
+                  // вместе с ним в одном upsert. Для сохранённого получателя
+                  // признак по-прежнему меняется точечным PATCH.
                   const savedKind = deliveryRecipientKind(loadedDelivery);
                   const formRecipient = {
                     contractorId: recipientKind === 'counterparty' ? contractorId : null,
@@ -2244,37 +2254,38 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   const recipientDirty =
                     (formRecipient.contractorId ?? null) !== loadedDelivery.contractorId ||
                     (formRecipient.recipientMolId ?? null) !== loadedDelivery.recipientMolId;
-                  const shown = recipientDirty
-                    ? reconcileDeliveryPurpose(
-                        savedKind,
-                        deliveryRecipientKind(formRecipient),
-                        loadedDelivery.purpose ?? null,
-                      )
-                    : (loadedDelivery.purpose ?? null);
-                  const allowed = allowedDeliveryPurposes(savedKind);
+                  const shown =
+                    pendingPurpose ??
+                    (recipientDirty
+                      ? reconcileDeliveryPurpose(
+                          savedKind,
+                          deliveryRecipientKind(formRecipient),
+                          loadedDelivery.purpose ?? null,
+                        )
+                      : (loadedDelivery.purpose ?? null));
+                  const allowed = allowedDeliveryPurposes(deliveryRecipientKind(formRecipient));
                   const button = (
                     <Button
                       size="small"
                       loading={patchPurpose.isPending}
-                      disabled={recipientDirty || isPending || patchPurpose.isPending}
+                      disabled={isPending || patchPurpose.isPending}
                     >
                       Признак{loadedDelivery.recipientsPerDocument ? ' (общий)' : ''}:{' '}
                       {shown ? DELIVERY_PURPOSE_LABELS[shown] : '—'} <DownOutlined />
                     </Button>
                   );
-                  if (recipientDirty) {
-                    return (
-                      <Tooltip title="Признак обновится после сохранения получателя">
-                        <span>{button}</span>
-                      </Tooltip>
-                    );
-                  }
                   return (
                     <Dropdown
                       menu={{
                         items: DELIVERY_PURPOSE_OPTIONS.filter((o) => allowed.includes(o.key)),
-                        selectedKeys: loadedDelivery.purpose ? [loadedDelivery.purpose] : [],
-                        onClick: ({ key }) => patchPurpose.mutate(key as DeliveryPurpose),
+                        selectedKeys: shown ? [shown] : [],
+                        onClick: ({ key }) => {
+                          if (isNew || recipientDirty || pendingPurpose !== null) {
+                            setPendingPurpose(key as DeliveryPurpose);
+                          } else {
+                            patchPurpose.mutate(key as DeliveryPurpose);
+                          }
+                        },
                       }}
                       disabled={isPending || patchPurpose.isPending}
                       trigger={['click']}

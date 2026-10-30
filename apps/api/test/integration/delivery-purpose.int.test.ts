@@ -186,7 +186,10 @@ suite('признак приёмки', () => {
     return row!.purpose;
   }
   // Тело — как у планшета: признака в upsert нет вовсе.
-  const upsert = (id: string, recipient: { contractorId?: string; recipientMolId?: string }) =>
+  const upsert = (
+    id: string,
+    recipient: { contractorId?: string; recipientMolId?: string; purpose?: string },
+  ) =>
     app.inject({
       method: 'POST',
       url: '/api/v1/deliveries',
@@ -212,6 +215,35 @@ suite('признак приёмки', () => {
     // Остальные пункты подрядчику доступны.
     expect((await patchOf(id, 'realization_tolling')).statusCode).toBe(200);
     expect(await purposeOf(id)).toBe('realization_tolling');
+  });
+
+  it('upsert сохраняет выбранного подрядчика и признак вместе', async () => {
+    currentUser = asManager();
+    const id = await seedDelivery({ recipientMolId: molA, purpose: 'own_forces' });
+    const res = await upsert(id, { contractorId, purpose: 'realization_tolling' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ contractorId, purpose: 'realization_tolling' });
+    const [row] = await sql<{ contractor_id: string | null; purpose: string | null }[]>`
+      SELECT contractor_id, purpose FROM deliveries WHERE id = ${id}`;
+    expect(row).toEqual({ contractor_id: contractorId, purpose: 'realization_tolling' });
+  });
+
+  it('upsert отклоняет неподходящий признак без записи получателя', async () => {
+    currentUser = asManager();
+    const id = await seedDelivery({ recipientMolId: molA, purpose: 'own_forces' });
+    const res = await upsert(id, { contractorId, purpose: 'own_forces' });
+    expect(res.statusCode).toBe(422);
+    expect(res.json()).toMatchObject({ error: 'purpose_conflicts_recipient' });
+    const [row] = await sql<{ contractor_id: string | null; purpose: string | null }[]>`
+      SELECT contractor_id, purpose FROM deliveries WHERE id = ${id}`;
+    expect(row).toEqual({ contractor_id: null, purpose: 'own_forces' });
+  });
+
+  it('инспектор не может передать явный признак через upsert', async () => {
+    currentUser = asRole('inspector_kpp');
+    const id = await seedDelivery({});
+    expect((await upsert(id, { purpose: 'realization' })).statusCode).toBe(403);
+    expect(await purposeOf(id)).toBeNull();
   });
 
   it('при МОЛ и без получателя доступны все пункты, включая «Свои силы»', async () => {
