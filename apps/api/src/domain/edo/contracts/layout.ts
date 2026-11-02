@@ -61,9 +61,22 @@ const ROLE_LABELS: Record<SignatureRole, string> = {
   other: 'подпись',
 };
 
-/** `<основа> — подпись получателя 2.sig`; номер — с второй подписи той же роли. */
-export function signatureFileName(stem: string, role: SignatureRole, index: number): string {
-  return fitFileName(stem, ` — ${ROLE_LABELS[role]}${index > 1 ? ` ${index}` : ''}.sig`);
+/**
+ * `<основа> — подпись получателя 3f9a1c2e.sig`. Метка — от идентификатора
+ * подписи, а не от порядка в ответе: при продолжении порядок сущностей может
+ * поменяться или добавиться подпись, и номер по порядку занял бы путь уже
+ * скачанной подписи.
+ */
+export function signatureFileName(stem: string, role: SignatureRole, tag: string): string {
+  return fitFileName(stem, ` — ${ROLE_LABELS[role]} ${safeSegment(tag, 40)}.sig`);
+}
+
+/** Короткие метки подписей документа: 8 знаков id, при совпадении — id целиком. */
+export function signatureTags(ids: readonly string[]): Map<string, string> {
+  const short = (id: string) => id.slice(0, 8);
+  const counts = new Map<string, number>();
+  for (const id of ids) counts.set(short(id), (counts.get(short(id)) ?? 0) + 1);
+  return new Map(ids.map((id) => [id, (counts.get(short(id)) ?? 0) > 1 ? id : short(id)]));
 }
 
 export function isAnnulledOrRejected(row: Pick<SnapshotRow, 'revocation' | 'recipientResponse'>): boolean {

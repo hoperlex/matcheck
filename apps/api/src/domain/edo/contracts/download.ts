@@ -12,17 +12,33 @@
  * подписи, появившиеся после описи, тоже попадут в архив. Подписи — все
  * сущности-подписи документа, каждая отдельным файлом, в том виде, в каком
  * Диадок отдаёт их по умолчанию (CAdES-T, с меткой времени).
+ *
+ * Что останавливает прогон целиком (продолжение — следующим запуском с того же
+ * места): граница части (`hardDeadline`) — она проверяется перед каждым
+ * запросом, а не только между документами; отказ уровня учётки или связи
+ * (429 после повторов, временный сбой, 401/402/403, отказ авторизации) — такой
+ * отказ не про документ, и перебор тысяч строк дал бы только тысячи ошибок.
  */
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { mkdir, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { DiadocClient } from '../diadoc.client.js';
 import type { DiadocEntity, DiadocMessage } from '../diadoc.types.js';
+import { DiadocAuthRejected } from '../diadoc.http.js';
 import { detectEdoFile } from '../edo-file-kind.js';
-import { EdoLeaseLost } from '../inventory.js';
+import { EdoLeaseLost, isTransportFailure } from '../inventory.js';
 import { NONFORMALIZED_TYPE, REVIEW_CATEGORIES, type ReviewCategory } from './classify.js';
 import { isDocumentEntity, isSignatureEntity } from './inventory.js';
-import { PRINT_FORM_FILE, computeLayout, fitFileName, signatureFileName, splitExt, type RowLayout } from './layout.js';
+import {
+  PRINT_FORM_FILE,
+  computeLayout,
+  fitFileName,
+  signatureFileName,
+  signatureTags,
+  splitExt,
+  type RowLayout,
+} from './layout.js';
 import {
   SELECTION_FILE,
   appendProgress,
@@ -53,6 +69,11 @@ export type DownloadOptions = {
   limit?: number | null;
   /** После этого момента новые документы не начинаются. */
   deadline?: Date | null;
+  /**
+   * Жёсткая граница: после неё не уходит ни один запрос, даже посреди
+   * документа. Недоделанное остаётся без итога и докачивается следующим запуском.
+   */
+  hardDeadline?: Date | null;
   maxFileBytes: number;
   printFormAttempts?: number;
   printFormMaxWaitMs?: number;
@@ -69,10 +90,30 @@ export type DownloadOptions = {
 export type DownloadRun = {
   selected: number;
   processed: number;
-  stoppedBy: 'limit' | 'deadline' | 'lease_lost' | 'disk' | null;
+  stoppedBy: 'limit' | 'deadline' | 'lease_lost' | 'disk' | 'diadoc_unavailable' | null;
+  /** Текст отказа Диадока при `diadoc_unavailable`. */
+  stopReason?: string;
   errors: number;
   requests: number;
 };
+
+/** Отказ не про документ: учётка, авторизация, связь. Прогон останавливается. */
+export function isAccountLevelFailure(err: unknown): boolean {
+  return isTransportFailure(err) || err instanceof DiadocAuthRejected;
+}
+
+/** Граница части пройдена — документ не доделывается, итог не пишется. */
+class PastHardDeadline extends Error {
+  constructor() {
+    super('граница части пройдена');
+    this.name = 'PastHardDeadline';
+  }
+}
+
+/** Ошибку пишем в журнал документа, только если она про документ. */
+function rethrowIfRunLevel(err: unknown): void {
+  if (err instanceof EdoLeaseLost || err instanceof PastHardDeadline || isAccountLevelFailure(err)) throw err;
+}
 
 /** Выгрузка не начата: опись неполная, чужая или выбор указан неверно. */
 export class DownloadRefused extends Error {
@@ -139,14 +180,38 @@ export async function resolveSelection(
   return { selected, rows: picked };
 }
 
-async function fileOk(outDir: string, rec: ProgressRecord | undefined): Promise<boolean> {
-  if (!rec || !('outcome' in rec) || rec.outcome !== 'done') return false;
+type FileCheck = 'ok' | 'нет записи' | 'нет файла' | 'другой размер' | 'sha256 не совпал';
+
+function sha256File(file: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    createReadStream(file)
+      .on('data', (chunk) => hash.update(chunk))
+      .on('error', reject)
+      .on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+/**
+ * Файл с отметкой «скачано» на месте. Размер сверяется всегда (быстро), sha256 —
+ * по запросу: в `--verify` перед упаковкой, а не на каждом шаге выгрузки.
+ */
+async function checkFile(outDir: string, rec: ProgressRecord | undefined, checkHash = false): Promise<FileCheck> {
+  if (!rec || !('outcome' in rec) || rec.outcome !== 'done') return 'нет записи';
+  const full = path.join(outDir, rec.path);
   try {
-    const st = await stat(path.join(outDir, rec.path));
-    return st.isFile() && st.size === rec.size;
+    const st = await stat(full);
+    if (!st.isFile()) return 'нет файла';
+    if (st.size !== rec.size) return 'другой размер';
   } catch {
-    return false;
+    return 'нет файла';
   }
+  if (checkHash && (await sha256File(full)) !== rec.sha256) return 'sha256 не совпал';
+  return 'ok';
+}
+
+async function fileOk(outDir: string, rec: ProgressRecord | undefined): Promise<boolean> {
+  return (await checkFile(outDir, rec)) === 'ok';
 }
 
 /** Итог есть: скачано (и файл на месте нужного размера) или недоступно с причиной. */
@@ -168,6 +233,8 @@ export type RowDownloadState = {
   printFormReason: string | null;
   dir: string | null;
   error: string | null;
+  /** Вещи с отметкой «скачано», файл которых проверку не прошёл. */
+  broken: { kind: 'file' | 'signature' | 'printform'; key: string; reason: FileCheck }[];
 };
 
 export type DownloadState = {
@@ -176,10 +243,23 @@ export type DownloadState = {
   complete: boolean;
   done: number;
   pending: number;
+  /** Сколько испорченных вещей помечено в журнале к перекачке (`markBroken`). */
+  marked: number;
 };
 
-/** Состояние выгрузки по файлам на диске и журналу — без обращения к Диадоку. */
-export async function collectDownloadState(outDir: string, snapshot: InventorySnapshot): Promise<DownloadState> {
+/**
+ * Состояние выгрузки по файлам на диске и журналу — без обращения к Диадоку.
+ * `checkHashes` — пересчитать sha256 каждого файла (для `--verify`).
+ * `markBroken` — испорченные вещи (нет файла, другой размер, чужой sha256)
+ * пометить в журнале ошибкой. Иначе выгрузка, которая при поиске недоделанного
+ * сверяет только размер, сочла бы подменённый файл готовым — и проверка не
+ * прошла бы никогда. После пометки следующий `--download` качает вещь заново.
+ */
+export async function collectDownloadState(
+  outDir: string,
+  snapshot: InventorySnapshot,
+  opts: { checkHashes?: boolean; markBroken?: boolean; now?: () => Date } = {},
+): Promise<DownloadState> {
   const read = await readSelection(outDir);
   // Выбор от другой описи к этой не относится: проверять по нему нечего.
   const selected = read && read.snapshotCreatedAt === snapshot.createdAt ? read : null;
@@ -190,15 +270,30 @@ export async function collectDownloadState(outDir: string, snapshot: InventorySn
   for (const n of selected?.rows ?? []) {
     const row = byRow.get(n);
     if (!row) continue;
-    const state = await rowState(outDir, row, progress);
+    const state = await rowState(outDir, row, progress, opts.checkHashes ?? false);
     rows.set(n, state);
     if (state.complete) done += 1;
   }
+  let marked = 0;
+  if (opts.markBroken) {
+    const at = (opts.now ?? (() => new Date()))().toISOString();
+    for (const state of rows.values()) {
+      for (const b of state.broken) {
+        await appendProgress(outDir, { kind: b.kind, key: b.key, row: state.row, at, outcome: 'error', reason: `при проверке: ${b.reason}` });
+        marked += 1;
+      }
+    }
+  }
   const total = selected?.rows.length ?? 0;
-  return { selected, rows, complete: selected !== null && done === total, done, pending: total - done };
+  return { selected, rows, complete: selected !== null && done === total, done, pending: total - done, marked };
 }
 
-async function rowState(outDir: string, row: SnapshotRow, progress: Map<string, ProgressRecord>): Promise<RowDownloadState> {
+async function rowState(
+  outDir: string,
+  row: SnapshotRow,
+  progress: Map<string, ProgressRecord>,
+  checkHashes = false,
+): Promise<RowDownloadState> {
   const missing: string[] = [];
   const docRec = progress.get(artifactKey(row, 'doc'));
   const fileRec = progress.get(artifactKey(row, 'file'));
@@ -207,6 +302,10 @@ async function rowState(outDir: string, row: SnapshotRow, progress: Map<string, 
   let error: string | null = null;
   let recipientState: RecipientState | null = null;
   let newSignatures: number | null = null;
+  const broken: RowDownloadState['broken'] = [];
+  const noteBroken = (kind: RowDownloadState['broken'][number]['kind'], key: string, rec: ProgressRecord | undefined, check: FileCheck) => {
+    if (check !== 'ok' && rec && 'outcome' in rec && rec.outcome === 'done') broken.push({ kind, key, reason: check });
+  };
 
   if (!docRec || docRec.kind !== 'doc' || ('outcome' in docRec && docRec.outcome === 'error')) {
     missing.push('состав документа не прочитан');
@@ -215,23 +314,33 @@ async function rowState(outDir: string, row: SnapshotRow, progress: Map<string, 
     recipientState = docRec.recipientState;
     newSignatures = docRec.newSignatures;
     for (const id of docRec.signatureIds) {
-      const rec = progress.get(artifactKey(row, 'signature', id));
-      if (await fileOk(outDir, rec)) signatures[docRec.roles[id] ?? 'other'] += 1;
+      const key = artifactKey(row, 'signature', id);
+      const rec = progress.get(key);
+      const check = await checkFile(outDir, rec, checkHashes);
+      noteBroken('signature', key, rec, check);
+      if (check === 'ok') signatures[docRec.roles[id] ?? 'other'] += 1;
       else {
-        missing.push(`подпись ${id}`);
+        missing.push(`подпись ${id} (${check})`);
         if (rec && 'outcome' in rec && rec.outcome === 'error') error = rec.reason;
       }
     }
   }
 
-  const fileDone = await fileOk(outDir, fileRec);
+  const fileCheck = await checkFile(outDir, fileRec, checkHashes);
+  noteBroken('file', artifactKey(row, 'file'), fileRec, fileCheck);
+  const fileDone = fileCheck === 'ok';
   if (!fileDone) {
-    missing.push('исходный файл');
+    missing.push(`исходный файл (${fileCheck})`);
     if (fileRec && 'outcome' in fileRec && fileRec.outcome === 'error') error = fileRec.reason;
   }
-  const printSettled = await settled(outDir, printRec);
+  const printCheck =
+    printRec && 'outcome' in printRec && printRec.outcome === 'unavailable'
+      ? 'ok'
+      : await checkFile(outDir, printRec, checkHashes);
+  noteBroken('printform', artifactKey(row, 'printform'), printRec, printCheck);
+  const printSettled = printCheck === 'ok';
   if (!printSettled) {
-    missing.push('печатная форма');
+    missing.push(`печатная форма (${printCheck})`);
     if (printRec && 'outcome' in printRec && printRec.outcome === 'error') error = printRec.reason;
   }
   const printForm: RowDownloadState['printForm'] = !printRec
@@ -254,6 +363,7 @@ async function rowState(outDir: string, row: SnapshotRow, progress: Map<string, 
     printFormReason: printRec && 'outcome' in printRec && printRec.outcome === 'unavailable' ? printRec.reason : null,
     dir: fileRec && 'outcome' in fileRec && fileRec.outcome === 'done' ? path.posix.dirname(fileRec.path) : null,
     error,
+    broken,
   };
 }
 
@@ -308,12 +418,20 @@ export async function runContractDownload(
   const progress = await readProgress(outDir);
   const run: DownloadRun = { selected: rows.length, processed: 0, stoppedBy: null, errors: 0, requests: 0 };
 
+  const pastHard = () => Boolean(opts.hardDeadline && now() >= opts.hardDeadline);
   const call = async <T>(fn: () => Promise<T>): Promise<T> => {
     if (opts.pauseMs) await sleep(opts.pauseMs);
+    if (pastHard()) throw new PastHardDeadline();
     await session.ensureLease();
     run.requests += 1;
     return fn();
   };
+  // Кто занимает путь: файл одного ключа не может лечь поверх файла другого.
+  const pathOwner = new Map<string, string>();
+  for (const rec of progress.values()) {
+    if ('outcome' in rec && rec.outcome === 'done') pathOwner.set(rec.path, rec.key);
+  }
+  const pathFree = (rel: string, key: string) => (pathOwner.get(rel) ?? key) === key;
   // Диск — общий с порталом: при нехватке места выгрузка останавливается сама.
   const diskLow = async (): Promise<boolean> => {
     if (!opts.freeBytes || opts.minFreeBytes === undefined) return false;
@@ -324,6 +442,7 @@ export async function runContractDownload(
   };
   const record = async (rec: ProgressRecord) => {
     progress.set(rec.key, rec);
+    if ('outcome' in rec && rec.outcome === 'done') pathOwner.set(rec.path, rec.key);
     if ('outcome' in rec && rec.outcome === 'error') run.errors += 1;
     await appendProgress(outDir, rec);
   };
@@ -356,7 +475,7 @@ export async function runContractDownload(
       try {
         message = await call(() => client.getMessage(boxId, messageId));
       } catch (err) {
-        if (err instanceof EdoLeaseLost) throw err;
+        rethrowIfRunLevel(err);
         for (const row of msgRows) {
           await record({ kind: 'doc', key: artifactKey(row, 'doc'), row: row.row, at: stamp(), outcome: 'error', reason: `состав сообщения: ${errorText(err)}` });
         }
@@ -381,8 +500,13 @@ export async function runContractDownload(
       }
     }
   } catch (err) {
-    if (!(err instanceof EdoLeaseLost)) throw err;
-    run.stoppedBy = 'lease_lost';
+    if (err instanceof EdoLeaseLost) run.stoppedBy = 'lease_lost';
+    else if (err instanceof PastHardDeadline) run.stoppedBy = 'deadline';
+    else if (isAccountLevelFailure(err)) {
+      run.stoppedBy = 'diadoc_unavailable';
+      run.stopReason = errorText(err);
+      log(`Диадок отказал на уровне учётки или связи — прогон остановлен: ${run.stopReason}`);
+    } else throw err;
   }
   return run;
 
@@ -424,26 +548,28 @@ export async function runContractDownload(
         const original = doc.FileName ?? doc.DocumentInfo?.FileName ?? row.fileName ?? '';
         const ext = splitExt(original).ext ?? `.${detectEdoFile(buf, original || null).ext}`;
         const rel = `${place.dir}/${fitFileName(place.stem, ext)}`;
+        if (!pathFree(rel, fileKey)) throw new Error(`путь ${rel} занят другим файлом`);
         await record({ kind: 'file', key: fileKey, row: row.row, at: stamp(), outcome: 'done', path: rel, ...(await writeArtifact(rel, buf)) });
       } catch (err) {
-        if (err instanceof EdoLeaseLost) throw err;
+        rethrowIfRunLevel(err);
         await record({ kind: 'file', key: fileKey, row: row.row, at: stamp(), outcome: 'error', reason: errorText(err) });
       }
     }
 
-    // Подписи — каждая отдельно; номер внутри роли — по порядку в сообщении.
-    const seenByRole: Record<SignatureRole, number> = { sender: 0, recipient: 0, approvement: 0, other: 0 };
+    // Подписи — каждая отдельно; имя от идентификатора подписи, не от порядка.
+    const tags = signatureTags(sigs.map((s) => s.EntityId));
     for (const sig of sigs) {
       const role = roles[sig.EntityId]!;
-      seenByRole[role] += 1;
       const key = artifactKey(row, 'signature', sig.EntityId);
       if (await fileOk(outDir, progress.get(key))) continue;
       try {
         const buf = await call(() => client.getEntityContent(boxId, row.messageId, sig.EntityId, opts.maxFileBytes));
-        const rel = `${place.dir}/${signatureFileName(place.stem, role, seenByRole[role])}`;
+        let rel = `${place.dir}/${signatureFileName(place.stem, role, tags.get(sig.EntityId)!)}`;
+        if (!pathFree(rel, key)) rel = `${place.dir}/${signatureFileName(place.stem, role, sig.EntityId)}`;
+        if (!pathFree(rel, key)) throw new Error(`путь ${rel} занят другим файлом`);
         await record({ kind: 'signature', key, row: row.row, at: stamp(), outcome: 'done', path: rel, ...(await writeArtifact(rel, buf)) });
       } catch (err) {
-        if (err instanceof EdoLeaseLost) throw err;
+        rethrowIfRunLevel(err);
         await record({ kind: 'signature', key, row: row.row, at: stamp(), outcome: 'error', reason: errorText(err) });
       }
     }
@@ -456,6 +582,7 @@ export async function runContractDownload(
         const res = await call(() => client.generatePrintForm(boxId, row.messageId, row.entityId, opts.maxFileBytes));
         if (res.state === 'ready') {
           const rel = `${place.dir}/${PRINT_FORM_FILE}`;
+          if (!pathFree(rel, printKey)) throw new Error(`путь ${rel} занят другим файлом`);
           await record({ kind: 'printform', key: printKey, row: row.row, at: stamp(), outcome: 'done', path: rel, ...(await writeArtifact(rel, res.pdf)) });
           return;
         }
@@ -467,10 +594,13 @@ export async function runContractDownload(
           await record({ kind: 'printform', key: printKey, row: row.row, at: stamp(), outcome: 'error', reason: `форма не готова за ${attempts} попыток` });
           return;
         }
-        await sleep(Math.min(res.afterMs, maxWait));
+        const wait = Math.min(res.afterMs, maxWait);
+        // Не успеем до границы части — отложить: без итога, следующий запуск начнёт заново.
+        if (opts.hardDeadline && now().getTime() + wait >= opts.hardDeadline.getTime()) throw new PastHardDeadline();
+        await sleep(wait);
       }
     } catch (err) {
-      if (err instanceof EdoLeaseLost) throw err;
+      rethrowIfRunLevel(err);
       await record({ kind: 'printform', key: printKey, row: row.row, at: stamp(), outcome: 'error', reason: errorText(err) });
     }
   }

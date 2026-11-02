@@ -12,9 +12,16 @@
  *
  * Портал не страдает:
  *   - скачивание идёт частями (--chunk-minutes) и между ними отпускает учётку,
- *     дожидаясь прохода автовыгрузки УПД, — реестр УПД не отстаёт;
+ *     дожидаясь прохода автовыгрузки УПД (и перед первой частью, кроме запуска
+ *     с --limit); не дождались — остановка. Граница части действует и внутри
+ *     документа (+3 мин на досчёт). Реестр УПД отстаёт обычно не больше
+ *     интервала автовыгрузки, в худшем случае на один пропущенный проход;
  *   - пауза между запросами к Диадоку (--pause-ms);
- *   - при нехватке места на диске (--min-free-gb) скачивание останавливается само.
+ *   - при нехватке места на диске (--min-free-gb) скачивание останавливается само;
+ *   - отказ уровня учётки или связи (401/402/403/429, обрыв) останавливает
+ *     прогон сразу, а не перебирает все документы.
+ *
+ * --verify сверяет sha256 каждого скачанного файла с журналом.
  *
  * Коды выхода: 0 — опись полная / выгрузка завершена; 1 — опись неполная,
  * выгрузка не завершена или сбой (файлы и отчёт записаны); 2 — учётку держит
@@ -29,7 +36,7 @@
  *     -v "$PWD/packages/contracts/src:/app/packages/contracts/src:ro" matcheck-api \
  *     node_modules/.bin/tsx scripts/edo-export-contracts.ts --inventory --since 2021-11-02 --out-dir /data/edo-contracts
  *   … --download --out-dir /data/edo-contracts [--include spec,protocol,agreement] [--add-rows /data/rows.txt]
- *               [--limit 5] [--chunk-minutes 25] [--max-minutes 480] [--pause-ms 150] [--min-free-gb 5]
+ *               [--limit 5] [--chunk-minutes 20] [--max-minutes 480] [--pause-ms 150] [--min-free-gb 5]
  *               [--max-file-mb 50]
  *   … --verify --out-dir /data/edo-contracts
  */
@@ -250,8 +257,15 @@ async function waitAutoExportPass(accountId: string, after: Date, maxWaitMs: num
   }
 }
 
+/** Сколько часть может досчитывать последний документ после своего конца. */
+const CHUNK_GRACE_MS = 3 * 60_000;
+
 const STOP_MESSAGES: Record<ChunkedResult['stoppedBy'], string> = {
   done: 'Всё выбранное обработано.',
+  auto_export_missing:
+    'Остановлено: автовыгрузка УПД не прошла за 35 мин. Проверьте её (edo_export_runs, mail-worker) и запустите снова — продолжит с того же места.',
+  diadoc_unavailable:
+    'Остановлено: Диадок отказал на уровне учётки или связи. Устраните причину и запустите снова — продолжит с того же места.',
   limit: 'Остановлено по --limit.',
   deadline: 'Остановлено по общему времени (--max-minutes); запустите ещё раз — продолжит с того же места.',
   disk: 'Остановлено: мало места на диске (--min-free-gb). Освободите место и запустите ещё раз.',
@@ -270,7 +284,7 @@ async function download(outDir: string, args: Map<string, string>): Promise<numb
   const addRows = await readAddRows(args.get('--add-rows'));
   const limit = positiveInt(args.get('--limit'), '--limit', null);
   const maxMinutes = positiveInt(args.get('--max-minutes'), '--max-minutes', 480)!;
-  const chunkMinutes = positiveInt(args.get('--chunk-minutes'), '--chunk-minutes', 25)!;
+  const chunkMinutes = positiveInt(args.get('--chunk-minutes'), '--chunk-minutes', 20)!;
   const pauseMs = nonNegativeInt(args.get('--pause-ms'), '--pause-ms', 150);
   const minFreeGb = nonNegativeInt(args.get('--min-free-gb'), '--min-free-gb', 5);
   const maxFileMb = positiveInt(args.get('--max-file-mb'), '--max-file-mb', 50)!;
@@ -295,6 +309,7 @@ async function download(outDir: string, args: Map<string, string>): Promise<numb
             addRows,
             limit: left,
             deadline,
+            hardDeadline: new Date(deadline.getTime() + CHUNK_GRACE_MS),
             pauseMs,
             freeBytes,
             minFreeBytes: minFreeGb * 1024 ** 3,
@@ -312,6 +327,8 @@ async function download(outDir: string, args: Map<string, string>): Promise<numb
       chunkMs: chunkMinutes * 60_000,
       overallDeadline: new Date(Date.now() + maxMinutes * 60_000),
       limit,
+      // Короткая проба (--limit) не ждёт проход: одна часть, слот задеть почти не может.
+      waitBeforeFirst: autoExportEnabled && limit === null,
       waitPassMaxMs: 35 * 60_000,
       leaseRetryMs: 60_000,
       leaseRetries: 40,
@@ -321,6 +338,7 @@ async function download(outDir: string, args: Map<string, string>): Promise<numb
     `Частей: ${result.chunks}, обработано документов: ${result.processed}, запросов: ${result.requests}, ошибок: ${result.errors}`,
   );
   console.info(STOP_MESSAGES[result.stoppedBy]);
+  if (result.stopReason) console.info(`Причина: ${result.stopReason}`);
 
   const state = await collectDownloadState(outDir, snapshot);
   await writeReports(outDir, snapshot, state);
@@ -331,7 +349,11 @@ async function download(outDir: string, args: Map<string, string>): Promise<numb
 
 async function verify(outDir: string): Promise<number> {
   const snapshot = await readSnapshot(outDir);
-  const state = await collectDownloadState(outDir, snapshot);
+  console.info('Проверяю каждый файл: наличие, размер и sha256 по журналу…');
+  const state = await collectDownloadState(outDir, snapshot, { checkHashes: true, markBroken: true });
+  if (state.marked > 0) {
+    console.info(`Помечено к перекачке: ${state.marked} — запустите --download, он скачает их заново, затем снова --verify.`);
+  }
   if (!state.selected) {
     console.info('Выгрузка не начиналась (нет selection.json).');
     return 1;

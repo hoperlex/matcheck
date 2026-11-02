@@ -11,6 +11,7 @@ import {
   moscowDay,
   safeSegment,
   signatureFileName,
+  signatureTags,
   splitExt,
 } from '../src/domain/edo/contracts/layout.js';
 import type { InventorySnapshot, SnapshotRow } from '../src/domain/edo/contracts/snapshot.js';
@@ -69,9 +70,16 @@ describe('безопасные имена', () => {
     const name = fitFileName('Д'.repeat(200), '.pdf');
     expect(name.endsWith('.pdf')).toBe(true);
     expect(Array.from(name).length).toBeLessThanOrEqual(NAME_LIMITS.file);
-    expect(signatureFileName('Договор', 'recipient', 1)).toBe('Договор — подпись получателя.sig');
-    expect(signatureFileName('Договор', 'sender', 2)).toBe('Договор — подпись отправителя 2.sig');
-    expect(signatureFileName('Договор', 'approvement', 1)).toBe('Договор — согласующая подпись.sig');
+    expect(signatureFileName('Договор', 'recipient', '3f9a1c2e')).toBe('Договор — подпись получателя 3f9a1c2e.sig');
+    expect(signatureFileName('Договор', 'sender', 'a1b2c3d4')).toBe('Договор — подпись отправителя a1b2c3d4.sig');
+    expect(signatureFileName('Договор', 'approvement', '00ff00ff')).toBe('Договор — согласующая подпись 00ff00ff.sig');
+  });
+
+  it('метка подписи — 8 знаков id, при совпадении в документе — id целиком', () => {
+    const tags = signatureTags(['3f9a1c2e-1111', '3f9a1c2e-2222', 'a1b2c3d4-3333']);
+    expect(tags.get('3f9a1c2e-1111')).toBe('3f9a1c2e-1111');
+    expect(tags.get('3f9a1c2e-2222')).toBe('3f9a1c2e-2222');
+    expect(tags.get('a1b2c3d4-3333')).toBe('a1b2c3d4');
   });
 
   it('расширение', () => {
@@ -121,7 +129,7 @@ describe('раскладка', () => {
     const layout = computeLayout(snapshot([long], cps), [long]);
     const place = layout.get(1)!;
     expect(place.dir).toContain('Без названия box-b');
-    const full = `${place.dir}/${signatureFileName(place.stem, 'recipient', 2)}`;
+    const full = `${place.dir}/${signatureFileName(place.stem, 'recipient', '3f9a1c2e')}`;
     expect(Array.from(full).length).toBeLessThanOrEqual(205);
   });
 

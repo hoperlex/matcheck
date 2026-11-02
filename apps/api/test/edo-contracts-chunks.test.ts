@@ -8,7 +8,10 @@ import type { DownloadRun } from '../src/domain/edo/contracts/download.js';
 
 const MIN = 60_000;
 
-function harness(outcomes: (DownloadRun | { skipped: 'lease_taken' | 'no_box' | 'not_found' })[], opts: { autoExport?: boolean; chunkMs?: number } = {}) {
+function harness(
+  outcomes: (DownloadRun | { skipped: 'lease_taken' | 'no_box' | 'not_found' })[],
+  opts: { autoExport?: boolean; chunkMs?: number; passes?: boolean[] } = {},
+) {
   let clock = Date.UTC(2026, 10, 2, 18, 0);
   const calls: string[] = [];
   const chunkArgs: { deadline: number; limit: number | null }[] = [];
@@ -23,8 +26,9 @@ function harness(outcomes: (DownloadRun | { skipped: 'lease_taken' | 'no_box' | 
     },
     waitAutoExportPass: async (_after, maxWaitMs) => {
       calls.push(`wait ${maxWaitMs / MIN}`);
-      clock += 10 * MIN;
-      return true;
+      const passed = opts.passes ? (opts.passes.shift() ?? true) : true;
+      clock += passed ? 10 * MIN : maxWaitMs;
+      return passed;
     },
     autoExportEnabled: opts.autoExport ?? true,
     now: () => new Date(clock),
@@ -39,6 +43,7 @@ function harness(outcomes: (DownloadRun | { skipped: 'lease_taken' | 'no_box' | 
       chunkMs: opts.chunkMs ?? 25 * MIN,
       overallDeadline: new Date(clock + 480 * MIN),
       limit: null,
+      waitBeforeFirst: false,
       waitPassMaxMs: 35 * MIN,
       leaseRetryMs: MIN,
       leaseRetries: 3,
@@ -86,6 +91,26 @@ describe('выгрузка частями', () => {
     const h = harness([part(3, 'deadline'), part(2, 'limit')]);
     expect(await h.run({ limit: 5 })).toMatchObject({ stoppedBy: 'limit', processed: 5 });
     expect(h.chunkArgs.map((c) => c.limit)).toEqual([5, 2]);
+  });
+
+  it('шлюз: прохода автовыгрузки не дождались — остановка, а не продолжение', async () => {
+    const h = harness([part(40, 'deadline')], { passes: [false] });
+    expect(await h.run()).toMatchObject({ stoppedBy: 'auto_export_missing', chunks: 1, processed: 40 });
+    expect(h.calls).toEqual(['chunk', 'wait 35']);
+  });
+
+  it('перед первой частью ждёт проход; не дождался — ни одной части', async () => {
+    const ok = harness([part(5, null)]);
+    expect(await ok.run({ waitBeforeFirst: true })).toMatchObject({ stoppedBy: 'done' });
+    expect(ok.calls).toEqual(['wait 35', 'chunk']);
+
+    const missing = harness([], { passes: [false] });
+    expect(await missing.run({ waitBeforeFirst: true })).toMatchObject({ stoppedBy: 'auto_export_missing', chunks: 0 });
+  });
+
+  it('отказ Диадока уровня учётки — остановка с причиной', async () => {
+    const out = { ...part(2, 'diadoc_unavailable'), stopReason: 'DiadocSubscriptionExpired: 402' };
+    expect(await harness([out]).run()).toMatchObject({ stoppedBy: 'diadoc_unavailable', stopReason: 'DiadocSubscriptionExpired: 402' });
   });
 
   it('мало места или потеря лиза — остановка сразу, без следующей части', async () => {
