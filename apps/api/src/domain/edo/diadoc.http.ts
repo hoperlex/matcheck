@@ -70,6 +70,11 @@ const ALLOWED_ROUTES: readonly AllowedRoute[] = [
   { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/V2/GetDocumentTypes' },
   // Резервный разбор формализованного титула (за флагом EDO_PARSE_TITLE_FALLBACK).
   { method: 'POST', host: 'diadoc-api.kontur.ru', path: '/ParseTitleXml' },
+  // Выгрузка договоров: реквизиты контрагента по ящику и печатная форма
+  // документа. Оба — чтение: форма собирается на стороне Диадока и отдаётся
+  // файлом, в документообороте ничего не меняется.
+  { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/GetOrganization' },
+  { method: 'GET', host: 'diadoc-api.kontur.ru', path: '/GeneratePrintForm' },
 ];
 
 export function isAllowedRequest(method: string, url: URL): boolean {
@@ -419,6 +424,12 @@ export type DiadocFetchOptions = {
    * запроса. Нужен для диагностики отказов: снаружи виден только ответ.
    */
   onRequest?: (snapshot: DiadocRequestSnapshot) => void;
+  /**
+   * Коды, которые для этого запроса — ответ, а не ошибка. Нужно печатной форме:
+   * 409 там значит «Диадок не формирует форму для этого документа», и вызывающему
+   * важно отличить это от сбоя. Остальным запросам 409 по-прежнему ошибка.
+   */
+  acceptStatuses?: readonly number[];
 };
 
 /**
@@ -463,7 +474,7 @@ export async function diadocFetch(opts: DiadocFetchOptions): Promise<Response> {
       continue;
     }
 
-    if (res.ok) return res;
+    if (res.ok || opts.acceptStatuses?.includes(res.status)) return res;
 
     switch (res.status) {
       case 401:

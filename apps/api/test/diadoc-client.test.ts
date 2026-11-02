@@ -221,3 +221,42 @@ describe('список документов (V3)', () => {
     expect(list.HasMoreResults).toBe(true);
   });
 });
+
+describe('выгрузка договоров: реквизиты и печатная форма', () => {
+  it('GetOrganization по ящику; 404 — «не найден», а не сбой', async () => {
+    const { client, calls } = clientWith((url) =>
+      url.searchParams.get('boxId') === 'box-1'
+        ? json({ Inn: ' 7700000001 ', Kpp: '770001001', FullName: 'ООО «Альфа»', ShortName: 'Альфа' })
+        : new Response('', { status: 404 }),
+    );
+    expect(await client.getOrganization('box-1')).toEqual({ inn: '7700000001', kpp: '770001001', name: 'Альфа' });
+    expect(await client.getOrganization('box-2')).toBeNull();
+    expect(new URL(calls[0]!.url).pathname).toBe('/GetOrganization');
+  });
+
+  it('печатная форма: пустой ответ с Retry-After — повтор, PDF — готово, 409 — недоступна', async () => {
+    const replies = [
+      () => new Response('', { status: 200, headers: { 'Retry-After': '7' } }),
+      () => new Response('%PDF-1.4 форма', { status: 200 }),
+      () => new Response('Невозможно сформировать печатную форму', { status: 409 }),
+    ];
+    const { client, calls } = clientWith(() => replies.shift()!());
+    expect(await client.generatePrintForm('b', 'm', 'd', 1024)).toEqual({ state: 'retry', afterMs: 7000 });
+    const ready = await client.generatePrintForm('b', 'm', 'd', 1024);
+    expect(ready.state === 'ready' && ready.pdf.toString('utf-8')).toBe('%PDF-1.4 форма');
+    expect(await client.generatePrintForm('b', 'm', 'd', 1024)).toEqual({
+      state: 'unavailable',
+      status: 409,
+      text: 'Невозможно сформировать печатную форму',
+    });
+    const url = new URL(calls[0]!.url);
+    expect(url.pathname).toBe('/GeneratePrintForm');
+    expect([...url.searchParams.entries()]).toEqual([
+      ['boxId', 'b'],
+      ['messageId', 'm'],
+      ['documentId', 'd'],
+    ]);
+    // Файл, а не структура: JSON не просим.
+    expect(calls[0]!.headers.Accept).toBeUndefined();
+  });
+});

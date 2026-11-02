@@ -73,6 +73,11 @@ export const DiadocEntitySchema = z
     ParentEntityId: z.string().optional(),
     FileName: z.string().optional(),
     NeedRecipientSignature: z.boolean().optional(),
+    // Только у подписи: чей ящик подписал и согласующая ли это подпись. По ним
+    // выгрузка договоров отличает подпись отправителя от ответной.
+    SignerBoxId: LooseString,
+    IsApprovementSignature: LooseBoolean,
+    PacketId: LooseString,
     DocumentInfo: DiadocDocumentInfoSchema.optional(),
     Content: z
       .object({ Size: z.number().optional() })
@@ -88,6 +93,7 @@ export const DiadocMessageSchema = z
     FromBoxId: z.string().optional(),
     FromTitle: LooseString,
     ToBoxId: z.string().optional(),
+    ToTitle: LooseString,
     // Время сообщения Диадок отдаёт в TimestampTicks; поля Timestamp в ответе
     // нет, но прежние фикстуры его используют — читаем оба.
     Timestamp: LooseTimestamp,

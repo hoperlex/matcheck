@@ -11,7 +11,9 @@ import type { DiadocAuth } from './diadoc.auth.js';
 import {
   DIADOC_ENDPOINTS,
   DiadocAuthExpired,
+  DiadocGone,
   diadocFetch,
+  parseRetryAfterMs,
   readBodyWithLimit,
   readJson,
   type DiadocEnvironment,
@@ -22,6 +24,7 @@ import {
   DiadocEmployeeSchema,
   DiadocMessageSchema,
   DiadocOrganizationListSchema,
+  DiadocOrganizationSchema,
   dateToDiadocTicks,
   type DiadocBoxEvent,
   type DiadocDocumentList,
@@ -111,7 +114,7 @@ export class DiadocClient {
   private async request(
     url: URL,
     method: 'GET' | 'POST' = 'GET',
-    opts: { json?: boolean; signal?: AbortSignal } = {},
+    opts: { json?: boolean; signal?: AbortSignal; acceptStatuses?: readonly number[] } = {},
   ): Promise<Response> {
     const wantJson = opts.json !== false;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -127,6 +130,7 @@ export class DiadocClient {
           timeoutMs: method === 'GET' ? LIST_TIMEOUT_MS : CONTENT_TIMEOUT_MS,
           fetchImpl: this.deps.fetchImpl,
           signal: opts.signal,
+          acceptStatuses: opts.acceptStatuses,
         });
       } catch (err) {
         if (err instanceof DiadocAuthExpired && attempt === 0) {
@@ -267,7 +271,69 @@ export class DiadocClient {
     const res = await this.request(url, 'GET', { json: false, signal: opts.signal });
     return readBodyWithLimit(res, maxBytes ?? loadEnv().EDO_XML_MAX_BYTES, url);
   }
+
+  /**
+   * Реквизиты организации по ящику: ИНН, КПП, название. Ящик не найден — `null`
+   * (Диадок отвечает 404, это не сбой).
+   */
+  async getOrganization(boxId: string, opts: RequestOptions = {}): Promise<DiadocOrganizationInfo | null> {
+    const url = new URL('/GetOrganization', this.api);
+    url.searchParams.set('boxId', boxId);
+    let res: Response;
+    try {
+      res = await this.request(url, 'GET', { signal: opts.signal });
+    } catch (err) {
+      if (err instanceof DiadocGone) return null;
+      throw err;
+    }
+    const org = DiadocOrganizationSchema.parse(await readJson(res, url));
+    return {
+      inn: org.Inn?.trim() || null,
+      kpp: org.Kpp?.trim() || null,
+      name: org.ShortName?.trim() || org.FullName?.trim() || null,
+    };
+  }
+
+  /**
+   * Печатная форма документа (PDF).
+   *
+   * Форма собирается асинхронно: пока она не готова, Диадок отвечает 200 с
+   * пустым телом и заголовком `Retry-After` — тогда `retry`, повторять решает
+   * вызывающий. 409 — Диадок не формирует форму для этого документа
+   * (`unavailable` с текстом ответа): это свойство документа, а не сбой.
+   */
+  async generatePrintForm(
+    boxId: string,
+    messageId: string,
+    documentId: string,
+    maxBytes: number,
+    opts: RequestOptions = {},
+  ): Promise<DiadocPrintFormResult> {
+    const url = new URL('/GeneratePrintForm', this.api);
+    url.searchParams.set('boxId', boxId);
+    url.searchParams.set('messageId', messageId);
+    url.searchParams.set('documentId', documentId);
+    const res = await this.request(url, 'GET', { json: false, signal: opts.signal, acceptStatuses: [409] });
+    if (res.status === 409) {
+      const text = (await readBodyWithLimit(res, PRINT_FORM_ERROR_MAX_BYTES, url)).toString('utf-8');
+      return { state: 'unavailable', status: 409, text: text.trim().slice(0, 500) };
+    }
+    const retryAfter = res.headers.get('Retry-After');
+    const body = await readBodyWithLimit(res, maxBytes, url);
+    if (body.length === 0) return { state: 'retry', afterMs: parseRetryAfterMs(retryAfter) };
+    return { state: 'ready', pdf: body };
+  }
 }
+
+/** Текст отказа печатной формы — для описи; больше не нужно. */
+const PRINT_FORM_ERROR_MAX_BYTES = 64 * 1024;
+
+export type DiadocOrganizationInfo = { inn: string | null; kpp: string | null; name: string | null };
+
+export type DiadocPrintFormResult =
+  | { state: 'ready'; pdf: Buffer }
+  | { state: 'retry'; afterMs: number }
+  | { state: 'unavailable'; status: 409; text: string };
 
 function asArray(v: unknown): Record<string, unknown>[] {
   return Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === 'object') : [];

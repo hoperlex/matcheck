@@ -48,6 +48,13 @@ describe('разрешающий список путей', () => {
     expect(isAllowedRequest('POST', new URL(`${API}/V3/GetDocuments`))).toBe(false);
   });
 
+  it('выгрузка договоров: реквизиты по ящику и печатная форма — только GET', () => {
+    expect(isAllowedRequest('GET', new URL(`${API}/GetOrganization`))).toBe(true);
+    expect(isAllowedRequest('POST', new URL(`${API}/GetOrganization`))).toBe(false);
+    expect(isAllowedRequest('GET', new URL(`${API}/GeneratePrintForm`))).toBe(true);
+    expect(isAllowedRequest('POST', new URL(`${API}/GeneratePrintForm`))).toBe(false);
+  });
+
   it('не пропускает методы, которые что-то отправляют или подписывают', () => {
     expect(isAllowedRequest('POST', new URL(`${API}/V3/PostMessage`))).toBe(false);
     expect(isAllowedRequest('POST', new URL(`${API}/V3/Sign`))).toBe(false);
@@ -158,6 +165,25 @@ describe('матрица ошибок', () => {
     ).rejects.toBeInstanceOf(DiadocTransient);
     // Первая попытка плюс EDO_HTTP_MAX_RETRIES.
     expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('409 — ответ только для запроса, который его ждёт; остальным по-прежнему ошибка', async () => {
+    const fetchImpl = vi.fn(async () => new Response('нельзя', { status: 409 }));
+    const base = {
+      method: 'GET' as const,
+      url: new URL(`${API}/GeneratePrintForm`),
+      timeoutMs: 1000,
+      sleep: noSleep,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    };
+    await expect(diadocFetch(base)).rejects.toThrow(/HTTP 409/);
+    const res = await diadocFetch({ ...base, acceptStatuses: [409] });
+    expect(res.status).toBe(409);
+    // Чужой код опция не пропускает.
+    const other = vi.fn(async () => new Response('', { status: 400 }));
+    await expect(
+      diadocFetch({ ...base, acceptStatuses: [409], fetchImpl: other as unknown as typeof fetch }),
+    ).rejects.toThrow(/HTTP 400/);
   });
 
   it('сообщение об ошибке не содержит тела ответа', async () => {
