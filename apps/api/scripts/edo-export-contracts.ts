@@ -10,24 +10,36 @@
  * Только чтение Диадока: работает под лизом учётки (под ним обменивается
  * refresh-токен); в БД, кроме лиза и токена, ничего не пишет, в хранилище — ничего.
  *
+ * Портал не страдает:
+ *   - скачивание идёт частями (--chunk-minutes) и между ними отпускает учётку,
+ *     дожидаясь прохода автовыгрузки УПД, — реестр УПД не отстаёт;
+ *   - пауза между запросами к Диадоку (--pause-ms);
+ *   - при нехватке места на диске (--min-free-gb) скачивание останавливается само.
+ *
  * Коды выхода: 0 — опись полная / выгрузка завершена; 1 — опись неполная,
  * выгрузка не завершена или сбой (файлы и отчёт записаны); 2 — учётку держит
  * другая работа по ЭДО или лиз потерян.
  *
- * Запуск на бою (каталог /data должен быть доступен пользователю node на запись):
+ * Запуск на бою без деплоя: разовый контейнер из работающего образа, свежий код
+ * подложен монтированием (из ~/app после `git pull --ff-only`). Каталог /data
+ * должен быть доступен на запись пользователю 1000.
  *   docker compose -f infra/docker-compose.prod.yml run --rm --no-deps -T \
- *     -v /srv/matcheck/tmp:/data matcheck-api \
+ *     -e NODE_OPTIONS=--max-old-space-size=512 -v /srv/matcheck/tmp:/data \
+ *     -v "$PWD/apps/api/src:/app/apps/api/src:ro" -v "$PWD/apps/api/scripts:/app/apps/api/scripts:ro" \
+ *     -v "$PWD/packages/contracts/src:/app/packages/contracts/src:ro" matcheck-api \
  *     node_modules/.bin/tsx scripts/edo-export-contracts.ts --inventory --since 2021-11-02 --out-dir /data/edo-contracts
  *   … --download --out-dir /data/edo-contracts [--include spec,protocol,agreement] [--add-rows /data/rows.txt]
- *               [--limit 5] [--max-minutes 60] [--max-file-mb 50]
+ *               [--limit 5] [--chunk-minutes 25] [--max-minutes 480] [--pause-ms 150] [--min-free-gb 5]
+ *               [--max-file-mb 50]
  *   … --verify --out-dir /data/edo-contracts
  */
 import { randomUUID } from 'node:crypto';
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, statfs } from 'node:fs/promises';
 import path from 'node:path';
 import { and, eq, isNotNull } from 'drizzle-orm';
 import { db, sql } from '../src/db/client.js';
 import { edoAccounts } from '../src/db/schema.js';
+import { runDownloadInChunks, type ChunkedResult } from '../src/domain/edo/contracts/chunks.js';
 import { REVIEW_CATEGORIES, type ReviewCategory } from '../src/domain/edo/contracts/classify.js';
 import {
   DownloadRefused,
@@ -37,7 +49,7 @@ import {
   type DownloadState,
 } from '../src/domain/edo/contracts/download.js';
 import { runContractInventory } from '../src/domain/edo/contracts/inventory.js';
-import { buildContractsXlsx } from '../src/domain/edo/contracts/inventory-xlsx.js';
+import { writeContractsXlsx } from '../src/domain/edo/contracts/inventory-xlsx.js';
 import {
   INVENTORY_FILE,
   PROGRESS_FILE,
@@ -50,7 +62,8 @@ import {
 } from '../src/domain/edo/contracts/snapshot.js';
 import { moscowMidnight } from '../src/domain/edo/list-windows.js';
 import { DIADOC_PROVIDER, isDiadocAccount } from '../src/domain/edo/provider.js';
-import { runWithEdoClient } from '../src/domain/jobs/edo-poll-runner.js';
+import { isRunnerSkipped, runWithEdoClient } from '../src/domain/jobs/edo-poll-runner.js';
+import { loadEnv } from '../src/lib/env.js';
 import { logger } from '../src/lib/logger.js';
 
 const MODES = new Set(['--inventory', '--download', '--verify']);
@@ -63,6 +76,9 @@ const FLAGS_WITH_VALUE = new Set([
   '--limit',
   '--max-minutes',
   '--max-file-mb',
+  '--chunk-minutes',
+  '--pause-ms',
+  '--min-free-gb',
 ]);
 
 function parseArgs(argv: string[]): { mode: string; args: Map<string, string> } {
@@ -91,6 +107,15 @@ function positiveInt(raw: string | undefined, flag: string, fallback: number | n
   return n;
 }
 
+function nonNegativeInt(raw: string | undefined, flag: string, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`${flag} ждёт целое число не меньше нуля`);
+  return n;
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 type Account = typeof edoAccounts.$inferSelect;
 
 async function resolveAccount(accountId: string | undefined): Promise<Account> {
@@ -114,8 +139,8 @@ async function resolveAccount(accountId: string | undefined): Promise<Account> {
 const runnerDeps = () => ({ db, log: logger.child({ service: 'edo-export-contracts' }), owner: randomUUID() });
 
 function skippedCode(outcome: unknown): number | null {
-  if (!outcome || typeof outcome !== 'object' || !('skipped' in outcome)) return null;
-  const skipped = (outcome as { skipped: string }).skipped;
+  if (!isRunnerSkipped(outcome)) return null;
+  const skipped = outcome.skipped;
   console.error(
     skipped === 'lease_taken'
       ? 'Учётная запись занята другой работой по ЭДО (автовыгрузка, осмотр). Запустите через несколько минут.'
@@ -134,7 +159,7 @@ async function exists(file: string): Promise<boolean> {
 }
 
 async function writeReports(outDir: string, snapshot: InventorySnapshot, download: DownloadState | null): Promise<void> {
-  await writeFile(path.join(outDir, XLSX_FILE), await buildContractsXlsx(snapshot, download));
+  await writeContractsXlsx(path.join(outDir, XLSX_FILE), snapshot, download);
   const count = (sel: string) => snapshot.rows.filter((r) => r.selection === sel).length;
   await writeJsonAtomic(path.join(outDir, SUMMARY_FILE), {
     at: new Date().toISOString(),
@@ -212,6 +237,30 @@ async function readAddRows(file: string | undefined): Promise<number[]> {
   return tokens.map(Number);
 }
 
+/** Новый завершённый проход автовыгрузки УПД, начатый после `after`. */
+async function waitAutoExportPass(accountId: string, after: Date, maxWaitMs: number): Promise<boolean> {
+  const until = Date.now() + maxWaitMs;
+  for (;;) {
+    const [row] = await sql<{ n: number }[]>`
+      select count(*)::int as n from edo_export_runs
+       where edo_account_id = ${accountId} and outcome = 'completed' and started_at > ${after}`;
+    if ((row?.n ?? 0) > 0) return true;
+    if (Date.now() >= until) return false;
+    await sleep(30_000);
+  }
+}
+
+const STOP_MESSAGES: Record<ChunkedResult['stoppedBy'], string> = {
+  done: 'Всё выбранное обработано.',
+  limit: 'Остановлено по --limit.',
+  deadline: 'Остановлено по общему времени (--max-minutes); запустите ещё раз — продолжит с того же места.',
+  disk: 'Остановлено: мало места на диске (--min-free-gb). Освободите место и запустите ещё раз.',
+  lease_lost: 'Лиз потерян — учётку забрала другая работа; запустите ещё раз.',
+  lease_busy: 'Учётка долго занята другой работой по ЭДО; запустите позже.',
+  no_box: 'У учётной записи не выбран ящик.',
+  not_found: 'Учётная запись не найдена.',
+};
+
 async function download(outDir: string, args: Map<string, string>): Promise<number> {
   const snapshot = await readSnapshot(outDir);
   assertDownloadable(snapshot);
@@ -220,34 +269,63 @@ async function download(outDir: string, args: Map<string, string>): Promise<numb
   if (unknown.length > 0) throw new Error(`--include: неизвестные категории ${unknown.join(', ')}; есть ${REVIEW_CATEGORIES.join(', ')}`);
   const addRows = await readAddRows(args.get('--add-rows'));
   const limit = positiveInt(args.get('--limit'), '--limit', null);
-  const maxMinutes = positiveInt(args.get('--max-minutes'), '--max-minutes', 60)!;
+  const maxMinutes = positiveInt(args.get('--max-minutes'), '--max-minutes', 480)!;
+  const chunkMinutes = positiveInt(args.get('--chunk-minutes'), '--chunk-minutes', 25)!;
+  const pauseMs = nonNegativeInt(args.get('--pause-ms'), '--pause-ms', 150);
+  const minFreeGb = nonNegativeInt(args.get('--min-free-gb'), '--min-free-gb', 5);
   const maxFileMb = positiveInt(args.get('--max-file-mb'), '--max-file-mb', 50)!;
   const account = await resolveAccount(snapshot.accountId);
-  const deadline = new Date(Date.now() + maxMinutes * 60_000);
-
-  const outcome = await runWithEdoClient(runnerDeps(), account.id, (session) =>
-    runContractDownload(session, snapshot, {
-      outDir,
-      include: include as ReviewCategory[],
-      addRows,
-      limit,
-      deadline,
-      maxFileBytes: maxFileMb * 1024 * 1024,
-      log: (l) => console.info(l),
-    }),
+  const autoExportEnabled = loadEnv().EDO_EXPORT_AUTO_ENABLED;
+  const freeBytes = async () => {
+    const st = await statfs(outDir);
+    return Number(st.bavail) * Number(st.bsize);
+  };
+  console.info(
+    `Части по ${chunkMinutes} мин, всего не больше ${maxMinutes} мин, пауза ${pauseMs} мс, порог диска ${minFreeGb} ГБ; ` +
+      (autoExportEnabled ? 'между частями — ожидание прохода автовыгрузки УПД.' : 'автовыгрузка УПД выключена — без ожидания.'),
   );
-  const skipped = skippedCode(outcome);
-  if (skipped !== null) return skipped;
-  const run = outcome as Awaited<ReturnType<typeof runContractDownload>>;
-  console.info(`Обработано документов: ${run.processed}, запросов: ${run.requests}, ошибок: ${run.errors}`);
-  if (run.stoppedBy === 'limit') console.info('Остановлено по --limit.');
-  if (run.stoppedBy === 'deadline') console.info(`Остановлено по времени (--max-minutes ${maxMinutes}); запустите ещё раз — продолжит с того же места.`);
-  if (run.stoppedBy === 'lease_lost') console.info('Лиз потерян — учётку забрала другая работа; запустите ещё раз.');
+
+  const result = await runDownloadInChunks(
+    {
+      runChunk: (deadline, left) =>
+        runWithEdoClient(runnerDeps(), account.id, (session) =>
+          runContractDownload(session, snapshot, {
+            outDir,
+            include: include as ReviewCategory[],
+            addRows,
+            limit: left,
+            deadline,
+            pauseMs,
+            freeBytes,
+            minFreeBytes: minFreeGb * 1024 ** 3,
+            maxFileBytes: maxFileMb * 1024 * 1024,
+            log: (l) => console.info(l),
+          }),
+        ),
+      waitAutoExportPass: (after, maxWaitMs) => waitAutoExportPass(account.id, after, maxWaitMs),
+      autoExportEnabled,
+      now: () => new Date(),
+      sleep,
+      log: (l) => console.info(l),
+    },
+    {
+      chunkMs: chunkMinutes * 60_000,
+      overallDeadline: new Date(Date.now() + maxMinutes * 60_000),
+      limit,
+      waitPassMaxMs: 35 * 60_000,
+      leaseRetryMs: 60_000,
+      leaseRetries: 40,
+    },
+  );
+  console.info(
+    `Частей: ${result.chunks}, обработано документов: ${result.processed}, запросов: ${result.requests}, ошибок: ${result.errors}`,
+  );
+  console.info(STOP_MESSAGES[result.stoppedBy]);
 
   const state = await collectDownloadState(outDir, snapshot);
   await writeReports(outDir, snapshot, state);
   printDownloadState(state);
-  if (run.stoppedBy === 'lease_lost') return 2;
+  if (result.stoppedBy === 'lease_lost' || result.stoppedBy === 'lease_busy') return 2;
   return state.complete ? 0 : 1;
 }
 

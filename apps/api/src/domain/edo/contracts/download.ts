@@ -56,6 +56,11 @@ export type DownloadOptions = {
   maxFileBytes: number;
   printFormAttempts?: number;
   printFormMaxWaitMs?: number;
+  /** Пауза перед каждым запросом к Диадоку — сверх повторов на 429/5xx в транспорте. */
+  pauseMs?: number;
+  /** Свободное место в папке выгрузки; меньше `minFreeBytes` — остановка до переполнения диска. */
+  freeBytes?: () => Promise<number>;
+  minFreeBytes?: number;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   log?: (line: string) => void;
@@ -64,7 +69,7 @@ export type DownloadOptions = {
 export type DownloadRun = {
   selected: number;
   processed: number;
-  stoppedBy: 'limit' | 'deadline' | 'lease_lost' | null;
+  stoppedBy: 'limit' | 'deadline' | 'lease_lost' | 'disk' | null;
   errors: number;
   requests: number;
 };
@@ -304,9 +309,18 @@ export async function runContractDownload(
   const run: DownloadRun = { selected: rows.length, processed: 0, stoppedBy: null, errors: 0, requests: 0 };
 
   const call = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (opts.pauseMs) await sleep(opts.pauseMs);
     await session.ensureLease();
     run.requests += 1;
     return fn();
+  };
+  // Диск — общий с порталом: при нехватке места выгрузка останавливается сама.
+  const diskLow = async (): Promise<boolean> => {
+    if (!opts.freeBytes || opts.minFreeBytes === undefined) return false;
+    const free = await opts.freeBytes();
+    if (free >= opts.minFreeBytes) return false;
+    log(`Мало места на диске: свободно ${Math.round(free / 2 ** 20)} МБ, нужно не меньше ${Math.round(opts.minFreeBytes / 2 ** 20)} МБ`);
+    return true;
   };
   const record = async (rec: ProgressRecord) => {
     progress.set(rec.key, rec);
@@ -334,6 +348,10 @@ export async function runContractDownload(
         run.stoppedBy = 'deadline';
         break;
       }
+      if (await diskLow()) {
+        run.stoppedBy = 'disk';
+        break;
+      }
       let message: DiadocMessage | null = null;
       try {
         message = await call(() => client.getMessage(boxId, messageId));
@@ -351,6 +369,10 @@ export async function runContractDownload(
         }
         if (opts.deadline && now() >= opts.deadline) {
           run.stoppedBy = 'deadline';
+          break outer;
+        }
+        if (await diskLow()) {
+          run.stoppedBy = 'disk';
           break outer;
         }
         await downloadRow(row, message, layout.get(row.row)!);

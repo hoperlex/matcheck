@@ -5,7 +5,12 @@
  * имени файла нечёткое, и пользователь должен видеть не только то, что
  * возьмётся, но и то, что отсеялось. После выгрузки опись переписывается с
  * колонками состояний: файл, подписи по сторонам, печатная форма, чего нет.
+ *
+ * Пишется потоком в файл, строка за строкой: опись за пять лет — десятки
+ * тысяч строк, и книга целиком в памяти не помещалась в предел контейнера
+ * (700 МБ) — процесс падал уже после записи inventory.json.
  */
+import { rename } from 'node:fs/promises';
 import ExcelJS from 'exceljs';
 import { CATEGORY_LABELS, REVIEW_CATEGORIES } from './classify.js';
 import type { DownloadState, RowDownloadState } from './download.js';
@@ -19,8 +24,14 @@ function yesNo(v: boolean | null): string {
   return v === null ? '' : v ? 'да' : 'нет';
 }
 
-export async function buildContractsXlsx(snapshot: InventorySnapshot, download: DownloadState | null): Promise<Buffer> {
-  const wb = new ExcelJS.Workbook();
+export async function writeContractsXlsx(
+  file: string,
+  snapshot: InventorySnapshot,
+  download: DownloadState | null,
+): Promise<void> {
+  // Через временный файл: оборванная запись не подменит прежнюю опись.
+  const tmp = `${file}.part`;
+  const wb = new ExcelJS.stream.xlsx.WorkbookWriter({ filename: tmp, useStyles: true });
   const frozen = { views: [{ state: 'frozen' as const, ySplit: 1 }] };
   const cps = new Map(snapshot.counterparties.map((c) => [c.boxId, c]));
   const selected = new Set(download?.selected?.rows ?? []);
@@ -33,7 +44,7 @@ export async function buildContractsXlsx(snapshot: InventorySnapshot, download: 
     { header: 'Значение', key: 'v', width: 90 },
   ];
   summary.getRow(1).font = { bold: true };
-  const add = (k: string, v: string | number) => summary.addRow({ k, v });
+  const add = (k: string, v: string | number) => summary.addRow({ k, v }).commit();
   add('Учётная запись', snapshot.accountName);
   add('Период', `${moscowDay(snapshot.since)} – ${moscowDay(snapshot.until)} (по ${snapshot.until})`);
   add('Опись составлена', `${snapshot.createdAt} – ${snapshot.finishedAt ?? '…'}`);
@@ -76,11 +87,12 @@ export async function buildContractsXlsx(snapshot: InventorySnapshot, download: 
   } else {
     add('Выгрузка', 'не начата');
   }
+  summary.commit();
 
   // ─── Строки ───
   const rowSheet = (title: string, rows: SnapshotRow[]) => {
     const ws = wb.addWorksheet(title, frozen);
-    ws.columns = [
+    const columns = [
       { header: '№', key: 'row', width: 7 },
       { header: 'Категория', key: 'category', width: 14 },
       { header: 'Почему', key: 'reason', width: 36 },
@@ -115,8 +127,9 @@ export async function buildContractsXlsx(snapshot: InventorySnapshot, download: 
       { header: 'MessageId', key: 'messageId', width: 38 },
       { header: 'EntityId', key: 'entityId', width: 38 },
     ];
+    ws.columns = columns;
     ws.getRow(1).font = { bold: true };
-    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ws.columns.length } };
+    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: columns.length } };
     for (const r of rows) {
       const cp = r.counteragentBoxId ? cps.get(r.counteragentBoxId) : undefined;
       const st: RowDownloadState | undefined = download?.rows.get(r.row);
@@ -150,8 +163,9 @@ export async function buildContractsXlsx(snapshot: InventorySnapshot, download: 
         problem: st ? [...st.missing, ...(st.error ? [st.error] : [])].join('; ') : '',
         messageId: r.messageId,
         entityId: r.entityId,
-      });
+      }).commit();
     }
+    ws.commit();
   };
   rowSheet('Берём', by('auto'));
   rowSheet('На просмотр', by('review'));
@@ -169,8 +183,9 @@ export async function buildContractsXlsx(snapshot: InventorySnapshot, download: 
   years.getRow(1).font = { bold: true };
   for (const [k, count] of Object.entries(snapshot.counts).sort(([a], [b]) => a.localeCompare(b))) {
     const [year, direction, type] = k.split('|');
-    years.addRow({ year, direction: DIRECTION_LABELS[direction as 'inbound' | 'outbound'] ?? direction, type, count });
+    years.addRow({ year, direction: DIRECTION_LABELS[direction as 'inbound' | 'outbound'] ?? direction, type, count }).commit();
   }
+  years.commit();
 
   // ─── Окна ───
   const windows = wb.addWorksheet('Окна', frozen);
@@ -191,8 +206,9 @@ export async function buildContractsXlsx(snapshot: InventorySnapshot, download: 
       total: w.total,
       read: w.read,
       ok: w.read === w.total ? 'да' : 'НЕТ',
-    });
+    }).commit();
   }
+  windows.commit();
 
   // ─── Типы ящика ───
   const types = wb.addWorksheet('Типы ящика', frozen);
@@ -201,7 +217,9 @@ export async function buildContractsXlsx(snapshot: InventorySnapshot, download: 
     { header: 'Название', key: 'title', width: 60 },
   ];
   types.getRow(1).font = { bold: true };
-  for (const t of snapshot.boxTypes ?? []) types.addRow(t);
+  for (const t of snapshot.boxTypes ?? []) types.addRow(t).commit();
+  types.commit();
 
-  return Buffer.from(await wb.xlsx.writeBuffer());
+  await wb.commit();
+  await rename(tmp, file);
 }

@@ -22,7 +22,8 @@ import {
   runContractDownload,
 } from '../src/domain/edo/contracts/download.js';
 import { runContractInventory } from '../src/domain/edo/contracts/inventory.js';
-import { buildContractsXlsx } from '../src/domain/edo/contracts/inventory-xlsx.js';
+import { writeContractsXlsx } from '../src/domain/edo/contracts/inventory-xlsx.js';
+import { isRunnerSkipped } from '../src/domain/jobs/edo-run-skip.js';
 import { readProgress, type InventorySnapshot } from '../src/domain/edo/contracts/snapshot.js';
 
 const BOX = 'box-su10';
@@ -421,6 +422,37 @@ describe('выгрузка', () => {
     expect((await collectDownloadState(outDir, snap)).complete).toBe(false);
   });
 
+  it('пауза перед каждым запросом к Диадоку', async () => {
+    const { box, snap } = await inventory();
+    const slept: number[] = [];
+    const run = await runContractDownload(box.session, snap, {
+      ...opts(),
+      pauseMs: 150,
+      sleep: async (ms) => void slept.push(ms),
+    });
+    // Каждый запрос — с паузой; плюс одно ожидание печатной формы e1 (30 с).
+    expect(slept.filter((ms) => ms === 150)).toHaveLength(run.requests);
+    expect(slept.filter((ms) => ms !== 150)).toEqual([30_000]);
+  });
+
+  it('мало места на диске — аккуратная остановка, выгрузка не завершена', async () => {
+    const { box, snap } = await inventory();
+    let free = 10 * 1024 ** 3;
+    const run = await runContractDownload(box.session, snap, {
+      ...opts(),
+      minFreeBytes: 5 * 1024 ** 3,
+      // Проверка — перед сообщением и перед каждым документом; каждая видит на 3 ГБ меньше:
+      // 10 (сообщение m1) → 7 (документ e1) → 4 < 5 (документ e2) — стоп.
+      freeBytes: async () => {
+        const now = free;
+        free -= 3 * 1024 ** 3;
+        return now;
+      },
+    });
+    expect(run).toMatchObject({ stoppedBy: 'disk', processed: 1 });
+    expect((await collectDownloadState(outDir, snap)).complete).toBe(false);
+  });
+
   it('потеря лиза — остановка без исключения наружу', async () => {
     const { snap } = await inventory();
     const box = fakeBox({ leaseLostAfter: 3 });
@@ -446,9 +478,10 @@ describe('опись в Excel', () => {
   it('листы описи и колонки состояний после выгрузки', async () => {
     const { box, snap } = await inventory();
     await runContractDownload(box.session, snap, opts());
-    const buf = await buildContractsXlsx(snap, await collectDownloadState(outDir, snap));
+    const file = path.join(outDir, 'опись.xlsx');
+    await writeContractsXlsx(file, snap, await collectDownloadState(outDir, snap));
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(buf as unknown as ArrayBuffer);
+    await wb.xlsx.readFile(file);
     expect(wb.worksheets.map((w) => w.name)).toEqual([
       'Сводка',
       'Берём',
@@ -467,4 +500,16 @@ describe('опись в Excel', () => {
   function opts() {
     return { outDir, include: [], addRows: [], maxFileBytes: 1024 * 1024, sleep: async () => {} };
   }
+});
+
+describe('исход работы под лизом', () => {
+  it('опись со счётчиками в поле skipped — не отказ; отказ — только строка из списка', async () => {
+    const { snap } = await inventory();
+    expect(snap.skipped).toEqual({ test: 0, deleted: 0, deletedInPackages: 0 });
+    expect(isRunnerSkipped(snap)).toBe(false);
+    expect(isRunnerSkipped({ skipped: 'lease_taken' })).toBe(true);
+    expect(isRunnerSkipped({ skipped: 'not_found' })).toBe(true);
+    expect(isRunnerSkipped({ skipped: 'другое' })).toBe(false);
+    expect(isRunnerSkipped(null)).toBe(false);
+  });
 });

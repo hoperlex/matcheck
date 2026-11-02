@@ -233,6 +233,8 @@ export type EdoClientSession = {
   ensureLease: () => Promise<void>;
 };
 
+export { isRunnerSkipped, type EdoRunSkip } from './edo-run-skip.js';
+
 /**
  * Клиент Диадока под лизом учётки — для скриптов, которым нужен только он
  * (проба списка документов). Лиз обязателен и здесь: под ним обменивается
