@@ -46,6 +46,7 @@ import path from 'node:path';
 import { and, eq, isNotNull } from 'drizzle-orm';
 import { db, sql } from '../src/db/client.js';
 import { edoAccounts } from '../src/db/schema.js';
+import { waitAutoExportPass } from '../src/domain/edo/contracts/auto-export-wait.js';
 import { runDownloadInChunks, type ChunkedResult } from '../src/domain/edo/contracts/chunks.js';
 import { REVIEW_CATEGORIES, type ReviewCategory } from '../src/domain/edo/contracts/classify.js';
 import {
@@ -244,19 +245,6 @@ async function readAddRows(file: string | undefined): Promise<number[]> {
   return tokens.map(Number);
 }
 
-/** Новый завершённый проход автовыгрузки УПД, начатый после `after`. */
-async function waitAutoExportPass(accountId: string, after: Date, maxWaitMs: number): Promise<boolean> {
-  const until = Date.now() + maxWaitMs;
-  for (;;) {
-    const [row] = await sql<{ n: number }[]>`
-      select count(*)::int as n from edo_export_runs
-       where edo_account_id = ${accountId} and outcome = 'completed' and started_at > ${after}`;
-    if ((row?.n ?? 0) > 0) return true;
-    if (Date.now() >= until) return false;
-    await sleep(30_000);
-  }
-}
-
 /** Сколько часть может досчитывать последний документ после своего конца. */
 const CHUNK_GRACE_MS = 3 * 60_000;
 
@@ -317,7 +305,7 @@ async function download(outDir: string, args: Map<string, string>): Promise<numb
             log: (l) => console.info(l),
           }),
         ),
-      waitAutoExportPass: (after, maxWaitMs) => waitAutoExportPass(account.id, after, maxWaitMs),
+      waitAutoExportPass: (after, maxWaitMs) => waitAutoExportPass({ sql, sleep }, account.id, after, maxWaitMs),
       autoExportEnabled,
       now: () => new Date(),
       sleep,
