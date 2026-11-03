@@ -122,6 +122,28 @@ export async function edoDocGroup(
   return { exportIds, sourceIds };
 }
 
+/** Приёмки, к которым группа привязана: сверкой (реестр или импорт) или документом приёмки. */
+function groupLinksSql(group: EdoDocGroup): SQL {
+  const exp = uuidArray(group.exportIds);
+  const src = uuidArray(group.sourceIds);
+  return drSql`
+      select dem.delivery_id from delivery_edo_matches dem
+       where dem.export_document_id = any(${exp}) or dem.source_document_id = any(${src})
+      union
+      select ds.delivery_id from delivery_sources ds where ds.source_document_id = any(${src})`;
+}
+
+/** Все приёмки, где уже стоит группа, с их объектом. */
+export async function edoGroupLinkedDeliveries(
+  db: Exec,
+  group: EdoDocGroup,
+): Promise<{ deliveryId: string; siteId: string }[]> {
+  const rows = await db.execute<{ delivery_id: string; site_id: string }>(drSql`
+    with links as (${groupLinksSql(group)})
+    select d.id as delivery_id, d.site_id from links l join deliveries d on d.id = l.delivery_id`);
+  return rows.map((row) => ({ deliveryId: row.delivery_id, siteId: row.site_id }));
+}
+
 /**
  * Где группа уже привязана: к этой приёмке и к другому объекту — приёмкой
  * другого объекта или карточкой, закреплённой за другим объектом.
@@ -132,14 +154,9 @@ export async function edoGroupLinks(
   group: EdoDocGroup,
   delivery: { id: string | null; siteId: string },
 ): Promise<{ linkedHere: boolean; foreignSite: boolean }> {
-  const exp = uuidArray(group.exportIds);
   const src = uuidArray(group.sourceIds);
   const [row] = await db.execute<{ here: boolean; foreign: boolean }>(drSql`
-    with links as (
-      select dem.delivery_id from delivery_edo_matches dem
-       where dem.export_document_id = any(${exp}) or dem.source_document_id = any(${src})
-      union
-      select ds.delivery_id from delivery_sources ds where ds.source_document_id = any(${src})
+    with links as (${groupLinksSql(group)}
     )
     select
       exists (select 1 from links where delivery_id = ${delivery.id}::uuid) as here,

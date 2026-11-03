@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Button, Popconfirm, Space, Typography } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 
@@ -12,6 +13,9 @@ import { DeleteOutlined } from '@ant-design/icons';
  *
  * Для inline-варианта важно: ничего НЕ рендерим при selectedCount===0,
  * чтобы родительский Space сжимался и не оставлял пустого места.
+ *
+ * `extra` — другие групповые действия страницы (слева от «Удалить»). Без
+ * `onDelete` кнопки удаления нет: галочки бывают и у того, кто не удаляет.
  */
 export function BulkActionInline({
   selectedCount,
@@ -19,13 +23,15 @@ export function BulkActionInline({
   onDelete,
   deleting,
   confirmTitle,
+  extra,
 }: {
   selectedCount: number;
   onClear: () => void;
-  onDelete: () => void;
+  onDelete?: () => void;
   deleting?: boolean;
   /** Полный текст подтверждения, например «Удалить 3 контрагента?» */
   confirmTitle: string;
+  extra?: ReactNode;
 }) {
   if (selectedCount === 0) return null;
   return (
@@ -33,18 +39,21 @@ export function BulkActionInline({
       <Typography.Text type="secondary">
         Выбрано: <b>{selectedCount}</b>
       </Typography.Text>
-      <Popconfirm
-        title={confirmTitle}
-        okText="Удалить"
-        cancelText="Отмена"
-        okButtonProps={{ danger: true, loading: deleting }}
-        onConfirm={onDelete}
-        placement="bottomRight"
-      >
-        <Button danger icon={<DeleteOutlined />} loading={deleting}>
-          Удалить выбранные
-        </Button>
-      </Popconfirm>
+      {extra}
+      {onDelete && (
+        <Popconfirm
+          title={confirmTitle}
+          okText="Удалить"
+          cancelText="Отмена"
+          okButtonProps={{ danger: true, loading: deleting }}
+          onConfirm={onDelete}
+          placement="bottomRight"
+        >
+          <Button danger icon={<DeleteOutlined />} loading={deleting}>
+            Удалить выбранные
+          </Button>
+        </Popconfirm>
+      )}
       <Button onClick={onClear} disabled={deleting}>
         Снять выбор
       </Button>

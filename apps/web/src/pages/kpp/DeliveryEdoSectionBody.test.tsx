@@ -300,3 +300,80 @@ describe('DeliveryEdoOnlyBlocks — УПД без блока бумажного 
     expect(container.textContent).toBe('');
   });
 });
+
+describe('УПД на несколько приёмок', () => {
+  const shared = {
+    matchId: 'm-41296',
+    count: 2,
+    deliveries: [
+      {
+        deliveryId: 'd2',
+        displayId: 23420,
+        arrivedAt: null,
+        scope: 'section' as const,
+        otherEdoInScope: false,
+        rows: [{ qtyActual: '10', qtyPlanned: null, price: '100', vatRate: null, vatSum: '200' }],
+      },
+      {
+        deliveryId: 'd3',
+        displayId: 23422,
+        arrivedAt: null,
+        scope: 'delivery' as const,
+        otherEdoInScope: false,
+        rows: [{ qtyActual: '5', qtyPlanned: null, price: null, vatRate: null, vatSum: null }],
+      },
+    ],
+  };
+  // Деньги форматируются с неразрывными пробелами — сравниваем по обычным.
+  const plain = (text: string | null) => (text ?? '').replace(/[\u00a0\u202f]/g, ' ');
+  const lineOf = () => plain(screen.getByText(/^УПД на 3 приёмки/).textContent);
+
+  it('в блоке: эта и соседи, итог ЭДО этой УПД и факт всех приёмок; без соседей строки нет', () => {
+    renderBody({ shared: new Map([['m-41296', shared]]) });
+    // Факт: эта (45 × 128,79) + сосед (10 × 100); у третьей строки нет цены.
+    expect(lineOf()).toBe(
+      'УПД на 3 приёмки: эта, 23420, 23422 · ЭДО: без НДС 11 623,28 ₽ · Факт по всем: строк 3 · без НДС 6 795,55 ₽ (у 1 строки нет цены) · НДС 1 475,02 ₽ (у 1 строки нет НДС)',
+    );
+    cleanup();
+    renderBody({ shared: new Map() });
+    expect(screen.queryByText(/^УПД на/)).toBeNull();
+  });
+
+  it('другая УПД в той же области — пометка, что факт блока общий', () => {
+    renderBody({
+      shared: new Map([
+        [
+          'm-41296',
+          {
+            ...shared,
+            deliveries: [{ ...shared.deliveries[0]!, otherEdoInScope: true }],
+            count: 1,
+          },
+        ],
+      ]),
+    });
+    expect(screen.getByText(/^УПД на 2 приёмки/).textContent).toContain(
+      'в блоке есть другая УПД — факт блока посчитан целиком',
+    );
+  });
+
+  it('УПД ко всей приёмке: факт — все позиции формы', () => {
+    render(
+      wrap(
+        <DeliveryEdoOnlyBlocks
+          deliveryId="d1"
+          entries={[entry({ match: { ...match, sectionDocumentId: null } })]}
+          photos={[]}
+          onOpenXml={vi.fn()}
+          shared={
+            new Map([['m-41296', { ...shared, count: 1, deliveries: [shared.deliveries[0]!] }]])
+          }
+          factRows={[{ qtyActual: '1', qtyPlanned: null, price: '1', vatRate: null, vatSum: '0' }]}
+        />,
+      ),
+    );
+    expect(plain(screen.getByText(/^УПД на 2 приёмки/).textContent)).toContain(
+      'Факт по всем: строк 2 · без НДС 1 001,00 ₽ · НДС 200,00 ₽',
+    );
+  });
+});

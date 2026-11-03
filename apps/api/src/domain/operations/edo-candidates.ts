@@ -25,12 +25,8 @@ import { alias } from 'drizzle-orm/pg-core';
 import type { Db } from '../../db/client.js';
 import {
   counterparties,
-  deliveries,
-  deliveryPhotos,
-  deliverySources,
   edoAccounts,
   edoExportDocuments,
-  photoRecognizedItems,
   sourceDocuments,
   suppliers,
 } from '../../db/schema.js';
@@ -38,6 +34,7 @@ import { loadEnv } from '../../lib/env.js';
 import { escapeLike } from '../../lib/like.js';
 import { twinCondition } from '../edo/export-twins.js';
 import { edoDocumentUsage, edoUsageKey, type EdoUsage } from './edo-usage.js';
+import { isoDate, loadReferences, mskDate } from './edo-references.js';
 import {
   censusForSupplier,
   exportRegistryStatus,
@@ -52,7 +49,6 @@ import {
   normalizeSupplierName,
   rankEdoAgainstReferences,
   supplierNameTokens,
-  validInns,
   type DocumentMatch,
   type MatchLevel,
   type MatchReference,
@@ -132,29 +128,17 @@ export const QUOTA = { number: 50, inn: 100, name: 100, date: 50, search: 200 } 
 /** Сколько строк забрать по слову названия, прежде чем сравнить названия целиком. */
 const NAME_PREFILTER = 300;
 
-const MSK_DATE = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' });
-
-function mskDate(value: Date | null): string | null {
-  return value ? MSK_DATE.format(value) : null;
-}
-
-function isoDate(value: Date | string | null): string | null {
-  if (!value) return null;
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : null;
-}
-
 function shiftDate(date: string, days: number): string {
   return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 }
 
 /** Номер целиком на стороне PostgreSQL — то же, что `normalizeDocumentNumber`. */
-function numberFullSql(column: SQL): SQL {
+export function numberFullSql(column: SQL): SQL {
   return drSql`regexp_replace(translate(upper(coalesce(${column}, '')), 'АВЕКМНОРСТУХ', 'ABEKMHOPCTYX'), '[^A-Z0-9А-ЯЁ]', '', 'g')`;
 }
 
 /** Цифровое ядро номера на стороне PostgreSQL — то же, что `documentNumberCore`. */
-function numberCoreSql(column: SQL): SQL {
+export function numberCoreSql(column: SQL): SQL {
   return drSql`ltrim(regexp_replace(coalesce(${column}, ''), '[^0-9]', '', 'g'), '0')`;
 }
 
@@ -414,184 +398,6 @@ function distanceSql(c: Columns, anchor: string): SQL {
 
 function windowSql(c: Columns, lower: string, upperExclusive: string): SQL {
   return drSql`${c.date} >= ${lower}::date and ${c.date} < ${upperExclusive}::date`;
-}
-
-type LoadedReferences = {
-  delivery: {
-    siteId: string;
-    arrivedDate: string | null;
-    createdDate: string;
-    contractorId: string | null;
-  };
-  references: MatchReference[];
-};
-
-/**
- * Эталоны подбора. С `sectionDocumentId` — только документ этого блока
- * материалов, любого вида (накладная тоже), без фото: номера с фото относятся
- * к другим документам приёмки. Что документ связан с приёмкой, проверяет маршрут.
- */
-async function loadReferences(
-  db: Db,
-  deliveryId: string,
-  sectionDocumentId?: string,
-): Promise<LoadedReferences | null> {
-  const [delivery] = await db
-    .select({
-      siteId: deliveries.siteId,
-      arrivedAt: deliveries.arrivedAt,
-      createdAt: deliveries.createdAt,
-      supplierId: deliveries.supplierId,
-      contractorId: deliveries.contractorId,
-    })
-    .from(deliveries)
-    .where(eq(deliveries.id, deliveryId))
-    .limit(1);
-  if (!delivery) return null;
-
-  const [ownSupplier] = delivery.supplierId
-    ? await db
-        .select({ name: counterparties.name, inn: counterparties.inn })
-        .from(counterparties)
-        .where(eq(counterparties.id, delivery.supplierId))
-        .limit(1)
-    : [];
-
-  const paperDirectory = alias(suppliers, 'paper_directory');
-  const paperSupplier = alias(counterparties, 'paper_supplier');
-  const paperRows = await db
-    .select({
-      docNumber: sourceDocuments.docNumber,
-      docDate: sourceDocuments.docDate,
-      totalSum: sourceDocuments.totalSum,
-      innRaw: sourceDocuments.supplierInnRaw,
-      directoryInn: paperDirectory.inn,
-      directoryName: paperDirectory.name,
-      supplierInn: paperSupplier.inn,
-      supplierName: paperSupplier.name,
-    })
-    .from(deliverySources)
-    .innerJoin(sourceDocuments, eq(deliverySources.sourceDocumentId, sourceDocuments.id))
-    .leftJoin(paperDirectory, eq(sourceDocuments.supplierDirectoryId, paperDirectory.id))
-    .leftJoin(paperSupplier, eq(sourceDocuments.supplierId, paperSupplier.id))
-    .where(
-      sectionDocumentId
-        ? and(eq(deliverySources.deliveryId, deliveryId), eq(sourceDocuments.id, sectionDocumentId))
-        : and(
-            eq(deliverySources.deliveryId, deliveryId),
-            eq(sourceDocuments.kind, 'upd'),
-            ne(sourceDocuments.origin, 'edo_diadoc'),
-          ),
-    );
-
-  const photoRows = sectionDocumentId
-    ? []
-    : await db
-        .select({
-          docNumber: photoRecognizedItems.docNumber,
-          docDate: photoRecognizedItems.docDate,
-          totalSum: photoRecognizedItems.totalSum,
-        })
-        .from(deliveryPhotos)
-        .innerJoin(
-          photoRecognizedItems,
-          eq(photoRecognizedItems.deliveryPhotoId, deliveryPhotos.id),
-        )
-        .where(
-          and(eq(deliveryPhotos.deliveryId, deliveryId), isNotNull(photoRecognizedItems.docNumber)),
-        );
-
-  // ИНН самой организации (владельца ящика ЭДО) в графе поставщика — это
-  // распознанный ИНН покупателя. Эталоном он сделал бы правильную УПД «чужой».
-  const orgRows = await db.select({ inn: edoAccounts.orgInn }).from(edoAccounts);
-  const orgInns = new Set(validInns(orgRows.map((row) => row.inn)).inns);
-  const supplierInnsOf = (values: readonly (string | null | undefined)[]) => {
-    const checked = validInns(values);
-    const inns = checked.inns.filter((inn) => !orgInns.has(inn));
-    return { inns, unreadable: checked.unreadable || (checked.inns.length > 0 && !inns.length) };
-  };
-
-  const arrivedDate = mskDate(delivery.arrivedAt);
-  const own = supplierInnsOf([ownSupplier?.inn]);
-  const ownNames = ownSupplier?.name ? [ownSupplier.name] : [];
-
-  const references: MatchReference[] = paperRows.map((paper) => {
-    // Каждый ИНН проверяется отдельно: битый `supplier_inn_raw` не должен
-    // перекрывать верный ИНН справочника, как это делал coalesce.
-    const checked = supplierInnsOf([
-      paper.innRaw,
-      paper.directoryInn,
-      paper.supplierInn,
-      ownSupplier?.inn,
-    ]);
-    return {
-      origin: 'paper',
-      label: paper.docNumber,
-      numbers: paper.docNumber ? [paper.docNumber] : [],
-      date: isoDate(paper.docDate),
-      inns: checked.inns,
-      innUnreadable: checked.unreadable,
-      names: [paper.directoryName, paper.supplierName, ...ownNames].filter(
-        (name): name is string => !!name,
-      ),
-      sums: paper.totalSum ? [paper.totalSum] : [],
-      arrivedDate,
-    };
-  });
-
-  // Страницы одной УПД на разных фото — один эталон. Склеиваем только по
-  // полному номеру и той же дате: по одним цифрам номера склеились бы
-  // разные документы.
-  const paperKeys = new Set(references.map((ref) => `${normalizeDocumentNumber(ref.label)}|${ref.date ?? ''}`));
-  const photoGroups = new Map<string, MatchReference>();
-  for (const photo of photoRows) {
-    const full = normalizeDocumentNumber(photo.docNumber);
-    if (!full) continue;
-    const date = isoDate(photo.docDate);
-    const key = `${full}|${date ?? ''}`;
-    if (paperKeys.has(key)) continue;
-    const group = photoGroups.get(key);
-    if (group) {
-      if (photo.totalSum) group.sums.push(photo.totalSum);
-      continue;
-    }
-    photoGroups.set(key, {
-      origin: 'photo',
-      label: photo.docNumber,
-      numbers: [photo.docNumber!],
-      date,
-      inns: own.inns,
-      innUnreadable: own.unreadable,
-      names: ownNames,
-      sums: photo.totalSum ? [photo.totalSum] : [],
-      arrivedDate,
-    });
-  }
-  references.push(...photoGroups.values());
-
-  if (!references.length) {
-    references.push({
-      origin: 'delivery',
-      label: null,
-      numbers: [],
-      date: null,
-      inns: own.inns,
-      innUnreadable: own.unreadable,
-      names: ownNames,
-      sums: [],
-      arrivedDate,
-    });
-  }
-
-  return {
-    delivery: {
-      siteId: delivery.siteId,
-      arrivedDate,
-      createdDate: mskDate(delivery.createdAt)!,
-      contractorId: delivery.contractorId,
-    },
-    references,
-  };
 }
 
 export async function findEdoCandidates(

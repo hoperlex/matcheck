@@ -9,7 +9,7 @@
  * Отдельным сценарием — «Поделиться»: у создания ссылки свой allow-list, и
  * одной ячейки `edit` для неё мало. Ревью нашло это дефектом №5.
  */
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -70,8 +70,13 @@ vi.mock('../../services/deliveries', () => ({
 // Модалки к предмету теста отношения не имеют и тянут галерею с IndexedDB.
 vi.mock('./DeliveryViewModal', () => ({ DeliveryViewModal: () => null }));
 vi.mock('../../components/ShareLinkModal', () => ({ ShareLinkModal: () => null }));
+// Окна групповой привязки ЭДО — свои тесты (ShareEdoModal); здесь — только кнопка.
+vi.mock('./BulkEdoLinkFlow', () => ({
+  BulkEdoLinkFlow: ({ open, deliveries }: { open: boolean; deliveries: unknown[] }) =>
+    open ? <div>поток привязки: {deliveries.length}</div> : null,
+}));
 
-import { DeliveriesHistory } from './DeliveriesHistory';
+import { DeliveriesHistory, bulkEdoLinkBlock } from './DeliveriesHistory';
 
 async function renderHistory(): Promise<HTMLElement> {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -215,5 +220,45 @@ describe('DeliveriesHistory: отметка проверки по матрице
     await renderHistory();
     expect(screen.queryByText('Проверено')).toBeNull();
     expect(screen.queryByText('Есть замечания')).toBeNull();
+  });
+});
+
+describe('DeliveriesHistory: одна УПД из ЭДО к отмеченным приёмкам', () => {
+  it('без права удаления, но с правом привязки — галочки и кнопка, удаления нет', async () => {
+    can.mockImplementation((_page: string, action: string) => action !== 'delete');
+    hasCapability.mockReturnValue(true);
+    const container = await renderHistory();
+    const box = container.querySelector<HTMLInputElement>('tbody input[type="checkbox"]');
+    expect(box).not.toBeNull();
+    fireEvent.click(box!);
+    const button = await screen.findByRole('button', { name: /Привязать УПД из ЭДО/ });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByRole('button', { name: /Удалить выбранные/ })).toBeNull();
+    fireEvent.click(button);
+    expect(await screen.findByText('поток привязки: 1')).toBeTruthy();
+  });
+
+  it('ни удаления, ни привязки — галочек нет', async () => {
+    can.mockImplementation((_page: string, action: string) => action !== 'delete');
+    hasCapability.mockReturnValue(false);
+    const container = await renderHistory();
+    expect(container.querySelector('tbody input[type="checkbox"]')).toBeNull();
+  });
+
+  it('кнопка не обещает невозможного: разные объекты, удаляемые, из отгрузки, больше 50', () => {
+    const r = (over: Partial<Parameters<typeof bulkEdoLinkBlock>[0][number]> = {}) => ({
+      siteId: 's1',
+      pendingDeletionAt: null,
+      sourceShipmentId: null,
+      ...over,
+    });
+    expect(bulkEdoLinkBlock([r(), r()])).toBeNull();
+    expect(bulkEdoLinkBlock([r(), r({ siteId: 's2' })])).toMatch(/разных объектов/);
+    expect(bulkEdoLinkBlock([r({ pendingDeletionAt: '2026-11-02T10:00:00Z' })])).toMatch(
+      /на удаление/,
+    );
+    expect(bulkEdoLinkBlock([r({ sourceShipmentId: 'sh-1' })])).toMatch(/из отгрузки/);
+    expect(bulkEdoLinkBlock(Array.from({ length: 51 }, () => r()))).toMatch(/Не больше 50/);
+    expect(bulkEdoLinkBlock([])).toMatch(/Отметьте/);
   });
 });

@@ -45,6 +45,9 @@ export function deliveryNumbersText(
  * XML остаётся в шапке панели. `documentId` такой строки — id документа
  * реестра, поэтому подходит PDF-маршрут кандидатов. Для документа из импорта
  * PDF не строится — его оригинал открывается, как раньше.
+ *
+ * «К другим приёмкам» (`onShare`) — та же УПД ещё к нескольким приёмкам
+ * объекта: одна УПД на несколько машин. Отвязка — только от этой приёмки.
  */
 export function LinkedEdoChips({
   deliveryId,
@@ -53,6 +56,7 @@ export function LinkedEdoChips({
   unlinkDisabled,
   onUnlink,
   onOpenOriginal,
+  onShare,
 }: {
   deliveryId: string | null;
   documents: readonly LinkedEdoDocument[];
@@ -60,6 +64,8 @@ export function LinkedEdoChips({
   unlinkDisabled: boolean;
   onUnlink: (document: LinkedEdoDocument) => void;
   onOpenOriginal: (document: LinkedEdoDocument) => void;
+  /** Нет — кнопки «К другим приёмкам» нет (нет права или приёмка не та). */
+  onShare?: (document: LinkedEdoDocument) => void;
 }) {
   const [compare, setCompare] = useState<LinkedEdoDocument | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
@@ -104,8 +110,22 @@ export function LinkedEdoChips({
           >
             Файл
           </Button>
+          {onShare && (
+            <Button
+              type="link"
+              size="small"
+              style={{ paddingInline: 4 }}
+              onClick={() => onShare(document)}
+            >
+              К другим приёмкам
+            </Button>
+          )}
           <Popconfirm
-            title="Убрать связь с УПД из ЭДО?"
+            title={
+              document.alsoInCount > 0
+                ? `Отвязать от этой приёмки? В ${deliveryNumbersText(document.alsoIn, document.alsoInCount)} УПД останется.`
+                : 'Убрать связь с УПД из ЭДО?'
+            }
             onConfirm={() => onUnlink(document)}
             okText="Убрать"
             cancelText="Отмена"

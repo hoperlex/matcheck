@@ -99,6 +99,8 @@ import { useDeliverySupplierOrders } from './useDeliverySupplierOrders';
 import { LinkedEdoChips, type LinkedEdoDocument } from './LinkedEdoChips';
 import { computeVatSum, toNum } from './itemMoney';
 import { useDeliveryEdoItems, type EdoItemsEntry } from './useDeliveryEdoItems';
+import { useDeliveryEdoShared } from './useDeliveryEdoShared';
+import { ShareEdoModal } from './ShareEdoModal';
 import { edoMatchesForSection, edoMatchesWithoutSection } from './edoSectionMatches';
 import {
   DeliveryEdoOnlyBlocks,
@@ -322,6 +324,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // целиком. При закрытии не сбрасывается, чтобы заголовок окна не менялся
   // во время анимации — следующее открытие всё равно его задаёт.
   const [linkEdoSection, setLinkEdoSection] = useState<EdoSection | null>(null);
+  // «К другим приёмкам»: данные и видимость раздельно — данные чистятся в
+  // afterClose, иначе окно размонтировалось бы без анимации закрытия.
+  const [shareEdo, setShareEdo] = useState<LinkedEdoDocument | null>(null);
+  const [shareEdoOpen, setShareEdoOpen] = useState(false);
   const [linkUpdError, setLinkUpdError] = useState<string | null>(null);
   const [linkEdoError, setLinkEdoError] = useState<string | null>(null);
 
@@ -440,6 +446,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // Строки УПД из ЭДО — основной список блока материалов (DeliveryEdoSectionBody).
   // Запрос на каждую привязку; без привязок (и без права на них) — ни одного.
   const edoItemsByMatch = useDeliveryEdoItems(deliveryId, edoMatchesQuery.data?.items ?? []);
+  // Та же УПД в других приёмках — их факт для строки «Факт по всем».
+  const edoShared = useDeliveryEdoShared(deliveryId, edoMatchesQuery.data?.items ?? []);
   // Подблок «Факт приёмки» в блоке с ЭДО: раскрыт или нет (см. useFactPanels).
   const factPanels = useFactPanels();
 
@@ -1804,6 +1812,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     const edoSectionKeys = linkedDocuments
       .filter((d) => edoMatchesForSection(d, edoMatches).length > 0)
       .map((d) => d.id);
+    // Та же УПД — к другим приёмкам объекта: те же условия, что у «+ УПД из ЭДО».
+    const shareEdoTo =
+      canLinkUpd && !isPending && !loadedDelivery.sourceShipmentId
+        ? (document: LinkedEdoDocument) => {
+            setShareEdo(document);
+            setShareEdoOpen(true);
+          }
+        : undefined;
     const isAdmin = authUser?.role === 'admin';
     const canUnmark = isAdmin || authUser?.id === (loadedDelivery?.pendingDeletionByUserId ?? null);
     return (
@@ -2188,6 +2204,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   unlinkDisabled={unlinkEdo.isPending || isPending}
                   onUnlink={(document) => unlinkEdo.mutate(document)}
                   onOpenOriginal={(document) => void openEdoFile(document)}
+                  onShare={shareEdoTo}
                 />
               )}
               {/* Заказы поставщикам из EstiMat. Чип — привязанные заказы (цвет по
@@ -2371,6 +2388,23 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           onPick={(candidate) =>
             linkEdo.mutate({ candidate, sectionDocumentId: linkEdoSection?.id ?? null })
           }
+        />
+
+        <ShareEdoModal
+          open={shareEdoOpen}
+          anchorDeliveryId={loadedDelivery?.id ?? null}
+          document={
+            shareEdo && {
+              source: shareEdo.source,
+              id: shareEdo.documentId,
+              docNumber: shareEdo.docNumber,
+              docDate: shareEdo.docDate,
+              operator: shareEdo.operator,
+            }
+          }
+          onCancel={() => setShareEdoOpen(false)}
+          onDone={() => setShareEdoOpen(false)}
+          afterClose={() => setShareEdo(null)}
         />
 
         <SourceDocumentOriginalModal
@@ -2564,6 +2598,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 onFactOpenChange={(open) => factPanels.setOpen(doc.id, open)}
                 photos={loadedDelivery.photos ?? []}
                 onOpenXml={(match) => void openEdoFile(match)}
+                shared={edoShared}
               />
             );
           }}
@@ -2602,6 +2637,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     unlinkDisabled={unlinkEdo.isPending || isPending}
                     onUnlink={(document) => unlinkEdo.mutate(document)}
                     onOpenOriginal={(document) => void openEdoFile(document)}
+                    onShare={shareEdoTo}
                   />
                 )}
                 {canPick && (
@@ -2631,6 +2667,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             entries={edoEntries(headerEdoMatches)}
             photos={loadedDelivery.photos ?? []}
             onOpenXml={(match) => void openEdoFile(match)}
+            shared={edoShared}
+            factRows={items}
+            otherEdoOnDelivery={edoMatches.length > 1}
           />
         )}
 

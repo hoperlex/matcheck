@@ -82,3 +82,23 @@ export function formatPartialSum(sum: PartialSum, what: string, of: 'rows' | 'do
   const whom = of === 'rows' ? `${sum.missing} ${rowsGenitive(sum.missing)}` : `${sum.missing} УПД`;
   return `${money} (у ${whom} нет ${what})`;
 }
+
+/**
+ * Факт этой приёмки и других приёмок с той же УПД — одной суммой. Правило то
+ * же, что у `factTotals`: неизвестное не становится нулём.
+ */
+export function sharedFactTotals(
+  current: readonly FactRow[],
+  others: readonly { rows: readonly FactRow[] }[],
+): ReturnType<typeof factTotals> {
+  return factTotals([...current, ...others.flatMap((delivery) => delivery.rows)]);
+}
+
+/** «на 2 приёмки», «на 5 приёмок», «на 21 приёмку». */
+export function deliveriesAccusative(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'приёмку';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'приёмки';
+  return 'приёмок';
+}

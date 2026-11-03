@@ -9,7 +9,6 @@ import {
   counterparties,
   deliveries,
   deliveryEdoMatches,
-  deliverySources,
   edoAccounts,
   edoExportDocuments,
   sourceDocumentAttachments,
@@ -19,6 +18,15 @@ import {
 } from '../db/schema.js';
 import { findEdoCandidates } from '../domain/operations/edo-candidates.js';
 import { edoDocumentUsage, edoUsageKey } from '../domain/operations/edo-usage.js';
+import {
+  findShareCandidates,
+  linkEdoDocumentToDeliveries,
+  lockLinkableEdoDocument,
+  sectionLinked,
+  sharedEdoFacts,
+  SHARE_MAX_TARGETS,
+  type BatchLinkError,
+} from '../domain/operations/edo-share.js';
 import { toIsoDate } from '../domain/edo/export-upd.js';
 import { edoGroupHasImported, edoGroupLinks, lockEdoDocGroup } from '../domain/edo/export-twins.js';
 import { readExportItems, readImportedItems } from '../domain/edo/linked-edo-items.js';
@@ -260,27 +268,106 @@ const LinkedEdoItemsSchema = z.object({
   ),
 });
 
-/**
- * Документ блока должен быть связан с приёмкой сейчас: в блок отвязанного
- * документа «+ Материал» тоже не добавляет. Вызывать под блокировкой строки
- * приёмки — её же берёт unlink-source до удаления связи.
- */
-async function sectionLinked(
-  db: Pick<Db, 'select'>,
-  deliveryId: string,
-  sectionDocumentId: string,
-): Promise<boolean> {
-  const [link] = await db
-    .select({ id: deliverySources.sourceDocumentId })
-    .from(deliverySources)
-    .where(
-      and(
-        eq(deliverySources.deliveryId, deliveryId),
-        eq(deliverySources.sourceDocumentId, sectionDocumentId),
+const ShareCandidatesSchema = z.object({
+  document: z.object({
+    docNumber: z.string().nullable(),
+    docDate: z.string().nullable(),
+    supplierName: z.string().nullable(),
+    supplierInn: z.string().nullable(),
+    totalSum: z.string().nullable(),
+  }),
+  siteId: z.string().uuid(),
+  items: z.array(
+    UsedInSchema.extend({
+      arrivedAt: z.string().nullable(),
+      vehiclePlate: z.string().nullable(),
+      supplierName: z.string().nullable(),
+      documents: z.array(
+        z.object({
+          id: z.string().uuid(),
+          kind: z.string(),
+          docNumber: z.string().nullable(),
+          docDate: z.string().nullable(),
+        }),
       ),
-    )
-    .limit(1);
-  return !!link;
+      photoNumbers: z.array(z.string()),
+      otherEdo: z.array(z.object({ docNumber: z.string().nullable() })),
+      state: z.enum(['linked', 'available']),
+      reasons: z.array(z.enum(['match', 'no_document', 'selected', 'search'])),
+      level: z.enum(['high', 'possible', 'weak']),
+      score: z.number().int(),
+      matches: z.array(z.string()),
+      conflicts: z.array(z.string()),
+      otherSupplier: z.boolean(),
+      defaultSectionId: z.string().uuid().nullable(),
+    }),
+  ),
+  truncated: z.boolean(),
+});
+
+/** Отказ групповой привязки: какие приёмки ему помешали. */
+const BatchErrorSchema = ErrorResponseSchema.extend({
+  deliveries: z.array(UsedInSchema).optional(),
+});
+
+const SharedEdoFactsSchema = z.object({
+  matchId: z.string().uuid(),
+  count: z.number().int(),
+  deliveries: z.array(
+    UsedInSchema.extend({
+      arrivedAt: z.string().nullable(),
+      scope: z.enum(['section', 'delivery']),
+      otherEdoInScope: z.boolean(),
+      rows: z.array(
+        z.object({
+          qtyActual: z.string().nullable(),
+          qtyPlanned: z.string().nullable(),
+          price: z.string().nullable(),
+          vatRate: z.string().nullable(),
+          vatSum: z.string().nullable(),
+        }),
+      ),
+    }),
+  ),
+});
+
+/** «Приёмка 23420 …» / «Приёмки 23420, 23422 …». */
+function deliveriesPhrase(
+  list: readonly { displayId: number }[],
+  one: string,
+  many: string,
+): string {
+  const numbers = list.map((d) => d.displayId).join(', ');
+  return list.length > 1 ? `Приёмки ${numbers} ${many}` : `Приёмка ${numbers} ${one}`;
+}
+
+/** Текст отказа групповой привязки — его и покажет окно. */
+function batchErrorMessage(error: BatchLinkError, list: readonly { displayId: number }[]): string {
+  const text = (() => {
+    switch (error) {
+      case 'not_found':
+        return 'Приёмка не найдена — обновите список';
+      case 'other_site':
+        return `${deliveriesPhrase(list, 'с другого объекта', 'с другого объекта')}: одна УПД привязывается к приёмкам одного объекта`;
+      case 'pending_deletion':
+        return deliveriesPhrase(list, 'помечена на удаление', 'помечены на удаление');
+      case 'from_shipment':
+        return deliveriesPhrase(list, 'создана из отгрузки', 'созданы из отгрузки');
+      case 'invalid_document':
+        return 'УПД из ЭДО не найдена или файл недоступен';
+      case 'foreign_site':
+        return list.length
+          ? `УПД относится к другому объекту (${list.length > 1 ? 'приёмки' : 'приёмка'} ${list.map((d) => d.displayId).join(', ')})`
+          : 'УПД относится к другому объекту';
+      case 'imported_available':
+        return 'УПД уже импортирована в портал — обновите окно';
+      case 'section_not_linked':
+        return `Документ блока отвязан: ${list.length > 1 ? 'приёмки' : 'приёмка'} ${list.map((d) => d.displayId).join(', ')} — обновите окно`;
+      case 'invalid_section':
+        return 'УПД нельзя привязать к её собственному блоку';
+    }
+  })();
+  return `${text}. Ничего не привязано.`;
 }
 
 const SECTION_NOT_LINKED = {
@@ -796,43 +883,8 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
           tx,
           isImport ? { sourceIds: [documentId] } : { exportIds: [documentId] },
         );
-        if (isImport) {
-          const [document] = await tx
-            .select({ id: sourceDocuments.id })
-            .from(sourceDocuments)
-            .where(
-              and(
-                eq(sourceDocuments.id, documentId),
-                eq(sourceDocuments.kind, 'upd'),
-                eq(sourceDocuments.direction, 'inbound'),
-                eq(sourceDocuments.origin, 'edo_diadoc'),
-                eq(sourceDocuments.status, 'parsed'),
-                eq(sourceDocuments.isTechnical, false),
-              ),
-            )
-            .for('update')
-            .limit(1);
-          if (!document) return 'invalid_document';
-        } else {
-          const [document] = await tx
-            .select({ id: edoExportDocuments.id })
-            .from(edoExportDocuments)
-            .where(
-              and(
-                eq(edoExportDocuments.id, documentId),
-                eq(edoExportDocuments.status, 'stored'),
-                isNotNull(edoExportDocuments.s3Key),
-                or(
-                  eq(edoExportDocuments.contentCategory, 'materials'),
-                  eq(edoExportDocuments.contentCategory, 'undetermined'),
-                  isNull(edoExportDocuments.contentCategory),
-                ),
-              ),
-            )
-            .for('update')
-            .limit(1);
-          if (!document) return 'invalid_document';
-        }
+        if (!(await lockLinkableEdoDocument(tx, { source: req.body.source, id: documentId })))
+          return 'invalid_document';
         // Проверки — по всей группе: копия у другого оператора и карточка
         // импорта — тот же документ, что и выбранная строка.
         const links = await edoGroupLinks(tx, group, delivery);
@@ -936,6 +988,144 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
         ts: new Date().toISOString(),
       });
       return { success: true as const };
+    },
+  );
+
+  // К каким ещё приёмкам объекта относится УПД — подсказка для групповой
+  // привязки (domain/operations/edo-share.ts). Связь не создаётся.
+  app.get(
+    '/api/v1/deliveries/:id/edo-share-candidates',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        querystring: z.object({
+          source: z.enum(['import', 'export']),
+          documentId: z.string().uuid(),
+          q: z.string().trim().max(100).optional(),
+          /** Приёмки, отмеченные в списке, — id через запятую. */
+          include: z
+            .string()
+            .max(SHARE_MAX_TARGETS * 37)
+            .optional(),
+        }),
+        response: {
+          200: ShareCandidatesSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const include = (req.query.include ?? '').split(',').filter(Boolean);
+      if (
+        include.length > SHARE_MAX_TARGETS ||
+        include.some((id) => !z.string().uuid().safeParse(id).success)
+      ) {
+        return reply
+          .code(400)
+          .send({ error: 'invalid_include', message: 'Неверный список приёмок' });
+      }
+      const result = await findShareCandidates(
+        app.db,
+        req.params.id,
+        { source: req.query.source, id: req.query.documentId },
+        { q: req.query.q, include },
+      );
+      if (result === 'delivery_not_found') return reply.code(404).send({ error: 'not_found' });
+      if (result === 'document_not_found')
+        return reply
+          .code(404)
+          .send({ error: 'document_not_found', message: 'УПД из ЭДО не найдена' });
+      return result;
+    },
+  );
+
+  // Одна УПД — к нескольким приёмкам объекта якоря `:id`, всё или ничего.
+  // Права и объект — по якорю: все цели должны быть на его объекте.
+  app.post(
+    '/api/v1/deliveries/:id/edo-matches/batch',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        body: z.object({
+          documentId: z.string().uuid(),
+          source: z.enum(['import', 'export']),
+          targets: z
+            .array(
+              z.object({
+                deliveryId: z.string().uuid(),
+                /** Блок материалов цели; null — к приёмке целиком. */
+                sectionDocumentId: z.string().uuid().nullable(),
+              }),
+            )
+            .min(1)
+            .max(SHARE_MAX_TARGETS)
+            .refine(
+              (targets) => new Set(targets.map((t) => t.deliveryId)).size === targets.length,
+              'Приёмка указана дважды',
+            ),
+        }),
+        response: {
+          200: z.object({ linked: z.array(UsedInSchema), alreadyLinked: z.array(UsedInSchema) }),
+          404: BatchErrorSchema,
+          409: BatchErrorSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const result = await app.db.transaction((tx) =>
+        linkEdoDocumentToDeliveries(tx, {
+          anchorId: req.params.id,
+          ref: { source: req.body.source, id: req.body.documentId },
+          targets: req.body.targets,
+          userId: req.user?.id ?? null,
+        }),
+      );
+      if (result.status !== 'ok') {
+        const code =
+          result.status === 'not_found' || result.status === 'invalid_document' ? 404 : 409;
+        return reply.code(code).send({
+          error: result.status,
+          message: batchErrorMessage(result.status, result.deliveries),
+          deliveries: result.deliveries,
+        });
+      }
+      const ts = new Date().toISOString();
+      for (const delivery of result.linked) {
+        publishEvent(app, {
+          type: 'delivery_updated',
+          entityId: delivery.deliveryId,
+          siteId: result.siteId,
+          ts,
+        });
+      }
+      return { linked: result.linked, alreadyLinked: result.alreadyLinked };
+    },
+  );
+
+  // Та же УПД в других приёмках и их факт — для строки «Факт по всем» в блоке.
+  app.get(
+    '/api/v1/deliveries/:id/edo-matches/shared',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: {
+          200: z.object({ items: z.array(SharedEdoFactsSchema) }),
+          404: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [delivery] = await app.db
+        .select({ id: deliveries.id })
+        .from(deliveries)
+        .where(eq(deliveries.id, req.params.id))
+        .limit(1);
+      if (!delivery) return reply.code(404).send({ error: 'not_found' });
+      return { items: await sharedEdoFacts(app.db, delivery.id) };
     },
   );
 

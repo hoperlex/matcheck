@@ -18,6 +18,7 @@ import {
   EditOutlined,
   ExclamationCircleOutlined,
   EyeOutlined,
+  LinkOutlined,
   ShareAltOutlined,
   UndoOutlined,
   WarningOutlined,
@@ -73,6 +74,7 @@ import { DeliveryViewModal, type DeliveryViewData } from './DeliveryViewModal';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
+import { BulkEdoLinkFlow } from './BulkEdoLinkFlow';
 import { operationsListQuery } from '../operations/operationsQuery';
 import {
   formatDocumentsShort,
@@ -190,6 +192,9 @@ export function DeliveriesHistory({
   const deliveryFeatures = hasCapability('operations.edit.link_source')
     ? DELIVERY_FEATURE_VALUES
     : FEATURE_VALUES;
+  // Одна УПД из ЭДО — к нескольким отмеченным приёмкам: та же пара «ячейка +
+  // возможность», что у кнопки «+ УПД из ЭДО» в карточке.
+  const canLinkUpd = canEdit && hasCapability('operations.edit.link_source');
 
   // Slot для bulk-actions в внешнем header-row родителя. Отслеживаем
   // через state, потому что ref.current = null до commit phase — портал
@@ -520,6 +525,11 @@ export function DeliveriesHistory({
   });
 
   const items = list.data?.items ?? [];
+  // Отмеченные строки: выбор сбрасывается при листании, поэтому все они — на
+  // текущей странице.
+  const selectedRows = items.filter((r) => bulk.selectedIds.has(r.id));
+  const bulkEdoBlocked = bulkEdoLinkBlock(selectedRows);
+  const [bulkEdoOpen, setBulkEdoOpen] = useState(false);
 
   const counterpartiesMap = useMemo(() => {
     const m = new Map<string, string>();
@@ -1052,7 +1062,24 @@ export function DeliveriesHistory({
                   <BulkActionInline
                     selectedCount={bulk.selectedCount}
                     onClear={bulk.clear}
-                    onDelete={() => bulkMark.mutate(Array.from(bulk.selectedIds))}
+                    extra={
+                      canLinkUpd ? (
+                        <Tooltip title={bulkEdoBlocked}>
+                          <span>
+                            <Button
+                              icon={<LinkOutlined />}
+                              disabled={!!bulkEdoBlocked}
+                              onClick={() => setBulkEdoOpen(true)}
+                            >
+                              Привязать УПД из ЭДО
+                            </Button>
+                          </span>
+                        </Tooltip>
+                      ) : null
+                    }
+                    onDelete={
+                      canDelete ? () => bulkMark.mutate(Array.from(bulk.selectedIds)) : undefined
+                    }
                     deleting={bulkMark.isPending}
                     confirmTitle={`Пометить ${bulk.selectedCount} ${pluralizeDelivery(bulk.selectedCount)} на удаление?`}
                   />
@@ -1112,7 +1139,11 @@ export function DeliveriesHistory({
             scrollX={1700}
             // Массовые действия — по праву удаления; в корзине они только у админа
             // (окончательное удаление помеченного — его прерогатива).
-            rowSelection={(isAdmin || !isTrash) && canDelete ? bulk.selection : undefined}
+            rowSelection={
+              ((isAdmin || !isTrash) && canDelete) || (!isTrash && canLinkUpd)
+                ? bulk.selection
+                : undefined
+            }
             // Без права правки клик по строке ведёт в просмотр (там же — отметка
             // проверки), а не в редактор, который всё равно откажет.
             onRowClick={(r) => (canEdit ? onOpen(r.id) : setViewData(buildViewData(r)))}
@@ -1369,8 +1400,38 @@ export function DeliveriesHistory({
         onClose={() => setShareId(null)}
         title="Поделиться приёмкой"
       />
+      {canLinkUpd && (
+        <BulkEdoLinkFlow
+          open={bulkEdoOpen}
+          deliveries={selectedRows}
+          onClose={() => setBulkEdoOpen(false)}
+          onDone={() => {
+            setBulkEdoOpen(false);
+            bulk.clear();
+          }}
+        />
+      )}
     </>
   );
+}
+
+/** Сколько приёмок за раз в групповой привязке УПД — тот же предел, что у сервера. */
+const BULK_EDO_MAX = 50;
+
+/**
+ * Почему одну УПД нельзя привязать к отмеченным приёмкам; null — можно.
+ * Сервер проверит то же самое, здесь — чтобы кнопка не обещала невозможного.
+ */
+export function bulkEdoLinkBlock(
+  rows: readonly Pick<Row, 'siteId' | 'pendingDeletionAt' | 'sourceShipmentId'>[],
+): string | null {
+  if (rows.length === 0) return 'Отметьте приёмки';
+  if (rows.length > BULK_EDO_MAX) return `Не больше ${BULK_EDO_MAX} приёмок за раз`;
+  if (new Set(rows.map((r) => r.siteId)).size > 1)
+    return 'Выбраны приёмки разных объектов: одна УПД привязывается к приёмкам одного объекта';
+  if (rows.some((r) => r.pendingDeletionAt)) return 'Среди отмеченных есть помеченные на удаление';
+  if (rows.some((r) => r.sourceShipmentId)) return 'Среди отмеченных есть приёмки, созданные из отгрузки';
+  return null;
 }
 
 // Склонение «приёмка»: 1 приёмку / 2-4 приёмки / 5+ приёмок.

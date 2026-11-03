@@ -212,3 +212,27 @@ describe('оператор ЭДО в чипе', () => {
     expect(screen.getByText(/^ЭДО:/).textContent).toContain('5555');
   });
 });
+
+describe('«К другим приёмкам»', () => {
+  it('кнопка есть только с обработчиком и отдаёт свою УПД', () => {
+    const onShare = vi.fn();
+    show({ documents: [exported], onShare });
+    fireEvent.click(screen.getByRole('button', { name: 'К другим приёмкам' }));
+    expect(onShare).toHaveBeenCalledWith(exported);
+    cleanup();
+    show({ documents: [exported] });
+    expect(screen.queryByRole('button', { name: 'К другим приёмкам' })).toBeNull();
+  });
+
+  it('отвязка общей УПД предупреждает, что в других приёмках она останется', async () => {
+    show({
+      documents: [
+        { ...exported, alsoIn: [{ deliveryId: 'x1', displayId: 21041 }], alsoInCount: 1 },
+      ],
+    });
+    fireEvent.click(screen.getByRole('button', { name: '×' }));
+    expect(
+      await screen.findByText('Отвязать от этой приёмки? В 21041 УПД останется.'),
+    ).toBeTruthy();
+  });
+});

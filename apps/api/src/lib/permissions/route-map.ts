@@ -384,6 +384,15 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
       expandableBy: UNSCOPED,
     }),
   ],
+  // Одна УПД — к нескольким приёмкам объекта якоря `:id`: то же решение,
+  // что у одиночной привязки, только для нескольких машин сразу.
+  [
+    'POST /api/v1/deliveries/:id/edo-matches/batch',
+    st('operations.deliveries', 'edit', {
+      capability: 'operations.edit.link_source',
+      expandableBy: UNSCOPED,
+    }),
+  ],
   // Чтение для окна подбора и метки в шапке. Запрашивается только там, где
   // показана кнопка привязки (canLinkUpd), — это часть функции привязки, а не
   // просмотра операций, поэтому выданный «Просмотр» её не открывает.
@@ -394,6 +403,8 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/deliveries/:id/edo-matches', EDO_READ],
   ['GET /api/v1/deliveries/:id/edo-matches/:matchId/file', EDO_READ],
   ['GET /api/v1/deliveries/:id/edo-matches/:matchId/items', EDO_READ],
+  ['GET /api/v1/deliveries/:id/edo-matches/shared', EDO_READ],
+  ['GET /api/v1/deliveries/:id/edo-share-candidates', EDO_READ],
   ['GET /api/v1/deliveries/:id/edo-candidates', EDO_READ],
   ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/file', EDO_READ],
   ['GET /api/v1/deliveries/:id/edo-candidates/export/:documentId/pdf', EDO_READ],

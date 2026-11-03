@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   Alert,
@@ -25,7 +25,7 @@ import { deliveryNumbersText } from './LinkedEdoChips';
 
 type FoundBy = 'number' | 'inn' | 'name' | 'date' | 'search';
 
-type Candidate = {
+export type Candidate = {
   id: string;
   source: 'import' | 'export';
   contentCategory: string | null;
@@ -300,6 +300,7 @@ export function LinkEdoDocumentModal({
   deliveryItems,
   deliveryPhotos,
   section = null,
+  headerExtra = null,
   onCancel,
   onPick,
 }: {
@@ -313,6 +314,8 @@ export function LinkEdoDocumentModal({
   deliveryPhotos: readonly ComparePhoto[];
   /** Подбор к блоку материалов: эталон — его документ. null — к приёмке целиком. */
   section?: EdoSection | null;
+  /** Строка над окном — например, выбор приёмки-эталона в групповой привязке. */
+  headerExtra?: ReactNode;
   onCancel: () => void;
   onPick: (candidate: Candidate) => void;
 }) {
@@ -594,6 +597,7 @@ export function LinkEdoDocumentModal({
       destroyOnClose
     >
       <Space ref={rootRef} direction="vertical" size="middle" style={{ width: '100%' }}>
+        {headerExtra}
         <div
           style={{
             display: 'flex',

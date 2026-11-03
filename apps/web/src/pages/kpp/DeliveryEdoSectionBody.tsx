@@ -5,8 +5,16 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { edoOperatorLabel } from '../shared/edoOperator';
 import { EdoCompareDrawer, type ComparePhoto } from './EdoCompareDrawer';
-import type { LinkedEdoDocument } from './LinkedEdoChips';
-import { edoTotals, factTotals, formatPartialSum, type FactRow } from './edoSectionTotals';
+import { deliveryNumbersText, type LinkedEdoDocument } from './LinkedEdoChips';
+import {
+  deliveriesAccusative,
+  edoTotals,
+  factTotals,
+  formatPartialSum,
+  sharedFactTotals,
+  type FactRow,
+} from './edoSectionTotals';
+import type { SharedEdoFacts } from './useDeliveryEdoShared';
 import type { EdoItem, EdoItemsEntry, EdoItemsResponse } from './useDeliveryEdoItems';
 
 /**
@@ -247,6 +255,50 @@ function isReady(entry: EdoItemsEntry): entry is EdoItemsEntry & { data: EdoItem
 }
 
 /**
+ * Та же УПД ещё в других приёмках: «УПД на 3 приёмки: эта, 23420, 23422 · ЭДО:
+ * … · Факт по всем: …». Строки УПД между машинами не делятся — рядом с итогом
+ * УПД стоит факт всех её приёмок. Факт этой приёмки — из формы, с
+ * несохранёнными правками; соседей — сохранённый.
+ */
+export function SharedEdoLine({
+  entry,
+  shared,
+  currentRows,
+  scopeHasOtherEdo,
+}: {
+  entry: EdoItemsEntry;
+  shared: SharedEdoFacts;
+  /** Факт этой приёмки по области связи: позиции блока или все позиции. */
+  currentRows: readonly FactRow[];
+  /** В той же области этой приёмки есть другая УПД из ЭДО. */
+  scopeHasOtherEdo: boolean;
+}) {
+  const total = shared.count + 1;
+  const fact = sharedFactTotals(currentRows, shared.deliveries);
+  const edo = isReady(entry) ? (entry.data.totals?.totalExVat ?? null) : undefined;
+  const edoText = edo === undefined ? '…' : edo === null ? '—' : formatMoneyRu(edo);
+  const partial = shared.deliveries.length < shared.count;
+  const mixed = scopeHasOtherEdo || shared.deliveries.some((delivery) => delivery.otherEdoInScope);
+  return (
+    <div>
+      <Typography.Text type="secondary">
+        {`УПД на ${total} ${deliveriesAccusative(total)}: эта, ${deliveryNumbersText(shared.deliveries, shared.count)}`}
+        {` · ЭДО: без НДС ${edoText}`}
+        {` · Факт по всем: строк ${fact.count} · без НДС ${formatPartialSum(fact.exVat, 'цены', 'rows')} · НДС ${formatPartialSum(fact.vat, 'НДС', 'rows')}`}
+        {partial &&
+          ` (по ${shared.deliveries.length + 1} ${deliveriesDative(shared.deliveries.length + 1)})`}
+        {mixed && ' · в блоке есть другая УПД — факт блока посчитан целиком'}
+      </Typography.Text>
+    </div>
+  );
+}
+
+/** «по 51 приёмке», «по 52 приёмкам». */
+function deliveriesDative(n: number): string {
+  return n % 10 === 1 && n % 100 !== 11 ? 'приёмке' : 'приёмкам';
+}
+
+/**
  * Счётчик для заголовка блока: строки готовых УПД; «…» — пока грузятся;
  * пусто — какая-то УПД не готова (сбой виден внутри блока).
  */
@@ -337,6 +389,7 @@ export function DeliveryEdoSectionBody({
   onFactOpenChange,
   photos,
   onOpenXml,
+  shared,
 }: {
   deliveryId: string;
   /** УПД из ЭДО, привязанные к этому блоку. */
@@ -350,6 +403,8 @@ export function DeliveryEdoSectionBody({
   onFactOpenChange: (open: boolean) => void;
   photos: readonly ComparePhoto[];
   onOpenXml: (match: LinkedEdoDocument) => void;
+  /** Общие УПД блока: та же УПД в других приёмках — по id привязки. */
+  shared?: ReadonlyMap<string, SharedEdoFacts>;
 }) {
   const { openPdf, drawer } = useEdoPdf(deliveryId, photos, onOpenXml);
   const actions: EdoFileActions = { onOpenXml, onOpenPdf: openPdf };
@@ -364,9 +419,22 @@ export function DeliveryEdoSectionBody({
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      {entries.map((entry) => (
-        <EdoDocumentLines key={entry.match.id} entry={entry} actions={actions} />
-      ))}
+      {entries.map((entry) => {
+        const facts = shared?.get(entry.match.id);
+        return (
+          <Space key={entry.match.id} direction="vertical" size={4} style={{ width: '100%' }}>
+            <EdoDocumentLines entry={entry} actions={actions} />
+            {facts && (
+              <SharedEdoLine
+                entry={entry}
+                shared={facts}
+                currentRows={factRows}
+                scopeHasOtherEdo={entries.length > 1}
+              />
+            )}
+          </Space>
+        );
+      })}
       <div>
         <div>
           <Typography.Text type="secondary">{edoSummary}</Typography.Text>
@@ -397,11 +465,20 @@ export function DeliveryEdoOnlyBlocks({
   entries,
   photos,
   onOpenXml,
+  shared,
+  factRows = [],
+  otherEdoOnDelivery = false,
 }: {
   deliveryId: string;
   entries: readonly EdoItemsEntry[];
   photos: readonly ComparePhoto[];
   onOpenXml: (match: LinkedEdoDocument) => void;
+  /** Общие УПД: та же УПД в других приёмках — по id привязки. */
+  shared?: ReadonlyMap<string, SharedEdoFacts>;
+  /** Все позиции формы — факт связи «к приёмке целиком». */
+  factRows?: readonly FactRow[];
+  /** У приёмки есть и другие УПД из ЭДО — их факт в тех же позициях. */
+  otherEdoOnDelivery?: boolean;
 }) {
   const [openKeys, setOpenKeys] = useAutoOpenKeys(entries.map((entry) => entry.match.id));
   const { openPdf, drawer } = useEdoPdf(deliveryId, photos, onOpenXml);
@@ -419,7 +496,22 @@ export function DeliveryEdoOnlyBlocks({
           return {
             key: entry.match.id,
             label: `Материалы · УПД № ${number ?? 'без номера'} из ЭДО · ${edoOperatorLabel(operator)}${edoCountLabel([entry])}`,
-            children: <EdoDocumentLines entry={entry} actions={actions} />,
+            children: (() => {
+              const facts = shared?.get(entry.match.id);
+              return facts ? (
+                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                  <EdoDocumentLines entry={entry} actions={actions} />
+                  <SharedEdoLine
+                    entry={entry}
+                    shared={facts}
+                    currentRows={factRows}
+                    scopeHasOtherEdo={otherEdoOnDelivery}
+                  />
+                </Space>
+              ) : (
+                <EdoDocumentLines entry={entry} actions={actions} />
+              );
+            })(),
           };
         })}
       />

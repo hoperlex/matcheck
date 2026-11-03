@@ -6,7 +6,14 @@
  */
 import { describe, expect, it } from 'vitest';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
-import { edoTotals, factTotals, formatPartialSum, type FactRow } from './edoSectionTotals';
+import {
+  deliveriesAccusative,
+  edoTotals,
+  factTotals,
+  formatPartialSum,
+  sharedFactTotals,
+  type FactRow,
+} from './edoSectionTotals';
 import type { EdoItemsResponse } from './useDeliveryEdoItems';
 
 const row = (over: Partial<FactRow> = {}): FactRow => ({
@@ -128,5 +135,32 @@ describe('formatPartialSum', () => {
 
   it('известного нет — «—»', () => {
     expect(formatPartialSum({ value: null, missing: 4 }, 'цены', 'rows')).toBe('—');
+  });
+});
+
+describe('sharedFactTotals — факт этой приёмки и соседей с той же УПД', () => {
+  it('складывает строки всех приёмок; неизвестное не становится нулём', () => {
+    const total = sharedFactTotals(
+      [row({ qtyActual: '2', price: '10' })],
+      [
+        { rows: [row({ qtyActual: '3', price: '10' })] },
+        { rows: [row({ qtyActual: '1', price: null })] },
+      ],
+    );
+    expect(total.count).toBe(3);
+    expect(total.exVat).toEqual({ value: 50, missing: 1 });
+  });
+
+  it('склонение после «на N»', () => {
+    expect([2, 3, 5, 11, 12, 21, 22, 25].map((n) => `${n} ${deliveriesAccusative(n)}`)).toEqual([
+      '2 приёмки',
+      '3 приёмки',
+      '5 приёмок',
+      '11 приёмок',
+      '12 приёмок',
+      '21 приёмку',
+      '22 приёмки',
+      '25 приёмок',
+    ]);
   });
 });
