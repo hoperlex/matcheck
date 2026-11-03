@@ -101,6 +101,7 @@ import {
   loadProblemRowItemIds,
 } from '../domain/operations/source-document-validation.js';
 import { canSeeReviewInMatrix } from '../lib/review.js';
+import { roleHasCapability } from '../lib/permissions/capabilities.js';
 import { assertPermission } from '../lib/permissions/assert.js';
 import {
   expandCustomerCounterpartyToOpIds,
@@ -152,7 +153,7 @@ const ListQuerySchema = z.object({
   // Поиск по госномеру — ILIKE.
   plate: z.string().optional(),
   // Признаки приёмки, AND между выбранными:
-  //   transit, assets, upd, waybill.
+  //   transit, assets, upd, waybill, doc_attention, edo.
   features: z.string().optional(),
   // Диапазон даты прибытия (ISO). Используется для архивных запросов
   // «приёмки за прошлый месяц», когда нужное >limit/offset назад.
@@ -189,7 +190,7 @@ function parseCsv(s: string | undefined): string[] {
     .filter(Boolean);
 }
 
-const KNOWN_FEATURES = new Set(['transit', 'assets', 'upd', 'waybill', 'doc_attention']);
+const KNOWN_FEATURES = new Set(['transit', 'assets', 'upd', 'waybill', 'doc_attention', 'edo']);
 
 // Маппинг directory-id (customer_counterparties / suppliers) в operational
 // counterparty.id через совпадение нормализованного ИНН. Повторяет логику
@@ -1048,6 +1049,14 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     //   assets  → is_assets = true OR EXISTS item_kind='asset'
     //   upd     → EXISTS source_document.kind='upd'
     //   waybill → EXISTS source_document.kind IN ('transport_waybill','os2_transfer')
+    //   edo     → EXISTS delivery_edo_matches (УПД из Диадока или СБИС)
+    //
+    // edo — только тем, кому привязки ЭДО видны в карточке (та же возможность,
+    // что у GET …/edo-matches). Веб без неё пункт не показывает; без проверки
+    // здесь чужая ссылка с ?feature=edo сужала бы список без видимого фильтра.
+    const edoAllowed =
+      featureCodes.includes('edo') &&
+      (await roleHasCapability(app, user?.role, 'operations.edit.link_source'));
     for (const f of featureCodes) {
       if (f === 'transit') {
         filters.push(eq(deliveries.inTransit, true));
@@ -1086,6 +1095,14 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           // обязаны совпадать, а раньше каждый считал своё.
           filters.push(drSql`NOT ${operationIsClosed(drSql`${deliveries.statusId}`)}`);
           filters.push(docAttentionExists(DELIVERY_TABLES, drSql`${deliveries.id}`));
+        }
+      } else if (f === 'edo') {
+        // Своя копия (source_document_id) и запись реестра (export_document_id)
+        // равноправны: CHECK держит ровно один документ в строке привязки.
+        if (edoAllowed) {
+          filters.push(drSql`EXISTS (
+          SELECT 1 FROM delivery_edo_matches dem_f WHERE dem_f.delivery_id = ${deliveries.id}
+        )`);
         }
       } else if (f === 'waybill') {
         filters.push(drSql`EXISTS (

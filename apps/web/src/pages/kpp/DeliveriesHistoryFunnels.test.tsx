@@ -11,10 +11,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+// Снятые возможности — по умолчанию пусто, то есть «можно всё».
+const permState = vi.hoisted(() => ({ deniedCaps: new Set<string>() }));
 vi.mock('../../shared/hooks/usePermissions', () => ({
   usePermissions: () => ({
     can: () => true,
-    hasCapability: () => true,
+    hasCapability: (cap: string) => !permState.deniedCaps.has(cap),
     canView: () => true,
     loading: false,
   }),
@@ -124,6 +126,7 @@ async function renderHistory(initial = '/operations'): Promise<void> {
 afterEach(() => {
   cleanup();
   useGlobalFiltersStore.getState().reset();
+  permState.deniedCaps.clear();
 });
 
 function th(title: string): HTMLElement {
@@ -211,5 +214,34 @@ describe('Принятые (приёмка): воронки в шапке', () =
 
     await waitFor(() => expect(search).toContain('dispatcher=none'));
     await expectListRequest({ dispatcherCheck: 'none' });
+  });
+
+  it('«УПД из ЭДО/СБИС» в «Признаках» — ?feature=edo в адресе и features=edo на сервер', async () => {
+    await renderHistory();
+    const select = (await screen.findByText('Признаки')).closest('.ant-select')!;
+    fireEvent.mouseDown(select.querySelector('.ant-select-selector')!);
+    fireEvent.click(await screen.findByTitle('УПД из ЭДО/СБИС'));
+
+    await waitFor(() => expect(search).toContain('feature=edo'));
+    await expectListRequest({ features: 'edo' });
+  });
+
+  it('без права на привязку ЭДО пункта нет, а ?feature=edo из ссылки не уходит на сервер', async () => {
+    permState.deniedCaps.add('operations.edit.link_source');
+    await renderHistory('/operations?feature=edo&feature=upd');
+
+    // Остальные признаки из адреса по-прежнему действуют.
+    await expectListRequest({ features: 'upd' });
+    expect(listQueries().some((qs) => qs.get('features')?.includes('edo'))).toBe(false);
+
+    // «Признаки» — селект с тегом «УПД» (tagRender в FilterSelect): placeholder
+    // при выбранном значении не рисуется.
+    const tag = Array.from(document.querySelectorAll('.ant-select .ant-tag')).find(
+      (el) => el.textContent?.trim() === 'УПД',
+    )!;
+    const select = tag.closest('.ant-select')!;
+    fireEvent.mouseDown(select.querySelector('.ant-select-selector')!);
+    await screen.findByTitle('Требует проверки');
+    expect(screen.queryByTitle('УПД из ЭДО/СБИС')).toBeNull();
   });
 });

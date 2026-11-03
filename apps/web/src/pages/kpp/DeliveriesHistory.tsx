@@ -65,6 +65,7 @@ import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 // directoryFilterMap (ИНН-маппинг customer_counterparties → operational
 // counterparties) больше не нужен — фильтрация переехала на сервер.
 import {
+  DELIVERY_FEATURE_VALUES,
   FEATURE_VALUES,
   ShipmentFeatureFilters,
   type OperationFeature,
@@ -183,6 +184,12 @@ export function DeliveriesHistory({
   // ссылок — always. Спрашивая одну возможность, мы оставили бы кнопку
   // менеджеру со снятым edit — и создание вернуло бы 403.
   const canShare = canEdit && hasCapability('operations.share.manage');
+  // Признак «УПД из ЭДО/СБИС» — тем, кому привязки ЭДО видны в карточке (та же
+  // возможность, что у чипов). Сервер без неё параметр игнорирует, поэтому и
+  // разбор адреса ниже его выкидывает: фильтр не действует — и не виден.
+  const deliveryFeatures = hasCapability('operations.edit.link_source')
+    ? DELIVERY_FEATURE_VALUES
+    : FEATURE_VALUES;
 
   // Slot для bulk-actions в внешнем header-row родителя. Отслеживаем
   // через state, потому что ref.current = null до commit phase — портал
@@ -203,7 +210,7 @@ export function DeliveriesHistory({
   // Симметрично с ShipmentsHistory: повторяющиеся ключи через
   // URLSearchParams.getAll/append, CSV не использую (имена короткие, но
   // оставляем единообразие). Невалидные значения из URL отбрасываются.
-  const FEATURE_SET = new Set<string>(FEATURE_VALUES);
+  const FEATURE_SET = new Set<string>(deliveryFeatures);
   const urlFeatures = params
     .getAll('feature')
     .filter((v): v is OperationFeature => FEATURE_SET.has(v));
@@ -958,6 +965,7 @@ export function DeliveriesHistory({
                       }
                     }}
                     showPurpose={false}
+                    availableFeatures={deliveryFeatures}
                   />
                   {/* Фильтр по отметке проверки — только менеджменту. */}
                   {canReview && (

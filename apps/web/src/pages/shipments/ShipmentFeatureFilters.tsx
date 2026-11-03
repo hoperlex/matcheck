@@ -26,8 +26,12 @@ export type ShipmentPurpose = (typeof PURPOSE_VALUES)[number];
 //             Источников три: связанные документы, документы в происхождении
 //             позиций и сверка фото документа. Третий не лишний: у 73 приёмок
 //             за месяц сигнал есть только там, документа к ним не привязано.
+//   edo     — только у приёмки: привязана УПД из Диадока или СБИС
+//             (delivery_edo_matches). У отгрузок таких привязок нет, поэтому
+//             общий набор FEATURE_VALUES её не содержит.
 export const FEATURE_VALUES = ['assets', 'waybill', 'upd', 'transit', 'doc_attention'] as const;
-export type OperationFeature = (typeof FEATURE_VALUES)[number];
+export const DELIVERY_FEATURE_VALUES = [...FEATURE_VALUES, 'edo'] as const;
+export type OperationFeature = (typeof DELIVERY_FEATURE_VALUES)[number];
 // Обратно-совместимое имя для существующих импортов в ShipmentsHistory.
 export type ShipmentFeature = OperationFeature;
 
@@ -39,6 +43,7 @@ const FEATURE_LABELS: Record<OperationFeature, string> = {
   // Не «Расхождение»: признак включает и подозрения, у которых арифметика
   // сошлась. Название обещает ровно то, что фильтр отбирает.
   doc_attention: 'Требует проверки',
+  edo: 'УПД из ЭДО/СБИС',
 };
 
 export interface ShipmentFeatureFiltersValue {

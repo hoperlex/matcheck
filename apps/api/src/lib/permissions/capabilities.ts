@@ -87,6 +87,45 @@ export function capabilitiesFor(
   return [...out].sort();
 }
 
+/** Минимум от FastifyInstance, из которого считаются права пользователя. */
+type PermissionsSource = {
+  enforced: boolean;
+  get(): Promise<OverrideMap>;
+  routeRoles?: RouteRolesMap;
+};
+
+/**
+ * Overrides, от которых считаются права пользователя.
+ *
+ * При выключенном enforcement — ДЕФОЛТЫ, сохранённые overrides игнорируются.
+ * Без этого «выключить флаг и перезапустить» не было бы полным откатом: сервер
+ * уже ничего не запрещает, а интерфейс всё ещё прятал бы кнопки по настройкам,
+ * которые не применяются.
+ */
+export async function effectiveOverrides(permissions: PermissionsSource): Promise<OverrideMap> {
+  return permissions.enforced ? await permissions.get() : new Map();
+}
+
+/**
+ * Есть ли у роли возможность — ровно то, что /me/permissions отдаёт вебу в
+ * `capabilities`. Нужна там, где сервер обязан повторить решение интерфейса:
+ * параметр фильтра, пункт которого веб показывает по возможности.
+ *
+ * Без плагина прав (часть тестов поднимает Fastify без него) или без
+ * инвентаря allow-list — `false`: «не знаем» значит «не даём», как в
+ * routeAllowsRole.
+ */
+export async function roleHasCapability(
+  app: { permissions?: PermissionsSource },
+  role: UserRole | null | undefined,
+  capability: string,
+): Promise<boolean> {
+  const permissions = app.permissions;
+  if (!permissions?.routeRoles || !role) return false;
+  const overrides = await effectiveOverrides(permissions);
+  return capabilitiesFor(overrides, role, permissions.routeRoles).includes(capability);
+}
+
 /** Все объявленные в реестре имена — для тестов и для отладки. */
 export function declaredCapabilities(): string[] {
   const out = new Set<string>();

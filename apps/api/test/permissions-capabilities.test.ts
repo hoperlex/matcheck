@@ -8,7 +8,11 @@
  */
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_MATRIX, MANAGED_ROLES, canExpand, type ManagedRole } from '@matcheck/contracts';
-import { capabilitiesFor, declaredCapabilities } from '../src/lib/permissions/capabilities.js';
+import {
+  capabilitiesFor,
+  declaredCapabilities,
+  roleHasCapability,
+} from '../src/lib/permissions/capabilities.js';
 import { ROUTE_PERMISSIONS, routeKey } from '../src/lib/permissions/route-map.js';
 import type { OverrideMap } from '../src/lib/permissions/matrix.js';
 import { overrideKey } from '../src/lib/permissions/matrix.js';
@@ -252,5 +256,37 @@ describe('инварианты реестра', () => {
     }
 
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('roleHasCapability: сервер повторяет решение /me/permissions', () => {
+  const app = async (enforced: boolean, overrides: OverrideMap = EMPTY) => ({
+    permissions: { enforced, get: async () => overrides, routeRoles: await roleMap() },
+  });
+
+  it('по дефолтам: менеджеру привязки ЭДО видны, монитору и инспектору — нет', async () => {
+    const a = await app(false);
+    expect(await roleHasCapability(a, 'manager', 'operations.edit.link_source')).toBe(true);
+    expect(await roleHasCapability(a, 'monitor', 'operations.edit.link_source')).toBe(false);
+    expect(await roleHasCapability(a, 'inspector_kpp', 'operations.edit.link_source')).toBe(false);
+  });
+
+  it('выданное монитору право действует только при включённой матрице', async () => {
+    const grant = granted('monitor', 'operations.deliveries', 'edit');
+    const on = await app(true, grant);
+    const off = await app(false, grant);
+    expect(await roleHasCapability(on, 'monitor', 'operations.edit.link_source')).toBe(true);
+    expect(await roleHasCapability(off, 'monitor', 'operations.edit.link_source')).toBe(false);
+  });
+
+  it('без плагина прав, без инвентаря или без роли — «не знаем» значит «нет»', async () => {
+    expect(await roleHasCapability({}, 'manager', 'operations.edit.link_source')).toBe(false);
+    const noInventory = { permissions: { enforced: false, get: async () => EMPTY } };
+    expect(await roleHasCapability(noInventory, 'manager', 'operations.edit.link_source')).toBe(
+      false,
+    );
+    expect(await roleHasCapability(await app(false), undefined, 'operations.edit.link_source')).toBe(
+      false,
+    );
   });
 });

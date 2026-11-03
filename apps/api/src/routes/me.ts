@@ -6,7 +6,7 @@ import {
 } from '@matcheck/contracts';
 import { asZod } from '../lib/fastify.js';
 import { effectiveFor } from '../lib/permissions/matrix.js';
-import { capabilitiesFor } from '../lib/permissions/capabilities.js';
+import { capabilitiesFor, effectiveOverrides } from '../lib/permissions/capabilities.js';
 
 /**
  * Эффективные права текущего пользователя.
@@ -34,13 +34,9 @@ export async function meRoutes(rawApp: FastifyInstance): Promise<void> {
     async (req) => {
       const user = req.user!;
 
-      // При выключенном enforcement отдаём ДЕФОЛТЫ, игнорируя сохранённые
-      // overrides. Без этого «выключить флаг и перезапустить» не было бы
-      // полным откатом: сервер уже ничего не запрещает, а интерфейс всё ещё
-      // прятал бы кнопки по настройкам, которые не применяются.
-      const overrides = app.permissions.enforced
-        ? await app.permissions.get()
-        : new Map<string, PagePermissions>();
+      // При выключенном enforcement — дефолты (см. effectiveOverrides). Тем же
+      // помощником сервер повторяет решения интерфейса в фильтрах списков.
+      const overrides = await effectiveOverrides(app.permissions);
 
       return {
         // Фронт сверяет userId с текущим пользователем перед записью в стор:
