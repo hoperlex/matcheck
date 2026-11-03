@@ -9,7 +9,6 @@ import type {
   SourceDirection,
   SourceDocument,
   SourceDocumentListResponseSchema,
-  Supplier,
   UpdCheck,
   UpdValidation,
 } from '@matcheck/contracts';
@@ -30,6 +29,7 @@ import { ExpandedSourceDocumentItems } from '../../shared/ui/ExpandedSourceDocum
 import { usePrefetchSourceDocumentDetails } from '../../shared/hooks/usePrefetchSourceDocumentDetails';
 import { useAuthStore } from '../../stores/auth';
 import { contractorFilterOptions } from './contractorFilterOptions';
+import { useSupplierFilterOptions } from './useSupplierFilterOptions';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 
@@ -261,11 +261,8 @@ export function ExpectedSourceDocsList({
       ),
     enabled: !isContractor,
   });
-  const suppliersQuery = useQuery({
-    queryKey: ['suppliers', 'all'],
-    queryFn: () => api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
-    enabled: !isContractor,
-  });
+  // Одна строка на поставщика: дубли справочника с ошибочным ИНН — внутри неё.
+  const supplierFilter = useSupplierFilterOptions({ enabled: !isContractor });
   const sitesQuery = useQuery({
     queryKey: ['sites', { activeOnly: true, limit: 200 }],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
@@ -276,14 +273,7 @@ export function ExpectedSourceDocsList({
     () => contractorFilterOptions(customerCounterpartiesQuery.data?.items ?? []),
     [customerCounterpartiesQuery.data],
   );
-  const supplierOptions = useMemo(
-    () =>
-      (suppliersQuery.data?.items ?? []).map((s) => ({
-        value: s.id,
-        label: s.name,
-      })),
-    [suppliersQuery.data],
-  );
+  const supplierIdsShown = supplierFilter.normalize(filters.supplierIds);
   // Варианты воронки «Объект» — те же, что в поле панели (код · название).
   const siteOptions = useMemo(
     () =>
@@ -360,15 +350,15 @@ export function ExpectedSourceDocsList({
       header={
         <>
           <ListFilters
-            value={filters}
+            value={{ ...filters, supplierIds: supplierIdsShown }}
             onChange={updateFilters}
             fields={isContractor ? ['q'] : ['contractor', 'supplier', 'site', 'q']}
             contractorOptions={contractorOptions}
-            supplierOptions={supplierOptions}
+            supplierOptions={supplierFilter.options}
             sites={sitesQuery.data?.items ?? []}
             loading={
               customerCounterpartiesQuery.isLoading ||
-              suppliersQuery.isLoading ||
+              supplierFilter.loading ||
               sitesQuery.isLoading
             }
             searchPlaceholder="Номер документа"
@@ -510,9 +500,9 @@ export function ExpectedSourceDocsList({
                   ...externalColumnFilter<SourceDocument>({
                     kind: 'values',
                     title: 'Поставщик',
-                    options: supplierOptions,
-                    loading: suppliersQuery.isLoading,
-                    value: filters.supplierIds,
+                    options: supplierFilter.options,
+                    loading: supplierFilter.loading,
+                    value: supplierIdsShown,
                     onApply: (supplierIds) => updateFilters({ supplierIds }),
                   }),
                 }

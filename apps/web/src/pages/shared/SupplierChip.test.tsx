@@ -29,9 +29,38 @@ const MOZHAYSK_DIRECTORY = [
   { id: 'dup-plain', inn: '5028024698', name: 'АО ИСТКУЛЬТ МОЖАЙСК', aliases: [] },
   { id: 'right', inn: '5028021698', name: 'ООО «МОЖАЙСК»', aliases: [] },
 ];
+// Справочник 02.11: настоящая ТУЛА-СТАЛЬ — запись BillHub «ТД», рядом дубли
+// распознавания «ТОРГОВЫЙ ДОМ» с ошибочными ИНН (один — с ИНН СУ-10).
+const TULA_DIRECTORY = [
+  { id: 'tula-dup-su10', inn: '7736255508', name: 'ООО «ТОРГОВЫЙ ДОМ «ТУЛА-СТАЛЬ»', aliases: [] },
+  {
+    id: 'tula-dup',
+    inn: '7725459500',
+    name: 'ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ТОРГОВЫЙ ДОМ "ТУЛА-СТАЛЬ"',
+    aliases: [],
+  },
+  { id: 'tula-bh', inn: '7725495000', name: 'ООО "ТД "ТУЛА-СТАЛЬ"', aliases: [] },
+];
+const TULA_GROUPS = [
+  {
+    value: 'tula-bh',
+    label: 'ООО "ТД "ТУЛА-СТАЛЬ"',
+    memberIds: ['tula-bh', 'tula-dup', 'tula-dup-su10'],
+  },
+];
 const savedDoc = { id: DOC, supplierName: 'ООО «Королевская вода»' };
 
+// Группы поставщиков с сервера. null — каждая запись сама по себе (так сервер
+// ответил бы на справочник без дублей); 'fail' — запрос групп упал.
+let groups: typeof TULA_GROUPS | 'fail' | null = null;
+
 const get = vi.fn((url: string) => {
+  if (url === '/suppliers/filter-options') {
+    if (groups === 'fail') return Promise.reject(new Error('boom'));
+    return Promise.resolve({
+      items: groups ?? directory.map((s) => ({ value: s.id, label: s.name, memberIds: [s.id] })),
+    });
+  }
   if (url.startsWith('/suppliers')) {
     return Promise.resolve({ items: directory, total: directory.length });
   }
@@ -68,6 +97,7 @@ async function choose(name: string, title: string): Promise<void> {
 
 beforeEach(() => {
   directory = BASE_DIRECTORY;
+  groups = null;
 });
 
 afterEach(() => {
@@ -309,5 +339,89 @@ describe('окно поставщика: поиск и ИНН документа
       supplierDirectoryId: 'right',
     });
     expect(screen.queryByRole('button', { name: 'Выбрать всё равно' })).toBeNull();
+  });
+});
+
+describe('окно поставщика: одна строка на поставщика (ТУЛА-СТАЛЬ, 02.11)', () => {
+  it('дубли спрятаны в строку поставщика — в окне одна ТУЛА-СТАЛЬ с ИНН BillHub', async () => {
+    directory = TULA_DIRECTORY;
+    groups = TULA_GROUPS;
+    renderDocumentChip(null);
+    const box = await screen.findByRole('combobox', { name: 'Поставщик в документе' });
+    fireEvent.mouseDown(box);
+    fireEvent.change(box, { target: { value: 'тула' } });
+    await waitFor(() => expect(optionTitles()).toEqual(['ООО "ТД "ТУЛА-СТАЛЬ" · ИНН 7725495000']));
+  });
+
+  it('поиск по ИНН дубля находит строку поставщика, выбор пишет основную запись', async () => {
+    directory = TULA_DIRECTORY;
+    groups = TULA_GROUPS;
+    renderDocumentChip(null);
+    const box = await screen.findByRole('combobox', { name: 'Поставщик в документе' });
+    fireEvent.mouseDown(box);
+    fireEvent.change(box, { target: { value: '7736255508' } });
+    fireEvent.click(await screen.findByTitle('ООО "ТД "ТУЛА-СТАЛЬ" · ИНН 7725495000'));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    expect(patch).toHaveBeenCalledWith(`/source-documents/${DOC}`, {
+      supplierDirectoryId: 'tula-bh',
+    });
+  });
+
+  it('ИНН документа — как у дубля: окно переспрашивает, затем пишет основную запись', async () => {
+    directory = TULA_DIRECTORY;
+    groups = TULA_GROUPS;
+    renderDocumentChip('7725459500');
+    const box = await screen.findByRole('combobox', { name: 'Поставщик в документе' });
+    fireEvent.mouseDown(box);
+    fireEvent.change(box, { target: { value: 'тула' } });
+    fireEvent.click(await screen.findByTitle('ООО "ТД "ТУЛА-СТАЛЬ" · ИНН 7725495000'));
+
+    expect(
+      await screen.findByText(/ИНН 7725495000 — не совпадает с ИНН в документе 7725459500/),
+    ).toBeTruthy();
+    expect(patch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Выбрать всё равно' }));
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    expect(patch).toHaveBeenCalledWith(`/source-documents/${DOC}`, {
+      supplierDirectoryId: 'tula-bh',
+    });
+  });
+
+  it('без УПД выбор тоже пишет основную запись', async () => {
+    directory = TULA_DIRECTORY;
+    groups = TULA_GROUPS;
+    render(
+      wrap(
+        <SupplierChip
+          entity="delivery"
+          entityId={DELIVERY}
+          hasUpd={false}
+          displayName={null}
+          invalidateQueryKey={['deliveries', DELIVERY]}
+        />,
+      ),
+    );
+    fireEvent.click(screen.getByText('— не указан —'));
+    const box = await screen.findByRole('combobox');
+    fireEvent.mouseDown(box);
+    fireEvent.change(box, { target: { value: 'тула' } });
+    await waitFor(() => expect(optionTitles()).toHaveLength(1));
+    fireEvent.click(await screen.findByTitle('ООО "ТД "ТУЛА-СТАЛЬ" · ИНН 7725495000'));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    expect(patch).toHaveBeenCalledWith(`/deliveries/${DELIVERY}/supplier-from-directory`, {
+      supplierDirectoryId: 'tula-bh',
+    });
+  });
+
+  it('группы не загрузились — окно работает по записям, как раньше', async () => {
+    directory = TULA_DIRECTORY;
+    groups = 'fail';
+    renderDocumentChip(null);
+    const box = await screen.findByRole('combobox', { name: 'Поставщик в документе' });
+    fireEvent.mouseDown(box);
+    fireEvent.change(box, { target: { value: 'тула' } });
+    await waitFor(() => expect(optionTitles()).toHaveLength(3));
   });
 });

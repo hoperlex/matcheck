@@ -3,10 +3,10 @@ import { type SQL, eq, ilike, inArray, sql as drSql } from 'drizzle-orm';
 import { deliverySources, shipmentSources, sourceDocuments } from '../../db/schema.js';
 import {
   expandCustomerCounterpartyToOpIds,
-  expandSupplierToOpIds,
   resolveContractorOpIds,
   sourceDocumentContractorPredicate,
 } from '../../lib/contractor-scope.js';
+import { expandSupplierFilterIds } from '../directories/supplier-filter-groups.js';
 import { escapeLike } from '../../lib/like.js';
 import { parseUuidCsv } from '../../lib/uuid-csv.js';
 import type { AuthUser } from '../../plugins/auth.js';
@@ -158,12 +158,13 @@ export async function buildSourceDocumentFilters(
   if (supplierDirIds.length > 0) {
     // Два пути: современные УПД ссылаются на справочник напрямую
     // (supplier_directory_id), исторические — на операционного контрагента.
-    const opIds = await expandSupplierToOpIds(app, supplierDirIds);
+    // id раскрывается во всю группу поставщика: supplier-filter-groups.ts.
+    const { dirIds, opIds } = await expandSupplierFilterIds(app, supplierDirIds);
     conditions.push(
       opIds.length > 0
-        ? drSql`(${sourceDocuments.supplierDirectoryId} in ${supplierDirIds}
+        ? drSql`(${sourceDocuments.supplierDirectoryId} in ${dirIds}
                  or ${sourceDocuments.supplierId} in ${opIds})`
-        : drSql`${sourceDocuments.supplierDirectoryId} in ${supplierDirIds}`,
+        : drSql`${sourceDocuments.supplierDirectoryId} in ${dirIds}`,
     );
   }
 

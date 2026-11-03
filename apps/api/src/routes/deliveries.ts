@@ -108,8 +108,8 @@ import {
   resolveContractorOpIds,
   deliveryContractorPredicate,
   deliveryVisibleToContractor,
-  expandSupplierToOpIds,
 } from '../lib/contractor-scope.js';
+import { expandSupplierFilterIds } from '../domain/directories/supplier-filter-groups.js';
 import { publishEvent } from './events.js';
 import { dateRangeConditions } from '../lib/date-range.js';
 import { parseUuidCsv } from '../lib/uuid-csv.js';
@@ -977,8 +977,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       }
     }
 
-    // supplierIds: directory ID → operational ID через ИНН-маппинг по
-    // справочнику suppliers.
+    // supplierIds: id справочника suppliers → вся группа одного поставщика
+    // (дубли с ошибочным ИНН — см. supplier-filter-groups.ts) и операционные
+    // контрагенты по ИНН её участников.
     //
     // + inheritance от привязанного документа — по той же причине, что и у
     // подрядчика выше. Собственное поле deliveries.supplier_id заполняется
@@ -988,13 +989,13 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     // экране показывает именно документ — фильтр обязан искать там же, иначе
     // человек видит строки, которые его же фильтр не находит.
     if (supplierDirIds.length > 0) {
-      const opIds = await expandSupplierToOpIds(app, supplierDirIds);
+      const { dirIds, opIds } = await expandSupplierFilterIds(app, supplierDirIds);
       const ownSupplier =
         opIds.length > 0 ? drSql`${deliveries.supplierId} in ${opIds} or ` : drSql``;
       const docSupplier =
         opIds.length > 0
-          ? drSql`(sd_sup.supplier_directory_id in ${supplierDirIds} or sd_sup.supplier_id in ${opIds})`
-          : drSql`sd_sup.supplier_directory_id in ${supplierDirIds}`;
+          ? drSql`(sd_sup.supplier_directory_id in ${dirIds} or sd_sup.supplier_id in ${opIds})`
+          : drSql`sd_sup.supplier_directory_id in ${dirIds}`;
       filters.push(drSql`(${ownSupplier}exists (
       SELECT 1 FROM delivery_sources ds_sup
       JOIN source_documents sd_sup ON sd_sup.id = ds_sup.source_document_id

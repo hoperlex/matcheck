@@ -34,3 +34,22 @@ export const SupplierListResponseSchema = z.object({
   items: z.array(SupplierSchema),
   total: z.number(),
 });
+
+/**
+ * Строка выбора поставщика: одна на организацию, а не на запись справочника.
+ * `value` — id основной записи группы (её пишет окно выбора, её id уходит в
+ * фильтр), `memberIds` — все записи группы, включая дубли с ошибочным ИНН.
+ * Сервер раскрывает в группу любой id участника, поэтому старые ссылки
+ * `?supplier=<дубль>` продолжают работать.
+ */
+export const SupplierFilterOptionSchema = z.object({
+  value: z.string().uuid(),
+  label: z.string(),
+  memberIds: z.array(z.string().uuid()),
+});
+export type SupplierFilterOption = z.infer<typeof SupplierFilterOptionSchema>;
+
+export const SupplierFilterOptionsResponseSchema = z.object({
+  items: z.array(SupplierFilterOptionSchema),
+});
+export type SupplierFilterOptionsResponse = z.infer<typeof SupplierFilterOptionsResponseSchema>;

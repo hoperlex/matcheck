@@ -42,7 +42,6 @@ import type {
   SourceDocumentListResponseSchema,
   SourceRecoverResponse,
   SourceReparseResponse,
-  Supplier,
 } from '@matcheck/contracts';
 import { getDocumentDisplayStatus, isActionableStub, isStubDocument } from '@matcheck/contracts';
 import type { z } from 'zod';
@@ -78,6 +77,7 @@ import { UploadDocumentsModal } from './UploadDocumentsModal';
 import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
 import { UpdResolveDuplicateModal } from './UpdResolveDuplicateModal';
 import { contractorFilterOptions } from '../shared/contractorFilterOptions';
+import { useSupplierFilterOptions } from '../shared/useSupplierFilterOptions';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 type Row = List['items'][number];
@@ -653,11 +653,8 @@ export default function InboxPage() {
       ),
     enabled: !isContractor,
   });
-  const suppliersQuery = useQuery({
-    queryKey: ['suppliers', 'all'],
-    queryFn: () => api.get<{ items: Supplier[]; total: number }>('/suppliers?limit=5000'),
-    enabled: !isContractor,
-  });
+  // Одна строка на поставщика: дубли справочника с ошибочным ИНН — внутри неё.
+  const supplierFilter = useSupplierFilterOptions({ enabled: !isContractor });
   const sitesQuery = useQuery({
     queryKey: ['sites', { activeOnly: true, limit: 200 }],
     queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?activeOnly=true&limit=200'),
@@ -667,10 +664,7 @@ export default function InboxPage() {
     () => contractorFilterOptions(customerCounterpartiesQuery.data?.items ?? []),
     [customerCounterpartiesQuery.data],
   );
-  const supplierOptions = useMemo(
-    () => (suppliersQuery.data?.items ?? []).map((s) => ({ value: s.id, label: s.name })),
-    [suppliersQuery.data],
-  );
+  const supplierIdsShown = supplierFilter.normalize(filters.supplierIds);
   // Варианты воронки «Объект» — те же, что в поле панели (код · название).
   const siteOptions = useMemo(
     () =>
@@ -1272,9 +1266,9 @@ export default function InboxPage() {
             ...externalColumnFilter<Row>({
               kind: 'values',
               title: 'Поставщик',
-              options: supplierOptions,
-              loading: suppliersQuery.isLoading,
-              value: filters.supplierIds,
+              options: supplierFilter.options,
+              loading: supplierFilter.loading,
+              value: supplierIdsShown,
               onApply: (supplierIds) => updateFilters({ supplierIds }),
             }),
           }
@@ -1403,16 +1397,16 @@ export default function InboxPage() {
               )}
             </div>
             <ListFilters
-              value={filters}
+              value={{ ...filters, supplierIds: supplierIdsShown }}
               onChange={updateFilters}
               // Подрядчик: только поиск (справочные фильтры не нужны и закрыты).
               fields={isContractor ? ['q'] : ['contractor', 'supplier', 'site', 'q']}
               contractorOptions={contractorOptions}
-              supplierOptions={supplierOptions}
+              supplierOptions={supplierFilter.options}
               sites={sitesQuery.data?.items ?? []}
               loading={
                 customerCounterpartiesQuery.isLoading ||
-                suppliersQuery.isLoading ||
+                supplierFilter.loading ||
                 sitesQuery.isLoading
               }
               searchPlaceholder="Номер документа"

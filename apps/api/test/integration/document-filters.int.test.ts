@@ -96,8 +96,11 @@ suite('фильтры документов (реальный PostgreSQL)', { tim
 
     await sql`INSERT INTO sites (id, code, name) VALUES (${siteId}, ${`FLT${Date.now() % 10000}`}, 'Фильтры документов')`;
     await sql`INSERT INTO suppliers (id, inn, name) VALUES (${supplierDirId}, ${supplierInn}, 'ООО «Поставщик справочника»')`;
+    // Имя то же, что в справочнике: запись не из BillHub находит операционного
+    // контрагента по ИНН, только если это та же организация по имени (иначе
+    // ТУЛА-СТАЛЬ с ИНН СУ-10 тянула бы документы СУ-10) — supplier-filter-groups.ts.
     await sql`INSERT INTO counterparties (id, inn, name, is_supplier)
-              VALUES (${supplierOpId}, ${supplierInn}, 'ООО «Поставщик операционный»', true)`;
+              VALUES (${supplierOpId}, ${supplierInn}, 'ООО "Поставщик справочника"', true)`;
     await sql`INSERT INTO customer_counterparties (id, inn, name)
               VALUES (${contractorDirId}, ${contractorInn}, 'ООО «Подрядчик справочника»')`;
     await sql`INSERT INTO counterparties (id, inn, name, is_contractor)

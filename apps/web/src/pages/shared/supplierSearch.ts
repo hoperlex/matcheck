@@ -107,6 +107,51 @@ export function pickSupplierOptions<T extends SupplierLike>(
     .map(({ supplier, group }) => ({ supplier, group }));
 }
 
+/** Группа поставщика с сервера: основная запись и все записи-дубли. */
+export type SupplierGroupLike = { value: string; memberIds: readonly string[] };
+
+/**
+ * Варианты окна по группам — одна строка на поставщика.
+ *
+ * 02.11: у ТУЛА-СТАЛЬ в справочнике 40 записей, и окно показывало каждую —
+ * Мониторинг выбирал дубль с ошибочным ИНН. Теперь запись, найденная поиском,
+ * показывается строкой своей группы, а выбор пишет основную запись (BillHub,
+ * иначе запись с верным ИНН не СУ-10 — правила на сервере,
+ * supplier-filter-groups.ts).
+ *
+ * Обещание поиска сохраняется на уровне группы: всё, что находил
+ * pickSupplierOptions, находится и здесь — строкой его группы. Ищется по
+ * имени, алиасу и ИНН любого участника; порядок и подпись — по основной
+ * записи. Запись, которой нет ни в одной группе (заведена после загрузки
+ * групп), остаётся строкой сама по себе.
+ */
+export function pickSupplierGroupOptions<T extends SupplierLike>(
+  groups: readonly SupplierGroupLike[],
+  items: readonly T[],
+  query: string,
+  docInn: string | null,
+  limit = 200,
+): Array<{ supplier: T; group: SupplierInnGroup }> {
+  const byId = new Map(items.map((s) => [s.id, s]));
+  const groupOf = new Map<string, SupplierGroupLike>();
+  for (const g of groups) for (const id of g.memberIds) groupOf.set(id, g);
+  const seen = new Set<string>();
+  const picked: Array<{ supplier: T; group: SupplierInnGroup; index: number }> = [];
+  for (const s of items) {
+    if (!matchesSupplierQuery(s, query)) continue;
+    const g = groupOf.get(s.id);
+    const key = g?.value ?? s.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const supplier = (g && byId.get(g.value)) || s;
+    picked.push({ supplier, group: supplierInnGroup(supplier.inn, docInn), index: picked.length });
+  }
+  return picked
+    .sort((a, b) => GROUP_ORDER[a.group] - GROUP_ORDER[b.group] || a.index - b.index)
+    .slice(0, limit)
+    .map(({ supplier, group }) => ({ supplier, group }));
+}
+
 /** Подпись варианта. Строка — по ней antd ставит title, и на неё опираются тесты. */
 export function supplierOptionLabel(s: SupplierLike, group: SupplierInnGroup): string {
   const base = s.inn ? `${s.name} · ИНН ${s.inn}` : s.name;

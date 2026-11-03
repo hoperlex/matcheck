@@ -7,11 +7,13 @@ import {
   BulkDeleteRequestSchema,
   BulkDeleteResponseSchema,
   ErrorResponseSchema,
+  SupplierFilterOptionsResponseSchema,
   SupplierListResponseSchema,
   SupplierSchema,
   SupplierUpsertSchema,
 } from '@matcheck/contracts';
 import { suppliers } from '../db/schema.js';
+import { loadSupplierFilterGroups } from '../domain/directories/supplier-filter-groups.js';
 
 // Справочник поставщиков заказчика (см. schema.ts / миграция 0055).
 // ОТДЕЛЬНАЯ таблица, не операционная `counterparties` — на приёмки/отгрузки/
@@ -67,6 +69,23 @@ export async function supplierRoutes(rawApp: FastifyInstance): Promise<void> {
         .from(suppliers)
         .where(where);
       return { items: rows.map(row), total: count };
+    },
+  );
+
+  // Выбор поставщика человеком (фильтр списков, окно в карточке): одна строка
+  // на организацию, дубли с ошибочным ИНН — внутри неё. Правила групп —
+  // domain/directories/supplier-filter-groups.ts.
+  app.get(
+    '/api/v1/suppliers/filter-options',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'inspector_kpp', 'monitor')],
+      schema: { response: { 200: SupplierFilterOptionsResponseSchema } },
+    },
+    async () => {
+      const groups = await loadSupplierFilterGroups(app);
+      return {
+        items: groups.map((g) => ({ value: g.value, label: g.label, memberIds: g.memberIds })),
+      };
     },
   );
 

@@ -51,6 +51,10 @@ vi.mock('../../services/api', () => ({
       if (url.startsWith('/sites')) {
         return { items: [{ id: SITE_ID, code: 'АЛ13', name: 'ЖК АЛИЯ' }], total: 1 };
       }
+      // Строки выбора поставщика — одна на организацию (группы дублей).
+      if (url === '/suppliers/filter-options') {
+        return { items: [{ value: SUPPLIER_ID, label: 'ООО «Лютик»', memberIds: [SUPPLIER_ID] }] };
+      }
       if (url.startsWith('/suppliers')) {
         return { items: [{ id: SUPPLIER_ID, name: 'ООО «Лютик»' }], total: 1 };
       }

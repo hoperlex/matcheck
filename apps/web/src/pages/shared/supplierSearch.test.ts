@@ -7,11 +7,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   matchesSupplierQuery,
+  pickSupplierGroupOptions,
   pickSupplierOptions,
   supplierInnGroup,
   supplierOptionLabel,
   supplierSearchKey,
 } from './supplierSearch';
+import { normalizeSupplierIds } from './useSupplierFilterOptions';
 
 const MOZHAYSK = [
   { id: 'dup-quoted', inn: '5028021898', name: 'АО "ИСТКУЛЬТ МОЖАЙСК"', aliases: [] },
@@ -127,5 +129,62 @@ describe('supplierOptionLabel', () => {
       'АО ИСТКУЛЬТ МОЖАЙСК · ИНН 5028024698 — ИНН не проходит проверку',
     );
     expect(supplierOptionLabel(MOZHAYSK[3]!, 'no_inn')).toBe('ИМПЕРИЯ');
+  });
+});
+
+describe('pickSupplierGroupOptions — одна строка на поставщика', () => {
+  const TULA = [
+    { id: 'dup-su10', inn: '7736255508', name: 'ООО «ТОРГОВЫЙ ДОМ «ТУЛА-СТАЛЬ»', aliases: [] },
+    { id: 'dup', inn: '7725459500', name: 'ООО "ТОРГОВЫЙ ДОМ "ТУЛА-СТАЛЬ"', aliases: [] },
+    { id: 'bh', inn: '7725495000', name: 'ООО "ТД "ТУЛА-СТАЛЬ"', aliases: [] },
+  ];
+  const GROUPS = [
+    { value: 'bh', memberIds: ['bh', 'dup', 'dup-su10'] },
+    ...MOZHAYSK.map((s) => ({ value: s.id, memberIds: [s.id] })),
+  ];
+  const all = [...TULA, ...MOZHAYSK];
+
+  it('дубли — строкой основной записи, по ИНН любого участника', () => {
+    for (const q of ['тула', '7736255508', '7725459500', '7725495000']) {
+      const picked = pickSupplierGroupOptions(GROUPS, all, q, null);
+      expect(picked.map((p) => p.supplier.id)).toEqual(['bh']);
+    }
+  });
+
+  it('всё, что находил поиск по записям, находится строкой своей группы', () => {
+    const groupOf = new Map(GROUPS.flatMap((g) => g.memberIds.map((id) => [id, g.value])));
+    for (const q of ['', 'АО И', 'исткульт', 'тула', '5028', 'ООО', 'империя ооо']) {
+      const before = pickSupplierOptions(all, q, null).map((p) => groupOf.get(p.supplier.id));
+      const after = pickSupplierGroupOptions(GROUPS, all, q, null).map((p) => p.supplier.id);
+      expect(new Set(after)).toEqual(new Set(before));
+    }
+  });
+
+  it('порядок по ИНН основной записи: «как в документе» — первой, битые — в конце', () => {
+    const picked = pickSupplierGroupOptions(GROUPS, all, '', '5028021698');
+    expect(picked[0]).toMatchObject({ supplier: { id: 'right' }, group: 'doc_inn' });
+    expect(picked.at(-1)?.group).toBe('invalid');
+  });
+
+  it('запись вне групп (заведена после загрузки) — строкой сама по себе', () => {
+    const fresh = { id: 'fresh', inn: '', name: 'ООО «ТУЛА-СТАЛЬ НОВАЯ»', aliases: [] };
+    const picked = pickSupplierGroupOptions(GROUPS, [...all, fresh], 'тула', null);
+    expect(picked.map((p) => p.supplier.id)).toEqual(['bh', 'fresh']);
+  });
+});
+
+describe('normalizeSupplierIds', () => {
+  const groupOf = new Map([
+    ['bh', 'bh'],
+    ['dup', 'bh'],
+    ['dup-su10', 'bh'],
+  ]);
+
+  it('участник группы — id её строки, повторы убираются, неизвестные id остаются', () => {
+    expect(normalizeSupplierIds(['dup', 'dup-su10', 'bh', 'gone'], groupOf)).toEqual([
+      'bh',
+      'gone',
+    ]);
+    expect(normalizeSupplierIds([], groupOf)).toEqual([]);
   });
 });

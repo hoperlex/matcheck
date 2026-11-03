@@ -739,6 +739,9 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/counterparties', always(LOOKUP, { affects: [v('references.counterparties_legacy')], matrixOnly: openedBy(v('references.counterparties_legacy'), ...OPS_VIEW, v('documents.list'), v('documents.mail'), v('materials_journal')) })],
   ['GET /api/v1/customer-counterparties', always(LOOKUP, { affects: [v('references.customer_counterparties')], matrixOnly: openedBy(v('references.customer_counterparties'), ...OPS_VIEW, v('admin.users')) })],
   ['GET /api/v1/suppliers', always(LOOKUP, { affects: [v('references.suppliers')], matrixOnly: openedBy(v('references.suppliers'), ...OPS_VIEW) })],
+  // Строки выбора поставщика (фильтр списков, окно в карточке) — тот же справочник
+  // на тех же страницах, что GET /suppliers, поэтому и правило то же.
+  ['GET /api/v1/suppliers/filter-options', always(LOOKUP, { affects: [v('references.suppliers')], matrixOnly: openedBy(v('references.suppliers'), ...OPS_VIEW) })],
   ['GET /api/v1/materials', always(LOOKUP, { affects: [v('references.materials')], matrixOnly: openedBy(v('references.materials')) })],
   ['GET /api/v1/responsible-persons', always(LOOKUP, { affects: [v('references.responsible_persons')], matrixOnly: openedBy(v('references.responsible_persons'), ...OPS_VIEW, v('documents.list')) })],
   ['GET /api/v1/assets', always(LOOKUP, { affects: [v('references.assets')], matrixOnly: openedBy(v('references.assets')) })],

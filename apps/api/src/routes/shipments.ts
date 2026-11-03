@@ -90,8 +90,8 @@ import { resolveSupplierCounterparty } from '../domain/directories/supplier-coun
 import {
   expandCustomerCounterpartyToOpIds,
   resolveContractorOpIds,
-  expandSupplierToOpIds,
 } from '../lib/contractor-scope.js';
+import { expandSupplierFilterIds } from '../domain/directories/supplier-filter-groups.js';
 import { publishEvent } from './events.js';
 import { dateRangeConditions } from '../lib/date-range.js';
 import { parseUuidCsv } from '../lib/uuid-csv.js';
@@ -784,14 +784,24 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       }
     }
 
-    // supplierIds: directory ID → operational ID через справочник suppliers.
+    // supplierIds: id справочника suppliers → вся группа одного поставщика
+    // (supplier-filter-groups.ts). Ищем там же, где у приёмки: собственный
+    // supplier_id и привязанный документ — колонка «Поставщик» отгрузки
+    // показывает именно документ (primarySourceDocument).
     if (supplierDirIds.length > 0) {
-      const opIds = await expandSupplierToOpIds(app, supplierDirIds);
-      if (opIds.length === 0) {
-        filters.push(drSql`false`);
-      } else {
-        filters.push(inArray(shipments.supplierId, opIds));
-      }
+      const { dirIds, opIds } = await expandSupplierFilterIds(app, supplierDirIds);
+      const ownSupplier =
+        opIds.length > 0 ? drSql`${shipments.supplierId} in ${opIds} or ` : drSql``;
+      const docSupplier =
+        opIds.length > 0
+          ? drSql`(sd_sup.supplier_directory_id in ${dirIds} or sd_sup.supplier_id in ${opIds})`
+          : drSql`sd_sup.supplier_directory_id in ${dirIds}`;
+      filters.push(drSql`(${ownSupplier}exists (
+      SELECT 1 FROM shipment_sources ss_sup
+      JOIN source_documents sd_sup ON sd_sup.id = ss_sup.source_document_id
+      WHERE ss_sup.shipment_id = ${shipments.id}
+        AND ${docSupplier}
+    ))`);
     }
 
     // q: поиск по номеру привязанного source_document.

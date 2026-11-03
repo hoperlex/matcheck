@@ -190,6 +190,8 @@ export function ListFilters({
           onChange={(v) => onChange({ supplierIds: v })}
           loading={loading}
           options={effectiveSupplierOptions}
+          // Тёзкам (разные ИНН в BillHub) в подписи дописан ИНН — как у «Подрядчика».
+          popupWidth={360}
         />
       )}
       {showSite && (

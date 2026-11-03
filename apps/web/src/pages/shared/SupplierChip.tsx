@@ -7,7 +7,13 @@ import { InlineEditChip } from '../../shared/ui/InlineEditChip';
 import { upsertServerSnapshot as upsertDeliverySnapshot } from '../../services/deliveries';
 import { upsertServerSnapshot as upsertShipmentSnapshot } from '../../services/shipments';
 import type { UpdSupplierEditTarget } from './updSupplierName';
-import { pickSupplierOptions, supplierInnMatchesDocument, supplierOptionLabel } from './supplierSearch';
+import {
+  pickSupplierGroupOptions,
+  pickSupplierOptions,
+  supplierInnMatchesDocument,
+  supplierOptionLabel,
+} from './supplierSearch';
+import { useSupplierFilterOptions } from './useSupplierFilterOptions';
 
 type ListResp = { items: Supplier[]; total: number };
 
@@ -22,9 +28,13 @@ type ListResp = { items: Supplier[]; total: number };
  *     PATCH /api/v1/source-documents/:docId { supplierDirectoryId }. Так
  *     исправляют неверно распознанного поставщика, и правка видна везде, где
  *     показывают документ, — во всех операциях, к которым он привязан.
- *  — `hasUpd=false` → чип-edit: Select из /api/v1/suppliers (982 поставщика
- *     из справочника заказчика). При выборе бэк апсертит counterparty по
+ *  — `hasUpd=false` → чип-edit: Select из /api/v1/suppliers (справочник
+ *     заказчика). При выборе бэк апсертит counterparty по
  *     ИНН и пишет её id в deliveries.supplier_id / shipments.supplier_id.
+ *
+ * В обоих окнах строка — поставщик, а не запись справочника: дубли с
+ * ошибочным ИНН спрятаны в строку своей группы, и выбор пишет её основную
+ * запись (pickSupplierGroupOptions, группы — /suppliers/filter-options).
  *
  * `entity` определяет endpoint:
  *   delivery → PATCH /api/v1/deliveries/:id/supplier-from-directory
@@ -67,6 +77,10 @@ export function SupplierChip({
     enabled: !hasUpd || !!updEdit,
   });
   const items = list.data?.items ?? [];
+  // Группы дублей одного поставщика: в окне одна строка на организацию, выбор
+  // пишет основную запись. Не загрузились — окно работает по записям, как раньше.
+  const supplierGroups = useSupplierFilterOptions({ enabled: !hasUpd || !!updEdit });
+  const loading = list.isLoading || supplierGroups.loading;
 
   const setSupplier = useMutation<Delivery | Shipment, Error, string | null>({
     mutationFn: (supplierDirectoryId) =>
@@ -121,9 +135,18 @@ export function SupplierChip({
   // filterOption={false}, иначе antd вторично отфильтровал бы по подписи и
   // спрятал `АО "ИСТКУЛЬТ…` по запросу «АО И».
   const docInn = hasUpd ? (updEdit?.docInn ?? null) : null;
+  // Пока группы грузятся, список пуст (спиннер): иначе дубль можно было бы
+  // выбрать за мгновение до того, как он спрячется в строку своей группы.
+  const groups = supplierGroups.groups;
+  const groupsPending = supplierGroups.loading;
   const picked = useMemo(
-    () => pickSupplierOptions(items, search, docInn),
-    [items, search, docInn],
+    () =>
+      groups
+        ? pickSupplierGroupOptions(groups, items, search, docInn)
+        : groupsPending
+          ? []
+          : pickSupplierOptions(items, search, docInn),
+    [groups, groupsPending, items, search, docInn],
   );
 
   const supplierOptions = picked.map(({ supplier: s, group }) => ({
@@ -133,7 +156,7 @@ export function SupplierChip({
     // не должен выглядеть равным настоящему.
     ...(group === 'invalid' ? { style: { opacity: 0.55 } } : {}),
   }));
-  const notFound = list.isLoading ? <Spin size="small" /> : 'Ничего не найдено';
+  const notFound = loading ? <Spin size="small" /> : 'Ничего не найдено';
 
   if (hasUpd && updEdit) {
     const operations = entity === 'delivery' ? 'приёмках' : 'отгрузках';
@@ -168,7 +191,7 @@ export function SupplierChip({
               docInn={updEdit.docInn}
               items={items}
               options={supplierOptions}
-              loading={list.isLoading}
+              loading={loading}
               notFound={notFound}
               onSearch={setSearch}
               onPick={(supplierDirectoryId) => {
@@ -219,7 +242,7 @@ export function SupplierChip({
           }}
           showSearch
           filterOption={false}
-          loading={list.isLoading}
+          loading={loading}
           options={supplierOptions}
           notFoundContent={notFound}
         />

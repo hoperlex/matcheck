@@ -73,7 +73,9 @@ const DOC = {
 
 vi.mock('../../services/api', () => ({
   api: {
-    get: async () => ({ items: [DOC], total: 1 }),
+    // Строки выбора поставщика — свой формат ответа (группы), здесь не нужны.
+    get: async (url: string) =>
+      url === '/suppliers/filter-options' ? { items: [] } : { items: [DOC], total: 1 },
     post: async () => ({ ok: true }),
     patch: async () => ({}),
     delete: async () => ({}),
