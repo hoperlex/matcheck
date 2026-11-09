@@ -122,6 +122,14 @@ export async function classifyImageKind(
     label?: string | null;
     /** Таймаут вызова. По умолчанию — общий VISION_ATTEMPT_TIMEOUT_MS (180 с). */
     timeoutMs?: number;
+    /**
+     * Явный выбор текста промпта. Нужен перепроверке ТОРГ-12 (TORG12_RECHECK):
+     * она переспрашивает ТОЛЬКО файлы, которые обычный вызов назвал М-15 или
+     * ТН, и обязана спросить текстом, знающим ТОРГ-12, не трогая рубильник
+     * ROUTER_CLASSIFY_TORG12 для всех остальных. Не задано — как раньше:
+     * текст выбирает рубильник.
+     */
+    prompt?: 'default' | 'torg12';
   } = { sourceDocumentId: null },
 ): Promise<{ kind: ImageDocKind; confidence: number } | null> {
   // Реквизиты для журнала: заполняются по ходу и нужны ветке ошибки.
@@ -161,7 +169,9 @@ export async function classifyImageKind(
     // Рубильник читается здесь, а не у вызывающего: классификатор зовут из
     // router и из фото-пути, и оба обязаны спрашивать модель одинаково.
     // Выключен — текст ровно прежний.
-    const promptText = loadEnv().ROUTER_CLASSIFY_TORG12 ? CLASSIFY_PROMPT_TORG12 : CLASSIFY_PROMPT;
+    const useTorg12 =
+      ctx.prompt === 'torg12' || (ctx.prompt == null && loadEnv().ROUTER_CLASSIFY_TORG12);
+    const promptText = useTorg12 ? CLASSIFY_PROMPT_TORG12 : CLASSIFY_PROMPT;
 
     startMs = Date.now();
     let raw = '';

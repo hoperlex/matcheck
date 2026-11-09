@@ -68,6 +68,13 @@
  * не повторяет. Другие правила количества (qty-scale, qty-repair) сверка не
  * воспроизводит.
  *
+ * Запись манифеста с parsePath "pages" и списком files — листы ОДНОГО документа,
+ * загруженные отдельными файлами (двухлистовая ТОРГ-12 РОКВУЛ). Они читаются
+ * так же, как сегмент сборки: шапка первой, одним вызовом extractUpdSegment
+ * (режим segment_vision). filename у такой записи — только ключ:
+ *   { "filename": "pair-10626044499", "parsePath": "pages",
+ *     "files": ["b52aa063__лист1.png", "e612a781__лист 2.jpg"], … }
+ *
  * Флаг --gate expectation — целевой гейт для корпуса, собранного ради дефекта:
  * новая версия обязана совпасть с бумагой на КАЖДОМ документе (номер, дата,
  * полный состав строк, единицы, количество, явные null в денежных графах) и
@@ -111,6 +118,8 @@ import { db } from '../src/db/client.js';
 import { llmCalls, llmProviders, prompts } from '../src/db/schema.js';
 import { parseUpdPdf, extractUpdFromText } from '../src/domain/edo/upd-pdf.parser.js';
 import { parseUpdVision } from '../src/domain/edo/upd-vision.parser.js';
+import { extractUpdSegment } from '../src/domain/edo/upd-segment-extract.js';
+import { imageToVisionPage, renderPdf } from '../src/domain/edo/page-render.js';
 import {
   countUniqueUpdInvoices,
   segmentUpdText,
@@ -143,7 +152,13 @@ type DocKind = 'upd' | 'm15';
 type ManifestEntry = {
   filename: string;
   kind: string;
-  parsePath: 'vision' | 'text_pdf' | 'multi_upd' | 'excel';
+  parsePath: 'vision' | 'text_pdf' | 'multi_upd' | 'excel' | 'pages';
+  /**
+   * Только для parsePath "pages": файлы ОДНОГО документа в порядке чтения
+   * (шапка первой). Так сборка пакета склеивает листы, загруженные отдельными
+   * фото, — двухлистовая ТОРГ-12 РОКВУЛ. `filename` остаётся ключом записи.
+   */
+  files?: string[];
   hasConsignee: boolean | null;
   source: string;
   /**
@@ -180,6 +195,9 @@ function argNumber(flag: string, fallback: number): number {
  */
 let callDelayMs = 0;
 let lastCallStartedAt = 0;
+
+/** Каталог корпуса: из него parsePath "pages" читает листы записи. */
+let corpusDir = '';
 
 async function throttle(): Promise<void> {
   if (callDelayMs <= 0) return;
@@ -297,6 +315,7 @@ function prodParseMode(entry: ManifestEntry, units: number): ParseMode {
     const mime = MIME_BY_EXT[extname(entry.filename).toLowerCase()] ?? '';
     return mime.startsWith('image/') ? 'image_vision' : 'vision_pdf';
   }
+  if (entry.parsePath === 'pages') return 'segment_vision';
   if (entry.parsePath === 'multi_upd' && units > 1) return 'text_bundle';
   return 'text';
 }
@@ -353,6 +372,44 @@ async function runOne(
   docKind: DocKind,
 ): Promise<Unit[]> {
   const ctx = { sourceDocumentId: null, promptOverride: override };
+
+  if (entry.parsePath === 'pages') {
+    // Листы одного документа из разных файлов — ровно как сегмент сборки:
+    // фото готовится imageToVisionPage, PDF рендерится постранично, и всё
+    // уходит одним вызовом extractUpdSegment (режим segment_vision).
+    const files = entry.files ?? [];
+    if (files.length === 0) {
+      throw new Error(`${entry.filename}: parsePath "pages" без списка files`);
+    }
+    const pages: Buffer[] = [];
+    for (const name of files) {
+      const ext = extname(name).toLowerCase();
+      if (!MIME_BY_EXT[ext]) {
+        throw new Error(`${entry.filename}: у листа «${name}» неизвестное расширение «${ext}»`);
+      }
+      const buf = await readFile(join(corpusDir, name));
+      if (ext === '.pdf') {
+        pages.push(...(await renderPdf(buf, {})));
+      } else {
+        pages.push(await imageToVisionPage(buf));
+      }
+    }
+    await throttle();
+    const res = await extractUpdSegment(pages, {
+      sourceDocumentId: null,
+      bundleId: 'upd-prompt-ab',
+      segmentIndex: 0,
+      promptOverride: override,
+    });
+    return [
+      {
+        key: entry.filename,
+        parsed: res.parsed,
+        consigneeFromModel: true,
+        providerId: res.llmProviderId ?? null,
+      },
+    ];
+  }
 
   if (entry.parsePath === 'vision') {
     // Неизвестное расширение — ОШИБКА, а не «наверное, PDF».
@@ -492,6 +549,7 @@ async function main(): Promise<void> {
   // «стало лучше или хуже» — а именно это и решается перед активацией.
   const details = process.argv.includes('--details');
   const dir = resolve(argValue('--dir') ?? join(process.cwd(), '../../docs/debug-upd'));
+  corpusDir = dir;
   const manifestPath = resolve(
     argValue('--manifest') ?? join(process.cwd(), 'scripts/corpus-manifest.json'),
   );
@@ -655,7 +713,9 @@ async function main(): Promise<void> {
   const providerMismatch: string[] = [];
 
   for (const entry of work) {
-    const buffer = await readFile(join(dir, entry.filename));
+    // У записи "pages" filename — ключ, а не файл: листы читает runOne.
+    const buffer =
+      entry.parsePath === 'pages' ? Buffer.alloc(0) : await readFile(join(dir, entry.filename));
     process.stdout.write(`[ab] ${entry.filename} (${entry.parsePath}) … `);
 
     let a1: Unit[];

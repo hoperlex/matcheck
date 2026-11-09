@@ -171,7 +171,13 @@ import {
 } from './domain/sourceDocuments/stub-documents.js';
 import { finalizeBundleTerminalState } from './domain/sourceDocuments/bundle-finalize.js';
 import { selectUnreferencedS3Keys } from './domain/sourceDocuments/s3-key-usage.js';
-import { classifyImageKind } from './domain/edo/vision-classifier.js';
+import { classifyImageKind, type ImageDocKind } from './domain/edo/vision-classifier.js';
+import {
+  fileNeedsRecheck,
+  mergeFileVerdict,
+  mergePageVerdicts,
+  pagesNeedRecheck,
+} from './domain/edo/torg12-recheck.js';
 import {
   assemblyDispatchKeyOf,
   segmentRepairKeyOf,
@@ -3807,7 +3813,8 @@ async function recordRecognitionEvidence(args: {
     | 'assembly_relaxed_copy'
     | 'assembly_copy_merge'
     | 'waybill_batch_result'
-    | 'party_roles';
+    | 'party_roles'
+    | 'torg12_recheck';
   payload: Record<string, unknown>;
 }): Promise<void> {
   await db.insert(recognitionEvidenceEvents).values({
@@ -3998,18 +4005,24 @@ async function recordAssemblyClassifyCall(args: {
   finishReason: string | null;
   latencyMs: number;
   log: WorkerLog;
+  /**
+   * Перепроверка ТОРГ-12 пишется отдельным видом записи: отчёты и разбор
+   * инцидентов по `upd_page_classify` не должны смешивать основной вызов со
+   * вторым вопросом. Не задано — прежняя запись побайтово.
+   */
+  torg12Recheck?: boolean;
 }): Promise<void> {
   try {
     await db.insert(llmCalls).values({
       sourceDocumentId: null,
       providerId: args.providerId,
       promptId: null,
-      docKind: 'upd_page_classify',
+      docKind: args.torg12Recheck ? 'upd_page_classify_torg12' : 'upd_page_classify',
       model: args.model,
       requestMessages: [
         {
           role: 'user',
-          content: `[upd assembly page classify: bundle=${args.bundleId}, generation=${args.generation}, chunk=${args.chunkIndex}, pages=${args.pageCount}]`,
+          content: `[upd assembly page classify${args.torg12Recheck ? ' torg12 recheck' : ''}: bundle=${args.bundleId}, generation=${args.generation}, chunk=${args.chunkIndex}, pages=${args.pageCount}]`,
         },
       ],
       requestSchema: null,
@@ -4033,6 +4046,67 @@ async function recordAssemblyClassifyCall(args: {
       'сборка УПД: не удалось записать журнал классификации страниц',
     );
   }
+}
+
+/**
+ * Перепроверка ТОРГ-12 одного файла в роутере (TORG12_RECHECK).
+ *
+ * Переспрашивает ТОЛЬКО принятый вердикт «М-15» / «ТН» (fileNeedsRecheck) и
+ * заменить его может только на «УПД» (mergeFileVerdict). Для всех остальных
+ * файлов — ни второго вызова, ни следа: функция возвращает base как есть.
+ *
+ * shadow — вызов и след, вердикт прежний. Когда включён глобальный
+ * ROUTER_CLASSIFY_TORG12, первый вызов уже спрашивал текстом с ТОРГ-12, и
+ * переспрашивать тем же текстом бессмысленно.
+ */
+async function recheckFileTorg12(args: {
+  base: { kind: ImageDocKind; confidence: number } | null;
+  buffer: Buffer;
+  mimeType: string;
+  bundleId: string;
+  generation: number;
+  registryItemId: string | null;
+  filename: string;
+  log: WorkerLog;
+}): Promise<{
+  verdict: { kind: ImageDocKind; confidence: number } | null;
+  appliedFrom: ImageDocKind | null;
+}> {
+  const env = loadEnv();
+  const mode = env.TORG12_RECHECK;
+  if (mode === 'off' || env.ROUTER_CLASSIFY_TORG12 || !fileNeedsRecheck(args.base)) {
+    return { verdict: args.base, appliedFrom: null };
+  }
+  const base = args.base;
+  // classifyImageKind не бросает: на любом сбое вернёт null, и замена не случится.
+  const recheck = await classifyImageKind(args.buffer, args.mimeType, {
+    sourceDocumentId: null,
+    prompt: 'torg12',
+    label: 'torg12 recheck',
+  });
+  const merged = mergeFileVerdict(base, recheck);
+  const applied = mode === 'on' && merged.changed;
+  await recordRecognitionEvidenceSafe(
+    {
+      bundleId: args.bundleId,
+      generation: args.generation,
+      evidenceType: 'torg12_recheck',
+      payload: {
+        stage: 'file',
+        mode,
+        registryItemId: args.registryItemId,
+        filename: args.filename,
+        base,
+        recheck,
+        wouldChange: merged.changed,
+        applied,
+      },
+    },
+    args.log,
+  );
+  return applied
+    ? { verdict: merged.verdict, appliedFrom: base.kind }
+    : { verdict: base, appliedFrom: null };
 }
 
 /**
@@ -4342,9 +4416,26 @@ export async function handleDocumentRouterJob(
           }
         }
 
-        const vc = visionBuffer
+        const baseVc = visionBuffer
           ? await classifyImageKind(visionBuffer, visionMime, { sourceDocumentId: null })
           : null;
+        // Перепроверка ТОРГ-12: трогает только вердикты «М-15»/«ТН», при off
+        // возвращает baseVc как есть (см. recheckFileTorg12). Excel не
+        // переспрашивается: у книги свой маршрут, ТОРГ-12 фото там нет.
+        const torg12 =
+          visionBuffer && excelExt == null
+            ? await recheckFileTorg12({
+                base: baseVc,
+                buffer: visionBuffer,
+                mimeType: visionMime,
+                bundleId,
+                generation: bundleGeneration,
+                registryItemId: a.registryItemId,
+                filename: a.filename,
+                log,
+              })
+            : { verdict: baseVc, appliedFrom: null };
+        const vc = torg12.verdict;
         if (vc && vc.confidence >= 0.6 && vc.kind !== 'unknown') {
           // Excel умеет только УПД-путь: parseWaybillBatch принимает изображения
           // и PDF, а книгу не примет. Поэтому для Excel любой товарный вердикт
@@ -4361,6 +4452,7 @@ export async function handleDocumentRouterJob(
               ...cls.signals,
               `vision-kind:${vc.kind}:${vc.confidence.toFixed(2)}`,
               ...(routedKind !== vc.kind ? [`excel-routed:${routedKind}`] : []),
+              ...(torg12.appliedFrom ? [`torg12-recheck:${torg12.appliedFrom}->${vc.kind}`] : []),
             ],
           };
         }
@@ -5358,6 +5450,67 @@ const ASSEMBLY_CLASSIFY_CHUNK = 15;
 const ASSEMBLY_PLANNER_VERSION = 'page_type_v1';
 
 /**
+ * Второй вопрос классификатору страниц — текстом, знающим ТОРГ-12
+ * (TORG12_RECHECK). Те же миниатюры и те же порции, что у основного вызова.
+ *
+ * Возвращает классификацию или null при любом сбое: перепроверка не имеет
+ * права уронить сборку — без неё пакет идёт ровно так, как шёл бы при off.
+ */
+async function classifyAssemblyPagesTorg12(args: {
+  creds: { providerId: string; apiBaseUrl: string; apiKey: string; model: string };
+  thumbs: Buffer[];
+  withDocNumber: boolean;
+  bundleId: string;
+  generation: number;
+  subBundleId: string;
+  log: WorkerLog;
+}): Promise<PageClassification[] | null> {
+  try {
+    const chunks: PageClassification[][] = [];
+    const sizes: number[] = [];
+    for (let i = 0; i < args.thumbs.length; i += ASSEMBLY_CLASSIFY_CHUNK) {
+      const slice = args.thumbs.slice(i, i + ASSEMBLY_CLASSIFY_CHUNK);
+      const chunkIndex = chunks.length;
+      const startedAt = Date.now();
+      const res = await classifyPages({
+        apiBaseUrl: args.creds.apiBaseUrl,
+        apiKey: args.creds.apiKey,
+        model: args.creds.model,
+        thumbs: slice,
+        prompt: pageClassifyPrompt({ withDocNumber: args.withDocNumber, torg12: true }),
+        ...(args.withDocNumber ? { maxTokens: loadEnv().UPD_ASSEMBLY_CLASSIFY_MAX_TOKENS } : {}),
+      });
+      chunks.push(res.classification);
+      sizes.push(slice.length);
+      await recordAssemblyClassifyCall({
+        bundleId: args.bundleId,
+        generation: args.generation,
+        subBundleId: args.subBundleId,
+        providerId: args.creds.providerId,
+        model: args.creds.model,
+        chunkIndex,
+        pageCount: slice.length,
+        raw: res.raw,
+        classification: res.classification,
+        promptTokens: res.promptTokens,
+        completionTokens: res.completionTokens,
+        finishReason: res.finishReason,
+        latencyMs: Date.now() - startedAt,
+        log: args.log,
+        torg12Recheck: true,
+      });
+    }
+    return mergeClassificationChunks(chunks, sizes);
+  } catch (err) {
+    args.log.warn(
+      { err: err instanceof Error ? err.message : String(err), bundleId: args.bundleId },
+      'перепроверка ТОРГ-12: классификация страниц не удалась — сборка идёт без неё',
+    );
+    return null;
+  }
+}
+
+/**
  * Сборка логических УПД: классификация страниц, нарезка, манифест, документы.
  *
  * Тяжёлого здесь ровно один вызов — классификация. Извлечение каждого УПД
@@ -5591,13 +5744,78 @@ export async function handleUpdAssemblyJob(
       return;
     }
 
-    const classification = mergeClassificationChunks(chunks, chunkSizes);
+    const baseClassification = mergeClassificationChunks(chunks, chunkSizes);
     // Карта «страница → файл» нужна перестановке: переставлять можно только
     // файлы целиком, порядок листов внутри PDF задан самим документом.
     const pageOwners = new Map(pages.map((page) => [page.globalPage, page.ref.inputOrder]));
+
+    // Перепроверка ТОРГ-12. Срабатывает только при страницах «ТН» /
+    // «сертификат» / «М-15» (pagesNeedRecheck); менять может только их и
+    // «прочее», и только когда среди них найдена шапка ТОРГ-12
+    // (mergePageVerdicts). Во всех остальных случаях classification — это
+    // baseClassification, а перестановка — как задано рубильником.
+    let classification = baseClassification;
+    let torg12Reorder = false;
+    const recheckMode = loadEnv().TORG12_RECHECK;
+    if (recheckMode !== 'off' && !torg12Classify && pagesNeedRecheck(baseClassification)) {
+      const recheck = await classifyAssemblyPagesTorg12({
+        creds,
+        thumbs: pages.map((p) => p.thumb),
+        withDocNumber: splitMode !== 'off',
+        bundleId: rootId,
+        generation,
+        subBundleId,
+        log,
+      });
+      const merged = mergePageVerdicts(baseClassification, recheck);
+      const changed = merged.changedPages.length > 0;
+      const applied = recheckMode === 'on' && changed;
+      // Что получилось бы после замены — в след: по нему в shadow видно,
+      // собрался бы пакет в один документ или нет.
+      const wouldPlan = changed
+        ? planUpdSegments(merged.classification, pages.length, MAX_PAGES_FOR_OPENROUTER_SEGMENT, {
+            pageOwners,
+            reorder: true,
+            splitByDocNumber: splitMode === 'on',
+          })
+        : null;
+      await recordRecognitionEvidenceSafe(
+        {
+          bundleId: rootId,
+          generation,
+          evidenceType: 'torg12_recheck',
+          payload: {
+            stage: 'pages',
+            mode: recheckMode,
+            subBundleId,
+            bundleGeneration,
+            base: baseClassification,
+            recheck,
+            changedPages: merged.changedPages,
+            applied,
+            ...(wouldPlan
+              ? {
+                  wouldPlan: {
+                    segments: wouldPlan.segments,
+                    confident: wouldPlan.confident,
+                    reasons: wouldPlan.reasons,
+                  },
+                }
+              : {}),
+          },
+        },
+        log,
+      );
+      if (applied) {
+        classification = merged.classification;
+        torg12Reorder = true;
+      }
+    }
+
+    const reorder = loadEnv().UPD_ASSEMBLY_REORDER_V1 || torg12Reorder;
     const plan = planUpdSegments(classification, pages.length, MAX_PAGES_FOR_OPENROUTER_SEGMENT, {
       pageOwners,
-      reorder: loadEnv().UPD_ASSEMBLY_REORDER_V1,
+      reorder,
       splitByDocNumber: splitMode === 'on',
     });
     // В shadow считаем ВТОРОЙ план — тот, что получился бы с разрезами по
@@ -5608,7 +5826,7 @@ export async function handleUpdAssemblyJob(
       splitMode === 'shadow'
         ? planUpdSegments(classification, pages.length, MAX_PAGES_FOR_OPENROUTER_SEGMENT, {
             pageOwners,
-            reorder: loadEnv().UPD_ASSEMBLY_REORDER_V1,
+            reorder,
             splitByDocNumber: true,
           })
         : null;
@@ -5635,6 +5853,10 @@ export async function handleUpdAssemblyJob(
         // По улике должно быть видно, каким текстом промпта получена эта
         // классификация: иначе разбор инцидента упирается в догадку.
         torg12Prompt: torg12Classify,
+        // Только когда перепроверка ТОРГ-12 заменила страницы: у остальных
+        // пакетов след остаётся прежним побайтово. Подробности — в улике
+        // torg12_recheck того же поколения.
+        ...(torg12Reorder ? { torg12Recheck: 'applied' } : {}),
         chunks: chunkMeta,
         ...(shadowPlan
           ? {
