@@ -135,9 +135,11 @@ import {
   applyTorg12Qty,
   buildTorg12QtyTrace,
   detectTorg12Qty,
+  torg12QtyAllowed,
   type Torg12QtyCandidate,
   type Torg12QtyTrace,
 } from './domain/edo/torg12-qty.js';
+import { QTY_REPAIR_PARSE_MODES, type ParseMode } from './domain/edo/parse-mode.js';
 import {
   applyQtyScale,
   buildQtyScaleTrace,
@@ -364,26 +366,8 @@ async function findOrCreateCounterparty(
   return created.id;
 }
 
-/**
- * Чем разобран документ. Нужен, чтобы решать про второй проход: булев
- * `parsedViaVision` для этого не годится — у структурного Excel он тоже false,
- * и слабый .xlsx ушёл бы в vision как PDF.
- */
-type ParseMode =
-  | 'text'
-  | 'text_bundle'
-  | 'vision_pdf'
-  | 'vision_bundle'
-  | 'image_vision'
-  | 'excel_structural'
-  | 'excel_vision'
-  | 'm15_vision'
-  | 'second_pass_vision'
-  // Логический УПД, собранный из страниц пакета (см. bundle_segments).
-  | 'segment_vision'
-  // Накладная (ТН/ОС-2), разобранная пакетным parseWaybillBatch. Ставится не
-  // здесь, а в createSourceDocumentFromWaybill: у пакетного пути свой обработчик.
-  | 'waybill_batch';
+// ParseMode и QTY_REPAIR_PARSE_MODES — в domain/edo/parse-mode.ts: их же
+// использует офлайн-сверка промптов, а импортировать исполняемый worker нельзя.
 
 /**
  * Режимы, для которых имеет смысл второй проход картинкой.
@@ -396,21 +380,6 @@ type ParseMode =
  *   * vision_* и image_vision — картинка уже была, повторять нечем.
  */
 const SECOND_PASS_MODES: ReadonlySet<ParseMode> = new Set<ParseMode>(['text']);
-
-/**
- * Режимы разбора, где разрешено восстановление количества.
- *
- * Только vision-пути: дефект «количество съехало на соседнюю графу» — свойство
- * чтения картинки. У текстового PDF и у Excel числа берутся из самого файла,
- * и подменять их арифметикой не за чем.
- */
-const QTY_REPAIR_PARSE_MODES: ReadonlySet<ParseMode> = new Set<ParseMode>([
-  'vision_pdf',
-  'vision_bundle',
-  'image_vision',
-  'm15_vision',
-  'segment_vision',
-]);
 
 /** Слабый результат: документ формально разобран, но пользоваться им нельзя. */
 function weakParseReasons(parsed: UpdPdfParsed, hasMismatch: boolean): string[] {
@@ -2385,14 +2354,17 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     const parsedBeforeTorg12 = parsed;
     try {
       torg12QtyCandidates = detectTorg12Qty(parsed);
-      const allowed =
-        torg12QtyMode === 'on' &&
-        QTY_REPAIR_PARSE_MODES.has(parseMode) &&
-        !secondPassJob &&
-        !segmentRepairJob &&
-        !wantSecondPass &&
-        !wantSegmentRepair &&
-        jobGeneration === 0;
+      // Условие — в домене: офлайн-сверка обязана считать «что сохранит
+      // воркер» тем же кодом, а не своей копией.
+      const allowed = torg12QtyAllowed({
+        mode: torg12QtyMode,
+        parseMode,
+        secondPassJob,
+        segmentRepairJob,
+        wantSecondPass,
+        wantSegmentRepair,
+        jobGeneration,
+      });
       if (allowed) {
         const repaired = applyTorg12Qty(parsed, torg12QtyCandidates);
         parsed = repaired.parsed;

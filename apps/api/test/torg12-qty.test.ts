@@ -13,7 +13,10 @@ import {
   applyTorg12Qty,
   buildTorg12QtyTrace,
   detectTorg12Qty,
+  torg12QtyAllowed,
+  type Torg12QtyApplyContext,
 } from '../src/domain/edo/torg12-qty.js';
+import { QTY_REPAIR_PARSE_MODES, type ParseMode } from '../src/domain/edo/parse-mode.js';
 
 type Item = UpdPdfParsed['items'][number];
 
@@ -158,5 +161,52 @@ describe('след правила', () => {
         docVersion: null,
       }),
     ).toBeNull();
+  });
+});
+
+describe('torg12QtyAllowed — когда воркер сохраняет пересчёт', () => {
+  // Первичная загрузка фото: единственный случай, где правка разрешена.
+  const firstUpload: Torg12QtyApplyContext = {
+    mode: 'on',
+    parseMode: 'image_vision',
+    secondPassJob: false,
+    segmentRepairJob: false,
+    wantSecondPass: false,
+    wantSegmentRepair: false,
+    jobGeneration: 0,
+  };
+
+  it('первичный разбор картинки при on — сохраняет', () => {
+    expect(torg12QtyAllowed(firstUpload)).toBe(true);
+    expect(torg12QtyAllowed({ ...firstUpload, parseMode: 'vision_pdf' })).toBe(true);
+  });
+
+  it('shadow и off — только наблюдение', () => {
+    expect(torg12QtyAllowed({ ...firstUpload, mode: 'shadow' })).toBe(false);
+    expect(torg12QtyAllowed({ ...firstUpload, mode: 'off' })).toBe(false);
+  });
+
+  it('текстовый путь и Excel закрыты: числа взяты из самого файла', () => {
+    for (const parseMode of ['text', 'text_bundle', 'excel_structural', 'excel_vision'] as ParseMode[]) {
+      expect(torg12QtyAllowed({ ...firstUpload, parseMode })).toBe(false);
+    }
+  });
+
+  it('второй проход картинкой закрыт, хотя это vision', () => {
+    // second_pass_vision не входит в режимы правок: повтор выбирает лучший
+    // результат сравнением с базой, и подменённое количество его исказило бы.
+    expect(QTY_REPAIR_PARSE_MODES.has('second_pass_vision')).toBe(false);
+    expect(torg12QtyAllowed({ ...firstUpload, parseMode: 'second_pass_vision' })).toBe(false);
+  });
+
+  it('ручной повтор (поколение > 0) не правит: накопленные документы так не чинятся', () => {
+    expect(torg12QtyAllowed({ ...firstUpload, jobGeneration: 1 })).toBe(false);
+  });
+
+  it('ни в роли повтора, ни когда разбор его ставит', () => {
+    expect(torg12QtyAllowed({ ...firstUpload, secondPassJob: true })).toBe(false);
+    expect(torg12QtyAllowed({ ...firstUpload, segmentRepairJob: true })).toBe(false);
+    expect(torg12QtyAllowed({ ...firstUpload, wantSecondPass: true })).toBe(false);
+    expect(torg12QtyAllowed({ ...firstUpload, wantSegmentRepair: true })).toBe(false);
   });
 });

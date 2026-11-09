@@ -1,4 +1,5 @@
 import type { UpdPdfParsed } from '@matcheck/contracts';
+import { QTY_REPAIR_PARSE_MODES, type ParseMode } from './parse-mode.js';
 
 /**
  * Количество позиции товарной накладной ТОРГ-12 — из граф бланка, а не из
@@ -26,6 +27,49 @@ export type Torg12QtyMode = 'off' | 'shadow' | 'on';
 
 /** Версия правила: пишется в след, чтобы старые записи читались однозначно. */
 export const TORG12_QTY_RULE_VERSION = 1;
+
+/** Обстоятельства разбора, от которых зависит, сохранит ли воркер пересчёт. */
+export type Torg12QtyApplyContext = {
+  mode: Torg12QtyMode;
+  parseMode: ParseMode;
+  /** Второй проход картинкой (`pass: 'vision'`). */
+  secondPassJob: boolean;
+  /** Автоповтор сегмента (`pass: 'segment_repair'`). */
+  segmentRepairJob: boolean;
+  /** Этот разбор сам поставит второй проход. */
+  wantSecondPass: boolean;
+  /** Этот разбор сам поставит автоповтор сегмента. */
+  wantSegmentRepair: boolean;
+  /** Поколение задания; ручной повтор поднимает его выше нуля. */
+  jobGeneration: number;
+};
+
+/**
+ * Применяет ли воркер пересчёт к позициям, а не только пишет кандидатов в след.
+ *
+ * Те же ограничения, что у остальных правил количества:
+ *   * только vision-режимы — у текстового PDF и Excel числа взяты из файла;
+ *   * повтор (второй проход, автоповтор сегмента) выбирает лучший результат
+ *     сравнением с базой из БД, и подменённое количество исказило бы это
+ *     сравнение — поэтому ни в роли повтора, ни когда разбор его ставит;
+ *   * ручной повтор (поколение > 0): документ уже жил на портале, и менять
+ *     его состав машиной нельзя.
+ *
+ * Отдельной функцией, потому что ровно это условие воспроизводит офлайн-сверка
+ * (scripts/upd-prompt-ab.ts --torg12-qty): «правило рассчитало 780» и «воркер
+ * сохранит 780» — разные утверждения, и сверка обязана их различать.
+ */
+export function torg12QtyAllowed(ctx: Torg12QtyApplyContext): boolean {
+  return (
+    ctx.mode === 'on' &&
+    QTY_REPAIR_PARSE_MODES.has(ctx.parseMode) &&
+    !ctx.secondPassJob &&
+    !ctx.segmentRepairJob &&
+    !ctx.wantSecondPass &&
+    !ctx.wantSegmentRepair &&
+    ctx.jobGeneration === 0
+  );
+}
 
 /**
  * Почему количество признано неверным.

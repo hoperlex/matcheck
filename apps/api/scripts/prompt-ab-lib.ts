@@ -20,6 +20,14 @@ import { normalizeOrgName } from '../src/domain/sourceDocuments/org-name.js';
 // бы «всё хорошо», а воркер отправил бы документ в partial_parse.
 import { deriveUpdParseOutcome } from '../src/domain/edo/upd-outcome.js';
 import { validateUpdTotals } from '../src/domain/edo/upd-validation.js';
+// Пересчёт количества ТОРГ-12 и условие, при котором воркер его сохраняет, —
+// тем же кодом, что в бою (см. simulateTorg12Qty).
+import {
+  applyTorg12Qty,
+  detectTorg12Qty,
+  torg12QtyAllowed,
+} from '../src/domain/edo/torg12-qty.js';
+import type { ParseMode } from '../src/domain/edo/parse-mode.js';
 
 /**
  * Тип файла для модели по расширению — ОДНА таблица на все скрипты сверки.
@@ -193,6 +201,13 @@ export function diffKeys(a: Snapshot, b: Snapshot): string[] {
 export type ExpectedItem = {
   /** Номер позиции из графы 1 — по нему позиция и находится в разборе. */
   rowNo: number;
+  /**
+   * Наименование и единица, как напечатаны. Сверяются только в целевом гейте
+   * (checkAgainstExpectation): позиция, которой у базы не было вовсе, иначе
+   * не отличить от выдуманной.
+   */
+  nameRaw?: string;
+  unit?: string;
   qty?: number | null;
   price?: number | null;
   sum?: number | null;
@@ -216,6 +231,14 @@ export type ExpectedItem = {
 /** Эталон одного логического документа из манифеста. */
 export type ExpectedDocument = {
   docNumber: string;
+  /** Дата документа `YYYY-MM-DD`, как напечатана. Отсутствует — не размечена. */
+  docDate?: string | null;
+  /**
+   * `true` — в `items` перечислены ВСЕ строки бумаги. Тогда лишняя или
+   * потерянная строка — расхождение. Без пометки разметка частичная, и сверка
+   * судит только о перечисленных строках.
+   */
+  itemsComplete?: boolean;
   consignee: { name: string; inn: string | null; kpp: string | null };
   /** Итоги документа. Отсутствуют — не размечены, сверка пропускается. */
   totalSum?: number | null;
@@ -398,6 +421,249 @@ export function matchExpectation(
   return byNumber ?? expectations[index];
 }
 
+// ─── Целевой гейт: разбор против эталона, а не против базы ──────────────────
+//
+// Обычный гейт сравнивает новую версию с базой и любое изменение критического
+// поля считает регрессом. Для версии, которую выпускают ради документа, где база
+// не видит НИЧЕГО (накладная РОКВУЛ: ноль позиций, номер договора вместо номера
+// документа), это запрет ровно на исправление: появление строк, новый номер и
+// новая дата — всё «регресс». И обратное: если обе версии ошиблись одинаково,
+// диффа нет и обычный гейт зелёный. Поэтому здесь каждая версия сверяется с
+// бумагой напрямую, а отличия от базы только печатаются.
+
+/**
+ * Наименование для сравнения: то, чем модель варьирует одно и то же.
+ *
+ * Размер «1000х600х150» приходит то с кириллической «х», то с латинской «x»,
+ * то со знаком умножения; кавычки и пробелы пляшут от прогона к прогону. Для
+ * бумаги это одна строка. Нормализуются ОБЕ стороны, поэтому латинская «x» в
+ * словах (FLEXI) на равенство не влияет.
+ */
+export function normalizeItemName(v: string | null | undefined): string {
+  if (v == null) return '';
+  return v
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[x×]/g, 'х')
+    .replace(/["'«»„“”`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Единица для сравнения: «м²», «м2» и «м 2.» — одна и та же графа. */
+export function normalizeUnit(v: string | null | undefined): string {
+  return (v ?? '').toLowerCase().replace(/²/g, '2').replace(/³/g, '3').replace(/[\s.]/g, '');
+}
+
+export type ExpectationIssue = { where: string; detail: string };
+
+/**
+ * Строки разбора по номеру из графы 1.
+ *
+ * Когда номера не вернулись НИ У ОДНОЙ строки, номером служит порядок: строка
+ * без номера в приёмке не хуже строки с номером, и валить на этом сверку
+ * значило бы проверять формат ответа, а не чтение бумаги. Если номер есть хотя
+ * бы у одной строки — только по номеру: тогда пропуск номера уже улика.
+ */
+function rowsByNo(parsed: UpdPdfParsed): (rowNo: number) => UpdPdfParsed['items'] {
+  const noNumbers = parsed.items.every((it) => it.rowNo == null);
+  return (rowNo) =>
+    noNumbers
+      ? parsed.items.filter((_, i) => i + 1 === rowNo)
+      : parsed.items.filter((it) => it.rowNo === rowNo);
+}
+
+/**
+ * Сверка разбора с бумагой целиком: номер, дата, итоги, состав строк, у каждой
+ * строки — наименование, единица, количество и деньги.
+ *
+ * Проверяется только размеченное: поле, которого в эталоне нет, — «не знаем».
+ * А вот `null` в эталоне — утверждение «в бланке этого нет», и значение от
+ * модели там — расхождение (см. ExpectedItem). Пустой результат — совпало.
+ */
+export function checkAgainstExpectation(
+  parsed: UpdPdfParsed,
+  expected: ExpectedDocument,
+): ExpectationIssue[] {
+  const out: ExpectationIssue[] = [];
+
+  if (str(parsed.docNumber) !== str(expected.docNumber)) {
+    out.push({
+      where: 'номер',
+      detail: `ожидался «${expected.docNumber}», получен «${parsed.docNumber ?? '∅'}»`,
+    });
+  }
+  if ('docDate' in expected) {
+    const want = expected.docDate ?? null;
+    const got = parsed.docDate ? String(parsed.docDate).slice(0, 10) : null;
+    if (want !== got) {
+      out.push({ where: 'дата', detail: `ожидалась ${want ?? '∅'}, получена ${got ?? '∅'}` });
+    }
+  }
+  for (const [field, label] of [
+    ['totalSum', 'итог документа'],
+    ['vatSum', 'НДС документа'],
+  ] as const) {
+    if (!(field in expected)) continue;
+    const want = expected[field] ?? null;
+    if (!sameMoney(want, parsed[field], SCALE.money)) {
+      out.push({
+        where: label,
+        detail: `ожидалось ${num(want, SCALE.money)}, получено ${num(parsed[field], SCALE.money)}`,
+      });
+    }
+  }
+
+  if (expected.itemsComplete) {
+    const want = expected.items?.length ?? 0;
+    if (parsed.items.length !== want) {
+      out.push({
+        where: 'состав',
+        detail: `строк в бумаге ${want}, в разборе ${parsed.items.length}`,
+      });
+    }
+  }
+
+  const rowsOf = rowsByNo(parsed);
+  for (const want of expected.items ?? []) {
+    const where = `строка ${want.rowNo}`;
+    const rows = rowsOf(want.rowNo);
+    if (rows.length === 0) {
+      out.push({ where, detail: 'позиции с таким номером в разборе нет' });
+      continue;
+    }
+    if (rows.length > 1) {
+      out.push({ where, detail: `номер задвоен: ${rows.length} позиций` });
+      continue;
+    }
+    const got = rows[0]!;
+    if ('nameRaw' in want && normalizeItemName(want.nameRaw) !== normalizeItemName(got.nameRaw)) {
+      out.push({
+        where,
+        detail: `наименование: ожидалось «${want.nameRaw}», получено «${got.nameRaw ?? '∅'}»`,
+      });
+    }
+    if ('unit' in want && normalizeUnit(want.unit) !== normalizeUnit(got.unit)) {
+      out.push({ where, detail: `единица: ожидалась «${want.unit}», получена «${got.unit ?? '∅'}»` });
+    }
+    for (const field of ['qty', 'price', 'sum', 'vatSum'] as const) {
+      if (!(field in want)) continue;
+      const scale = FIELD_SCALE[field];
+      const wantValue = want[field] ?? null;
+      const gotValue = got[field] ?? null;
+      if (sameMoney(wantValue, gotValue, scale)) continue;
+      out.push({
+        where,
+        detail:
+          wantValue == null
+            ? `${FIELD_LABEL[field]} в бумаге не напечатана, а модель вернула ${num(gotValue, scale)}`
+            : `${FIELD_LABEL[field]}: ожидалось ${num(wantValue, scale)}, получено ${num(gotValue, scale)}` +
+              // Воркер пишет пустое количество нулём (qty ?? '0'): в приёмке
+              // будет не «нет данных», а ноль штук.
+              (field === 'qty' && gotValue == null ? ' (в приёмку уйдёт 0)' : ''),
+      });
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Чего не хватает эталону, чтобы целевой гейт мог на него опереться.
+ *
+ * Гейт «новая версия совпала с бумагой» доказывает ровно то, что размечено:
+ * неразмеченная дата или не заявленный полный состав строк молча выпадают из
+ * проверки. Поэтому для целевого прогона эталон обязан быть полным, а проверка
+ * стоит ДО вызовов модели — платить за прогон, который ничего не докажет, не
+ * за чем.
+ */
+export function incompleteExpectation(expected: ExpectedDocument[] | undefined): string[] {
+  if (!expected?.length) return ['нет expectedDocuments'];
+  const out: string[] = [];
+  for (const doc of expected) {
+    const at = `№ ${doc.docNumber}`;
+    if (!('docDate' in doc)) out.push(`${at}: не размечена дата (docDate)`);
+    if (doc.itemsComplete !== true) out.push(`${at}: не заявлен полный состав строк (itemsComplete)`);
+    if (!doc.items?.length) {
+      out.push(`${at}: нет ни одной строки`);
+      continue;
+    }
+    for (const item of doc.items) {
+      const missing = (['nameRaw', 'unit', 'qty', 'price', 'sum', 'vatSum'] as const).filter(
+        (f) => !(f in item),
+      );
+      if (missing.length > 0) {
+        // Деньги перечислены намеренно: для бумаги без цен это явный null, а
+        // не отсутствие поля, — иначе подставленная массой «сумма» не видна.
+        out.push(`${at}, строка ${item.rowNo}: не размечено ${missing.join(', ')}`);
+      }
+    }
+  }
+  return out;
+}
+
+/** Что сделало бы правило ТОРГ-12 с разбором одного документа. */
+export type Torg12Simulation = {
+  /** Режим разбора, которым этот путь идёт в бою (по нему решает воркер). */
+  parseMode: ParseMode;
+  /** Строки, где правило РАССЧИТАЛО количество (графа 7 × графа 8). */
+  computed: Array<{ row: number; qtyFrom: number | null; qtyTo: number }>;
+  /** СОХРАНИТ ли воркер рассчитанное — то же условие, что в бою. */
+  saved: boolean;
+};
+
+/**
+ * Разбор глазами воркера при `TORG12_QTY=on`: что окажется в БД после правила.
+ *
+ * «Правило рассчитало 780» и «воркер сохранит 780» — разные утверждения:
+ * воркер применяет пересчёт только в vision-режимах и только при первичном
+ * разборе (torg12QtyAllowed). Безусловное применение здесь показало бы
+ * результат лучше боевого, поэтому условие берётся тем же кодом.
+ *
+ * Контекст — первичная загрузка (поколение 0, не повтор): именно эту
+ * популяцию меняет включение. `wantSecondPass` всегда false: второй проход
+ * ставится только из режима `text`, а он правилу закрыт и без того.
+ * Сегментов скрипт не гоняет, поэтому и `wantSegmentRepair` false.
+ */
+export function simulateTorg12Qty(
+  parsed: UpdPdfParsed,
+  parseMode: ParseMode,
+): { parsed: UpdPdfParsed; simulation: Torg12Simulation } {
+  const candidates = detectTorg12Qty(parsed);
+  const saved =
+    candidates.length > 0 &&
+    torg12QtyAllowed({
+      mode: 'on',
+      parseMode,
+      secondPassJob: false,
+      segmentRepairJob: false,
+      wantSecondPass: false,
+      wantSegmentRepair: false,
+      jobGeneration: 0,
+    });
+  return {
+    parsed: saved ? applyTorg12Qty(parsed, candidates).parsed : parsed,
+    simulation: {
+      parseMode,
+      computed: candidates.map((c) => ({ row: c.row, qtyFrom: c.qtyFrom, qtyTo: c.qtyTo })),
+      saved,
+    },
+  };
+}
+
+/** Сверка одного документа с бумагой — для целевого гейта. */
+export type AbsoluteCheck = {
+  /** Расхождения новой версии. Пусто — совпала с бумагой. */
+  fresh: ExpectationIssue[];
+  /**
+   * Те же расхождения у базы (первый прогон). Справочно: показывают, что
+   * исправлено, а при совпадении с `fresh` — что обе ошиблись одинаково.
+   */
+  base: ExpectationIssue[];
+  /** Итог документа у новой версии — дойдёт ли он до «распознано». */
+  freshOutcome: OutcomeSnapshot;
+};
+
 export type UnitComparison = {
   label: string;
   /** Ключи, разошедшиеся между двумя прогонами базовой версии. */
@@ -451,6 +717,11 @@ export type UnitComparison = {
    * Пусто — у документа целей не размечено (см. checkTargets).
    */
   targets: TargetVerdict[];
+  /**
+   * Сверка с бумагой целиком (целевой гейт). null — эталона у документа нет.
+   * Необязательное: части отчётов, снятые до появления поля, сводятся как раньше.
+   */
+  absolute?: AbsoluteCheck | null;
 };
 
 /**
@@ -782,6 +1053,13 @@ export function compareUnit(args: {
     // а исходное состояние документа одно.
     outcomeShift: compareOutcome(outcomeOf(args.a1), outcomeOf(args.b)),
     targets: checkTargets({ a1: args.a1, a2: args.a2, b: args.b, expected: args.expected }),
+    absolute: args.expected
+      ? {
+          fresh: checkAgainstExpectation(args.b, args.expected),
+          base: checkAgainstExpectation(args.a1, args.expected),
+          freshOutcome: outcomeOf(args.b),
+        }
+      : null,
   };
 }
 
@@ -924,6 +1202,57 @@ export function evaluateGate(input: GateInput): string[] {
     if (unmarked.length > 0) {
       blockers.push(`целевое поле без эталонного значения: ${unmarked.length} стр.`);
     }
+  }
+
+  return blockers;
+}
+
+/** Вид гейта прогона: против базы (анти-регресс) или против бумаги (исправление). */
+export type GateKind = 'regression' | 'expectation';
+
+/**
+ * Целевой гейт: новая версия обязана совпасть с бумагой на КАЖДОМ документе.
+ *
+ * Отличия от базы здесь не блокируют — на корпусе, собранном ради дефекта,
+ * они и есть исправление (см. раздел «Целевой гейт»). Зато блокирует то, что
+ * обычный гейт пропускает: обе версии ошиблись одинаково, документ остался
+ * «частично», грузополучатель не тот. Анти-регресс по остальному потоку этот
+ * гейт НЕ доказывает: для него отдельный прогон с `--gate regression`.
+ */
+export function evaluateExpectationGate(input: GateInput): string[] {
+  const blockers: string[] = [];
+
+  if (input.checkedUnits === 0) blockers.push('нет разобранных документов');
+  if (input.failures.length > 0) blockers.push(`не разобрались файлы: ${input.failures.length}`);
+
+  // Документ без эталона в целевом прогоне — дыра в доказательстве, а не
+  // «нечего проверять»: скрипт отсекает такие записи до вызовов модели, и
+  // сюда они попадают только если логический документ не сопоставился.
+  const unmatched = input.comparisons.filter((c) => !c.absolute);
+  if (unmatched.length > 0) {
+    blockers.push(`документ не сопоставлен с эталоном: ${unmatched.length}`);
+  }
+
+  const wrong = input.comparisons.filter((c) => (c.absolute?.fresh.length ?? 0) > 0);
+  if (wrong.length > 0) {
+    const fields = wrong.reduce((n, c) => n + c.absolute!.fresh.length, 0);
+    blockers.push(`новая версия расходится с бумагой: ${wrong.length} док. / ${fields} полей`);
+  }
+
+  // Совпавший с бумагой разбор, который воркер всё равно оставит «частично»,
+  // менеджеру ничего не даёт: судьбу документа решает deriveUpdParseOutcome.
+  const notParsed = input.comparisons.filter(
+    (c) => c.absolute && c.absolute.freshOutcome.status !== 'parsed',
+  );
+  if (notParsed.length > 0) {
+    blockers.push(`документ не получит статус «распознано»: ${notParsed.length}`);
+  }
+
+  const consignee = input.comparisons.filter(
+    (c) => c.expectation.status === 'mismatch' || c.expectation.status === 'filled_from_text',
+  );
+  if (consignee.length > 0) {
+    blockers.push(`грузополучатель не совпал с бумагой: ${consignee.length}`);
   }
 
   return blockers;
@@ -1103,7 +1432,18 @@ export type AbReportIdentity = {
   };
   corpus: { manifestSha256: string };
   git: { sha: string | null };
+  /**
+   * Как считался вердикт. Необязательное: отчёты, снятые до появления поля,
+   * — это анти-регресс без правила ТОРГ-12.
+   */
+  mode?: { gate?: GateKind; torg12Qty?: boolean };
 };
+
+/** Режим сверки строкой: части с разным режимом сводить нельзя. */
+function modeLabel(mode: AbReportIdentity['mode']): string {
+  const gate = mode?.gate ?? 'regression';
+  return `${gate}${mode?.torg12Qty ? ' + правило ТОРГ-12' : ''}`;
+}
 
 /**
  * Отпечаток условий прогона.
@@ -1119,6 +1459,9 @@ export function reportIdentity(r: AbReportIdentity): Record<string, string> {
     'новый промпт': `${r.prompts.fresh.name} (${r.prompts.fresh.sha256.slice(0, 12)})`,
     эталон: r.corpus.manifestSha256.slice(0, 12),
     'код (git)': r.git.sha ?? 'неизвестен',
+    // Часть, где количество пересчитано правилом, и часть без него сравнивают
+    // разные разборы — свод таких частей смешал бы два вопроса.
+    'режим сверки': modeLabel(r.mode),
   };
 }
 

@@ -25,6 +25,14 @@
  * Запуск:
  *   pnpm --filter @matcheck/api exec tsx scripts/prompt-ab-merge.ts /tmp/ab-*.json
  *
+ * --regression-only: свод анти-регрессионного прогона общего корпуса, где
+ * целевых строк нет по замыслу (исправление доказывается отдельным целевым
+ * прогоном, upd-prompt-ab.ts --gate expectation). Без флага отсутствие целей —
+ * блокер: иначе «ничего не сломал» выдавалось бы за «починил». С флагом это
+ * не блокер, но вердикт прямо говорит, что доказано только отсутствие регрессий.
+ * Все остальные блокеры остаются. Части целевого прогона сюда не принимаются:
+ * он делается одним запуском и судится по бумаге, а не по базе.
+ *
  * Ничего не пишет и никуда не ходит: читает файлы и печатает отчёт.
  */
 import { readFile } from 'node:fs/promises';
@@ -59,6 +67,8 @@ type Report = {
   files: string[];
   corpus: { dir: string; manifestPath: string; manifestSha256: string; entries: number };
   git: { sha: string | null; dirty: boolean | null };
+  /** Нет у отчётов, снятых до появления режима, — это анти-регресс. */
+  mode?: { gate?: 'regression' | 'expectation'; torg12Qty?: boolean };
   prompts: { base: PromptMeta; fresh: PromptMeta };
   calls: CallRecord[];
   /** Документы, которые база и новая версия читали разными моделями. */
@@ -75,6 +85,7 @@ function fail(message: string): never {
 
 async function main(): Promise<void> {
   const paths = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+  const regressionOnly = process.argv.includes('--regression-only');
   if (paths.length === 0) {
     fail('укажите файлы отчётов: prompt-ab-merge.ts /tmp/ab-*.json');
   }
@@ -89,6 +100,11 @@ async function main(): Promise<void> {
     const missing = missingReportFields(parsed);
     if (missing.length > 0) {
       fail(`${path}: в отчёте нет обязательных полей — ${missing.join(', ')}`);
+    }
+    if (parsed.mode?.gate === 'expectation') {
+      // Свод считает гейт против базы — к целевому прогону он неприменим и
+      // объявил бы исправление регрессией.
+      fail(`${path}: это целевой прогон (--gate expectation) — он не сводится, вердикт в самом отчёте`);
     }
     reports.push(parsed);
   }
@@ -195,10 +211,10 @@ async function main(): Promise<void> {
   }
 
   const blockers = evaluateGate({ checkedUnits: comparisons.length, failures, comparisons });
-  if (targets.total === 0) {
+  if (targets.total === 0 && !regressionOnly) {
     blockers.push(
       'ни одной целевой строки во всём корпусе — прогон не доказывает исправление, ' +
-        'только отсутствие регрессий',
+        'только отсутствие регрессий (для анти-регрессионного свода — флаг --regression-only)',
     );
   }
   // Неполное покрытие — блокер свода, а не самого гейта: гейт про качество
@@ -215,6 +231,12 @@ async function main(): Promise<void> {
   if (blockers.length > 0) {
     console.log(`\nАКТИВИРОВАТЬ «${first.prompts.fresh.name}» НЕЛЬЗЯ — ${blockers.join('; ')}.`);
     process.exitCode = 1;
+  } else if (regressionOnly && targets.total === 0) {
+    console.log(`\nПо всему корпусу регрессий нет.`);
+    console.log(
+      'Свод доказывает ТОЛЬКО отсутствие регрессий: исправление подтверждается отдельным ' +
+        `целевым прогоном. Решение об активации «${first.prompts.fresh.name}» — за владельцем.`,
+    );
   } else {
     console.log(
       `\nПо всему корпусу регрессий нет. Решение об активации «${first.prompts.fresh.name}» — за владельцем.`,

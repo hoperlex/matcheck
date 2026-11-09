@@ -14,11 +14,18 @@
 import { describe, it, expect } from 'vitest';
 import type { UpdPdfParsed } from '@matcheck/contracts';
 import {
+  checkAgainstExpectation,
   checkTargets,
   compareOutcome,
+  compareUnit,
+  evaluateExpectationGate,
   evaluateGate,
+  identityDiff,
+  incompleteExpectation,
   outcomeOf,
   revisionBlocker,
+  simulateTorg12Qty,
+  type AbReportIdentity,
   type ExpectedDocument,
   type OutcomeSnapshot,
   type UnitComparison,
@@ -361,5 +368,236 @@ describe('evaluateGate — цели и исход', () => {
       ],
     });
     expect(blockers).toEqual([]);
+  });
+});
+
+// ─── Целевой гейт: накладная ТОРГ-12 РОКВУЛ ─────────────────────────────────
+//
+// Числа — с боевой накладной 1002004449 от 21.09.2026: 13 мест по 60 м², масса
+// нетто 2886 кг, денежных граф в бланке нет. Активный v13 читает её как
+// «номер договора MO/25347/2017 от 01.06.2017, позиций ноль».
+
+const SU10 = { inn: '7736255508', kpp: null, name: 'ООО "СУ-10"' };
+
+function torg12(over: Partial<UpdPdfParsed> = {}): UpdPdfParsed {
+  return {
+    docNumber: '1002004449',
+    docDate: '2026-09-21',
+    totalSum: null,
+    vatSum: null,
+    confidence: 0.9,
+    supplier: { inn: '5012093506', kpp: null, name: 'ООО "РОКВУЛ"' },
+    recipient: { inn: '7714529160', kpp: null, name: 'ООО "ТЕПЛОКРОВЛЯ"' },
+    consignee: SU10,
+    items: [
+      {
+        rowNo: 1,
+        // Латинская «x» и «м²» — так модель пишет то же самое, что в бумаге.
+        nameRaw: 'ВЕНТИ БАТТС Н 1000x600x100 (20 ПАЧ/ПАЛ) Плита минераловатная',
+        unit: 'м²',
+        qty: null,
+        qtyPerPlace: 60,
+        places: 13,
+        massNetKg: 2886,
+        price: null,
+        sum: null,
+        vatRate: null,
+        vatSum: null,
+      },
+    ],
+    ...over,
+  } as unknown as UpdPdfParsed;
+}
+
+/** Что отдаёт v13: реквизиты договора из «Основания» и пустая таблица. */
+const contractInsteadOfDoc = (): UpdPdfParsed =>
+  torg12({ docNumber: 'MO/25347/2017', docDate: '2017-06-01', items: [], confidence: 0.2 });
+
+const paper: ExpectedDocument = {
+  docNumber: '1002004449',
+  docDate: '2026-09-21',
+  itemsComplete: true,
+  consignee: { name: 'ООО «СУ-10»', inn: '7736255508', kpp: null },
+  items: [
+    {
+      rowNo: 1,
+      nameRaw: 'ВЕНТИ БАТТС Н 1000х600х100 (20 ПАЧ/ПАЛ) Плита минераловатная',
+      unit: 'м2',
+      qty: 780,
+      price: null,
+      sum: null,
+      vatSum: null,
+    },
+  ],
+};
+
+describe('simulateTorg12Qty — «рассчитало» и «сохранит» различаются', () => {
+  it('первичный разбор картинки: воркер сохранит 13 × 60 = 780', () => {
+    const { parsed, simulation } = simulateTorg12Qty(torg12(), 'image_vision');
+    expect(simulation).toMatchObject({ saved: true, parseMode: 'image_vision' });
+    expect(simulation.computed).toEqual([{ row: 1, qtyFrom: null, qtyTo: 780 }]);
+    expect(parsed.items[0]!.qty).toBe(780);
+  });
+
+  it('текстовый путь: правило рассчитало, но воркер НЕ сохранит', () => {
+    // Безусловное применение показало бы здесь 780 — результат лучше боевого.
+    const { parsed, simulation } = simulateTorg12Qty(torg12(), 'text');
+    expect(simulation.saved).toBe(false);
+    expect(simulation.computed).toHaveLength(1);
+    expect(parsed.items[0]!.qty).toBeNull();
+  });
+
+  it('документ без граф ТОРГ-12 не трогается ни в каком режиме', () => {
+    const plain = torg12({
+      items: [{ rowNo: 1, nameRaw: 'Труба', unit: 'м', qty: 18, price: 100, sum: 2196 }],
+    } as Partial<UpdPdfParsed>);
+    const { parsed, simulation } = simulateTorg12Qty(plain, 'image_vision');
+    expect(simulation).toMatchObject({ saved: false, computed: [] });
+    expect(parsed).toBe(plain);
+  });
+});
+
+describe('checkAgainstExpectation — разбор против бумаги', () => {
+  it('после правила совпадает целиком, несмотря на «x» и «м²»', () => {
+    const { parsed } = simulateTorg12Qty(torg12(), 'image_vision');
+    expect(checkAgainstExpectation(parsed, paper)).toEqual([]);
+  });
+
+  it('без правила количество пустое — и в приёмку ушёл бы 0', () => {
+    const issues = checkAgainstExpectation(torg12(), paper);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.detail).toMatch(/ожидалось 780\.0000, получено ∅ \(в приёмку уйдёт 0\)/);
+  });
+
+  it('реквизиты договора вместо документа и пустая таблица — всё названо', () => {
+    const issues = checkAgainstExpectation(contractInsteadOfDoc(), paper);
+    expect(issues.map((i) => i.where)).toEqual(['номер', 'дата', 'состав', 'строка 1']);
+    expect(issues[0]!.detail).toMatch(/MO\/25347\/2017/);
+  });
+
+  it('масса в денежной графе там, где бумага без цен, — расхождение', () => {
+    const { parsed } = simulateTorg12Qty(torg12(), 'image_vision');
+    parsed.items[0]!.sum = 2886;
+    const issues = checkAgainstExpectation(parsed, paper);
+    expect(issues).toEqual([
+      { where: 'строка 1', detail: 'сумма в бумаге не напечатана, а модель вернула 2886.00' },
+    ]);
+  });
+
+  it('лишняя строка при полном составе — расхождение', () => {
+    const { parsed } = simulateTorg12Qty(torg12(), 'image_vision');
+    parsed.items.push({ ...parsed.items[0]!, rowNo: 2 });
+    expect(checkAgainstExpectation(parsed, paper).map((i) => i.where)).toEqual(['состав']);
+  });
+
+  it('номеров строк нет ни у одной — сопоставление по порядку', () => {
+    const { parsed } = simulateTorg12Qty(torg12(), 'image_vision');
+    parsed.items[0]!.rowNo = null;
+    expect(checkAgainstExpectation(parsed, paper)).toEqual([]);
+  });
+});
+
+describe('incompleteExpectation — целевой гейт требует полного эталона', () => {
+  it('полный эталон годится', () => {
+    expect(incompleteExpectation([paper])).toEqual([]);
+  });
+
+  it('нет эталона вовсе', () => {
+    expect(incompleteExpectation(undefined)).toEqual(['нет expectedDocuments']);
+  });
+
+  it('называет каждую дыру, включая неразмеченные денежные графы', () => {
+    const partial: ExpectedDocument = {
+      docNumber: '1002004449',
+      consignee: paper.consignee,
+      items: [{ rowNo: 1, qty: 780 }],
+    };
+    expect(incompleteExpectation([partial])).toEqual([
+      '№ 1002004449: не размечена дата (docDate)',
+      '№ 1002004449: не заявлен полный состав строк (itemsComplete)',
+      '№ 1002004449, строка 1: не размечено nameRaw, unit, price, sum, vatSum',
+    ]);
+  });
+});
+
+describe('evaluateExpectationGate — исправление судится по бумаге', () => {
+  const fixed = () => simulateTorg12Qty(torg12(), 'image_vision').parsed;
+  const unit = (a: UpdPdfParsed, b: UpdPdfParsed, expected: ExpectedDocument = paper) =>
+    compareUnit({
+      label: '1002004449.png',
+      a1: a,
+      a2: a,
+      b,
+      consigneeFromModel: true,
+      expected,
+    });
+
+  it('исправление проходит целевой гейт, а гейт против базы его запретил бы', () => {
+    const c = unit(contractInsteadOfDoc(), fixed());
+    const input = { checkedUnits: 1, failures: [], comparisons: [c] };
+    expect(evaluateExpectationGate(input)).toEqual([]);
+    // Ради этого гейт и введён: номер, дата и появившиеся строки для гейта
+    // против базы — «регрессия критических полей».
+    expect(evaluateGate(input)).toContain('регрессии критических полей: 1');
+  });
+
+  it('обе версии ошиблись одинаково: гейт против базы молчит, целевой — нет', () => {
+    const c = unit(contractInsteadOfDoc(), contractInsteadOfDoc());
+    const input = { checkedUnits: 1, failures: [], comparisons: [c] };
+    expect(evaluateGate(input)).toEqual([]);
+    expect(c.absolute!.fresh).toEqual(c.absolute!.base);
+    expect(evaluateExpectationGate(input)).toEqual([
+      'новая версия расходится с бумагой: 1 док. / 4 полей',
+      'документ не получит статус «распознано»: 1',
+    ]);
+  });
+
+  it('документ без эталона в целевом прогоне — блокер, а не пропуск', () => {
+    // compareUnit напрямую: undefined в помощнике подставил бы эталон по умолчанию.
+    const c = compareUnit({
+      label: '1002004449.png',
+      a1: contractInsteadOfDoc(),
+      a2: contractInsteadOfDoc(),
+      b: fixed(),
+      consigneeFromModel: true,
+      expected: undefined,
+    });
+    expect(
+      evaluateExpectationGate({ checkedUnits: 1, failures: [], comparisons: [c] }),
+    ).toContain('документ не сопоставлен с эталоном: 1');
+  });
+
+  it('чужой грузополучатель блокирует', () => {
+    const c = unit(
+      contractInsteadOfDoc(),
+      { ...fixed(), consignee: { inn: '7714529160', kpp: null, name: 'ООО "ТЕПЛОКРОВЛЯ"' } },
+    );
+    expect(
+      evaluateExpectationGate({ checkedUnits: 1, failures: [], comparisons: [c] }),
+    ).toEqual(['грузополучатель не совпал с бумагой: 1']);
+  });
+});
+
+describe('identityDiff — режим сверки входит в условия прогона', () => {
+  const base: AbReportIdentity = {
+    docKind: 'upd',
+    prompts: {
+      base: { name: 'default v13', sha256: 'a'.repeat(64) },
+      fresh: { name: 'default v18', sha256: 'b'.repeat(64) },
+    },
+    corpus: { manifestSha256: 'c'.repeat(64) },
+    git: { sha: 'deadbeef' },
+  };
+
+  it('отчёт без поля режима — это анти-регресс без правила', () => {
+    expect(identityDiff(base, { ...base, mode: { gate: 'regression', torg12Qty: false } })).toEqual(
+      [],
+    );
+  });
+
+  it('части с правилом ТОРГ-12 и без него не сводятся', () => {
+    expect(identityDiff(base, { ...base, mode: { torg12Qty: true } })).toEqual([
+      'режим сверки: «regression» против «regression + правило ТОРГ-12»',
+    ]);
   });
 });

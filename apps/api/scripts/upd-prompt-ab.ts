@@ -60,6 +60,25 @@
  * Флаг --details печатает значения изменившихся полей («было → стало»): без
  * них список имён не отвечает, улучшение это или регресс.
  *
+ * Флаг --torg12-qty: количество сравнивается ПОСЛЕ правила ТОРГ-12 (графа 7 ×
+ * графа 8), причём только там, где его сохранил бы воркер при TORG12_QTY=on
+ * (vision-режимы, первичный разбор — torg12QtyAllowed). Отчёт печатает
+ * отдельно «правило рассчитало» и «воркер сохранит». Скан в манифесте должен
+ * быть помечен parsePath "vision": переход воркера с текста на картинку скрипт
+ * не повторяет. Другие правила количества (qty-scale, qty-repair) сверка не
+ * воспроизводит.
+ *
+ * Флаг --gate expectation — целевой гейт для корпуса, собранного ради дефекта:
+ * новая версия обязана совпасть с бумагой на КАЖДОМ документе (номер, дата,
+ * полный состав строк, единицы, количество, явные null в денежных графах) и
+ * дойти до «распознано». Отличия от базы при этом только печатаются — на таком
+ * корпусе они и есть исправление. Эталон обязан быть полным (docDate,
+ * itemsComplete, у строк nameRaw/unit/qty/price/sum/vatSum) — это проверяется
+ * до вызовов модели. Анти-регресс он НЕ доказывает: для этого прогон общего
+ * корпуса с --gate regression (по умолчанию). Пример:
+ *   … --base "default v13" --new "default v18" --dir /corpus \
+ *     --manifest /corpus/manifest.json --torg12-qty --gate expectation --details
+ *
  * Стоит денег: три прогона по корпусу (A/A + новая версия) — это ~3 LLM-вызова
  * на файл, а на пакет из N УПД — 3N. Для черновых проверок используйте --limit.
  *
@@ -97,19 +116,25 @@ import {
   segmentUpdText,
 } from '../src/domain/edo/upd-text-bundle.parser.js';
 import type { PromptOverride } from '../src/domain/prompts/registry.js';
+import type { ParseMode } from '../src/domain/edo/parse-mode.js';
 import {
   compareUnit,
   newMoneyMismatches,
+  evaluateExpectationGate,
   evaluateGate,
+  incompleteExpectation,
   matchExpectation,
   mixedModelPrompts,
   parseIntArg,
   revisionBlocker,
+  simulateTorg12Qty,
   DOC_MIME_BY_EXT as MIME_BY_EXT,
   summarizeTargets,
   windowOf,
   writeReportSafely,
   type ExpectedDocument,
+  type GateKind,
+  type Torg12Simulation,
   type UnitComparison,
 } from './prompt-ab-lib.js';
 
@@ -253,7 +278,37 @@ type Unit = {
    * разница объясняется моделью, а не текстом промпта, и сравнивать нечего.
    */
   providerId: string | null;
+  /** Что сделало правило ТОРГ-12 (только с --torg12-qty). */
+  torg12?: Torg12Simulation;
 };
+
+/**
+ * Каким режимом этот путь разбирается в бою — по нему воркер решает, сохранять
+ * ли пересчёт количества.
+ *
+ * vision: картинка — `image_vision`, PDF — `vision_pdf` (скан без текстового
+ * слоя). text_pdf: текстовый путь, `text`. Переход воркера с текста на картинку
+ * скрипт не повторяет, поэтому скан в манифесте надо помечать `vision` — иначе
+ * сверка и разбирает, и судит его как текст. multi_upd: сложившийся пакет —
+ * `text_bundle`, иначе одиночный `text`.
+ */
+function prodParseMode(entry: ManifestEntry, units: number): ParseMode {
+  if (entry.parsePath === 'vision') {
+    const mime = MIME_BY_EXT[extname(entry.filename).toLowerCase()] ?? '';
+    return mime.startsWith('image/') ? 'image_vision' : 'vision_pdf';
+  }
+  if (entry.parsePath === 'multi_upd' && units > 1) return 'text_bundle';
+  return 'text';
+}
+
+/** Применяет правило ТОРГ-12 так, как его применил бы воркер, к каждому документу прогона. */
+function withTorg12(entry: ManifestEntry, units: Unit[]): Unit[] {
+  const parseMode = prodParseMode(entry, units.length);
+  return units.map((u) => {
+    const { parsed, simulation } = simulateTorg12Qty(u.parsed, parseMode);
+    return { ...u, parsed, torg12: simulation };
+  });
+}
 
 /** Постраничный текст PDF — вход сегментатора пакетов. */
 async function pdfPages(buffer: Buffer): Promise<{ num: number; text: string }[]> {
@@ -449,6 +504,14 @@ async function main(): Promise<void> {
   callDelayMs = argNumber('--delay', 0);
   const outPath = argValue('--out');
   const planOnly = process.argv.includes('--plan');
+  // Количество так, как его сохранит воркер при TORG12_QTY=on: обе версии
+  // сравниваются уже ПОСЛЕ правила (см. simulateTorg12Qty).
+  const torg12Qty = process.argv.includes('--torg12-qty');
+  const gateRaw = argValue('--gate', 'regression') ?? 'regression';
+  if (gateRaw !== 'regression' && gateRaw !== 'expectation') {
+    throw new Error(`--gate: ожидается regression или expectation, получено «${gateRaw}»`);
+  }
+  const gate: GateKind = gateRaw;
   const startedAt = new Date();
 
   // Отпечаток кода — до всего остального, включая --plan.
@@ -518,6 +581,22 @@ async function main(): Promise<void> {
   if (callDelayMs > 0) {
     console.log(`[ab] пауза между вызовами модели: ${callDelayMs} мс`);
   }
+  console.log(
+    `[ab] гейт: ${gate === 'expectation' ? 'против бумаги (целевой)' : 'против базы (анти-регресс)'}` +
+      (torg12Qty ? '; количество — после правила ТОРГ-12, как сохранит воркер' : ''),
+  );
+  if (gate === 'expectation') {
+    // Целевой гейт доказывает ровно размеченное. Неполный эталон проверяется
+    // ДО вызовов модели: прогон, который ничего не докажет, не должен стоить денег.
+    const problems = work.flatMap((e) =>
+      incompleteExpectation(e.expectedDocuments).map((p) => `${e.filename}: ${p}`),
+    );
+    if (problems.length > 0) {
+      throw new Error(
+        `целевой гейт требует полного эталона у каждого документа окна:\n  ${problems.join('\n  ')}`,
+      );
+    }
+  }
   // «Пустая графа 4» — тоже утверждение, и оно проверяется; без эталона
   // остаются только записи, где не сказано вообще ничего.
   const withoutExpectation = work.filter(
@@ -569,6 +648,8 @@ async function main(): Promise<void> {
   console.log(`[ab] база: «${baseName}», новый: «${newName}», температура: 0`);
 
   const comparisons: UnitComparison[] = [];
+  /** Что правило ТОРГ-12 рассчитало и что из этого сохранил бы воркер. */
+  const torg12Rows: Array<{ label: string; base?: Torg12Simulation; fresh?: Torg12Simulation }> = [];
   const failures: { file: string; error: string }[] = [];
   /** Документы, которые базовая и новая версии читали разными моделями. */
   const providerMismatch: string[] = [];
@@ -584,6 +665,13 @@ async function main(): Promise<void> {
       a1 = await runOne(entry, buffer, { prompt: base, temperature: 0 }, docKind);
       a2 = await runOne(entry, buffer, { prompt: base, temperature: 0 }, docKind);
       b = await runOne(entry, buffer, { prompt: fresh, temperature: 0 }, docKind);
+      if (torg12Qty) {
+        // Ко ВСЕМ прогонам, не только к новому: в бою правило включено при
+        // любой активной версии, и база должна сравниваться в тех же условиях.
+        a1 = withTorg12(entry, a1);
+        a2 = withTorg12(entry, a2);
+        b = withTorg12(entry, b);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.log('ОШИБКА');
@@ -608,6 +696,7 @@ async function main(): Promise<void> {
     for (const pair of aligned) {
       const ids = new Set([pair.a1.providerId, pair.a2.providerId, pair.b.providerId]);
       if (ids.size > 1) providerMismatch.push(pair.key);
+      if (torg12Qty) torg12Rows.push({ label: pair.key, base: pair.a1.torg12, fresh: pair.b.torg12 });
     }
 
     const fileComparisons = aligned.map((pair, index) =>
@@ -653,7 +742,12 @@ async function main(): Promise<void> {
 
   const critical = comparisons.filter((c) => c.changedCritical.length > 0);
   if (critical.length > 0) {
-    console.log(`\nРЕГРЕСС КРИТИЧЕСКИХ ПОЛЕЙ (${critical.length} документов) — это блокирует выкат:`);
+    console.log(
+      gate === 'expectation'
+        ? `\nОТЛИЧИЯ ОТ БАЗЫ В КРИТИЧЕСКИХ ПОЛЯХ (${critical.length} документов) — справочно, ` +
+            'целевой гейт судит по бумаге:'
+        : `\nРЕГРЕСС КРИТИЧЕСКИХ ПОЛЕЙ (${critical.length} документов) — это блокирует выкат:`,
+    );
     for (const c of critical) {
       const keys = new Set(c.changedCritical);
       if (details) {
@@ -738,11 +832,61 @@ async function main(): Promise<void> {
     console.log('\nЦелевых строк в окне нет: прогон показывает только отсутствие регрессий.');
   }
 
-  const blockers = evaluateGate({
-    checkedUnits: comparisons.length,
-    failures,
-    comparisons,
-  });
+  // Правило ТОРГ-12: «рассчитало» и «сохранит» печатаются раздельно — первое
+  // без второго ничего не меняет в приёмке.
+  const torg12Touched = torg12Rows.filter(
+    (r) => (r.base?.computed.length ?? 0) > 0 || (r.fresh?.computed.length ?? 0) > 0,
+  );
+  if (torg12Qty) {
+    console.log(`\nПравило ТОРГ-12: сработало в ${torg12Touched.length} док.`);
+    for (const r of torg12Touched) {
+      for (const [who, sim] of [
+        ['база', r.base],
+        ['новая', r.fresh],
+      ] as const) {
+        if (!sim || sim.computed.length === 0) continue;
+        const rows = sim.computed
+          .map((c) => `стр. ${c.row}: ${c.qtyFrom ?? '∅'} → ${c.qtyTo}`)
+          .join('; ');
+        const verdict = sim.saved ? 'воркер сохранит' : `воркер НЕ сохранит (режим ${sim.parseMode})`;
+        console.log(`  ${r.label} [${who}] правило рассчитало ${rows} — ${verdict}`);
+      }
+    }
+  }
+
+  // Сверка с бумагой целиком. В целевом гейте это и есть вердикт; в
+  // анти-регрессе — справочно для документов, где эталон размечен полностью.
+  const absolute = comparisons.filter((c) => c.absolute);
+  if (gate === 'expectation' || absolute.some((c) => c.absolute!.fresh.length > 0)) {
+    const matched = absolute.filter((c) => c.absolute!.fresh.length === 0).length;
+    console.log(`\nСВЕРКА С БУМАГОЙ: новая версия совпала на ${matched} из ${comparisons.length} док.`);
+    for (const c of comparisons) {
+      const a = c.absolute;
+      if (!a) {
+        console.log(`  ✘ ${c.label} — эталон не сопоставлен`);
+        continue;
+      }
+      const baseNote =
+        a.base.length === 0
+          ? 'у базы совпадало'
+          : a.base.length === a.fresh.length &&
+              a.base.every((m, i) => m.where === a.fresh[i]?.where && m.detail === a.fresh[i]?.detail)
+            ? 'база ошиблась ТАК ЖЕ'
+            : `у базы расхождений: ${a.base.length}`;
+      const outcome = a.freshOutcome.status === 'parsed' ? '' : `; итог: ${a.freshOutcome.status}`;
+      if (a.fresh.length === 0) {
+        console.log(`  ✔ ${c.label} (${baseNote}${outcome})`);
+        continue;
+      }
+      console.log(`  ✘ ${c.label} (${baseNote}${outcome}):`);
+      for (const m of a.fresh) console.log(`      ${m.where}: ${m.detail}`);
+    }
+  }
+
+  const blockers =
+    gate === 'expectation'
+      ? evaluateExpectationGate({ checkedUnits: comparisons.length, failures, comparisons })
+      : evaluateGate({ checkedUnits: comparisons.length, failures, comparisons });
 
   // Фактические модели прогона. Если их больше одной на версию промпта —
   // сравнение недостоверно: часть вызовов ушла к другому провайдеру, и разница
@@ -781,6 +925,10 @@ async function main(): Promise<void> {
       files: work.map((e) => e.filename),
       corpus: { dir, manifestPath, manifestSha256: sha256(manifestRaw), entries: all.length },
       git: revision,
+      // Режим входит в отпечаток условий: свод не смешает анти-регресс с
+      // целевым прогоном и части с правилом ТОРГ-12 с частями без него.
+      mode: { gate, torg12Qty },
+      torg12: torg12Rows,
       prompts: {
         base: { name: baseName, id: base.id, sha256: sha256(base.content), length: base.content.length },
         fresh: { name: newName, id: fresh.id, sha256: sha256(fresh.content), length: fresh.content.length },
@@ -806,6 +954,14 @@ async function main(): Promise<void> {
     console.log(`\nАКТИВИРОВАТЬ «${newName}» НЕЛЬЗЯ — ${blockers.join('; ')}.`);
     console.log('Сначала разберитесь с перечисленным выше.');
     process.exitCode = 1;
+  } else if (gate === 'expectation') {
+    // Целевой зелёный — это половина решения: отсутствие регрессий на общем
+    // потоке им не доказано.
+    console.log(`\nНовая версия совпала с бумагой на всех ${comparisons.length} документах окна.`);
+    console.log(
+      'Это доказывает исправление, но НЕ отсутствие регрессий: перед активацией нужен ' +
+        'зелёный прогон общего корпуса с --gate regression.',
+    );
   } else {
     console.log('\nРегрессий нет: все поля, стабильные у базы, совпали с новой версией.');
     console.log('Критические поля стабильны, confidence не пересёк пороги 0.5 / 0.6.');
