@@ -86,6 +86,12 @@
  *   … --base "default v13" --new "default v18" --dir /corpus \
  *     --manifest /corpus/manifest.json --torg12-qty --gate expectation --details
  *
+ * Черновик новой версии можно взять из файла, не заводя его в таблицу prompts:
+ * --new-file <путь> вместо --new. Так правка текста сверяется без миграции и
+ * деплоя; в таблицу версия попадает миграцией уже после зелёного прогона.
+ *   … --base "default v13" --new-file /corpus/torg12-v1.txt --dir /corpus \
+ *     --manifest /corpus/manifest.json --torg12-qty --gate expectation --details
+ *
  * Стоит денег: три прогона по корпусу (A/A + новая версия) — это ~3 LLM-вызова
  * на файл, а на пакет из N УПД — 3N. Для черновых проверок используйте --limit.
  *
@@ -109,7 +115,7 @@ import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { dirname, extname, join, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PDFParse } from 'pdf-parse';
 import { and, eq, gte, isNull } from 'drizzle-orm';
@@ -135,6 +141,7 @@ import {
   matchExpectation,
   mixedModelPrompts,
   parseIntArg,
+  promptFromFile,
   revisionBlocker,
   simulateTorg12Qty,
   DOC_MIME_BY_EXT as MIME_BY_EXT,
@@ -555,6 +562,12 @@ async function main(): Promise<void> {
   );
   const baseName = argValue('--base', DEFAULT_PROMPTS[docKind].base)!;
   const newName = argValue('--new', DEFAULT_PROMPTS[docKind].fresh)!;
+  const newFile = argValue('--new-file');
+  if (newFile && process.argv.includes('--new')) {
+    throw new Error(
+      '--new и --new-file вместе не задаются: новая версия — из таблицы prompts или из файла',
+    );
+  }
   // Окно прогона. Корпус гоняется частями, поэтому нужен именно сдвиг:
   // одного --limit хватает только на «первые N», и части пересекались бы.
   const offset = argNumber('--offset', 0);
@@ -702,8 +715,19 @@ async function main(): Promise<void> {
   }
 
   const base = await loadPrompt(docKind, baseName);
-  const fresh = await loadPrompt(docKind, newName);
-  console.log(`[ab] база: «${baseName}», новый: «${newName}», температура: 0`);
+  const freshLoaded = newFile
+    ? promptFromFile(await readFile(resolve(newFile), 'utf8'), basename(newFile))
+    : { ...(await loadPrompt(docKind, newName)), name: newName };
+  const freshName = freshLoaded.name;
+  // У версии из файла id = null (см. promptFromFile). Тип override требует
+  // строку, но разбор использует id только для llm_calls.prompt_id, а эта
+  // колонка NULL допускает.
+  const fresh = { id: freshLoaded.id as unknown as string, content: freshLoaded.content };
+  console.log(
+    `[ab] база: «${baseName}», новый: «${freshName}»` +
+      (newFile ? ` (sha256 ${sha256(fresh.content).slice(0, 12)})` : '') +
+      ', температура: 0',
+  );
 
   const comparisons: UnitComparison[] = [];
   /** Что правило ТОРГ-12 рассчитало и что из этого сохранил бы воркер. */
@@ -959,7 +983,7 @@ async function main(): Promise<void> {
     // Печатаем справочно, чтобы отчёт объяснял, откуда в журнале две модели.
     console.log('\nмоделей за прогон — больше одной (так работает выбор провайдера по пути разбора):');
     for (const [promptId, models] of mixed) {
-      const which = promptId === base.id ? baseName : promptId === fresh.id ? newName : promptId;
+      const which = promptId === base.id ? baseName : promptId === fresh.id ? freshName : promptId;
       console.log(`  ${which}: ${models.join(', ')}`);
     }
   }
@@ -991,7 +1015,13 @@ async function main(): Promise<void> {
       torg12: torg12Rows,
       prompts: {
         base: { name: baseName, id: base.id, sha256: sha256(base.content), length: base.content.length },
-        fresh: { name: newName, id: fresh.id, sha256: sha256(fresh.content), length: fresh.content.length },
+        fresh: {
+          name: freshName,
+          id: freshLoaded.id,
+          sha256: sha256(fresh.content),
+          length: fresh.content.length,
+          ...(newFile ? { file: resolve(newFile) } : {}),
+        },
       },
       calls,
       providerMismatch,
@@ -1011,7 +1041,7 @@ async function main(): Promise<void> {
   }
 
   if (blockers.length > 0) {
-    console.log(`\nАКТИВИРОВАТЬ «${newName}» НЕЛЬЗЯ — ${blockers.join('; ')}.`);
+    console.log(`\nАКТИВИРОВАТЬ «${freshName}» НЕЛЬЗЯ — ${blockers.join('; ')}.`);
     console.log('Сначала разберитесь с перечисленным выше.');
     process.exitCode = 1;
   } else if (gate === 'expectation') {
@@ -1026,7 +1056,7 @@ async function main(): Promise<void> {
     console.log('\nРегрессий нет: все поля, стабильные у базы, совпали с новой версией.');
     console.log('Критические поля стабильны, confidence не пересёк пороги 0.5 / 0.6.');
     console.log(
-      `Осталось глазами сверить несколько документов — и можно активировать «${newName}»` +
+      `Осталось глазами сверить несколько документов — и можно активировать «${freshName}»` +
         ' в Администрирование → Промпты.',
     );
   }

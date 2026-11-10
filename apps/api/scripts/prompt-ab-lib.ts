@@ -1283,6 +1283,29 @@ export function parseIntArg(raw: string | null | undefined, flag: string, fallba
   return value;
 }
 
+/** Новая версия промпта, взятая из файла (`--new-file`), а не из таблицы prompts. */
+export type FilePrompt = { id: null; content: string; name: string };
+
+/**
+ * Версия промпта из файла: черновик сверяется без записи в таблицу prompts и
+ * без деплоя миграции на каждую правку текста.
+ *
+ * id — null, а не выдуманный. Разбор пишет каждый вызов в llm_calls, и
+ * prompt_id там — внешний ключ на prompts: несуществующий id запись бы не
+ * прошёл, а журнал глотает ошибку молча — сырые ответы черновика пропали бы.
+ * С null запись проходит, а вызовы черновика отличаются от базы пустым
+ * prompt_id.
+ *
+ * Хвостовые пробелы и переводы строки срезаются: файл в репозитории кончается
+ * переводом строки, а миграция, которая потом заведёт эту версию, вставит текст
+ * без него. sha256 в отчёте должен совпасть с будущей строкой таблицы.
+ */
+export function promptFromFile(text: string, fileName: string): FilePrompt {
+  const content = text.replace(/\s+$/u, '');
+  if (content === '') throw new Error(`--new-file: файл «${fileName}» пуст`);
+  return { id: null, content, name: `file:${fileName}` };
+}
+
 /**
  * Окно прогона: часть корпуса, которую берёт этот запуск.
  *
