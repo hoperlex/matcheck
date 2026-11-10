@@ -37,6 +37,8 @@ export const NAV_ACCESS: Record<PageId, ManagedRole[]> = {
   'references.mol': ['manager'],
   // router.tsx: /references/supplier-orders — тот же гард раздела (admin, manager).
   'references.supplier_orders': ['manager'],
+  // router.tsx: /references/supplier-contracts — тот же гард раздела (admin, manager).
+  'references.supplier_contracts': ['manager'],
   'references.counterparties_legacy': ['manager'],
   'references.responsible_persons': ['manager'],
   'references.materials': ['manager'],

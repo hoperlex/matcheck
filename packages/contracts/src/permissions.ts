@@ -83,6 +83,7 @@ export const PAGE_IDS = [
   'references.units',
   'references.mol',
   'references.supplier_orders',
+  'references.supplier_contracts',
   'references.counterparties_legacy',
   'references.responsible_persons',
   'references.materials',
@@ -314,6 +315,15 @@ export const PAGE_CATALOG: PageCatalogEntry[] = [
     // read-only-гард пропустил бы её любой роли с выданной галочкой.
     actions: ['view', 'edit'],
     base: { view: ['manager'], edit: ['manager'] },
+  },
+  {
+    id: 'references.supplier_contracts',
+    group: 'references',
+    label: 'Договоры',
+    // Договоры из 1С — пишет только CLI-импорт (scripts/import-contracts.ts),
+    // в портале их только смотрят. Выбор договора в приёмке — ячейка операций.
+    actions: ['view'],
+    base: { view: ['manager'] },
   },
   {
     id: 'references.counterparties_legacy',

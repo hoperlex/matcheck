@@ -1002,6 +1002,13 @@
       "when": 1797389200000,
       "tag": "0143_delivery_document_recipients",
       "breakpoints": true
+    },
+    {
+      "idx": 144,
+      "version": "7",
+      "when": 1797475600000,
+      "tag": "0144_supplier_contracts",
+      "breakpoints": true
     }
   ]
 }

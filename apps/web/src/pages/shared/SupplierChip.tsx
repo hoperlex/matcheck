@@ -82,6 +82,14 @@ export function SupplierChip({
   const supplierGroups = useSupplierFilterOptions({ enabled: !hasUpd || !!updEdit });
   const loading = list.isLoading || supplierGroups.loading;
 
+  // Поставщик приёмки — источник ИНН для договора 1С: метки «поставщик приёмки»
+  // в чипе договора и в окне подбора после смены поставщика устарели бы.
+  const invalidateDeliveryContract = () => {
+    if (entity !== 'delivery') return;
+    void qc.invalidateQueries({ queryKey: ['delivery-contract', entityId] });
+    void qc.invalidateQueries({ queryKey: ['delivery-contract-candidates', entityId] });
+  };
+
   const setSupplier = useMutation<Delivery | Shipment, Error, string | null>({
     mutationFn: (supplierDirectoryId) =>
       api.patch<Delivery | Shipment>(
@@ -99,6 +107,7 @@ export function SupplierChip({
       } else {
         await upsertShipmentSnapshot([updated as Shipment]);
       }
+      invalidateDeliveryContract();
       await qc.invalidateQueries({ queryKey: invalidateQueryKey });
     },
     onError: (err) => {
@@ -118,6 +127,7 @@ export function SupplierChip({
       // Сначала родителю: чип берёт имя из документа, который тот держит в
       // state, и без этого показывал бы прежнего поставщика до перезагрузки.
       updEdit?.onSaved(doc);
+      invalidateDeliveryContract();
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['source-documents'] }),
         qc.invalidateQueries({ queryKey: ['source-document', doc.id] }),

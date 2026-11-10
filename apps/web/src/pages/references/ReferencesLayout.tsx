@@ -56,6 +56,14 @@ export const TAB_DEFS: {
     page: 'references.supplier_orders',
     capability: 'references.supplier_orders.view',
   },
+  // «Договоры» — договоры с контрагентами из 1С (CLI-импорт, только чтение).
+  {
+    key: '/references/supplier-contracts',
+    label: 'Договоры',
+    countUrl: '/supplier-contracts?limit=1',
+    page: 'references.supplier_contracts',
+    capability: 'references.supplier_contracts.view',
+  },
   {
     key: '/references/units',
     label: 'Ед-ы изм.',

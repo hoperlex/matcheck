@@ -229,6 +229,7 @@ function route(url: string): unknown {
     return { id, kind: 'upd', docNumber: 'УПД', items: [], supplierName: null, siteId: SITE };
   }
   if (url.includes('supplier-orders')) return { items: [], sync: { enabled: false } };
+  if (url.endsWith('/contract')) return { contract: null, catalog: { total: 0, importedAt: null } };
   return { items: [], total: 0 };
 }
 

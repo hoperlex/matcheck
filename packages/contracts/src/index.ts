@@ -10,6 +10,7 @@ export * from './materials.js';
 export * from './responsible-persons.js';
 export * from './mol.js';
 export * from './estimat.js';
+export * from './supplier-contracts.js';
 export * from './assets.js';
 export * from './sites.js';
 export * from './units.js';

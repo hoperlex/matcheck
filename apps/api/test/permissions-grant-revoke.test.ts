@@ -226,3 +226,24 @@ describe('подробности заказа в окне подбора — п�
     expect(await get('/api/v1/deliveries/42/supplier-order-candidates')).toBe(403);
   });
 });
+
+describe('договор 1С в приёмке — Мониторингу правом «Приёмки → Редактировать»', () => {
+  const base = '/api/v1/deliveries/42';
+  const call = async (method: 'GET' | 'PUT' | 'DELETE', url: string) =>
+    (await app!.inject({ method, url })).statusCode;
+
+  it('monitor с выданной правкой выбирает договор (на бою ячейка включена)', async () => {
+    app = await buildApp('monitor', [overrideRow('monitor', 'operations.deliveries', 'edit', true)]);
+    expect(await call('GET', `${base}/contract-candidates`)).toBe(200);
+    expect(await call('PUT', `${base}/contract`)).toBe(200);
+    expect(await call('DELETE', `${base}/contract`)).toBe(200);
+    expect(await call('GET', `${base}/contract`)).toBe(200);
+  });
+
+  it('monitor без правки договор видит, но выбрать не может', async () => {
+    app = await buildApp('monitor', []);
+    expect(await call('GET', `${base}/contract`)).toBe(200);
+    expect(await call('GET', `${base}/contract-candidates`)).toBe(403);
+    expect(await call('PUT', `${base}/contract`)).toBe(403);
+  });
+});

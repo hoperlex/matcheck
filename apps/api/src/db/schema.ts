@@ -2982,3 +2982,103 @@ export const deliverySupplierOrders = pgTable(
     index('delivery_supplier_orders_order_idx').on(t.orderId),
   ],
 );
+
+// ─── Договоры с контрагентами из 1С (миграция 0144) ───────────────────────
+
+export type SupplierContractKind = 'supplier' | 'buyer' | 'other';
+export type SupplierContractSiteStatus = 'exact' | 'group' | 'conflict' | 'none';
+
+/**
+ * Справочник договоров из выгрузки 1С. Пишет только scripts/import-contracts.ts;
+ * строки не удаляются — пропавший из выгрузки договор получает missing_since.
+ * Объект (site_*) — подсказка подбора по правилам domain/supplier-contracts/site-rules.ts.
+ */
+export const supplierContracts = pgTable(
+  'supplier_contracts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    onecId: uuid('onec_id').notNull(),
+    counterpartyOnecId: uuid('counterparty_onec_id'),
+    counterpartyName: text('counterparty_name').notNull(),
+    counterpartyInn: text('counterparty_inn').notNull(),
+    name: text('name').notNull(),
+    number: text('number'),
+    contractDate: date('contract_date', { mode: 'string' }),
+    kind: text('kind').$type<SupplierContractKind>().notNull(),
+    objectText: text('object_text'),
+    siteStatus: text('site_status').$type<SupplierContractSiteStatus>().notNull().default('none'),
+    siteIds: uuid('site_ids').array().notNull().default(sql`'{}'::uuid[]`),
+    siteRule: text('site_rule'),
+    missingSince: timestamp('missing_since', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('supplier_contracts_onec_id_uq').on(t.onecId),
+    index('supplier_contracts_inn_idx').on(t.counterpartyInn),
+    index('supplier_contracts_site_ids_idx').using('gin', t.siteIds),
+    check('supplier_contracts_kind_check', sql`${t.kind} in ('supplier', 'buyer', 'other')`),
+    check(
+      'supplier_contracts_site_status_check',
+      sql`${t.siteStatus} in ('exact', 'group', 'conflict', 'none')`,
+    ),
+  ],
+);
+
+/** Применённые импорты договоров. Действующий — последний без reverted_at. */
+export const supplierContractImports = pgTable(
+  'supplier_contract_imports',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    appliedAt: timestamp('applied_at', { withTimezone: true }).notNull(),
+    fileName: text('file_name').notNull(),
+    fileSha256: text('file_sha256').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    rowsTotal: integer('rows_total').notNull(),
+    inserted: integer('inserted').notNull(),
+    updated: integer('updated').notNull(),
+    missing: integer('missing').notNull(),
+    returned: integer('returned').notNull(),
+    revertedAt: timestamp('reverted_at', { withTimezone: true }),
+  },
+  (t) => [index('supplier_contract_imports_applied_idx').on(t.appliedAt)],
+);
+
+/** Договор приёмки — один на приёмку (PK по delivery_id). deliveries не меняется. */
+export const deliveryContracts = pgTable(
+  'delivery_contracts',
+  {
+    deliveryId: uuid('delivery_id')
+      .primaryKey()
+      .references(() => deliveries.id, { onDelete: 'cascade' }),
+    contractId: uuid('contract_id')
+      .notNull()
+      .references(() => supplierContracts.id, { onDelete: 'restrict' }),
+    linkedByUserId: uuid('linked_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    linkedAt: timestamp('linked_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('delivery_contracts_contract_idx').on(t.contractId)],
+);
+
+export type DeliveryContractEventKind = 'linked' | 'replaced' | 'unlinked';
+
+/** Журнал привязок договора к приёмке. delivery_id без FK — переживает удаление приёмки. */
+export const deliveryContractEvents = pgTable(
+  'delivery_contract_events',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    deliveryId: uuid('delivery_id').notNull(),
+    contractId: uuid('contract_id'),
+    previousContractId: uuid('previous_contract_id'),
+    kind: text('kind').$type<DeliveryContractEventKind>().notNull(),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('delivery_contract_events_delivery_idx').on(t.deliveryId, t.id),
+    check(
+      'delivery_contract_events_kind_check',
+      sql`${t.kind} in ('linked', 'replaced', 'unlinked')`,
+    ),
+  ],
+);

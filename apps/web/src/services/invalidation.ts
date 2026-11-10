@@ -44,6 +44,9 @@ const FALLBACK_KEYS: string[][] = [
   ['delivery-edo-matches'],
   // Заказы EstiMat в карточке приёмки — тоже отдельный запрос.
   ['delivery-supplier-orders'],
+  // Договор 1С приёмки и окно его подбора.
+  ['delivery-contract'],
+  ['delivery-contract-candidates'],
   ['shipments'],
   ['source-documents'],
   ['reports'],
@@ -151,6 +154,9 @@ export function setupInvalidation(qc: QueryClient): () => void {
       // delivery-edo-matches: чипы УПД из ЭДО — привязку мог сделать другой
       // менеджер, а «ещё в приёмке N» меняется от привязки к соседней приёмке.
       // delivery-supplier-orders: заказы EstiMat, привязанные к приёмке.
+      // delivery-contract(-candidates): договор 1С приёмки и окно подбора —
+      // договор мог поменять другой пользователь, а метки кандидатов зависят
+      // от документов приёмки.
       // photo-recognition: таблица фото сверяется с УПД операции
       // (linkedDocument) — привязка, отвязка или правка УПД меняют сверку
       // уже открытого фото. Перечитывается только открытое окно.
@@ -159,6 +165,8 @@ export function setupInvalidation(qc: QueryClient): () => void {
         ['source-documents'],
         ['delivery-edo-matches'],
         ['delivery-supplier-orders'],
+        ['delivery-contract'],
+        ['delivery-contract-candidates'],
         ['photo-recognition'],
         ...DELIVERY_REPORTS,
       ];

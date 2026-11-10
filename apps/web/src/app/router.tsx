@@ -28,6 +28,7 @@ const Materials = lazy(() => import('../pages/references/Materials'));
 const ResponsiblePersons = lazy(() => import('../pages/references/ResponsiblePersons'));
 const MolPersons = lazy(() => import('../pages/references/MolPersons'));
 const SupplierOrders = lazy(() => import('../pages/references/SupplierOrders'));
+const SupplierContracts = lazy(() => import('../pages/references/SupplierContracts'));
 const Units = lazy(() => import('../pages/references/Units'));
 const Assets = lazy(() => import('../pages/references/Assets'));
 const MaterialsJournal = lazy(() => import('../pages/materials/MaterialsPage'));
@@ -310,6 +311,14 @@ export const router = sentryCreateBrowserRouter([
             element: (
               <ProtectedRoute page="references.supplier_orders">
                 {suspense(<SupplierOrders />)}
+              </ProtectedRoute>
+            ),
+          },
+          {
+            path: 'supplier-contracts',
+            element: (
+              <ProtectedRoute page="references.supplier_contracts">
+                {suspense(<SupplierContracts />)}
               </ProtectedRoute>
             ),
           },

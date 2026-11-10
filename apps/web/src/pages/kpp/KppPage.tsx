@@ -40,6 +40,8 @@ import type {
   Counterparty,
   ResponsiblePerson,
   Delivery,
+  DeliveryContractChanged,
+  DeliveryContractResponse,
   DeliveryPurpose,
   DeliveryStatusCode,
   DeliverySupplierOrder,
@@ -51,7 +53,7 @@ import type {
   Status,
   UnlinkSourceBody,
 } from '@matcheck/contracts';
-import { api, apiDownload, ConflictError } from '../../services/api';
+import { api, apiDownload, ApiError, ConflictError } from '../../services/api';
 import { useAuthStore } from '../../stores/auth';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { SYSTEM_SITE_ID } from '../../lib/db';
@@ -96,6 +98,9 @@ import { LinkSupplierOrderModal } from './LinkSupplierOrderModal';
 import { SupplierOrderChip } from './SupplierOrderChip';
 import { DeliverySupplierOrdersBlock } from './DeliverySupplierOrdersBlock';
 import { useDeliverySupplierOrders } from './useDeliverySupplierOrders';
+import { ContractChip } from './ContractChip';
+import { contractQueryKeys, LinkContractModal } from './LinkContractModal';
+import { useDeliveryContract } from './useDeliveryContract';
 import { LinkedEdoChips, type LinkedEdoDocument } from './LinkedEdoChips';
 import { computeVatSum, toNum } from './itemMoney';
 import { useDeliveryEdoItems, type EdoItemsEntry } from './useDeliveryEdoItems';
@@ -254,6 +259,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const canViewSupplierOrders = !isContractor && hasCapability('operations.view.supplier_orders');
   const canLinkSupplierOrder =
     canEditDelivery && !isContractor && hasCapability('operations.edit.supplier_order');
+  // Договор 1С: виден всем, кто видит карточку, кроме подрядчика; выбирают те,
+  // кому открыт маршрут выбора (admin/manager и Мониторинг с правом правки).
+  const canViewContract = !isContractor && hasCapability('operations.view.contract');
+  const canLinkContract = canEditDelivery && !isContractor && hasCapability('operations.edit.contract');
   // Поставщик привязанного УПД правится в самом документе — правом карточки
   // документа, как стороны (PATCH /source-documents/:id, documents.list:edit):
   // админ и Мониторинг с выданной ячейкой.
@@ -320,6 +329,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const [linkUpdOpen, setLinkUpdOpen] = useState(false);
   const [linkEdoOpen, setLinkEdoOpen] = useState(false);
   const [linkOrderOpen, setLinkOrderOpen] = useState(false);
+  const [linkContractOpen, setLinkContractOpen] = useState(false);
   // Блок материалов, к которому подбирается УПД из ЭДО; null — к приёмке
   // целиком. При закрытии не сбрасывается, чтобы заголовок окна не менялся
   // во время анимации — следующее открытие всё равно его задаёт.
@@ -443,6 +453,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     deliveryId,
     !isNew && canViewSupplierOrders,
   );
+  // Договор 1С — свой запрос с опросом раз в 30 с (см. хук).
+  const contractQuery = useDeliveryContract(deliveryId, !isNew && canViewContract);
+  const contract = contractQuery.data?.contract ?? null;
   // Строки УПД из ЭДО — основной список блока материалов (DeliveryEdoSectionBody).
   // Запрос на каждую привязку; без привязок (и без права на них) — ни одного.
   const edoItemsByMatch = useDeliveryEdoItems(deliveryId, edoMatchesQuery.data?.items ?? []);
@@ -1094,6 +1107,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onSuccess: async (dto, upd) => {
       await upsertServerSnapshot([dto]);
       message.success('УПД привязана');
+      invalidateContractInns();
       setLinkUpdOpen(false);
       setLinkUpdError(null);
       // Раньше здесь стоял hydratedIdRef.current = null — принудительная
@@ -1167,6 +1181,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       message.success('УПД из ЭДО сопоставлена с приёмкой');
       setLinkEdoOpen(false);
       setLinkEdoError(null);
+      invalidateContractInns();
       void queryClient.invalidateQueries({ queryKey: ['delivery-edo-matches', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['delivery-edo-candidates', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
@@ -1181,6 +1196,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     },
     onSuccess: () => {
       message.success('Связь с УПД из ЭДО удалена');
+      invalidateContractInns();
       void queryClient.invalidateQueries({ queryKey: ['delivery-edo-matches', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['delivery-edo-candidates', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
@@ -1202,6 +1218,42 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     },
     onError: (err: Error) => message.error(err.message),
   });
+
+  // Договор приёмки: отвязка с договором, который человек видел в момент
+  // открытия подтверждения (ContractChip фиксирует его сам). 409 — договор уже
+  // поменяли: показываем текущий и перечитываем.
+  const contractKeys = contractQueryKeys(deliveryId);
+  const unlinkContract = useMutation({
+    mutationFn: (expectedContractId: string) =>
+      api.delete<DeliveryContractResponse>(
+        `/deliveries/${deliveryId}/contract?expectedContractId=${encodeURIComponent(expectedContractId)}`,
+      ),
+    onSuccess: (data) => {
+      message.success('Договор отвязан');
+      queryClient.setQueryData(contractKeys.contract, data);
+      void queryClient.invalidateQueries({ queryKey: contractKeys.candidates });
+    },
+    onError: (err: Error) => {
+      void queryClient.invalidateQueries({ queryKey: contractKeys.contract });
+      void queryClient.invalidateQueries({ queryKey: contractKeys.candidates });
+      if (err instanceof ApiError && err.status === 409 && err.code === 'contract_changed') {
+        const now = (err.payload as DeliveryContractChanged | undefined)?.current;
+        message.warning(
+          now
+            ? `Договор уже изменил другой пользователь: «${now.name}». Карточка обновлена.`
+            : 'Договор уже отвязал другой пользователь. Карточка обновлена.',
+        );
+        return;
+      }
+      message.error(err.message);
+    },
+  });
+  // Документы приёмки — источник ИНН поставщика: после их смены метки
+  // «поставщик приёмки» в окне подбора договора устарели бы.
+  function invalidateContractInns() {
+    void queryClient.invalidateQueries({ queryKey: contractKeys.candidates });
+    void queryClient.invalidateQueries({ queryKey: contractKeys.contract });
+  }
 
   const openLinkEdo = (section: EdoSection | null) => {
     setLinkEdoError(null);
@@ -1253,6 +1305,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       if (deleteItems) setItems((prev) => prev.filter((it) => it.sourceDocumentId !== doc.id));
       itemsVersionRef.current = advanceItemsVersion(itemsVersionRef.current, dto.version);
       message.success(deleteItems ? 'Документ отвязан, его материалы удалены' : 'Документ отвязан');
+      invalidateContractInns();
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
@@ -2228,6 +2281,33 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     + Заказ
                   </Button>
                 )}
+              {/* Договор 1С. Чип — выбранный договор (оранжевый, если что-то не
+                  сходится), «+ Договор» — окно подбора. Кнопки нет, пока
+                  справочник пуст (импорт не делали): пустое окно ничего не даст. */}
+              {canViewContract && (
+                <ContractChip
+                  contract={contract}
+                  onUnlink={
+                    canLinkContract && !isPending ? (expected) => unlinkContract.mutate(expected) : undefined
+                  }
+                  onReplace={
+                    canLinkContract && !isPending && !loadedDelivery?.sourceShipmentId
+                      ? () => setLinkContractOpen(true)
+                      : undefined
+                  }
+                  unlinkPending={unlinkContract.isPending}
+                />
+              )}
+              {canLinkContract &&
+                !isNew &&
+                !isPending &&
+                !loadedDelivery?.sourceShipmentId &&
+                !contract &&
+                (contractQuery.data?.catalog.total ?? 0) > 0 && (
+                  <Button size="small" type="dashed" onClick={() => setLinkContractOpen(true)}>
+                    + Договор
+                  </Button>
+                )}
               {/* Транзит — admin/manager могут поставить/снять прямо
                   с портала (PATCH /deliveries/:id/flags). Inspector_kpp
                   видит только цветной чип при true (как раньше), править
@@ -2366,6 +2446,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           open={linkOrderOpen}
           deliveryId={loadedDelivery?.id ?? null}
           onClose={() => setLinkOrderOpen(false)}
+        />
+
+        <LinkContractModal
+          open={linkContractOpen}
+          deliveryId={loadedDelivery?.id ?? null}
+          current={contract}
+          onClose={() => setLinkContractOpen(false)}
         />
 
         <LinkEdoDocumentModal

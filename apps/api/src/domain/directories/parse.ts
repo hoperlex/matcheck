@@ -47,19 +47,19 @@ export type OneCContractor = {
   projects: string[];
 };
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function cell(row: unknown[] | undefined, i: number | undefined): string {
+export function cell(row: unknown[] | undefined, i: number | undefined): string {
   if (!row || i === undefined) return '';
   const v = row[i];
   return v === null || v === undefined ? '' : String(v);
 }
 
-function headerKey(s: string): string {
+export function headerKey(s: string): string {
   return collapseSpaces(s).toLowerCase().replace(/ё/g, 'е');
 }
 
-function findHeader(
+export function findHeader(
   rows: unknown[][],
   required: readonly string[],
 ): { index: number; columns: Map<string, number> } | null {

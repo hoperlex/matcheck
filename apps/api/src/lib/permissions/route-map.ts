@@ -212,6 +212,31 @@ const ORDER_LINK: RouteRule = st('operations.deliveries', 'edit', {
   capability: 'operations.edit.supplier_order',
   expandableBy: UNSCOPED,
 });
+/**
+ * Договоры 1С (вкладка «Договоры»). Список отдаёт договоры ВСЕХ объектов,
+ * поэтому расширение — только ролям без скоупа строк, как у «Заказов».
+ */
+const CONTRACTS_VIEW: RouteRule = st('references.supplier_contracts', 'view', {
+  capability: 'references.supplier_contracts.view',
+  expandableBy: UNSCOPED,
+});
+/**
+ * Договор приёмки — просмотр операции. Подрядчику закрыто; инспектору — свой
+ * объект (сверка siteId в хендлере).
+ */
+const CONTRACT_VIEW_IN_DELIVERY: RouteRule = st('operations.deliveries', 'view', {
+  capability: 'operations.view.contract',
+  expandableBy: UNSCOPED,
+});
+/**
+ * Выбор/замена/отвязка договора и окно подбора — одно правило (иначе кнопка
+ * есть, а окно 403). allow-list — admin/manager; monitor получает возможность
+ * расширением ячейки edit (на бою она у него включена — решение 10.11.2026).
+ */
+const CONTRACT_LINK: RouteRule = st('operations.deliveries', 'edit', {
+  capability: 'operations.edit.contract',
+  expandableBy: UNSCOPED,
+});
 const legacy = (
   page: PageId,
   action: PageAction,
@@ -417,6 +442,11 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/deliveries/:id/supplier-order-candidates/:orderId/items', ORDER_LINK],
   ['POST /api/v1/deliveries/:id/supplier-orders', ORDER_LINK],
   ['DELETE /api/v1/deliveries/:id/supplier-orders/:orderId', ORDER_LINK],
+  // Договор 1С приёмки (миграция 0144).
+  ['GET /api/v1/deliveries/:id/contract', CONTRACT_VIEW_IN_DELIVERY],
+  ['GET /api/v1/deliveries/:id/contract-candidates', CONTRACT_LINK],
+  ['PUT /api/v1/deliveries/:id/contract', CONTRACT_LINK],
+  ['DELETE /api/v1/deliveries/:id/contract', CONTRACT_LINK],
   // Ссылки-шаринги — не часть обычного редактирования: у создания, списка,
   // отзыва и переписки РАЗНЫЕ allow-list (инспектор создаёт и видит, но не
   // отзывает). Выдача edit их не открывает, интерфейс скрывает по capability.
@@ -762,6 +792,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['GET /api/v1/estimat/supplier-orders/:id/items', ORDERS_VIEW],
   ['GET /api/v1/estimat/sync-status', ORDERS_VIEW],
   ['POST /api/v1/estimat/sync', ORDERS_SYNC],
+  ['GET /api/v1/supplier-contracts', CONTRACTS_VIEW],
 
   ['POST /api/v1/sites', st('references.sites', 'create')],
   ['PATCH /api/v1/sites/:id', st('references.sites', 'edit')],
