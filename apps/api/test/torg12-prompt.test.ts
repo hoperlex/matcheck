@@ -6,6 +6,8 @@
 import { describe, expect, it } from 'vitest';
 import type { UpdPdfParsed } from '@matcheck/contracts';
 import {
+  clearTorg12Money,
+  innInList,
   parseSupplierInns,
   summarizeForTrace,
   torg12PromptApplies,
@@ -117,5 +119,77 @@ describe('summarizeForTrace', () => {
       totalSum: null,
       confidence: 0.9,
     });
+  });
+});
+
+describe('innInList', () => {
+  it('сравнивает только цифры; пустой ИНН — нет', () => {
+    const inns = parseSupplierInns(ROCKWOOL);
+    expect(innInList('5012 093-506', inns)).toBe(true);
+    expect(innInList('7714529160', inns)).toBe(false);
+    expect(innInList(null, inns)).toBe(false);
+    expect(innInList('', inns)).toBe(false);
+  });
+});
+
+describe('clearTorg12Money', () => {
+  // Боевой сдвиг граф (пара P1): масса нетто 2886 кг ушла в цену и сумму.
+  const shifted = {
+    docNumber: '10626044499',
+    docDate: '2026-09-21',
+    totalSum: 2886,
+    vatSum: null,
+    pricing: 'printed',
+    supplier: { inn: ROCKWOOL, kpp: null, name: 'ООО "РОКВУЛ"' },
+    confidence: 0.9,
+    items: [
+      {
+        rowNo: 1,
+        nameRaw: 'ВЕНТИ БАТТС Н 1000х600х100 (20 ПАЧ/ПАЛ) Плита минераловатная',
+        unit: 'м2',
+        qty: null,
+        qtyPerPlace: 60,
+        places: 13,
+        massNetKg: 3152.5,
+        price: 2886,
+        sum: 2886,
+        vatRate: null,
+        vatSum: null,
+      },
+    ],
+  } as unknown as UpdPdfParsed;
+
+  it('обнуляет деньги строк и документа, ставит pricing = absent', () => {
+    const { parsed, cleared } = clearTorg12Money(shifted);
+    expect(parsed.totalSum).toBeNull();
+    expect(parsed.vatSum).toBeNull();
+    expect(parsed.pricing).toBe('absent');
+    expect(parsed.items[0]).toMatchObject({ price: null, sum: null, vatRate: null, vatSum: null });
+    expect(cleared).toEqual([
+      { row: 1, field: 'price', value: 2886 },
+      { row: 1, field: 'sum', value: 2886 },
+      { row: null, field: 'totalSum', value: 2886 },
+    ]);
+  });
+
+  it('не трогает номер, стороны, наименование и графы 7/8', () => {
+    const { parsed } = clearTorg12Money(shifted);
+    expect(parsed.docNumber).toBe('10626044499');
+    expect(parsed.supplier).toEqual(shifted.supplier);
+    expect(parsed.items[0]).toMatchObject({
+      nameRaw: shifted.items[0]!.nameRaw,
+      unit: 'м2',
+      qtyPerPlace: 60,
+      places: 13,
+      massNetKg: 3152.5,
+    });
+  });
+
+  it('без денег — пустой список обнулённого, исходный объект не меняется', () => {
+    const clean = clearTorg12Money(shifted).parsed;
+    expect(clearTorg12Money(clean).cleared).toEqual([]);
+    // Чистая функция: исходный ответ модели остаётся для следа как был.
+    expect(shifted.items[0]!.price).toBe(2886);
+    expect(shifted.totalSum).toBe(2886);
   });
 });

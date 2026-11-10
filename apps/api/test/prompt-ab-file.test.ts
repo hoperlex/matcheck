@@ -32,9 +32,11 @@ describe('promptFromFile', () => {
   });
 });
 
-describe('черновик torg12-v1.txt', () => {
-  const text = readFileSync(join(here, '../scripts/prompts/torg12-v1.txt'), 'utf8');
-  const p = promptFromFile(text, 'torg12-v1.txt');
+const draft = (file: string) =>
+  promptFromFile(readFileSync(join(here, '../scripts/prompts', file), 'utf8'), file);
+
+describe.each(['torg12-v1.txt', 'torg12-v2.txt'])('черновик %s', (file) => {
+  const p = draft(file);
 
   it('требует qty: null — иначе правило ТОРГ-12 не посчитает количество', () => {
     // detectTorg12Qty пересчитывает только пустое qty (или совпавшее с массой
@@ -52,5 +54,25 @@ describe('черновик torg12-v1.txt', () => {
     // v18 включала раздел ТОРГ-12 условием «если в шапке ОКУД 0330212» и на
     // коллажах и вторых листах его не применяла (прогон А 10.11: 0 из 13).
     expect(p.content).not.toMatch(/^Если в шапке/m);
+  });
+});
+
+describe('черновик torg12-v2.txt — уточнения после прогона А 10.11', () => {
+  const v1 = draft('torg12-v1.txt');
+  const v2 = draft('torg12-v2.txt');
+
+  it('строка шапки со срезанной подписью определяется по месту', () => {
+    // ab64a7b9: подпись «Грузополучатель» срезана краем коллажа — у v1 пусто.
+    expect(v2.content).toMatch(/подпись строки слева срезана/);
+  });
+
+  it('порядок граф масс: брутто, затем нетто, затем деньги', () => {
+    expect(v2.content).toMatch(/сначала графа 9 \(брутто/);
+  });
+
+  it('v2 только дополняет v1: всё прежнее на месте', () => {
+    for (const line of v1.content.split('\n').filter((l) => l.trim() !== '')) {
+      expect(v2.content).toContain(line);
+    }
   });
 });

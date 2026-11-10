@@ -92,6 +92,9 @@
  *   … --base "default v13" --new-file /corpus/torg12-v1.txt --dir /corpus \
  *     --manifest /corpus/manifest.json --torg12-qty --gate expectation --details
  *
+ * --torg12-no-price <ИНН,…> повторяет TORG12_PROMPT_NO_PRICE_INNS воркера: у
+ * результата новой версии обнуляются деньги, если поставщик из списка.
+ *
  * Стоит денег: три прогона по корпусу (A/A + новая версия) — это ~3 LLM-вызова
  * на файл, а на пакет из N УПД — 3N. Для черновых проверок используйте --limit.
  *
@@ -132,6 +135,11 @@ import {
 } from '../src/domain/edo/upd-text-bundle.parser.js';
 import type { PromptOverride } from '../src/domain/prompts/registry.js';
 import type { ParseMode } from '../src/domain/edo/parse-mode.js';
+import {
+  clearTorg12Money,
+  innInList,
+  parseSupplierInns,
+} from '../src/domain/edo/torg12-prompt.js';
 import {
   compareUnit,
   newMoneyMismatches,
@@ -578,6 +586,11 @@ async function main(): Promise<void> {
   // Количество так, как его сохранит воркер при TORG12_QTY=on: обе версии
   // сравниваются уже ПОСЛЕ правила (см. simulateTorg12Qty).
   const torg12Qty = process.argv.includes('--torg12-qty');
+  // Деньги ТОРГ-12 поставщиков, которые цен в ней не печатают, — как воркер при
+  // TORG12_PROMPT_NO_PRICE_INNS: обнуляются только у результата новой версии
+  // (это и есть второй разбор воркера) и только если ИНН поставщика из
+  // базового разбора есть в списке.
+  const noPriceInns = parseSupplierInns(argValue('--torg12-no-price'));
   const gateRaw = argValue('--gate', 'regression') ?? 'regression';
   if (gateRaw !== 'regression' && gateRaw !== 'expectation') {
     throw new Error(`--gate: ожидается regression или expectation, получено «${gateRaw}»`);
@@ -654,7 +667,10 @@ async function main(): Promise<void> {
   }
   console.log(
     `[ab] гейт: ${gate === 'expectation' ? 'против бумаги (целевой)' : 'против базы (анти-регресс)'}` +
-      (torg12Qty ? '; количество — после правила ТОРГ-12, как сохранит воркер' : ''),
+      (torg12Qty ? '; количество — после правила ТОРГ-12, как сохранит воркер' : '') +
+      (noPriceInns.size > 0
+        ? `; деньги ТОРГ-12 без цен обнуляются у новой версии (ИНН ${[...noPriceInns].join(', ')})`
+        : ''),
   );
   if (gate === 'expectation') {
     // Целевой гейт доказывает ровно размеченное. Неполный эталон проверяется
@@ -730,6 +746,8 @@ async function main(): Promise<void> {
   );
 
   const comparisons: UnitComparison[] = [];
+  /** Документы, у которых правило «ТОРГ-12 без цен» что-то обнулило. */
+  const moneyCleared: Array<{ key: string; fields: number }> = [];
   /** Что правило ТОРГ-12 рассчитало и что из этого сохранил бы воркер. */
   const torg12Rows: Array<{ label: string; base?: Torg12Simulation; fresh?: Torg12Simulation }> = [];
   const failures: { file: string; error: string }[] = [];
@@ -749,6 +767,16 @@ async function main(): Promise<void> {
       a1 = await runOne(entry, buffer, { prompt: base, temperature: 0 }, docKind);
       a2 = await runOne(entry, buffer, { prompt: base, temperature: 0 }, docKind);
       b = await runOne(entry, buffer, { prompt: fresh, temperature: 0 }, docKind);
+      if (noPriceInns.size > 0) {
+        b = b.map((u, i) => {
+          // Решает ИНН поставщика из базового разбора того же документа — так же,
+          // как воркер, который смотрит на результат обычного разбора.
+          if (!innInList((a1[i] ?? u).parsed.supplier?.inn, noPriceInns)) return u;
+          const { parsed, cleared } = clearTorg12Money(u.parsed);
+          if (cleared.length > 0) moneyCleared.push({ key: u.key, fields: cleared.length });
+          return { ...u, parsed };
+        });
+      }
       if (torg12Qty) {
         // Ко ВСЕМ прогонам, не только к новому: в бою правило включено при
         // любой активной версии, и база должна сравниваться в тех же условиях.
@@ -921,6 +949,10 @@ async function main(): Promise<void> {
   const torg12Touched = torg12Rows.filter(
     (r) => (r.base?.computed.length ?? 0) > 0 || (r.fresh?.computed.length ?? 0) > 0,
   );
+  if (noPriceInns.size > 0) {
+    console.log(`\nДеньги ТОРГ-12 без цен обнулены у новой версии: ${moneyCleared.length} док.`);
+    for (const m of moneyCleared) console.log(`  ${m.key}: полей ${m.fields}`);
+  }
   if (torg12Qty) {
     console.log(`\nПравило ТОРГ-12: сработало в ${torg12Touched.length} док.`);
     for (const r of torg12Touched) {
@@ -1011,7 +1043,11 @@ async function main(): Promise<void> {
       git: revision,
       // Режим входит в отпечаток условий: свод не смешает анти-регресс с
       // целевым прогоном и части с правилом ТОРГ-12 с частями без него.
-      mode: { gate, torg12Qty },
+      mode: {
+        gate,
+        torg12Qty,
+        ...(noPriceInns.size > 0 ? { torg12NoPrice: [...noPriceInns].sort() } : {}),
+      },
       torg12: torg12Rows,
       prompts: {
         base: { name: baseName, id: base.id, sha256: sha256(base.content), length: base.content.length },

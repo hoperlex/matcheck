@@ -42,6 +42,12 @@ export function parseSupplierInns(raw: string | null | undefined): ReadonlySet<s
   );
 }
 
+/** Есть ли ИНН (только цифры) в списке. Пустой ИНН — нет. */
+export function innInList(inn: string | null | undefined, inns: ReadonlySet<string>): boolean {
+  const v = digits(inn);
+  return v !== '' && inns.has(v);
+}
+
 export type Torg12PromptContext = {
   mode: Torg12PromptMode;
   parseMode: ParseMode;
@@ -64,14 +70,65 @@ export type Torg12PromptContext = {
 export function torg12PromptApplies(ctx: Torg12PromptContext): boolean {
   if (ctx.mode === 'off') return false;
   if (ctx.inns.size === 0) return false;
-  const inn = digits(ctx.supplierInn);
-  if (!inn || !ctx.inns.has(inn)) return false;
+  if (!innInList(ctx.supplierInn, ctx.inns)) return false;
   return (
     TORG12_PROMPT_PARSE_MODES.has(ctx.parseMode) &&
     !ctx.secondPassJob &&
     !ctx.segmentRepairJob &&
     ctx.jobGeneration === 0
   );
+}
+
+/** Что именно обнулило clearTorg12Money — для следа. */
+export type Torg12MoneyCleared = Array<{
+  /** Номер строки 1-based (порядок items) или null для полей документа. */
+  row: number | null;
+  field: 'price' | 'sum' | 'vatRate' | 'vatSum' | 'totalSum';
+  value: number;
+}>;
+
+const ITEM_MONEY_FIELDS = ['price', 'sum', 'vatRate', 'vatSum'] as const;
+
+/**
+ * Деньги из ТОРГ-12 поставщика, который цен в ней не печатает
+ * (TORG12_PROMPT_NO_PRICE_INNS).
+ *
+ * Зачем. У накладной РОКВУЛ денежные графы 11–15 пусты структурно — цену
+ * ставит дилер в своём УПД. Модель же на части снимков сдвигает массы на одну
+ * графу вправо: массу брутто отдаёт как нетто, а массу нетто — как сумму
+ * (иногда ×1000: «2 592,000» кг → 2 592 000 ₽). По равенству «сумма = масса»
+ * это не ловится — масса нетто тоже взята не та. Количество сдвиг не задевает:
+ * его считает TORG12_QTY из граф 7 и 8.
+ *
+ * Обнуляет денежные поля строк и документа и ставит pricing = 'absent'.
+ * Остальное (номер, стороны, наименования, графы 7/8) не трогает.
+ */
+export function clearTorg12Money(parsed: UpdPdfParsed): {
+  parsed: UpdPdfParsed;
+  cleared: Torg12MoneyCleared;
+} {
+  const cleared: Torg12MoneyCleared = [];
+  const items = parsed.items.map((item, index) => {
+    const next = { ...item };
+    for (const field of ITEM_MONEY_FIELDS) {
+      const value = item[field];
+      if (value != null) {
+        cleared.push({ row: index + 1, field, value });
+        next[field] = null;
+      }
+    }
+    return next;
+  });
+  if (parsed.totalSum != null) {
+    cleared.push({ row: null, field: 'totalSum', value: parsed.totalSum });
+  }
+  if (parsed.vatSum != null) {
+    cleared.push({ row: null, field: 'vatSum', value: parsed.vatSum });
+  }
+  return {
+    parsed: { ...parsed, items, totalSum: null, vatSum: null, pricing: 'absent' },
+    cleared,
+  };
 }
 
 /** Сводка разбора для следа: чтобы сравнить две версии, не храня ответы целиком. */

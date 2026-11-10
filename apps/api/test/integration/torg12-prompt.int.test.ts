@@ -38,6 +38,7 @@ vi.mock('../../src/db/client.js', () => ({ db: sql ? drizzle(sql) : ({} as never
 const flags = vi.hoisted(() => ({
   prompt: 'off' as 'off' | 'shadow' | 'on',
   inns: '5012093506',
+  noPrice: '',
 }));
 vi.mock('../../src/lib/env.js', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('../../src/lib/env.js');
@@ -50,6 +51,7 @@ vi.mock('../../src/lib/env.js', async () => {
       TORG12_PROMPT: flags.prompt,
       TORG12_PROMPT_SUPPLIER_INNS: flags.inns,
       TORG12_PROMPT_NAME: 'default v18',
+      TORG12_PROMPT_NO_PRICE_INNS: flags.noPrice,
     }),
   };
 });
@@ -148,7 +150,8 @@ function torg12Result() {
 }
 
 /** Второй вызов узнаётся по promptOverride — его передаёт только правило ТОРГ-12. */
-function byPrompt(active = activeResult(), torg12 = torg12Result()) {
+// Ответы — произвольной формы: в части тестов второй разбор нарочно со сдвигом граф.
+function byPrompt(active: unknown = activeResult(), torg12: unknown = torg12Result()) {
   parseUpdVision.mockImplementation(async (_input: unknown, ctx: { promptOverride?: unknown }) =>
     ctx?.promptOverride ? torg12 : active,
   );
@@ -189,6 +192,7 @@ suite('промпт ТОРГ-12 для поставщиков из списка 
     byPrompt();
     flags.prompt = 'off';
     flags.inns = '5012093506';
+    flags.noPrice = '';
     await cleanup();
   });
 
@@ -214,6 +218,28 @@ suite('промпт ТОРГ-12 для поставщиков из списка 
     const items = await db<{ qty: string }[]>`
       SELECT qty FROM source_document_items WHERE source_document_id = ${docId} ORDER BY line_no`;
     return { ...d!, qty: items.map((i) => Number(i.qty)) };
+  }
+
+  async function moneyOf(docId: string) {
+    const [d] = await db<{ total_sum: string | null }[]>`
+      SELECT total_sum FROM source_documents WHERE id = ${docId}`;
+    const items = await db<{ price: string | null; sum: string | null }[]>`
+      SELECT price, sum FROM source_document_items WHERE source_document_id = ${docId} ORDER BY line_no`;
+    return { totalSum: d!.total_sum, items };
+  }
+
+  /** Второй разбор со сдвигом граф (пара P1): масса нетто 2886 кг в цене и сумме. */
+  function torg12Shifted() {
+    const r = torg12Result();
+    return {
+      ...r,
+      parsed: {
+        ...r.parsed,
+        totalSum: 2886,
+        pricing: 'printed',
+        items: r.parsed.items.map((it) => ({ ...it, massNetKg: 3152.5, price: 2886, sum: 2886 })),
+      },
+    };
   }
 
   const evidenceOf = (bundleId: string) => db<{ payload: Record<string, unknown> }[]>`
@@ -290,5 +316,54 @@ suite('промпт ТОРГ-12 для поставщиков из списка 
     await handleJob(job(docId));
 
     expect(await docOf(docId)).toMatchObject({ doc_number: 'MO/25347/2017', qty: [60] });
+  });
+
+  it('поставщик без цен в режиме on — деньги второго разбора обнулены, количество посчитано', async () => {
+    flags.prompt = 'on';
+    flags.noPrice = '5012093506';
+    byPrompt(activeResult(), torg12Shifted());
+    const { docId, bundleId } = await seedDoc();
+    await handleJob(job(docId));
+
+    expect(await docOf(docId)).toMatchObject({ doc_number: '10626044499', qty: [780] });
+    expect(await moneyOf(docId)).toEqual({ totalSum: null, items: [{ price: null, sum: null }] });
+    const [ev] = await evidenceOf(bundleId);
+    expect(ev?.payload).toMatchObject({
+      applied: true,
+      // В следе — и сырой ответ модели, и то, что обнулено.
+      torg12: { totalSum: 2886 },
+      moneyCleared: [
+        { row: 1, field: 'price', value: 2886 },
+        { row: 1, field: 'sum', value: 2886 },
+        { row: null, field: 'totalSum', value: 2886 },
+      ],
+    });
+  });
+
+  it('поставщик не в списке без цен — деньги второго разбора остаются', async () => {
+    flags.prompt = 'on';
+    flags.noPrice = '';
+    byPrompt(activeResult(), torg12Shifted());
+    const { docId, bundleId } = await seedDoc();
+    await handleJob(job(docId));
+
+    expect(await moneyOf(docId)).toMatchObject({ items: [{ sum: '2886.00' }] });
+    const [ev] = await evidenceOf(bundleId);
+    expect(ev?.payload).not.toHaveProperty('moneyCleared');
+  });
+
+  it('shadow — обнулённое видно в следе, документ с результатом обычного разбора', async () => {
+    flags.prompt = 'shadow';
+    flags.noPrice = '5012093506';
+    byPrompt(activeResult(), torg12Shifted());
+    const { docId, bundleId } = await seedDoc();
+    await handleJob(job(docId));
+
+    expect(await docOf(docId)).toMatchObject({ doc_number: 'MO/25347/2017', qty: [60] });
+    const [ev] = await evidenceOf(bundleId);
+    expect(ev?.payload).toMatchObject({
+      applied: false,
+      moneyCleared: [{ field: 'price' }, { field: 'sum' }, { field: 'totalSum' }],
+    });
   });
 });

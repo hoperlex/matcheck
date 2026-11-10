@@ -1459,13 +1459,16 @@ export type AbReportIdentity = {
    * Как считался вердикт. Необязательное: отчёты, снятые до появления поля,
    * — это анти-регресс без правила ТОРГ-12.
    */
-  mode?: { gate?: GateKind; torg12Qty?: boolean };
+  mode?: { gate?: GateKind; torg12Qty?: boolean; torg12NoPrice?: string[] };
 };
 
 /** Режим сверки строкой: части с разным режимом сводить нельзя. */
 function modeLabel(mode: AbReportIdentity['mode']): string {
   const gate = mode?.gate ?? 'regression';
-  return `${gate}${mode?.torg12Qty ? ' + правило ТОРГ-12' : ''}`;
+  const noPrice = mode?.torg12NoPrice?.length
+    ? ` + ТОРГ-12 без цен (${mode.torg12NoPrice.join(', ')})`
+    : '';
+  return `${gate}${mode?.torg12Qty ? ' + правило ТОРГ-12' : ''}${noPrice}`;
 }
 
 /**

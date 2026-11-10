@@ -179,6 +179,8 @@ import {
   pagesNeedRecheck,
 } from './domain/edo/torg12-recheck.js';
 import {
+  clearTorg12Money,
+  innInList,
   parseSupplierInns,
   summarizeForTrace,
   torg12PromptApplies,
@@ -1738,6 +1740,15 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
                 { sourceDocumentId, promptOverride: override },
               );
         const applied = torg12PromptMode === 'on';
+        // Поставщик, чья ТОРГ-12 цен не печатает: деньги второго разбора —
+        // это масса из соседних граф (см. clearTorg12Money). В следе остаётся
+        // и сырой ответ модели, и то, что обнулено.
+        const money = innInList(
+          parsed.supplier?.inn,
+          parseSupplierInns(env.TORG12_PROMPT_NO_PRICE_INNS),
+        )
+          ? clearTorg12Money(second.parsed)
+          : null;
         await recordTorg12PromptEvidence({
           sourceDocumentId,
           generation: jobGeneration,
@@ -1747,12 +1758,13 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
             parseMode,
             base: summarizeForTrace(parsed),
             torg12: summarizeForTrace(second.parsed),
+            ...(money ? { moneyCleared: money.cleared } : {}),
             applied,
           },
           log,
         });
         if (applied) {
-          parsed = second.parsed;
+          parsed = money ? money.parsed : second.parsed;
           llmProviderId = second.llmProviderId ?? llmProviderId;
         }
       } catch (err) {
