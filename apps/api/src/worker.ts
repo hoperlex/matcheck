@@ -179,6 +179,12 @@ import {
   pagesNeedRecheck,
 } from './domain/edo/torg12-recheck.js';
 import {
+  parseSupplierInns,
+  summarizeForTrace,
+  torg12PromptApplies,
+} from './domain/edo/torg12-prompt.js';
+import { loadPromptByName } from './domain/prompts/registry.js';
+import {
   assemblyDispatchKeyOf,
   segmentRepairKeyOf,
   bundleDispatchKeyOf,
@@ -1055,12 +1061,16 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   let llmProviderId: string | null = null;
   let parsedViaVision = false;
   let parseMode: ParseMode = 'text';
+  // Страницы сегмента — для второго разбора промптом ТОРГ-12 (TORG12_PROMPT):
+  // повторно грузить их из S3 незачем.
+  let segmentPages: Buffer[] | null = null;
   try {
     if (segmentContext) {
       // Логический УПД, собранный из страниц пакета. Страницы уже отобраны
       // классификатором и лежат в манифесте — ни классифицировать заново, ни
       // угадывать формат файла не нужно.
       const pages = await loadSegmentPages(segmentContext);
+      segmentPages = pages;
       const r = await extractUpdSegment(pages, {
         sourceDocumentId,
         bundleId: segmentContext.rootId,
@@ -1684,6 +1694,76 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     }
     log.error({ err }, 'parse failed, will retry');
     throw err;
+  }
+
+  // ─── Промпт ТОРГ-12 для поставщиков из списка (TORG12_PROMPT) ───────────
+  //
+  // Активный промпт УПД не меняется. Накладная поставщика из списка (РОКВУЛ —
+  // ТОРГ-12 без цен, на двух листах) после обычного разбора переразбирается
+  // версией с разделом ТОРГ-12. Любой другой документ отсекается первым же
+  // условием torg12PromptApplies — второго вызова модели нет.
+  //
+  // Стоит ДО правил количества: TORG12_QTY считает «в одном месте × мест» по
+  // графам, которые возвращает именно эта версия промпта.
+  {
+    const env = loadEnv();
+    const torg12PromptMode = env.TORG12_PROMPT;
+    if (
+      torg12PromptApplies({
+        mode: torg12PromptMode,
+        parseMode,
+        secondPassJob,
+        segmentRepairJob,
+        jobGeneration,
+        supplierInn: parsed.supplier?.inn,
+        inns: parseSupplierInns(env.TORG12_PROMPT_SUPPLIER_INNS),
+      })
+    ) {
+      try {
+        const override = { prompt: await loadPromptByName('upd', env.TORG12_PROMPT_NAME) };
+        const second =
+          parseMode === 'segment_vision' && segmentContext && segmentPages
+            ? await extractUpdSegment(segmentPages, {
+                sourceDocumentId,
+                bundleId: segmentContext.rootId,
+                segmentIndex: segmentContext.segmentIndex,
+                promptOverride: override,
+              })
+            : await parseUpdVision(
+                {
+                  buffer,
+                  mimeType: parseMode === 'image_vision' && imageMime ? imageMime : 'application/pdf',
+                  filename: s3Key,
+                },
+                { sourceDocumentId, promptOverride: override },
+              );
+        const applied = torg12PromptMode === 'on';
+        await recordTorg12PromptEvidence({
+          sourceDocumentId,
+          generation: jobGeneration,
+          payload: {
+            mode: torg12PromptMode,
+            promptName: env.TORG12_PROMPT_NAME,
+            parseMode,
+            base: summarizeForTrace(parsed),
+            torg12: summarizeForTrace(second.parsed),
+            applied,
+          },
+          log,
+        });
+        if (applied) {
+          parsed = second.parsed;
+          llmProviderId = second.llmProviderId ?? llmProviderId;
+        }
+      } catch (err) {
+        // Второй разбор — улучшение, а не условие: при сбое документ остаётся
+        // с результатом обычного разбора, как при off.
+        log.warn(
+          { err: err instanceof Error ? err.message : String(err), sourceDocumentId },
+          'промпт ТОРГ-12: второй разбор не удался — документ с прежним результатом',
+        );
+      }
+    }
   }
 
   // ─── Потеря десятичной запятой в количестве: 74,000 → 74000 ─────────────
@@ -3814,7 +3894,8 @@ async function recordRecognitionEvidence(args: {
     | 'assembly_copy_merge'
     | 'waybill_batch_result'
     | 'party_roles'
-    | 'torg12_recheck';
+    | 'torg12_recheck'
+    | 'torg12_prompt';
   payload: Record<string, unknown>;
 }): Promise<void> {
   await db.insert(recognitionEvidenceEvents).values({
@@ -4044,6 +4125,40 @@ async function recordAssemblyClassifyCall(args: {
     args.log.warn(
       { err: err instanceof Error ? err.message : String(err), chunk: args.chunkIndex },
       'сборка УПД: не удалось записать журнал классификации страниц',
+    );
+  }
+}
+
+/**
+ * След второго разбора промптом ТОРГ-12 (TORG12_PROMPT): сводки обеих версий,
+ * чтобы в shadow сравнить их с фото, не включая. bundle_id читается здесь —
+ * правило срабатывает на единицах документов, общий путь от него не меняется.
+ * Сбой записи следа разбор не роняет.
+ */
+async function recordTorg12PromptEvidence(args: {
+  sourceDocumentId: string;
+  generation: number;
+  payload: Record<string, unknown>;
+  log: WorkerLog;
+}): Promise<void> {
+  try {
+    const [doc] = await db
+      .select({ bundleId: sourceDocuments.bundleId })
+      .from(sourceDocuments)
+      .where(eq(sourceDocuments.id, args.sourceDocumentId))
+      .limit(1);
+    if (!doc?.bundleId) return;
+    await recordRecognitionEvidence({
+      bundleId: doc.bundleId,
+      sourceDocumentId: args.sourceDocumentId,
+      generation: args.generation,
+      evidenceType: 'torg12_prompt',
+      payload: args.payload,
+    });
+  } catch (err) {
+    args.log.warn(
+      { err: err instanceof Error ? err.message : String(err), sourceDocumentId: args.sourceDocumentId },
+      'промпт ТОРГ-12: след не записан',
     );
   }
 }

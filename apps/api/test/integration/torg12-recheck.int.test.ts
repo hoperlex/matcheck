@@ -28,7 +28,10 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const suite = TEST_DATABASE_URL ? describe : describe.skip;
 const sql = TEST_DATABASE_URL ? postgres(TEST_DATABASE_URL, { max: 4 }) : null;
 
-const flags = vi.hoisted(() => ({ recheck: 'off' as 'off' | 'shadow' | 'on' }));
+const flags = vi.hoisted(() => ({
+  recheck: 'off' as 'off' | 'shadow' | 'on',
+  prompt: 'off' as 'off' | 'shadow' | 'on',
+}));
 
 vi.mock('../../src/lib/env.js', async (importOriginal) => {
   const actual = await importOriginal<typeof EnvModule>();
@@ -43,6 +46,9 @@ vi.mock('../../src/lib/env.js', async (importOriginal) => {
       PAGE_CLASSIFY_TORG12: false,
       ROUTER_CLASSIFY_TORG12: false,
       TORG12_RECHECK: flags.recheck,
+      TORG12_PROMPT: flags.prompt,
+      TORG12_PROMPT_SUPPLIER_INNS: '5012093506',
+      TORG12_PROMPT_NAME: 'default v18',
     }),
   };
 });
@@ -96,6 +102,15 @@ vi.mock('../../src/domain/edo/page-render.js', async (importOriginal) => {
     imageToPng: vi.fn().mockResolvedValue(Buffer.from('png')),
     imageToVisionPage: vi.fn().mockResolvedValue(Buffer.from('png')),
     toClassifyThumb: vi.fn().mockResolvedValue(Buffer.from('thumb')),
+  };
+});
+
+// Версия промпта ТОРГ-12 по имени — без зависимости от содержимого тестовой БД.
+vi.mock('../../src/domain/prompts/registry.js', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    loadPromptByName: vi.fn(async (_kind: string, name: string) => ({ id: 'p-v18', content: name })),
   };
 });
 
@@ -167,6 +182,7 @@ suite('перепроверка ТОРГ-12 (реальный PostgreSQL)', () =
   beforeEach(async () => {
     await cleanup();
     flags.recheck = 'off';
+    flags.prompt = 'off';
     // По умолчанию файл уже опознан как УПД: проверяется только сборка.
     classifyFile.mockReset().mockResolvedValue({
       detectedKind: 'upd',
@@ -344,6 +360,40 @@ suite('перепроверка ТОРГ-12 (реальный PostgreSQL)', () =
 
       expect(await segmentsOf(bundleId)).toHaveLength(1);
       expect(await realDocs()).toHaveLength(1);
+    });
+  });
+
+  describe('склеенные листы РОКВУЛ и промпт ТОРГ-12 (TORG12_PROMPT)', () => {
+    it('сегмент переразбирается версией ТОРГ-12 на тех же страницах', async () => {
+      flags.recheck = 'on';
+      flags.prompt = 'on';
+      const bundleId = await publicBundle(['list1.jpg', 'list2.jpg']);
+      pages(['transport_waybill', 'other'], ['upd_main', 'upd_continuation']);
+      // Активный промпт читает номер договора, версия ТОРГ-12 — номер документа.
+      extractUpdSegment.mockImplementation(
+        async (_pages: Buffer[], ctx: { promptOverride?: unknown }) =>
+          ctx?.promptOverride ? updResult('10626044499') : updResult('MO/25347/2017'),
+      );
+
+      await runAssembly(bundleId);
+
+      expect(extractUpdSegment).toHaveBeenCalledTimes(2);
+      const [first, second] = extractUpdSegment.mock.calls;
+      expect(second![0]).toEqual(first![0]);
+      expect((second![1] as { promptOverride?: { prompt?: { id: string } } }).promptOverride?.prompt?.id).toBe('p-v18');
+      const docs = await realDocs();
+      expect(docs).toHaveLength(1);
+      expect(docs[0]!.doc_number).toBe('10626044499');
+    });
+
+    it('без промпта ТОРГ-12 сегмент разбирается один раз', async () => {
+      flags.recheck = 'on';
+      const bundleId = await publicBundle(['list1.jpg', 'list2.jpg']);
+      pages(['transport_waybill', 'other'], ['upd_main', 'upd_continuation']);
+
+      await runAssembly(bundleId);
+
+      expect(extractUpdSegment).toHaveBeenCalledTimes(1);
     });
   });
 
