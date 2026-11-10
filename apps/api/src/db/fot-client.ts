@@ -20,11 +20,19 @@ export function getFotPool(): Sql | null {
   initialized = true;
   const env = loadEnv();
   if (!env.FOT_DATABASE_URL) return null;
+  // Odyssey пускает пользователя FOT_Prod.mcp_readonly не более чем 4 подключениями
+  // (лимит общий на всех, кто ходит этим логином). max:1 и короткий простой
+  // оставляют место MCP/SSH-сессиям, а их подключения не отнимают пул у matcheck-api.
+  // Правка работала на бою с 05.11 (образ собран из незакоммиченной копии),
+  // в git перенесена 10.11 без изменения кода.
   pool = postgres(env.FOT_DATABASE_URL, {
-    max: 2,
-    idle_timeout: 30,
+    max: 1,
+    idle_timeout: 20,
     connect_timeout: 10,
     prepare: false,
+    connection: {
+      application_name: 'matcheck-api-fot-ro',
+    },
   });
   return pool;
 }

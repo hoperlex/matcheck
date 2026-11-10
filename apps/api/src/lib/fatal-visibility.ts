@@ -17,8 +17,33 @@ import { logger } from './logger.js';
  * Ставить как можно раньше — до создания серверов, соединений и очередей.
  */
 export function installFatalHandlers(component: 'api' | 'worker' | 'mail-worker'): void {
+  /**
+   * Сбой read-only базы ФОТ (лимит Odyssey / сеть) не должен ронять процесс API целиком.
+   * Работало на бою с 05.11 (образ собран из незакоммиченной копии), в git перенесено
+   * 10.11 без изменения кода.
+   */
+  const isFotSoftUnhandled = (err: unknown): boolean => {
+    const anyErr = err as { code?: string; message?: string } | null;
+    const code = anyErr?.code ?? '';
+    const msg = anyErr?.message ?? String(err);
+    if (msg.includes('FOT_Prod.mcp_readonly')) return true;
+    if (msg.includes('too many active clients for user') && msg.includes('odyssey')) return true;
+    if (msg.includes('warmUpFotMolCache') || msg.includes('FOT_DATABASE_URL')) return true;
+    // postgres-js при обрыве соединения отдаёт ECONNRESET/53300 отдельным rejection
+    if (code === '53300') return true;
+    if ((code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'ETIMEDOUT') && msg.includes('TLSWrap')) {
+      return component === 'api';
+    }
+    return false;
+  };
+
   const bail = (kind: 'uncaughtException' | 'unhandledRejection') => {
     return (err: unknown): void => {
+      if (kind === 'unhandledRejection' && isFotSoftUnhandled(err)) {
+        logger.warn({ err, event: 'soft-unhandled', kind, component }, `${component}: swallowed FOT soft rejection`);
+        return;
+      }
+
       // Лог первым: если Sentry не сконфигурирован или недоступен, строка в
       // stdout остаётся единственным свидетельством.
       logger.error({ err, event: 'fatal', kind, component }, `${component}: ${kind}`);
