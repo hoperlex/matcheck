@@ -115,9 +115,16 @@ function Probe({ deliveryId }: { deliveryId: string }) {
 describe('useDeliveryContract', () => {
   it('опрос раз в 30 с без договора: пустой справочник → после импорта total > 0', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    const empty: DeliveryContractResponse = { contract: null, catalog: { total: 0, importedAt: null } };
+    const empty: DeliveryContractResponse = {
+      contract: null,
+      perDocument: false,
+      documents: [],
+      catalog: { total: 0, importedAt: null },
+    };
     const full: DeliveryContractResponse = {
       contract: null,
+      perDocument: false,
+      documents: [],
       catalog: { total: 6007, importedAt: '2026-11-10T12:00:00.000Z' },
     };
     apiGet.mockResolvedValueOnce(empty).mockResolvedValue(full);
@@ -140,8 +147,8 @@ describe('useDeliveryContract', () => {
     const a = contractFixture();
     const c = contractFixture();
     apiGet
-      .mockResolvedValueOnce({ contract: a, catalog: { total: 2, importedAt: null } })
-      .mockResolvedValue({ contract: c, catalog: { total: 2, importedAt: null } });
+      .mockResolvedValueOnce({ contract: a, perDocument: false, documents: [], catalog: { total: 2, importedAt: null } })
+      .mockResolvedValue({ contract: c, perDocument: false, documents: [], catalog: { total: 2, importedAt: null } });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const spy = vi.spyOn(client, 'invalidateQueries');
     render(

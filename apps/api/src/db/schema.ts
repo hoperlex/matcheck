@@ -14,6 +14,8 @@ import {
   uniqueIndex,
   primaryKey,
   check,
+  unique,
+  foreignKey,
   bigint,
   bigserial,
   date,
@@ -3044,23 +3046,40 @@ export const supplierContractImports = pgTable(
   (t) => [index('supplier_contract_imports_applied_idx').on(t.appliedAt)],
 );
 
-/** Договор приёмки — один на приёмку (PK по delivery_id). deliveries не меняется. */
+/**
+ * Договор приёмки: общая строка (source_document_id IS NULL) плюс по одной на
+ * документ в режиме «Разные получатели по документам» (миграция 0146).
+ * Уникальность (delivery_id, source_document_id) — NULLS NOT DISTINCT.
+ * deliveries не меняется.
+ */
 export const deliveryContracts = pgTable(
   'delivery_contracts',
   {
     deliveryId: uuid('delivery_id')
-      .primaryKey()
+      .notNull()
       .references(() => deliveries.id, { onDelete: 'cascade' }),
+    /** NULL — общий договор приёмки; иначе — договор этого документа. */
+    sourceDocumentId: uuid('source_document_id'),
     contractId: uuid('contract_id')
       .notNull()
       .references(() => supplierContracts.id, { onDelete: 'restrict' }),
     linkedByUserId: uuid('linked_by_user_id').references(() => users.id, { onDelete: 'set null' }),
     linkedAt: timestamp('linked_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('delivery_contracts_contract_idx').on(t.contractId)],
+  (t) => [
+    unique('delivery_contracts_scope_uq').on(t.deliveryId, t.sourceDocumentId).nullsNotDistinct(),
+    foreignKey({
+      name: 'delivery_contracts_source_fk',
+      columns: [t.deliveryId, t.sourceDocumentId],
+      foreignColumns: [deliverySources.deliveryId, deliverySources.sourceDocumentId],
+    }).onDelete('cascade'),
+    index('delivery_contracts_contract_idx').on(t.contractId),
+  ],
 );
 
 export type DeliveryContractEventKind = 'linked' | 'replaced' | 'unlinked';
+/** Почему договор снят без действия человека. */
+export type DeliveryContractEventReason = 'mode_off' | 'document_unlinked';
 
 /** Журнал привязок договора к приёмке. delivery_id без FK — переживает удаление приёмки. */
 export const deliveryContractEvents = pgTable(
@@ -3071,6 +3090,9 @@ export const deliveryContractEvents = pgTable(
     contractId: uuid('contract_id'),
     previousContractId: uuid('previous_contract_id'),
     kind: text('kind').$type<DeliveryContractEventKind>().notNull(),
+    /** NULL — общий договор; иначе — договор документа (без FK, как delivery_id). */
+    sourceDocumentId: uuid('source_document_id'),
+    reason: text('reason').$type<DeliveryContractEventReason>(),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3079,6 +3101,10 @@ export const deliveryContractEvents = pgTable(
     check(
       'delivery_contract_events_kind_check',
       sql`${t.kind} in ('linked', 'replaced', 'unlinked')`,
+    ),
+    check(
+      'delivery_contract_events_reason_check',
+      sql`${t.reason} is null or ${t.reason} in ('mode_off', 'document_unlinked')`,
     ),
   ],
 );

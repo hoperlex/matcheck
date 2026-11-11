@@ -1,37 +1,94 @@
 // Договор приёмки: чтение с флагами, окно подбора, выбор/замена и отвязка.
 //
-// Один договор на приёмку (PK delivery_contracts.delivery_id). deliveries не
-// меняется — мобильный клиент и upsert приёмки связь не видят, version не растёт.
+// Область договора (scope): общий договор приёмки (documentId = null) или
+// договор документа в режиме «Разные получатели по документам» (0146). Одна
+// строка delivery_contracts на область — UNIQUE NULLS NOT DISTINCT
+// (delivery_id, source_document_id). КАЖДОЕ чтение и удаление связи — с явной
+// областью: без неё отвязка общего договора снесла бы договоры документов.
+// deliveries не меняется — мобильный клиент и upsert приёмки связь не видят.
 //
 // Порядок проверок выбора (PUT) — так, чтобы повтор после потерянного ответа
 // давал 200, а чужая замена — 409:
-//   1. приёмка FOR NO KEY UPDATE (сериализует все изменения связи этой приёмки,
-//      в том числе первую вставку, когда строки связи ещё нет);
-//   2. связь уже на contractId → 200 без события (цель достигнута);
-//   3. pending_deletion / transfer_pair → 409;
-//   4. текущая связь ≠ replaceContractId → 409 contract_changed;
-//   5. договор FOR SHARE: нет → 404, вид ≠ «С поставщиком» → 409 contract_kind;
-//   6. upsert связи + событие linked/replaced.
+//   1. приёмка FOR NO KEY UPDATE (сериализует все изменения связей этой
+//      приёмки, в том числе первую вставку, когда строки связи ещё нет;
+//      recipient-mode и unlink-source берут ту же строку FOR UPDATE);
+//   2. для документа: режим выключен → 409 per_document_off, документ не
+//      привязан → 404 document_not_linked;
+//   3. связь области уже на contractId → 200 без события (цель достигнута);
+//   4. pending_deletion / transfer_pair → 409;
+//   5. текущая связь ≠ replaceContractId → 409 contract_changed;
+//   6. договор FOR SHARE: нет → 404, вид ≠ «С поставщиком» → 409 contract_kind;
+//   7. upsert связи + событие linked/replaced.
 
-import { and, asc, count, eq, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, eq, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
 import type {
   ContractCandidate,
   ContractCandidatesContext,
   ContractSiteMatch,
   DeliveryContract,
+  DeliveryContractResponse,
   SupplierContractSummary,
 } from '@matcheck/contracts';
 import type { Db } from '../../db/client.js';
 import {
+  counterparties,
   deliveries,
   deliveryContractEvents,
   deliveryContracts,
+  deliverySources,
   sites,
+  sourceDocuments,
   supplierContracts,
+  suppliers,
   users,
+  type DeliveryContractEventReason,
 } from '../../db/schema.js';
 import { loadDeliveryPartyInns } from '../estimat/delivery-orders.js';
+import { innDigits } from '../estimat/estimat.types.js';
+import { loadOwnInns } from '../sourceDocuments/supplier-inn-check.js';
 import { readCatalogInfo } from './apply.js';
+
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+type Executor = Db | Tx;
+
+/** Условие области: общий договор (null) или договор документа. */
+function scopeWhere(deliveryId: string, documentId: string | null): SQL {
+  return and(
+    eq(deliveryContracts.deliveryId, deliveryId),
+    documentId === null
+      ? isNull(deliveryContracts.sourceDocumentId)
+      : eq(deliveryContracts.sourceDocumentId, documentId),
+  )!;
+}
+
+/**
+ * ИНН поставщика одного документа приёмки — тот же COALESCE, что у
+ * loadDeliveryPartyInns, без собственных ИНН. Пусто — ИНН неизвестен.
+ */
+export async function loadDocumentSupplierInns(
+  db: Executor,
+  deliveryId: string,
+  documentId: string,
+): Promise<Set<string>> {
+  const [rows, own] = await Promise.all([
+    db
+      .select({
+        inn: sql<string | null>`COALESCE(NULLIF(BTRIM(${sourceDocuments.supplierInnRaw}), ''), NULLIF(BTRIM(${suppliers.inn}), ''), NULLIF(BTRIM(${counterparties.inn}), ''))`,
+      })
+      .from(deliverySources)
+      .innerJoin(sourceDocuments, eq(sourceDocuments.id, deliverySources.sourceDocumentId))
+      .leftJoin(suppliers, eq(suppliers.id, sourceDocuments.supplierDirectoryId))
+      .leftJoin(counterparties, eq(counterparties.id, sourceDocuments.supplierId))
+      .where(and(eq(deliverySources.deliveryId, deliveryId), eq(deliverySources.sourceDocumentId, documentId))),
+    loadOwnInns(db as Db),
+  ]);
+  const out = new Set<string>();
+  for (const r of rows) {
+    const inn = innDigits(r.inn);
+    if (inn && !own.has(inn)) out.add(inn);
+  }
+  return out;
+}
 
 type ContractRow = typeof supplierContracts.$inferSelect;
 
@@ -87,37 +144,81 @@ function supplierMatchOf(inn: string, supplierInns: ReadonlySet<string>): boolea
   return supplierInns.size === 0 ? null : supplierInns.has(inn);
 }
 
-async function loadDeliveryContract(db: Db, deliveryId: string, deliverySiteId: string): Promise<DeliveryContract | null> {
-  const [row] = await db
-    .select({ contract: supplierContracts, linkedAt: deliveryContracts.linkedAt, linkedByName: users.fullName })
-    .from(deliveryContracts)
-    .innerJoin(supplierContracts, eq(supplierContracts.id, deliveryContracts.contractId))
-    .leftJoin(users, eq(users.id, deliveryContracts.linkedByUserId))
-    .where(eq(deliveryContracts.deliveryId, deliveryId))
-    .limit(1);
-  if (!row) return null;
-  const [codes, inns] = await Promise.all([siteCodesById(db), loadDeliveryPartyInns(db, deliveryId)]);
+type LinkRow = {
+  contract: ContractRow;
+  sourceDocumentId: string | null;
+  linkedAt: Date;
+  linkedByName: string | null;
+};
+
+function toDeliveryContract(
+  row: LinkRow,
+  codes: Map<string, string>,
+  supplierInns: ReadonlySet<string>,
+  deliverySiteId: string,
+): DeliveryContract {
   const c = row.contract;
   return {
     ...toContractSummary(c, codes),
     linkedAt: row.linkedAt.toISOString(),
     linkedByName: row.linkedByName ?? null,
-    supplierMatch: supplierMatchOf(c.counterpartyInn, inns.supplierInns),
+    supplierMatch: supplierMatchOf(c.counterpartyInn, supplierInns),
     siteMatch: contractSiteMatch(c.siteStatus, siteIdsOf(c), deliverySiteId),
     kindChanged: c.kind !== 'supplier',
     missing: c.missingSince !== null,
   };
 }
 
+/**
+ * Договоры приёмки: общий и договоры документов. Флаги пересчитываются при
+ * каждом запросе: у общего — по ИНН всей приёмки, у договора документа — по
+ * ИНН поставщика этого документа.
+ */
 export async function getDeliveryContract(
   db: Db,
   delivery: { id: string; siteId: string },
-): Promise<{ contract: DeliveryContract | null; catalog: { total: number; importedAt: string | null } }> {
-  const [contract, catalog] = await Promise.all([
-    loadDeliveryContract(db, delivery.id, delivery.siteId),
+): Promise<DeliveryContractResponse> {
+  const [links, catalog, [mode]] = await Promise.all([
+    db
+      .select({
+        contract: supplierContracts,
+        sourceDocumentId: deliveryContracts.sourceDocumentId,
+        linkedAt: deliveryContracts.linkedAt,
+        linkedByName: users.fullName,
+      })
+      .from(deliveryContracts)
+      .innerJoin(supplierContracts, eq(supplierContracts.id, deliveryContracts.contractId))
+      .leftJoin(users, eq(users.id, deliveryContracts.linkedByUserId))
+      .where(eq(deliveryContracts.deliveryId, delivery.id))
+      .orderBy(asc(deliveryContracts.sourceDocumentId)),
     readCatalogInfo(db),
+    db
+      .select({ perDocument: deliveries.recipientsPerDocument })
+      .from(deliveries)
+      .where(eq(deliveries.id, delivery.id))
+      .limit(1),
   ]);
-  return { contract, catalog };
+  const perDocument = mode?.perDocument ?? false;
+  if (links.length === 0) return { contract: null, perDocument, documents: [], catalog };
+
+  const general = links.find((l) => l.sourceDocumentId === null) ?? null;
+  const own = links.filter((l): l is LinkRow & { sourceDocumentId: string } => l.sourceDocumentId !== null);
+  const [codes, deliveryInns, docInns] = await Promise.all([
+    siteCodesById(db),
+    general ? loadDeliveryPartyInns(db, delivery.id) : Promise.resolve(null),
+    Promise.all(own.map((l) => loadDocumentSupplierInns(db, delivery.id, l.sourceDocumentId))),
+  ]);
+  return {
+    contract: general
+      ? toDeliveryContract(general, codes, deliveryInns!.supplierInns, delivery.siteId)
+      : null,
+    perDocument,
+    documents: own.map((l, i) => ({
+      documentId: l.sourceDocumentId,
+      contract: toDeliveryContract(l, codes, docInns[i]!, delivery.siteId),
+    })),
+    catalog,
+  };
 }
 
 // ─── Окно подбора ───────────────────────────────────────────────────────────
@@ -125,6 +226,8 @@ export async function getDeliveryContract(
 export type ContractCandidateQuery = {
   deliveryId: string;
   deliverySiteId: string;
+  /** null — общий договор приёмки; иначе подбор для документа (по его ИНН). */
+  documentId: string | null;
   q?: string;
   allSuppliers: boolean;
   limit: number;
@@ -145,16 +248,19 @@ export async function findContractCandidates(
   query: ContractCandidateQuery,
 ): Promise<{ items: ContractCandidate[]; total: number; context: ContractCandidatesContext }> {
   const c = supplierContracts;
-  const [inns, codes, catalog, current] = await Promise.all([
-    loadDeliveryPartyInns(db, query.deliveryId),
+  const [supplierInns, codes, catalog, current] = await Promise.all([
+    query.documentId === null
+      ? loadDeliveryPartyInns(db, query.deliveryId).then((x) => x.supplierInns)
+      : loadDocumentSupplierInns(db, query.deliveryId, query.documentId),
     siteCodesById(db),
     readCatalogInfo(db),
     db
       .select({ contractId: deliveryContracts.contractId })
       .from(deliveryContracts)
-      .where(eq(deliveryContracts.deliveryId, query.deliveryId))
+      .where(scopeWhere(query.deliveryId, query.documentId))
       .limit(1),
   ]);
+  const inns = { supplierInns };
   const supplierKnown = inns.supplierInns.size > 0;
   const filteredBySupplier = supplierKnown && !query.allSuppliers;
   const csv = innCsv(inns.supplierInns);
@@ -208,6 +314,7 @@ export async function findContractCandidates(
     })),
     total: Number(totalRow?.n ?? 0),
     context: {
+      documentId: query.documentId,
       supplierInns: [...inns.supplierInns].sort(),
       supplierKnown,
       filteredBySupplier,
@@ -225,9 +332,8 @@ type DeliveryLockRow = {
   siteId: string;
   pendingDeletionAt: Date | null;
   sourceShipmentId: string | null;
+  recipientsPerDocument: boolean;
 };
-
-type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 async function lockDelivery(tx: Tx, deliveryId: string): Promise<DeliveryLockRow | undefined> {
   const [d] = await tx
@@ -236,6 +342,7 @@ async function lockDelivery(tx: Tx, deliveryId: string): Promise<DeliveryLockRow
       siteId: deliveries.siteId,
       pendingDeletionAt: deliveries.pendingDeletionAt,
       sourceShipmentId: deliveries.sourceShipmentId,
+      recipientsPerDocument: deliveries.recipientsPerDocument,
     })
     .from(deliveries)
     .where(eq(deliveries.id, deliveryId))
@@ -243,34 +350,72 @@ async function lockDelivery(tx: Tx, deliveryId: string): Promise<DeliveryLockRow
   return d;
 }
 
-async function currentLink(tx: Tx, deliveryId: string): Promise<string | null> {
+async function currentLink(tx: Tx, deliveryId: string, documentId: string | null): Promise<string | null> {
   const [row] = await tx
     .select({ contractId: deliveryContracts.contractId })
     .from(deliveryContracts)
-    .where(eq(deliveryContracts.deliveryId, deliveryId))
+    .where(scopeWhere(deliveryId, documentId))
     .for('update');
   return row?.contractId ?? null;
 }
 
+type ScopeFailure =
+  | { ok: false; status: 404; error: 'document_not_linked' }
+  | { ok: false; status: 409; error: 'per_document_off'; message: string; siteId: string };
+
+/** Проверки области документа под блокировкой приёмки. null — область годится. */
+async function checkDocumentScope(
+  tx: Tx,
+  delivery: DeliveryLockRow,
+  documentId: string | null,
+): Promise<ScopeFailure | null> {
+  if (documentId === null) return null;
+  if (!delivery.recipientsPerDocument) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'per_document_off',
+      message: 'Договор по документу выбирают в режиме «Разные получатели по документам» — он выключен',
+      siteId: delivery.siteId,
+    };
+  }
+  const [link] = await tx
+    .select({ id: deliverySources.sourceDocumentId })
+    .from(deliverySources)
+    .where(and(eq(deliverySources.deliveryId, delivery.id), eq(deliverySources.sourceDocumentId, documentId)))
+    .limit(1);
+  if (!link) return { ok: false, status: 404, error: 'document_not_linked' };
+  return null;
+}
+
 export type SetContractResult =
   | { ok: true; changed: boolean; siteId: string }
-  | { ok: false; status: 404; error: 'not_found' | 'contract_not_found' }
+  | { ok: false; status: 404; error: 'not_found' | 'contract_not_found' | 'document_not_linked' }
   | {
       ok: false;
       status: 409;
-      error: 'pending_deletion' | 'transfer_pair' | 'contract_kind' | 'contract_changed';
+      error: 'pending_deletion' | 'transfer_pair' | 'contract_kind' | 'contract_changed' | 'per_document_off';
       message: string;
       siteId: string;
     };
 
 export async function setDeliveryContract(
   db: Db,
-  input: { deliveryId: string; contractId: string; replaceContractId: string | null; userId: string | null },
+  input: {
+    deliveryId: string;
+    /** null — общий договор приёмки. */
+    documentId: string | null;
+    contractId: string;
+    replaceContractId: string | null;
+    userId: string | null;
+  },
 ): Promise<SetContractResult> {
   return db.transaction(async (tx) => {
     const delivery = await lockDelivery(tx, input.deliveryId);
     if (!delivery) return { ok: false, status: 404, error: 'not_found' } as const;
-    const current = await currentLink(tx, delivery.id);
+    const scopeFailure = await checkDocumentScope(tx, delivery, input.documentId);
+    if (scopeFailure) return scopeFailure;
+    const current = await currentLink(tx, delivery.id, input.documentId);
     if (current === input.contractId) return { ok: true, changed: false, siteId: delivery.siteId } as const;
 
     if (delivery.pendingDeletionAt !== null) {
@@ -321,13 +466,19 @@ export async function setDeliveryContract(
 
     await tx
       .insert(deliveryContracts)
-      .values({ deliveryId: delivery.id, contractId: contract.id, linkedByUserId: input.userId })
+      .values({
+        deliveryId: delivery.id,
+        sourceDocumentId: input.documentId,
+        contractId: contract.id,
+        linkedByUserId: input.userId,
+      })
       .onConflictDoUpdate({
-        target: deliveryContracts.deliveryId,
+        target: [deliveryContracts.deliveryId, deliveryContracts.sourceDocumentId],
         set: { contractId: contract.id, linkedByUserId: input.userId, linkedAt: sql`now()` },
       });
     await tx.insert(deliveryContractEvents).values({
       deliveryId: delivery.id,
+      sourceDocumentId: input.documentId,
       contractId: contract.id,
       previousContractId: current,
       kind: current ? 'replaced' : 'linked',
@@ -342,14 +493,19 @@ export type UnsetContractResult =
   | { ok: false; status: 404; error: 'not_found' }
   | { ok: false; status: 409; error: 'pending_deletion' | 'contract_changed'; message: string; siteId: string };
 
+/**
+ * Отвязать договор области. Связи нет — 200 без события (цель достигнута),
+ * поэтому выключенный режим или отвязанный документ здесь не ошибка: их
+ * договоры уже сняты в recipient-mode / unlink-source.
+ */
 export async function unsetDeliveryContract(
   db: Db,
-  input: { deliveryId: string; expectedContractId: string; userId: string | null },
+  input: { deliveryId: string; documentId: string | null; expectedContractId: string; userId: string | null },
 ): Promise<UnsetContractResult> {
   return db.transaction(async (tx) => {
     const delivery = await lockDelivery(tx, input.deliveryId);
     if (!delivery) return { ok: false, status: 404, error: 'not_found' } as const;
-    const current = await currentLink(tx, delivery.id);
+    const current = await currentLink(tx, delivery.id, input.documentId);
     if (current === null) return { ok: true, changed: false, siteId: delivery.siteId } as const;
     if (delivery.pendingDeletionAt !== null) {
       return {
@@ -369,9 +525,10 @@ export async function unsetDeliveryContract(
         siteId: delivery.siteId,
       } as const;
     }
-    await tx.delete(deliveryContracts).where(eq(deliveryContracts.deliveryId, delivery.id));
+    await tx.delete(deliveryContracts).where(scopeWhere(delivery.id, input.documentId));
     await tx.insert(deliveryContractEvents).values({
       deliveryId: delivery.id,
+      sourceDocumentId: input.documentId,
       contractId: null,
       previousContractId: current,
       kind: 'unlinked',
@@ -379,6 +536,64 @@ export async function unsetDeliveryContract(
     });
     return { ok: true, changed: true, siteId: delivery.siteId } as const;
   });
+}
+
+// ─── Снятие договоров документов без действия человека ─────────────────────
+
+async function dropDocumentLinks(
+  tx: Tx,
+  deliveryId: string,
+  documentId: string | null,
+  userId: string | null,
+  reason: DeliveryContractEventReason,
+): Promise<number> {
+  const where = and(
+    eq(deliveryContracts.deliveryId, deliveryId),
+    documentId === null
+      ? isNotNull(deliveryContracts.sourceDocumentId)
+      : eq(deliveryContracts.sourceDocumentId, documentId),
+  );
+  const removed = await tx
+    .delete(deliveryContracts)
+    .where(where)
+    .returning({ sourceDocumentId: deliveryContracts.sourceDocumentId, contractId: deliveryContracts.contractId });
+  if (removed.length > 0) {
+    await tx.insert(deliveryContractEvents).values(
+      removed.map((r) => ({
+        deliveryId,
+        sourceDocumentId: r.sourceDocumentId,
+        contractId: null,
+        previousContractId: r.contractId,
+        kind: 'unlinked' as const,
+        reason,
+        userId,
+      })),
+    );
+  }
+  return removed.length;
+}
+
+/**
+ * Выключили «Разные получатели по документам» — договоры документов снимаются
+ * вместе со своими получателями и признаками; общий договор остаётся. Зовётся
+ * в транзакции recipient-mode под блокировкой приёмки.
+ */
+export async function resetDocumentContracts(tx: Tx, deliveryId: string, userId: string | null): Promise<number> {
+  return dropDocumentLinks(tx, deliveryId, null, userId, 'mode_off');
+}
+
+/**
+ * Документ отвязывают от приёмки — его договор снимается с записью в журнал до
+ * удаления связи (FK-каскад остаётся страховкой). Зовётся в транзакции
+ * unlink-source под блокировкой приёмки.
+ */
+export async function dropDocumentContract(
+  tx: Tx,
+  deliveryId: string,
+  documentId: string,
+  userId: string | null,
+): Promise<number> {
+  return dropDocumentLinks(tx, deliveryId, documentId, userId, 'document_unlinked');
 }
 
 // ─── Вкладка «Договоры» ─────────────────────────────────────────────────────

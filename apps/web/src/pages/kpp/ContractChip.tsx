@@ -21,11 +21,14 @@ import {
  */
 export function ContractChip({
   contract,
+  label = 'Договор:',
   onUnlink,
   onReplace,
   unlinkPending = false,
 }: {
   contract: DeliveryContract | null;
+  /** Подпись чипа: «Договор:» или «Договор (общий):» в режиме «разные получатели». */
+  label?: string;
   /** undefined — прав нет, кнопок не будет. Аргумент — договор, который человек видел. */
   onUnlink?: (expectedContractId: string) => void;
   onReplace?: () => void;
@@ -110,7 +113,7 @@ export function ContractChip({
         title={contract.name}
       >
         <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-          Договор:
+          {label}
         </Typography.Text>{' '}
         <Typography.Text strong style={{ fontSize: 12 }}>
           {contractShortLabel(contract)}

@@ -162,6 +162,8 @@ const CONTRACTOR = '88888888-8888-4888-8888-888888888888';
 const MOL = '99999999-9999-4999-8999-999999999999';
 
 let current: Delivery;
+const EMPTY_CONTRACTS = { contract: null, perDocument: false, documents: [], catalog: { total: 0, importedAt: null } };
+let contractResponse: unknown = EMPTY_CONTRACTS;
 
 function route(url: string): unknown {
   if (url === `/deliveries/${ID}`) return current;
@@ -179,7 +181,7 @@ function route(url: string): unknown {
     return { id, kind: 'upd', docNumber: 'УПД', items: [], supplierName: null, siteId: SITE };
   }
   if (url.includes('supplier-orders')) return { items: [], sync: { enabled: false } };
-  if (url.endsWith('/contract')) return { contract: null, catalog: { total: 0, importedAt: null } };
+  if (url.endsWith('/contract')) return contractResponse;
   return { items: [], total: 0 };
 }
 
@@ -220,6 +222,7 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   authUser.role = 'monitor';
+  contractResponse = EMPTY_CONTRACTS;
 });
 
 describe('режим получателей по УПД', () => {
@@ -237,6 +240,72 @@ describe('режим получателей по УПД', () => {
         perDocument: true,
       }),
     );
+  });
+
+  it('ответ PATCH сразу в карточке: тумблер включён без повторного GET карточки', async () => {
+    authUser.role = 'manager';
+    current = delivery(3, []);
+    vi.mocked(api.patch).mockResolvedValue({ ...current, recipientsPerDocument: true });
+    renderCard();
+    const label = await screen.findByText('Разные получатели по документам');
+    const switchEl = () => label.parentElement!.querySelector('[role="switch"]') as HTMLButtonElement;
+    await waitFor(() => expect(switchEl().disabled).toBe(false));
+    const cardGets = () => mocks.apiGet.mock.calls.filter(([u]) => u === `/deliveries/${ID}`).length;
+    const before = cardGets();
+    fireEvent.click(switchEl());
+    // Тумблер в новом положении и без индикатора — ответ PATCH уже в кэше.
+    await waitFor(() => {
+      expect(switchEl().getAttribute('aria-checked')).toBe('true');
+      expect(switchEl().classList.contains('ant-switch-loading')).toBe(false);
+    });
+    expect(cardGets()).toBe(before);
+  });
+
+  it('у строк УПД — «+ Договор» и чип своего договора документа', async () => {
+    authUser.role = 'manager';
+    current = { ...delivery(3, []), recipientsPerDocument: true } as Delivery;
+    contractResponse = {
+      contract: null,
+      perDocument: true,
+      documents: [
+        {
+          documentId: FIRST,
+          contract: {
+            id: '77777777-7777-4777-8777-777777777777',
+            onecId: '77777777-7777-4777-8777-777777777778',
+            counterpartyName: 'РУТЕК ООО',
+            counterpartyInn: '7716951747',
+            name: 'Договор документа',
+            number: 'СУ-ЗИЛ33/25-33',
+            contractDate: '2025-08-26',
+            kind: 'supplier',
+            objectText: null,
+            siteStatus: 'exact',
+            siteCodes: ['ЗИЛ33'],
+            missingSince: null,
+            linkedAt: '2026-11-11T10:00:00.000Z',
+            linkedByName: null,
+            supplierMatch: true,
+            siteMatch: 'match',
+            kindChanged: false,
+            missing: false,
+          },
+        },
+      ],
+      catalog: { total: 5, importedAt: '2026-11-10T14:13:45.088Z' },
+    };
+    renderCard();
+    // Свой договор у УПД-1 — чип, у УПД-2 своего нет — «+ Договор».
+    const chips = await screen.findAllByTestId('contract-chip');
+    expect(chips.map((c) => c.textContent)).toEqual([expect.stringContaining('СУ-ЗИЛ33/25-33')]);
+    expect(await screen.findAllByTestId('document-contract-add')).toHaveLength(1);
+    // В шапке — общий договор (не выбран) с пометкой режима.
+    expect(screen.getByRole('button', { name: '+ Договор (общий)' })).toBeTruthy();
+
+    // Выключение: подтверждение считает и документ со своим договором.
+    const label = screen.getByText('Разные получатели по документам');
+    fireEvent.click(label.parentElement!.querySelector('[role="switch"]')!);
+    expect(await screen.findByText('У 1 документов свой получатель, признак или договор — сбросить?')).toBeTruthy();
   });
 });
 

@@ -119,6 +119,7 @@ import { MONEY_FMT, QTY_FMT, fmtDateTimeRu } from '../lib/xlsx-format.js';
 import { registerDeliveryEdoRoutes } from './delivery-edo.js';
 import { registerDeliveryRecipientRoutes } from './delivery-recipient.js';
 import { registerDeliveryDocumentRecipientRoutes } from './delivery-document-recipients.js';
+import { dropDocumentContract } from '../domain/supplier-contracts/delivery-contract.js';
 import { resolveSupplierCounterparty } from '../domain/directories/supplier-counterparty.js';
 import { edoGroupLinks, lockEdoDocGroup } from '../domain/edo/export-twins.js';
 
@@ -3093,6 +3094,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           if (!locked) return 'not_linked';
           if (locked.pendingDeletionAt !== null) return 'pending_deletion';
           if (deleteItems && locked.version !== baseVersion) return 'conflict';
+
+          // Договор 1С этого документа (режим «разные получатели») снимаем
+          // явно, с записью в журнал, до удаления связи: составной FK удалил
+          // бы его каскадом молча. Если связи нет, удалять нечего.
+          await dropDocumentContract(tx, d.id, sourceDocumentId, req.user?.id ?? null);
 
           const deleted = await tx
             .delete(deliverySources)

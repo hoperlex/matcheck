@@ -63,6 +63,10 @@ suite('договор 1С в приёмке', () => {
           if (!req.user || !roles.includes(req.user.role)) reply.code(403).send({ error: 'forbidden' });
         },
     );
+    // recipient-mode и unlink-source проверяют матрицу (assertPermission):
+    // пустые overrides — дефолтные права менеджера.
+    app.decorate('permissions', { enforced: true, get: async () => new Map() } as never);
+    app.decorate('logUnauthorized', async () => {});
     await app.register(deliveryRoutes);
     await app.register(supplierContractsRoutes);
     await app.ready();
@@ -141,6 +145,32 @@ suite('договор 1С в приёмке', () => {
   }
 
   const get = (d: string) => app.inject({ method: 'GET', url: `/api/v1/deliveries/${d}/contract` });
+  const putDoc = (d: string, documentId: string, contractId: string, replaceContractId: string | null) =>
+    app.inject({
+      method: 'PUT',
+      url: `/api/v1/deliveries/${d}/contract`,
+      payload: { documentId, contractId, replaceContractId },
+    });
+  const delDoc = (d: string, documentId: string, expectedContractId: string) =>
+    app.inject({
+      method: 'DELETE',
+      url: `/api/v1/deliveries/${d}/contract?expectedContractId=${expectedContractId}&documentId=${documentId}`,
+    });
+  const recipientMode = (d: string, perDocument: boolean) =>
+    app.inject({ method: 'PATCH', url: `/api/v1/deliveries/${d}/recipient-mode`, payload: { perDocument } });
+  const docEvents = async (d: string) =>
+    (
+      await sql<{ kind: string; doc: string | null; contract_id: string | null; previous: string | null; reason: string | null }[]>`
+        SELECT kind, source_document_id::text AS doc, contract_id::text AS contract_id,
+               previous_contract_id::text AS previous, reason
+        FROM delivery_contract_events WHERE delivery_id = ${d} ORDER BY id`
+    ).map((e) => [e.kind, e.doc, e.contract_id, e.previous, e.reason]);
+  const links = async (d: string) =>
+    (
+      await sql<{ doc: string | null; contract_id: string }[]>`
+        SELECT source_document_id::text AS doc, contract_id::text AS contract_id
+        FROM delivery_contracts WHERE delivery_id = ${d} ORDER BY source_document_id NULLS FIRST`
+    ).map((r) => [r.doc, r.contract_id]);
   const candidates = (d: string, query = '') =>
     app.inject({ method: 'GET', url: `/api/v1/deliveries/${d}/contract-candidates${query}` });
   const put = (d: string, contractId: string, replaceContractId: string | null) =>
@@ -360,6 +390,173 @@ suite('договор 1С в приёмке', () => {
       await put(d, a, null);
       const [after] = await sql<{ version: number }[]>`SELECT version FROM deliveries WHERE id = ${d}`;
       expect(after!.version).toBe(before!.version);
+    });
+  });
+
+  describe('договор документа (режим «Разные получатели по документам»)', () => {
+    /** Приёмка с двумя документами: doc1 от SUPPLIER_INN, doc2 от OTHER_INN. */
+    async function twoDocDelivery(perDocument = true) {
+      const d = await delivery();
+      const doc1 = await linkDocument(d, SUPPLIER_INN);
+      const doc2 = await linkDocument(d, OTHER_INN);
+      if (perDocument) expect((await recipientMode(d, true)).statusCode).toBe(200);
+      return { d, doc1, doc2 };
+    }
+
+    it('режим выключен — 409 per_document_off; документ не привязан — 404', async () => {
+      const { d, doc1 } = await twoDocDelivery(false);
+      const a = await contract();
+      const off = await putDoc(d, doc1, a, null);
+      expect(off.statusCode).toBe(409);
+      expect(off.json()).toMatchObject({ error: 'per_document_off' });
+      expect((await recipientMode(d, true)).statusCode).toBe(200);
+      const missing = await putDoc(d, randomUUID(), a, null);
+      expect(missing.statusCode).toBe(404);
+      expect(missing.json()).toMatchObject({ error: 'document_not_linked' });
+      expect(await links(d)).toEqual([]);
+    });
+
+    it('общий и договор документа живут вместе; отвязка общего договоры документов НЕ трогает', async () => {
+      const { d, doc1 } = await twoDocDelivery();
+      const general = await contract();
+      const own = await contract();
+      expect((await put(d, general, null)).statusCode).toBe(200);
+      expect((await putDoc(d, doc1, own, null)).statusCode).toBe(200);
+      expect(await links(d)).toEqual([
+        [null, general],
+        [doc1, own],
+      ]);
+
+      const body = (await get(d)).json();
+      expect(body).toMatchObject({ perDocument: true, contract: { id: general } });
+      expect(body.documents).toEqual([expect.objectContaining({ documentId: doc1, contract: expect.objectContaining({ id: own }) })]);
+
+      // Отвязка общего — только общая строка.
+      expect((await del(d, general)).statusCode).toBe(200);
+      expect(await links(d)).toEqual([[doc1, own]]);
+      expect(await docEvents(d)).toEqual([
+        ['linked', null, general, null, null],
+        ['linked', doc1, own, null, null],
+        ['unlinked', null, null, general, null],
+      ]);
+    });
+
+    it('повторы: PUT документа дважды и DELETE дважды — 200, по одному событию; чужая замена — 409', async () => {
+      const { d, doc1 } = await twoDocDelivery();
+      const a = await contract();
+      const b = await contract();
+      const c = await contract();
+      expect((await putDoc(d, doc1, a, null)).statusCode).toBe(200);
+      expect((await putDoc(d, doc1, a, null)).statusCode).toBe(200);
+      expect((await putDoc(d, doc1, b, a)).statusCode).toBe(200);
+      const stale = await putDoc(d, doc1, c, a);
+      expect(stale.statusCode).toBe(409);
+      expect(stale.json()).toMatchObject({ error: 'contract_changed', current: { id: b } });
+      expect((await delDoc(d, doc1, b)).statusCode).toBe(200);
+      expect((await delDoc(d, doc1, b)).statusCode).toBe(200);
+      expect((await docEvents(d)).map((e) => e[0])).toEqual(['linked', 'replaced', 'unlinked']);
+    });
+
+    it('настоящая гонка двух выборов договора одного документа — один 200, второй 409', async () => {
+      for (let round = 0; round < 10; round++) {
+        const { d, doc1 } = await twoDocDelivery();
+        const b = await contract();
+        const c = await contract();
+        const [rb, rc] = await Promise.all([putDoc(d, doc1, b, null), putDoc(d, doc1, c, null)]);
+        expect([rb.statusCode, rc.statusCode].sort()).toEqual([200, 409]);
+        expect(await links(d)).toHaveLength(1);
+        expect(await docEvents(d)).toHaveLength(1);
+      }
+    });
+
+    it('supplierMatch договора документа — по ИНН этого документа, а не всей приёмки', async () => {
+      const { d, doc1, doc2 } = await twoDocDelivery();
+      const supplierContract = await contract({ inn: SUPPLIER_INN });
+      expect((await putDoc(d, doc1, supplierContract, null)).statusCode).toBe(200);
+      expect((await putDoc(d, doc2, supplierContract, null)).statusCode).toBe(200);
+      const docs = (await get(d)).json().documents as { documentId: string; contract: { supplierMatch: boolean | null } }[];
+      expect(docs.find((x) => x.documentId === doc1)!.contract.supplierMatch).toBe(true);
+      // У приёмки в целом SUPPLIER_INN есть (doc1), но поставщик doc2 — OTHER_INN.
+      expect(docs.find((x) => x.documentId === doc2)!.contract.supplierMatch).toBe(false);
+    });
+
+    it('подбор для документа — по ИНН его поставщика; current — договор этого документа', async () => {
+      const { d, doc1, doc2 } = await twoDocDelivery();
+      const mine = await contract({ inn: SUPPLIER_INN });
+      const other = await contract({ inn: OTHER_INN });
+      await putDoc(d, doc2, other, null);
+      const forDoc2 = (await candidates(d, `?documentId=${doc2}`)).json();
+      expect(forDoc2.context).toMatchObject({ documentId: doc2, supplierInns: [OTHER_INN], filteredBySupplier: true });
+      expect(forDoc2.items.map((x: { id: string; current: boolean }) => [x.id, x.current])).toEqual([[other, true]]);
+      const forDoc1 = (await candidates(d, `?documentId=${doc1}`)).json();
+      expect(forDoc1.items.map((x: { id: string; current: boolean }) => [x.id, x.current])).toEqual([[mine, false]]);
+      // Общий подбор — по ИНН всей приёмки, current общий (его нет).
+      const general = (await candidates(d)).json();
+      expect(general.context.documentId).toBeNull();
+      expect(general.items.every((x: { current: boolean }) => !x.current)).toBe(true);
+    });
+
+    it('выключение режима снимает договоры документов (reason mode_off), общий остаётся', async () => {
+      const { d, doc1, doc2 } = await twoDocDelivery();
+      const general = await contract();
+      const a = await contract();
+      const b = await contract();
+      await put(d, general, null);
+      await putDoc(d, doc1, a, null);
+      await putDoc(d, doc2, b, null);
+      expect((await recipientMode(d, false)).statusCode).toBe(200);
+      expect(await links(d)).toEqual([[null, general]]);
+      const resetEvents = (await docEvents(d)).filter((e) => e[4] === 'mode_off');
+      expect(resetEvents.map((e) => [e[0], e[1], e[3]]).sort()).toEqual(
+        [
+          ['unlinked', doc1, a],
+          ['unlinked', doc2, b],
+        ].sort(),
+      );
+      const body = (await get(d)).json();
+      expect(body).toMatchObject({ perDocument: false, documents: [], contract: { id: general } });
+    });
+
+    it('отвязка документа снимает его договор с событием document_unlinked', async () => {
+      const { d, doc1, doc2 } = await twoDocDelivery();
+      const a = await contract();
+      const b = await contract();
+      await putDoc(d, doc1, a, null);
+      await putDoc(d, doc2, b, null);
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/deliveries/${d}/unlink-source`,
+        payload: { sourceDocumentId: doc1 },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(await links(d)).toEqual([[doc2, b]]);
+      expect((await docEvents(d)).at(-1)).toEqual(['unlinked', doc1, null, a, 'document_unlinked']);
+    });
+
+    it('без явного снятия связь документа не переживает удаление строки delivery_sources (FK-каскад)', async () => {
+      const { d, doc1 } = await twoDocDelivery();
+      const a = await contract();
+      await putDoc(d, doc1, a, null);
+      await sql`DELETE FROM delivery_sources WHERE delivery_id = ${d} AND source_document_id = ${doc1}`;
+      expect(await links(d)).toEqual([]);
+    });
+
+    it('полный upsert приёмки (как с планшета) договоры документов не трогает', async () => {
+      const { d, doc1 } = await twoDocDelivery();
+      const general = await contract();
+      const a = await contract();
+      await put(d, general, null);
+      await putDoc(d, doc1, a, null);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/deliveries',
+        payload: { id: d, statusCode: 'filled', siteId: siteS, comment: 'с планшета', items: [], sourceDocumentIds: [] },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(await links(d)).toEqual([
+        [null, general],
+        [doc1, a],
+      ]);
     });
   });
 

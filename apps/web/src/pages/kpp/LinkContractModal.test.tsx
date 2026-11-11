@@ -64,6 +64,7 @@ function response(items: ContractCandidate[], ctx: Partial<ContractCandidatesRes
     items,
     total: items.length,
     context: {
+      documentId: null,
       supplierInns: ['7716951747'],
       supplierKnown: true,
       filteredBySupplier: true,
@@ -77,15 +78,26 @@ function response(items: ContractCandidate[], ctx: Partial<ContractCandidatesRes
 
 const okResponse = (contract: DeliveryContract | null): DeliveryContractResponse => ({
   contract,
+  perDocument: false,
+  documents: [],
   catalog: { total: 3, importedAt: null },
 });
 
-function renderModal(props: { open?: boolean; current?: DeliveryContract | null; onClose?: () => void } = {}) {
+function renderModal(
+  props: { open?: boolean; current?: DeliveryContract | null; onClose?: () => void; documentId?: string } = {},
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const onClose = props.onClose ?? vi.fn();
   const view = (p: typeof props) => (
     <QueryClientProvider client={client}>
-      <LinkContractModal open={p.open ?? true} deliveryId="d1" current={p.current ?? null} onClose={onClose} />
+      <LinkContractModal
+        open={p.open ?? true}
+        deliveryId="d1"
+        documentId={p.documentId ?? null}
+        documentLabel={p.documentId ? 'УПД № 201/211153746-24' : null}
+        current={p.current ?? null}
+        onClose={onClose}
+      />
     </QueryClientProvider>
   );
   const utils = render(view(props));
@@ -193,6 +205,23 @@ describe('LinkContractModal', () => {
     expect(await screen.findByText(/уже изменил другой пользователь: «СУ-ЗИЛ33\/25-77/)).toBeTruthy();
     expect(spy).toHaveBeenCalledWith({ queryKey: ['delivery-contract', 'd1'] });
     expect(spy).toHaveBeenCalledWith({ queryKey: ['delivery-contract-candidates', 'd1'] });
+  });
+
+  it('договор документа: documentId в запросе кандидатов и в PUT, заголовок с номером УПД', async () => {
+    const c = candidate();
+    apiGet.mockResolvedValue(response([c], { documentId: 'doc-1' }));
+    apiPut.mockResolvedValue(okResponse(null));
+    renderModal({ documentId: 'doc-1' });
+    expect(await screen.findByText('Договор 1С для УПД № 201/211153746-24')).toBeTruthy();
+    await waitFor(() => expect(lastUrl()).toBe('/deliveries/d1/contract-candidates?limit=20&offset=0&documentId=doc-1'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Выбрать' }));
+    await waitFor(() =>
+      expect(apiPut).toHaveBeenCalledWith('/deliveries/d1/contract', {
+        contractId: c.id,
+        replaceContractId: null,
+        documentId: 'doc-1',
+      }),
+    );
   });
 
   it('закрытое окно не запрашивает; повторное открытие — новый запрос', async () => {

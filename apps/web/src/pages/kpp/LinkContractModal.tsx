@@ -38,12 +38,18 @@ export function contractQueryKeys(deliveryId: string | null) {
 export function LinkContractModal({
   open,
   deliveryId,
+  documentId = null,
+  documentLabel = null,
   current,
   onClose,
 }: {
   open: boolean;
   deliveryId: string | null;
-  /** Договор приёмки, который сейчас видит человек. */
+  /** Договор документа (режим «Разные получатели»); null — общий договор приёмки. */
+  documentId?: string | null;
+  /** «УПД № …» — для заголовка окна договора документа. */
+  documentLabel?: string | null;
+  /** Договор этой области, который сейчас видит человек. */
   current: DeliveryContract | null;
   onClose: () => void;
 }) {
@@ -66,9 +72,10 @@ export function LinkContractModal({
 
   const offset = (page - 1) * PAGE_SIZE;
   const candidates = useQuery({
-    queryKey: [...keys.candidates, query, allSuppliers, offset],
+    queryKey: [...keys.candidates, documentId ?? 'general', query, allSuppliers, offset],
     queryFn: () => {
       const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
+      if (documentId) params.set('documentId', documentId);
       if (query) params.set('q', query);
       if (allSuppliers) params.set('allSuppliers', '1');
       return api.get<ContractCandidatesResponse>(`/deliveries/${deliveryId}/contract-candidates?${params.toString()}`);
@@ -86,7 +93,10 @@ export function LinkContractModal({
 
   const link = useMutation({
     mutationFn: (body: { contractId: string; replaceContractId: string | null }) =>
-      api.put<DeliveryContractResponse>(`/deliveries/${deliveryId}/contract`, body),
+      api.put<DeliveryContractResponse>(`/deliveries/${deliveryId}/contract`, {
+        ...body,
+        ...(documentId ? { documentId } : {}),
+      }),
     onSuccess: (data) => {
       queryClient.setQueryData(keys.contract, data);
       void queryClient.invalidateQueries({ queryKey: keys.candidates });
@@ -233,7 +243,7 @@ export function LinkContractModal({
       onCancel={() => {
         if (!link.isPending) onClose();
       }}
-      title="Выбрать договор 1С"
+      title={documentLabel ? `Договор 1С для ${documentLabel}` : 'Выбрать договор 1С'}
       width="min(1200px, 96vw)"
       footer={null}
       destroyOnHidden
@@ -242,10 +252,10 @@ export function LinkContractModal({
         <Typography.Text type="secondary" data-testid="contract-modal-context">
           {ctx
             ? ctx.supplierKnown
-              ? `Договоры поставщика приёмки (ИНН ${ctx.supplierInns.join(', ')})${
+              ? `Договоры поставщика ${documentId ? 'документа' : 'приёмки'} (ИНН ${ctx.supplierInns.join(', ')})${
                   ctx.filteredBySupplier ? '' : ' — сверху, ниже все остальные'
                 }. Сверху — договоры объекта ${ctx.siteCode ?? 'приёмки'}.`
-              : 'Поставщик приёмки не определён — ищите по номеру, адресу или ИНН.'
+              : `Поставщик ${documentId ? 'документа' : 'приёмки'} не определён — ищите по номеру, адресу или ИНН.`
             : null}{' '}
           {importedText}
         </Typography.Text>

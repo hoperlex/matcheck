@@ -99,6 +99,7 @@ import { SupplierOrderChip } from './SupplierOrderChip';
 import { DeliverySupplierOrdersBlock } from './DeliverySupplierOrdersBlock';
 import { useDeliverySupplierOrders } from './useDeliverySupplierOrders';
 import { ContractChip } from './ContractChip';
+import { DocumentContractControl } from './DocumentContractControl';
 import { contractQueryKeys, LinkContractModal } from './LinkContractModal';
 import { useDeliveryContract } from './useDeliveryContract';
 import { LinkedEdoChips, type LinkedEdoDocument } from './LinkedEdoChips';
@@ -329,7 +330,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const [linkUpdOpen, setLinkUpdOpen] = useState(false);
   const [linkEdoOpen, setLinkEdoOpen] = useState(false);
   const [linkOrderOpen, setLinkOrderOpen] = useState(false);
-  const [linkContractOpen, setLinkContractOpen] = useState(false);
+  // Окно выбора договора 1С: для какой области открыто. documentId = null —
+  // общий договор приёмки, иначе — договор документа (режим «разные
+  // получатели»); label — «УПД № …» для заголовка окна.
+  const [contractTarget, setContractTarget] = useState<{
+    documentId: string | null;
+    label: string | null;
+  } | null>(null);
   // Блок материалов, к которому подбирается УПД из ЭДО; null — к приёмке
   // целиком. При закрытии не сбрасывается, чтобы заголовок окна не менялся
   // во время анимации — следующее открытие всё равно его задаёт.
@@ -1224,10 +1231,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // поменяли: показываем текущий и перечитываем.
   const contractKeys = contractQueryKeys(deliveryId);
   const unlinkContract = useMutation({
-    mutationFn: (expectedContractId: string) =>
-      api.delete<DeliveryContractResponse>(
-        `/deliveries/${deliveryId}/contract?expectedContractId=${encodeURIComponent(expectedContractId)}`,
-      ),
+    mutationFn: ({ expected, documentId }: { expected: string; documentId: string | null }) => {
+      const qs = new URLSearchParams({ expectedContractId: expected });
+      if (documentId) qs.set('documentId', documentId);
+      return api.delete<DeliveryContractResponse>(`/deliveries/${deliveryId}/contract?${qs.toString()}`);
+    },
     onSuccess: (data) => {
       message.success('Договор отвязан');
       queryClient.setQueryData(contractKeys.contract, data);
@@ -1339,15 +1347,34 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     onError: (err: Error) => message.error(err.message),
   });
 
+  // Точечные PATCH признака и получателей отвечают полной карточкой. Её и
+  // кладём в кэш: раньше ответ выбрасывали и ждали повторный GET карточки
+  // (вторая полная сборка DTO на сервере + запись в IDB), а префиксная
+  // инвалидация ['deliveries'] заодно перечитывала список «Принятые» под окном —
+  // тумблер «Разные получатели» перерисовывался только после всего этого.
+  // Опрос карточки, начатый до PATCH, отменяем, чтобы он не вернул старое
+  // состояние поверх ответа. Списки перечитываются в фоне.
+  const beforeDeliveryPatch = () =>
+    queryClient.cancelQueries({ queryKey: ['deliveries', deliveryId], exact: true });
+  const applyDeliveryResponse = (dto: Delivery) => {
+    queryClient.setQueryData(['deliveries', deliveryId], dto);
+    // Снимок для офлайна — как в queryFn карточки; сбой IDB не мешает экрану.
+    void upsertServerSnapshot([dto]).catch(() => undefined);
+    void queryClient.invalidateQueries({
+      queryKey: ['deliveries'],
+      predicate: (q) => q.queryKey[1] !== deliveryId,
+    });
+  };
+
   const patchPurpose = useMutation({
     mutationFn: async (purpose: DeliveryPurpose) => {
       if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
       return api.patch<Delivery>(`/deliveries/${loadedDelivery.id}/purpose`, { purpose });
     },
-    onSuccess: () => {
+    onMutate: beforeDeliveryPatch,
+    onSuccess: (dto) => {
       message.success('Признак сохранён');
-      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
-      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+      applyDeliveryResponse(dto);
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -1359,9 +1386,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         perDocument,
       });
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
-      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+    onMutate: beforeDeliveryPatch,
+    onSuccess: (dto) => {
+      applyDeliveryResponse(dto);
+      // Выключение снимает договоры документов — блок договоров перечитать.
+      void queryClient.invalidateQueries({ queryKey: ['delivery-contract', deliveryId] });
+      void queryClient.invalidateQueries({ queryKey: ['delivery-contract-candidates', deliveryId] });
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -1374,10 +1404,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         patch,
       );
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
-      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
-    },
+    onMutate: beforeDeliveryPatch,
+    onSuccess: applyDeliveryResponse,
     onError: (err: Error) => message.error(err.message),
   });
 
@@ -1389,10 +1417,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         patch,
       );
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
-      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
-    },
+    onMutate: beforeDeliveryPatch,
+    onSuccess: applyDeliveryResponse,
     onError: (err: Error) => message.error(err.message),
   });
 
@@ -1848,6 +1874,23 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     const ownDocumentPurposeExists = (loadedDelivery.documentRecipients ?? []).some(
       (x) => x.ownPurpose,
     );
+    // Договоры 1С документов (режим «разные получатели»): id документа → договор.
+    const documentContracts = new Map(
+      (contractQuery.data?.documents ?? []).map((x) => [x.documentId, x.contract] as const),
+    );
+    // Выбирать договор можно, только когда справочник не пуст (импорт был).
+    const canPickContract =
+      canLinkContract &&
+      !isNew &&
+      !isPending &&
+      !loadedDelivery.sourceShipmentId &&
+      (contractQuery.data?.catalog.total ?? 0) > 0;
+    // Документы, которые потеряют свои настройки при выключении режима:
+    // свой получатель или признак (documentRecipients — только такие) и свой договор.
+    const ownDocumentSettingsCount = new Set([
+      ...(loadedDelivery.documentRecipients ?? []).map((x) => x.sourceDocumentId),
+      ...documentContracts.keys(),
+    ]).size;
     const supplierOrders = supplierOrdersQuery.data?.items ?? [];
     // УПД из ЭДО: привязанные к блоку показываются в его заголовке, остальные —
     // в шапке. Блок, которого нет среди связанных документов, тоже шапка:
@@ -2070,14 +2113,16 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     {loadedDelivery.recipientsPerDocument ? (
                       <Popconfirm
                         title="Выключить разные получатели?"
-                        description={`У ${loadedDelivery.documentRecipients?.length ?? 0} документов свой получатель или признак — сбросить?`}
+                        description={`У ${ownDocumentSettingsCount} документов свой получатель, признак или договор — сбросить?`}
                         okText="Сбросить"
                         cancelText="Отмена"
                         onConfirm={() => patchRecipientMode.mutate(false)}
                       >
                         <Switch
                           size="small"
-                          checked
+                          // Пока PATCH идёт, тумблер уже в новом положении.
+                          checked={!(patchRecipientMode.isPending && patchRecipientMode.variables === false)}
+                          loading={patchRecipientMode.isPending}
                           disabled={
                             !canEditDocumentRecipient ||
                             isPending ||
@@ -2089,7 +2134,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     ) : (
                       <Switch
                         size="small"
-                        checked={false}
+                        checked={patchRecipientMode.isPending && patchRecipientMode.variables === true}
+                        loading={patchRecipientMode.isPending}
                         disabled={
                           !canEditDocumentRecipient || isPending || patchRecipientMode.isPending
                         }
@@ -2287,27 +2333,29 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               {canViewContract && (
                 <ContractChip
                   contract={contract}
+                  label={loadedDelivery?.recipientsPerDocument ? 'Договор (общий):' : 'Договор:'}
                   onUnlink={
-                    canLinkContract && !isPending ? (expected) => unlinkContract.mutate(expected) : undefined
+                    canLinkContract && !isPending
+                      ? (expected) => unlinkContract.mutate({ expected, documentId: null })
+                      : undefined
                   }
                   onReplace={
                     canLinkContract && !isPending && !loadedDelivery?.sourceShipmentId
-                      ? () => setLinkContractOpen(true)
+                      ? () => setContractTarget({ documentId: null, label: null })
                       : undefined
                   }
                   unlinkPending={unlinkContract.isPending}
                 />
               )}
-              {canLinkContract &&
-                !isNew &&
-                !isPending &&
-                !loadedDelivery?.sourceShipmentId &&
-                !contract &&
-                (contractQuery.data?.catalog.total ?? 0) > 0 && (
-                  <Button size="small" type="dashed" onClick={() => setLinkContractOpen(true)}>
-                    + Договор
-                  </Button>
-                )}
+              {canPickContract && !contract && (
+                <Button
+                  size="small"
+                  type="dashed"
+                  onClick={() => setContractTarget({ documentId: null, label: null })}
+                >
+                  {loadedDelivery?.recipientsPerDocument ? '+ Договор (общий)' : '+ Договор'}
+                </Button>
+              )}
               {/* Транзит — admin/manager могут поставить/снять прямо
                   с портала (PATCH /deliveries/:id/flags). Inspector_kpp
                   видит только цветной чип при true (как раньше), править
@@ -2449,10 +2497,16 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         />
 
         <LinkContractModal
-          open={linkContractOpen}
+          open={contractTarget !== null}
           deliveryId={loadedDelivery?.id ?? null}
-          current={contract}
-          onClose={() => setLinkContractOpen(false)}
+          documentId={contractTarget?.documentId ?? null}
+          documentLabel={contractTarget?.label ?? null}
+          current={
+            contractTarget?.documentId
+              ? (documentContracts.get(contractTarget.documentId) ?? null)
+              : contract
+          }
+          onClose={() => setContractTarget(null)}
         />
 
         <LinkEdoDocumentModal
@@ -2714,6 +2768,21 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     molsLoading={responsiblePersonsQuery.isLoading}
                     onRecipient={(patch) => patchDocumentRecipient.mutate({ docId: doc.id, patch })}
                     onPurpose={(patch) => patchDocumentPurpose.mutate({ docId: doc.id, patch })}
+                  />
+                )}
+                {loadedDelivery.recipientsPerDocument && canViewContract && (
+                  <DocumentContractControl
+                    own={documentContracts.get(doc.id) ?? null}
+                    general={contract}
+                    canLink={canPickContract}
+                    onPick={() =>
+                      setContractTarget({
+                        documentId: doc.id,
+                        label: `${sourceKindLabel(doc.kind)} № ${doc.docNumber ?? 'без номера'}`,
+                      })
+                    }
+                    onUnlink={(expected) => unlinkContract.mutate({ expected, documentId: doc.id })}
+                    unlinkPending={unlinkContract.isPending}
                   />
                 )}
                 {canLinkUpd && own.length > 0 && (

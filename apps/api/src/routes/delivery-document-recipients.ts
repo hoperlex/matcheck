@@ -17,6 +17,7 @@ import { asZod } from '../lib/fastify.js';
 import { counterparties, deliveries, deliverySources, responsiblePersons } from '../db/schema.js';
 import { assertPermission } from '../lib/permissions/assert.js';
 import { publishEvent } from './events.js';
+import { resetDocumentContracts } from '../domain/supplier-contracts/delivery-contract.js';
 
 const IdParams = z.object({ id: z.string().uuid() });
 const DocParams = IdParams.extend({ docId: z.string().uuid() });
@@ -153,6 +154,9 @@ export function registerDeliveryDocumentRecipientRoutes(
           if (links.some((link) => link.ownPurpose)) {
             await assertPermission(req, 'operations.deliveries', 'review');
           }
+          // Договоры 1С документов сбрасываются вместе со своими получателями и
+          // признаками (решение 11.11.2026); общий договор приёмки остаётся.
+          await resetDocumentContracts(tx, row.id, req.user?.id ?? null);
           await tx
             .update(deliverySources)
             .set({

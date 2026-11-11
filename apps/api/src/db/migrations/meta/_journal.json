@@ -1016,6 +1016,13 @@
       "when": 1797562000000,
       "tag": "0145_upd_prompt_torg12_v2",
       "breakpoints": true
+    },
+    {
+      "idx": 146,
+      "version": "7",
+      "when": 1797648400000,
+      "tag": "0146_delivery_document_contracts",
+      "breakpoints": true
     }
   ]
 }

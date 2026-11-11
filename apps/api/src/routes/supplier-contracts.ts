@@ -56,6 +56,19 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
     return d;
   }
 
+  /** Договор области (общий или документа) — для ответа 409 contract_changed. */
+  async function scopeContract(deliveryId: string, siteId: string, documentId: string | null) {
+    const all = await getDeliveryContract(app.db, { id: deliveryId, siteId });
+    if (documentId === null) return all.contract;
+    return all.documents.find((d) => d.documentId === documentId)?.contract ?? null;
+  }
+
+  function documentIdOf(req: { body?: unknown; query?: unknown }): string | null {
+    const fromBody = (req.body as { documentId?: string | null } | undefined)?.documentId;
+    const fromQuery = (req.query as { documentId?: string } | undefined)?.documentId;
+    return fromBody ?? fromQuery ?? null;
+  }
+
   function notify(deliveryId: string, siteId: string) {
     publishEvent(app, {
       type: 'delivery_updated',
@@ -113,6 +126,7 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
       return findContractCandidates(app.db, {
         deliveryId: delivery.id,
         deliverySiteId: delivery.siteId,
+        documentId: req.query.documentId ?? null,
         q: req.query.q,
         allSuppliers: req.query.allSuppliers === '1',
         limit: req.query.limit,
@@ -138,6 +152,7 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
     async (req, reply) => {
       const result = await setDeliveryContract(app.db, {
         deliveryId: req.params.id,
+        documentId: req.body.documentId ?? null,
         contractId: req.body.contractId,
         replaceContractId: req.body.replaceContractId,
         userId: req.user?.id ?? null,
@@ -145,8 +160,11 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
       if (!result.ok) {
         if (result.status === 404) return reply.code(404).send({ error: result.error });
         if (result.error === 'contract_changed') {
-          const { contract } = await getDeliveryContract(app.db, { id: req.params.id, siteId: result.siteId });
-          return reply.code(409).send({ error: 'contract_changed', message: result.message, current: contract });
+          return reply.code(409).send({
+            error: 'contract_changed',
+            message: result.message,
+            current: await scopeContract(req.params.id, result.siteId, documentIdOf(req)),
+          });
         }
         return reply.code(409).send({ error: result.error, message: result.message });
       }
@@ -172,14 +190,18 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
     async (req, reply) => {
       const result = await unsetDeliveryContract(app.db, {
         deliveryId: req.params.id,
+        documentId: req.query.documentId ?? null,
         expectedContractId: req.query.expectedContractId,
         userId: req.user?.id ?? null,
       });
       if (!result.ok) {
         if (result.status === 404) return reply.code(404).send({ error: result.error });
         if (result.error === 'contract_changed') {
-          const { contract } = await getDeliveryContract(app.db, { id: req.params.id, siteId: result.siteId });
-          return reply.code(409).send({ error: 'contract_changed', message: result.message, current: contract });
+          return reply.code(409).send({
+            error: 'contract_changed',
+            message: result.message,
+            current: await scopeContract(req.params.id, result.siteId, documentIdOf(req)),
+          });
         }
         return reply.code(409).send({ error: result.error, message: result.message });
       }

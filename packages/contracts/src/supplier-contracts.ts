@@ -71,13 +71,30 @@ export const DeliveryContractSchema = SupplierContractSummarySchema.extend({
 });
 export type DeliveryContract = z.infer<typeof DeliveryContractSchema>;
 
+/** Свой договор документа (режим «Разные получатели по документам»). */
+export const DeliveryDocumentContractSchema = z.object({
+  documentId: z.string().uuid(),
+  contract: DeliveryContractSchema,
+});
+export type DeliveryDocumentContract = z.infer<typeof DeliveryDocumentContractSchema>;
+
 export const DeliveryContractResponseSchema = z.object({
+  /** Общий договор приёмки. */
   contract: DeliveryContractSchema.nullable(),
+  /** Включён ли режим «Разные получатели по документам». */
+  perDocument: z.boolean(),
+  /**
+   * Документы со своим договором. Документ без своего договора наследует общий.
+   * Флаги договора документа считаются по ИНН поставщика этого документа.
+   */
+  documents: z.array(DeliveryDocumentContractSchema),
   catalog: SupplierContractCatalogInfoSchema,
 });
 export type DeliveryContractResponse = z.infer<typeof DeliveryContractResponseSchema>;
 
 export const ContractCandidatesQuerySchema = z.object({
+  /** Подбор для документа приёмки (по ИНН его поставщика); без него — общий договор. */
+  documentId: z.string().uuid().optional(),
   q: z.string().trim().max(200).optional(),
   /** 1 — все поставщики, а не только поставщик приёмки. */
   allSuppliers: z.enum(['0', '1']).optional(),
@@ -96,7 +113,9 @@ export const ContractCandidateSchema = SupplierContractSummarySchema.extend({
 export type ContractCandidate = z.infer<typeof ContractCandidateSchema>;
 
 export const ContractCandidatesContextSchema = z.object({
-  /** ИНН поставщика приёмки (из документов и самой приёмки, без своих ИНН). */
+  /** Документ, для которого подбор; null — общий договор приёмки. */
+  documentId: z.string().uuid().nullable(),
+  /** ИНН поставщика приёмки или документа (без своих ИНН). */
   supplierInns: z.array(z.string()),
   supplierKnown: z.boolean(),
   /** Фильтр по поставщику фактически применён (ИНН известен и не «Все поставщики»). */
@@ -121,6 +140,8 @@ export type ContractCandidatesResponse = z.infer<typeof ContractCandidatesRespon
  * сервере уже другой — 409 contract_changed, тихой перезаписи нет.
  */
 export const SetDeliveryContractBodySchema = z.object({
+  /** Договор документа (режим «Разные получатели»); null/нет — общий договор приёмки. */
+  documentId: z.string().uuid().nullable().optional(),
   contractId: z.string().uuid(),
   replaceContractId: z.string().uuid().nullable(),
 });
@@ -128,6 +149,8 @@ export type SetDeliveryContractBody = z.infer<typeof SetDeliveryContractBodySche
 
 export const UnsetDeliveryContractQuerySchema = z.object({
   expectedContractId: z.string().uuid(),
+  /** Договор документа; без него — общий договор приёмки. */
+  documentId: z.string().uuid().optional(),
 });
 export type UnsetDeliveryContractQuery = z.infer<typeof UnsetDeliveryContractQuerySchema>;
 

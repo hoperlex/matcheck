@@ -178,9 +178,9 @@ export async function readContractsState(ex: Executor): Promise<ContractsState> 
     readContractRows(ex),
     ex.execute(sql`select id::text as id, code from sites`),
     ex.execute(sql`
-      select dc.contract_id::text as contract_id, d.display_id::text as display_id
+      select distinct dc.contract_id::text as contract_id, d.display_id::text as display_id
       from delivery_contracts dc join deliveries d on d.id = dc.delivery_id
-      order by d.display_id`),
+      order by 2`),
   ]);
   const sitesByCode = new Map(rowsOf<{ id: string; code: string }>(sitesRes).map((s) => [s.code, s.id]));
   const linkedDeliveries = new Map<string, string[]>();
@@ -513,7 +513,7 @@ async function checkRevert(tx: Tx, s: ContractsImportSnapshot): Promise<RevertOb
   for (const part of chunks(insertIds, CHUNK)) {
     const res = rowsOf<{ contract_id: string; display_id: string }>(
       await tx.execute(sql`
-        select dc.contract_id::text as contract_id, d.display_id::text as display_id
+        select distinct dc.contract_id::text as contract_id, d.display_id::text as display_id
         from delivery_contracts dc join deliveries d on d.id = dc.delivery_id
         where dc.contract_id = any(string_to_array(${part.join(',')}, ',')::uuid[])`),
     );
