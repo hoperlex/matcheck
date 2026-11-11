@@ -12,6 +12,7 @@
 import { PDFParse } from 'pdf-parse';
 import { countUniqueUpdInvoices } from './upd-text-bundle.parser.js';
 import { parseUpdXlsx, collectRowsViaSheetJS } from './upd-xlsx.parser.js';
+import { isForwardingReceiptLeadPage } from './forwarding-receipt.js';
 
 // 'supplementary' — сопроводительный документ качества: сертификат, паспорт
 // качества, декларация о соответствии, протокол испытаний. Реквизиты из него не
@@ -431,6 +432,24 @@ export async function classifyFile(
         needsVision: false,
         parserUsed: 'parseWaybillBatch',
         signals: ['text:tn'],
+      };
+    }
+    // Экспедиторская расписка транспортной компании. Стоит после всех известных
+    // форм — ловит только то, что иначе ушло бы в unknown, и не перехватывает
+    // УПД, ТН или ТОРГ-12, где расписка лишь упомянута. Но ДО сертификата: на
+    // обороте расписки печатаются условия про сопроводительные документы.
+    //
+    // Путь — накладные: там её разбирает код по тексту (forwarding-receipt.ts)
+    // и заводит «Накладную» с отправителем и числом мест, которая едет
+    // инспектору на планшет. Раньше она становилась ложным УПД с поставщиком-
+    // экспедитором.
+    if (isForwardingReceiptLeadPage(pages[0]?.text ?? '')) {
+      return {
+        detectedKind: 'transport_waybill',
+        confidence: 0.9,
+        needsVision: false,
+        parserUsed: 'parseWaybillBatch',
+        signals: ['text:forwarding-receipt'],
       };
     }
     // Сопроводительный документ качества. Проверяется ПОСЛЕ всех известных

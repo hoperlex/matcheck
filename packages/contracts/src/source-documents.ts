@@ -1414,7 +1414,12 @@ export type WaybillItem = z.infer<typeof WaybillItemSchema>;
 // печатаются в шапке товарного раздела, а не в нумерованных разделах 2116.
 // В kind документа обе дают 'transport_waybill', то есть тег «Накладная» на
 // портале и планшете одинаков.
-export const WaybillFormSchema = z.enum(['tn_2116', 'tn_1t', 'os2']);
+//
+// forwarding_receipt — экспедиторская расписка транспортной компании. Её разбирает
+// код по текстовому слою PDF (domain/edo/forwarding-receipt.ts), а не модель:
+// в схему ответа LLM это значение намеренно не входит. Стороны те же, что у ТН,
+// — отправитель и получатель с ИНН, — поэтому и kind тот же: «Накладная».
+export const WaybillFormSchema = z.enum(['tn_2116', 'tn_1t', 'os2', 'forwarding_receipt']);
 export type WaybillForm = z.infer<typeof WaybillFormSchema>;
 
 export const WaybillDocumentSchema = z.object({

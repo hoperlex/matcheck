@@ -108,6 +108,7 @@ import {
   WAYBILL_1T_MAX_PAGES_FOR_OPENROUTER,
 } from './domain/edo/waybill-pdf.js';
 import { detectWaybill1t } from './domain/edo/waybill-1t-detect.js';
+import { parseForwardingReceiptBatch } from './domain/edo/forwarding-receipt.js';
 import { getDefaultProviderKind } from './domain/llm/registry.js';
 import { cleanupPhotoOrphans } from './domain/jobs/photo-orphan-cleanup.js';
 import {
@@ -3425,7 +3426,21 @@ async function handleWaybillBundleJob(
   // документам, и увести смешанную пачку целиком к промпту 1-Т значило бы
   // потерять лежащие рядом ТН-2116 и ОС-2. На бою у всех разобранных 1-Т в
   // пакете ровно один файл.
-  if (loadEnv().WAYBILL_1T_ROUTE) {
+  //
+  // Экспедиторская расписка проверяется раньше и без модели: промпт накладных
+  // её по инструкции игнорирует, и пустой ответ уводил файл в общий УПД-разбор
+  // — ложный УПД с поставщиком-экспедитором. Код читает текстовый слой и
+  // заводит «Накладную» с отправителем и числом мест (forwarding-receipt.ts).
+  // Не расписка или прочитано мало — null, и дальше всё как раньше.
+  const receipts = await parseForwardingReceiptBatch(originalFiles);
+  if (receipts) {
+    parsed = receipts.parsed;
+    llmProviderId = receipts.llmProviderId;
+    promptKind = 'forwarding_receipt';
+    log.info({ documents: parsed.documents.length }, 'экспедиторская расписка разобрана по тексту');
+  }
+
+  if (!parsed && loadEnv().WAYBILL_1T_ROUTE) {
     const flags = await Promise.all(
       originalFiles.map((f) => detectWaybill1t(f.buffer, f.mimeType)),
     );
@@ -7524,7 +7539,8 @@ async function createSourceDocumentFromWaybill(args: {
   // товарного раздела, а не в нумерованных разделах формы 2116. Разделять
   // ветки значило бы продублировать поиск поставщика в справочнике; забыть
   // же добавить сюда новую форму — оставить документ без поставщика вовсе.
-  if (doc.form === 'tn_2116' || doc.form === 'tn_1t') {
+  // Экспедиторская расписка — туда же: отправитель и получатель с ИНН.
+  if (doc.form === 'tn_2116' || doc.form === 'tn_1t' || doc.form === 'forwarding_receipt') {
     if (doc.shipper?.inn || doc.shipper?.name) {
       const shipper = { inn: doc.shipper.inn ?? null, kpp: null, name: doc.shipper.name ?? null };
       const innMode = loadEnv().SUPPLIER_INN_CHECK;
@@ -7644,8 +7660,10 @@ async function createSourceDocumentFromWaybill(args: {
       const rows = await Promise.all(
         qtyScale.items.map(async (it, idx) => ({
           sourceDocumentId: id,
+          // «Сборный груз» из экспедиторской расписки — не материал: реальные
+          // материалы МОЛ вносит на втором этапе. В справочник его не заводим.
           materialId:
-            kind === 'transport_waybill'
+            kind === 'transport_waybill' && doc.form !== 'forwarding_receipt'
               ? await findOrCreateMaterial(it.nameRaw, it.unit ?? null)
               : null,
           nameRaw: it.nameRaw,
@@ -7752,7 +7770,14 @@ async function handleWaybillSingleReparseJob(
       doc.waybillPromptKind === 'transport_waybill_1t'
         ? await runWaybill1tPass(originalFiles, { sourceDocumentId, bundleId: null }, log)
         : null;
+    // Экспедиторскую расписку разбирал код по тексту — повтор идёт тем же
+    // путём. Модель её не знает: вернула бы пустой список и откат.
+    const receipt =
+      doc.waybillPromptKind === 'forwarding_receipt'
+        ? await parseForwardingReceiptBatch(originalFiles)
+        : null;
     const first =
+      receipt ??
       routed1t ??
       (await parseWaybillBatch(files, {
         sourceDocumentId,
@@ -7803,7 +7828,7 @@ async function handleWaybillSingleReparseJob(
       picked.items.map(async (it, idx) => ({
         sourceDocumentId,
         materialId:
-          kind === 'transport_waybill'
+          kind === 'transport_waybill' && picked.form !== 'forwarding_receipt'
             ? await findOrCreateMaterial(it.nameRaw, it.unit ?? null)
             : null,
         nameRaw: it.nameRaw,
