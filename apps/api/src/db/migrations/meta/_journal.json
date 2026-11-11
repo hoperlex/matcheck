@@ -1023,6 +1023,13 @@
       "when": 1797648400000,
       "tag": "0146_delivery_document_contracts",
       "breakpoints": true
+    },
+    {
+      "idx": 147,
+      "version": "7",
+      "when": 1797734800000,
+      "tag": "0147_onec_integration",
+      "breakpoints": true
     }
   ]
 }

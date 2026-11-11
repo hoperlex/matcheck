@@ -14,6 +14,8 @@ import dbPlugin from './plugins/db.js';
 import redisPlugin from './plugins/redis.js';
 import queuePlugin from './plugins/queue.js';
 import securityPlugin from './plugins/security.js';
+import { integrationTokenRoutes } from './routes/integration-token.js';
+import { integrationOnecRoutes } from './routes/integration-onec.js';
 import authPlugin from './plugins/auth.js';
 import permissionsPlugin from './plugins/permissions.js';
 import metricsPlugin from './plugins/metrics.js';
@@ -156,6 +158,10 @@ export async function buildServer() {
   // Единственный namespace без авторизации (см. plugins/auth.ts).
   await app.register(publicUploadRoutes);
   await app.register(publicPasswordResetRoutes);
+  // Машинный канал 1С: выдача токена — под /public/, данные — под
+  // /api/v1/integration/1c/ (своя ветка авторизации в plugins/auth.ts).
+  await app.register(integrationTokenRoutes);
+  await app.register(integrationOnecRoutes);
 
   // Глобальный onSend hook: проставляем no-store / Vary: Authorization на
   // все API-ответы, чтобы PWA Service Worker / прокси / CDN не отдавали

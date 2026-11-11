@@ -16,6 +16,11 @@ export const logger = pino({
       'refreshToken',
       'apiKey',
       'api_key',
+      // Машинный канал 1С: секрет учётки и выданный токен (OAuth-имена полей).
+      'client_secret',
+      'access_token',
+      '*.client_secret',
+      '*.access_token',
       '*.password',
       '*.token',
       'headers.authorization',

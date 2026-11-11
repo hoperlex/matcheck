@@ -116,3 +116,60 @@ describe('публичный namespace /api/v1/public/', () => {
     expect(res.statusCode).toBe(401);
   });
 });
+
+describe('машинный канал /api/v1/integration/', () => {
+  async function buildIntegrationApp(enabled?: boolean): Promise<FastifyInstance> {
+    const instance = Fastify({ logger: false });
+    await instance.register(cookie);
+    instance.decorate('db', {
+      insert: () => ({ values: async () => undefined }),
+      select: () => ({
+        from: () => ({ where: () => ({ limit: async () => [] }) }),
+      }),
+    } as never);
+    await instance.register(
+      authPlugin,
+      enabled === undefined ? {} : { integrationEnabled: () => enabled },
+    );
+    instance.get('/api/v1/integration/1c/deliveries/queue', async () => ({ ok: 'machine' }));
+    await instance.ready();
+    return instance;
+  }
+
+  it('по умолчанию (рубильник env выключен) канал закрыт целиком — 503', async () => {
+    app = await buildIntegrationApp();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/integration/1c/deliveries/queue' });
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('включён, но без токена — 401, а не доступ', async () => {
+    app = await buildIntegrationApp(true);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/integration/1c/deliveries/queue' });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('мусор в Authorization и токен в cookie — 401', async () => {
+    app = await buildIntegrationApp(true);
+    const bad = await app.inject({
+      method: 'GET',
+      url: '/api/v1/integration/1c/deliveries/queue',
+      headers: { authorization: 'Bearer не-токен' },
+    });
+    expect(bad.statusCode).toBe(401);
+    const viaCookie = await app.inject({
+      method: 'GET',
+      url: '/api/v1/integration/1c/deliveries/queue',
+      cookies: { mc_access: 'x' },
+    });
+    expect(viaCookie.statusCode).toBe(401);
+  });
+
+  it('префикс канала в query публичного пути канал не открывает', async () => {
+    app = await buildIntegrationApp(true);
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/sites?x=/api/v1/integration/1c/deliveries/queue',
+    });
+    expect(res.statusCode).not.toBe(200);
+  });
+});

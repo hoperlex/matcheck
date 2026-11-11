@@ -1,6 +1,6 @@
 import type { FastifyRequest, preHandlerHookHandler } from 'fastify';
 
-type Noun = 'входа' | 'регистрации' | 'сброса пароля';
+type Noun = 'входа' | 'регистрации' | 'сброса пароля' | 'получения токена';
 
 export interface BurstyRateLimitOptions {
   burst: number;

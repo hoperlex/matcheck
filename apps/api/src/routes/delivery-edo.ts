@@ -1,5 +1,5 @@
 import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
-import { and, asc, desc, eq, isNotNull, isNull, or, sql as drSql } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, isNull, or, sql as drSql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
@@ -11,7 +11,6 @@ import {
   deliveryEdoMatches,
   edoAccounts,
   edoExportDocuments,
-  sourceDocumentAttachments,
   sourceDocumentItems,
   sourceDocuments,
   suppliers,
@@ -40,6 +39,7 @@ import {
 import { getObject, presign } from '../domain/storage/s3.signer.js';
 import { createBoundedLimiter, LimiterBusyError } from '../lib/bounded-limiter.js';
 import { publishEvent } from './events.js';
+import { resolveEdoMatchFile } from '../domain/edo/edo-match-file.js';
 
 const FoundBySchema = z.enum(['number', 'inn', 'name', 'date', 'search']);
 
@@ -484,61 +484,10 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
       },
     },
     async (req, reply) => {
-      const [match] = await app.db
-        .select({
-          sourceDocumentId: deliveryEdoMatches.sourceDocumentId,
-          exportDocumentId: deliveryEdoMatches.exportDocumentId,
-        })
-        .from(deliveryEdoMatches)
-        .where(
-          and(
-            eq(deliveryEdoMatches.id, req.params.matchId),
-            eq(deliveryEdoMatches.deliveryId, req.params.id),
-          ),
-        )
-        .limit(1);
-      if (!match) return reply.code(404).send({ error: 'not_found' });
-      let file: { s3Key: string; filename: string; mimeType: string } | null = null;
-      if (match.exportDocumentId) {
-        const [record] = await app.db
-          .select({ s3Key: edoExportDocuments.s3Key })
-          .from(edoExportDocuments)
-          .where(
-            and(
-              eq(edoExportDocuments.id, match.exportDocumentId),
-              eq(edoExportDocuments.status, 'stored'),
-            ),
-          )
-          .limit(1);
-        if (record?.s3Key)
-          file = {
-            s3Key: record.s3Key,
-            filename: record.s3Key.split('/').pop() ?? 'УПД.xml',
-            mimeType: 'application/xml',
-          };
-      } else if (match.sourceDocumentId) {
-        const [attachment] = await app.db
-          .select({
-            s3Key: sourceDocumentAttachments.s3Key,
-            filename: sourceDocumentAttachments.filename,
-            mimeType: sourceDocumentAttachments.mimeType,
-          })
-          .from(sourceDocumentAttachments)
-          .where(
-            and(
-              eq(sourceDocumentAttachments.sourceDocumentId, match.sourceDocumentId),
-              eq(sourceDocumentAttachments.role, 'original'),
-            ),
-          )
-          .orderBy(desc(sourceDocumentAttachments.createdAt))
-          .limit(1);
-        if (attachment)
-          file = {
-            s3Key: attachment.s3Key,
-            filename: attachment.filename,
-            mimeType: attachment.mimeType ?? 'application/octet-stream',
-          };
-      }
+      // Резолв общий с машинным каналом 1С (domain/edo/edo-match-file.ts).
+      const resolved = await resolveEdoMatchFile(app.db, req.params.id, req.params.matchId);
+      if (resolved.kind === 'not_found') return reply.code(404).send({ error: 'not_found' });
+      const file = resolved.kind === 'ok' ? resolved.file : null;
       if (!file) return reply.code(404).send({ error: 'file_not_found' });
       try {
         return {

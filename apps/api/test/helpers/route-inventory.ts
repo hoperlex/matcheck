@@ -85,6 +85,8 @@ export async function collectRoutes(): Promise<RouteRow[]> {
     roleTags.set(fn, roles);
     return fn;
   }) as never);
+  // Машинный канал (plugins/auth.ts): страж scope учётки, ролей у него нет.
+  app.decorate('requireScope', (() => async () => {}) as never);
 
   // Заглушки инфраструктуры: на этапе регистрации роутов до них не доходит,
   // но некоторые модули дотрагиваются до них в теле плагина.

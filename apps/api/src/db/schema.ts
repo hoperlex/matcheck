@@ -3108,3 +3108,116 @@ export const deliveryContractEvents = pgTable(
     ),
   ],
 );
+
+// ─────────────────────────── Интеграция с 1С ───────────────────────────────
+// Миграция 0147. Машинные учётки (docs/fin_auth.md §2) и состояние выгрузки
+// приёмок в 1С (pull + ack). Протокол — docs/ONEC_API.md.
+
+/** Машинная учётка внешней системы: client_id + секрет (в базе только sha256). */
+export const serviceAccounts = pgTable(
+  'service_accounts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    clientId: varchar('client_id', { length: 64 }).notNull(),
+    name: text('name').notNull(),
+    secretHash: varchar('secret_hash', { length: 64 }).notNull(),
+    /** Попадает в machine-токен (claim gen): ротация секрета отзывает выданные токены. */
+    secretGeneration: integer('secret_generation').notNull().default(1),
+    scopes: text('scopes').array().notNull().default(sql`'{}'::text[]`),
+    /** NULL — без ограничения по сети. */
+    allowedCidrs: text('allowed_cidrs').array(),
+    isActive: boolean('is_active').notNull().default(true),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    lastTokenAt: timestamp('last_token_at', { withTimezone: true }),
+    lastTokenIp: varchar('last_token_ip', { length: 64 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('service_accounts_client_id_uq').on(t.clientId),
+    check('service_accounts_client_id_format', sql`${t.clientId} ~ '^[a-z0-9][a-z0-9_-]{1,63}$'`),
+    check('service_accounts_secret_hash_format', sql`${t.secretHash} ~ '^[0-9a-f]{64}$'`),
+    check('service_accounts_generation_positive', sql`${t.secretGeneration} >= 1`),
+  ],
+);
+
+export type OnecQueueReason = 'changed' | 'deleted' | 'restored';
+
+/**
+ * Что лежит в 1С по приёмке. delivery_id без FK — строка переживает жёсткое
+ * удаление приёмки, иначе 1С не узнала бы об удалении.
+ */
+export const deliveryOnecExports = pgTable(
+  'delivery_onec_exports',
+  {
+    deliveryId: uuid('delivery_id').primaryKey(),
+    displayId: bigint('display_id', { mode: 'number' }),
+    /** NULL — успешного подтверждения ещё не было; 'deleted' — 1С применила удаление. */
+    contentHash: varchar('content_hash', { length: 64 }),
+    hashVersion: integer('hash_version'),
+    /** Когда 1С подтвердила ЭТОТ хеш; от него отсчитывается окно поиска изменений. */
+    exportedAt: timestamp('exported_at', { withTimezone: true }),
+    firstExportedAt: timestamp('first_exported_at', { withTimezone: true }),
+    lastAckAt: timestamp('last_ack_at', { withTimezone: true }),
+    ackCount: integer('ack_count').notNull().default(0),
+    queueReason: text('queue_reason').$type<OnecQueueReason>(),
+    /** Устойчивое время причины — порядок очереди; меняется только со сменой причины. */
+    queueSince: timestamp('queue_since', { withTimezone: true }),
+    /** Для 'changed' — последний вычисленный текущий хеш. */
+    pendingHash: varchar('pending_hash', { length: 64 }),
+    lastError: text('last_error'),
+    lastErrorAt: timestamp('last_error_at', { withTimezone: true }),
+    serviceAccountId: uuid('service_account_id').references(() => serviceAccounts.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('delivery_onec_exports_exported_at_idx').on(t.exportedAt),
+    index('delivery_onec_exports_queue_idx')
+      .on(t.queueSince, t.deliveryId)
+      .where(sql`${t.queueReason} IS NOT NULL`),
+    check(
+      'delivery_onec_exports_hash_format',
+      sql`${t.contentHash} IS NULL OR ${t.contentHash} = 'deleted' OR ${t.contentHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      'delivery_onec_exports_pending_format',
+      sql`${t.pendingHash} IS NULL OR ${t.pendingHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      'delivery_onec_exports_reason_check',
+      sql`${t.queueReason} IS NULL OR ${t.queueReason} IN ('changed', 'deleted', 'restored')`,
+    ),
+    check(
+      'delivery_onec_exports_reason_needs_hash',
+      sql`${t.contentHash} IS NOT NULL OR ${t.queueReason} IS NULL`,
+    ),
+    check(
+      'delivery_onec_exports_reason_since',
+      sql`(${t.queueReason} IS NULL) = (${t.queueSince} IS NULL)`,
+    ),
+    check(
+      'delivery_onec_exports_hash_exported_at',
+      sql`(${t.contentHash} IS NULL) = (${t.exportedAt} IS NULL)`,
+    ),
+    check(
+      'delivery_onec_exports_hash_version',
+      sql`${t.contentHash} IS NULL OR ${t.contentHash} = 'deleted' OR ${t.hashVersion} IS NOT NULL`,
+    ),
+  ],
+);
+
+/** Одна строка: последний проход поиска изменений для 1С. */
+export const onecDetectionState = pgTable(
+  'onec_detection_state',
+  {
+    id: integer('id').primaryKey().default(1),
+    lastPassStartedAt: timestamp('last_pass_started_at', { withTimezone: true }),
+    lastPassFinishedAt: timestamp('last_pass_finished_at', { withTimezone: true }),
+    lastPassRows: integer('last_pass_rows'),
+    lastPassMs: integer('last_pass_ms'),
+  },
+  (t) => [check('onec_detection_state_singleton', sql`${t.id} = 1`)],
+);

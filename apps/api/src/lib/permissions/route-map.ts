@@ -287,6 +287,8 @@ const MSG: RuleMeta = { capability: 'operations.share.messages' };
  */
 const PHOTO_UPLOAD: RuleMeta = { capability: 'operations.photo.upload' };
 const PHOTO_MANAGE: RuleMeta = { capability: 'operations.photo.manage' };
+const ONEC_CHANNEL =
+  'Машинный канал 1С: доступ по machine-токену сервисной учётки и её scope, не по матрице ролей.';
 const GAP =
   'РАЗРЫВ «API щедрее UI»: роль имеет доступ по API, но страницы в вебе у неё нет. ' +
   'Перечисленные роли идут мимо матрицы — сужение отложено до отдельного согласования ' +
@@ -328,6 +330,12 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['POST /api/v1/public/password-reset/request', always('Публичный сброс пароля.', { matrixOnly: SELF })],
   ['POST /api/v1/public/password-reset/inspect', always('Публичный сброс пароля.', { matrixOnly: SELF })],
   ['POST /api/v1/public/password-reset/consume', always('Публичный сброс пароля.', { matrixOnly: SELF })],
+  [
+    'POST /api/v1/public/integration/token',
+    always('Выдача machine-токена внешней системе по секрету учётки (fin_auth §2).', {
+      matrixOnly: SELF,
+    }),
+  ],
   ['GET /api/v1/share/:token', always(SHARE_TOKEN, { matrixOnly: SELF })],
   ['GET /api/v1/share/:token/messages', always(SHARE_TOKEN, { matrixOnly: SELF })],
   ['POST /api/v1/share/:token/messages', always(SHARE_TOKEN, { matrixOnly: SELF })],
@@ -973,6 +981,22 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     },
   ],
   ['PUT /api/v1/admin/settings', st('admin.settings', 'edit')],
+  // ─────────────────────────── Машинный канал 1С ──────────────────────────
+  // req.user здесь не заполняется никогда (plugins/auth.ts, ветка integration):
+  // доступ — machine-токен сервисной учётки и её scope (app.requireScope), а не
+  // матрица ролей. matrixOnly — констатация, как у публичного периметра.
+  ['GET /api/v1/integration/1c/deliveries/queue', always(ONEC_CHANNEL, { matrixOnly: NO })],
+  ['GET /api/v1/integration/1c/deliveries', always(ONEC_CHANNEL, { matrixOnly: NO })],
+  ['GET /api/v1/integration/1c/deliveries/:id', always(ONEC_CHANNEL, { matrixOnly: NO })],
+  [
+    'GET /api/v1/integration/1c/deliveries/by-number/:displayId',
+    always(ONEC_CHANNEL, { matrixOnly: NO }),
+  ],
+  [
+    'GET /api/v1/integration/1c/deliveries/:id/edo/:matchId/xml',
+    always(ONEC_CHANNEL, { matrixOnly: NO }),
+  ],
+  ['POST /api/v1/integration/1c/deliveries/ack', always(ONEC_CHANNEL, { matrixOnly: NO })],
 ]);
 
 /**

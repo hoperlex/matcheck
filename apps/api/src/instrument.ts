@@ -31,6 +31,10 @@ const SENSITIVE_KEYS = new Set([
   'set-cookie',
   'apikey',
   'api_key',
+  // Машинный канал 1С (OAuth-имена полей): секрет учётки и выданный токен.
+  'client_secret',
+  'clientsecret',
+  'access_token',
   'csrf',
   'x-csrf-token',
   'email',

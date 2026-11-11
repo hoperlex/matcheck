@@ -33,3 +33,4 @@ export * from './share.js';
 export * from './share-messages.js';
 export * from './password-reset.js';
 export * from './public-upload.js';
+export * from './integration-onec.js';

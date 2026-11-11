@@ -4,6 +4,12 @@ import { eq } from 'drizzle-orm';
 import { verifyAccessToken, type AccessTokenClaims } from '../domain/auth/jwt.js';
 import { users, sessions, unauthorizedAccessLog } from '../db/schema.js';
 import { ACCESS_COOKIE_NAME } from '../domain/auth/refresh.js';
+import {
+  resolveServicePrincipal,
+  type ServicePrincipal,
+} from '../domain/auth/service-accounts.js';
+import { clientIpOf } from '../lib/client-ip.js';
+import { loadEnv } from '../lib/env.js';
 
 export type AuthUser = {
   id: string;
@@ -34,8 +40,16 @@ export type AuthorizeGuard = ((req: FastifyRequest, reply: FastifyReply) => Prom
 declare module 'fastify' {
   interface FastifyRequest {
     user?: AuthUser;
+    /**
+     * Машинная учётка внешней системы — только на /api/v1/integration/*.
+     * Там req.user не заполняется никогда: машинный канал не получает прав
+     * пользователя, а матрица ролей его не судит (plugins/permissions.ts).
+     */
+    serviceAccount?: ServicePrincipal;
   }
   interface FastifyInstance {
+    /** preHandler машинного канала: у учётки должно быть право scope, иначе 403. */
+    requireScope: (scope: string) => (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
     authenticate: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
     authorize: (
       ...roles: AuthUser['role'][]
@@ -71,7 +85,33 @@ const PUBLIC_PATHS = new Set([
  */
 const PUBLIC_ROUTE_PREFIX = '/api/v1/public/';
 
-export default fp(async (app) => {
+/**
+ * Namespace машинного канала внешних систем (docs/fin_auth.md §2).
+ *
+ * Здесь принимается ТОЛЬКО machine-токен и ТОЛЬКО из заголовка Authorization:
+ * пользовательский JWT отвергается (другой audience и тип), cookie не читается —
+ * браузер пользователя не должен попадать в машинный канал своей сессией.
+ */
+export const INTEGRATION_ROUTE_PREFIX = '/api/v1/integration/';
+
+const ONEC_ROUTE_PREFIX = '/api/v1/integration/1c/';
+
+export type AuthPluginOptions = {
+  /**
+   * Открыт ли канал для шаблона маршрута. По умолчанию — рубильник из env
+   * (ONEC_INTEGRATION_ENABLED для /1c/); неизвестный канал закрыт. Параметр —
+   * для тестов: loadEnv кэширует значение на весь процесс.
+   */
+  integrationEnabled?: (routeUrl: string) => boolean;
+};
+
+function defaultIntegrationEnabled(routeUrl: string): boolean {
+  if (routeUrl.startsWith(ONEC_ROUTE_PREFIX)) return loadEnv().ONEC_INTEGRATION_ENABLED;
+  return false;
+}
+
+export default fp<AuthPluginOptions>(async (app, opts) => {
+  const integrationEnabled = opts.integrationEnabled ?? defaultIntegrationEnabled;
   async function logUnauthorized(
     req: FastifyRequest,
     statusCode: number,
@@ -208,13 +248,48 @@ export default fp(async (app) => {
     return guard;
   });
 
+  app.decorate('requireScope', (scope: string) => {
+    return async (req: FastifyRequest, reply: FastifyReply) => {
+      if (!req.serviceAccount) {
+        await logUnauthorized(req, 401, 'integration_principal_missing');
+        reply.code(401).send({ error: 'unauthorized' });
+        return;
+      }
+      if (!req.serviceAccount.scopes.includes(scope)) {
+        await logUnauthorized(req, 403, `scope_required:${scope}`);
+        reply.code(403).send({ error: 'insufficient_scope', message: `Нужно право ${scope}` });
+      }
+    };
+  });
+
   app.addHook('onRequest', async (req, reply) => {
+    // Машинный канал — до публичного периметра и до пользовательской проверки.
+    // Тоже по ШАБЛОНУ роута: сырой url подделывается так же, как у public.
+    const routeUrl = req.routeOptions?.url;
+    if (routeUrl?.startsWith(INTEGRATION_ROUTE_PREFIX)) {
+      if (!integrationEnabled(routeUrl)) {
+        reply.code(503).send({ error: 'integration_disabled' });
+        return;
+      }
+      const header = req.headers.authorization;
+      const token = header?.startsWith('Bearer ') ? header.slice(7) : null;
+      const principal = token
+        ? await resolveServicePrincipal(app.db, token, clientIpOf(req))
+        : null;
+      if (!principal) {
+        await logUnauthorized(req, 401, 'integration_auth_required');
+        reply.code(401).send({ error: 'unauthorized' });
+        return;
+      }
+      req.serviceAccount = principal;
+      return;
+    }
     // Матчим ШАБЛОН роута, а не сырой req.url: сырой можно подделать
     // (`/api/v1/public/../sites`), шаблон выдаёт роутер уже после матчинга.
     // На 404 routeOptions.url отсутствует — поведение прежнее, 401.
     // req.user при этом НЕ заполняется: залогиненный пользователь, открывший
     // публичную страницу, не получает на ней скрытых привилегий.
-    if (req.routeOptions?.url?.startsWith(PUBLIC_ROUTE_PREFIX)) {
+    if (routeUrl?.startsWith(PUBLIC_ROUTE_PREFIX)) {
       return;
     }
     if (PUBLIC_PATHS.has(req.url.split('?')[0] ?? '') || req.url.startsWith('/health')) {

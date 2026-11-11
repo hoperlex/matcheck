@@ -767,6 +767,20 @@ const envSchema = z.object({
     .transform((v) => v === '1'),
   ESTIMAT_SYNC_INTERVAL_SEC: z.coerce.number().int().min(300).default(1800),
 
+  // Выгрузка приёмок в 1С (docs/ONEC_API.md). Рубильник закрывает канал целиком:
+  // выдачу machine-токена и все маршруты /api/v1/integration/1c/* (503
+  // integration_disabled). Дату начала очереди здесь НЕ разбираем: loadEnv
+  // бросает на любой ошибке, а файл общий для api/worker/mail-worker — опечатка в
+  // дате уронила бы все три процесса. Её разбирает обработчик очереди и при
+  // неверном значении отвечает 503 not_configured.
+  ONEC_INTEGRATION_ENABLED: z
+    .preprocess((v) => (v === '' ? undefined : v), z.enum(['0', '1']).default('0'))
+    .transform((v) => v === '1'),
+  ONEC_EXPORT_SINCE: z.string().optional(),
+  // Сколько дней после подтверждения 1С ищем изменения приёмки. Найденное
+  // изменение держится в очереди до подтверждения независимо от окна.
+  ONEC_CHANGE_WINDOW_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+
   // Публичная форма /uploads — потолки приёма.
   //
   // Значения по умолчанию согласованы с мощностью воркера: при CONCURRENCY=1

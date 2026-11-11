@@ -77,11 +77,17 @@ export async function signAccessToken(claims: AccessTokenClaims): Promise<string
 
 export async function verifyAccessToken(token: string): Promise<AccessTokenClaims> {
   const { publicKey } = await getJwtKeys();
-  const { payload } = await jwtVerify(token, publicKey, {
+  const { payload, protectedHeader } = await jwtVerify(token, publicKey, {
     issuer: ENV.JWT_ISSUER,
     audience: ENV.JWT_AUDIENCE,
     algorithms: [ALG],
   });
+  // Machine-токен внешней системы пользовательским не бывает ни при каких
+  // настройках audience. Именно отказ по метке, а не требование метки у
+  // пользовательских: уже выданные токены веба и планшетов typ не несут.
+  if (protectedHeader.typ === MACHINE_TOKEN_TYP) {
+    throw new Error('machine token is not a user access token');
+  }
   return {
     sub: payload.sub as string,
     role: payload['role'] as AccessTokenClaims['role'],
@@ -89,4 +95,50 @@ export async function verifyAccessToken(token: string): Promise<AccessTokenClaim
     aal: (payload['aal'] as AccessTokenClaims['aal']) ?? 'aal1',
     iat: payload.iat,
   };
+}
+
+// ─── Machine-токен внешней системы (docs/fin_auth.md §2) ──────────────────
+//
+// Отдельный audience и явная метка типа в заголовке (RFC 8725 §3.11): токен 1С
+// не принимается пользовательской проверкой, а пользовательский — машинной,
+// даже если кто-то выставит JWT_AUDIENCE равным машинному.
+
+export const MACHINE_TOKEN_TYP = 'mc+jwt';
+export const MACHINE_TOKEN_AUDIENCE = 'matcheck-integration';
+export const MACHINE_TOKEN_TTL_SECONDS = 600;
+
+export type MachineTokenClaims = {
+  /** id строки service_accounts. */
+  sub: string;
+  scopes: string[];
+  /** service_accounts.secret_generation на момент выдачи. */
+  gen: number;
+};
+
+export async function signMachineToken(claims: MachineTokenClaims): Promise<string> {
+  const { privateKey } = await getJwtKeys();
+  return await new SignJWT({ scope: claims.scopes.join(' '), gen: claims.gen })
+    .setProtectedHeader({ alg: ALG, typ: MACHINE_TOKEN_TYP })
+    .setSubject(claims.sub)
+    .setIssuer(ENV.JWT_ISSUER)
+    .setAudience(MACHINE_TOKEN_AUDIENCE)
+    .setIssuedAt()
+    .setExpirationTime(`${MACHINE_TOKEN_TTL_SECONDS}s`)
+    .sign(privateKey);
+}
+
+export async function verifyMachineToken(token: string): Promise<MachineTokenClaims> {
+  const { publicKey } = await getJwtKeys();
+  const { payload } = await jwtVerify(token, publicKey, {
+    issuer: ENV.JWT_ISSUER,
+    audience: MACHINE_TOKEN_AUDIENCE,
+    algorithms: [ALG],
+    typ: MACHINE_TOKEN_TYP,
+  });
+  const gen = payload['gen'];
+  const scope = payload['scope'];
+  if (typeof payload.sub !== 'string' || typeof gen !== 'number' || typeof scope !== 'string') {
+    throw new Error('malformed machine token');
+  }
+  return { sub: payload.sub, gen, scopes: scope.split(' ').filter(Boolean) };
 }
