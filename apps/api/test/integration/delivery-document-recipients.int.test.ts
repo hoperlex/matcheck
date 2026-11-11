@@ -18,6 +18,10 @@ suite('получатели документов приёмки (PostgreSQL)', {
   let sql: ReturnType<typeof postgres>;
   let currentUser: AuthUser;
   let reviewAllowed = true;
+  // Администратор выдал Мониторингу «Приёмки × Редактировать». Боевой плагин
+  // прав тогда ставит req.permissionExpanded, и authorize снимает allow-list;
+  // здесь плагина нет, поэтому оба слоя повторены моками ниже.
+  let monitorEditGranted = false;
   const siteId = randomUUID();
   const managerId = randomUUID();
   const sessionId = randomUUID();
@@ -40,16 +44,21 @@ suite('получатели документов приёмки (PostgreSQL)', {
       contractorCustomerId: null,
       sessionId,
     };
-    app.decorate('authenticate', async (req: { user?: AuthUser }) => {
-      req.user = currentUser;
-    });
+    app.decorate(
+      'authenticate',
+      async (req: { user?: AuthUser; permissionExpanded?: boolean }) => {
+        req.user = currentUser;
+        if (currentUser.role === 'monitor' && monitorEditGranted) req.permissionExpanded = true;
+      },
+    );
     app.decorate(
       'authorize',
       (...roles: UserRole[]) =>
         async (
-          req: { user?: AuthUser },
+          req: { user?: AuthUser; permissionExpanded?: boolean },
           reply: { code: (n: number) => { send: (v: unknown) => void } },
         ) => {
+          if (req.permissionExpanded) return;
           if (!req.user || !roles.includes(req.user.role))
             reply.code(403).send({ error: 'forbidden' });
         },
@@ -57,7 +66,12 @@ suite('получатели документов приёмки (PostgreSQL)', {
     app.decorate('permissions', {
       enforced: true,
       get: async () =>
-        new Map(reviewAllowed ? [] : [['manager:operations.deliveries', { review: false }]]),
+        new Map([
+          ...(reviewAllowed ? [] : [['manager:operations.deliveries', { review: false }] as const]),
+          ...(monitorEditGranted
+            ? [['monitor:operations.deliveries', { view: true, review: true, edit: true }] as const]
+            : []),
+        ]),
     } as never);
     app.decorate('logUnauthorized', async () => {});
     await app.register(deliveryRoutes);
@@ -80,6 +94,7 @@ suite('получатели документов приёмки (PostgreSQL)', {
 
   beforeEach(() => {
     reviewAllowed = true;
+    monitorEditGranted = false;
     currentUser = { ...currentUser, role: 'manager' };
   });
 
@@ -330,7 +345,7 @@ suite('получатели документов приёмки (PostgreSQL)', {
     reviewAllowed = true;
   });
 
-  it('новые PATCH не двигают version/updated_at; монитор меняет только признак', async () => {
+  it('новые PATCH не двигают version/updated_at; монитор без «Редактировать» меняет только признак', async () => {
     const id = await makeDelivery();
     const before = await sql<{ version: number; updated_at: Date }[]>`
       SELECT version, updated_at FROM deliveries WHERE id=${id}`;
@@ -348,6 +363,31 @@ suite('получатели документов приёмки (PostgreSQL)', {
       SELECT version, updated_at FROM deliveries WHERE id=${id}`;
     expect(after[0]!.version).toBe(before[0]!.version);
     expect(String(after[0]!.updated_at)).toBe(String(before[0]!.updated_at));
+    currentUser = { ...currentUser, role: 'manager' };
+  });
+
+  it('монитор с выданным «Редактировать» включает режим и меняет получателя документа', async () => {
+    // Обработчик не должен держать роль сам: раньше здесь была жёсткая проверка
+    // admin/manager, и выданное право до записи не доходило.
+    const id = await makeDelivery(2, 'mol');
+    currentUser = { ...currentUser, role: 'monitor' };
+    monitorEditGranted = true;
+    expect((await patch(id, '/recipient-mode', { perDocument: true })).statusCode).toBe(200);
+    expect((await patch(id, `${link(docs[0]!)}/recipient`, { contractorId })).statusCode).toBe(200);
+    expect(
+      (await patch(id, `${link(docs[1]!)}/purpose`, { purpose: 'realization' })).statusCode,
+    ).toBe(200);
+    const [on] = await sql<{ recipients_per_document: boolean }[]>`
+      SELECT recipients_per_document FROM deliveries WHERE id=${id}`;
+    expect(on!.recipients_per_document).toBe(true);
+    const [own] = await sql<{ own_recipient: boolean; contractor_id: string | null }[]>`
+      SELECT own_recipient, contractor_id FROM delivery_sources WHERE delivery_id=${id} AND source_document_id=${docs[0]}`;
+    expect(own).toMatchObject({ own_recipient: true, contractor_id: contractorId });
+    // Выключение при своём признаке требует review — у монитора оно базовое.
+    expect((await patch(id, '/recipient-mode', { perDocument: false })).statusCode).toBe(200);
+    const rows = await sql<{ own_recipient: boolean; own_purpose: boolean }[]>`
+      SELECT own_recipient, own_purpose FROM delivery_sources WHERE delivery_id=${id}`;
+    expect(rows.every((r) => !r.own_recipient && !r.own_purpose)).toBe(true);
     currentUser = { ...currentUser, role: 'manager' };
   });
 

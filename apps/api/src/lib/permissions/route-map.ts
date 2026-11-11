@@ -237,6 +237,17 @@ const CONTRACT_LINK: RouteRule = st('operations.deliveries', 'edit', {
   capability: 'operations.edit.contract',
   expandableBy: UNSCOPED,
 });
+/**
+ * Режим «Разные получатели по документам» и получатель отдельного УПД — одна
+ * функция, одна возможность: иначе тумблер включается, а выбор получателя у
+ * строки отвечает 403. allow-list — admin/manager; monitor получает её
+ * расширением ячейки edit (решение 11.11.2026). Признак документа сюда не
+ * входит — это `review`, у монитора базовое.
+ */
+const DOCUMENT_RECIPIENT: RouteRule = st('operations.deliveries', 'edit', {
+  capability: 'operations.edit.document_recipient',
+  expandableBy: UNSCOPED,
+});
 const legacy = (
   page: PageId,
   action: PageAction,
@@ -344,8 +355,8 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // то есть неспособным быть расширенным до настоящей правки.
   ['PATCH /api/v1/deliveries/:id/review', st('operations.deliveries', 'review')],
   ['PATCH /api/v1/deliveries/:id/purpose', st('operations.deliveries', 'review')],
-  ['PATCH /api/v1/deliveries/:id/recipient-mode', st('operations.deliveries', 'edit')],
-  ['PATCH /api/v1/deliveries/:id/sources/:docId/recipient', st('operations.deliveries', 'edit')],
+  ['PATCH /api/v1/deliveries/:id/recipient-mode', DOCUMENT_RECIPIENT],
+  ['PATCH /api/v1/deliveries/:id/sources/:docId/recipient', DOCUMENT_RECIPIENT],
   ['PATCH /api/v1/deliveries/:id/sources/:docId/purpose', st('operations.deliveries', 'review')],
   ['PATCH /api/v1/deliveries/:id/dispatcher-check', st('operations.deliveries', 'review')],
   // Три маршрута ниже открыты только admin/manager, хотя базовый edit есть и у

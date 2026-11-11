@@ -120,6 +120,16 @@ async function buildApp(opts: {
     async () => ({ ok: 'flags' }),
   );
   instance.patch('/api/v1/deliveries/:id/review', async () => ({ ok: 'review' }));
+  // Тумблер «Разные получатели по документам»: allow-list и проверка матрицы
+  // как в routes/delivery-document-recipients.ts.
+  instance.patch(
+    '/api/v1/deliveries/:id/recipient-mode',
+    { preHandler: [authorize('admin', 'manager')] as never },
+    async (req) => {
+      await assertPermission(req, 'operations.deliveries', 'edit');
+      return { ok: 'recipient-mode' };
+    },
+  );
   // Окно подбора УПД из ЭДО: чтение для кнопки привязки, allow-list как в
   // routes/delivery-edo.ts.
   instance.get(
@@ -199,6 +209,7 @@ describe('Мониторинг без выданных прав', () => {
     expect((await post(app, '/api/v1/photos/photo-1/content')).statusCode).toBe(403);
     // Окно подбора УПД из ЭДО — часть привязки, без «Редактировать» закрыто.
     expect((await get(app, '/api/v1/deliveries/1/edo-candidates')).statusCode).toBe(403);
+    expect((await patch(app, '/api/v1/deliveries/1/recipient-mode')).statusCode).toBe(403);
   });
 });
 
@@ -276,6 +287,15 @@ describe('администратор выдал Мониторингу «Ред�
     // кнопка вела в 403 «Не удалось загрузить УПД из ЭДО».
     app = await buildApp({ role: 'monitor', overrides: monitorGranted({ canEdit: true }) });
     expect((await get(app, '/api/v1/deliveries/1/edo-candidates')).statusCode).toBe(200);
+  });
+
+  it('тумблер «Разные получатели» открывается тем же правом', async () => {
+    // Раньше монитор видел тумблер серым: роль была зашита и в вебе, и в
+    // обработчике, а маршрут не открывался расширением.
+    app = await buildApp({ role: 'monitor', overrides: monitorGranted({ canEdit: true }) });
+    const res = await patch(app, '/api/v1/deliveries/1/recipient-mode');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: 'recipient-mode' });
   });
 });
 

@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   applyLocalEdit: vi.fn(),
   enqueueMutation: vi.fn(),
   flushMutation: vi.fn(),
+  // Возможности, которых у пользователя НЕТ; по умолчанию есть все.
+  deniedCapabilities: new Set<string>(),
 }));
 
 vi.mock('../../services/api', async () => {
@@ -50,7 +52,7 @@ vi.mock('../../shared/hooks/usePermissions', () => ({
     can: () => true,
     canView: () => true,
     canViewGroup: () => true,
-    hasCapability: () => true,
+    hasCapability: (capability: string) => !mocks.deniedCapabilities.has(capability),
     enforced: true,
     loading: false,
   }),
@@ -223,6 +225,7 @@ afterEach(() => {
   vi.clearAllMocks();
   authUser.role = 'monitor';
   contractResponse = EMPTY_CONTRACTS;
+  mocks.deniedCapabilities.clear();
 });
 
 describe('режим получателей по УПД', () => {
@@ -240,6 +243,34 @@ describe('режим получателей по УПД', () => {
         perDocument: true,
       }),
     );
+  });
+
+  it('Мониторинг с выданным «Редактировать» включает его так же, как менеджер', async () => {
+    // authUser.role по умолчанию — monitor. Раньше тумблер был серым по роли,
+    // независимо от выданного права.
+    current = delivery(3, []);
+    vi.mocked(api.patch).mockResolvedValue({ ...current, recipientsPerDocument: true });
+    renderCard();
+    const label = await screen.findByText('Разные получатели по документам');
+    const switchEl = () => label.parentElement!.querySelector('[role="switch"]') as HTMLButtonElement;
+    await waitFor(() => expect(switchEl().disabled).toBe(false));
+    fireEvent.click(switchEl());
+    await waitFor(() =>
+      expect(api.patch).toHaveBeenCalledWith(`/deliveries/${ID}/recipient-mode`, {
+        perDocument: true,
+      }),
+    );
+  });
+
+  it('без возможности document_recipient тумблер серый и запрос не уходит', async () => {
+    mocks.deniedCapabilities.add('operations.edit.document_recipient');
+    current = delivery(3, []);
+    renderCard();
+    const label = await screen.findByText('Разные получатели по документам');
+    const switchEl = label.parentElement!.querySelector('[role="switch"]') as HTMLButtonElement;
+    expect(switchEl.disabled).toBe(true);
+    fireEvent.click(switchEl);
+    expect(api.patch).not.toHaveBeenCalled();
   });
 
   it('ответ PATCH сразу в карточке: тумблер включён без повторного GET карточки', async () => {

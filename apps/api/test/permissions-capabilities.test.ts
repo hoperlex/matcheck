@@ -69,11 +69,13 @@ describe('capabilities: фактический доступ, а не перес�
     expect(caps).not.toContain('operations.edit.flags');
     expect(caps).not.toContain('operations.edit.link_source');
     expect(caps).not.toContain('operations.edit.supplier_directory');
+    expect(caps).not.toContain('operations.edit.document_recipient');
   });
 
   it('менеджер получает правку, но не удаление навсегда', async () => {
     const caps = capabilitiesFor(EMPTY, 'manager', await roleMap());
     expect(caps).toContain('operations.edit.flags');
+    expect(caps).toContain('operations.edit.document_recipient');
     expect(caps).toContain('operations.share.revoke');
     expect(caps).not.toContain('operations.delete.bulk_hard');
   });
@@ -83,6 +85,7 @@ describe('capabilities: фактический доступ, а не перес�
     expect(caps).not.toContain('operations.edit.flags');
     expect(caps).not.toContain('operations.share.manage');
     expect(caps).not.toContain('operations.edit.contractor_directory');
+    expect(caps).not.toContain('operations.edit.document_recipient');
   });
 
   it('подрядчик из справочника: менеджеру да, инспектору нет', async () => {
@@ -167,6 +170,8 @@ describe('политика расширения: выданное право о�
     expect(caps).toContain('operations.edit.flags');
     expect(caps).toContain('operations.edit.link_source');
     expect(caps).toContain('operations.edit.contractor_directory');
+    // Тумблер «Разные получатели» и получатель строки УПД (решение 11.11.2026).
+    expect(caps).toContain('operations.edit.document_recipient');
   });
 
   it('выданный монитору edit НЕ открывает ссылки-шаринги', async () => {

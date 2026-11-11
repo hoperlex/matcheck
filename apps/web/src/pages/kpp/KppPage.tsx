@@ -1869,8 +1869,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     const recipientDirty =
       (recipientKind === 'counterparty' ? contractorId : null) !== loadedDelivery.contractorId ||
       (recipientKind === 'mol' ? recipientMolId : null) !== loadedDelivery.recipientMolId;
+    // Тумблер «Разные получатели» и получатель строки УПД — по возможности,
+    // а не по роли: Мониторинг получает её выданным «Редактировать».
     const canEditDocumentRecipient =
-      ['admin', 'manager'].includes(authUser?.role ?? '') && canEditDelivery;
+      canEditDelivery && hasCapability('operations.edit.document_recipient');
     const ownDocumentPurposeExists = (loadedDelivery.documentRecipients ?? []).some(
       (x) => x.ownPurpose,
     );

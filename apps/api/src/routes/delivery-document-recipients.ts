@@ -133,8 +133,9 @@ export function registerDeliveryDocumentRecipientRoutes(
       },
     },
     async (req, reply) => {
-      if (!['admin', 'manager'].includes(req.user?.role ?? ''))
-        return reply.code(403).send({ error: 'forbidden' });
+      // Роль проверяет authorize выше: Мониторинг проходит его только
+      // расширением ячейки edit (route-map, DOCUMENT_RECIPIENT). Второй
+      // жёсткой проверки роли здесь нет — она держала бы его всегда.
       await assertPermission(req, 'operations.deliveries', 'edit');
       const result = await app.db.transaction(async (tx) => {
         const row = await lockDelivery(tx, req.params.id);
@@ -186,8 +187,7 @@ export function registerDeliveryDocumentRecipientRoutes(
       schema: { params: DocParams, body: RecipientBody, response: Responses },
     },
     async (req, reply) => {
-      if (!['admin', 'manager'].includes(req.user?.role ?? ''))
-        return reply.code(403).send({ error: 'forbidden' });
+      // Как у recipient-mode: роль — authorize, монитор — расширением edit.
       await assertPermission(req, 'operations.deliveries', 'edit');
       const result = await app.db.transaction(async (tx) => {
         const row = await lockDelivery(tx, req.params.id);
