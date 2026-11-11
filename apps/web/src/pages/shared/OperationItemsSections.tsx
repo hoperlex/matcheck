@@ -202,9 +202,15 @@ export function OperationItemsSections<T extends RowBase>({
               pagination={{ pageSize: 100, showSizeChanger: false, hideOnSinglePage: true }}
             />
           );
+        const label = sectionLabel ? sectionLabel(section, defaultLabel) : defaultLabel;
         return {
           key: section.key,
-          label: sectionLabel ? sectionLabel(section, defaultLabel) : defaultLabel,
+          // В режиме «разные получатели» справа много чипов. Название блока не
+          // переносится: его ширина — минимум заголовка во flex-раскладке antd,
+          // и сжимается (переносится) только правая часть, когда места
+          // действительно нет. Фиксированный потолок справа (раньше 720 px)
+          // ломал строку и при свободном месте слева.
+          label: constrainExtra ? <span style={{ whiteSpace: 'nowrap' }}>{label}</span> : label,
           extra:
             extraContent || addButton || removeButton ? (
               // Клик в заголовке переключает блок, а всплывающие подтверждения
@@ -212,9 +218,7 @@ export function OperationItemsSections<T extends RowBase>({
               <span
                 onClick={(e) => e.stopPropagation()}
                 style={
-                  constrainExtra
-                    ? { display: 'inline-flex', minWidth: 0, maxWidth: 'min(65vw, 720px)' }
-                    : undefined
+                  constrainExtra ? { display: 'inline-flex', minWidth: 0, maxWidth: '100%' } : undefined
                 }
               >
                 <Space
