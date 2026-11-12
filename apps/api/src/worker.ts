@@ -2918,6 +2918,17 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         qtyRepairApplied.length > 0 ||
         torg12QtyApplied.length > 0
       ) {
+        // Порядок блокировок «документ → позиции» — общий для переразбора
+        // (ниже UPDATE документа, затем DELETE позиций), создания и обновления
+        // приёмки и отгрузки, link-source. Без строки документа впереди эта
+        // ветка брала позиции первой и образовывала цикл с операцией, которая
+        // держит документ и ждёт позиции. Режим совпадает с последующим UPDATE,
+        // поэтому новых конфликтов нет — блокировка берётся раньше.
+        await txDb
+          .select({ id: sourceDocuments.id })
+          .from(sourceDocuments)
+          .where(eq(sourceDocuments.id, sourceDocumentId))
+          .for('no key update');
         const existingItemIds = await txDb
           .select({ id: sourceDocumentItems.id })
           .from(sourceDocumentItems)

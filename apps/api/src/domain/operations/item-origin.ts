@@ -110,6 +110,9 @@ function countBy<T>(rows: readonly T[], key: (row: T) => string): Map<string, nu
   return map;
 }
 
+/** Сколько строк сопоставлено только по названию и сколько отвергнуто как неоднозначные. */
+export type NameMatchStats = { matched: number; ambiguous: number };
+
 /**
  * Возвращает происхождение для каждой входящей позиции — в том же порядке.
  *
@@ -121,8 +124,28 @@ export function resolveItemOrigins(args: {
   existing: readonly ExistingItemRow[];
   incoming: readonly IncomingItem[];
   linkedDocumentIds: readonly string[];
+  nameOnlyFallback?: boolean;
 }): ItemOrigin[] {
+  return resolveItemOriginsWithStats(args).origins;
+}
+
+/**
+ * То же, что [resolveItemOrigins], плюс счётчики шага 2б — для лога маршрута.
+ *
+ * @param nameOnlyFallback включает шаг 2б (сопоставление по одному названию).
+ *   Только для запросов планшета: он присылает строки, которые не узнаются по
+ *   id, без происхождения и с «шт» вместо единицы документа — и ключ шага 2
+ *   («название|единица|номер») на них промахивается. Портал шлёт серверные id и
+ *   происхождение, ему шаг не нужен.
+ */
+export function resolveItemOriginsWithStats(args: {
+  existing: readonly ExistingItemRow[];
+  incoming: readonly IncomingItem[];
+  linkedDocumentIds: readonly string[];
+  nameOnlyFallback?: boolean;
+}): { origins: ItemOrigin[]; nameMatch: NameMatchStats } {
   const { existing, incoming, linkedDocumentIds } = args;
+  const nameMatch: NameMatchStats = { matched: 0, ambiguous: 0 };
   const allowed = new Set(linkedDocumentIds);
 
   const existingById = new Map(existing.map((r) => [r.id, r]));
@@ -184,7 +207,19 @@ export function resolveItemOrigins(args: {
     const key = fallbackKey(item);
     const row = pickUnique(existingByKey.get(key), incomingCountByKey.get(key));
     if (!row) continue;
+    // Занятость нужна шагу 2б. Самому шагу 2 она ничего не меняет: его
+    // множества построены до цикла, а pickUnique и так даёт соответствие один к
+    // одному.
+    claimedExistingIds.add(row.id);
     result[index] = inherit(row);
+  }
+
+  // Шаг 2б: только название — для строк планшета, на которых промахнулись все
+  // ключи выше. См. nameOnlyFallback и nameOnlyInherit.
+  if (args.nameOnlyFallback) {
+    const stats = nameOnlyInherit({ existing, incoming, result, claimedExistingIds });
+    nameMatch.matched = stats.matched;
+    nameMatch.ambiguous = stats.ambiguous;
   }
 
   // Шаг 3: строки, которым сопоставление ничего не дало, и строки, у которых в
@@ -197,7 +232,7 @@ export function resolveItemOrigins(args: {
   // до этой ветки не доходил. Строка, однажды сохранённая без привязки, уже
   // никогда не могла её получить: на бою так застряли 357 позиций в 109
   // приёмках, причём в 64 из них — все строки разом.
-  return incoming.map((item, index) => {
+  const origins = incoming.map((item, index) => {
     const resolved = result[index];
     // Непустое наследство неприкосновенно: клиент не должен уметь переписать
     // происхождение существующей строки — в этом весь смысл шагов 1–2.
@@ -210,6 +245,190 @@ export function resolveItemOrigins(args: {
       sourceDocumentItemId: item.sourceDocumentItemId ?? null,
     };
   });
+  return { origins, nameMatch };
+}
+
+/**
+ * Позиции документа, которые уже кому-то отданы или кем-то заявлены.
+ *
+ * Сюда идут и ссылки, присланные клиентом, даже непроверенные: слабому шагу
+ * лучше промолчать, чем выдать позицию, на которую уже претендует другая строка.
+ */
+function usedSourceItemIds(
+  resolved: readonly (ItemOrigin | null)[],
+  incoming: readonly { sourceDocumentItemId?: string | null }[],
+): Set<string> {
+  const used = new Set<string>();
+  for (const origin of resolved) {
+    if (origin?.sourceDocumentItemId) used.add(origin.sourceDocumentItemId);
+  }
+  for (const item of incoming) {
+    if (item.sourceDocumentItemId) used.add(item.sourceDocumentItemId);
+  }
+  return used;
+}
+
+/**
+ * Шаг 2б: наследование по одному названию.
+ *
+ * Зачем. Планшет на 2 Этапе присылает строки, которые не узнаются по id, без
+ * происхождения (черновик 2 Этапа его не хранит) и с «шт» вместо единицы
+ * документа. Ключ шага 2 содержит единицу и номер строки, поэтому на таких
+ * строках промахивается: теряют привязку все строки с не-«шт» единицей и все,
+ * у которых номер сдвинулся после удалённой строки (боевые 24687, 19525).
+ *
+ * Название — эвристика, поэтому правило отказывается при малейшей
+ * неоднозначности. Строке лучше остаться без привязки, чем получить чужую:
+ *  - кандидаты — только строки, которые ни один шаг не опознал И для которых
+ *    клиент не прислал документ. Строку, опознанную по id без происхождения,
+ *    не трогаем: «починка истории» побочным эффектом сохранения не нужна;
+ *  - название уникально среди ВСЕХ входящих строк, а не только кандидатов, —
+ *    иначе ручная строка рядом с одноимённой строкой документа заберёт её
+ *    позицию;
+ *  - название уникально среди ВСЕХ строк БД с происхождением, включая уже
+ *    занятые;
+ *  - строка БД не занята, её позиция документа никому не отдана и никем не
+ *    заявлена;
+ *  - решения принимаются по замороженным множествам и применяются потом,
+ *    поэтому результат не зависит от порядка строк. Если одну позицию документа
+ *    получили бы две строки (в БД две строки с общей позицией), не получает
+ *    никто.
+ *
+ * Значение, как и на шагах 1–2, берётся из БД: клиент максимум наследует
+ * происхождение другой строки той же приёмки.
+ */
+function nameOnlyInherit(args: {
+  existing: readonly ExistingItemRow[];
+  incoming: readonly IncomingItem[];
+  result: (ItemOrigin | null)[];
+  claimedExistingIds: Set<string>;
+}): NameMatchStats {
+  const { existing, incoming, result, claimedExistingIds } = args;
+  const key = (r: { nameRaw: string }) => normalizeItemNameForMatch(r.nameRaw);
+
+  const incomingCount = countBy(incoming, key);
+  const withOrigin = existing.filter((r) => r.sourceDocumentId !== null);
+  const existingByName = groupBy(withOrigin, key);
+  const used = usedSourceItemIds(result, incoming);
+
+  let ambiguous = 0;
+  const proposed: { index: number; row: ExistingItemRow }[] = [];
+  incoming.forEach((item, index) => {
+    if (result[index] !== null) return;
+    if (item.sourceDocumentId) return;
+    const k = key(item);
+    const rows = existingByName.get(k);
+    if (!rows) return;
+    if (rows.length !== 1 || incomingCount.get(k) !== 1) {
+      ambiguous += 1;
+      return;
+    }
+    const row = rows[0]!;
+    if (claimedExistingIds.has(row.id)) return;
+    if (row.sourceDocumentItemId !== null && used.has(row.sourceDocumentItemId)) return;
+    proposed.push({ index, row });
+  });
+
+  // Одна позиция документа — не больше чем одной строке.
+  const proposedPerSourceItem = countBy(
+    proposed.filter((p) => p.row.sourceDocumentItemId !== null),
+    (p) => p.row.sourceDocumentItemId!,
+  );
+  let matched = 0;
+  for (const { index, row } of proposed) {
+    if (
+      row.sourceDocumentItemId !== null &&
+      proposedPerSourceItem.get(row.sourceDocumentItemId)! > 1
+    ) {
+      ambiguous += 1;
+      continue;
+    }
+    result[index] = {
+      sourceDocumentId: row.sourceDocumentId,
+      sourceDocumentItemId: row.sourceDocumentItemId,
+    };
+    claimedExistingIds.add(row.id);
+    matched += 1;
+  }
+  return { matched, ambiguous };
+}
+
+/** Позиция документа, как её видит сопоставление при создании операции. */
+export type DocumentItemForMatch = {
+  id: string;
+  sourceDocumentId: string;
+  nameRaw: string;
+};
+
+/**
+ * Есть ли среди строк те, кому сопоставление по названию вообще может помочь.
+ * Маршрут спрашивает это до загрузки позиций документов, чтобы не ходить в БД
+ * впустую.
+ */
+export function hasNameMatchCandidates(args: {
+  incoming: readonly { sourceDocumentId?: string | null }[];
+  origins: readonly ItemOrigin[];
+}): boolean {
+  return args.incoming.some(
+    (item, index) => !item.sourceDocumentId && args.origins[index]?.sourceDocumentId == null,
+  );
+}
+
+/**
+ * Создание операции: строкам без происхождения — позиция привязанного документа
+ * по названию.
+ *
+ * При создании наследовать не от чего: строк в БД ещё нет, а происхождение
+ * берётся только из запроса. Планшет, у которого оба этапа ушли одним запросом
+ * из черновика 2 Этапа, присылает строки документа без ссылки на него. Правило
+ * то же, что у шага 2б, и так же консервативно:
+ *  - кандидаты — строки, которым проверка не оставила документа И для которых
+ *    клиент документ не присылал (ссылку на непривязанный документ не
+ *    «исправляем» — это подозрительный запрос, а не потерянная ссылка);
+ *  - название уникально среди ВСЕХ строк запроса и среди ВСЕХ позиций ВСЕХ
+ *    привязанных документов: одинаковые позиции двух УПД — неоднозначность;
+ *  - позиция не отдана и не заявлена другой строкой запроса.
+ */
+export function matchItemsToDocumentsByName(args: {
+  incoming: readonly {
+    nameRaw: string;
+    sourceDocumentId?: string | null;
+    sourceDocumentItemId?: string | null;
+  }[];
+  origins: readonly ItemOrigin[];
+  documentItems: readonly DocumentItemForMatch[];
+}): { origins: ItemOrigin[]; matched: number; ambiguous: number } {
+  const { incoming, documentItems } = args;
+  const key = (r: { nameRaw: string }) => normalizeItemNameForMatch(r.nameRaw);
+
+  const incomingCount = countBy(incoming, key);
+  const docByName = groupBy(documentItems, key);
+  const used = usedSourceItemIds(args.origins, incoming);
+
+  const origins = [...args.origins];
+  let matched = 0;
+  let ambiguous = 0;
+  incoming.forEach((item, index) => {
+    if (item.sourceDocumentId) return;
+    if (origins[index]?.sourceDocumentId != null) return;
+    const k = key(item);
+    const docs = docByName.get(k);
+    if (!docs) return;
+    if (docs.length !== 1 || incomingCount.get(k) !== 1) {
+      ambiguous += 1;
+      return;
+    }
+    const doc = docs[0]!;
+    if (used.has(doc.id)) {
+      ambiguous += 1;
+      return;
+    }
+    // Каждое название уникально с обеих сторон, поэтому одна позиция не может
+    // достаться двум строкам — проверка «после» здесь не нужна.
+    origins[index] = { sourceDocumentId: doc.sourceDocumentId, sourceDocumentItemId: doc.id };
+    matched += 1;
+  });
+  return { origins, matched, ambiguous };
 }
 
 /**

@@ -2550,6 +2550,19 @@ async function createShipment(
       })
       .returning();
     if (!created) throw new Error('Failed to insert shipment');
+    // Порядок блокировок «документ → позиции» — как в createDelivery
+    // (routes/deliveries.ts): документы берём до того, как внешний ключ при
+    // вставке строк положит KEY SHARE на их позиции. Обратный порядок
+    // образовывал цикл с переразбором воркера (UPDATE документа → DELETE
+    // позиций).
+    if (input.sourceDocumentIds.length) {
+      await assertSourcesAvailableForShipment(
+        { db: tx },
+        input.sourceDocumentIds,
+        created.id,
+        input.siteId,
+      );
+    }
     if (input.items.length) {
       // При СОЗДАНИИ отгрузки происхождение берётся из запроса: строк в БД ещё
       // нет, переносить нечего. Ограничение то же, что и дальше по жизни
@@ -2623,12 +2636,6 @@ async function createShipment(
       );
     }
     if (input.sourceDocumentIds.length) {
-      await assertSourcesAvailableForShipment(
-        { db: tx },
-        input.sourceDocumentIds,
-        created.id,
-        input.siteId,
-      );
       try {
         await tx.insert(shipmentSources).values(
           input.sourceDocumentIds.map((sid) => ({
@@ -2827,6 +2834,19 @@ async function updateShipment(
       .from(shipmentSources)
       .where(eq(shipmentSources.shipmentId, id));
     const linkedDocumentIds = linkedSources.map((x) => x.sourceDocumentId);
+
+    // Порядок блокировок «документ → позиции», как в updateDelivery: документы
+    // берём до KEY SHARE на их позициях (внешний ключ при вставке строк). Режим
+    // тот же, что у UPDATE в touchSourceDocuments ниже, — блокировка просто
+    // берётся раньше.
+    if (linkedDocumentIds.length) {
+      await tx
+        .select({ id: sourceDocuments.id })
+        .from(sourceDocuments)
+        .where(inArray(sourceDocuments.id, linkedDocumentIds))
+        .orderBy(sourceDocuments.id)
+        .for('no key update');
+    }
 
     const origins = resolveItemOrigins({
       existing: previousItems,

@@ -28,6 +28,11 @@ import {
   users,
 } from '../../src/db/schema.js';
 import type { AuthUser } from '../../src/plugins/auth.js';
+import {
+  relinkDeliveryItems,
+  RelinkRefusedError,
+  type RelinkInput,
+} from '../../src/domain/operations/relink-delivery-items.js';
 
 // Восстановление единицы измерения проверяется здесь же: инфраструктура та же,
 // а на тесты происхождения флаг не влияет — они не шлют X-Client-Type, и режим
@@ -1864,6 +1869,407 @@ suite('происхождение позиций приёмки (реальны�
 
       expect(res.statusCode, res.body).toBe(200);
       expect(await unitsOf(deliveryId)).toEqual(['шт']);
+    });
+  });
+
+  /**
+   * Строки планшета без происхождения. Боевой случай — приёмка 24687: 2 Этап
+   * из черновика прислал строки с чужими id, без ссылки на документ и с «шт»
+   * вместо «м2», и прежние ключи сопоставления на них промахнулись.
+   */
+  describe('строки планшета без происхождения: сопоставление по названию', () => {
+    async function rowsOf(deliveryId: string) {
+      return await sql<
+        {
+          name_raw: string;
+          unit: string;
+          line_no: number;
+          source_document_id: string | null;
+          source_document_item_id: string | null;
+        }[]
+      >`SELECT name_raw, unit, line_no, source_document_id, source_document_item_id
+          FROM delivery_items WHERE delivery_id = ${deliveryId} ORDER BY line_no`;
+    }
+
+    async function versionNow(deliveryId: string): Promise<number> {
+      const [row] = await sql<{ version: number }[]>`
+        SELECT version FROM deliveries WHERE id = ${deliveryId}`;
+      return row!.version;
+    }
+
+    const NAMES = [
+      'Стеклопакет 880х1448 - 8 шт.',
+      'Стеклопакет 780х1348 - 4 шт.',
+      'Уплотнитель EPDM',
+    ] as const;
+    const UNITS = ['м2', 'м2', 'шт'] as const;
+    const QTYS = ['10.192', '4.204', '5'] as const;
+
+    const makeGlassUpd = (docNumber: string) =>
+      makeUpd(
+        docNumber,
+        NAMES.map((name, idx) => ({ name, qty: QTYS[idx]!, unit: UNITS[idx]! })),
+      );
+
+    /** 1 Этап: строки документа с происхождением и единицей документа. */
+    async function stage1(docNumber: string) {
+      const upd = await makeGlassUpd(docNumber);
+      const deliveryId = randomUUID();
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'filled',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: NAMES.map((nameRaw, idx) => ({
+          nameRaw,
+          qtyActual: QTYS[idx],
+          unit: UNITS[idx],
+          lineNo: idx + 1,
+          sourceDocumentId: upd.id,
+          sourceDocumentItemId: upd.itemIds[idx],
+        })),
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      return { upd, deliveryId };
+    }
+
+    /** 2 Этап из черновика: первая строка удалена, id чужие, «шт», без происхождения. */
+    const stage2Items = () =>
+      NAMES.slice(1).map((nameRaw, idx) => ({
+        id: randomUUID(),
+        nameRaw,
+        qtyActual: QTYS[idx + 1],
+        unit: 'шт',
+        lineNo: idx + 1,
+      }));
+
+    it('планшет: строки узнаются по названию, единица возвращается из документа', async () => {
+      const { upd, deliveryId } = await stage1('НМ-1');
+
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        baseVersion: await versionNow(deliveryId),
+        sourceDocumentIds: [upd.id],
+        items: stage2Items(),
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await rowsOf(deliveryId)).toEqual([
+        {
+          name_raw: NAMES[1],
+          unit: 'м2',
+          line_no: 1,
+          source_document_id: upd.id,
+          source_document_item_id: upd.itemIds[1],
+        },
+        {
+          name_raw: NAMES[2],
+          unit: 'шт',
+          line_no: 2,
+          source_document_id: upd.id,
+          source_document_item_id: upd.itemIds[2],
+        },
+      ]);
+    });
+
+    it('портал: тот же запрос без заголовка планшета — прежнее поведение', async () => {
+      const { upd, deliveryId } = await stage1('НМ-2');
+
+      const res = await upsert({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        baseVersion: await versionNow(deliveryId),
+        sourceDocumentIds: [upd.id],
+        items: stage2Items(),
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      const rows = await rowsOf(deliveryId);
+      expect(rows.map((r) => r.source_document_id)).toEqual([null, null]);
+      expect(rows.map((r) => r.unit)).toEqual(['шт', 'шт']);
+    });
+
+    it('не финализация (filled): привязка возвращается, единица остаётся присланной', async () => {
+      // Единицу восстанавливает только финализация 2 Этапа (unitModeFor), а
+      // привязку — любой запрос планшета.
+      const { upd, deliveryId } = await stage1('НМ-3');
+
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'filled',
+        siteId,
+        baseVersion: await versionNow(deliveryId),
+        sourceDocumentIds: [upd.id],
+        items: stage2Items(),
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      const rows = await rowsOf(deliveryId);
+      expect(rows.map((r) => r.source_document_item_id)).toEqual([upd.itemIds[1], upd.itemIds[2]]);
+      expect(rows.map((r) => r.unit)).toEqual(['шт', 'шт']);
+    });
+
+    it('создание сразу подтверждённой приёмки без происхождения: строки узнаются по названию', async () => {
+      // Оба этапа ушли офлайн одним запросом — наследовать при создании не от
+      // чего, поэтому строки сопоставляются с позициями привязанного документа.
+      const upd = await makeGlassUpd('НМ-4');
+      const deliveryId = randomUUID();
+
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: NAMES.map((nameRaw, idx) => ({
+          id: randomUUID(),
+          nameRaw,
+          qtyActual: QTYS[idx],
+          unit: 'шт',
+          lineNo: idx + 1,
+        })),
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      const rows = await rowsOf(deliveryId);
+      expect(rows.map((r) => r.source_document_item_id)).toEqual(upd.itemIds);
+      expect(rows.map((r) => r.unit)).toEqual(['м2', 'м2', 'шт']);
+    });
+
+    it('создание без заголовка планшета — без привязки, как раньше', async () => {
+      const upd = await makeGlassUpd('НМ-5');
+      const deliveryId = randomUUID();
+
+      const res = await upsert({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: NAMES.map((nameRaw, idx) => ({
+          nameRaw,
+          qtyActual: QTYS[idx],
+          unit: 'шт',
+          lineNo: idx + 1,
+        })),
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect((await rowsOf(deliveryId)).every((r) => r.source_document_id === null)).toBe(true);
+    });
+
+    it('создание приёмки не встаёт во взаимную блокировку с переразбором документа', async () => {
+      // T0 делает то, что обычный переразбор воркера: UPDATE документа, затем
+      // DELETE и INSERT его позиций (worker.ts, без правок количества). Создание
+      // со ссылками на позиции стартует, пока T0 держит документ. Раньше оно
+      // успевало взять KEY SHARE на позиции и вставало ждать документ, а T0 на
+      // DELETE ждал позиции — цикл, 40P01. Теперь создание первым делом ждёт
+      // документ и позиций не трогает.
+      const upd = await makeGlassUpd('НМ-6');
+      const deliveryId = randomUUID();
+
+      let locked!: () => void;
+      let proceed!: () => void;
+      const lockedP = new Promise<void>((r) => (locked = r));
+      const proceedP = new Promise<void>((r) => (proceed = r));
+      const t0 = sql.begin(async (tx) => {
+        await tx`UPDATE source_documents SET updated_at = now() WHERE id = ${upd.id}`;
+        locked();
+        await proceedP;
+        await tx`DELETE FROM source_document_items WHERE source_document_id = ${upd.id}`;
+        for (const [idx, name] of NAMES.entries()) {
+          await tx`
+            INSERT INTO source_document_items (id, source_document_id, name_raw, qty, unit, line_no)
+            VALUES (${randomUUID()}, ${upd.id}, ${name}, ${QTYS[idx]!}, ${UNITS[idx]!}, ${idx + 1})`;
+        }
+      });
+      await lockedP;
+
+      const createP = upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'filled',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: NAMES.map((nameRaw, idx) => ({
+          nameRaw,
+          qtyActual: QTYS[idx],
+          unit: UNITS[idx],
+          lineNo: idx + 1,
+          sourceDocumentId: upd.id,
+          sourceDocumentItemId: upd.itemIds[idx],
+        })),
+      });
+      await waitForLockWaiter('%from "source_documents"%for update');
+      proceed();
+      await t0;
+      const res = await createP;
+
+      expect(res.statusCode, res.body).toBe(200);
+      // Ссылки на старые позиции устарели и отброшены, документ остался.
+      const rows = await rowsOf(deliveryId);
+      expect(rows.every((r) => r.source_document_id === upd.id)).toBe(true);
+      expect(rows.every((r) => r.source_document_item_id === null)).toBe(true);
+    });
+  });
+
+  /** Адресный ремонт приёмки — domain/operations/relink-delivery-items.ts. */
+  describe('ремонт: возврат привязки строкам приёмки', () => {
+    type Row = {
+      id: string;
+      unit: string;
+      source_document_id: string | null;
+      source_document_item_id: string | null;
+    };
+
+    /** Приёмка в состоянии 24687: строки УПД без привязки и с «шт». */
+    async function brokenDelivery(docNumber: string) {
+      const upd = await makeUpd(docNumber, [
+        { name: 'Стеклопакет 880х1448 - 8 шт.', qty: '10.192', unit: 'м2' },
+        { name: 'Стеклопакет 780х1348 - 4 шт.', qty: '4.204', unit: 'м2' },
+      ]);
+      await sql`UPDATE source_document_items SET price = 6487.81 WHERE source_document_id = ${upd.id}`;
+      const deliveryId = randomUUID();
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'filled',
+        siteId,
+        sourceDocumentIds: [upd.id],
+        items: [
+          {
+            nameRaw: 'Стеклопакет 880х1448 - 8 шт.',
+            qtyActual: '10.192',
+            price: '6487.81',
+            unit: 'м2',
+            lineNo: 1,
+          },
+          {
+            nameRaw: 'Стеклопакет 780х1348 - 4 шт.',
+            qtyActual: '4.204',
+            price: '6487.81',
+            unit: 'м2',
+            lineNo: 2,
+          },
+        ].map((it, idx) => ({
+          ...it,
+          sourceDocumentId: upd.id,
+          sourceDocumentItemId: upd.itemIds[idx],
+        })),
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      await sql`
+        UPDATE delivery_items
+           SET source_document_id = NULL, source_document_item_id = NULL, unit = 'шт'
+         WHERE delivery_id = ${deliveryId}`;
+      const items = await sql<{ id: string }[]>`
+        SELECT id FROM delivery_items WHERE delivery_id = ${deliveryId} ORDER BY line_no`;
+      const [v] = await sql<
+        { version: number }[]
+      >`SELECT version FROM deliveries WHERE id = ${deliveryId}`;
+      const input: RelinkInput = {
+        deliveryId,
+        documentId: upd.id,
+        expectedVersion: v!.version,
+        pairs: items.map((it, idx) => ({ itemId: it.id, sourceDocumentItemId: upd.itemIds[idx]! })),
+      };
+      return { upd, deliveryId, input };
+    }
+
+    const run = (input: RelinkInput) => sql.begin((tx) => relinkDeliveryItems(tx, input));
+
+    async function snapshot(deliveryId: string) {
+      const [d] = await sql<
+        { version: number }[]
+      >`SELECT version FROM deliveries WHERE id = ${deliveryId}`;
+      const rows = await sql<Row[]>`
+        SELECT id, unit, source_document_id, source_document_item_id
+          FROM delivery_items WHERE delivery_id = ${deliveryId} ORDER BY line_no`;
+      return { version: d!.version, rows: [...rows] };
+    }
+
+    it('возвращает привязку и единицу документа, поднимает версию', async () => {
+      const { upd, deliveryId, input } = await brokenDelivery('РМ-1');
+
+      const result = await run(input);
+
+      expect(result.versionAfter).toBe(input.expectedVersion + 1);
+      const after = await snapshot(deliveryId);
+      expect(after.version).toBe(input.expectedVersion + 1);
+      expect(after.rows.map((r) => r.source_document_item_id)).toEqual(upd.itemIds);
+      expect(after.rows.map((r) => r.source_document_id)).toEqual([upd.id, upd.id]);
+      expect(after.rows.map((r) => r.unit)).toEqual(['м2', 'м2']);
+    });
+
+    it('ранний отказ: версия не совпала — ничего не изменено', async () => {
+      const { deliveryId, input } = await brokenDelivery('РМ-2');
+      const before = await snapshot(deliveryId);
+
+      await expect(
+        run({ ...input, expectedVersion: input.expectedVersion + 5 }),
+      ).rejects.toBeInstanceOf(RelinkRefusedError);
+      expect(await snapshot(deliveryId)).toEqual(before);
+    });
+
+    it('поздний отказ после повышения версии: изменилась цена — откат целиком', async () => {
+      const { deliveryId, input } = await brokenDelivery('РМ-3');
+      await sql`UPDATE delivery_items SET price = 1 WHERE id = ${input.pairs[1]!.itemId}`;
+      const before = await snapshot(deliveryId);
+
+      await expect(run(input)).rejects.toThrow(/не совпали/);
+      const after = await snapshot(deliveryId);
+      expect(after).toEqual(before);
+      expect(after.rows.every((r) => r.source_document_id === null && r.unit === 'шт')).toBe(true);
+    });
+
+    it('повторный запуск после успеха отказывает', async () => {
+      const { input } = await brokenDelivery('РМ-4');
+      await run(input);
+
+      await expect(run(input)).rejects.toBeInstanceOf(RelinkRefusedError);
+      await expect(
+        run({ ...input, expectedVersion: input.expectedVersion + 1 }),
+      ).rejects.toBeInstanceOf(RelinkRefusedError);
+    });
+
+    it('сохранение со старой версией после ремонта получает 409, строки целы', async () => {
+      const { upd, deliveryId, input } = await brokenDelivery('РМ-5');
+      await run(input);
+      const repaired = await snapshot(deliveryId);
+
+      const res = await upsertFromTablet({
+        id: deliveryId,
+        statusCode: 'confirmed_mol',
+        siteId,
+        baseVersion: input.expectedVersion,
+        sourceDocumentIds: [upd.id],
+        items: [
+          { nameRaw: 'Стеклопакет 880х1448 - 8 шт.', qtyActual: '10.192', unit: 'шт', lineNo: 1 },
+        ],
+      });
+
+      expect(res.statusCode, res.body).toBe(409);
+      expect(await snapshot(deliveryId)).toEqual(repaired);
+    });
+
+    it('откат транзакции после успешного ремонта ничего не оставляет (сухой прогон)', async () => {
+      const { deliveryId, input } = await brokenDelivery('РМ-6');
+      const before = await snapshot(deliveryId);
+
+      await expect(
+        sql.begin(async (tx) => {
+          await relinkDeliveryItems(tx, input);
+          throw new Error('dry run');
+        }),
+      ).rejects.toThrow('dry run');
+      expect(await snapshot(deliveryId)).toEqual(before);
+    });
+
+    it('строк в приёмке больше, чем пар, — отказ', async () => {
+      const { deliveryId, input } = await brokenDelivery('РМ-7');
+      const before = await snapshot(deliveryId);
+
+      await expect(run({ ...input, pairs: input.pairs.slice(0, 1) })).rejects.toThrow(/состав/);
+      expect(await snapshot(deliveryId)).toEqual(before);
     });
   });
 });

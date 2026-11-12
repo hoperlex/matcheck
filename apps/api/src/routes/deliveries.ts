@@ -74,7 +74,10 @@ import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import {
   findDroppedOrigins,
-  resolveItemOrigins,
+  hasNameMatchCandidates,
+  matchItemsToDocumentsByName,
+  resolveItemOriginsWithStats,
+  type DocumentItemForMatch,
   type ExistingItemRow,
   type ItemOrigin,
 } from '../domain/operations/item-origin.js';
@@ -1550,6 +1553,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               inspectorId,
               req.user?.sessionId ?? null,
               unitModeFor(req, input.statusCode),
+              isMobileClient(req),
             );
           } else {
             await assertPermission(req, 'operations.deliveries', 'edit');
@@ -1589,6 +1593,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               // чтением existing и UPDATE менеджер не успел перенести запись.
               req.user?.role === 'inspector_kpp' ? existing.siteId : null,
               unitModeFor(req, input.statusCode),
+              isMobileClient(req),
             );
           }
           const dto = await buildDeliveryDto(app, input.id, req.user?.role);
@@ -1610,6 +1615,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           inspectorId,
           req.user?.sessionId ?? null,
           unitModeFor(req, input.statusCode),
+          isMobileClient(req),
         );
         const dto = await buildDeliveryDto(app, created.id, req.user?.role);
         if (!dto) throw new Error('Delivery missing after create');
@@ -3280,6 +3286,12 @@ async function createDelivery(
    * параметр updateDelivery и domain/operations/item-units.ts.
    */
   unitMode: 'off' | 'shadow' | 'on' = 'off',
+  /**
+   * Сопоставлять строки без происхождения с позициями привязанных документов по
+   * названию (domain/operations/item-origin.ts, matchItemsToDocumentsByName).
+   * Только для запросов планшета — см. одноимённый параметр updateDelivery.
+   */
+  nameOnlyFallback = false,
 ) {
   // «Ручной внос» на мобиле: инспектор создаёт приёмку сразу со статусом
   // confirmed_mol (без выбора УПД, минуя 1-2 этап). В этом случае
@@ -3343,6 +3355,22 @@ async function createDelivery(
       .returning();
     if (!created) throw new Error('Failed to insert delivery');
 
+    // Порядок блокировок «документ → позиции» — общий для всех путей, которые
+    // трогают и документ, и его позиции: переразбор воркера (UPDATE документа,
+    // затем DELETE позиций), пакет накладных, правка позиций на портале,
+    // удаление документа, link-source. Поэтому документы берём ПЕРВЫМИ, до
+    // KEY SHARE на позициях (validateSourceDocumentItemOrigins, сопоставление по
+    // названию, внешний ключ при вставке строк). Раньше было наоборот, и
+    // создание, державшее позиции, ждало документ, который держал переразбор,
+    // ждавший позиции, — взаимная блокировка (40P01).
+    if (input.sourceDocumentIds.length) {
+      await assertSourcesAvailableForDelivery(
+        { db: tx },
+        input.sourceDocumentIds,
+        created.id,
+        input.siteId,
+      );
+    }
     if (input.items.length) {
       // При СОЗДАНИИ приёмки происхождение берётся из запроса: строк в БД ещё
       // нет, переносить нечего. Ограничение то же, что и дальше по жизни
@@ -3361,12 +3389,51 @@ async function createDelivery(
             }
           : { sourceDocumentId: null, sourceDocumentItemId: null },
       );
-      const originsOnCreate = await validateSourceDocumentItemOrigins(
+      const validatedOrigins = await validateSourceDocumentItemOrigins(
         tx,
         requestedOrigins,
         app.log,
         created.id,
       );
+      // Планшет, у которого оба этапа ушли одним запросом из черновика 2 Этапа,
+      // присылает строки документа без ссылки на него — наследовать при
+      // создании не от чего. Сопоставляем с позициями привязанных документов по
+      // названию, строго однозначно (см. matchItemsToDocumentsByName).
+      let originsOnCreate: ItemOrigin[] = validatedOrigins;
+      if (
+        nameOnlyFallback &&
+        linkedOnCreate.size > 0 &&
+        hasNameMatchCandidates({ incoming: input.items, origins: validatedOrigins })
+      ) {
+        // KEY SHARE после блокировки документов — тот же порядок, что выше.
+        const documentItems = (await tx
+          .select({
+            id: sourceDocumentItems.id,
+            sourceDocumentId: sourceDocumentItems.sourceDocumentId,
+            nameRaw: sourceDocumentItems.nameRaw,
+          })
+          .from(sourceDocumentItems)
+          .where(inArray(sourceDocumentItems.sourceDocumentId, [...linkedOnCreate]))
+          .for('key share')) as DocumentItemForMatch[];
+        const byName = matchItemsToDocumentsByName({
+          incoming: input.items,
+          origins: validatedOrigins,
+          documentItems,
+        });
+        originsOnCreate = byName.origins;
+        if (byName.matched) {
+          app.log.info(
+            { deliveryId: created.id, path: 'create', matched: byName.matched },
+            'item origin matched by name',
+          );
+        }
+        if (byName.ambiguous) {
+          app.log.info(
+            { deliveryId: created.id, path: 'create', ambiguous: byName.ambiguous },
+            'item origin name ambiguous',
+          );
+        }
+      }
       const unitDecisions = await decideUnitsFromDocument({
         mode: unitMode,
         incoming: input.items.map((i) => ({ unit: i.unit })),
@@ -3417,16 +3484,6 @@ async function createDelivery(
       );
     }
     if (input.sourceDocumentIds.length) {
-      // Сначала helper выше удерживает KEY SHARE на валидных строках, затем
-      // блокируем документы. Это тот же порядок «строки → документ», что у
-      // воркера переразбора, поэтому конкурентная загрузка с планшета не
-      // образует взаимную блокировку. Обе блокировки живут до конца транзакции.
-      await assertSourcesAvailableForDelivery(
-        { db: tx },
-        input.sourceDocumentIds,
-        created.id,
-        input.siteId,
-      );
       try {
         await tx.insert(deliverySources).values(
           input.sourceDocumentIds.map((sid) => ({
@@ -3469,6 +3526,14 @@ async function updateDelivery(
    * (см. domain/operations/item-units.ts и UNIT_FROM_DOCUMENT в env).
    */
   unitMode: 'off' | 'shadow' | 'on' = 'off',
+  /**
+   * Шаг 2б сопоставления происхождения — по одному названию
+   * (domain/operations/item-origin.ts). Только для запросов планшета: он
+   * присылает строки, которые не узнаются по id, без происхождения и с «шт»
+   * вместо единицы документа, и прежние ключи на них промахиваются. Портал шлёт
+   * серверные id и происхождение — для него поведение прежнее.
+   */
+  nameOnlyFallback = false,
 ) {
   const id = existing.id;
   // Защита от downgrade жизненного статуса. См. status-guard.ts:
@@ -3639,27 +3704,70 @@ async function updateDelivery(
       .where(eq(deliverySources.deliveryId, id));
     const linkedDocumentIds = linkedSources.map((s) => s.sourceDocumentId);
 
-    const resolvedOrigins = resolveItemOrigins({
+    // Порядок блокировок «документ → позиции», как в createDelivery: связанные
+    // документы берём ДО того, как KEY SHARE ляжет на их позиции (проверка
+    // ссылок и внешний ключ при вставке строк). Раньше документ блокировался
+    // только в конце, в touchSourceDocuments, — после позиций, то есть в
+    // порядке, обратном переразбору воркера. Режим тот же, что у UPDATE в
+    // touchSourceDocuments, поэтому новых конфликтов нет — блокировка просто
+    // берётся раньше. Сортировка — единый порядок между самими документами.
+    if (linkedDocumentIds.length) {
+      await tx
+        .select({ id: sourceDocuments.id })
+        .from(sourceDocuments)
+        .where(inArray(sourceDocuments.id, linkedDocumentIds))
+        .orderBy(sourceDocuments.id)
+        .for('no key update');
+    }
+
+    const incomingForOrigins = itemsForInsert.map((i) => ({
+      id: i.clientId ?? null,
+      nameRaw: i.nameRaw,
+      unit: i.unit,
+      lineNo: i.lineNo,
+      sourceDocumentId: i.sourceDocumentId ?? null,
+      sourceDocumentItemId: i.sourceDocumentItemId ?? null,
+    }));
+    const { origins: resolvedOrigins, nameMatch } = resolveItemOriginsWithStats({
       existing: previousItems,
-      incoming: itemsForInsert.map((i) => ({
-        id: i.clientId ?? null,
-        nameRaw: i.nameRaw,
-        unit: i.unit,
-        lineNo: i.lineNo,
-        sourceDocumentId: i.sourceDocumentId ?? null,
-        sourceDocumentItemId: i.sourceDocumentItemId ?? null,
-      })),
+      incoming: incomingForOrigins,
       linkedDocumentIds,
+      nameOnlyFallback,
     });
     const origins = await validateSourceDocumentItemOrigins(tx, resolvedOrigins, app.log, id);
+    if (nameMatch.matched) {
+      app.log.info(
+        { deliveryId: id, path: 'update', matched: nameMatch.matched },
+        'item origin matched by name',
+      );
+    }
+    if (nameMatch.ambiguous) {
+      app.log.info(
+        { deliveryId: id, path: 'update', ambiguous: nameMatch.ambiguous },
+        'item origin name ambiguous',
+      );
+    }
 
     // Наблюдение за промахами сопоставления: строка, у которой привязка к
     // позиции документа БЫЛА и после upsert исчезла. Валовое число позиций без
     // `source_document_item_id` этого не показывает — туда попадают и строки,
     // заведённые руками, и последствия переразбора УПД (FK обнуляется штатно).
+    // Это сигнал, а не точная мера потерь: намеренно удалённая строка тоже
+    // попадает сюда. Счётчики рядом показывают, узнавал ли сервер строки
+    // клиента по id и присылал ли клиент происхождение.
     const droppedOrigins = findDroppedOrigins({ existing: previousItems, origins });
     if (droppedOrigins.length) {
-      app.log.warn({ deliveryId: id, dropped: droppedOrigins }, 'item origin dropped on upsert');
+      const existingIds = new Set(previousItems.map((r: ExistingItemRow) => r.id));
+      app.log.warn(
+        {
+          deliveryId: id,
+          dropped: droppedOrigins,
+          incomingWithId: incomingForOrigins.filter((i) => i.id).length,
+          idMatched: incomingForOrigins.filter((i) => i.id && existingIds.has(i.id)).length,
+          incomingWithOrigin: incomingForOrigins.filter((i) => i.sourceDocumentId).length,
+        },
+        'item origin dropped on upsert',
+      );
     }
 
     // Обратный случай: строка лежала БЕЗ привязки, и клиент её вернул. Раньше
