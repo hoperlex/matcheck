@@ -68,6 +68,7 @@ import { SiteSelect } from './SiteSelect';
 import { ResponsiblePersonSelect } from '../../components/ResponsiblePersonSelect';
 import { DocumentOriginalViewer } from '../shared/DocumentOriginalViewer';
 import { SourceDocumentItemsTable } from '../shared/SourceDocumentItemsTable';
+import { DuplicateTrailAlerts } from './DuplicateTrailAlerts';
 
 type Item = SourceDocumentDetail['items'][number];
 
@@ -252,10 +253,17 @@ export function SourceDocumentDetailModal({
   id,
   open,
   onClose,
+  onResolveDuplicate,
 }: {
   id: string | null;
   open: boolean;
   onClose: () => void;
+  /**
+   * Открыть окно решения по копии-дубликату. Передаёт список «Документы»: окно
+   * открывается ВМЕСТО карточки, а не поверх неё — вложенная antd-модалка ломает
+   * ESC внешней. Не передан — кнопки «Оставить как новую поставку…» нет.
+   */
+  onResolveDuplicate?: (id: string) => void;
 }) {
   const qc = useQueryClient();
   const role = useAuthStore((s) => s.user?.role ?? null);
@@ -292,6 +300,11 @@ export function SourceDocumentDetailModal({
 
   const sd = detail.data;
   const items = sd?.items ?? [];
+  // Ref, а не значение из замыкания: onSuccess мутации читает состояние на
+  // момент ответа сервера.
+  const isDuplicateRef = useRef(false);
+  isDuplicateRef.current =
+    sd?.status === 'needs_resolution' && sd.parseErrorCode === 'duplicate_upd';
   const isProcessing = sd?.status === 'queued' || sd?.status === 'processing';
   const canRecoverWork =
     isProcessing &&
@@ -317,6 +330,16 @@ export function SourceDocumentDetailModal({
     mutationFn: (body: Record<string, unknown>) =>
       api.patch<SourceDocumentDetail>(`/source-documents/${id}`, body),
     onSuccess: () => {
+      // Копия-дубликат после сохранения остаётся открытой: правка — это первый
+      // шаг, второй — «Оставить как новую поставку». Закрыв карточку, мы
+      // заставили бы искать документ в списке заново.
+      if (isDuplicateRef.current) {
+        message.success('Копия сохранена. На планшет она уйдёт после «Оставить как новую поставку»');
+        void qc.invalidateQueries({ queryKey: ['source-documents'] });
+        void qc.invalidateQueries({ queryKey: ['source-document', id] });
+        void qc.invalidateQueries({ queryKey: ['source-document-offline', id] });
+        return;
+      }
       message.success('Документ сохранён');
       void qc.invalidateQueries({ queryKey: ['source-documents'] });
       // Один ключ на карточку, префетч списка и раскрытие «+» в списке.
@@ -461,6 +484,19 @@ export function SourceDocumentDetailModal({
   const isMismatchPending =
     sd?.status === 'needs_resolution' && sd.parseErrorCode === 'validation_mismatch';
   const isDuplicate = sd?.status === 'needs_resolution' && sd.parseErrorCode === 'duplicate_upd';
+  // Несохранённые правки копии: «Оставить» отправит на планшет то, что лежит
+  // на сервере, поэтому сначала — «Сохранить».
+  const duplicateHasUnsaved = useMemo(() => {
+    if (!isDuplicate || !edit || !sd) return false;
+    const isOutbound = sd.direction === 'outbound';
+    const body = diffPatchBody(
+      buildPatchBody(edit, isOutbound),
+      buildPatchBody(initialForm(sd), isOutbound),
+    );
+    return Object.keys(body).length > 0;
+    // buildPatchBody — чистая функция формы, зависимости — форма и документ.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDuplicate, edit, sd]);
 
   return (
     <>
@@ -642,7 +678,23 @@ export function SourceDocumentDetailModal({
                   </Button>
                 </Popconfirm>
               )}
-              {!isProcessing && !isDuplicate && (
+              {isDuplicate && onResolveDuplicate && canEditDocument && (
+                <Tooltip
+                  title={
+                    duplicateHasUnsaved
+                      ? 'Сначала сохраните изменения'
+                      : 'Решить, что делать с копией: оставить как новую поставку, заменить или удалить'
+                  }
+                >
+                  <Button
+                    disabled={duplicateHasUnsaved}
+                    onClick={() => onResolveDuplicate(sd.id)}
+                  >
+                    Оставить как новую поставку…
+                  </Button>
+                </Tooltip>
+              )}
+              {!isProcessing && (
                 // Popconfirm с disabled: пока очистка даты машине не грозит, он
                 // отключён и клик уходит прямо в onSave — лишнего шага у обычного
                 // сохранения не появляется.
@@ -724,10 +776,11 @@ export function SourceDocumentDetailModal({
                 style={{ marginBottom: 12 }}
                 type="warning"
                 showIcon
-                message="Это дубликат уже существующего УПД"
-                description="Откройте список «Документы» и нажмите «Разрешить» в строке этого документа."
+                message="Это копия уже загруженного документа"
+                description="Её можно поправить и сохранить — на планшет она не уйдёт, пока не нажмёте «Оставить как новую поставку». Если это не вторая машина, а повторная загрузка, копию лучше удалить."
               />
             )}
+            <DuplicateTrailAlerts sd={sd} />
             {sd.status === 'parse_failed' && (
               <Alert
                 style={{ marginBottom: 12 }}
@@ -758,7 +811,7 @@ export function SourceDocumentDetailModal({
               layout={layout}
               setLayout={setLayout}
               itemsNode={
-                edit && !isProcessing && !isDuplicate ? (
+                edit && !isProcessing ? (
                   <EditableTable
                     edit={edit}
                     setEdit={setEdit}
@@ -781,7 +834,7 @@ export function SourceDocumentDetailModal({
                 )
               }
               headerNode={
-                edit && !isProcessing && !isDuplicate ? (
+                edit && !isProcessing ? (
                   <Form layout="vertical" style={{ maxWidth: 500 }}>
                     <Form.Item label="№ документа">
                       <Input

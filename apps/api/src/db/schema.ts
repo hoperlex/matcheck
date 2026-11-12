@@ -26,6 +26,7 @@ import type { QtyRepairTrace } from '../domain/edo/qty-repair.js';
 import type { Torg12QtyTrace } from '../domain/edo/torg12-qty.js';
 import type { QtyScaleTrace } from '../domain/edo/qty-scale.js';
 import type { SupplierInnCheckTrace } from '../domain/sourceDocuments/supplier-inn-check.js';
+import type { DuplicateResolutionTrace } from '../domain/sourceDocuments/duplicate-keep.js';
 
 // ─── Enums ─────────────────────────────────────────────────────────────────
 
@@ -1186,6 +1187,12 @@ export const sourceDocuments = pgTable(
     // прочитала модель, что стало итогом и откуда исправлено. В режиме on
     // исправленный ИНН ложится и в supplier_inn_raw — исходный живёт здесь.
     supplierInnCheck: jsonb('supplier_inn_check').$type<SupplierInnCheckTrace | null>(),
+    // След решения «копия оставлена как новая поставку» (миграция 0148):
+    // кто, когда, с каким комментарием и какие операции были у такого же
+    // документа в момент решения. Пишет только resolve-duplicate action='keep'.
+    // Отдельной колонкой: parse_error_details перезаписывает пересчёт исхода
+    // при правке позиций. В /sync не уходит.
+    duplicateResolution: jsonb('duplicate_resolution').$type<DuplicateResolutionTrace | null>(),
     // Пользователь, загрузивший УПД через /upload-upd или /upload-upd-pdf.
     // Для EDO/mail-полученных документов — NULL (poller, не юзер).
     // Используется мобильным клиентом для отображения контакта менеджера

@@ -144,6 +144,18 @@ async function buildApp(opts: {
     { preHandler: [authorize('admin', 'manager')] as never },
     async () => ({ ok: 'document' }),
   );
+  // Решение по копии-дубликату и окно к нему: allow-list как в
+  // routes/source-documents.ts. Мониторинг проходит расширением той же ячейки.
+  instance.post(
+    '/api/v1/source-documents/:id/resolve-duplicate',
+    { preHandler: [authorize('admin', 'manager')] as never },
+    async () => ({ ok: 'resolve-duplicate' }),
+  );
+  instance.get(
+    '/api/v1/source-documents/:id/duplicate-info',
+    { preHandler: [authorize('admin', 'manager')] as never },
+    async () => ({ ok: 'duplicate-info' }),
+  );
   instance.post(
     '/api/v1/deliveries/bulk-hard-delete',
     { preHandler: [authorize('admin')] as never },
@@ -319,6 +331,41 @@ describe('карточка документа: стороны правят ад�
   it('администратору матрица не нужна', async () => {
     app = await buildApp({ role: 'admin' });
     expect((await patch(app, '/api/v1/source-documents/1')).statusCode).toBe(200);
+  });
+});
+
+describe('дубликат документа: «разрешить» у Мониторинга с «Редактировать»', () => {
+  const documentsRow = (canEdit: boolean) => [
+    row('monitor', 'documents.list', { canView: true, canEdit }),
+  ];
+
+  it('выданная ячейка открывает и окно, и само решение', async () => {
+    app = await buildApp({ role: 'monitor', overrides: documentsRow(true) });
+    const info = await get(app, '/api/v1/source-documents/1/duplicate-info');
+    expect(info.statusCode).toBe(200);
+    expect(info.json()).toMatchObject({ ok: 'duplicate-info' });
+    const res = await post(app, '/api/v1/source-documents/1/resolve-duplicate', {
+      action: 'keep',
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: 'resolve-duplicate' });
+  });
+
+  it('без ячейки — отказ на первом слое', async () => {
+    app = await buildApp({ role: 'monitor', overrides: documentsRow(false) });
+    expect((await get(app, '/api/v1/source-documents/1/duplicate-info')).statusCode).toBe(403);
+    expect(
+      (await post(app, '/api/v1/source-documents/1/resolve-duplicate', { action: 'keep' }))
+        .statusCode,
+    ).toBe(403);
+  });
+
+  it('инспектору закрыто: документы ему не выдаются', async () => {
+    app = await buildApp({ role: 'inspector_kpp' });
+    expect(
+      (await post(app, '/api/v1/source-documents/1/resolve-duplicate', { action: 'keep' }))
+        .statusCode,
+    ).toBe(403);
   });
 });
 

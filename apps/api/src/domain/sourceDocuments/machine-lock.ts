@@ -58,34 +58,68 @@ type LockedDocRow = {
 };
 
 /**
+ * Корень машины портала, в которую входит документ; null — документ не из
+ * публичной загрузки (машины не образует) или его нет. Без блокировок.
+ */
+async function portalMachineRootOf(tx: Db, documentId: string): Promise<string | null> {
+  const [head] = await tx
+    .select({ bundleId: sourceDocuments.bundleId })
+    .from(sourceDocuments)
+    .where(eq(sourceDocuments.id, documentId))
+    .limit(1);
+  if (!head?.bundleId) return null;
+  const rootRows = await tx.execute<{ root_id: string; is_portal: boolean }>(sql`
+    select coalesce(b.parent_bundle_id, b.id) as root_id,
+           exists (
+             select 1 from ingest_events ie
+              where ie.bundle_id = coalesce(b.parent_bundle_id, b.id)
+                and ie.channel = 'public'
+           ) as is_portal
+      from ${sourceBundles} b
+     where b.id = ${head.bundleId}::uuid
+  `);
+  const root = [...rootRows][0];
+  return root?.is_portal ? root.root_id : null;
+}
+
+/**
+ * Блокирует машины НЕСКОЛЬКИХ документов — для операций, которые трогают две
+ * поставки сразу («Заменить» в разрешении дубликата: удаляется оригинал из
+ * одной машины, копия из другой распознаётся заново).
+ *
+ * Порядок между машинами фиксированный — по ключу «корень машины, иначе id
+ * документа», по возрастанию. Внутри машины порядок прежний (lockMachine).
+ * Два документа одной машины блокируются дважды одной транзакцией — это
+ * безопасно: свои блокировки не ждут.
+ *
+ * Вызывать ПЕРВЫМ действием транзакции, как и lockMachine.
+ */
+export async function lockMachinesOrdered(
+  tx: Db,
+  documentIds: string[],
+): Promise<Map<string, MachineLock | null>> {
+  const keyed: { id: string; key: string }[] = [];
+  for (const id of new Set(documentIds)) {
+    keyed.push({ id, key: (await portalMachineRootOf(tx, id)) ?? id });
+  }
+  keyed.sort((a, b) =>
+    a.key < b.key ? -1 : a.key > b.key ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+  );
+  const out = new Map<string, MachineLock | null>();
+  for (const { id } of keyed) out.set(id, await lockMachine(tx, id));
+  return out;
+}
+
+/**
  * Блокирует машину документа и возвращает её состав.
  *
  * Вызывать ПЕРВЫМ действием транзакции правки документа — см. порядок
  * блокировок в шапке файла. `null` означает, что документа нет вовсе.
  */
 export async function lockMachine(tx: Db, documentId: string): Promise<MachineLock | null> {
-  const [head] = await tx
-    .select({ bundleId: sourceDocuments.bundleId })
-    .from(sourceDocuments)
-    .where(eq(sourceDocuments.id, documentId))
-    .limit(1);
-
   // Корень машины и признак публичной загрузки — до блокировок, чтобы знать, что
   // именно блокировать. Значения перечитываются ниже уже под блокировкой.
-  const rootRows = head?.bundleId
-    ? await tx.execute<{ root_id: string; is_portal: boolean }>(sql`
-        select coalesce(b.parent_bundle_id, b.id) as root_id,
-               exists (
-                 select 1 from ingest_events ie
-                  where ie.bundle_id = coalesce(b.parent_bundle_id, b.id)
-                    and ie.channel = 'public'
-               ) as is_portal
-          from ${sourceBundles} b
-         where b.id = ${head.bundleId}::uuid
-      `)
-    : [];
-  const root = [...rootRows][0];
-  const machineRootId = root?.is_portal ? root.root_id : null;
+  const machineRootId = await portalMachineRootOf(tx, documentId);
 
   const bundleIds: string[] = [];
   if (machineRootId) {

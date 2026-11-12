@@ -92,6 +92,22 @@ export function hasIncompleteItemList(validation: UpdValidation): boolean {
 }
 
 /**
+ * Сколько позиций ждали по бланку («Всего наименований») — из прежнего снимка
+ * сверки. `null`, если число не было напечатано или проверки нет.
+ *
+ * Нужно ручной правке: пересчёт validation в PATCH идёт по строкам из БД, а
+ * число с бланка там взять неоткуда. Без переноса правка количества одной
+ * строки стирала бы признак неполного списка, и неполный документ уходил бы
+ * инспектору как полный.
+ */
+export function expectedItemsCountOf(
+  validation: UpdValidation | null | undefined,
+): number | null {
+  const check = validation?.checks.find((c) => c.name === 'items_count');
+  return typeof check?.expected === 'number' ? check.expected : null;
+}
+
+/**
  * Денежное расхождение: итоги, построчная арифметика, НДС.
  *
  * Отделено от неполноты списка намеренно. Расхождение на копейки — повод

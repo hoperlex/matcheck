@@ -21,6 +21,9 @@ import {
   UpdPdfQueueRequestSchema,
   UpdPdfQueueResponseSchema,
   UpdResolveDuplicateRequestSchema,
+  SourceDuplicateInfoSchema,
+  type SourceDuplicateInfo,
+  type SourceDuplicateTrail,
   SourceReparseResponseSchema,
   SourceRecoverResponseSchema,
   type SourceWorkHealth,
@@ -35,14 +38,11 @@ import {
 } from '@matcheck/contracts';
 import {
   counterparties,
-  deliveryEdoMatches,
-  deliverySources,
   entityDeletions,
   ingestEvents,
   llmCalls,
   materials,
   responsiblePersons,
-  shipmentSources,
   sites,
   sourceBundles,
   sourceDocuments,
@@ -58,7 +58,7 @@ import { vatFieldsOf } from '../domain/edo/vat-fields.js';
 import { mergePersistentUpdWarnings, validateUpdTotals } from '../domain/edo/upd-validation.js';
 import { withSupplierInnWarning } from '../domain/sourceDocuments/supplier-inn-check.js';
 import { withPartyRolesWarning } from '../domain/sourceDocuments/party-roles.js';
-import { deriveUpdParseOutcome } from '../domain/edo/upd-outcome.js';
+import { deriveUpdParseOutcome, expectedItemsCountOf } from '../domain/edo/upd-outcome.js';
 import { presign, putObject } from '../domain/storage/s3.signer.js';
 import { discardBody, fetchPresignedForStream } from '../domain/storage/s3.retry.js';
 import { buildS3Key } from '../domain/storage/s3.path.js';
@@ -88,8 +88,19 @@ import {
 } from '../domain/sourceDocuments/site-transfer.js';
 import {
   lockMachine,
+  lockMachinesOrdered,
   resyncMachineBundleKeys,
 } from '../domain/sourceDocuments/machine-lock.js';
+import {
+  KEEP_REASON_MESSAGES,
+  countDocumentReferences,
+  duplicateExistingIdOf,
+  duplicateKeepVerdict,
+  isAcceptedForTablet,
+  loadDocumentOperations,
+  replaceVerdict,
+  type DuplicateResolutionTrace,
+} from '../domain/sourceDocuments/duplicate-keep.js';
 import {
   transferExpectedDate,
   type ExpectedDateTransfer,
@@ -724,7 +735,12 @@ async function findOriginalAttachment(
   app: any,
   sourceDocumentId: string,
 ) {
-  const [att] = await app.db
+  return findOriginalAttachmentIn(app.db, sourceDocumentId);
+}
+
+// То же внутри транзакции вызывающего (разрешение дубликата).
+async function findOriginalAttachmentIn(db: Db, sourceDocumentId: string) {
+  const [att] = await db
     .select()
     .from(sourceDocumentAttachments)
     .where(
@@ -790,49 +806,124 @@ function duplicateConflictPayload(sd: typeof sourceDocuments.$inferSelect) {
   };
 }
 
-// Удаление УПД с проверкой привязок к приёмкам/отгрузкам. Бросает
-// HasReferencesError, если есть привязки. Сами позиции, attachments и
-// llm_calls удаляются каскадно по FK; реальная чистка S3-объектов
-// выполняется асинхронно через очередь s3-cleanup (см. worker.ts), чтобы
-// HTTP-ответ возвращался мгновенно.
-async function deleteUpdWithRefsCheck(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  app: any,
+/**
+ * Дубликаты в карточке документа: решение «оставлена как новая поставка» по
+ * нему самому и копии такого же документа, оставленные другими. null — ни того,
+ * ни другого.
+ *
+ * Копии ищутся по ключу дедупликации (вид, поставщик из справочника, номер,
+ * дата) сравнением колонок, как и братья в duplicate-keep.ts.
+ */
+async function loadDuplicateTrail(
+  db: Db,
+  sd: typeof sourceDocuments.$inferSelect,
+): Promise<SourceDuplicateTrail | null> {
+  const trace = sd.duplicateResolution ?? null;
+  let copies: { id: string; docNumber: string | null; expectedDate: string | null; siteName: string | null; at: string | null; userId: string | null }[] = [];
+  if (sd.supplierDirectoryId && sd.docNumber && sd.docDate) {
+    const self = alias(sourceDocuments, 'self');
+    copies = await db
+      .select({
+        id: sourceDocuments.id,
+        docNumber: sourceDocuments.docNumber,
+        expectedDate: drSql<string | null>`to_char(${sourceDocuments.expectedDate}, 'YYYY-MM-DD')`,
+        siteName: sites.name,
+        at: drSql<string | null>`${sourceDocuments.duplicateResolution} ->> 'at'`,
+        userId: drSql<string | null>`${sourceDocuments.duplicateResolution} ->> 'userId'`,
+      })
+      .from(sourceDocuments)
+      .innerJoin(
+        self,
+        and(
+          eq(self.id, sd.id),
+          eq(sourceDocuments.kind, self.kind),
+          eq(sourceDocuments.supplierDirectoryId, self.supplierDirectoryId),
+          eq(sourceDocuments.docNumber, self.docNumber),
+          eq(sourceDocuments.docDate, self.docDate),
+        ),
+      )
+      .leftJoin(sites, eq(sites.id, sourceDocuments.siteId))
+      .where(
+        and(
+          drSql`${sourceDocuments.id} <> ${sd.id}`,
+          eq(sourceDocuments.isTechnical, false),
+          drSql`${sourceDocuments.duplicateResolution} is not null`,
+        ),
+      )
+      .orderBy(sourceDocuments.createdAt);
+  }
+  if (!trace && copies.length === 0) return null;
+
+  const userIds = [trace?.userId, ...copies.map((c) => c.userId)].filter(
+    (v): v is string => typeof v === 'string' && v.length > 0,
+  );
+  const userNames = new Map<string, string>();
+  if (userIds.length > 0) {
+    const rows = await db
+      .select({ id: users.id, fullName: users.fullName, email: users.email })
+      .from(users)
+      .where(inArray(users.id, [...new Set(userIds)]));
+    for (const u of rows) userNames.set(u.id, u.fullName?.trim() || u.email);
+  }
+  const ops = await loadDocumentOperations(db, [sd.id]);
+
+  return {
+    resolution: trace
+      ? {
+          action: 'kept',
+          existingId: trace.existingId,
+          existingDocNumber: trace.existingDocNumber,
+          operations: trace.siblings.flatMap((s) => s.operations),
+          comment: trace.comment,
+          userName: trace.userId ? (userNames.get(trace.userId) ?? null) : null,
+          at: trace.at,
+        }
+      : null,
+    keptCopies: copies.map((c) => ({
+      id: c.id,
+      docNumber: c.docNumber,
+      expectedDate: c.expectedDate,
+      siteName: c.siteName,
+      at: c.at ?? '',
+      userName: c.userId ? (userNames.get(c.userId) ?? null) : null,
+    })),
+    selfAccepted: isAcceptedForTablet(ops.get(sd.id)),
+  };
+}
+
+// Удаление документа ВНУТРИ транзакции вызывающего. Бросает HasReferencesError,
+// если есть привязки (приёмки и отгрузки, в том числе в корзине, и связи ЭДО) —
+// подсчёт тоже внутри транзакции, вместе с удалением. Позиции, attachments и
+// llm_calls удаляются каскадно по FK. Возвращает S3-ключи: ставить их в очередь
+// чистки вызывающий обязан ПОСЛЕ коммита.
+//
+// Блокировок здесь нет — порядок задаёт вызывающий. Разрешение дубликата
+// вызывает это под уже захваченной машиной (lockMachine), прочие пути — как и
+// раньше, без захвата.
+async function deleteSourceDocumentTx(
+  tx: Db,
   id: string,
   deletedByUserId: string | null,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  log?: { warn: (...args: any[]) => void },
-): Promise<void> {
-  const [{ count: deliveriesCount } = { count: 0 }] = await app.db
-    .select({ count: drSql<number>`count(*)::int` })
-    .from(deliverySources)
-    .where(eq(deliverySources.sourceDocumentId, id));
-  const [{ count: edoMatchesCount } = { count: 0 }] = await app.db
-    .select({ count: drSql<number>`count(*)::int` })
-    .from(deliveryEdoMatches)
-    .where(eq(deliveryEdoMatches.sourceDocumentId, id));
-  const [{ count: shipmentsCount } = { count: 0 }] = await app.db
-    .select({ count: drSql<number>`count(*)::int` })
-    .from(shipmentSources)
-    .where(eq(shipmentSources.sourceDocumentId, id));
-  if (deliveriesCount > 0 || edoMatchesCount > 0 || shipmentsCount > 0) {
-    throw new HasReferencesError(deliveriesCount + edoMatchesCount, shipmentsCount);
+): Promise<{ s3Keys: string[] }> {
+  const refs = await countDocumentReferences(tx, id);
+  if (refs.deliveries > 0 || refs.shipments > 0) {
+    throw new HasReferencesError(refs.deliveries, refs.shipments);
   }
 
   // Забираем s3-ключи ДО hard delete (cascade удалит строки attachments)
   // и siteId — для журнала удалений.
-  const attachments = await app.db
+  const attachments = await tx
     .select({ s3Key: sourceDocumentAttachments.s3Key })
     .from(sourceDocumentAttachments)
     .where(eq(sourceDocumentAttachments.sourceDocumentId, id));
-  const [doc] = await app.db
+  const [doc] = await tx
     .select({ siteId: sourceDocuments.siteId })
     .from(sourceDocuments)
     .where(eq(sourceDocuments.id, id))
     .limit(1);
   // Корень машины забираем ДО удаления: после него связь документа с пакетом
   // пропадает, и оповестить соседей будет не по чему.
-  const [machine] = await app.db
+  const [machine] = await tx
     .select({
       rootId: drSql<string>`coalesce(${sourceBundles.parentBundleId}, ${sourceBundles.id})`,
     })
@@ -844,56 +935,79 @@ async function deleteUpdWithRefsCheck(
   const rollout = loadEnv().GROUPS_ROLLOUT;
   // Журнал hard-delete + физическое удаление одной транзакцией:
   // офлайн-клиент узнаёт об удалении через /sync.deletedIds.
-  await app.db.transaction(async (tx: typeof app.db) => {
-    await tx.insert(entityDeletions).values({
-      entityType: 'source_document',
-      entityId: id,
-      siteId: doc?.siteId ?? null,
-      deletedByUserId,
-    });
-    // Ревизию машины поднимаем ДО удаления, пока документ ещё связан с пакетом.
-    // Удаление меняет СОСТАВ машины, и планшет обязан узнать об этом: без бампа
-    // у соседей не меняется ни updated_at, ни version, дельта их не привозит, и
-    // на форме приёмки остаётся документ, которого больше нет.
-    //
-    // Под рубильником: это ИСПРАВЛЕНИЕ, но заметное инспектору. Соседи приедут
-    // заново, и если у него открыта форма по этой машине, он получит диалог
-    // «состав машины изменился». До выката новой модели интерфейс инспектора не
-    // должен меняться вообще.
-    if (rollout) await bumpGroupRevision(tx, id);
-    // Закрываем строку реестра ДО удаления документа, в той же транзакции.
-    // Иначе проверка «у каждого принятого файла есть документ» увидит файл без
-    // документа и заведёт заглушку заново — причём призраком: ключи этого
-    // документа уходят ниже в очередь на физическое удаление из S3.
-    await closeRegistryRowsForDeletedDocument(tx, id, deletedByUserId);
-    await tx.delete(sourceDocuments).where(eq(sourceDocuments.id, id));
-    // Переход видимости — ПОСЛЕДНЕЙ операцией транзакции: событие помечается
-    // временем записи, а становится видимым только после коммита. Чем ближе
-    // запись к коммиту, тем меньше окно, в котором курсор /sync успеет уйти
-    // вперёд метки (см. visibility-events).
-    //
-    // Скоуп по машине, а не по удалённому документу: гаснет или, наоборот,
-    // открывается именно СОСЕД — удалённого в выборке уже нет.
-    if (rollout && machine?.rootId) {
-      await recordVisibilityTransitions(tx, {
-        groupId: machine.rootId,
-        reason: 'документ удалён менеджером',
-      });
-    }
+  await tx.insert(entityDeletions).values({
+    entityType: 'source_document',
+    entityId: id,
+    siteId: doc?.siteId ?? null,
+    deletedByUserId,
   });
-
-  const s3Keys = attachments
-    .map((a: { s3Key: string }) => a.s3Key)
-    .filter((k: string): k is string => Boolean(k));
-  if (s3Keys.length > 0) {
-    try {
-      await app.queues.s3Cleanup.add('cleanup', { s3Keys }, { jobId: `sd-${id}` });
-    } catch (err) {
-      // Падение enqueue не должно ронять удаление — БД уже консистентна,
-      // S3-объекты при необходимости можно будет почистить вручную.
-      log?.warn({ err, sourceDocumentId: id, s3Keys }, 'failed to enqueue s3 cleanup');
-    }
+  // Ревизию машины поднимаем ДО удаления, пока документ ещё связан с пакетом.
+  // Удаление меняет СОСТАВ машины, и планшет обязан узнать об этом: без бампа
+  // у соседей не меняется ни updated_at, ни version, дельта их не привозит, и
+  // на форме приёмки остаётся документ, которого больше нет.
+  //
+  // Под рубильником: это ИСПРАВЛЕНИЕ, но заметное инспектору. Соседи приедут
+  // заново, и если у него открыта форма по этой машине, он получит диалог
+  // «состав машины изменился». До выката новой модели интерфейс инспектора не
+  // должен меняться вообще.
+  if (rollout) await bumpGroupRevision(tx, id);
+  // Закрываем строку реестра ДО удаления документа, в той же транзакции.
+  // Иначе проверка «у каждого принятого файла есть документ» увидит файл без
+  // документа и заведёт заглушку заново — причём призраком: ключи этого
+  // документа уходят ниже в очередь на физическое удаление из S3.
+  await closeRegistryRowsForDeletedDocument(tx, id, deletedByUserId);
+  await tx.delete(sourceDocuments).where(eq(sourceDocuments.id, id));
+  // Переход видимости — ПОСЛЕДНЕЙ операцией транзакции: событие помечается
+  // временем записи, а становится видимым только после коммита. Чем ближе
+  // запись к коммиту, тем меньше окно, в котором курсор /sync успеет уйти
+  // вперёд метки (см. visibility-events).
+  //
+  // Скоуп по машине, а не по удалённому документу: гаснет или, наоборот,
+  // открывается именно СОСЕД — удалённого в выборке уже нет.
+  if (rollout && machine?.rootId) {
+    await recordVisibilityTransitions(tx, {
+      groupId: machine.rootId,
+      reason: 'документ удалён менеджером',
+    });
   }
+
+  return { s3Keys: attachments.map((a) => a.s3Key).filter((k): k is string => Boolean(k)) };
+}
+
+// Очередь чистки S3 — после коммита. Падение enqueue не роняет удаление: БД уже
+// консистентна, объекты при необходимости можно почистить вручную.
+async function enqueueS3Cleanup(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: any,
+  id: string,
+  s3Keys: string[],
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log?: { warn: (...args: any[]) => void },
+): Promise<void> {
+  if (s3Keys.length === 0) return;
+  try {
+    await app.queues.s3Cleanup.add('cleanup', { s3Keys }, { jobId: `sd-${id}` });
+  } catch (err) {
+    log?.warn({ err, sourceDocumentId: id, s3Keys }, 'failed to enqueue s3 cleanup');
+  }
+}
+
+// Удаление УПД с проверкой привязок к приёмкам/отгрузкам — своей транзакцией.
+// Бросает HasReferencesError, если есть привязки. Реальная чистка S3-объектов
+// выполняется асинхронно через очередь s3-cleanup (см. worker.ts), чтобы
+// HTTP-ответ возвращался мгновенно.
+async function deleteUpdWithRefsCheck(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: any,
+  id: string,
+  deletedByUserId: string | null,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log?: { warn: (...args: any[]) => void },
+): Promise<void> {
+  const { s3Keys } = await app.db.transaction((tx: Db) =>
+    deleteSourceDocumentTx(tx, id, deletedByUserId),
+  );
+  await enqueueS3Cleanup(app, id, s3Keys, log);
 }
 
 export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<void> {
@@ -1675,6 +1789,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           )
         : [];
 
+      // Дубликаты — только порталу: планшет дотягивает документы этим же
+      // маршрутом, а поле ему не нужно (лишние запросы на каждый документ).
+      const duplicateTrail =
+        req.user?.role === 'inspector_kpp' ? null : await loadDuplicateTrail(app.db, sd);
+
       return {
         ...base,
         validation: liveValidation,
@@ -1682,6 +1801,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         attachments: attachments.map(attachmentDto),
         extraFiles: extraFiles.map(extraFileDto),
         submission,
+        duplicateTrail,
       };
     },
   );
@@ -2880,7 +3000,19 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
     },
   );
 
-  // ──────────── Разрешение дубликата УПД (needs_resolution+duplicate_upd) ────────────
+  // ──────────── Разрешение дубликата (needs_resolution + duplicate_upd) ────────────
+  //
+  // Три действия, одна транзакция и один порядок блокировок:
+  //   skip    — удалить копию;
+  //   replace — удалить найденный документ и распознать копию заново;
+  //   keep    — оставить копию как новую поставку: снять пометку, документ
+  //             уходит на планшет (правило «одна карточка» — duplicate-keep.ts).
+  //
+  // ПЕРВЫМ действием — захват машины (machine-lock.ts: «пакет → документы»). У
+  // replace машин две, копии и оригинала, и они берутся в фиксированном порядке.
+  // Под захватом состояние копии перечитывается: двойной клик, вторая вкладка или
+  // «оставить» одновременно с «удалить» получат 409 already_resolved, а не удалят
+  // уже оставленную копию. Раньше проверка шла по прочитанной до записи строке.
   app.post(
     '/api/v1/source-documents/:id/resolve-duplicate',
     {
@@ -2898,51 +3030,191 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       },
     },
     async (req, reply) => {
-      const [sd] = await app.db
-        .select()
-        .from(sourceDocuments)
-        .where(
-          and(
-            eq(sourceDocuments.id, req.params.id),
-            // Служебная запись пакета — держатель вложений на время разбора и
-            // промежуточный документ сборки логических УПД. Снаружи её не
-            // существует, поэтому мутация по прямому id отвечает 404.
-            eq(sourceDocuments.isTechnical, false),
-          ),
-        )
-        .limit(1);
-      if (!sd) return reply.code(404).send({ error: 'not_found' });
-      if (sd.parseErrorCode !== 'duplicate_upd') {
-        return reply
-          .code(400)
-          .send({ error: 'not_duplicate', message: 'Документ не в статусе дубликата' });
-      }
-      const existingId =
-        sd.parseErrorDetails && typeof sd.parseErrorDetails === 'object'
-          ? ((sd.parseErrorDetails as { existingId?: string }).existingId ?? null)
-          : null;
-      if (req.body.action === 'skip') {
-        // Удаляем загруженный дубль (не существующий оригинал).
-        try {
-          await deleteUpdWithRefsCheck(app, sd.id, req.user?.id ?? null, req.log);
-        } catch (err) {
-          if (err instanceof HasReferencesError) {
-            return reply.code(409).send({ error: 'has_references', message: err.message });
-          }
-          throw err;
-        }
-        return reply.code(204).send({ ok: true as const });
-      }
+      const userId = req.user?.id ?? null;
+      const action = req.body.action;
 
-      // 'replace': удаляем старый документ (если нет ссылок), а новый
-      // отправляем обратно в очередь — он добежит до конца и сохранит данные.
-      if (!existingId) {
-        return reply
-          .code(400)
-          .send({ error: 'bad_request', message: 'В деталях ошибки нет existingId' });
-      }
+      // Предварительное чтение БЕЗ блокировки — только чтобы знать, чьи машины
+      // захватывать. Решение принимается ниже, по строке, перечитанной под
+      // захватом.
+      const [pre] = await app.db
+        .select({
+          id: sourceDocuments.id,
+          isTechnical: sourceDocuments.isTechnical,
+          parseErrorDetails: sourceDocuments.parseErrorDetails,
+        })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, req.params.id))
+        .limit(1);
+      // Служебная запись пакета снаружи не существует.
+      if (!pre || pre.isTechnical) return reply.code(404).send({ error: 'not_found' });
+      const preExistingId = duplicateExistingIdOf(pre.parseErrorDetails);
+
+      type Attachment = NonNullable<Awaited<ReturnType<typeof findOriginalAttachmentIn>>>;
+      type Outcome =
+        | { kind: 'error'; code: 400 | 404 | 409; error: string; message?: string }
+        | { kind: 'skip'; s3Keys: string[]; siteId: string | null }
+        | {
+            kind: 'replace';
+            s3Keys: string[];
+            deletedExistingId: string | null;
+            deletedExistingSiteId: string | null;
+            att: Attachment;
+            siteId: string | null;
+          }
+        | { kind: 'keep'; updated: typeof sourceDocuments.$inferSelect };
+
+      let outcome: Outcome;
       try {
-        await deleteUpdWithRefsCheck(app, existingId, req.user?.id ?? null, req.log);
+        outcome = await app.db.transaction(async (rawTx): Promise<Outcome> => {
+          const tx = rawTx as unknown as Db;
+          const locks = await lockMachinesOrdered(
+            tx,
+            action === 'replace' && preExistingId ? [pre.id, preExistingId] : [pre.id],
+          );
+          if (!locks.get(pre.id)) return { kind: 'error', code: 404, error: 'not_found' };
+
+          const [sd] = await tx
+            .select()
+            .from(sourceDocuments)
+            .where(eq(sourceDocuments.id, pre.id))
+            .limit(1);
+          if (!sd || sd.isTechnical) return { kind: 'error', code: 404, error: 'not_found' };
+          if (sd.status !== 'needs_resolution' || sd.parseErrorCode !== 'duplicate_upd') {
+            return {
+              kind: 'error',
+              code: 409,
+              error: 'already_resolved',
+              message: 'Документ уже обработан — обновите список',
+            };
+          }
+          const existingId = duplicateExistingIdOf(sd.parseErrorDetails);
+
+          if (action === 'skip') {
+            // Удаляем загруженную копию (не существующий оригинал).
+            const { s3Keys } = await deleteSourceDocumentTx(tx, sd.id, userId);
+            return { kind: 'skip', s3Keys, siteId: sd.siteId };
+          }
+
+          if (action === 'replace') {
+            if (!existingId) {
+              return {
+                kind: 'error',
+                code: 400,
+                error: 'bad_request',
+                message: 'В деталях ошибки нет existingId',
+              };
+            }
+            // Пометка сменилась между чтением и захватом: захвачена не та машина.
+            if (existingId !== preExistingId) {
+              return {
+                kind: 'error',
+                code: 409,
+                error: 'already_resolved',
+                message: 'Документ изменился — обновите список',
+              };
+            }
+            const verdict = await replaceVerdict(tx, existingId);
+            if (!verdict.allowed) {
+              const refs = await countDocumentReferences(tx, existingId);
+              return {
+                kind: 'error',
+                code: 409,
+                error: 'has_references',
+                message: new HasReferencesError(refs.deliveries, refs.shipments).message,
+              };
+            }
+            // Файл копии — ДО удаления оригинала: без него распознавать нечего, и
+            // удалять оригинал тогда нельзя.
+            const att = await findOriginalAttachmentIn(tx, sd.id);
+            if (!att) {
+              return { kind: 'error', code: 400, error: 'no_attachment', message: 'Файл не найден' };
+            }
+            let s3Keys: string[] = [];
+            let deletedExistingSiteId: string | null = null;
+            if (!verdict.existingMissing) {
+              const [ex] = await tx
+                .select({ siteId: sourceDocuments.siteId })
+                .from(sourceDocuments)
+                .where(eq(sourceDocuments.id, existingId))
+                .limit(1);
+              deletedExistingSiteId = ex?.siteId ?? null;
+              s3Keys = (await deleteSourceDocumentTx(tx, existingId, userId)).s3Keys;
+            }
+            await tx
+              .update(sourceDocuments)
+              .set({
+                status: 'queued',
+                parseErrorCode: null,
+                parseErrorDetails: null,
+                updatedAt: drSql`statement_timestamp()`,
+              })
+              .where(eq(sourceDocuments.id, sd.id));
+            return {
+              kind: 'replace',
+              s3Keys,
+              deletedExistingId: verdict.existingMissing ? null : existingId,
+              deletedExistingSiteId,
+              att,
+              siteId: sd.siteId,
+            };
+          }
+
+          // keep — оставить копию как новую поставку.
+          const verdict = await duplicateKeepVerdict(tx, sd);
+          if (!verdict.allowed) {
+            return {
+              kind: 'error',
+              code: 409,
+              error: verdict.reason,
+              message: KEEP_REASON_MESSAGES[verdict.reason],
+            };
+          }
+          const trace: DuplicateResolutionTrace = {
+            action: 'kept',
+            existingId,
+            // Ключ дедупликации у копии и найденного документа общий, номер тот же.
+            existingDocNumber: sd.docNumber,
+            siblings: verdict.siblings.map((s) => ({
+              id: s.id,
+              docNumber: s.docNumber,
+              operations: s.operations,
+            })),
+            duplicateCheck:
+              (sd.parseErrorDetails as { duplicateCheck?: unknown } | null)?.duplicateCheck ?? null,
+            comment: req.body.comment?.trim() || null,
+            userId,
+            at: new Date().toISOString(),
+          };
+          const o = verdict.outcome;
+          const [updated] = await tx
+            .update(sourceDocuments)
+            .set({
+              status: o.status,
+              parseErrorCode: o.parseErrorCode,
+              parseErrorDetails: o.parseErrorDetails,
+              // Итог, посчитанный по строкам, — как при ручной правке: только если
+              // шапочного итога не было.
+              ...(sd.totalSum == null && o.totalSumSynthesized && o.totalSum != null
+                ? { totalSum: o.totalSum.toString() }
+                : {}),
+              duplicateResolution: trace,
+              updatedAt: drSql`statement_timestamp()`,
+            })
+            .where(eq(sourceDocuments.id, sd.id))
+            .returning();
+          if (!updated) throw new Error('Failed to update source_document');
+          // Как в PATCH: под рубильником — ревизия машины (пакет уже захвачен
+          // выше, порядок блокировок не нарушается) и переход видимости ПОСЛЕДНЕЙ
+          // операцией транзакции (см. visibility-events).
+          if (loadEnv().GROUPS_ROLLOUT) {
+            await bumpGroupRevision(tx, sd.id);
+            await recordVisibilityTransitions(tx, {
+              documentIds: [sd.id],
+              reason: 'копия оставлена как новая поставка',
+            });
+          }
+          return { kind: 'keep', updated };
+        });
       } catch (err) {
         if (err instanceof HasReferencesError) {
           return reply.code(409).send({ error: 'has_references', message: err.message });
@@ -2950,46 +3222,166 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         throw err;
       }
 
-      // Найдём S3-ключ оригинального PDF (он остался в attachments дубля).
-      const att = await findOriginalAttachment(app, sd.id);
-      if (!att) {
-        return reply.code(400).send({ error: 'no_attachment', message: 'Файл не найден' });
+      if (outcome.kind === 'error') {
+        return reply
+          .code(outcome.code)
+          .send({ error: outcome.error, ...(outcome.message ? { message: outcome.message } : {}) });
       }
-      await app.db
-        .update(sourceDocuments)
-        .set({
-          status: 'queued',
-          parseErrorCode: null,
-          parseErrorDetails: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(sourceDocuments.id, sd.id));
-      await app.queues.updParse.add('parse', {
-        sourceDocumentId: sd.id,
-        s3Key: att.s3Key,
-      });
 
-      const [refetched] = await app.db
+      const ts = new Date().toISOString();
+      if (outcome.kind === 'skip') {
+        await enqueueS3Cleanup(app, pre.id, outcome.s3Keys, req.log);
+        publishEvent(app, {
+          type: 'source_document_deleted',
+          entityId: pre.id,
+          ...(outcome.siteId ? { siteId: outcome.siteId } : {}),
+          ts,
+        });
+        return reply.code(204).send({ ok: true as const });
+      }
+
+      if (outcome.kind === 'replace') {
+        if (outcome.deletedExistingId) {
+          await enqueueS3Cleanup(app, outcome.deletedExistingId, outcome.s3Keys, req.log);
+          publishEvent(app, {
+            type: 'source_document_deleted',
+            entityId: outcome.deletedExistingId,
+            ...(outcome.deletedExistingSiteId ? { siteId: outcome.deletedExistingSiteId } : {}),
+            ts,
+          });
+        }
+        await app.queues.updParse.add('parse', {
+          sourceDocumentId: pre.id,
+          s3Key: outcome.att.s3Key,
+        });
+        const [refetched] = await app.db
+          .select()
+          .from(sourceDocuments)
+          .where(eq(sourceDocuments.id, pre.id))
+          .limit(1);
+        if (!refetched) throw new Error('Failed to refetch source_document');
+        const names = await loadSdNames(app, refetched);
+        return SourceDocumentDetailSchema.parse({
+          ...sdRow(refetched, names),
+          items: [],
+          attachments: [attachmentDto(outcome.att)],
+        });
+      }
+
+      // keep
+      const updated = outcome.updated;
+      publishEvent(app, {
+        type: 'source_document_updated',
+        entityId: updated.id,
+        ...(updated.siteId ? { siteId: updated.siteId } : {}),
+        ts,
+      });
+      const items = await app.db
+        .select()
+        .from(sourceDocumentItems)
+        .where(eq(sourceDocumentItems.sourceDocumentId, updated.id))
+        .orderBy(sourceDocumentItems.lineNo);
+      const attachments = await app.db
+        .select()
+        .from(sourceDocumentAttachments)
+        .where(eq(sourceDocumentAttachments.sourceDocumentId, updated.id));
+      const names = await loadSdNames(app, updated);
+      return {
+        ...sdRow(updated, names),
+        items: items.map(itemDto),
+        attachments: attachments.map(attachmentDto),
+        duplicateTrail: await loadDuplicateTrail(app.db, updated),
+      };
+    },
+  );
+
+  // ──────────── Окно разрешения дубликата ────────────
+  //
+  // Всё, что нужно окну: найденный документ и его «братья» (тот же ключ
+  // дедупликации) с приёмками, и можно ли «Оставить» / «Заменить». Решения
+  // считают ТЕ ЖЕ функции, что и переход выше, — кнопки и сервер не расходятся.
+  app.get(
+    '/api/v1/source-documents/:id/duplicate-info',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: {
+        params: z.object({ id: z.string().uuid() }),
+        response: {
+          200: SourceDuplicateInfoSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+        },
+      },
+    },
+    async (req, reply) => {
+      const [sd] = await app.db
         .select()
         .from(sourceDocuments)
-        .where(eq(sourceDocuments.id, sd.id))
+        .where(and(eq(sourceDocuments.id, req.params.id), eq(sourceDocuments.isTechnical, false)))
         .limit(1);
-      if (!refetched) throw new Error('Failed to refetch source_document');
-      const names = await loadSdNames(app, refetched);
-      return SourceDocumentDetailSchema.parse({
-        ...sdRow(refetched, names),
-        items: [],
-        attachments: [
-          {
-            id: att.id,
-            s3Key: att.s3Key,
-            filename: att.filename,
-            mimeType: att.mimeType,
-            sizeBytes: att.sizeBytes,
-            role: att.role,
-          },
-        ],
-      });
+      if (!sd) return reply.code(404).send({ error: 'not_found' });
+      if (sd.status !== 'needs_resolution' || sd.parseErrorCode !== 'duplicate_upd') {
+        return reply
+          .code(400)
+          .send({ error: 'not_duplicate', message: 'Документ не в статусе дубликата' });
+      }
+      const existingId = duplicateExistingIdOf(sd.parseErrorDetails);
+      const keep = await duplicateKeepVerdict(app.db, sd);
+      const replace = await replaceVerdict(app.db, existingId);
+      let existingMissing = false;
+      if (existingId) {
+        const [ex] = await app.db
+          .select({ id: sourceDocuments.id })
+          .from(sourceDocuments)
+          .where(eq(sourceDocuments.id, existingId))
+          .limit(1);
+        existingMissing = !ex;
+      }
+      const names = await loadSdNames(app, sd);
+      const check = (sd.parseErrorDetails as {
+        duplicateCheck?: { verdict?: unknown; detail?: unknown };
+      } | null)?.duplicateCheck;
+      return {
+        id: sd.id,
+        supplierName: names.supplierName ?? null,
+        docNumber: sd.docNumber,
+        docDate: sd.docDate?.toISOString().slice(0, 10) ?? null,
+        expectedDate: sd.expectedDate?.toISOString().slice(0, 10) ?? null,
+        siteName: names.siteName ?? null,
+        duplicateCheck:
+          check && typeof check.verdict === 'string'
+            ? {
+                verdict: check.verdict,
+                detail: typeof check.detail === 'string' ? check.detail : null,
+              }
+            : null,
+        existingId,
+        existingMissing,
+        siblings: keep.siblings.map((s) => ({
+          id: s.id,
+          status: s.status as SourceDuplicateInfo['siblings'][number]['status'],
+          parseErrorCode: s.parseErrorCode,
+          docNumber: s.docNumber,
+          expectedDate: s.expectedDate,
+          siteName: s.siteName,
+          isExisting: s.id === existingId,
+          accepted: s.accepted,
+          operations: s.operations,
+          edoLinks: s.edoLinks,
+        })),
+        keep: keep.allowed
+          ? { allowed: true, reason: null, message: null, missing: [], blockingIds: [] }
+          : {
+              allowed: false,
+              reason: keep.reason,
+              message: KEEP_REASON_MESSAGES[keep.reason],
+              missing: keep.missing,
+              blockingIds: keep.blockingIds,
+            },
+        replace: replace.allowed
+          ? { allowed: true, reason: null }
+          : { allowed: false, reason: replace.reason },
+      };
     },
   );
 
@@ -3723,10 +4115,33 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             req.body.resolveManually === true;
           if (outcomeInputsTouched) {
             const totalSumForCheck = upd.totalSum !== undefined ? upd.totalSum : sd.totalSum;
+            // Частичная накладная: «дополнить» доводит её до «обработана» тем же
+            // правилом, что и УПД (решение 12.11.2026). Раньше исход у накладных
+            // не пересчитывался вовсе, и дополненная накладная навсегда
+            // оставалась «распознано частично» — на планшет не попадала.
+            //
+            // ТОЛЬКО из partial_parse: обработанные накладные (в том числе без
+            // номера — пакетный путь ставит им parsed без этой проверки) правкой
+            // не понижаются, иначе исчезли бы с планшета.
+            const partialWaybill =
+              sd.kind === 'transport_waybill' &&
+              sd.status === 'needs_resolution' &&
+              sd.parseErrorCode === 'partial_parse';
+            // Число позиций с бланка («Всего наименований») берётся из прежнего
+            // снимка: пересчёт идёт по строкам из БД, и без переноса правка
+            // одного количества стирала бы признак неполного списка. Только у
+            // копии дубликата (её исход потом посчитает «Оставить как новую
+            // поставку») и у частичной накладной — для прочих документов
+            // поведение PATCH прежнее.
+            const carriedItemsCount =
+              sd.parseErrorCode === 'duplicate_upd' || partialWaybill
+                ? expectedItemsCountOf(sd.validation)
+                : null;
             const validation = validateUpdTotals(
               {
                 totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
                 vatSum: sd.vatSum != null ? Number(sd.vatSum) : null,
+                ...(carriedItemsCount != null ? { itemsCount: carriedItemsCount } : {}),
                 items: updatedItems.map((i) => ({
                   qty: Number(i.qty),
                   price: i.price != null ? Number(i.price) : null,
@@ -3757,8 +4172,9 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             // настоящий. Пересчитав ему исход здесь, мы бы стёрли эту пометку при
             // любой правке поля — и второй экземпляр УПД тихо уехал бы инспектору.
             const touchable =
-              sd.kind === 'upd' &&
-              (sd.status === 'needs_resolution' || sd.status === 'parsed') &&
+              ((sd.kind === 'upd' &&
+                (sd.status === 'needs_resolution' || sd.status === 'parsed')) ||
+                partialWaybill) &&
               sd.parseErrorCode !== 'duplicate_upd' &&
               !isActionableStub({ status: sd.status, parseErrorCode: sd.parseErrorCode });
             if (touchable) {
@@ -3775,7 +4191,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
                   docNumber: nextNumber ?? null,
                   totalSum: totalSumForCheck != null ? Number(totalSumForCheck) : null,
                   confidence: sd.llmConfidence != null ? Number(sd.llmConfidence) : 0,
-                  itemsCount: null,
+                  itemsCount: carriedItemsCount,
                 },
                 validation,
               );

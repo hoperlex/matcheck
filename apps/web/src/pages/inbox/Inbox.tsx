@@ -182,10 +182,18 @@ function stubHint(code: Row['parseErrorCode']): string {
 function StatusTag({
   row,
   onResolve,
+  onOpen,
   onManualResolve,
 }: {
   row: Row;
+  /** «разрешить» у дубликата — окно решения по копии. */
   onResolve?: (r: Row) => void;
+  /**
+   * «дополнить» и «проверить» — карточка документа, где правятся реквизиты и
+   * позиции. Раньше обе ссылки звали onResolve и открывали окно дубликата, где
+   * ни одна кнопка к такому документу не применима.
+   */
+  onOpen?: (r: Row) => void;
   onManualResolve?: (r: Row) => void;
 }) {
   // Принятый файл, по которому документа ещё нет. «не загружен» — отдельный
@@ -199,8 +207,9 @@ function StatusTag({
       </Tooltip>
     );
   }
-  // onResolve не передан (роль contractor) → resolve-кнопки скрыты: дозаполнение
-  // и разрешение дубликатов — write-операции, подрядчику недоступны.
+  // Колбэки не переданы (нет права «Документы × Редактировать» — подрядчик,
+  // мониторинг без галочки) → кнопки скрыты: дозаполнение и разрешение
+  // дубликатов — write-операции, и сервер ответил бы 403.
   // Derived-статус: если parsed, но не заполнены получатель/объект/дата
   // поставки — показываем «Черновик» вместо «обработано». UI сразу
   // подскажет пользователю, что документ требует дозаполнения.
@@ -359,14 +368,14 @@ function StatusTag({
                 распознано частично
               </Tag>
             </Tooltip>
-            {onResolve && (
+            {onOpen && (
               <Button
                 size="small"
                 type="link"
                 style={{ padding: 0, height: 'auto' }}
                 onClick={(e) => {
                   e.stopPropagation();
-                  onResolve(row);
+                  onOpen(row);
                 }}
               >
                 дополнить
@@ -388,14 +397,14 @@ function StatusTag({
               суммы не сходятся
             </Tag>
           </Tooltip>
-          {onResolve && (
+          {onOpen && (
             <Button
               size="small"
               type="link"
               style={{ padding: 0, height: 'auto' }}
               onClick={(e) => {
                 e.stopPropagation();
-                onResolve(row);
+                onOpen(row);
               }}
             >
               проверить
@@ -453,6 +462,10 @@ export default function InboxPage() {
   const { can: canDo } = usePermissions();
   const canCreateDocs = canDo('documents.list', 'create');
   const canDeleteDocs = canDo('documents.list', 'delete');
+  // «разрешить», «дополнить», «проверить», «разобрано» — правка документа. По
+  // матрице, а не «всем, кроме подрядчика»: мониторинг получает их галочкой
+  // «Документы × Редактировать», и без неё кнопка ответила бы 403.
+  const canEditDocs = canDo('documents.list', 'edit');
   // Повторное распознавание — отдельное действие матрицы: правка полей и
   // повторный прогон через модель различаются и по цене, и по последствиям.
   const canReparseDocs = canDo('documents.list', 'reparse');
@@ -1081,8 +1094,9 @@ export default function InboxPage() {
           {isUnrecognized(r) || isPendingRow(r) ? <Tag>—</Tag> : <KindTag kind={r.kind} />}
           <StatusTag
             row={r}
-            onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
-            onManualResolve={isContractor ? undefined : (row) => resolveManually.mutate(row.id)}
+            onResolve={canEditDocs ? (row) => setResolveId(row.id) : undefined}
+            onOpen={canEditDocs ? (row) => setSelectedId(row.id) : undefined}
+            onManualResolve={canEditDocs ? (row) => resolveManually.mutate(row.id) : undefined}
           />
         </Space>
         <Typography.Text strong>
@@ -1198,8 +1212,9 @@ export default function InboxPage() {
       render: (_: unknown, r: Row) => (
         <StatusTag
           row={r}
-          onResolve={isContractor ? undefined : (row) => setResolveId(row.id)}
-          onManualResolve={isContractor ? undefined : (row) => resolveManually.mutate(row.id)}
+          onResolve={canEditDocs ? (row) => setResolveId(row.id) : undefined}
+          onOpen={canEditDocs ? (row) => setSelectedId(row.id) : undefined}
+          onManualResolve={canEditDocs ? (row) => resolveManually.mutate(row.id) : undefined}
         />
       ),
     },
@@ -1554,11 +1569,23 @@ export default function InboxPage() {
         id={selectedId}
         open={!!selectedId}
         onClose={() => setSelectedId(null)}
+        onResolveDuplicate={
+          canEditDocs
+            ? (docId) => {
+                setSelectedId(null);
+                setResolveId(docId);
+              }
+            : undefined
+        }
       />
       <UpdResolveDuplicateModal
         id={resolveId}
         open={!!resolveId}
         onClose={() => setResolveId(null)}
+        onOpenDocument={(docId) => {
+          setResolveId(null);
+          setSelectedId(docId);
+        }}
       />
     </>
   );

@@ -858,6 +858,122 @@ export const SourceReparseStateSchema = z.object({
 });
 export type SourceReparseState = z.infer<typeof SourceReparseStateSchema>;
 
+/**
+ * Операция (приёмка или отгрузка), в которой участвует документ. Для окна
+ * дубликата и следа решения: «принят в №24827 · подтверждена МОЛ».
+ */
+export const SourceDuplicateOperationSchema = z.object({
+  kind: z.enum(['delivery', 'shipment']),
+  id: z.string().uuid(),
+  displayId: z.number().int(),
+  statusLabel: z.string().nullable(),
+  /** Приёмка — время въезда, отгрузка — время выезда. */
+  at: z.string().nullable(),
+  /** В корзине: планшет такую операцию не учитывает. */
+  pendingDeletion: z.boolean(),
+});
+export type SourceDuplicateOperation = z.infer<typeof SourceDuplicateOperationSchema>;
+
+/**
+ * След решения «копия оставлена как новая поставка» (миграция 0148). Снимок на
+ * момент решения: какой документ был найден и в каких операциях он был.
+ */
+export const SourceDuplicateResolutionSchema = z.object({
+  action: z.literal('kept'),
+  existingId: z.string().uuid().nullable(),
+  existingDocNumber: z.string().nullable(),
+  operations: z.array(SourceDuplicateOperationSchema),
+  comment: z.string().nullable(),
+  userName: z.string().nullable(),
+  at: z.string(),
+});
+export type SourceDuplicateResolution = z.infer<typeof SourceDuplicateResolutionSchema>;
+
+/** Копия этого же документа, оставленная как новая поставка. */
+export const SourceKeptCopySchema = z.object({
+  id: z.string().uuid(),
+  docNumber: z.string().nullable(),
+  expectedDate: z.string().nullable(),
+  siteName: z.string().nullable(),
+  at: z.string(),
+  userName: z.string().nullable(),
+});
+export type SourceKeptCopy = z.infer<typeof SourceKeptCopySchema>;
+
+/**
+ * Всё про дубликаты в карточке документа: решение по нему самому и копии,
+ * оставленные от такого же документа. `selfAccepted` — принят ли сам документ
+ * так, как это понимает планшет (живая приёмка/отгрузка): если нет, а копия
+ * оставлена, на планшете могут быть две карточки.
+ */
+export const SourceDuplicateTrailSchema = z.object({
+  resolution: SourceDuplicateResolutionSchema.nullable(),
+  keptCopies: z.array(SourceKeptCopySchema),
+  selfAccepted: z.boolean(),
+});
+export type SourceDuplicateTrail = z.infer<typeof SourceDuplicateTrailSchema>;
+
+/** Документ с тем же ключом дедупликации, что и копия. */
+export const SourceDuplicateSiblingSchema = z.object({
+  id: z.string().uuid(),
+  status: SourceStatusSchema,
+  parseErrorCode: z.string().nullable(),
+  docNumber: z.string().nullable(),
+  expectedDate: z.string().nullable(),
+  siteName: z.string().nullable(),
+  /** На него указывает пометка дубликата. */
+  isExisting: z.boolean(),
+  /** Принят так, как это понимает планшет. */
+  accepted: z.boolean(),
+  operations: z.array(SourceDuplicateOperationSchema),
+  /** Связи ЭДО: от удаления защищают, на планшете документ не прячут. */
+  edoLinks: z.number().int(),
+});
+export type SourceDuplicateSibling = z.infer<typeof SourceDuplicateSiblingSchema>;
+
+export const SourceDuplicateKeepReasonSchema = z.enum([
+  'legacy',
+  'incomplete',
+  'sibling_not_accepted',
+  'same_machine',
+]);
+export type SourceDuplicateKeepReason = z.infer<typeof SourceDuplicateKeepReasonSchema>;
+
+/**
+ * Ответ GET /source-documents/:id/duplicate-info — всё, что нужно окну
+ * разрешения дубликата. Кнопки рисуются по `keep.allowed`/`replace.allowed`,
+ * а сервер при нажатии считает то же самое теми же функциями.
+ */
+export const SourceDuplicateInfoSchema = z.object({
+  id: z.string().uuid(),
+  supplierName: z.string().nullable(),
+  docNumber: z.string().nullable(),
+  docDate: z.string().nullable(),
+  expectedDate: z.string().nullable(),
+  siteName: z.string().nullable(),
+  duplicateCheck: z
+    .object({ verdict: z.string(), detail: z.string().nullable() })
+    .nullable(),
+  existingId: z.string().uuid().nullable(),
+  /** Найденный документ уже удалён. */
+  existingMissing: z.boolean(),
+  siblings: z.array(SourceDuplicateSiblingSchema),
+  keep: z.object({
+    allowed: z.boolean(),
+    reason: SourceDuplicateKeepReasonSchema.nullable(),
+    message: z.string().nullable(),
+    /** Чего не хватает копии (reason='incomplete'): docNumber, items, itemsIncomplete. */
+    missing: z.array(z.string()),
+    /** Какие документы мешают (sibling_not_accepted, same_machine). */
+    blockingIds: z.array(z.string().uuid()),
+  }),
+  replace: z.object({
+    allowed: z.boolean(),
+    reason: z.enum(['original_used', 'no_existing_ref']).nullable(),
+  }),
+});
+export type SourceDuplicateInfo = z.infer<typeof SourceDuplicateInfoSchema>;
+
 export const SourceDocumentDetailSchema = SourceDocumentSchema.extend({
   items: z.array(SourceItemSchema),
   attachments: z.array(SourceAttachmentSchema),
@@ -875,6 +991,10 @@ export const SourceDocumentDetailSchema = SourceDocumentSchema.extend({
   // документ. Optional по той же причине, что и fromSupplierPortal: схема
   // используется ещё и в /sync, и в PATCH-ответах, где поле не считается.
   submission: SourceSubmissionSchema.nullable().optional(),
+  // Дубликаты: решение «оставлена как новая поставка» и оставленные копии
+  // такого же документа. Только карточка портала; /sync и мобильный клиент
+  // поле не получают (null — дубликатов нет или ключа документа нет).
+  duplicateTrail: SourceDuplicateTrailSchema.nullable().optional(),
 });
 export type SourceDocumentDetail = z.infer<typeof SourceDocumentDetailSchema>;
 
@@ -1640,7 +1760,12 @@ export type SourceDocumentBulkDeleteResponse = z.infer<
 // ──────────── Разрешение статуса needs_resolution ────────────
 
 export const UpdResolveDuplicateRequestSchema = z.object({
-  action: z.enum(['skip', 'replace']),
+  // skip — удалить копию; replace — удалить найденный документ и распознать
+  // копию заново; keep — оставить копию как новую поставку (уходит на планшет).
+  action: z.enum(['skip', 'replace', 'keep']),
+  // Только для keep: почему копия — отдельная поставка («вторая машина по той
+  // же накладной»). Необязательно: автор и время пишутся всегда.
+  comment: z.string().trim().max(500).optional(),
 });
 export type UpdResolveDuplicateRequest = z.infer<typeof UpdResolveDuplicateRequestSchema>;
 
