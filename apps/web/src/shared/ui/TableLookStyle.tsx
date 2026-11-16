@@ -140,7 +140,7 @@ ${T} .ant-table-tbody > tr.ant-table-row > td { height: 40px; }
 
 /* Зебра — отдельным правилом: браузер без «nth-child(… of …)» отбросит только его.
    Подсвеченные, выбранные и строка под курсором — без зебры, со своим цветом. */
-${T} .ant-table-tbody > tr.ant-table-row:nth-child(even of .ant-table-row):not(:hover):not(.ant-table-row-selected):not(.matcheck-row-mismatch):not(.matcheck-row-progress-today):not(.matcheck-row-overdue) > td:not(.ant-table-cell-row-hover) {
+${T} .ant-table-tbody > tr.ant-table-row:nth-child(even of .ant-table-row):not(:hover):not(.ant-table-row-selected):not(.matcheck-row-mismatch):not(.matcheck-row-progress-today):not(.matcheck-row-overdue):not(.mc-group-head) > td:not(.ant-table-cell-row-hover) {
   background-image: linear-gradient(${ZEBRA}, ${ZEBRA});
 }
 

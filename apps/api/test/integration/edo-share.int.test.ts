@@ -546,6 +546,47 @@ suite('одна УПД — несколько приёмок объекта (р�
       });
     });
 
+    it('отмеченные в ответе всегда: 60+ совпадений не вытесняют их, «уже привязана» тоже', async () => {
+      // Группа приёмок передаёт весь состав в include — при большом числе
+      // совпадений участник не должен выпасть из окна (лимит 60 строк).
+      const site = randomUUID();
+      await sql`INSERT INTO sites (id, code, name) VALUES (${site}, ${`SHD${RUN}`}, 'Рейсы Г')`;
+      try {
+        const doc = await exportDoc({ tag: 'L1' });
+        const anchor = await delivery({ site });
+        await paper(anchor, 'L1');
+        for (let i = 0; i < 62; i += 1) {
+          const match = await delivery({ site, at: shift(0, 8) });
+          await paper(match, 'L1');
+        }
+        const far1 = await delivery({ site, at: shift(60) });
+        const far2 = await delivery({ site, at: shift(61) });
+        const linkedFar = await delivery({ site, at: shift(62) });
+        expect((await single(linkedFar, doc)).statusCode).toBe(200);
+
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/v1/deliveries/${anchor}/edo-share-candidates?source=export&documentId=${doc}&include=${far1},${far2},${linkedFar}`,
+        });
+        expect(res.statusCode, res.body).toBe(200);
+        const body = res.json() as {
+          items: { deliveryId: string; state: string; reasons: string[] }[];
+          truncated: boolean;
+        };
+        const byId = new Map(body.items.map((row) => [row.deliveryId, row]));
+        expect(byId.get(far1)).toMatchObject({ reasons: ['selected'] });
+        expect(byId.get(far2)).toMatchObject({ reasons: ['selected'] });
+        expect(byId.get(linkedFar)).toMatchObject({ state: 'linked' });
+        expect(body.items.length).toBe(60);
+        expect(body.truncated).toBe(true);
+      } finally {
+        await sql`DELETE FROM delivery_edo_matches WHERE delivery_id IN (SELECT id FROM deliveries WHERE site_id = ${site})`;
+        await sql`DELETE FROM delivery_sources WHERE delivery_id IN (SELECT id FROM deliveries WHERE site_id = ${site})`;
+        await sql`DELETE FROM deliveries WHERE site_id = ${site}`;
+        await sql`DELETE FROM sites WHERE id = ${site}`;
+      }
+    });
+
     it('неверный список отмеченных — 400; нет УПД — 404', async () => {
       const anchor = await delivery();
       const doc = await exportDoc({ tag: 'K2' });

@@ -44,6 +44,7 @@ import {
   counterparties,
   deliveries,
   deliveryEdoMatches,
+  deliveryGroupMembers,
   deliveryItems,
   deliveryPhotos,
   deliverySources,
@@ -120,6 +121,11 @@ import { escapeLike } from '../lib/like.js';
 import { docNumberMatchSql } from '../lib/doc-number-search.js';
 import { MONEY_FMT, QTY_FMT, fmtDateTimeRu } from '../lib/xlsx-format.js';
 import { registerDeliveryEdoRoutes } from './delivery-edo.js';
+import { registerDeliveryGroupRoutes } from './delivery-groups.js';
+import {
+  detachDeliveries,
+  loadDeliveryGroupSummaries,
+} from '../domain/operations/delivery-groups.js';
 import { registerDeliveryRecipientRoutes } from './delivery-recipient.js';
 import { registerDeliveryDocumentRecipientRoutes } from './delivery-document-recipients.js';
 import { dropDocumentContract } from '../domain/supplier-contracts/delivery-contract.js';
@@ -175,6 +181,11 @@ const ListQuerySchema = z.object({
   // Отметка «Диспетчер»: checked — отмечено, none — нет. Видимость — как у
   // reviewState: без права на отметку параметр игнорируется.
   dispatcherCheck: z.enum(['checked', 'none']).optional(),
+  // ?grouped=1 — «Принятые» с группами приёмок: участники группы встают подряд
+  // на месте самой новой, в строках — deliveryGroup. Литерал, а не
+  // z.coerce.boolean: тот считает строку 'false' истиной. Действует вне
+  // корзины и только тем, у кого есть «Проверять»; иначе запрос прежний.
+  grouped: z.literal('1').optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
@@ -1161,19 +1172,52 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       const { limit, offset } = req.query;
       const filters = await buildDeliveryFilters(req.user, req.query);
       const where = filters.length ? and(...filters) : undefined;
+      const grouped =
+        req.query.grouped === '1' &&
+        !req.query.trash &&
+        (await canSeeReviewInMatrix(app, req.user?.role, 'operations.deliveries'));
 
-      const rows = await app.db
-        .select({ id: deliveries.id })
-        .from(deliveries)
-        .where(where)
-        // Сортировка по displayId DESC (а не updatedAt) — чтобы при
-        // редактировании уже принятой приёмки она не «прыгала» наверх
-        // списка. displayId назначается БД-sequence монотонно (миграция
-        // 0059), поэтому новые сверху, а save существующей запись на
-        // её место. Симметрично с shipments.
-        .orderBy(desc(deliveries.displayId))
-        .limit(limit)
-        .offset(offset);
+      // Сортировка по displayId DESC (а не updatedAt) — чтобы при
+      // редактировании уже принятой приёмки она не «прыгала» наверх
+      // списка. displayId назначается БД-sequence монотонно (миграция
+      // 0059), поэтому новые сверху, а save существующей запись на
+      // её место. Симметрично с shipments.
+      //
+      // С группами ключ — номер самой новой приёмки группы: он у каждой
+      // группы свой (это display_id её участника), поэтому группа стоит
+      // подряд, а одиночные приёмки — на прежних местах. Соединение с
+      // маленьким подзапросом (хеш), а не подзапрос на каждую строку: замер
+      // на бою 16.11 — +~10 мс на первой странице против +~170 мс.
+      const memberDelivery = alias(deliveries, 'group_member_delivery');
+      const groupTop = app.db
+        .select({
+          deliveryId: deliveryGroupMembers.deliveryId,
+          top: drSql<number>`max(${memberDelivery.displayId}) over (partition by ${deliveryGroupMembers.groupId})`.as(
+            'group_top',
+          ),
+        })
+        .from(deliveryGroupMembers)
+        .innerJoin(memberDelivery, eq(memberDelivery.id, deliveryGroupMembers.deliveryId))
+        .as('group_top_of');
+      const rows: Array<{ id: string }> = grouped
+        ? await app.db
+            .select({ id: deliveries.id })
+            .from(deliveries)
+            .leftJoin(groupTop, eq(groupTop.deliveryId, deliveries.id))
+            .where(where)
+            .orderBy(
+              desc(drSql`coalesce(${groupTop.top}, ${deliveries.displayId})`),
+              desc(deliveries.displayId),
+            )
+            .limit(limit)
+            .offset(offset)
+        : await app.db
+            .select({ id: deliveries.id })
+            .from(deliveries)
+            .where(where)
+            .orderBy(desc(deliveries.displayId))
+            .limit(limit)
+            .offset(offset);
       const [{ count } = { count: 0 }] = await app.db
         .select({ count: drSql<number>`count(*)::int` })
         .from(deliveries)
@@ -1181,12 +1225,16 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
 
       // Батч вместо Promise.all(buildDeliveryDto×N): ~5 запросов на страницу
       // вместо ~4×N (устранение N+1). Порядок страницы — по rows (displayId DESC).
-      const items = await buildDeliveryDtosBatch(
-        app,
-        rows.map((r: { id: string }) => r.id),
-        req.user?.role,
-      );
-      return { items, total: count };
+      const ids = rows.map((r: { id: string }) => r.id);
+      const items = await buildDeliveryDtosBatch(app, ids, req.user?.role);
+      if (!grouped) return { items, total: count };
+      const summaries = await loadDeliveryGroupSummaries(app.db, ids, {
+        withEdo: await roleHasCapability(app, req.user?.role, 'operations.edit.link_source'),
+      });
+      return {
+        items: items.map((item) => ({ ...item, deliveryGroup: summaries.get(item.id) ?? null })),
+        total: count,
+      };
     },
   );
 
@@ -1751,6 +1799,10 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           .for('update')
           .limit(1);
         if (locked.length === 0) return; // удалена конкурентно — no-op
+        // Группа приёмок: выводим приёмку под её же блокировкой (порядок
+        // «приёмка → группа»), группа из двух распускается. Каскад FK снял бы
+        // членство и сам, но оставил бы группу из одной приёмки.
+        await detachDeliveries(tx, [req.params.id]);
 
         const photos = await tx
           .select({ s3Key: deliveryPhotos.s3Key, thumbS3Key: deliveryPhotos.thumbS3Key })
@@ -1849,16 +1901,22 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         });
       }
 
-      await app.db
-        .update(deliveries)
-        .set({
-          pendingDeletionAt: new Date(),
-          pendingDeletionByUserId: req.user?.id ?? null,
-          pendingDeletionReason: req.body.reason ?? null,
-          version: drSql`${deliveries.version} + 1`,
-          updatedAt: new Date(),
-        })
-        .where(eq(deliveries.id, existing.id));
+      // Транзакция ради группы приёмок: помеченная на удаление выходит из
+      // группы (восстановление её не возвращает). UPDATE блокирует строку,
+      // затем группа — порядок «приёмка → группа» общий для всех путей.
+      await app.db.transaction(async (tx) => {
+        await tx
+          .update(deliveries)
+          .set({
+            pendingDeletionAt: new Date(),
+            pendingDeletionByUserId: req.user?.id ?? null,
+            pendingDeletionReason: req.body.reason ?? null,
+            version: drSql`${deliveries.version} + 1`,
+            updatedAt: new Date(),
+          })
+          .where(eq(deliveries.id, existing.id));
+        await detachDeliveries(tx, [existing.id]);
+      });
       const dto = await buildDeliveryDto(app, existing.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
       publishEvent(app, {
@@ -1988,16 +2046,21 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             skipped.push({ id, reason: 'wrong_status' });
             continue;
           }
-          await app.db
-            .update(deliveries)
-            .set({
-              pendingDeletionAt: new Date(),
-              pendingDeletionByUserId: req.user?.id ?? null,
-              pendingDeletionReason: null,
-              version: drSql`${deliveries.version} + 1`,
-              updatedAt: new Date(),
-            })
-            .where(eq(deliveries.id, id));
+          // Как у одиночной пометки: приёмка выходит из группы в той же
+          // транзакции, что и сама пометка.
+          await app.db.transaction(async (tx) => {
+            await tx
+              .update(deliveries)
+              .set({
+                pendingDeletionAt: new Date(),
+                pendingDeletionByUserId: req.user?.id ?? null,
+                pendingDeletionReason: null,
+                version: drSql`${deliveries.version} + 1`,
+                updatedAt: new Date(),
+              })
+              .where(eq(deliveries.id, id));
+            await detachDeliveries(tx, [id]);
+          });
           publishEvent(app, {
             type: 'delivery_updated',
             entityId: id,
@@ -2137,6 +2200,8 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               .for('update')
               .limit(1);
             if (locked.length === 0) return false; // удалена конкурентно
+            // Как у одиночного удаления: вывести из группы под блокировкой приёмки.
+            await detachDeliveries(tx, [id]);
 
             const photos = await tx
               .select({ s3Key: deliveryPhotos.s3Key, thumbS3Key: deliveryPhotos.thumbS3Key })
@@ -2755,6 +2820,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
   registerDeliveryEdoRoutes(rawApp);
   registerDeliveryRecipientRoutes(rawApp);
   registerDeliveryDocumentRecipientRoutes(rawApp, buildDeliveryDto);
+  registerDeliveryGroupRoutes(rawApp, buildDeliveryDtosBatch);
 
   // Привязка УПД к существующей приёмке (приёмка остаётся в своём статусе,
   // ручные материалы из мобилы НЕ удаляются). Заменяет старый клиентский
@@ -3678,6 +3744,11 @@ async function updateDelivery(
       // foreign_site (см. domain/operations/foreign-site.ts).
       throw new ForeignSiteError();
     }
+    // Группа приёмок держит один объект: перенос на другой объект выводит
+    // приёмку из группы (группа из двух распускается). Тихо — ответ и коды
+    // upsert прежние, планшет ничего не замечает. Строка приёмки уже
+    // заблокирована выше, порядок «приёмка → группа» общий для всех путей.
+    await detachDeliveries(tx, [id], { onlyIfSiteNot: input.siteId });
 
     // Происхождение позиций переносится ЯВНО: строки удаляются и вставляются
     // заново, а `source_document_id` — данные, которых в запросе может не быть

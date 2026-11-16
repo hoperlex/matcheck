@@ -1528,6 +1528,49 @@
           "docAttention": {
             "type": "boolean"
           },
+          "deliveryGroup": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "siteId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "members": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "deliveryId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "displayId": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "deliveryId",
+                    "displayId"
+                  ]
+                }
+              },
+              "edoLinkedCount": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "siteId",
+              "members"
+            ]
+          },
           "createdAt": {
             "type": "string"
           },
@@ -2769,6 +2812,49 @@
                 "docAttention": {
                   "type": "boolean"
                 },
+                "deliveryGroup": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "siteId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "members": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "deliveryId": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "displayId": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "deliveryId",
+                          "displayId"
+                        ]
+                      }
+                    },
+                    "edoLinkedCount": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "siteId",
+                    "members"
+                  ]
+                },
                 "createdAt": {
                   "type": "string"
                 },
@@ -3783,6 +3869,49 @@
               },
               "docAttention": {
                 "type": "boolean"
+              },
+              "deliveryGroup": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "siteId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "members": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "deliveryId": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "displayId": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "deliveryId",
+                        "displayId"
+                      ]
+                    }
+                  },
+                  "edoLinkedCount": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "siteId",
+                  "members"
+                ]
               },
               "createdAt": {
                 "type": "string"
@@ -11080,6 +11209,49 @@
                 },
                 "docAttention": {
                   "type": "boolean"
+                },
+                "deliveryGroup": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "siteId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "members": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "deliveryId": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "displayId": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "deliveryId",
+                          "displayId"
+                        ]
+                      }
+                    },
+                    "edoLinkedCount": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "siteId",
+                    "members"
+                  ]
                 },
                 "createdAt": {
                   "type": "string"

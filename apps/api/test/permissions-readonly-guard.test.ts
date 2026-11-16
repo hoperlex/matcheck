@@ -84,6 +84,9 @@ async function buildApp(opts: {
     ok: 'document-purpose',
   }));
   instance.patch('/api/v1/deliveries/:id/dispatcher-check', async () => ({ ok: 'dispatcher' }));
+  instance.post('/api/v1/delivery-groups', async () => ({ ok: 'group-compose' }));
+  instance.post('/api/v1/delivery-groups/leave', async () => ({ ok: 'group-leave' }));
+  instance.delete('/api/v1/delivery-groups/:id', async () => ({ ok: 'group-dissolve' }));
   instance.patch('/api/v1/deliveries/:id/flags', async () => ({ ok: 'flags' }));
   instance.post('/api/v1/deliveries', async () => ({ ok: 'upsert' }));
   instance.post('/api/v1/sites', async () => ({ ok: 'site' }));
@@ -108,8 +111,11 @@ afterEach(async () => {
   process.env = { ...ORIGINAL_ENV };
 });
 
-const send = (instance: FastifyInstance, method: 'POST' | 'PATCH' | 'GET', url: string) =>
-  instance.inject({ method, url, payload: method === 'GET' ? undefined : {} });
+const send = (
+  instance: FastifyInstance,
+  method: 'POST' | 'PATCH' | 'GET' | 'DELETE',
+  url: string,
+) => instance.inject({ method, url, payload: method === 'GET' ? undefined : {} });
 
 describe('при выключенном флаге гард ведёт себя ровно как прежде', () => {
   it('монитору разрешены проверка, «Диспетчер» и признак приёмки', async () => {
@@ -122,6 +128,10 @@ describe('при выключенном флаге гард ведёт себя 
     expect((await send(app, 'PATCH', '/api/v1/deliveries/1/dispatcher-check')).statusCode).toBe(
       200,
     );
+    // Группы приёмок — то же действие «Проверять»: монитору открыты и без матрицы.
+    expect((await send(app, 'POST', '/api/v1/delivery-groups')).statusCode).toBe(200);
+    expect((await send(app, 'POST', '/api/v1/delivery-groups/leave')).statusCode).toBe(200);
+    expect((await send(app, 'DELETE', '/api/v1/delivery-groups/1')).statusCode).toBe(200);
     expect((await send(app, 'PATCH', '/api/v1/deliveries/1/flags')).statusCode).toBe(403);
     expect((await send(app, 'POST', '/api/v1/deliveries')).statusCode).toBe(403);
   });

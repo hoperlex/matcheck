@@ -26,12 +26,18 @@ function toSelected(n: number): string {
 export function BulkEdoLinkFlow({
   open,
   deliveries,
+  deliveryGroup,
   onClose,
   onDone,
 }: {
   open: boolean;
   /** Отмеченные приёмки — строки списка (объект у всех один, проверяет вызывающий). */
   deliveries: readonly Delivery[];
+  /**
+   * Привязка ко всей группе приёмок: `deliveries` — её полный состав, участники
+   * в окне «К другим приёмкам» не снимаются, сервер сверяет состав.
+   */
+  deliveryGroup?: { id: string; memberIds: readonly string[] };
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -76,7 +82,9 @@ export function BulkEdoLinkFlow({
               }))}
             />
             <Typography.Text type="secondary">
-              {`УПД будет привязана к ${toSelected(deliveries.length)} — на следующем шаге можно снять отметки и выбрать блоки`}
+              {deliveryGroup
+                ? `УПД будет привязана ко всем приёмкам группы (${deliveries.length}) — на следующем шаге можно выбрать блоки и добавить другие приёмки`
+                : `УПД будет привязана к ${toSelected(deliveries.length)} — на следующем шаге можно снять отметки и выбрать блоки`}
             </Typography.Text>
           </Space>
         }
@@ -97,6 +105,7 @@ export function BulkEdoLinkFlow({
         anchorDeliveryId={anchor?.id ?? null}
         document={picked}
         preselected={deliveries.map((d) => d.id)}
+        deliveryGroup={deliveryGroup}
         onCancel={onClose}
         onDone={onDone}
       />

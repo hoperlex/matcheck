@@ -225,3 +225,64 @@ describe('ResponsiveTable: сортировка и фильтр в колонк�
     expect(th(container, 'Город').classList.contains('ant-table-column-has-sorters')).toBe(false);
   });
 });
+
+/**
+ * Группы приёмок: строки групп добавляются к странице сверх pageSize. antd при
+ * `items.length > pageSize` и `< total` режет массив сам — на второй странице
+ * от 50 приёмок и трёх строк групп осталось бы три строки. Отдельный
+ * переключатель страниц этого не допускает.
+ */
+describe('ResponsiveTable: строки сверх страницы и колонка левее галочек', () => {
+  type Line = { id: string; name: string };
+  const page2: Line[] = [
+    ...Array.from({ length: 3 }, (_, i) => ({ id: `head-${i}`, name: `Группа ${i}` })),
+    ...Array.from({ length: 50 }, (_, i) => ({ id: `d-${i}`, name: `Приёмка ${51 + i}` })),
+  ];
+  const table = (props: Partial<Parameters<typeof ResponsiveTable<Line>>[0]> = {}) =>
+    render(
+      <ResponsiveTable<Line>
+        items={page2}
+        rowKey="id"
+        cardRender={(r) => r.name}
+        columns={[{ title: 'Название', dataIndex: 'name' }]}
+        pagination={{ current: 2, pageSize: 50, total: 120, onChange: () => {} }}
+        {...props}
+      />,
+    );
+  const bodyRows = (c: HTMLElement) =>
+    c.querySelectorAll('.ant-table-tbody > tr.ant-table-row').length;
+
+  it('встроенная пагинация antd режет 53 строки второй страницы — поэтому и нужен отдельный переключатель', () => {
+    const { container } = table();
+    expect(bodyRows(container)).toBe(3);
+  });
+
+  it('externalPagination: все 53 строки на месте, переключатель страниц под таблицей', () => {
+    const onChange = vi.fn();
+    const { container } = table({
+      externalPagination: true,
+      pagination: { current: 2, pageSize: 50, total: 120, onChange },
+    });
+    expect(bodyRows(container)).toBe(53);
+    expect(screen.getByText('Приёмка 100')).toBeTruthy();
+    const pager = container.querySelector('.ant-table-pagination');
+    expect(pager).not.toBeNull();
+    expect(pager!.querySelector('.ant-pagination-item-active')?.textContent).toBe('2');
+    fireEvent.click(pager!.querySelector('.ant-pagination-item-3')!);
+    expect(onChange).toHaveBeenCalledWith(3, 50);
+  });
+
+  it('leadingColumn стоит левее галочек выбора', () => {
+    const { container } = table({
+      items: page2.slice(3, 5),
+      pagination: false,
+      rowSelection: { selectedRowKeys: [], onChange: () => {} },
+      leadingColumn: { key: 'gutter', width: 28, render: () => <span>скобка</span> },
+    });
+    const firstRow = container.querySelector('.ant-table-tbody > tr.ant-table-row')!;
+    const cells = [...firstRow.querySelectorAll('td')];
+    expect(cells[0]!.textContent).toBe('скобка');
+    expect(cells[1]!.querySelector('input[type="checkbox"]')).not.toBeNull();
+    expect(cells[2]!.textContent).toContain('Приёмка 51');
+  });
+});

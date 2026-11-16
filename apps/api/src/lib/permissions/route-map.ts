@@ -367,6 +367,13 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['PATCH /api/v1/deliveries/:id/sources/:docId/recipient', DOCUMENT_RECIPIENT],
   ['PATCH /api/v1/deliveries/:id/sources/:docId/purpose', st('operations.deliveries', 'review')],
   ['PATCH /api/v1/deliveries/:id/dispatcher-check', st('operations.deliveries', 'review')],
+  // Группы приёмок (рейсы одной поставки): «Проверять», как «Диспетчер» —
+  // по умолчанию менеджер и мониторинг. Привязка УПД к группе идёт прежним
+  // POST …/edo-matches/batch со своим правом (link_source).
+  ['POST /api/v1/delivery-groups', st('operations.deliveries', 'review')],
+  ['POST /api/v1/delivery-groups/leave', st('operations.deliveries', 'review')],
+  ['DELETE /api/v1/delivery-groups/:id', st('operations.deliveries', 'review')],
+  ['GET /api/v1/delivery-groups/:id/members', st('operations.deliveries', 'review')],
   // Три маршрута ниже открыты только admin/manager, хотя базовый edit есть и у
   // inspector_kpp: для него это остаётся закрытым (его записи ограничены
   // объектом, а сверки siteId на этих путях нет). Монитору же выданный edit

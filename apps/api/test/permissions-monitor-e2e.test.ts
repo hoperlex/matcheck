@@ -156,6 +156,28 @@ async function buildApp(opts: {
     { preHandler: [authorize('admin', 'manager')] as never },
     async () => ({ ok: 'duplicate-info' }),
   );
+  // Группы приёмок — действие «Проверять», как «Диспетчер»: allow-list
+  // admin/manager/monitor, ячейка review.
+  instance.post(
+    '/api/v1/delivery-groups',
+    { preHandler: [authorize('admin', 'manager', 'monitor')] as never },
+    async () => ({ ok: 'group-compose' }),
+  );
+  instance.post(
+    '/api/v1/delivery-groups/leave',
+    { preHandler: [authorize('admin', 'manager', 'monitor')] as never },
+    async () => ({ ok: 'group-leave' }),
+  );
+  instance.delete(
+    '/api/v1/delivery-groups/:id',
+    { preHandler: [authorize('admin', 'manager', 'monitor')] as never },
+    async () => ({ ok: 'group-dissolve' }),
+  );
+  instance.get(
+    '/api/v1/delivery-groups/:id/members',
+    { preHandler: [authorize('admin', 'manager', 'monitor')] as never },
+    async () => ({ ok: 'group-members' }),
+  );
   instance.post(
     '/api/v1/deliveries/bulk-hard-delete',
     { preHandler: [authorize('admin')] as never },
@@ -222,6 +244,49 @@ describe('Мониторинг без выданных прав', () => {
     // Окно подбора УПД из ЭДО — часть привязки, без «Редактировать» закрыто.
     expect((await get(app, '/api/v1/deliveries/1/edo-candidates')).statusCode).toBe(403);
     expect((await patch(app, '/api/v1/deliveries/1/recipient-mode')).statusCode).toBe(403);
+  });
+});
+
+describe('группы приёмок: менеджер, мониторинг и админ — по «Проверять»', () => {
+  const groupRoutes = (i: FastifyInstance) => [
+    post(i, '/api/v1/delivery-groups'),
+    post(i, '/api/v1/delivery-groups/leave'),
+    i.inject({ method: 'DELETE', url: '/api/v1/delivery-groups/1' }),
+    get(i, '/api/v1/delivery-groups/1/members'),
+  ];
+  const codes = async (i: FastifyInstance) =>
+    (await Promise.all(groupRoutes(i))).map((res) => res.statusCode);
+
+  it('мониторинг на дефолтах собирает и распускает группы через все слои', async () => {
+    app = await buildApp({ role: 'monitor' });
+    expect(await codes(app)).toEqual([200, 200, 200, 200]);
+  });
+
+  it('менеджер на дефолтах — тоже; админу матрица не нужна', async () => {
+    app = await buildApp({ role: 'manager' });
+    expect(await codes(app)).toEqual([200, 200, 200, 200]);
+    await app.close();
+    app = await buildApp({
+      role: 'admin',
+      overrides: [row('admin', 'operations.deliveries', { canReview: false })],
+    });
+    expect(await codes(app)).toEqual([200, 200, 200, 200]);
+  });
+
+  it('снятое «Проверять» закрывает группы мониторингу', async () => {
+    app = await buildApp({
+      role: 'monitor',
+      overrides: [row('monitor', 'operations.deliveries', { canView: true, canReview: false })],
+    });
+    expect(await codes(app)).toEqual([403, 403, 403, 403]);
+  });
+
+  it('инспектору и подрядчику закрыто', async () => {
+    app = await buildApp({ role: 'inspector_kpp' });
+    expect(await codes(app)).toEqual([403, 403, 403, 403]);
+    await app.close();
+    app = await buildApp({ role: 'contractor' });
+    expect(await codes(app)).toEqual([403, 403, 403, 403]);
   });
 });
 

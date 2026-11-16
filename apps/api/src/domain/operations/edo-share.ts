@@ -45,6 +45,7 @@ import {
   type MatchLevel,
 } from './edo-match.js';
 import { isoDate, loadReferencesForDeliveries, mskDate } from './edo-references.js';
+import { lockGroupForLink } from './delivery-groups.js';
 
 type Exec = Pick<Db, 'execute' | 'select' | 'insert'>;
 
@@ -425,11 +426,19 @@ export async function findShareCandidates(
       a.distance - b.distance ||
       b.displayId - a.displayId,
   );
+  // Отмеченные (`include`) в ответе всегда, в каком бы состоянии ни были, —
+  // включая «уже привязана», которая сортируется в конец. Иначе при 60+
+  // совпадениях приёмка группы выпадала бы из окна. Остаток лимита — прочим по
+  // той же сортировке.
+  const selected = rows.filter((row) => row.reasons.includes('selected'));
+  const others = rows.filter((row) => !row.reasons.includes('selected'));
+  const room = Math.max(0, SHARE_MAX_ROWS - selected.length);
+  const kept = new Set([...selected, ...others.slice(0, room)]);
   return {
     document: headerView(header),
     siteId: anchor.siteId,
-    items: rows.slice(0, SHARE_MAX_ROWS).map(({ distance: _distance, ...row }) => row),
-    truncated: rows.length > SHARE_MAX_ROWS,
+    items: rows.filter((row) => kept.has(row)).map(({ distance: _distance, ...row }) => row),
+    truncated: others.length > room,
   };
 }
 
@@ -563,7 +572,9 @@ export type BatchLinkError =
   | 'foreign_site'
   | 'imported_available'
   | 'section_not_linked'
-  | 'invalid_section';
+  | 'invalid_section'
+  | 'group_changed'
+  | 'group_incomplete';
 
 export type BatchLinkResult =
   | { status: 'ok'; siteId: string; linked: DeliveryRef[]; alreadyLinked: DeliveryRef[] }
@@ -586,6 +597,13 @@ export async function linkEdoDocumentToDeliveries(
     ref: EdoDocRef;
     targets: readonly BatchTarget[];
     userId: string | null;
+    /**
+     * Привязка ко всей группе приёмок: состав, который видел человек. Под
+     * блокировкой группы он сверяется с текущим, и каждый участник обязан быть
+     * в целях или уже нести эту УПД — иначе `group_changed` / `group_incomplete`
+     * и ничего не привязано.
+     */
+    deliveryGroup?: { id: string; memberIds: readonly string[] };
   },
 ): Promise<BatchLinkResult> {
   const { anchorId, ref, targets } = input;
@@ -620,6 +638,21 @@ export async function linkEdoDocumentToDeliveries(
   if (pending.length) return { status: 'pending_deletion', deliveries: pending };
   const fromShipment = failing((row) => row.sourceShipmentId !== null);
   if (fromShipment.length) return { status: 'from_shipment', deliveries: fromShipment };
+
+  // Группа приёмок — после приёмок и до ключей ЭДО: тот же порядок «приёмки →
+  // группа», что у сбора группы. FOR SHARE не даёт составу измениться до
+  // коммита: вступление, уход и пометка на удаление берут группу FOR UPDATE.
+  let groupMembers: string[] | null = null;
+  if (input.deliveryGroup) {
+    groupMembers = await lockGroupForLink(tx, input.deliveryGroup.id);
+    const expected = new Set(input.deliveryGroup.memberIds);
+    if (
+      !groupMembers ||
+      groupMembers.length !== expected.size ||
+      groupMembers.some((id) => !expected.has(id))
+    )
+      return { status: 'group_changed', deliveries: [] };
+  }
 
   const group = await lockEdoDocGroup(tx, groupStart(ref));
   if (!(await lockLinkableEdoDocument(tx, ref)))
@@ -658,6 +691,20 @@ export async function linkEdoDocumentToDeliveries(
   if (invalidSection.length) return { status: 'invalid_section', deliveries: invalidSection };
 
   const already = new Set(linkedAll.map((link) => link.deliveryId));
+  if (groupMembers) {
+    // Участник, где эта УПД уже стоит (любой копией), условие выполняет и без
+    // строки в целях: повторная привязка ко всей группе — не ошибка.
+    const targetIds = new Set(targets.map((t) => t.deliveryId));
+    const missing = groupMembers.filter((id) => !targetIds.has(id) && !already.has(id));
+    if (missing.length) {
+      const shown = await tx
+        .select({ deliveryId: deliveries.id, displayId: deliveries.displayId })
+        .from(deliveries)
+        .where(inArray(deliveries.id, missing))
+        .orderBy(asc(deliveries.displayId));
+      return { status: 'group_incomplete', deliveries: shown };
+    }
+  }
   const toInsert = targets.filter((t) => !already.has(t.deliveryId));
   const inserted = toInsert.length
     ? await tx

@@ -204,6 +204,30 @@ export const DocumentRecipientSchema = z.object({
 });
 export type DocumentRecipient = z.infer<typeof DocumentRecipientSchema>;
 
+/** Не больше 50 приёмок в группе — ровно столько привязывает одна пачка ЭДО. */
+export const DELIVERY_GROUP_MAX = 50;
+
+/** Приёмка в составе группы: id и номер для подписи. */
+export const DeliveryGroupRefSchema = z.object({
+  deliveryId: z.string().uuid(),
+  displayId: z.number().int(),
+});
+export type DeliveryGroupRef = z.infer<typeof DeliveryGroupRefSchema>;
+
+/**
+ * Группа приёмки в строке списка. `members` — весь состав (в группе только
+ * живые приёмки одного объекта, их не меньше двух), по убыванию номера.
+ * `edoLinkedCount` — сколько из них уже с УПД из ЭДО; только тем, кому
+ * привязки ЭДО видны (право привязки), иначе поля нет.
+ */
+export const DeliveryGroupSummarySchema = z.object({
+  id: z.string().uuid(),
+  siteId: z.string().uuid(),
+  members: z.array(DeliveryGroupRefSchema),
+  edoLinkedCount: z.number().int().optional(),
+});
+export type DeliveryGroupSummary = z.infer<typeof DeliveryGroupSummarySchema>;
+
 export const DeliverySchema = z.object({
   id: z.string().uuid(),
   // Короткий человекочитаемый id для столбца «id» в Принятых и
@@ -294,6 +318,11 @@ export const DeliverySchema = z.object({
    * не объявляет вовсе.
    */
   docAttention: z.boolean().optional(),
+  /**
+   * Группа приёмок (рейсы одной поставки) — только в списке «Принятые» по
+   * `grouped=1`. Optional: `/sync`, карточка и прочие вызовы поле не собирают.
+   */
+  deliveryGroup: DeliveryGroupSummarySchema.nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

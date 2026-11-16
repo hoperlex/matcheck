@@ -1865,6 +1865,35 @@ export const deliveryEdoMatches = pgTable(
   ],
 );
 
+// Группа приёмок: рейсы одной поставки (миграция 0149). Только портал — /sync
+// и upsert планшета её не видят, строки deliveries при смене членства не
+// меняются. Инварианты (один объект, ≥ 2 живых члена, ≤ 50) держит
+// domain/operations/delivery-groups.ts.
+export const deliveryGroups = pgTable('delivery_groups', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  siteId: uuid('site_id')
+    .notNull()
+    .references(() => sites.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  createdByUserId: uuid('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+});
+
+export const deliveryGroupMembers = pgTable(
+  'delivery_group_members',
+  {
+    // PK по приёмке: приёмка не больше чем в одной группе.
+    deliveryId: uuid('delivery_id')
+      .primaryKey()
+      .references(() => deliveries.id, { onDelete: 'cascade' }),
+    groupId: uuid('group_id')
+      .notNull()
+      .references(() => deliveryGroups.id, { onDelete: 'cascade' }),
+    addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+    addedByUserId: uuid('added_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  },
+  (t) => [index('delivery_group_members_group_idx').on(t.groupId)],
+);
+
 export const deliveryItems = pgTable(
   'delivery_items',
   {

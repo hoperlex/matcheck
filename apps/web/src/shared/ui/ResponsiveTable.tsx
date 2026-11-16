@@ -1,4 +1,14 @@
-import { ConfigProvider, List, Space, Table, Tooltip, Typography, type TableProps } from 'antd';
+import {
+  ConfigProvider,
+  List,
+  Pagination,
+  Space,
+  Table,
+  Tooltip,
+  Typography,
+  type PaginationProps,
+  type TableProps,
+} from 'antd';
 import type { TableRef } from 'antd/es/table';
 import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { useBreakpoint } from '../hooks/useBreakpoint';
@@ -126,6 +136,8 @@ export function ResponsiveTable<T extends object>({
   scrollY,
   scrollX,
   autoColumnTools,
+  leadingColumn,
+  externalPagination,
 }: {
   items: T[];
   columns: ToolColumn<T>[];
@@ -194,6 +206,20 @@ export function ResponsiveTable<T extends object>({
    * значило бы врать.
    */
   autoColumnTools?: { total: number };
+  /**
+   * Узкая колонка ЛЕВЕЕ галочек выбора — например скобка группы строк, как
+   * группировка в Excel. Идёт мимо оформления колонок: оно пересоздаёт объекты,
+   * а `Table.SELECTION_COLUMN` antd узнаёт только по ссылке.
+   */
+  leadingColumn?: Column<T>;
+  /**
+   * Переключатель страниц (`pagination`) рисуется отдельно от таблицы, а
+   * таблица получает `pagination={false}`. Нужен при серверной пагинации, когда
+   * в `items` строк больше, чем `pageSize`: antd при `items.length > pageSize`
+   * режет массив сам (`InternalTable`, `mergedData.slice(...)`), и на второй
+   * странице от 50 приёмок с тремя строками групп оставались бы три строки.
+   */
+  externalPagination?: boolean;
 }) {
   const bp = useBreakpoint();
   const serverPaged =
@@ -275,6 +301,13 @@ export function ResponsiveTable<T extends object>({
         ...tools.columns.map(decorate),
       ]
     : tools.columns.map(decorate);
+  // Колонка левее галочек: antd ставит выбор туда, где в колонках стоит
+  // SELECTION_COLUMN, а без него — первым.
+  const tableColumns: Column<T>[] = leadingColumn
+    ? rowSelection
+      ? [leadingColumn, Table.SELECTION_COLUMN as Column<T>, ...finalColumns]
+      : [leadingColumn, ...finalColumns]
+    : finalColumns;
 
   const handleChange: TableProps<T>['onChange'] = (p, f, s, extra) => {
     tools.onChange(p, f, s, extra);
@@ -337,7 +370,7 @@ export function ResponsiveTable<T extends object>({
           // приёмки) перешли бы на auto, и колонки растянулись бы по тексту.
           tableLayout="fixed"
           dataSource={items}
-          columns={finalColumns}
+          columns={tableColumns}
           rowKey={rowKey as TableProps<T>['rowKey']}
           loading={loading}
           size="small"
@@ -345,7 +378,7 @@ export function ResponsiveTable<T extends object>({
           expandable={expandable}
           showSorterTooltip={false}
           pagination={
-            pagination === false
+            externalPagination || pagination === false
               ? false
               : { pageSize: 100, showSizeChanger: false, ...(pagination ?? {}) }
           }
@@ -362,6 +395,22 @@ export function ResponsiveTable<T extends object>({
               : undefined
           }
         />
+        {externalPagination && pagination && (
+          // Как встроенный переключатель antd 5 (InternalTable.renderPagination):
+          // справа, мелкий, отступ 16px — расчёт высоты tbody (~48px под
+          // пагинацию) не меняется. Обёртка ant-table-wrapper — чтобы действовали
+          // общие стили строки под таблицей (TableLookStyle).
+          <div className="ant-table-wrapper">
+            <Pagination
+              align="end"
+              size="small"
+              className="ant-table-pagination"
+              style={{ margin: '16px 0' }}
+              showSizeChanger={false}
+              {...(pagination as PaginationProps)}
+            />
+          </div>
+        )}
         {listIncomplete && (
           <div style={{ marginTop: 8, fontSize: 12, color: '#71717a' }}>
             Показаны первые {items.length} из {autoColumnTools.total} — сортировка и фильтры в

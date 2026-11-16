@@ -14,6 +14,7 @@ import {
   message,
 } from 'antd';
 import {
+  ApartmentOutlined,
   DeleteOutlined,
   EditOutlined,
   ExclamationCircleOutlined,
@@ -33,6 +34,7 @@ import type {
 } from '@matcheck/contracts';
 import { DELIVERY_SOFT_DELETE_STATUSES } from '@matcheck/contracts';
 import type { z } from 'zod';
+import type { ColumnsType, TableRowSelection } from 'antd/es/table/interface';
 import dayjs from 'dayjs';
 import { ApiError, api } from '../../services/api';
 import { hardDeleteDelivery, markDeletion, unmarkDeletion } from '../../services/deliveries';
@@ -75,6 +77,21 @@ import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
 import { BulkEdoLinkFlow } from './BulkEdoLinkFlow';
+import { bulkEdoLinkBlock } from './bulkEdoLinkBlock';
+import {
+  buildGroupedRows,
+  deliveriesCount,
+  groupJoinPlan,
+  groupLeaveBlock,
+  isGroupHead,
+  withGroupRows,
+  type GroupHeadRow,
+} from './deliveryGroupRows';
+import { DeliveryGroupHeader } from './DeliveryGroupHeader';
+import { DeliveryGroupStyle, DeliveryGroupToggle, gutterCellClass } from './DeliveryGroupGutter';
+import { DeliveryGroupModal } from './DeliveryGroupModal';
+import { GroupEdoLinkFlow } from './GroupEdoLinkFlow';
+import { useCollapsedDeliveryGroups, useDeliveryGroupMutations } from './useDeliveryGroups';
 import { operationsListQuery } from '../operations/operationsQuery';
 import {
   formatDocumentsShort,
@@ -86,6 +103,10 @@ import { useSupplierFilterOptions } from '../shared/useSupplierFilterOptions';
 
 type List = z.infer<typeof DeliveryListResponseSchema>;
 type Row = List['items'][number];
+/** Строка таблицы: приёмка или строка группы над её приёмками. */
+type TableRow = Row | GroupHeadRow;
+
+export { bulkEdoLinkBlock };
 
 // Статусы, для которых вместо hard-delete показываем «Пометить на удаление»,
 // берём из @matcheck/contracts — общий источник с сервером (см. statuses.ts).
@@ -144,6 +165,7 @@ export function DeliveriesHistory({
   onTabChange,
   filtersExtra,
   bulkActionsPortalRef,
+  showGroups = false,
 }: {
   onOpen: (id: string) => void;
   tabs?: PageTabItem[];
@@ -157,6 +179,12 @@ export function DeliveriesHistory({
   // поведение прежнее: actions рисуются под фильтрами (для других
   // страниц, где этот компонент используется без OperationsPage).
   bulkActionsPortalRef?: RefObject<HTMLElement | null>;
+  /**
+   * Группы приёмок (рейсы одной поставки): скобка слева, строка группы,
+   * «Объединить в группу». Включает только «Принятые» в Операциях — список у
+   * инспектора (KppPage) остаётся прежним.
+   */
+  showGroups?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
@@ -210,6 +238,11 @@ export function DeliveriesHistory({
   type View = 'active' | 'trash';
   const view: View = params.get('trash') === '1' ? 'trash' : 'active';
   const isTrash = view === 'trash';
+  // Группы приёмок — действие «Проверять», как «Диспетчер»: по умолчанию у
+  // менеджера и мониторинга, админ всегда. В корзине групп нет (удалённая
+  // приёмка из группы выходит).
+  const canGroup = canReview;
+  const groupsOn = showGroups && canGroup && !isTrash;
 
   // «Признаки» в Принятых приёмках — повторяющиеся ?feature=A&feature=B.
   // Симметрично с ShipmentsHistory: повторяющиеся ключи через
@@ -335,6 +368,7 @@ export function DeliveriesHistory({
     view,
     page,
     PAGE_SIZE,
+    groupsOn ? 'grouped' : 'plain',
     {
       contractor: filters.contractorIds.join(','),
       supplier: filters.supplierIds.join(','),
@@ -358,6 +392,8 @@ export function DeliveriesHistory({
       // Тот же сборщик, что у «Экспорт Excel»: выгрузка обязана повторять
       // таблицу, а не собирать свой урезанный набор фильтров.
       const qs = operationsListQuery(filters, { kind: 'delivery', trash: view === 'trash' });
+      // Группы — только таблице: выгрузка в Excel идёт тем же сборщиком без них.
+      if (groupsOn) qs.set('grouped', '1');
       qs.set('limit', String(PAGE_SIZE));
       qs.set('offset', String(offset));
       return api.get<List>(`/deliveries?${qs.toString()}`);
@@ -496,7 +532,7 @@ export function DeliveriesHistory({
   //  - Удалённые (trash): «Восстановить N» + «Удалить N навсегда».
   // Bulk-bar живёт в PageTabs.tabBarExtraContent — занимает зарезервированное
   // место в шапке, не сдвигает таблицу при появлении/исчезновении.
-  const bulk = useBulkSelection<Row>((r) => r.id);
+  const bulk = useBulkSelection<TableRow>((r) => r.id);
   const handleBulkSuccess = (res: BulkDeleteResponse, okMsg: string) => {
     bulk.clear();
     if (res.deleted.length > 0) message.success(`${okMsg}: ${res.deleted.length}`);
@@ -530,6 +566,70 @@ export function DeliveriesHistory({
   const selectedRows = items.filter((r) => bulk.selectedIds.has(r.id));
   const bulkEdoBlocked = bulkEdoLinkBlock(selectedRows);
   const [bulkEdoOpen, setBulkEdoOpen] = useState(false);
+
+  // ─── группы приёмок ───────────────────────────────────────────────
+  const { collapsed, toggle: toggleCollapsed } = useCollapsedDeliveryGroups();
+  const grouped = useMemo(
+    () => (groupsOn ? buildGroupedRows(items, collapsed) : null),
+    [groupsOn, items, collapsed],
+  );
+  const tableItems: TableRow[] = grouped?.rows ?? items;
+  const groupMutations = useDeliveryGroupMutations();
+  const joinPlan = groupJoinPlan(selectedRows);
+  const leaveBlocked = groupLeaveBlock(selectedRows);
+  const [groupModal, setGroupModal] = useState<{
+    groupId: string | null;
+    siteId: string;
+    initial: Row[];
+  } | null>(null);
+  const [groupLinkId, setGroupLinkId] = useState<string | null>(null);
+  // Свернуть — значит и снять отметки со скрытых приёмок: невидимое не должно
+  // уйти в массовое действие.
+  const toggleGroup = (head: GroupHeadRow) => {
+    if (!head.collapsed) head.visibleIds.forEach((id) => bulk.remove(id));
+    toggleCollapsed(head.group.id);
+  };
+  const siteNameOf = (head: GroupHeadRow): string | null =>
+    items.find((r) => head.visibleIds.includes(r.id))?.siteName ??
+    sitesMap.get(head.group.siteId) ??
+    null;
+  const leaveSelected = () =>
+    groupMutations.leave.mutate(
+      selectedRows.filter((r) => r.deliveryGroup).map((r) => r.id),
+      {
+        onSuccess: (res) => {
+          message.success(
+            `Из группы убрано: ${deliveriesCount(res.removed.length)}${
+              res.dissolvedGroupIds.length ? ' — группа, где осталась одна приёмка, распущена' : ''
+            }`,
+          );
+          bulk.clear();
+        },
+        onError: (err: Error) => message.error(err.message),
+      },
+    );
+  const dissolveGroup = (groupId: string) =>
+    groupMutations.dissolve.mutate(groupId, {
+      onSuccess: () => message.success('Группа распущена'),
+      onError: (err: Error) => message.error(err.message),
+    });
+  const renderGroupHead = (head: GroupHeadRow, wrap = false) => (
+    <DeliveryGroupHeader
+      head={head}
+      siteName={siteNameOf(head)}
+      canGroup={canGroup}
+      canLinkUpd={canLinkUpd}
+      wrap={wrap}
+      onLink={() => setGroupLinkId(head.group.id)}
+      onEdit={() =>
+        setGroupModal({ groupId: head.group.id, siteId: head.group.siteId, initial: [] })
+      }
+      onDissolve={() => dissolveGroup(head.group.id)}
+      dissolving={
+        groupMutations.dissolve.isPending && groupMutations.dissolve.variables === head.group.id
+      }
+    />
+  );
 
   const counterpartiesMap = useMemo(() => {
     const m = new Map<string, string>();
@@ -907,6 +1007,41 @@ export function DeliveriesHistory({
     return partyCell(sd?.supplierName ?? null, sd?.supplierInn ?? null);
   };
 
+  // Галочки: по праву удаления (в корзине — только у админа), по привязке УПД
+  // и по группам. Строку группы отметить нельзя, её ячейка выбора закрыта
+  // (заголовок растянут на всю ширину).
+  const selectionWanted =
+    ((isAdmin || !isTrash) && canDelete) || (!isTrash && canLinkUpd) || groupsOn;
+  const rowSelection: TableRowSelection<TableRow> | undefined = selectionWanted
+    ? groupsOn
+      ? {
+          ...bulk.selection,
+          getCheckboxProps: (r: TableRow) => ({ disabled: isGroupHead(r) }),
+          onCell: (r: TableRow) => (isGroupHead(r) ? { colSpan: 0 } : {}),
+        }
+      : bulk.selection
+    : undefined;
+
+  // Колонки и карточка, пережившие строки групп: строка группы растянута на
+  // всю ширину, колонки её не рисуют (withGroupRows), карточка — своя.
+  const groupColumns = (columns: ColumnsType<Row>) =>
+    withGroupRows<Row>(columns, (head) => renderGroupHead(head), {
+      selectionCell: !!rowSelection,
+    });
+  const groupCard =
+    (render: (r: Row) => ReactNode) =>
+    (r: TableRow): ReactNode =>
+      isGroupHead(r) ? (
+        <Card key={r.id} size="small" style={{ width: '100%', background: '#f5f7fa' }}>
+          <Space size={8} align="start">
+            <DeliveryGroupToggle collapsed={r.collapsed} onToggle={() => toggleGroup(r)} />
+            {renderGroupHead(r, true)}
+          </Space>
+        </Card>
+      ) : (
+        render(r)
+      );
+
   return (
     <>
       <StickyPageHeader
@@ -1063,18 +1198,56 @@ export function DeliveriesHistory({
                     selectedCount={bulk.selectedCount}
                     onClear={bulk.clear}
                     extra={
-                      canLinkUpd ? (
-                        <Tooltip title={bulkEdoBlocked}>
-                          <span>
-                            <Button
-                              icon={<LinkOutlined />}
-                              disabled={!!bulkEdoBlocked}
-                              onClick={() => setBulkEdoOpen(true)}
+                      canLinkUpd || groupsOn ? (
+                        <Space size={8}>
+                          {groupsOn && (
+                            <Tooltip title={joinPlan.block}>
+                              <span>
+                                <Button
+                                  icon={<ApartmentOutlined />}
+                                  disabled={!!joinPlan.block}
+                                  onClick={() => {
+                                    if (joinPlan.block !== null) return;
+                                    setGroupModal({
+                                      groupId: joinPlan.groupId,
+                                      siteId: joinPlan.siteId,
+                                      initial: selectedRows,
+                                    });
+                                  }}
+                                >
+                                  Объединить в группу
+                                </Button>
+                              </span>
+                            </Tooltip>
+                          )}
+                          {groupsOn && !leaveBlocked && (
+                            <Popconfirm
+                              title="Убрать отмеченные приёмки из их групп?"
+                              description="Группа, где останется одна приёмка, распустится."
+                              okText="Убрать"
+                              cancelText="Отмена"
+                              onConfirm={leaveSelected}
+                              placement="bottomRight"
                             >
-                              Привязать УПД из ЭДО
-                            </Button>
-                          </span>
-                        </Tooltip>
+                              <Button loading={groupMutations.leave.isPending}>
+                                Убрать из группы
+                              </Button>
+                            </Popconfirm>
+                          )}
+                          {canLinkUpd && (
+                            <Tooltip title={bulkEdoBlocked}>
+                              <span>
+                                <Button
+                                  icon={<LinkOutlined />}
+                                  disabled={!!bulkEdoBlocked}
+                                  onClick={() => setBulkEdoOpen(true)}
+                                >
+                                  Привязать УПД из ЭДО
+                                </Button>
+                              </span>
+                            </Tooltip>
+                          )}
+                        </Space>
                       ) : null
                     }
                     onDelete={
@@ -1129,8 +1302,8 @@ export function DeliveriesHistory({
             }
           />
         ) : (
-          <ResponsiveTable<Row>
-            items={items}
+          <ResponsiveTable<TableRow>
+            items={tableItems}
             loading={list.isLoading}
             rowKey="id"
             // 14 колонок, из них три стороны документа — фиксированные 170px под
@@ -1139,19 +1312,48 @@ export function DeliveriesHistory({
             scrollX={1700}
             // Массовые действия — по праву удаления; в корзине они только у админа
             // (окончательное удаление помеченного — его прерогатива).
-            rowSelection={
-              ((isAdmin || !isTrash) && canDelete) || (!isTrash && canLinkUpd)
-                ? bulk.selection
-                : undefined
-            }
+            rowSelection={rowSelection}
             // Без права правки клик по строке ведёт в просмотр (там же — отметка
-            // проверки), а не в редактор, который всё равно откажет.
-            onRowClick={(r) => (canEdit ? onOpen(r.id) : setViewData(buildViewData(r)))}
+            // проверки), а не в редактор, который всё равно откажет. Клик по
+            // строке группы сворачивает её.
+            onRowClick={(r) =>
+              isGroupHead(r)
+                ? toggleGroup(r)
+                : canEdit
+                  ? onOpen(r.id)
+                  : setViewData(buildViewData(r))
+            }
             emptyText={view === 'trash' ? 'Корзина пуста' : 'Нет приёмок'}
             rowClassName={(r) =>
-              operationsRowClass({ statusCode: r.status.code, dateIso: r.arrivedAt })
+              isGroupHead(r)
+                ? 'mc-group-head'
+                : operationsRowClass({ statusCode: r.status.code, dateIso: r.arrivedAt })
             }
             numberedOffset={offset}
+            // Строки групп добавляются к 50 приёмкам страницы — переключатель
+            // страниц отдельно, иначе antd резал бы их повторно.
+            externalPagination={groupsOn}
+            leadingColumn={
+              grouped
+                ? {
+                    key: '__group__',
+                    width: 28,
+                    onCell: (r: TableRow) => ({
+                      className: gutterCellClass(
+                        grouped.gutter.get(r.id) ?? null,
+                        isGroupHead(r) && r.collapsed,
+                      ),
+                    }),
+                    render: (_: unknown, r: TableRow) =>
+                      isGroupHead(r) ? (
+                        <DeliveryGroupToggle
+                          collapsed={r.collapsed}
+                          onToggle={() => toggleGroup(r)}
+                        />
+                      ) : null,
+                  }
+                : undefined
+            }
             pagination={{
               // Server-side controlled: current/pageSize/total — антд сам
               // рендерит 1, 2, ... N. При смене страницы вызываем setPage,
@@ -1168,7 +1370,7 @@ export function DeliveriesHistory({
               },
               showTotal: () => <OperationsRowLegend />,
             }}
-            columns={[
+            columns={groupColumns([
               // ─── sorter/dateRangeColumnFilter из колонок удалены ───
               // Server-side pagination несовместима с клиентской сортировкой
               // в рамках одной страницы (UX-ловушка «отсортировал только то
@@ -1348,8 +1550,8 @@ export function DeliveriesHistory({
                   </Space>
                 ),
               },
-            ]}
-            cardRender={(r) => (
+            ])}
+            cardRender={groupCard((r) => (
               <Card key={r.id} style={{ width: '100%' }} size="small">
                 <Space
                   direction="vertical"
@@ -1378,10 +1580,30 @@ export function DeliveriesHistory({
                   </div>
                 </Space>
               </Card>
-            )}
+            ))}
           />
         )}
       </StickyPageHeader>
+      {groupsOn && <DeliveryGroupStyle />}
+      {groupModal && (
+        <DeliveryGroupModal
+          open
+          groupId={groupModal.groupId}
+          siteId={groupModal.siteId}
+          siteName={sitesMap.get(groupModal.siteId) ?? groupModal.initial[0]?.siteName ?? null}
+          initial={groupModal.initial}
+          onClose={() => setGroupModal(null)}
+          onDone={() => {
+            setGroupModal(null);
+            bulk.clear();
+          }}
+        />
+      )}
+      <GroupEdoLinkFlow
+        groupId={canLinkUpd ? groupLinkId : null}
+        onClose={() => setGroupLinkId(null)}
+        onDone={() => setGroupLinkId(null)}
+      />
       <DeliveryViewModal
         data={viewData}
         open={viewData !== null}
@@ -1413,25 +1635,6 @@ export function DeliveriesHistory({
       )}
     </>
   );
-}
-
-/** Сколько приёмок за раз в групповой привязке УПД — тот же предел, что у сервера. */
-const BULK_EDO_MAX = 50;
-
-/**
- * Почему одну УПД нельзя привязать к отмеченным приёмкам; null — можно.
- * Сервер проверит то же самое, здесь — чтобы кнопка не обещала невозможного.
- */
-export function bulkEdoLinkBlock(
-  rows: readonly Pick<Row, 'siteId' | 'pendingDeletionAt' | 'sourceShipmentId'>[],
-): string | null {
-  if (rows.length === 0) return 'Отметьте приёмки';
-  if (rows.length > BULK_EDO_MAX) return `Не больше ${BULK_EDO_MAX} приёмок за раз`;
-  if (new Set(rows.map((r) => r.siteId)).size > 1)
-    return 'Выбраны приёмки разных объектов: одна УПД привязывается к приёмкам одного объекта';
-  if (rows.some((r) => r.pendingDeletionAt)) return 'Среди отмеченных есть помеченные на удаление';
-  if (rows.some((r) => r.sourceShipmentId)) return 'Среди отмеченных есть приёмки, созданные из отгрузки';
-  return null;
 }
 
 // Склонение «приёмка»: 1 приёмку / 2-4 приёмки / 5+ приёмок.

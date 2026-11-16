@@ -94,6 +94,7 @@ export function ShareEdoModal({
   anchorDeliveryId,
   document,
   preselected = [],
+  deliveryGroup,
   onCancel,
   onDone,
   afterClose,
@@ -104,6 +105,12 @@ export function ShareEdoModal({
   document: ShareEdoDocument | null;
   /** Приёмки, отмеченные в списке: показаны всегда и отмечены. */
   preselected?: readonly string[];
+  /**
+   * Привязка ко всей группе приёмок: участники отмечены и не снимаются, в
+   * запрос уходят все (и те, где УПД уже стоит, — сервер вернёт «уже была»),
+   * а сервер сверяет состав группы. Без пропа окно прежнее.
+   */
+  deliveryGroup?: { id: string; memberIds: readonly string[] };
   onCancel: () => void;
   onDone: () => void;
   /** После анимации закрытия — здесь вызывающий чистит данные окна. */
@@ -116,6 +123,8 @@ export function ShareEdoModal({
   const [sections, setSections] = useState<Map<string, string>>(() => new Map());
   const [error, setError] = useState<string | null>(null);
   const include = preselected.join(',');
+  const memberIds = deliveryGroup?.memberIds;
+  const members = useMemo(() => new Set(memberIds ?? []), [memberIds]);
 
   // Окно переиспользуется: при новом открытии — чистое состояние.
   useEffect(() => {
@@ -161,19 +170,30 @@ export function ShareEdoModal({
     });
   }, [data]);
 
-  const targets = useMemo(
-    () =>
-      [...checked]
-        .map((id) => known.get(id))
-        .filter((row): row is ShareCandidate => !!row && row.state === 'available')
-        .map((row) => ({
-          deliveryId: row.deliveryId,
-          sectionDocumentId:
-            (sections.has(row.deliveryId) ? sections.get(row.deliveryId) : row.defaultSectionId) ||
-            null,
-        })),
-    [checked, known, sections],
-  );
+  const targets = useMemo(() => {
+    const sectionOf = (deliveryId: string, fallback: string | null) =>
+      (sections.has(deliveryId) ? sections.get(deliveryId) : fallback) || null;
+    // Участники группы — все и всегда, независимо от выдачи подсказки и её
+    // состояния: у «уже привязана» блок не выбирается (сервер отнесёт её в
+    // «уже была»), строка, не попавшая в выдачу, идёт ко всей приёмке.
+    const fromGroup = [...members].map((deliveryId) => {
+      const row = known.get(deliveryId);
+      return {
+        deliveryId,
+        sectionDocumentId:
+          row && row.state === 'available' ? sectionOf(deliveryId, row.defaultSectionId) : null,
+      };
+    });
+    const others = [...checked]
+      .filter((id) => !members.has(id))
+      .map((id) => known.get(id))
+      .filter((row): row is ShareCandidate => !!row && row.state === 'available')
+      .map((row) => ({
+        deliveryId: row.deliveryId,
+        sectionDocumentId: sectionOf(row.deliveryId, row.defaultSectionId),
+      }));
+    return [...fromGroup, ...others];
+  }, [checked, known, sections, members]);
 
   const link = useMutation({
     mutationFn: () =>
@@ -181,6 +201,9 @@ export function ShareEdoModal({
         documentId: document!.id,
         source: document!.source,
         targets,
+        ...(deliveryGroup
+          ? { deliveryGroup: { id: deliveryGroup.id, memberIds: [...deliveryGroup.memberIds] } }
+          : {}),
       }),
     onSuccess: async (result) => {
       message.success(batchResultText(result));
@@ -283,12 +306,20 @@ export function ShareEdoModal({
           }}
           rowSelection={{
             selectedRowKeys: rows
-              .filter((row) => checked.has(row.deliveryId) && row.state === 'available')
+              .filter(
+                (row) =>
+                  members.has(row.deliveryId) ||
+                  (checked.has(row.deliveryId) && row.state === 'available'),
+              )
               .map((row) => row.deliveryId),
             onSelect: (row, selected) => toggle(row.deliveryId, selected),
             onSelectAll: (selected, _rows, changed) =>
-              changed.forEach((row) => toggle(row.deliveryId, selected)),
-            getCheckboxProps: (row) => ({ disabled: row.state === 'linked' }),
+              changed
+                .filter((row) => !members.has(row.deliveryId))
+                .forEach((row) => toggle(row.deliveryId, selected)),
+            getCheckboxProps: (row) => ({
+              disabled: row.state === 'linked' || members.has(row.deliveryId),
+            }),
           }}
           columns={[
             {
@@ -350,7 +381,11 @@ export function ShareEdoModal({
                       <Tag color={LEVEL_TAG[row.level].color}>{LEVEL_TAG[row.level].text}</Tag>
                     )}
                     {row.otherSupplier && <Tag color="volcano">Другой поставщик</Tag>}
-                    {row.reasons.includes('selected') && <Tag>Выбрана в списке</Tag>}
+                    {members.has(row.deliveryId) ? (
+                      <Tag color="purple">В группе</Tag>
+                    ) : (
+                      row.reasons.includes('selected') && <Tag>Выбрана в списке</Tag>
+                    )}
                   </Space>
                   {row.matches.length > 0 && row.state === 'available' && (
                     <Typography.Text type="secondary">

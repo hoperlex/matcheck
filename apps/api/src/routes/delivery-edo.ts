@@ -3,7 +3,7 @@ import { and, asc, eq, isNotNull, isNull, or, sql as drSql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
-import { ErrorResponseSchema } from '@matcheck/contracts';
+import { EdoBatchDeliveryGroupSchema, ErrorResponseSchema } from '@matcheck/contracts';
 import type { Db } from '../db/client.js';
 import {
   counterparties,
@@ -365,6 +365,10 @@ function batchErrorMessage(error: BatchLinkError, list: readonly { displayId: nu
         return `Документ блока отвязан: ${list.length > 1 ? 'приёмки' : 'приёмка'} ${list.map((d) => d.displayId).join(', ')} — обновите окно`;
       case 'invalid_section':
         return 'УПД нельзя привязать к её собственному блоку';
+      case 'group_changed':
+        return 'Состав группы изменился — откройте привязку заново';
+      case 'group_incomplete':
+        return `В привязке не хватает приёмок группы (${list.map((d) => d.displayId).join(', ')}) — откройте привязку заново`;
     }
   })();
   return `${text}. Ничего не привязано.`;
@@ -1015,6 +1019,8 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
               (targets) => new Set(targets.map((t) => t.deliveryId)).size === targets.length,
               'Приёмка указана дважды',
             ),
+          /** Привязка ко всей группе приёмок — сервер сверит состав. */
+          deliveryGroup: EdoBatchDeliveryGroupSchema.optional(),
         }),
         response: {
           200: z.object({ linked: z.array(UsedInSchema), alreadyLinked: z.array(UsedInSchema) }),
@@ -1030,6 +1036,7 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
           ref: { source: req.body.source, id: req.body.documentId },
           targets: req.body.targets,
           userId: req.user?.id ?? null,
+          deliveryGroup: req.body.deliveryGroup,
         }),
       );
       if (result.status !== 'ok') {

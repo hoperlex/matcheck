@@ -501,6 +501,8 @@ export default function OperationsPage() {
             onOpen={onOpenExisting}
             filtersExtra={headerExtras}
             bulkActionsPortalRef={bulkActionsSlotRef}
+            // Группы приёмок (рейсы одной поставки) — только здесь, в «Принятых».
+            showGroups
           />
         ) : (
           <ShipmentsHistory

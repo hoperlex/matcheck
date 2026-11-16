@@ -175,6 +175,35 @@ describe('ShareEdoModal', () => {
     expect(props.onDone).not.toHaveBeenCalled();
   });
 
+  it('ко всей группе: участники отмечены и не снимаются; в запрос идут все — и «уже привязана», и не попавшая в выдачу', async () => {
+    post.mockResolvedValue({ linked: [], alreadyLinked: [] });
+    const memberIds = ['d-same', 'd-linked', 'd-hidden'];
+    const props = show({ preselected: memberIds, deliveryGroup: { id: 'g-1', memberIds } });
+    const same = await checkboxOf(17733);
+    expect(same.checked).toBe(true);
+    expect(same.disabled).toBe(true);
+    expect(within(await rowOf(17733)).getByText('В группе')).toBeTruthy();
+    const linked = await checkboxOf(17713);
+    expect(linked.checked).toBe(true);
+    expect(linked.disabled).toBe(true);
+    // Не участника группы можно добавить.
+    fireEvent.click(await checkboxOf(17741));
+    expect(submit().textContent).toBe('Привязать к 4 приёмкам');
+    fireEvent.click(submit());
+    await waitFor(() => expect(props.onDone).toHaveBeenCalled());
+    expect(post).toHaveBeenCalledWith('/deliveries/d-anchor/edo-matches/batch', {
+      documentId: 'reg-1',
+      source: 'export',
+      targets: [
+        { deliveryId: 'd-same', sectionDocumentId: 'paper-17733' },
+        { deliveryId: 'd-linked', sectionDocumentId: null },
+        { deliveryId: 'd-hidden', sectionDocumentId: null },
+        { deliveryId: 'd-nodoc', sectionDocumentId: null },
+      ],
+      deliveryGroup: { id: 'g-1', memberIds },
+    });
+  });
+
   it('итог привязки — числом привязанных и «уже была»', () => {
     const d = (displayId: number) => ({ deliveryId: `d${displayId}`, displayId });
     expect(batchResultText({ linked: [d(1), d(2), d(3)], alreadyLinked: [] })).toBe(
