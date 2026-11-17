@@ -7,6 +7,7 @@ import type {
   Status,
 } from '@matcheck/contracts';
 import { api } from './api';
+import { localCacheEnabled } from '../lib/localCache';
 
 const PLACEHOLDER_NOT_FILLED: Status = {
   id: '',
@@ -18,10 +19,13 @@ const PLACEHOLDER_NOT_FILLED: Status = {
 };
 
 export async function listLocalShipments(): Promise<ShipmentRecord[]> {
+  // Наблюдатель локальной базой не пользуется (lib/localCache.ts).
+  if (!localCacheEnabled()) return [];
   return withDb((dbi) => dbi.getAll('shipments'));
 }
 
 export async function getShipment(id: string): Promise<ShipmentRecord | undefined> {
+  if (!localCacheEnabled()) return undefined;
   return withDb((dbi) => dbi.get('shipments', id));
 }
 
@@ -58,6 +62,8 @@ export function effectiveState(r: ShipmentRecord): Shipment | null {
 }
 
 export async function upsertServerSnapshot(items: Shipment[]): Promise<void> {
+  // Наблюдателю снимки не пишем: копия пережила бы потерю доступа к объекту.
+  if (!localCacheEnabled()) return;
   await withDb(async (dbi) => {
     const tx = dbi.transaction('shipments', 'readwrite');
     for (const item of items) {

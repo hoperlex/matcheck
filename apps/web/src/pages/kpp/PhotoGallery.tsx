@@ -25,6 +25,7 @@ import { api, apiDownload, ApiError } from '../../services/api';
 import { uploadPhoto } from '../../services/photoPipeline';
 import { enqueueThumbLoad, enqueueFullLoad } from '../../lib/thumbQueue';
 import { withDb, type OperationKind } from '../../lib/db';
+import { localCacheEnabled } from '../../lib/localCache';
 import { PhotoDocumentPreview } from './PhotoDocumentPreview';
 
 const THUMB_SIZE = 140;
@@ -404,7 +405,9 @@ function PhotoThumb({
     let fullUrl: string | null = null;
     void (async () => {
       try {
-        const rec = await withDb((dbi) => dbi.get('photos', photo.id));
+        const rec = localCacheEnabled()
+          ? await withDb((dbi) => dbi.get('photos', photo.id))
+          : undefined;
         if (cancelled) return;
         if (rec?.thumbBlob) thumbUrl = URL.createObjectURL(rec.thumbBlob);
         if (rec?.blob) fullUrl = URL.createObjectURL(rec.blob);

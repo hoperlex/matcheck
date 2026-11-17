@@ -1,6 +1,6 @@
 import fp from 'fastify-plugin';
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { verifyAccessToken, type AccessTokenClaims } from '../domain/auth/jwt.js';
 import { users, sessions, unauthorizedAccessLog } from '../db/schema.js';
 import { ACCESS_COOKIE_NAME } from '../domain/auth/refresh.js';
@@ -22,6 +22,12 @@ export type AuthUser = {
   // У роли contractor определяет область видимости (свои приёмки/отгрузки/
   // документы по всем объектам). Читаем из БД на каждом запросе — как siteId.
   contractorCustomerId: string | null;
+  // Объекты наблюдателя (user_sites). Заполняется только у роли observer, у
+  // остальных пусто. Пустой список у наблюдателя — «не видит ничего». Читаем
+  // из БД на каждом запросе, как siteId. Скоуп считает lib/site-scope.ts.
+  // Необязательное: отсутствие у наблюдателя трактуется как пустой список,
+  // то есть безопасно — «не видит ничего».
+  siteIds?: string[];
   sessionId: string;
 };
 
@@ -166,6 +172,17 @@ export default fp<AuthPluginOptions>(async (app, opts) => {
           isActive: users.isActive,
           siteId: users.siteId,
           contractorCustomerId: users.contractorCustomerId,
+          // Подзапрос только для наблюдателя: CASE не вычисляет невыбранную
+          // ветку, остальные роли лишнего обращения к user_sites не делают.
+          // json_agg, а не array_agg: драйвер разбирает json сам, а uuid[]
+          // пришёл бы строкой.
+          // Колонки внешней таблицы — с явным именем: drizzle внутри select
+          // рендерит колонку users.id как голое "id", и подзапрос нашёл бы его
+          // во внешней таблице лишь потому, что в user_sites такой колонки нет.
+          siteIds: sql<string[]>`case when users.role = 'observer'
+            then (select coalesce(json_agg(us.site_id order by us.site_id), '[]'::json)
+                  from user_sites us where us.user_id = users.id)
+            else '[]'::json end`,
           sessionsInvalidatedAt: users.sessionsInvalidatedAt,
           passwordChangedAt: users.passwordChangedAt,
         })
@@ -191,6 +208,7 @@ export default fp<AuthPluginOptions>(async (app, opts) => {
         role: user.role,
         siteId: user.siteId,
         contractorCustomerId: user.contractorCustomerId,
+        siteIds: Array.isArray(user.siteIds) ? user.siteIds : [],
         sessionId: claims.sid,
       };
     } catch {

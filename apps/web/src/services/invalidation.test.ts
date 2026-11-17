@@ -59,3 +59,38 @@ describe('setupInvalidation → photo-recognition', () => {
     },
   );
 });
+
+describe('поток событий открывается только ролям, которым его отдаёт сервер', () => {
+  it('зеркало allow-list /api/v1/events', async () => {
+    const { sseAvailableForRole } = await import('./invalidation');
+    expect(sseAvailableForRole('admin')).toBe(true);
+    expect(sseAvailableForRole('manager')).toBe(true);
+    expect(sseAvailableForRole('inspector_kpp')).toBe(true);
+    for (const role of ['observer', 'monitor', 'contractor', undefined]) {
+      expect(sseAvailableForRole(role), String(role)).toBe(false);
+    }
+  });
+
+  it('при sse: false EventSource не создаётся, межвкладочная инвалидация живёт', () => {
+    vi.useFakeTimers();
+    const created = vi.fn();
+    vi.stubGlobal(
+      'EventSource',
+      class {
+        constructor() {
+          created();
+        }
+        addEventListener() {}
+        close() {}
+      },
+    );
+    const teardown = setupInvalidation(
+      { invalidateQueries: vi.fn().mockResolvedValue(undefined) } as unknown as QueryClient,
+      { sse: false },
+    );
+    expect(created).not.toHaveBeenCalled();
+    teardown();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+});

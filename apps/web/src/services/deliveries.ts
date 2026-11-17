@@ -1,6 +1,7 @@
 import { withDb, SYSTEM_SITE_ID, type DeliveryRecord, type MutationRecord } from '../lib/db';
 import type { Delivery, DeliveryStatusCode, DeliveryUpsert, Status } from '@matcheck/contracts';
 import { api } from './api';
+import { localCacheEnabled } from '../lib/localCache';
 
 const PLACEHOLDER_NOT_FILLED: Status = {
   id: '',
@@ -12,10 +13,13 @@ const PLACEHOLDER_NOT_FILLED: Status = {
 };
 
 export async function listLocalDeliveries(): Promise<DeliveryRecord[]> {
+  // Наблюдатель локальной базой не пользуется (lib/localCache.ts).
+  if (!localCacheEnabled()) return [];
   return withDb((dbi) => dbi.getAll('deliveries'));
 }
 
 export async function getDelivery(id: string): Promise<DeliveryRecord | undefined> {
+  if (!localCacheEnabled()) return undefined;
   return withDb((dbi) => dbi.get('deliveries', id));
 }
 
@@ -53,6 +57,8 @@ export function effectiveState(r: DeliveryRecord): Delivery | null {
 }
 
 export async function upsertServerSnapshot(items: Delivery[]): Promise<void> {
+  // Наблюдателю снимки не пишем: копия пережила бы потерю доступа к объекту.
+  if (!localCacheEnabled()) return;
   await withDb(async (dbi) => {
     const tx = dbi.transaction('deliveries', 'readwrite');
     for (const item of items) {

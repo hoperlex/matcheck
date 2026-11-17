@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { siteInScope, siteScopeOf } from '../lib/site-scope.js';
 import type { FastifyInstance } from 'fastify';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
@@ -80,7 +81,7 @@ export async function estimatRoutes(rawApp: FastifyInstance): Promise<void> {
   /** Приёмка для маршрутов просмотра: inspector_kpp — только своего объекта. */
   async function visibleDelivery(
     deliveryId: string,
-    user: { role?: string; siteId?: string | null } | undefined,
+    user: { role?: string; siteId?: string | null; siteIds?: string[] } | undefined,
   ): Promise<{ id: string; siteId: string } | null> {
     const [d] = await app.db
       .select({ id: deliveries.id, siteId: deliveries.siteId })
@@ -89,6 +90,8 @@ export async function estimatRoutes(rawApp: FastifyInstance): Promise<void> {
       .limit(1);
     if (!d) return null;
     if (user?.role === 'inspector_kpp' && (!user.siteId || user.siteId !== d.siteId)) return null;
+    // Наблюдатель — только приёмки своих объектов.
+    if (!siteInScope(siteScopeOf(user), d.siteId)) return null;
     return d;
   }
 
@@ -228,7 +231,7 @@ export async function estimatRoutes(rawApp: FastifyInstance): Promise<void> {
       const delivery = await visibleDelivery(req.params.id, req.user);
       if (!delivery) return reply.code(404).send({ error: 'not_found' });
       const [items, sync] = await Promise.all([
-        listDeliveryOrders(app.db, delivery.id),
+        listDeliveryOrders(app.db, delivery.id, siteScopeOf(req.user)),
         loadSyncInfo(app.db, settings()),
       ]);
       return { items, sync };
@@ -246,7 +249,10 @@ export async function estimatRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const delivery = await visibleDelivery(req.params.id, req.user);
-      if (!delivery || !(await isOrderLinked(app.db, delivery.id, req.params.orderId))) {
+      if (
+        !delivery ||
+        !(await isOrderLinked(app.db, delivery.id, req.params.orderId, siteScopeOf(req.user)))
+      ) {
         return reply.code(404).send({ error: 'not_found' });
       }
       const items = await loadOrderItems({ db: app.db, config: settings().config }, req.params.orderId);

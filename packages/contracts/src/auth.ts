@@ -47,6 +47,10 @@ export const UserDtoSchema = z.object({
   // Объект, привязанный к пользователю. Обязателен для inspector_kpp;
   // для admin/manager всегда null.
   siteId: z.string().uuid().nullable(),
+  // Объекты наблюдателя (роль observer): он видит данные только этих объектов,
+  // пустой список — не видит ничего. У остальных ролей всегда пусто.
+  // Необязательное в схеме: мобильный клиент и старые ответы его не знают.
+  siteIds: z.array(z.string().uuid()).optional(),
   // Подрядчик (id из справочника customer_counterparties), привязанный к
   // пользователю. Обязателен для роли contractor; для остальных ролей null.
   contractorCustomerId: z.string().uuid().nullable(),
@@ -86,6 +90,10 @@ export const UserAdminPatchSchema = z.object({
   role: UserRoleSchema.optional(),
   isActive: z.boolean().optional(),
   siteId: z.string().uuid().nullable().optional(),
+  // Объекты наблюдателя. Принимаются только для роли observer (итоговой, с
+  // учётом смены роли в том же запросе); при смене роли с observer список
+  // очищается. Смена списка завершает сессии наблюдателя.
+  siteIds: z.array(z.string().uuid()).max(200).optional(),
   // Привязка к подрядчику (справочник customer_counterparties). Проставляется
   // админом для роли contractor; при смене роли на не-contractor обнуляется.
   contractorCustomerId: z.string().uuid().nullable().optional(),

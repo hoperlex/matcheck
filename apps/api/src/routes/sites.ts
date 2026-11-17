@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { siteInScope, siteScopeCondition, siteScopeOf } from '../lib/site-scope.js';
 import { and, eq, ilike, inArray, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
@@ -83,6 +84,10 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
         filters.push(or(ilike(sites.name, `%${like}%`), ilike(sites.code, `${like}%`)));
       }
       if (activeOnly) filters.push(eq(sites.isActive, true));
+      // Наблюдатель видит в справочнике только свои объекты — отсюда сами
+      // сужаются все выпадающие списки «Объект» на портале.
+      const siteScope = siteScopeOf(req.user);
+      if (siteScope) filters.push(siteScopeCondition(siteScope, sites.id));
       const where = filters.length ? and(...filters) : undefined;
 
       const rows = await app.db
@@ -111,7 +116,9 @@ export async function siteRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const [s] = await app.db.select().from(sites).where(eq(sites.id, req.params.id)).limit(1);
-      if (!s) return reply.code(404).send({ error: 'not_found' });
+      if (!s || !siteInScope(siteScopeOf(req.user), s.id)) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
       return row(s);
     },
   );

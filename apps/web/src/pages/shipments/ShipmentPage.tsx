@@ -68,6 +68,7 @@ import { describeEmptyNames } from '../../shared/utils/emptyItemNames';
 import { EditableItemName } from '../shared/EditableItemName';
 import { itemNameLock } from '../shared/itemNameLock';
 import { withDb, SYSTEM_SITE_ID } from '../../lib/db';
+import { localCacheEnabled } from '../../lib/localCache';
 import { reportPhotoCaptureError } from '../../services/photoCaptureError';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
@@ -337,7 +338,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     queryKey: ['source-document-offline', updIdFromUrl],
     queryFn: async (): Promise<SourceDocumentDetail> => {
       if (!updIdFromUrl) throw new Error('no upd id');
-      const cached = await withDb((dbi) => dbi.get('source_documents', updIdFromUrl));
+      const cached = localCacheEnabled()
+        ? await withDb((dbi) => dbi.get('source_documents', updIdFromUrl))
+        : undefined;
       if (cached) return cached;
       return await api.get<SourceDocumentDetail>(`/source-documents/${updIdFromUrl}`);
     },
@@ -349,7 +352,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const localPhotosQuery = useQuery({
     queryKey: ['photos-local', 'shipment', shipmentId],
     queryFn: async (): Promise<GalleryPhoto[]> => {
-      if (!shipmentId) return [];
+      if (!shipmentId || !localCacheEnabled()) return [];
       const all = await withDb((dbi) =>
         dbi.transaction('photos').store.index('byDelivery').getAll(shipmentId),
       );
@@ -543,7 +546,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     queryKey: ['source-document-offline', linkedSourceId],
     queryFn: async (): Promise<SourceDocumentDetail> => {
       if (!linkedSourceId) throw new Error('no source id');
-      const cached = await withDb((dbi) => dbi.get('source_documents', linkedSourceId));
+      const cached = localCacheEnabled()
+        ? await withDb((dbi) => dbi.get('source_documents', linkedSourceId))
+        : undefined;
       if (cached) return cached;
       return await api.get<SourceDocumentDetail>(`/source-documents/${linkedSourceId}`);
     },

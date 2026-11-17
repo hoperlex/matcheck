@@ -27,6 +27,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { roleLabel } from '../../shared/constants/roleLabels';
 import { UserEditModal } from './UserEditModal';
+import { ObserverSitesSelect } from './ObserverSitesSelect';
 import { PasswordResetLinkModal } from './PasswordResetLinkModal';
 import { formatDateRu, formatDateTimeRu } from '../../shared/utils/formatRu';
 import { usePermissions } from '../../shared/hooks/usePermissions';
@@ -151,6 +152,25 @@ export default function AdminUsersPage() {
   };
 
   const renderSiteCell = (row: UserDto) => {
+    if (row.role === 'observer') {
+      return (
+        <ObserverSitesSelect
+          value={row.siteIds ?? []}
+          sites={sites}
+          loading={sitesQuery.isLoading}
+          disabled={!canEditUsers}
+          onCommit={(siteIds) =>
+            patch.mutate(
+              { id: row.id, body: { siteIds } },
+              {
+                onSuccess: () =>
+                  message.info('Объекты наблюдателя сохранены — ему нужно войти заново'),
+              },
+            )
+          }
+        />
+      );
+    }
     if (row.role !== 'inspector_kpp') {
       return <Typography.Text type="secondary">—</Typography.Text>;
     }
@@ -265,6 +285,12 @@ export default function AdminUsersPage() {
             render: (_: unknown, row: UserDto) => renderSiteCell(row),
             tools: {
               text: (row) => {
+                if (row.role === 'observer') {
+                  const codes = (row.siteIds ?? [])
+                    .map((id) => sites.find((x) => x.id === id)?.code ?? null)
+                    .filter((c): c is string => !!c);
+                  return codes.length > 0 ? codes.join(', ') : null;
+                }
                 if (row.role !== 'inspector_kpp' || !row.siteId) return null;
                 const s = sites.find((x) => x.id === row.siteId);
                 return s ? `${s.code} · ${s.name}` : null;
@@ -374,6 +400,19 @@ export default function AdminUsersPage() {
                     <Typography.Text>{`${site.code} · ${site.name}`}</Typography.Text>
                   ) : (
                     <Tag color="orange">не назначен</Tag>
+                  )}
+                </Space>
+              )}
+              {u.role === 'observer' && (
+                <Space wrap>
+                  <Typography.Text type="secondary">Объекты:</Typography.Text>
+                  {(u.siteIds ?? []).length > 0 ? (
+                    (u.siteIds ?? []).map((id) => {
+                      const s = sites.find((x) => x.id === id);
+                      return <Tag key={id}>{s ? s.code : id.slice(0, 8)}</Tag>;
+                    })
+                  ) : (
+                    <Tag color="orange">не назначены — не видит ничего</Tag>
                   )}
                 </Space>
               )}

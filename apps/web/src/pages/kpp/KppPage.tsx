@@ -77,6 +77,7 @@ import { EditableItemName } from '../shared/EditableItemName';
 import { itemNameLock } from '../shared/itemNameLock';
 import { shouldReplaceItems } from '../shared/itemsHydration';
 import { withDb } from '../../lib/db';
+import { localCacheEnabled } from '../../lib/localCache';
 import { reportPhotoCaptureError } from '../../services/photoCaptureError';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
@@ -499,7 +500,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     queryKey: ['source-document-offline', updIdFromUrl],
     queryFn: async (): Promise<SourceDocumentDetail> => {
       if (!updIdFromUrl) throw new Error('no upd id');
-      const cached = await withDb((dbi) => dbi.get('source_documents', updIdFromUrl));
+      const cached = localCacheEnabled()
+        ? await withDb((dbi) => dbi.get('source_documents', updIdFromUrl))
+        : undefined;
       if (cached) return cached;
       return await api.get<SourceDocumentDetail>(`/source-documents/${updIdFromUrl}`);
     },
@@ -572,7 +575,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const localPhotosQuery = useQuery({
     queryKey: ['photos-local', 'delivery', deliveryId],
     queryFn: async (): Promise<GalleryPhoto[]> => {
-      if (!deliveryId) return [];
+      if (!deliveryId || !localCacheEnabled()) return [];
       const all = await withDb((dbi) =>
         dbi.transaction('photos').store.index('byDelivery').getAll(deliveryId),
       );

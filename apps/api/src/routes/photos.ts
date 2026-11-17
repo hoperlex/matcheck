@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { siteInScope, siteScopeOf } from '../lib/site-scope.js';
 import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
@@ -572,6 +573,10 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       ) {
         return reply.code(404).send({ error: 'not_found' });
       }
+      // Наблюдатель — только фото операций своих объектов.
+      if (!siteInScope(siteScopeOf(req.user), found.parentSiteId)) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
       // Матрица прав — ПОСЛЕ проверок видимости выше и до обращения к S3.
       // Порядок принципиален: проверки выше намеренно отвечают 404, чтобы не
       // раскрывать существование чужого фото. Поставив права первыми, мы
@@ -619,6 +624,10 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
         req.user?.role === 'contractor' &&
         !(await photoVisibleToContractor(app, found, req.user))
       ) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      // Наблюдатель — только фото операций своих объектов.
+      if (!siteInScope(siteScopeOf(req.user), found.parentSiteId)) {
         return reply.code(404).send({ error: 'not_found' });
       }
       // См. комментарий о порядке в GET /api/v1/photos/:id/url.
@@ -1199,6 +1208,10 @@ export async function photoRoutes(rawApp: FastifyInstance): Promise<void> {
       ) {
         return reply.code(404).send({ error: 'not_found' });
       }
+      // Наблюдатель — только фото операций своих объектов.
+      if (!siteInScope(siteScopeOf(req.user), found.parentSiteId)) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
       // См. комментарий о порядке в GET /api/v1/photos/:id/url.
       await assertPermission(req, pageOfKind(found.kind), 'view');
       const cached = await loadRecognition(app, found.kind, req.params.id);
@@ -1642,7 +1655,11 @@ async function attachLinkedDocument(
   value: z.infer<typeof PhotoRecognitionSchema>,
   role: AuthUser['role'] | undefined,
 ): Promise<z.infer<typeof PhotoRecognitionSchema>> {
-  if (role === 'contractor' || role === 'inspector_kpp') return { ...value, linkedDocument: null };
+  // Наблюдателю — как инспектору: ссылка на документ из распознавания фото не
+  // нужна для просмотра, а документ мог с тех пор уехать на другой объект.
+  if (role === 'contractor' || role === 'inspector_kpp' || role === 'observer') {
+    return { ...value, linkedDocument: null };
+  }
   if (value.status !== 'done' || value.parser !== 'upd_vision' || value.items.length === 0) {
     return { ...value, linkedDocument: null };
   }

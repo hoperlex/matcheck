@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { siteScopeCondition, siteScopeOf } from '../../lib/site-scope.js';
 import { type SQL, eq, ilike, inArray, sql as drSql } from 'drizzle-orm';
 import { deliverySources, shipmentSources, sourceDocuments } from '../../db/schema.js';
 import {
@@ -126,6 +127,11 @@ export async function buildSourceDocumentFilters(
       conditions.push(sourceDocumentContractorPredicate(opIds));
     }
   }
+  // Наблюдатель — только документы своих объектов. Документ без объекта в
+  // ограниченный скоуп не входит. Пользовательский siteIds выше пересекается с
+  // этим условием через AND.
+  const siteScope = siteScopeOf(user);
+  if (siteScope) conditions.push(siteScopeCondition(siteScope, sourceDocuments.siteId));
 
   if (unaccepted) {
     if (direction !== 'outbound') {

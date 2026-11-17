@@ -1,4 +1,5 @@
 import { and, asc, count, eq, inArray, isNull, sql, type SQL } from 'drizzle-orm';
+import { siteScopeCondition } from '../../lib/site-scope.js';
 import { alias } from 'drizzle-orm/pg-core';
 import type {
   DeliverySupplierOrder,
@@ -96,8 +97,18 @@ export function matchFlags(
   return { supplierMatch, contractorMatch };
 }
 
-/** Заказы, привязанные к приёмке. */
-export async function listDeliveryOrders(db: Db, deliveryId: string): Promise<DeliverySupplierOrder[]> {
+/**
+ * Заказы, привязанные к приёмке.
+ *
+ * siteScope — объекты наблюдателя (lib/site-scope.ts). Заказ мог быть привязан
+ * к приёмке с подтверждённым несовпадением объекта (confirmSiteMismatch): тогда
+ * он принадлежит чужому объекту, и наблюдателю его не показываем.
+ */
+export async function listDeliveryOrders(
+  db: Db,
+  deliveryId: string,
+  siteScope: string[] | null = null,
+): Promise<DeliverySupplierOrder[]> {
   const o = estimatSupplierOrders;
   const rows = await db
     .select({
@@ -109,7 +120,12 @@ export async function listDeliveryOrders(db: Db, deliveryId: string): Promise<De
     .from(deliverySupplierOrders)
     .innerJoin(o, eq(o.id, deliverySupplierOrders.orderId))
     .leftJoin(sites, eq(sites.id, o.siteId))
-    .where(eq(deliverySupplierOrders.deliveryId, deliveryId))
+    .where(
+      and(
+        eq(deliverySupplierOrders.deliveryId, deliveryId),
+        siteScope ? siteScopeCondition(siteScope, o.siteId) : undefined,
+      ),
+    )
     .orderBy(asc(deliverySupplierOrders.linkedAt), asc(o.id));
   if (rows.length === 0) return [];
   const [inns, revoked] = await Promise.all([
@@ -382,12 +398,27 @@ export async function unlinkOrder(
   });
 }
 
-/** Привязан ли заказ к приёмке — для состава привязанного заказа. */
-export async function isOrderLinked(db: Db, deliveryId: string, orderId: string): Promise<boolean> {
+/**
+ * Привязан ли заказ к приёмке — для состава привязанного заказа. siteScope —
+ * как в listDeliveryOrders: заказ чужого объекта наблюдателю не виден.
+ */
+export async function isOrderLinked(
+  db: Db,
+  deliveryId: string,
+  orderId: string,
+  siteScope: string[] | null = null,
+): Promise<boolean> {
   const [row] = await db
     .select({ orderId: deliverySupplierOrders.orderId })
     .from(deliverySupplierOrders)
-    .where(and(eq(deliverySupplierOrders.deliveryId, deliveryId), eq(deliverySupplierOrders.orderId, orderId)))
+    .innerJoin(estimatSupplierOrders, eq(estimatSupplierOrders.id, deliverySupplierOrders.orderId))
+    .where(
+      and(
+        eq(deliverySupplierOrders.deliveryId, deliveryId),
+        eq(deliverySupplierOrders.orderId, orderId),
+        siteScope ? siteScopeCondition(siteScope, estimatSupplierOrders.siteId) : undefined,
+      ),
+    )
     .limit(1);
   return !!row;
 }

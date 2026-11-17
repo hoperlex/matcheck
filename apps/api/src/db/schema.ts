@@ -169,6 +169,33 @@ export const users = pgTable(
   ],
 );
 
+/**
+ * Объекты наблюдателя (роль observer): он видит данные только этих объектов.
+ *
+ * Отдельная таблица, а не users.site_id: тот — объект инспектора КПП, на нём
+ * держится планшет (смена siteId в /auth/me стирает его локальный архив), и
+ * объект там один, а наблюдателю нужны несколько.
+ *
+ * Пустой список означает «не видит ничего», а не «видит всё». Поэтому CASCADE
+ * при удалении объекта безопасен: доступ только сужается.
+ */
+export const userSites = pgTable(
+  'user_sites',
+  {
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    siteId: uuid('site_id')
+      .notNull()
+      .references(() => sites.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.siteId] }),
+    index('user_sites_site_idx').on(t.siteId),
+  ],
+);
+
 export const sessions = pgTable('sessions', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id')

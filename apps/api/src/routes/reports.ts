@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
 import { isUuid, parseUuidCsv } from '../lib/uuid-csv.js';
 import { expandCustomerCounterpartyToOpIds } from '../lib/contractor-scope.js';
+import { siteScopeOf } from '../lib/site-scope.js';
 import {
   InspectorOptionsResponseSchema,
   MovementsResponseSchema,
@@ -103,6 +105,19 @@ const safeUuids = parseUuidCsv;
 // Все uuid уже прошли через safeUuids — экранирование не нужно.
 function uuidInClause(col: string, ids: string[]): string {
   return `${col} IN (${ids.map((id) => `'${id}'::uuid`).join(',')})`;
+}
+
+/**
+ * Условие скоупа наблюдателя для raw SQL: `col IN (его объекты)`, при пустом
+ * списке — `false`; null — у пользователя ограничения по объекту нет.
+ * id приходят из БД (user_sites), но идут в raw SQL — поэтому всё равно через
+ * isUuid, как любые другие id в этом файле.
+ */
+function observerSiteWhere(user: Parameters<typeof siteScopeOf>[0], col: string): string | null {
+  const scope = siteScopeOf(user);
+  if (scope === null) return null;
+  const ids = scope.filter((id) => isUuid(id));
+  return ids.length > 0 ? uuidInClause(col, ids) : 'false';
 }
 
 function safeTimestamp(v: string | undefined): string | null {
@@ -209,6 +224,8 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         if (!req.user.siteId) filters.push('false');
         else filters.push(uuidInClause('b.site_id', [req.user.siteId]));
       }
+      const observerStock = observerSiteWhere(req.user, 'b.site_id');
+      if (observerStock) filters.push(observerStock);
       if (sIds.length) filters.push(uuidInClause('b.site_id', sIds));
       if (mId) filters.push(`b.material_id = '${mId}'::uuid`);
       if (q) {
@@ -423,6 +440,8 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         if (!req.user.siteId) where.push('false');
         else where.push(uuidInClause('d.site_id', [req.user.siteId]));
       }
+      const observerIntake = observerSiteWhere(req.user, 'd.site_id');
+      if (observerIntake) where.push(observerIntake);
       if (sIds.length) where.push(uuidInClause('d.site_id', sIds));
       if (contractorDirIds.length > 0) {
         if (cIds.length === 0) {
@@ -602,6 +621,10 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         intakeWhere.push(uuidInClause('d.site_id', [inspectorSite]));
         shipmentWhere.push(uuidInClause('s.site_id', [inspectorSite]));
       }
+      const observerIn = observerSiteWhere(req.user, 'd.site_id');
+      const observerOut = observerSiteWhere(req.user, 's.site_id');
+      if (observerIn) intakeWhere.push(observerIn);
+      if (observerOut) shipmentWhere.push(observerOut);
       if (sIds.length) {
         intakeWhere.push(uuidInClause('d.site_id', sIds));
         shipmentWhere.push(uuidInClause('s.site_id', sIds));
@@ -827,6 +850,8 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
         if (!req.user.siteId) where.push('false');
         else where.push(uuidInClause('s.site_id', [req.user.siteId]));
       }
+      const observerShipment = observerSiteWhere(req.user, 's.site_id');
+      if (observerShipment) where.push(observerShipment);
       if (sIds.length) where.push(uuidInClause('s.site_id', sIds));
       if (k) where.push(`s.kind = '${k}'::shipment_kind`);
       if (contractorDirIds.length > 0) {
@@ -1167,8 +1192,24 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       if (req.user?.role === 'inspector_kpp' && !inspectorSiteId) {
         return { completedToday: 0, inProgressToday: 0, overdue: 0 };
       }
-      const siteFilterD = inspectorSiteId ? `AND d.site_id = '${inspectorSiteId}'::uuid` : '';
-      const siteFilterS = inspectorSiteId ? `AND s.site_id = '${inspectorSiteId}'::uuid` : '';
+      // Наблюдатель: только свои объекты; без объектов — нули, как инспектор
+      // без объекта.
+      const observerScope = siteScopeOf(req.user);
+      if (observerScope && observerScope.length === 0) {
+        return { completedToday: 0, inProgressToday: 0, overdue: 0 };
+      }
+      const observerD = observerSiteWhere(req.user, 'd.site_id');
+      const observerS = observerSiteWhere(req.user, 's.site_id');
+      const siteFilterD = inspectorSiteId
+        ? `AND d.site_id = '${inspectorSiteId}'::uuid`
+        : observerD
+          ? `AND ${observerD}`
+          : '';
+      const siteFilterS = inspectorSiteId
+        ? `AND s.site_id = '${inspectorSiteId}'::uuid`
+        : observerS
+          ? `AND ${observerS}`
+          : '';
 
       // Волна 2 — Redis-кэш (необязательный, TTL ~20с + jitter) + single-flight.
       // Ключ включает МСК-дату: на смене суток по Москве ключ меняется →
@@ -1177,7 +1218,14 @@ export async function reportRoutes(rawApp: FastifyInstance): Promise<void> {
       const moscowDate = new Intl.DateTimeFormat('en-CA', {
         timeZone: 'Europe/Moscow',
       }).format(new Date());
-      const cacheKey = `opcounters:${inspectorSiteId ?? 'all'}:${moscowDate}`;
+      // Ключ обязан различать набор объектов: иначе наблюдатель получил бы
+      // общие цифры из кэша «all» (или наоборот — админ его цифры).
+      const scopeKey = inspectorSiteId
+        ? inspectorSiteId
+        : observerScope
+          ? `obs-${createHash('sha1').update([...observerScope].sort().join(',')).digest('hex').slice(0, 16)}`
+          : 'all';
+      const cacheKey = `opcounters:${scopeKey}:${moscowDate}`;
 
       // Границы «сегодня по Москве» вычисляет Postgres (bounds CTE) → SARGABLE
       // сравнение col >= today_start AND col < today_start+1day (индексируемо),

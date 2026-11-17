@@ -6,6 +6,7 @@ import { pushPendingMutations, withQueueLock } from './mutationQueue';
 import { getSetting, setSetting, withDb } from '../lib/db';
 import { useAuthStore } from '../stores/auth';
 import { retryPendingUploads } from './photoPipeline';
+import { localCacheEnabled } from '../lib/localCache';
 
 const CURSOR_KEY = 'sync_cursor';
 
@@ -29,6 +30,10 @@ export async function pullSync(): Promise<void> {
   const cursor = await getSetting<string>(CURSOR_KEY);
   const qs = cursor ? `?since=${encodeURIComponent(cursor)}` : '';
   const res = await api.get<SyncDeltaResponse>(`/sync${qs}`);
+  // Ответ мог прийти после смены пользователя или роли во вкладке: наблюдатель
+  // локальной базой не пользуется, и запоздалая дельта прежнего доступа не
+  // должна туда лечь (lib/localCache.ts).
+  if (!localCacheEnabled()) return;
   await upsertServerSnapshot(res.deliveries);
   await upsertShipmentSnapshot(res.shipments);
 

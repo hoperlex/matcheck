@@ -10,7 +10,7 @@
 // нужно для главного инварианта фичи — отсутствие данных НЕ равно отсутствию
 // прав (см. shared/utils/permissions.ts).
 
-import type { MePermissionsResponse, UserDto } from '@matcheck/contracts';
+import { authzRevisionOf, type MePermissionsResponse, type UserDto } from '@matcheck/contracts';
 import { useAuthStore } from '../stores/auth';
 import { usePermissionsStore } from '../stores/permissions';
 import { buildPermissionSet, type PermissionSet } from '../shared/utils/permissions';
@@ -128,9 +128,7 @@ async function refreshUserIfAuthzChanged(
 ): Promise<void> {
   const revision = payload.authzRevision;
   if (!revision || !current) return;
-  const known = [current.role, current.siteId ?? '-', current.contractorCustomerId ?? '-'].join(
-    ':',
-  );
+  const known = authzRevisionOf(current);
   if (revision === known) return;
 
   try {

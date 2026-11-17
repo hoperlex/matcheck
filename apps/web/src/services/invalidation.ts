@@ -58,7 +58,26 @@ const RECONNECT_MAX_MS = 30000;
 let bc: BroadcastChannel | null = null;
 let sse: EventSource | null = null;
 
-export function setupInvalidation(qc: QueryClient): () => void {
+/**
+ * Роли, которым сервер отдаёт поток /api/v1/events. Зеркалит allow-list на
+ * маршруте (`app.authorize('admin', 'manager', 'inspector_kpp')` в
+ * apps/api/src/routes/events.ts), как SYNC_ROLES в services/sync.ts.
+ *
+ * Остальным поток закрыт (403): раньше браузер всё равно открывал его и
+ * переподключался каждые 5–30 с. Для наблюдателя это ещё и вопрос гигиены —
+ * он видит только свои объекты, и соединения к чужому потоку быть не должно.
+ * Обновление у таких ролей идёт fallback-рефетчем ниже и сменой вкладки.
+ */
+const SSE_ROLES: readonly string[] = ['admin', 'manager', 'inspector_kpp'];
+
+export function sseAvailableForRole(role: string | undefined): boolean {
+  return role !== undefined && SSE_ROLES.includes(role);
+}
+
+export function setupInvalidation(
+  qc: QueryClient,
+  opts: { sse?: boolean } = {},
+): () => void {
   if (typeof window === 'undefined') return () => undefined;
 
   try {
@@ -179,7 +198,7 @@ export function setupInvalidation(qc: QueryClient): () => void {
     void evt;
   }
 
-  connectSse();
+  if (opts.sse !== false) connectSse();
 
   // Fallback: если SSE молча оборвался (в проде поток «молчит» из-за
   // прокси/буферизации), разделы должны обновляться без F5. Раньше здесь

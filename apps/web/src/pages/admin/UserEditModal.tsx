@@ -77,6 +77,7 @@ export function UserEditModal({
   const [fullName, setFullName] = useState('');
   const [role, setRole] = useState<UserRole>('manager');
   const [siteId, setSiteId] = useState<string | null>(null);
+  const [siteIds, setSiteIds] = useState<string[]>([]);
   const [contractorCustomerId, setContractorCustomerId] = useState<string | null>(null);
   const [phone, setPhone] = useState('');
   const [isActive, setIsActive] = useState(true);
@@ -92,6 +93,7 @@ export function UserEditModal({
     setFullName(user.fullName ?? '');
     setRole(user.role);
     setSiteId(user.siteId);
+    setSiteIds(user.siteIds ?? []);
     setContractorCustomerId(user.contractorCustomerId);
     setPhone(user.phone ?? '');
     setIsActive(user.isActive);
@@ -146,6 +148,9 @@ export function UserEditModal({
       role,
       // inspector_kpp может иметь siteId; для остальных — бэк сам обнулит.
       siteId: role === 'inspector_kpp' ? siteId : null,
+      // Объекты наблюдателя. Для других ролей не шлём: уходя из роли
+      // наблюдателя, список сервер очистит сам.
+      ...(role === 'observer' ? { siteIds } : {}),
       // contractor привязан к подрядчику; для остальных ролей — null.
       contractorCustomerId: role === 'contractor' ? contractorCustomerId : null,
       phone: phone.trim() ? phone.trim() : null,
@@ -226,6 +231,28 @@ export function UserEditModal({
               optionFilterProp="label"
               allowClear
               options={sites.map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` }))}
+            />
+          </Form.Item>
+        )}
+        {role === 'observer' && (
+          <Form.Item
+            label="Объекты"
+            help="Наблюдатель видит данные только этих объектов; без объектов — не видит ничего. После смены объектов ему нужно войти заново."
+          >
+            <Select<string[]>
+              mode="multiple"
+              value={siteIds}
+              onChange={(v) => setSiteIds(v)}
+              placeholder="Не назначены"
+              showSearch
+              optionFilterProp="label"
+              aria-label="Объекты наблюдателя"
+              options={[
+                ...sites.map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` })),
+                ...siteIds
+                  .filter((id) => !sites.some((s) => s.id === id))
+                  .map((id) => ({ value: id, label: `неактивный объект ${id.slice(0, 8)}` })),
+              ]}
             />
           </Form.Item>
         )}

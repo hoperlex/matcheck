@@ -8,6 +8,8 @@ import { lookupRule, type RouteRule } from '../lib/permissions/route-map.js';
 import { collectRouteRoles, type RouteRolesMap } from '../lib/permissions/route-roles.js';
 import { judgeCells, judgeRuleCells, matrixCellsOf } from '../lib/permissions/rule-cells.js';
 import { isMatrixOnlyRole, isWebOnlyRole } from '../lib/roles.js';
+import { siteScopeOf } from '../lib/site-scope.js';
+import { siteScopeMarkOf } from '../lib/permissions/site-scope-map.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -214,6 +216,31 @@ export default fp(async (app) => {
     // собственным ячейкам. При выключенном флаге основного хука не будет,
     // поэтому закрываем сами.
     if (!enforced) return deny(req, reply, tmpl, req.method.toLowerCase());
+  });
+
+  /**
+   * Наблюдатель видит только свои объекты (user_sites). Матрица решает, КАКИЕ
+   * разделы ему открыты, а этот хук — сумеет ли маршрут ограничить данные его
+   * объектами. Маршрут не размечен в SITE_SCOPE_MAP — 403, даже если галочка
+   * его открывает: забытый маршрут закрывается, а не отдаёт данные всех
+   * объектов.
+   *
+   * Стоит до раннего выхода по флагу: при PERMISSIONS_ENFORCE=0 наблюдателю и
+   * так открыты только `allow`-маршруты (хук выше), но пусть правило не
+   * зависит от того, кто из них сработает первым.
+   */
+  app.addHook('onRequest', async (req, reply) => {
+    if (siteScopeOf(req.user) === null) return;
+    const tmpl = req.routeOptions?.url;
+    // На 404 шаблона нет — поведение прежнее.
+    if (!tmpl) return;
+    if (lookupRule(req.method, tmpl)?.matrixOnly?.mode === 'allow') return;
+    if (siteScopeMarkOf(req.method, tmpl)) return;
+    await app.logUnauthorized(req, 403, 'site_scope_unsupported', req.user?.id);
+    return reply.code(403).send({
+      error: 'site_scope_unsupported',
+      message: 'Наблюдателю этот раздел недоступен: у него нет фильтра по объекту',
+    });
   });
 
   if (!enforced) {

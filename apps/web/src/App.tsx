@@ -9,8 +9,9 @@ import { router } from './app/router';
 import { QueryProvider } from './app/providers/QueryProvider';
 import { AuthProvider } from './app/providers/AuthProvider';
 import { useQueryClient } from '@tanstack/react-query';
-import { setupInvalidation } from './services/invalidation';
+import { setupInvalidation, sseAvailableForRole } from './services/invalidation';
 import { startSyncLoop, syncAvailableForRole } from './services/sync';
+import { narrowStickySiteFilter, reconcileLocalAccess } from './services/localAccessKey';
 import { useAuthStore } from './stores/auth';
 import { UpdateBanner } from './shared/ui/UpdateBanner';
 import { MismatchRowStyle } from './shared/ui/MismatchRowStyle';
@@ -41,12 +42,27 @@ function SideEffects() {
     // Только id (UUID, не ПДн) — чтобы видеть, чья сессия словила ошибку.
     Sentry.setUser(user ? { id: user.id } : null);
     if (!user) return;
-    const teardownInv = setupInvalidation(qc);
+    // Поток событий открываем только ролям, которым сервер его отдаёт:
+    // остальным он ответил бы 403, а браузер переподключался бы бесконечно.
+    const teardownInv = setupInvalidation(qc, { sse: sseAvailableForRole(user.role) });
     // Офлайн-синхронизация есть не у всех ролей: contractor и monitor получают
     // на /api/v1/sync 403. Раньше цикл стартовал для любого залогиненного и раз
     // в минуту стучался в закрытую дверь.
-    const teardownSync = syncAvailableForRole(user.role) ? startSyncLoop() : undefined;
+    //
+    // Сначала — сверка ключа локальной базы (services/localAccessKey.ts): если
+    // в этом браузере раньше работал другой человек или другая роль, а теперь
+    // наблюдатель (или наоборот), база очищается ДО первой синхронизации.
+    narrowStickySiteFilter(user);
+    let cancelled = false;
+    let teardownSync: (() => void) | undefined;
+    void reconcileLocalAccess(user)
+      .catch(() => false)
+      .finally(() => {
+        if (cancelled) return;
+        if (syncAvailableForRole(user.role)) teardownSync = startSyncLoop();
+      });
     return () => {
+      cancelled = true;
       teardownInv();
       teardownSync?.();
     };

@@ -518,8 +518,41 @@ export function isNeverGrantable(page: PageId, action: PageAction): boolean {
  * Подрядчик видит только свои записи, но пути записи принадлежность подрядчику
  * не сверяют вовсе. Пока этой сверки нет, любое выданное ему create/edit/delete
  * означало бы право писать в чужое — отдельная задача про write-scope.
+ *
+ * Наблюдатель (observer) ограничен своими объектами и только смотрит: объект
+ * на путях записи для него не сверяется нигде, так что запись закрыта целиком.
+ * Строку с правом записи, вписанную в БД мимо матрицы, режет isAllowed (шаг 4).
  */
-export const WRITE_BLOCKED_ROLES: ManagedRole[] = ['contractor'];
+export const WRITE_BLOCKED_ROLES: ManagedRole[] = ['contractor', 'observer'];
+
+/**
+ * Страницы, которые можно выдать наблюдателю (observer) хотя бы на просмотр.
+ *
+ * Наблюдатель видит только объекты из своего списка (user_sites), поэтому
+ * выдавать ему можно лишь то, что умеет этот список учитывать: операции,
+ * документы и журнал фильтруются по объекту, справочники без объекта общие.
+ * Почта, статистика, справочники заказов и договоров, администрирование
+ * фильтра по объекту не имеют — галочка там открыла бы данные всех объектов.
+ *
+ * Именно разрешающий список, а не запрещающий: новая страница каталога
+ * наблюдателю закрыта, пока её сюда сознательно не добавят.
+ */
+export const OBSERVER_PAGES: ReadonlySet<PageId> = new Set<PageId>([
+  'operations.deliveries',
+  'operations.shipments',
+  'documents.list',
+  'documents.extra_only',
+  'materials_journal',
+  'references.sites',
+  'references.customer_counterparties',
+  'references.suppliers',
+  'references.units',
+  'references.mol',
+  'references.counterparties_legacy',
+  'references.responsible_persons',
+  'references.materials',
+  'references.assets',
+]);
 
 /**
  * Роли с ограничением видимости по строкам: inspector_kpp — по siteId.
@@ -569,6 +602,7 @@ export const WRITE_SCOPE_ENFORCED: ReadonlySet<string> = new Set([
 export function canExpand(role: ManagedRole, page: PageId, action: PageAction): boolean {
   if (!isActionApplicable(page, action)) return false;
   if (isNeverGrantable(page, action)) return false;
+  if (role === 'observer' && !OBSERVER_PAGES.has(page)) return false;
   if (action === 'view') return true;
   if (WRITE_BLOCKED_ROLES.includes(role)) return false;
   if (!ROW_SCOPED_PAGES.includes(page)) return true;
@@ -589,6 +623,12 @@ export function expandBlockReason(
   if (!isActionApplicable(page, action)) return null;
   if (isNeverGrantable(page, action)) {
     return 'Это право не выдаётся ни одной роли: через него можно получить полномочия администратора и отобрать доступ у остальных';
+  }
+  if (role === 'observer') {
+    if (!OBSERVER_PAGES.has(page)) {
+      return 'Наблюдатель видит только свои объекты, а у этого раздела нет фильтра по объекту — галочка открыла бы данные всех объектов';
+    }
+    return 'Наблюдатель только смотрит: права на изменение ему не выдаются';
   }
   if (WRITE_BLOCKED_ROLES.includes(role)) {
     return 'Подрядчик видит только свои записи, но пути записи принадлежность не сверяют — выданное право позволило бы менять чужое';
@@ -645,6 +685,30 @@ export const MePermissionsResponseSchema = z.object({
   authzRevision: z.string().optional(),
 });
 export type MePermissionsResponse = z.infer<typeof MePermissionsResponseSchema>;
+
+/**
+ * Отпечаток authz-состояния — ОДНА функция для сервера (/me/permissions) и
+ * веба (сверка с профилем в auth-store). Две копии формата уже однажды
+ * разошлись бы на первом же новом поле: сервер добавил бы его, клиент — нет, и
+ * профиль перечитывался бы на каждом опросе.
+ *
+ * Для всех ролей, кроме наблюдателя, формат прежний (role:siteId:contractor).
+ * У наблюдателя добавлены его объекты — отсортированные, чтобы порядок строк в
+ * БД не менял отпечаток.
+ */
+export function authzRevisionOf(u: {
+  role: string;
+  siteId: string | null;
+  contractorCustomerId: string | null;
+  siteIds?: readonly string[];
+}): string {
+  const parts = [u.role, u.siteId ?? '-', u.contractorCustomerId ?? '-'];
+  if (u.role === 'observer') {
+    const ids = [...(u.siteIds ?? [])].sort();
+    parts.push(ids.length > 0 ? ids.join(',') : '-');
+  }
+  return parts.join(':');
+}
 
 /** GET /api/v1/admin/role-permissions — вся матрица + каталог для отрисовки. */
 export const RolePermissionsResponseSchema = z.object({

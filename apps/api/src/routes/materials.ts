@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { siteScopeCondition, siteScopeOf } from '../lib/site-scope.js';
 import { and, desc, eq, ilike, or, sql as drSql } from 'drizzle-orm';
 import { dateRangeConditions } from '../lib/date-range.js';
 import { z } from 'zod';
@@ -92,6 +93,10 @@ export async function materialRoutes(rawApp: FastifyInstance): Promise<void> {
       conditions.push(
         ...dateRangeConditions(deliveries.arrivedAt, from, to, { toInclusive: true }),
       );
+      // Наблюдатель — только приёмки своих объектов. Остальные роли — как было
+      // (журнал без скоупа, см. комментарий у preHandler).
+      const siteScope = siteScopeOf(req.user);
+      if (siteScope) conditions.push(siteScopeCondition(siteScope, deliveries.siteId));
 
       const where = and(...conditions);
 

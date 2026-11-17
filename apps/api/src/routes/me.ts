@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import {
+  authzRevisionOf,
   MePermissionsResponseSchema,
   type PagePermissions,
   type PageId,
@@ -52,7 +53,7 @@ export async function meRoutes(rawApp: FastifyInstance): Promise<void> {
         capabilities: capabilitiesFor(overrides, user.role, app.permissions.routeRoles),
         // Отпечаток authz-состояния: роль и обе привязки скоупа. Значение
         // непрозрачно для клиента — он только сравнивает его с прошлым.
-        authzRevision: [user.role, user.siteId ?? '-', user.contractorCustomerId ?? '-'].join(':'),
+        authzRevision: authzRevisionOf(user),
       };
     },
   );

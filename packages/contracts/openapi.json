@@ -101,6 +101,13 @@
             ],
             "format": "uuid"
           },
+          "siteIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
           "contractorCustomerId": {
             "type": [
               "string",
@@ -209,6 +216,13 @@
                   "null"
                 ],
                 "format": "uuid"
+              },
+              "siteIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                }
               },
               "contractorCustomerId": {
                 "type": [

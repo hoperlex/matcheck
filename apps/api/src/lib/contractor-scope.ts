@@ -7,6 +7,7 @@ import {
   sourceDocuments,
 } from '../db/schema.js';
 import type { AuthUser } from '../plugins/auth.js';
+import { siteInScope, siteScopeOf } from './site-scope.js';
 
 // Скоупинг видимости по подрядчику (роль contractor). Аналог inspector_kpp→siteId,
 // но по подрядчику: пользователь привязан к строке справочника
@@ -151,6 +152,10 @@ export async function sourceDocumentVisible(
   // inspector_kpp видит только документы своего объекта.
   if (user?.role === 'inspector_kpp') {
     return !!user.siteId && sd.siteId === user.siteId;
+  }
+  // Наблюдатель — только документы своих объектов (user_sites).
+  if (user?.role === 'observer') {
+    return siteInScope(siteScopeOf(user), sd.siteId);
   }
   // contractor видит только документы своего подрядчика — и только там, где
   // подрядчик проставлен человеком, а не автоподстановкой.

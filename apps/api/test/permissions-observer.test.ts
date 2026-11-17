@@ -21,6 +21,7 @@ import {
   DEFAULT_MATRIX,
   MANAGED_ROLES,
   PAGE_ACTIONS,
+  OBSERVER_PAGES,
   PAGE_IDS,
   canExpand,
   type PageAction,
@@ -193,10 +194,35 @@ describe('дефолт наблюдателя пуст', () => {
     expect(MANAGED_ROLES).toContain('observer');
   });
 
-  it('просмотр выдаваем везде, кроме матрицы прав', () => {
+  it('просмотр выдаётся только там, где данные умеют ограничиваться объектами', () => {
+    // Наблюдатель видит только свои объекты (user_sites). Разделы без фильтра
+    // по объекту — почта, статистика, справочники заказов и договоров,
+    // администрирование — ему не выдаются даже на просмотр.
     for (const page of PAGE_IDS) {
-      const expected = page !== 'admin.roles';
+      const expected = OBSERVER_PAGES.has(page);
       expect(canExpand('observer', page, 'view'), `${page}:view`).toBe(expected);
+    }
+    for (const page of [
+      'documents.mail',
+      'stats',
+      'references.supplier_orders',
+      'references.supplier_contracts',
+      'admin.users',
+      'admin.settings',
+    ] as const) {
+      expect(canExpand('observer', page, 'view'), page).toBe(false);
+    }
+    for (const page of ['operations.deliveries', 'documents.list', 'materials_journal'] as const) {
+      expect(canExpand('observer', page, 'view'), page).toBe(true);
+    }
+  });
+
+  it('запись не выдаётся ни на одной странице', () => {
+    for (const page of PAGE_IDS) {
+      for (const action of PAGE_ACTIONS) {
+        if (action === 'view') continue;
+        expect(canExpand('observer', page, action), `${page}:${action}`).toBe(false);
+      }
     }
   });
 });
@@ -301,11 +327,11 @@ describe('выданная галочка открывает страницу ц
     ).toEqual([]);
   });
 
-  it('изоляция справочников: «Статистика» открывает объекты и только их', async () => {
-    app = await buildApp([grant('stats', 'view')]);
-    // Страница статистики грузит /sites (фильтр по объектам) и свои отчёты.
+  it('изоляция справочников: «История поступлений» открывает объекты и только их', async () => {
+    app = await buildApp([grant('materials_journal', 'view')]);
+    // Страница журнала грузит /sites (фильтр по объектам) и свои отчёты.
     expect(await status(app, 'GET', '/api/v1/sites')).toBe(200);
-    expect(await status(app, 'GET', '/api/v1/reports/stats-summary')).toBe(200);
+    expect(await status(app, 'GET', '/api/v1/reports/intake')).toBe(200);
     // Остальные справочники ей не нужны — и открываться не должны.
     for (const url of [
       '/api/v1/units',
@@ -422,6 +448,79 @@ describe('откат флага не открывает роль', () => {
     expect(await status(app, 'GET', '/api/v1/source-documents')).toBe(403);
     expect(await status(app, 'GET', '/api/v1/units')).toBe(403);
     expect(await status(app, 'GET', '/api/v1/me/permissions')).toBe(200);
+    expect(await status(app, 'GET', '/api/v1/auth/me')).toBe(200);
+  });
+});
+
+describe('наблюдатель по объектам: границы матрицы', () => {
+  it('запись, вписанная в БД мимо матрицы, не действует; самообслуживание работает', async () => {
+    // Строка с правом записи — как после прямого UPDATE в psql. isAllowed (шаг 4)
+    // сверяет её с canExpand, а наблюдателю запись не выдаётся нигде.
+    const forced: Row = {
+      ...grant('operations.deliveries', 'view'),
+      canCreate: true,
+      canEdit: true,
+      canDelete: true,
+      canReview: true,
+    };
+    app = await buildApp([forced, { ...grant('documents.list', 'view'), canCreate: true, canEdit: true }]);
+    expect(await status(app, 'GET', '/api/v1/deliveries')).toBe(200);
+    for (const [method, url] of [
+      ['POST', '/api/v1/deliveries'],
+      ['PATCH', '/api/v1/deliveries/:id/review'],
+      ['POST', '/api/v1/deliveries/:id/mark-deletion'],
+      ['POST', '/api/v1/source-documents/upload-documents'],
+      ['PATCH', '/api/v1/source-documents/:id'],
+    ] as const) {
+      expect(await status(app, method, url), `${method} ${url}`).toBe(403);
+    }
+    expect(await status(app, 'PATCH', '/api/v1/auth/me')).toBe(200);
+    expect(await status(app, 'POST', '/api/v1/auth/change-password')).toBe(200);
+  });
+
+  it('просмотр разделов без фильтра по объекту, вписанный в БД, не действует', async () => {
+    app = await buildApp([
+      grant('documents.mail', 'view'),
+      grant('stats', 'view'),
+      grant('references.supplier_orders', 'view'),
+      grant('references.supplier_contracts', 'view'),
+      grant('admin.users', 'view'),
+    ]);
+    for (const url of [
+      '/api/v1/mail/messages',
+      '/api/v1/reports/stats-summary',
+      '/api/v1/reports/inspector-stats',
+      '/api/v1/estimat/supplier-orders',
+      '/api/v1/supplier-contracts',
+      '/api/v1/admin/users',
+    ]) {
+      expect(await status(app, 'GET', url), url).toBe(403);
+    }
+  });
+
+  it('маршрут без разметки объекта закрыт, даже если галочка его открывает', async () => {
+    // Карта SITE_SCOPE_MAP «забыла» все маршруты — ровно случай нового маршрута,
+    // который добавили в реестр, но не научили сверять объект.
+    vi.doMock('../src/lib/permissions/site-scope-map.js', () => ({
+      SITE_SCOPE_MAP: new Map(),
+      siteScopeMarkOf: () => undefined,
+    }));
+    try {
+      app = await buildApp([grant('operations.deliveries', 'view')]);
+      const res = await app.inject({ method: 'GET', url: '/api/v1/deliveries' });
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toMatchObject({ error: 'site_scope_unsupported' });
+      // Самообслуживание (matrixOnly: allow) хук не трогает.
+      expect(await status(app, 'GET', '/api/v1/auth/me')).toBe(200);
+    } finally {
+      vi.doUnmock('../src/lib/permissions/site-scope-map.js');
+    }
+  });
+
+  it('при PERMISSIONS_ENFORCE=0 бизнес-маршруты закрыты и с разметкой объекта', async () => {
+    app = await buildApp([grant('operations.deliveries', 'view')], '0');
+    expect(await status(app, 'GET', '/api/v1/deliveries')).toBe(403);
+    expect(await status(app, 'GET', '/api/v1/source-documents')).toBe(403);
     expect(await status(app, 'GET', '/api/v1/auth/me')).toBe(200);
   });
 });

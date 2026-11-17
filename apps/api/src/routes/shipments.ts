@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { siteInScope, siteScopeCondition, siteScopeOf } from '../lib/site-scope.js';
 import {
   and,
   desc,
@@ -758,6 +759,11 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       if (siteId) filters.push(eq(shipments.siteId, siteId));
       if (inspectorId) filters.push(eq(shipments.inspectorId, inspectorId));
     }
+    // Наблюдатель видит отгрузки только со своих объектов (объект-источник, как
+    // у инспектора). Отдельным условием: пользовательские фильтры выше и ниже
+    // пересекаются с ним через AND и расширить видимость не могут.
+    const siteScope = siteScopeOf(user);
+    if (siteScope) filters.push(siteScopeCondition(siteScope, shipments.siteId));
     if (!status && user?.role !== 'inspector_kpp' && user) {
       const draftId = await resolveStatusId(app, 'draft');
       filters.push(or(ne(shipments.statusId, draftId), eq(shipments.inspectorId, user.id))!);
@@ -1119,6 +1125,10 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         req.user?.role === 'inspector_kpp' &&
         (!req.user.siteId || dto.siteId !== req.user.siteId)
       ) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      // Наблюдатель — только отгрузки со своих объектов.
+      if (!siteInScope(siteScopeOf(req.user), dto.siteId)) {
         return reply.code(404).send({ error: 'not_found' });
       }
       // contractor видит только отгрузки, где он получатель. DTO уже содержит

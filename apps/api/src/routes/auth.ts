@@ -33,10 +33,11 @@ import { sha256Hex } from '../domain/auth/crypto.js';
 import { loadEnv } from '../lib/env.js';
 import { createBurstyRateLimit } from '../lib/auth-rate-limit.js';
 import { isWebOnlyRole } from '../lib/roles.js';
+import { siteIdsOfUser } from '../domain/auth/user-sites.js';
 
 const env = loadEnv();
 
-function userToDto(u: {
+type UserRow = {
   id: string;
   email: string;
   role: 'admin' | 'manager' | 'inspector_kpp' | 'contractor' | 'monitor' | 'observer';
@@ -46,13 +47,18 @@ function userToDto(u: {
   phone: string | null;
   fullName: string | null;
   createdAt: Date;
-}) {
+};
+
+function userToDto(u: UserRow, siteIds: string[]) {
   return {
     id: u.id,
     email: u.email,
     role: u.role,
     isActive: u.isActive,
     siteId: u.siteId,
+    // Объекты наблюдателя. У остальных ролей в user_sites строк нет, но и
+    // запрашивать их незачем.
+    siteIds: u.role === 'observer' ? siteIds : [],
     contractorCustomerId: u.contractorCustomerId,
     phone: u.phone,
     fullName: u.fullName,
@@ -118,6 +124,9 @@ function extractBearerToken(authHeader: string | undefined): string | null {
 
 export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
+  // Профиль с объектами наблюдателя. Запрос к user_sites — только для observer.
+  const dtoOf = async (u: UserRow) =>
+    userToDto(u, u.role === 'observer' ? await siteIdsOfUser(app.db, u.id) : []);
   app.post(
     '/api/v1/auth/register',
     {
@@ -175,7 +184,7 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
         ip: req.ip,
         userAgent: req.headers['user-agent'] ?? null,
       });
-      return { ok: true as const, user: userToDto(created) };
+      return { ok: true as const, user: userToDto(created, []) };
     },
   );
 
@@ -277,7 +286,7 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
         return {
           accessToken: access,
           expiresIn: env.ACCESS_TOKEN_TTL_SECONDS,
-          user: userToDto(user),
+          user: await dtoOf(user),
           refreshToken: refresh.token,
           refreshExpiresIn: refreshExpiresInSeconds(refresh.expiresAt),
         };
@@ -288,7 +297,7 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
       return {
         accessToken: access,
         expiresIn: env.ACCESS_TOKEN_TTL_SECONDS,
-        user: userToDto(user),
+        user: await dtoOf(user),
       };
     },
   );
@@ -402,7 +411,7 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!req.user) return reply.code(401).send({ error: 'unauthorized' });
       const [user] = await app.db.select().from(users).where(eq(users.id, req.user.id)).limit(1);
       if (!user) return reply.code(401).send({ error: 'unauthorized' });
-      return userToDto(user);
+      return await dtoOf(user);
     },
   );
 
@@ -435,7 +444,7 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
       await app.db.update(users).set(patch).where(eq(users.id, req.user.id));
       const [user] = await app.db.select().from(users).where(eq(users.id, req.user.id)).limit(1);
       if (!user) return reply.code(401).send({ error: 'unauthorized' });
-      return userToDto(user);
+      return await dtoOf(user);
     },
   );
 
@@ -525,7 +534,7 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
       });
       const [updated] = await app.db.select().from(users).where(eq(users.id, user.id)).limit(1);
       if (!updated) return reply.code(401).send({ error: 'unauthorized' });
-      return userToDto(updated);
+      return await dtoOf(updated);
     },
   );
 }

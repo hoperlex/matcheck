@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { desc, eq, and, isNull } from 'drizzle-orm';
+import { desc, eq, and, inArray, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { asZod } from '../../lib/fastify.js';
 import {
@@ -8,19 +8,22 @@ import {
   AdminSetPasswordRequestSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
-import { users, sessions } from '../../db/schema.js';
+import { users, sessions, sites, userSites } from '../../db/schema.js';
+import { loadUserSiteIds, replaceUserSites } from '../../domain/auth/user-sites.js';
 import { hashPassword } from '../../domain/auth/password.js';
 import { applyPasswordHash } from '../../domain/auth/apply-password.js';
 import { publishEvent } from '../events.js';
 import { isMatrixOnlyRole, isWebOnlyRole } from '../../lib/roles.js';
 
-function dto(u: typeof users.$inferSelect) {
+function dto(u: typeof users.$inferSelect, siteIds: string[] = []) {
   return {
     id: u.id,
     email: u.email,
     role: u.role,
     isActive: u.isActive,
     siteId: u.siteId,
+    // Объекты наблюдателя; у остальных ролей строк в user_sites нет.
+    siteIds: u.role === 'observer' ? siteIds : [],
     contractorCustomerId: u.contractorCustomerId,
     phone: u.phone,
     fullName: u.fullName,
@@ -38,7 +41,11 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
     },
     async () => {
       const rows = await app.db.select().from(users).orderBy(desc(users.createdAt));
-      return rows.map(dto);
+      const siteIdsByUser = await loadUserSiteIds(
+        app.db,
+        rows.filter((u) => u.role === 'observer').map((u) => u.id),
+      );
+      return rows.map((u) => dto(u, siteIdsByUser.get(u.id) ?? []));
     },
   );
 
@@ -49,7 +56,12 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
       schema: {
         params: z.object({ id: z.string().uuid() }),
         body: UserAdminPatchSchema,
-        response: { 200: UserDtoSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema },
+        response: {
+          200: UserDtoSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
+        },
       },
     },
     async (req, reply) => {
@@ -108,12 +120,60 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
         patch.contractorCustomerId = req.body.contractorCustomerId;
       }
 
-      const [updated] = await app.db
-        .update(users)
-        .set(patch)
-        .where(eq(users.id, req.params.id))
-        .returning();
-      if (!updated) return reply.code(404).send({ error: 'not_found' });
+      // Объекты наблюдателя — только у итоговой роли observer. Уходит из роли —
+      // список очищается (как siteId у инспектора). Добавлять можно лишь
+      // существующие активные объекты; уже назначенный и с тех пор
+      // деактивированный остаётся, если админ его не снял.
+      let nextSiteIds: string[] | null = null;
+      if (nextRole === 'observer') {
+        if (req.body.siteIds !== undefined) nextSiteIds = [...new Set(req.body.siteIds)];
+      } else if (existing.role === 'observer') {
+        nextSiteIds = [];
+      }
+      if (nextSiteIds && nextSiteIds.length > 0) {
+        const current = new Set(
+          (await loadUserSiteIds(app.db, [existing.id])).get(existing.id) ?? [],
+        );
+        const found = await app.db
+          .select({ id: sites.id, isActive: sites.isActive })
+          .from(sites)
+          .where(inArray(sites.id, nextSiteIds));
+        const byId = new Map(found.map((r) => [r.id, r.isActive]));
+        const bad = nextSiteIds.filter(
+          (id) => !byId.has(id) || (!byId.get(id) && !current.has(id)),
+        );
+        if (bad.length > 0) {
+          return reply.code(400).send({
+            error: 'site_not_available',
+            message: 'Объект не найден или неактивен',
+          });
+        }
+      }
+
+      const result = await app.db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(users)
+          .set(patch)
+          .where(eq(users.id, req.params.id))
+          .returning();
+        if (!row) return null;
+        const sitesChanged =
+          nextSiteIds !== null ? await replaceUserSites(tx, row.id, nextSiteIds) : false;
+        const siteIds =
+          row.role === 'observer'
+            ? (
+                await tx
+                  .select({ siteId: userSites.siteId })
+                  .from(userSites)
+                  .where(eq(userSites.userId, row.id))
+              )
+                .map((r) => r.siteId)
+                .sort()
+            : [];
+        return { row, sitesChanged, siteIds };
+      });
+      if (!result) return reply.code(404).send({ error: 'not_found' });
+      const updated = result.row;
 
       // Deploy-safety: смена роли на web-only (contractor/monitor/observer)
       // инвалидирует все сессии юзера. Роль читается из БД на каждом запросе, а
@@ -135,7 +195,11 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
       const roleClassChanged =
         (isWebOnlyRole(nextRole) && !isWebOnlyRole(existing.role)) ||
         isMatrixOnlyRole(nextRole) !== isMatrixOnlyRole(existing.role);
-      if (roleClassChanged) {
+      // Смена объектов наблюдателя тоже гасит его сессии. Сервер читает список
+      // на каждом запросе, так что доступ меняется и без этого; но открытая
+      // вкладка держит в памяти и в IndexedDB данные прежних объектов, а
+      // повторный вход её гарантированно перезагружает.
+      if (roleClassChanged || (result.sitesChanged && nextRole === 'observer')) {
         const now = new Date();
         await app.db
           .update(users)
@@ -155,14 +219,14 @@ export async function userAdminRoutes(rawApp: FastifyInstance): Promise<void> {
       const siteChanged = patch.siteId !== undefined && updated.siteId !== existing.siteId;
       const activeChanged =
         patch.isActive !== undefined && updated.isActive !== existing.isActive;
-      if (siteChanged || activeChanged) {
+      if (siteChanged || activeChanged || result.sitesChanged) {
         publishEvent(app, {
           type: 'user_updated',
           entityId: updated.id,
           ts: new Date().toISOString(),
         });
       }
-      return dto(updated);
+      return dto(updated, result.siteIds);
     },
   );
 

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { siteInScope, siteScopeCondition, siteScopeOf } from '../lib/site-scope.js';
 import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, inArray, isNull, or, sql as drSql } from 'drizzle-orm';
@@ -1791,8 +1792,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
       // Дубликаты — только порталу: планшет дотягивает документы этим же
       // маршрутом, а поле ему не нужно (лишние запросы на каждый документ).
+      // Наблюдателю — тоже нет: копии ищутся по всей базе и несут название
+      // чужого объекта.
       const duplicateTrail =
-        req.user?.role === 'inspector_kpp' ? null : await loadDuplicateTrail(app.db, sd);
+        req.user?.role === 'inspector_kpp' || req.user?.role === 'observer'
+          ? null
+          : await loadDuplicateTrail(app.db, sd);
 
       return {
         ...base,
@@ -2856,11 +2861,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           id: sourceBundles.id,
           status: sourceBundles.status,
           activeUploadGeneration: sourceBundles.activeUploadGeneration,
+          siteId: sourceBundles.siteId,
         })
         .from(sourceBundles)
         .where(eq(sourceBundles.id, bundleId))
         .limit(1);
-      if (!bundle) {
+      // Наблюдатель — только пакеты своих объектов; чужой — как несуществующий.
+      if (!bundle || !siteInScope(siteScopeOf(req.user), bundle.siteId)) {
         return reply.code(404).send({ error: 'not_found', message: 'Пакет не найден' });
       }
       // Только строки живой загрузки. Раньше брались все строки пакета, и у
@@ -2934,7 +2941,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
                 or bi.status in ('skipped', 'failed', 'needs_review'))
            and bi.input_s3_key is not null
       )`;
-      const where = and(isNull(sourceBundles.parentBundleId), noDocuments);
+      // Наблюдатель — только пакеты своих объектов.
+      const siteScope = siteScopeOf(req.user);
+      const where = and(
+        isNull(sourceBundles.parentBundleId),
+        noDocuments,
+        siteScope ? siteScopeCondition(siteScope, sourceBundles.siteId) : undefined,
+      );
 
       const [counted] = await app.db
         .select({ total: drSql<number>`count(*)::int` })
@@ -2994,6 +3007,18 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
       },
     },
     async (req, reply) => {
+      // Наблюдатель — только файлы пакетов своих объектов.
+      const siteScope = siteScopeOf(req.user);
+      if (siteScope) {
+        const [b] = await app.db
+          .select({ siteId: sourceBundles.siteId })
+          .from(sourceBundles)
+          .where(eq(sourceBundles.id, req.params.bundleId))
+          .limit(1);
+        if (!b || !siteInScope(siteScope, b.siteId)) {
+          return reply.code(404).send({ error: 'not_found' });
+        }
+      }
       const link = await presignExtraFile(app, req.log, req.params.bundleId, req.params.itemId);
       if (!link.ok) return reply.code(404).send({ error: link.error });
       return { url: link.url, filename: link.filename, mimeType: link.mimeType };

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { siteInScope, siteScopeCondition, siteScopeOf } from '../lib/site-scope.js';
 import {
   and,
   desc,
@@ -957,6 +958,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     } else if (inspectorId) {
       filters.push(eq(deliveries.inspectorId, inspectorId));
     }
+    // Наблюдатель видит только свои объекты (user_sites). Отдельным условием, а
+    // не веткой цепочки выше: иначе у него пропал бы фильтр «Инспектор».
+    // Пользовательский siteIds ниже пересекается с ним через AND и расширить
+    // видимость не может.
+    const siteScope = siteScopeOf(user);
+    if (siteScope) filters.push(siteScopeCondition(siteScope, deliveries.siteId));
     // Чужие черновики (draft) скрыты, если status не указан явно
     if (!status && user?.role !== 'inspector_kpp' && user) {
       const draftId = await resolveStatusId(app, 'draft');
@@ -1258,6 +1265,10 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         req.user?.role === 'inspector_kpp' &&
         (!req.user.siteId || dto.siteId !== req.user.siteId)
       ) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      // Наблюдатель — только приёмки своих объектов.
+      if (!siteInScope(siteScopeOf(req.user), dto.siteId)) {
         return reply.code(404).send({ error: 'not_found' });
       }
       // contractor видит только свои приёмки (с наследованием от УПД). DTO не

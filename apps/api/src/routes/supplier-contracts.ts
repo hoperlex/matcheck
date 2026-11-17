@@ -9,6 +9,7 @@
  * «Операции → Приёмки → Редактировать» включена, и кнопка у него есть сразу
  * (решение 10.11.2026). Сняли галочку — кнопки и маршрутов нет.
  */
+import { siteInScope, siteScopeCondition, siteScopeOf } from '../lib/site-scope.js';
 import type { FastifyInstance } from 'fastify';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
@@ -24,7 +25,7 @@ import {
   UnsetDeliveryContractQuerySchema,
 } from '@matcheck/contracts';
 import { asZod } from '../lib/fastify.js';
-import { deliveries } from '../db/schema.js';
+import { deliveries, sites } from '../db/schema.js';
 import {
   findContractCandidates,
   getDeliveryContract,
@@ -44,7 +45,7 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
   /** Приёмка, видимая пользователю: inspector_kpp — только своего объекта. */
   async function visibleDelivery(
     deliveryId: string,
-    user: { role?: string; siteId?: string | null } | undefined,
+    user: { role?: string; siteId?: string | null; siteIds?: string[] } | undefined,
   ): Promise<{ id: string; siteId: string } | null> {
     const [d] = await app.db
       .select({ id: deliveries.id, siteId: deliveries.siteId })
@@ -53,6 +54,8 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
       .limit(1);
     if (!d) return null;
     if (user?.role === 'inspector_kpp' && (!user.siteId || user.siteId !== d.siteId)) return null;
+    // Наблюдатель — только приёмки своих объектов.
+    if (!siteInScope(siteScopeOf(user), d.siteId)) return null;
     return d;
   }
 
@@ -106,7 +109,33 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
     async (req, reply) => {
       const delivery = await visibleDelivery(req.params.id, req.user);
       if (!delivery) return reply.code(404).send({ error: 'not_found' });
-      return getDeliveryContract(app.db, delivery);
+      const result = await getDeliveryContract(app.db, delivery);
+      const scope = siteScopeOf(req.user);
+      if (!scope) return result;
+      // Наблюдатель. Договор 1С бывает общим на несколько объектов: коды чужих
+      // объектов и свободный текст «объект» из 1С (там их перечисляют словами)
+      // ему не показываем. Размер справочника договоров — тоже не его данные.
+      const own = new Set(
+        scope.length === 0
+          ? []
+          : (
+              await app.db
+                .select({ code: sites.code })
+                .from(sites)
+                .where(siteScopeCondition(scope, sites.id))
+            ).map((r) => r.code),
+      );
+      const narrow = <C extends { siteCodes: string[]; objectText: string | null }>(c: C): C => ({
+        ...c,
+        siteCodes: c.siteCodes.filter((code) => own.has(code)),
+        objectText: null,
+      });
+      return {
+        ...result,
+        contract: result.contract ? narrow(result.contract) : null,
+        documents: result.documents.map((d) => ({ ...d, contract: narrow(d.contract) })),
+        catalog: { ...result.catalog, total: 0 },
+      };
     },
   );
 
