@@ -12,10 +12,12 @@
 //   1. строка с именем как в справочнике (pickOperationalCounterparty);
 //   2. нет такой и место «ИНН без КПП» свободно — заводим строку с именем из
 //      справочника;
-//   3. место занято строкой с другим именем — ОТКАЗ (`inn_taken`), маршрут
-//      отвечает 409 с именем, которое там записано.
+//   3. место занято строкой с другим написанием той же организации (порядок
+//      слов, опечатка в 1–2 знака — sameCompanySpelling) — берём её, как раньше;
+//   4. место занято строкой с действительно другим именем — ОТКАЗ (`inn_taken`),
+//      маршрут отвечает 409 с именем, которое там записано.
 //
-// До 17.11 в шаге 3 молча бралась чужая строка: приёмки 24888, 24994, 25616 и
+// До 17.11 в шаге 4 молча бралась чужая строка: приёмки 24888, 24994, 25616 и
 // 25619 вместо выбранной «ООО "ВЫСОТА"» получили «ИП Сатаневский», потому что
 // распознавание накладных завело грузополучателя с ИНН «Высоты». Портал при
 // этом писал «Поставщик обновлён». Неверное имя в приёмке хуже явного отказа:
@@ -24,7 +26,11 @@
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { counterparties, deliveries, shipments } from '../../db/schema.js';
-import { operationalNameMatches, pickOperationalCounterparty } from './operational-pick.js';
+import {
+  operationalNameClose,
+  operationalNameMatches,
+  pickOperationalCounterparty,
+} from './operational-pick.js';
 
 export type SupplierDirectoryEntry = {
   inn: string | null;
@@ -70,16 +76,20 @@ export async function resolveSupplierCounterparty(
   const slot = sameInn.find((r) => r.kpp === null);
   if (!slot) return ok(await insertSupplier(db, innDigits, name, { onConflict: 'reread' }));
 
+  // Отказываем только при действительно чужом имени: «КЕРАМЕС ГРУП» вместо
+  // «КЕРАМЕС ГРУПП» — та же организация, и выбор проходил всегда.
+  const refused = !operationalNameClose(slot.name, directory);
   log.info(
     {
       inn: innDigits,
       directoryName: name,
       operationalName: slot.name,
       counterpartyId: slot.id,
-      refused: true,
+      refused,
     },
     'supplier_from_directory_foreign_name',
   );
+  if (!refused) return { kind: 'ok', id: slot.id };
   return { kind: 'inn_taken', inn: innDigits, operationalName: slot.name };
 }
 

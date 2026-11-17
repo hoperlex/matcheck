@@ -3,8 +3,10 @@
 // «ООО "СТРОЙСЕРВИС"» с ИНН СТРОЙПАРТНЕРа).
 import { describe, expect, it } from 'vitest';
 import {
+  operationalNameClose,
   operationalNameMatches,
   pickOperationalCounterparty,
+  sameCompanySpelling,
   type OperationalRow,
 } from '../src/domain/directories/operational-pick.js';
 
@@ -95,5 +97,42 @@ describe('operationalNameMatches', () => {
     const picked = pickOperationalCounterparty(rows, vi, new Map());
     expect(picked?.id).toBe('vi1');
     expect(operationalNameMatches(picked!.name, vi)).toBe(true);
+  });
+});
+
+// Выбор поставщика отказывает (409), только когда под ИНН записана другая
+// организация. Пары — с боя 17.11: место «ИНН без КПП» занято строкой с другим
+// именем (31 поставщик справочника).
+describe('sameCompanySpelling', () => {
+  it.each([
+    ['ООО «АЛЮПРОМ» ', 'ООО АЛПРОМ'],
+    ['ООО "КЕРАМЕС ГРУПП"', 'ООО "КЕРАМЕС ГРУП"'],
+    ['АО "ЮТЕХ ДИСТРИБЬЮШН"', 'АО "КОТЕХ Дистрибьюшн"'],
+    ['СТРОИНВЕСТ', 'ООО "СТРОЙИНВЕСТ"'],
+    ['ООО ЛИДЕРГРУВ', 'ООО "Лидергруп"'],
+    ['ООО "СК Горизонт"', 'ГОРИЗОНТ СК'],
+  ])('одна организация: %s / %s', (a, b) => {
+    expect(sameCompanySpelling(a, b)).toBe(true);
+  });
+
+  it.each([
+    ['ООО "ВЫСОТА"', 'ИП Сатаневский Никита Михайлович'],
+    ['ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ТОРГОВЫЙ ДОМ "ТУЛА-СТАЛЬ"', 'ООО «СУ-10»'],
+    ['ООО "КТМ"', 'СУ-10'],
+    [
+      'ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ТОРГОВЫЙ ДОМ "ТУЛА-СТАЛЬ"',
+      'ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "М-ТЕРМИНАЛ"',
+    ],
+    ['ООО "КТМ"', 'ООО "КТС"'],
+    ['ООО "ЗМ ГРУПП"', 'ООО "КРОНОС ГРУПП"'],
+    ['ООО "ВЫСОТА"', ''],
+  ])('разные: %s / %s', (a, b) => {
+    expect(sameCompanySpelling(a, b)).toBe(false);
+  });
+
+  it('сравнивается и с алиасами справочника', () => {
+    const dir = { name: 'ООО "Мистраль"', aliases: ['ООО «ЭКОПЛАНТ»'] };
+    expect(operationalNameClose('ООО "ЭКОПЛАНТ"', dir)).toBe(true);
+    expect(operationalNameClose('ООО "СУ-61"', dir)).toBe(false);
   });
 });

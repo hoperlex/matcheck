@@ -40,13 +40,15 @@ suite(
     const innFree = `71${stamp}1`; // чужое имя с КПП, место без КПП свободно
     const innTaken = `71${stamp}2`; // место без КПП занято чужим именем
     const innFresh = `71${stamp}3`; // строк нет совсем
-    const inns = [innMany, innFree, innTaken, innFresh];
+    const innVariant = `71${stamp}4`; // место без КПП — та же фирма с опечаткой
+    const inns = [innMany, innFree, innTaken, innFresh, innVariant];
 
     const dir = {
       many: randomUUID(),
       free: randomUUID(),
       taken: randomUUID(),
       fresh: randomUUID(),
+      variant: randomUUID(),
     };
     const ids = {
       escalift: randomUUID(),
@@ -54,6 +56,7 @@ suite(
       viNew: randomUUID(),
       foreignWithKpp: randomUUID(),
       foreignNoKpp: randomUUID(),
+      variantNoKpp: randomUUID(),
     };
 
     let deliveryStatusId: string;
@@ -137,7 +140,8 @@ suite(
       (${dir.many}, ${innMany}, 'ООО "ВСЕИНСТРУМЕНТЫ.РУ"'),
       (${dir.free}, ${innFree}, 'ООО "Вент-Профиль"'),
       (${dir.taken}, ${innTaken}, 'ООО "Вент-Профиль-2"'),
-      (${dir.fresh}, ${innFresh}, 'ООО "Новый поставщик"')`;
+      (${dir.fresh}, ${innFresh}, 'ООО "Новый поставщик"'),
+      (${dir.variant}, ${innVariant}, 'ООО "КЕРАМЕС ГРУПП"')`;
 
       // 22204: под одним ИНН покупатели с чужими именами; «ЭСКАЛИФТ» — самый
       // старый, его и отдавал LIMIT 1.
@@ -148,7 +152,8 @@ suite(
       (${ids.viNew}, ${innMany}, '771965904', 'ВсеИнструменты.ру', true, '2026-09-17'),
       (${randomUUID()}, ${innMany}, '772001001', 'ООО «МТ-СТРОЙГРУПП»', true, '2026-08-26'),
       (${ids.foreignWithKpp}, ${innFree}, '507401001', 'ООО "ЗМ ГРУПП"', true, '2026-08-28'),
-      (${ids.foreignNoKpp}, ${innTaken}, NULL, 'ООО "ЗМ ГРУПП"', true, '2026-09-18')`;
+      (${ids.foreignNoKpp}, ${innTaken}, NULL, 'ООО "ЗМ ГРУПП"', true, '2026-09-18'),
+      (${ids.variantNoKpp}, ${innVariant}, NULL, 'ООО "КЕРАМЕС ГРУП"', true, '2026-08-24')`;
 
       deliveryStatusId = (
         await sql<{ id: string }[]>`
@@ -221,6 +226,17 @@ suite(
         expect(n).toBe(1);
       });
     }
+
+    // Ревью 5a3fb00: отказ — только при действительно другой организации.
+    // «КЕРАМЕС ГРУП» в месте без КПП — та же фирма с опечаткой, выбор проходит.
+    it('место без КПП занято той же фирмой в другом написании → 200, эта строка', async () => {
+      const res = await pick('deliveries', await newDelivery(), dir.variant);
+      expect(res.status).toBe(200);
+      expect(res.supplierId).toBe(ids.variantNoKpp);
+      const [{ n }] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM counterparties WHERE inn = ${innVariant}`;
+      expect(n).toBe(1);
+    });
 
     it('два одновременных выбора нового поставщика — одна строка и оба 200', async () => {
       const [a, b] = await Promise.all([

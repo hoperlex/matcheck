@@ -16,7 +16,7 @@
 //   4. самая старая, затем по id — чтобы результат не зависел от плана запроса.
 // При одной строке на ИНН результат прежний: выбирать не из чего.
 
-import { companyKey } from './names.js';
+import { companyKey, editDistance, tokenKey } from './names.js';
 
 export type OperationalRow = {
   id: string;
@@ -36,6 +36,33 @@ function directoryKeys(directory: DirectoryName): Set<string> {
 /** Имя операционной строки совпадает с записью справочника или её алиасом. */
 export function operationalNameMatches(name: string, directory: DirectoryName): boolean {
   return directoryKeys(directory).has(companyKey(name));
+}
+
+/**
+ * Два имени при одном ИНН — одна организация, записанная по-разному: другой
+ * порядок слов («СК Горизонт» / «ГОРИЗОНТ СК») или опечатка в 1–2 знака
+ * («КЕРАМЕС ГРУПП» / «КЕРАМЕС ГРУП», «ЮТЕХ» / «КОТЕХ ДИСТРИБЬЮШН»).
+ *
+ * Порог зависит от длины: у коротких ключей допуск нулевой, иначе «КТМ» и
+ * «КТС» сошлись бы. Сокращения («РС» / «Русский Свет») сюда не попадают:
+ * правило по общим словам склеило бы и «ЗМ ГРУПП» с «КРОНОС ГРУПП».
+ *
+ * Нужна для выбора поставщика (supplier-counterparty.ts): отказывать стоит,
+ * только когда под ИНН записана действительно другая организация (на бою
+ * ближайшая такая пара — «ТД ТУЛА-СТАЛЬ» / «М-ТЕРМИНАЛ», 19 правок).
+ */
+export function sameCompanySpelling(a: string, b: string): boolean {
+  const ka = companyKey(a);
+  const kb = companyKey(b);
+  if (ka === '' || kb === '') return false;
+  if (ka === kb || tokenKey(a) === tokenKey(b)) return true;
+  const allowed = Math.min(2, Math.floor(Math.max(ka.length, kb.length) / 5));
+  return editDistance(ka, kb) <= allowed;
+}
+
+/** То же против записи справочника и её алиасов. */
+export function operationalNameClose(name: string, directory: DirectoryName): boolean {
+  return [directory.name, ...(directory.aliases ?? [])].some((d) => sameCompanySpelling(name, d));
 }
 
 export function pickOperationalCounterparty<T extends OperationalRow>(
