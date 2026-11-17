@@ -288,6 +288,86 @@ suite('стороны документа: что записывает ворке
     expect(doc!.recipient_id).toBeNull();
   });
 
+  // Накладные «Высоты» 11957/11992/12029: грузополучатель «ИП Сатаневский» с ИНН
+  // грузоотправителя. Строка counterparties под эту пару заняла место «ИНН без
+  // КПП» «Высоты», и выбор её поставщиком в приёмке 25616 давал чужое имя.
+  it('ТН-2116: ИНН грузополучателя = ИНН грузоотправителя при другом имени → связи нет', async () => {
+    const VYSOTA_INN = '7727294638';
+    const bundleId = randomUUID();
+    const techId = randomUUID();
+    bundleIds.push(bundleId);
+    await db`INSERT INTO source_bundles (id, site_id, direction, status, bundle_hash, doc_count)
+             VALUES (${bundleId}, ${siteId}, 'inbound', 'queued', ${bundleId}, 1)`;
+    await db`INSERT INTO source_documents (id, kind, direction, status, origin, site_id, bundle_id, is_technical)
+             VALUES (${techId}, 'transport_waybill', 'inbound', 'queued', 'manual_pdf', ${siteId}, ${bundleId}, true)`;
+    await db`INSERT INTO source_document_attachments (source_document_id, s3_key, filename, mime_type, size_bytes)
+             VALUES (${techId}, ${`test/${techId}/tn.pdf`}, 'tn.pdf', 'application/pdf', 1000)`;
+
+    parseWaybillBatch.mockResolvedValue({
+      parsed: {
+        documents: [
+          {
+            form: 'tn_2116',
+            docNumber: '11957',
+            docDate: '2026-10-11',
+            shipper: { inn: VYSOTA_INN, name: 'ООО "ВЫСОТА"' },
+            consignee: { inn: VYSOTA_INN, name: 'ИП Сатаневский Никита Михайлович' },
+            items: [{ nameRaw: 'Профиль', qty: 10, unit: 'шт' }],
+            confidence: 0.9,
+          },
+        ],
+      },
+      llmProviderId: null,
+    });
+
+    await handleJob({ id: 'j3', data: { bundleId } } as never);
+
+    const [doc] = await db<
+      {
+        status: string;
+        consignee_id: string | null;
+        consignee_name_raw: string | null;
+        consignee_inn_raw: string | null;
+        supplier_inn_raw: string | null;
+      }[]
+    >`SELECT status, consignee_id, consignee_name_raw, consignee_inn_raw, supplier_inn_raw
+        FROM source_documents
+       WHERE bundle_id = ${bundleId} AND is_technical = false`;
+    expect(doc).toBeTruthy();
+    expect(doc!.status).toBe('parsed');
+    expect(doc!.consignee_name_raw).toBe('ИП Сатаневский Никита Михайлович');
+    expect(doc!.consignee_id).toBeNull();
+    expect(doc!.consignee_inn_raw).toBeNull();
+    // Поставщик не затронут.
+    expect(doc!.supplier_inn_raw).toBe(VYSOTA_INN);
+    const [{ n }] = await db<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM counterparties
+       WHERE inn = ${VYSOTA_INN} AND name = 'ИП Сатаневский Никита Михайлович'`;
+    expect(n).toBe(0);
+  }, 30_000);
+
+  it('УПД: ИНН грузополучателя = ИНН поставщика при другом имени → связи нет', async () => {
+    const docId = await seedUpd();
+    // Поставщик в parsedUpd — «АРХЕТИП», ИНН 5001120691.
+    parseUpdPdf.mockResolvedValue(
+      parsedUpd({
+        docNumber: '18267',
+        consignee: { inn: '5001120691', kpp: null, name: 'ООО "ФСК Инжиниринг"' },
+      }),
+    );
+
+    await handleJob(job(docId));
+
+    const r = await row(docId);
+    expect(r.status).toBe('parsed');
+    expect(r.consignee_name_raw).toBe('ООО "ФСК Инжиниринг"');
+    expect(r.consignee_id).toBeNull();
+    const [raw] = await db<{ consignee_inn_raw: string | null; supplier_inn_raw: string | null }[]>`
+      SELECT consignee_inn_raw, supplier_inn_raw FROM source_documents WHERE id = ${docId}`;
+    expect(raw!.consignee_inn_raw).toBeNull();
+    expect(raw!.supplier_inn_raw).toBe('5001120691');
+  }, 30_000);
+
   /**
    * Гард справочника: что попадает в counterparties, а что нет.
    *

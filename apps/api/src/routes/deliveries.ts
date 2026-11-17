@@ -129,7 +129,10 @@ import {
 import { registerDeliveryRecipientRoutes } from './delivery-recipient.js';
 import { registerDeliveryDocumentRecipientRoutes } from './delivery-document-recipients.js';
 import { dropDocumentContract } from '../domain/supplier-contracts/delivery-contract.js';
-import { resolveSupplierCounterparty } from '../domain/directories/supplier-counterparty.js';
+import {
+  innTakenMessage,
+  resolveSupplierCounterparty,
+} from '../domain/directories/supplier-counterparty.js';
 import { edoGroupLinks, lockEdoDocGroup } from '../domain/edo/export-twins.js';
 
 const ListQuerySchema = z.object({
@@ -2725,6 +2728,14 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         return reply.code(404).send({
           error: 'counterparty_create_failed',
           message: 'Не удалось создать запись о поставщике',
+        });
+      }
+      // Под ИНН записана другая организация — не подменяем выбор чужим именем
+      // (приёмка 25616), а отказываем с тем, что там записано.
+      if (counterparty.kind === 'inn_taken') {
+        return reply.code(409).send({
+          error: 'supplier_inn_taken',
+          message: innTakenMessage(counterparty),
         });
       }
 

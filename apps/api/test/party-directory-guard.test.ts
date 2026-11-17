@@ -147,6 +147,39 @@ describe('consigneeOwnIdentity — реквизиты, скопированны�
   });
 });
 
+// Тот же вызов в воркере сравнивает грузополучателя и с поставщиком: накладные
+// «Высоты» 11957/11992/12029 дали «ИП Сатаневский» с ИНН «Высоты», и строка
+// под эту пару заняла место поставщика (приёмка 25616).
+describe('consigneeOwnIdentity — реквизиты, скопированные у поставщика', () => {
+  const VYSOTA = { inn: '7727294638', name: 'ООО "ВЫСОТА"' };
+
+  it('боевой случай 25616: имя подрядчика при ИНН грузоотправителя → ИНН отброшен', () => {
+    const r = consigneeOwnIdentity(
+      { inn: '7727294638', name: 'ИП Сатаневский Никита Михайлович' },
+      VYSOTA,
+    );
+    expect(r).toEqual({ inn: null, kpp: null });
+  });
+
+  it('ИНН грузополучателя свой — остаётся', () => {
+    const r = consigneeOwnIdentity(
+      { inn: '744516546324', name: 'ИП Сатаневский Никита Михайлович' },
+      VYSOTA,
+    );
+    expect(r.inn).toBe('744516546324');
+  });
+
+  it('совпали и ИНН, и имя — остаётся, как прежде', () => {
+    const r = consigneeOwnIdentity({ inn: '7727294638', name: 'ООО «Высота»' }, VYSOTA);
+    expect(r.inn).toBe('7727294638');
+  });
+
+  it('уже отброшенный проверкой против покупателя ИНН не возвращается', () => {
+    const r = consigneeOwnIdentity({ name: 'ООО "АЛЬЯНС"', inn: null, kpp: null }, VYSOTA);
+    expect(r).toEqual({ inn: null, kpp: null });
+  });
+});
+
 describe('normalizePartyForDirectory — КПП', () => {
   it('девятизначный КПП сохраняется', () => {
     expect(

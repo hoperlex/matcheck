@@ -12,10 +12,14 @@
 //   1. строка с именем как в справочнике (pickOperationalCounterparty);
 //   2. нет такой и место «ИНН без КПП» свободно — заводим строку с именем из
 //      справочника;
-//   3. место занято строкой с другим именем — берём лучшую по тому же порядку,
-//      как раньше. Чужое имя тогда остаётся (принятый остаток, см. лог
-//      supplier_from_directory_foreign_name): лечится чисткой операционной
-//      таблицы, а не выбором.
+//   3. место занято строкой с другим именем — ОТКАЗ (`inn_taken`), маршрут
+//      отвечает 409 с именем, которое там записано.
+//
+// До 17.11 в шаге 3 молча бралась чужая строка: приёмки 24888, 24994, 25616 и
+// 25619 вместо выбранной «ООО "ВЫСОТА"» получили «ИП Сатаневский», потому что
+// распознавание накладных завело грузополучателя с ИНН «Высоты». Портал при
+// этом писал «Поставщик обновлён». Неверное имя в приёмке хуже явного отказа:
+// отказ виден сразу, а такое место лечится только чисткой операционной таблицы.
 
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
@@ -30,20 +34,27 @@ export type SupplierDirectoryEntry = {
 
 type Log = { info: (obj: object, msg: string) => void };
 
+export type SupplierCounterpartyResult =
+  | { kind: 'ok'; id: string }
+  /** Место «ИНН без КПП» занято строкой с другим именем — выбор не выполнен. */
+  | { kind: 'inn_taken'; inn: string; operationalName: string };
+
 export async function resolveSupplierCounterparty(
   db: Db,
   src: SupplierDirectoryEntry,
   log: Log,
-): Promise<{ id: string } | null> {
+): Promise<SupplierCounterpartyResult | null> {
   const innDigits = (src.inn ?? '').replace(/\D+/g, '');
   const name = src.name.trim();
   const directory = { name, aliases: src.aliases ?? [] };
 
   // Без ИНН сопоставлять не по чему — прежняя ветка создания.
-  if (innDigits.length === 0) return insertSupplier(db, '0', name);
+  if (innDigits.length === 0) return ok(await insertSupplier(db, '0', name));
 
   const sameInn = await db.select().from(counterparties).where(eq(counterparties.inn, innDigits));
-  if (sameInn.length === 0) return insertSupplier(db, innDigits, name, { onConflict: 'reread' });
+  if (sameInn.length === 0) {
+    return ok(await insertSupplier(db, innDigits, name, { onConflict: 'reread' }));
+  }
 
   const usage =
     sameInn.length > 1
@@ -53,24 +64,35 @@ export async function resolveSupplierCounterparty(
         )
       : new Map();
   const picked = pickOperationalCounterparty(sameInn, directory, usage);
-  if (picked && operationalNameMatches(picked.name, directory)) return { id: picked.id };
+  if (picked && operationalNameMatches(picked.name, directory))
+    return { kind: 'ok', id: picked.id };
 
-  if (!sameInn.some((r) => r.kpp === null)) {
-    const created = await insertSupplier(db, innDigits, name, { onConflict: 'reread' });
-    if (created) return created;
-  }
+  const slot = sameInn.find((r) => r.kpp === null);
+  if (!slot) return ok(await insertSupplier(db, innDigits, name, { onConflict: 'reread' }));
 
-  if (!picked) return null;
   log.info(
     {
       inn: innDigits,
       directoryName: name,
-      operationalName: picked.name,
-      counterpartyId: picked.id,
+      operationalName: slot.name,
+      counterpartyId: slot.id,
+      refused: true,
     },
     'supplier_from_directory_foreign_name',
   );
-  return { id: picked.id };
+  return { kind: 'inn_taken', inn: innDigits, operationalName: slot.name };
+}
+
+function ok(row: { id: string } | null): SupplierCounterpartyResult | null {
+  return row ? { kind: 'ok', id: row.id } : null;
+}
+
+/** Текст отказа для портала: что записано под ИНН и что делать. */
+export function innTakenMessage(r: { inn: string; operationalName: string }): string {
+  return (
+    `Под ИНН ${r.inn} в базе записана другая организация — «${r.operationalName}». ` +
+    'Поставщик не изменён, сообщите администратору.'
+  );
 }
 
 /** Сколько приёмок и отгрузок ссылается на строку как на поставщика. */

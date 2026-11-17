@@ -77,7 +77,11 @@ suite(
       entity: 'deliveries' | 'shipments',
       id: string,
       supplierDirectoryId: string,
-    ): Promise<{ status: number; supplierId: string | null }> {
+    ): Promise<{
+      status: number;
+      supplierId: string | null;
+      body: { error?: string; message?: string };
+    }> {
       const res = await app.inject({
         method: 'PATCH',
         url: `/api/v1/${entity}/${id}/supplier-from-directory`,
@@ -85,7 +89,11 @@ suite(
       });
       const rows = await sql<{ supplier_id: string | null }[]>`
       SELECT supplier_id FROM ${sql(entity)} WHERE id = ${id}`;
-      return { status: res.statusCode, supplierId: rows[0]?.supplier_id ?? null };
+      return {
+        status: res.statusCode,
+        supplierId: rows[0]?.supplier_id ?? null,
+        body: res.json() as { error?: string; message?: string },
+      };
     }
 
     async function counterpartyOf(id: string | null) {
@@ -192,14 +200,27 @@ suite(
       expect(again.supplierId).toBe(res.supplierId);
     });
 
-    it('ограничение: место без КПП занято чужим именем — остаётся прежний выбор', async () => {
-      const res = await pick('deliveries', await newDelivery(), dir.taken);
-      expect(res.status).toBe(200);
-      expect(res.supplierId).toBe(ids.foreignNoKpp);
-      const [{ n }] = await sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM counterparties WHERE inn = ${innTaken}`;
-      expect(n).toBe(1);
-    });
+    // 17.11, приёмка 25616: под ИНН «Высоты» лежала строка «ИП Сатаневский»
+    // (грузополучатель из накладной), и выбор «Высоты» молча ставил её.
+    // Теперь — отказ с тем, что записано под ИНН; поставщик не меняется.
+    for (const entity of ['deliveries', 'shipments'] as const) {
+      it(`${entity}: место без КПП занято чужим именем → 409, поставщик прежний`, async () => {
+        const id = entity === 'deliveries' ? await newDelivery() : await newShipment();
+        const before = await pick(entity, id, dir.many);
+        expect(before.status).toBe(200);
+        expect(before.supplierId).not.toBeNull();
+
+        const res = await pick(entity, id, dir.taken);
+        expect(res.status).toBe(409);
+        expect(res.body.error).toBe('supplier_inn_taken');
+        expect(res.body.message).toContain(innTaken);
+        expect(res.body.message).toContain('ООО "ЗМ ГРУПП"');
+        expect(res.supplierId).toBe(before.supplierId);
+        const [{ n }] = await sql<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM counterparties WHERE inn = ${innTaken}`;
+        expect(n).toBe(1);
+      });
+    }
 
     it('два одновременных выбора нового поставщика — одна строка и оба 200', async () => {
       const [a, b] = await Promise.all([

@@ -2114,8 +2114,8 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   // промпту v9 копирует ИНН и КПП покупателя даже когда наименование другое
   // (см. consigneeOwnIdentity). Скопированные — отбрасываем, иначе документ
   // покажет чужой ИНН и свяжется с чужой организацией.
-  const consigneeIdentity = consigneeOwnIdentity(consignee, recipient);
-  if (consignee?.inn && !consigneeIdentity.inn) {
+  const consigneeVsBuyer = consigneeOwnIdentity(consignee, recipient);
+  if (consignee?.inn && !consigneeVsBuyer.inn) {
     logger.warn(
       {
         docNumber: parsed.docNumber,
@@ -2125,6 +2125,28 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
         recipientInn: recipient?.inn,
       },
       'consignee identity dropped: looks copied from buyer',
+    );
+  }
+  // То же против поставщика: модель повторяет в графе 4 и ИНН продавца, а
+  // заведённая под него строка `counterparties` с чужим именем занимает место
+  // «ИНН без КПП» — потом выбор этого поставщика из справочника упирается в неё
+  // (приёмка 25616: «Высота» → «ИП Сатаневский», см. supplier-counterparty.ts).
+  // Сравнение — с поставщиком как прочитан, а не с исправленным ИНН: копирует
+  // модель то, что видит.
+  const consigneeIdentity = consigneeOwnIdentity(
+    { name: consignee?.name ?? null, ...consigneeVsBuyer },
+    supplier,
+  );
+  if (consigneeVsBuyer.inn && !consigneeIdentity.inn) {
+    logger.warn(
+      {
+        docNumber: parsed.docNumber,
+        consigneeName: consignee?.name,
+        consigneeInn: consigneeVsBuyer.inn,
+        supplierName: supplier?.name,
+        supplierInn: supplier?.inn,
+      },
+      'consignee identity dropped: looks copied from supplier',
     );
   }
   // Адрес отрезаем ПОСЛЕ проверки реквизитов, и порядок здесь принципиален.
@@ -2155,7 +2177,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // «что стояло в документе». Нормализацию оставляем читателю.
     //
     // Исключение — грузополучатель: если его реквизиты скопированы у
-    // покупателя, «сырое» значение перестаёт отвечать на этот вопрос (в графе 4
+    // покупателя или поставщика, «сырое» значение перестаёт отвечать на этот вопрос (в графе 4
     // ИНН не печатают вовсе), поэтому пишем то, что осталось после проверки.
     // При SUPPLIER_INN_CHECK=on исправленный ИНН: список и приёмки показывают
     // supplier_inn_raw раньше справочного. Прочитанный моделью — в следе.
@@ -7592,10 +7614,30 @@ async function createSourceDocumentFromWaybill(args: {
       }
     }
     consigneeNameRaw = doc.consignee?.name ?? null;
-    consigneeInnRaw = doc.consignee?.inn ?? null;
-    if (doc.consignee?.inn && doc.consignee?.name) {
+    // ИНН грузополучателя, повторяющий ИНН грузоотправителя при другом имени, —
+    // копия модели, а не реквизит (накладные «Высоты» 11957/11992/12029:
+    // «ИП Сатаневский» с ИНН «Высоты»). Заведённая под такую пару строка
+    // `counterparties` занимает место «ИНН без КПП» поставщика, и его выбор из
+    // справочника потом упирается в чужое имя (см. supplier-counterparty.ts).
+    // Имя оставляем, связь и ИНН — нет, как у УПД.
+    const consigneeIdentity = consigneeOwnIdentity(doc.consignee, doc.shipper);
+    if (doc.consignee?.inn && !consigneeIdentity.inn) {
+      logger.warn(
+        {
+          bundleId,
+          docNumber: doc.docNumber ?? null,
+          consigneeName: doc.consignee.name,
+          consigneeInn: doc.consignee.inn,
+          shipperName: doc.shipper?.name,
+          shipperInn: doc.shipper?.inn,
+        },
+        'waybill consignee identity dropped: looks copied from shipper',
+      );
+    }
+    consigneeInnRaw = consigneeIdentity.inn;
+    if (consigneeIdentity.inn && doc.consignee?.name) {
       consigneeId = await findOrCreateCounterparty(
-        { inn: doc.consignee.inn, kpp: null, name: doc.consignee.name },
+        { inn: consigneeIdentity.inn, kpp: null, name: doc.consignee.name },
         'customer',
       );
     }
