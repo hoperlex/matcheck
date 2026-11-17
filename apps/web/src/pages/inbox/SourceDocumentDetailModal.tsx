@@ -920,7 +920,6 @@ export function SourceDocumentDetailModal({
                             value={edit.recipientMolId}
                             onChange={(v) => setEdit({ ...edit, recipientMolId: v })}
                             placeholder="Выберите получателя"
-                            source="fot"
                           />
                         )}
                       </Form.Item>
@@ -988,7 +987,6 @@ export function SourceDocumentDetailModal({
                             value={edit.recipientMolId}
                             onChange={(v) => setEdit({ ...edit, recipientMolId: v })}
                             placeholder="Выберите МОЛ"
-                            source="fot"
                           />
                         </Form.Item>
                       </>

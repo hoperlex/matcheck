@@ -404,15 +404,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       ),
     enabled: !isContractor,
   });
-  // source=fot — берём только тех МОЛ, что синхронизированы из внешней
-  // БД ФОТ (см. /api/v1/mol + domain/mol/syncFotMol.ts). Это тот же
-  // набор, что отображается в Справочники → МОЛ; ручной локальный
-  // справочник в выпадающем списке Получатель не показываем.
+  // Все активные МОЛ: зеркало ФОТ и заведённые вручную в Справочники → МОЛ
+  // (кладовщики, которых в ФОТ нет). Тот же запрос и ключ кэша, что у
+  // ResponsiblePersonSelect в документах.
   const responsiblePersonsQuery = useQuery({
-    queryKey: ['responsible-persons', 'active', 'fot'],
+    queryKey: ['responsible-persons', 'active'],
     queryFn: () =>
       api.get<{ items: ResponsiblePerson[]; total: number }>(
-        '/responsible-persons?activeOnly=true&source=fot&limit=500',
+        '/responsible-persons?activeOnly=true&limit=500',
       ),
     enabled: !isContractor,
   });

@@ -6,12 +6,15 @@ import { asZod } from '../lib/fastify.js';
 import {
   BulkDeleteRequestSchema,
   BulkDeleteResponseSchema,
+  ResponsiblePersonConflictSchema,
+  ResponsiblePersonCreateResponseSchema,
   ResponsiblePersonImportResponseSchema,
   ResponsiblePersonListResponseSchema,
   ResponsiblePersonSchema,
   ResponsiblePersonUpsertSchema,
   ErrorResponseSchema,
 } from '@matcheck/contracts';
+import type { Db } from '../db/client.js';
 import { entityDeletions, responsiblePersons } from '../db/schema.js';
 import {
   filterFotResponsiblePersonIds,
@@ -35,7 +38,36 @@ const ListQuerySchema = z.object({
   offset: z.coerce.number().int().nonnegative().default(0),
 });
 
-function row(r: typeof responsiblePersons.$inferSelect) {
+type Row = typeof responsiblePersons.$inferSelect;
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+
+/**
+ * Сериализует создание/правку МОЛ с одним ФИО: проверка «такой уже есть» и
+ * запись идут под одной advisory-блокировкой, иначе два одновременных POST
+ * заводят две ручные записи. Ключ — ФИО в нижнем регистре без крайних
+ * пробелов (toLowerCase в JS кириллицу понимает всегда, поэтому одинаковые
+ * ФИО в разном регистре берут одну блокировку).
+ *
+ * Уникального индекса по ФИО нет намеренно: архивная ФОТ-запись и новая
+ * ручная с тем же ФИО обязаны уживаться (человек выпал из ФОТ, а принимать
+ * материал продолжает). Инвариант «не больше одного активного МОЛ с ФИО»
+ * держат POST и PATCH этого файла; синк ФОТ вставляет только ФОТ-записи.
+ */
+async function lockMolName(tx: Tx, fullName: string): Promise<void> {
+  const key = `responsible_person:${fullName.trim().toLowerCase()}`;
+  await tx.execute(drSql`SELECT pg_advisory_xact_lock(hashtext(${key}))`);
+}
+
+/** Все записи с тем же ФИО; сравнение — в SQL с lower() с обеих сторон. */
+async function findSameName(tx: Tx, fullName: string, exceptId?: string): Promise<Row[]> {
+  const sameName = drSql`lower(btrim(${responsiblePersons.fullName})) = lower(btrim(${fullName}))`;
+  return tx
+    .select()
+    .from(responsiblePersons)
+    .where(exceptId ? and(sameName, drSql`${responsiblePersons.id} <> ${exceptId}`) : sameName);
+}
+
+function row(r: Row) {
   return {
     id: r.id,
     fullName: r.fullName,
@@ -89,31 +121,56 @@ export async function responsiblePersonRoutes(rawApp: FastifyInstance): Promise<
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         body: ResponsiblePersonUpsertSchema,
-        // 200 — найден существующий по lower(full_name) (дедуп сработал).
-        // 201 — создан новый.
+        // 201 created  — заведена новая ручная запись.
+        // 200 existing — активный МОЛ с таким ФИО уже есть (ФОТ или ручной).
+        // 409 mol_archived — ручная запись с таким ФИО в архиве.
         response: {
-          200: ResponsiblePersonSchema,
-          201: ResponsiblePersonSchema,
+          200: ResponsiblePersonCreateResponseSchema,
+          201: ResponsiblePersonCreateResponseSchema,
+          409: ResponsiblePersonConflictSchema,
         },
       },
     },
     async (req, reply) => {
       const body = req.body;
-      const trimmedName = body.fullName.trim();
-      const lname = trimmedName.toLowerCase();
-      // Дедуп по lower(full_name) — для МОЛ aliases не делаем (ФИО более
-      // уникально, обычно нет коротких форм).
-      const [existing] = await app.db
-        .select()
-        .from(responsiblePersons)
-        .where(drSql`lower(${responsiblePersons.fullName}) = ${lname}`)
-        .limit(1);
-      if (existing) return row(existing);
+      // POST никогда не меняет существующие записи: право «создавать» не даёт
+      // правки. Вернуть запись из архива — PATCH, у него своё право «edit».
+      // Новая запись всегда активна (isActive из тела не берём): в архив МОЛ
+      // уводит правка, а не создание.
+      const result = await app.db.transaction(async (tx) => {
+        await lockMolName(tx, body.fullName);
+        const same = await findSameName(tx, body.fullName);
+        const active = same.find((r) => r.isActive);
+        if (active) return { kind: 'existing' as const, rec: active };
+        // Архивная ФОТ-запись создание не блокирует: человек выпал из ФОТ,
+        // а материал принимать продолжает — заводим ручную рядом.
+        const archivedLocal = same.find((r) => !r.isActive && r.fotEmployeeId == null);
+        if (archivedLocal) return { kind: 'archived' as const, rec: archivedLocal };
+        const [created] = await tx
+          .insert(responsiblePersons)
+          .values({
+            fullName: body.fullName,
+            position: body.position ?? null,
+            phone: body.phone ?? null,
+            isActive: true,
+          })
+          .returning();
+        if (!created) throw new Error('insert failed');
+        return { kind: 'created' as const, rec: created };
+      });
 
-      const [created] = await app.db.insert(responsiblePersons).values(body).returning();
-      if (!created) throw new Error('insert failed');
-      reply.code(201);
-      return row(created);
+      if (result.kind === 'archived') {
+        return reply.code(409).send({
+          error: 'mol_archived' as const,
+          message: `«${result.rec.fullName}» есть в справочнике, но в архиве`,
+          existing: row(result.rec),
+        });
+      }
+      if (result.kind === 'created') {
+        reply.code(201);
+        return { ...row(result.rec), outcome: 'created' as const };
+      }
+      return { ...row(result.rec), outcome: 'existing' as const };
     },
   );
 
@@ -269,26 +326,59 @@ export async function responsiblePersonRoutes(rawApp: FastifyInstance): Promise<
         response: {
           200: ResponsiblePersonSchema,
           404: ErrorResponseSchema,
-          409: ErrorResponseSchema,
+          // fot_readonly — ErrorResponse; mol_name_taken — с записью-тёзкой.
+          409: z.union([ResponsiblePersonConflictSchema, ErrorResponseSchema]),
         },
       },
     },
     async (req, reply) => {
-      // Запись из ФОТ редактируется на стороне ФОТ-БД, не в MATCHECK.
-      // Иначе sync на следующем тике затрёт ручные правки.
-      if (await isFotResponsiblePerson(app.db, req.params.id)) {
+      const id = req.params.id;
+      const result = await app.db.transaction(async (tx) => {
+        // Порядок блокировок: строка, затем ФИО. POST строк не блокирует,
+        // поэтому цикла ожидания нет.
+        const [current] = await tx
+          .select()
+          .from(responsiblePersons)
+          .where(eq(responsiblePersons.id, id))
+          .for('update');
+        if (!current) return { kind: 'not_found' as const };
+        // Запись из ФОТ редактируется на стороне ФОТ-БД, не в MATCHECK.
+        // Иначе sync на следующем тике затрёт ручные правки.
+        if (current.fotEmployeeId != null) return { kind: 'fot_readonly' as const };
+
+        // Активной запись останется или станет (возврат из архива, смена ФИО) —
+        // второго активного МОЛ с тем же ФИО быть не должно.
+        const nextName = req.body.fullName ?? current.fullName;
+        const nextActive = req.body.isActive ?? current.isActive;
+        if (nextActive) {
+          await lockMolName(tx, nextName);
+          const clash = (await findSameName(tx, nextName, id)).find((r) => r.isActive);
+          if (clash) return { kind: 'name_taken' as const, clash };
+        }
+        const [updated] = await tx
+          .update(responsiblePersons)
+          .set({ ...req.body, updatedAt: new Date() })
+          .where(eq(responsiblePersons.id, id))
+          .returning();
+        if (!updated) throw new Error('update failed');
+        return { kind: 'ok' as const, updated };
+      });
+
+      if (result.kind === 'not_found') return reply.code(404).send({ error: 'not_found' });
+      if (result.kind === 'fot_readonly') {
         return reply.code(409).send({
           error: 'fot_readonly',
           message: 'МОЛ из ФОТ нельзя редактировать в MATCHECK',
         });
       }
-      const [updated] = await app.db
-        .update(responsiblePersons)
-        .set({ ...req.body, updatedAt: new Date() })
-        .where(eq(responsiblePersons.id, req.params.id))
-        .returning();
-      if (!updated) return reply.code(404).send({ error: 'not_found' });
-      return row(updated);
+      if (result.kind === 'name_taken') {
+        return reply.code(409).send({
+          error: 'mol_name_taken' as const,
+          message: `Активный МОЛ «${result.clash.fullName}» уже есть в справочнике`,
+          existing: row(result.clash),
+        });
+      }
+      return row(result.updated);
     },
   );
 

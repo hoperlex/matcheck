@@ -320,6 +320,16 @@ describe('выданная галочка открывает страницу ц
     }
   });
 
+  it('«МОЛ: просмотр» открывает обе таблицы вкладки, но не запись в справочник', async () => {
+    app = await buildApp([grant('references.mol', 'view')]);
+    // Вкладка Справочники → МОЛ: таблица ФОТ (/mol) и блок «Добавлены вручную»
+    // (/responsible-persons). Без второго блок отвечал бы 403 при открытой вкладке.
+    expect(await status(app, 'GET', '/api/v1/mol')).toBe(200);
+    expect(await status(app, 'GET', '/api/v1/responsible-persons')).toBe(200);
+    expect(await status(app, 'POST', '/api/v1/responsible-persons')).toBe(403);
+    expect(await status(app, 'PATCH', '/api/v1/responsible-persons/:id')).toBe(403);
+  });
+
   it('«Документы: просмотр» открывает чтение УПД, но не операции', async () => {
     app = await buildApp([grant('documents.list', 'view')]);
     expect(await status(app, 'GET', '/api/v1/source-documents')).toBe(200);

@@ -1,16 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   Alert,
   Button,
   Card,
-  Drawer,
-  Form,
-  Input,
   List,
   Modal,
   Popconfirm,
   Space,
-  Switch,
   Tag,
   Typography,
   Upload,
@@ -22,7 +18,6 @@ import type {
   BulkDeleteResponse,
   ResponsiblePerson,
   ResponsiblePersonImportResponse,
-  ResponsiblePersonUpsert,
 } from '@matcheck/contracts';
 import { api, apiUploadFile, ApiError } from '../../services/api';
 import { usePermissions } from '../../shared/hooks/usePermissions';
@@ -32,6 +27,7 @@ import { stringSorter } from '../../shared/ui/tableSorters';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
+import { ResponsiblePersonDrawer } from './ResponsiblePersonDrawer';
 
 type List = { items: ResponsiblePerson[]; total: number };
 
@@ -41,7 +37,6 @@ export default function ResponsiblePersonsPage() {
   const [editing, setEditing] = useState<ResponsiblePerson | null>(null);
   const [search, setSearch] = useState('');
   const [importOpen, setImportOpen] = useState(false);
-  const [form] = Form.useForm<ResponsiblePersonUpsert>();
   // Права страницы. До включения матрицы значения те же, что были у ролей
   // (правит manager, удаляет admin) — так задан дефолт в PAGE_CATALOG.
   // «Создавать» и «Редактировать» разведены: раньше обе кнопки жили на одном
@@ -62,44 +57,12 @@ export default function ResponsiblePersonsPage() {
   function closeDrawer() {
     setOpen(false);
     setEditing(null);
-    form.resetFields();
   }
-
-  // Заполняем форму при открытии редактирования; resetFields при создании.
-  useEffect(() => {
-    if (!open) return;
-    if (editing) {
-      form.setFieldsValue({
-        fullName: editing.fullName,
-        position: editing.position ?? undefined,
-        phone: editing.phone ?? undefined,
-        isActive: editing.isActive,
-      });
-    } else {
-      form.resetFields();
-      form.setFieldsValue({ isActive: true });
-    }
-  }, [open, editing, form]);
 
   function openEdit(row: ResponsiblePerson) {
     setEditing(row);
     setOpen(true);
   }
-
-  const save = useMutation({
-    mutationFn: async (body: ResponsiblePersonUpsert) => {
-      if (editing) {
-        return api.patch(`/responsible-persons/${editing.id}`, body);
-      }
-      return api.post('/responsible-persons', body);
-    },
-    onSuccess: () => {
-      message.success(editing ? 'МОЛ сохранён' : 'МОЛ создан');
-      closeDrawer();
-      void qc.invalidateQueries({ queryKey: ['responsible-persons'] });
-    },
-    onError: (err: Error) => message.error(err.message),
-  });
 
   const del = useMutation({
     mutationFn: (id: string) => api.delete(`/responsible-persons/${id}`),
@@ -243,38 +206,12 @@ export default function ResponsiblePersonsPage() {
           </Card>
         )}
       />
-      <Drawer
+      <ResponsiblePersonDrawer
         open={open}
+        editing={editing}
+        canEdit={canEdit}
         onClose={closeDrawer}
-        title={editing ? `Редактирование: ${editing.fullName}` : 'Новый МОЛ'}
-        width={420}
-        destroyOnClose
-        maskClosable={false}
-        keyboard={false}
-      >
-        <Form<ResponsiblePersonUpsert>
-          form={form}
-          layout="vertical"
-          initialValues={{ isActive: true }}
-          onFinish={(values) => save.mutate(values)}
-        >
-          <Form.Item name="fullName" label="ФИО" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="position" label="Должность">
-            <Input />
-          </Form.Item>
-          <Form.Item name="phone" label="Телефон">
-            <Input inputMode="tel" />
-          </Form.Item>
-          <Form.Item name="isActive" label="Активный" valuePropName="checked">
-            <Switch />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" loading={save.isPending} block size="large">
-            Сохранить
-          </Button>
-        </Form>
-      </Drawer>
+      />
       <ImportModal
         open={importOpen}
         onClose={() => setImportOpen(false)}

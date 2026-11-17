@@ -247,3 +247,19 @@ describe('договор 1С в приёмке — Мониторингу пра
     expect(await call('PUT', `${base}/contract`)).toBe(403);
   });
 });
+
+describe('МОЛ: «Создавать» без «Редактировать» не возвращает запись из архива', () => {
+  // POST /responsible-persons на архивное ФИО отвечает 409 и запись не трогает
+  // (responsible-persons-manual.int); вернуть из архива — только PATCH, а он
+  // закрыт ячейкой «Редактировать».
+  const call = async (method: 'POST' | 'PATCH', url: string) =>
+    (await app!.inject({ method, url, payload: {} })).statusCode;
+
+  it('manager с create и без edit: POST доходит до обработчика, PATCH — 403', async () => {
+    app = await buildApp('manager', [
+      overrideRow('manager', 'references.responsible_persons', 'edit', false),
+    ]);
+    expect(await call('POST', '/api/v1/responsible-persons')).toBe(200);
+    expect(await call('PATCH', '/api/v1/responsible-persons/42')).toBe(403);
+  });
+});

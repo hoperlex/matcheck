@@ -271,13 +271,13 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     queryFn: () => api.get<{ items: Counterparty[]; total: number }>('/counterparties?limit=500'),
     enabled: !isContractor,
   });
-  // source=fot — те же МОЛ, что в Справочники → МОЛ и в чипе приёмки;
-  // ручной локальный справочник в выпадающий список не попадает.
+  // Все активные МОЛ: зеркало ФОТ и заведённые вручную в Справочники → МОЛ.
+  // Тот же запрос и ключ кэша, что в приёмке и ResponsiblePersonSelect.
   const responsiblePersonsQuery = useQuery({
-    queryKey: ['responsible-persons', 'active', 'fot'],
+    queryKey: ['responsible-persons', 'active'],
     queryFn: () =>
       api.get<{ items: ResponsiblePerson[]; total: number }>(
-        '/responsible-persons?activeOnly=true&source=fot&limit=500',
+        '/responsible-persons?activeOnly=true&limit=500',
       ),
     enabled: !isContractor,
   });

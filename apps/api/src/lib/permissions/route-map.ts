@@ -814,7 +814,8 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // на тех же страницах, что GET /suppliers, поэтому и правило то же.
   ['GET /api/v1/suppliers/filter-options', always(LOOKUP, { affects: [v('references.suppliers')], matrixOnly: openedBy(v('references.suppliers'), ...OPS_VIEW) })],
   ['GET /api/v1/materials', always(LOOKUP, { affects: [v('references.materials')], matrixOnly: openedBy(v('references.materials')) })],
-  ['GET /api/v1/responsible-persons', always(LOOKUP, { affects: [v('references.responsible_persons')], matrixOnly: openedBy(v('references.responsible_persons'), ...OPS_VIEW, v('documents.list')) })],
+  // references.mol — вкладка Справочники → МОЛ читает отсюда блок ручных МОЛ.
+  ['GET /api/v1/responsible-persons', always(LOOKUP, { affects: [v('references.responsible_persons')], matrixOnly: openedBy(v('references.responsible_persons'), v('references.mol'), ...OPS_VIEW, v('documents.list')) })],
   ['GET /api/v1/assets', always(LOOKUP, { affects: [v('references.assets')], matrixOnly: openedBy(v('references.assets')) })],
   ['GET /api/v1/mol', always(LOOKUP, { affects: [v('references.mol')], matrixOnly: openedBy(v('references.mol')) })],
   ['GET /api/v1/estimat/supplier-orders', ORDERS_VIEW],

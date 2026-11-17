@@ -1044,6 +1044,13 @@
       "when": 1797907600000,
       "tag": "0149_delivery_groups",
       "breakpoints": true
+    },
+    {
+      "idx": 150,
+      "version": "7",
+      "when": 1797994000000,
+      "tag": "0150_archive_legacy_manual_mol",
+      "breakpoints": true
     }
   ]
 }

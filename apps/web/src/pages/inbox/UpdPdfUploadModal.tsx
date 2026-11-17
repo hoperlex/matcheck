@@ -238,7 +238,6 @@ export function UpdPdfUploadModal({
               onChange={setRecipientMolId}
               placeholder="Выберите получателя"
               disabled={uploading}
-              source="fot"
             />
           )}
         </Form.Item>
