@@ -87,6 +87,10 @@ import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
 import {
+  decideManualOnCreate,
+  InvalidManualEntryError,
+} from '../domain/operations/manual-entry.js';
+import {
   findDroppedOrigins,
   hasNameMatchCandidates,
   matchItemsToDocumentsByName,
@@ -197,6 +201,9 @@ const ListQuerySchema = z.object({
   // Отметка «Диспетчер»: checked — отмечено, none — нет. Видимость — как у
   // reviewState: без права на отметку параметр игнорируется.
   dispatcherCheck: z.enum(['checked', 'none']).optional(),
+  // Вид операции: manual — «Ручной внос» (deliveries.is_manual), vehicle —
+  // приёмка с машиной. Enum, а не z.coerce.boolean: тот считает 'false' истиной.
+  entry: z.enum(['manual', 'vehicle']).optional(),
   // ?grouped=1 — «Принятые» с группами приёмок: участники группы встают подряд
   // на месте самой новой, в строках — deliveryGroup. Литерал, а не
   // z.coerce.boolean: тот считает строку 'false' истиной. Действует вне
@@ -619,6 +626,7 @@ function assembleDeliveryDto(
     comment: d.comment,
     inTransit: d.inTransit,
     isAssets: d.isAssets,
+    isManual: d.isManual,
     purpose: DeliveryPurposeSchema.nullable().parse(d.purpose),
     recipientsPerDocument: d.recipientsPerDocument,
     documentRecipients,
@@ -995,6 +1003,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       nophotoOlderHours,
       reviewState,
       dispatcherCheck,
+      entry,
     } = query;
 
     // CSV → массивы. Для UUID-полей фильтруем регексом — невалидное
@@ -1170,6 +1179,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     // plate: ILIKE на госномер.
     if (plate?.trim()) {
       filters.push(ilike(deliveries.vehiclePlate, `%${escapeLike(plate.trim())}%`));
+    }
+
+    // Вид операции: «Ручной внос» / с машиной.
+    if (entry) {
+      filters.push(eq(deliveries.isManual, entry === 'manual'));
     }
 
     // features (AND между выбранными):
@@ -1791,6 +1805,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         });
         return dto;
       } catch (err) {
+        if (err instanceof InvalidManualEntryError) {
+          return reply.code(400).send({ error: 'invalid_manual_entry', message: err.message });
+        }
         if (err instanceof SourceAlreadyLinkedError) {
           return reply.code(400).send({
             error: 'source_document_already_linked',
@@ -2635,6 +2652,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           { header: 'Признак', key: 'purpose', width: 24 },
           { header: 'Диспетчер', key: 'dispatcher', width: 30 },
           { header: 'Получатель (по документу)', key: 'documentRecipient', width: 32 },
+          { header: 'Ручной внос', key: 'manual', width: 12 },
           // Откуда сумма и строки: УПД из ЭДО или факт приёмки. Последней — по
           // той же причине, что колонки выше.
           { header: 'Источник', key: 'source', width: 34 },
@@ -2717,6 +2735,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
                 ? `${fmtDateTimeRu(d.dispatcherCheckedAt)}${r.dispatcherEmail ? ` · ${r.dispatcherEmail}` : ''}`
                 : '',
             documentRecipient: recipientFor(undefined),
+            manual: d.isManual ? 'да' : '',
             nameRaw: '',
             qtyPlanned: null,
             qtyActual: null,
@@ -3624,6 +3643,10 @@ async function createDelivery(
   // update 'confirmed_mol') не затронут — там isFirstConfirm в updateDelivery
   // уже выставляет эти поля.
   const isDirectConfirm = input.statusCode === 'confirmed_mol';
+  // «Ручной внос» — только при создании, потом не меняется (domain/operations/manual-entry.ts).
+  // Явный isManual портала у недопустимой записи — отказ до транзакции.
+  const manual = decideManualOnCreate('delivery', input);
+  if (!manual.ok) throw new InvalidManualEntryError(manual.message);
   const now = new Date();
   // Время подтверждения — с планшета (момент нажатия «Завершить»), а не время
   // приёма мутации: при офлайне они расходятся на часы. Старые сборки поля не
@@ -3667,6 +3690,7 @@ async function createDelivery(
         comment: input.comment ?? null,
         inTransit: input.inTransit ?? false,
         isAssets: input.isAssets ?? false,
+        isManual: manual.isManual,
         ...(isDirectConfirm && {
           confirmedByMolUserId: inspectorId,
           confirmedByMolAt: confirmedAtCandidate,

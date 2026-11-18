@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert,
   Button,
+  Dropdown,
   Modal,
   Space,
   Spin,
@@ -13,7 +14,7 @@ import {
   Typography,
   message,
 } from 'antd';
-import { DownloadOutlined, PlusOutlined } from '@ant-design/icons';
+import { DownOutlined, DownloadOutlined, PlusOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import type { Delivery, PageId, Shipment, SourceDocument } from '@matcheck/contracts';
 import { useAuthStore } from '../../stores/auth';
@@ -123,6 +124,7 @@ export default function OperationsPage() {
       delivery: null,
       shipment: null,
       new: null,
+      manual: null,
       upd: null,
       from: null,
     });
@@ -168,7 +170,10 @@ export default function OperationsPage() {
   // к текущему URL `/operations`. KppPage/ShipmentPage внутри Modal
   // читают эти параметры из useSearchParams.
   // Под feature flag MODAL_DISABLED — всё через старые страницы.
-  const createNew = () => {
+  // manual — «Ручной внос/вынос»: без машины одним этапом (?manual=1 читает
+  // KppPage / ShipmentPage). Имя параметра не совпадает с фильтром списка
+  // (`entry`), иначе закрытие формы стирало бы фильтр.
+  const createNew = (manual = false) => {
     // Кнопка при закрытом «Создавать» не рисуется вовсе; проверка здесь — на
     // случай вызова из другого места (горячая клавиша, старая ссылка).
     if (!canCreate) {
@@ -180,13 +185,15 @@ export default function OperationsPage() {
       return;
     }
     const id = crypto.randomUUID();
+    const manualParam = manual ? '1' : null;
     if (!MODAL_DISABLED) {
-      if (type === 'delivery') updateUrl({ delivery: id, new: '1' });
-      else updateUrl({ shipment: id, new: '1' });
+      if (type === 'delivery') updateUrl({ delivery: id, new: '1', manual: manualParam });
+      else updateUrl({ shipment: id, new: '1', manual: manualParam });
       return;
     }
-    if (type === 'delivery') navigate(legacyEditorUrl('/kpp', { delivery: id, new: '1' }));
-    else navigate(legacyEditorUrl('/shipments', { shipment: id, new: '1' }));
+    if (type === 'delivery')
+      navigate(legacyEditorUrl('/kpp', { delivery: id, new: '1', manual: manualParam }));
+    else navigate(legacyEditorUrl('/shipments', { shipment: id, new: '1', manual: manualParam }));
   };
   const createFromUpd = (upd: SourceDocument) => {
     if (!canCreate) {
@@ -259,14 +266,14 @@ export default function OperationsPage() {
       navigate('/materials');
       return;
     }
-    updateUrl({ delivery: null, new: null, upd: null, from: null });
+    updateUrl({ delivery: null, new: null, manual: null, upd: null, from: null });
   };
   const closeShipmentModal = () => {
     if (params.get('from') === 'materials') {
       navigate('/materials');
       return;
     }
-    updateUrl({ shipment: null, new: null, upd: null, from: null });
+    updateUrl({ shipment: null, new: null, manual: null, upd: null, from: null });
   };
 
   // Подтягиваем displayId для заголовков модалок «Приёмка #N» / «Отгрузка #N».
@@ -344,15 +351,30 @@ export default function OperationsPage() {
     }
   }
 
+  // Две формы: с машиной (1 и 2 этап) и ручной внос/вынос — один этап, как
+  // одноимённая форма на планшете.
   const createButton = (
-    <Button
-      type="primary"
-      icon={<PlusOutlined />}
-      onClick={createNew}
+    <Dropdown
+      trigger={['click']}
       disabled={inspectorWithoutSite}
+      menu={{
+        items: [
+          {
+            key: 'vehicle',
+            label: type === 'delivery' ? 'Приёмка с машиной' : 'Отгрузка с машиной',
+          },
+          {
+            key: 'manual',
+            label: type === 'delivery' ? 'Ручной внос (1 этап)' : 'Ручной вынос (1 этап)',
+          },
+        ],
+        onClick: ({ key }) => createNew(key === 'manual'),
+      }}
     >
-      {type === 'delivery' ? 'Новая приёмка' : 'Новая отгрузка'}
-    </Button>
+      <Button type="primary" icon={<PlusOutlined />} disabled={inspectorWithoutSite}>
+        {type === 'delivery' ? 'Новая приёмка' : 'Новая отгрузка'} <DownOutlined />
+      </Button>
+    </Dropdown>
   );
   const exportButton = (
     <Button icon={<DownloadOutlined />} onClick={handleExportExcel} loading={exporting}>
@@ -526,7 +548,9 @@ export default function OperationsPage() {
           onCancel={closeDeliveryModal}
           title={
             editDeliveryIsNew
-              ? 'Новая приёмка'
+              ? params.get('manual') === '1'
+                ? 'Ручной внос'
+                : 'Новая приёмка'
               : deliveryHeader.data
                 ? `Приёмка ${deliveryHeader.data.displayId}`
                 : 'Приёмка'
@@ -581,7 +605,9 @@ export default function OperationsPage() {
           onCancel={closeShipmentModal}
           title={
             editShipmentIsNew
-              ? 'Новая отгрузка'
+              ? params.get('manual') === '1'
+                ? 'Ручной вынос'
+                : 'Новая отгрузка'
               : shipmentHeader.data
                 ? `Отгрузка ${shipmentHeader.data.displayId}`
                 : 'Отгрузка'

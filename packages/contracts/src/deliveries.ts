@@ -341,6 +341,13 @@ export const DeliverySchema = z.object({
    * false. Веб-портал показывает бейдж рядом с «Транзит». См. миграцию 0065.
    */
   isAssets: z.boolean(),
+  /**
+   * «Ручной внос» — приёмка без машины одним этапом (сразу «Подтверждено МОЛ»,
+   * без госномера и УПД). Ставится сервером только при создании и потом не
+   * меняется. Optional: старые офлайн-снимки портала поля не знают — считать
+   * отсутствие за false. См. миграцию 0153.
+   */
+  isManual: z.boolean().optional(),
   // null у существующих приёмок, которым признак ещё не назначен.
   // optional сохраняет совместимость старых офлайн-снимков мобильного клиента.
   purpose: DeliveryPurposeSchema.nullable().optional(),
@@ -496,6 +503,13 @@ export const DeliveryUpsertSchema = z.object({
   inTransit: z.boolean().default(false),
   /** ОС — см. DeliverySchema.isAssets. Default false. */
   isAssets: z.boolean().default(false),
+  /**
+   * Явный «Ручной внос» с портала. Учитывается ТОЛЬКО при создании записи и
+   * только если запись допустима как ручная (сразу confirmed_mol, без номера,
+   * документов и транзита) — иначе 400. При обновлении игнорируется. Без
+   * default: старые клиенты поле не шлют, и флаг от этого не должен меняться.
+   */
+  isManual: z.boolean().optional(),
   sourceDocumentIds: z.array(z.string().uuid()).default([]),
   items: z.array(DeliveryUpsertItemSchema).default([]),
   baseVersion: z.number().int().nonnegative().optional(),

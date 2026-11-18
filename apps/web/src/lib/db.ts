@@ -79,6 +79,10 @@ export type PhotoRecord = {
   // Барьер backoff: retryPendingUploads пропускает запись, пока now < nextRetryAt.
   nextRetryAt?: number;
   lastUploadError?: { status?: number; code: string; at: number };
+  // Разовое восстановление `blocked` с «операция не найдена», когда операция
+  // уже есть на сервере (фото сняли до первого «Сохранить»). Отметка ставится
+  // перед повтором, чтобы удалённая на самом деле операция не долбилась вечно.
+  recoveryTriedAt?: number;
 };
 
 export type ReferenceRecord =

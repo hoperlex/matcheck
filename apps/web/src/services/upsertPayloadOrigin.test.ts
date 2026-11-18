@@ -229,3 +229,73 @@ describe('buildUpsertPayload передаёт только явно выбран
     ).not.toHaveProperty('purpose');
   });
 });
+
+describe('buildUpsertPayload: ручной внос и время подтверждения — только при создании', () => {
+  const manualLocal = {
+    isManual: true,
+    confirmedByMolAt: '2026-11-17T18:30:00.000Z',
+    arrivedAt: '2026-11-17T18:30:00.000Z',
+  };
+
+  it('приёмка без серверного снимка (создание): isManual и confirmedByMolAt уходят', () => {
+    const record = {
+      id: baseOperation.id,
+      server: null,
+      local: { ...baseOperation, items: [], ...manualLocal } as unknown as Delivery,
+      tombstone: false,
+      version: 0,
+      lastSyncedAt: null,
+    } as DeliveryRecord;
+    expect(buildUpsertPayload(record, 0)).toMatchObject({
+      isManual: true,
+      confirmedByMolAt: '2026-11-17T18:30:00.000Z',
+    });
+  });
+
+  it('приёмка уже на сервере: поля не уходят, даже если остались в локальной правке', () => {
+    const record = {
+      id: baseOperation.id,
+      server: { ...baseOperation, items: [] } as unknown as Delivery,
+      local: manualLocal as unknown as Partial<Delivery>,
+      tombstone: false,
+      version: 3,
+      lastSyncedAt: null,
+    } as DeliveryRecord;
+    const payload = buildUpsertPayload(record, 3);
+    expect(payload).not.toHaveProperty('isManual');
+    expect(payload).not.toHaveProperty('confirmedByMolAt');
+  });
+
+  it('обычная новая приёмка: поля нет вовсе', () => {
+    const record = {
+      id: baseOperation.id,
+      server: null,
+      local: { ...baseOperation, items: [] } as unknown as Delivery,
+      tombstone: false,
+      version: 0,
+      lastSyncedAt: null,
+    } as DeliveryRecord;
+    expect(buildUpsertPayload(record, 0)).not.toHaveProperty('isManual');
+  });
+
+  it('отгрузка: то же самое', () => {
+    const record = {
+      id: baseOperation.id,
+      server: null,
+      local: {
+        ...baseOperation,
+        kind: 'contractor',
+        items: [],
+        isManual: true,
+        confirmedByMolAt: '2026-11-17T18:30:00.000Z',
+      } as unknown as Shipment,
+      tombstone: false,
+      version: 0,
+      lastSyncedAt: null,
+    } as ShipmentRecord;
+    expect(buildShipmentUpsertPayload(record, 0)).toMatchObject({
+      isManual: true,
+      confirmedByMolAt: '2026-11-17T18:30:00.000Z',
+    });
+  });
+});

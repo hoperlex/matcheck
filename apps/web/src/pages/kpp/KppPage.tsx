@@ -226,6 +226,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // UUID лежит в deliveryId, а флаг new=1 отключает deliveryQuery и активирует
   // ветку creation в save-mutation (первый «Сохранить» создаёт документ filled).
   const isNew = params.get('new') === '1';
+  // «Новая приёмка → Ручной внос»: приёмка без машины одним этапом, как форма
+  // «Ручной внос» на планшете. «Сохранить» создаёт её сразу «Подтверждено МОЛ».
+  const isManualNew = isNew && params.get('manual') === '1';
   const updIdFromUrl = params.get('upd');
 
   // Для inspector_kpp объект фиксирован значением из БД; селект блокируется,
@@ -549,6 +552,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       comment: null,
       inTransit: false,
       isAssets: false,
+      isManual: isManualNew,
       confirmedByMolUserId: null,
       confirmedByMolUserEmail: null,
       confirmedByMolAt: null,
@@ -567,8 +571,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-  }, [isNew, deliveryId, inspectorSiteId, updIdFromUrl, authUser?.id]);
+  }, [isNew, isManualNew, deliveryId, inspectorSiteId, updIdFromUrl, authUser?.id]);
   const loadedDelivery: Delivery | null = virtualDelivery ?? deliveryQuery.data ?? null;
+  // Ручной внос: без машины и госномера (сервер ставит флаг только при создании).
+  const isManualEntry = isManualNew || loadedDelivery?.isManual === true;
 
   // Локальные IDB-записи фото для приёмки. Параллельно с серверным delivery.photos:
   // свежеснятое фото появляется в IDB немедленно (через capturePhoto), а в delivery.photos —
@@ -831,6 +837,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           // включает подпись «Груз/машина» в галерее 2 Этапа (showLabels).
           stage === 'after' ? 'vehicle' : 'cargo',
           stage,
+          // Новая форма до первого «Сохранить»: записи нет ни на сервере, ни в
+          // IndexedDB — фото ждёт создания приёмки (см. operationAwaitsCreation).
+          { operationIsNew: isNew },
         );
         // Локальный список фото перечитывается сразу из IDB, серверный delivery.photos —
         // после отправки и следующего pullSync. Галерея мерджит оба источника по id.
@@ -845,6 +854,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         void uploadPromise.then((outcome) => {
           if (outcome.ok) {
             message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
+          } else if ('deferred' in outcome) {
+            message.info('Фото сохранено в браузере, отправится после сохранения приёмки');
           } else {
             message.error('Фото сохранено в браузере, но не отправлено — повторим автоматически');
           }
@@ -943,6 +954,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     const serverComment = loadedDelivery.comment ?? '';
     const serverParsed = parseDeliveryComment(serverComment);
     const effectiveComment = serverParsed.hasStructure ? serverComment || null : comment || null;
+    // Ручной внос — один момент на приход и подтверждение (как на планшете).
+    // При повторном «Сохранить» офлайн applyLocalEdit оставит первый (keepIfSet).
+    const operationAt = new Date().toISOString();
     return {
       status: nextStatus,
       siteId: siteId ?? loadedDelivery.siteId,
@@ -954,8 +968,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       contractorId: recipientKind === 'counterparty' ? contractorId : null,
       recipientMolId: recipientKind === 'mol' ? recipientMolId : null,
       ...(pendingPurpose !== null && canChoosePurpose && { purpose: pendingPurpose }),
-      vehiclePlate: plate || null,
-      arrivedAt: loadedDelivery.arrivedAt ?? new Date().toISOString(),
+      vehiclePlate: isManualNew ? null : plate || null,
+      arrivedAt: isManualNew ? operationAt : (loadedDelivery.arrivedAt ?? operationAt),
+      ...(isManualNew && { isManual: true, confirmedByMolAt: operationAt }),
       comment: effectiveComment,
       // Набор связей существующей приёмки upsert на сервере не меняет, но это
       // же значение ложится в локальный overlay — и до отправки очереди
@@ -1022,7 +1037,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     if (emptyNames.length > 0) {
       throw new Error(`Заполните название материала — ${emptyNames.join('; ')}`);
     }
-    await applyLocalEdit(loadedDelivery.id, buildPatch(nextCode));
+    const patch = buildPatch(nextCode);
+    // Новый ручной внос/вынос: момент операции первого «Сохранить» не
+    // перезаписывается повторным — в очередь уйдёт первый (как на планшете).
+    if (isManualNew)
+      await applyLocalEdit(loadedDelivery.id, patch, ['arrivedAt', 'confirmedByMolAt']);
+    else await applyLocalEdit(loadedDelivery.id, patch);
     const mutationId = crypto.randomUUID();
     await enqueueMutation({
       id: mutationId,
@@ -1080,6 +1100,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       // отвязки последнего документа оставался бы загруженным и держал filled.
       // Сервер понижение всё равно отбивает (status-guard), но локальный
       // optimistic-state показал бы «Не оформлена» до следующего pullSync.
+      // Ручной внос — один этап: сразу «Подтверждено МОЛ», как на планшете.
+      if (isManualNew) return persistStatus('confirmed_mol');
       const currentCode = loadedDelivery.status.code as DeliveryStatusCode;
       const hasDocuments =
         (isNew ? selectedUpd !== null : loadedDelivery.sourceDocumentIds.length > 0) ||
@@ -1629,7 +1651,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
     if (!siteId) reasons.push('Выберите объект');
-    if (!plate.trim()) reasons.push('Заполните госномер');
+    // У ручного вноса машины нет — на планшете поля госномера там нет вовсе.
+    if (!isManualEntry && !plate.trim()) reasons.push('Заполните госномер');
     if (photosCount === 0) reasons.push('Сделайте хотя бы одно фото');
     return reasons.length ? reasons.join(' · ') : null;
   })();
@@ -2249,7 +2272,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   /supplier-from-directory), и поправить его можно только в
                   самом основном документе — с правом карточки документа.
                   Иначе менеджер выбирает из Справочника → Поставщики. */}
-              {loadedDelivery && deliveryId && (
+              {/* У нового ручного вноса поставщика нет: чип сохраняет отдельным
+                  запросом, а записи на сервере ещё нет (404). После создания —
+                  в карточке как обычно. */}
+              {loadedDelivery && deliveryId && !isManualNew && (
                 <SupplierChip
                   entity="delivery"
                   entityId={deliveryId}
@@ -2263,25 +2289,33 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 />
               )}
 
-              <InlineEditChip
-                label="Госномер"
-                value={plate || null}
-                placeholder="— не указан —"
-                width={200}
-              >
-                {(close) => (
-                  <Input
-                    autoFocus
-                    size="small"
-                    placeholder="А123ВВ77"
-                    value={plate}
-                    onChange={(e) => setPlate(e.target.value.toUpperCase())}
-                    onPressEnter={close}
-                    onBlur={close}
-                    autoCapitalize="characters"
-                  />
-                )}
-              </InlineEditChip>
+              {isManualEntry && (
+                <Tag color="cyan" style={{ marginInlineEnd: 0 }}>
+                  Ручной внос
+                </Tag>
+              )}
+
+              {!isManualNew && (
+                <InlineEditChip
+                  label="Госномер"
+                  value={plate || null}
+                  placeholder={isManualEntry ? '— без машины —' : '— не указан —'}
+                  width={200}
+                >
+                  {(close) => (
+                    <Input
+                      autoFocus
+                      size="small"
+                      placeholder="А123ВВ77"
+                      value={plate}
+                      onChange={(e) => setPlate(e.target.value.toUpperCase())}
+                      onPressEnter={close}
+                      onBlur={close}
+                      autoCapitalize="characters"
+                    />
+                  )}
+                </InlineEditChip>
+              )}
 
               {/* УПД / Перемещение — read-only чип: значение приходит из УПД
                   (либо при создании, либо после привязки), inline-редактирования
@@ -2433,7 +2467,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   видит только цветной чип при true (как раньше), править
                   не может — для него поле редактируется чекбоксом «Транзит»
                   на 1 этапе в мобиле. См. миграцию 0051 + новый FlagChip. */}
-              {loadedDelivery && (
+              {loadedDelivery && !isManualNew && (
                 <FlagChip
                   label="Транзит"
                   emoji="🚚"
@@ -2447,7 +2481,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               {/* ОС — флаг «основные средства», рядом с Транзитом.
                   Источник на 1 этапе мобилы — чекбокс «ОС». См. миграцию
                   0065. Менеджер правит ошибочные значения с портала. */}
-              {loadedDelivery && (
+              {loadedDelivery && !isManualNew && (
                 <FlagChip
                   label="ОС"
                   emoji="📦"
@@ -3105,17 +3139,20 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       </Button>
                     </span>
                   </Tooltip>
-                  <Tooltip title={confirmTooltip} placement="top">
-                    <span style={{ display: 'inline-flex' }}>
-                      <Button
-                        loading={confirmMol.isPending}
-                        disabled={confirmDisabled}
-                        onClick={() => confirmMol.mutate()}
-                      >
-                        Подтвердить МОЛ
-                      </Button>
-                    </span>
-                  </Tooltip>
+                  {/* Ручной внос — один этап: «Сохранить» уже подтверждает МОЛ. */}
+                  {!isManualNew && (
+                    <Tooltip title={confirmTooltip} placement="top">
+                      <span style={{ display: 'inline-flex' }}>
+                        <Button
+                          loading={confirmMol.isPending}
+                          disabled={confirmDisabled}
+                          onClick={() => confirmMol.mutate()}
+                        >
+                          Подтвердить МОЛ
+                        </Button>
+                      </span>
+                    </Tooltip>
+                  )}
                 </>
               )}
             </div>
@@ -3154,19 +3191,21 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       </Button>
                     </span>
                   </Tooltip>
-                  <Tooltip title={confirmTooltip} placement="top">
-                    <span style={{ flex: 1, display: 'inline-flex' }}>
-                      <Button
-                        size="large"
-                        style={{ flex: 1 }}
-                        loading={confirmMol.isPending}
-                        disabled={confirmDisabled}
-                        onClick={() => confirmMol.mutate()}
-                      >
-                        Подтвердить МОЛ
-                      </Button>
-                    </span>
-                  </Tooltip>
+                  {!isManualNew && (
+                    <Tooltip title={confirmTooltip} placement="top">
+                      <span style={{ flex: 1, display: 'inline-flex' }}>
+                        <Button
+                          size="large"
+                          style={{ flex: 1 }}
+                          loading={confirmMol.isPending}
+                          disabled={confirmDisabled}
+                          onClick={() => confirmMol.mutate()}
+                        >
+                          Подтвердить МОЛ
+                        </Button>
+                      </span>
+                    </Tooltip>
+                  )}
                 </>
               )}
             </div>

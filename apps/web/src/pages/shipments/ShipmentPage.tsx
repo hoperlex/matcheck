@@ -189,6 +189,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   // UUID лежит в shipmentId, флаг new=1 отключает shipmentQuery и активирует
   // ветку creation в save-mutation (первый «Сохранить» создаёт документ shipped).
   const isNew = params.get('new') === '1';
+  // «Новая отгрузка → Ручной вынос»: без машины одним этапом, как форма «Ручной
+  // вынос» на планшете. «Сохранить» создаёт её сразу «Подтверждено МОЛ».
+  const isManualNew = isNew && params.get('manual') === '1';
   const updIdFromUrl = params.get('upd');
 
   // Для inspector_kpp объект-источник фиксирован значением из БД (selectбыл бы
@@ -467,6 +470,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       purpose: null,
       inTransit: false,
       isAssets: false,
+      isManual: isManualNew,
       siteId: inspectorSiteId ?? SYSTEM_SITE_ID,
       receiverCounterpartyId: null,
       receiverMolId: null,
@@ -491,7 +495,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-  }, [isNew, shipmentId, inspectorSiteId, updIdFromUrl, authUser?.id]);
+  }, [isNew, isManualNew, shipmentId, inspectorSiteId, updIdFromUrl, authUser?.id]);
 
   // Гидратация формы в режиме isNew по выбранному УПД. items/receiverId/siteId
   // подставляются из SourceDocumentDetail один раз — далее редактирование идёт
@@ -535,6 +539,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   }, [isNew, shipmentId, newFromUpdQuery.data, isInspector]);
 
   const loadedShipment: Shipment | null = virtualShipment ?? shipmentQuery.data ?? null;
+  // Ручной вынос: без машины и госномера (сервер ставит флаг только при создании).
+  const isManualEntry = isManualNew || loadedShipment?.isManual === true;
 
   // Для уже сохранённой отгрузки — детали привязанного источника
   // (для отображения номера/даты/суммы УПД или Накладной в шапке).
@@ -642,6 +648,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           // «Груз/машина» в галерее 2 Этапа (showLabels).
           stage === 'after' ? 'vehicle' : 'cargo',
           stage,
+          // Новая форма до первого «Сохранить» — фото ждёт создания отгрузки.
+          { operationIsNew: isNew },
         );
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ['photos-local', 'shipment', shipmentId] }),
@@ -653,6 +661,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
         void uploadPromise.then((outcome) => {
           if (outcome.ok) {
             message.success(`Фото добавлено к ${stage === 'before' ? '1 Этапу' : '2 Этапу'}`);
+          } else if ('deferred' in outcome) {
+            message.info('Фото сохранено в браузере, отправится после сохранения отгрузки');
           } else {
             message.error('Фото сохранено в браузере, но не отправлено — повторим автоматически');
           }
@@ -724,6 +734,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const buildPatch = (nextCode: ShipmentStatusCode): Partial<Shipment> => {
     if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
     const nextStatus: Status = { ...loadedShipment.status, code: nextCode };
+    // Ручной вынос — один момент на отгрузку и подтверждение (как на планшете).
+    // При повторном «Сохранить» офлайн applyLocalEdit оставит первый (keepIfSet).
+    const operationAt = new Date().toISOString();
     return {
       status: nextStatus,
       kind,
@@ -738,9 +751,10 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
           ? receiverId
           : null,
       destSiteId: kind === 'transfer' ? destSiteId : null,
-      vehiclePlate: plate || null,
-      driverName: driverName || null,
-      shippedAt: loadedShipment.shippedAt ?? new Date().toISOString(),
+      vehiclePlate: isManualNew ? null : plate || null,
+      driverName: isManualNew ? null : driverName || null,
+      shippedAt: isManualNew ? operationAt : (loadedShipment.shippedAt ?? operationAt),
+      ...(isManualNew && { isManual: true, confirmedByMolAt: operationAt }),
       comment: comment || null,
       purpose: purpose || null,
       // Фильтра пустых названий здесь больше нет: он молча удалял позицию
@@ -792,7 +806,12 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     if (emptyNames.length > 0) {
       throw new Error(`Заполните название материала — ${emptyNames.join('; ')}`);
     }
-    await applyLocalEdit(loadedShipment.id, buildPatch(nextCode));
+    const patch = buildPatch(nextCode);
+    // Новый ручной внос/вынос: момент операции первого «Сохранить» не
+    // перезаписывается повторным — в очередь уйдёт первый (как на планшете).
+    if (isManualNew)
+      await applyLocalEdit(loadedShipment.id, patch, ['shippedAt', 'confirmedByMolAt']);
+    else await applyLocalEdit(loadedShipment.id, patch);
     const mutationId = crypto.randomUUID();
     await enqueueMutation({
       id: mutationId,
@@ -841,6 +860,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
       // Без УПД оформить как shipped нельзя — сервер всё равно понизит,
       // но локальный optimistic-state должен совпадать.
+      // Ручной вынос — один этап: сразу «Подтверждено МОЛ», как на планшете.
+      if (isManualNew) return persistStatus('confirmed_mol');
       const hasUpd = loadedShipment.sourceDocumentIds.length > 0;
       const currentCode = loadedShipment.status.code as ShipmentStatusCode;
       const nextCode: ShipmentStatusCode =
@@ -1058,7 +1079,12 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const verifyReason: string | null = (() => {
     const reasons: string[] = [];
     if (!siteId) reasons.push('Выберите объект «Откуда»');
-    if (kind === 'contractor' || kind === 'return') {
+    // Ручной вынос без документов получатель не требует — так же решает сервер
+    // (isEmptyDraft в validateKindLinks). После привязки УПД получатель снова
+    // обязателен, иначе сервер ответит 422 receiver_required.
+    const hasDocumentsNow = (loadedShipment?.sourceDocumentIds.length ?? 0) > 0;
+    const receiverOptional = kind === 'contractor' && isManualEntry && !hasDocumentsNow;
+    if ((kind === 'contractor' || kind === 'return') && !receiverOptional) {
       if (!receiverId) reasons.push('Выберите получателя');
     }
     if (kind === 'transfer') {
@@ -1067,7 +1093,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
         reasons.push('Объект-приёмник должен отличаться от источника');
       if (!receiverId) reasons.push('Выберите получателя на новом объекте');
     }
-    if (!plate.trim()) reasons.push('Заполните госномер');
+    // У ручного выноса машины нет — на планшете поля госномера там нет вовсе.
+    if (!isManualEntry && !plate.trim()) reasons.push('Заполните госномер');
     if (photosCount === 0) reasons.push('Сделайте хотя бы одно фото');
     // Позиции обязательны только если привязана УПД. Отгрузка без УПД
     // оформляется одними фото — позиции подтянутся позже при ручной
@@ -1621,7 +1648,9 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               )}
 
               {/* Чип «Поставщик»: симметрично с приёмкой. См. SupplierChip. */}
-              {loadedShipment && shipmentId && (
+              {/* У нового ручного выноса поставщика нет: чип сохраняет отдельным
+                  запросом, а записи на сервере ещё нет (404). */}
+              {loadedShipment && shipmentId && !isManualNew && (
                 <SupplierChip
                   entity="shipment"
                   entityId={shipmentId}
@@ -1632,46 +1661,56 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 />
               )}
 
-              <InlineEditChip
-                label="Госномер"
-                value={plate || null}
-                placeholder="— не указан —"
-                disabled={isContractor}
-                width={200}
-              >
-                {(close) => (
-                  <Input
-                    autoFocus
-                    size="small"
-                    placeholder="А123ВВ77"
-                    value={plate}
-                    onChange={(e) => setPlate(e.target.value.toUpperCase())}
-                    onPressEnter={close}
-                    onBlur={close}
-                    autoCapitalize="characters"
-                  />
-                )}
-              </InlineEditChip>
+              {isManualEntry && (
+                <Tag color="cyan" style={{ marginInlineEnd: 0 }}>
+                  Ручной вынос
+                </Tag>
+              )}
 
-              <InlineEditChip
-                label="Водитель"
-                value={driverName || null}
-                placeholder="— не указан —"
-                disabled={isContractor}
-                width={260}
-              >
-                {(close) => (
-                  <Input
-                    autoFocus
-                    size="small"
-                    placeholder="ФИО"
-                    value={driverName}
-                    onChange={(e) => setDriverName(e.target.value)}
-                    onPressEnter={close}
-                    onBlur={close}
-                  />
-                )}
-              </InlineEditChip>
+              {!isManualNew && (
+                <InlineEditChip
+                  label="Госномер"
+                  value={plate || null}
+                  placeholder={isManualEntry ? '— без машины —' : '— не указан —'}
+                  disabled={isContractor}
+                  width={200}
+                >
+                  {(close) => (
+                    <Input
+                      autoFocus
+                      size="small"
+                      placeholder="А123ВВ77"
+                      value={plate}
+                      onChange={(e) => setPlate(e.target.value.toUpperCase())}
+                      onPressEnter={close}
+                      onBlur={close}
+                      autoCapitalize="characters"
+                    />
+                  )}
+                </InlineEditChip>
+              )}
+
+              {!isManualNew && (
+                <InlineEditChip
+                  label="Водитель"
+                  value={driverName || null}
+                  placeholder="— не указан —"
+                  disabled={isContractor}
+                  width={260}
+                >
+                  {(close) => (
+                    <Input
+                      autoFocus
+                      size="small"
+                      placeholder="ФИО"
+                      value={driverName}
+                      onChange={(e) => setDriverName(e.target.value)}
+                      onPressEnter={close}
+                      onBlur={close}
+                    />
+                  )}
+                </InlineEditChip>
+              )}
 
               {/* «Тип отгрузки» — серверное поле shipments.purpose (миграция
                   0050). Заполняет инспектор с мобилы в dropdown'е на форме
@@ -1706,7 +1745,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   видит только цветной чип при true и не правит — у него
                   есть чекбокс «Транзит» на 1 этапе мобилы.
                   См. миграцию 0051 + FlagChip. */}
-              {loadedShipment && (
+              {loadedShipment && !isManualNew && (
                 <FlagChip
                   label="Транзит"
                   emoji="🚚"
@@ -1720,7 +1759,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               {/* ОС — флаг «основные средства», рядом с Транзитом.
                   Источник — чекбокс «ОС» на 1 этапе мобилы. См. миграцию
                   0065. */}
-              {loadedShipment && (
+              {loadedShipment && !isManualNew && (
                 <FlagChip
                   label="ОС"
                   emoji="📦"
@@ -2015,17 +2054,20 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                       </Button>
                     </span>
                   </Tooltip>
-                  <Tooltip title={confirmTooltip} placement="top">
-                    <span style={{ display: 'inline-flex' }}>
-                      <Button
-                        loading={confirmMol.isPending}
-                        disabled={confirmDisabled}
-                        onClick={() => confirmMol.mutate()}
-                      >
-                        Подтвердить МОЛ
-                      </Button>
-                    </span>
-                  </Tooltip>
+                  {/* Ручной вынос — один этап: «Сохранить» уже подтверждает МОЛ. */}
+                  {!isManualNew && (
+                    <Tooltip title={confirmTooltip} placement="top">
+                      <span style={{ display: 'inline-flex' }}>
+                        <Button
+                          loading={confirmMol.isPending}
+                          disabled={confirmDisabled}
+                          onClick={() => confirmMol.mutate()}
+                        >
+                          Подтвердить МОЛ
+                        </Button>
+                      </span>
+                    </Tooltip>
+                  )}
                 </>
               )}
             </div>
@@ -2068,19 +2110,21 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                       </Button>
                     </span>
                   </Tooltip>
-                  <Tooltip title={confirmTooltip} placement="top">
-                    <span style={{ flex: 1, display: 'inline-flex' }}>
-                      <Button
-                        size="large"
-                        style={{ flex: 1 }}
-                        loading={confirmMol.isPending}
-                        disabled={confirmDisabled}
-                        onClick={() => confirmMol.mutate()}
-                      >
-                        Подтвердить МОЛ
-                      </Button>
-                    </span>
-                  </Tooltip>
+                  {!isManualNew && (
+                    <Tooltip title={confirmTooltip} placement="top">
+                      <span style={{ flex: 1, display: 'inline-flex' }}>
+                        <Button
+                          size="large"
+                          style={{ flex: 1 }}
+                          loading={confirmMol.isPending}
+                          disabled={confirmDisabled}
+                          onClick={() => confirmMol.mutate()}
+                        >
+                          Подтвердить МОЛ
+                        </Button>
+                      </span>
+                    </Tooltip>
+                  )}
                 </>
               )}
             </div>

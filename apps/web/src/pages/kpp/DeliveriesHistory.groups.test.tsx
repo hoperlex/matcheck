@@ -235,7 +235,9 @@ describe('Принятые: группы приёмок', () => {
     const confirm = await screen.findAllByRole('button', { name: 'Разгруппировать' });
     fireEvent.click(confirm.at(-1)!);
     await waitFor(() => expect(del).toHaveBeenCalledWith('/delivery-groups/g-1'));
-  });
+    // Две модалки подтверждения поверх полной таблицы: в одиночку ~3 с, в общем
+    // прогоне под нагрузкой упирался в 5 с по умолчанию.
+  }, 15_000);
 
   it('«Изменить состав» и «Привязать УПД из ЭДО» в строке группы', async () => {
     asManager();

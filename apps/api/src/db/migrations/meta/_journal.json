@@ -1065,6 +1065,13 @@
       "when": 1798166800000,
       "tag": "0152_edo_document_recipients",
       "breakpoints": true
+    },
+    {
+      "idx": 153,
+      "version": "7",
+      "when": 1798253200000,
+      "tag": "0153_manual_entry",
+      "breakpoints": true
     }
   ]
 }

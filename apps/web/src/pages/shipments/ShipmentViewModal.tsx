@@ -149,6 +149,11 @@ export function ShipmentViewModal({
             {data.destSiteName ? (
               <Tag style={{ marginInlineEnd: 0 }}>На объект: {data.destSiteName}</Tag>
             ) : null}
+            {s.isManual ? (
+              <Tag style={{ marginInlineEnd: 0 }} color="cyan">
+                Ручной вынос
+              </Tag>
+            ) : null}
             {s.vehiclePlate ? (
               <Tag style={{ marginInlineEnd: 0 }}>Авто: {s.vehiclePlate}</Tag>
             ) : null}

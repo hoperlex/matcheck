@@ -57,6 +57,11 @@ import {
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isShipmentDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
+import {
+  decideManualOnCreate,
+  InvalidManualEntryError,
+  MANUAL_TRANSFER_FORBIDDEN_MESSAGE,
+} from '../domain/operations/manual-entry.js';
 import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/foreign-site.js';
 import { VersionConflictError } from '../domain/operations/version-conflict.js';
 import {
@@ -141,6 +146,8 @@ const ListQuerySchema = z.object({
   nophotoOlderHours: z.coerce.number().int().positive().max(720).optional(),
   // Фильтр по отметке проверки (менеджмент): approved|issues|none. См. deliveries.ts.
   reviewState: z.enum(['approved', 'issues', 'none']).optional(),
+  // Вид операции: manual — «Ручной вынос» (shipments.is_manual), vehicle — с машиной.
+  entry: z.enum(['manual', 'vehicle']).optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
   offset: z.coerce.number().int().nonnegative().default(0),
 });
@@ -355,6 +362,7 @@ function assembleShipmentDto(
     purpose: s.purpose,
     inTransit: s.inTransit,
     isAssets: s.isAssets,
+    isManual: s.isManual,
     siteId: s.siteId,
     receiverCounterpartyId: s.receiverCounterpartyId,
     receiverMolId: s.receiverMolId,
@@ -701,6 +709,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       nophoto,
       nophotoOlderHours,
       reviewState,
+      entry,
     } = query;
 
     const contractorDirIds = parseUuidCsv(contractorIdsCsv);
@@ -834,6 +843,11 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
     // plate: ILIKE на госномер.
     if (plate?.trim()) {
       filters.push(ilike(shipments.vehiclePlate, `%${escapeLike(plate.trim())}%`));
+    }
+
+    // Вид операции: «Ручной вынос» / с машиной.
+    if (entry) {
+      filters.push(eq(shipments.isManual, entry === 'manual'));
     }
 
     // purposes: OR между выбранными (легаси отгрузки без purpose не
@@ -1024,6 +1038,8 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
           { header: 'Цена', key: 'price', width: 12 },
           { header: 'Сумма НДС', key: 'vatSum', width: 14 },
           { header: 'Сумма', key: 'sum', width: 16 },
+          // В конец: на выгрузке строят формулы, вставка в середину сдвинула бы ссылки.
+          { header: 'Ручной вынос', key: 'manual', width: 12 },
         ];
         const headerRow = ws.getRow(1);
         headerRow.font = { bold: true };
@@ -1053,6 +1069,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             // между строкой Excel и карточкой на портале быть не может.
             vatSum: dto.itemsVatSum ?? null,
             sum: dto.itemsTotal ?? null,
+            manual: dto.isManual ? 'да' : '',
           });
           docRow.font = { bold: true };
           docRow.getCell('vatSum').numFmt = MONEY_FMT;
@@ -1321,6 +1338,15 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
                 server: server!,
               });
             }
+            // Ручной вынос перемещением не бывает: перемещение заводит парную
+            // приёмку, а её 1 этап на планшете требует госномер. is_manual после
+            // создания не меняется, поэтому чтение вне транзакции гонки не даёт.
+            if (existing.isManual && input.kind === 'transfer') {
+              return reply.code(422).send({
+                error: 'manual_transfer_forbidden',
+                message: MANUAL_TRANSFER_FORBIDDEN_MESSAGE,
+              });
+            }
             await updateShipment(
               app,
               existing,
@@ -1369,6 +1395,9 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         });
         return dto;
       } catch (err) {
+        if (err instanceof InvalidManualEntryError) {
+          return reply.code(400).send({ error: 'invalid_manual_entry', message: err.message });
+        }
         if (err instanceof SourceAlreadyLinkedError) {
           return reply.code(400).send({
             error: 'source_document_already_linked',
@@ -2526,6 +2555,9 @@ async function createShipment(
   // 'confirmed_mol') не затронут — там isFirstConfirm в updateShipment уже
   // выставляет эти поля.
   const isDirectConfirm = input.statusCode === 'confirmed_mol';
+  // «Ручной вынос» — только при создании, потом не меняется (domain/operations/manual-entry.ts).
+  const manual = decideManualOnCreate('shipment', input);
+  if (!manual.ok) throw new InvalidManualEntryError(manual.message);
   const now = new Date();
   // Время подтверждения — с планшета (момент нажатия «Завершить»), а не время
   // приёма мутации: при офлайне они расходятся на часы. Старые сборки поля не
@@ -2562,6 +2594,7 @@ async function createShipment(
         inspectorId,
         comment: input.comment ?? null,
         isAssets: input.isAssets ?? false,
+        isManual: manual.isManual,
         ...(isDirectConfirm && {
           confirmedByMolUserId: inspectorId,
           confirmedByMolAt: confirmedAtCandidate,

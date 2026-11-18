@@ -15,3 +15,18 @@ describe('operationsListQuery: отметка «Диспетчер»', () => {
     expect(qs.has('dispatcherCheck')).toBe(false);
   });
 });
+
+describe('operationsListQuery: вид операции (ручной внос / с машиной)', () => {
+  it.each(['delivery', 'shipment'] as const)('%s: ?entry= уходит на сервер как есть', (kind) => {
+    for (const entry of ['manual', 'vehicle']) {
+      const filters = readOperationsFilters(new URLSearchParams(`entry=${entry}`));
+      expect(operationsListQuery(filters, { kind }).get('entry')).toBe(entry);
+    }
+  });
+
+  it('чужое значение из ссылки не уходит (сервер ответил бы 400 вместо таблицы)', () => {
+    const filters = readOperationsFilters(new URLSearchParams('entry=yes'));
+    expect(filters.entry).toBeNull();
+    expect(operationsListQuery(filters, { kind: 'delivery' }).has('entry')).toBe(false);
+  });
+});

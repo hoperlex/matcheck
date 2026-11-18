@@ -90,14 +90,29 @@ export async function upsertServerSnapshot(items: Shipment[]): Promise<void> {
   });
 }
 
-export async function applyLocalEdit(id: string, patch: Partial<Shipment>): Promise<void> {
+/**
+ * `keepIfSet` — поля, которые НЕ перезаписываются, если в локальной правке уже
+ * есть значение. Так новая ручная запись сохраняет момент операции первого
+ * «Сохранить»: повторное «Сохранить» офлайн присылает новое время, но в очередь
+ * уходит первое (как на планшете). Проверка — в той же транзакции.
+ */
+export async function applyLocalEdit(
+  id: string,
+  patch: Partial<Shipment>,
+  keepIfSet: readonly (keyof Shipment)[] = [],
+): Promise<void> {
   // Чтение и запись — одной транзакцией: `withDb` повторяет колбэк на новом
   // соединении, и разнесённые get/put повторились бы поверх чужой правки.
   await withDb(async (dbi) => {
     const tx = dbi.transaction('shipments', 'readwrite');
     const existing = await tx.store.get(id);
+    const prevLocal: Partial<Shipment> = existing?.local ?? {};
+    const kept: Partial<Shipment> = {};
+    for (const key of keepIfSet) {
+      if (prevLocal[key] != null) Object.assign(kept, { [key]: prevLocal[key] });
+    }
     const next: ShipmentRecord = existing
-      ? { ...existing, local: { ...(existing.local ?? {}), ...patch } }
+      ? { ...existing, local: { ...prevLocal, ...patch, ...kept } }
       : {
           id,
           server: null,
@@ -172,6 +187,13 @@ export function buildUpsertPayload(r: ShipmentRecord, baseVersion: number): Ship
     comment: effective.comment,
     inTransit: effective.inTransit ?? false,
     isAssets: effective.isAssets ?? false,
+    // Ручная запись (без машины, одним этапом) — только при СОЗДАНИИ: сервер
+    // учитывает поле лишь при INSERT, а записи, которой ещё нет на сервере, нет
+    // и серверного снимка. Время подтверждения — момент первого «Сохранить»,
+    // а не время отправки очереди (иначе офлайн разнесёт приход и подтверждение).
+    ...(r.server === null && r.local?.isManual === true && { isManual: true }),
+    ...(r.server === null &&
+      r.local?.confirmedByMolAt != null && { confirmedByMolAt: r.local.confirmedByMolAt }),
     sourceDocumentIds: effective.sourceDocumentIds,
     items: effective.items.map((it) => ({
       id: it.id,

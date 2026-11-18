@@ -1705,6 +1705,10 @@ export const deliveries = pgTable(
     // Ортогонален статусу и kind; используется веб-порталом для бейджа и
     // будущей отчётности.
     isAssets: boolean('is_assets').notNull().default(false),
+    // «Ручной внос» — приёмка без машины одним этапом (планшет: форма «Ручной
+    // внос»; портал: «Новая приёмка → Ручной внос»). Ставится ТОЛЬКО при
+    // создании (createDelivery) и потом не меняется. Миграция 0153.
+    isManual: boolean('is_manual').notNull().default(false),
     purpose: varchar('purpose', { length: 24 }),
     recipientsPerDocument: boolean('recipients_per_document').notNull().default(false),
     confirmedByMolUserId: uuid('confirmed_by_mol_user_id').references(() => users.id, {
@@ -2097,6 +2101,9 @@ export const shipments = pgTable(
     // ОС — зеркало deliveries.is_assets. Чекбокс на 1 этапе мобилы.
     // См. миграцию 0065. Default false — legacy-записи в порядке.
     isAssets: boolean('is_assets').notNull().default(false),
+    // «Ручной вынос» — зеркало deliveries.is_manual: только при создании
+    // (createShipment), перемещением не бывает. Миграция 0153.
+    isManual: boolean('is_manual').notNull().default(false),
     siteId: uuid('site_id')
       .notNull()
       .references(() => sites.id, { onDelete: 'restrict' }),

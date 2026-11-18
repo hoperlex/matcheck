@@ -177,6 +177,11 @@ export function DeliveryViewModal({
             {data.supplierName ? (
               <Tag style={{ marginInlineEnd: 0 }}>Поставщик: {data.supplierName}</Tag>
             ) : null}
+            {d.isManual ? (
+              <Tag style={{ marginInlineEnd: 0 }} color="cyan">
+                Ручной внос
+              </Tag>
+            ) : null}
             {d.vehiclePlate ? (
               <Tag style={{ marginInlineEnd: 0 }}>Авто: {d.vehiclePlate}</Tag>
             ) : null}

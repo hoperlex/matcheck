@@ -216,6 +216,16 @@ describe('Принятые (приёмка): воронки в шапке', () =
     await expectListRequest({ dispatcherCheck: 'none' });
   });
 
+  it('«Вид: Ручной внос» из панели — ?entry в адресе и entry на сервер', async () => {
+    await renderHistory();
+    const select = (await screen.findByText('Вид: все')).closest('.ant-select')!;
+    fireEvent.mouseDown(select.querySelector('.ant-select-selector')!);
+    fireEvent.click(await screen.findByTitle('Ручной внос'));
+
+    await waitFor(() => expect(search).toContain('entry=manual'));
+    await expectListRequest({ entry: 'manual' });
+  });
+
   it('«УПД из ЭДО/СБИС» в «Признаках» — ?feature=edo в адресе и features=edo на сервер', async () => {
     await renderHistory();
     const select = (await screen.findByText('Признаки')).closest('.ant-select')!;

@@ -99,7 +99,7 @@ import { DeliveryGroupStyle, DeliveryGroupToggle, gutterCellClass } from './Deli
 import { DeliveryGroupModal } from './DeliveryGroupModal';
 import { GroupEdoLinkFlow } from './GroupEdoLinkFlow';
 import { useCollapsedDeliveryGroups, useDeliveryGroupMutations } from './useDeliveryGroups';
-import { operationsListQuery } from '../operations/operationsQuery';
+import { operationsListQuery, parseEntry } from '../operations/operationsQuery';
 import {
   formatDocumentsShort,
   sumDocumentTotals,
@@ -309,6 +309,8 @@ export function DeliveriesHistory({
     reviewState: string | null;
     // Фильтр по отметке «Диспетчер» (те же роли): checked|none.
     dispatcherCheck: string | null;
+    // Вид операции: ручной внос / с машиной (null — все). В URL — ?entry=.
+    entry: 'manual' | 'vehicle' | null;
     // Диапазон даты прибытия — дни (YYYY-MM-DD), пустая строка = граница не
     // задана. В URL это ?dfrom=/?dto= — короче и читаемее ISO; конверсия в
     // ISO-границы для сервера живёт в queryFn (см. arrivedFrom/arrivedTo).
@@ -330,6 +332,7 @@ export function DeliveriesHistory({
     nophotoOlderHours: params.get('nophotoHours'),
     reviewState: params.get('review'),
     dispatcherCheck: params.get('dispatcher'),
+    entry: parseEntry(params.get('entry')),
     dateFrom: params.get('dfrom') ?? '',
     dateTo: params.get('dto') ?? '',
   };
@@ -357,6 +360,7 @@ export function DeliveriesHistory({
     if ('nophotoOlderHours' in patch) apply('nophotoHours', patch.nophotoOlderHours);
     if ('reviewState' in patch) apply('review', patch.reviewState);
     if ('dispatcherCheck' in patch) apply('dispatcher', patch.dispatcherCheck);
+    if ('entry' in patch) apply('entry', patch.entry);
     if ('dateFrom' in patch) apply('dfrom', patch.dateFrom);
     if ('dateTo' in patch) apply('dto', patch.dateTo);
     setParams(next, { replace: true });
@@ -421,6 +425,7 @@ export function DeliveriesHistory({
       nophotoHours: filters.nophotoOlderHours,
       review: filters.reviewState,
       dispatcher: filters.dispatcherCheck,
+      entry: filters.entry,
       dateFrom: filters.dateFrom,
       dateTo: filters.dateTo,
     },
@@ -805,7 +810,7 @@ export function DeliveriesHistory({
   // пользователь может «удалить выбранные строки» на странице 7,
   // забыв что они с прошлой выборки). useEffect ниже отслеживает
   // комбинированный ключ фильтров.
-  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dispatcherCheck ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dispatcherCheck ?? ''}|${filters.entry ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
    
   // Сброс страницы и выбора — только на РЕАЛЬНУЮ смену фильтра. Эффект с
   // массивом зависимостей срабатывает и на монтировании, и ссылка вида
@@ -1144,6 +1149,21 @@ export function DeliveriesHistory({
                     showPurpose={false}
                     availableFeatures={deliveryFeatures}
                   />
+                  {/* Вид операции — всем: ручной внос (без машины) / с машиной. */}
+                  <FilterSelect
+                    size="small"
+                    width={170}
+                    allowClear={false}
+                    value={filters.entry ?? 'all'}
+                    onChange={(v: string) =>
+                      updateFilters({ entry: v === 'manual' || v === 'vehicle' ? v : null })
+                    }
+                    options={[
+                      { value: 'all', label: 'Вид: все' },
+                      { value: 'manual', label: 'Ручной внос' },
+                      { value: 'vehicle', label: 'С машиной' },
+                    ]}
+                  />
                   {/* Фильтр по отметке проверки — только менеджменту. */}
                   {canReview && (
                     <FilterSelect
@@ -1458,6 +1478,12 @@ export function DeliveriesHistory({
               {
                 title: 'Авто',
                 dataIndex: 'vehiclePlate',
+                // У ручного вноса машины нет — пустая ячейка выглядела бы недочётом.
+                render: (plate: string | null, r: Row) =>
+                  plate ||
+                  (r.isManual ? (
+                    <Typography.Text type="secondary">ручной внос</Typography.Text>
+                  ) : null),
                 ...externalColumnFilter<Row>({
                   kind: 'text',
                   title: 'Номер авто',
@@ -1600,7 +1626,9 @@ export function DeliveriesHistory({
                 >
                   <Space wrap>
                     {renderStatusCell(r)}
-                    <Typography.Text strong>{r.vehiclePlate ?? 'Без номера'}</Typography.Text>
+                    <Typography.Text strong>
+                      {r.vehiclePlate || (r.isManual ? 'Ручной внос' : 'Без номера')}
+                    </Typography.Text>
                   </Space>
                   <Typography.Text type="secondary">
                     {renderSupplierName(r)} · {r.items?.length ?? 0} стр.

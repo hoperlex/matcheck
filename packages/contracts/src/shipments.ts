@@ -88,6 +88,13 @@ export const ShipmentSchema = z.object({
    * показывает бейдж рядом с «Транзит». См. миграцию 0065.
    */
   isAssets: z.boolean(),
+  /**
+   * «Ручной вынос» — отгрузка без машины одним этапом. Ставится сервером
+   * только при создании и потом не меняется; перемещением быть не может.
+   * Optional: старые офлайн-снимки портала поля не знают — отсутствие = false.
+   * См. миграцию 0153.
+   */
+  isManual: z.boolean().optional(),
   siteId: z.string().uuid(),
   receiverCounterpartyId: z.string().uuid().nullable(),
   receiverMolId: z.string().uuid().nullable(),
@@ -214,6 +221,12 @@ export const ShipmentUpsertSchema = z.object({
   inTransit: z.boolean().default(false),
   /** ОС — см. ShipmentSchema.isAssets. Default false. */
   isAssets: z.boolean().default(false),
+  /**
+   * Явный «Ручной вынос» с портала — только при создании и только для
+   * допустимой ручной записи (сразу confirmed_mol, без номера, документов,
+   * транзита, не перемещение), иначе 400. При обновлении игнорируется.
+   */
+  isManual: z.boolean().optional(),
   sourceDocumentIds: z.array(z.string().uuid()).default([]),
   items: z.array(ShipmentUpsertItemSchema).default([]),
   baseVersion: z.number().int().nonnegative().optional(),

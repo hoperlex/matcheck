@@ -58,7 +58,7 @@ import { partyCell } from '../../shared/ui/documentPartyColumns';
 import { externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
 import { useStatusFilterOptions } from '../../shared/hooks/useStatusFilterOptions';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
-import { operationsListQuery } from '../operations/operationsQuery';
+import { operationsListQuery, parseEntry } from '../operations/operationsQuery';
 import {
   formatDocumentsShort,
   sumDocumentTotals,
@@ -191,6 +191,8 @@ export function ShipmentsHistory({
     nophotoOlderHours: string | null;
     // Фильтр по отметке проверки (менеджмент): approved|issues|none.
     reviewState: string | null;
+    // Вид операции: ручной вынос / с машиной (null — все). В URL — ?entry=.
+    entry: 'manual' | 'vehicle' | null;
     // Диапазон даты отгрузки — дни (YYYY-MM-DD), пустая строка = граница не
     // задана. В URL это ?dfrom=/?dto=; конверсия в ISO-границы для сервера —
     // в queryFn (см. shippedFrom/shippedTo). Симметрично с DeliveriesHistory.
@@ -210,6 +212,7 @@ export function ShipmentsHistory({
     nophoto: params.get('nophoto') === '1',
     nophotoOlderHours: params.get('nophotoHours'),
     reviewState: params.get('review'),
+    entry: parseEntry(params.get('entry')),
     dateFrom: params.get('dfrom') ?? '',
     dateTo: params.get('dto') ?? '',
   };
@@ -240,6 +243,7 @@ export function ShipmentsHistory({
     if ('nophoto' in patch) apply('nophoto', patch.nophoto ? '1' : null);
     if ('nophotoOlderHours' in patch) apply('nophotoHours', patch.nophotoOlderHours);
     if ('reviewState' in patch) apply('review', patch.reviewState);
+    if ('entry' in patch) apply('entry', patch.entry);
     if ('dateFrom' in patch) apply('dfrom', patch.dateFrom);
     if ('dateTo' in patch) apply('dto', patch.dateTo);
     setParams(next, { replace: true });
@@ -296,6 +300,7 @@ export function ShipmentsHistory({
       nophoto: filters.nophoto,
       nophotoHours: filters.nophotoOlderHours,
       review: filters.reviewState,
+      entry: filters.entry,
       dateFrom: filters.dateFrom,
       dateTo: filters.dateTo,
     },
@@ -549,7 +554,7 @@ export function ShipmentsHistory({
   // (см. shipments.ts: contractorIds/supplierIds/siteIds/q/plate/features/
   // purposes/nophoto/status в WHERE). При смене любого фильтра — сброс
   // page=1 и очистка selection.
-  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.purposes.join(',')}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.purposes.join(',')}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.entry ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
   // Сброс страницы и выбора — только на РЕАЛЬНУЮ смену фильтра. Эффект с
   // массивом зависимостей срабатывает и на монтировании, и ссылка вида
   // ?page=4 открывалась первой страницей: коллега получал не тот экран,
@@ -830,6 +835,21 @@ export function ShipmentsHistory({
                     value={{ purposes: filters.purposes, features: filters.features }}
                     onChange={updateFilters}
                   />
+                  {/* Вид операции — всем: ручной вынос (без машины) / с машиной. */}
+                  <FilterSelect
+                    size="small"
+                    width={170}
+                    allowClear={false}
+                    value={filters.entry ?? 'all'}
+                    onChange={(v: string) =>
+                      updateFilters({ entry: v === 'manual' || v === 'vehicle' ? v : null })
+                    }
+                    options={[
+                      { value: 'all', label: 'Вид: все' },
+                      { value: 'manual', label: 'Ручной вынос' },
+                      { value: 'vehicle', label: 'С машиной' },
+                    ]}
+                  />
                   {/* Фильтр по отметке проверки — только менеджменту. */}
                   {canReview && (
                     <FilterSelect
@@ -1022,6 +1042,12 @@ export function ShipmentsHistory({
               {
                 title: 'Авто',
                 dataIndex: 'vehiclePlate',
+                // У ручного выноса машины нет — пустая ячейка выглядела бы недочётом.
+                render: (plate: string | null, r: Row) =>
+                  plate ||
+                  (r.isManual ? (
+                    <Typography.Text type="secondary">ручной вынос</Typography.Text>
+                  ) : null),
                 ...externalColumnFilter<Row>({
                   kind: 'text',
                   title: 'Номер авто',
@@ -1183,7 +1209,9 @@ export function ShipmentsHistory({
                 >
                   <Space wrap>
                     {renderStatusCell(r)}
-                    <Typography.Text strong>{r.vehiclePlate ?? 'Без номера'}</Typography.Text>
+                    <Typography.Text strong>
+                      {r.vehiclePlate || (r.isManual ? 'Ручной вынос' : 'Без номера')}
+                    </Typography.Text>
                   </Space>
                   <Typography.Text type="secondary">
                     {r.siteName ?? sitesMap.get(r.siteId) ?? '—'} → {destinationLabel(r)}

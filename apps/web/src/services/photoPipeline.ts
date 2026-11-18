@@ -95,7 +95,39 @@ export type CapturedPhoto = {
   uploadPromise: Promise<PhotoUploadOutcome>;
 };
 
-export type PhotoUploadOutcome = { ok: true } | { ok: false; error: unknown };
+export type PhotoUploadOutcome =
+  | { ok: true }
+  | { ok: false; error: unknown }
+  /**
+   * Отправка отложена: операции ещё нет на сервере (новая приёмка/отгрузка до
+   * первого «Сохранить»). Фото лежит в браузере и уйдёт фоновым проходом после
+   * создания операции. Это не успех — «Фото добавлено» показывать рано.
+   */
+  | { ok: false; deferred: true };
+
+const DEFERRED: PhotoUploadOutcome = { ok: false, deferred: true };
+
+/**
+ * Ждёт ли операция создания на сервере. Запись в IndexedDB — главный источник:
+ * `server === null` значит «сохранена локально, на сервер ещё не ушла». Записи
+ * может не быть вовсе — до первого «Сохранить» новая форма живёт только в
+ * состоянии React; тогда решает `operationIsNew` от вызывающего. У существующей
+ * операции без записи (снимок не записался) — отправляем сразу, как раньше.
+ */
+async function operationAwaitsCreation(
+  operationKind: OperationKind,
+  operationId: string,
+  operationIsNew: boolean,
+): Promise<boolean> {
+  const rec: { server: unknown } | undefined = await withDb(
+    async (dbi): Promise<{ server: unknown } | undefined> =>
+      operationKind === 'shipment'
+        ? dbi.get('shipments', operationId)
+        : dbi.get('deliveries', operationId),
+  );
+  if (rec) return rec.server === null;
+  return operationIsNew;
+}
 
 function settle(promise: Promise<void>): Promise<PhotoUploadOutcome> {
   return promise.then(
@@ -110,6 +142,8 @@ export async function capturePhoto(
   blob: Blob,
   kind: 'document' | 'cargo' | 'vehicle' | 'other',
   stage: DeliveryPhotoStage = 'before',
+  /** Форма новой, ещё не сохранённой операции (URL new=1). См. operationAwaitsCreation. */
+  options: { operationIsNew?: boolean } = {},
 ): Promise<CapturedPhoto> {
   const main = await compressInWorker(blob, 1.5, 2048);
   const thumb = await compressInWorker(blob, 0.1, 320);
@@ -155,20 +189,26 @@ export async function capturePhoto(
     return null;
   });
 
-  if (existing) {
-    // Уже есть локальная запись с этим contentHash. Если она ещё не uploaded —
-    // переиспользуем её promise upload'а, а не плодим параллельные попытки.
-    const uploadPromise = existing.uploaded
-      ? Promise.resolve({ ok: true } as const)
-      : settle(uploadPhoto(existing.id));
-    return { id: existing.id, uploadPromise };
+  if (existing?.uploaded) {
+    return { id: existing.id, uploadPromise: Promise.resolve({ ok: true } as const) };
+  }
+  const photoId = existing ? existing.id : id;
+  // Операции ещё нет на сервере — presign дал бы 404 delivery_not_found, а это
+  // терминальная ошибка: фото навсегда оставалось бы в браузере (единственная
+  // приёмка, созданная на портале за 90 дней, так и осталась без фото). Ждём:
+  // фоновый проход отправит после создания операции. Та же проверка — для
+  // повторного выбора того же файла.
+  if (await operationAwaitsCreation(operationKind, operationId, options.operationIsNew === true)) {
+    return { id: photoId, uploadPromise: Promise.resolve(DEFERRED) };
   }
 
-  // Best-effort immediate upload — выставляем результат наружу, чтобы UI мог
-  // дождаться обмена local-id на server-id, пере-invalidate queryClient и
+  // Уже есть локальная запись с этим contentHash, ещё не uploaded —
+  // переиспользуем её promise upload'а, а не плодим параллельные попытки.
+  // Новая — best-effort immediate upload: выставляем результат наружу, чтобы UI
+  // мог дождаться обмена local-id на server-id, пере-invalidate queryClient и
   // показать ошибку, если отправка не удалась.
-  const uploadPromise = settle(uploadPhoto(id));
-  return { id, uploadPromise };
+  const uploadPromise = settle(uploadPhoto(photoId));
+  return { id: photoId, uploadPromise };
 }
 
 export async function uploadPhoto(photoId: string): Promise<void> {
@@ -359,6 +399,43 @@ async function withPhotoRetryLock(fn: () => Promise<void>): Promise<void> {
   }
 }
 
+/**
+ * `blocked` из-за «операция не найдена» восстанавливается ОДИН раз — когда
+ * операция уже есть на сервере. Так оживают фото, снятые до первого
+ * «Сохранить» старой сборкой портала. Удалённая на самом деле операция снова
+ * даст 404 → blocked, и больше не трогаем. pending_deletion / forbidden —
+ * не восстанавливаются: там повтор бесполезен.
+ */
+function canRecoverBlocked(p: {
+  recoveryTriedAt?: number;
+  lastUploadError?: { code: string };
+}): boolean {
+  if (p.recoveryTriedAt) return false;
+  const code = p.lastUploadError?.code;
+  return code === 'delivery_not_found' || code === 'shipment_not_found';
+}
+
+/** Снимает blocked и ставит отметку попытки — одной транзакцией. false — уже не нужно. */
+async function markRecoveryTried(id: string): Promise<boolean> {
+  return withDb(async (dbi) => {
+    const tx = dbi.transaction('photos', 'readwrite');
+    const store = tx.objectStore('photos');
+    const cur = await store.get(id);
+    if (!cur || cur.uploaded || cur.uploadState !== 'blocked' || !canRecoverBlocked(cur)) {
+      await tx.done;
+      return false;
+    }
+    await store.put({
+      ...cur,
+      uploadState: undefined,
+      nextRetryAt: undefined,
+      recoveryTriedAt: Date.now(),
+    });
+    await tx.done;
+    return true;
+  });
+}
+
 export async function retryPendingUploads(): Promise<void> {
   await withPhotoRetryLock(async () => {
     // Под тем же Web Lock: чистка ходит по всем фото, и две вкладки не должны
@@ -376,8 +453,9 @@ export async function retryPendingUploads(): Promise<void> {
     const now = Date.now();
     for (const p of all) {
       if (p.uploaded) continue;
-      if (p.uploadState === 'blocked') continue; // терминальная ошибка — не долбим
-      if (p.nextRetryAt && p.nextRetryAt > now) continue; // backoff ещё не истёк
+      const recoverable = p.uploadState === 'blocked' && canRecoverBlocked(p);
+      if (p.uploadState === 'blocked' && !recoverable) continue; // терминальная ошибка — не долбим
+      if (!recoverable && p.nextRetryAt && p.nextRetryAt > now) continue; // backoff ещё не истёк
       // Операция должна быть уже на сервере, иначе /photos/presign даст 404.
       // Ждём следующего прохода runSync после успешного push *_upsert.
       if (p.operationKind === 'shipment') {
@@ -387,6 +465,7 @@ export async function retryPendingUploads(): Promise<void> {
         const dlv = await withDb((dbi) => dbi.get('deliveries', p.deliveryId));
         if (!dlv || dlv.server === null) continue;
       }
+      if (recoverable && !(await markRecoveryTried(p.id))) continue;
       try {
         await uploadPhoto(p.id);
       } catch {

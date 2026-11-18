@@ -27,8 +27,14 @@ vi.mock('./api', () => ({
   apiUploadPhoto: mocks.apiUploadPhoto,
 }));
 
-const { capturePhoto, sha256Hex, uploadPhoto, onPhotoUploadSettled, pruneUploadedPhotoBlobs } =
-  await import('./photoPipeline');
+const {
+  capturePhoto,
+  sha256Hex,
+  uploadPhoto,
+  onPhotoUploadSettled,
+  pruneUploadedPhotoBlobs,
+  retryPendingUploads,
+} = await import('./photoPipeline');
 const { db } = await import('../lib/db');
 
 const LOCAL_ID = 'local-uuid';
@@ -307,5 +313,177 @@ describe('pruneUploadedPhotoBlobs', () => {
 
     expect(await pruneUploadedPhotoBlobs()).toBe(1);
     expect(await pruneUploadedPhotoBlobs()).toBe(0);
+  });
+});
+
+/** Воркер сжатия: возвращает тот же blob (как в тесте этапа выше). */
+function stubCompressWorker(): void {
+  vi.stubGlobal(
+    'Worker',
+    class {
+      private listeners = new Set<(event: MessageEvent) => void>();
+
+      addEventListener(_type: string, listener: (event: MessageEvent) => void) {
+        this.listeners.add(listener);
+      }
+
+      removeEventListener(_type: string, listener: (event: MessageEvent) => void) {
+        this.listeners.delete(listener);
+      }
+
+      postMessage(data: { id: number; blob: Blob }) {
+        queueMicrotask(() => {
+          for (const listener of this.listeners) {
+            listener({ data: { id: data.id, ok: true, blob: data.blob } } as MessageEvent);
+          }
+        });
+      }
+    },
+  );
+}
+
+/** Запись операции в IndexedDB: server — снимок с сервера или null (сохранена только локально). */
+async function putOperation(
+  kind: 'delivery' | 'shipment',
+  id: string,
+  onServer: boolean,
+): Promise<void> {
+  const dbi = await db();
+  const record = {
+    id,
+    server: onServer ? ({ id, version: 1 } as never) : null,
+    local: onServer ? null : ({ id } as never),
+    tombstone: false,
+    version: onServer ? 1 : 0,
+    lastSyncedAt: null,
+  };
+  if (kind === 'shipment') await dbi.put('shipments', record);
+  else await dbi.put('deliveries', record);
+}
+
+/**
+ * Фото новой операции до первого «Сохранить». Раньше presign давал 404
+ * delivery_not_found → blocked навсегда: единственная приёмка, созданная на
+ * портале за 90 дней, осталась без фото, хотя «Сохранить» без фото недоступно.
+ */
+describe('capturePhoto — операция ещё не создана на сервере', () => {
+  beforeEach(async () => {
+    stubCompressWorker();
+    const dbi = await db();
+    await dbi.clear('photos');
+    await dbi.clear('deliveries');
+    await dbi.clear('shipments');
+  });
+
+  it.each([
+    ['delivery', 'new-delivery'],
+    ['shipment', 'new-shipment'],
+  ] as const)(
+    '%s: новая форма (записи в IndexedDB нет) — отправка отложена, presign не зовётся',
+    async (operationKind, operationId) => {
+      const blob = new Blob([new Uint8Array([7, 7, 7])], { type: 'image/jpeg' });
+
+      const first = await capturePhoto(operationKind, operationId, blob, 'cargo', 'before', {
+        operationIsNew: true,
+      });
+      expect(await first.uploadPromise).toEqual({ ok: false, deferred: true });
+      expect(await readPhoto(first.id)).toMatchObject({ uploaded: false });
+      expect((await readPhoto(first.id))?.uploadState).toBeUndefined();
+
+      // Тот же файл повторно — тоже без запроса и без дубля.
+      const again = await capturePhoto(operationKind, operationId, blob, 'cargo', 'before', {
+        operationIsNew: true,
+      });
+      expect(again.id).toBe(first.id);
+      expect(await again.uploadPromise).toEqual({ ok: false, deferred: true });
+      expect(mocks.apiPost).not.toHaveBeenCalled();
+
+      // После «Сохранить» операция на сервере — фоновый проход отправляет фото.
+      await putOperation(operationKind, operationId, true);
+      await retryPendingUploads();
+      expect(mocks.apiPost).toHaveBeenCalledWith(
+        '/photos/presign',
+        expect.objectContaining({ operationKind, operationId }),
+      );
+      expect(await readPhoto(SERVER_ID)).toMatchObject({ uploaded: true });
+    },
+  );
+
+  it('запись сохранена офлайн (server = null) — ждём и без флага новой формы', async () => {
+    await putOperation('delivery', 'offline-delivery', false);
+    const blob = new Blob([new Uint8Array([8, 8])], { type: 'image/jpeg' });
+
+    const captured = await capturePhoto('delivery', 'offline-delivery', blob, 'cargo', 'before');
+
+    expect(await captured.uploadPromise).toEqual({ ok: false, deferred: true });
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+    // Фоновый проход тоже ждёт, пока запись не уйдёт на сервер.
+    await retryPendingUploads();
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Фото, уже заблокированные старой сборкой по 404 «операция не найдена»,
+ * восстанавливаются один раз, когда операция появилась на сервере.
+ */
+describe('retryPendingUploads — восстановление заблокированных', () => {
+  const blockedBy = (code: string) => ({
+    uploadState: 'blocked' as const,
+    uploadAttempts: 1,
+    lastUploadError: { status: 404, code, at: 1 },
+  });
+
+  beforeEach(async () => {
+    const dbi = await db();
+    await dbi.clear('photos');
+    await dbi.clear('deliveries');
+    await dbi.clear('shipments');
+  });
+
+  it('blocked по delivery_not_found + операция на сервере → одна повторная отправка', async () => {
+    await putOperation('delivery', 'delivery-1', true);
+    await putPhoto(blockedBy('delivery_not_found'));
+
+    await retryPendingUploads();
+
+    expect(mocks.apiPost).toHaveBeenCalledTimes(1);
+    expect(await readPhoto(SERVER_ID)).toMatchObject({ uploaded: true });
+  });
+
+  it('снова 404 → blocked навсегда, следующий проход не повторяет', async () => {
+    await putOperation('delivery', 'delivery-1', true);
+    await putPhoto(blockedBy('delivery_not_found'));
+    mocks.apiPost.mockRejectedValue(
+      Object.assign(new Error('not found'), { status: 404, code: 'delivery_not_found' }),
+    );
+
+    await retryPendingUploads();
+    const after = await readPhoto(LOCAL_ID);
+    expect(after).toMatchObject({ uploadState: 'blocked', uploaded: false });
+    expect(after?.recoveryTriedAt).toEqual(expect.any(Number));
+    expect(after?.blob).toBeInstanceOf(Blob);
+
+    await retryPendingUploads();
+    expect(mocks.apiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it('операции на сервере нет — не трогаем', async () => {
+    await putPhoto(blockedBy('delivery_not_found'));
+
+    await retryPendingUploads();
+
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+    expect((await readPhoto(LOCAL_ID))?.recoveryTriedAt).toBeUndefined();
+  });
+
+  it.each(['pending_deletion', 'forbidden'])('blocked по %s не восстанавливается', async (code) => {
+    await putOperation('delivery', 'delivery-1', true);
+    await putPhoto(blockedBy(code));
+
+    await retryPendingUploads();
+
+    expect(mocks.apiPost).not.toHaveBeenCalled();
+    expect(await readPhoto(LOCAL_ID)).toMatchObject({ uploadState: 'blocked' });
   });
 });

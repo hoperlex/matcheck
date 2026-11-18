@@ -28,6 +28,12 @@ export type OperationsFilters = {
   reviewState: string | null;
   /** Только у приёмок: отметка «Диспетчер» — checked | none (в URL — ?dispatcher=). */
   dispatcherCheck?: string | null;
+  /**
+   * Вид операции (в URL — ?entry=): manual — ручной внос/вынос, vehicle — с
+   * машиной, null — все. Только эти два значения: чужое из ссылки не уходит на
+   * сервер (там enum, ответ был бы 400 вместо таблицы).
+   */
+  entry?: 'manual' | 'vehicle' | null;
   /** Дни YYYY-MM-DD; пустая строка — граница не задана. */
   dateFrom: string;
   dateTo: string;
@@ -49,9 +55,15 @@ export function readOperationsFilters(params: URLSearchParams): OperationsFilter
     nophotoOlderHours: params.get('nophotoHours'),
     reviewState: params.get('review'),
     dispatcherCheck: params.get('dispatcher'),
+    entry: parseEntry(params.get('entry')),
     dateFrom: params.get('dfrom') ?? '',
     dateTo: params.get('dto') ?? '',
   };
+}
+
+/** Значение фильтра «Вид» из URL; всё, кроме двух известных, — «все». */
+export function parseEntry(raw: string | null): 'manual' | 'vehicle' | null {
+  return raw === 'manual' || raw === 'vehicle' ? raw : null;
 }
 
 function parseCsv(raw: string | null): string[] {
@@ -93,6 +105,7 @@ export function operationsListQuery(
   if (opts.kind === 'delivery' && filters.dispatcherCheck) {
     qs.set('dispatcherCheck', filters.dispatcherCheck);
   }
+  if (filters.entry) qs.set('entry', filters.entry);
   // Дни → ISO-границы. Сервер сравнивает поле >= from AND поле < to, поэтому
   // верхняя граница — начало СЛЕДУЮЩЕГО дня: иначе записи выбранного
   // конечного дня выпали бы из выдачи.

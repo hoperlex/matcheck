@@ -3,7 +3,7 @@ type OperationType = 'delivery' | 'shipment';
 function listParams(params: URLSearchParams, type: OperationType): URLSearchParams {
   const next = new URLSearchParams(params);
   next.set('type', type);
-  for (const key of ['delivery', 'shipment', 'new', 'upd', 'from']) next.delete(key);
+  for (const key of ['delivery', 'shipment', 'new', 'manual', 'upd', 'from']) next.delete(key);
   return next;
 }
 
