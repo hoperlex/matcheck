@@ -36,6 +36,7 @@ export const MONITOR_WRITE_ROUTES = new Set([
   '/api/v1/deliveries/:id/sources/:docId/purpose',
   '/api/v1/deliveries/:id/edo-matches/:matchId/purpose',
   '/api/v1/deliveries/:id/dispatcher-check',
+  '/api/v1/deliveries/bulk-dispatcher-check',
   // Группы приёмок — тоже действие «Проверять» (менеджер и мониторинг).
   '/api/v1/delivery-groups',
   '/api/v1/delivery-groups/leave',

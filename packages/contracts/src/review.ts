@@ -54,6 +54,40 @@ export const ReviewFieldsShape = {
 export const DispatcherCheckRequestSchema = z.object({ checked: z.boolean() });
 export type DispatcherCheckRequest = z.infer<typeof DispatcherCheckRequestSchema>;
 
+/**
+ * Отметка «Диспетчер» у многих приёмок разом — строка группы и отмеченные
+ * строки «Принятых»: POST /api/v1/deliveries/bulk-dispatcher-check.
+ * Уже стоящие отметки не перезаписываются (автор и время сохраняются),
+ * снятие трогает только отмеченные.
+ */
+export const DispatcherBulkCheckRequestSchema = z.object({
+  ids: z
+    .array(z.string().uuid())
+    .min(1)
+    .max(500)
+    .refine((list) => new Set(list).size === list.length, 'Приёмка указана дважды'),
+  checked: z.boolean(),
+});
+export type DispatcherBulkCheckRequest = z.infer<typeof DispatcherBulkCheckRequestSchema>;
+
+/**
+ * Почему приёмка не изменилась: не найдена, помечена на удаление, ещё не
+ * оформлена или уже в нужном состоянии.
+ */
+export const DispatcherBulkSkipReasonSchema = z.enum([
+  'not_found',
+  'pending_deletion',
+  'not_reviewable',
+  'already',
+]);
+export type DispatcherBulkSkipReason = z.infer<typeof DispatcherBulkSkipReasonSchema>;
+
+export const DispatcherBulkCheckResponseSchema = z.object({
+  changed: z.array(z.string().uuid()),
+  skipped: z.array(z.object({ id: z.string().uuid(), reason: DispatcherBulkSkipReasonSchema })),
+});
+export type DispatcherBulkCheckResponse = z.infer<typeof DispatcherBulkCheckResponseSchema>;
+
 export const DispatcherCheckFieldsShape = {
   dispatcherCheckedAt: z.string().nullable().optional(),
   dispatcherCheckedByUserEmail: z.string().nullable().optional(),

@@ -34,6 +34,15 @@ suite('отметка «Диспетчер» (реальный PostgreSQL)', () 
   const unchecked = randomUUID();
   const notFilled = randomUUID();
   const pending = randomUUID();
+  // Пакетная отметка — на своём объекте, чтобы не сбить ожидания фильтров выше.
+  const bulkSiteId = randomUUID();
+  const monitorId = randomUUID();
+  const bA = randomUUID();
+  const bB = randomUUID();
+  const bPre = randomUUID();
+  const bRaw = randomUUID();
+  const bPending = randomUUID();
+  const PRE_AT = '2031-03-01T10:00:00.000Z';
 
   beforeAll(async () => {
     sql = postgres(TEST_DATABASE_URL!, { max: 4 });
@@ -77,14 +86,27 @@ suite('отметка «Диспетчер» (реальный PostgreSQL)', () 
       (${notFilled}, ${siteId}, ${draft}, 1)`;
     await sql`INSERT INTO deliveries (id, site_id, status_id, version, pending_deletion_at, pending_deletion_by_user_id)
       VALUES (${pending}, ${siteId}, ${filled}, 1, now(), ${managerId})`;
+
+    const confirmed = await status('confirmed_mol');
+    await sql`INSERT INTO sites (id, code, name) VALUES (${bulkSiteId}, ${`DB${RUN.slice(-4)}`}, 'Диспетчер пакетом')`;
+    await sql`INSERT INTO users (id, email, password_hash, role, site_id) VALUES
+      (${monitorId}, ${`disp-${monitorId}@test`}, 'x', 'monitor', NULL)`;
+    await sql`INSERT INTO deliveries (id, site_id, status_id, version) VALUES
+      (${bA}, ${bulkSiteId}, ${filled}, 1),
+      (${bB}, ${bulkSiteId}, ${confirmed}, 1),
+      (${bRaw}, ${bulkSiteId}, ${draft}, 1)`;
+    await sql`INSERT INTO deliveries (id, site_id, status_id, version, dispatcher_checked_at, dispatcher_checked_by_user_id)
+      VALUES (${bPre}, ${bulkSiteId}, ${filled}, 1, ${PRE_AT}, ${monitorId})`;
+    await sql`INSERT INTO deliveries (id, site_id, status_id, version, pending_deletion_at, pending_deletion_by_user_id)
+      VALUES (${bPending}, ${bulkSiteId}, ${filled}, 1, now(), ${managerId})`;
   });
 
   afterAll(async () => {
     await app?.close();
     if (!sql) return;
-    await sql`DELETE FROM deliveries WHERE site_id = ${siteId}`;
-    await sql`DELETE FROM users WHERE id IN (${managerId}, ${inspectorId})`;
-    await sql`DELETE FROM sites WHERE id = ${siteId}`;
+    await sql`DELETE FROM deliveries WHERE site_id IN (${siteId}, ${bulkSiteId})`;
+    await sql`DELETE FROM users WHERE id IN (${managerId}, ${inspectorId}, ${monitorId})`;
+    await sql`DELETE FROM sites WHERE id IN (${siteId}, ${bulkSiteId})`;
     await sql.end({ timeout: 5 });
   });
 
@@ -208,5 +230,80 @@ suite('отметка «Диспетчер» (реальный PostgreSQL)', () 
     expect(await listIds({ dispatcherCheck: 'checked' })).toEqual(
       [checked, notFilled, unchecked].sort(),
     );
+  });
+
+  describe('пакетом: строка группы и отмеченные строки', () => {
+    const bulk = (ids: string[], value: boolean) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/v1/deliveries/bulk-dispatcher-check',
+        payload: { ids, checked: value },
+      });
+    const iso = (v: unknown) => new Date(v as string).toISOString();
+
+    it('ставит только оформленным без отметки; стоявшая сохраняет автора и время', async () => {
+      currentUser = as('manager', managerId);
+      const before = await row(bA);
+      const ghost = randomUUID();
+      const res = await bulk([bA, bPre, bRaw, bB, bPending, ghost], true);
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toEqual({
+        changed: [bA, bB],
+        skipped: [
+          { id: bPre, reason: 'already' },
+          { id: bRaw, reason: 'not_reviewable' },
+          { id: bPending, reason: 'pending_deletion' },
+          { id: ghost, reason: 'not_found' },
+        ],
+      });
+      const a = await row(bA);
+      expect(a.dispatcher_checked_by_user_id).toBe(managerId);
+      expect(a.version).toBe(before.version);
+      expect(String(a.updated_at)).toBe(String(before.updated_at));
+      expect((await row(bB)).dispatcher_checked_by_user_id).toBe(managerId);
+      const pre = await row(bPre);
+      expect(pre.dispatcher_checked_by_user_id).toBe(monitorId);
+      expect(iso(pre.dispatcher_checked_at)).toBe(PRE_AT);
+      expect((await row(bRaw)).dispatcher_checked_at).toBeNull();
+      expect((await row(bPending)).dispatcher_checked_at).toBeNull();
+    });
+
+    it('снятие трогает только отмеченные; повтор — already', async () => {
+      currentUser = as('monitor', monitorId);
+      const res = await bulk([bA, bRaw], false);
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toEqual({
+        changed: [bA],
+        skipped: [{ id: bRaw, reason: 'not_reviewable' }],
+      });
+      const a = await row(bA);
+      expect(a.dispatcher_checked_at).toBeNull();
+      expect(a.dispatcher_checked_by_user_id).toBeNull();
+      // Соседние отметки не задеты.
+      expect((await row(bB)).dispatcher_checked_at).not.toBeNull();
+      expect((await row(bPre)).dispatcher_checked_by_user_id).toBe(monitorId);
+
+      const again = await bulk([bA], false);
+      expect(again.json()).toEqual({ changed: [], skipped: [{ id: bA, reason: 'already' }] });
+    });
+
+    it('админ тоже; инспектор, подрядчик и наблюдатель — 403', async () => {
+      // id — существующего пользователя: автор отметки ссылается на users.
+      currentUser = as('admin', managerId);
+      expect((await bulk([bA], true)).statusCode).toBe(200);
+      expect((await bulk([bA], false)).statusCode).toBe(200);
+      for (const role of ['inspector_kpp', 'contractor', 'observer'] as const) {
+        currentUser = as(role);
+        expect((await bulk([bA], true)).statusCode, role).toBe(403);
+      }
+      expect((await row(bA)).dispatcher_checked_at).toBeNull();
+    });
+
+    it('пустой список и повтор id — 400', async () => {
+      currentUser = as('manager', managerId);
+      expect((await bulk([], true)).statusCode).toBe(400);
+      expect((await bulk([bA, bA], true)).statusCode).toBe(400);
+      expect((await row(bA)).dispatcher_checked_at).toBeNull();
+    });
   });
 });

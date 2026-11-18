@@ -10,7 +10,10 @@
  *   - «Объединить в группу» открывает окно с отмеченными (пополнение, если одна
  *     из них уже в группе), «Убрать из группы» и «Разгруппировать» зовут сервер;
  *   - «Привязать УПД из ЭДО» и счёт «у N из M» — только при праве привязки:
- *     мониторинг без него группирует, но не привязывает.
+ *     мониторинг без него группирует, но не привязывает;
+ *   - «Диспетчер» разом: в строке группы — всем участникам (счёт с сервера),
+ *     на панели — отмеченным строкам; панель встаёт на место «Обозначений»,
+ *     таблица не сдвигается.
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -29,7 +32,13 @@ vi.mock('../../stores/auth', () => ({
 }));
 
 const SITE = '33333333-3333-3333-3333-333333333333';
-const group = {
+const group: {
+  id: string;
+  siteId: string;
+  members: { deliveryId: string; displayId: number }[];
+  edoLinkedCount: number;
+  dispatcher?: { checked: number; eligible: number };
+} = {
   id: 'g-1',
   siteId: SITE,
   members: [
@@ -148,6 +157,7 @@ beforeEach(() => {
   del.mockReset();
   urls.length = 0;
   window.localStorage.clear();
+  delete group.dispatcher;
 });
 afterEach(() => cleanup());
 
@@ -172,6 +182,8 @@ describe('Принятые: группы приёмок', () => {
     expect(gutter(rowOf('Т036ВК550'))).toContain('mc-gutter-mid');
     expect(gutter(rowOf('Т036ВК551'))).toContain('mc-gutter-end');
     expect(gutter(rowOf('О082КЕ977'))).not.toMatch(/mc-gutter-(head|mid|end)/);
+    // Счёта «Диспетчера» сервер не прислал — кнопки нет.
+    expect(within(head).queryByRole('button', { name: /Диспетчер/ })).toBeNull();
   });
 
   it('без showGroups (список инспектора) и в корзине — групп нет, grouped не уходит', async () => {
@@ -261,4 +273,66 @@ describe('Принятые: группы приёмок', () => {
     expect(await screen.findByRole('button', { name: /Объединить в группу/ })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Привязать УПД из ЭДО/ })).toBeNull();
   });
+});
+
+describe('Принятые: «Диспетчер» разом', () => {
+  it('строка группы: счёт с сервера, отметка уходит всем участникам группы', async () => {
+    asMonitor();
+    group.dispatcher = { checked: 1, eligible: 2 };
+    post.mockResolvedValue({ changed: ['d-15'], skipped: [{ id: 'd-18', reason: 'already' }] });
+    const container = await show();
+    const head = headRow(container)!;
+    expect(head.textContent).toContain('Диспетчер: 1 из 2');
+    fireEvent.click(within(head).getByRole('button', { name: /Диспетчер/ }));
+    expect(
+      await screen.findByText('Отметить «Диспетчер» в группе: 1 приёмка без отметки?'),
+    ).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Отметить' }));
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith('/deliveries/bulk-dispatcher-check', {
+        ids: ['d-18', 'd-15'],
+        checked: true,
+      }),
+    );
+  }, 15_000);
+
+  it('строка группы: отмечены все — кнопка снимает отметку у всех', async () => {
+    asMonitor();
+    group.dispatcher = { checked: 2, eligible: 2 };
+    post.mockResolvedValue({ changed: ['d-18', 'd-15'], skipped: [] });
+    const container = await show();
+    fireEvent.click(within(headRow(container)!).getByRole('button', { name: /Диспетчер/ }));
+    expect(await screen.findByText('Снять отметку «Диспетчер» в группе: 2 приёмки?')).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Снять' }));
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith('/deliveries/bulk-dispatcher-check', {
+        ids: ['d-18', 'd-15'],
+        checked: false,
+      }),
+    );
+  }, 15_000);
+
+  it('отмеченные строки: панель на месте «Обозначений», «Диспетчер» — отмеченным', async () => {
+    asMonitor();
+    post.mockResolvedValue({ changed: ['d-18', 'd-16'], skipped: [] });
+    await show();
+    expect(screen.getByText('Обозначения:')).toBeTruthy();
+    fireEvent.click(checkbox(rowOf('Т036ВК550'))!);
+    fireEvent.click(checkbox(rowOf('О082КЕ977'))!);
+    expect(await screen.findByText(/Выбрано/)).toBeTruthy();
+    // Панель заняла строку легенды, а не встала новой строкой над таблицей.
+    expect(screen.queryByText('Обозначения:')).toBeNull();
+    const bar = screen.getByText(/Выбрано/).closest<HTMLElement>('.ant-space')!;
+    fireEvent.click(within(bar).getByRole('button', { name: /Диспетчер/ }));
+    expect(await screen.findByText('Отметить «Диспетчер»: 2 приёмки без отметки?')).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Отметить' }));
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith('/deliveries/bulk-dispatcher-check', {
+        ids: ['d-18', 'd-16'],
+        checked: true,
+      }),
+    );
+    // После отметки выбор снят — легенда вернулась.
+    await waitFor(() => expect(screen.getByText('Обозначения:')).toBeTruthy());
+  }, 15_000);
 });

@@ -1,6 +1,5 @@
-import type { MouseEvent, ReactNode, RefObject } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import { Alert, Button, Card, Input, Popconfirm, Space, Tooltip, Typography, message } from 'antd';
 import {
@@ -41,6 +40,7 @@ import { ActiveFilterChips, type ActiveFilterChip } from '../../shared/ui/Active
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
+import { LegendOrBulkBar } from '../../shared/ui/LegendOrBulkBar';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
 import { useSyncGlobalFilters } from '../../shared/hooks/useSyncGlobalFilters';
 import { ShareLinkModal } from '../../components/ShareLinkModal';
@@ -113,16 +113,12 @@ export function ShipmentsHistory({
   activeTab,
   onTabChange,
   filtersExtra,
-  bulkActionsPortalRef,
 }: {
   onOpen: (id: string) => void;
   tabs?: PageTabItem[];
   activeTab?: string;
   onTabChange?: (key: string) => void;
   filtersExtra?: ReactNode;
-  // См. комментарий-двойник в DeliveriesHistory: если задан — bulk-actions
-  // улетают через React Portal в slot OperationsPage и не двигают таблицу.
-  bulkActionsPortalRef?: RefObject<HTMLElement | null>;
 }) {
   const queryClient = useQueryClient();
   const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
@@ -147,13 +143,6 @@ export function ShipmentsHistory({
   // возможность, мы оставили бы кнопку менеджеру со снятым edit — и создание
   // вернуло бы 403.
   const canShare = canEdit && hasCapability('operations.share.manage');
-
-  // См. комментарий в DeliveriesHistory: tracking внешнего slot для portal-
-  // режима bulk-actions, чтобы не сдвигать таблицу при выборе строк.
-  const [bulkSlotEl, setBulkSlotEl] = useState<HTMLElement | null>(null);
-  useEffect(() => {
-    setBulkSlotEl(bulkActionsPortalRef?.current ?? null);
-  }, [bulkActionsPortalRef]);
 
   // Две вкладки: «Активные» (включая отгрузки без УПД) и «Корзина».
   // URL: trash=1 — корзина. Поиск «Без документа» доступен через
@@ -928,27 +917,24 @@ export function ShipmentsHistory({
                 )
               ) : null;
 
+              const legend = <StatusLegend statuses={legendStatuses} showReview={canReview} />;
               if (tabs && activeTab && onTabChange) {
                 return (
-                  <PageTabs
-                    items={tabs}
-                    activeKey={activeTab}
-                    onChange={onTabChange}
-                    extra={actions}
-                  />
+                  <>
+                    <PageTabs
+                      items={tabs}
+                      activeKey={activeTab}
+                      onChange={onTabChange}
+                      extra={actions}
+                    />
+                    {legend}
+                  </>
                 );
               }
-              // См. DeliveriesHistory: portal-режим — actions улетают в
-              // шапку OperationsPage, таблица не сдвигается. Без ref —
-              // legacy inline-рендер (для других страниц).
-              if (bulkActionsPortalRef) {
-                return bulkSlotEl && actions ? createPortal(actions, bulkSlotEl) : null;
-              }
-              return actions ? (
-                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>{actions}</div>
-              ) : null;
+              // См. DeliveriesHistory: действия — на месте «Обозначений»,
+              // отметка строки не сдвигает таблицу.
+              return <LegendOrBulkBar actions={actions} legend={legend} />;
             })()}
-            <StatusLegend statuses={legendStatuses} showReview={canReview} />
           </Space>
         }
       >

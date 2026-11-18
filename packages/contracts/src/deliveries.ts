@@ -241,12 +241,16 @@ export type DeliveryGroupRef = z.infer<typeof DeliveryGroupRefSchema>;
  * живые приёмки одного объекта, их не меньше двух), по убыванию номера.
  * `edoLinkedCount` — сколько из них уже с УПД из ЭДО; только тем, кому
  * привязки ЭДО видны (право привязки), иначе поля нет.
+ * `dispatcher` — отметка «Диспетчер» в группе: `eligible` — сколько участников
+ * её можно поставить (оформлены), `checked` — у скольких стоит; только тем, кому
+ * видны отметки проверки, иначе поля нет.
  */
 export const DeliveryGroupSummarySchema = z.object({
   id: z.string().uuid(),
   siteId: z.string().uuid(),
   members: z.array(DeliveryGroupRefSchema),
   edoLinkedCount: z.number().int().optional(),
+  dispatcher: z.object({ checked: z.number().int(), eligible: z.number().int() }).optional(),
 });
 export type DeliveryGroupSummary = z.infer<typeof DeliveryGroupSummarySchema>;
 

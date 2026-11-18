@@ -375,6 +375,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['PATCH /api/v1/deliveries/:id/edo-matches/:matchId/recipient', DOCUMENT_RECIPIENT],
   ['PATCH /api/v1/deliveries/:id/edo-matches/:matchId/purpose', st('operations.deliveries', 'review')],
   ['PATCH /api/v1/deliveries/:id/dispatcher-check', st('operations.deliveries', 'review')],
+  ['POST /api/v1/deliveries/bulk-dispatcher-check', st('operations.deliveries', 'review')],
   // Группы приёмок (рейсы одной поставки): «Проверять», как «Диспетчер» —
   // по умолчанию менеджер и мониторинг. Привязка УПД к группе идёт прежним
   // POST …/edo-matches/batch со своим правом (link_source).

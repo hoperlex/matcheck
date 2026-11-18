@@ -1,6 +1,5 @@
-import type { MouseEvent, ReactNode, RefObject } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import {
   Alert,
@@ -15,6 +14,7 @@ import {
 } from 'antd';
 import {
   ApartmentOutlined,
+  CheckSquareOutlined,
   DeleteOutlined,
   EditOutlined,
   ExclamationCircleOutlined,
@@ -28,6 +28,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import type {
   BulkDeleteResponse,
   Counterparty,
+  DispatcherBulkCheckResponse,
   CustomerCounterparty,
   DeliveryListResponseSchema,
   Site,
@@ -55,6 +56,7 @@ import { ActiveFilterChips, type ActiveFilterChip } from '../../shared/ui/Active
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
+import { LegendOrBulkBar } from '../../shared/ui/LegendOrBulkBar';
 import {
 } from '../../shared/ui/tableSorters';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
@@ -99,6 +101,12 @@ import { DeliveryGroupStyle, DeliveryGroupToggle, gutterCellClass } from './Deli
 import { DeliveryGroupModal } from './DeliveryGroupModal';
 import { GroupEdoLinkFlow } from './GroupEdoLinkFlow';
 import { useCollapsedDeliveryGroups, useDeliveryGroupMutations } from './useDeliveryGroups';
+import {
+  dispatcherBulkPlan,
+  dispatcherBulkResult,
+  dispatcherConfirmTitle,
+  dispatcherCountsOf,
+} from './dispatcherBulk';
 import { operationsListQuery, parseEntry } from '../operations/operationsQuery';
 import {
   formatDocumentsShort,
@@ -203,7 +211,6 @@ export function DeliveriesHistory({
   activeTab,
   onTabChange,
   filtersExtra,
-  bulkActionsPortalRef,
   showGroups = false,
 }: {
   onOpen: (id: string) => void;
@@ -211,13 +218,6 @@ export function DeliveriesHistory({
   activeTab?: string;
   onTabChange?: (key: string) => void;
   filtersExtra?: ReactNode;
-  // Если задан — bulk-actions рендерятся через React Portal в этот
-  // внешний слот (напр., в header-row OperationsPage), а НЕ строкой
-  // под фильтрами. Это убирает layout shift при выборе строк: таблица
-  // больше не «прыгает» вниз при появлении панели. Если не задан —
-  // поведение прежнее: actions рисуются под фильтрами (для других
-  // страниц, где этот компонент используется без OperationsPage).
-  bulkActionsPortalRef?: RefObject<HTMLElement | null>;
   /**
    * Группы приёмок (рейсы одной поставки): скобка слева, строка группы,
    * «Объединить в группу». Включает только «Принятые» в Операциях — список у
@@ -262,14 +262,6 @@ export function DeliveriesHistory({
   // Одна УПД из ЭДО — к нескольким отмеченным приёмкам: та же пара «ячейка +
   // возможность», что у кнопки «+ УПД из ЭДО» в карточке.
   const canLinkUpd = canEdit && hasCapability('operations.edit.link_source');
-
-  // Slot для bulk-actions в внешнем header-row родителя. Отслеживаем
-  // через state, потому что ref.current = null до commit phase — портал
-  // на первом рендере не сработает иначе.
-  const [bulkSlotEl, setBulkSlotEl] = useState<HTMLElement | null>(null);
-  useEffect(() => {
-    setBulkSlotEl(bulkActionsPortalRef?.current ?? null);
-  }, [bulkActionsPortalRef]);
 
   // Две вкладки: «Активные» (включая приёмки без УПД) и «Корзина».
   // URL: trash=1 — корзина. Поиск «Без документа» доступен через
@@ -603,12 +595,31 @@ export function DeliveriesHistory({
     onSuccess: (res) => handleBulkSuccess(res, 'Удалено навсегда'),
     onError: (err: Error) => message.error(err.message),
   });
+  // «Диспетчер» разом: у всей группы (строка группы) или у отмеченных строк.
+  const bulkDispatcher = useMutation({
+    mutationFn: (v: { ids: string[]; checked: boolean; from: string }) =>
+      api.post<DispatcherBulkCheckResponse>('/deliveries/bulk-dispatcher-check', {
+        ids: v.ids,
+        checked: v.checked,
+      }),
+    onSuccess: (res, v) => {
+      const { success, warning } = dispatcherBulkResult(res, v.checked);
+      if (success) message.success(success);
+      if (warning) message.warning(warning);
+      if (v.from === 'selected') bulk.clear();
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
+    },
+    onError: (err: Error) => message.error(err.message),
+  });
+  const dispatchingFrom = (from: string) =>
+    bulkDispatcher.isPending && bulkDispatcher.variables?.from === from;
 
   const items = list.data?.items ?? [];
   // Отмеченные строки: выбор сбрасывается при листании, поэтому все они — на
   // текущей странице.
   const selectedRows = items.filter((r) => bulk.selectedIds.has(r.id));
   const bulkEdoBlocked = bulkEdoLinkBlock(selectedRows);
+  const selectedDispatcherPlan = dispatcherBulkPlan(dispatcherCountsOf(selectedRows));
   const [bulkEdoOpen, setBulkEdoOpen] = useState(false);
 
   // ─── группы приёмок ───────────────────────────────────────────────
@@ -663,12 +674,23 @@ export function DeliveriesHistory({
       siteName={siteNameOf(head)}
       canGroup={canGroup}
       canLinkUpd={canLinkUpd}
+      canDispatch={canReview}
       wrap={wrap}
       onLink={() => setGroupLinkId(head.group.id)}
       onEdit={() =>
         setGroupModal({ groupId: head.group.id, siteId: head.group.siteId, initial: [] })
       }
       onDissolve={() => dissolveGroup(head.group.id)}
+      // Все участники группы, а не только видимые на странице: отмечается
+      // вся поставка. Неоформленные сервер пропустит.
+      onDispatcher={(checked) =>
+        bulkDispatcher.mutate({
+          ids: head.group.members.map((m) => m.deliveryId),
+          checked,
+          from: head.group.id,
+        })
+      }
+      dispatching={dispatchingFrom(head.group.id)}
       dissolving={
         groupMutations.dissolve.isPending && groupMutations.dissolve.variables === head.group.id
       }
@@ -1260,8 +1282,46 @@ export function DeliveriesHistory({
                     selectedCount={bulk.selectedCount}
                     onClear={bulk.clear}
                     extra={
-                      canLinkUpd || groupsOn ? (
+                      canLinkUpd || groupsOn || canReview ? (
                         <Space size={8}>
+                          {canReview &&
+                            (selectedDispatcherPlan.block !== null ? (
+                              <Tooltip title={selectedDispatcherPlan.block}>
+                                <span>
+                                  <Button icon={<CheckSquareOutlined />} disabled>
+                                    Диспетчер
+                                  </Button>
+                                </span>
+                              </Tooltip>
+                            ) : (
+                              <Popconfirm
+                                title={dispatcherConfirmTitle(selectedDispatcherPlan, 'selected')}
+                                okText={
+                                  selectedDispatcherPlan.mode === 'check' ? 'Отметить' : 'Снять'
+                                }
+                                cancelText="Отмена"
+                                placement="bottomLeft"
+                                onConfirm={() =>
+                                  bulkDispatcher.mutate({
+                                    ids: selectedRows.map((r) => r.id),
+                                    checked: selectedDispatcherPlan.mode === 'check',
+                                    from: 'selected',
+                                  })
+                                }
+                              >
+                                <Button
+                                  icon={<CheckSquareOutlined />}
+                                  type={
+                                    selectedDispatcherPlan.mode === 'uncheck'
+                                      ? 'primary'
+                                      : 'default'
+                                  }
+                                  loading={dispatchingFrom('selected')}
+                                >
+                                  Диспетчер
+                                </Button>
+                              </Popconfirm>
+                            ))}
                           {groupsOn && (
                             <Tooltip title={joinPlan.block}>
                               <span>
@@ -1321,27 +1381,26 @@ export function DeliveriesHistory({
                 )
               ) : null;
 
+              const legend = (
+                <StatusLegend statuses={legendStatuses} showReview={canReview} showDispatcher />
+              );
               if (tabs && activeTab && onTabChange) {
                 return (
-                  <PageTabs
-                    items={tabs}
-                    activeKey={activeTab}
-                    onChange={onTabChange}
-                    extra={actions}
-                  />
+                  <>
+                    <PageTabs
+                      items={tabs}
+                      activeKey={activeTab}
+                      onChange={onTabChange}
+                      extra={actions}
+                    />
+                    {legend}
+                  </>
                 );
               }
-              // Portal-режим: actions улетают в slot шапки OperationsPage,
-              // под фильтрами ничего не рисуется → таблица не сдвигается.
-              if (bulkActionsPortalRef) {
-                return bulkSlotEl && actions ? createPortal(actions, bulkSlotEl) : null;
-              }
-              // Legacy inline для других страниц.
-              return actions ? (
-                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>{actions}</div>
-              ) : null;
+              // Действия — на месте «Обозначений», в строке постоянной высоты:
+              // отметка строки не сдвигает таблицу (LegendOrBulkBar).
+              return <LegendOrBulkBar actions={actions} legend={legend} />;
             })()}
-            <StatusLegend statuses={legendStatuses} showReview={canReview} showDispatcher />
           </Space>
         }
       >

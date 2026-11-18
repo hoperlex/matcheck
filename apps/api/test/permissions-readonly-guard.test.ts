@@ -84,6 +84,9 @@ async function buildApp(opts: {
     ok: 'document-purpose',
   }));
   instance.patch('/api/v1/deliveries/:id/dispatcher-check', async () => ({ ok: 'dispatcher' }));
+  instance.post('/api/v1/deliveries/bulk-dispatcher-check', async () => ({
+    ok: 'dispatcher-bulk',
+  }));
   instance.post('/api/v1/delivery-groups', async () => ({ ok: 'group-compose' }));
   instance.post('/api/v1/delivery-groups/leave', async () => ({ ok: 'group-leave' }));
   instance.delete('/api/v1/delivery-groups/:id', async () => ({ ok: 'group-dissolve' }));
@@ -126,6 +129,9 @@ describe('при выключенном флаге гард ведёт себя 
       200,
     );
     expect((await send(app, 'PATCH', '/api/v1/deliveries/1/dispatcher-check')).statusCode).toBe(
+      200,
+    );
+    expect((await send(app, 'POST', '/api/v1/deliveries/bulk-dispatcher-check')).statusCode).toBe(
       200,
     );
     // Группы приёмок — то же действие «Проверять»: монитору открыты и без матрицы.

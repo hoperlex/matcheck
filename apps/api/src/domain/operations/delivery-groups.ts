@@ -433,11 +433,13 @@ export async function deliveryGroupComposition(
  * Сводка группы для строк списка: deliveryId → группа. Ничего не скрывает:
  * членство показывается как есть. `withEdo` — добавить `edoLinkedCount`
  * (сколько участников уже с УПД из ЭДО), только тем, кому привязки видны.
+ * `withDispatcher` — добавить `dispatcher` (у скольких оформленных участников
+ * стоит отметка «Диспетчер»), только тем, кому видны отметки проверки.
  */
 export async function loadDeliveryGroupSummaries(
   db: Reader,
   deliveryIds: readonly string[],
-  opts: { withEdo: boolean },
+  opts: { withEdo: boolean; withDispatcher: boolean },
 ): Promise<Map<string, DeliveryGroupSummary>> {
   const result = new Map<string, DeliveryGroupSummary>();
   const membership = await membershipOf(db, deliveryIds);
@@ -454,6 +456,9 @@ export async function loadDeliveryGroupSummaries(
         deliveryId: deliveries.id,
         displayId: deliveries.displayId,
         hasEdo: drSql<boolean>`exists (select 1 from ${deliveryEdoMatches} where ${deliveryEdoMatches.deliveryId} = ${deliveries.id})`,
+        dispatcherChecked: drSql<boolean>`${deliveries.dispatcherCheckedAt} is not null`,
+        // Гейт зрелости отметки «Диспетчер» — как у PATCH .../dispatcher-check.
+        mature: drSql<boolean>`exists (select 1 from ${statuses} where ${statuses.id} = ${deliveries.statusId} and ${statuses.code} in ('filled', 'confirmed_mol'))`,
       })
       .from(deliveryGroupMembers)
       .innerJoin(deliveries, eq(deliveries.id, deliveryGroupMembers.deliveryId))
@@ -468,6 +473,14 @@ export async function loadDeliveryGroupSummaries(
       siteId: group.siteId,
       members: members.map((row) => ({ deliveryId: row.deliveryId, displayId: row.displayId })),
       ...(opts.withEdo ? { edoLinkedCount: members.filter((row) => row.hasEdo).length } : {}),
+      ...(opts.withDispatcher
+        ? {
+            dispatcher: {
+              checked: members.filter((row) => row.mature && row.dispatcherChecked).length,
+              eligible: members.filter((row) => row.mature).length,
+            },
+          }
+        : {}),
     });
   }
   for (const [deliveryId, groupId] of membership) {

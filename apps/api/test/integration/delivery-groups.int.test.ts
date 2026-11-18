@@ -594,10 +594,49 @@ suite('группы приёмок (реальный PostgreSQL)', { timeout: 24
       await create(d1!, d2!, d3!);
       const doc = await exportDoc('E1');
       expect((await batch(d1!, doc, [d1!, d2!])).statusCode).toBe(200);
-      const withEdo = await loadDeliveryGroupSummaries(db, [d1!], { withEdo: true });
+      const withEdo = await loadDeliveryGroupSummaries(db, [d1!], {
+        withEdo: true,
+        withDispatcher: false,
+      });
       expect(withEdo.get(d1!)).toMatchObject({ edoLinkedCount: 2 });
-      const without = await loadDeliveryGroupSummaries(db, [d1!], { withEdo: false });
+      const without = await loadDeliveryGroupSummaries(db, [d1!], {
+        withEdo: false,
+        withDispatcher: false,
+      });
       expect(without.get(d1!)).not.toHaveProperty('edoLinkedCount');
+    });
+
+    it('dispatcher — у скольких оформленных участников стоит «Диспетчер»; инспектору группы нет', async () => {
+      const d1 = await delivery();
+      const d2 = await delivery({ code: 'confirmed_mol' });
+      const d3 = await delivery();
+      const raw = await delivery({ code: 'not_filled' });
+      await create(d1, d2, d3, raw);
+      await sql`UPDATE deliveries SET dispatcher_checked_at = now(), dispatcher_checked_by_user_id = ${managerId}
+                 WHERE id IN (${d1}, ${d2})`;
+      const summary = await loadDeliveryGroupSummaries(db, [d3], {
+        withEdo: false,
+        withDispatcher: true,
+      });
+      // Неоформленная не в счёт: отметку ей поставить нельзя.
+      expect(summary.get(d3)).toMatchObject({ dispatcher: { checked: 2, eligible: 3 } });
+      const hidden = await loadDeliveryGroupSummaries(db, [d3], {
+        withEdo: false,
+        withDispatcher: false,
+      });
+      expect(hidden.get(d3)).not.toHaveProperty('dispatcher');
+
+      const listed = async () => {
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/v1/deliveries?displayId=${await displayIdOf(d3)}&grouped=1`,
+        });
+        expect(res.statusCode, res.body).toBe(200);
+        return res.json().items[0]?.deliveryGroup;
+      };
+      expect(await listed()).toMatchObject({ dispatcher: { checked: 2, eligible: 3 } });
+      currentUser = { ...currentUser, role: 'inspector_kpp', siteId: siteA } as unknown as AuthUser;
+      expect(await listed()).toBeFalsy();
     });
   });
 

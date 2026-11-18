@@ -29,8 +29,11 @@ import {
   DeliverySchema,
   DeliveryStatusCodeSchema,
   DeliveryUpsertSchema,
+  DispatcherBulkCheckRequestSchema,
+  DispatcherBulkCheckResponseSchema,
   DispatcherCheckRequestSchema,
   ErrorResponseSchema,
+  type DispatcherBulkCheckResponse,
   ReviewRequestSchema,
   UnlinkSourceBodySchema,
   DELIVERY_HARD_DELETE_STATUSES,
@@ -1356,6 +1359,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!grouped) return { items, total: count };
       const summaries = await loadDeliveryGroupSummaries(app.db, ids, {
         withEdo: await roleHasCapability(app, req.user?.role, 'operations.edit.link_source'),
+        // grouped выше уже требует видимости отметок проверки — того же гейта,
+        // что у dispatcherCheckedAt в DTO.
+        withDispatcher: true,
       });
       return {
         items: items.map((item) => ({ ...item, deliveryGroup: summaries.get(item.id) ?? null })),
@@ -1545,6 +1551,80 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       const dto = await buildDeliveryDto(app, d.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
       return dto;
+    },
+  );
+
+  // «Диспетчер» у многих приёмок разом: строка группы и отмеченные строки
+  // «Принятых». Права и гейт зрелости — как у одиночного PATCH выше. Запись —
+  // одним условным UPDATE. Условие на текущее состояние не даёт массовой
+  // отметке перезаписать автора и время уже стоящих отметок, а снятие трогает
+  // только отмеченные. version/updated_at не трогаем — планшетам она не нужна.
+  app.post(
+    '/api/v1/deliveries/bulk-dispatcher-check',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager', 'monitor')],
+      schema: {
+        body: DispatcherBulkCheckRequestSchema,
+        response: { 200: DispatcherBulkCheckResponseSchema },
+      },
+    },
+    async (req) => {
+      const mature = [
+        await resolveStatusId(app, 'filled'),
+        await resolveStatusId(app, 'confirmed_mol'),
+      ];
+      const { ids, checked } = req.body;
+      const updated = await app.db
+        .update(deliveries)
+        .set({
+          dispatcherCheckedAt: checked ? new Date() : null,
+          dispatcherCheckedByUserId: checked ? (req.user?.id ?? null) : null,
+        })
+        .where(
+          and(
+            inArray(deliveries.id, ids),
+            isNull(deliveries.pendingDeletionAt),
+            inArray(deliveries.statusId, mature),
+            checked
+              ? isNull(deliveries.dispatcherCheckedAt)
+              : isNotNull(deliveries.dispatcherCheckedAt),
+          ),
+        )
+        .returning({ id: deliveries.id, siteId: deliveries.siteId });
+      const changed = new Set(updated.map((d) => d.id));
+      const rest = ids.filter((id) => !changed.has(id));
+      const skipped: DispatcherBulkCheckResponse['skipped'] = [];
+      if (rest.length) {
+        // Причина — справочная, перечиткой: между UPDATE и этим чтением
+        // состояние могло смениться, но запись от причины не зависит.
+        const current = await app.db
+          .select({
+            id: deliveries.id,
+            statusId: deliveries.statusId,
+            pendingDeletionAt: deliveries.pendingDeletionAt,
+          })
+          .from(deliveries)
+          .where(inArray(deliveries.id, rest));
+        const byId = new Map(current.map((row) => [row.id, row]));
+        for (const id of rest) {
+          const row = byId.get(id);
+          skipped.push({
+            id,
+            reason: !row
+              ? 'not_found'
+              : row.pendingDeletionAt !== null
+                ? 'pending_deletion'
+                : !mature.includes(row.statusId)
+                  ? 'not_reviewable'
+                  : 'already',
+          });
+        }
+      }
+      const ts = new Date().toISOString();
+      for (const d of updated) {
+        publishEvent(app, { type: 'delivery_updated', entityId: d.id, siteId: d.siteId, ts });
+      }
+      return { changed: ids.filter((id) => changed.has(id)), skipped };
     },
   );
 
