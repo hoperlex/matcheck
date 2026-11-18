@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
-import { Alert, Button, Image, Modal, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
-import { ReloadOutlined } from '@ant-design/icons';
+import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
+import { Alert, Button, Modal, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { LeftOutlined, ReloadOutlined, RightOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PhotoRecognition, PhotoRecognitionItem } from '@matcheck/contracts';
 import { suspectQtyPriceSwap } from '@matcheck/contracts';
@@ -10,6 +11,7 @@ import { ClampText } from '../../shared/ui/ResponsiveTable';
 import { enqueueFullLoad } from '../../lib/thumbQueue';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import type { OperationKind } from '../../lib/db';
+import { ZoomableImage } from '../../shared/ui/ZoomableImage';
 import { photoRowHints, rowCheckText, type PhotoRowHint } from './photoRowHints';
 
 /**
@@ -20,15 +22,42 @@ import { photoRowHints, rowCheckText, type PhotoRowHint } from './photoRowHints'
 const LOW_RES_PX = 1280;
 const SUSPECT_RES_PX = 1600;
 
+/** Листание документов этапа: позиция открытого и переходы к соседям. */
+export type PhotoDocumentNav = {
+  index: number;
+  total: number;
+  onPrev: () => void;
+  onNext: () => void;
+};
+
 /**
- * Split-view модалка просмотра фото-документа: слева увеличенное фото,
- * справа таблица распознанных позиций. Открывается из PhotoGallery
- * при клике на превью с kind='document'. Для kind='cargo'/'vehicle'
- * показывается стандартный antd Image preview как раньше.
+ * Поворот документа на время жизни вкладки: вернулся к фото — оно стоит так
+ * же, как его оставили. Снимки боком — частый случай (лист кладут на капот).
+ */
+const rotationByPhoto = new Map<string, number>();
+
+/**
+ * Пауза перед автозапуском распознавания. При листании ←/→ окно проходит
+ * через несколько документов подряд — без паузы каждый пролистанный и ещё не
+ * распознанный документ запускал бы LLM.
+ */
+export const AUTO_RECOGNIZE_DELAY_MS = 400;
+
+/**
+ * Split-view модалка просмотра фото-документа: слева скан с зумом и
+ * поворотом прямо в панели, справа таблица распознанных позиций.
+ * Открывается из PhotoGallery при клике на превью с kind='document'. Для
+ * kind='cargo'/'vehicle' показывается стандартный antd Image preview.
  *
- * Логика данных:
+ * Оболочка держит окно, листание и клавиши; всё, что относится к одному
+ * фото, — в PhotoDocumentPreviewBody с key={photoId}. Перемонтирование при
+ * листании — не косметика: у каждого фото своя мутация распознавания. С одной
+ * общей ответ по предыдущему фото, пришедший после перехода, записался бы в
+ * кэш следующего (onSuccess брал photoId из замыкания).
+ *
+ * Логика данных (в теле):
  *   1) GET /photos/:id/recognition — пробуем взять кэш.
- *   2) Если нет (404) — автоматически POST /photos/:id/recognize.
+ *   2) Если нет (404) — через AUTO_RECOGNIZE_DELAY_MS POST /photos/:id/recognize.
  *   3) Пока ждём (10-30 сек) — рисуем Spin «Распознаём…».
  *   4) Готово/упало — рисуем таблицу или error с retry.
  */
@@ -39,6 +68,8 @@ export function PhotoDocumentPreview({
   photoId,
   imageSrc,
   operationKind = 'delivery',
+  nav,
+  onOriginalDisplayed,
 }: {
   open: boolean;
   onClose: () => void;
@@ -46,28 +77,108 @@ export function PhotoDocumentPreview({
   // использует его, чтобы вернуть фокус во внешнюю модалку приёмки/отгрузки.
   afterClose?: () => void;
   photoId: string;
-  imageSrc: string;
+  /** Миниатюра — плейсхолдер, пока качается оригинал. */
+  imageSrc?: string;
   /** Чья это фотография — для подписи сверки «с УПД этой приёмки/отгрузки». */
   operationKind?: OperationKind;
+  /** Листание документов этапа; нет — фото открыто одно. */
+  nav?: PhotoDocumentNav;
+  /** На экране нарисован оригинал этого фото (не миниатюра) — для отметки «просмотрено». */
+  onOriginalDisplayed?: (photoId: string) => void;
 }): JSX.Element {
-  const qc = useQueryClient();
   // На телефоне фото и таблица рядом не помещаются: у таблицы минимум 360px, и
   // фото схлопывалось до нулевой ширины. Ниже порога портала (1024px) они идут
   // стопкой, а прокручивается всё тело окна.
   const stacked = useBreakpoint() === 'mobile';
+
+  // ←/→ листают документы. Слушаем window: фокус в окне бывает где угодно
+  // (кнопка, таблица, панель зума). Поле ввода и сочетания с модификаторами
+  // не трогаем — там стрелки нужны самому полю или браузеру.
+  const navRef = useRef(nav);
+  navRef.current = nav;
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      const n = navRef.current;
+      if (!n || e.defaultPrevented) return;
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      if (isEditableTarget(e.target)) return;
+      if (e.key === 'ArrowLeft' && n.index > 0) {
+        e.preventDefault();
+        n.onPrev();
+      } else if (e.key === 'ArrowRight' && n.index < n.total - 1) {
+        e.preventDefault();
+        n.onNext();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  return (
+    <Modal
+      open={open}
+      onCancel={onClose}
+      afterClose={afterClose}
+      footer={null}
+      width="97vw"
+      // Окно во весь экран: высоту держит само окно (ModalLookStyle), тело
+      // заполняет остаток — фото с height:100% растягивается по нему.
+      rootClassName="mc-modal-fill"
+      bodyStyle={{
+        padding: 0,
+        display: 'flex',
+        flexDirection: stacked ? 'column' : 'row',
+        overflow: stacked ? 'auto' : 'hidden',
+      }}
+      destroyOnClose
+    >
+      <PhotoDocumentPreviewBody
+        key={photoId}
+        open={open}
+        photoId={photoId}
+        imageSrc={imageSrc}
+        operationKind={operationKind}
+        stacked={stacked}
+        nav={nav}
+        onOriginalDisplayed={onOriginalDisplayed}
+      />
+    </Modal>
+  );
+}
+
+function PhotoDocumentPreviewBody({
+  open,
+  photoId,
+  imageSrc,
+  operationKind,
+  stacked,
+  nav,
+  onOriginalDisplayed,
+}: {
+  open: boolean;
+  photoId: string;
+  imageSrc?: string;
+  operationKind: OperationKind;
+  stacked: boolean;
+  nav?: PhotoDocumentNav;
+  onOriginalDisplayed?: (photoId: string) => void;
+}): JSX.Element {
+  const qc = useQueryClient();
 
   // Оригинал документа. imageSrc, переданный из PhotoGallery, — это миниатюра
   // (320px): фото-документ открывается по клику при previewOpen=false, поэтому
   // fullQuery галереи не стартовал, и текст скана на миниатюре нечитаем. Грузим
   // оригинал сами по photoId. Тот же query-ключ, что у PhotoThumb.fullQuery →
   // react-query переиспользует кэш в обе стороны; та же очередь-лимитер.
+  // signal — чтобы пролистанный кадр можно было оборвать (см. эффект ниже).
   const fullBlob = useQuery({
     queryKey: ['photo-blob', photoId, 'full'],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       enqueueFullLoad(async () => {
-        const { blob } = await apiDownload(`/photos/${photoId}/content`);
+        const { blob } = await apiDownload(`/photos/${photoId}/content`, { signal });
         return blob;
-      }),
+      }, signal),
     enabled: open,
     staleTime: Infinity,
     gcTime: 30 * 60 * 1000,
@@ -75,15 +186,27 @@ export function PhotoDocumentPreview({
     retryDelay: (attempt) => Math.min(500 * 2 ** attempt, 4000),
     refetchOnWindowFocus: false,
   });
+  // Ушли с фото (листание, закрытие окна), а оригинал ещё в пути — обрываем.
+  // Сам react-query отменяет запрос, только когда у него не осталось ни одного
+  // наблюдателя, а здесь он есть всегда: выключенный fullQuery миниатюры этого
+  // же фото в PhotoGallery (тот же ключ). Без явной отмены пролистанные кадры
+  // докачивались бы целиком, занимая слоты очереди перед нужным.
+  useEffect(
+    () => () => {
+      const key = ['photo-blob', photoId, 'full'];
+      const state = qc.getQueryState(key);
+      if (state?.fetchStatus === 'fetching' && state.data === undefined) {
+        void qc.cancelQueries({ queryKey: key, exact: true });
+      }
+    },
+    [qc, photoId],
+  );
   const [fullUrl, setFullUrl] = useState<string | null>(null);
   // Разрешение оригинала. Меряем его отдельным экземпляром Image, а не onLoad на
-  // разметке: antd <Image> раскладывает чужие пропсы на обёртку-div, до самого
-  // <img> onLoad не доходит (rc-image/es/common.js — белый список COMMON_PROPS),
-  // а событие load не всплывает. Заодно размеры по построению снимаются только с
-  // оригинала — миниатюру 320px нельзя выдавать за разрешение фото, иначе каждое
-  // открытие на мгновение обвиняет камеру в «низком разрешении».
+  // разметке: так размеры по построению снимаются только с оригинала —
+  // миниатюру 320px нельзя выдавать за разрешение фото, иначе каждое открытие
+  // на мгновение обвиняет камеру в «низком разрешении».
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
-  useEffect(() => setDims(null), [photoId]);
   useEffect(() => {
     if (!fullBlob.data) {
       setFullUrl(null);
@@ -107,7 +230,7 @@ export function PhotoDocumentPreview({
     };
   }, [fullBlob.data]);
   // Оригинал когда загружен, иначе переданная миниатюра как быстрый плейсхолдер.
-  const displaySrc = fullUrl ?? imageSrc;
+  const displaySrc = fullUrl ?? (imageSrc || null);
 
   const fullDims = fullUrl ? dims : null;
   const longestSide = fullDims ? Math.max(fullDims.w, fullDims.h) : null;
@@ -146,79 +269,55 @@ export function PhotoDocumentPreview({
     },
   });
 
-  // Автозапуск распознавания при первом открытии модалки, если кэша нет.
+  // Автозапуск распознавания, если кэша нет, — после паузы
+  // AUTO_RECOGNIZE_DELAY_MS: ушли с фото раньше — таймер отменён, LLM не
+  // тронут.
   useEffect(() => {
     if (!open) return;
     if (recognition.isLoading) return;
     if (recognition.data) return;
     if (recognize.isPending) return;
-    recognize.mutate({});
+    const timer = setTimeout(() => recognize.mutate({}), AUTO_RECOGNIZE_DELAY_MS);
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, recognition.isLoading, recognition.data]);
 
   return (
-    <Modal
-      open={open}
-      onCancel={onClose}
-      afterClose={afterClose}
-      footer={null}
-      width="97vw"
-      // Окно во весь экран: высоту держит само окно (ModalLookStyle), тело
-      // заполняет остаток — фото с height:100% растягивается по нему.
-      rootClassName="mc-modal-fill"
-      bodyStyle={{
-        padding: 0,
-        display: 'flex',
-        flexDirection: stacked ? 'column' : 'row',
-        overflow: stacked ? 'auto' : 'hidden',
-      }}
-      destroyOnClose
-    >
-      {/* Слева: фото. Зум даёт штатный antd-просмотрщик (клик по маске
-          «Открыть для зума» разворачивает его поверх модалки) — то же решение,
-          что в разделе «Документы», см. SourceDocumentDetailModal. Зум прямо в
-          панели не делаем: справа бывает свой скролл, и колесо конфликтовало бы
-          с ним. */}
+    <>
+      {/* Слева: фото. Колесо масштабирует прямо здесь, без клика: колесо
+          ловит только эта панель, у таблицы справа своя прокрутка, и они не
+          мешают друг другу. */}
       <div
         style={{
+          position: 'relative',
           flex: stacked ? 'none' : '1 1 60%',
           height: stacked ? '60vh' : undefined,
+          minWidth: 0,
           // Нейтральный светлый фон: на чёрном не видно границы листа, а мелкий кадр
           // читался как «фото в чёрной рамке», хотя рамка — это фон панели.
           background: '#f5f5f5',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          overflow: 'auto',
+          overflow: 'hidden',
         }}
       >
         {displaySrc ? (
           <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-            <Image
+            <ZoomableImage
               src={displaySrc}
               alt="Документ"
-              // wrapperStyle — на обёртку .ant-image (она же ловит клик и держит
-              // маску), style — на сам <img>.
-              wrapperStyle={{
-                width: '100%',
-                height: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
+              // Пока грузится оригинал — миниатюра приглушена: видно, что идёт
+              // загрузка более чёткой версии.
+              dimmed={!fullUrl}
+              initialRotation={rotationByPhoto.get(photoId) ?? 0}
+              onRotationChange={(r) => rotationByPhoto.set(photoId, r)}
+              onDisplayed={(src) => {
+                // Просмотренным считается только оригинал: по миниатюре
+                // документ не прочитать.
+                if (fullUrl && src === fullUrl) onOriginalDisplayed?.(photoId);
               }}
-              style={{
-                // width/height обязательны: без них objectFit не работает вовсе, и
-                // кадр мельче панели рисовался в натуральную величину по центру.
-                width: '100%',
-                height: '100%',
-                objectFit: 'contain',
-                userSelect: 'none',
-                // Пока грузится оригинал — показываем миниатюру приглушённой,
-                // чтобы было видно, что идёт загрузка более чёткой версии.
-                opacity: fullUrl ? 1 : 0.5,
-                transition: 'opacity 0.2s',
-              }}
-              preview={{ mask: 'Открыть для зума' }}
+              touchScroll={stacked}
             />
             {fullDims && longestSide !== null && (
               <div
@@ -232,8 +331,8 @@ export function PhotoDocumentPreview({
                   padding: '2px 8px',
                   borderRadius: 4,
                   background: 'rgba(255, 255, 255, 0.85)',
-                  // Оверлеи лежат поверх картинки — клик должен проходить сквозь
-                  // них на маску «Открыть для зума».
+                  // Оверлеи лежат поверх картинки — колесо и перетаскивание
+                  // должны проходить сквозь них в панель зума.
                   pointerEvents: 'none',
                 }}
               >
@@ -281,6 +380,47 @@ export function PhotoDocumentPreview({
         ) : (
           <Spin />
         )}
+        {nav && nav.total > 1 && (
+          <>
+            <div
+              style={{
+                position: 'absolute',
+                top: 8,
+                left: '50%',
+                transform: 'translateX(-50%)',
+                padding: '2px 10px',
+                borderRadius: 12,
+                background: 'rgba(0, 0, 0, 0.55)',
+                color: '#fff',
+                fontSize: 12,
+                pointerEvents: 'none',
+                zIndex: 2,
+              }}
+            >
+              Документ {nav.index + 1} из {nav.total}
+            </div>
+            <Tooltip title="Предыдущий документ (←)">
+              <Button
+                shape="circle"
+                aria-label="Предыдущий документ"
+                icon={<LeftOutlined />}
+                disabled={nav.index <= 0}
+                onClick={nav.onPrev}
+                style={{ ...NAV_BUTTON_STYLE, left: 8 }}
+              />
+            </Tooltip>
+            <Tooltip title="Следующий документ (→)">
+              <Button
+                shape="circle"
+                aria-label="Следующий документ"
+                icon={<RightOutlined />}
+                disabled={nav.index >= nav.total - 1}
+                onClick={nav.onNext}
+                style={{ ...NAV_BUTTON_STYLE, right: 8 }}
+              />
+            </Tooltip>
+          </>
+        )}
       </div>
 
       {/* Справа: таблица материалов или статус. */}
@@ -305,8 +445,24 @@ export function PhotoDocumentPreview({
           operationKind={operationKind}
         />
       </div>
-    </Modal>
+    </>
   );
+}
+
+const NAV_BUTTON_STYLE: CSSProperties = {
+  position: 'absolute',
+  top: '50%',
+  transform: 'translateY(-50%)',
+  zIndex: 2,
+  background: 'rgba(255, 255, 255, 0.9)',
+};
+
+/** Фокус в поле ввода — стрелки нужны ему самому, не листанию. */
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 }
 
 function RecognitionPanel({

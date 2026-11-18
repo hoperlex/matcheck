@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Image,
@@ -11,7 +11,13 @@ import {
   Typography,
   message,
 } from 'antd';
-import { DeleteOutlined, EditOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons';
+import {
+  CheckOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  ReloadOutlined,
+  WarningOutlined,
+} from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   DeliveryPhoto,
@@ -26,7 +32,8 @@ import { uploadPhoto } from '../../services/photoPipeline';
 import { enqueueThumbLoad, enqueueFullLoad } from '../../lib/thumbQueue';
 import { withDb, type OperationKind } from '../../lib/db';
 import { localCacheEnabled } from '../../lib/localCache';
-import { PhotoDocumentPreview } from './PhotoDocumentPreview';
+import { useMarkViewedAfterDwell, useViewedPhotos } from '../../lib/photoViewed';
+import { PhotoDocumentPreview, type PhotoDocumentNav } from './PhotoDocumentPreview';
 
 const THUMB_SIZE = 140;
 // Фото загружаем через API-прокси /api/v1/photos/:id/content — сервер сам
@@ -210,15 +217,20 @@ export function PhotoGallery({
   // rc-dialog вызывает afterClose только при переходе open true→false. Если
   // закрытие сразу обнуляет docPreview, компонент размонтируется без этого
   // перехода и afterClose (возврат фокуса) не отработает.
-  const [docPreview, setDocPreview] = useState<{ id: string; src: string } | null>(null);
+  // inList — документ из списка листания (подтверждён сервером). Открытый до
+  // подтверждения загрузки живёт под локальным id: листания и отметки у него нет.
+  const [docPreview, setDocPreview] = useState<{
+    id: string;
+    src: string;
+    inList: boolean;
+  } | null>(null);
   const [docPreviewOpen, setDocPreviewOpen] = useState(false);
   const galleryRef = useRef<HTMLDivElement>(null);
   // Общий previewOpen-флаг для всей PreviewGroup: при открытии fullscreen
   // preview ЛЮБОГО фото он становится true → enabled для fullQuery включается
   // сразу у всех фото группы.
   const [previewOpen, setPreviewOpen] = useState(false);
-
-  if (photos.length === 0) return null;
+  const viewed = useViewedPhotos();
 
   // Сортировка фото внутри stage'а (1/2 Этап родитель делит на отдельные
   // галереи через beforePhotos/afterPhotos): сначала Документы, затем
@@ -226,11 +238,115 @@ export function PhotoGallery({
   // группы — стабильный порядок по takenAt (как было раньше), чтобы при
   // refetch / смене kind / добавлении нового фото порядок был детерминированным.
   // Делается на UI-уровне, БД не трогаем — это чистая визуальная группировка.
-  const sorted = [...photos].sort((a, b) => {
-    const rank = kindRank(a.kind) - kindRank(b.kind);
-    if (rank !== 0) return rank;
-    return a.takenAt.localeCompare(b.takenAt);
+  const sorted = useMemo(
+    () =>
+      [...photos].sort((a, b) => {
+        const rank = kindRank(a.kind) - kindRank(b.kind);
+        if (rank !== 0) return rank;
+        return a.takenAt.localeCompare(b.takenAt);
+      }),
+    [photos],
+  );
+  // Документы для листания ←/→ в окне просмотра — в порядке миниатюр.
+  const docIds = useMemo(
+    () => sorted.filter((p) => p.kind === 'document' && p.uploadedAt !== null).map((p) => p.id),
+    [sorted],
+  );
+
+  // Реестр адресов картинок, его заполняют миниатюры:
+  //   - id → миниатюра: плейсхолдер в окне документа, пока качается оригинал
+  //     соседнего документа, к которому перелистали;
+  //   - адрес ОРИГИНАЛА → id: какое фото сейчас на экране штатного просмотра
+  //     antd (груз/машина). Адреса миниатюр сюда не попадают — растянутая
+  //     миниатюра просмотром не считается.
+  const srcRegistry = useRef({
+    thumbById: new Map<string, string>(),
+    originalById: new Map<string, string>(),
+    idByOriginal: new Map<string, string>(),
   });
+  const registerSrc = useCallback((id: string, thumb: string, original: string | null) => {
+    const r = srcRegistry.current;
+    if (thumb) r.thumbById.set(id, thumb);
+    const prev = r.originalById.get(id);
+    if (prev && prev !== original) r.idByOriginal.delete(prev);
+    if (original) {
+      r.originalById.set(id, original);
+      r.idByOriginal.set(original, id);
+    } else {
+      r.originalById.delete(id);
+    }
+  }, []);
+  const resolveOriginal = useCallback(
+    (url: string | undefined) => (url ? (srcRegistry.current.idByOriginal.get(url) ?? null) : null),
+    [],
+  );
+
+  // Отметка документа: оригинал нарисован в окне (onOriginalDisplayed) и
+  // простоял секунду. Сброс displayedDocId при листании и закрытии.
+  const [displayedDocId, setDisplayedDocId] = useState<string | null>(null);
+  useMarkViewedAfterDwell(
+    docPreview && docPreviewOpen && docPreview.inList && displayedDocId === docPreview.id
+      ? docPreview.id
+      : null,
+  );
+
+  const openDoc = useCallback((id: string, src: string, inList: boolean) => {
+    setDisplayedDocId(null);
+    setDocPreview({ id, src, inList });
+    setDocPreviewOpen(true);
+  }, []);
+  // Отметка фото груза/машины: оригинал на экране просмотра antd (сообщает
+  // PreviewShownReporter) и просмотр открыт. Закрытие гасит отсчёт здесь, в
+  // галерее: внутрь закрытого окна обновления уже не доходят.
+  const [cargoShownId, setCargoShownId] = useState<string | null>(null);
+  useMarkViewedAfterDwell(previewOpen ? cargoShownId : null);
+
+  const goToDoc = useCallback(
+    (id: string) => openDoc(id, srcRegistry.current.thumbById.get(id) ?? '', true),
+    [openDoc],
+  );
+
+  // Список документов поменялся, пока окно открыто: открытое фото удалили или
+  // сменили ему тип с другого клиента (приходит очередным обновлением
+  // приёмки). Оставлять в окне фото, которого в приёмке уже нет, нельзя —
+  // переходим на документ с тем же номером, а если его нет — на предыдущий;
+  // документов не осталось — закрываем окно.
+  const docIdsKey = docIds.join(',');
+  const prevDocIdsRef = useRef<string[]>(docIds);
+  useEffect(() => {
+    const prev = prevDocIdsRef.current;
+    prevDocIdsRef.current = docIds;
+    if (!docPreview || !docPreviewOpen || !docPreview.inList) return;
+    if (docIds.includes(docPreview.id)) return;
+    message.info('Документ удалён или сменил тип');
+    if (docIds.length === 0) {
+      setDocPreviewOpen(false);
+      return;
+    }
+    const oldIndex = Math.max(0, prev.indexOf(docPreview.id));
+    const next = docIds[Math.min(oldIndex, docIds.length - 1)];
+    if (next) goToDoc(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docIdsKey]);
+
+  const docIndex = docPreview?.inList ? docIds.indexOf(docPreview.id) : -1;
+  const docNav: PhotoDocumentNav | undefined =
+    docIndex >= 0 && docIds.length > 1
+      ? {
+          index: docIndex,
+          total: docIds.length,
+          onPrev: () => {
+            const id = docIds[docIndex - 1];
+            if (id) goToDoc(id);
+          },
+          onNext: () => {
+            const id = docIds[docIndex + 1];
+            if (id) goToDoc(id);
+          },
+        }
+      : undefined;
+
+  if (photos.length === 0) return null;
 
   // Подписи «Документ» / «Груз/машина» под фото выводим только если у этой
   // галереи kind проставлен ОСМЫСЛЕННО — т.е. встречается хоть один
@@ -263,6 +379,7 @@ export function PhotoGallery({
   const handleDocPreviewAfterClose = () => {
     restoreOuterModalFocus();
     setDocPreview(null);
+    setDisplayedDocId(null);
   };
 
   // Общий previewOpen-флаг для всей PreviewGroup: при открытии fullscreen
@@ -289,6 +406,21 @@ export function PhotoGallery({
           // потом листают стрелками. Это и есть единый сигнал «оригиналы
           // нужны прямо сейчас» для всех PhotoThumb группы.
           onVisibleChange: (vis) => setPreviewOpen(vis),
+          // Какое фото сейчас на экране просмотра — по адресу картинки. Индекс
+          // из onChange не годится: rc-image нумерует кадры в порядке
+          // монтирования миниатюр, а не в порядке сортировки галереи.
+          // Репортёр ничего не рисует, только сообщает id показанного
+          // оригинала.
+          imageRender: (node, info) => (
+            <>
+              {node}
+              <PreviewShownReporter
+                photoId={resolveOriginal(info.image?.url)}
+                url={info.image?.url}
+                onShown={setCargoShownId}
+              />
+            </>
+          ),
         }}
       >
         {sorted.map((p) => (
@@ -302,11 +434,10 @@ export function PhotoGallery({
             onChangeKind={(kind) => patchKind.mutate({ id: p.id, kind })}
             changingKind={patchKind.isPending && patchKind.variables?.id === p.id}
             showLabel={showLabels}
-            onDocumentClick={(src) => {
-              setDocPreview({ id: p.id, src });
-              setDocPreviewOpen(true);
-            }}
+            onDocumentClick={(src) => openDoc(p.id, src, docIds.includes(p.id))}
             previewOpen={previewOpen}
+            viewedAt={p.uploadedAt !== null ? viewed[p.id] : undefined}
+            onSrc={registerSrc}
           />
         ))}
       </Image.PreviewGroup>
@@ -318,6 +449,8 @@ export function PhotoGallery({
           photoId={docPreview.id}
           imageSrc={docPreview.src}
           operationKind={operationKind}
+          nav={docNav}
+          onOriginalDisplayed={setDisplayedDocId}
         />
       )}
     </div>
@@ -344,6 +477,51 @@ function kindRank(kind: string | undefined): number {
   return 2;
 }
 
+/**
+ * Что сейчас на экране штатного просмотра antd (груз/машина) — для отметки
+ * «просмотрено». Сообщает id фото, только когда на экране оригинал (id найден
+ * по его адресу — у растянутой миниатюры id нет) и картинка действительно
+ * декодируется: пробный Image с тем же адресом дождался onload. Иначе — null.
+ *
+ * Сам отсчёт секунды ведёт галерея, а не этот компонент: rc-dialog держит
+ * содержимое закрытого окна замороженным (MemoChildren с shouldUpdate =
+ * visible), и проп «просмотр закрыт» сюда бы уже не дошёл — таймер внутри
+ * отметил бы фото после закрытия.
+ */
+function PreviewShownReporter({
+  photoId,
+  url,
+  onShown,
+}: {
+  photoId: string | null;
+  url: string | undefined;
+  onShown: (photoId: string | null) => void;
+}): null {
+  const [decodedUrl, setDecodedUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!photoId || !url) return;
+    let cancelled = false;
+    const probe = new window.Image();
+    probe.onload = () => {
+      if (!cancelled) setDecodedUrl(url);
+    };
+    probe.src = url;
+    return () => {
+      cancelled = true;
+      probe.onload = null;
+    };
+  }, [photoId, url]);
+  const shown = photoId && url && decodedUrl === url ? photoId : null;
+  useEffect(() => onShown(shown), [shown, onShown]);
+  return null;
+}
+
+function formatViewedAt(ts: number): string {
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function PhotoThumb({
   photo,
   canDelete,
@@ -355,6 +533,8 @@ function PhotoThumb({
   showLabel,
   onDocumentClick,
   previewOpen,
+  viewedAt,
+  onSrc,
 }: {
   photo: GalleryPhoto;
   canDelete: boolean;
@@ -377,6 +557,10 @@ function PhotoThumb({
   // загрузку оригинала ДЛЯ ВСЕХ фото — чтобы листание стрелками между
   // фото показывало оригиналы, а не растянутые миниатюры.
   previewOpen: boolean;
+  /** Когда текущий пользователь смотрел это фото; нет — не смотрел. */
+  viewedAt?: number;
+  /** Сообщить галерее адреса миниатюры и оригинала (null — оригинала ещё нет). */
+  onSrc?: (id: string, thumb: string, original: string | null) => void;
 }): JSX.Element {
   const label = showLabel ? kindLabel(photo.kind) : null;
   const isDocument = photo.kind === 'document';
@@ -520,7 +704,15 @@ function PhotoThumb({
   }, [fullQuery.data]);
 
   const thumbSrc = localThumb ?? thumbObjectUrl ?? '';
-  const fullSrc = localFull ?? fullObjectUrl ?? thumbSrc;
+  const originalSrc = localFull ?? fullObjectUrl ?? null;
+  const fullSrc = originalSrc ?? thumbSrc;
+
+  // Layout-эффект, а не обычный: просмотр antd получает новый адрес картинки
+  // следующим рендером (регистрация кадра в группе — state rc-image), и к
+  // этому моменту адрес оригинала уже должен лежать в реестре галереи.
+  useLayoutEffect(() => {
+    onSrc?.(photo.id, thumbSrc, originalSrc);
+  }, [onSrc, photo.id, thumbSrc, originalSrc]);
 
   // Error-state: явная плитка вместо бесконечного спиннера. retry: 2
   // в useQuery уже отработал, дальше пользователь сам решает.
@@ -756,54 +948,93 @@ function PhotoThumb({
     );
   }
 
+  const image = (
+    <Image
+      src={thumbSrc}
+      // У документов перехватываем клик и открываем свою split-view
+      // модалку (фото + распознанные позиции справа), стандартный
+      // antd preview отключаем. У cargo/vehicle всё как раньше.
+      preview={
+        isDocument
+          ? false
+          : {
+              src: fullSrc,
+              // visible/onVisibleChange здесь НЕ задаём:
+              // PreviewGroup сам контролирует видимость overlay'я и
+              // дёргает свой собственный onVisibleChange (см.
+              // PhotoGallery → Image.PreviewGroup preview prop).
+              // Локальный controlled-state в PhotoThumb приводил к
+              // тому, что enabled у fullQuery вспыхивал только на том
+              // фото, которое было кликнуто первым, а у соседних
+              // (доступных через стрелки) оставался false → preview
+              // показывал растянутый thumb.
+            }
+      }
+      width={THUMB_SIZE}
+      height={THUMB_SIZE}
+      style={{
+        objectFit: 'cover',
+        borderRadius: 6,
+        cursor: isDocument ? 'pointer' : undefined,
+      }}
+      onClick={isDocument ? () => onDocumentClick(fullSrc) : undefined}
+      placeholder={
+        <div
+          style={{
+            width: THUMB_SIZE,
+            height: THUMB_SIZE,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: '#fafafa',
+            borderRadius: 6,
+          }}
+        >
+          <Spin size="small" />
+        </div>
+      }
+    />
+  );
+
   return (
     <div style={{ width: THUMB_SIZE }}>
       <div style={{ position: 'relative', width: THUMB_SIZE, height: THUMB_SIZE }}>
-        <Image
-          src={thumbSrc}
-          // У документов перехватываем клик и открываем свою split-view
-          // модалку (фото + распознанные позиции справа), стандартный
-          // antd preview отключаем. У cargo/vehicle всё как раньше.
-          preview={
-            isDocument
-              ? false
-              : {
-                  src: fullSrc,
-                  // visible/onVisibleChange здесь НЕ задаём:
-                  // PreviewGroup сам контролирует видимость overlay'я и
-                  // дёргает свой собственный onVisibleChange (см.
-                  // PhotoGallery → Image.PreviewGroup preview prop).
-                  // Локальный controlled-state в PhotoThumb приводил к
-                  // тому, что enabled у fullQuery вспыхивал только на том
-                  // фото, которое было кликнуто первым, а у соседних
-                  // (доступных через стрелки) оставался false → preview
-                  // показывал растянутый thumb.
-                }
-          }
-          width={THUMB_SIZE}
-          height={THUMB_SIZE}
-          style={{
-            objectFit: 'cover',
-            borderRadius: 6,
-            cursor: isDocument ? 'pointer' : undefined,
-          }}
-          onClick={isDocument ? () => onDocumentClick(fullSrc) : undefined}
-          placeholder={
-            <div
-              style={{
-                width: THUMB_SIZE,
-                height: THUMB_SIZE,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                background: '#fafafa',
-                borderRadius: 6,
-              }}
-            >
-              <Spin size="small" />
-            </div>
-          }
-        />
+        {/* Подсказка — на всю миниатюру: сам значок прозрачен для мыши, иначе
+            клик в его угол не открывал бы фото. Обёртка есть всегда, даже без
+            отметки: появление отметки при открытом просмотре не должно
+            перемонтировать Image — rc-image перерегистрировал бы кадр в
+            конец группы, и просмотр перескочил бы на другое фото. */}
+        <Tooltip
+          title={viewedAt !== undefined ? `Просмотрено ${formatViewedAt(viewedAt)}` : undefined}
+          mouseEnterDelay={0.5}
+        >
+          <div>{image}</div>
+        </Tooltip>
+        {viewedAt !== undefined && (
+          <span
+            aria-label="Просмотрено"
+            style={{
+              position: 'absolute',
+              top: 4,
+              left: 4,
+              width: 20,
+              height: 20,
+              borderRadius: '50%',
+              background: '#52c41a',
+              color: '#fff',
+              fontSize: 11,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              // Белое кольцо — значок читается и на светлом листе, и на снегу.
+              boxShadow: '0 0 0 2px rgba(255, 255, 255, 0.9)',
+              pointerEvents: 'none',
+              zIndex: 1,
+            }}
+          >
+            <CheckOutlined />
+          </span>
+        )}
         {canDelete && (
           <Popconfirm
             title="Удалить фото?"

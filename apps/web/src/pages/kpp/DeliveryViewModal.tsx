@@ -3,6 +3,7 @@ import { EditOutlined } from '@ant-design/icons';
 import type { z } from 'zod';
 import type { DeliveryListResponseSchema } from '@matcheck/contracts';
 import { PhotoGallery } from './PhotoGallery';
+import { PhotoViewedCounter } from './PhotoViewedCounter';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
@@ -344,6 +345,7 @@ export function DeliveryViewModal({
                           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                             1 Этап ({before.length})
                           </Typography.Text>
+                          <PhotoViewedCounter photos={before} small />
                           <div style={{ marginTop: 4 }}>
                             <PhotoGallery
                               deliveryId={d.id}
@@ -358,6 +360,7 @@ export function DeliveryViewModal({
                           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                             2 Этап ({after.length})
                           </Typography.Text>
+                          <PhotoViewedCounter photos={after} small />
                           <div style={{ marginTop: 4 }}>
                             <PhotoGallery
                               deliveryId={d.id}

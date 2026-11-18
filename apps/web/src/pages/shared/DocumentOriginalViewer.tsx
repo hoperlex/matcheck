@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Image, message, Tooltip, Typography } from 'antd';
+import { Button, message, Tooltip, Typography } from 'antd';
 import {
   DownloadOutlined,
   FileExcelOutlined,
@@ -9,6 +9,7 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import type { SourceDocumentPagesResponse } from '@matcheck/contracts';
 import { api, apiDownload } from '../../services/api';
+import { ZoomableImage } from '../../shared/ui/ZoomableImage';
 
 /**
  * Просмотр ОРИГИНАЛА документа: скан, PDF или файл, который браузер показать
@@ -164,10 +165,10 @@ export function DocumentOriginalViewer({
           {pagesLabel ? ` · ${pagesLabel}` : ''}
         </Typography.Text>
         {kind === 'image' ? (
-          // antd Image даёт встроенный lightbox (zoom/rotate/fullscreen) —
-          // для скана накладной это удобнее, чем image в <iframe>, где у
-          // Chrome нет ни зума, ни поворота. Меняем active.id ⇒ Image
-          // перегружает src.
+          // Скан накладной: зум колесом, сдвиг и поворот прямо в панели, без
+          // второго окна поверх (раньше — antd Image с маской «Открыть для
+          // зума»). В <iframe> у Chrome для картинки нет ни зума, ни поворота.
+          // key={active.id}: другое вложение — свежие масштаб и поворот.
           <div
             key={active.id}
             style={{
@@ -175,25 +176,11 @@ export function DocumentOriginalViewer({
               minHeight: 200,
               border: '1px solid #f0f0f0',
               background: '#fafafa',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
+              position: 'relative',
               overflow: 'hidden',
             }}
           >
-            <Image
-              src={activeUrl}
-              alt={active.filename}
-              wrapperStyle={{
-                width: '100%',
-                height: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-              style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
-              preview={{ mask: 'Открыть для зума' }}
-            />
+            <ZoomableImage src={activeUrl} alt={active.filename} />
           </div>
         ) : kind === 'excel' ? (
           // Excel в браузере inline не открывается (нет встроенного

@@ -89,6 +89,7 @@ import { DeliveriesHistory } from './DeliveriesHistory';
 import { SourceDocumentOriginalModal } from '../shared/SourceDocumentOriginalModal';
 import { ExpectedUpds } from './ExpectedUpds';
 import { PhotoGallery, type GalleryPhoto } from './PhotoGallery';
+import { PhotoViewedCounter } from './PhotoViewedCounter';
 import { formatStageTime } from './stageTime';
 import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
 import { RecipientSuggestionHint } from './RecipientSuggestionHint';
@@ -2737,6 +2738,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                             </Typography.Text>
                           ) : null;
                         })()}
+                        <PhotoViewedCounter photos={beforePhotos} />
                         <div style={{ marginTop: 8 }}>
                           {beforePhotos.length > 0 ? (
                             <PhotoGallery
@@ -2763,6 +2765,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                             </Typography.Text>
                           ) : null;
                         })()}
+                        <PhotoViewedCounter photos={afterPhotos} />
                         <div style={{ marginTop: 8 }}>
                           {afterPhotos.length > 0 ? (
                             <PhotoGallery

@@ -142,8 +142,9 @@ describe('DocumentOriginalViewer', () => {
     );
     expect(screen.getByText(/Фото 1 из 2 · стр1.jpg/)).toBeTruthy();
 
-    const thumbs = screen.getAllByRole('button');
-    fireEvent.click(thumbs[1]!);
+    // По имени, а не по порядку: у просмотрщика картинки свои кнопки
+    // (поворот, масштаб), и «вторая кнопка» — уже не вторая миниатюра.
+    fireEvent.click(screen.getByRole('button', { name: '2' }));
 
     expect(screen.getByText(/Фото 2 из 2 · стр2.jpg/)).toBeTruthy();
     expect(container.querySelector('img')!.getAttribute('src')).toContain('attachmentId=a2');

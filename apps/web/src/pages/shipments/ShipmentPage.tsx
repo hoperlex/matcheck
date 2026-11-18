@@ -77,6 +77,7 @@ import { ReviewControls } from '../../shared/ui/ReviewControls';
 import type { PageTabItem } from '../../shared/ui/PageTabs';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import { PhotoGallery, type GalleryPhoto } from '../kpp/PhotoGallery';
+import { PhotoViewedCounter } from '../kpp/PhotoViewedCounter';
 import { formatStageTime } from '../kpp/stageTime';
 import { SupplierChip, useSupplierDisplayName } from '../shared/SupplierChip';
 import { pickUpdSupplierName } from '../shared/updSupplierName';
@@ -1889,6 +1890,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                             </Typography.Text>
                           ) : null;
                         })()}
+                        <PhotoViewedCounter photos={beforePhotos} />
                         <div style={{ marginTop: 8 }}>
                           {beforePhotos.length > 0 ? (
                             <PhotoGallery
@@ -1916,6 +1918,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                             </Typography.Text>
                           ) : null;
                         })()}
+                        <PhotoViewedCounter photos={afterPhotos} />
                         <div style={{ marginTop: 8 }}>
                           {afterPhotos.length > 0 ? (
                             <PhotoGallery

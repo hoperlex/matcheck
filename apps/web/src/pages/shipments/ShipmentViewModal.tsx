@@ -3,6 +3,7 @@ import { EditOutlined } from '@ant-design/icons';
 import type { z } from 'zod';
 import type { ShipmentListResponseSchema, ShipmentKind } from '@matcheck/contracts';
 import { PhotoGallery } from '../kpp/PhotoGallery';
+import { PhotoViewedCounter } from '../kpp/PhotoViewedCounter';
 import { formatStageTime } from '../kpp/stageTime';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
@@ -288,6 +289,7 @@ export function ShipmentViewModal({
                                 </Typography.Text>
                               ) : null;
                             })()}
+                            <PhotoViewedCounter photos={beforePhotos} />
                             <div style={{ marginTop: 8 }}>
                               {beforePhotos.length > 0 ? (
                                 <PhotoGallery
@@ -315,6 +317,7 @@ export function ShipmentViewModal({
                                 </Typography.Text>
                               ) : null;
                             })()}
+                            <PhotoViewedCounter photos={afterPhotos} />
                             <div style={{ marginTop: 8 }}>
                               {afterPhotos.length > 0 ? (
                                 <PhotoGallery

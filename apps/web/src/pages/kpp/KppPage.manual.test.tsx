@@ -62,6 +62,8 @@ const authUser = { id: 'u-1', email: 'kpp@test.com', role: 'inspector_kpp', site
 vi.mock('../../stores/auth', () => ({
   useAuthStore: Object.assign((selector: (s: unknown) => unknown) => selector({ user: authUser }), {
     getState: () => ({ user: authUser, accessToken: 'token' }),
+    // Отметки «просмотрено» у фото подписываются на смену пользователя.
+    subscribe: () => () => {},
   }),
 }));
 

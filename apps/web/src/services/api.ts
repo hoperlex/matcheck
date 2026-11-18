@@ -240,14 +240,21 @@ export const api = {
  * для xlsx-экспорта, CSV и других бинарных загрузок, где обычный api.get<T>
  * не подходит (тот ждёт JSON).
  */
-export async function apiDownload(path: string): Promise<{ blob: Blob; filename: string }> {
+export async function apiDownload(
+  path: string,
+  opts?: { signal?: AbortSignal },
+): Promise<{ blob: Blob; filename: string }> {
   const headers = new Headers();
   const token = useAuthStore.getState().accessToken;
   if (token) headers.set('Authorization', `Bearer ${token}`);
+  // signal — отмена ненужной загрузки (просмотрщик фото пролистали дальше).
+  // Уходит в оба fetch, включая повтор после обновления токена.
+  const signal = opts?.signal;
 
   let res = await fetch(`${BASE}${path}`, {
     headers,
     credentials: 'include',
+    signal,
   });
 
   if (res.status === 401) {
@@ -259,6 +266,7 @@ export async function apiDownload(path: string): Promise<{ blob: Blob; filename:
       res = await fetch(`${BASE}${path}`, {
         headers: retryHeaders,
         credentials: 'include',
+        signal,
       });
     } else if (r.sessionDead) {
       useAuthStore.getState().expireSession();
