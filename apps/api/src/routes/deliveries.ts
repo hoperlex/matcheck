@@ -2473,6 +2473,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           docNumber: string | null;
           contractorId: string | null;
           contractorName: string | null;
+          supplierName: string | null;
           validation: UpdValidation | null;
         };
         const srcLinks: SrcLink[] = deliveryIds.length
@@ -2492,9 +2493,15 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               .leftJoin(docContractor, eq(deliverySources.contractorId, docContractor.id))
               .leftJoin(docMol, eq(deliverySources.recipientMolId, docMol.id))
               .where(inArray(deliverySources.deliveryId, deliveryIds))
+              // «Первый документ» — тот же, что у экрана (primarySourceDocument
+              // в assembleDeliveryDtos): иначе у приёмки с несколькими
+              // документами подрядчик, номер и поставщик брались бы из другого.
+              .orderBy(deliverySources.deliveryId, deliverySources.sourceDocumentId)
           : [];
         const sdIds = Array.from(new Set(srcLinks.map((l) => l.sourceDocumentId)));
         const sdContractor = alias(counterparties, 'sd_contractor');
+        const sdSupplier = alias(counterparties, 'sd_supplier');
+        const sdSupplierDir = alias(suppliers, 'sd_supplier_dir');
         const sdRowsRaw: SrcDoc[] = sdIds.length
           ? await app.db
               .select({
@@ -2502,10 +2509,17 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
                 docNumber: sourceDocuments.docNumber,
                 contractorId: sourceDocuments.contractorId,
                 contractorName: sdContractor.name,
+                // Тот же COALESCE, что у primarySourceDocument: распознавание
+                // пишет поставщика в справочник документа, а не в counterparties.
+                supplierName: drSql<
+                  string | null
+                >`COALESCE(${sdSupplierDir.name}, ${sdSupplier.name})`,
                 validation: sourceDocuments.validation,
               })
               .from(sourceDocuments)
               .leftJoin(sdContractor, eq(sourceDocuments.contractorId, sdContractor.id))
+              .leftJoin(sdSupplier, eq(sourceDocuments.supplierId, sdSupplier.id))
+              .leftJoin(sdSupplierDir, eq(sourceDocuments.supplierDirectoryId, sdSupplierDir.id))
               .where(inArray(sourceDocuments.id, sdIds))
           : [];
         const sdById = new Map<string, SrcDoc>(sdRowsRaw.map((r) => [r.id, r]));
@@ -2516,13 +2530,17 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           linksByDelivery.set(l.deliveryId, arr);
         }
 
-        // Резолвим контрагента и номер документа как в UI:
-        // contractor = delivery.contractorId || sd.contractorId первой привязки.
+        // Резолвим контрагента, поставщика и номер документа как в UI:
+        // contractor = delivery.contractorId || sd.contractorId первой привязки;
+        // supplier = delivery.supplierId || поставщик первой привязки
+        // (resolveSupplierName в DeliveriesHistory). Своё поле у приёмки с
+        // документом почти всегда пусто — ручной выбор там закрыт (409).
         const resolved = rows.map((r) => {
           const links = linksByDelivery.get(r.d.id) ?? [];
           const firstSd = links[0] ? sdById.get(links[0].sourceDocumentId) : undefined;
           const contractorIdR = r.d.contractorId ?? firstSd?.contractorId ?? null;
           const contractorNameR = r.contractorName ?? firstSd?.contractorName ?? null;
+          const supplierNameR = r.supplierName ?? firstSd?.supplierName ?? null;
           const docNumber = firstSd?.docNumber ?? null;
           // По ВСЕМ документам приёмки, а не только по первому: фильтр
           // doc_attention срабатывает на любом из них, и выгрузка обязана
@@ -2543,6 +2561,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             ...r,
             contractorIdResolved: contractorIdR,
             contractorNameResolved: contractorNameR,
+            supplierNameResolved: supplierNameR,
             docNumber,
             docAttention,
           };
@@ -2721,7 +2740,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             vehiclePlate: d.vehiclePlate ?? '',
             arrivedAt: fmtDateTimeRu(d.arrivedAt),
             docNumber: edoDocNumber ?? r.docNumber ?? '',
-            supplierName: r.supplierName ?? '',
+            supplierName: r.supplierNameResolved ?? '',
             contractorName: r.contractorNameResolved ?? '',
             siteName: siteFull,
             photos: photoCounts.get(d.id) ?? 0,
@@ -2950,7 +2969,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       if (linked.length > 0) {
         return reply.code(409).send({
           error: 'upd_takes_priority',
-          message: 'У приёмки привязана УПД — поставщик берётся из неё',
+          message: 'К приёмке привязан документ — поставщик берётся из него',
         });
       }
 

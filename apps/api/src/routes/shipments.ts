@@ -1992,7 +1992,7 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       if (linked.length > 0) {
         return reply.code(409).send({
           error: 'upd_takes_priority',
-          message: 'У отгрузки привязана УПД — поставщик берётся из неё',
+          message: 'К отгрузке привязан документ — поставщик берётся из него',
         });
       }
 
